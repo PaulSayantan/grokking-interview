@@ -52,7 +52,7 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 | [Docker](topics/docker/README.md) | 15 | 0 |
 | [Kubernetes](topics/kubernetes/README.md) | 16 | 0 |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 18 | 0 |
-| [Spring Boot](topics/spring-boot/README.md) | 18 | 0 |
+| [Spring Boot](topics/spring-boot/README.md) | 18 | 18 ✅ |
 | [Spring Framework Core](topics/spring-core/README.md) | 19 | 0 |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 15 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 16 | 0 |
@@ -65,3 +65,9 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 
 - **Session 1 (2026-07-15):** Foundation laid — repo scaffold, docs, templates,
   memory, skills, taxonomy research. See memory for details.
+- **Session 2 (2026-07-15):** Spring Boot domain fully authored — all 18 topics have
+  interview-grade `concepts.md` + `questions.yaml` (1,044 MCQs total, ~56/topic, mixed
+  difficulty, descriptive/scenario-style options). Authored via parallel workflow
+  (author → fact/schema verify), guided by two user-provided reference syllabi
+  (ChatGPT 46-section + Gemini 14-section PDFs). All content validates. Also fixed a
+  GitHub-anchor slug bug in `validate_content.py` (`&` leaves a double-dash).

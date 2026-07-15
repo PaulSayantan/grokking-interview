@@ -32,10 +32,15 @@ REQUIRED_Q_FIELDS = {"id", "difficulty", "question", "options", "answer", "expla
 
 
 def slugify_heading(text: str) -> str:
-    """Approximate GitHub heading-anchor slugification."""
+    """GitHub heading-anchor slugification.
+
+    Matches github-slugger: lowercase, strip punctuation except word chars /
+    whitespace / hyphens, then replace each whitespace char with a hyphen WITHOUT
+    collapsing runs. So "A & B" -> "a--b" (the removed "&" leaves two spaces).
+    """
     text = text.strip().lower()
     text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"\s", "-", text)
     return text
 
 
