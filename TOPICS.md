@@ -16,7 +16,7 @@ Frequency = how often the topic shows up in interviews (very-high → low).
 - [Spring Framework Core](#spring-core) — 19 topics
 - [Hibernate & JPA](#hibernate-jpa) — 15 topics
 - [Apache Tomcat](#apache-tomcat) — 16 topics
-- [Java & JVM (framework-relevant)](#java-jvm) — 16 topics
+- [Java & JVM (framework-relevant)](#java-jvm) — 25 topics
 - [Messaging & Databases](#messaging-databases) — 12 topics
 
 <a id="system-design"></a>
@@ -4117,7 +4117,7 @@ Observing and managing a running Tomcat via JMX, the Manager status pages, and m
 <a id="java-jvm"></a>
 ## Java & JVM (framework-relevant)
 
-Folder: `topics/java-jvm/` · 16 topics
+Folder: `topics/java-jvm/` · 25 topics — see `topics/java-jvm/README.md` for the authoritative, current topic list (9 topics added in Session 7: Java 8 functional interfaces, java.time, CompletableFuture; JDK 16-21 records/sealed/pattern-matching/virtual-threads; modern JVM GC/JIT/GraalVM/JFR; JPMS; parallelism).
 
 ### JVM Architecture & Class Loading
 

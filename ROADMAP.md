@@ -56,7 +56,7 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 | [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ✅ (all tiers) |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 15 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 16 | 0 |
-| [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 16 | 0 |
+| [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 25 | 25 ✅ (all tiers) |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 12 | 0 |
 
 <!-- CONTENT-PROGRESS-END -->
@@ -76,6 +76,15 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
   341 beginner / 473 intermediate) per user request. Advanced/expert deferred to a later
   deepening pass (reuse the Spring Boot deepen pattern). Built via `spring-core-authoring.js`
   (author → verify). Verify stage rebalanced skewed answer-index distributions + fixed facts.
+- **Session 7 (2026-07-16):** Java/JVM domain — EXPANDED taxonomy 16 → 25 topics (added
+  Java 8 depth: functional interfaces/method refs, java.time, CompletableFuture; modern
+  JDK 16-21: records, sealed classes, pattern matching/switch/text blocks, virtual threads;
+  modern JVM: ZGC/Shenandoah/JIT/GraalVM/JFR, JPMS; plus a Parallelism topic per user
+  follow-up). Authored all 25 across ALL FOUR tiers via `java-jvm-authoring.js` (author →
+  verify, high effort, version-accuracy emphasis). **1,541 MCQs** (317 B / 516 I / 437 adv /
+  275 expert). 11 author agents hit transient API errors mid-run; recovered via workflow
+  resume (cached agents replayed). Post-hoc fixed ~68 broken ref anchors (verify agents on
+  re-run wrote refs not matching headings) via a token-matching remap script. All validates.
 - **Session 6 (2026-07-16):** System Design domain — EXPANDED taxonomy 19 → 23 topics
   (added event-driven/CQRS/saga/CDC, GenAI/LLM/RAG/vector-DBs, real-time streaming,
   resilience-trade-offs deep-dive). Authored all 23 across ALL FOUR tiers in one pass via

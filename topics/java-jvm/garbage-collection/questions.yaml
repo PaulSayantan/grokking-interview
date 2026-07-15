@@ -1,0 +1,1292 @@
+topic: "Garbage Collection"
+domain: java-jvm
+topic_slug: garbage-collection
+version: 1
+questions:
+  - id: garbage-collection-001
+    difficulty: beginner
+    tags: [reachability, gc-roots, fundamentals]
+    question: |
+      What is the fundamental rule the HotSpot JVM uses to decide whether an
+      object can be garbage collected?
+    options:
+      - "An object is collectable when it is no longer reachable via a chain of references from any GC root"
+      - "An object is collectable when its reference count drops to zero"
+      - "An object is collectable once it has survived at least one minor GC"
+      - "An object is collectable as soon as the variable holding it goes out of lexical scope"
+    answer: 0
+    explanation: |
+      HotSpot uses reachability (tracing) analysis: starting from GC roots it
+      traverses the object graph, and anything not reached is garbage. It does
+      NOT use reference counting (which cannot reclaim cycles). Surviving a
+      minor GC does not make an object collectable, and lexical scope exit does
+      not immediately free anything — the object lives until the next GC finds
+      it unreachable.
+    ref: "concepts.md#gc-roots-and-reachability"
+
+  - id: garbage-collection-002
+    difficulty: beginner
+    tags: [gc-roots]
+    question: |
+      Which of the following is NOT typically considered a GC root?
+    options:
+      - "Local variables on the stack of a running thread"
+      - "Static fields of loaded classes"
+      - "An object that is only referenced by another object on the heap"
+      - "JNI global references held by native code"
+    answer: 2
+    explanation: |
+      GC roots are entry points known to be live: thread stack locals/operands,
+      static fields, active thread objects, JNI references, and held monitors.
+      An object referenced only by another heap object is NOT a root — its
+      liveness depends on whether that other object is itself reachable from a
+      root.
+    ref: "concepts.md#gc-roots-and-reachability"
+
+  - id: garbage-collection-003
+    difficulty: intermediate
+    tags: [reachability, cycles]
+    question: |
+      Two objects A and B reference each other, but nothing else references
+      either of them and no GC root can reach them. What happens under a
+      HotSpot tracing collector?
+    options:
+      - "They leak forever because their mutual references keep each other alive"
+      - "Only the older of the two is collected; the younger survives one more cycle"
+      - "A NullPointerException is thrown when the collector visits the cycle"
+      - "Both are collected, because reachability from roots — not reference counts — determines liveness"
+    answer: 3
+    explanation: |
+      This is the key advantage of tracing over reference counting. Because
+      liveness is defined by reachability from GC roots, an isolated island of
+      mutually referencing objects is unreachable and gets collected. Reference
+      counting would leak such a cycle; tracing does not.
+    ref: "concepts.md#gc-roots-and-reachability"
+
+  - id: garbage-collection-004
+    difficulty: expert
+    tags: [safepoints, stop-the-world]
+    question: |
+      A production JVM shows occasional multi-hundred-millisecond
+      "time-to-safepoint" delays before GC pauses even begin. Which scenario
+      most directly explains this?
+    options:
+      - "The heap is too small, forcing frequent full GCs"
+      - "A thread is spinning in a long counted loop with no safepoint poll, so the VM cannot bring all threads to a safepoint promptly"
+      - "The survivor spaces are too large, delaying promotion"
+      - "The card table is fragmented and must be rebuilt"
+    answer: 1
+    explanation: |
+      The collector can only enumerate roots when every application thread is
+      parked at a safepoint. A thread stuck in a tight, long-running counted
+      loop (which HotSpot may not instrument with a safepoint poll) or a long
+      native call delays reaching the global safepoint, inflating
+      time-to-safepoint. Heap size, survivor sizing, and card tables affect GC
+      work itself, not the time to *reach* the safepoint.
+    ref: "concepts.md#gc-roots-and-reachability"
+
+  - id: garbage-collection-005
+    difficulty: intermediate
+    tags: [mark-sweep-compact, algorithms]
+    question: |
+      In the classic "mark-sweep-compact" algorithm, what does the COMPACT
+      phase accomplish?
+    options:
+      - "It relocates live objects so they occupy contiguous memory, eliminating fragmentation"
+      - "It marks all reachable objects starting from GC roots"
+      - "It compresses object headers to save memory"
+      - "It counts references to each object to detect garbage"
+    answer: 0
+    explanation: |
+      Compaction slides/relocates live objects together so free memory is one
+      contiguous block. This removes fragmentation and enables cheap
+      bump-the-pointer allocation. Marking is the first phase; there is no
+      reference counting or header compression involved.
+    ref: "concepts.md#mark-sweep-and-compact"
+
+  - id: garbage-collection-006
+    difficulty: intermediate
+    tags: [mark-sweep-compact, fragmentation]
+    question: |
+      Compared with a mark-compact or copying collector, what is the main
+      drawback of a non-moving mark-sweep collector?
+    options:
+      - "It cannot collect cyclic garbage"
+      - "It requires twice the heap size at all times"
+      - "It leaves the heap fragmented, so allocation must search free lists and can fail despite sufficient total free memory"
+      - "It cannot run on multi-core machines"
+    answer: 2
+    explanation: |
+      Mark-sweep does not relocate survivors, so free space becomes fragmented
+      into scattered gaps. Allocation must scan free lists, and a large object
+      can fail to allocate even when total free memory is adequate. Cycles are
+      still collected (it is a tracing collector). The 2x-space cost is specific
+      to semi-space copying collectors.
+    ref: "concepts.md#mark-sweep-and-compact"
+
+  - id: garbage-collection-007
+    difficulty: advanced
+    tags: [copying, mark-sweep-compact]
+    question: |
+      Why is a copying (semi-space) collector especially efficient for the
+      young generation?
+    options:
+      - "It never needs to update references after moving objects"
+      - "It uses reference counting to avoid tracing entirely"
+      - "It compacts without moving any objects"
+      - "Its cost is proportional to the number of live objects, which is small when most objects die young"
+    answer: 3
+    explanation: |
+      Copying collection only touches live objects (copying them to to-space);
+      dead objects cost nothing. Since the generational hypothesis says most
+      young objects die quickly, the live set is tiny and copying is cheap. It
+      DOES have to update references to moved objects, and copying inherently
+      moves objects — those are costs, not benefits.
+    ref: "concepts.md#mark-sweep-and-compact"
+
+  - id: garbage-collection-008
+    difficulty: beginner
+    tags: [generational-hypothesis]
+    question: |
+      What does the "weak generational hypothesis" state?
+    options:
+      - "Older objects reference younger objects more often than the reverse"
+      - "Most objects die young — they become unreachable soon after allocation"
+      - "The heap should always be split into exactly two equal halves"
+      - "Garbage collection should run only when the heap is completely full"
+    answer: 1
+    explanation: |
+      The weak generational hypothesis observes empirically that the large
+      majority of objects become garbage shortly after they are created. This
+      justifies collecting a small, frequently-churned young generation cheaply
+      and often, while scanning the long-lived old generation rarely.
+    ref: "concepts.md#generational-hypothesis"
+
+  - id: garbage-collection-009
+    difficulty: intermediate
+    tags: [generational-hypothesis, heap-layout]
+    question: |
+      In the HotSpot generational heap, where are brand-new objects normally
+      allocated?
+    options:
+      - "Eden, within the young generation"
+      - "The Old (Tenured) generation"
+      - "A Survivor space (S0 or S1)"
+      - "Metaspace"
+    answer: 0
+    explanation: |
+      New objects are allocated in Eden. Survivors of a minor GC are copied to a
+      Survivor space and aged; once old enough (or on survivor overflow) they are
+      promoted to the Old generation. Metaspace holds class metadata in native
+      memory, not application objects.
+    ref: "concepts.md#generational-hypothesis"
+
+  - id: garbage-collection-010
+    difficulty: advanced
+    tags: [generational-hypothesis, write-barrier, card-table]
+    question: |
+      During a minor GC, references from the Old generation into the young
+      generation must be treated as roots. How does HotSpot avoid scanning the
+      entire old generation to find them?
+    options:
+      - "It scans all old-gen objects but caches the result between GCs"
+      - "It promotes all young objects first so the problem disappears"
+      - "A write barrier records old-to-young references in a card table (or remembered sets), so only 'dirty' regions are scanned"
+      - "It temporarily makes the old generation unreachable"
+    answer: 2
+    explanation: |
+      A write barrier runs on reference-field stores and marks the relevant card
+      (or updates a per-region remembered set) dirty when an old object starts
+      referencing a young object. The minor GC then only scans dirty
+      cards/remembered sets instead of the whole old gen, keeping minor GC cheap.
+    ref: "concepts.md#generational-hypothesis"
+
+  - id: garbage-collection-011
+    difficulty: intermediate
+    tags: [generational-hypothesis, metaspace, java-8]
+    question: |
+      Which Java version removed the permanent generation (PermGen) and
+      replaced it with Metaspace in native memory?
+    options:
+      - "Java 7"
+      - "Java 11"
+      - "Java 17"
+      - "Java 8"
+    answer: 3
+    explanation: |
+      Java 8 removed PermGen and introduced Metaspace, which stores class
+      metadata in native memory (sized dynamically, capped with
+      -XX:MaxMetaspaceSize). This eliminated many 'OutOfMemoryError: PermGen
+      space' issues but introduced native-memory class-loader-leak symptoms
+      ('OutOfMemoryError: Metaspace').
+    ref: "concepts.md#generational-hypothesis"
+
+  - id: garbage-collection-012
+    difficulty: advanced
+    tags: [generational-hypothesis, tenuring, promotion]
+    question: |
+      An object is repeatedly copied between survivor spaces on successive
+      minor GCs. What eventually causes it to be promoted to the Old
+      generation?
+    options:
+      - "It is promoted immediately on the first minor GC regardless of age"
+      - "Its age exceeds MaxTenuringThreshold, or the target survivor space cannot hold it"
+      - "It is promoted only when System.gc() is called"
+      - "It is never promoted; survivors always stay in the young generation"
+    answer: 1
+    explanation: |
+      Each minor GC increments a survivor's age. Once the age crosses
+      MaxTenuringThreshold, or the survivor space overflows (premature
+      promotion), the object is promoted to Old. Very large objects may be
+      allocated directly in Old. Promotion is not tied to System.gc().
+    ref: "concepts.md#generational-hypothesis"
+
+  - id: garbage-collection-013
+    difficulty: beginner
+    tags: [minor-major-full-gc]
+    question: |
+      A "minor GC" in HotSpot collects which part of the heap?
+    options:
+      - "Only the young generation (Eden and survivor spaces)"
+      - "The entire heap plus Metaspace"
+      - "Only the old generation"
+      - "Only Metaspace"
+    answer: 0
+    explanation: |
+      A minor (young) GC collects only the young generation. It is frequent and
+      cheap because the young gen is small and most of it is dead. Collecting the
+      whole heap plus Metaspace is a full GC; collecting old gen is a major GC.
+    ref: "concepts.md#minor-major-and-full-gc"
+
+  - id: garbage-collection-014
+    difficulty: intermediate
+    tags: [minor-major-full-gc, stop-the-world]
+    question: |
+      In the classic HotSpot generational collectors (Serial, Parallel, G1),
+      which statement about a minor GC is TRUE?
+    options:
+      - "It runs entirely concurrently with application threads and never pauses them"
+      - "It only pauses threads that are currently allocating"
+      - "It is a stop-the-world event, but it is usually short because the young generation is small"
+      - "It is slower than a full GC in the common case"
+    answer: 2
+    explanation: |
+      Minor GCs in Serial, Parallel, and G1 are stop-the-world pauses. They are
+      short because the young generation is small and most of it is dead, so the
+      copied live set is tiny. They are far cheaper than full GCs, not slower.
+    ref: "concepts.md#minor-major-and-full-gc"
+
+  - id: garbage-collection-015
+    difficulty: advanced
+    tags: [minor-major-full-gc, promotion-failure]
+    question: |
+      Under what condition does a cheap young GC degrade into an expensive full
+      GC, causing a latency spike?
+    options:
+      - "When the young generation is larger than the old generation"
+      - "When -XX:MaxGCPauseMillis is set too high"
+      - "When string deduplication is enabled"
+      - "When the old generation cannot accept promoted objects (promotion failure / concurrent mode failure)"
+    answer: 3
+    explanation: |
+      If survivors need to be promoted but the old generation has no room (or the
+      concurrent cycle didn't free space in time), a promotion failure /
+      concurrent mode failure forces a full GC to reclaim and often compact old
+      gen — a major source of tail-latency spikes. Pause goals and dedup don't
+      cause this.
+    ref: "concepts.md#minor-major-and-full-gc"
+
+  - id: garbage-collection-016
+    difficulty: intermediate
+    tags: [minor-major-full-gc, system-gc]
+    question: |
+      What is the effect of calling System.gc() in production, and how can it
+      be neutralized?
+    options:
+      - "It guarantees an immediate full GC that cannot be disabled"
+      - "It is only a hint to run a (usually full) GC and can be disabled with -XX:+DisableExplicitGC"
+      - "It frees only the young generation and always improves throughput"
+      - "It compiles the calling method to native code"
+    answer: 1
+    explanation: |
+      System.gc() is a hint, typically requesting a full GC. The JVM may honor,
+      delay, or ignore it, and -XX:+DisableExplicitGC turns explicit calls into
+      no-ops. Calling it in production is discouraged because an unexpected full
+      GC can cause a long STW pause.
+    ref: "concepts.md#minor-major-and-full-gc"
+
+  - id: garbage-collection-017
+    difficulty: beginner
+    tags: [serial-collector]
+    question: |
+      Which characteristic best describes the Serial collector
+      (-XX:+UseSerialGC)?
+    options:
+      - "It is single-threaded and stops the world for the whole collection, with the smallest footprint"
+      - "It uses many concurrent threads to minimize pause times on large heaps"
+      - "It never stops application threads"
+      - "It is the default collector for large server heaps"
+    answer: 0
+    explanation: |
+      The Serial collector uses a single thread and a full stop-the-world pause
+      for both young (copying) and old (mark-compact) collection. Its minimal
+      overhead makes it ideal for small heaps, single-core/constrained
+      containers, and short-lived JVMs. G1 is the large-heap default, not Serial.
+    ref: "concepts.md#serial-collector"
+
+  - id: garbage-collection-018
+    difficulty: intermediate
+    tags: [serial-collector, when-to-use]
+    question: |
+      For which workload is the Serial collector often the best choice?
+    options:
+      - "A latency-critical trading engine on a 200 GB heap"
+      - "A large analytics cluster maximizing throughput across 64 cores"
+      - "A short-lived CLI tool or a tiny microservice with a small heap on a single core"
+      - "A web server needing sub-millisecond pauses"
+    answer: 2
+    explanation: |
+      Serial shines with small heaps, single-core/constrained environments, and
+      short-lived JVMs where GC-thread coordination would only add overhead and
+      pause length is irrelevant. Large heaps, high throughput on many cores, or
+      sub-ms latency call for Parallel, G1, or ZGC/Shenandoah respectively.
+    ref: "concepts.md#serial-collector"
+
+  - id: garbage-collection-019
+    difficulty: intermediate
+    tags: [parallel-collector, throughput]
+    question: |
+      The Parallel collector (-XX:+UseParallelGC) is primarily optimized for
+      what?
+    options:
+      - "Minimizing individual pause times"
+      - "Running entirely without stop-the-world pauses"
+      - "Supporting heaps larger than 16 TB"
+      - "Maximizing throughput (application time versus total time)"
+    answer: 3
+    explanation: |
+      The Parallel (throughput) collector uses multiple threads for STW young and
+      old collection to maximize the fraction of time spent in application code.
+      It does NOT minimize pause length (pauses can be long) and it is not
+      concurrent. Multi-TB, near-zero-pause scaling is ZGC's domain.
+    ref: "concepts.md#parallel-collector"
+
+  - id: garbage-collection-020
+    difficulty: intermediate
+    tags: [parallel-collector, defaults, versions]
+    question: |
+      Which collector was the default from Java 5 through Java 8, before being
+      replaced as the default in Java 9?
+    options:
+      - "The CMS collector"
+      - "The Parallel collector"
+      - "The Serial collector"
+      - "The Z collector (ZGC)"
+    answer: 1
+    explanation: |
+      Parallel GC was the default from Java 5 to Java 8. Java 9 (JEP 248) made G1
+      the default. CMS was a low-pause option (never the general default, and now
+      removed); ZGC arrived experimentally in JDK 11.
+    ref: "concepts.md#parallel-collector"
+
+  - id: garbage-collection-021
+    difficulty: beginner
+    tags: [cms-collector-removed, versions]
+    question: |
+      What happened to the Concurrent Mark Sweep (CMS) collector in modern
+      OpenJDK?
+    options:
+      - "It was deprecated in JDK 9 and removed in JDK 14"
+      - "It became the default collector in Java 11"
+      - "It was renamed to ZGC in Java 15"
+      - "It is still the recommended low-pause collector in JDK 21"
+    answer: 0
+    explanation: |
+      CMS was deprecated in JDK 9 (JEP 291) and removed in JDK 14 (JEP 363). It
+      does not exist in JDK 17 or 21. It was neither renamed to ZGC nor made a
+      default; its role as a low-pause collector was taken over by G1, then
+      ZGC/Shenandoah.
+    ref: "concepts.md#cms-collector-removed"
+
+  - id: garbage-collection-022
+    difficulty: advanced
+    tags: [cms-collector-removed, fragmentation]
+    question: |
+      What was the fundamental design weakness of CMS that could trigger a slow,
+      single-threaded full GC?
+    options:
+      - "It scanned the entire heap on every minor GC"
+      - "It could not run concurrently with the application at all"
+      - "It was a non-compacting old-gen collector, so fragmentation could force a compacting full GC ('concurrent mode failure')"
+      - "It only worked on 32-bit JVMs"
+    answer: 2
+    explanation: |
+      CMS collected the old generation concurrently but did NOT compact it, so
+      the old gen fragmented over time. When fragmentation or a promotion failure
+      left no suitable space, CMS fell back to a stop-the-world, historically
+      single-threaded compacting full GC — the 'concurrent mode failure' pause
+      that made it hard to tune.
+    ref: "concepts.md#cms-collector-removed"
+
+  - id: garbage-collection-023
+    difficulty: beginner
+    tags: [g1-collector, defaults]
+    question: |
+      Since which Java version has G1 been the default garbage collector?
+    options:
+      - "Java 7"
+      - "Java 8"
+      - "Java 15"
+      - "Java 9"
+    answer: 3
+    explanation: |
+      G1 became the default collector in Java 9 (JEP 248), replacing Parallel GC.
+      It was available (non-default) earlier. Java 8's default was Parallel; Java
+      15 is when ZGC and Shenandoah reached production readiness.
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-024
+    difficulty: intermediate
+    tags: [g1-collector, regions]
+    question: |
+      How does G1 organize the heap, and what does this enable?
+    options:
+      - "As two fixed contiguous halves that are swapped on each GC"
+      - "As many equal-size regions tagged as Eden, Survivor, Old, or Humongous, letting G1 collect a chosen subset of regions"
+      - "As a single flat space with no generations"
+      - "As a linked list of variable-size blocks searched on every allocation"
+    answer: 1
+    explanation: |
+      G1 divides the heap into ~2048 equal-size regions (1-32 MB) that are
+      dynamically labeled Eden, Survivor, Old, or Humongous. Generations are
+      logical sets of regions. Using per-region remembered sets, G1 can evacuate a
+      selected collection set of regions (garbage-first) without scanning the whole
+      heap, giving bounded pauses.
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-025
+    difficulty: intermediate
+    tags: [g1-collector, pause-goal, tuning]
+    question: |
+      What does -XX:MaxGCPauseMillis=200 mean for G1?
+    options:
+      - "A soft pause-time goal G1 tries to meet by sizing its collection set; it can still be missed (e.g. during a full GC)"
+      - "A hard real-time guarantee that no pause will ever exceed 200 ms"
+      - "The maximum time between two consecutive GCs"
+      - "The interval at which the concurrent marking cycle runs"
+    answer: 0
+    explanation: |
+      MaxGCPauseMillis (default 200) is a soft target. G1 adaptively chooses how
+      many regions to include in each collection set to try to stay under it, but
+      it is not a guarantee — humongous churn, a full GC, or a heap that is too
+      small can blow past the goal.
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-026
+    difficulty: expert
+    tags: [g1-collector, full-gc, versions]
+    question: |
+      Which improvement did JEP 307 bring to G1 in JDK 10?
+    options:
+      - "It made G1 the default collector"
+      - "It removed the need for remembered sets"
+      - "It parallelized G1's fallback Full GC, which had previously been single-threaded"
+      - "It added generational support to ZGC"
+    answer: 2
+    explanation: |
+      JEP 307 (JDK 10) made G1's fallback Full GC parallel; before that the Full
+      GC was single-threaded, making the worst-case pause disproportionately long.
+      G1 became default in JDK 9 (JEP 248), and generational ZGC is JDK 21 (JEP
+      439) — different features.
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-027
+    difficulty: advanced
+    tags: [g1-collector, humongous]
+    question: |
+      In G1, what is a "humongous" object and why can it hurt performance?
+    options:
+      - "Any object larger than 8 bytes; it forces immediate promotion"
+      - "An object with more than 100 fields; it disables the write barrier"
+      - "An object that outlives 15 minor GCs; it is pinned in Eden"
+      - "An object at least 50% of a region size; it is allocated in special humongous regions and churn can trigger extra collections and fragmentation"
+    answer: 3
+    explanation: |
+      G1 treats objects that occupy at least half a region as humongous and
+      allocates them across contiguous humongous regions. Frequent allocation and
+      death of large objects (large arrays/buffers) causes humongous-region churn
+      and can pressure the collector, sometimes prompting a marking cycle or full
+      GC. Tuning G1HeapRegionSize can help.
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-028
+    difficulty: beginner
+    tags: [zgc-collector, latency]
+    question: |
+      What is the primary design goal of ZGC?
+    options:
+      - "Maximum batch throughput at the cost of long pauses"
+      - "Ultra-low pause times that do not grow with heap size, on heaps up to multiple terabytes"
+      - "Smallest possible memory footprint for tiny heaps"
+      - "Deterministic finalization ordering"
+    answer: 1
+    explanation: |
+      ZGC targets very short pauses (originally under 10 ms, now sub-millisecond)
+      that stay roughly constant regardless of heap size, scaling from hundreds of
+      MB to 16 TB. It trades some throughput and extra CPU/memory (barriers) for
+      this. Throughput-first is Parallel; tiny footprint is Serial.
+    ref: "concepts.md#zgc-collector"
+
+  - id: garbage-collection-029
+    difficulty: intermediate
+    tags: [zgc-collector, versions]
+    question: |
+      In which Java version did ZGC become production-ready (no longer
+      experimental)?
+    options:
+      - "JDK 15"
+      - "JDK 11"
+      - "JDK 14"
+      - "JDK 17"
+    answer: 0
+    explanation: |
+      ZGC was experimental in JDK 11 (JEP 333) and became production-ready in JDK
+      15 (JEP 377). Shenandoah also reached production in JDK 15 (JEP 379).
+      Generational ZGC came later, in JDK 21 (JEP 439).
+    ref: "concepts.md#zgc-collector"
+
+  - id: garbage-collection-030
+    difficulty: advanced
+    tags: [zgc-collector, generational, versions]
+    question: |
+      Which statement about Generational ZGC is correct?
+    options:
+      - "It was introduced in JDK 15 and is the default when you pass -XX:+UseZGC"
+      - "It removed the young generation from ZGC entirely"
+      - "It was introduced in JDK 21 (JEP 439) and is enabled with -XX:+UseZGC -XX:+ZGenerational"
+      - "It only works on 32-bit JVMs"
+    answer: 2
+    explanation: |
+      Generational ZGC arrived in JDK 21 via JEP 439, adding young/old generations
+      for better efficiency. In JDK 21 you enable it with
+      -XX:+UseZGC -XX:+ZGenerational (plain -XX:+UseZGC still selects the older
+      non-generational mode, later deprecated). ZGC is 64-bit only.
+    ref: "concepts.md#zgc-collector"
+
+  - id: garbage-collection-031
+    difficulty: expert
+    tags: [zgc-collector, colored-pointers, load-barrier]
+    question: |
+      Which pair of mechanisms does ZGC rely on to relocate objects concurrently
+      with the application?
+    options:
+      - "Card tables and mark-compact stop-the-world phases"
+      - "Reference counting and finalizer threads"
+      - "Brooks forwarding pointers combined with a permanent generation"
+      - "Colored pointers (metadata bits in the 64-bit reference) and load barriers that remap and self-heal references"
+    answer: 3
+    explanation: |
+      ZGC stores metadata in unused bits of 64-bit pointers (colored pointers) and
+      uses a load barrier on reference reads: when the application loads a
+      reference to a relocated object, the barrier remaps it to the new location
+      and 'heals' the stored pointer. This is why ZGC is 64-bit only. Brooks
+      forwarding pointers are Shenandoah's classic approach, not ZGC's.
+    ref: "concepts.md#zgc-collector"
+
+  - id: garbage-collection-032
+    difficulty: advanced
+    tags: [shenandoah-collector, versions]
+    question: |
+      When did Shenandoah become production-ready, and what is a notable
+      distribution caveat?
+    options:
+      - "JDK 11; it is only in Oracle's builds"
+      - "JDK 15; it is not included in Oracle's JDK builds but ships in OpenJDK builds like Corretto, Temurin, and Red Hat's"
+      - "JDK 17; it replaced G1 as the default"
+      - "JDK 21; it only runs on Windows"
+    answer: 1
+    explanation: |
+      Shenandoah reached production in JDK 15 (JEP 379). A well-known caveat is
+      that Oracle's own JDK builds do not include Shenandoah; you get it from
+      OpenJDK-based distributions such as Amazon Corretto, Eclipse Temurin, and Red
+      Hat's builds. It never became the default.
+    ref: "concepts.md#shenandoah-collector"
+
+  - id: garbage-collection-033
+    difficulty: advanced
+    tags: [shenandoah-collector, zgc-collector, comparison]
+    question: |
+      Which statement best captures a difference between ZGC and Shenandoah?
+    options:
+      - "ZGC uses colored pointers (64-bit only) and scales to multi-TB heaps; Shenandoah uses forwarding pointers plus load barriers and runs on more platforms"
+      - "ZGC is single-threaded while Shenandoah is multi-threaded"
+      - "Shenandoah requires a permanent generation while ZGC does not"
+      - "ZGC never moves objects while Shenandoah always compacts"
+    answer: 0
+    explanation: |
+      Both are concurrent, compacting, low-pause collectors with pauses
+      independent of heap size. ZGC uses colored pointers (hence 64-bit only) and
+      scales to very large heaps; Shenandoah historically used Brooks forwarding
+      pointers with load reference barriers and supported more architectures
+      (including 32-bit). Both move/compact objects concurrently.
+    ref: "concepts.md#shenandoah-collector"
+
+  - id: garbage-collection-034
+    difficulty: beginner
+    tags: [stop-the-world]
+    question: |
+      What is a "stop-the-world" (STW) pause?
+    options:
+      - "A period when only the garbage collector threads are paused"
+      - "The time spent compiling bytecode to native code"
+      - "A period when the JVM suspends all application threads so the collector can work on a consistent heap view"
+      - "A pause caused exclusively by disk I/O"
+    answer: 2
+    explanation: |
+      An STW pause suspends all mutator (application) threads at a safepoint so GC
+      can operate on a stable object graph. Every collector has some STW work; they
+      differ in how much and whether marking/relocation is concurrent. It is
+      unrelated to JIT compilation or disk I/O.
+    ref: "concepts.md#stop-the-world-and-pause-time-goals"
+
+  - id: garbage-collection-035
+    difficulty: intermediate
+    tags: [stop-the-world, pause-time-goals, concurrent]
+    question: |
+      For a concurrent collector like ZGC, why are STW pauses so short and what
+      do they scale with?
+    options:
+      - "Pauses scale with total heap size, so a larger heap means longer pauses"
+      - "They never stop the world at all under any circumstances"
+      - "Pauses scale with the number of dead objects that must be swept"
+      - "The bulk of work (marking, relocation) is concurrent; the short STW phases are essentially root scanning, scaling with the number of GC roots"
+    answer: 3
+    explanation: |
+      ZGC/Shenandoah perform marking and relocation concurrently with the app, so
+      only small STW segments (root scanning / final marking) remain. Those scale
+      with the number of GC roots (roughly the number of threads), not the heap
+      size — which is why pauses stay sub-millisecond even on multi-TB heaps.
+    ref: "concepts.md#stop-the-world-and-pause-time-goals"
+
+  - id: garbage-collection-036
+    difficulty: expert
+    tags: [pause-time-goals, tuning]
+    question: |
+      A team sets -XX:MaxGCPauseMillis=5 on G1 and is surprised that throughput
+      drops and pauses still sometimes exceed 5 ms. What is the correct
+      explanation?
+    options:
+      - "MaxGCPauseMillis is a hard guarantee, so the JVM has a bug"
+      - "It is a soft goal; an aggressively low target forces smaller, more frequent collections (hurting throughput) yet cannot guarantee the target, especially during a full GC"
+      - "The flag only works with the Serial collector"
+      - "The flag disables the young generation entirely"
+    answer: 1
+    explanation: |
+      MaxGCPauseMillis is a soft target. Setting it very low makes G1 shrink the
+      collection set and collect more frequently, which raises GC overhead and
+      lowers throughput, while still not guaranteeing the goal (a full GC or
+      humongous churn can exceed it). Realistic goals plus adequate heap sizing
+      work better.
+    ref: "concepts.md#stop-the-world-and-pause-time-goals"
+
+  - id: garbage-collection-037
+    difficulty: beginner
+    tags: [throughput-versus-latency]
+    question: |
+      "Throughput" in the GC context most precisely means:
+    options:
+      - "The fraction of total time the application spends running its own code rather than in GC"
+      - "The number of objects allocated per second"
+      - "The length of the longest GC pause"
+      - "The amount of memory reclaimed per collection"
+    answer: 0
+    explanation: |
+      GC throughput is the proportion of wall-clock time spent in application code
+      versus GC. High throughput means GC overhead is a small fraction of runtime.
+      Longest pause length is a latency metric; reclaimed memory and allocation
+      rate are separate measures.
+    ref: "concepts.md#throughput-versus-latency"
+
+  - id: garbage-collection-038
+    difficulty: intermediate
+    tags: [throughput-versus-latency, selection]
+    question: |
+      A nightly ETL batch job cares only about finishing as fast as possible;
+      multi-second pauses are irrelevant. Which collector is the most natural
+      fit?
+    options:
+      - "ZGC, for its sub-millisecond pauses"
+      - "Shenandoah, for concurrent compaction"
+      - "Parallel GC, for maximum throughput"
+      - "Serial GC, for its tiny footprint"
+    answer: 2
+    explanation: |
+      When only total completion time matters and pause length is irrelevant, the
+      Parallel (throughput) collector is ideal — it does no concurrent bookkeeping
+      overhead and reclaims memory in efficient parallel STW batches. ZGC and
+      Shenandoah optimize latency (unneeded here) at some throughput cost; Serial
+      would be slow on a large multi-core batch job.
+    ref: "concepts.md#throughput-versus-latency"
+
+  - id: garbage-collection-039
+    difficulty: advanced
+    tags: [throughput-versus-latency, tradeoffs]
+    question: |
+      Which statement about the throughput / latency / footprint trade-off is
+      most accurate?
+    options:
+      - "A single collector can maximize throughput, minimize latency, and minimize footprint simultaneously"
+      - "Lower pause times always improve throughput"
+      - "Footprint is independent of the collector chosen"
+      - "Concurrent low-latency collectors typically use more CPU and memory (barriers, heap headroom) and sacrifice some throughput to keep pauses short"
+    answer: 3
+    explanation: |
+      You cannot maximize all three at once. Concurrent collectors (ZGC,
+      Shenandoah) run barriers and GC threads that compete with the app and need
+      extra heap headroom, so they trade throughput and footprint for low, stable
+      pauses. Chasing very low pauses generally reduces throughput, and footprint
+      clearly depends on the collector.
+    ref: "concepts.md#throughput-versus-latency"
+
+  - id: garbage-collection-040
+    difficulty: beginner
+    tags: [reference-types]
+    question: |
+      Which reference type is cleared by the GC only when the JVM is running low
+      on memory, making it suitable for memory-sensitive caches?
+    options:
+      - "Strong reference"
+      - "Soft reference"
+      - "Weak reference"
+      - "Phantom reference"
+    answer: 1
+    explanation: |
+      SoftReference objects are cleared at the collector's discretion when memory
+      is tight (as a last resort before OutOfMemoryError), which fits
+      memory-sensitive caches. Strong references are never collected while
+      reachable; weak references are cleared at the next GC once weakly reachable;
+      phantom references' get() always returns null.
+    ref: "concepts.md#reference-types"
+
+  - id: garbage-collection-041
+    difficulty: intermediate
+    tags: [reference-types, phantom]
+    question: |
+      What is unusual about PhantomReference compared with soft and weak
+      references?
+    options:
+      - "Its get() method always returns null, and it is enqueued after the referent is finalized, for post-mortem cleanup"
+      - "It is never cleared by the garbage collector"
+      - "It keeps its referent strongly reachable"
+      - "It can only reference primitive values"
+    answer: 0
+    explanation: |
+      PhantomReference.get() always returns null by design, so you cannot resurrect
+      the object. It is enqueued in a ReferenceQueue after finalization and just
+      before reclamation, giving a safe hook for cleanup — a modern alternative to
+      finalizers. It does not keep the referent alive.
+    ref: "concepts.md#reference-types"
+
+  - id: garbage-collection-042
+    difficulty: intermediate
+    tags: [reference-types, weakhashmap]
+    question: |
+      Which collection uses weak references for its keys so that entries
+      disappear automatically once the key is no longer strongly reachable
+      elsewhere?
+    options:
+      - "HashMap"
+      - "ConcurrentHashMap"
+      - "WeakHashMap"
+      - "LinkedHashMap"
+    answer: 2
+    explanation: |
+      WeakHashMap holds its keys via weak references, so once a key is no longer
+      strongly reachable elsewhere it can be GC'd and its entry removed. Note that
+      values are held strongly — a value referencing its own key defeats the
+      mechanism and leaks. The other maps hold keys strongly.
+    ref: "concepts.md#reference-types"
+
+  - id: garbage-collection-043
+    difficulty: advanced
+    tags: [reference-types, code-analysis]
+    question: |
+      Consider:
+
+      ```java
+      WeakReference<Object> ref = new WeakReference<>(new Object());
+      System.gc();
+      System.out.println(ref.get());
+      ```
+
+      Assuming the GC actually runs, what is the most likely output and why?
+    options:
+      - "A non-null object reference, because WeakReference keeps the object alive"
+      - "A compile error, because WeakReference cannot wrap Object"
+      - "It always throws IllegalStateException"
+      - "null, because the only reference to the object was weak, so it became weakly reachable and was cleared"
+    answer: 3
+    explanation: |
+      The freshly created Object has no strong reference — only the WeakReference
+      points to it — so it is weakly reachable and eligible for clearing on the next
+      GC. After System.gc() runs, ref.get() most likely returns null. WeakReference
+      does not keep referents alive; the code compiles fine.
+    ref: "concepts.md#reference-types"
+
+  - id: garbage-collection-044
+    difficulty: expert
+    tags: [reference-types, reachability-levels]
+    question: |
+      An object is reachable both through a strong reference chain and through a
+      SoftReference. If the strong chain is then broken (set to null) but the
+      SoftReference remains, at what reachability level is the object, and what
+      determines collection?
+    options:
+      - "Phantom-reachable; it is collected immediately"
+      - "Softly reachable; it is cleared only under memory pressure because the weakest still-present reference now governs it"
+      - "Strongly reachable; it can never be collected"
+      - "Unreachable; it is collected at the next minor GC regardless of memory"
+    answer: 1
+    explanation: |
+      Reachability is defined by the strongest reference path. With the strong
+      chain gone, the strongest remaining path is the SoftReference, so the object
+      is softly reachable and the GC clears it only under memory pressure. If a weak
+      reference (but no soft) were the strongest, it would be weakly reachable and
+      cleared at the next GC.
+    ref: "concepts.md#reference-types"
+
+  - id: garbage-collection-045
+    difficulty: beginner
+    tags: [finalization-deprecation]
+    question: |
+      Why is overriding Object.finalize() discouraged for releasing resources?
+    options:
+      - "There is no guarantee it will ever run, when it runs, or on which thread — so resources may never be released"
+      - "It runs too frequently and slows the application"
+      - "It can only be used with primitive types"
+      - "It requires the Serial collector"
+    answer: 0
+    explanation: |
+      finalize() offers no guarantee that it runs at all, when it runs, or on which
+      thread; a blocked finalizer stalls the queue, objects can be resurrected, and
+      exceptions are swallowed. That unpredictability makes it unsuitable for
+      resource cleanup. Use try-with-resources/AutoCloseable or Cleaner instead.
+    ref: "concepts.md#finalization-deprecation"
+
+  - id: garbage-collection-046
+    difficulty: intermediate
+    tags: [finalization-deprecation, versions]
+    question: |
+      Which Java version deprecated finalization *for removal* (JEP 421),
+      allowing it to be disabled at runtime with --finalization=disabled?
+    options:
+      - "JDK 9"
+      - "JDK 11"
+      - "JDK 18"
+      - "JDK 21"
+    answer: 2
+    explanation: |
+      Object.finalize() was deprecated in JDK 9, and JEP 421 in JDK 18 deprecated
+      finalization *for removal*, adding the --finalization=disabled runtime switch
+      ahead of eventual complete removal. JDK 21 continues down that path but the
+      'for removal' milestone is JDK 18.
+    ref: "concepts.md#finalization-deprecation"
+
+  - id: garbage-collection-047
+    difficulty: intermediate
+    tags: [finalization-deprecation, cleaner, versions]
+    question: |
+      Which class, introduced in Java 9, provides a safer, phantom-reachability-
+      based alternative to finalizers for cleaning up (e.g. native) resources?
+    options:
+      - "java.util.concurrent.Cleaner"
+      - "java.lang.AutoFinalizer"
+      - "java.lang.ref.SoftReference"
+      - "java.lang.ref.Cleaner"
+    answer: 3
+    explanation: |
+      java.lang.ref.Cleaner (Java 9) lets you register a cleaning action tied to an
+      object's phantom-reachability; the action runs on a dedicated thread when the
+      object becomes unreachable. It is a backstop, not a replacement for
+      deterministic close() via try-with-resources. There is no Cleaner in
+      java.util.concurrent or a java.lang.AutoFinalizer.
+    ref: "concepts.md#finalization-deprecation"
+
+  - id: garbage-collection-048
+    difficulty: expert
+    tags: [finalization-deprecation, cleaner, gotcha]
+    question: |
+      When using java.lang.ref.Cleaner, why must the registered cleaning action
+      (Runnable) avoid capturing a reference to the object being cleaned?
+    options:
+      - "Because capturing it throws a CleanerException at registration"
+      - "Because capturing the object keeps it reachable, so it never becomes phantom-reachable and the cleaning action never runs"
+      - "Because the action must be static to compile"
+      - "Because Cleaner actions cannot be lambdas"
+    answer: 1
+    explanation: |
+      If the cleaning action holds a reference to the very object it is meant to
+      clean (e.g., an inner-class/lambda capturing 'this'), that object stays
+      reachable through the Cleaner, so it never becomes phantom-reachable and the
+      cleanup never triggers — a subtle leak. The idiom is a static nested state
+      class holding only the resource handle.
+    ref: "concepts.md#finalization-deprecation"
+
+  - id: garbage-collection-049
+    difficulty: beginner
+    tags: [tuning-logging, flags]
+    question: |
+      What do the JVM flags -Xms and -Xmx control?
+    options:
+      - "The initial and maximum size of the heap"
+      - "The minimum and maximum size of the young generation"
+      - "The number of GC threads and the pause goal"
+      - "The Metaspace and code-cache sizes"
+    answer: 0
+    explanation: |
+      -Xms sets the initial heap size and -Xmx the maximum. Setting them equal in
+      servers avoids heap-resize pauses. Young-gen size is -Xmn/-XX:NewRatio; GC
+      threads are -XX:ParallelGCThreads; Metaspace is -XX:MaxMetaspaceSize.
+    ref: "concepts.md#gc-tuning-and-logging-basics"
+
+  - id: garbage-collection-050
+    difficulty: intermediate
+    tags: [tuning-logging, unified-logging, versions]
+    question: |
+      In JDK 9+, which flag enables GC logging, replacing the removed JDK 8-era
+      flags like -XX:+PrintGCDetails and -Xloggc?
+    options:
+      - "-verbose:memory"
+      - "-XX:+TraceGC"
+      - "-Xlog:gc*"
+      - "-XX:+LogGarbageCollection"
+    answer: 2
+    explanation: |
+      JDK 9 introduced unified logging (JEP 158/271). GC logging now uses
+      -Xlog:gc* (with optional file, decorators, rotation), e.g.
+      -Xlog:gc*:file=gc.log:time,uptime,level,tags:filecount=5,filesize=10m. The
+      old -XX:+PrintGCDetails / -Xloggc flags were removed in JDK 9. The other
+      options are not real flags.
+    ref: "concepts.md#gc-tuning-and-logging-basics"
+
+  - id: garbage-collection-051
+    difficulty: advanced
+    tags: [tuning-logging, containers]
+    question: |
+      In a memory-limited container, which approach is generally preferred for
+      sizing the heap on a modern container-aware JDK?
+    options:
+      - "Hardcode -Xmx to the container's total memory"
+      - "Disable the heap limit entirely"
+      - "Rely on System.gc() to keep the heap small"
+      - "Use -XX:MaxRAMPercentage to size the heap as a fraction of the (cgroup-detected) container memory"
+    answer: 3
+    explanation: |
+      Modern JDKs read cgroup limits, so -XX:MaxRAMPercentage lets the heap scale
+      with the container's actual memory allotment and leaves headroom for
+      non-heap/native memory — safer than hardcoding -Xmx to the full container
+      size (which risks OOM-kills). Disabling limits or leaning on System.gc() are
+      not sound strategies.
+    ref: "concepts.md#gc-tuning-and-logging-basics"
+
+  - id: garbage-collection-052
+    difficulty: advanced
+    tags: [tuning-logging, diagnosis]
+    question: |
+      Repeated 'OutOfMemoryError: Metaspace' errors in a frequently redeployed
+      application server most strongly suggest what root cause?
+    options:
+      - "The young generation is too small"
+      - "A class-loader leak — class metadata from old deployments is never unloaded"
+      - "Too many soft references are being retained"
+      - "The pause-time goal is set too low"
+    answer: 1
+    explanation: |
+      Metaspace holds class metadata and is reclaimed when class loaders become
+      unloadable. In app servers that redeploy repeatedly, a lingering reference to
+      an old application's class loader prevents unloading, so metadata accumulates
+      until Metaspace exhausts — a classic class-loader leak. Young-gen size, soft
+      refs, and pause goals do not cause Metaspace OOM.
+    ref: "concepts.md#gc-tuning-and-logging-basics"
+
+  - id: garbage-collection-053
+    difficulty: expert
+    tags: [tuning-logging, symptoms]
+    question: |
+      GC logs show frequent Full GCs with the heap filling right back up
+      immediately after each one. What is the most likely cause?
+    options:
+      - "A genuine memory leak — live objects are accumulating and cannot be reclaimed"
+      - "A healthy application with an optimally tuned heap"
+      - "The young generation is too large"
+      - "String deduplication is disabled"
+    answer: 0
+    explanation: |
+      When full GCs run back-to-back yet reclaim little and the heap refills
+      immediately, live (reachable) objects are accumulating — a memory leak. The
+      next step is a heap dump (jmap) analyzed in a tool like Eclipse MAT to find
+      the retaining path. This is not healthy behavior, nor is it about young-gen
+      sizing or dedup.
+    ref: "concepts.md#gc-tuning-and-logging-basics"
+
+  - id: garbage-collection-054
+    difficulty: expert
+    tags: [tuning-logging, allocation-rate]
+    question: |
+      A latency-sensitive service on G1 shows short but very frequent young GCs
+      and an extremely high allocation rate, yet no leak. Which remediation
+      attacks the root cause most directly?
+    options:
+      - "Call System.gc() periodically to smooth things out"
+      - "Switch to the Serial collector"
+      - "Reduce the allocation rate (e.g., cut per-request temporary objects, avoid autoboxing) and/or enlarge the young generation to lower GC frequency"
+      - "Set -XX:MaxTenuringThreshold=0 to promote everything immediately"
+    answer: 2
+    explanation: |
+      Frequent young GCs driven by a high allocation rate are best addressed by
+      allocating less garbage (fewer transient objects, avoid boxing) and/or giving
+      the young gen more room so it fills less often. System.gc() makes pauses
+      worse; Serial is single-threaded and would hurt; promoting everything (age 0)
+      floods old gen and triggers expensive major/full GCs.
+    ref: "concepts.md#gc-tuning-and-logging-basics"
+
+  - id: garbage-collection-055
+    difficulty: advanced
+    tags: [g1-collector, mixed-gc]
+    question: |
+      What distinguishes a G1 "mixed" GC from a G1 "young" GC?
+    options:
+      - "A mixed GC runs fully concurrently while a young GC is stop-the-world"
+      - "A mixed GC only runs when System.gc() is called"
+      - "A young GC compacts the old generation; a mixed GC does not"
+      - "A mixed GC collects all young regions plus a selected set of old regions with high garbage, whereas a young GC collects only young regions"
+    answer: 3
+    explanation: |
+      After a concurrent marking cycle identifies old regions rich in garbage, G1
+      performs mixed GCs that evacuate all young regions plus a chosen subset of
+      those old regions — reclaiming old-gen space incrementally within the pause
+      goal. A young GC touches only young regions. Both are STW evacuations.
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-056
+    difficulty: expert
+    tags: [g1-collector, ihop, tuning]
+    question: |
+      In G1, what does -XX:InitiatingHeapOccupancyPercent (IHOP, default 45)
+      control, and what is a risk of setting it too high?
+    options:
+      - "The survivor ratio; too high causes premature promotion"
+      - "The old-gen occupancy that triggers a concurrent marking cycle; setting it too high can delay marking so old gen fills before space is reclaimed, forcing a full GC"
+      - "The maximum pause time; too high disables mixed GCs"
+      - "The number of regions; too high wastes memory"
+    answer: 1
+    explanation: |
+      IHOP is the old-generation occupancy threshold at which G1 kicks off a
+      concurrent marking cycle (which enables subsequent mixed GCs to reclaim old
+      space). If IHOP is too high, marking starts too late, old gen can fill before
+      reclamation completes, and G1 falls back to an expensive full GC. (Modern G1
+      also has adaptive IHOP.)
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-057
+    difficulty: intermediate
+    tags: [collectors, flags]
+    question: |
+      Which JVM flag selects the Z Garbage Collector?
+    options:
+      - "-XX:+UseZGC"
+      - "-XX:+UseParallelGC"
+      - "-XX:+UseShenandoahGC"
+      - "-XX:+UseSerialGC"
+    answer: 0
+    explanation: |
+      -XX:+UseZGC selects ZGC. -XX:+UseParallelGC, -XX:+UseShenandoahGC, and
+      -XX:+UseSerialGC select the Parallel, Shenandoah, and Serial collectors
+      respectively. G1 (the default since JDK 9) is -XX:+UseG1GC.
+    ref: "concepts.md#zgc-collector"
+
+  - id: garbage-collection-058
+    difficulty: expert
+    tags: [collectors, scenario, selection]
+    question: |
+      A payments API on a 120 GB heap must keep p99.9 latency under a few
+      milliseconds. Occasional full-GC pauses of hundreds of milliseconds from
+      G1 are unacceptable. What is the best move?
+    options:
+      - "Switch to Parallel GC to raise throughput"
+      - "Switch to Serial GC to reduce overhead"
+      - "Switch to a concurrent low-pause collector such as generational ZGC (JDK 21) or Shenandoah, which keep pauses sub-millisecond regardless of heap size"
+      - "Set -XX:MaxGCPauseMillis=1 on G1, which guarantees 1 ms pauses"
+    answer: 2
+    explanation: |
+      When strict tail-latency on a large heap is the priority, a concurrent
+      compacting collector (generational ZGC in JDK 21, or Shenandoah) is the right
+      tool — their pauses stay sub-millisecond and independent of heap size.
+      Parallel and Serial optimize throughput/footprint with long pauses, and
+      MaxGCPauseMillis on G1 is only a soft goal, not a guarantee.
+    ref: "concepts.md#throughput-versus-latency"
+
+  - id: garbage-collection-059
+    difficulty: intermediate
+    tags: [mark-sweep-compact, allocation]
+    question: |
+      After a moving collector compacts or copies live objects together, why is
+      subsequent allocation so cheap?
+    options:
+      - "Because it no longer needs GC roots"
+      - "Because reference counting takes over"
+      - "Because objects are allocated in Metaspace"
+      - "Because it can allocate by simply bumping a pointer over contiguous free space"
+    answer: 3
+    explanation: |
+      Compaction/copying leaves one contiguous free region, so allocation is just
+      'pointer += size' (bump-the-pointer) — no free-list search. This is a core
+      advantage of moving collectors over non-moving mark-sweep. GC roots are still
+      needed, reference counting is unrelated, and objects are not in Metaspace.
+    ref: "concepts.md#mark-sweep-and-compact"
+
+  - id: garbage-collection-060
+    difficulty: expert
+    tags: [code-analysis, reference-types, referencequeue]
+    question: |
+      Consider:
+
+      ```java
+      ReferenceQueue<byte[]> q = new ReferenceQueue<>();
+      byte[] data = new byte[1024];
+      PhantomReference<byte[]> pr = new PhantomReference<>(data, q);
+      System.out.println(pr.get());
+      ```
+
+      What does this print, and what is pr's purpose?
+    options:
+      - "It prints the byte array's contents; pr keeps data alive"
+      - "It prints null, because PhantomReference.get() always returns null; pr is used to detect when data is about to be reclaimed via the queue"
+      - "It prints the array's hash code; pr behaves like a weak reference"
+      - "It fails to compile because PhantomReference requires a ReferenceQueue at get() time"
+    answer: 1
+    explanation: |
+      PhantomReference.get() is specified to always return null (you can never
+      obtain the referent), so this prints 'null'. Its value comes from being
+      enqueued in the ReferenceQueue after the referent is finalized and just before
+      reclamation, letting you perform post-mortem cleanup — a safer pattern than
+      finalizers. The code compiles fine.
+    ref: "concepts.md#reference-types"
+
+  - id: garbage-collection-061
+    difficulty: expert
+    tags: [cms-collector-removed, code-analysis, versions]
+    question: |
+      You start a JDK 17 process with -XX:+UseConcMarkSweepGC. What is the most
+      accurate description of what happens?
+    options:
+      - "CMS was removed in JDK 14, so the flag is unrecognized/ignored (with a warning) and the JVM falls back to the default collector, G1"
+      - "The JVM runs CMS as requested"
+      - "The JVM refuses to start and prints 'CMS deprecated'"
+      - "The JVM silently switches to ZGC"
+    answer: 0
+    explanation: |
+      CMS was removed in JDK 14 (JEP 363), so on JDK 17 the flag no longer selects a
+      real collector — it is treated as an obsolete/unrecognized option (typically a
+      warning) and the JVM uses its default, G1. It does not run CMS, hard-fail, or
+      switch to ZGC.
+    ref: "concepts.md#cms-collector-removed"
+
+  - id: garbage-collection-062
+    difficulty: advanced
+    tags: [minor-major-full-gc, definitions]
+    question: |
+      Which sequence correctly orders these collections from cheapest/most
+      frequent to most expensive/least frequent in a generational collector?
+    options:
+      - "Full GC, major GC, minor GC"
+      - "Major GC, minor GC, then no full GC ever occurs"
+      - "Minor GC, major/full GC (old gen or whole heap)"
+      - "They all cost exactly the same"
+    answer: 2
+    explanation: |
+      Minor (young) GCs are the cheapest and most frequent; collecting the old
+      generation (major) or the whole heap plus Metaspace (full) is progressively
+      more expensive and less frequent. Full GC is the worst case, so the ordering
+      goes minor -> major/full.
+    ref: "concepts.md#minor-major-and-full-gc"
+
+  - id: garbage-collection-063
+    difficulty: advanced
+    tags: [finalization-deprecation, autocloseable]
+    question: |
+      Which mechanism gives *deterministic* resource release exactly when a
+      scope exits, and is the primary recommended replacement for finalizers?
+    options:
+      - "A SoftReference to the resource"
+      - "Overriding finalize() but calling it manually"
+      - "Registering the resource with a Cleaner"
+      - "try-with-resources on an AutoCloseable (its close() runs when the block exits)"
+    answer: 3
+    explanation: |
+      try-with-resources (Java 7) over an AutoCloseable guarantees close() runs
+      deterministically when the block exits (even on exception) — the primary,
+      predictable cleanup mechanism. Cleaner is a non-deterministic safety net
+      (runs at some point after unreachability), soft references don't release
+      resources, and finalize() is exactly what we're replacing.
+    ref: "concepts.md#finalization-deprecation"
+
+  - id: garbage-collection-064
+    difficulty: beginner
+    tags: [collectors, defaults]
+    question: |
+      Which collector is the default in a typical server-class JDK 17 or JDK 21
+      installation?
+    options:
+      - "Serial GC"
+      - "G1 GC"
+      - "Parallel GC"
+      - "Shenandoah GC"
+    answer: 1
+    explanation: |
+      G1 has been the default since JDK 9 and remains the default in the current
+      LTS releases (JDK 17 and JDK 21) for server-class machines. Parallel was the
+      pre-9 default; ZGC and Shenandoah are opt-in low-pause collectors.
+    ref: "concepts.md#g1-collector"
+
+  - id: garbage-collection-065
+    difficulty: advanced
+    tags: [stop-the-world, safepoints, expert]
+    question: |
+      Even ZGC and Shenandoah have brief stop-the-world phases. Why can't a
+      practical collector avoid stopping the world entirely, even for root
+      scanning?
+    options:
+      - "Because scanning thread stack roots requires the threads to be at a safepoint so their stack maps are stable and consistent"
+      - "Because Java lacks threads"
+      - "Because the heap must be locked during allocation"
+      - "Because the JIT compiler must be paused for correctness"
+    answer: 0
+    explanation: |
+      Enumerating roots on thread stacks requires those threads to be at a
+      safepoint so the stack layout (which slots hold references) is well-defined
+      and not mid-mutation. That is why even ultra-low-pause collectors keep a tiny
+      STW window for (initial/final) root scanning, scaling with the number of
+      threads. It is not about lacking threads, allocation locks, or the JIT.
+    ref: "concepts.md#stop-the-world-and-pause-time-goals"
+
+  - id: garbage-collection-066
+    difficulty: intermediate
+    tags: [reference-types, soft, gotcha]
+    question: |
+      A developer builds a cache using SoftReference values expecting it to hold
+      entries "as long as possible." Which caveat is most important to
+      understand?
+    options:
+      - "Soft references are never cleared, so the cache will leak"
+      - "Soft references keep keys alive but not values"
+      - "Under memory pressure the GC may clear soft entries unpredictably, and under abundant memory they may linger past usefulness — so a SoftReference cache offers no size or timing guarantees"
+      - "SoftReference can only wrap primitive wrappers"
+    answer: 2
+    explanation: |
+      SoftReference-based caches give no eviction guarantees: entries can vanish
+      abruptly under memory pressure (hurting hit rate) yet also survive long after
+      they're useful when memory is plentiful. For predictable behavior, a bounded
+      cache (e.g., size/time-based eviction like Caffeine) is usually better. Soft
+      refs can wrap any object and do get cleared.
+    ref: "concepts.md#reference-types"
