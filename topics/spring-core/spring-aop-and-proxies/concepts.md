@@ -1,0 +1,275 @@
+# Spring AOP and Proxies
+
+Aspect-Oriented Programming (AOP) complements Object-Oriented Programming by giving you another way to structure a program. Where OOP's unit of modularity is the class, AOP's unit of modularity is the *aspect*: a module that encapsulates a concern (like logging, security, or transactions) that would otherwise be scattered across many classes. Spring AOP is the framework's own, proxy-based implementation of these ideas, and it is the machinery behind declarative transactions (`@Transactional`), method-level security, caching (`@Cacheable`), and `@Async`.
+
+This note covers the vocabulary, the annotations, the two proxying strategies (JDK dynamic proxies vs CGLIB), the famous self-invocation limitation, and how Spring AOP differs from full AspectJ.
+
+---
+
+## Cross-cutting concerns
+
+A **cross-cutting concern** is a piece of behaviour that is needed in many places across an application but is not part of any one component's core business responsibility. Classic examples:
+
+- Logging / tracing of method entry, exit, and arguments
+- Transaction management (begin, commit, rollback)
+- Security / authorization checks
+- Performance monitoring and metrics
+- Caching
+- Retry and error handling
+
+If you implement these directly inside business methods, the same boilerplate gets copied everywhere. This causes two problems that AOP is designed to solve:
+
+- **Code tangling** — a single method mixes business logic with unrelated concerns (a `transferMoney` method that also opens transactions, logs, checks permissions).
+- **Code scattering** — the same concern is duplicated across dozens of methods and classes; changing it means editing all of them.
+
+AOP lets you write the concern **once**, in an aspect, and declaratively apply it to all the places (join points) that match a pointcut. The business code stays clean and focused; the cross-cutting logic lives in one modular unit.
+
+```java
+// Without AOP: the concern is tangled into every method
+public void placeOrder(Order o) {
+    long start = System.currentTimeMillis();      // metrics concern
+    log.info("placeOrder start");                 // logging concern
+    // ... actual business logic ...
+    log.info("placeOrder done in {}ms", System.currentTimeMillis() - start);
+}
+```
+
+With AOP that timing/logging code is extracted into an aspect and the method contains only business logic.
+
+---
+
+## Core AOP terminology
+
+These terms are shared vocabulary across AOP frameworks (AspectJ defined most of them; Spring reuses them). Interviewers frequently ask you to define and distinguish them.
+
+| Term | Definition |
+|------|------------|
+| **Aspect** | A module that encapsulates a cross-cutting concern. In Spring, a class annotated with `@Aspect` containing advice and pointcuts. |
+| **Join point** | A point during program execution where an aspect can be applied. **In Spring AOP a join point is always a method execution** — nothing else. |
+| **Advice** | The action taken by an aspect at a join point (the actual code that runs): `@Before`, `@After`, `@Around`, etc. |
+| **Pointcut** | A predicate/expression that matches join points. Advice is associated with a pointcut and runs at any join point the pointcut matches. Spring uses the AspectJ pointcut expression language. |
+| **Target object** | The original object being advised (the real bean with the business logic). Also called the "advised" object. |
+| **Proxy** | The object created by the framework that wraps the target to apply advice. Callers get the proxy, not the raw target. |
+| **Weaving** | Linking aspects with target objects to create the advised object. Can happen at compile time, load time, or runtime. **Spring AOP weaves at runtime** (via proxies). |
+| **Introduction** | Declaring additional methods or fields on behalf of a type (making a bean implement a new interface). Called inter-type declaration in AspectJ. |
+| **AOP proxy** | The specific proxy object Spring creates: a JDK dynamic proxy or a CGLIB proxy. |
+
+A useful mental model: the **pointcut** selects *where*, the **advice** defines *what* and *when*, the **aspect** bundles them, and **weaving** wires the aspect into the target through a **proxy**.
+
+---
+
+## Advice types
+
+Advice is the code that runs at a matched join point. Spring supports five advice annotations (from `org.aspectj.lang.annotation`):
+
+| Annotation | When it runs | Can prevent method call | Can modify return | Notes |
+|------------|--------------|-------------------------|-------------------|-------|
+| `@Before` | Before the join point | No (unless it throws) | No | Runs before the method; can't stop it except by throwing. |
+| `@AfterReturning` | After the method returns normally | No | No (can read the returned value via `returning`) | Not called if the method throws. |
+| `@AfterThrowing` | After the method throws an exception | No | Can access the exception via `throwing` | Not called on normal return. |
+| `@After` | After the method, regardless of outcome | No | No | "Finally" semantics — runs on both normal return and exception. |
+| `@Around` | Surrounds the join point | **Yes** | **Yes** | Most powerful; receives `ProceedingJoinPoint`, must call `proceed()`. |
+
+```java
+@Aspect
+@Component
+public class LoggingAspect {
+
+    @Before("execution(* com.example.service.*.*(..))")
+    public void logBefore(JoinPoint jp) {
+        System.out.println("Calling " + jp.getSignature().getName());
+    }
+
+    @AfterReturning(pointcut = "execution(* com.example.service.*.*(..))",
+                    returning = "result")
+    public void logReturn(JoinPoint jp, Object result) {
+        System.out.println("Returned: " + result);
+    }
+
+    @AfterThrowing(pointcut = "execution(* com.example.service.*.*(..))",
+                   throwing = "ex")
+    public void logError(JoinPoint jp, Throwable ex) {
+        System.out.println("Threw: " + ex.getMessage());
+    }
+
+    @After("execution(* com.example.service.*.*(..))")
+    public void logAfterFinally(JoinPoint jp) {
+        System.out.println("Finished (finally)");
+    }
+
+    @Around("execution(* com.example.service.*.*(..))")
+    public Object timeIt(ProceedingJoinPoint pjp) throws Throwable {
+        long start = System.currentTimeMillis();
+        try {
+            Object result = pjp.proceed();          // invoke the target method
+            return result;                           // may wrap/replace the result
+        } finally {
+            long ms = System.currentTimeMillis() - start;
+            System.out.println(pjp.getSignature() + " took " + ms + "ms");
+        }
+    }
+}
+```
+
+Key details interviewers probe:
+
+- **`@Around` must declare `ProceedingJoinPoint` and call `proceed()`.** If you forget `proceed()`, the target method never runs. `@Around` can also skip `proceed()` deliberately (e.g., return a cached value), call it multiple times (retry), or transform its return value / swallow exceptions.
+- **Other advice types use `JoinPoint`** (not `ProceedingJoinPoint`) as an optional first parameter to introspect args, signature, and target.
+- **Advice ordering.** Around the same join point, on entry the order is `@Around` (before `proceed`) → `@Before`; on exit it is `@AfterReturning`/`@AfterThrowing` → `@After` → `@Around` (after `proceed`). Note: in Spring Framework 5.2.7+ the ordering for multiple advice methods *within the same aspect* was made deterministic based on advice type (`@Around`, then `@Before`, then `@After`, then `@AfterReturning`, then `@AfterThrowing` on the "after" side). Ordering between *different* aspects is controlled by `@Order` / `Ordered`.
+
+---
+
+## Aspect declaration and EnableAspectJAutoProxy
+
+Spring uses **@AspectJ annotation style** — you write plain classes annotated with AspectJ annotations, but they are processed by Spring's proxy-based runtime (this is not AspectJ's compiler/weaver).
+
+Two things are required:
+
+1. **Mark the class as an aspect and register it as a bean.**
+
+```java
+@Aspect                 // marks this as an aspect (from AspectJ)
+@Component              // makes Spring pick it up as a bean (needed for Spring to manage it)
+public class LoggingAspect { ... }
+```
+
+`@Aspect` alone does **not** register the class as a Spring bean — Spring explicitly ignores `@Aspect`-only classes for autodetection. You still need `@Component` (or an `@Bean` method / XML definition) so the aspect becomes a managed bean.
+
+2. **Enable auto-proxying** so Spring scans beans for aspects and creates proxies.
+
+```java
+@Configuration
+@EnableAspectJAutoProxy      // turns on @AspectJ support in a Java-config context
+@ComponentScan("com.example")
+public class AppConfig { }
+```
+
+`@EnableAspectJAutoProxy` registers an `AnnotationAwareAspectJAutoProxyCreator` (a `BeanPostProcessor`) that, at bean creation time, checks whether any aspect's pointcut matches the bean and, if so, wraps it in an AOP proxy. The XML equivalent is `<aop:aspectj-autoproxy/>`.
+
+Reusable **named pointcuts** keep expressions DRY:
+
+```java
+@Aspect @Component
+public class Pointcuts {
+    @Pointcut("execution(* com.example.service.*.*(..))")
+    public void serviceLayer() {}    // the method body is empty; name = pointcut
+
+    @Pointcut("@annotation(com.example.Audited)")
+    public void audited() {}
+}
+// referenced elsewhere: @Before("com.example.Pointcuts.serviceLayer() && audited()")
+```
+
+Common pointcut designators: `execution(...)` (most used — matches method execution), `within(...)` (types), `@annotation(...)` (methods carrying an annotation), `bean(name)` (by bean name), `args(...)`, `this(...)`, `target(...)`.
+
+> Note on packages: In **Spring Framework 6.x** the aspect annotations still come from `org.aspectj.lang.annotation` (AspectJ), unchanged. The jakarta/javax split affects things like `@Transactional`'s underlying APIs and servlet/JPA, not the AOP annotations themselves.
+
+---
+
+## JDK dynamic proxy vs CGLIB
+
+Spring AOP is **proxy-based**: it does not modify your class bytecode. Instead it creates a proxy object that intercepts calls and applies advice before delegating to the target. There are two proxy mechanisms.
+
+**JDK dynamic proxy**
+- Built into the JDK (`java.lang.reflect.Proxy`).
+- **Proxies interfaces**: the generated proxy implements the same interface(s) as the target and holds a reference to the target.
+- Only methods declared on the proxied interfaces can be advised. The proxy is *not* an instance of the concrete class, only of its interfaces.
+
+**CGLIB proxy**
+- Uses a bytecode library (CGLIB, now repackaged inside `spring-core`) to generate a **runtime subclass** of the target class and override its methods.
+- **Proxies classes** — no interface required.
+- Limitations that follow from subclassing: it **cannot proxy `final` classes** or override **`final` methods**, and `private` methods are never advised. The target needs an instantiable constructor. Since Spring 4.0, CGLIB uses Objenesis, so a default no-arg constructor is not strictly required.
+
+**How Spring chooses:**
+
+| Situation | Proxy used |
+|-----------|------------|
+| Target implements one or more interfaces AND `proxyTargetClass=false` (default in plain Spring Framework) | **JDK dynamic proxy** |
+| Target implements no interface | **CGLIB** (forced — nothing else is possible) |
+| `proxyTargetClass=true` set on `@EnableAspectJAutoProxy(proxyTargetClass=true)` or `<aop:aspectj-autoproxy proxy-target-class="true"/>` | **CGLIB** always |
+
+```java
+@EnableAspectJAutoProxy(proxyTargetClass = true)  // force CGLIB for all proxies
+```
+
+Important nuances:
+
+- **Default differs in Spring Boot.** Plain Spring Framework defaults to interface-based JDK proxies when interfaces exist. Spring Boot flips the default to CGLIB (`proxyTargetClass=true`) for its AOP auto-configuration, so injecting by concrete class type works out of the box. (This note is about the framework; the Boot default is a common gotcha.)
+- **Inject by interface, not by concrete class, when using JDK proxies.** A JDK proxy is not an instance of the target class, so `@Autowired MyServiceImpl impl` fails to inject a JDK proxy — autowire the interface (`MyService`) instead.
+- Regardless of mechanism, the proxy delegates to a single target instance; both approaches produce a runtime (weaving) proxy.
+
+---
+
+## Self-invocation limitation
+
+Because Spring AOP works through a proxy, **advice is only applied when the call comes through the proxy.** When a method inside the target object calls another method on the *same* object using `this`, the call goes directly to the target and bypasses the proxy entirely — so no advice runs. This is the **self-invocation** (a.k.a. internal method call) limitation.
+
+```java
+@Service
+public class OrderService {
+
+    @Transactional
+    public void outer() {
+        inner();           // self-invocation: 'this.inner()' — bypasses the proxy!
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void inner() {  // its @Transactional is IGNORED when called from outer()
+        ...
+    }
+}
+```
+
+Here calling `orderService.outer()` triggers the proxy for `outer()`, but the internal `inner()` call does not go through the proxy, so `inner()`'s transactional advice (and any other advice) is silently skipped. The same applies to `@Cacheable`, `@Async`, custom aspects, etc.
+
+Ways to deal with it (intro level — know that the limitation exists and the common fixes):
+
+1. **Restructure** — move `inner()` into a separate bean and inject it, so the call crosses a proxy boundary.
+2. **Self-injection** — inject the bean into itself and call through the injected reference (`self.inner()`).
+3. **`AopContext.currentProxy()`** — call `((OrderService) AopContext.currentProxy()).inner()`. Requires `exposeProxy = true` and couples code to Spring AOP.
+4. **Use full AspectJ (compile/load-time weaving)** — it weaves the actual bytecode, so self-invocation is advised too, since there is no proxy involved.
+
+This limitation is a direct consequence of the proxy model and is one of the most commonly asked "gotcha" questions about Spring AOP.
+
+---
+
+## Spring AOP vs AspectJ
+
+Both use the same annotations and pointcut language, but they are fundamentally different implementations. AspectJ is a complete AOP language/framework; Spring AOP is a lighter, proxy-based subset integrated with the Spring container.
+
+| Aspect | Spring AOP | AspectJ |
+|--------|-----------|---------|
+| **Weaving** | Runtime, via dynamic proxies | Compile-time, post-compile, or load-time weaving (LTW) — modifies bytecode |
+| **Join points supported** | **Method execution only** | Method call/execution, constructor, field get/set, static init, exception handler, etc. |
+| **Scope of what it can advise** | Only Spring-managed beans | Any object, including non-Spring objects and those created with `new` |
+| **Self-invocation advised?** | No (proxy bypass) | Yes (bytecode is woven) |
+| **Extra build/setup** | None — pure Java, part of Spring | Needs AspectJ compiler (ajc) or a load-time weaving agent |
+| **Performance** | Slight per-call proxy overhead | Faster at runtime (woven directly), no proxy indirection |
+| **Complexity** | Simpler, sufficient for most needs | More powerful but heavier to set up |
+
+**Key takeaway:** Spring AOP intentionally covers the "80% case" (method-level cross-cutting on beans) with zero build changes. Reach for full AspectJ only when you need capabilities Spring AOP cannot provide: advising constructors or field access, advising non-Spring/`new`-created objects, or making self-invocations trigger advice. Spring can also *drive* AspectJ load-time weaving via `@EnableLoadTimeWeaving` / `<context:load-time-weaver/>` when you need it — the two are not mutually exclusive.
+
+---
+
+## Common follow-up questions
+
+- **Q: In Spring AOP, what is the only kind of join point?** Method execution. Field access, constructor calls, etc. are not supported (that's AspectJ).
+- **Q: Difference between `@After` and `@AfterReturning`?** `@After` runs regardless of outcome (finally semantics); `@AfterReturning` runs only on normal return and can capture the returned value.
+- **Q: Why did my `@Transactional` / `@Cacheable` not work on an internal call?** Self-invocation — the internal call bypasses the proxy. Move the method to another bean or use `AopContext.currentProxy()`.
+- **Q: When does Spring use CGLIB instead of a JDK proxy?** When the target has no interface, or when `proxyTargetClass=true` is set. (And by default in Spring Boot.)
+- **Q: Can Spring AOP advise `private` or `final` methods?** No. `private` methods are never advised; CGLIB cannot override `final` methods or subclass `final` classes; JDK proxies only see interface methods.
+- **Q: Does `@Aspect` make a class a Spring bean?** No — you also need `@Component`/`@Bean`. And you need `@EnableAspectJAutoProxy` to activate proxying.
+- **Q: What must an `@Around` advice do?** Accept a `ProceedingJoinPoint` and call `proceed()` (unless it deliberately short-circuits); it can alter arguments, the return value, or handle exceptions.
+- **Q: How do you order multiple aspects?** Implement `Ordered` or annotate with `@Order`; lower value = higher precedence (runs first on the way in).
+- **Q: Is Spring AOP the same as AspectJ?** No. Spring AOP is proxy-based, runtime, method-execution-only; it uses AspectJ's annotations and pointcut syntax but not its weaver.
+
+---
+
+## References
+
+- Spring Framework Reference — Aspect Oriented Programming with Spring: https://docs.spring.io/spring-framework/reference/core/aop.html
+- Spring Framework Reference — @AspectJ support and `@EnableAspectJAutoProxy`: https://docs.spring.io/spring-framework/reference/core/aop/ataspectj.html
+- Spring Framework Reference — Proxying mechanisms (JDK dynamic proxies vs CGLIB): https://docs.spring.io/spring-framework/reference/core/aop/proxying.html
+- Spring Framework Reference — Advice types and ordering: https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/advice.html
+- Spring Framework Reference — Choosing between Spring AOP and full AspectJ: https://docs.spring.io/spring-framework/reference/core/aop/choosing.html
+- AspectJ Programming Guide (terminology and full weaving model): https://eclipse.dev/aspectj/doc/latest/progguide/
