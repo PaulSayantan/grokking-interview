@@ -336,9 +336,11 @@ questions:
       - "Spring throws an IllegalStateException"
     answer: 0
     explanation: |
-      When `reason` is set, `ResponseStatusExceptionResolver` calls
+      When `reason` is set, `ResponseStatusExceptionResolver.applyStatusAndReason` calls
       `HttpServletResponse.sendError(status, reason)`, which commits the response and typically
-      triggers the container's error page (or `/error` under Boot). An empty `reason` sets only the status.
+      triggers the container's error page (or `/error` under Boot). An empty `reason` still goes
+      through `sendError` (the single-argument `sendError(status)`), so the error-page mechanism
+      applies either way; the `reason` only controls whether a message string is attached.
     ref: "concepts.md#mapping-exceptions-to-http-status-with-responsestatus"
 
   - id: web-exception-handling-021
@@ -717,3 +719,703 @@ questions:
       Multiple `@ControllerAdvice` beans are ordered using `@Order`, the `Ordered` interface, or
       `@Priority`, which controls the sequence in which they are consulted.
     ref: "concepts.md#controlleradvice-and-restcontrolleradvice-global"
+
+  - id: web-exception-handling-043
+    difficulty: expert
+    tags: [advice-ordering, shadowing, controller-advice]
+    question: |
+      Advice A (`@Order(1)`) declares `@ExceptionHandler(Exception.class)`. Advice B (`@Order(2)`)
+      declares `@ExceptionHandler(OrderNotFoundException.class)`. A controller (with no local
+      handler) throws `OrderNotFoundException`. Which handler runs, and why?
+    options:
+      - "A's handler, because the resolver iterates advices in @Order sequence and the FIRST advice with any match wins; B is never consulted"
+      - "B's handler, because Spring always selects the most specific exception match across all advices"
+      - "Both run in order, A first then B, and B's result is used"
+      - "Neither; the ambiguity causes an IllegalStateException at request time"
+    answer: 0
+    explanation: |
+      Specificity via `ExceptionDepthComparator` only decides *within* one advice. Across advices,
+      `ExceptionHandlerExceptionResolver` iterates `ControllerAdviceBean`s in `@Order` sequence and
+      stops at the first advice that has any matching handler. A (order 1) matches `Exception`, so
+      A wins and B's more specific handler is never reached. This is why the catch-all belongs in the
+      lowest-priority advice.
+    ref: "concepts.md#controlleradvice-and-restcontrolleradvice-global"
+
+  - id: web-exception-handling-044
+    difficulty: expert
+    tags: [matching, ambiguity, exception-depth-comparator]
+    question: |
+      A single `@ControllerAdvice` has `@ExceptionHandler(InterfaceA.class)` and
+      `@ExceptionHandler(InterfaceB.class)`. A thrown exception implements BOTH interfaces at the
+      same inheritance depth. What happens?
+    options:
+      - "The handler declared first in source order is chosen"
+      - "Spring throws IllegalStateException reporting an ambiguous @ExceptionHandler mapping"
+      - "Spring silently invokes both and merges their return values"
+      - "The exception propagates unhandled because neither is a class match"
+    answer: 1
+    explanation: |
+      `ExceptionHandlerMethodResolver` collects all assignable mappings and sorts by depth. When two
+      mappings tie at the same minimal depth (possible via unrelated interfaces), Spring throws
+      `IllegalStateException("Ambiguous @ExceptionHandler method mapped for ...")` — an eager,
+      fail-fast error rather than an arbitrary pick.
+    ref: "concepts.md#exceptionhandler-controller-local"
+
+  - id: web-exception-handling-045
+    difficulty: expert
+    tags: [mapping-keys, annotation-vs-parameter]
+    question: |
+      A handler is declared `@ExceptionHandler({IOException.class, SQLException.class}) public
+      ResponseEntity<?> h(Exception ex)`. A `RuntimeException` (unrelated to IOException/SQLException)
+      is thrown and no other handler exists. Does this handler match it?
+    options:
+      - "No, because when the annotation lists exception types, those become the mapping keys; the parameter type Exception is ignored for matching"
+      - "Yes, because the method parameter type is Exception, which is a supertype of RuntimeException"
+      - "Yes, because Spring unions the annotation values with the parameter type"
+      - "It throws at startup because the parameter type is broader than the annotation values"
+    answer: 0
+    explanation: |
+      When `@ExceptionHandler` declares explicit types, THOSE are the mapping keys — here
+      `IOException` and `SQLException`. The parameter type is only used to derive mappings when the
+      annotation value is empty. So a `RuntimeException` does not match, and it falls through.
+    ref: "concepts.md#exceptionhandler-controller-local"
+
+  - id: web-exception-handling-046
+    difficulty: advanced
+    tags: [cause-unwrapping, matching]
+    question: |
+      A service wraps the real error: it throws `ServiceException` whose cause is
+      `OrderNotFoundException`. An advice has handlers for BOTH `ServiceException` and
+      `OrderNotFoundException`. Which one is invoked (Spring 5.3+)?
+    options:
+      - "The OrderNotFoundException handler, because cause matching is always preferred"
+      - "Neither; wrapped exceptions are never matched"
+      - "Both handlers, cause first then wrapper"
+      - "The ServiceException handler, because the top-level exception is matched against all handlers first, and cause unwrapping only happens if nothing matches the top level"
+    answer: 3
+    explanation: |
+      Spring first tries the top-level exception type against all candidate handlers. Only if none
+      match does it unwrap `getCause()` and retry. Since `ServiceException` has a handler, that wins;
+      the cause handler is never consulted. A handler for the wrapper shadows one for the cause.
+    ref: "concepts.md#exceptionhandler-controller-local"
+
+  - id: web-exception-handling-047
+    difficulty: expert
+    tags: [pre-empt, response-status, ordering]
+    question: |
+      An exception class is annotated `@ResponseStatus(HttpStatus.NOT_FOUND)`. A high-priority
+      `@ControllerAdvice` also has `@ExceptionHandler(Exception.class)` returning a 500 body.
+      The controller throws that exception. What status does the client see?
+    options:
+      - "404, because @ResponseStatus on the exception always takes precedence"
+      - "404, because ResponseStatusExceptionResolver is registered with higher precedence than the annotation resolver"
+      - "500, because ExceptionHandlerExceptionResolver runs before ResponseStatusExceptionResolver, and the catch-all @ExceptionHandler matches first"
+      - "The request fails with an ambiguity error between the two mechanisms"
+    answer: 2
+    explanation: |
+      `ExceptionHandlerExceptionResolver` is first in the chain. The catch-all `@ExceptionHandler
+      (Exception.class)` matches and handles the exception, returning 500. `@ResponseStatus` is only
+      honored by `ResponseStatusExceptionResolver`, which never runs because an earlier resolver
+      already handled it. A matching `@ExceptionHandler` pre-empts `@ResponseStatus`.
+    ref: "concepts.md#ordering-and-precedence-across-mechanisms"
+
+  - id: web-exception-handling-048
+    difficulty: advanced
+    tags: [send-error, response-status, reason]
+    question: |
+      In a pure REST app, a `@ResponseStatus(code = HttpStatus.NOT_FOUND, reason = "Missing")`
+      exception propagates unhandled. A client with `Accept: application/json` often receives an
+      HTML error page instead of JSON. Why?
+    options:
+      - "Because @ResponseStatus disables all message converters"
+      - "Because a non-empty reason triggers response.sendError(code, reason), which commits the response and forwards to the container error page, bypassing your message converters"
+      - "Because JSON is not supported for 404 responses in Spring MVC"
+      - "Because the reason attribute forces content type to text/html on the ProblemDetail"
+    answer: 1
+    explanation: |
+      A present `reason` makes `ResponseStatusExceptionResolver` call `sendError(code, reason)`, which
+      commits the response and triggers the container's error-page mechanism (or `/error` under Boot)
+      — an HTML page, not your JSON. To get a real JSON/`ProblemDetail` body written by message
+      converters, handle the exception with an `@ExceptionHandler`/`@ControllerAdvice`
+      (e.g. `ResponseEntityExceptionHandler`) rather than letting `ResponseStatusExceptionResolver`
+      resolve it. Note `ResponseStatusException` is also resolved by that resolver via the same
+      `sendError` path, so throwing it does not by itself avoid the forward.
+    ref: "concepts.md#mapping-exceptions-to-http-status-with-responsestatus"
+
+  - id: web-exception-handling-049
+    difficulty: advanced
+    tags: [interceptor, after-completion, pipeline]
+    question: |
+      A `HandlerInterceptor.afterCompletion(...)` method throws a RuntimeException. Will your
+      `@ControllerAdvice` `@ExceptionHandler` handle it?
+    options:
+      - "No, afterCompletion runs after the DispatcherServlet's try block (during cleanup), so its exception propagates to the container and is not resolvable"
+      - "Yes, all interceptor exceptions are routed through the resolver chain"
+      - "Only if the interceptor is registered as a @ControllerAdvice"
+      - "Yes, but only for the highest-priority advice"
+    answer: 0
+    explanation: |
+      Only `preHandle` and `postHandle` are inside `doDispatch`'s try block. `afterCompletion`
+      executes afterward during cleanup/rendering, outside the region routed to
+      `processHandlerException`. An exception there propagates to the servlet container.
+    ref: "concepts.md#the-exception-resolution-pipeline"
+
+  - id: web-exception-handling-050
+    difficulty: expert
+    tags: [null-handler, no-handler-found, controller-advice]
+    question: |
+      With `NoHandlerFoundException` enabled, a request hits no mapped handler. Why can a
+      controller-LOCAL `@ExceptionHandler` never handle this, while a `@ControllerAdvice` can?
+    options:
+      - "Because NoHandlerFoundException is a checked exception excluded from local handlers"
+      - "Because NoHandlerFoundException is resolved exclusively by DefaultHandlerExceptionResolver, which ignores advices"
+      - "Because local handlers only fire for exceptions thrown after the response starts"
+      - "Because the handler argument passed to the resolver is null; ExceptionHandlerExceptionResolver needs a HandlerMethod to locate controller-local handlers, so only advice-based handlers are eligible"
+    answer: 3
+    explanation: |
+      When no handler is matched, the `handler` passed to `resolveException` is `null`. Controller-
+      local `@ExceptionHandler` lookup requires the failing `HandlerMethod`'s class; with a null
+      handler there is none, so only `@ControllerAdvice` handlers (context-wide) can match.
+    ref: "concepts.md#the-exception-resolution-pipeline"
+
+  - id: web-exception-handling-051
+    difficulty: advanced
+    tags: [thread-safety, controller-advice, concurrency]
+    question: |
+      A `@RestControllerAdvice` stores `private Exception lastError;` in an instance field and reads
+      it inside its handler to build the response. Under concurrent load, what is the defect?
+    options:
+      - "None; Spring creates one advice instance per request"
+      - "It causes a memory leak because exceptions are never garbage-collected"
+      - "A data race: the advice is a singleton shared across request threads, so one request can observe another request's exception"
+      - "It forces every request to serialize, killing throughput but staying correct"
+    answer: 2
+    explanation: |
+      `@ControllerAdvice` beans are singletons invoked concurrently. Mutable instance state creates a
+      race where threads clobber and read each other's values. Keep handlers stateless; take request
+      data via method parameters (`WebRequest`, `HttpServletRequest`) or inject request-scoped beans.
+    ref: "concepts.md#controlleradvice-and-restcontrolleradvice-global"
+
+  - id: web-exception-handling-052
+    difficulty: expert
+    tags: [response-committed, streaming, failure-mode]
+    question: |
+      A handler returns a `StreamingResponseBody` that writes 5 MB and then throws midway. Your
+      `@ExceptionHandler(IOException.class)` returning a 500 ProblemDetail appears to "run" but the
+      client still receives status 200 with a truncated body. Why?
+    options:
+      - "Because StreamingResponseBody exceptions are never resolvable"
+      - "Because once the first bytes were flushed the response was committed; the status line and headers are frozen, so the resolver cannot change 200 to 500"
+      - "Because ProblemDetail cannot be written to a streaming response"
+      - "Because @ExceptionHandler only supports ResponseEntity, not ProblemDetail, for streams"
+    answer: 1
+    explanation: |
+      After the response is committed (bytes flushed to the client), status and headers cannot be
+      altered. The resolver may run but can only stop writing; it cannot rewrite an already-sent 200
+      into a 500. Streaming/SSE responses are especially prone to this.
+    ref: "concepts.md#failure-modes-when-handling-an-exception"
+
+  - id: web-exception-handling-053
+    difficulty: expert
+    tags: [handler-throws, recursion, failure-mode]
+    question: |
+      Your `@ExceptionHandler(Exception.class)` itself throws a `NullPointerException` while building
+      the error body. What does Spring MVC do?
+    options:
+      - "It logs both the original and the handler-thrown exception and lets the new exception propagate to the container; it does NOT recursively re-run your advices"
+      - "It re-resolves the NullPointerException through the same advices, potentially recursing"
+      - "It silently returns HTTP 200 with an empty body"
+      - "It retries the original handler method up to three times"
+    answer: 0
+    explanation: |
+      `ExceptionHandlerExceptionResolver` does not recursively re-resolve an exception thrown by the
+      handler itself. It logs the original and the newly thrown exception, and the new one propagates
+      to the container. There is no infinite recursion, but no second chance from your advices either.
+    ref: "concepts.md#failure-modes-when-handling-an-exception"
+
+  - id: web-exception-handling-054
+    difficulty: advanced
+    tags: [content-negotiation, problem-detail, failure-mode]
+    question: |
+      A client sends `Accept: application/xml` (with no XML converter configured for the error type).
+      An exception occurs and your handler returns a `ProblemDetail`. What is the likely outcome?
+    options:
+      - "Spring falls back to JSON automatically and returns 500 with problem+json"
+      - "The request hangs until the negotiation times out"
+      - "The ProblemDetail is silently serialized as plain text"
+      - "A secondary HttpMediaTypeNotAcceptableException is raised during rendering, and the client ends up with a 406 from the container rather than your intended body"
+    answer: 3
+    explanation: |
+      `ProblemDetail` is still written by an `HttpMessageConverter` subject to content negotiation.
+      If no converter can satisfy the client's `Accept`, a fresh `HttpMediaTypeNotAcceptableException`
+      arises while rendering the error body, typically surfacing as a 406 — a secondary failure.
+    ref: "concepts.md#failure-modes-when-handling-an-exception"
+
+  - id: web-exception-handling-055
+    difficulty: advanced
+    tags: [response-entity-exception-handler, constraint-violation]
+    question: |
+      You extend `ResponseEntityExceptionHandler` and expect it to format ALL validation errors
+      uniformly. A `@Validated` service bean (outside the web layer) fails a constraint and raises
+      `ConstraintViolationException`, but it is NOT formatted like your other errors. Why?
+    options:
+      - "Because ConstraintViolationException is always resolved by ResponseStatusExceptionResolver"
+      - "Because @Validated disables the base class handlers"
+      - "Because ConstraintViolationException is a Jakarta Bean Validation type, not a Spring MVC exception; ResponseEntityExceptionHandler does not declare a handler for it"
+      - "Because the base class only handles exceptions from @RequestBody, and service beans use a different resolver"
+    answer: 2
+    explanation: |
+      `ResponseEntityExceptionHandler` handles `MethodArgumentNotValidException` (from `@Valid
+      @RequestBody`) but NOT `ConstraintViolationException`, which comes from Jakarta Bean Validation
+      on a `@Validated` bean and is not a Spring MVC exception. You must add your own handler for it.
+      (Note: since Spring 6.1, validation on *controller* method parameters raises
+      `HandlerMethodValidationException`, which the base class does handle — so the un-handled case is
+      specifically the `ConstraintViolationException` from `@Validated` beans.)
+    ref: "concepts.md#responseentityexceptionhandler"
+
+  - id: web-exception-handling-056
+    difficulty: expert
+    tags: [handle-exception-internal, null-body, spring6]
+    question: |
+      In Spring 6, you call `handleExceptionInternal(ex, null, headers, HttpStatus.NOT_FOUND, request)`
+      passing a NULL body. What body does the client receive?
+    options:
+      - "An empty response body, exactly as in Spring 5"
+      - "The exception's ProblemDetail (from ErrorResponse.updateAndGetBody(...)) is substituted as the body when the exception implements ErrorResponse"
+      - "A plain-text rendering of ex.toString()"
+      - "An HTTP 500 because a null body is illegal"
+    answer: 1
+    explanation: |
+      In Spring 6, `handleExceptionInternal` substitutes the exception's `ProblemDetail`
+      (via `ErrorResponse.updateAndGetBody(...)`) when the body is null and the exception implements
+      `ErrorResponse`. So a null body no longer means "empty response" as it did in Spring 5.
+    ref: "concepts.md#responseentityexceptionhandler"
+
+  - id: web-exception-handling-057
+    difficulty: advanced
+    tags: [advice-discovery, child-context, dispatcher-servlet]
+    question: |
+      A `@ControllerAdvice` bean is defined ONLY in a second `DispatcherServlet`'s own child
+      context. Why does it not affect requests served by the first `DispatcherServlet`?
+    options:
+      - "Because ExceptionHandlerExceptionResolver scans for advices per DispatcherServlet context at startup; each servlet builds its own view, and a bean in another servlet's context is invisible"
+      - "Because @ControllerAdvice only works in the root context"
+      - "Because @ControllerAdvice beans must be prototype-scoped to be shared"
+      - "Because advices defined after startup are ignored"
+    answer: 0
+    explanation: |
+      Advice discovery happens once per `DispatcherServlet`'s `ExceptionHandlerExceptionResolver`
+      (in `afterPropertiesSet`). Beans in the root context are visible to all servlets, but a bean
+      only in servlet-2's child context is not visible to servlet-1's resolver.
+    ref: "concepts.md#controlleradvice-and-restcontrolleradvice-global"
+
+  - id: web-exception-handling-058
+    difficulty: advanced
+    tags: [model-and-view, contract, custom-resolver]
+    question: |
+      A custom `HandlerExceptionResolver` fully writes a JSON error to the response and then returns
+      `new ModelAndView()` (an empty ModelAndView). What does `DispatcherServlet` conclude?
+    options:
+      - "The exception was not handled; the next resolver is tried"
+      - "It throws because an empty ModelAndView is invalid"
+      - "It renders a default view named after the empty ModelAndView"
+      - "The exception is handled and the response is already written, so no view rendering occurs"
+    answer: 3
+    explanation: |
+      Returning an empty (`isEmpty()`) `ModelAndView` means "handled; response already fully written,
+      do not render a view." Returning `null` would mean "not handled, try the next resolver." A
+      non-empty `ModelAndView` would trigger view rendering.
+    ref: "concepts.md#handlerexceptionresolver-concept"
+
+  - id: web-exception-handling-059
+    difficulty: expert
+    tags: [extend-resolvers, ordering, cannot-pre-empt]
+    question: |
+      You add a custom resolver via `WebMvcConfigurer.extendHandlerExceptionResolvers(...)` intending
+      it to run BEFORE `ExceptionHandlerExceptionResolver`. It never fires for exceptions your
+      `@ControllerAdvice` also matches. Why, and what actually fixes it?
+    options:
+      - "You must annotate the resolver with @Primary to move it first"
+      - "Custom resolvers are always consulted last regardless of registration; there is no fix"
+      - "extendHandlerExceptionResolvers appends after the defaults, so it only sees exceptions the defaults declined; to pre-empt you must register a resolver bean with a lower order (often replacing the default config)"
+      - "It fires only for checked exceptions; declare it for RuntimeException to fix"
+    answer: 2
+    explanation: |
+      `extendHandlerExceptionResolvers` appends to the end of the ordered list, so your resolver runs
+      after the built-ins and only sees what they declined. To run first you need a resolver bean with
+      a lower `Ordered` value (and typically to reconfigure rather than merely extend).
+    ref: "concepts.md#handlerexceptionresolver-concept"
+
+  - id: web-exception-handling-060
+    difficulty: advanced
+    tags: [response-status-inheritance, meta-annotation]
+    question: |
+      `BaseDomainException` is annotated `@ResponseStatus(HttpStatus.CONFLICT)`.
+      `StockConflictException extends BaseDomainException` adds no annotation. It propagates
+      unhandled. What status is set?
+    options:
+      - "500, because @ResponseStatus is not inherited"
+      - "409, because @ResponseStatus is discovered via findMergedAnnotation, which walks superclasses and meta-annotations"
+      - "200, because the subclass overrides nothing"
+      - "It throws because the subclass lacks its own @ResponseStatus"
+    answer: 1
+    explanation: |
+      `ResponseStatusExceptionResolver` uses `AnnotatedElementUtils.findMergedAnnotation`, which
+      resolves `@ResponseStatus` through superclasses and meta-annotations. So the subclass inherits
+      the parent's 409.
+    ref: "concepts.md#mapping-exceptions-to-http-status-with-responsestatus"
+
+  - id: web-exception-handling-061
+    difficulty: advanced
+    tags: [init-binder, model-attribute, exception-handler]
+    question: |
+      Are `@InitBinder` and `@ModelAttribute` methods (in the same controller/advice) applied when an
+      `@ExceptionHandler` method is invoked?
+    options:
+      - "No; @ExceptionHandler methods are invoked without data binding, so @InitBinder/@ModelAttribute are not applied, though argument resolvers and return-value handlers still are"
+      - "Yes, exactly as for a normal @RequestMapping method"
+      - "Only @ModelAttribute is applied; @InitBinder is skipped"
+      - "Only @InitBinder is applied; @ModelAttribute is skipped"
+    answer: 0
+    explanation: |
+      There is no request-body/parameter binding for exception handlers, so `@InitBinder` and
+      `@ModelAttribute` are not applied. The method is still invoked through `InvocableHandlerMethod`,
+      so supported argument resolvers and return-value handlers (message converters, view resolution)
+      apply.
+    ref: "concepts.md#exceptionhandler-controller-local"
+
+  - id: web-exception-handling-062
+    difficulty: expert
+    tags: [async, deferred-result, timeout]
+    question: |
+      A controller returns a `DeferredResult`. It never completes, and the async timeout elapses.
+      How does `AsyncRequestTimeoutException` reach your `@ControllerAdvice`, given the original
+      request thread already returned?
+    options:
+      - "It cannot; async timeouts bypass exception handling entirely"
+      - "The container performs an ASYNC error dispatch that re-enters DispatcherServlet, which routes AsyncRequestTimeoutException through the resolver chain on the dispatched thread"
+      - "Spring polls the DeferredResult from a background thread and calls the advice directly"
+      - "The advice is invoked on the original thread via a ThreadLocal snapshot"
+    answer: 1
+    explanation: |
+      On timeout the container issues an async error dispatch that re-enters `DispatcherServlet`; the
+      `AsyncRequestTimeoutException` (or your set error result) is then processed through the normal
+      resolver chain, so `@ExceptionHandler`/`ResponseEntityExceptionHandler` can handle it.
+    ref: "concepts.md#failure-modes-when-handling-an-exception"
+
+  - id: web-exception-handling-063
+    difficulty: expert
+    tags: [async, raw-thread, invisible]
+    question: |
+      Inside a `@GetMapping` method you spawn a raw `new Thread(() -> { throw new RuntimeException(); })`
+      and return immediately. The thread throws. Does any `@ExceptionHandler` see it?
+    options:
+      - "Yes, Spring MVC captures all thread exceptions in the request scope"
+      - "Yes, but only if the advice is @Async"
+      - "No; only exceptions surfaced through the managed Callable/DeferredResult contract (or thrown on the request thread) go through the resolver chain — a raw thread's exception is invisible to Spring MVC"
+      - "Only if the thread is a daemon thread"
+    answer: 2
+    explanation: |
+      Spring MVC exception handling covers exceptions thrown on the request thread or surfaced via the
+      managed async contracts (`Callable`, `DeferredResult`, `CompletableFuture` return values). An
+      exception on a bare thread you spawned is outside that contract and never reaches the resolvers.
+    ref: "concepts.md#failure-modes-when-handling-an-exception"
+
+  - id: web-exception-handling-064
+    difficulty: advanced
+    tags: [problem-detail, controller, response-body]
+    question: |
+      A plain `@Controller` (not `@RestController`, method not `@ResponseBody`) has an
+      `@ExceptionHandler` that returns a `ProblemDetail`. What happens?
+    options:
+      - "It is serialized as application/problem+json automatically"
+      - "The ProblemDetail is treated as a model attribute (view-resolution path), NOT serialized, because there is no @ResponseBody semantics"
+      - "Spring throws because ProblemDetail cannot be a model attribute"
+      - "It returns 500 because ProblemDetail requires @RestController"
+    answer: 1
+    explanation: |
+      Without `@ResponseBody`/`@RestController`, a returned object — including a `ProblemDetail` — is
+      interpreted as a model attribute and routed to view resolution, not written via message
+      converters. You need `@ResponseBody` (or `@RestControllerAdvice`) for serialization.
+    ref: "concepts.md#problemdetail-rfc-7807-in-spring-6"
+
+  - id: web-exception-handling-065
+    difficulty: expert
+    tags: [problem-detail, extension, collision]
+    question: |
+      You build a `ProblemDetail` and call `pd.setProperty("status", "critical")` as an extension
+      member (intending a business "status"). What is the risk?
+    options:
+      - "None; extension members live in a separate namespace from standard fields"
+      - "Spring throws IllegalArgumentException on setProperty for reserved names"
+      - "The extension key collides with the standard RFC 7807 'status' member during flattened top-level serialization, producing a malformed/ambiguous body"
+      - "The property is silently dropped and only the numeric status remains, with no other effect"
+    answer: 2
+    explanation: |
+      Extension properties are serialized flattened at the top level alongside the standard members.
+      A key that collides with a standard name (`status`, `title`, `type`, `detail`, `instance`) is a
+      bug — the RFC 7807 `status` is an integer HTTP status, and your string clobbers/duplicates it.
+    ref: "concepts.md#problemdetail-rfc-7807-in-spring-6"
+
+  - id: web-exception-handling-066
+    difficulty: advanced
+    tags: [problem-detail, i18n, message-source]
+    question: |
+      You set a `MessageSource` on your `ResponseEntityExceptionHandler` subclass to localize
+      ProblemDetail messages. By default, what message code resolves the `detail` for a framework
+      exception?
+    options:
+      - "The literal exception message, ignored by MessageSource"
+      - "problemDetail. + the fully-qualified exception class name, with arguments from getDetailMessageArguments()"
+      - "error. + the HTTP status code"
+      - "problem.detail.default, a single shared key for all exceptions"
+    answer: 1
+    explanation: |
+      `ErrorResponse` uses the code `problemDetail.` + the fully-qualified exception class name for
+      `detail` (and `problemDetail.title.` + class name for the title), with substitution arguments
+      from `getDetailMessageArguments()`. `handleExceptionInternal` localizes when a `MessageSource`
+      is present.
+    ref: "concepts.md#problemdetail-rfc-7807-in-spring-6"
+
+  - id: web-exception-handling-067
+    difficulty: expert
+    tags: [override-dead-code, ordering, response-entity-exception-handler]
+    question: |
+      You override `handleMethodArgumentNotValid` in your `ResponseEntityExceptionHandler` subclass,
+      but a SEPARATE `@ControllerAdvice(@Order(HIGHEST_PRECEDENCE))` also declares
+      `@ExceptionHandler(MethodArgumentNotValidException.class)`. Which runs?
+    options:
+      - "The higher-order advice's handler; the base class methods are ordinary @ExceptionHandler methods with no special elevation, so advice ordering decides and your override is dead code"
+      - "Your subclass override, because ResponseEntityExceptionHandler methods have special priority"
+      - "Both run; results are merged"
+      - "A startup error because two advices handle the same exception"
+    answer: 0
+    explanation: |
+      `ResponseEntityExceptionHandler`'s methods are just normal `@ExceptionHandler` methods. Nothing
+      elevates them. A higher-`@Order` advice with a matching handler wins, making your override dead
+      code. Precedence is by advice order/locality, not by subclassing the base class.
+    ref: "concepts.md#responseentityexceptionhandler"
+
+  - id: web-exception-handling-068
+    difficulty: advanced
+    tags: [caching, concurrent-hash-map, performance]
+    question: |
+      How does `ExceptionHandlerMethodResolver` avoid walking the exception hierarchy on every
+      request for a repeated exception type?
+    options:
+      - "It recompiles the mapping table per request for correctness"
+      - "It caches resolved (exceptionType -> Method) lookups in a ConcurrentHashMap after the first tree walk"
+      - "It uses a synchronized method so only one thread resolves at a time"
+      - "It disables matching after the first exception and reuses the last handler blindly"
+    answer: 1
+    explanation: |
+      After the first `getMappedMethod` tree walk for a given exception type, the result is cached in
+      a `ConcurrentHashMap`, so subsequent occurrences of that type are O(1) lookups — thread-safe and
+      allocation-free on the hot path.
+    ref: "concepts.md#exceptionhandler-controller-local"
+
+  - id: web-exception-handling-069
+    difficulty: expert
+    tags: [response-committed, abstract-resolver, headers]
+    question: |
+      `AbstractHandlerExceptionResolver.doResolveException` is reached but the response is already
+      committed. What is its documented behavior (Spring 4.3.9+)?
+    options:
+      - "It skips resolution and returns null, logging a warning that the response is already committed"
+      - "It forcibly resets the buffer and rewrites the status"
+      - "It throws IllegalStateException to abort the request"
+      - "It buffers the new body and replays it on the next request"
+    answer: 0
+    explanation: |
+      When the response is committed, `AbstractHandlerExceptionResolver` cannot change status/headers,
+      so it declines (returns null) and logs a warning. This is where the "response committed → cannot
+      handle" rule lives for the built-in resolvers.
+    ref: "concepts.md#handlerexceptionresolver-concept"
+
+  - id: web-exception-handling-070
+    difficulty: advanced
+    tags: [prevent-response-caching, headers]
+    question: |
+      By default, what side effect does `AbstractHandlerExceptionResolver` have on the response
+      headers of a resolved error (beyond status/body)?
+    options:
+      - "It adds a Retry-After header"
+      - "It adds an X-Error-Id correlation header automatically"
+      - "It strips all custom headers set by the handler"
+      - "It sets Cache-Control headers to prevent caching of the error response (preventResponseCaching)"
+    answer: 3
+    explanation: |
+      `AbstractHandlerExceptionResolver` has a `preventResponseCaching` behavior that, when enabled,
+      writes `Cache-Control` (no-store style) headers so error responses are not cached. It does not
+      add correlation or Retry-After headers automatically.
+    ref: "concepts.md#handlerexceptionresolver-concept"
+
+  - id: web-exception-handling-071
+    difficulty: expert
+    tags: [same-class, catch-all, depth]
+    question: |
+      One class both `extends ResponseEntityExceptionHandler` AND adds
+      `@ExceptionHandler(Exception.class)`. A `HttpMessageNotReadableException` is thrown. Which
+      method handles it?
+    options:
+      - "Your Exception.class catch-all, because it is declared in the subclass and subclass methods win"
+      - "Neither; declaring both in one class is a configuration error"
+      - "The inherited handleHttpMessageNotReadable path, because within one advice ExceptionDepthComparator picks the more specific match over Exception.class"
+      - "Both, in declaration order"
+    answer: 2
+    explanation: |
+      Within a single advice class, `ExceptionDepthComparator` selects the closest match. The base
+      class's handler for `HttpMessageNotReadableException` (mapped via the framework method) is far
+      more specific than `Exception.class`, so it wins. The catch-all only fires for otherwise
+      unmatched exceptions.
+    ref: "concepts.md#responseentityexceptionhandler"
+
+  - id: web-exception-handling-072
+    difficulty: advanced
+    tags: [http-message-not-writable, failure-mode]
+    question: |
+      Your error DTO includes a field backed by an uninitialized lazy Hibernate proxy. When the
+      handler serializes it, what exception class typically surfaces, and when?
+    options:
+      - "MethodArgumentNotValidException, at binding time"
+      - "HttpMessageNotWritableException, during the message-converter write of the error body — a secondary failure while rendering the error"
+      - "HttpMessageNotReadableException, when reading the request"
+      - "ResponseStatusException, thrown by the converter deliberately"
+    answer: 1
+    explanation: |
+      Serialization problems (unresolvable lazy proxy, no serializer) raise
+      `HttpMessageNotWritableException` during the converter's write phase — a secondary failure that
+      occurs while rendering the error body, after the primary exception was "handled."
+    ref: "concepts.md#failure-modes-when-handling-an-exception"
+
+  - id: web-exception-handling-073
+    difficulty: expert
+    tags: [view-rendering, not-resolvable, pipeline]
+    question: |
+      A controller returns a view name; during `View.render(...)` the template throws. Why is your
+      `@ExceptionHandler` generally NOT a reliable place to catch this?
+    options:
+      - "Because rendering occurs after handler execution, outside the region routed to processHandlerException; DispatcherServlet triggers afterCompletion and rethrows rather than re-running the resolver chain"
+      - "Because view exceptions are always checked and cannot be caught"
+      - "Because @ExceptionHandler only catches exceptions with @ResponseStatus"
+      - "Because the view layer runs on a different thread"
+    answer: 0
+    explanation: |
+      Exception resolution wraps handler execution (and pre/postHandle). View rendering happens
+      afterward; a render failure leads `DispatcherServlet` to trigger `afterCompletion` and rethrow,
+      not to re-enter the resolver chain, so `@ExceptionHandler` is not a dependable catch point.
+    ref: "concepts.md#the-exception-resolution-pipeline"
+
+  - id: web-exception-handling-074
+    difficulty: advanced
+    tags: [response-status-exception, headers, subclasses]
+    question: |
+      Which capability do `ResponseStatusException` subclasses like `MethodNotAllowedException` and
+      `UnsupportedMediaTypeStatusException` add beyond a plain status?
+    options:
+      - "They automatically retry the request with a corrected method"
+      - "They bypass all HandlerExceptionResolvers"
+      - "They convert the response to XML"
+      - "They let you attach response headers relevant to the error (e.g. Allow, Accept) via the exception itself"
+    answer: 3
+    explanation: |
+      These `ErrorResponse`-implementing subclasses carry status, a ProblemDetail body, AND relevant
+      headers (e.g. `Allow` for 405, `Accept` for 415). When resolved by an `@ExceptionHandler`
+      /`ResponseEntityExceptionHandler` (via the `ErrorResponseException` handler), the headers and a
+      `ProblemDetail` body are written by message converters. Note that if `ResponseStatusExceptionResolver`
+      resolves the exception instead, it copies the headers onto the response but then calls
+      `sendError`, so the body is the container error page rather than a `ProblemDetail`.
+    ref: "concepts.md#mapping-exceptions-to-http-status-with-responsestatus"
+
+  - id: web-exception-handling-075
+    difficulty: expert
+    tags: [composite, ordering, dispatcher]
+    question: |
+      Under `@EnableWebMvc`, how does `DispatcherServlet` actually consult the three default
+      resolvers?
+    options:
+      - "It autowires each resolver bean separately and sorts them per request"
+      - "WebMvcConfigurationSupport builds a fixed-order list and wraps it in a single HandlerExceptionResolverComposite (registered at LOWEST_PRECEDENCE), which iterates in order and returns the first non-null result"
+      - "It picks one resolver at random and falls back only on null"
+      - "It merges all resolvers' ModelAndViews into one"
+    answer: 1
+    explanation: |
+      The three defaults are assembled into a fixed-order list and wrapped in a single
+      `HandlerExceptionResolverComposite`. The composite iterates the inner list in order, returning
+      the first non-null `ModelAndView`. This is why appended custom resolvers run last.
+    ref: "concepts.md#ordering-and-precedence-across-mechanisms"
+
+  - id: web-exception-handling-076
+    difficulty: advanced
+    tags: [local-vs-advice, precedence, absolute]
+    question: |
+      A controller declares a local `@ExceptionHandler(Exception.class)` (broad), while a
+      `@ControllerAdvice` has a very specific `@ExceptionHandler(OrderNotFoundException.class)`. The
+      controller throws `OrderNotFoundException`. Which runs?
+    options:
+      - "The controller-local broad handler, because a controller-local @ExceptionHandler pre-empts every advice regardless of specificity"
+      - "The advice's specific handler, because specificity beats locality"
+      - "Both, local first then advice"
+      - "Neither; the mismatch causes propagation to the container"
+    answer: 0
+    explanation: |
+      Locality dominates: the failing controller's own `ExceptionHandlerMethodResolver` is consulted
+      first, and any local match (even a broad `Exception.class`) is used before advices are ever
+      considered. The specific advice handler never runs.
+    ref: "concepts.md#ordering-and-precedence-across-mechanisms"
+
+  - id: web-exception-handling-077
+    difficulty: expert
+    tags: [error-attribute, servlet, 500]
+    question: |
+      When `handleExceptionInternal` produces a 500-level response in Spring 6, which request
+      attribute does it set so downstream (e.g. container error) infrastructure can see the original
+      exception?
+    options:
+      - "jakarta.servlet.error.exception"
+      - "spring.mvc.exception"
+      - "org.springframework.web.originalException"
+      - "javax.servlet.error.exception"
+    answer: 0
+    explanation: |
+      For 5xx responses it sets the `jakarta.servlet.error.exception` request attribute (Jakarta EE 9
+      namespace in Spring 6), exposing the original exception to downstream error handling. `javax.*`
+      was the Spring 5 name.
+    ref: "concepts.md#responseentityexceptionhandler"
+
+  - id: web-exception-handling-078
+    difficulty: advanced
+    tags: [pre-handle, interceptor, resolvable]
+    question: |
+      A `HandlerInterceptor.preHandle(...)` throws a RuntimeException before the controller runs.
+      Can a `@ControllerAdvice` `@ExceptionHandler` handle it?
+    options:
+      - "No, interceptor exceptions never reach the resolver chain"
+      - "Yes; preHandle executes inside DispatcherServlet's try block, so its exception is routed to processHandlerException and the resolver chain"
+      - "Only if the controller has already started executing"
+      - "Only afterCompletion exceptions are resolvable"
+    answer: 1
+    explanation: |
+      `applyPreHandle` runs inside `doDispatch`'s try block. An exception there is caught and routed
+      to `processHandlerException`, so the resolver chain (and your advices) can handle it — unlike
+      `afterCompletion`, which runs after the try block.
+    ref: "concepts.md#the-exception-resolution-pipeline"
+
+  - id: web-exception-handling-079
+    difficulty: expert
+    tags: [error-response, get-body, lazy]
+    question: |
+      A custom exception implements `ErrorResponse` and lazily builds its `ProblemDetail` in
+      `getBody()` using a `MessageSource`-backed detail. Why is it important that this build be
+      idempotent and side-effect free?
+    options:
+      - "Because getBody() is called exactly once, so purity is irrelevant"
+      - "Because ErrorResponse forbids MessageSource use entirely"
+      - "Because the framework may invoke getBody() (and detail-message resolution) more than once across resolution/rendering, and stateful side effects there would produce inconsistent or racy bodies"
+      - "Because ProblemDetail is immutable and cannot be built lazily"
+    answer: 2
+    explanation: |
+      `getBody()`/detail resolution may be invoked more than once (e.g. during resolution and while
+      rendering/localizing). Non-idempotent or stateful logic there risks inconsistent bodies and, on
+      shared exception instances, races. Keep it pure and deterministic.
+    ref: "concepts.md#problemdetail-rfc-7807-in-spring-6"

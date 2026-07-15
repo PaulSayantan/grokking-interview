@@ -677,3 +677,642 @@ questions:
   explanation: |
     A @Configuration class can have many @Bean methods, each declaring a bean. A stereotype-annotated class registers a single bean (itself). @Bean is per-method; the stereotype is per-class.
   ref: concepts.md#component-versus-bean
+- id: bean-definition-stereotype-annotations-043
+  difficulty: advanced
+  tags:
+  - bean-name
+  - decapitalize
+  - gotcha
+  question: |
+    A component is declared as `@Component class URLParser {}` with no explicit name. A collaborator later injects it with `@Qualifier("uRLParser")` and fails at startup with NoSuchBeanDefinitionException. What is the actual default bean name, and why?
+  options:
+  - urlParser, because AnnotationBeanNameGenerator lowercases the whole leading acronym
+  - uRLParser, because only the very first character is ever lowercased
+  - URLParser, because Introspector.decapitalize leaves the name unchanged when the first two characters are both uppercase
+  - parser, because leading uppercase runs are stripped down to the last capitalized word
+  answer: 2
+  explanation: |
+    AnnotationBeanNameGenerator delegates to java.beans.Introspector.decapitalize, whose special rule is: if the first two characters are both uppercase, the string is returned unchanged. So URLParser stays "URLParser". The @Qualifier("uRLParser") therefore matches no bean.
+  ref: concepts.md#stereotype-annotations-overview
+- id: bean-definition-stereotype-annotations-044
+  difficulty: expert
+  tags:
+  - repository
+  - self-invocation
+  - proxy
+  question: |
+    A @Repository has publicMethod() that internally calls this.helper(), and helper() executes JDBC that throws a native SQLException-backed exception. A PersistenceExceptionTranslationPostProcessor is registered. Callers of publicMethod() observe the untranslated native exception, not a DataAccessException. Why?
+  options:
+  - The self-invocation this.helper() does not pass back through the translation proxy, so the advisor never intercepts the throw
+  - PETPP only translates checked exceptions, and the native exception is unchecked
+  - '@Repository disables translation whenever a method calls another method in the same class'
+  - Translation only applies to methods annotated with @Transactional
+  answer: 0
+  explanation: |
+    Exception translation is applied by an AOP proxy wrapping the repository. Only invocations that traverse the proxy (external calls to public methods) are advised. this.helper() is a direct call on the target instance and bypasses the proxy, so the translation advisor never runs for it.
+  ref: concepts.md#repository-and-exception-translation
+- id: bean-definition-stereotype-annotations-045
+  difficulty: expert
+  tags:
+  - repository
+  - translator
+  - edge-case
+  question: |
+    Inside a @Repository proxied by PETPP, a method throws a native exception for which no registered PersistenceExceptionTranslator returns a mapping (translateExceptionIfPossible returns null). What does the caller receive?
+  options:
+  - The original native exception, rethrown unchanged
+  - A generic org.springframework.dao.UncategorizedDataAccessException wrapping it, always
+  - A NullPointerException because translation returned null
+  - A RuntimeException with no cause attached
+  answer: 0
+  explanation: |
+    The advisor consults registered PersistenceExceptionTranslators; if translateExceptionIfPossible returns null (no translator recognizes it), Spring rethrows the original exception unchanged rather than force-wrapping it. Translation is best-effort, not guaranteed for every exception.
+  ref: concepts.md#repository-and-exception-translation
+- id: bean-definition-stereotype-annotations-046
+  difficulty: expert
+  tags:
+  - configuration
+  - proxyBeanMethods
+  - trap
+  question: |
+    A @Configuration(proxyBeanMethods = false) class has `@Bean OrderService orderService() { return new OrderService(orderRepository()); }` and a separate `@Bean OrderRepository orderRepository() {...}`. orderRepository() has a @PostConstruct that opens a connection pool. At runtime the OrderService ends up with a repository whose pool was never initialized. Why, and what is the fix?
+  options:
+  - proxyBeanMethods=false makes all beans prototype; declare @Scope("singleton") explicitly
+  - The @PostConstruct is ignored on @Bean methods entirely; move it to an initMethod
+  - With proxying off the inter-bean call is a plain Java call returning a new unmanaged instance whose @PostConstruct never runs; fix by injecting OrderRepository as a method parameter of orderService
+  - CGLIB failed to enhance the class; mark it final to force enhancement
+  answer: 2
+  explanation: |
+    Without CGLIB proxying, orderRepository() is a normal Java call producing a brand-new, unmanaged instance. The container never processes it, so @PostConstruct and dependency injection do not run on that object. The idiomatic fix is to declare the dependency as a @Bean method parameter so Spring injects the managed singleton.
+  ref: concepts.md#configuration-classes
+- id: bean-definition-stereotype-annotations-047
+  difficulty: expert
+  tags:
+  - bean-post-processor
+  - static-bean
+  - ordering
+  question: |
+    Why should a BeanFactoryPostProcessor or BeanPostProcessor be declared via a static @Bean method inside a @Configuration class?
+  options:
+  - A non-static @Bean method forces early instantiation of the enclosing config class (and its dependencies) before the post-processor phase, which can defeat the post-processor and trigger BeanPostProcessorChecker warnings
+  - Static methods run faster because they skip CGLIB interception overhead
+  - Non-static @Bean methods cannot return post-processor types at all
+  - Static is required so the post-processor becomes a prototype
+  answer: 0
+  explanation: |
+    Post-processors must be created very early. If produced by a non-static @Bean method, Spring must instantiate the config class first, dragging in its dependencies before the BFPP/BPP infrastructure is ready. A static @Bean method is invoked without instantiating the config class, avoiding premature instantiation and the associated warnings.
+  ref: concepts.md#bean-definition-internals-and-registration-order
+- id: bean-definition-stereotype-annotations-048
+  difficulty: advanced
+  tags:
+  - bean
+  - return-type
+  - autowiring
+  question: |
+    A config declares `@Bean public DataSource ds() { return new HikariDataSource(); }`. Another bean autowires `HikariDataSource` by type. What is the risk?
+  options:
+  - The container reasons about the bean by its declared return type (DataSource) before instantiation, so a by-type request for the concrete HikariDataSource may fail to match
+  - It always works because Spring inspects the runtime object immediately
+  - HikariDataSource cannot be a Spring bean because it is third-party
+  - Two beans are created, one per type
+  answer: 0
+  explanation: |
+    For @Bean methods, Spring registers and reasons about the bean using the method's declared return type until the bean is actually created. Declaring DataSource hides the concrete HikariDataSource from early type-based autowiring. Declare the most specific useful return type to expose the concrete type.
+  ref: concepts.md#component-versus-bean
+- id: bean-definition-stereotype-annotations-049
+  difficulty: expert
+  tags:
+  - bean
+  - destroy-method
+  - inference
+  question: |
+    A @Bean method returns a third-party client that happens to have a public no-arg close() method, and you did not set destroyMethod. At container shutdown the client is closed unexpectedly. Why, and how do you prevent it?
+  options:
+  - Spring performs destroy-method inference and calls close()/shutdown() automatically; set destroyMethod = "" to disable it
+  - Spring closes every bean on shutdown; there is no way to prevent it
+  - The client implements Closeable, which Spring forbids; remove the interface
+  - '@Bean methods always call finalize(); override it to a no-op'
+  answer: 0
+  explanation: |
+    Spring infers a destroy method: if the returned type exposes a public no-arg close() or shutdown(), it is invoked at shutdown unless you opt out with @Bean(destroyMethod = ""). This surprises people wrapping AutoCloseable third-party clients.
+  ref: concepts.md#component-versus-bean
+- id: bean-definition-stereotype-annotations-050
+  difficulty: expert
+  tags:
+  - component-scan
+  - asm
+  - metadata
+  question: |
+    During component scanning, how does Spring decide whether a class is a candidate component without triggering side effects from loading it?
+  options:
+  - It uses an ASM-based MetadataReader to read annotation metadata directly from the .class bytecode, so the class is not loaded into the JVM during candidate detection
+  - It calls Class.forName on every class and reads annotations reflectively
+  - It parses the .java source files at build time
+  - It instantiates each class and inspects the object
+  answer: 0
+  explanation: |
+    ClassPathScanningCandidateComponentProvider reads each .class resource with an ASM-based MetadataReader (SimpleMetadataReaderFactory). Candidate detection inspects bytecode metadata without loading/initializing the class, so classes with unmet optional dependencies do not fail scanning until actually matched, and only RUNTIME-retained annotations are visible.
+  ref: concepts.md#component-scanning-basics
+- id: bean-definition-stereotype-annotations-051
+  difficulty: advanced
+  tags:
+  - component-scan
+  - candidate
+  - abstract
+  question: |
+    You put @Component on an abstract class and on an interface, expecting each to register a bean. Neither does. Why?
+  options:
+  - By default a scanned candidate must be a concrete, independent (top-level or static nested) class; abstract classes and interfaces are rejected
+  - '@Component is only legal on classes in the same package as @ComponentScan'
+  - Abstract classes register but with a synthetic name that is hard to find
+  - Interfaces register but abstract classes do not
+  answer: 0
+  explanation: |
+    The default candidate criteria require a concrete, independent class. Abstract classes and interfaces cannot be instantiated by the container and are excluded (an abstract class can only participate via lookup-method injection), so @Component on them registers nothing.
+  ref: concepts.md#component-scanning-basics
+- id: bean-definition-stereotype-annotations-052
+  difficulty: expert
+  tags:
+  - component-scan
+  - conflicting-definition
+  question: |
+    Two classes in different packages, com.a.Report and com.b.Report, are both @Component and both under the scanned base package with no explicit names. What happens at startup?
+  options:
+  - A ConflictingBeanDefinitionException is thrown during scanning because both resolve to the bean name "report"
+  - Both register; the second silently overrides the first
+  - Only the first class discovered is registered and the other is ignored
+  - A NoUniqueBeanDefinitionException is thrown at context refresh
+  answer: 0
+  explanation: |
+    Both default to the bean name "report". When scanning maps two different classes to the same name, Spring throws ConflictingBeanDefinitionException during the scan. This is a scan-time name collision, distinct from programmatic definition overriding or the injection-time NoUniqueBeanDefinitionException.
+  ref: concepts.md#registration-and-overriding-failure-modes
+- id: bean-definition-stereotype-annotations-053
+  difficulty: expert
+  tags:
+  - overriding
+  - boot-vs-spring
+  - exception
+  question: |
+    Two @Bean methods (in different imported configs) both produce a bean named "cache". Contrast plain Spring Framework default behavior with Spring Boot 2.1+ default behavior.
+  options:
+  - Plain Spring defaults allowBeanDefinitionOverriding=true so the last definition silently wins; Spring Boot 2.1+ defaults it to false, throwing BeanDefinitionOverrideException
+  - Both throw immediately; there is no configurable difference
+  - Plain Spring throws, Boot silently merges the two definitions
+  - Both silently keep the first definition and discard the second
+  answer: 0
+  explanation: |
+    DefaultListableBeanFactory.allowBeanDefinitionOverriding is true by default in plain Spring, so a later same-named definition overrides the earlier one silently. Spring Boot 2.1+ sets it to false, so the duplicate throws BeanDefinitionOverrideException at startup.
+  ref: concepts.md#registration-and-overriding-failure-modes
+- id: bean-definition-stereotype-annotations-054
+  difficulty: advanced
+  tags:
+  - resolution
+  - primary
+  - unique
+  question: |
+    You have two beans of type NotificationSender (email and sms) with distinct names and no @Primary. Some code does `@Autowired NotificationSender sender;`. Which exception and when?
+  options:
+  - ConflictingBeanDefinitionException during component scanning
+  - BeanDefinitionOverrideException at registration
+  - NoUniqueBeanDefinitionException at injection/lookup time because a by-type request matches two candidates
+  - No exception; Spring picks one arbitrarily
+  answer: 2
+  explanation: |
+    Having two beans of the same type is legal. The failure occurs only when something requests the type without disambiguation: NoUniqueBeanDefinitionException is thrown at injection/lookup. Resolve with @Primary, @Qualifier, or by injecting a specifically-named bean.
+  ref: concepts.md#registration-and-overriding-failure-modes
+- id: bean-definition-stereotype-annotations-055
+  difficulty: expert
+  tags:
+  - primary
+  - priority
+  - qualifier
+  question: |
+    Three beans of type PaymentGateway exist: A is @Primary, B is @Priority(1), C is @Priority(2). An injection point does `@Autowired PaymentGateway gw;` with no @Qualifier. Which is injected?
+  options:
+  - A, because @Primary takes precedence over @Priority for single-bean resolution
+  - B, because @Priority(1) is the lowest priority value and wins outright
+  - C, because the highest @Priority value wins
+  - It throws NoUniqueBeanDefinitionException because @Primary and @Priority conflict
+  answer: 0
+  explanation: |
+    For single-injection resolution, @Primary takes precedence over JSR-250 @Priority. @Priority only breaks ties (lowest value wins) when no @Primary candidate exists. A @Qualifier at the injection point would beat both, but none is present here.
+  ref: concepts.md#registration-and-overriding-failure-modes
+- id: bean-definition-stereotype-annotations-056
+  difficulty: expert
+  tags:
+  - circular-dependency
+  - constructor
+  - concurrency
+  question: |
+    Two singletons A and B depend on each other. In case 1 both use constructor injection; in case 2 both use field/setter injection. Assuming default settings, what happens?
+  options:
+  - Both cases succeed via the three-level singleton cache
+  - Both cases throw BeanCurrentlyInCreationException
+  - Constructor injection throws BeanCurrentlyInCreationException; field/setter injection can be resolved via early singleton exposure
+  - Field/setter injection throws; constructor injection is resolved by reordering
+  answer: 2
+  explanation: |
+    Setter/field circular references are resolvable because Spring exposes an early (partially constructed) singleton reference via the three-level cache. Constructor circular dependencies cannot be resolved this way — the object cannot be referenced before its constructor completes — so Spring throws BeanCurrentlyInCreationException.
+  ref: concepts.md#concurrency-and-thread-safety-of-bean-creation
+- id: bean-definition-stereotype-annotations-057
+  difficulty: advanced
+  tags:
+  - singleton
+  - thread-safety
+  - concurrency
+  question: |
+    Under concurrent getBean("x") calls for a singleton x that is expensive to build, what does the container guarantee?
+  options:
+  - Each thread gets its own copy to avoid contention
+  - The bean is rebuilt if two threads race, keeping the last one
+  - Spring throws if two threads request the same singleton simultaneously
+  - The singleton is created exactly once; DefaultSingletonBeanRegistry synchronizes on the singleton cache so concurrent callers wait and share one instance
+  answer: 3
+  explanation: |
+    Singleton creation is thread-safe: getSingleton synchronizes on the singleton object cache, so exactly one instance is created and shared even under concurrent access. Note this guarantees single creation, not that the bean's own methods are thread-safe — shared mutable state is your responsibility.
+  ref: concepts.md#concurrency-and-thread-safety-of-bean-creation
+- id: bean-definition-stereotype-annotations-058
+  difficulty: expert
+  tags:
+  - prototype
+  - scope
+  - injection
+  question: |
+    A singleton service injects a prototype-scoped bean via a plain field. You expected a fresh prototype per business call. What actually happens, and which mechanisms fix it?
+  options:
+  - Spring auto-refreshes the field before each method call
+  - The prototype's destroy callbacks run after each call, recreating it
+  - The injection fails because prototypes cannot be injected into singletons
+  - The prototype is resolved once at wiring time and that single instance is reused; use ObjectProvider, @Lookup method injection, or a scoped proxy to get a fresh instance per call
+  answer: 3
+  explanation: |
+    Dependencies are resolved when the singleton is created, so a directly-injected prototype is captured once and reused. To obtain a new instance per invocation, use ObjectProvider/Provider, @Lookup method injection, or a scoped proxy. Also note the container does not manage a prototype's destruction lifecycle.
+  ref: concepts.md#concurrency-and-thread-safety-of-bean-creation
+- id: bean-definition-stereotype-annotations-059
+  difficulty: expert
+  tags:
+  - meta-annotation
+  - inheritance
+  - stereotype
+  question: |
+    BaseService is annotated @Service. ConcreteService extends BaseService but has no annotations of its own. Under component scanning of their package, how many beans are registered?
+  options:
+  - Two, because @Service is @Inherited and propagates to subclasses
+  - Zero, because an annotated superclass makes the subclass ambiguous
+  - Two, because scanning always registers every class in the type hierarchy
+  - One, for BaseService only, because stereotypes are not @Inherited and ConcreteService carries no component annotation
+  answer: 3
+  explanation: |
+    Stereotype annotations are not meta-annotated with @Inherited, and even @Inherited would apply only to class inheritance for directly-present annotations, never making the subclass a separate scanned candidate on its own merit. ConcreteService has no component annotation, so only BaseService (concrete, annotated) registers.
+  ref: concepts.md#meta-annotations-and-composed-annotations
+- id: bean-definition-stereotype-annotations-060
+  difficulty: expert
+  tags:
+  - merged-annotations
+  - search-strategy
+  question: |
+    What is the practical difference between MergedAnnotations.get/getMergedAnnotation (DIRECT/INHERITED strategy) and find/findMergedAnnotation (TYPE_HIERARCHY strategy)?
+  options:
+  - get walks the full class + interface + superclass hierarchy; find only looks at the element itself
+  - get resolves @AliasFor while find ignores it
+  - They are identical; the names are historical aliases
+  - find walks the full type hierarchy (superclasses and interfaces, including methods); get only respects directly-present annotations and Java's @Inherited rule for classes
+  answer: 3
+  explanation: |
+    The find* family uses SearchStrategy.TYPE_HIERARCHY, walking superclasses and interfaces (and works for methods), whereas the get* family respects only directly-present annotations plus Java's @Inherited semantics (class-only, directly-present). Choosing the wrong one is a common cause of "my annotation on an interface isn't detected" bugs.
+  ref: concepts.md#meta-annotations-and-composed-annotations
+- id: bean-definition-stereotype-annotations-061
+  difficulty: advanced
+  tags:
+  - aliasfor
+  - failure
+  question: |
+    You define a composed annotation whose two aliased attributes are declared with @AliasFor but have different default values. When is the problem detected?
+  options:
+  - At compile time, as a Java error
+  - At class-load time via a VerifyError
+  - Never; Spring picks one default arbitrarily
+  - At annotation-resolution time (context refresh), throwing AnnotationConfigurationException
+  answer: 3
+  explanation: |
+    @AliasFor constraints (same return type, same default value, mutual referencing) are validated by Spring's annotation machinery at resolution time, not by javac. A mismatched default triggers AnnotationConfigurationException when the annotation is processed.
+  ref: concepts.md#meta-annotations-and-composed-annotations
+- id: bean-definition-stereotype-annotations-062
+  difficulty: expert
+  tags:
+  - configuration
+  - cglib
+  - enhancer
+  question: |
+    In full mode, what does Spring's ConfigurationClassEnhancer generate, and what interface does the enhanced subclass implement to enable inter-bean interception?
+  options:
+  - A JDK dynamic proxy implementing the config class's interfaces
+  - A record wrapper that memoizes each @Bean result in a static map
+  - A byte-buddy proxy that delegates to a shared singleton registry
+  - A CGLIB subclass whose @Bean methods are overridden by a BeanMethodInterceptor, implementing EnhancedConfiguration (which extends BeanFactoryAware) so it holds a BeanFactory reference
+  answer: 3
+  explanation: |
+    ConfigurationClassEnhancer produces a CGLIB subclass whose @Bean methods are overridden by BeanMethodInterceptor, checking the container before creating a new object. The subclass implements EnhancedConfiguration (extending BeanFactoryAware) so the interceptor can consult the BeanFactory for the managed singleton.
+  ref: concepts.md#configuration-classes
+- id: bean-definition-stereotype-annotations-063
+  difficulty: advanced
+  tags:
+  - configuration
+  - full-vs-lite
+  - detection
+  question: |
+    Which of the following is treated as a "lite" @Bean-hosting class rather than a "full" @Configuration class?
+  options:
+  - A class annotated @Configuration with default attributes
+  - Any class registered via AnnotationConfigApplicationContext.register
+  - A @Configuration whose @Bean methods reference each other directly
+  - A @Component (not @Configuration) that declares @Bean methods
+  answer: 3
+  explanation: |
+    Lite mode applies to classes that declare @Bean methods but are not annotated @Configuration (e.g. plain @Component, @Import, @ComponentScan classes) or are @Configuration(proxyBeanMethods=false). A default @Configuration is full mode with CGLIB interception of inter-bean calls.
+  ref: concepts.md#configuration-classes
+- id: bean-definition-stereotype-annotations-064
+  difficulty: expert
+  tags:
+  - bean-definition
+  - post-processor
+  - phases
+  question: |
+    Which statement about BeanFactoryPostProcessor (BFPP) versus BeanPostProcessor (BPP) is correct?
+  options:
+  - BPPs run before BFPPs so they can rewrite bean definitions before parsing
+  - BFPPs run once per bean instance; BPPs run once globally
+  - Both operate on definitions; the difference is only naming
+  - BFPPs operate on bean definitions before any bean is instantiated; BPPs operate on already-instantiated bean instances and cannot see or change definitions
+  answer: 3
+  explanation: |
+    BFPPs (and the earlier-running BeanDefinitionRegistryPostProcessor sub-interface) mutate/add bean definitions before instantiation. Only after that phase are singletons created and BPPs applied to instances. A BPP can wrap/decorate an instance but never sees the BeanDefinition metadata.
+  ref: concepts.md#bean-definition-internals-and-registration-order
+- id: bean-definition-stereotype-annotations-065
+  difficulty: advanced
+  tags:
+  - bean-definition
+  - subtypes
+  question: |
+    A bean produced by an @Bean factory method is modeled internally by which kind of definition, and what distinguishes it?
+  options:
+  - A ScannedGenericBeanDefinition holding ASM AnnotationMetadata
+  - A plain GenericBeanDefinition identical to an XML <bean>
+  - A RootBeanDefinition with a null beanClass and no factory info
+  - A ConfigurationClassBeanDefinition carrying factoryBeanName and factoryMethodName, since it is created via a factory method rather than a directly instantiable class
+  answer: 3
+  explanation: |
+    @Bean-produced beans are factory-method definitions: the BeanDefinition points at the configuration bean (factoryBeanName) plus the method (factoryMethodName), not at a directly-newable class. ScannedGenericBeanDefinition is for component-scanned classes.
+  ref: concepts.md#bean-definition-internals-and-registration-order
+- id: bean-definition-stereotype-annotations-066
+  difficulty: advanced
+  tags:
+  - component-scan
+  - ordering
+  - collection-injection
+  question: |
+    You inject `List<Validator> validators` and need them in a deterministic order. Relying on scan/discovery order is unsafe. What actually controls the list order?
+  options:
+  - The alphabetical order of bean names, always
+  - The order classes appear on the classpath
+  - '@Order / Ordered (or @Priority) on the beans; component discovery order is classpath-dependent and must not be relied upon'
+  - The order of @ComponentScan basePackages entries
+  answer: 2
+  explanation: |
+    Discovery order from scanning is filesystem/classpath dependent and not guaranteed. To order a collection injection point, annotate beans with @Order/implement Ordered (or use @Priority). @DependsOn controls instantiation ordering, not list ordering.
+  ref: concepts.md#component-scanning-basics
+- id: bean-definition-stereotype-annotations-067
+  difficulty: expert
+  tags:
+  - petpp
+  - bean-post-processor
+  - early-instantiation
+  question: |
+    A @Repository is (transitively) needed to construct another BeanPostProcessor. At startup you see a BeanPostProcessorChecker warning and the repository's exception-translation proxy is missing. Explain.
+  options:
+  - PETPP was disabled because two post-processors were present
+  - '@Repository translation only works for beans created lazily'
+  - Because the repository is instantiated before all BeanPostProcessors (including PETPP) are registered, it is not eligible to be processed by them, so no translation proxy is applied
+  - The repository was registered as ROLE_INFRASTRUCTURE, which forbids proxying
+  answer: 2
+  explanation: |
+    A BeanPostProcessor (PETPP) can only proxy beans instantiated after it is registered. If a @Repository is pulled in to build another post-processor, it is created too early, is not eligible for processing by all BPPs (logged by BeanPostProcessorChecker), and misses the translation proxy.
+  ref: concepts.md#repository-and-exception-translation
+- id: bean-definition-stereotype-annotations-068
+  difficulty: advanced
+  tags:
+  - configuration-class-post-processor
+  - internals
+  question: |
+    Which infrastructure component parses @Configuration classes, registers their @Bean definitions, and marks classes as full or lite mode?
+  options:
+  - DispatcherServlet during the web init phase
+  - ConfigurationClassPostProcessor, a BeanDefinitionRegistryPostProcessor that runs before any bean is instantiated
+  - AutowiredAnnotationBeanPostProcessor, at instance creation time
+  - AnnotationBeanNameGenerator, during name generation
+  answer: 1
+  explanation: |
+    ConfigurationClassPostProcessor is a BeanDefinitionRegistryPostProcessor (a BeanFactoryPostProcessor). It parses configuration classes, registers @Bean definitions and @Import/@ComponentScan results, and flags each class CONFIGURATION_CLASS_FULL or _LITE, all before instantiation begins.
+  ref: concepts.md#bean-definition-internals-and-registration-order
+- id: bean-definition-stereotype-annotations-069
+  difficulty: expert
+  tags:
+  - configuration
+  - constructor-injection
+  - bootstrapping
+  question: |
+    A full-mode @Configuration class uses constructor injection to receive a dependency. What constraint and risk does this introduce?
+  options:
+  - It is forbidden; @Configuration classes may only use field injection
+  - CGLIB must be able to call a non-private, non-final constructor to build the subclass, and pulling beans in via the constructor risks a bootstrapping chicken-and-egg problem if those beans need BeanFactoryPostProcessors
+  - Constructor injection silently switches the class to lite mode
+  - It causes every @Bean method to become static
+  answer: 1
+  explanation: |
+    CGLIB enhancement subclasses the config class, so its constructor must be callable (non-private/non-final). Injecting beans via the constructor forces those beans to be created during config-class instantiation, which can conflict with the ordering of BeanFactoryPostProcessors and cause early-instantiation problems.
+  ref: concepts.md#configuration-classes
+- id: bean-definition-stereotype-annotations-070
+  difficulty: advanced
+  tags:
+  - xml
+  - annotation-config
+  - component-scan
+  question: |
+    An XML context uses only `<context:component-scan base-package="com.app"/>` (no `<context:annotation-config/>`). Are @Autowired and @PostConstruct on the scanned beans processed?
+  options:
+  - No; you must also add <context:annotation-config/> explicitly
+  - Yes; component-scan implicitly enables the annotation-config post-processors in addition to detecting and registering the classes
+  - Only @Autowired is processed; @PostConstruct requires annotation-config
+  - Only @PostConstruct is processed; @Autowired requires annotation-config
+  answer: 1
+  explanation: |
+    <context:component-scan> both detects/registers stereotype classes and implicitly activates the annotation post-processors (equivalent to <context:annotation-config/>). So @Autowired and @PostConstruct work without a separate annotation-config element.
+  ref: concepts.md#xml-versus-annotation-versus-java-config
+- id: bean-definition-stereotype-annotations-071
+  difficulty: expert
+  tags:
+  - custom-stereotype
+  - scope
+  - meta-annotation
+  question: |
+    You create `@Service @Scope("prototype")` composed annotation @PrototypeService and put it on a class, but the bean still behaves like a singleton. Which cause is most plausible?
+  options:
+  - '@Scope cannot be used as a meta-annotation and is silently ignored'
+  - The class was also registered by an explicit @Bean method (or another config) whose definition overrides the scanned one, or the scope metadata was not resolved because a non-meta-aware lookup was used; verify a single scanned definition carries the merged @Scope
+  - Prototype scope is only honored for @Component, never through @Service
+  - Composed annotations reset all scopes to singleton by design
+  answer: 1
+  explanation: |
+    Meta-annotated @Scope is normally honored via merged-annotation resolution during scanning. If the bean is a singleton, the usual culprit is a competing/overriding definition (e.g. an explicit @Bean) for the same name, or the scope not being read through a meta-annotation-aware path. The composed-annotation mechanism itself does honor @Scope.
+  ref: concepts.md#meta-annotations-and-composed-annotations
+- id: bean-definition-stereotype-annotations-072
+  difficulty: advanced
+  tags:
+  - bean-definition
+  - role
+  question: |
+    What does BeanDefinition.getRole() (ROLE_APPLICATION / ROLE_SUPPORT / ROLE_INFRASTRUCTURE) affect?
+  options:
+  - It changes the autowiring priority of the bean
+  - It is metadata only (a hint for tooling/actuator to categorize or hide infrastructure beans) and does not change wiring or instantiation
+  - It sets the bean scope
+  - It determines whether the bean is eligible for AOP proxying
+  answer: 1
+  explanation: |
+    The role is purely a categorization hint. ROLE_INFRASTRUCTURE marks internally-registered beans (like post-processors) so tools can hide them. It does not influence wiring, scope, or proxying.
+  ref: concepts.md#bean-definition-internals-and-registration-order
+- id: bean-definition-stereotype-annotations-073
+  difficulty: expert
+  tags:
+  - configuration
+  - final
+  - proxyBeanMethods
+  question: |
+    You mark a @Configuration class final. In which scenario does the container start successfully, and in which does it fail?
+  options:
+  - It always fails because @Configuration can never be final
+  - It always succeeds because CGLIB can subclass final classes
+  - It fails in full mode (default) because CGLIB cannot subclass a final class, but succeeds with @Configuration(proxyBeanMethods = false) since no subclass is generated
+  - It fails only if the class has @Bean methods with parameters
+  answer: 2
+  explanation: |
+    Full mode requires a CGLIB subclass, which is impossible for a final class, so startup fails. With proxyBeanMethods=false (lite mode) no subclass is generated, so a final class is fine — provided you never rely on inter-bean self-calls.
+  ref: concepts.md#configuration-classes
+- id: bean-definition-stereotype-annotations-074
+  difficulty: advanced
+  tags:
+  - repository
+  - proxy-type
+  - final
+  question: |
+    A @Repository class implements no interface and has a public final method that performs data access. With PETPP active, calls to that final method are not translated. Why?
+  options:
+  - Final methods throw only checked exceptions, which are never translated
+  - With no interface, Spring uses a CGLIB subclass proxy, and a final method cannot be overridden, so it is not advised by the translation interceptor
+  - '@Repository requires an interface; the class is not proxied at all'
+  - PETPP only advises methods named following the get/find convention
+  answer: 1
+  explanation: |
+    Lacking an interface, the repository is proxied via a CGLIB subclass. CGLIB advice works by overriding methods, and a final method cannot be overridden, so the translation advisor never intercepts it. Interface-based JDK proxies would sidestep this but require the method be on an interface.
+  ref: concepts.md#repository-and-exception-translation
+- id: bean-definition-stereotype-annotations-075
+  difficulty: expert
+  tags:
+  - static-bean
+  - placeholder
+  - ordering
+  question: |
+    PropertySourcesPlaceholderConfigurer is declared as a non-static @Bean method in a @Configuration class, and ${...} placeholders in other @Bean definitions are not being resolved. What is the fix?
+  options:
+  - Add @DependsOn on every bean that uses placeholders
+  - Declare the PropertySourcesPlaceholderConfigurer @Bean method static so it is created early enough to post-process other bean definitions before they are instantiated
+  - Move all placeholders into a @Value on the config class
+  - Mark the config class @Lazy
+  answer: 1
+  explanation: |
+    PropertySourcesPlaceholderConfigurer is a BeanFactoryPostProcessor and must run in the BFPP phase. A non-static @Bean method forces early config-class instantiation and ordering issues. Declaring it static lets it be created without instantiating the config class, so it processes definitions before they are used.
+  ref: concepts.md#bean-definition-internals-and-registration-order
+- id: bean-definition-stereotype-annotations-076
+  difficulty: advanced
+  tags:
+  - stereotype
+  - refactor
+  - aop
+  question: |
+    A codebase has AOP advice bound by the pointcut `@within(org.springframework.stereotype.Repository)`. A developer "cleans up" by changing a DAO from @Repository to @Component (arguing they are interchangeable). What breaks?
+  options:
+  - Nothing; the four stereotypes are fully interchangeable
+  - The bean fails to register because @Component is more restrictive
+  - The pointcut no longer matches that bean, so the cross-cutting advice (and, separately, exception translation) silently stops applying to it
+  - Component scanning throws ConflictingBeanDefinitionException
+  answer: 2
+  explanation: |
+    Stereotypes are interchangeable only for raw registration. A pointcut keyed on @within(...Repository) stops matching once the annotation changes, silently dropping the advice; the bean also loses PETPP exception-translation eligibility. Swapping stereotypes is not always behavior-preserving.
+  ref: concepts.md#stereotype-annotations-overview
+- id: bean-definition-stereotype-annotations-077
+  difficulty: expert
+  tags:
+  - merged-annotations
+  - closest-wins
+  question: |
+    In a chain of meta-annotations where the same attribute name appears at multiple levels with different values, how does MergedAnnotations resolve the effective value?
+  options:
+  - The farthest (root) meta-annotation value always wins
+  - The closest annotation in the hierarchy wins (nearer overrides farther)
+  - It throws because of the conflict
+  - Values are concatenated
+  answer: 1
+  explanation: |
+    MergedAnnotations applies a "closest annotation wins" rule: an attribute value declared nearer to the annotated element overrides one declared on a farther meta-annotation. This is what lets composed annotations override defaults from their meta-annotations.
+  ref: concepts.md#meta-annotations-and-composed-annotations
+- id: bean-definition-stereotype-annotations-078
+  difficulty: advanced
+  tags:
+  - component-scan
+  - filters
+  - default-filters
+  question: |
+    You want a @ComponentScan to register ONLY classes matching a custom TypeFilter and nothing else, ignoring @Component/@Service/etc. Which configuration is correct?
+  options:
+  - includeFilters with the custom filter, leaving useDefaultFilters at its default true
+  - excludeFilters with FilterType.ANNOTATION for @Component
+  - useDefaultFilters = false together with includeFilters using FilterType.CUSTOM
+  - basePackageClasses pointing at the filter class
+  answer: 2
+  explanation: |
+    Leaving useDefaultFilters=true would still auto-detect all stereotypes. Setting useDefaultFilters=false disables the built-in stereotype detection so only your includeFilters (here FilterType.CUSTOM) determine candidates.
+  ref: concepts.md#component-scanning-basics
+- id: bean-definition-stereotype-annotations-079
+  difficulty: expert
+  tags:
+  - full-mode
+  - static
+  - interception
+  question: |
+    Within a full-mode @Configuration class, a static helper method and an instance @Bean method both exist. Which calls are subject to CGLIB inter-bean interception?
+  options:
+  - Both static and instance @Bean method calls are intercepted
+  - Only instance @Bean method calls are intercepted; static methods are invoked without instantiating the config class and are never proxied
+  - Only static methods are intercepted
+  - Neither, because full mode intercepts field access instead
+  answer: 1
+  explanation: |
+    CGLIB interception works by overriding instance methods on the enhanced subclass, so only instance @Bean methods are intercepted to return managed singletons. A static @Bean method is invoked without a config-class instance and cannot be overridden, so it never participates in inter-bean interception.
+  ref: concepts.md#configuration-classes
+- id: bean-definition-stereotype-annotations-080
+  difficulty: advanced
+  tags:
+  - bean
+  - object-return-type
+  - autowiring
+  question: |
+    What is the specific danger of declaring `@Bean public Object widget() { return new Widget(); }`?
+  options:
+  - Spring refuses to register beans whose return type is Object
+  - The bean registers, but because its declared type is Object, type-based autowiring for Widget will not match it until (and unless) something forces its instantiation, effectively hiding it from by-type injection
+  - It forces the bean to prototype scope
+  - Object return types are always treated as FactoryBeans
+  answer: 1
+  explanation: |
+    The container reasons about a @Bean by its declared return type before instantiation. An Object return type gives no useful type information, so by-type autowiring for the concrete Widget will not find it reliably. Always declare the most specific useful return type.
+  ref: concepts.md#component-versus-bean

@@ -690,3 +690,718 @@ questions:
       Micrometer is a standalone library usable without Spring. Boot adds auto-configuration: the
       registry, common tags, MeterBinders, and wiring of `/actuator/metrics`.
     ref: "concepts.md#micrometer-as-the-metrics-facade"
+
+  - id: actuator-observability-043
+    difficulty: advanced
+    tags: [custom-endpoint, operations, http]
+    question: |
+      You define `@Endpoint(id="features")` with a `@ReadOperation public Boolean one(@Selector String name)`
+      that returns `toggles.get(name)`. A client calls `GET /actuator/features/unknownFlag` for a name
+      that is not present in the map. What HTTP status does Actuator return?
+    options:
+      - "404 Not Found, because a @ReadOperation that returns null is mapped to a 404 response."
+      - "200 OK with a JSON body of `null`, because the method completed without throwing."
+      - "204 No Content, because there is no body to send back."
+      - "400 Bad Request, because the @Selector value did not match any known resource."
+    answer: 0
+    explanation: |
+      For Actuator's operation model, a `@ReadOperation` returning `null` maps to **404 Not Found**
+      (a value maps to 200). By contrast a `@WriteOperation`/`@DeleteOperation` returning null maps to
+      204, and a missing *required* parameter maps to 400. The method did not throw, so it is the
+      null-return-to-404 rule that applies.
+    ref: "concepts.md#writing-custom-endpoints"
+
+  - id: actuator-observability-044
+    difficulty: advanced
+    tags: [custom-endpoint, parameters, binding]
+    question: |
+      A custom `@WriteOperation` is written as `public void update(CustomData data)` where `CustomData`
+      is your own class with two fields. The endpoint is exposed over HTTP and you POST a matching JSON
+      body. What happens?
+    options:
+      - "It works: Actuator deserializes the JSON body into the CustomData parameter using Jackson."
+      - "It fails to bind because Actuator operations only accept simple-typed parameters; each root JSON property must map to its own simple parameter."
+      - "It works only if CustomData is annotated with @ConfigurationProperties."
+      - "It works over JMX but silently ignores the body over HTTP."
+    answer: 1
+    explanation: |
+      Actuator's endpoint operation model binds each **root JSON property to a separate simple-typed
+      parameter** (via `ApplicationConversionService`). You cannot bind a whole custom object as one
+      parameter. You would write `update(String name, int counter)` instead. This is a deliberate
+      limitation of the technology-agnostic operation model, not a Jackson issue.
+    ref: "concepts.md#writing-custom-endpoints"
+
+  - id: actuator-observability-045
+    difficulty: advanced
+    tags: [custom-endpoint, caching]
+    question: |
+      Two of your custom read operations exist on the same endpoint: `all()` with no parameters, and
+      `one(@Selector String name)`. `management.endpoint.features.cache.time-to-live=30s` is set. A
+      client hits each operation twice in quick succession. Which responses can be served from the
+      Actuator response cache?
+    options:
+      - "Both operations are cached, because caching is configured per-endpoint and applies to every operation."
+      - "Neither is cached, because Actuator only caches the built-in health and info endpoints."
+      - "Only `all()` can be cached; `one(...)` takes a @Selector parameter and is therefore never cached."
+      - "Only `one(...)` is cached, because parameterized operations are the ones worth caching."
+    answer: 2
+    explanation: |
+      Actuator only auto-caches **read operations that take no parameters**. `all()` qualifies and is
+      cached for the TTL; `one(@Selector ...)` is parameterized (a selector, query param, Principal, or
+      SecurityContext all count) and is never cached. This is also why rapid `/health` calls can return
+      an identical body within the TTL window.
+    ref: "concepts.md#writing-custom-endpoints"
+
+  - id: actuator-observability-046
+    difficulty: expert
+    tags: [custom-endpoint, parameters, compilation]
+    question: |
+      A colleague's custom `@WriteOperation public void set(String name, boolean enabled)` works
+      perfectly on their machine but, once deployed through a hand-rolled build, every POST returns
+      400 Bad Request complaining about a missing `name`/`enabled` parameter even though the JSON body
+      is correct. What is the most likely root cause?
+    options:
+      - "The endpoint was exposed over JMX only, so HTTP requests cannot carry a body."
+      - "boolean is not a supported operation parameter type and must be Boolean."
+      - "The @WriteOperation must declare a return type; void operations reject all input."
+      - "The class was compiled without the `-parameters` flag, so Actuator cannot resolve the JSON body keys to the reflective parameter names."
+    answer: 3
+    explanation: |
+      Actuator maps JSON body keys to operation parameters **by reflective parameter name**, which is
+      only retained when compiling with `-parameters`. Spring Boot's Gradle/Maven tooling enables this
+      automatically; a hand-rolled build that omits it leaves parameter names as `arg0`/`arg1`, so the
+      real names cannot be matched and required parameters appear missing (400).
+    ref: "concepts.md#writing-custom-endpoints"
+
+  - id: actuator-observability-047
+    difficulty: advanced
+    tags: [custom-endpoint, extensions, web]
+    question: |
+      You want to keep a technology-neutral `@Endpoint` but add an HTTP-only operation (returning
+      different HTTP status codes) that augments it — exactly how the health endpoint maps status to
+      HTTP codes. Which construct is designed for this, and what is its key constraint?
+    options:
+      - "@EndpointWebExtension referencing the endpoint; an endpoint may have at most one web extension."
+      - "A second @Endpoint bean with the same id; duplicates are merged automatically."
+      - "@RestControllerEndpoint, which is the only way to control HTTP status and can be declared any number of times."
+      - "A @ControllerAdvice bean scanning for the endpoint id."
+    answer: 0
+    explanation: |
+      `@EndpointWebExtension` (and `@EndpointJmxExtension`) augment an existing endpoint with
+      technology-specific operations; an endpoint may have **at most one extension of each type**. This
+      is precisely how Actuator's health web extension maps `Status` to HTTP codes without polluting
+      the technology-neutral `@Endpoint`.
+    ref: "concepts.md#writing-custom-endpoints"
+
+  - id: actuator-observability-048
+    difficulty: advanced
+    tags: [enablement, exposure, security]
+    question: |
+      Your `SecurityFilterChain` uses `EndpointRequest.to("shutdown")` to require an admin role for the
+      shutdown endpoint, but you left `management.endpoint.shutdown.enabled` at its default. A test that
+      expects that matcher to protect a request finds the matcher never matches anything. Why?
+    options:
+      - "EndpointRequest.to(...) only matches endpoints exposed over JMX, not HTTP."
+      - "shutdown is disabled by default, so no endpoint bean exists and there is nothing for the matcher to resolve to."
+      - "EndpointRequest matchers require the endpoint to be listed in exposure.exclude."
+      - "The matcher matches, but Spring Security evaluates it after the controller, so it appears inert."
+    answer: 1
+    explanation: |
+      A disabled endpoint has **no bean at all** — it cannot be discovered, secured, cached, or
+      extended. `EndpointRequest.to("shutdown")` resolves against the registered endpoints and, finding
+      none, matches nothing. You must enable (and expose) the endpoint for the matcher to have a target.
+    ref: "concepts.md#exposing-and-securing-endpoints"
+
+  - id: actuator-observability-049
+    difficulty: expert
+    tags: [exposure, discovery, jmx]
+    question: |
+      A `@WebEndpoint`-annotated custom endpoint is present and enabled, and you have configured
+      `management.endpoints.jmx.exposure.include=*`. The endpoint does not appear as a JMX MBean. Which
+      explanation is correct?
+    options:
+      - "JMX exposure include=* only applies to built-in endpoints, never custom ones."
+      - "The endpoint must also be added to management.endpoints.web.exposure.exclude to appear over JMX."
+      - "@WebEndpoint restricts the endpoint to the web technology; it is absent from the JmxEndpointsSupplier regardless of JMX exposure settings."
+      - "JMX endpoints require the endpoint to implement a separate MBean interface."
+    answer: 2
+    explanation: |
+      Actuator builds a separate supplier per technology (`WebEndpointsSupplier`,
+      `JmxEndpointsSupplier`, ...). `@WebEndpoint` marks the endpoint as web-only, so it is never
+      collected by the JMX supplier — no amount of JMX exposure configuration will surface it. Use a
+      plain `@Endpoint` if you want both technologies.
+    ref: "concepts.md#writing-custom-endpoints"
+
+  - id: actuator-observability-050
+    difficulty: advanced
+    tags: [sanitization, env, configprops]
+    question: |
+      In Spring Boot 3.x, with default settings, a caller hits `/actuator/env` (exposed) and sees every
+      property value rendered as `******`, including plainly non-secret values like `server.port`. A
+      teammate insists old Boot showed these values. What changed and how do you show them again?
+    options:
+      - "Nothing changed; you must be misreading the response — env values are always visible by default."
+      - "The env endpoint was removed in Boot 3; you are seeing a placeholder page."
+      - "Values only appear when management.endpoints.web.exposure.include lists env explicitly with a trailing wildcard."
+      - "Boot 3 sanitizes ALL values by default; set management.endpoint.env.show-values to always or when-authorized (and it applies unless a SanitizingFunction masks a value)."
+    answer: 3
+    explanation: |
+      Boot 3 changed the default so `/env`, `/configprops`, and `/quartz` **fully sanitize all values**
+      (`******`). A value shows only when `show-values` is `always` or `when-authorized` AND no
+      `SanitizingFunction` masks it. Older Boot relied on key-name heuristics (`password`, `secret`,
+      ...) and otherwise showed values, so `server.port` used to be visible.
+    ref: "concepts.md#key-endpoints-health-info-metrics-env-beans-loggers"
+
+  - id: actuator-observability-051
+    difficulty: expert
+    tags: [sanitization, security, roles]
+    question: |
+      You set `management.endpoint.env.show-values=when-authorized` and
+      `management.endpoint.env.roles=admin`. Which statement precisely describes when an env property
+      value is rendered unsanitized?
+    options:
+      - "Only for a caller who is authenticated AND holds the `admin` role, AND provided no applicable SanitizingFunction still masks that value."
+      - "For any caller, because when-authorized always reveals values once configured."
+      - "Only for callers coming through the JMX endpoint; HTTP callers always see ******."
+      - "For any authenticated caller regardless of role, because roles only affect the beans endpoint."
+    answer: 0
+    explanation: |
+      `when-authorized` reveals values only to an authenticated caller holding the endpoint's `roles`
+      (here `admin`). Even then, a matching `SanitizingFunction` bean can still mask specific values —
+      show-values and sanitizing functions are ANDed. (Over JMX all users are treated as authorized,
+      the opposite of the distractor.)
+    ref: "concepts.md#key-endpoints-health-info-metrics-env-beans-loggers"
+
+  - id: actuator-observability-052
+    difficulty: advanced
+    tags: [health, caching, staleness]
+    question: |
+      An on-call engineer scripts a loop that polls `/actuator/health` every 200 ms during an incident
+      and notices the JSON is byte-for-byte identical for stretches even though a downstream indicator
+      is flapping. Assuming default configuration plus a non-zero
+      `management.endpoint.health.cache.time-to-live`, what is happening?
+    options:
+      - "The health indicators are only ever evaluated once at startup and cached forever."
+      - "Actuator caches the parameterless read response for the TTL, so within each window the indicators are not re-invoked and the body is reused."
+      - "The load balancer is caching the response; Actuator itself never caches."
+      - "Byte-identical responses prove the downstream is actually stable; the flapping is a metrics artifact."
+    answer: 1
+    explanation: |
+      Health is a parameterless read operation, so Actuator's endpoint cache reuses the computed
+      response for the configured TTL. Within a TTL window the indicators are not re-run, so rapid
+      polls return an identical body even while the real state changes. Lower the TTL (or set it to 0)
+      if you need fresher reads.
+    ref: "concepts.md#key-endpoints-health-info-metrics-env-beans-loggers"
+
+  - id: actuator-observability-053
+    difficulty: expert
+    tags: [health-indicator, timeout, threads]
+    question: |
+      A blocking `HealthIndicator` calls `downstream.ping()` on an HTTP client configured with no read
+      timeout. During a downstream stall, `/actuator/health` requests start piling up and Tomcat worker
+      threads become exhausted. What is the accurate diagnosis and fix?
+    options:
+      - "HealthIndicator.health() runs asynchronously, so this cannot exhaust request threads; the real cause is GC."
+      - "Actuator automatically times out any indicator after 1 second, so the stall must be in Spring Security."
+      - "health() runs synchronously on the request thread with no built-in per-indicator timeout, so a hanging call pins threads; give the client a hard read/connect timeout (or run the check reactively with .timeout())."
+      - "Setting show-details=never disables indicator execution and resolves the hang."
+    answer: 2
+    explanation: |
+      Indicators execute **synchronously on the request thread** and there is **no built-in
+      per-indicator timeout**. A hanging downstream call blocks that thread, and repeated probes exhaust
+      the pool — a classic self-inflicted outage. The fix is a hard client timeout, a reactive check
+      with `.timeout(...)`, or caching the result; not any Actuator-level toggle.
+    ref: "concepts.md#custom-health-indicators"
+
+  - id: actuator-observability-054
+    difficulty: advanced
+    tags: [health, contributor, hierarchy]
+    question: |
+      You need a single `/actuator/health` component `db` that itself nests the results of three
+      separate datasource checks. Which abstraction models this "named tree of child checks"?
+    options:
+      - "A single HealthIndicator that concatenates the three statuses into one string detail."
+      - "Three separate @Endpoint beans sharing the id `db`."
+      - "A StatusAggregator, which is the only way to nest components."
+      - "A CompositeHealthContributor whose children are the individual indicators."
+    answer: 3
+    explanation: |
+      The health type hierarchy has `HealthContributor` as the root marker, with `HealthIndicator` as
+      the leaf and `CompositeHealthContributor` as a **named tree of children**. A composite lets one
+      `db` component nest multiple datasource checks, each appearing as a nested component in the JSON.
+    ref: "concepts.md#custom-health-indicators"
+
+  - id: actuator-observability-055
+    difficulty: expert
+    tags: [health, reactive, bridging]
+    question: |
+      A Servlet (Spring MVC) application registers a bean implementing `ReactiveHealthIndicator`
+      returning `Mono<Health>`. When `/actuator/health` is queried, what does Actuator do?
+    options:
+      - "It bridges the worlds by subscribing to and blocking on the Mono to obtain the Health for the Servlet endpoint."
+      - "It ignores the bean, because ReactiveHealthIndicator is only recognized on the WebFlux stack."
+      - "It throws at startup, because a reactive indicator cannot be registered in a Servlet context."
+      - "It returns UNKNOWN for that component, because the Servlet endpoint cannot subscribe to a Mono."
+    answer: 0
+    explanation: |
+      Actuator bridges the reactive and blocking worlds: a `ReactiveHealthIndicator` queried from the
+      Servlet endpoint is `.block()`-ed to obtain the `Health`, and conversely a blocking
+      `HealthIndicator` queried from the reactive endpoint is adapted to run on a bounded-elastic
+      scheduler. The reactive indicator is honored, not ignored.
+    ref: "concepts.md#custom-health-indicators"
+
+  - id: actuator-observability-056
+    difficulty: advanced
+    tags: [health, groups, additional-path]
+    question: |
+      Your load balancer can only reach the main server port, but you run Actuator on a separate
+      management port (`management.server.port`). You still want a readiness signal on the main port.
+      Which mechanism achieves this?
+    options:
+      - "Set management.server.port back to the main port; separate ports make readiness impossible."
+      - "Use a health group with an additional-path bound to the server, e.g. management.endpoint.health.group.readiness.additional-path=server:/readyz."
+      - "Expose the whole /actuator base path twice by listing it in exposure.include on both ports."
+      - "Readiness is only ever available at /actuator/health/readiness on the management port; there is no alternative."
+    answer: 1
+    explanation: |
+      Health groups support an `additional-path` that can map a group onto the **main server port**
+      (`server:/readyz`) while the rest of Actuator stays on the management port. This is the standard
+      way to give an LB a readiness endpoint it can actually reach.
+    ref: "concepts.md#custom-health-indicators"
+
+  - id: actuator-observability-057
+    difficulty: expert
+    tags: [micrometer, meter-identity, registration]
+    question: |
+      Somewhere in the codebase, one path registers `registry.counter("api.calls", "region", "us")`
+      and another later does `registry.timer("api.calls")` (same name, different meter type). With a
+      Prometheus registry, what is the expected outcome?
+    options:
+      - "Both coexist happily; Micrometer namespaces meters by type internally."
+      - "The timer overwrites the counter and previously recorded counts are migrated."
+      - "It is a conflicting registration: a name cannot back two different meter types (or inconsistent tag key sets), so registration fails/throws rather than silently merging."
+      - "Prometheus renames the second one to api.calls_2 automatically."
+    answer: 2
+    explanation: |
+      A meter's identity is name + tags, and a given name must map to a single meter type with a
+      consistent tag-key set — Prometheus/most backends cannot represent otherwise. Registering the same
+      name as both a counter and a timer (or with inconsistent tag keys) is a conflicting registration
+      and fails; it does not silently coexist or auto-rename.
+    ref: "concepts.md#micrometer-as-the-metrics-facade"
+
+  - id: actuator-observability-058
+    difficulty: expert
+    tags: [micrometer, gauge, garbage-collection]
+    question: |
+      You write `Gauge.builder("cache.entries", buildLocalCache(), Cache::size).register(registry);`
+      passing a freshly built cache directly to the builder and keeping no other reference to it. After
+      a GC cycle the metric reports `NaN` or vanishes. Why?
+    options:
+      - "Gauges are reset to NaN on every scrape and must be re-registered each time."
+      - "Cache::size is not a valid ToDoubleFunction, so Micrometer silently drops the meter."
+      - "Prometheus reports NaN for any gauge whose value exceeds Integer.MAX_VALUE."
+      - "A Micrometer gauge holds only a weak reference to the observed object; with no strong reference the cache is collected and the gauge can no longer sample it."
+    answer: 3
+    explanation: |
+      Micrometer gauges reference the measured object **weakly** to avoid memory leaks. If nothing else
+      keeps it strongly reachable, it is garbage-collected and the gauge reports `NaN`/disappears.
+      Always retain a strong reference to the object a gauge observes (store the cache in a field).
+    ref: "concepts.md#micrometer-as-the-metrics-facade"
+
+  - id: actuator-observability-059
+    difficulty: advanced
+    tags: [micrometer, meter-filter, ordering]
+    question: |
+      A `MeterFilter` that adds a common tag `region=eu` is registered, but a specific counter created
+      earlier during context refresh lacks the tag. All later meters have it. What explains the
+      inconsistency?
+    options:
+      - "MeterFilters run at meter registration time; a meter created before the filter was added is not retroactively modified."
+      - "MeterFilters only apply to Timers, never Counters."
+      - "Common tags are applied lazily at scrape time, so the discrepancy is a display bug that self-corrects."
+      - "The counter was created on a different thread, and MeterFilters are thread-local."
+    answer: 0
+    explanation: |
+      `MeterFilter`s are applied **when a meter is registered**, in the order filters were added. A
+      meter that was already created before the filter existed is not retouched — so ordering and
+      timing both matter. Ensure common-tag filters are registered before any meter is created (Boot
+      does this early via `MeterRegistryCustomizer`).
+    ref: "concepts.md#micrometer-as-the-metrics-facade"
+
+  - id: actuator-observability-060
+    difficulty: expert
+    tags: [micrometer, timer, percentiles, histogram]
+    question: |
+      Two instances of a service both configure their request `Timer` with
+      `publishPercentiles(0.99)`. Your dashboard averages the two exported p99 values to get a "fleet
+      p99." A staff engineer says this number is meaningless. Why, and what should you have done?
+    options:
+      - "Nothing is wrong; averaging per-instance p99s is the standard way to compute a fleet p99."
+      - "Client-side publishPercentiles are computed in-process and are not aggregatable across instances; publish a percentile histogram (bucket counts) and let the backend compute the quantile (e.g. histogram_quantile)."
+      - "The p99 is meaningless only because the two instances have different sampling rates; align management.tracing.sampling.probability."
+      - "publishPercentiles is deprecated; you must use LongTaskTimer for latency."
+    answer: 1
+    explanation: |
+      `publishPercentiles(...)` computes percentiles **in-process** per instance; you cannot average
+      p99s across hosts to get a real fleet p99. To aggregate correctly, emit a **percentile histogram**
+      (`publishPercentileHistogram()`) so the backend receives bucket counts and computes the quantile
+      over the merged distribution (e.g. Prometheus `histogram_quantile`).
+    ref: "concepts.md#micrometer-as-the-metrics-facade"
+
+  - id: actuator-observability-061
+    difficulty: advanced
+    tags: [micrometer, gauge, api]
+    question: |
+      What does `registry.gauge("queue.size", myQueue, q -> q.size())` return, and why does that
+      surprise developers who assign it to a variable expecting to call `.increment()` later?
+    options:
+      - "It returns the Gauge meter; the surprise is that Gauge has no increment() method."
+      - "It returns void, so any assignment is a compile error."
+      - "It returns the object you passed in (myQueue), not a meter handle; developers expect a Meter but get their own object back."
+      - "It returns a Counter, because Micrometer converts gauges to counters when a lambda is supplied."
+    answer: 2
+    explanation: |
+      The convenience overload `MeterRegistry.gauge(name, stateObject, valueFunction)` returns the
+      **state object you passed in** (`myQueue`), not the `Gauge` meter — a deliberate API choice so you
+      can register in one line. To get the meter handle, use `Gauge.builder(...).register(registry)`.
+      Gauges have no increment(); their value is sampled via the function.
+    ref: "concepts.md#micrometer-as-the-metrics-facade"
+
+  - id: actuator-observability-062
+    difficulty: expert
+    tags: [observation-api, handlers, wiring]
+    question: |
+      You instrument code with `Observation.createNotStarted("checkout", registry).observe(() -> run())`.
+      In a plain Spring app you have an `ObservationRegistry` but registered **no** `ObservationHandler`.
+      What is recorded, and what does `run()` do?
+    options:
+      - "run() is skipped entirely because there is no handler to execute it."
+      - "A timer is recorded automatically; handlers are only needed for tracing."
+      - "The call throws IllegalStateException at start() due to the missing handler."
+      - "run() executes normally, but nothing is recorded (no timer, no span) because there are no handlers to react to the lifecycle."
+    answer: 3
+    explanation: |
+      `.observe(...)` always runs your code, but an `ObservationRegistry` with **zero handlers records
+      nothing** — no timer, no span. Metrics appear only when a meter observation handler is registered;
+      spans only when a tracing handler is registered. Adding Micrometer Tracing to the classpath is
+      what makes Boot register the tracing handler, turning existing observations into spans.
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-063
+    difficulty: expert
+    tags: [observation-api, scope, mdc, tracing]
+    question: |
+      A developer hand-codes `Observation obs = Observation.start("job", registry); doWork(); obs.stop();`
+      (no scope opened, no try/finally scope). A span is exported for the job, but log lines emitted
+      inside `doWork()` carry no traceId/spanId, and a nested observation is not parented to it. What is
+      the precise cause?
+    options:
+      - "Without opening a scope, the observation never becomes 'current' on the thread, so trace context/MDC is not populated and nested code is not correlated to it."
+      - "stop() was called on a different thread than start(), corrupting the span."
+      - "Micrometer Tracing requires the Brave bridge; the OTel bridge does not populate MDC."
+      - "Log correlation requires setting management.tracing.sampling.probability=1.0; it is a sampling issue."
+    answer: 0
+    explanation: |
+      The span exists (start/stop ran the handlers) but **opening a scope** is what makes the
+      observation current on the thread and populates trace context / MDC for correlation and parenting.
+      Using `.observe(...)` (or an explicit `try (var scope = obs.openScope()) { ... }`) fixes it.
+      Hand-rolling start/stop without a scope is the classic mistake.
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-064
+    difficulty: advanced
+    tags: [observation-api, predicate, filter]
+    question: |
+      You want to (a) completely stop recording observations for Actuator's own endpoint requests, and
+      (b) add a `deployment.region` key to every remaining observation's context at stop time. Which
+      two components are the idiomatic fit, respectively?
+    options:
+      - "An ObservationHandler for (a) and an ObservationConvention for (b)."
+      - "An ObservationPredicate for (a) (produces a no-op when it returns false) and an ObservationFilter for (b) (mutates the context, running before onStop)."
+      - "A MeterFilter.deny() for (a) and a SanitizingFunction for (b)."
+      - "An ObservationConvention for (a) and an ObservationPredicate for (b)."
+    answer: 1
+    explanation: |
+      An `ObservationPredicate` decides whether a real observation vs a **no-op** is created — ideal for
+      suppressing actuator noise. An `ObservationFilter` **mutates the context** (add/remove
+      key-values) and runs at stop, before the handlers' `onStop`. Conventions are for default
+      naming/key-values, not suppression, and MeterFilter/SanitizingFunction are unrelated layers.
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-065
+    difficulty: expert
+    tags: [observation-api, handler, supports-context]
+    question: |
+      In an app with both a metrics handler and a tracing handler registered, you create a custom
+      `Observation.Context` subtype for a batch job and expect only your custom handler to react to it,
+      while the built-in handlers still handle standard contexts. Which handler method makes this
+      selective behavior possible?
+    options:
+      - "onStart(), by throwing for unsupported contexts."
+      - "onScopeOpened(), which is only invoked for contexts the handler created."
+      - "supportsContext(Context), which each handler uses to opt into only the context types it understands."
+      - "getName(), which Micrometer matches against the observation name."
+    answer: 2
+    explanation: |
+      `ObservationHandler.supportsContext(Context)` lets each handler declare which context types it
+      applies to. The metrics/tracing handlers return true for standard contexts, and your custom
+      handler can return true only for your batch context — so handlers cleanly ignore contexts they
+      do not understand rather than all firing on everything.
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-066
+    difficulty: advanced
+    tags: [tracing, sampling, logs]
+    question: |
+      With `management.tracing.sampling.probability=0.1`, an engineer claims "90% of our requests have
+      no trace id in the logs, which breaks correlation." Evaluate this claim.
+    options:
+      - "Correct: unsampled requests get no trace/span ids at all, so their logs cannot be correlated."
+      - "Correct, but only on the OTel bridge; the Brave bridge always logs ids."
+      - "Incorrect: sampling probability only affects metrics, not traces or logs."
+      - "Incorrect: trace and span ids are always generated and placed in the MDC; sampling only controls whether the trace is recorded/exported, so logs still carry ids for unsampled requests."
+    answer: 3
+    explanation: |
+      Sampling decides whether a trace is **recorded/exported**, not whether ids exist. Trace/span ids
+      are always generated and placed in the MDC, so even unsampled requests log correlatable ids
+      (you just will not find the corresponding spans in the tracing backend). The claim conflates
+      "not exported" with "no id."
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-067
+    difficulty: expert
+    tags: [tracing, propagation, distributed]
+    question: |
+      Service A (Brave bridge, B3 propagation) calls Service B (OTel bridge, W3C traceparent). Each
+      service produces valid traces in isolation, but in the backend every hop starts a brand-new trace
+      instead of continuing the caller's trace. What is the root cause?
+    options:
+      - "A propagation-format mismatch: A sends B3 headers while B only reads W3C traceparent, so B cannot extract the upstream context and starts a fresh trace."
+      - "Sampling probability differs between the services, so B refuses A's spans."
+      - "Two tracing bridges cannot interoperate at all; you must run identical library versions."
+      - "The clock skew between hosts exceeds the trace TTL, so spans are discarded."
+    answer: 0
+    explanation: |
+      Trace continuity depends on both services agreeing on the **propagation format** in the wire
+      headers. A emits B3; B only parses W3C `traceparent`, so it cannot read A's context and begins a
+      new trace per hop. Configure `management.tracing.propagation.type` consistently across the fleet
+      (or enable multi-format reading).
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-068
+    difficulty: advanced
+    tags: [tracing, bridge, configuration]
+    question: |
+      A build includes BOTH `micrometer-tracing-bridge-otel` and `micrometer-tracing-bridge-brave`.
+      What is the correct characterization?
+    options:
+      - "This is required: one bridge handles metrics and the other handles spans."
+      - "It is a configuration error; Micrometer Tracing is a facade and you must add exactly one bridge implementation, not both."
+      - "Both are fine; Micrometer picks the faster one at runtime per request."
+      - "Both are needed only if you use the Observation API; otherwise pick one."
+    answer: 1
+    explanation: |
+      Micrometer Tracing is a **facade**; the actual tracer comes from exactly one bridge —
+      `micrometer-tracing-bridge-otel` OR `micrometer-tracing-bridge-brave` — plus a reporter/exporter.
+      Having both on the classpath is a misconfiguration that leads to ambiguous/duplicate wiring.
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-069
+    difficulty: advanced
+    tags: [health, status-aggregator, custom-status]
+    question: |
+      You introduce a custom status `FROZEN` and want it to be treated as worse than `OUT_OF_SERVICE`
+      but better than `DOWN` in the aggregate, and to return HTTP 503. Which combination configures
+      this correctly?
+    options:
+      - "Only management.endpoints.web.exposure.include=health; custom statuses inherit DOWN's behavior automatically."
+      - "A @Bean StatusAggregator is the only option; the two status.* properties do not affect custom values."
+      - "management.endpoint.health.status.order to place FROZEN in the severity list, and management.endpoint.health.status.http-mapping.FROZEN=503 for the HTTP code."
+      - "server.error.status-codes.FROZEN=503 plus a MeterFilter to order it."
+    answer: 2
+    explanation: |
+      `management.endpoint.health.status.order` defines the severity ordering used by the default
+      `StatusAggregator` (so you position FROZEN between OUT_OF_SERVICE and DOWN), and
+      `management.endpoint.health.status.http-mapping.FROZEN=503` maps the aggregate status to an HTTP
+      code. Both are needed; exposure alone does nothing for ordering/codes.
+    ref: "concepts.md#custom-health-indicators"
+
+  - id: actuator-observability-070
+    difficulty: expert
+    tags: [liveness, readiness, availability, events]
+    question: |
+      A warmup component publishes `AvailabilityChangeEvent.publish(publisher, this, ReadinessState.REFUSING_TRAFFIC)`
+      while priming a cache, then ACCEPTING_TRAFFIC when done. During the refusing window, what is true
+      about the liveness probe and pod lifecycle in Kubernetes?
+    options:
+      - "Liveness also flips to BROKEN, so Kubernetes restarts the pod during warmup."
+      - "Publishing readiness events has no effect unless management.server.port is set."
+      - "Both liveness and readiness are recomputed from HealthIndicators, ignoring the published event."
+      - "Only readiness is affected: the pod stays running and is temporarily removed from Service endpoints (no traffic), while liveness remains CORRECT so no restart occurs."
+    answer: 3
+    explanation: |
+      Readiness and liveness are independent signals. Publishing `REFUSING_TRAFFIC` moves the readiness
+      group to DOWN, so the pod is pulled from the Service's endpoints (no traffic) but **keeps
+      running**; liveness stays `CORRECT`, so Kubernetes does not restart it. The state machine is
+      driven by `AvailabilityChangeEvent`s on the `ApplicationEventPublisher`.
+    ref: "concepts.md#liveness-and-readiness-probes"
+
+  - id: actuator-observability-071
+    difficulty: advanced
+    tags: [liveness, readiness, availability, auto-config]
+    question: |
+      In a non-Kubernetes environment, `/actuator/health/liveness` and `/actuator/health/readiness`
+      return 404, but they start working once you deploy to Kubernetes. What governs whether these two
+      probe groups are auto-registered, and what backs each group's status when they are?
+    options:
+      - "The probe groups only exist when Spring Security is on the classpath; each group's status is derived from the http.server.requests metric."
+      - "The probe groups are auto-registered when Boot detects a Kubernetes environment (or when management.endpoint.health.probes.enabled=true), and each is backed by the in-memory ApplicationAvailability state (LivenessState / ReadinessState), not by scanning all HealthIndicators."
+      - "They are always registered on every stack; the 404 must be caused by a missing exposure.include entry for liveness and readiness."
+      - "They are registered only when a DataSource bean exists, and both groups aggregate every HealthIndicator in the context."
+    answer: 1
+    explanation: |
+      Boot auto-detects a Kubernetes environment (deployment platform) and registers the `liveness` and
+      `readiness` health groups; you can also force them on any platform with
+      `management.endpoint.health.probes.enabled=true`. Their status is driven by the framework-level
+      `ApplicationAvailability` abstraction — the `livenessState` (`CORRECT`/`BROKEN`) and
+      `readinessState` (`ACCEPTING_TRAFFIC`/`REFUSING_TRAFFIC`) contributors updated via
+      `AvailabilityChangeEvent`s — rather than by aggregating arbitrary external HealthIndicators.
+    ref: "concepts.md#liveness-and-readiness-probes"
+
+  - id: actuator-observability-072
+    difficulty: expert
+    tags: [security, endpoint-request, exclusions]
+    question: |
+      Consider:
+      `http.securityMatcher(EndpointRequest.toAnyEndpoint().excluding("health"))
+           .authorizeHttpRequests(r -> r.anyRequest().hasRole("ADMIN"));`
+      What is the effect on requests to `/actuator/health` versus `/actuator/metrics`?
+    options:
+      - "Both require ADMIN, because toAnyEndpoint() overrides the exclusion."
+      - "This filter chain does not match /actuator/health at all (it is excluded from the securityMatcher), so health falls through to other chains/defaults; /actuator/metrics is matched and requires ADMIN."
+      - "/actuator/health is permitted and /actuator/metrics is denied to everyone, because excluding() means deny."
+      - "Neither is matched, because excluding() disables the entire matcher."
+    answer: 1
+    explanation: |
+      `excluding("health")` narrows the chain's **securityMatcher** so this chain does not apply to the
+      health endpoint — health is left to be handled by another `SecurityFilterChain` or default rules
+      (often permitAll). `/actuator/metrics` is still matched by this chain and requires ADMIN.
+      `excluding` scopes the matcher; it does not itself mean "deny."
+    ref: "concepts.md#exposing-and-securing-endpoints"
+
+  - id: actuator-observability-073
+    difficulty: advanced
+    tags: [exposure, jmx, web, independence]
+    question: |
+      A team sets `management.endpoints.web.exposure.include=health,info` and never touches JMX
+      settings. A tool connecting over JMX finds none of the custom `@Endpoint` beans exposed. Which
+      statement is correct about default JMX exposure in modern Boot?
+    options:
+      - "Web and JMX exposure are the same setting, so web include=health,info also exposes them over JMX."
+      - "JMX always exposes everything by default; the tool must be misconfigured."
+      - "In modern Boot, JMX exposure defaults to exposing nothing; web and JMX exposure are configured independently, so the JMX tool sees nothing until management.endpoints.jmx.exposure.include is set."
+      - "Custom @Endpoint beans are web-only and can never be exposed over JMX."
+    answer: 2
+    explanation: |
+      Web and JMX exposure are **independent** properties. Modern Boot exposes nothing over JMX by
+      default (older Boot 2.0 exposed all over JMX). Setting only web exposure does not surface anything
+      over JMX; you would configure `management.endpoints.jmx.exposure.include` separately. (Plain
+      `@Endpoint` beans are eligible for both technologies — only `@WebEndpoint` is web-only.)
+    ref: "concepts.md#exposing-and-securing-endpoints"
+
+  - id: actuator-observability-074
+    difficulty: expert
+    tags: [health, contributor-registry, runtime]
+    question: |
+      A plugin system loads modules after application startup and wants each module to contribute its
+      own health check that appears in `/actuator/health` immediately, without a context restart. Which
+      mechanism supports this?
+    options:
+      - "It is impossible; health contributors are frozen after context refresh."
+      - "Re-run component scanning by calling refresh() on the ApplicationContext."
+      - "Add the module to management.endpoint.health.group.* at runtime through the env endpoint."
+      - "Register/unregister the contributor at runtime via the HealthContributorRegistry (ReactiveHealthContributorRegistry on the reactive stack)."
+    answer: 3
+    explanation: |
+      All contributors are collected into a `HealthContributorRegistry` (reactive:
+      `ReactiveHealthContributorRegistry`) that supports **dynamic register/unregister at runtime** —
+      exactly the hook a plugin system needs to add checks after startup without a context restart.
+    ref: "concepts.md#custom-health-indicators"
+
+  - id: actuator-observability-075
+    difficulty: advanced
+    tags: [enablement, global-default, opt-in]
+    question: |
+      A security-conscious team wants every Actuator endpoint to be opt-in: no endpoint bean should
+      exist unless explicitly turned on. Which single property flips the default, and what must they
+      then do per endpoint?
+    options:
+      - "management.endpoints.enabled-by-default=false; then set management.endpoint.<id>.enabled=true for each endpoint they want."
+      - "management.endpoints.web.exposure.include=none; then add each endpoint to exposure."
+      - "management.endpoint.all.enabled=false; then flip a sensitive flag per endpoint."
+      - "spring.actuator.default=disabled; then annotate each endpoint with @Enabled."
+    answer: 0
+    explanation: |
+      `management.endpoints.enabled-by-default=false` makes every endpoint opt-in at the **bean**
+      (enablement) level; each desired endpoint must then set `management.endpoint.<id>.enabled=true`.
+      Exposure is a separate later gate. There is no `sensitive` flag or `@Enabled` annotation in modern
+      Boot.
+    ref: "concepts.md#exposing-and-securing-endpoints"
+
+  - id: actuator-observability-076
+    difficulty: expert
+    tags: [micrometer, composite-registry, binders]
+    question: |
+      Actuator uses a `CompositeMeterRegistry` and you later add a second delegate registry (say a
+      Datadog registry) at runtime. What happens to previously registered meters, common-tag
+      MeterFilters, and MeterBinders with respect to the newly added delegate?
+    options:
+      - "Nothing propagates; the new delegate only receives meters created after it was added."
+      - "The composite propagates its meters and applies its filters to the newly added delegate as delegates are added, so existing meters appear in the new backend too."
+      - "The application must restart for the new delegate to receive any meters."
+      - "Only gauges propagate; counters and timers stay on the original delegate."
+    answer: 1
+    explanation: |
+      A `CompositeMeterRegistry` fans out to its delegates and, when a delegate is added, it registers
+      the composite's existing meters into that delegate and applies the composite's filters — so a
+      newly added backend receives the already-registered meters, not just future ones. Binders bind to
+      the composite once and flow through.
+    ref: "concepts.md#micrometer-as-the-metrics-facade"
+
+  - id: actuator-observability-077
+    difficulty: advanced
+    tags: [observation-api, convention, precedence]
+    question: |
+      For an HTTP server observation you register a custom `ObservationConvention`, and there is also a
+      matching `GlobalObservationConvention` plus the built-in default. Which naming/key-value
+      convention wins, and in what order are they considered?
+    options:
+      - "The default always wins to guarantee consistency; custom conventions are ignored."
+      - "The GlobalObservationConvention always wins because it is registered on the registry."
+      - "An explicitly-supplied custom convention wins; otherwise a matching GlobalObservationConvention; otherwise the default convention."
+      - "They are merged field-by-field with the default taking precedence on conflicts."
+    answer: 2
+    explanation: |
+      Convention precedence is: an explicitly-passed **custom** convention > a matching
+      **GlobalObservationConvention** > the **default** convention. This lets you override naming/tags
+      at a single instrumentation point, or globally, while a sensible default remains as a fallback.
+    ref: "concepts.md#logging-and-observability-basics"
+
+  - id: actuator-observability-078
+    difficulty: expert
+    tags: [loggers, reset, semantics]
+    question: |
+      A logger `com.example.svc` has no explicitly configured level and inherits INFO from its parent.
+      An operator POSTs `{"configuredLevel":"DEBUG"}` to raise it, then later POSTs
+      `{"configuredLevel":null}`. What is the effect of the second POST?
+    options:
+      - "It sets the level to OFF, silencing the logger."
+      - "It is rejected with 400, because configuredLevel cannot be null."
+      - "It permanently pins the logger at DEBUG until restart, because null is treated as 'no change'."
+      - "It resets the configuredLevel to null, so the logger goes back to inheriting its parent's effective level (INFO)."
+    answer: 3
+    explanation: |
+      Posting a null `configuredLevel` **clears** the explicit level, so the logger reverts to
+      inheriting its parent's effective level (INFO here) — the same state as before the DEBUG override.
+      It is not OFF, not rejected, and not a no-op.
+    ref: "concepts.md#key-endpoints-health-info-metrics-env-beans-loggers"

@@ -25,6 +25,10 @@ Key mental model:
 
 An endpoint can be **enabled but not exposed** (bean exists, not reachable over HTTP), or **exposed but disabled** (unreachable because it does not exist). Both `enabled` and `exposure` gates must pass for an HTTP request to succeed.
 
+**Gotcha — enabled vs exposed at the bean level.** A disabled endpoint (`management.endpoint.<id>.enabled=false`) has **no endpoint bean at all**, so it cannot be secured, cached, extended, or discovered — it is as if it did not exist. An enabled-but-not-exposed endpoint's bean *does* exist (and is exposed over JMX subject to JMX exposure rules) but is filtered out of the web-mapping step. This matters for `@EndpointWebExtension` and for `EndpointRequest` matchers: a matcher for a disabled endpoint matches nothing. There is also a global switch `management.endpoints.enabled-by-default=false` that flips the default so that every endpoint is opt-in via its own `enabled=true`.
+
+**Three technologies, three discovery paths.** Actuator builds a separate `EndpointsSupplier` per technology: `WebEndpointsSupplier`, `JmxEndpointsSupplier`, and (for controller endpoints) `ControllerEndpointsSupplier`. Each starts from the same `@Endpoint` beans but applies its own exposure filter and produces its own set of operations. This is why `@WebEndpoint` beans never appear over JMX and vice versa, and why the web and JMX exposure includes/excludes are independent properties.
+
 By default, endpoints are served under the base path **`/actuator`**, e.g. `GET /actuator/health`. Actuator supports two technologies out of the box: **HTTP (web)** endpoints and **JMX** endpoints. In modern Boot, JMX exposure is disabled by default; web exposure defaults to only `health`.
 
 Actuator is available for both Spring MVC (Servlet) and Spring WebFlux (reactive) stacks, and for a plain Jersey/JAX-RS setup.
@@ -82,6 +86,52 @@ Empty by default. Populated by `InfoContributor` beans. Common contributors: `en
 ### `/actuator/env` and `/actuator/beans`
 
 `env` shows the layered `PropertySource`s of the Spring `Environment` (system props, env vars, config files, etc.); sensitive values are sanitized by default. `beans` dumps every bean, its type, scope, and dependencies — useful for debugging wiring.
+
+### Value sanitization on env, configprops, quartz
+
+Data from `/env`, `/configprops`, and `/quartz` can leak secrets, so in Spring Boot 3.x **all values are fully sanitized (`******`) by default**. A value is shown unsanitized only when **both** conditions hold: (1) the per-endpoint `management.endpoint.<id>.show-values` is set to something other than `never` (`always` or `when-authorized`), **and** (2) no custom `SanitizingFunction` bean decides to sanitize it. `when-authorized` additionally requires the caller to be authenticated and to hold the roles listed in `management.endpoint.<id>.roles` (default: any authenticated user). This is a behavioral change from older Boot, where key-name heuristics (`password`, `secret`, `key`, `token`, `.*credentials.*`, `vcap_services`, `sun.java.command`) drove sanitization and values were otherwise visible. To restore key-based masking you now register a `SanitizingFunction` bean.
+
+### Endpoint response caching
+
+Actuator **automatically caches the response of read operations that take no parameters** for a configurable TTL: `management.endpoint.<id>.cache.time-to-live=10s`. This is why two rapid `GET /actuator/health` calls can return an identical body even if an indicator's underlying state changed in between — the cache short-circuits re-invocation. Operations that accept a `@Selector`, a query parameter, a `Principal`, or a `SecurityContext` are considered parameterized and are **never cached**. Caching is per-endpoint and independent of the HTTP layer's own caching headers.
+
+---
+
+## Writing Custom Endpoints
+
+Beyond `HealthIndicator`/`InfoContributor`, Actuator lets you define entirely new management operations with a **technology-agnostic** programming model. A `@Bean` annotated with `@Endpoint(id = "features")` whose methods carry `@ReadOperation`, `@WriteOperation`, or `@DeleteOperation` is exposed over **both** JMX and (in a web app) HTTP, without you touching MVC/WebFlux/JMX APIs directly.
+
+```java
+@Component
+@Endpoint(id = "features")            // -> /actuator/features and a JMX MBean
+public class FeatureTogglesEndpoint {
+
+    private final Map<String, Boolean> toggles = new ConcurrentHashMap<>();
+
+    @ReadOperation                     // HTTP GET  /actuator/features
+    public Map<String, Boolean> all() { return toggles; }
+
+    @ReadOperation                     // HTTP GET  /actuator/features/{name}
+    public Boolean one(@Selector String name) { return toggles.get(name); }
+
+    @WriteOperation                    // HTTP POST /actuator/features/{name}
+    public void enable(@Selector String name, boolean enabled) { toggles.put(name, enabled); }
+
+    @DeleteOperation                   // HTTP DELETE /actuator/features/{name}
+    public void delete(@Selector String name) { toggles.remove(name); }
+}
+```
+
+Rules and traps that senior candidates are expected to know:
+
+- **Operation → HTTP verb:** `@ReadOperation`→GET, `@WriteOperation`→POST, `@DeleteOperation`→DELETE. A read returning `null` yields **404**; a write/delete returning `null` yields **204**; a missing required parameter yields **400**.
+- **Parameters are required by default.** On the Spring Framework 6 / Spring Boot 3 baseline you make one optional with Spring's `@Nullable` (`org.springframework.lang.Nullable`), or via Kotlin null-safety — otherwise a missing value is a 400, not a null injection. (Spring Framework 7 / Boot 4 later switched this to JSpecify's `org.jspecify.annotations.Nullable`.)
+- **Only simple types bind.** Each root JSON property maps to a *separate* simple-typed parameter; you cannot bind a whole custom object as one parameter. Conversion uses `ApplicationConversionService` plus `Converter` beans annotated `@EndpointConverter`.
+- **`-parameters` compilation is mandatory.** Parameter names are resolved reflectively; without `-parameters` (provided automatically by the Boot Gradle/Maven tooling) the binding of body/query values to names fails.
+- **`@Selector`** turns a parameter into a path variable; `@Selector(Match = ALL_REMAINING)` (bound to `String[]`) captures the rest of the path.
+- **Technology-restricted variants:** `@WebEndpoint` (HTTP only), `@JmxEndpoint` (JMX only). To *augment an existing* endpoint per-technology use `@EndpointWebExtension`/`@EndpointJmxExtension` — a given endpoint may have **at most one extension of each type** (the health endpoint uses a web extension to map status to HTTP codes, for instance).
+- **Security context injection:** a web operation can take a `Principal` (usually `@Nullable`) or a `SecurityContext` parameter and call `isUserInRole(...)` to vary behavior for authorized callers. Injecting these makes the operation parameterized, so it is not cached.
+- **Escape hatch:** `@ServletEndpoint`/`@ControllerEndpoint`/`@RestControllerEndpoint` give raw web-framework access but forfeit JMX and cross-framework portability (and are deprecated in favor of `@Endpoint` + `@EndpointWebExtension` where possible).
 
 ---
 
@@ -180,6 +230,18 @@ Rules and details:
 - **Grouping.** `management.endpoint.health.group.<name>.include=...` creates health groups (e.g. a `readiness` group of only the checks that must pass before receiving traffic), served at `/actuator/health/<name>`.
 - **`AbstractHealthIndicator`** provides a `doHealthCheck(Health.Builder)` template that catches exceptions for you.
 
+### HealthContributor, hierarchy, and the registry
+
+The type hierarchy is broader than just `HealthIndicator`. The root marker is **`HealthContributor`**; `HealthIndicator` is the leaf variant and **`CompositeHealthContributor`** is a named tree of children (this is how, e.g., a single `db` component can nest multiple datasource checks). At runtime all contributors are collected into a **`HealthContributorRegistry`** (reactive stack: `ReactiveHealthContributorRegistry`), which supports **registering and unregistering contributors dynamically at runtime** — a rarely-used but powerful hook for plugins that appear after startup. The reactive and blocking worlds are bridged automatically: a blocking `HealthIndicator` is adapted so it runs on a bounded-elastic scheduler when queried from the reactive endpoint, and a `ReactiveHealthIndicator` is `.block()`-ed when queried from the Servlet endpoint.
+
+### Slow indicators, timeouts, and thread-safety
+
+A `HealthIndicator.health()` call is invoked **synchronously on the request thread** each time `/health` is hit (subject to the endpoint cache TTL above). There is no built-in per-indicator timeout, so a hanging downstream `client.ping()` will hang the health request and can pin request threads — a classic cause of a health-check-induced outage. Mitigations: give the client a hard connect/read timeout, run the check in the reactive stack with `.timeout(...)`, or cache the result yourself. Indicators must also be **thread-safe**: multiple probes (liveness, readiness, k8s, load balancer) can call the same singleton indicator concurrently.
+
+### Grouping mechanics and per-group overrides
+
+A health group is more than a filtered view: each group can override `show-details`, `show-components`, its own `StatusAggregator`, its own `HttpCodeStatusMapper`, and even additional-path exposure. For example a group can be mapped onto the **main server port** with `management.endpoint.health.group.readiness.additional-path=server:/readyz`, so a load balancer that cannot reach the management port still gets a readiness signal. Includes use the **contributor name** (`db`, `readinessState`), and `*` includes everything with `exclude` taking precedence — mirroring exposure semantics.
+
 ---
 
 ## Micrometer as the Metrics Facade
@@ -227,6 +289,20 @@ Key concepts:
 - **Naming convention:** use lowercase, dot-separated names (`orders.placed`); Micrometer translates to each backend's convention (Prometheus → `orders_placed_total`).
 
 Prometheus example: add `micrometer-registry-prometheus`, expose the `prometheus` endpoint, and scrape `GET /actuator/prometheus`.
+
+### Meter identity, registration, and the gauge-reference trap
+
+A meter's identity is its **name plus its full set of tags**. Calling `registry.counter("orders.placed", "channel", "web")` twice returns the **same** counter; calling it with a different tag value creates a *new* time series. Registration is idempotent and thread-safe, but a **conflicting registration** — same name+tags but a different meter *type*, or an inconsistent set of tag keys for the same name — throws (or is dropped depending on config) because Prometheus and most backends cannot represent a name with varying label sets.
+
+The most infamous trap is **gauge garbage collection**. `Gauge.builder("cache.size", myCache, Cache::size)` registers a gauge that holds only a **weak reference** to the observed object. If nothing else keeps `myCache` strongly reachable, it is collected and the gauge reports `NaN`/disappears. Likewise, `registry.gauge("queue.size", queue, Queue::size)` returns the *object you passed*, not a meter handle — a common surprise. Always keep a strong reference to the measured object.
+
+### MeterFilter ordering and MeterBinder timing
+
+`MeterFilter`s form an ordered chain applied at **registration time**, in the order they were added to the registry; the first filter to `deny`/`accept`/transform an id wins for that decision. Boot registers common-tag and property-driven filters early. Because filters run when a meter is *created*, a filter added after a meter already exists does **not** retroactively affect it — ordering and timing both matter. `MeterBinder.bindTo(registry)` is invoked once per registry; with a `CompositeMeterRegistry`, binders and filters are applied to the composite and propagated to each delegate as delegates are added.
+
+### Timer internals: client-side percentiles vs histograms
+
+`Timer` can publish (a) **pre-computed percentiles** via `publishPercentiles(0.95, 0.99)` — these are computed **in-process** and are **not aggregatable across instances** (you cannot average two hosts' p99s); or (b) a **percentile histogram** (`publishPercentileHistogram()`) that ships bucket counts, which the backend (e.g. Prometheus `histogram_quantile`) aggregates correctly across instances. For SLOs, `serviceLevelObjectives(...)` adds explicit buckets. Confusing client-side percentiles with server-side histogram quantiles is a frequent senior-level mistake.
 
 > **Framework vs Boot:** Micrometer is an independent library and works without Spring at all. Spring Boot's contribution is **auto-configuring** the registry, common tags, and the many `MeterBinder`s, plus wiring `/actuator/metrics`.
 
@@ -280,6 +356,9 @@ Common trap: putting an external dependency check in the **liveness** probe. If 
 ### Tracing and correlation
 
 - **Micrometer Tracing** (successor to Spring Cloud Sleuth) generates and propagates **trace IDs and span IDs** across service hops, with bridges to **OpenTelemetry (OTel)** or Brave/Zipkin. Trace/span IDs are placed in the **MDC** so they appear in every log line, letting you correlate logs across services for one request.
+- **Micrometer Tracing is a facade, not an implementation.** You must add exactly one bridge — `micrometer-tracing-bridge-otel` **or** `micrometer-tracing-bridge-brave` — plus a reporter/exporter (`opentelemetry-exporter-zipkin`, `zipkin-reporter-brave`, OTLP, etc.). Putting *both* bridges on the classpath is a configuration error.
+- **Sampling is a probability, and it is propagated.** `management.tracing.sampling.probability` (default `0.1` = 10%) decides whether a trace is *recorded/exported*. The sampling decision is carried in the propagated context, so a downstream service honors the upstream decision (all-or-nothing per trace) rather than sampling independently. Trace/span **IDs are always generated and always in the MDC** even for unsampled requests — only export is suppressed. Confusing "no trace ID in logs" with "sampling turned it off" is a common misdiagnosis: unsampled requests still log IDs.
+- **Propagation format matters.** OTel bridge defaults to W3C `traceparent`; Brave historically used B3. A format mismatch between two services silently breaks trace continuity (each hop starts a fresh trace) even though each service works in isolation — configure `management.tracing.propagation.type` consistently across the fleet.
 
 ### The Observation API (Spring Framework 6 / Micrometer)
 
@@ -293,6 +372,20 @@ Observation.createNotStarted("orders.checkout", registry)
 
 - **Low- vs high-cardinality key values:** *low*-cardinality keys become **metric tags** (bounded values → safe to aggregate); *high*-cardinality keys (e.g. an order id) are attached only to the **trace/span**, never the metric, to avoid metric cardinality explosions.
 - This API lives at the **framework layer** (Micrometer + Spring Framework 6), while Actuator/Boot supplies the auto-configuration (`ObservationRegistry`, `ObservationHandler`s, exporters).
+
+### Observation lifecycle, handlers, and scopes
+
+An `Observation` moves through a defined lifecycle, and the pieces that plug in are worth knowing precisely:
+
+1. **Creation** against an `ObservationRegistry` with a mutable `Observation.Context`. Registered **`ObservationPredicate`**s decide whether a real observation or a **no-op** is produced (this is how you globally suppress noisy observations — e.g. actuator's own endpoints). A **no-op observation still lets `.observe()` run your code**, it just records nothing.
+2. **`start()`** invokes every applicable handler's `onStart`.
+3. **`openScope()`** makes the observation "current" on the thread — this is the step that populates trace context / **MDC** so log correlation works. Forgetting to open a scope (e.g. hand-rolling `start()`/`stop()` without a try-with-resources scope, instead of using `.observe(...)`) means the span exists but nested code and logs are **not** correlated to it. Scopes are nestable and must be closed on the same thread.
+4. **`event(...)`/`error(...)`** signal annotations/exceptions during execution.
+5. **`stop()`** runs all **`ObservationFilter`**s *first* (they can mutate the context, add/remove key-values), *then* the handlers' `onStop`.
+
+An **`ObservationHandler`** implements `onStart`, `onStop`, `onError`, `onEvent`, `onScopeOpened`/`onScopeClosed`, and crucially **`supportsContext(Context)`** — which lets a handler opt into only the context types it understands. Boot registers a **metrics** handler (`DefaultMeterObservationHandler`) and, when tracing is present, **tracing** handlers; each ignores contexts it does not support. An **`ObservationConvention`** centralizes naming/key-values with precedence: an explicitly-passed custom convention > a matching `GlobalObservationConvention` > the default convention.
+
+**Gotcha — no handlers, no output.** An `ObservationRegistry` with *zero* registered `ObservationHandler`s records **nothing** even though `.observe()` executes your code and predicates run. Metrics appear only because a meter handler is registered; spans appear only because a tracing handler is registered. This is why adding Micrometer Tracing on the classpath (so Boot registers the tracing handler) is what turns existing observations into spans without changing instrumentation.
 
 Signals summary:
 

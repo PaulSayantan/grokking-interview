@@ -134,6 +134,25 @@ if (earlySingletonExposure) {
 - **A final-fields / constructor cycle can't use it** — no raw instance exists.
 - If `A` is proxied and its `getEarlyBeanReference` proxy differs from the final proxy Spring would build, Spring performs a consistency check and can throw `BeanCurrentlyInCreationException` ("Bean with name 'a' has been injected into other beans ... in its raw version as part of a circular reference, but has eventually been wrapped"). This happens when the early-exposed reference and the final bean diverge.
 
+## The `@Async` gotcha: not every post-processor supports early proxying
+
+A subtle but very common senior-level trap: **not all proxying is early-reference-aware.** Whether a proxied bean survives a cycle depends on *which* `BeanPostProcessor` builds its proxy.
+
+- `@Transactional`, `@Cacheable`, and Spring AOP `@Aspect` advice are applied by `AbstractAutoProxyCreator`, which **implements `SmartInstantiationAwareBeanPostProcessor#getEarlyBeanReference`**. When a cycle forces early exposure, the auto-proxy creator builds the proxy *early* (level-3 factory), remembers via `earlyProxyReferences` that it already proxied that bean, and skips re-wrapping in `postProcessAfterInitialization`. The early reference and the final bean are the *same* proxy, so the consistency check passes.
+- `@Async` is applied by `AsyncAnnotationBeanPostProcessor` (an `AbstractAdvisingBeanPostProcessor`). It **does not implement `getEarlyBeanReference`** — it only wraps the bean in `postProcessAfterInitialization`. So in a cycle, the reference exposed early is the **raw, un-async'd** bean, but the *final* bean is an async proxy. The two diverge and Spring throws:
+
+```
+BeanCurrentlyInCreationException: Bean with name 'a' has been injected into other beans [b]
+in its raw version as part of a circular reference, but has eventually been wrapped.
+This means that said other beans do not use the final version of the bean.
+```
+
+This is why an `@Async` bean in a setter/field cycle fails even though the *same* topology with `@Transactional` succeeds. The fix is the same as any cycle: break it (`@Lazy`, `ObjectProvider`, redesign) rather than fight the proxy machinery. The check that raises this exception is `DefaultSingletonBeanRegistry`/`doCreateBean`'s comparison of `getSingleton(beanName, false)` (the exposed early reference) against `exposedObject` after initialization.
+
+## `allowRawInjectionDespiteWrapping`
+
+`AbstractAutowireCapableBeanFactory` has a lesser-known flag, `allowRawInjectionDespiteWrapping` (default `false`). When left at `false`, the divergence described above is a hard error. Setting it to `true` **suppresses** the consistency check and lets other beans keep the raw (un-wrapped) reference they already received — meaning `B` holds the *raw* `A`, bypassing `A`'s advice, while the context itself stores the proxied `A`. It trades a fail-fast error for silent, hard-to-debug behavior (advice not applied on the injected copy). It exists mainly for backward compatibility and is almost never the right answer in review.
+
 ---
 
 ## Spring Boot 2.6 plus prohibits circular references by default
@@ -183,6 +202,30 @@ The intent of the Boot change is to *nudge* developers to fix the design rather 
 | Spring Framework (raw) | Allowed (`allowCircularReferences=true`) | `factory.setAllowCircularReferences(false)` |
 | Spring Boot < 2.6 | Allowed | n/a |
 | Spring Boot >= 2.6 | Prohibited | `spring.main.allow-circular-references=true` or `setAllowCircularReferences(true)` |
+
+## How the "prohibited" check actually works
+
+The Boot flag does **not** add a graph cycle-detector. Boot simply calls `beanFactory.setAllowCircularReferences(false)`, which turns off `earlySingletonExposure` in `doCreateBean` (the `addSingletonFactory` call is skipped). With no level-3 factory registered, a re-entrant `getBean` during population finds nothing to expose and the *same* `BeanCurrentlyInCreationException` that a constructor cycle produces is thrown — just now for setter/field cycles too. The friendly ASCII "form a cycle" diagram is produced by Boot's `FailureAnalyzer` (`BeanCurrentlyInCreationFailureAnalyzer`), which post-processes the exception into a readable report. So "prohibited by default" is really "early exposure disabled by default, plus a nicer error message."
+
+---
+
+## Bean creation ordering and eager instantiation
+
+Cycle *outcome* can depend on **which bean the container starts creating first**, and that order is largely deterministic but not something you should rely on.
+
+- `preInstantiateSingletons()` iterates bean definitions in **registration order** (the order names were added to `beanDefinitionNames`). For classpath scanning this roughly follows discovery order; for `@Bean` methods it follows declaration order within a `@Configuration`. So a mixed cycle (one constructor, one setter) may succeed or fail depending on which side Spring reaches first.
+- `@DependsOn` forces another bean to be created first; misusing it can *create* a cycle (`@DependsOn` cycles are detected and throw `BeanCreationException`).
+- `@Lazy` at the class/definition level removes a bean from eager pre-instantiation, so a cycle may not surface at startup at all — it fires on the first `getBean`, turning a startup failure into a runtime one. This is a reason fail-fast constructor cycles are preferable to lazily-hidden ones.
+- `@Order` and `Ordered` affect collection injection ordering and post-processor ordering — **not** singleton creation order — so they do not influence cycle resolution.
+
+## Concurrency and thread-safety of singleton creation
+
+Interviewers probing "what happens under concurrent `getBean`" want you to know the singleton registry is guarded.
+
+- In Spring Framework **through 6.1**, `getSingleton(...)` synchronizes on the `singletonObjects` map. A thread creating a singleton holds that lock across the whole `createBean`, and threads requesting a bean *currently in creation on another thread* block until it finishes. This global lock made deadlocks possible when two threads each triggered creation of beans that also form a cycle across threads.
+- The `singletonsCurrentlyInCreation` set is a concurrent set; a bean re-entered **on the same thread** (a real cycle) is detected via `isSingletonCurrentlyInCreation`, whereas a bean in creation **on another thread** causes the requester to wait, not to throw.
+- **Spring Framework 6.2** reworked this into a mix of *strict* and *lenient* locking to reduce startup deadlocks and enable background/parallel initialization (`@Bean(bootstrap = BACKGROUND)`). The main bootstrap thread uses strict locking; other startup threads infer lenient locking. Since 6.2.6, `spring.locking.strict=true` restores the old always-strict behavior. Background bean initialization always uses lenient locking. None of this changes the *semantics* of cycle resolution — early exposure still works the same — only the locking strategy governing contention and deadlock risk.
+- Practical implication: early references are exposed and consumed **within a single creation thread's call stack**; the three-level cache is not a cross-thread hand-off mechanism. A cycle that "works" does so because the same thread walks A -> B -> A and finds A's level-3 factory on its own stack.
 
 ---
 

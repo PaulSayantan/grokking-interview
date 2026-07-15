@@ -794,3 +794,744 @@ questions:
       is initialized or refreshed. Others in the family include ContextStartedEvent,
       ContextStoppedEvent, and ContextClosedEvent.
     ref: "concepts.md#application-events-with-applicationeventpublisher-and-eventlistener"
+
+  - id: transaction-management-events-046
+    difficulty: advanced
+    tags: [propagation, physical-logical, unexpected-rollback]
+    question: |
+      An outer method annotated @Transactional (REQUIRED) calls an inner @Transactional
+      (REQUIRED) method. The inner method throws a RuntimeException; the outer method
+      catches it, logs it, and returns normally. What does the caller observe?
+    options:
+      - "The whole operation commits successfully because the outer method swallowed the exception before it reached the interceptor"
+      - "Only the inner method's writes roll back; the outer method's writes commit, because REQUIRED gives each method its own physical transaction"
+      - "An UnexpectedRollbackException is thrown when the outer transaction attempts to commit, because the inner scope had marked the shared physical transaction rollback-only"
+      - "A NestedTransactionNotSupportedException is thrown because REQUIRED cannot be nested"
+    answer: 2
+    explanation: |
+      With REQUIRED both methods share one physical transaction (separate logical scopes).
+      When the inner scope fails, globalRollbackOnParticipationFailure (default true) marks
+      the shared physical transaction rollback-only. Swallowing the exception in the outer
+      method does not clear that flag, so the outer commit fails with
+      UnexpectedRollbackException — Spring refuses to mislead the caller that a commit happened.
+    ref: "concepts.md#transaction-propagation"
+
+  - id: transaction-management-events-047
+    difficulty: advanced
+    tags: [propagation, joining, isolation, read-only]
+    question: |
+      A method @Transactional(propagation = REQUIRED, isolation = SERIALIZABLE, readOnly =
+      true) is invoked while a plain READ_COMMITTED writable transaction is already active.
+      What isolation and read-only characteristics apply during that call, by default?
+    options:
+      - "SERIALIZABLE and readOnly=true, because the inner definition always overrides the outer"
+      - "SERIALIZABLE isolation but writable, because only isolation can be upgraded when joining"
+      - "An IllegalTransactionStateException is thrown because the isolation levels conflict"
+      - "READ_COMMITTED and writable, because a participating REQUIRED transaction silently ignores the inner isolation and readOnly settings"
+    answer: 3
+    explanation: |
+      When REQUIRED joins an existing physical transaction, the inner method's isolation,
+      timeout, and readOnly attributes are silently ignored — the outer transaction's
+      characteristics win. Only the scope that physically starts the transaction sets them.
+      To make Spring reject such a mismatch instead of ignoring it, set
+      validateExistingTransaction = true on the transaction manager.
+    ref: "concepts.md#transaction-propagation"
+
+  - id: transaction-management-events-048
+    difficulty: expert
+    tags: [propagation, requires-new, connection-pool, deadlock]
+    question: |
+      A service uses a connection pool of maximum size 10. Under load, 10 concurrent
+      threads each enter an outer @Transactional method, then call a helper annotated
+      REQUIRES_NEW. The application hangs. What is the most precise explanation?
+    options:
+      - "REQUIRES_NEW is not supported by DataSourceTransactionManager, so the calls block indefinitely"
+      - "Each thread holds its outer transaction's connection (suspended but still bound) and simultaneously needs a second connection for the inner REQUIRES_NEW transaction; with 10 threads holding all 10 connections, none can acquire an inner connection, producing a pool-exhaustion deadlock"
+      - "The savepoints created by REQUIRES_NEW exhaust the database's savepoint limit"
+      - "REQUIRES_NEW forces SERIALIZABLE isolation, so the threads deadlock at the database level"
+    answer: 1
+    explanation: |
+      REQUIRES_NEW suspends the outer transaction but keeps its resources bound to the
+      thread while acquiring a brand-new connection for the inner transaction. With the pool
+      sized equal to the thread count, all connections are held by outer transactions and no
+      thread can obtain an inner connection — a classic deadlock. Spring's guidance is to
+      size the pool to exceed concurrent threads by at least 1.
+    ref: "concepts.md#transaction-propagation"
+
+  - id: transaction-management-events-049
+    difficulty: advanced
+    tags: [propagation, nested, savepoint, support]
+    question: |
+      Which statement about Propagation.NESTED is correct?
+    options:
+      - "It is implemented with a second physical connection, like REQUIRES_NEW, but shares the outer's commit"
+      - "It is supported over JTA global transactions but not over plain JDBC"
+      - "It maps onto JDBC savepoints, works with DataSourceTransactionManager, and throws NestedTransactionNotSupportedException if the resource cannot create savepoints"
+      - "It always behaves exactly like REQUIRED regardless of whether an outer transaction exists"
+    answer: 2
+    explanation: |
+      NESTED uses JDBC savepoints within a single physical transaction, so it works with
+      DataSourceTransactionManager (JDBC resource transactions) and generally not over JTA.
+      If nesting is requested but the resource/driver cannot support savepoints (or nesting
+      is disallowed), Spring throws NestedTransactionNotSupportedException. When no outer
+      transaction exists it behaves like REQUIRED (creates a new one).
+    ref: "concepts.md#transaction-propagation"
+
+  - id: transaction-management-events-050
+    difficulty: expert
+    tags: [propagation, suspension, synchronization-manager]
+    question: |
+      Mechanically, what does Spring do to the current transaction's resources when a
+      REQUIRES_NEW (or NOT_SUPPORTED) method suspends it?
+    options:
+      - "It unbinds the outer resources from the thread via TransactionSynchronizationManager, stashes them in a SuspendedResourcesHolder, runs the inner work, then rebinds the originals on resume"
+      - "It commits the outer transaction early and reopens it afterward"
+      - "It copies the outer connection into a ThreadLocal shared by both transactions"
+      - "It downgrades the outer transaction to read-only for the duration of the inner call"
+    answer: 0
+    explanation: |
+      Suspension is real resource bookkeeping: Spring unbinds the existing resources (e.g.
+      the JDBC Connection) from the current thread through TransactionSynchronizationManager,
+      holds them in a SuspendedResourcesHolder, executes the inner scope (acquiring a new
+      connection for REQUIRES_NEW), then rebinds the originals when resuming. The outer
+      transaction is neither committed nor rolled back during suspension.
+    ref: "concepts.md#transaction-propagation"
+
+  - id: transaction-management-events-051
+    difficulty: expert
+    tags: [propagation, globalrollbackonparticipationfailure, tuning]
+    question: |
+      A team wants an outer REQUIRED transaction to still attempt to commit even when a
+      participating REQUIRED inner scope failed and was caught. Which knob changes this
+      default behavior, and what is the risk?
+    options:
+      - "Set globalRollbackOnParticipationFailure = false on AbstractPlatformTransactionManager; the risk is committing partially-failed work because the shared physical transaction is no longer force-marked rollback-only"
+      - "Set validateExistingTransaction = true; there is no downside"
+      - "Switch the inner scope to REQUIRES_NEW; this always eliminates UnexpectedRollbackException with no trade-off"
+      - "Set failEarlyOnGlobalRollbackOnly = true; this suppresses the rollback marker entirely"
+    answer: 0
+    explanation: |
+      globalRollbackOnParticipationFailure defaults to true, marking the entire physical
+      transaction rollback-only when a participating scope fails (the root of
+      UnexpectedRollbackException). Setting it false lets the outer scope still try to commit,
+      but risks committing data left in an inconsistent state by the failed inner work.
+      REQUIRES_NEW is a different design (independent transaction), not a drop-in fix.
+    ref: "concepts.md#transaction-propagation"
+
+  - id: transaction-management-events-052
+    difficulty: advanced
+    tags: [enable-transaction-management, manager-resolution, multi-manager]
+    question: |
+      An application defines two PlatformTransactionManager beans and none is @Primary; no
+      bean is named "transactionManager". A @Transactional method omits the transactionManager
+      qualifier. When does the failure surface and what is it?
+    options:
+      - "At context startup, with a BeanDefinitionValidationException, because two managers cannot coexist"
+      - "Never; Spring silently runs the method non-transactionally"
+      - "At the first invocation of the advised method, with a NoUniqueBeanDefinitionException, because the interceptor resolves the manager lazily by type and cannot disambiguate"
+      - "At the first invocation, but it defaults to the first manager registered and logs a warning"
+    answer: 2
+    explanation: |
+      The TransactionInterceptor resolves the transaction manager lazily by type the first
+      time the method runs. With multiple candidates and no @Primary and no bean named
+      "transactionManager", it cannot disambiguate and throws NoUniqueBeanDefinitionException
+      at first invocation — not at startup. This lazy resolution is why such misconfigurations
+      pass context refresh and only break under the first transactional call.
+    ref: "concepts.md#enabletransactionmanagement"
+
+  - id: transaction-management-events-053
+    difficulty: expert
+    tags: [enable-transaction-management, async, ordering, thread-binding]
+    question: |
+      A single method carries both @Async and @Transactional, with @EnableAsync and
+      @EnableTransactionManagement active. On which thread does the transaction begin, and
+      why does it matter?
+    options:
+      - "On the caller's thread, because @Transactional always runs before @Async in the advice chain"
+      - "On the async worker thread; the transaction is created after the call is handed to the TaskExecutor, so it does not share the caller's thread-bound transaction context"
+      - "On both threads simultaneously via a distributed transaction"
+      - "It never begins because combining @Async and @Transactional on one method is illegal and fails at startup"
+    answer: 1
+    explanation: |
+      @Async dispatches the invocation to a TaskExecutor first, so the method body — and the
+      @Transactional advice around it — executes on the worker thread. The new transaction is
+      therefore bound to that worker thread, not the caller's. It cannot join any transaction
+      the caller had open, which is a frequent source of confusion when developers expect the
+      async work to share the caller's transaction.
+    ref: "concepts.md#enabletransactionmanagement"
+
+  - id: transaction-management-events-054
+    difficulty: advanced
+    tags: [enable-transaction-management, aspectj, weaving]
+    question: |
+      A team sets @EnableTransactionManagement(mode = AdviceMode.ASPECTJ) specifically to
+      make self-invoked @Transactional calls work, but nothing is transactional anymore.
+      What is the most likely cause?
+    options:
+      - "ASPECTJ mode requires a JtaTransactionManager, which is missing"
+      - "ASPECTJ mode disables @Transactional on public methods; only private methods are advised"
+      - "The AnnotationTransactionAspect (spring-aspects) and load-time or compile-time weaving are not configured, so no advice is woven at all"
+      - "ASPECTJ mode only works with XML configuration, not Java config"
+    answer: 2
+    explanation: |
+      ASPECTJ mode relies on AnnotationTransactionAspect from spring-aspects plus a weaving
+      setup (LTW or CTW). Merely setting mode = ASPECTJ without the weaver in place produces
+      no woven advice, so transactions silently disappear. When correctly configured, weaving
+      advises actual method invocations, enabling self-invocation and non-public transactional
+      methods.
+    ref: "concepts.md#enabletransactionmanagement"
+
+  - id: transaction-management-events-055
+    difficulty: advanced
+    tags: [enable-transaction-management, ordering, caching]
+    question: |
+      You want caching (@Cacheable) to occur OUTSIDE the transaction (cache lookup before a
+      transaction is opened, cache put after commit) rather than inside it. Which lever most
+      directly controls the relative nesting of the transaction advice and other advisors?
+    options:
+      - "The propagation attribute on @Transactional"
+      - "The isolation level, which implicitly reorders advisors"
+      - "Setting proxyTargetClass = true, which moves transaction advice to the outermost position"
+      - "The order attribute on @EnableTransactionManagement (and the analogous order on the caching advisor), since advisor order determines which advice wraps which"
+    answer: 3
+    explanation: |
+      Advisor ordering determines nesting. The transaction advisor defaults to
+      LOWEST_PRECEDENCE (innermost). By adjusting the order attribute on
+      @EnableTransactionManagement relative to the caching advisor's order, you control
+      whether caching sits inside or outside the transaction boundary. Propagation, isolation,
+      and proxyTargetClass do not reorder advisors.
+    ref: "concepts.md#enabletransactionmanagement"
+
+  - id: transaction-management-events-056
+    difficulty: expert
+    tags: [proxy, jdk-cglib, transactional]
+    question: |
+      A @Service class implements an interface, and @Transactional is placed on the class's
+      public methods. With default settings (proxyTargetClass = false), a colleague injects
+      the bean by its concrete class type and gets a startup/injection failure. Why?
+    options:
+      - "@Transactional cannot be used on classes that implement interfaces"
+      - "Because interfaces exist, Spring creates a JDK dynamic proxy that implements the interface but is NOT an instance of the concrete class, so injecting by the concrete type fails to match"
+      - "CGLIB proxies cannot be injected by type at all"
+      - "The transaction manager bean is missing, unrelated to proxying"
+    answer: 1
+    explanation: |
+      With proxyTargetClass = false and an interface present, Spring uses a JDK dynamic proxy
+      that implements the interface but does not extend the concrete class. Injecting by the
+      concrete class type therefore cannot be satisfied by the proxy. Setting
+      proxyTargetClass = true (CGLIB subclass proxy) or injecting by the interface type
+      resolves it.
+    ref: "concepts.md#proxy-based-self-invocation-and-private-method-limitation"
+
+  - id: transaction-management-events-057
+    difficulty: advanced
+    tags: [self-invocation, aop-context, expose-proxy]
+    question: |
+      Within a bean, a public method must call another public @Transactional method of the
+      SAME bean and have the transaction actually start, without extracting a second bean.
+      Which approach works?
+    options:
+      - "Call the method normally via this; Spring detects same-class transactional calls automatically"
+      - "Make the target method static so it bypasses proxy limitations"
+      - "Enable exposeProxy = true and invoke through ((MyService) AopContext.currentProxy()).method(), so the call goes through the proxy"
+      - "Annotate the target method with @Async to force it onto the proxy"
+    answer: 2
+    explanation: |
+      Self-invocation via this bypasses the proxy. Setting exposeProxy = true exposes the
+      current proxy in a ThreadLocal accessible through AopContext.currentProxy(); invoking
+      the target through that proxy reference re-enters the AOP interceptor chain so the
+      transaction advice applies. It works but is considered a code smell; extracting a
+      separate bean is cleaner.
+    ref: "concepts.md#proxy-based-self-invocation-and-private-method-limitation"
+
+  - id: transaction-management-events-058
+    difficulty: expert
+    tags: [proxy, final-method, cglib, silent-failure]
+    question: |
+      With proxyTargetClass = true (CGLIB), a developer marks a public @Transactional method
+      as final. At runtime the method runs but is never transactional, and there is no error.
+      Why?
+    options:
+      - "final methods automatically opt out of all Spring AOP by design contract"
+      - "CGLIB creates a subclass proxy and cannot override a final method, so the advice cannot be applied; the call reaches the original method directly with no transaction"
+      - "final methods force JDK proxying, which ignores class-level annotations"
+      - "The transaction manager rejects final methods and logs at DEBUG level only"
+    answer: 1
+    explanation: |
+      CGLIB proxies work by subclassing the target and overriding methods to insert advice.
+      A final method cannot be overridden, so the proxy cannot intercept it; the invocation
+      goes straight to the original implementation with no transactional behavior. Because
+      overriding is simply skipped (though newer Spring may log a warning), it fails silently
+      in terms of transaction semantics.
+    ref: "concepts.md#proxy-based-self-invocation-and-private-method-limitation"
+
+  - id: transaction-management-events-059
+    difficulty: advanced
+    tags: [rollback-rules, inheritance-distance, resolution]
+    question: |
+      A method is annotated @Transactional(rollbackFor = Exception.class, noRollbackFor =
+      IllegalStateException.class). It throws an IllegalStateException. Does it roll back?
+    options:
+      - "Yes; rollbackFor = Exception.class matches every exception and takes precedence"
+      - "No; noRollbackFor = IllegalStateException.class is a more specific (closer by inheritance distance) match, so the no-rollback rule wins"
+      - "Yes; IllegalStateException is unchecked, so the default unchecked-rollback rule overrides both attributes"
+      - "It throws a rule-conflict exception because the two rules are contradictory"
+    answer: 1
+    explanation: |
+      Spring resolves rollback rules by inheritance distance: the rule whose exception type
+      is the closest supertype of the thrown exception wins. IllegalStateException matches
+      the noRollbackFor rule at distance 0, far closer than Exception.class. So the no-rollback
+      rule wins and the transaction commits. The default unchecked rule only applies when no
+      custom rule matches.
+    ref: "concepts.md#rollback-rules"
+
+  - id: transaction-management-events-060
+    difficulty: advanced
+    tags: [rollback-rules, checked-exception, requires-new]
+    question: |
+      An outer @Transactional (default rules) calls an inner method @Transactional(propagation
+      = REQUIRES_NEW). The inner method throws a checked exception that the outer does NOT
+      catch. Assuming no rollbackFor is declared anywhere, what is the outcome?
+    options:
+      - "Both transactions commit, because checked exceptions do not trigger rollback by default, and the propagating exception then leaves the outer method"
+      - "Both transactions roll back, because the inner is REQUIRES_NEW"
+      - "The inner commits and the outer rolls back, in that order"
+      - "The inner rolls back and the outer commits independently"
+    answer: 0
+    explanation: |
+      Checked exceptions do not trigger rollback by default. The inner REQUIRES_NEW
+      transaction therefore commits on return despite the checked exception. The exception
+      then propagates through the outer method; again checked, so the outer also commits.
+      Both commit. Declaring rollbackFor for the checked type would change this.
+    ref: "concepts.md#rollback-rules"
+
+  - id: transaction-management-events-061
+    difficulty: expert
+    tags: [rollback-rules, error, propagation-out]
+    question: |
+      Which statement about how the TransactionInterceptor decides to roll back is most
+      accurate?
+    options:
+      - "It inspects every exception created inside the method, even caught ones, via bytecode analysis"
+      - "It decides based solely on the method's throws clause (declared exception types)"
+      - "It bases the decision only on the exception that propagates OUT of the method; a caught-and-swallowed exception yields a commit (unless a participating scope already marked rollback-only)"
+      - "It always rolls back if any exception object is instantiated during the method"
+    answer: 2
+    explanation: |
+      The interceptor's rollback decision is made on whatever exception actually propagates
+      out of the advised method. Catching an exception internally and returning normally
+      leads to a commit — unless an inner REQUIRED scope had already set the shared physical
+      transaction rollback-only, in which case the commit fails with UnexpectedRollbackException.
+      The declared throws clause is irrelevant to the decision.
+    ref: "concepts.md#rollback-rules"
+
+  - id: transaction-management-events-062
+    difficulty: advanced
+    tags: [read-only, hibernate, flush-mode]
+    question: |
+      Within a Hibernate/JPA @Transactional(readOnly = true) method, code loads a managed
+      entity and mutates one of its fields, then the method returns normally. What typically
+      happens to that change?
+    options:
+      - "It is flushed and committed like any other change; readOnly only affects the JDBC connection flag"
+      - "Spring throws a ReadOnlyViolationException at commit"
+      - "Hibernate sets the flush mode to MANUAL/NEVER, so the dirty entity is not auto-flushed and the UPDATE is silently not issued"
+      - "The change is written but immediately rolled back by the read-only transaction"
+    answer: 2
+    explanation: |
+      For Hibernate/JPA, readOnly = true sets the flush mode so the persistence context is
+      not dirty-checked or flushed. A mutation to a managed entity is therefore not written —
+      no UPDATE is issued, and the change silently disappears. This optimization is the main
+      practical benefit of readOnly for read-heavy paths, but it surprises developers who
+      accidentally mutate entities.
+    ref: "concepts.md#readonly-transactions"
+
+  - id: transaction-management-events-063
+    difficulty: expert
+    tags: [read-only, propagation, requires-new, replica]
+    question: |
+      A read-heavy method needs to be genuinely read-only (e.g. flush disabled, possible
+      replica routing) even when called from within an existing writable REQUIRED
+      transaction. Which propagation choice actually makes the readOnly hint take effect?
+    options:
+      - "REQUIRED, because Spring re-evaluates readOnly on every method entry"
+      - "SUPPORTS, which upgrades the existing transaction to read-only"
+      - "REQUIRES_NEW, because it starts a new physical transaction whose definition (including readOnly = true) is honored at creation"
+      - "MANDATORY, which forces the outer transaction to become read-only"
+    answer: 2
+    explanation: |
+      readOnly is applied when a transaction is physically created. A REQUIRED method joining
+      an existing writable transaction cannot downgrade it, so the hint is ignored there.
+      REQUIRES_NEW creates a fresh physical transaction whose definition — including readOnly
+      = true — is honored, so the flush-disabling and any replica-routing behavior apply.
+    ref: "concepts.md#readonly-transactions"
+
+  - id: transaction-management-events-064
+    difficulty: advanced
+    tags: [isolation, jta, portability]
+    question: |
+      A method declares @Transactional(isolation = SERIALIZABLE) and runs under a
+      JtaTransactionManager. At runtime the isolation level is not applied. What is the most
+      accurate explanation?
+    options:
+      - "JtaTransactionManager always forces SERIALIZABLE, so the declaration is redundant and ignored"
+      - "Per-transaction isolation levels are generally not portable over JTA and typically require vendor-specific extensions; a plain JtaTransactionManager does not apply a custom isolation to the resource by default"
+      - "Isolation levels are only honored by JpaTransactionManager, never by any other manager"
+      - "JTA transactions run without isolation because they are always distributed"
+    answer: 1
+    explanation: |
+      Unlike DataSourceTransactionManager (which sets Connection.setTransactionIsolation on the
+      JDBC connection), a standard JtaTransactionManager does not apply a per-transaction
+      isolation level: JTA has no portable API for it. Applying a custom isolation under JTA
+      typically requires a vendor-specific IsolationLevelDataSourceRouter or an
+      extended/subclassed manager. Relying on the @Transactional isolation attribute under a
+      plain JTA setup silently has no effect.
+    ref: "concepts.md#isolation-levels"
+
+  - id: transaction-management-events-065
+    difficulty: advanced
+    tags: [isolation, jdbc-connection, reset]
+    question: |
+      With DataSourceTransactionManager, how is a non-default @Transactional isolation level
+      actually applied and cleaned up for a pooled connection?
+    options:
+      - "Spring sends a database-specific ALTER SESSION command that persists for the connection's lifetime"
+      - "It calls Connection.setTransactionIsolation(...) at transaction start and resets the connection to its previous isolation before returning it to the pool"
+      - "It cannot change isolation on pooled connections; the setting is ignored"
+      - "It opens a dedicated non-pooled connection for any non-default isolation level"
+    answer: 1
+    explanation: |
+      DataSourceTransactionManager applies a custom isolation by calling
+      Connection.setTransactionIsolation() when the transaction begins, and restores the
+      connection's prior isolation level on cleanup before returning it to the pool. This
+      reset is important so a pooled connection does not leak a raised isolation level to the
+      next borrower.
+    ref: "concepts.md#isolation-levels"
+
+  - id: transaction-management-events-066
+    difficulty: expert
+    tags: [thread-binding, datasource-utils, participation]
+    question: |
+      Inside a @Transactional service method (DataSourceTransactionManager), a repository
+      obtains its connection by calling dataSource.getConnection() directly instead of going
+      through Spring. What is the consequence for that repository's writes?
+    options:
+      - "They participate normally, because any connection from the same DataSource joins the active transaction"
+      - "They run on a different, non-transactional connection and are NOT part of the surrounding transaction, so they are neither committed nor rolled back with it"
+      - "Spring detects the raw getConnection() call and throws IllegalTransactionStateException"
+      - "They participate only if the isolation levels match"
+    answer: 1
+    explanation: |
+      Spring binds the transactional connection to the thread via TransactionSynchronizationManager.
+      Only code that retrieves it through DataSourceUtils.getConnection() (as JdbcTemplate
+      does) shares that connection. A direct dataSource.getConnection() returns a different,
+      autocommit connection outside the transaction — its writes are independent of the
+      surrounding transaction's commit/rollback.
+    ref: "concepts.md#transaction-synchronization-and-thread-binding-internals"
+
+  - id: transaction-management-events-067
+    difficulty: expert
+    tags: [thread-binding, two-datasources, atomicity]
+    question: |
+      A service is annotated @Transactional with a single DataSourceTransactionManager, but
+      it writes to two different DataSources (only one is managed by that manager). A failure
+      occurs after both writes. What is true about atomicity?
+    options:
+      - "Both writes roll back, because @Transactional guarantees atomicity across all data sources in the method"
+      - "Neither write is committed because the manager blocks unmanaged DataSources"
+      - "Spring automatically promotes the transaction to XA to cover both"
+      - "Only the write on the managed DataSource can roll back; the write on the unmanaged DataSource already committed on its own connection and is not undone"
+    answer: 3
+    explanation: |
+      A DataSourceTransactionManager binds and controls exactly one DataSource. Writes to a
+      second, unmanaged DataSource run outside the transaction (typically autocommit) and are
+      not rolled back with it. Atomic coordination across two resources requires JTA/XA
+      (JtaTransactionManager) or a chained/best-effort pattern — @Transactional alone does not
+      provide it.
+    ref: "concepts.md#transaction-synchronization-and-thread-binding-internals"
+
+  - id: transaction-management-events-068
+    difficulty: advanced
+    tags: [thread-binding, async, thread-hop]
+    question: |
+      Why does spawning a new thread (or using parallelStream / an @Async call) inside a
+      @Transactional method cause the spawned work to run outside the transaction?
+    options:
+      - "Because Spring transactions are deliberately disabled inside multi-threaded code"
+      - "Because the imperative transaction is bound to the current thread via ThreadLocal state in TransactionSynchronizationManager, and a different thread has no access to that binding"
+      - "Because new threads always get a read-only copy of the transaction"
+      - "Because the JVM copies ThreadLocals to child threads only for daemon threads"
+    answer: 1
+    explanation: |
+      Spring's imperative transaction infrastructure binds the resource and synchronizations
+      to the current thread using ThreadLocal storage in TransactionSynchronizationManager.
+      Any thread hop — a manually started thread, parallelStream worker, or @Async executor
+      thread — does not inherit that binding, so the work runs outside the caller's
+      transaction. The reactive stack instead carries the transaction in the Reactor Context.
+    ref: "concepts.md#transaction-synchronization-and-thread-binding-internals"
+
+  - id: transaction-management-events-069
+    difficulty: advanced
+    tags: [events, multicaster, error-handler]
+    question: |
+      Three synchronous @EventListener methods handle the same event. The first throws a
+      RuntimeException. With the default SimpleApplicationEventMulticaster and no configured
+      ErrorHandler, what happens to the second and third listeners and to the publisher?
+    options:
+      - "All three still run; the exception is logged and swallowed automatically"
+      - "The event is retried from the beginning after each failure"
+      - "The second and third listeners are skipped and the exception propagates back to the publishEvent() caller"
+      - "Only the failing listener is skipped; the other two run, and the publisher sees nothing"
+    answer: 2
+    explanation: |
+      Default synchronous multicasting runs listeners in sequence on the caller thread with
+      no isolation. A thrown exception propagates to the publishEvent() caller and prevents
+      the remaining listeners from running. Configuring an ErrorHandler on the
+      applicationEventMulticaster bean is what isolates failures so subsequent listeners still
+      receive the event.
+    ref: "concepts.md#application-events-with-applicationeventpublisher-and-eventlistener"
+
+  - id: transaction-management-events-070
+    difficulty: expert
+    tags: [events, custom-multicaster, bean-name]
+    question: |
+      A developer registers a custom SimpleApplicationEventMulticaster with a TaskExecutor as
+      a bean named "asyncEventMulticaster", expecting all events to become asynchronous, but
+      events still run synchronously. What is the defect?
+    options:
+      - "The multicaster bean must be named exactly 'applicationEventMulticaster' for the context to detect and use it; any other name is ignored and the default multicaster is used"
+      - "TaskExecutor cannot be set on SimpleApplicationEventMulticaster; only @Async works"
+      - "You must also set proxyTargetClass = true for async events"
+      - "SimpleApplicationEventMulticaster is synchronous-only; you need a different class"
+    answer: 0
+    explanation: |
+      The ApplicationContext looks up the multicaster by the well-known bean name
+      applicationEventMulticaster. A bean under any other name is not recognized, so the
+      container falls back to its default synchronous multicaster and the custom TaskExecutor
+      is never used. Renaming the bean fixes it.
+    ref: "concepts.md#application-events-with-applicationeventpublisher-and-eventlistener"
+
+  - id: transaction-management-events-071
+    difficulty: expert
+    tags: [events, generics, type-erasure, resolvable-type]
+    question: |
+      A listener is declared @EventListener void on(EntityCreatedEvent<Person> e). Code
+      publishes new EntityCreatedEvent<Person>(person) (the raw parameterized class, not a
+      subclass). The listener is never invoked. Why, and what is the fix?
+    options:
+      - "Generic events are unsupported in Spring; you must use raw types everywhere"
+      - "The listener parameter must be Object; generic parameters are ignored"
+      - "@EventListener cannot filter by payload type at all; you must add a condition SpEL"
+      - "Due to type erasure Spring cannot resolve the <Person> parameter of a raw EntityCreatedEvent at runtime; fix by publishing a concrete subclass (PersonCreatedEvent extends EntityCreatedEvent<Person>) or having the event implement ResolvableTypeProvider"
+    answer: 3
+    explanation: |
+      Because of erasure, a raw EntityCreatedEvent<Person> instance does not carry its type
+      argument at runtime, so Spring cannot match it to a listener declared for
+      EntityCreatedEvent<Person>. The event must resolve its generic type — either via a
+      concrete subclass that fixes the parameter in its type hierarchy, or by implementing
+      ResolvableTypeProvider to advertise its ResolvableType.
+    ref: "concepts.md#application-events-with-applicationeventpublisher-and-eventlistener"
+
+  - id: transaction-management-events-072
+    difficulty: advanced
+    tags: [events, chaining, return-value]
+    question: |
+      What is the effect of a synchronous @EventListener method returning a non-null object
+      (that is not a collection/array of events versus a single event)?
+    options:
+      - "The return value is ignored; @EventListener methods must be void"
+      - "The return value replaces the original event for all remaining listeners"
+      - "The returned object is published as a further application event (event chaining); returning void or null publishes nothing"
+      - "The return value is stored in the ApplicationContext as a bean"
+    answer: 2
+    explanation: |
+      A non-null return from a synchronous @EventListener is itself published as a new event,
+      enabling event chaining (a returned collection/array publishes each element). Returning
+      void or null publishes nothing. Note this chaining does NOT work for @Async listeners —
+      those must inject ApplicationEventPublisher and publish manually.
+    ref: "concepts.md#application-events-with-applicationeventpublisher-and-eventlistener"
+
+  - id: transaction-management-events-073
+    difficulty: expert
+    tags: [events, async, exception-handling, thread-context]
+    question: |
+      An @EventListener is also annotated @Async (with @EnableAsync). It throws an exception
+      and also tries to read the publisher's transaction via TransactionSynchronizationManager.
+      Which pair of statements is correct?
+    options:
+      - "The exception propagates to the publisher; the transaction context is visible on the worker thread"
+      - "The exception is swallowed silently; the transaction context is copied to the worker thread automatically"
+      - "The exception rolls back the publisher's transaction; the worker thread joins that transaction"
+      - "The exception is routed to the AsyncUncaughtExceptionHandler (not the publisher); the publisher's transaction context is NOT visible because ThreadLocal state is not propagated to the worker thread"
+    answer: 3
+    explanation: |
+      Async delivery runs the listener on a TaskExecutor thread. Exceptions no longer reach
+      the publisher — they go to the AsyncUncaughtExceptionHandler. And because the
+      transaction (and other ThreadLocal-bound context like MDC) is not propagated to the
+      worker thread by default, the async listener cannot see or participate in the
+      publisher's transaction.
+    ref: "concepts.md#application-events-with-applicationeventpublisher-and-eventlistener"
+
+  - id: transaction-management-events-074
+    difficulty: expert
+    tags: [transactional-event-listener, after-commit, lost-write]
+    question: |
+      An @TransactionalEventListener with the default phase performs repository.save(entity)
+      directly (no propagation attribute) after an order commits. The save appears to run
+      with no error, yet the row is never persisted. What is the precise cause and fix?
+    options:
+      - "The listener runs before commit, so the save is rolled back; move it to AFTER_COMMIT"
+      - "save() is not allowed inside any event listener; use the EntityManager directly"
+      - "The entity is detached, so save() is a no-op; call merge() instead"
+      - "By AFTER_COMMIT the transaction is already committed but resources may still be bound, so the save 'participates' in a finishing transaction whose changes will not be committed; fix by running the save in a new transaction (REQUIRES_NEW)"
+    answer: 3
+    explanation: |
+      The default phase is AFTER_COMMIT. At that point the original transaction has committed
+      but its resources may still be bound to the thread, so data access 'participates' in a
+      transaction that will not commit again — the write silently vanishes. The fix is to
+      execute the listener's write in its own new physical transaction via
+      @Transactional(propagation = REQUIRES_NEW).
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: transaction-management-events-075
+    difficulty: expert
+    tags: [transactional-event-listener, before-commit, veto]
+    question: |
+      Which phase of @TransactionalEventListener can throw an exception that actually
+      prevents the surrounding transaction from committing (acting as a veto), and why?
+    options:
+      - "AFTER_COMMIT, because it runs last and can signal the manager to undo the commit"
+      - "AFTER_COMPLETION, because completion has not finalized until listeners return"
+      - "BEFORE_COMMIT, because it runs while the transaction is still open, so a thrown exception aborts the commit and triggers rollback"
+      - "AFTER_ROLLBACK, because it can re-open and re-commit the transaction"
+    answer: 2
+    explanation: |
+      BEFORE_COMMIT runs inside the open transaction, so an exception there aborts the commit
+      and the transaction rolls back — making it the correct phase for last-second validation
+      that must be able to veto a commit. AFTER_COMMIT/AFTER_COMPLETION run after the commit
+      has already occurred, so their exceptions cannot undo it.
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: transaction-management-events-076
+    difficulty: advanced
+    tags: [transactional-event-listener, no-transaction, fallback]
+    question: |
+      A batch job publishes an event with NO surrounding transaction. An
+      @TransactionalEventListener (default settings) registered for that event does not fire,
+      breaking the job in production. What is the minimal correct fix if the listener should
+      run even without a transaction?
+    options:
+      - "Wrap the publish in a @Transactional method so a transaction always exists"
+      - "Change the listener to a plain @EventListener, losing all deferral semantics"
+      - "Set fallbackExecution = true on the @TransactionalEventListener so it runs immediately when no transaction is active"
+      - "Set phase = AFTER_COMPLETION, which always fires regardless of transaction state"
+    answer: 2
+    explanation: |
+      By default @TransactionalEventListener requires an active transaction; without one the
+      event is discarded silently. Setting fallbackExecution = true makes the listener execute
+      immediately even when no transaction is present — the minimal, intended fix. Wrapping in
+      a transaction is heavier-handed, and AFTER_COMPLETION still requires a transaction.
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: transaction-management-events-077
+    difficulty: expert
+    tags: [transactional-event-listener, nested, requires-new, ordering]
+    question: |
+      An outer @Transactional method calls an inner method with REQUIRES_NEW that publishes
+      OrderAuditedEvent inside itself. An @TransactionalEventListener(phase = AFTER_COMMIT)
+      handles it. The inner method commits, then the OUTER transaction rolls back. When (if
+      ever) does the listener fire?
+    options:
+      - "It never fires because the outer transaction rolled back"
+      - "It fires when the inner REQUIRES_NEW transaction commits, because the synchronization is bound to the transaction active at publish time (the inner one) — even though the outer later rolls back"
+      - "It fires only after the outer transaction completes, regardless of the inner"
+      - "It fires twice: once for the inner commit and once for the outer rollback"
+    answer: 1
+    explanation: |
+      The listener's synchronization binds to whichever transaction is active when the event
+      is published — here the inner REQUIRES_NEW transaction. AFTER_COMMIT therefore fires when
+      that inner transaction commits, independent of the outer transaction's later rollback.
+      This surprises developers who assume 'after commit' means after the whole business
+      operation committed.
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: transaction-management-events-078
+    difficulty: advanced
+    tags: [transactional-event-listener, synchronization, registration]
+    question: |
+      Mechanically, how does an @TransactionalEventListener defer its handler to the chosen
+      phase when an event is published inside a transaction?
+    options:
+      - "It stores the event in a database outbox table and polls it after commit"
+      - "It blocks the publishing thread with a lock until commit completes"
+      - "It registers a TransactionSynchronization via TransactionSynchronizationManager, and the handler runs from the matching callback (beforeCommit/afterCommit/afterCompletion)"
+      - "It schedules the handler on a delayed TaskExecutor timer sized to the timeout"
+    answer: 2
+    explanation: |
+      When the event arrives within an active transaction, the listener registers a
+      TransactionSynchronization on the current thread through TransactionSynchronizationManager.
+      The handler body is then invoked from the corresponding synchronization callback for the
+      configured phase. This requires that transaction synchronization is active, which it is
+      for Spring-managed transactions.
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: transaction-management-events-079
+    difficulty: advanced
+    tags: [transaction-template, programmatic, thread-safety]
+    question: |
+      Which statement about TransactionTemplate is correct for a typical Spring application?
+    options:
+      - "TransactionTemplate is stateful per call and must be created fresh for every transaction to be thread-safe"
+      - "TransactionTemplate can only roll back on setRollbackOnly(), never on thrown exceptions"
+      - "TransactionTemplate bypasses the PlatformTransactionManager and talks to the DataSource directly"
+      - "Once configured, a TransactionTemplate instance is thread-safe and can be shared/injected as a singleton; its transaction settings are applied per execute() call"
+    answer: 3
+    explanation: |
+      A configured TransactionTemplate holds only immutable transaction settings and a
+      reference to the PlatformTransactionManager, so instances are thread-safe and are
+      typically injected as singletons. Each execute()/executeWithoutResult() call runs its
+      callback in a transaction, committing on normal return and rolling back on unchecked
+      exceptions or setRollbackOnly().
+    ref: "concepts.md#declarative-vs-programmatic-transaction-management"
+
+  - id: transaction-management-events-080
+    difficulty: expert
+    tags: [transaction-template, rollback, checked-exception]
+    question: |
+      Inside txTemplate.execute(status -> { ... }), the callback throws a CHECKED exception
+      (declared by wrapping logic). Compared to declarative @Transactional defaults, how does
+      TransactionTemplate treat it?
+    options:
+      - "Identically to @Transactional: checked exceptions commit by default, unchecked roll back"
+      - "TransactionTemplate always commits and swallows the exception"
+      - "TransactionTemplate rolls back on ANY exception (checked or unchecked) thrown from the callback, then rethrows it — so a checked exception rolls back, unlike @Transactional defaults"
+      - "TransactionTemplate cannot propagate checked exceptions at all"
+    answer: 2
+    explanation: |
+      TransactionCallback bodies wrap application code such that any exception thrown from the
+      callback triggers a rollback (the template rolls back and rethrows). This differs from
+      declarative @Transactional, whose default rolls back only on unchecked exceptions. So a
+      checked exception from a TransactionTemplate callback rolls back the transaction, whereas
+      the same checked exception under default @Transactional would commit.
+    ref: "concepts.md#declarative-vs-programmatic-transaction-management"
+
+  - id: transaction-management-events-081
+    difficulty: expert
+    tags: [events, early-publish, initialization]
+    question: |
+      A @Component publishes a custom event from inside its @PostConstruct during context
+      startup, and some expected @EventListener beans never receive it. What best explains
+      this timing hazard?
+    options:
+      - "@PostConstruct cannot publish events; it must be done in a @Bean method"
+      - "Custom events fired before ContextClosedEvent are always discarded"
+      - "Events published in @PostConstruct are queued and delivered only after context shutdown"
+      - "@EventListener methods are wired by EventListenerMethodProcessor after singletons are instantiated, so events fired during early bean initialization may reach fewer (or no) registered listeners"
+    answer: 3
+    explanation: |
+      @EventListener methods are discovered and registered by EventListenerMethodProcessor,
+      which runs after singleton instantiation. An event published during a bean's
+      @PostConstruct can fire before all listener beans are registered, so some listeners miss
+      it. Very early events go through an earlyApplicationEvents buffer until the multicaster
+      is ready. Deferring publication (e.g. to ContextRefreshedEvent) avoids the hazard.
+    ref: "concepts.md#application-events-with-applicationeventpublisher-and-eventlistener"

@@ -83,6 +83,23 @@ are destroyed when the container shuts down.
   before initialization completes. (Prototypes can never participate in this resolution —
   Spring cannot cache a half-built prototype, so a prototype circular reference always
   fails.)
+- The break-glass fix for a constructor cycle is to annotate **one** injection point with
+  `@Lazy` — Spring then injects a lazy-resolving proxy there, so the constructor completes
+  without eagerly forcing the other bean into creation, breaking the cycle. (Spring Framework
+  6.1+ also *prohibits* the field/setter three-level-cache path by default when the involved
+  beans are subject to certain post-processing/proxying, and may fail fast instead — the
+  robust design is to avoid cycles rather than rely on early references.)
+- **Singleton creation is guarded**: `getSingleton(...)` synchronizes on the
+  `singletonObjects` map so that concurrent first-time `getBean()` calls for the same
+  definition create the object once and publish it safely. This is *creation-time* locking
+  only — it says nothing about concurrent business-method calls (see thread-safety section).
+- **Destruction ordering**: on context close, singletons are destroyed in **reverse
+  registration order**, and dependencies expressed via injection or `@DependsOn` are honored
+  so a bean is destroyed *before* the beans it depends on. Creation order is the mirror image:
+  `@DependsOn("x")` forces `x` to be fully instantiated first.
+- A **`@Lazy` bean injected into a non-lazy singleton** is still instantiated at startup to
+  satisfy that eager dependency — unless the **injection point itself** is `@Lazy` (which
+  injects a proxy and defers the target's creation to first method call).
 
 ---
 
@@ -119,6 +136,26 @@ Use `prototype` for **stateful** objects that must not be shared — e.g. a per-
 command object, a builder, an accumulator, a per-user conversational object. Use `singleton`
 (the default) for **stateless** services, DAOs, controllers, configuration holders — the vast
 majority of beans. Prototypes are comparatively rare in typical applications.
+
+### Prototype internals and gotchas
+
+- **`destroy()` on a scoped-proxy prototype does not reach past instances.** Because Spring
+  keeps no reference to prototype instances, a `@PreDestroy`/`DisposableBean` on a prototype
+  is never called by the container even when the prototype is behind a scoped proxy. If you
+  need deterministic cleanup, use `ObjectProvider` and a try-with-resources/finally block, or
+  register instances with a manager bean yourself.
+- **`@Scope("prototype")` on a `@Bean` factory method** produces a new instance per lookup,
+  but only if the method is *called through the container*. Inside a `@Configuration` class,
+  calling one `@Bean` method from another is intercepted by the CGLIB-enhanced config proxy
+  and routed through `getBean`, so prototype semantics are preserved; calling a prototype
+  `@Bean` method on a `@Configuration(proxyBeanMethods = false)` "lite" config, or via a
+  plain `@Component`, is a *direct* Java call that bypasses the container and returns a plain
+  `new` object every time — losing container post-processing.
+- **Prototype beans are not eagerly instantiated** at `refresh()`. They are created only on
+  demand, so a broken prototype definition (bad wiring) is discovered lazily at first request,
+  not at startup — the opposite of the fail-fast singleton behavior.
+- A prototype **injected by `ObjectProvider.stream()`** into a collection is materialized once
+  per stream call; each terminal operation that pulls elements creates fresh instances.
 
 ---
 
@@ -174,6 +211,35 @@ Spring 6/7 no longer support `javax.servlet.*`. Beyond the scopes, a `WebApplica
 can also inject `HttpServletRequest`, `HttpServletResponse`, `HttpSession`, and `WebRequest`
 directly by type — Spring injects **proxies** for these so a singleton can safely hold a
 reference to the current request/session.
+
+### Web-scope failure modes and edge cases
+
+- **`ScopeNotActiveException` / `BeanCreationException` with "No thread-bound request found".**
+  Accessing a `request`/`session`-scoped bean (through its scoped proxy) on a thread that has
+  no bound request throws at *method-call* time — a classic trap when work is offloaded to an
+  `@Async` executor thread or a `@Scheduled` task, because the request context is bound to the
+  original servlet thread only and is **not inherited** by pooled threads. Fixes: capture the
+  needed data before crossing threads, use `RequestContextHolder` with
+  `setInheritable(true)`/a task decorator that propagates context, or redesign to pass values
+  explicitly.
+- **Session-scope concurrency.** A single `HttpSession` can service multiple simultaneous
+  requests (e.g. parallel AJAX calls, tabs). A `session`-scoped bean is therefore *shared
+  across concurrent threads*, so it is **not** automatically thread-safe despite being
+  "one per user". Mutable session-scoped state needs its own synchronization.
+- **Session replication/serialization.** In a clustered container that replicates or persists
+  sessions, `session`-scoped beans (stored as session attributes) may be **serialized**; they
+  should be `Serializable` and hold serializable state, or replication fails.
+- **`request` vs `session` proxy resolution.** The scoped proxy resolves the *current*
+  request/session on each call via `RequestContextHolder`, so the *same* injected proxy in a
+  singleton transparently maps to a different backing instance for each user/request — that is
+  precisely why the proxy is mandatory when the lifetime mismatch exists.
+- **`application` scope vs true singleton on redeploy.** Because `application`-scoped beans
+  live as `ServletContext` attributes, they can outlive an individual `WebApplicationContext`
+  refresh differently than container singletons and are visible to non-Spring servlet code —
+  a subtle sharing/lifecycle distinction.
+- **`websocket` scope** requires `proxyMode = TARGET_CLASS` (there is no `@WebSocketScope`
+  shortcut) and is only meaningful under the STOMP messaging infrastructure; the bean is bound
+  to the WebSocket session's attributes.
 
 ---
 
@@ -312,6 +378,33 @@ usually cleaner.
 | Scoped proxy | Yes (per method call) | CGLIB/JDK proxy | best for web scopes |
 | `@Lookup` / method injection | Yes (per call) | CGLIB subclass | older; class can't be final |
 
+### Scoped-proxy subtleties
+
+- **The scoped proxy is itself a singleton.** When you inject a `@RequestScope` bean into a
+  singleton, the injected reference is a single, long-lived CGLIB/JDK proxy object; only the
+  *target* it delegates to changes per request/session. So the field is stable; the behavior
+  routes dynamically.
+- **`getBean()` on a scoped-proxied bean returns the proxy, not the target.** `instanceof`
+  checks against concrete subtypes, reflection on declared fields, and `getClass()` see the
+  proxy (a generated subclass for CGLIB). State set directly on the proxy object's own fields
+  is *not* the target's state — always go through methods.
+- **CGLIB proxy construction and `final`.** A `TARGET_CLASS` scoped proxy is a generated
+  subclass, so the target class cannot be `final`, and `final`/`private`/`static` methods are
+  not intercepted (calls to them hit the empty proxy shell, not a resolved target — a source
+  of `NullPointerException` on uninitialized proxy fields). Since Spring 4.0+/objenesis the
+  target's constructor is bypassed for the proxy, so a no-arg constructor is not strictly
+  required, but the *concrete class* must still be non-final.
+- **Ordering with AOP.** A scoped proxy and other AOP proxies (transactions, security) stack;
+  the scoped proxy sits at the injection point and resolves the target, then the target's own
+  advice applies. Mixing `proxyMode = INTERFACES` with class-based AOP elsewhere can surface
+  `ClassCastException`/proxy-type mismatches if code casts the injected proxy to the concrete
+  class.
+- **`ObjectProvider` vs scoped proxy for web scopes.** `ObjectProvider.getObject()` throws
+  `ScopeNotActiveException` when no request is bound, giving you an explicit failure/`getIfAvailable()`
+  fallback; a scoped proxy defers the same failure to the intercepted method call. Choose the
+  provider when you want to *detect* absence of scope; choose the proxy for transparent
+  drop-in injection.
+
 ---
 
 ## Custom scopes
@@ -373,6 +466,31 @@ scopes.)
 
 Note on `FactoryBean`: placing `<aop:scoped-proxy/>` on a `FactoryBean` definition scopes the
 **factory bean itself**, not the object returned from `getObject()`.
+
+### Custom-scope internals and correctness
+
+- **`get(name, objectFactory)` is the caching contract.** Spring calls it whenever it needs an
+  instance for a custom-scoped definition. Your implementation must: look up the current
+  "conversation" context (thread, tenant, actor…), return the cached object if present, else
+  invoke `objectFactory.getObject()` (which triggers the *full* creation + init lifecycle) and
+  cache it. Getting this wrong (e.g. returning a new object every call) silently breaks the
+  scope's identity semantics.
+- **Destruction callbacks are your job.** The container hands you a `Runnable` via
+  `registerDestructionCallback`; *you* must invoke it when the conversation ends. If you never
+  call it, `@PreDestroy`/`DisposableBean` never runs for that scope — exactly the leak in
+  `SimpleThreadScope`, which registers callbacks but never fires them on thread return to a
+  pool. A production request scope (`RequestScope`) fires them when the request completes.
+- **Registration must precede use.** `registerScope`/`CustomScopeConfigurer` runs as a
+  `BeanFactoryPostProcessor` step, before singleton pre-instantiation, so the scope name is
+  known when scoped bean definitions are resolved. Referencing an unregistered scope name
+  yields `IllegalStateException: No Scope registered for scope name '...'` when the bean is
+  first needed.
+- **Scoped proxies still apply.** Injecting a custom-scoped bean into a wider-scoped bean
+  needs the same `proxyMode`/`<aop:scoped-proxy/>` treatment as web scopes, because the
+  narrower bean may not exist (or may differ) at the wider bean's wiring time.
+- **`resolveContextualObject` and `getConversationId`** let advice and diagnostics ask the
+  scope for its current key/context object (e.g. `"request"` → the current request); returning
+  `null`/unstable ids degrades tooling but not core resolution.
 
 ---
 

@@ -47,6 +47,16 @@ The three pillars of the API are `ExpressionParser` (parses strings), `Expressio
 (the compiled/parsed form), and `EvaluationContext` (supplies the root object, variables,
 functions, property accessors, and type conversion).
 
+**Parsing versus evaluation are separate phases.** `parseExpression(String)` runs the
+lexer/parser once and produces an `Expression` (a `SpelExpression`) that holds the AST.
+`getValue(...)` walks that AST. Because parsing is the expensive part, the parsed
+`Expression` is meant to be **cached and reused** across many evaluations — Spring's own
+`BeanExpressionResolver` caches parsed expressions keyed by the expression string. A
+`SpelExpressionParser` and the `Expression` objects it produces are thread-safe for
+concurrent evaluation *as long as the evaluation is read-only*; the mutable state that must
+not be shared unsafely lives in the `EvaluationContext` (variables, root object), not in the
+`Expression` itself.
+
 ---
 
 ## SpEL expressions versus property placeholders
@@ -256,6 +266,27 @@ private List<BigDecimal> totals;
 Map selection filters entries; inside the expression `key` and `value` are available
 (e.g. `map.?[value > 100]`).
 
+**Subtleties seniors are expected to know:**
+
+- **Map selection returns a new `Map`, not a `List`.** When the operand is a `Map`, the
+  selection expression is evaluated against each `Map.Entry`, exposing `key` and `value` as
+  properties, and the result is a *new map* of matching entries (`#map.?[value < 27]`
+  yields a `Map`). Projection over a map (`#map.![...]`) instead iterates the *entries* and
+  returns a `List`.
+- **`#this` versus `#root` inside selection/projection.** `#this` is the *current element*
+  and changes on each iteration; `#root` always refers to the root object of the whole
+  expression. This lets a projection reach back to the root:
+  `#root.inventions.![#root.name + ' invented ' + #this]`.
+- **Selection/projection cannot be compiled.** The SpEL bytecode compiler explicitly does
+  not support selection, projection, bean references, array construction, or expressions
+  that rely on the conversion service — such expressions always run interpreted.
+- **Safe collection selection/projection.** The null-safe variants `?.?[...]` and `?.![...]`
+  return `null` (rather than throwing) when the operand collection itself is `null`. First-
+  and last-match (`.^[]`, `.$[]`) return `null` when no element matches.
+- **Inline lists are immutable when they contain only literals.** A purely-literal
+  `{1,2,3}` is created as an unmodifiable list at parse time (a constant); a list containing
+  a non-literal element is rebuilt on each evaluation and is mutable.
+
 ---
 
 ## Operators, ternary, and the Elvis operator
@@ -301,6 +332,32 @@ Regex example:
 @Value("#{'someHost.example.com' matches '[a-zA-Z0-9\\.]+' }")
 private boolean validHost;
 ```
+
+**Gotchas that trip up seniors:**
+
+- **`null` is treated as "nothing", not zero, in relational comparisons.** SpEL defines
+  `X > null` as always `true` and `X < null` as always `false`, for *any* left operand.
+  So `#{someBean.count > null}` is `true` even when `count` is `5`, and it never throws.
+  If you want a numeric guard, compare against `0`, not `null`.
+- **Relational operators require `Comparable`, and `==`/`!=` differ from `equals` for
+  `Comparable` types.** `<`, `<=`, `>`, `>=` use `compareTo`, so `'black' < 'block'` is
+  `true`. For `==`, SpEL first tries numeric/`Comparable` comparison where applicable
+  (e.g. `new BigDecimal("1.0") == new BigDecimal("1.00")` is `true` because `compareTo`
+  returns 0), which can diverge from Java's `equals`.
+- **`between`** is a shortcut: `input between {low, high}` expands to
+  `input >= low and input <= high`, so `1 between {5, 1}` is `false` (order matters).
+- **`instanceof` boxes primitives:** `1 instanceof T(int)` is `false` but
+  `1 instanceof T(Integer)` is `true`.
+- **String operators:** `+` concatenates, `*` repeats (`'ab' * 2` -> `'abab'`), and `-` on
+  single-character strings shifts the char (`'d' - 3` -> `'a'`).
+- **The power operator `^` promotes to a wider type on overflow rather than wrapping:**
+  because `2^31` (2147483648) exceeds the `int` range, SpEL returns it as a `Long`, so
+  `(2^31) - 1` evaluates to `2147483647L` and narrows cleanly to `Integer.MAX_VALUE` for an
+  `int` target — it does *not* silently wrap like Java `int` math. Numeric type promotion
+  otherwise follows Java rules (mixing a `double` promotes the result to `double`).
+- **`matches` is anchored per `Matcher.matches()` semantics** (the whole input must match),
+  and an invalid pattern or a mismatched type raises a `SpelEvaluationException` at
+  evaluation time, not parse time.
 
 ---
 
@@ -378,6 +435,150 @@ Spring annotation (`org.springframework.beans.factory.annotation.Value`) and is 
 In Spring Framework 6.x (baseline Java 17, Jakarta EE 9+), the JSR-330/JSR-250 annotations
 migrated from `javax.*` to `jakarta.*`, but `@Value` and the SpEL API are Spring's own and
 keep their package names across both versions.
+
+---
+
+## Evaluation contexts, security, and property accessors
+
+The `EvaluationContext` is the single most important object for correctness *and* security,
+and the difference between the two shipped implementations is a favourite senior probe.
+
+- **`StandardEvaluationContext`** exposes the *full* language: type references via `T(...)`,
+  constructor invocation via `new`, method invocation, bean references, and a
+  `ReflectivePropertyAccessor` that reads/writes arbitrary properties via reflection. This
+  is what `StandardBeanExpressionResolver` uses for `@Value` and bean-definition SpEL —
+  appropriate because those expressions come from *your own trusted configuration*.
+- **`SimpleEvaluationContext`** (since Spring 4.3.15) is a deliberately locked-down subset
+  built for evaluating expressions against *untrusted* input (data binding, user-supplied
+  filters). It **disables `T(...)` type references, `new` constructor calls, and bean
+  references entirely** — those aren't "restricted", they simply do not resolve. You choose
+  the property-access level explicitly via builders:
+  `SimpleEvaluationContext.forReadOnlyDataBinding().build()`,
+  `forReadWriteDataBinding().build()`, or `forPropertyAccessors(...)` with a custom
+  (typically non-reflective) `PropertyAccessor` such as `DataBindingPropertyAccessor`.
+
+```java
+// UNSAFE: user string can call T(java.lang.Runtime).getRuntime().exec(...)
+Expression e = parser.parseExpression(userSuppliedString);
+e.getValue(new StandardEvaluationContext());   // full language exposed
+
+// SAFE: no T(), no new, no @bean — only property navigation on the root
+EvaluationContext ctx = SimpleEvaluationContext.forReadOnlyDataBinding().build();
+e.getValue(ctx, rootObject);
+```
+
+This is the root cause of the SpEL remote-code-execution CVEs that have appeared in various
+Spring components: expressions built from HTTP input and evaluated in a
+`StandardEvaluationContext` allow `T(...).exec(...)`. The mitigation is always the same —
+never concatenate untrusted input into a SpEL string, and evaluate against a
+`SimpleEvaluationContext` when the input is not fully trusted.
+
+**Property accessor resolution order.** An `EvaluationContext` holds an *ordered* list of
+`PropertyAccessor`s consulted until one reports it can read the property. Spring adds
+specialized accessors (e.g. a `MapAccessor`, or in bean SpEL a `BeanFactoryAccessor`) ahead
+of or alongside the reflective one, which is how `map.someKey` can resolve as a map lookup
+rather than a bean-method call. A custom `PropertyAccessor` lets you make SpEL navigate a
+non-JavaBean structure (JSON tree, `Map`, etc.).
+
+**Type conversion is generics-aware.** By default a `StandardEvaluationContext` uses Spring's
+`ConversionService`, which preserves generic type information — writing the `String`
+`"false"` into a `List<Boolean>` element converts it to a `Boolean`. `SimpleEvaluationContext`
+can be configured with or without a converter.
+
+---
+
+## SpEL compilation, SpelCompilerMode, and performance
+
+SpEL is **interpreted by default** (`SpelCompilerMode.OFF`). Because it is a dynamically
+typed language, the interpreter re-resolves properties, methods, and conversions reflectively
+on every evaluation, which is fine for one-shot `@Value` injection but costly on hot paths
+(a documented micro-benchmark shows 50,000 iterations at ~75 ms interpreted versus ~3 ms
+compiled). The compiler generates a real Java class implementing the expression.
+
+The three modes, configured via `SpelParserConfiguration`:
+
+| Mode | Behaviour |
+|------|-----------|
+| `OFF` | Default. Always interpreted. |
+| `IMMEDIATE` | Compiles after the first interpreted evaluation. If a later compiled run fails (a type changed vs. what was observed), the **caller gets the exception**. |
+| `MIXED` | Silently alternates: after some interpreted runs it compiles; if a compiled run throws, the failure is caught *internally* and it reverts to interpreted, possibly recompiling later, until a failure threshold permanently pins it to interpreted. |
+
+**Why `IMMEDIATE` exists despite `MIXED` being more forgiving:** `MIXED` mode is dangerous for
+expressions with **side effects**. A compiled expression can partially execute (mutating
+state) and then fail; `MIXED` will silently re-run it in interpreted mode, executing part of
+it twice. `IMMEDIATE` surfaces the failure to the caller instead. Because the compiler infers
+types from the *first* interpreted evaluation, it assumes types are stable across runs — an
+expression that returns `Integer` on run one and `Double` on run two is a classic breakage.
+
+**What the compiler cannot compile** (these always fall back to interpreted): assignment,
+expressions relying on the `ConversionService`, custom `PropertyAccessor`/resolvers,
+overloaded operators, `Optional` with the null-safe or Elvis operator, array construction,
+selection, projection, and bean references.
+
+**ClassLoader note:** compiled expressions are defined in a *child* ClassLoader of the one you
+supply (or the thread context ClassLoader). That ClassLoader must be able to see every type
+referenced in the expression, which matters in modular/OSGi or plugin setups.
+
+**Global limits (DoS guards).** `SpelParserConfiguration` caps expression length at
+`maxExpressionLength` (default 10,000 chars, also settable via
+`spring.context.expression.maxLength`) and total operations per evaluation at `maxOperations`
+(default ~10,000, via `spring.expression.maxOperations`). These prevent pathological or
+malicious expressions from exhausting resources.
+
+---
+
+## Failure modes: parse-time versus evaluation-time errors
+
+A recurring senior distinction is *when* a bad SpEL expression fails and *what* it throws.
+
+- **`ParseException` / `SpelParseException`** happens at `parseExpression(...)` time for
+  syntactically invalid expressions (unbalanced brackets, illegal tokens). For `@Value`, this
+  surfaces during bean creation as the container parses the expression.
+- **`SpelEvaluationException` (an `EvaluationException`)** happens at `getValue(...)` time for
+  a *syntactically valid* expression that fails at runtime: unknown property (`EL1008E`),
+  method not found (`EL1004E`), type conversion failure, a `T(...)` referencing a
+  non-existent class, division by zero, or a `null` navigation without safe-navigation.
+- **`@Value` wrapping.** Because `@Value` SpEL runs during dependency injection, both kinds
+  surface as a `BeanCreationException`/`BeanExpressionException` wrapping the underlying SpEL
+  exception, failing the context startup for singletons — a syntactically-fine but
+  semantically-wrong `@Value("#{@noSuchBean.foo}")` is only detected at startup, not compile
+  time.
+- **Missing placeholder versus failed SpEL are different failures.** An unresolved `${...}`
+  throws `IllegalArgumentException: Could not resolve placeholder` from the placeholder
+  resolver; a broken `#{...}` throws a SpEL exception from the expression engine. Because
+  placeholders resolve *first*, a missing `${x}` inside `#{'${x}'.trim()}` fails before SpEL
+  ever runs.
+- **Null navigation:** `a.b.c` throws if `b` is `null`; `a?.b?.c` yields `null` instead. The
+  Elvis operator only substitutes for a `null` *result*, it does not guard intermediate
+  navigation — `#{user?.address?.city ?: 'N/A'}` needs both operators.
+
+---
+
+## Ordering, timing, and lifecycle of @Value resolution
+
+Several bugs come from misunderstanding *when* `@Value` is resolved relative to the bean
+lifecycle and infrastructure availability.
+
+- **`PropertySourcesPlaceholderConfigurer` is a `BeanFactoryPostProcessor`.** It must be a
+  `static @Bean` in Java config so it can be instantiated *before* the regular beans it
+  configures, without forcing early instantiation of the `@Configuration` class and its other
+  beans. A non-static factory method can cause the config class (and its `@Autowired`
+  dependencies) to be created too early, and logs a warning that `@Autowired`/`@Value` inside
+  that config class may not be honoured.
+- **`@Value` fields are populated during the *population* phase**, after the constructor runs
+  and before `@PostConstruct`. So a field-injected `@Value` is `null` inside the constructor
+  but set by the time `@PostConstruct` runs; constructor-parameter `@Value` is the way to have
+  the value available in the constructor (and enables `final` fields).
+- **One-shot evaluation.** `@Value` SpEL/placeholders are resolved once at injection time. To
+  get values that track changes at runtime you need indirection — inject the `Environment`
+  and read it on demand, use `@RefreshScope` (Spring Cloud), or a scoped/`ObjectProvider`
+  lookup. A plain `@Value` field never updates after startup.
+- **Prototype and scoped beans.** For a prototype bean, `@Value` is re-evaluated for *each new
+  instance*, so a `#{T(java.lang.Math).random()}` differs per instance; for a singleton it is
+  evaluated exactly once. This is the mechanism behind "inject a fresh value per lookup".
+- **Placeholder default versus Elvis timing.** `${key:default}` is resolved by the placeholder
+  processor (before SpEL); `?:` is resolved by the expression engine (during SpEL). They are
+  not interchangeable and fire at different stages.
 
 ---
 

@@ -744,3 +744,665 @@ questions:
       @Configuration). Spring Boot instead searches upward for @SpringBootConfiguration (your
       @SpringBootApplication) and applies auto-configuration.
     ref: "concepts.md#springboottest-as-a-boot-slice-contrasted"
+
+  - id: testing-spring-applications-046
+    difficulty: expert
+    tags: [testexecutionlisteners, ordering, defaults]
+    question: |
+      A developer adds a custom listener to capture metrics with @TestExecutionListeners(AuditListener.class)
+      on a test class. Afterwards @Autowired fields are null, @Transactional no longer rolls back, and @Sql
+      scripts don't run. What happened and what is the correct fix?
+    options:
+      - "A bare @TestExecutionListeners REPLACES the default listener set, so DependencyInjection/Transactional/SqlScripts listeners are gone; add mergeMode = MergeMode.MERGE_WITH_DEFAULTS"
+      - "Custom listeners always run before defaults and consume the test instance; annotate AuditListener with @Order(Integer.MAX_VALUE)"
+      - "@Autowired stopped working because the SpringExtension was disabled by the annotation; re-add @ExtendWith(SpringExtension.class)"
+      - "The context cache evicted the context; add @DirtiesContext(classMode = AFTER_CLASS) to force a fresh load"
+    answer: 0
+    explanation: |
+      By default declaring any listener via @TestExecutionListeners switches OFF the framework defaults
+      (DependencyInjectionTestExecutionListener, TransactionalTestExecutionListener,
+      SqlScriptsTestExecutionListener, etc.), so DI, rollback, and @Sql silently stop. The fix is
+      mergeMode = MergeMode.MERGE_WITH_DEFAULTS, which merges the custom listener with the defaults and
+      re-sorts by AnnotationAwareOrderComparator.
+    ref: "concepts.md#testexecutionlisteners-and-execution-order"
+
+  - id: testing-spring-applications-047
+    difficulty: expert
+    tags: [testexecutionlisteners, ordering, dependency-injection]
+    question: |
+      Relative to the default TestExecutionListener ordering, when is @Autowired dependency injection into
+      the test instance performed versus when the test's transaction is started?
+    options:
+      - "Transaction is started at prepareTestInstance, injection happens later at beforeTestMethod"
+      - "Both happen simultaneously inside a single combined callback so ordering is undefined"
+      - "DependencyInjectionTestExecutionListener injects during prepareTestInstance/beforeTestMethod BEFORE TransactionalTestExecutionListener opens the transaction, because DI is ordered ahead of the transactional listener"
+      - "Injection is skipped entirely for transactional tests; beans are resolved lazily on first access"
+    answer: 2
+    explanation: |
+      DependencyInjectionTestExecutionListener is ordered ahead of TransactionalTestExecutionListener, so
+      the test instance is populated with dependencies before the transactional listener opens the test
+      transaction at beforeTestMethod. This ordering is why injected repositories are ready when the
+      transaction begins.
+    ref: "concepts.md#testexecutionlisteners-and-execution-order"
+
+  - id: testing-spring-applications-048
+    difficulty: advanced
+    tags: [testexecutionlisteners, discovery, spring-factories]
+    question: |
+      How are the DEFAULT TestExecutionListeners discovered and ordered by the framework?
+    options:
+      - "They are discovered via SpringFactoriesLoader (spring.factories) and sorted by AnnotationAwareOrderComparator honoring Ordered/@Order"
+      - "They are hard-coded in the SpringExtension in a fixed array and cannot be reordered"
+      - "They are scanned as @Component beans from the loaded ApplicationContext"
+      - "They are read alphabetically from the org.springframework.test.context package"
+    answer: 0
+    explanation: |
+      Default listeners are registered through SpringFactoriesLoader under the
+      org.springframework.test.context.TestExecutionListener key in spring.factories, then sorted by
+      AnnotationAwareOrderComparator (which honors the Ordered interface and @Order). This is also how
+      third-party libraries (Boot, Spring Security) contribute listeners automatically.
+    ref: "concepts.md#testexecutionlisteners-and-execution-order"
+
+  - id: testing-spring-applications-049
+    difficulty: advanced
+    tags: [mockito, reset, listener, caching]
+    question: |
+      Why does the framework need a MockitoResetTestExecutionListener that resets @MockitoBean mocks after
+      each test method?
+    options:
+      - "Because Mockito mocks are not thread-safe and must be recreated per thread"
+      - "Because @MockitoBean mocks are prototype-scoped and get garbage collected otherwise"
+      - "Because resetting is required to make the mock visible to @Autowired fields"
+      - "Because the ApplicationContext (and thus the mock instances) is cached and reused across methods, so stubbing/verification state would leak into later methods without a reset"
+    answer: 3
+    explanation: |
+      The context is cached and shared, meaning the same mock instances persist across test methods. Without
+      resetting them after each method (default MockReset.AFTER), stubbing and interaction state from one
+      test would leak into the next, causing flaky order-dependent failures.
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-050
+    difficulty: expert
+    tags: [mockitobean, mockitospybean, strategy]
+    question: |
+      A test declares @MockitoSpyBean PaymentGateway gateway, but the context defines no PaymentGateway bean.
+      Contrast this with @MockitoBean PaymentGateway gateway in the same situation.
+    options:
+      - "@MockitoSpyBean fails because WRAP requires exactly one existing candidate to wrap; @MockitoBean succeeds because REPLACE_OR_CREATE creates a new mock bean when none exists"
+      - "Both create a new bean automatically since bean overrides use REPLACE_OR_CREATE"
+      - "Both fail; bean override annotations always require an existing bean unless enforceOverride=false"
+      - "@MockitoSpyBean succeeds by creating an empty spy; @MockitoBean fails because it defaults to REPLACE"
+    answer: 0
+    explanation: |
+      @MockitoSpyBean uses the WRAP strategy, which wraps an existing instance and therefore requires
+      exactly one candidate bean — it fails if none exists. @MockitoBean uses REPLACE_OR_CREATE, so it
+      creates a brand-new mock bean when no matching bean is present (unless enforceOverride=true switches
+      it to strict REPLACE).
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-051
+    difficulty: advanced
+    tags: [testbean, factory-method, convention]
+    question: |
+      For a field annotated with a bare @TestBean of type CustomService, what must the accompanying factory
+      method look like by default?
+    options:
+      - "A static, no-argument method named customService() returning a CustomService-compatible type"
+      - "An instance method named createCustomService() returning a mock"
+      - "A static method named customServiceTestOverride() taking the original bean as an argument"
+      - "A @Bean-annotated method in a nested @Configuration class"
+    answer: 0
+    explanation: |
+      @TestBean requires a static, no-arg factory method whose return type is compatible with the field, and
+      whose name defaults to the field name (here customService). There is no "TestOverride" suffix (that is
+      not the @TestBean convention); use the methodName attribute or a FQCN#method reference to point
+      elsewhere.
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-052
+    difficulty: expert
+    tags: [bean-override, selection, heuristics]
+    question: |
+      The context has two beans of type NotificationSender: "emailSender" and "smsSender". A test declares
+      @MockitoBean NotificationSender emailSender; with no @Qualifier. What happens?
+    options:
+      - "It fails as ambiguous because bean override uses the same autowiring resolution as @Autowired"
+      - "It mocks BOTH beans since the type matches two candidates"
+      - "It uses the field name emailSender as a fallback qualifier and mocks the bean named emailSender"
+      - "It creates a third new mock bean because REPLACE_OR_CREATE always creates on ambiguity"
+    answer: 2
+    explanation: |
+      Bean-override selection is by type first; when multiple candidates match, the field name is used as a
+      fallback qualifier (or you add @Qualifier / the name attribute). Since a bean named emailSender exists,
+      that one is replaced. The infrastructure does not run full autowiring resolution.
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-053
+    difficulty: advanced
+    tags: [bean-override, caching, cache-key]
+    question: |
+      Two integration test classes have identical @ContextConfiguration, profiles, and property sources, but
+      class A adds @MockitoBean Clock clock and class B does not. How many contexts are cached?
+    options:
+      - "Two — the bean-override handlers contribute a ContextCustomizer that is part of the cache key, so A and B get different contexts"
+      - "One — bean overrides are applied after context load and don't affect the cache key"
+      - "One — only @ActiveProfiles and @TestPropertySource affect the cache key"
+      - "Three — each @MockitoBean forces a brand-new context per method"
+    answer: 0
+    explanation: |
+      Bean overrides contribute a ContextCustomizer built from the set of override handlers, which is part
+      of the merged context configuration and therefore the cache key. A class with @MockitoBean gets a
+      different cached context from one without, even with otherwise identical configuration.
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-054
+    difficulty: expert
+    tags: [sql, transaction-mode, isolated]
+    question: |
+      A @Transactional test seeds data with @Sql(scripts="seed.sql", config=@SqlConfig(transactionMode=ISOLATED)),
+      then a service method annotated @Transactional(propagation=REQUIRES_NEW) reads that data. Why is ISOLATED
+      necessary here, and what must you also add?
+    options:
+      - "ISOLATED commits the seed data in its own transaction so the REQUIRES_NEW method (a separate transaction) can see it; you must add an AFTER_TEST_METHOD cleanup script because the seed won't be rolled back"
+      - "ISOLATED is unnecessary; INFERRED would let the REQUIRES_NEW method see the data because it joins the test transaction"
+      - "ISOLATED disables the test transaction entirely, so nothing needs cleanup"
+      - "ISOLATED runs the script on a background thread; you must add @DirtiesContext to reset it"
+    answer: 0
+    explanation: |
+      A REQUIRES_NEW method suspends the test transaction and runs in its own transaction, so it cannot see
+      uncommitted data written inside the test transaction. ISOLATED commits the seed in a separate
+      transaction, making it visible — but because it commits, the test rollback won't undo it, so you must
+      provide an AFTER_TEST_METHOD cleanup script.
+    ref: "concepts.md#executing-sql-scripts-with-sql"
+
+  - id: testing-spring-applications-055
+    difficulty: advanced
+    tags: [sql, merge-mode, override]
+    question: |
+      A test class has @Sql("/schema.sql") at class level. A method adds @Sql("/data.sql"). The method fails
+      because the table doesn't exist. What is the cause?
+    options:
+      - "Class-level @Sql only runs once per class and had already been consumed"
+      - "@Sql scripts run after the test method by default, so schema.sql hadn't executed yet"
+      - "The default @SqlMergeMode is OVERRIDE, so the method-level @Sql REPLACES the class-level one; schema.sql never runs for that method. Add @SqlMergeMode(MERGE)"
+      - "class-level @Sql requires executionPhase=BEFORE_TEST_CLASS to run at all"
+    answer: 2
+    explanation: |
+      By default @SqlMergeMode is OVERRIDE: a method-level @Sql replaces class-level declarations for that
+      method, so /schema.sql does not run and the table is missing. Annotating with @SqlMergeMode(MERGE)
+      combines both so schema and data both execute.
+    ref: "concepts.md#executing-sql-scripts-with-sql"
+
+  - id: testing-spring-applications-056
+    difficulty: advanced
+    tags: [sql, execution-phase, listener]
+    question: |
+      Which listener executes @Sql scripts, and what is the DEFAULT execution phase?
+    options:
+      - "SqlScriptsTestExecutionListener; scripts run BEFORE_TEST_METHOD by default"
+      - "TransactionalTestExecutionListener; scripts run after commit"
+      - "DependencyInjectionTestExecutionListener; scripts run during prepareTestInstance"
+      - "SqlScriptsTestExecutionListener; scripts run AFTER_TEST_METHOD by default"
+    answer: 0
+    explanation: |
+      The default-registered SqlScriptsTestExecutionListener runs @Sql scripts, and the default
+      executionPhase is BEFORE_TEST_METHOD. You can switch to AFTER_TEST_METHOD for cleanup, or (since 6.1)
+      BEFORE_TEST_CLASS / AFTER_TEST_CLASS at class level.
+    ref: "concepts.md#executing-sql-scripts-with-sql"
+
+  - id: testing-spring-applications-057
+    difficulty: expert
+    tags: [sql, inferred, transaction]
+    question: |
+      With @SqlConfig(transactionMode = INFERRED) (the default) on a test class annotated @Transactional,
+      how are the @Sql script's changes handled at the end of the test?
+    options:
+      - "The script commits immediately and its changes persist regardless of the test transaction"
+      - "The script runs in a nested savepoint that is committed even if the test rolls back"
+      - "The script runs with no transaction and its changes always persist"
+      - "The script joins the test's transaction and its changes are rolled back with the test"
+    answer: 3
+    explanation: |
+      With INFERRED and an active Spring-managed (test) transaction, the script joins that transaction, so
+      its changes are rolled back along with the test by TransactionalTestExecutionListener — no manual
+      cleanup needed. ISOLATED would instead commit in a separate transaction.
+    ref: "concepts.md#executing-sql-scripts-with-sql"
+
+  - id: testing-spring-applications-058
+    difficulty: expert
+    tags: [transactional, propagation, requires-new]
+    question: |
+      A @Transactional test calls a service method annotated @Transactional(propagation = REQUIRES_NEW) that
+      inserts an audit row. After the suite, the audit table contains rows from the tests. Why?
+    options:
+      - "REQUIRES_NEW suspends the test transaction and runs in a new transaction that commits independently, so those inserts are NOT rolled back by the test"
+      - "The test's rollback only affects the primary datasource, not audit tables"
+      - "@Transactional on tests never actually rolls back inserts, only updates"
+      - "Because the context is cached, committed data survives between contexts"
+    answer: 0
+    explanation: |
+      REQUIRES_NEW suspends the outer (test) transaction and opens a brand-new transaction that commits on
+      its own. The test's rollback only affects the outer transaction, so the audit rows written by the
+      REQUIRES_NEW method persist and leak across tests.
+    ref: "concepts.md#transactional-test-rollback"
+
+  - id: testing-spring-applications-059
+    difficulty: expert
+    tags: [transactional, jpa, lazy-loading, false-negative]
+    question: |
+      An entity has a LAZY association. In production, accessing it outside the service throws
+      LazyInitializationException, but the @Transactional integration test accessing the same association
+      passes. Why is the test misleading?
+    options:
+      - "The test uses a different JPA provider that eagerly fetches everything"
+      - "@Transactional tests disable lazy loading via a global flag"
+      - "The single test transaction (and its persistence context) stays open for the whole test method, so the lazy association loads successfully — masking the production failure that occurs after the session closes"
+      - "MockMvc keeps the Hibernate session open across requests"
+    answer: 2
+    explanation: |
+      Because the test runs in one open transaction for the entire method, the persistence context/session
+      remains open, so lazy associations resolve fine. In production the session is already closed when the
+      association is touched, throwing LazyInitializationException — a false negative created by the test's
+      transaction boundary.
+    ref: "concepts.md#transactional-test-rollback"
+
+  - id: testing-spring-applications-060
+    difficulty: advanced
+    tags: [transactional, flush, persistence]
+    question: |
+      A @Transactional test saves an entity with a unique constraint that the code violates, yet the test
+      passes without an exception. What is the most likely explanation?
+    options:
+      - "The unique constraint is disabled inside test transactions"
+      - "The context cache returned a stale entity that passed validation"
+      - "Rollback repairs the constraint violation automatically"
+      - "The persist is never flushed to the database before rollback, so the constraint is never checked; force EntityManager.flush() or @Commit to exercise it"
+    answer: 3
+    explanation: |
+      JPA can defer the INSERT until flush/commit. Since the transaction rolls back and may never flush,
+      the database-level unique constraint is never evaluated, so the violation goes undetected. Forcing
+      flush() (or committing via @Commit) triggers the constraint check.
+    ref: "concepts.md#transactional-test-rollback"
+
+  - id: testing-spring-applications-061
+    difficulty: expert
+    tags: [caching, jvm, fork, parallelism]
+    question: |
+      A team enables parallel test execution with forkCount=4 in Surefire hoping to speed up their
+      integration suite, but total context-build time INCREASES. Why?
+    options:
+      - "Parallel forks corrupt the shared context cache, forcing rebuilds"
+      - "forkCount=4 disables the context cache entirely as a safety measure"
+      - "@DirtiesContext is triggered automatically when running in parallel"
+      - "The context cache is a static per-JVM singleton, so each of the 4 forks maintains its own cache and rebuilds the same contexts independently, reducing overall cache reuse"
+    answer: 3
+    explanation: |
+      The ContextCache is a static, JVM-wide structure held per fork. With multiple forks, each JVM builds
+      its own copies of the contexts instead of sharing one cache, so a suite tuned for a single JVM can see
+      more total context builds. This is a genuine trade-off between parallelism and cache reuse.
+    ref: "concepts.md#loading-and-caching-the-application-context-across-tests"
+
+  - id: testing-spring-applications-062
+    difficulty: expert
+    tags: [caching, dirties-context, hierarchy]
+    question: |
+      In a @ContextHierarchy test with a shared parent and a child context, @DirtiesContext with the default
+      hierarchyMode is applied. What gets evicted and closed?
+    options:
+      - "Only the child context; the parent is always preserved"
+      - "Nothing until JVM shutdown; @DirtiesContext only flags for later"
+      - "With the default EXHAUSTIVE mode, the entire context hierarchy (parent included) is closed and evicted, because the parent may be shared and referenced by the dirtied child"
+      - "Only beans marked @DirtiesContext, not whole contexts"
+    answer: 2
+    explanation: |
+      The default hierarchyMode for @DirtiesContext is EXHAUSTIVE, which removes and closes the whole
+      hierarchy — parents and children — since a parent could be shared with the affected child. Using
+      CURRENT_LEVEL restricts eviction to the current level and below.
+    ref: "concepts.md#loading-and-caching-the-application-context-across-tests"
+
+  - id: testing-spring-applications-063
+    difficulty: expert
+    tags: [caching, shared-state, order-dependence]
+    question: |
+      A singleton bean holds a mutable counter. TestA increments it and passes; TestB asserts the counter is
+      0 and passes when run alone but fails when the whole class runs. Root cause and correct remedy?
+    options:
+      - "JUnit ordering bug; annotate with @TestMethodOrder"
+      - "TestB needs @Transactional to isolate state"
+      - "The cached context is shared, so both tests see the same singleton instance and TestA's mutation leaks into TestB; mark the mutating test (or class) with @DirtiesContext, or avoid mutating shared singletons"
+      - "The counter should be a prototype bean so JUnit resets it automatically"
+    answer: 2
+    explanation: |
+      Context caching means both tests share the same singleton instance. TestA's mutation persists into
+      TestB, producing an order-dependent failure. The correct remedy is @DirtiesContext on the mutating
+      test (forcing a fresh context afterward) or, better, not mutating shared singleton state in tests.
+    ref: "concepts.md#loading-and-caching-the-application-context-across-tests"
+
+  - id: testing-spring-applications-064
+    difficulty: advanced
+    tags: [constructor-injection, springextension, parameter-resolver]
+    question: |
+      How is SpringExtension able to inject dependencies into a JUnit 5 test's CONSTRUCTOR parameters?
+    options:
+      - "It uses reflection to set private fields after construction"
+      - "It rewrites the test bytecode at load time to add setters"
+      - "It requires the test class to extend AbstractJUnit4SpringContextTests"
+      - "It implements JUnit Jupiter's ParameterResolver, so it can resolve constructor, method, and lifecycle parameters from the ApplicationContext"
+    answer: 3
+    explanation: |
+      SpringExtension implements JUnit Jupiter's ParameterResolver API, which lets Spring resolve parameters
+      of test constructors, test methods, and lifecycle callback methods from the context (for @Autowired /
+      @Qualifier / @Value parameters or ApplicationContext types).
+    ref: "concepts.md#constructor-injection-testconstructor-and-nested-tests"
+
+  - id: testing-spring-applications-065
+    difficulty: expert
+    tags: [testconstructor, autowire-mode, precedence]
+    question: |
+      A test constructor has parameters but NO @Autowired annotation, and one parameter is a JUnit
+      TestInfo. Without any extra configuration, what happens?
+    options:
+      - "Spring autowires all parameters and fails because TestInfo is not a bean"
+      - "Spring ignores the constructor and uses field injection instead"
+      - "The test fails to start because mixing Spring and JUnit parameter resolution is forbidden"
+      - "Because the constructor isn't autowirable (no @Autowired, no @TestConstructor(ALL), default mode not changed), Spring only resolves explicitly annotated parameters and JUnit resolves TestInfo"
+    answer: 3
+    explanation: |
+      A constructor is only fully autowirable if it is @Autowired, or @TestConstructor(autowireMode = ALL)
+      is present, or the global spring.test.constructor.autowire.mode is set to all. Otherwise Spring only
+      resolves explicitly annotated parameters and lets JUnit resolve the rest (e.g. TestInfo). When the
+      whole constructor IS autowirable, no other JUnit resolver may touch its parameters.
+    ref: "concepts.md#constructor-injection-testconstructor-and-nested-tests"
+
+  - id: testing-spring-applications-066
+    difficulty: expert
+    tags: [constructor-injection, per-class, dirties-context]
+    question: |
+      Why is constructor injection discouraged when combining @TestInstance(PER_CLASS) with a method-level
+      @DirtiesContext that closes the context between methods?
+    options:
+      - "PER_CLASS is incompatible with SpringExtension entirely"
+      - "Constructor injection is slower than field injection under PER_CLASS"
+      - "The single PER_CLASS test instance is created once with constructor-injected beans; if @DirtiesContext closes that context mid-class, the instance keeps references to beans from a now-closed context. Prefer field/setter injection here"
+      - "@DirtiesContext cannot run at method level under PER_CLASS"
+    answer: 2
+    explanation: |
+      With PER_CLASS the test instance (and its constructor-injected dependencies) is created once for the
+      whole class. A method-level @DirtiesContext that closes the context leaves the instance holding beans
+      from a closed context. Field/setter injection re-populates per method-appropriate lifecycle, avoiding
+      the stale references.
+    ref: "concepts.md#constructor-injection-testconstructor-and-nested-tests"
+
+  - id: testing-spring-applications-067
+    difficulty: advanced
+    tags: [nested, configuration-inheritance, profiles]
+    question: |
+      An outer test class is @SpringJUnitConfig(AppConfig.class). It has two @Nested classes, one
+      @ActiveProfiles("a") and one @ActiveProfiles("b"). What is true?
+    options:
+      - "The nested classes lose the outer @SpringJUnitConfig and must redeclare it"
+      - "@ActiveProfiles on @Nested classes is ignored; the outer profile always wins"
+      - "Only the first @Nested class inherits configuration; the second must use @ContextConfiguration"
+      - "Nested classes inherit the enclosing AppConfig by default (INHERIT), and each distinct profile set yields a different cached context, so two contexts are created"
+    answer: 3
+    explanation: |
+      @Nested classes inherit the enclosing class's Spring configuration by default
+      (@NestedTestConfiguration(INHERIT)), so both inherit AppConfig but layer their own profiles. Since
+      profiles are part of the cache key, the two distinct profile sets create two separate cached contexts.
+      Use OVERRIDE mode to stop inheritance.
+    ref: "concepts.md#constructor-injection-testconstructor-and-nested-tests"
+
+  - id: testing-spring-applications-068
+    difficulty: expert
+    tags: [dynamic-property-source, testcontainers, static]
+    question: |
+      What are the requirements for a @DynamicPropertySource method, and how are its values resolved?
+    options:
+      - "It must be an instance method returning a Map; values are read once at class load"
+      - "It must be a static method returning Properties, eagerly evaluated before the JVM starts"
+      - "It must be annotated @Bean and return a PropertySource"
+      - "It must be static, take a single DynamicPropertyRegistry, and register values as Suppliers that are resolved lazily when the property is first read"
+    answer: 3
+    explanation: |
+      A @DynamicPropertySource method must be static and accept a single DynamicPropertyRegistry; you add
+      properties as Suppliers (registry.add("k", supplier)) that are resolved lazily. This is why it suits
+      Testcontainers, whose URLs/ports are only known after the container starts. These properties also
+      participate in the context cache key.
+    ref: "concepts.md#context-hierarchy-and-dynamic-property-sources"
+
+  - id: testing-spring-applications-069
+    difficulty: advanced
+    tags: [context-hierarchy, parent-child, caching]
+    question: |
+      What is a genuine performance advantage of @ContextHierarchy (parent/child contexts) in a large test
+      suite?
+    options:
+      - "Child contexts never need dependency injection"
+      - "Hierarchies disable the context cache to save memory"
+      - "A shared parent context can be cached and reused across multiple test classes while their child contexts differ, avoiding rebuilding the expensive shared infrastructure"
+      - "Parent contexts bypass @DirtiesContext eviction permanently"
+    answer: 2
+    explanation: |
+      With @ContextHierarchy the parent (e.g. shared infrastructure like datasources) can be cached and
+      reused across classes while each class supplies a different child context. This avoids rebuilding the
+      expensive parent per class, a real lever for suite performance.
+    ref: "concepts.md#context-hierarchy-and-dynamic-property-sources"
+
+  - id: testing-spring-applications-070
+    difficulty: advanced
+    tags: [dynamic-property-source, initializer, comparison]
+    question: |
+      How does @DynamicPropertySource differ from registering properties via
+      @ContextConfiguration(initializers = ...)?
+    options:
+      - "@DynamicPropertySource runs after the context is refreshed; initializers run after all tests"
+      - "There is no difference; they are aliases"
+      - "@DynamicPropertySource is declarative with lazily-evaluated Suppliers added before refresh, whereas an ApplicationContextInitializer runs imperative setup code at a fixed bootstrap point before refresh"
+      - "Initializers cannot register property sources at all"
+    answer: 2
+    explanation: |
+      @DynamicPropertySource is a declarative static method whose Supplier values are evaluated lazily when
+      first read, added to the Environment before refresh. An ApplicationContextInitializer runs arbitrary
+      imperative code against the context at a fixed point during bootstrap (the older Testcontainers
+      approach). Both can register properties, but the mechanism and evaluation timing differ.
+    ref: "concepts.md#context-hierarchy-and-dynamic-property-sources"
+
+  - id: testing-spring-applications-071
+    difficulty: expert
+    tags: [mockmvc, standalone, fidelity]
+    question: |
+      A controller test passes with MockMvcBuilders.standaloneSetup(controller) but the same request 500s in
+      production. The controller relies on a custom @ControllerAdvice exception handler and a custom Jackson
+      module. Why the discrepancy?
+    options:
+      - "standaloneSetup uses a real servlet container that behaves differently"
+      - "standaloneSetup builds a minimal defaulted MVC setup; your custom @ControllerAdvice and Jackson module are NOT registered unless added explicitly, so behavior diverges from the full context"
+      - "standaloneSetup always disables exception handling"
+      - "The production failure is unrelated; standaloneSetup and webAppContextSetup are identical"
+    answer: 1
+    explanation: |
+      standaloneSetup registers only the given controller with a minimal, defaulted MVC infrastructure —
+      custom @ControllerAdvice, message converters/Jackson modules, interceptors, and argument resolvers are
+      absent unless you register them on the builder. webAppContextSetup uses the real beans and reproduces
+      production behavior, which is why fidelity-sensitive tests should use it.
+    ref: "concepts.md#mockmvc-for-web-layer-tests"
+
+  - id: testing-spring-applications-072
+    difficulty: expert
+    tags: [mockmvc, security, filters]
+    question: |
+      An endpoint requires authentication (returns 401 unauthenticated in production). A MockMvc test built
+      with webAppContextSetup(wac).build() gets 200 for an unauthenticated request. What is the most likely
+      cause?
+    options:
+      - "MockMvc always bypasses authentication by design and cannot test security"
+      - "The Spring Security filter chain is not applied unless you add it (e.g. .apply(springSecurity()) or .addFilters(...)); a bare MockMvc dispatches straight to the controller"
+      - "The 401 requires a real socket, which MockMvc never opens"
+      - "webAppContextSetup disables all filters permanently"
+    answer: 1
+    explanation: |
+      MockMvc dispatches through the DispatcherServlet but does not automatically include servlet filters
+      like Spring Security's filter chain. You must register them, e.g. via Security's springSecurity()
+      MockMvc configurer or addFilters(...). Without it, the request reaches the controller unfiltered and
+      returns 200.
+    ref: "concepts.md#mockmvc-for-web-layer-tests"
+
+  - id: testing-spring-applications-073
+    difficulty: advanced
+    tags: [mockmvc, async, dispatch]
+    question: |
+      A controller returns a DeferredResult/Callable. A MockMvc test asserts the JSON body directly after
+      perform(...) and fails/finds an empty body. What is missing?
+    options:
+      - "You must call asyncDispatch(mvcResult) to complete the async request before asserting the final response"
+      - "Async controllers cannot be tested with MockMvc at all"
+      - "You must start a real embedded server for async"
+      - "You must annotate the test with @Async"
+    answer: 0
+    explanation: |
+      For async controllers, the initial perform returns before the deferred result completes. You capture
+      the MvcResult (andReturn()) and re-dispatch with asyncDispatch(mvcResult) to obtain the final
+      response, then assert on it. MockMvc simulates async dispatch rather than running it on a container.
+    ref: "concepts.md#mockmvc-for-web-layer-tests"
+
+  - id: testing-spring-applications-074
+    difficulty: advanced
+    tags: [testbean, enforce-override, strategy]
+    question: |
+      A test declares @TestBean(enforceOverride = true) on a field whose type has NO matching bean in the
+      context. What is the outcome?
+    options:
+      - "A new bean is created from the factory method because @TestBean defaults to REPLACE_OR_CREATE"
+      - "The test fails: enforceOverride=true switches the strategy to strict REPLACE, which requires an existing bean to override"
+      - "The field is left null and the test proceeds"
+      - "enforceOverride only affects Mockito annotations, not @TestBean"
+    answer: 1
+    explanation: |
+      @TestBean normally uses REPLACE_OR_CREATE (creates the bean if absent). Setting enforceOverride=true
+      makes it strict REPLACE, so if no corresponding bean exists the override fails rather than creating
+      one. The same enforceOverride semantics apply to @MockitoBean.
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-075
+    difficulty: advanced
+    tags: [mockitobean, type-level, repeatable]
+    question: |
+      How do you use @MockitoBean at the TYPE (class) level rather than on a field, and what constraint applies?
+    options:
+      - "You cannot; @MockitoBean is only valid on fields"
+      - "Supply the bean(s) to mock via the types attribute, e.g. @MockitoBean(types = {OrderService.class, UserService.class}); the annotation is repeatable, and when a name is given, types must contain a single type"
+      - "You must combine it with @TestConfiguration and a nested class"
+      - "Type-level mocking requires enforceOverride = true"
+    answer: 1
+    explanation: |
+      At the type level you specify targets via the types attribute (there is no field to infer from). The
+      annotation is repeatable and usable as a meta-annotation; if you provide an explicit name, types must
+      contain exactly one type.
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-076
+    difficulty: expert
+    tags: [caching, failure, spring-6.1]
+    question: |
+      In Spring Framework 6.1+, what happens the second time a test requests a context configuration whose
+      initial load already failed with a bean-creation exception?
+    options:
+      - "The framework retries the full context load, potentially failing slowly again"
+      - "The framework remembers the load failure for that cache key and fails fast with the recorded exception instead of retrying the expensive load"
+      - "The framework silently returns an empty context"
+      - "The test is skipped automatically"
+    answer: 1
+    explanation: |
+      As of Spring 6.1 the context cache records load failures, so subsequent tests requesting the same
+      (broken) configuration fail fast with the cached exception rather than repeatedly attempting the slow,
+      doomed load. Before 6.1 each matching test retried the load.
+    ref: "concepts.md#loading-and-caching-the-application-context-across-tests"
+
+  - id: testing-spring-applications-077
+    difficulty: advanced
+    tags: [mockitospybean, factorybean, scoped-proxy]
+    question: |
+      Which statement about @MockitoSpyBean's WRAP behavior is correct?
+    options:
+      - "For a FactoryBean target, it wraps the FactoryBean itself, not the produced object"
+      - "It can spy a scoped-proxy bean (proxyMode = TARGET_CLASS) without issue"
+      - "For a FactoryBean target it wraps the object the factory PRODUCES, and it cannot spy a scoped-proxy target (that fails with an exception)"
+      - "It creates a new instance to spy even when the bean is missing"
+    answer: 2
+    explanation: |
+      With WRAP, a FactoryBean's produced object is wrapped in the spy (not the factory). Spying a
+      scoped-proxy target (e.g. @Scope(proxyMode = TARGET_CLASS)) is unsupported and throws. WRAP also
+      requires exactly one existing candidate, so it never creates a bean.
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-078
+    difficulty: expert
+    tags: [testexecutionlisteners, sql, transaction, ordering]
+    question: |
+      Given the default listener ordering, why can an @Sql script with INFERRED mode detect and join the
+      test's transaction?
+    options:
+      - "Because SqlScriptsTestExecutionListener starts its own transaction independent of the test"
+      - "Because TransactionalTestExecutionListener opens the test transaction before SqlScriptsTestExecutionListener runs, so at beforeTestMethod the SQL listener sees an active Spring-managed transaction and joins it"
+      - "Because @Sql always runs on a separate thread that inherits the transaction"
+      - "Because the SQL listener runs before DI, guaranteeing a transaction exists"
+    answer: 1
+    explanation: |
+      The transactional listener is ordered so the test transaction is active by the time
+      SqlScriptsTestExecutionListener executes the scripts at beforeTestMethod. With INFERRED mode the SQL
+      listener detects that active Spring-managed transaction and joins it, so the script's changes roll back
+      with the test.
+    ref: "concepts.md#testexecutionlisteners-and-execution-order"
+
+  - id: testing-spring-applications-079
+    difficulty: advanced
+    tags: [bean-override, non-singleton, factorybean]
+    question: |
+      What happens when a bean-override annotation (e.g. @MockitoBean or @TestBean with REPLACE) targets a
+      PROTOTYPE-scoped bean or a FactoryBean?
+    options:
+      - "The override is rejected because only singletons can be overridden"
+      - "A prototype target is replaced with a singleton (its definition converted to singleton); for a FactoryBean, REPLACE replaces the FactoryBean itself with a singleton"
+      - "The prototype scope is preserved and a new mock is produced on each getBean call"
+      - "The FactoryBean's getObjectType() is ignored and the raw factory is injected"
+    answer: 1
+    explanation: |
+      Overriding a non-singleton converts the bean definition to singleton and replaces it with the single
+      override instance. For a FactoryBean, REPLACE/REPLACE_OR_CREATE replaces the FactoryBean itself with a
+      singleton (whereas WRAP/spy wraps the produced object).
+    ref: "concepts.md#bean-override-internals-with-testbean-mockitobean-and-mockitospybean"
+
+  - id: testing-spring-applications-080
+    difficulty: expert
+    tags: [nested-test-configuration, override, inherit]
+    question: |
+      A base test class uses @NestedTestConfiguration(OVERRIDE). What is the effect on its @Nested classes?
+    options:
+      - "Nested classes still inherit the enclosing configuration; OVERRIDE only affects profiles"
+      - "Nested classes (and their subclasses/nested classes recursively) STOP inheriting the enclosing class's Spring configuration and must declare their own"
+      - "OVERRIDE forces every nested class to share a single context"
+      - "OVERRIDE is only valid on the @Nested class itself, not the enclosing class"
+    answer: 1
+    explanation: |
+      The default @NestedTestConfiguration mode is INHERIT (nested classes inherit enclosing config).
+      OVERRIDE flips this so nested classes no longer inherit and must supply their own configuration; the
+      mode applies recursively to the annotated class and its subclasses/nested classes.
+    ref: "concepts.md#constructor-injection-testconstructor-and-nested-tests"
+
+  - id: testing-spring-applications-081
+    difficulty: advanced
+    tags: [caching, diagnostics, logging]
+    question: |
+      What is the quickest built-in way to diagnose why a test suite is creating far more ApplicationContexts
+      than expected?
+    options:
+      - "Add @DirtiesContext to every class and count the rebuilds"
+      - "Set the org.springframework.test.context.cache logger to DEBUG to log ContextCache hit/miss/size statistics"
+      - "Increase spring.test.context.cache.maxSize until the warnings stop"
+      - "Run each test class in its own JVM fork"
+    answer: 1
+    explanation: |
+      Enabling DEBUG logging for org.springframework.test.context.cache makes the framework log ContextCache
+      statistics (hit count, miss count, size, parent contexts), which quickly reveals how many distinct
+      contexts are being built and why — the fastest diagnostic for context proliferation.
+    ref: "concepts.md#loading-and-caching-the-application-context-across-tests"

@@ -117,6 +117,13 @@ Key details interviewers probe:
 - **Other advice types use `JoinPoint`** (not `ProceedingJoinPoint`) as an optional first parameter to introspect args, signature, and target.
 - **Advice ordering.** Around the same join point, on entry the order is `@Around` (before `proceed`) → `@Before`; on exit it is `@AfterReturning`/`@AfterThrowing` → `@After` → `@Around` (after `proceed`). Note: in Spring Framework 5.2.7+ the ordering for multiple advice methods *within the same aspect* was made deterministic based on advice type (`@Around`, then `@Before`, then `@After`, then `@AfterReturning`, then `@AfterThrowing` on the "after" side). Ordering between *different* aspects is controlled by `@Order` / `Ordered`.
 
+Deeper details a senior interviewer probes about `@Around`:
+
+- **Declare the return type as `Object`, not `void`.** If an `@Around` method is declared `void`, Spring always returns `null` to the caller and the value produced by `proceed()` is discarded — even if the target returned something. This silently corrupts non-void target methods. Always declare `Object` (or the exact matching type) and `return` the value from `proceed()`.
+- **`proceed()` vs `proceed(Object[])`.** Calling `proceed()` with no arguments forwards the *original* call arguments to the target. The overload `proceed(Object[] args)` lets `@Around` **substitute** arguments before the target runs — the canonical way to sanitize, decorate, or normalize inputs. In Spring's proxy model the array positions map to the join-point arguments; this is one behavioral difference from aspects compiled with the native AspectJ (`ajc`) weaver, where the `proceed` argument count must match the *advice's* bound parameters instead.
+- **Argument binding.** Instead of positional `args()` indexing, you can name pointcut bindings (`args(pattern)`, `@annotation(audited)`, `this(svc)`, `target(t)`, `@args(...)`) and declare matching typed parameters on the advice method. Binding also acts as a *matching filter*: `args(String)` only matches when the runtime argument is a `String`. Likewise `@AfterReturning(returning = "r")` where `r` is typed `List` only fires when the actual return value is assignable to `List` — a subtle way advice can be skipped even though the pointcut's `execution(...)` part matched.
+- **Least-powerful-advice principle.** Prefer `@Before`/`@AfterReturning` over `@Around` when you do not need to control invocation or mutate the result — `@Around` is easy to misuse (forgotten `proceed()`, wrong return type, swallowed exceptions).
+
 ---
 
 ## Aspect declaration and EnableAspectJAutoProxy
@@ -198,6 +205,14 @@ Important nuances:
 - **Inject by interface, not by concrete class, when using JDK proxies.** A JDK proxy is not an instance of the target class, so `@Autowired MyServiceImpl impl` fails to inject a JDK proxy — autowire the interface (`MyService`) instead.
 - Regardless of mechanism, the proxy delegates to a single target instance; both approaches produce a runtime (weaving) proxy.
 
+**Deeper internals:**
+
+- **Fields are never proxied — only methods are intercepted.** Both proxy types dispatch on *method invocation*. A JDK proxy holds a separate target instance and forwards; a CGLIB proxy is a subclass whose own fields are typically **never populated** (Objenesis instantiates it without running the constructor, and Spring wires the *target*, not the proxy shell). Consequences: (1) reading a field directly on the proxy sees `null`/defaults, which is why advised methods must access state via getters that route to the target; (2) with CGLIB the target's `final` fields and constructor-initialized state live on the target, not the proxy subclass.
+- **Objenesis and constructors.** Since Spring 4.0, CGLIB proxies are instantiated via Objenesis, bypassing the constructor, so the constructor is **not** invoked twice and a no-arg constructor is not required. If the JVM cannot bypass constructor invocation, Spring falls back to normal instantiation and the constructor may run twice — visible in debug logs.
+- **`equals`/`hashCode`/`toString`.** `Object` methods are generally **not advised**. JDK proxies handle `equals`/`hashCode` specially (identity-ish semantics on the proxy). This matters when proxies are placed in `HashSet`/`HashMap` keys.
+- **`AopUtils` / `AopProxyUtils`.** To reason about a proxied bean at runtime, use `AopUtils.isAopProxy()`, `isJdkDynamicProxy()`, `isCglibProxy()`, and `AopProxyUtils.ultimateTargetClass(bean)` to recover the real class behind the proxy. `bean.getClass()` on a CGLIB proxy returns a generated name like `MyService$$SpringCGLIB$$0` (or the older `$$EnhancerBySpringCGLIB$$` form).
+- **`getBean(MyServiceImpl.class)` and `@Qualifier`.** Under JDK proxying, requesting the bean by its concrete class throws `NoSuchBeanDefinitionException`/`NoUniqueBeanDefinitionException`-style failures because the exposed type is the interface. This is the runtime face of the "inject by interface" rule.
+
 ---
 
 ## Self-invocation limitation
@@ -231,6 +246,14 @@ Ways to deal with it (intro level — know that the limitation exists and the co
 
 This limitation is a direct consequence of the proxy model and is one of the most commonly asked "gotcha" questions about Spring AOP.
 
+**Subtle extensions of the same rule:**
+
+- **Constructor-time calls are never advised.** If a target invokes an advised method from its own constructor, the proxy does not yet exist (the proxy wraps the fully constructed bean via a `BeanPostProcessor` *after* initialization), so no advice runs — regardless of whether the call is "external".
+- **Lifecycle-callback calls.** Calls made from `@PostConstruct` or an `InitializingBean.afterPropertiesSet()` run on the raw target too, before/around proxy creation, so their internal advised calls are not intercepted.
+- **`@Async` self-invocation returns synchronously.** A self-invoked `@Async` method not only skips the async advice — it runs on the caller's thread and returns immediately, which is a common source of "why isn't this running in the background" confusion.
+- **`AopContext.currentProxy()` needs `exposeProxy=true`.** Without `@EnableAspectJAutoProxy(exposeProxy = true)`, `AopContext.currentProxy()` throws `IllegalStateException: Cannot find current proxy` because the proxy is not bound to the thread-local. `exposeProxy` has a small per-call cost since it stores/clears a `ThreadLocal` around every proxied invocation.
+- **Self-injection ordering.** Injecting a bean into itself (`@Autowired private OrderService self;`) works but creates a self-reference that must be resolvable; with strict constructor injection this is a circular dependency, so self-injection is usually done via field/setter injection or `@Lazy`.
+
 ---
 
 ## Spring AOP vs AspectJ
@@ -248,6 +271,34 @@ Both use the same annotations and pointcut language, but they are fundamentally 
 | **Complexity** | Simpler, sufficient for most needs | More powerful but heavier to set up |
 
 **Key takeaway:** Spring AOP intentionally covers the "80% case" (method-level cross-cutting on beans) with zero build changes. Reach for full AspectJ only when you need capabilities Spring AOP cannot provide: advising constructors or field access, advising non-Spring/`new`-created objects, or making self-invocations trigger advice. Spring can also *drive* AspectJ load-time weaving via `@EnableLoadTimeWeaving` / `<context:load-time-weaver/>` when you need it — the two are not mutually exclusive.
+
+---
+
+## Proxy creation internals and bean post-processing
+
+Spring AOP proxies are created by an `AbstractAutoProxyCreator` — a `SmartInstantiationAwareBeanPostProcessor`. `@EnableAspectJAutoProxy` registers the `AnnotationAwareAspectJAutoProxyCreator` subclass, which understands both `@AspectJ` aspects and Spring's low-level `Advisor` beans.
+
+Key timing and ordering facts:
+
+- **Proxies are created in `postProcessAfterInitialization`.** For a normally created bean, wrapping happens *after* the target is fully instantiated, populated, and initialized (`@PostConstruct`/`afterPropertiesSet` have run on the raw target). This is why constructor/init-time internal calls are unadvised.
+- **Early proxy references for circular dependencies.** When beans form a cycle, the auto-proxy creator can expose an *early* proxy via `getEarlyBeanReference` (the "early singleton reference" mechanism) so the injected reference is already the proxy. If a bean that needs proxying is injected into another bean mid-cycle and cannot be proxied early consistently, Spring throws `BeanCurrentlyInCreationException` or a "wrapped version" warning.
+- **Multiple `BeanPostProcessor`s and `@Order`.** If several post-processors both want to wrap a bean (e.g., an AOP proxy creator and a custom BPP), the *order of the post-processors* determines nesting. `AbstractAutoProxyCreator` itself is ordered, and a bean already proxied is not re-proxied — matching advisors are merged into the single existing proxy where possible.
+- **`@Transactional`, `@Cacheable`, `@Async`, and custom `@Aspect`s share one proxy.** They are all realized as `Advisor`s in a single interceptor chain around the bean, ordered by their advisor precedence (`@Order`, `Ordered`, or framework-assigned values such as `Ordered.LOWEST_PRECEDENCE` for the transaction advisor by default). Getting `@Transactional` and a custom aspect to interleave correctly is purely an ordering problem.
+- **`@Configuration` classes are themselves CGLIB-proxied**, but by a *different* mechanism (the `ConfigurationClassEnhancer`, to enforce inter-`@Bean` singleton semantics), not by the AOP auto-proxy creator. Do not conflate the two.
+
+## Advisor chain, MethodInterceptor, and matching
+
+Under the hood every piece of advice becomes an `Advisor` = `Pointcut` + `Advice`, and each advice type is adapted into an `org.aopalliance.intercept.MethodInterceptor`. At invocation time a `ReflectiveMethodInvocation` (JDK) or CGLIB equivalent walks the interceptor chain, each interceptor calling `invocation.proceed()` to reach the next link, ending at the target method. `@Around` maps most directly to a `MethodInterceptor`; `@Before`, `@AfterReturning`, etc. are wrapped by adapter interceptors that call the target at the right point.
+
+- **`execution` matching is static (per method); `args`/`this`/`target`/`@annotation` with runtime binding can be dynamic (per invocation).** Purely static pointcuts are matched once and cached, so they are cheap. Pointcuts requiring runtime argument type checks are evaluated on every call and are more expensive — relevant for hot paths.
+- **Pointcut evaluation cost.** Broad `execution(* com..*(..))` pointcuts force the auto-proxy creator to test many beans at startup and can proxy far more beans than intended, adding startup cost and per-call indirection. Narrow with `within(...)` or bean-name scoping.
+- **`this()` vs `target()`.** `this(Foo)` matches when the *proxy* is an instance of `Foo`; `target(Foo)` matches when the *target* is. Under JDK proxying the proxy is not an instance of the concrete class, so `this(ConcreteClass)` may fail to match where `target(ConcreteClass)` succeeds — a genuine trap.
+
+## Thread-safety and performance
+
+- **Proxies and advisor chains are thread-safe and stateless per call.** A single proxy instance serves all threads; per-invocation state lives on the stack (`MethodInvocation`). Aspect *beans* are singletons by default, so any mutable field you add to an aspect is shared across threads — keep aspects stateless or use `ThreadLocal`/concurrent structures.
+- **Overhead.** Each proxied call adds a small, bounded cost: interceptor-chain traversal plus reflective (JDK) or generated (CGLIB) dispatch. CGLIB dispatch via generated `FastClass`/index is generally faster than JDK reflective invocation. The cost is per-call and negligible versus I/O, but broad pointcuts on tight in-memory loops can show up in profiles.
+- **`exposeProxy` and thread-locals** add a `ThreadLocal` set/reset around each call; enable it only when `AopContext.currentProxy()` is actually needed.
 
 ---
 

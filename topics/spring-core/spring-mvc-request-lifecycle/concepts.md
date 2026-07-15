@@ -104,6 +104,14 @@ Client → [Servlet Container] → DispatcherServlet
 
 Key distinction: a controller that returns a **view name** goes through the `ViewResolver`/`View` render path; a controller that returns a **response body** (`@ResponseBody`, `@RestController`, or `ResponseEntity`) bypasses view resolution entirely and uses an `HttpMessageConverter` to serialize the return value.
 
+### Gotcha: postHandle timing for body-writing handlers
+
+Interviewers love this one. For a **view-rendering** handler, `postHandle` runs *after* the handler returns but *before* `view.render(...)`, so it can still meaningfully mutate the `ModelAndView`. For a **`@ResponseBody`/`ResponseEntity`** handler, the return-value handler (`RequestResponseBodyMethodProcessor`) invokes the `HttpMessageConverter` and **writes the body to the response output stream during `HandlerAdapter.handle(...)`, before `postHandle` is called**. By the time `postHandle` runs, the `ModelAndView` is `null` and the response may already be **committed** — so trying to add headers or change the status there is silently ineffective. If you must alter a serialized response, use a `ResponseBodyAdvice`, a `Filter`, or `@ControllerAdvice`, not `postHandle`.
+
+### Gotcha: what actually happens on an exception
+
+If the handler (or a `preHandle`, or view rendering) throws, `postHandle` is **skipped**. `DispatcherServlet` catches the exception, walks its `HandlerExceptionResolver` chain to produce an (error) `ModelAndView`, renders it, and then calls `afterCompletion` with the exception. Interceptors whose `preHandle` already returned `true` still get `afterCompletion` (in reverse order); an interceptor whose `preHandle` returned `false` or was never reached does **not**. `DispatcherServlet` tracks the index of the last successfully-executed `preHandle` to know exactly which `afterCompletion` callbacks to fire.
+
 ---
 
 ## HandlerMapping and HandlerAdapter
@@ -407,6 +415,104 @@ public ResponseEntity<UserDto> create(@RequestBody CreateUserRequest req) {
 | `String` (in `@Controller`) | no | no | no (it's a view name) | yes |
 | `@ResponseBody` object | fixed 200 (or `@ResponseStatus`) | limited | yes | no |
 | `ResponseEntity<T>` | yes (dynamic) | yes | yes | no |
+
+---
+
+## Exception Resolution Internals
+
+When a handler or view render throws, `DispatcherServlet.processHandlerException(...)` iterates its ordered list of `HandlerExceptionResolver`s and uses the **first** that returns a non-null `ModelAndView` (an empty `ModelAndView` means "handled, nothing to render"). `@EnableWebMvc` registers three, in this precedence order:
+
+1. **`ExceptionHandlerExceptionResolver`** — dispatches to `@ExceptionHandler` methods (local to the controller, then to `@ControllerAdvice` beans). This runs first, so a matching `@ExceptionHandler` wins over `@ResponseStatus` or the default resolver.
+2. **`ResponseStatusExceptionResolver`** — handles exceptions annotated with `@ResponseStatus` and `ResponseStatusException`.
+3. **`DefaultHandlerExceptionResolver`** — translates standard Spring MVC exceptions (`HttpRequestMethodNotSupportedException` → 405, `HttpMediaTypeNotSupportedException` → 415, `MissingServletRequestParameterException` → 400, etc.) into status codes.
+
+Key subtleties senior candidates should know:
+
+- **`@ExceptionHandler` method matching** picks the handler whose declared exception type is the *closest supertype* of the thrown exception (nearest match in the class hierarchy wins, not declaration order). If two `@ExceptionHandler`s are equally specific, an `IllegalStateException` (ambiguous) is raised.
+- **Controller-local `@ExceptionHandler` beats `@ControllerAdvice`.** A local handler is always preferred over a global one for the same controller.
+- **`@ControllerAdvice` ordering** among multiple advices honors `@Order`/`Ordered`; the first advice with a matching handler wins.
+- **Exceptions inside `@ExceptionHandler` methods, `afterCompletion`, or during body serialization after the response is committed** cannot be re-resolved cleanly — the container's default error page (or the servlet error dispatch) takes over.
+- `HandlerExceptionResolver`s only handle exceptions thrown **from the handler or during rendering inside `doDispatch`** — not exceptions thrown in a `Filter` (those are outside `DispatcherServlet`) or after the response is committed.
+- Since Spring 6, `ResponseEntityExceptionHandler` (an `@ControllerAdvice` base class) and the `ProblemDetail` / `ErrorResponse` model (originally per RFC 7807, now RFC 9457, which obsoletes it) provide a standardized body for framework exceptions.
+
+---
+
+## HandlerMapping Ordering and Path Matching
+
+`DispatcherServlet` sorts all detected `HandlerMapping` beans by `Ordered`/`@Order` and consults them **in order**, using the first that returns a non-null chain. By default `RequestMappingHandlerMapping` has order 0, `BeanNameUrlHandlerMapping` order 2, and the resource/`SimpleUrlHandlerMapping` handlers are ordered near `Integer.MAX_VALUE - n` so annotated controllers win over static-resource fallbacks.
+
+### Best-match selection within RequestMappingHandlerMapping
+
+When several `@RequestMapping`s match one request, Spring does **not** pick by declaration order. It builds all matching `RequestMappingInfo`s and sorts them with a `RequestMappingInfo` comparator that ranks by specificity: an exact path beats a `{var}` template, which beats a single `*`, which beats `**`; then method, params, headers, `consumes`, and `produces` conditions break ties. The best and second-best are compared — if they are *equally* specific, a `IllegalStateException: Ambiguous handler methods` is thrown at request time (not startup).
+
+### PathPattern vs AntPathMatcher
+
+Spring 5.3+ introduced `PathPattern` (parsed path matching) as the default for Spring MVC via `PathPatternParser`, replacing string-based `AntPathMatcher` for most cases. Differences that trip people up:
+
+- `PathPattern` only allows `**` at the **end** of a pattern; `/a/**/b` is illegal with `PathPatternParser` but was allowed by `AntPathMatcher`.
+- `PathPattern` uses a pre-parsed `RequestPath` and is faster and allocation-light on the hot path.
+- The historical **suffix pattern matching** (`/foo` also matching `/foo.*`) and trailing-slash matching (`/foo` matching `/foo/`) are **deprecated and disabled by default** in Spring 6. `setUseTrailingSlashMatch(true)` is removed; you must map both explicitly or add a redirect. This is a common migration break: `/users` no longer matches `/users/`.
+
+---
+
+## Async Request Processing
+
+A handler may return `DeferredResult<T>`, `Callable<T>`, `WebAsyncTask<T>`, `CompletableFuture<T>`/`CompletionStage`, or a reactive type (with the reactive adapter). This starts **Servlet 3.0 async processing**: the container thread that `DispatcherServlet` ran on is released back to the pool *before* the response is produced, and the result is produced later on another thread.
+
+Mechanics and gotchas:
+
+- On an async return, `DispatcherServlet` calls `request.startAsync()`, the request enters async mode, and `doDispatch` returns without rendering. `postHandle`/`afterCompletion` of `HandlerInterceptor` are **not** the async-aware hooks — use `AsyncHandlerInterceptor.afterConcurrentHandlingStarted(...)` to observe the point where the container thread is released.
+- When the async result is set, the container **re-dispatches** the request to `DispatcherServlet` (a `DispatcherType.ASYNC` dispatch). The mapping/handler is not re-run; instead the produced value flows through return-value handling and rendering. Interceptors and filters mapped for `ASYNC` dispatch run again on this second dispatch.
+- **`Callable`** is executed on a Spring-managed `AsyncTaskExecutor` (by default a `SimpleAsyncTaskExecutor` — which does **not** pool threads; configure a real executor via `WebMvcConfigurer.configureAsyncSupport`). **`DeferredResult`** is completed by *your* code from any thread (e.g. a message listener), decoupled from any Spring thread.
+- **`ThreadLocal`-bound context is lost across the thread hop** unless propagated: request-scoped beans, `SecurityContextHolder` (default `MODE_THREADLOCAL`), and `RequestContextHolder` are thread-bound. Spring re-establishes request attributes on the async dispatch thread, but arbitrary `ThreadLocal`s and the security context need explicit propagation (e.g. `DelegatingSecurityContextRunnable`, `TaskDecorator`).
+- Timeouts: an unfulfilled `DeferredResult`/`Callable` triggers `AsyncRequestTimeoutException` (default 503) after the configured timeout; you can supply `onTimeout`/`onError` callbacks.
+
+---
+
+## Data Binding, Type Conversion, and Validation Internals
+
+`@RequestParam`, `@PathVariable`, and `@ModelAttribute` values are converted through Spring's `WebDataBinder`, which uses the shared `ConversionService` (plus legacy `PropertyEditor`s). Points that separate seniors:
+
+- **`@InitBinder`** methods let a controller customize the `WebDataBinder` per request — register custom `PropertyEditor`s/`Formatter`s, set allowed/disallowed fields (`setAllowedFields`, `setDisallowedFields`) to prevent mass-assignment, and set required fields. `@InitBinder` methods run **before** argument resolution for each handler invocation.
+- **`@ModelAttribute` binding never fails the request by itself** — binding/type-conversion errors are recorded in the `BindingResult`. But the `BindingResult` parameter **must immediately follow** the `@ModelAttribute` parameter in the method signature; otherwise Spring throws `BindException` (400) instead of giving you the errors to inspect. Order matters.
+- **`@Valid`/`@Validated` on `@ModelAttribute`** → violations go into `BindingResult` (if present) so you can render the form again. **`@Valid` on `@RequestBody`** → violations throw `MethodArgumentNotValidException` (400) unless a following `Errors`/`BindingResult` is declared.
+- **`@Validated` (Spring) vs `@Valid` (Jakarta):** only Spring's `@Validated` supports **validation groups**; `@Valid` does not. `@Validated` at the *class* level activates method-level validation via `MethodValidationPostProcessor` (violations → `ConstraintViolationException`, a different path than `MethodArgumentNotValidException`).
+- **`@RequestParam Map<String,String>`** binds *all* parameters; a `@RequestParam` with no name and a `Map` type behaves differently from a named one — subtle but testable.
+- Conversion failure for a typed `@RequestParam`/`@PathVariable` (e.g. `?age=abc` into an `int`) throws `MethodArgumentTypeMismatchException` → 400, distinct from a *missing* parameter (`MissingServletRequestParameterException`).
+
+---
+
+## Content Negotiation Internals
+
+For response serialization, `ContentNegotiationManager` determines the requested media types via a strategy list, in this default priority: (1) **`Accept` header** (`HeaderContentNegotiationStrategy`), unless overridden. In Spring 6 the legacy **path-extension** strategy (`.json`) is disabled by default (security and ambiguity concerns); **query-parameter** strategy (`?format=json`) is off unless enabled via `configureContentNegotiation`. `RequestMappingHandlerAdapter` then intersects the requested types with the `produces` condition and the media types each `HttpMessageConverter` can write, picking the most specific match.
+
+Gotchas:
+
+- **`produces` on the mapping affects both routing and the chosen content type.** A request whose `Accept` cannot be satisfied by any `produces`/converter combination yields **406 Not Acceptable**.
+- **Converter order matters**: converters are consulted in registration order; the first that `canWrite(type, mediaType)` wins. Adding a custom converter via `extendMessageConverters` vs `configureMessageConverters` differs: the latter **replaces** the entire default list (you lose Jackson, `String`, `ByteArray`, etc.), the former appends/tweaks. This is a frequent "why did my JSON stop working" trap.
+- The `MappingJackson2HttpMessageConverter` supports `application/json` and, historically, `application/*+json`; ordering it before a more generic converter matters for `text/plain` String returns.
+
+---
+
+## FrameworkServlet, Initialization, and Thread-Safety
+
+`DispatcherServlet` is a singleton servlet instance; the container may serve **many concurrent requests through the same instance**, so all its strategy beans (`HandlerMapping`, `HandlerAdapter`, converters) must be thread-safe — and they are designed to be effectively immutable after `refresh()`. Notes:
+
+- `FrameworkServlet.initWebApplicationContext()` builds/attaches the `WebApplicationContext`; `DispatcherServlet.onRefresh()` → `initStrategies()` populates the strategy fields. This happens **once** at servlet init (or on context refresh), not per request.
+- **`@Controller` singletons must be stateless.** Mutable instance fields shared across requests are a classic concurrency bug. Per-request state belongs in method parameters, request/session-scoped beans (injected as scoped proxies), or `ThreadLocal`-backed holders like `RequestContextHolder`.
+- `RequestContextHolder` exposes the current request via a `ThreadLocal`; it is populated by `FrameworkServlet` (or `RequestContextFilter`/`RequestContextListener`) and is why you can retrieve request-scoped beans deep in the service layer — but it breaks across async/other-thread hops unless propagated.
+- Multiple `DispatcherServlet`s can coexist (e.g. one for `/api/*`, one for `/admin/*`), each with its own child context but sharing the one root context.
+
+---
+
+## Filter Ordering and DelegatingFilterProxy
+
+Filters run outside `DispatcherServlet`, wrapping it. Their **order is determined by the servlet container's filter chain**, not by Spring's `Ordered` (in plain Spring MVC with `web.xml`/programmatic registration, order follows `<filter-mapping>` declaration order or the registration order in `WebApplicationInitializer`). Key facts:
+
+- **`DelegatingFilterProxy`** is a container-managed `Filter` that delegates to a Spring bean of type `Filter` found by name in the (root) `WebApplicationContext`. This is how Spring Security's `springSecurityFilterChain` is wired: the container manages a thin proxy, the real filter is a Spring bean with full DI.
+- **`OncePerRequestFilter`** guards against running twice on the same request — important because a single request can pass through the filter chain multiple times across `FORWARD`/`INCLUDE`/`ASYNC` dispatches. It keys off a request attribute so `doFilterInternal` runs once per request, not per dispatch.
+- Because filters sit outside MVC, an exception thrown in a filter **cannot** be handled by `@ExceptionHandler`/`HandlerExceptionResolver`; it propagates to the container error handling. Security/auth done as a filter therefore produces responses before MVC ever sees the request.
+- Filters can **wrap** the request/response (e.g. `ContentCachingRequestWrapper`, `HttpServletRequestWrapper`) to cache/modify the body — something interceptors cannot do.
 
 ---
 

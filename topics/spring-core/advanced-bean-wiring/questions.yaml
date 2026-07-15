@@ -753,3 +753,739 @@ questions:
       candidates and no primary, it throws `NoUniqueBeanDefinitionException`;
       with zero it throws `NoSuchBeanDefinitionException`.
     ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"
+
+  - id: advanced-bean-wiring-043
+    difficulty: expert
+    tags: [factorybean, bean-post-processor, lifecycle]
+    question: |
+      A `FactoryBean<Widget>` returns from `getObject()` a `Widget` that has an
+      `@Autowired Repo repo` field and a `@PostConstruct init()` method. After
+      the context refreshes, `repo` is null and `init()` never ran, even though
+      `Repo` is a valid bean. Why?
+    options:
+      - "The object returned by getObject() does not go through Spring's full bean-creation lifecycle: its properties are not populated, its init methods are not called, and postProcessBeforeInitialization is not applied to it"
+      - "@Autowired and @PostConstruct are ignored on any generic type parameter of a FactoryBean"
+      - "FactoryBeans disable annotation processing for the entire context until refresh completes"
+      - "The Widget must implement FactoryBean itself to receive injection"
+    answer: 0
+    explanation: |
+      Spring treats the FactoryBean instance as a fully managed bean, but the
+      product of getObject() is constructed by your code, not by the container's
+      creation pipeline. Spring only passes the product through
+      postProcessAfterInitialization (enabling AOP proxying); it does not inject
+      fields or invoke init callbacks. You must wire and initialize the product
+      yourself inside getObject().
+    ref: "concepts.md#factorybean-versus-a-bean-factory-method"
+
+  - id: advanced-bean-wiring-044
+    difficulty: expert
+    tags: [factorybean, bean-post-processor, aop]
+    question: |
+      Given that a FactoryBean's product skips most of the bean lifecycle, how
+      does an @Transactional or other AOP aspect still manage to wrap the object
+      returned by a FactoryBean's getObject()?
+    options:
+      - "AOP does not work on FactoryBean products; you must proxy them manually"
+      - "Spring passes the product through postProcessAfterInitialization (via postProcessObjectFromFactoryBean), and the auto-proxy creator is a BeanPostProcessor that wraps it there"
+      - "Spring re-runs the full initialization lifecycle for FactoryBean products when an aspect matches"
+      - "The FactoryBean itself is proxied, and the proxy delegates getObject()"
+    answer: 1
+    explanation: |
+      The one lifecycle touchpoint the product does receive is
+      postProcessAfterInitialization, applied via
+      FactoryBeanRegistrySupport.postProcessObjectFromFactoryBean. Because the
+      AOP auto-proxy creator is a BeanPostProcessor acting in that phase, it can
+      still wrap the product even though field injection and init callbacks were
+      skipped.
+    ref: "concepts.md#factorybean-versus-a-bean-factory-method"
+
+  - id: advanced-bean-wiring-045
+    difficulty: expert
+    tags: [factorybean, type-matching, generics]
+    question: |
+      A `@Bean` method is declared `public FactoryBean myFactory() { ... }`
+      (raw `FactoryBean`, no generic argument) and its `getObjectType()` returns
+      the real product type only after construction. What is the consequence for
+      the container at startup compared to declaring `FactoryBean<Product>`?
+    options:
+      - "No difference; Spring always instantiates FactoryBeans eagerly regardless of generics"
+      - "The raw declaration causes a compile error in Spring 6"
+      - "The raw declaration forces Spring to instantiate the FactoryBean early to call getObjectType() for type matching, whereas the parameterized declaration lets Spring infer the product type from generics without instantiating it"
+      - "The parameterized declaration disables autowiring of the product by type"
+    answer: 2
+    explanation: |
+      Spring can read the declared generic type argument (FactoryBean<Product>)
+      to learn the product type without creating the factory. A raw FactoryBean
+      hides that information, so the container must instantiate the factory to
+      call getObjectType() during type matching — a hidden eager initialization.
+    ref: "concepts.md#factorybean-versus-a-bean-factory-method"
+
+  - id: advanced-bean-wiring-046
+    difficulty: expert
+    tags: [factorybean, bean-post-processor, infrastructure]
+    question: |
+      You see the log warning "Bean 'x' is not eligible for getting processed by
+      all BeanPostProcessors (for example: not eligible for auto-proxying)".
+      Which scenario most directly causes this for a FactoryBean-related bean?
+    options:
+      - "The FactoryBean returned null from getObject()"
+      - "The FactoryBean's getObjectType() returned a primitive type"
+      - "The bean name was prefixed with & in a getBean call"
+      - "A bean is instantiated during the early infrastructure phase (e.g. it is or is depended upon by a BeanPostProcessor / BeanFactoryPostProcessor) before all ordinary BeanPostProcessors are registered, so it skips their processing"
+    answer: 3
+    explanation: |
+      Beans pulled into existence during the early infrastructure phase — such
+      as BeanPostProcessors, BeanFactoryPostProcessors, and their dependencies —
+      are created before the full set of ordinary BeanPostProcessors is
+      registered. They therefore miss processing like AOP auto-proxying, which is
+      exactly what the warning reports.
+    ref: "concepts.md#factorybean-versus-a-bean-factory-method"
+
+  - id: advanced-bean-wiring-047
+    difficulty: advanced
+    tags: [factorybean, caching, isSingleton]
+    question: |
+      A FactoryBean has `isSingleton()` return `true` but its `getObject()`
+      contains `return new Widget();` and increments a counter each call. After
+      the context is up, code calls `ctx.getBean("widget")` five times. How many
+      times does `getObject()` execute, and why?
+    options:
+      - "Five times; the container calls getObject() on every lookup regardless of isSingleton()"
+      - "Zero times; the product is created only during refresh"
+      - "Five times, but only the first result is returned and the rest are discarded"
+      - "Once; the singleton product is stored in the container's factoryBeanObjectCache and reused for subsequent lookups"
+    answer: 3
+    explanation: |
+      When isSingleton() is true, Spring caches the product in a dedicated
+      factoryBeanObjectCache keyed by bean name and reuses it, so getObject()
+      runs once. Returning a fresh instance from getObject() does not defeat this
+      cache — you would need isSingleton() to return false for per-lookup
+      creation.
+    ref: "concepts.md#factorybean-versus-a-bean-factory-method"
+
+  - id: advanced-bean-wiring-048
+    difficulty: advanced
+    tags: [factorybean, ampersand-prefix, type]
+    question: |
+      With a `FactoryBean<Connection>` registered as `conn`, which pair of
+      results is correct?
+    options:
+      - "getBean(\"conn\", Connection.class) -> the FactoryBean; getBean(\"&conn\") -> a Connection"
+      - "Both getBean(\"conn\") and getBean(\"&conn\") return a Connection"
+      - "getBean(\"&conn\") throws because & is only valid in XML"
+      - "getBean(\"conn\") -> a Connection; getBean(\"&conn\", FactoryBean.class) -> the FactoryBean instance"
+    answer: 3
+    explanation: |
+      The plain name yields the product (Connection); the &-prefixed name yields
+      the FactoryBean instance itself. Requesting getBean("conn", Connection.class)
+      returns the product and getBean("&conn", FactoryBean.class) returns the
+      factory. The & prefix works programmatically, not only in XML.
+    ref: "concepts.md#factorybean-versus-a-bean-factory-method"
+
+  - id: advanced-bean-wiring-049
+    difficulty: advanced
+    tags: [lazy, injection-point, proxy, jdk-cglib]
+    question: |
+      `@Autowired @Lazy PaymentGateway gw;` is declared where `PaymentGateway`
+      is a concrete class (not an interface). What proxy does Spring inject, and
+      what must be true of the class?
+    options:
+      - "A JDK dynamic proxy; the class must implement at least one interface"
+      - "No proxy at all; @Lazy on a concrete type just delays the field assignment"
+      - "A CGLIB subclass proxy; the class must be non-final and proxyable"
+      - "A java.lang.reflect.Proxy over Object; the class is irrelevant"
+    answer: 2
+    explanation: |
+      The lazy-resolution proxy is built with ProxyFactory. For a concrete class
+      target it creates a CGLIB subclass proxy, so the class must be non-final
+      (and the relevant methods non-final). Only when the injection type is an
+      interface does Spring create a JDK dynamic proxy.
+    ref: "concepts.md#lazy-initialization-with-lazy"
+
+  - id: advanced-bean-wiring-050
+    difficulty: expert
+    tags: [lazy, circular-dependency, constructor]
+    question: |
+      To break a constructor cycle, `A(@Lazy B b)` receives a lazy proxy. But
+      A's constructor body also calls `b.warmUp()`. What happens at startup?
+    options:
+      - "Nothing changes; the proxy always fully isolates A from B"
+      - "The proxy resolves B when warmUp() is invoked during A's construction, re-entering B's creation while A is still being created and throwing BeanCurrentlyInCreationException"
+      - "warmUp() is silently ignored on a lazy proxy until after refresh"
+      - "Spring detects the call and switches B to setter injection automatically"
+    answer: 1
+    explanation: |
+      The lazy proxy defers only the lookup, not the eventual need for a real B.
+      Invoking a method on the proxy inside A's constructor forces B's resolution
+      mid-cycle, reintroducing the circular-creation failure. The @Lazy fix works
+      only if A does not call into B during its own construction.
+    ref: "concepts.md#lazy-initialization-with-lazy"
+
+  - id: advanced-bean-wiring-051
+    difficulty: advanced
+    tags: [lazy, definition-vs-injection-point]
+    question: |
+      `HeavyBean` is annotated `@Lazy` on its definition. Singleton `Consumer`
+      (not lazy) declares `@Autowired HeavyBean heavy;` with NO `@Lazy` on that
+      field. When is `HeavyBean` created?
+    options:
+      - "Eagerly at startup, because the eager Consumer's dependency must be satisfied and the injection point is not itself lazy, overriding the definition's laziness"
+      - "On first method call on heavy, because @Lazy on the definition always defers"
+      - "Never, unless getBean is called explicitly"
+      - "After the context is closed"
+    answer: 0
+    explanation: |
+      @Lazy on a definition is overridden when a non-lazy singleton depends on
+      that bean: the container must create it at startup to satisfy the
+      dependency. Real deferral requires the injection point itself to be @Lazy
+      (a proxy) or to use ObjectProvider.
+    ref: "concepts.md#lazy-initialization-with-lazy"
+
+  - id: advanced-bean-wiring-052
+    difficulty: expert
+    tags: [lazy, proxy, identity]
+    question: |
+      A field injected with `@Autowired @Lazy Cache cache;` (Cache is a concrete
+      class) is compared elsewhere with `cache == ctx.getBean(Cache.class)`.
+      What is the result and why?
+    options:
+      - "true, because the proxy is unwrapped automatically in == comparisons"
+      - "It throws a ClassCastException"
+      - "false, because 'cache' is a CGLIB proxy object whose identity differs from the real singleton returned by getBean, even though the proxy delegates to that same singleton"
+      - "true, because @Lazy proxies are interned by the container"
+    answer: 2
+    explanation: |
+      The @Lazy proxy is a distinct object standing in for the bean; reference
+      identity against the real bean is false. The proxy's TargetSource resolves
+      to the same singleton on invocation, so behavior is correct, but ==,
+      identity-sensitive maps, and (for non-matching types) instanceof can be
+      surprising.
+    ref: "concepts.md#lazy-initialization-with-lazy"
+
+  - id: advanced-bean-wiring-053
+    difficulty: advanced
+    tags: [lazy, startup, error-timing]
+    question: |
+      A bean's constructor throws an exception due to a misconfiguration. It is
+      injected everywhere via `@Lazy` proxies. What is the practical effect on
+      failure timing?
+    options:
+      - "The failure is deferred: the context refreshes successfully and the exception surfaces only at the first method call on a proxy, potentially in production traffic rather than at startup"
+      - "The context still fails fast at refresh, because @Lazy cannot delay construction errors"
+      - "The exception is swallowed permanently and the bean silently becomes null"
+      - "Spring retries construction on every proxy call until it succeeds"
+    answer: 0
+    explanation: |
+      Because the lazy proxy defers creation to first use, construction-time
+      errors no longer break startup; they appear on first invocation. This trades
+      fail-fast startup for the risk of a runtime failure under load — an
+      important trade-off when applying @Lazy broadly.
+    ref: "concepts.md#lazy-initialization-with-lazy"
+
+  - id: advanced-bean-wiring-054
+    difficulty: advanced
+    tags: [objectprovider, ordering, stream]
+    question: |
+      Beans B1 (@Order(2)), B2 (@Order(1)), B3 (no @Order) all implement
+      `Handler`. An `ObjectProvider<Handler>` is injected. How do `stream()` and
+      `orderedStream()` differ in what they yield?
+    options:
+      - "Both yield B2, B1, B3 in @Order sequence"
+      - "stream() yields them in registration/definition order ignoring @Order; orderedStream() yields them sorted by @Order (and Ordered/@Priority)"
+      - "stream() sorts by @Order; orderedStream() returns them unsorted"
+      - "Both throw because B3 has no @Order"
+    answer: 1
+    explanation: |
+      stream() returns candidates in definition order and ignores @Order, mirroring
+      List<T> injection semantics only partially — it is orderedStream() that
+      applies @Order, Ordered, and @Priority sorting. This is a frequent source of
+      "why aren't my handlers ordered" bugs.
+    ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"
+
+  - id: advanced-bean-wiring-055
+    difficulty: expert
+    tags: [objectprovider, prototype, lifecycle, destruction]
+    question: |
+      A singleton pulls prototype-scoped `Session` beans via
+      `sessionProvider.getObject()` in a loop and each `Session` implements
+      `DisposableBean` with a `destroy()` that releases a socket. After the app
+      runs for hours, sockets are exhausted. What is the root cause?
+    options:
+      - "ObjectProvider caches every prototype it creates, leaking them"
+      - "getObject() reuses one Session, so destroy() is called too early"
+      - "Spring does not manage the full lifecycle of prototype beans: it never calls destroy()/DisposableBean on them, so the caller is responsible for cleanup"
+      - "Prototype destruction only runs if the bean is @Lazy"
+    answer: 2
+    explanation: |
+      For prototypes, Spring creates and hands off the instance but does not track
+      it or invoke destruction callbacks. Each getObject() yields a new Session
+      whose destroy() Spring never calls; the client owns cleanup. This is a
+      well-known prototype gotcha, independent of whether ObjectProvider or @Lookup
+      obtained the instance.
+    ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"
+
+  - id: advanced-bean-wiring-056
+    difficulty: advanced
+    tags: [objectprovider, getifunique, primary]
+    question: |
+      Two `CacheManager` beans exist; one is annotated `@Primary`. What does
+      `provider.getIfUnique()` return?
+    options:
+      - "null, because there are multiple candidates"
+      - "It throws NoUniqueBeanDefinitionException"
+      - "A random one of the two"
+      - "The @Primary bean, because 'unique' means unambiguously resolvable to one, and @Primary provides that resolution"
+    answer: 3
+    explanation: |
+      getIfUnique() returns null only when the container cannot resolve a single
+      unambiguous candidate. With a @Primary marker among multiple candidates the
+      resolution is unambiguous, so the primary is returned rather than null.
+    ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"
+
+  - id: advanced-bean-wiring-057
+    difficulty: expert
+    tags: [objectprovider, priority, order, autowiring]
+    question: |
+      Three `Validator` beans exist: two carry only `@Order(1)` and `@Order(2)`,
+      the third carries only `@jakarta.annotation.Priority(5)`. None is
+      `@Primary`, and a single `@Autowired Validator v;` is declared (not a
+      collection). Which bean is injected, and why?
+    options:
+      - "The @Priority(5) bean is injected: @Order does not participate in single-injection candidate selection, whereas @Priority does; since it is the only candidate carrying @Priority, determineHighestPriorityCandidate selects it unambiguously"
+      - "The @Order(1) bean wins, because the lowest @Order value always decides single-injection autowiring"
+      - "It throws NoUniqueBeanDefinitionException, because three candidates match and none is @Primary"
+      - "The container silently injects the first-registered bean"
+    answer: 0
+    explanation: |
+      For single-value autowiring, @Order is used only for collection/stream
+      ordering, never to pick one winner; @Primary and @Priority participate in
+      selecting a single candidate. In determineHighestPriorityCandidate,
+      candidates without @Priority return null and are skipped, so the lone
+      @Priority(5) bean is chosen unambiguously (no exception). It would throw
+      only if two candidates tied at the same highest @Priority. This
+      @Order-vs-@Priority distinction for single injection is a classic trap.
+    ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"
+
+  - id: advanced-bean-wiring-058
+    difficulty: advanced
+    tags: [objectprovider, lazy, cycle-breaking, identity]
+    question: |
+      A team replaces `@Lazy` field injection with an injected
+      `ObjectProvider<Foo>` to break a cycle. Compared to the @Lazy proxy
+      approach, what is a concrete advantage regarding the returned object?
+    options:
+      - "ObjectProvider guarantees Foo is created eagerly, avoiding lazy pitfalls"
+      - "ObjectProvider makes Foo thread-confined to the calling thread"
+      - "ObjectProvider caches Foo in a ThreadLocal automatically"
+      - "ObjectProvider.getObject() returns the real Foo bean (no proxy), so identity, equals, and instanceof behave normally"
+    answer: 3
+    explanation: |
+      ObjectProvider defers resolution without introducing a proxy: getObject()
+      returns the actual bean, so reference identity and type checks are exact.
+      The trade-off versus @Lazy is an explicit getObject() call at the use site
+      instead of a transparent field.
+    ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"
+
+  - id: advanced-bean-wiring-059
+    difficulty: advanced
+    tags: [objectprovider, thread-safety]
+    question: |
+      Is it safe to store an injected `ObjectProvider<Foo>` in a field of a
+      singleton and call it concurrently from many threads?
+    options:
+      - "No; ObjectProvider is stateful and must be synchronized externally"
+      - "Only if Foo is a singleton; for prototypes it corrupts internal state"
+      - "Yes; the provider is a thin handle to the container, and each getObject()/stream() is an independent lookup with no shared mutable state in the handle"
+      - "No; a new ObjectProvider must be injected per request scope"
+    answer: 2
+    explanation: |
+      An ObjectProvider is a stateless handle onto the BeanFactory; concurrent
+      calls each perform their own lookup. For singletons you get the shared
+      instance, for prototypes a fresh instance per call — both thread-safe at
+      the provider level (the beans' own thread-safety is a separate concern).
+    ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"
+
+  - id: advanced-bean-wiring-060
+    difficulty: expert
+    tags: [lookup, bean-method, failure-mode]
+    question: |
+      A class `Worker` declares `@Lookup protected Command newCommand() { return null; }`
+      and is registered via a `@Bean` method: `@Bean Worker worker() { return new Worker(); }`.
+      Calling `worker.newCommand()` returns null. Why does @Lookup silently fail here?
+    options:
+      - "@Lookup only works on abstract methods, and this one is concrete"
+      - "The bean was created by a @Bean factory method returning a plain instance, so Spring did not create a CGLIB subclass; without the subclass the @Lookup method is never overridden and its original body runs"
+      - "@Lookup requires the return type to be an interface"
+      - "The method must be public for @Lookup to take effect"
+    answer: 1
+    explanation: |
+      @Lookup relies on Spring instantiating the bean via CGLIB subclassing.
+      When you return an already-constructed instance from a @Bean method (or a
+      Supplier), Spring stores that plain object and never generates the
+      overriding subclass, so the placeholder body executes and returns null.
+      @Lookup works on component-scanned/container-instantiated beans.
+    ref: "concepts.md#lookup-method-injection-with-lookup"
+
+  - id: advanced-bean-wiring-061
+    difficulty: advanced
+    tags: [lookup, resolution, by-name]
+    question: |
+      Two beans implement `Report`: `pdfReport` and `csvReport`. A class declares
+      `@Lookup("csvReport") protected abstract Report make();`. What does `make()`
+      return and on what basis?
+    options:
+      - "The csvReport, resolved by name because @Lookup has an explicit value"
+      - "The pdfReport, chosen by type since @Lookup ignores its value"
+      - "It throws NoUniqueBeanDefinitionException because two Report beans exist"
+      - "A merged proxy over both beans"
+    answer: 0
+    explanation: |
+      @Lookup with an explicit value resolves by bean name (getBean(name)), so it
+      returns csvReport unambiguously. @Lookup with no value would resolve by
+      return type and, with two candidates and no primary, would fail on
+      ambiguity.
+    ref: "concepts.md#lookup-method-injection-with-lookup"
+
+  - id: advanced-bean-wiring-062
+    difficulty: expert
+    tags: [lookup, scoped-proxy, comparison, identity]
+    question: |
+      Contrast injecting a `@Scope(value="prototype", proxyMode=TARGET_CLASS)`
+      bean as an ordinary field versus using `@Lookup`. Which statement is
+      accurate about the object the caller holds?
+    options:
+      - "Both give the caller the real prototype instance directly"
+      - "@Lookup returns a proxy while the scoped-proxy approach returns the real bean"
+      - "The scoped-proxy field holds a single proxy object that creates a new target per method invocation; @Lookup returns the real prototype instance on each method call"
+      - "Both hold a proxy that is identical by reference"
+    answer: 2
+    explanation: |
+      With a scoped proxy the injected field is one proxy object; each method
+      invocation on it resolves a fresh target under the hood (so it is
+      transparent but is a proxy). @Lookup instead returns the actual prototype
+      instance each time the lookup method is called. This affects identity and
+      instanceof semantics.
+    ref: "concepts.md#lookup-method-injection-with-lookup"
+
+  - id: advanced-bean-wiring-063
+    difficulty: advanced
+    tags: [lookup, constraints, cglib]
+    question: |
+      Which combination would prevent Spring from applying @Lookup and cause a
+      startup/definition failure or a non-overridden method?
+    options:
+      - "A private or final @Lookup method, or a final declaring class, because CGLIB cannot override it"
+      - "A protected abstract no-arg method on a non-final component-scanned class"
+      - "A method returning a prototype-scoped type"
+      - "A method annotated @Lookup with an explicit bean name"
+    answer: 0
+    explanation: |
+      CGLIB subclassing requires the declaring class to be non-final and the
+      @Lookup method to be non-final, non-private, and non-static so it can be
+      overridden. Private/final methods or a final class defeat the mechanism.
+    ref: "concepts.md#lookup-method-injection-with-lookup"
+
+  - id: advanced-bean-wiring-064
+    difficulty: expert
+    tags: [bdrpp, bfpp, ordering, static-bean]
+    question: |
+      A `@Configuration` class exposes a `BeanFactoryPostProcessor` via a
+      NON-static `@Bean` method. What negative effect does this commonly cause?
+    options:
+      - "Nothing; static vs non-static is purely stylistic for BFPP @Bean methods"
+      - "It forces the declaring @Configuration class to be instantiated very early to obtain the BFPP, before other BFPPs can post-process that config class — producing warnings and skipping full @Configuration enhancement/@Bean proxying for it"
+      - "It converts the BFPP into a BeanPostProcessor"
+      - "It causes the BFPP to run after bean instantiation instead of before"
+    answer: 1
+    explanation: |
+      Because BFPPs must be instantiated in the early phase, a non-static @Bean
+      BFPP drags its whole @Configuration class into early instantiation before
+      other BFPPs can process it. Spring recommends declaring such @Bean methods
+      static so the config class is not prematurely created.
+    ref: "concepts.md#programmatic-bean-registration-with-beandefinitionregistry"
+
+  - id: advanced-bean-wiring-065
+    difficulty: expert
+    tags: [bfpp, premature-instantiation, gotcha]
+    question: |
+      Inside a `BeanFactoryPostProcessor.postProcessBeanFactory`, code calls
+      `beanFactory.getBean(SomeService.class)` to reconfigure it. What is the
+      most serious consequence?
+    options:
+      - "It is perfectly safe because BFPPs run after all beans are created"
+      - "It throws IllegalStateException because getBean is forbidden in any post-processor"
+      - "It forces SomeService (and its dependencies) to be instantiated too early — during the BFPP phase, before all BeanPostProcessors are registered — so those beans may skip post-processing such as AOP proxying"
+      - "It only returns the bean definition metadata, never an instance"
+    answer: 2
+    explanation: |
+      BFPPs run before ordinary beans exist. Fetching a real bean there triggers
+      premature instantiation that bypasses BeanPostProcessors registered later,
+      commonly breaking auto-proxying (@Transactional, @Async). BFPPs should
+      operate on definitions/metadata, not instantiate beans.
+    ref: "concepts.md#programmatic-bean-registration-with-beandefinitionregistry"
+
+  - id: advanced-bean-wiring-066
+    difficulty: expert
+    tags: [bdrpp, ordering, priorityordered]
+    question: |
+      Two `BeanDefinitionRegistryPostProcessor`s exist: one implements
+      `PriorityOrdered`, another implements `Ordered`. A third is registered by
+      the first one at runtime. In what order does Spring invoke their
+      `postProcessBeanDefinitionRegistry` methods?
+    options:
+      - "In arbitrary order, since BDRPPs are unordered"
+      - "Ordered ones first because they were declared as beans, then PriorityOrdered"
+      - "All postProcessBeanFactory methods run before any postProcessBeanDefinitionRegistry method"
+      - "PriorityOrdered ones first, then Ordered ones, then any newly registered/remaining ones, with Spring re-scanning the registry between groups to catch BDRPPs added by earlier BDRPPs"
+    answer: 3
+    explanation: |
+      PostProcessorRegistrationDelegate invokes BDRPPs in PriorityOrdered, then
+      Ordered, then the remainder, re-scanning the registry between groups since a
+      BDRPP may register another. Only after all registry callbacks are done does
+      Spring call their postProcessBeanFactory methods.
+    ref: "concepts.md#programmatic-bean-registration-with-beandefinitionregistry"
+
+  - id: advanced-bean-wiring-067
+    difficulty: advanced
+    tags: [bean-post-processor, ordering, programmatic]
+    question: |
+      A `BeanPostProcessor` is added programmatically with
+      `beanFactory.addBeanPostProcessor(bpp)` and it implements `Ordered` with a
+      high order value. Where in the execution sequence does it run relative to
+      auto-detected BPPs?
+    options:
+      - "Its Ordered value places it last among all BPPs"
+      - "It throws because programmatic BPPs are not allowed to implement Ordered"
+      - "It runs only for beans created after it was added, in Ordered sequence"
+      - "Programmatically added BPPs ignore the Ordered interface; they run in registration order and always before auto-detected BeanPostProcessors"
+    answer: 3
+    explanation: |
+      BeanPostProcessors added directly via addBeanPostProcessor do not respect
+      Ordered; their execution order is the registration order, and they always
+      run before auto-detected BPPs. Ordering via Ordered/PriorityOrdered applies
+      only to auto-detected ones.
+    ref: "concepts.md#programmatic-bean-registration-with-beandefinitionregistry"
+
+  - id: advanced-bean-wiring-068
+    difficulty: advanced
+    tags: [registerbean, supplier, aot]
+    question: |
+      Why does the functional `registerBean(name, Type.class, supplier, customizers...)`
+      style matter for Spring's AOT / GraalVM native-image support?
+    options:
+      - "It makes all beans lazy, which native images require"
+      - "It forces beans to be prototypes, which native images optimize better"
+      - "It disables the BeanFactory entirely at build time"
+      - "It registers a definition whose creation is an explicit instance supplier rather than reflective class instantiation, which AOT can translate into generated, reflection-free registration code"
+    answer: 3
+    explanation: |
+      Supplier-based registration expresses bean creation as explicit code rather
+      than reflective instantiation. Spring's AOT engine generates such
+      registerBean-style calls at build time, minimizing runtime reflection —
+      which is central to GraalVM native-image compatibility.
+    ref: "concepts.md#programmatic-bean-registration-with-beandefinitionregistry"
+
+  - id: advanced-bean-wiring-069
+    difficulty: expert
+    tags: [import-registrar, deferred, ordering]
+    question: |
+      An `ImportBeanDefinitionRegistrar` R1 tries to register a bean only if a
+      bean registered by another registrar R2 is absent, using
+      `registry.containsBeanDefinition(...)`. Why is this unreliable?
+    options:
+      - "Registrars cannot access the BeanDefinitionRegistry"
+      - "containsBeanDefinition always returns false inside a registrar"
+      - "ImportBeanDefinitionRegistrars run during configuration-class parsing in a non-guaranteed relative order, so R1 may run before R2 has registered its bean; overriding-by-absence semantics belong to the deferred (DeferredImportSelector) phase"
+      - "Registrars only see XML-defined beans, never annotation-defined ones"
+    answer: 2
+    explanation: |
+      Registrar callbacks fire at the end of parsing each importing config class,
+      with no guaranteed cross-registrar ordering, so 'register if other bean
+      absent' is order-dependent. Reliable override-by-absence is what the
+      deferred selector phase (and Boot's conditions built on it) is for.
+    ref: "concepts.md#importing-configuration-with-import-and-registrars"
+
+  - id: advanced-bean-wiring-070
+    difficulty: expert
+    tags: [import-selector, aware, autowired]
+    question: |
+      An `ImportSelector` needs the active `Environment` to decide which classes
+      to import. A developer adds `@Autowired Environment env;` to the selector,
+      but it is null. What is the correct fix and why?
+    options:
+      - "Annotate the selector with @Component so it becomes a managed bean"
+      - "Implement EnvironmentAware; selectors/registrars are instantiated directly by the config parser (not as managed beans), so field @Autowired does not run, but Aware callbacks are invoked before selectImports"
+      - "Call ctx.getEnvironment() statically from within selectImports"
+      - "Move the selector into a @Configuration class and inject Environment there"
+    answer: 1
+    explanation: |
+      ImportSelectors and registrars are created directly by
+      ConfigurationClassPostProcessor, not registered as beans, so @Autowired/@Value
+      injection never fires. Spring honors the Aware interfaces
+      (EnvironmentAware, ResourceLoaderAware, BeanFactoryAware, BeanClassLoaderAware)
+      and invokes them before selectImports/registerBeanDefinitions.
+    ref: "concepts.md#importing-configuration-with-import-and-registrars"
+
+  - id: advanced-bean-wiring-071
+    difficulty: advanced
+    tags: [deferred-import-selector, grouping, ordering]
+    question: |
+      What does a `DeferredImportSelector` returning a `Group` from
+      `getImportGroup()` enable that a plain `ImportSelector` cannot?
+    options:
+      - "It batches and de-duplicates selections across multiple deferred selectors into a group that can be ordered together, giving deterministic ordering across a whole family of imports"
+      - "It lets the selector register bean definitions directly like a registrar"
+      - "It causes the imports to be processed before regular @Configuration imports"
+      - "It converts imported classes into prototypes"
+    answer: 0
+    explanation: |
+      The Group mechanism collects selections from deferred selectors, ordering
+      and de-duplicating them as a unit. This deterministic grouping is what makes
+      large conditional import sets (e.g. Boot auto-configuration) predictable; in
+      plain Spring it enforces a total order across selectors.
+    ref: "concepts.md#importing-configuration-with-import-and-registrars"
+
+  - id: advanced-bean-wiring-072
+    difficulty: advanced
+    tags: [import-registrar, ordering, deferred-phase]
+    question: |
+      Relative to regular `@Import`ed `@Configuration` classes and
+      `ImportSelector`s, when do `ImportBeanDefinitionRegistrar`s and
+      `DeferredImportSelector`s run?
+    options:
+      - "Registrars run first of all, before any @Configuration parsing"
+      - "Both run strictly before regular imports"
+      - "Registrars run at the end of parsing their importing config class, while DeferredImportSelectors run only after every other @Configuration class has been processed"
+      - "DeferredImportSelectors run before registrars in all cases"
+    answer: 2
+    explanation: |
+      Regular configuration imports and selectors are resolved during parsing;
+      registrars' registerBeanDefinitions runs at the end of parsing the importing
+      class; DeferredImportSelectors are processed last, after all other
+      @Configuration classes, enabling ordering/overriding.
+    ref: "concepts.md#importing-configuration-with-import-and-registrars"
+
+  - id: advanced-bean-wiring-073
+    difficulty: expert
+    tags: [conditional, evaluation-timing, ordering]
+    question: |
+      A custom `@Conditional` on a `@Bean` method checks
+      `ctx.getRegistry().containsBeanDefinition("other")` and registers only if
+      absent. The same "other" bean is a component-scanned class elsewhere.
+      Sometimes the condition matches, sometimes not, across builds. Why?
+    options:
+      - "Conditions are evaluated during configuration parsing / definition registration and see only definitions registered so far; whether 'other' is already registered depends on parse/scan order, making absence checks order-dependent"
+      - "Conditions are evaluated at bean-instantiation time, which is nondeterministic"
+      - "containsBeanDefinition randomly caches results"
+      - "@Conditional cannot access the registry at all"
+    answer: 0
+    explanation: |
+      @Conditional runs at definition-registration time, not at instantiation,
+      and sees only what has been registered up to that point. An absence check
+      against a component-scanned bean therefore depends on scan/parse ordering —
+      exactly why Boot's bean conditions defer to a late phase for determinism.
+    ref: "concepts.md#conditional-registration-with-conditional"
+
+  - id: advanced-bean-wiring-074
+    difficulty: expert
+    tags: [conditional, configuration-condition, phase]
+    question: |
+      To make a condition that decides based on other bean definitions more
+      reliable, which interface and setting lets you defer evaluation until the
+      REGISTER_BEAN phase (when more definitions are visible)?
+    options:
+      - "Implement Ordered and return LOWEST_PRECEDENCE"
+      - "Implement ConfigurationCondition and return ConfigurationPhase.REGISTER_BEAN from getConfigurationPhase()"
+      - "Annotate the condition with @DeferredConditional"
+      - "Return false from matches() on the first pass and true on the second"
+    answer: 1
+    explanation: |
+      ConfigurationCondition adds getConfigurationPhase(); returning REGISTER_BEAN
+      defers evaluation to when individual @Bean methods are registered (more
+      definitions visible), versus PARSE_CONFIGURATION which decides whether the
+      @Configuration class is even parsed. Choosing the wrong phase causes
+      conditions that only sometimes work.
+    ref: "concepts.md#conditional-registration-with-conditional"
+
+  - id: advanced-bean-wiring-075
+    difficulty: advanced
+    tags: [conditional, component, definition-source]
+    question: |
+      A `@Conditional(OnFlag.class)` is placed on the `@Component`-annotated
+      class `FeatureX`. Elsewhere a `@Bean FeatureX featureX()` method (no
+      condition) also defines a bean of that type. If the flag is off, is a
+      FeatureX bean present?
+    options:
+      - "No; the class-level @Conditional suppresses all beans of type FeatureX globally"
+      - "It throws a conflict error because two definitions target the same type"
+      - "Yes; the condition is attached to the component-scan definition source only. The unconditional @Bean method still registers a FeatureX bean because the condition does not apply to the Java type globally"
+      - "Only the @Bean one is suppressed; the scanned one remains"
+    answer: 2
+    explanation: |
+      Conditions attach to the specific definition source (here, the scanned
+      component), not to the type across the container. An independent @Bean
+      method with no condition still registers its FeatureX bean regardless of the
+      flag.
+    ref: "concepts.md#conditional-registration-with-conditional"
+
+  - id: advanced-bean-wiring-076
+    difficulty: advanced
+    tags: [conditional, profile, spring-vs-boot]
+    question: |
+      Which statement is precisely correct about condition support in plain
+      Spring Framework 6 (no Spring Boot on the classpath)?
+    options:
+      - "@ConditionalOnProperty and @ConditionalOnMissingBean are available from spring-context"
+      - "@Profile is a Boot-only feature; core Spring has no profile support"
+      - "Core Spring provides @ConditionalOnClass but not @ConditionalOnBean"
+      - "Only the generic @Conditional + Condition SPI and @Profile (built on @Conditional via ProfileCondition) are available; the @ConditionalOnX family lives in spring-boot-autoconfigure"
+    answer: 3
+    explanation: |
+      Core Spring ships @Conditional/Condition and @Profile (a meta-annotation
+      using ProfileCondition). The rich @ConditionalOnClass/OnBean/OnMissingBean/
+      OnProperty conditions are Spring Boot additions in the autoconfigure module.
+    ref: "concepts.md#conditional-registration-with-conditional"
+
+  - id: advanced-bean-wiring-077
+    difficulty: expert
+    tags: [smartfactorybean, eager-init, ordering]
+    question: |
+      A singleton `FactoryBean` implements `SmartFactoryBean` with
+      `isEagerInit()` returning `true`. What behavior does this force during
+      context refresh, and what stays the same?
+    options:
+      - "The FactoryBean instance is skipped at refresh and created lazily; the product is eager"
+      - "Both the factory and product become prototypes"
+      - "It disables the factoryBeanObjectCache so getObject runs on every access"
+      - "The product of getObject() is created eagerly at the end of refresh (during preInstantiateSingletons) instead of on first access; the &-dereferenced factory retrieval and product caching semantics are unchanged"
+    answer: 3
+    explanation: |
+      isEagerInit() true tells the container to materialize the singleton product
+      during preInstantiateSingletons rather than lazily on first getBean. It does
+      not change &-dereferencing or the singleton product cache; it only changes
+      when the product is first produced.
+    ref: "concepts.md#factorybean-versus-a-bean-factory-method"
+
+  - id: advanced-bean-wiring-078
+    difficulty: expert
+    tags: [objectprovider, getobject-args, prototype]
+    question: |
+      A prototype-scoped `Report` bean has a constructor `Report(String title)`.
+      A singleton injects `ObjectProvider<Report>` and needs a new `Report` with a
+      runtime-computed title on each call. Which call correctly creates it, and
+      what is the constraint?
+    options:
+      - "provider.getObject(title); the varargs overload forwards the args to getBean(name, args), which the container applies to the prototype's constructor/factory — usable only for prototype (non-singleton) beans, since explicit args cannot be applied to an already-cached singleton"
+      - "provider.getIfAvailable(() -> new Report(title)); getObject cannot accept arguments"
+      - "provider.getObject(title) works for singletons too, replacing the cached instance each call"
+      - "You must call provider.stream().findFirst() and set the title reflectively afterward"
+    answer: 0
+    explanation: |
+      ObjectProvider<T> declares getObject(Object... args), which delegates to
+      BeanFactory.getBean(name, args) so the supplied arguments feed the target's
+      constructor/factory method. Because explicit arguments only make sense when a
+      fresh instance is created per call, this is valid for prototype-scoped beans;
+      passing args to resolve a shared singleton is not supported (the cached
+      instance already exists). getIfAvailable(Supplier) is a different mechanism —
+      a fallback when no bean exists — not a way to pass constructor args.
+    ref: "concepts.md#objectprovider-and-objectfactory-for-on-demand-lookup"

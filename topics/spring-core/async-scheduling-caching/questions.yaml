@@ -724,3 +724,704 @@ questions:
       method is @Async, the actual work is handed to the TaskExecutor, freeing the
       scheduler thread.
     ref: "concepts.md#enabling-scheduling-with-enablescheduling-and-scheduled"
+  - id: async-scheduling-caching-045
+    difficulty: advanced
+    tags: [async, executor, resolution, precedence]
+    question: |
+      A method is annotated @Async("reportExecutor"). The context defines a
+      ThreadPoolTaskExecutor bean named reportExecutor, an AsyncConfigurer whose
+      getAsyncExecutor() returns a different pool, and a bean named taskExecutor.
+      Which executor actually runs the method, and why?
+    options:
+      - "The AsyncConfigurer executor, because AsyncConfigurer always wins over qualifiers"
+      - "A SimpleAsyncTaskExecutor, because the ambiguity forces the default fallback"
+      - "The bean named taskExecutor, because Spring prefers that conventional name"
+      - "The bean named reportExecutor, because the @Async value qualifier takes precedence over all fallbacks"
+    answer: 3
+    explanation: |
+      The @Async value qualifier is resolved first: Spring looks up the executor
+      bean by that name/qualifier. Only when no qualifier is present does it fall
+      back to the AsyncConfigurer executor, then a unique/taskExecutor-named bean,
+      then SimpleAsyncTaskExecutor. So the explicitly named reportExecutor wins.
+    ref: "concepts.md#enabling-asynchronous-execution-with-enableasync-and-async"
+  - id: async-scheduling-caching-046
+    difficulty: expert
+    tags: [async, transactional, threading]
+    question: |
+      Service A has a @Transactional method that calls, through a proxy, an @Async
+      @Transactional method on service B. What is true about the transaction(s)?
+    options:
+      - "B joins A's transaction because propagation defaults to REQUIRED"
+      - "Both run in A's transaction because @Async keeps the same thread"
+      - "B starts its own independent transaction on the executor thread; it cannot join A's because A's transactional resources are bound to the caller thread"
+      - "B's @Transactional is ignored entirely because @Async strips transaction advice"
+    answer: 2
+    explanation: |
+      @Async dispatches B to another thread. Transaction context and its
+      ThreadLocal-bound resources live on the caller thread, so they do not
+      propagate. B therefore begins a brand-new transaction on the executor
+      thread; there is nothing to join. Expecting REQUIRED to reuse A's transaction
+      across the async boundary is a classic mistake.
+    ref: "concepts.md#enabling-asynchronous-execution-with-enableasync-and-async"
+  - id: async-scheduling-caching-047
+    difficulty: advanced
+    tags: [async, return-types, exception-handler]
+    question: |
+      You registered a custom AsyncUncaughtExceptionHandler, but exceptions thrown
+      by an @Async method returning CompletableFuture<Order> never reach it. Why?
+    options:
+      - "The handler only fires for @Async methods returning void; for Future/CompletableFuture the exception is stored in the future and surfaces on get()/join()"
+      - "Custom handlers must be registered via @EnableAsync(handler=...) or they are ignored"
+      - "CompletableFuture swallows all exceptions unless you call exceptionally()"
+      - "The handler only fires when proxyTargetClass is true"
+    answer: 0
+    explanation: |
+      AsyncUncaughtExceptionHandler is invoked only for void-returning async
+      methods, where the caller has no future to inspect. For a Future/
+      CompletableFuture return, the exception is captured into the future and
+      re-thrown (wrapped in ExecutionException) when the caller calls get()/join().
+    ref: "concepts.md#async-return-types-void-future-and-completablefuture"
+  - id: async-scheduling-caching-048
+    difficulty: expert
+    tags: [async, threadpooltaskexecutor, saturation]
+    question: |
+      A ThreadPoolTaskExecutor is configured corePoolSize=2, maxPoolSize=50,
+      queueCapacity=10000. Under a sustained burst of 40 concurrent @Async
+      submissions, roughly how many worker threads will be active?
+    options:
+      - "50, because the pool immediately scales to maxPoolSize under load"
+      - "40, one thread per in-flight task"
+      - "2, because tasks fill the large queue before any thread beyond core is created; maxPoolSize is only reached once the queue is full"
+      - "0; all 40 tasks are rejected because the queue exceeds maxPoolSize"
+    answer: 2
+    explanation: |
+      The ThreadPoolExecutor algorithm creates threads up to corePoolSize, then
+      queues, and only spawns threads toward maxPoolSize when the queue is full.
+      With a 10000-slot queue, 40 tasks never fill it, so the pool stays at 2
+      threads. A huge queue effectively caps concurrency at corePoolSize.
+    ref: "concepts.md#configuring-the-taskexecutor-for-async"
+  - id: async-scheduling-caching-049
+    difficulty: expert
+    tags: [async, rejection, back-pressure]
+    question: |
+      With corePoolSize=2, maxPoolSize=2, queueCapacity=0 and the default rejection
+      policy, what happens when a 3rd task is submitted while both threads are busy?
+    options:
+      - "The task is silently dropped and returns a completed future"
+      - "The task waits in an unbounded queue until a thread is free"
+      - "A new temporary thread is created to run it"
+      - "The submit call throws RejectedExecutionException synchronously on the caller thread"
+    answer: 3
+    explanation: |
+      With no queue capacity and the pool at max, the default AbortPolicy rejects
+      the task, throwing RejectedExecutionException on the caller's thread at submit
+      time. CallerRunsPolicy would instead run it on the caller thread (back
+      pressure); AbortPolicy simply fails fast.
+    ref: "concepts.md#configuring-the-taskexecutor-for-async"
+  - id: async-scheduling-caching-050
+    difficulty: expert
+    tags: [async, task-decorator, context-propagation]
+    question: |
+      An @Async method logs without the correlation id that request-scoped MDC
+      normally provides, and cannot read the SecurityContext. What is the correct
+      framework-level fix?
+    options:
+      - "Mark the method @Transactional so the context propagates"
+      - "Increase corePoolSize so a fresh thread carries the context"
+      - "Configure a TaskDecorator on the ThreadPoolTaskExecutor to capture and re-establish MDC/SecurityContext around each task"
+      - "Switch the executor to SimpleAsyncTaskExecutor, which copies ThreadLocals"
+    answer: 2
+    explanation: |
+      ThreadLocal-based context (MDC, SecurityContext, request scope) does not
+      cross the thread boundary automatically. A TaskDecorator wraps each submitted
+      Runnable to snapshot the caller's context and restore it on the worker
+      thread (and clean it up after), which is the intended extension point.
+    ref: "concepts.md#configuring-the-taskexecutor-for-async"
+  - id: async-scheduling-caching-051
+    difficulty: advanced
+    tags: [async, postconstruct, lifecycle]
+    question: |
+      A bean puts @Async on a method annotated @PostConstruct, expecting
+      initialization to run in the background. What actually happens?
+    options:
+      - "The @PostConstruct method runs synchronously during initialization (not async), because the async proxy is not yet applied to internal lifecycle calls"
+      - "Initialization runs asynchronously and the bean is usable immediately"
+      - "The context fails to start with a circular-proxy exception"
+      - "The method runs twice: once sync, once async"
+    answer: 0
+    explanation: |
+      Lifecycle callbacks are invoked directly by the container during bean
+      initialization, before the async proxy governs external calls. So an @Async
+      @PostConstruct runs synchronously on the initializing thread; you cannot make
+      init logic async this way.
+    ref: "concepts.md#enabling-asynchronous-execution-with-enableasync-and-async"
+  - id: async-scheduling-caching-052
+    difficulty: advanced
+    tags: [async, future, null]
+    question: |
+      An @Async method declared to return CompletableFuture<User> returns null in
+      one branch. What is the consequence for a caller doing result.thenApply(...)?
+    options:
+      - "Spring substitutes CompletableFuture.completedFuture(null) automatically"
+      - "The caller receives a completed future holding null"
+      - "The proxy returns null, so the caller gets a NullPointerException when it dereferences the future"
+      - "The branch is treated as void and routed to the AsyncUncaughtExceptionHandler"
+    answer: 2
+    explanation: |
+      A Future-returning @Async method must return a non-null Future. Returning
+      null makes the proxy hand back null, and any caller chaining on it hits an
+      NPE. Always return CompletableFuture.completedFuture(value), even for null
+      payloads (wrap it), never a null future.
+    ref: "concepts.md#async-return-types-void-future-and-completablefuture"
+  - id: async-scheduling-caching-053
+    difficulty: advanced
+    tags: [async, simpleasynctaskexecutor, production]
+    question: |
+      Why is the default SimpleAsyncTaskExecutor fallback considered dangerous for
+      production @Async workloads unless configured?
+    options:
+      - "It runs everything on the caller thread, defeating async"
+      - "It serializes all tasks onto a single thread, creating a bottleneck"
+      - "It only supports void return types"
+      - "It has no queue and by default creates a new thread per task, so a load spike can spawn unbounded threads and exhaust resources"
+    answer: 3
+    explanation: |
+      SimpleAsyncTaskExecutor does not pool or queue by default; each task gets a
+      fresh thread. Under load this creates threads without bound, risking OOM/
+      thread exhaustion. You must set a concurrency limit or use a real pool
+      (ThreadPoolTaskExecutor) in production.
+    ref: "concepts.md#configuring-the-taskexecutor-for-async"
+  - id: async-scheduling-caching-054
+    difficulty: expert
+    tags: [scheduling, fixed-rate, overlap, concurrency]
+    question: |
+      A @Scheduled(fixedRate = 1000) method typically takes 3 seconds. A
+      ThreadPoolTaskScheduler with poolSize=5 is configured. What is the observable
+      behavior?
+    options:
+      - "Multiple executions of the method run concurrently, because fixedRate fires on schedule and separate pool threads pick up overlapping invocations"
+      - "Executions are serialized; each starts 1s after the previous finishes"
+      - "The scheduler silently drops fires that would overlap, running once every 3s"
+      - "Spring throws because fixedRate is shorter than the execution time"
+    answer: 0
+    explanation: |
+      fixedRate anchors fire times to the planned schedule, not completion. With a
+      multi-threaded scheduler, a fire that comes due while a prior run is still
+      executing is dispatched to another pool thread, so executions overlap. On a
+      single-threaded scheduler they would instead bunch up without overlapping.
+    ref: "concepts.md#fixedrate-vs-fixeddelay-vs-cron"
+  - id: async-scheduling-caching-055
+    difficulty: advanced
+    tags: [scheduling, fixed-delay, overlap]
+    question: |
+      Why can a @Scheduled(fixedDelay = 1000) task NEVER overlap with itself,
+      regardless of scheduler pool size?
+    options:
+      - "Because fixedDelay tasks are always forced onto a single thread by Spring"
+      - "Because Spring holds a lock on the bean for the delay duration"
+      - "Because fixedDelay disables the thread pool"
+      - "Because the next start is anchored to the previous execution's completion, so at most one invocation is ever in flight"
+    answer: 3
+    explanation: |
+      fixedDelay schedules the next run only after the current one completes (plus
+      the delay). The next fire time is not known until completion, so there is by
+      construction only ever a single execution active at a time, independent of
+      pool size.
+    ref: "concepts.md#fixedrate-vs-fixeddelay-vs-cron"
+  - id: async-scheduling-caching-056
+    difficulty: expert
+    tags: [scheduling, double-initialization, scope]
+    question: |
+      A developer reports that a @Scheduled(fixedRate = 60000) method fires three
+      times every minute. Which explanation is most consistent with proxy/registration
+      internals?
+    options:
+      - "The default scheduler multiplies fires by its pool size"
+      - "fixedRate always fires 3 times to guarantee delivery"
+      - "Three live instances of the @Scheduled bean exist (e.g. prototype scope or double registration via @Configurable plus container), each registering its own trigger"
+      - "The cron parser defaults to 3 when fixedRate is used"
+    answer: 2
+    explanation: |
+      ScheduledAnnotationBeanPostProcessor registers a trigger per live bean
+      instance. If the class is instantiated multiple times (prototype scope, or
+      registered both by the container and by @Configurable weaving), each instance
+      schedules the method, so it fires once per instance per interval.
+    ref: "concepts.md#enabling-scheduling-with-enablescheduling-and-scheduled"
+  - id: async-scheduling-caching-057
+    difficulty: advanced
+    tags: [scheduling, task-scheduler, resolution]
+    question: |
+      An application defines two TaskScheduler beans, neither named taskScheduler,
+      and @Scheduled methods without a scheduler qualifier. What happens at startup?
+    options:
+      - "Spring picks the first one alphabetically"
+      - "Spring merges both into a composite scheduler"
+      - "Startup fails / the tasks cannot resolve a unique scheduler, because with multiple candidates Spring needs one named taskScheduler or a scheduler qualifier"
+      - "Both schedulers run every task, doubling executions"
+    answer: 2
+    explanation: |
+      With exactly one TaskScheduler it is used automatically; with several, Spring
+      falls back to one named taskScheduler or the per-method scheduler qualifier
+      (6.1+). Multiple unqualified candidates with no conventional name are
+      ambiguous and cannot be resolved.
+    ref: "concepts.md#enabling-scheduling-with-enablescheduling-and-scheduled"
+  - id: async-scheduling-caching-058
+    difficulty: advanced
+    tags: [scheduling, exception, resilience]
+    question: |
+      A @Scheduled(fixedRate = 5000) method throws a RuntimeException on one
+      execution. What happens to subsequent executions?
+    options:
+      - "The scheduler stops the task permanently after the first exception"
+      - "The task automatically retries the failed execution three times"
+      - "The exception propagates to the main thread and crashes the application"
+      - "The exception is logged by the trigger's error handler and future executions continue on schedule"
+    answer: 3
+    explanation: |
+      A thrown exception from a scheduled run is caught by the task's error handler
+      (logged by default) and does not cancel the recurring schedule. Subsequent
+      fires proceed normally. This differs from a Future task where you would
+      inspect the exception explicitly.
+    ref: "concepts.md#enabling-scheduling-with-enablescheduling-and-scheduled"
+  - id: async-scheduling-caching-059
+    difficulty: expert
+    tags: [scheduling, initial-delay, cron]
+    question: |
+      Which @Scheduled configuration is invalid or meaningless?
+    options:
+      - "@Scheduled(cron = \"0 0 * * * *\", initialDelay = 10000)"
+      - "@Scheduled(fixedRate = 5000, initialDelay = 10000)"
+      - "@Scheduled(fixedDelayString = \"PT30S\")"
+      - "@Scheduled(cron = \"-\")"
+    answer: 0
+    explanation: |
+      initialDelay only applies to fixedRate/fixedDelay tasks; it has no meaning for
+      a cron trigger, which fires at the next matching wall-clock time. Combining
+      cron with initialDelay is rejected/ignored. The others are all valid
+      (Duration string, disabled cron, initialDelay with fixedRate).
+    ref: "concepts.md#fixedrate-vs-fixeddelay-vs-cron"
+  - id: async-scheduling-caching-060
+    difficulty: expert
+    tags: [scheduling, cron, day-of-week, edge-case]
+    question: |
+      In Spring's 6-field cron, what does "0 0 12 15 * MON" do, and what is the
+      subtle trap?
+    options:
+      - "Fires at 12:00 on the 15th of the month OR on any Monday, because when both day-of-month and day-of-week are restricted they are OR-combined"
+      - "Fires at 12:00 only on a day that is BOTH the 15th of the month AND a Monday, because Spring AND-combines the two day fields"
+      - "Throws because you cannot restrict both day-of-month and day-of-week"
+      - "Fires every Monday and ignores the day-of-month field entirely"
+    answer: 1
+    explanation: |
+      Spring's CronExpression AND-combines day-of-month and day-of-week when both
+      are restricted (neither is * or ?): the job fires only on a day that is both
+      the 15th AND a Monday. This is a deliberate Spring deviation from Unix/Vixie
+      crontab, which OR-combines them. Expecting Unix-style OR (every 15th plus every
+      Monday) is the trap; use ? in one field to disable that constraint.
+    ref: "concepts.md#fixedrate-vs-fixeddelay-vs-cron"
+  - id: async-scheduling-caching-061
+    difficulty: advanced
+    tags: [scheduling, simpleasynctaskscheduler, virtual-threads]
+    question: |
+      With Spring 6.1's SimpleAsyncTaskScheduler and virtual threads enabled, why
+      is fixedRate/cron recommended over fixedDelay?
+    options:
+      - "fixedDelay is deprecated in Spring 6.1"
+      - "Virtual threads cannot run fixedDelay tasks at all"
+      - "SimpleAsyncTaskScheduler fires each fixedRate/cron execution on a fresh (virtual) thread, but fixed-delay tasks must run on the single scheduler thread because the next delay can only be measured after completion"
+      - "fixedRate uses less memory per fire than fixedDelay"
+    answer: 2
+    explanation: |
+      SimpleAsyncTaskScheduler uses one scheduler thread and spins up a new thread
+      per execution for rate/cron triggers. Fixed-delay semantics require waiting
+      for each task to finish before scheduling the next, so those tasks stay on
+      the single scheduler thread, negating the virtual-thread advantage.
+    ref: "concepts.md#enabling-scheduling-with-enablescheduling-and-scheduled"
+  - id: async-scheduling-caching-062
+    difficulty: expert
+    tags: [scheduling, scheduling-configurer, dynamic-trigger]
+    question: |
+      You need a scheduled task whose interval is read from a database and can
+      change at runtime. Which mechanism is appropriate?
+    options:
+      - "Use @Scheduled(fixedRateString = \"${db.rate}\") and it refreshes automatically"
+      - "Implement SchedulingConfigurer and register a Trigger (e.g. via ScheduledTaskRegistrar) whose nextExecution is computed dynamically each cycle"
+      - "Annotate the method with @Scheduled(cron = \"#{dynamic}\") using SpEL that re-evaluates each fire"
+      - "Set fixedRate = -1 to make it recompute continuously"
+    answer: 1
+    explanation: |
+      Static annotation attributes are resolved once. For a runtime-variable
+      schedule, implement SchedulingConfigurer and register a custom Trigger with
+      the ScheduledTaskRegistrar; the Trigger's nextExecution method is called after
+      each run and can consult live state to compute the next fire time.
+    ref: "concepts.md#enabling-scheduling-with-enablescheduling-and-scheduled"
+  - id: async-scheduling-caching-063
+    difficulty: expert
+    tags: [caching, sync, limitations]
+    question: |
+      Which combination will cause Spring to reject the configuration at startup?
+    options:
+      - "@Cacheable(cacheNames = \"a\", sync = true, condition = \"#id > 0\")"
+      - "@Cacheable(cacheNames = {\"a\", \"b\"}, sync = true)"
+      - "@Cacheable(cacheNames = \"a\", key = \"#id\")"
+      - "@Cacheable(cacheNames = \"a\", unless = \"#result == null\")"
+    answer: 1
+    explanation: |
+      sync = true imposes documented limitations: exactly one cache may be named,
+      unless() is not supported, and it cannot be combined with other cache
+      operations. Specifying two caches with sync=true violates the single-cache
+      rule and is rejected. condition is still allowed with sync.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-064
+    difficulty: expert
+    tags: [caching, sync, unless]
+    question: |
+      Why does @Cacheable not permit the unless attribute when sync = true?
+    options:
+      - "unless is only valid on @CachePut, never on @Cacheable"
+      - "sync mode collapses the operation into a single atomic get-or-compute callback, leaving no separate post-computation point at which to evaluate unless and veto the put"
+      - "unless requires the result which is unavailable in any @Cacheable"
+      - "It is an arbitrary restriction with no technical basis; unless works fine but is disallowed"
+    answer: 1
+    explanation: |
+      With sync=true the interceptor uses the provider's atomic get(key, loader)
+      compute callback rather than distinct get-then-put steps. There is no discrete
+      post-invocation stage to run unless and reject storing the value, so unless is
+      not supported. condition (pre-invocation) remains valid.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-065
+    difficulty: advanced
+    tags: [caching, exception, miss]
+    question: |
+      A @Cacheable method throws an exception while computing a value on a cache
+      miss. What is the cache state afterward?
+    options:
+      - "The exception is cached, so subsequent calls rethrow it without running the method"
+      - "The entire cache region is evicted as a safety measure"
+      - "A null placeholder is stored to prevent repeated failures"
+      - "Nothing is stored; the exception propagates and the next call retries the method"
+    answer: 3
+    explanation: |
+      Spring caches only successful return values. If the method throws during a
+      miss, no entry is written, the exception propagates to the caller, and the
+      next invocation with the same key will attempt the method again. There is no
+      built-in negative/exception caching.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-066
+    difficulty: expert
+    tags: [caching, cache-evict, before-invocation, consistency]
+    question: |
+      A method @CacheEvict(value = "users", key = "#id") deletes a user from the DB
+      but the DB delete throws. With the DEFAULT eviction timing, what is the risk?
+    options:
+      - "The default (beforeInvocation = false) skips eviction because the method threw, so a now-deleted-intended user may remain cached as stale data if the failure is partial or retried"
+      - "The cache is evicted twice, causing an error"
+      - "The cache is always evicted first, so there is no risk"
+      - "The exception forces allEntries eviction automatically"
+    answer: 0
+    explanation: |
+      With beforeInvocation = false (default), eviction runs only after a successful
+      return. If the method throws, the entry is left in the cache. For delete-style
+      operations where you must not serve stale data even on partial failure,
+      beforeInvocation = true evicts up front regardless of outcome.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-067
+    difficulty: expert
+    tags: [caching, transaction-aware, consistency]
+    question: |
+      A @Transactional method annotated @CacheEvict evicts an entry, then the
+      surrounding transaction rolls back. With a plain CacheManager, what is the
+      inconsistency and the fix?
+    options:
+      - "No inconsistency; cache operations always roll back with the transaction"
+      - "The fix is to set beforeInvocation = false, which ties eviction to commit"
+      - "The rollback re-inserts the evicted entry automatically"
+      - "The eviction already happened at the method boundary while the DB change was undone, leaving the cache missing an entry that still exists in the DB; wrap the manager in TransactionAwareCacheManagerProxy to defer cache ops until commit"
+    answer: 3
+    explanation: |
+      By default cache operations occur immediately at method boundaries, not at
+      commit. A rollback leaves the cache mutated but the DB unchanged. Wrapping the
+      CacheManager in a TransactionAwareCacheManagerProxy registers cache mutations
+      as transaction synchronizations so they apply only after a successful commit.
+    ref: "concepts.md#the-cachemanager-abstraction"
+  - id: async-scheduling-caching-068
+    difficulty: advanced
+    tags: [caching, spel, result]
+    question: |
+      In which of these is #result available in the SpEL expression?
+    options:
+      - "The condition attribute of @Cacheable"
+      - "The key attribute of @Cacheable"
+      - "The unless attribute of @Cacheable and the key of @CachePut"
+      - "The condition attribute of @CacheEvict(beforeInvocation = true)"
+    answer: 2
+    explanation: |
+      #result reflects the method's return value and is only available after the
+      method runs: in unless, in @CachePut key expressions, and in
+      @CacheEvict(beforeInvocation = false). Pre-invocation expressions (condition,
+      @Cacheable key, beforeInvocation=true evict) cannot see #result.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-069
+    difficulty: expert
+    tags: [caching, spel, optional, result]
+    question: |
+      A method returns Optional<Book> and is annotated
+      @Cacheable(cacheNames = "books", unless = "#result?.hardback"). What does
+      #result refer to inside unless?
+    options:
+      - "The Optional wrapper itself, so #result?.hardback would fail to compile"
+      - "The unwrapped Book instance (or null), because Spring exposes the actual value inside wrapper types like Optional to #result"
+      - "A SimpleKey derived from the arguments"
+      - "The cache name string \"books\""
+    answer: 1
+    explanation: |
+      For wrapper return types such as Optional and CompletableFuture, Spring
+      exposes the unwrapped underlying value as #result, not the wrapper. So
+      #result?.hardback safely navigates the Book (null-safe), letting unless veto
+      caching of hardbacks.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-070
+    difficulty: advanced
+    tags: [caching, key-generator, mutable]
+    question: |
+      A @Cacheable method keys on a single mutable object argument (default key
+      generation). Code puts an entry, then mutates that same object's fields, then
+      calls again with it. What is the likely outcome?
+    options:
+      - "The second call may miss, because the default SimpleKeyGenerator uses the argument itself as the key and its equals/hashCode now differ after mutation"
+      - "The second call is always a hit because Spring uses object identity"
+      - "Spring throws because mutable objects cannot be cache keys"
+      - "The cache automatically re-indexes the entry on mutation"
+    answer: 0
+    explanation: |
+      With one argument the default key is that argument, so lookups depend on its
+      equals/hashCode. Mutating fields that participate in those methods changes the
+      computed key, making the previously stored entry unreachable (a miss). Cache
+      keys should be immutable/value-based.
+    ref: "concepts.md#the-cachemanager-abstraction"
+  - id: async-scheduling-caching-071
+    difficulty: expert
+    tags: [caching, cache-resolver, cache-manager]
+    question: |
+      What happens if a single @Cacheable specifies BOTH cacheManager = "cmA" and
+      cacheResolver = "myResolver"?
+    options:
+      - "cmA is used and the resolver is ignored"
+      - "The resolver is used and cmA is silently applied as a fallback"
+      - "Configuration fails: cacheManager and cacheResolver are mutually exclusive, and a custom CacheResolver ignores a CacheManager anyway"
+      - "They are merged into a CompositeCacheManager"
+    answer: 2
+    explanation: |
+      cacheManager and cacheResolver are mutually exclusive (as are key and
+      keyGenerator). Specifying both throws, because a CacheResolver fully controls
+      cache selection and would ignore the CacheManager. Choose one: cacheManager
+      for static selection, cacheResolver for runtime resolution.
+    ref: "concepts.md#the-cachemanager-abstraction"
+  - id: async-scheduling-caching-072
+    difficulty: advanced
+    tags: [caching, allow-null-values, backend]
+    question: |
+      A CacheManager is configured with allowNullValues = false and a @Cacheable
+      method returns null on a miss. What is the effect?
+    options:
+      - "The null is stored and counts as a hit on subsequent calls"
+      - "@EnableCaching is disabled for that method"
+      - "Spring converts null to an empty Optional and caches that"
+      - "The method re-executes on every call because null is never cached, and depending on the backend a null store attempt may even throw"
+    answer: 3
+    explanation: |
+      With allowNullValues = false, null results are not stored, so each call misses
+      and re-runs the method; some backends also reject storing null. With the
+      default allowNullValues = true, Spring wraps null so it is a legitimate cached
+      hit. unless = "#result == null" is the portable way to intentionally skip
+      caching nulls.
+    ref: "concepts.md#the-cachemanager-abstraction"
+  - id: async-scheduling-caching-073
+    difficulty: expert
+    tags: [caching, cache-error-handler, resilience]
+    question: |
+      Redis backs the CacheManager and Redis becomes unreachable. With the default
+      SimpleCacheErrorHandler, what is the blast radius, and how do you contain it?
+    options:
+      - "The default handler rethrows cache backend exceptions, so a cache outage turns into method-call failures; supply a custom CacheErrorHandler that logs and continues so the method still runs against the source of truth"
+      - "Cache errors are always swallowed, so nothing happens"
+      - "Spring automatically falls back to ConcurrentMapCacheManager"
+      - "The @Cacheable method is skipped entirely, returning null"
+    answer: 0
+    explanation: |
+      SimpleCacheErrorHandler rethrows exceptions from the cache backend, so a Redis
+      outage propagates as application errors. A custom CacheErrorHandler (via
+      CachingConfigurer) can log-and-swallow get/put/evict failures, letting the
+      method execute against the underlying data store instead of failing.
+    ref: "concepts.md#the-cachemanager-abstraction"
+  - id: async-scheduling-caching-074
+    difficulty: expert
+    tags: [caching, stampede, sync, concurrency]
+    question: |
+      Ten threads simultaneously call a @Cacheable (sync = false) method with the
+      same, currently-uncached key. How many times does the method body run, and
+      what fixes it to run once?
+    options:
+      - "Once; @Cacheable is always atomic per key"
+      - "Exactly two: one to compute and one to verify"
+      - "Zero; the first miss disables caching for that key"
+      - "Potentially all ten times (independent get/compute/put per thread); set sync = true so the provider locks the key and only one thread computes"
+    answer: 3
+    explanation: |
+      Without sync, each concurrent miss independently runs the method and puts,
+      causing a cache stampede (up to ten executions). sync = true instructs the
+      provider to lock the entry so only one thread computes while the rest block
+      and then read the freshly cached value.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-075
+    difficulty: expert
+    tags: [proxy, ordering, transactional, caching]
+    question: |
+      With both @Cacheable and @Transactional on a method and caching advice
+      ordered OUTSIDE transaction advice, what happens on a cache hit?
+    options:
+      - "A transaction is always started before the cache is consulted"
+      - "The cache is consulted first; on a hit the cached value is returned without ever beginning a transaction or acquiring a DB connection"
+      - "The method body always runs to populate the transaction"
+      - "Spring throws because the two aspects cannot coexist"
+    answer: 1
+    explanation: |
+      Advisor order determines nesting. With caching outermost, a hit short-circuits
+      before the transaction interceptor runs, so no transaction begins and no
+      connection is acquired. If the transaction advisor were outermost, a
+      transaction would open even for hits. Order is tunable via the order
+      attributes on the @EnableXxx annotations.
+    ref: "concepts.md#proxy-aop-basis-and-the-self-invocation-caveat"
+  - id: async-scheduling-caching-076
+    difficulty: expert
+    tags: [proxy, async, ordering, transactional, threading]
+    question: |
+      A method is @Async and @Transactional with @Async ordered outermost. On which
+      thread does the transaction run?
+    options:
+      - "On the caller thread, before the task is submitted"
+      - "On the executor (worker) thread, because advice inside the async advisor executes after the hand-off to the executor"
+      - "On a dedicated transaction-manager thread"
+      - "The transaction is ignored because @Async removes it"
+    answer: 1
+    explanation: |
+      Because @Async hands the invocation to the executor, any advice nested inside
+      it (here @Transactional) runs on the worker thread. So the transaction begins
+      and commits on the executor thread, which is generally what you want. Reversing
+      the order would open the transaction on the caller thread, spanning the wrong
+      thread.
+    ref: "concepts.md#proxy-aop-basis-and-the-self-invocation-caveat"
+  - id: async-scheduling-caching-077
+    difficulty: advanced
+    tags: [proxy, self-invocation, aop-context]
+    question: |
+      A team wants an internal this-call to a @Cacheable method to actually hit the
+      cache, without splitting the class into two beans. Which approach works with
+      proxy mode (not AspectJ)?
+    options:
+      - "Enable exposeProxy = true and call AopContext.currentProxy() then invoke the method through that proxy reference"
+      - "Mark the target method final so the JVM caches it"
+      - "Add @Primary to the bean"
+      - "Nothing works in proxy mode; only a JVM agent can fix it"
+    answer: 0
+    explanation: |
+      In proxy mode you can re-enter through the advice by retrieving the outer
+      proxy from the thread-local exposed when exposeProxy = true, via
+      AopContext.currentProxy(), and calling the method on it. It couples code to
+      Spring AOP (a downside), but it does route the internal call through the cache
+      advice. AspectJ weaving is the cleaner alternative.
+    ref: "concepts.md#proxy-aop-basis-and-the-self-invocation-caveat"
+  - id: async-scheduling-caching-078
+    difficulty: advanced
+    tags: [proxy, jdk-cglib, injection]
+    question: |
+      A bean implements an interface and is @Async. Another component autowires the
+      concrete class type (not the interface) by field. With default proxying, what
+      is the likely result?
+    options:
+      - "It always works; JDK proxies implement the concrete class"
+      - "Injection may fail because the JDK dynamic proxy implements only the interface, not the concrete class, so it is not assignable to the concrete type (unless proxyTargetClass = true forces CGLIB)"
+      - "Spring injects the raw unproxied target, so async silently stops working"
+      - "The context creates two beans, one per proxy type"
+    answer: 1
+    explanation: |
+      With an interface present, Spring creates a JDK dynamic proxy that implements
+      the interface but is not a subclass of the concrete class. Autowiring by the
+      concrete type then fails to match the proxy. Injecting by the interface, or
+      forcing CGLIB with proxyTargetClass = true, resolves it.
+    ref: "concepts.md#proxy-aop-basis-and-the-self-invocation-caveat"
+  - id: async-scheduling-caching-079
+    difficulty: expert
+    tags: [caching, caching-annotation, multiple-ops]
+    question: |
+      A save method must update the entry under key #entity.id in cache "books" and
+      also evict a "bookLists" region. What is the correct construct?
+    options:
+      - "Put @Cacheable and @CacheEvict on the method; Spring merges them"
+      - "Use @Caching to group a @CachePut(value=\"books\", key=\"#entity.id\") and a @CacheEvict(value=\"bookLists\", allEntries=true) on the same method"
+      - "Call the two cache operations manually because a method may carry only one cache annotation"
+      - "Use @CachePut with two value arrays and a second key"
+    answer: 1
+    explanation: |
+      @Caching aggregates multiple, potentially different cache operations on one
+      method: here a @CachePut to refresh the entity entry and a @CacheEvict to clear
+      the derived list region. A single method can carry several operations only via
+      @Caching (or repeated annotations where supported), not by stacking @Cacheable
+      and @CachePut which conflict.
+    ref: "concepts.md#enabling-caching-with-enablecaching-cacheable-cacheevict-and-cacheput"
+  - id: async-scheduling-caching-080
+    difficulty: expert
+    tags: [async, completablefuture, composition, pitfall]
+    question: |
+      A controller calls three @Async CompletableFuture-returning services and then
+      immediately does a.join(); b.join(); c.join() sequentially before combining.
+      What is the performance characteristic?
+    options:
+      - "The three tasks still run concurrently on executor threads (they were submitted before the first join), so total wait is about the slowest; joining sequentially does not serialize their execution"
+      - "The three calls run fully in parallel and total latency is roughly the slowest of the three"
+      - "The joins force the tasks to run one after another, so latency is the sum of all three"
+      - "join() cancels the other two futures"
+    answer: 0
+    explanation: |
+      All three @Async methods are invoked (and thus submitted to the executor)
+      before any join, so they execute concurrently. Sequential join() calls only
+      block the caller until each completes; the total wait approximates the slowest
+      task, not the sum. Serialization would only occur if you invoked-then-joined
+      one before invoking the next.
+    ref: "concepts.md#async-return-types-void-future-and-completablefuture"
+  - id: async-scheduling-caching-081
+    difficulty: advanced
+    tags: [async, cancellation, future]
+    question: |
+      A caller holds the Future from an @Async task that is already running and
+      calls future.cancel(true). What does this reliably accomplish?
+    options:
+      - "It immediately aborts the running task and rolls back its side effects"
+      - "It requests interruption; a not-yet-started task will not run, but a running task is only aborted if its code actually responds to Thread interruption"
+      - "It always throws CancellationException from inside the running method"
+      - "It reduces the executor pool size by one"
+    answer: 1
+    explanation: |
+      cancel(true) prevents a queued task from starting and signals interruption to
+      a running one, but code that never checks the interrupt flag or blocks on
+      interruptible operations keeps running to completion. Cancellation is
+      cooperative, not a forced abort, and it does not undo side effects.
+    ref: "concepts.md#async-return-types-void-future-and-completablefuture"
+  - id: async-scheduling-caching-082
+    difficulty: expert
+    tags: [async, return-type, validation, proxy]
+    question: |
+      An @Async method is declared to return int. When is the problem detected, and
+      what is the behavior?
+    options:
+      - "At compile time; the code will not compile"
+      - "At context startup; the bean fails to be created"
+      - "When the method is actually invoked through the proxy, where an unsupported return type triggers a runtime failure; the proxy itself is still created for the bean"
+      - "Never; the int is silently boxed into a Future"
+    answer: 2
+    explanation: |
+      @Async requires void or a Future subtype. An unsupported type like int is not
+      caught at compile time, and the async proxy is still applied to the bean. The
+      failure surfaces at invocation time when the interceptor cannot adapt the
+      return value to an async result.
+    ref: "concepts.md#async-return-types-void-future-and-completablefuture"

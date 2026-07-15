@@ -693,3 +693,671 @@ questions:
       The container manages the full singleton lifecycle, invoking destruction callbacks when
       the context is closed. (Prototypes, by contrast, get no destruction callbacks.)
     ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-043
+    difficulty: advanced
+    tags: [singleton, circular-reference, constructor-injection]
+    question: |
+      Two singleton beans A and B depend on each other. With CONSTRUCTOR injection on both
+      sides and no other annotations, what happens at container startup?
+    options:
+      - "Both are created; the three-level cache exposes an early reference that satisfies the cycle"
+      - "Startup fails with BeanCurrentlyInCreationException because a half-built constructor-injected singleton cannot be exposed early"
+      - "Spring silently converts one of them to prototype scope to break the cycle"
+      - "Both beans are created lazily on first use, avoiding the cycle entirely"
+    answer: 1
+    explanation: |
+      The three-level cache can expose an early reference only after a bean's constructor has
+      returned (setter/field injection). With constructor injection on both sides, neither can
+      be instantiated first, so Spring throws BeanCurrentlyInCreationException. Setter/field
+      cycles between singletons can be resolved via the early-reference cache.
+    ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-044
+    difficulty: advanced
+    tags: [singleton, circular-reference, lazy]
+    question: |
+      You have an unavoidable constructor-injection cycle between two singletons. Which minimal
+      change lets the context start without redesigning the dependencies?
+    options:
+      - "Annotate one of the two constructor injection points with @Lazy so a lazy proxy is injected there"
+      - "Annotate both beans with @Primary"
+      - "Switch both beans to prototype scope"
+      - "Add @DependsOn on each bean pointing at the other"
+    answer: 0
+    explanation: |
+      Marking ONE injection point @Lazy makes Spring inject a lazy-resolving proxy, so that
+      constructor completes without forcing the other bean's eager creation, breaking the
+      cycle. Prototype scope cannot participate in early-reference resolution and @DependsOn
+      only reinforces ordering (it would deadlock the cycle, not resolve it).
+    ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-045
+    difficulty: advanced
+    tags: [singleton, destruction, ordering, depends-on]
+    question: |
+      Bean X is declared @DependsOn("Y") and both are singletons. What is the guaranteed
+      creation and destruction ordering?
+    options:
+      - "Y created before X; on shutdown X destroyed before Y"
+      - "X created before Y; on shutdown Y destroyed before X"
+      - "Creation order is undefined but both are destroyed simultaneously"
+      - "Y created before X; on shutdown Y destroyed before X"
+    answer: 0
+    explanation: |
+      @DependsOn forces Y to be fully instantiated before X. Destruction is the mirror image:
+      dependents are destroyed before their dependencies, so X is destroyed before Y. Spring
+      destroys singletons in reverse of the effective initialization order.
+    ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-046
+    difficulty: expert
+    tags: [singleton, thread-safety, creation-lock]
+    question: |
+      Two threads simultaneously call getBean() for the same not-yet-created @Lazy singleton
+      whose constructor is expensive. What does Spring guarantee?
+    options:
+      - "Each thread gets its own instance because there is no locking on lazy beans"
+      - "The second thread receives a partially initialized instance from the early-reference cache"
+      - "The container synchronizes singleton creation so the object is instantiated once and both threads receive the same fully published instance"
+      - "Spring throws BeanCurrentlyInCreationException on the losing thread"
+    answer: 2
+    explanation: |
+      DefaultSingletonBeanRegistry synchronizes on the singletonObjects map during
+      getSingleton, so concurrent first-time creation collapses to a single instantiation that
+      is safely published to both callers. This is creation-time locking only; it does not
+      make subsequent business-method calls thread-safe.
+    ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-047
+    difficulty: advanced
+    tags: [singleton, lazy, eager]
+    question: |
+      A bean B is annotated @Lazy. A non-lazy singleton A has `@Autowired B b;` (a plain field,
+      injection point NOT marked @Lazy). When is B instantiated?
+    options:
+      - "At container startup, because A eagerly needs a concrete B to inject"
+      - "Only when a method is first called on B"
+      - "Never, until getBean(B.class) is called explicitly"
+      - "Once per method call on A"
+    answer: 0
+    explanation: |
+      @Lazy on the bean definition only defers creation until something requires it. A is a
+      non-lazy singleton created eagerly, and its plain injection point demands a real B, so B
+      is instantiated at startup anyway. Deferral would require marking the INJECTION POINT
+      @Lazy (injecting a proxy).
+    ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-048
+    difficulty: expert
+    tags: [prototype, configuration, proxyBeanMethods]
+    question: |
+      In a @Configuration(proxyBeanMethods = false) "lite" config, a prototype @Bean method
+      `foo()` is called directly by another @Bean method `bar()`. What does bar() receive?
+    options:
+      - "A plain new object from the direct Java method call, bypassing the container and its post-processing"
+      - "A fresh container-managed prototype each call, because @Bean methods always route through getBean"
+      - "The same cached singleton instance, because lite configs cache all @Bean results"
+      - "A CGLIB scoped proxy that lazily resolves the prototype"
+    answer: 0
+    explanation: |
+      With proxyBeanMethods = false there is no CGLIB config proxy to intercept inter-bean
+      method calls, so `foo()` is an ordinary Java call returning a `new` object that skips
+      container instantiation/post-processing. Only full @Configuration (proxyBeanMethods =
+      true) routes such calls through getBean to preserve scope semantics.
+    ref: "concepts.md#prototype-scope"
+
+  - id: bean-scopes-049
+    difficulty: advanced
+    tags: [prototype, startup, fail-fast]
+    question: |
+      A prototype-scoped bean has a misconfigured dependency that would fail at instantiation.
+      When is this error surfaced?
+    options:
+      - "At container refresh, during preInstantiateSingletons"
+      - "Lazily, only when the prototype is first requested"
+      - "Immediately, because Spring validates all definitions eagerly"
+      - "Never; prototype wiring errors are suppressed"
+    answer: 1
+    explanation: |
+      Prototypes are not eagerly instantiated at refresh(); they are created on demand. So a
+      broken prototype definition is discovered only at first request, unlike singletons which
+      fail fast at startup.
+    ref: "concepts.md#prototype-scope"
+
+  - id: bean-scopes-050
+    difficulty: expert
+    tags: [prototype, destruction, scoped-proxy]
+    question: |
+      A prototype bean holding a JDBC connection is injected via a scoped proxy into a
+      singleton. You call methods on it across many requests. Regarding cleanup, what is true?
+    options:
+      - "The scoped proxy tracks every created target and calls @PreDestroy on context close"
+      - "Only the most recently created prototype gets its @PreDestroy called"
+      - "@PreDestroy runs automatically after each method call on the proxy"
+      - "The container never invokes destruction callbacks on any of the prototype instances; you must release resources yourself"
+    answer: 3
+    explanation: |
+      Spring keeps no reference to prototype instances, so destruction callbacks are never
+      invoked for them even behind a scoped proxy. Deterministic cleanup requires client-side
+      management (e.g. ObjectProvider + try/finally, or a manager bean).
+    ref: "concepts.md#prototype-scope"
+
+  - id: bean-scopes-051
+    difficulty: advanced
+    tags: [prototype, objectprovider, stream]
+    question: |
+      A singleton injects `ObjectProvider<Task>` where Task is prototype-scoped, and calls
+      `provider.stream().count()` twice. How many Task instances are created in total?
+    options:
+      - "Zero; stream() is lazy and count() does not materialize elements"
+      - "One, reused across both stream() calls"
+      - "Two, one materialized per stream() invocation that pulls the element"
+      - "It throws because prototypes cannot be streamed"
+    answer: 2
+    explanation: |
+      ObjectProvider.stream() materializes matching beans; for a prototype each terminal
+      traversal creates a fresh instance. Two stream/count cycles that each pull the single
+      matching definition create two Task instances.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-052
+    difficulty: expert
+    tags: [web-scopes, async, thread-binding]
+    question: |
+      A controller injects a request-scoped bean via a scoped proxy, then hands work to an
+      @Async method that calls a method on that proxy. What is the most likely outcome?
+    options:
+      - "It works, because request scope is inherited by @Async executor threads automatically"
+      - "It silently returns a new singleton instance on the async thread"
+      - "It blocks until the original request completes, then resolves the bean"
+      - "It throws (e.g. BeanCreationException / ScopeNotActiveException: No thread-bound request found) on the async thread"
+    answer: 3
+    explanation: |
+      The request context is bound (via RequestContextHolder) to the servlet thread and is NOT
+      inherited by pooled @Async threads by default. Invoking the scoped proxy there finds no
+      bound request and fails. Fixes include capturing data before crossing threads or
+      propagating context with a task decorator.
+    ref: "concepts.md#web-scopes-request-session-application-websocket"
+
+  - id: bean-scopes-053
+    difficulty: expert
+    tags: [web-scopes, session, concurrency, thread-safety]
+    question: |
+      A session-scoped bean holds a mutable List. A user opens two browser tabs firing
+      concurrent requests in the same HttpSession. What must you consider?
+    options:
+      - "The bean can be accessed concurrently by both request threads, so its mutable state is not automatically thread-safe"
+      - "Nothing; session scope guarantees single-threaded access per user"
+      - "Spring serializes all requests in one session, so no synchronization is ever needed"
+      - "Each tab gets its own session-scoped instance, eliminating sharing"
+    answer: 0
+    explanation: |
+      A single HttpSession can service multiple simultaneous requests, so one session-scoped
+      instance may be touched by several threads concurrently. "One per user" does not imply
+      single-threaded; mutable session state still needs synchronization.
+    ref: "concepts.md#web-scopes-request-session-application-websocket"
+
+  - id: bean-scopes-054
+    difficulty: advanced
+    tags: [web-scopes, session, serialization, clustering]
+    question: |
+      An application runs in a cluster that replicates HTTP sessions across nodes. What
+      requirement does this impose on session-scoped beans?
+    options:
+      - "They must be annotated @Clustered"
+      - "They must be converted to application scope"
+      - "Nothing; Spring transparently reconstructs them from the bean definition on each node"
+      - "They (and their held state) should be Serializable, since they live as session attributes that get serialized for replication"
+    answer: 3
+    explanation: |
+      Session-scoped beans are stored as HttpSession attributes; a container that replicates or
+      persists sessions serializes those attributes. The bean and its state must be
+      Serializable or replication fails.
+    ref: "concepts.md#web-scopes-request-session-application-websocket"
+
+  - id: bean-scopes-055
+    difficulty: advanced
+    tags: [web-scopes, application, singleton, distinction]
+    question: |
+      What is a defensible, precise difference between an application-scoped bean and a
+      container singleton in a web app?
+    options:
+      - "Application scope is one per ServletContext and exposed as a ServletContext attribute (visible to plain servlets), whereas a singleton is one per ApplicationContext and not published to the servlet context"
+      - "There is no difference; @ApplicationScope is an alias for singleton"
+      - "Application scope creates a new instance per request while singleton does not"
+      - "Singletons are serialized on shutdown; application-scoped beans are not"
+    answer: 0
+    explanation: |
+      Application scope binds one instance to the ServletContext and publishes it as a
+      ServletContext attribute reachable by non-Spring servlet code. A singleton is scoped to
+      the ApplicationContext and is not exposed to the servlet context. If multiple contexts
+      share one ServletContext they'd share the application-scoped bean but not singletons.
+    ref: "concepts.md#web-scopes-request-session-application-websocket"
+
+  - id: bean-scopes-056
+    difficulty: expert
+    tags: [scoped-proxy, cglib, identity]
+    question: |
+      A @RequestScope bean with a public field `count` is injected (via its default scoped
+      proxy) into a singleton. Code does `bean.count = 5;` directly on the injected reference,
+      then later reads `bean.count`. What is the pitfall?
+    options:
+      - "It correctly stores 5 on the current request's target instance"
+      - "The field write hits the CGLIB proxy's own (unused) field, not the resolved target; only method calls are routed to the real bean"
+      - "It throws IllegalAccessException because proxy fields are final"
+      - "It creates a new target instance on the field write"
+    answer: 1
+    explanation: |
+      A TARGET_CLASS scoped proxy is a generated subclass that intercepts METHOD calls to
+      resolve the target; direct field access touches the proxy's own inherited field, not the
+      per-request target. State must be accessed through methods, not fields, on a scoped
+      proxy.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-057
+    difficulty: expert
+    tags: [scoped-proxy, final, cglib, failure]
+    question: |
+      You annotate a bean with @Scope(value = "session", proxyMode = TARGET_CLASS) but the
+      class is declared `final`. What happens?
+    options:
+      - "It works; CGLIB proxies final classes via bytecode replacement"
+      - "Spring silently falls back to a JDK dynamic proxy"
+      - "The bean is created but the proxy delegates every call to a single shared instance"
+      - "Context creation fails because CGLIB cannot subclass a final class to build the proxy"
+    answer: 3
+    explanation: |
+      A TARGET_CLASS scoped proxy is a CGLIB subclass of the target. A final class cannot be
+      subclassed, so proxy creation fails at context startup. You would need a non-final class,
+      or INTERFACES mode with an implemented interface.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-058
+    difficulty: expert
+    tags: [scoped-proxy, interfaces, classcastexception]
+    question: |
+      A session-scoped bean uses @Scope(value="session", proxyMode=INTERFACES) and implements
+      MyService. A singleton injects it as the concrete class `MyServiceImpl impl`. What is the
+      likely result?
+    options:
+      - "Works fine; JDK proxies implement the concrete class"
+      - "Spring upgrades it to a CGLIB proxy automatically"
+      - "The bean is injected but all calls throw UnsupportedOperationException"
+      - "Injection fails / ClassCastException because a JDK dynamic proxy implements only the interface, not MyServiceImpl"
+    answer: 3
+    explanation: |
+      INTERFACES mode yields a JDK dynamic proxy that implements the bean's interfaces, not the
+      concrete class. Injecting/casting to MyServiceImpl fails because the proxy is not an
+      instance of that class. Inject by the interface type, or use TARGET_CLASS.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-059
+    difficulty: advanced
+    tags: [scoped-proxy, singleton-proxy, identity]
+    question: |
+      When a request-scoped bean is injected into a singleton through a scoped proxy, what is
+      the lifetime of the object stored in the singleton's field?
+    options:
+      - "A single long-lived proxy (itself effectively a singleton); only the target it delegates to changes per request"
+      - "A new proxy is created for each request and reassigned to the field"
+      - "The field holds the actual request-scoped target, replaced each request"
+      - "The field is null between requests"
+    answer: 0
+    explanation: |
+      The injected reference is one stable, long-lived proxy object. The proxy delegates each
+      method call to the current request's target resolved via RequestContextHolder, so the
+      field never changes even though behavior routes to different backing instances.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-060
+    difficulty: expert
+    tags: [objectprovider, scope-not-active, web-scopes]
+    question: |
+      Instead of a scoped proxy, a singleton injects `ObjectProvider<CartBean>` for a
+      session-scoped CartBean, and calls `provider.getObject()` on a thread with no bound
+      session. What is the behavior, and how would getIfAvailable() differ?
+    options:
+      - "getObject() returns null; getIfAvailable() throws"
+      - "Both return a fresh singleton fallback instance"
+      - "getObject() throws (e.g. ScopeNotActiveException); getIfAvailable() lets you handle absence, typically returning null"
+      - "Both block until a session is bound"
+    answer: 2
+    explanation: |
+      With no active scope, getObject() throws (ScopeNotActiveException / BeanCreationException),
+      surfacing the failure explicitly. getIfAvailable() is designed to tolerate absence and
+      returns null (or your supplied default), which is why ObjectProvider is chosen when you
+      want to detect missing scope rather than defer failure to a proxied method call.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-061
+    difficulty: advanced
+    tags: [lookup, method-injection, internals]
+    question: |
+      How does Spring implement an @Lookup method that returns a fresh prototype?
+    options:
+      - "It rewrites the method's bytecode in place using an agent"
+      - "It generates a CGLIB subclass overriding the method body to call getBean() for the target on each invocation"
+      - "It stores a cached instance and returns it via reflection"
+      - "It wraps the whole bean in a JDK dynamic proxy"
+    answer: 1
+    explanation: |
+      Method injection uses a CGLIB-generated subclass that overrides the abstract/concrete
+      lookup method to delegate to the container's getBean for the target type, returning a
+      fresh instance each call. Hence the class and method cannot be final or private.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-062
+    difficulty: advanced
+    tags: [prototype, singleton, wiring-once, code-analysis]
+    question: |
+      A singleton `Counter` prototype-injected plainly (`@Autowired Counter c;`) exposes
+      c.incrementAndGet(). Two different requests call the singleton's method that calls
+      c.incrementAndGet(). What sequence of values is returned?
+    options:
+      - "1 then 1, because a fresh Counter is created per call"
+      - "1 then 2, because the same single Counter instance was captured once at wiring time and is shared"
+      - "It throws because prototypes can't be autowired into singletons"
+      - "Random values because the Counter is recreated non-deterministically"
+    answer: 1
+    explanation: |
+      Plain @Autowired wires the prototype exactly once when the singleton is created, so the
+      singleton holds ONE Counter forever. Both calls hit the same instance, yielding 1 then 2
+      - defeating the intended per-use freshness. Use ObjectProvider, a scoped proxy, or
+      @Lookup for a fresh instance.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-063
+    difficulty: advanced
+    tags: [custom-scopes, get-contract]
+    question: |
+      In a custom Scope, what must Scope.get(name, objectFactory) do to honor the scope's
+      identity semantics?
+    options:
+      - "Return the cached object for the current context if present, otherwise create it via objectFactory.getObject() and cache it under that context"
+      - "Always call objectFactory.getObject() so every access is a fresh object"
+      - "Ignore objectFactory and construct the bean with reflection"
+      - "Return a scoped proxy wrapping the objectFactory"
+    answer: 0
+    explanation: |
+      get() must resolve the current conversation context (thread/tenant/etc.), return the
+      cached instance if one exists, else create it via the supplied ObjectFactory (triggering
+      full creation + init) and cache it. Returning a new object every time silently breaks
+      scope identity.
+    ref: "concepts.md#custom-scopes"
+
+  - id: bean-scopes-064
+    difficulty: expert
+    tags: [custom-scopes, destruction-callback, leak]
+    question: |
+      Your custom Scope stores registerDestructionCallback runnables but never invokes them.
+      What is the consequence, and which shipped scope shares this exact flaw?
+    options:
+      - "No consequence; Spring invokes them on context close regardless. No shipped scope has this issue"
+      - "The context refuses to start because destruction callbacks are mandatory"
+      - "Only prototype beans in that scope leak; singletons are cleaned up by the container"
+      - "@PreDestroy/DisposableBean never run for beans in that scope, leaking resources; SimpleThreadScope has the same flaw (registers but never fires callbacks on thread return)"
+    answer: 3
+    explanation: |
+      The scope owns firing of destruction callbacks when its conversation ends. If it never
+      does, no destruction lifecycle runs and resources leak. SimpleThreadScope exhibits this:
+      it does not clean up ThreadLocal state or fire callbacks when a pooled thread is returned.
+    ref: "concepts.md#custom-scopes"
+
+  - id: bean-scopes-065
+    difficulty: advanced
+    tags: [custom-scopes, registration-order]
+    question: |
+      A bean is defined with @Scope("tenant") but no Scope named "tenant" is registered. When
+      and how does this fail?
+    options:
+      - "At compile time"
+      - "When the bean is first requested, with IllegalStateException: No Scope registered for scope name 'tenant'"
+      - "At context refresh with a duplicate-definition error"
+      - "Never; Spring defaults unknown scope names to singleton"
+    answer: 1
+    explanation: |
+      Custom scopes must be registered (registerScope/CustomScopeConfigurer) before use. An
+      unregistered scope name is only detected when the container tries to resolve the bean,
+      throwing IllegalStateException: No Scope registered for scope name '...'.
+    ref: "concepts.md#custom-scopes"
+
+  - id: bean-scopes-066
+    difficulty: advanced
+    tags: [custom-scopes, configurer, bean-factory-post-processor]
+    question: |
+      Why is CustomScopeConfigurer implemented as a BeanFactoryPostProcessor rather than an
+      ordinary bean?
+    options:
+      - "So it can rewrite bean class bytecode"
+      - "Because only BeanFactoryPostProcessors may be prototype-scoped"
+      - "To make it lazy-initialized by default"
+      - "So scopes are registered during the post-processing phase, before singleton pre-instantiation, ensuring scope names are known when scoped definitions are resolved"
+    answer: 3
+    explanation: |
+      Scope registration must happen before beans that use those scopes are instantiated.
+      Running as a BeanFactoryPostProcessor places registration in the early post-processing
+      phase, before preInstantiateSingletons, so the scope name is available when needed.
+    ref: "concepts.md#custom-scopes"
+
+  - id: bean-scopes-067
+    difficulty: expert
+    tags: [factorybean, scoped-proxy, edge-case]
+    question: |
+      You place <aop:scoped-proxy/> on a FactoryBean definition (a bean implementing
+      FactoryBean<T>). What exactly gets scoped/proxied?
+    options:
+      - "The object returned by FactoryBean.getObject()"
+      - "Both the factory and its product, in lockstep"
+      - "The FactoryBean itself, not the product of getObject()"
+      - "Nothing; scoped proxies are illegal on FactoryBeans"
+    answer: 2
+    explanation: |
+      The scoped-proxy directive applies to the FactoryBean bean definition itself, scoping the
+      factory instance, not the T produced by getObject(). This is a subtle trap when you
+      intended to scope the product.
+    ref: "concepts.md#custom-scopes"
+
+  - id: bean-scopes-068
+    difficulty: advanced
+    tags: [singleton, thread-safety, design]
+    question: |
+      A singleton service must maintain a per-invocation running total across several private
+      helper methods. Which design is both correct and idiomatic under concurrency?
+    options:
+      - "Store the total in an instance field and synchronize every public method"
+      - "Store the total in a local variable / parameter passed between the helper methods, keeping the singleton stateless"
+      - "Store the total in a static field"
+      - "Change the service to prototype scope"
+    answer: 1
+    explanation: |
+      Per-invocation state belongs on the thread stack: a local variable passed to helpers. The
+      singleton stays stateless and inherently thread-safe with no locking. Instance/static
+      fields would be shared across threads; prototype-scoping a service is usually the wrong
+      hammer.
+    ref: "concepts.md#singleton-thread-safety-responsibility"
+
+  - id: bean-scopes-069
+    difficulty: expert
+    tags: [singleton, threadlocal, thread-safety]
+    question: |
+      A singleton legitimately needs per-thread mutable context and uses a ThreadLocal field.
+      In a servlet container with a request-handling thread pool, what is the key risk?
+    options:
+      - "Stale/leaked values: because threads are reused from the pool, a value set in one request may persist into a later unrelated request unless explicitly removed"
+      - "ThreadLocal cannot be used in singletons"
+      - "Each request gets a brand-new thread, so no cleanup is ever needed"
+      - "Spring automatically clears all ThreadLocals after each request"
+    answer: 0
+    explanation: |
+      Pooled threads are reused, so a ThreadLocal not cleared (remove()) at request end leaks
+      into the next task on that thread, causing cross-request data bleed and memory retention.
+      This is the same class of hazard behind SimpleThreadScope's lack of pool cleanup.
+    ref: "concepts.md#singleton-thread-safety-responsibility"
+
+  - id: bean-scopes-070
+    difficulty: advanced
+    tags: [scoped-proxy, aop, ordering]
+    question: |
+      A request-scoped bean is both @Transactional and injected via a scoped proxy into a
+      singleton. How do the proxies compose on a method call?
+    options:
+      - "The injection-point scoped proxy resolves the current request's target first, then that target's own transactional advice applies on the call"
+      - "Only one proxy can exist, so @Transactional is ignored"
+      - "The transaction proxy resolves the scope and the scoped proxy is discarded"
+      - "It throws because a bean cannot have two proxies"
+    answer: 0
+    explanation: |
+      The scoped proxy sits at the injection point and resolves the per-request target; the
+      resolved target is itself an AOP proxy carrying transactional advice, which then applies.
+      The two proxy layers stack rather than conflict.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-071
+    difficulty: advanced
+    tags: [singleton, circular-reference, three-level-cache]
+    question: |
+      A setter/field circular reference between two singletons is resolved by exposing an early
+      object reference before initialization completes. Which three internal caches implement
+      this mechanism in DefaultSingletonBeanRegistry?
+    options:
+      - "beanDefinitionMap, mergedBeanDefinitions, aliasMap"
+      - "singletonObjects, earlySingletonObjects, singletonFactories"
+      - "primaryCache, secondaryCache, tertiaryCache"
+      - "resolvableDependencies, scopes, disposableBeans"
+    answer: 1
+    explanation: |
+      Spring's three-level cache is singletonObjects (fully initialized), earlySingletonObjects
+      (early reference), and singletonFactories (factory that can produce the early reference,
+      e.g. an early AOP proxy). It lets a not-yet-initialized singleton be exposed to satisfy a
+      setter/field cycle; constructor cycles cannot use it and throw
+      BeanCurrentlyInCreationException.
+    ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-072
+    difficulty: expert
+    tags: [prototype, circular-reference]
+    question: |
+      Two prototype beans P and Q depend on each other (field injection). What happens when P
+      is requested?
+    options:
+      - "Resolved via the three-level early-reference cache, like singletons"
+      - "Succeeds, sharing one instance of each"
+      - "Fails with BeanCurrentlyInCreationException, because Spring cannot cache a half-built prototype to expose an early reference"
+      - "Spring converts them to singletons to resolve the cycle"
+    answer: 2
+    explanation: |
+      The early-reference cache is a singleton mechanism. Prototypes are never cached
+      mid-construction, so a prototype-to-prototype circular reference cannot be resolved and
+      throws BeanCurrentlyInCreationException regardless of constructor vs field injection.
+    ref: "concepts.md#prototype-scope"
+
+  - id: bean-scopes-073
+    difficulty: expert
+    tags: [scoped-proxy, private-method, npe]
+    question: |
+      A TARGET_CLASS scoped proxy is created for a session bean. Some framework code invokes a
+      final method on the proxy that reads an instance field. Why might this NPE?
+    options:
+      - "Because CGLIB cannot override final methods, so the call hits the proxy's own shell (target not resolved), reading an uninitialized field"
+      - "Because final methods are intercepted and return null"
+      - "Because session beans always have null fields"
+      - "Because the proxy throws NPE on any field read by design"
+    answer: 0
+    explanation: |
+      CGLIB cannot override final/private/static methods, so such a call executes on the proxy
+      subclass shell without resolving/delegating to the real target. The shell's fields are
+      never populated, so reading them yields null and can NPE. Interception only covers
+      overridable methods.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-074
+    difficulty: advanced
+    tags: [web-scopes, request, getbean-vs-proxy]
+    question: |
+      Within an active request, calling context.getBean(MyRequestBean.class) twice returns what?
+    options:
+      - "Two different instances each time, like a prototype"
+      - "The same instance for that request (request scope caches per request); a new instance only appears in a different request"
+      - "The scoped proxy both times, never a real instance"
+      - "A singleton shared across all requests"
+    answer: 1
+    explanation: |
+      Request scope caches one instance per HTTP request. Repeated lookups within the same
+      request return that cached instance; a new instance is created only for a different
+      request. It is not prototype-like within a single request.
+    ref: "concepts.md#web-scopes-request-session-application-websocket"
+
+  - id: bean-scopes-075
+    difficulty: expert
+    tags: [web-scopes, injected-request, proxy]
+    question: |
+      A singleton bean directly injects `HttpServletRequest request;` by type in a
+      WebApplicationContext and stores it in a field. Why is this safe despite the singleton
+      outliving any single request?
+    options:
+      - "Spring copies the current request into the field on every call"
+      - "It is not safe; this configuration throws at startup"
+      - "Spring injects a proxy for HttpServletRequest that delegates to the current thread-bound request, so the stored reference always resolves correctly"
+      - "The request is a singleton in Spring, so there is nothing to worry about"
+    answer: 2
+    explanation: |
+      A WebApplicationContext injects a PROXY for request/response/session/WebRequest that
+      resolves to the current thread-bound instance on each access. So a singleton can safely
+      hold the reference; each method call routes to the right per-request object.
+    ref: "concepts.md#web-scopes-request-session-application-websocket"
+
+  - id: bean-scopes-076
+    difficulty: advanced
+    tags: [prototype, objectprovider, cleanup, pattern]
+    question: |
+      You need a fresh prototype per operation AND deterministic resource cleanup. Which
+      pattern best achieves both?
+    options:
+      - "Inject a scoped proxy and rely on @PreDestroy"
+      - "Plain @Autowired and call a reset() method between operations"
+      - "Inject ObjectProvider<T>, call getObject() per operation, and release the resource in a try/finally (or try-with-resources) since the container won't"
+      - "Make the bean a singleton and synchronize"
+    answer: 2
+    explanation: |
+      ObjectProvider gives a fresh prototype per getObject() call, and because the container
+      never invokes prototype destruction callbacks, the client wraps usage in try/finally or
+      try-with-resources to release resources deterministically. A scoped proxy would still
+      leave cleanup unhandled.
+    ref: "concepts.md#injecting-a-prototype-into-a-singleton"
+
+  - id: bean-scopes-077
+    difficulty: expert
+    tags: [singleton, destruction-order, dependency]
+    question: |
+      Singleton A is injected into singleton B (B depends on A). During context shutdown, what
+      is the destruction order and why does it matter?
+    options:
+      - "A destroyed before B; risk that B's @PreDestroy uses an already-destroyed A"
+      - "Order is nondeterministic, so @PreDestroy must never touch collaborators"
+      - "B destroyed before A, so B can still safely use A in its @PreDestroy; Spring destroys dependents before their dependencies"
+      - "Both destroyed concurrently on separate threads"
+    answer: 2
+    explanation: |
+      Spring destroys beans in reverse initialization order, honoring dependencies: the
+      dependent (B) is destroyed before the dependency (A). This lets B's @PreDestroy safely
+      use A. The reverse would risk using an already-torn-down collaborator.
+    ref: "concepts.md#singleton-scope"
+
+  - id: bean-scopes-078
+    difficulty: advanced
+    tags: [websocket, scope, proxy]
+    question: |
+      Which statement about websocket scope in Spring Framework is accurate?
+    options:
+      - "There is a @WebSocketScope shortcut analogous to @RequestScope"
+      - "It behaves identically to application scope"
+      - "It has no dedicated shortcut annotation, is bound to a WebSocket session, and is typically declared with proxyMode = TARGET_CLASS since it is injected into longer-lived beans; it applies to STOMP-over-WebSocket apps"
+      - "It works in any plain ApplicationContext without web support"
+    answer: 2
+    explanation: |
+      Unlike request/session/application, websocket scope has no composed shortcut annotation.
+      It binds to a WebSocket session's attributes, needs a scoped proxy (TARGET_CLASS) when
+      injected into longer-lived beans, and applies to STOMP-over-WebSocket messaging apps in a
+      web-aware context.
+    ref: "concepts.md#web-scopes-request-session-application-websocket"

@@ -120,6 +120,41 @@ singletons that use *setter/field* injection via early bean references (the
 purely through *constructor* injection — that throws
 `BeanCurrentlyInCreationException`.
 
+The three-level cache is subtler than "singletons are cached once built":
+
+- `singletonObjects` (level 1) holds fully initialized singletons.
+- `earlySingletonObjects` (level 2) holds raw early references that have been
+  *exposed* but not yet initialized.
+- `singletonFactories` (level 3) holds `ObjectFactory` lambdas that, when
+  invoked, run the `getEarlyBeanReference` chain of
+  `SmartInstantiationAwareBeanPostProcessor`s. This is the hook that lets AOP
+  produce an **early proxy** when a bean is referenced mid-creation.
+
+Why three levels and not two? The factory level exists so that the early proxy
+is created **at most once** and only **on demand**. If a bean B, mid-creation,
+injects a reference to A (also mid-creation), A's factory is invoked, the early
+(possibly proxied) reference is promoted from level 3 to level 2, and B receives
+*that same* reference A will ultimately expose.
+
+**The AOP + circular-reference gotcha:** if A is proxied and lands in a setter
+cycle, Spring compares the object it finished initializing against the early
+reference already handed to B. If the final wrapping differs from the early
+reference (e.g., a post-processor other than the standard auto-proxy creator
+wraps A *after* B already captured the early reference), Spring throws
+`BeanCurrentlyInCreationException` ("Bean with name 'a' has been injected into
+other beans ... in its raw version as part of a circular reference, but has
+eventually been wrapped"). The fix is to break the cycle (e.g. `@Lazy` on one
+injection point) rather than to rely on early-reference identity.
+
+**`@Lazy` as a cycle-breaker:** annotating an injection point `@Lazy` injects a
+lazy-resolution proxy instead of forcing the target's creation, so the cycle
+never forms during instantiation. This works even for constructor injection,
+which is otherwise unresolvable in a cycle.
+
+Note that `allowCircularReferences` defaults to `true` in the framework but
+Spring Boot 2.6+ flips it to `false`, so a setter cycle that "worked" on the
+plain framework can fail under Boot unless explicitly re-enabled.
+
 ---
 
 ## Aware interfaces
@@ -234,6 +269,36 @@ registered, which happens automatically with annotation-config or component
 scanning (`<context:annotation-config/>`, `@ComponentScan`, or an
 `AnnotationConfigApplicationContext`).
 
+### Deduplication when the same method is targeted twice
+
+The "three mechanisms run in order" rule assumes three *distinct* methods. If two
+or more mechanisms resolve to the **same method name**, Spring runs that method
+**once**, not multiple times. For example, if a bean implements
+`InitializingBean` and also declares `@Bean(initMethod = "afterPropertiesSet")`,
+`afterPropertiesSet()` runs a single time. The same collapsing applies to
+`@PostConstruct` placed on a method that is also the named init-method. This is
+why you rarely see a method double-invoked even when configs overlap.
+
+### Ordering and inheritance edge cases
+
+- **Multiple `@PostConstruct` in a class hierarchy:** JSR-250 permits one
+  `@PostConstruct` method per class. When a subclass and its superclass each
+  declare one, Spring invokes the **superclass** `@PostConstruct` **before** the
+  subclass one (parent-first), mirroring construction order. `@PreDestroy`
+  ordering is the reverse (subclass first). Declaring more than one
+  `@PostConstruct` in a *single* class is illegal per the spec.
+- **`@PostConstruct` on a private method** still works — Spring invokes it
+  reflectively, making it accessible — but such a method is *not* overridable, so
+  a subclass cannot replace it.
+- **Static or parameterized methods are invalid:** `@PostConstruct` /
+  `@PreDestroy` must be non-static and take no arguments; a non-void return is
+  tolerated but ignored.
+- **Init methods and AOP:** init callbacks (`@PostConstruct`,
+  `afterPropertiesSet`, init-method) run on the **target instance**, *before*
+  the after-init post-processor creates the AOP proxy. So an init method that
+  calls another advised method on `this` bypasses the proxy — the advice
+  (transactions, caching) does **not** apply during initialization.
+
 ---
 
 ## BeanPostProcessor
@@ -283,6 +348,47 @@ There is also a sub-interface, `InstantiationAwareBeanPostProcessor`, whose
 `postProcessProperties` hooks fire around the *instantiation* and
 *property-population* phases (earlier than the standard init hooks). This is how
 field/setter injection is actually applied.
+
+### Ordering, early instantiation, and self-processing gotchas
+
+The ordering rules deserve care, because they are a frequent source of subtle
+bugs:
+
+- `BeanPostProcessor`s are sorted into three tiers when applied:
+  `PriorityOrdered` first, then `Ordered`, then the remaining (unordered)
+  processors in registration order. Crucially, this ordering is only honored for
+  BPPs **registered as beans** in the context and applied via
+  `AbstractApplicationContext.refresh()` → `registerBeanPostProcessors`. BPPs
+  added *programmatically* through
+  `ConfigurableBeanFactory.addBeanPostProcessor` are appended in call order and
+  **do not participate** in the `Ordered` sort — a common surprise.
+- Because BPPs must exist *before* the beans they process, the container
+  instantiates all BPP beans eagerly during `refresh()`, ahead of ordinary
+  singletons. A consequence: **a `BeanPostProcessor` (and the beans it depends
+  on, pulled in transitively) is created too early to be post-processed by
+  other BPPs.** If your BPP `@Autowired`s a service that would normally be
+  AOP-proxied or `@Transactional`, that service may be instantiated as a *raw,
+  unproxied* instance, and Spring logs
+  *"is not eligible for getting processed by all BeanPostProcessors (for
+  example: not eligible for auto-proxying)."* The remedy is to make the BPP's
+  dependency `@Lazy` or `ObjectProvider`-wrapped so it is not forced early.
+- A `BeanPostProcessor`'s own callbacks are **never applied to itself**, and BPPs
+  do not process other BPPs unless the other one was created earlier — ordering
+  among BPP beans affects which infrastructure beans a given BPP sees.
+- `BeanPostProcessor` methods are invoked for essentially every bean, including
+  many internal/infrastructure beans. Throwing from a BPP, or doing expensive
+  work unconditionally, is a global tax; guard on `beanName`/type and return
+  fast for beans you do not care about.
+
+### InstantiationAwareBeanPostProcessor short-circuiting
+
+`InstantiationAwareBeanPostProcessor.postProcessBeforeInstantiation` runs
+**before** the constructor is even called. If it returns a non-null object,
+Spring treats that object as the finished bean and **skips normal
+instantiation, population, and init callbacks entirely** — only
+`postProcessAfterInitialization` still runs on the substitute. This is the
+lowest-level interception point and is how some frameworks return fully custom
+or proxied stand-ins in place of the real bean.
 
 ---
 
@@ -389,6 +495,32 @@ for components that need coordinated **start/stop** semantics tied to the contex
   last), `isAutoStartup()` (start automatically with the context), and a
   callback-style `stop(Runnable)` for asynchronous shutdown.
 
+**Phase semantics precisely:** startup goes from the **lowest** phase to the
+**highest**; shutdown is the exact reverse (highest phase stops first). A plain
+`Lifecycle` (non-Smart) bean is treated as phase `0`. The `SmartLifecycle`
+`DEFAULT_PHASE` is `Integer.MAX_VALUE`, which deliberately places auto-started
+smart components **last to start and first to stop** — the rationale being that
+a component started last generally depends on everything before it, so it should
+be torn down first. A negative phase therefore starts *before* ordinary
+`Lifecycle` beans; a positive phase starts *after* them. Beans sharing a phase
+have no guaranteed order among themselves. Explicit `depends-on` relationships
+override phase: a dependent bean starts after, and stops before, its dependency.
+
+**`stop(Runnable)` and the shutdown timeout:** on context close, the
+`DefaultLifecycleProcessor` stops beans one phase at a time, and within a phase
+invokes the async `stop(Runnable)` form; it then **blocks waiting** for each
+bean to call `callback.run()` before moving to the next phase, up to a per-phase
+timeout (default **30 seconds**, configurable via
+`setTimeoutPerShutdownPhase`). If your `stop(Runnable)` implementation forgets to
+invoke the callback, context shutdown stalls for the full timeout on that phase.
+
+**Lifecycle stop vs. destruction:** `stop()` is *not* the same as
+`@PreDestroy`. On an orderly `close()`, Spring first sends `stop` to `Lifecycle`
+beans (in phase order) and *then* runs destruction callbacks. But this ordering
+guarantee holds only for a regular shutdown — on a "stopped"/failed refresh,
+Spring may run destroy callbacks **without** a preceding `stop`. Do not rely on
+`stop()` always running before `@PreDestroy`.
+
 To ensure singleton destruction callbacks actually run in a standalone
 (non-web) application, either call `context.close()` explicitly or register a JVM
 shutdown hook with `context.registerShutdownHook()`. If the context is never
@@ -405,6 +537,83 @@ ctx.close();                  // triggers singleton destruction callbacks
 ```
 
 ---
+
+## Exceptions and failure modes during the lifecycle
+
+What happens when a callback throws is a favorite senior probe because the
+answer varies by phase:
+
+- **Exception in a constructor, `populateBean`, an aware callback, or any init
+  callback** (`@PostConstruct` / `afterPropertiesSet` / init-method) propagates
+  out of `getBean`, is wrapped in a `BeanCreationException`, and **aborts context
+  refresh**. For a non-lazy singleton this means the whole `ApplicationContext`
+  fails to start. The half-created bean is *not* left in the singleton cache.
+- **Cleanup of already-created singletons on a failed refresh:** when `refresh()`
+  fails partway, Spring calls `destroyBeans()` and invokes destruction callbacks
+  on the singletons it *had* already fully created, so their `@PreDestroy` runs
+  even though startup ultimately failed. A bean whose own init threw, however,
+  never reached the "registered as disposable" point, so its destroy callbacks
+  do **not** run.
+- **Exception in a destruction callback** (`@PreDestroy` / `destroy()` /
+  destroy-method) is **caught and logged**, not propagated, and Spring continues
+  destroying the remaining beans. One misbehaving `@PreDestroy` will not prevent
+  other beans from being destroyed, but it also will not fail the `close()` call.
+- **Exception thrown from `postProcessBeforeInitialization` /
+  `postProcessAfterInitialization`** propagates and fails that bean's creation
+  (and thus refresh, for a non-lazy singleton), because BPPs run inline in
+  `initializeBean`.
+- **`SmartLifecycle.stop` throwing** is logged by the `LifecycleProcessor`;
+  shutdown proceeds to the next bean/phase.
+
+Because a throwing init callback aborts startup, `@PostConstruct` /
+`afterPropertiesSet` are the correct place to **fail fast** on misconfiguration —
+you want the app to refuse to start rather than serve traffic in a broken state.
+
+## Ordering of bean creation, depends-on, and destruction
+
+Init-callback ordering *within* one bean is fixed, but the order in which
+different beans are created and destroyed is governed by dependencies:
+
+- Spring instantiates beans in **dependency order**: a bean is created after the
+  beans it needs (constructor args, `@Autowired` collaborators, and any
+  `@DependsOn`). `@DependsOn` forces an ordering even when there is no injection
+  edge — useful when one bean has a side effect (registering a driver, priming a
+  cache) another relies on.
+- **Destruction is the reverse of creation order.** A dependency is destroyed
+  *after* the beans that depend on it, so a bean's collaborators are still valid
+  during its `@PreDestroy`. `@DependsOn` similarly reverses at shutdown.
+- This creation/destruction ordering is **independent** of `SmartLifecycle`
+  phase ordering. Phases control `start()`/`stop()`; dependency order controls
+  instantiation and destroy callbacks. A bean can therefore be *stopped* (via
+  `Lifecycle`) in one order and *destroyed* (via `@PreDestroy`) in another.
+- Ties (beans with no dependency relationship) fall back to bean-definition
+  registration order, which for component scanning is effectively filesystem /
+  classpath order — do **not** depend on it.
+
+## Thread-safety and timing of lifecycle callbacks
+
+- **Singleton creation is guarded by a lock.** `getSingleton` in
+  `DefaultSingletonBeanRegistry` synchronizes on the singleton cache, so a given
+  singleton is created (and its init callbacks run) exactly once even under
+  concurrent `getBean` calls. Init callbacks therefore need no synchronization
+  against *other threads creating the same bean* — but this lock has historically
+  been a **deadlock risk** if a `@PostConstruct` spawns a thread that itself
+  calls `getBean` on a bean currently mid-creation.
+- **`@PostConstruct` is not a "container fully started" signal.** It runs while
+  the owning bean is being created, which may be *before* other beans (even ones
+  in a later part of the same refresh) exist. Publishing events or touching
+  not-yet-created beans from `@PostConstruct` is fragile. For "everything is
+  ready" logic, listen for `ContextRefreshedEvent` / `ApplicationReadyEvent`, or
+  use `SmartLifecycle.start()`, which run after *all* singletons are initialized.
+- **Prototype creation is not globally serialized** the way singletons are; two
+  threads requesting a prototype get two independent instances, each running its
+  own init callbacks concurrently. Any shared state a prototype's init touches
+  must be thread-safe.
+- **Visibility:** because the creating thread publishes the fully initialized
+  singleton into the cache under a lock and readers acquire it through the same
+  structures, a correctly injected singleton is safely published; but a bean that
+  hands out `this` from within its constructor or init method (e.g. registering a
+  callback) risks exposing a partially constructed object.
 
 ## Common follow-up questions
 

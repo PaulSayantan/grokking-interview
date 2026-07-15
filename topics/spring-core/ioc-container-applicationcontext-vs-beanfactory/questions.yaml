@@ -779,3 +779,832 @@ questions:
     ApplicationContext (often a web variant) and calls refresh(). Auto-configuration
     is a Boot feature layered on the identical Spring Framework IoC machinery.
   ref: concepts.md#common-follow-up-questions
+- id: ioc-container-applicationcontext-vs-beanfactory-043
+  difficulty: expert
+  tags:
+  - internals
+  - singleton-cache
+  - circular-dependency
+  question: |
+    Spring's DefaultSingletonBeanRegistry uses a three-level cache (singletonObjects,
+    earlySingletonObjects, singletonFactories). At which exact point in doCreateBean
+    is a bean's early reference exposed via addSingletonFactory, and why does that
+    point matter?
+  options:
+  - After the constructor returns but before populateBean runs, which is precisely why setter/field
+    cycles can be resolved but constructor cycles cannot
+  - Before the constructor is invoked, so that even constructor arguments can be resolved from the
+    early cache
+  - After full initialization (BeanPostProcessors and @PostConstruct have run), so only completely
+    ready beans are ever exposed to collaborators
+  - Only when close() is called, as part of orderly singleton teardown
+  answer: 0
+  explanation: |
+    doCreateBean instantiates the bean (constructor), then calls addSingletonFactory to
+    publish an early reference, then populateBean (injection), then initializeBean.
+    Because the early reference exists only after construction, a collaborator in a
+    setter/field cycle can obtain it — but a constructor cycle has no such window, so
+    it cannot be resolved.
+  ref: concepts.md#bean-creation-internals-and-the-singleton-cache
+- id: ioc-container-applicationcontext-vs-beanfactory-044
+  difficulty: expert
+  tags:
+  - internals
+  - circular-dependency
+  - aop
+  - exception
+  question: |
+    A singleton bean A is involved in a setter-based circular reference with B, and A
+    is also targeted by a custom BeanPostProcessor that wraps A in a decorator during
+    postProcessAfterInitialization (not via the standard AOP SmartInstantiationAware
+    proxy path). What is the most likely outcome at startup?
+  options:
+  - Startup succeeds and B receives the fully wrapped, final version of A because Spring re-injects
+    wrapped instances into all collaborators
+  - Spring silently injects the raw (unwrapped) A into B and the wrapped A everywhere else, with no
+    error
+  - Spring throws BeanCurrentlyInCreationException because the raw early reference injected into B
+    does not equal the wrapped instance that becomes the final singleton
+  - The BeanPostProcessor is skipped entirely for A because A participates in a cycle
+  answer: 2
+  explanation: |
+    The early reference exposed to B is the raw instance. If the final singleton ends up
+    being a different (wrapped) object created by a late BeanPostProcessor, Spring
+    detects that B holds a stale raw reference and throws
+    BeanCurrentlyInCreationException. The AOP auto-proxy creator avoids this because it
+    is a SmartInstantiationAwareBeanPostProcessor whose getEarlyBeanReference exposes the
+    proxy early.
+  ref: concepts.md#bean-creation-internals-and-the-singleton-cache
+- id: ioc-container-applicationcontext-vs-beanfactory-045
+  difficulty: advanced
+  tags:
+  - circular-dependency
+  - constructor-injection
+  - lazy
+  question: |
+    Two singletons, A and B, each require the other via constructor injection. Which
+    approach resolves the cycle WITHOUT converting either to setter/field injection?
+  options:
+  - Mark both classes @Primary so the container knows which to build first
+  - Change both beans to prototype scope, which disables cycle detection
+  - Increase the container's thread pool so both constructors can run in parallel
+  - Annotate one of the constructor parameters with @Lazy so a lazy proxy is injected and the real
+    bean is resolved on first method call
+  answer: 3
+  explanation: |
+    @Lazy on one constructor injection point causes Spring to inject a lazy-initializing
+    proxy; the actual target is resolved on first use, after both beans have been
+    constructed. ObjectProvider<T> achieves the same deferral. @Primary and scope changes
+    do not break a constructor cycle.
+  ref: concepts.md#circular-dependencies-and-injection-styles
+- id: ioc-container-applicationcontext-vs-beanfactory-046
+  difficulty: advanced
+  tags:
+  - circular-dependency
+  - exception
+  question: |
+    What exception does the container throw for an unresolvable constructor-based
+    circular dependency detected during refresh()?
+  options:
+  - NoUniqueBeanDefinitionException
+  - BeanCurrentlyInCreationException (typically wrapped in a BeanCreationException /
+    UnsatisfiedDependencyException)
+  - BeanDefinitionOverrideException
+  - ApplicationContextException
+  answer: 1
+  explanation: |
+    A constructor cycle cannot expose an early reference, so when the container re-enters
+    creation of a bean already in creation, it throws BeanCurrentlyInCreationException,
+    generally surfaced wrapped in BeanCreationException / UnsatisfiedDependencyException.
+  ref: concepts.md#circular-dependencies-and-injection-styles
+- id: ioc-container-applicationcontext-vs-beanfactory-047
+  difficulty: advanced
+  tags:
+  - circular-dependency
+  - spring-boot
+  - versions
+  question: |
+    A setter-injection circular dependency worked on the raw Spring Framework but fails
+    fast when the same beans run under Spring Boot 2.6+. What best explains this?
+  options:
+  - Spring Boot 2.6+ flipped its default to allowCircularReferences=false, a Boot policy over the
+    same core switch that still defaults to true in the framework
+  - Spring Framework 6 removed support for circular dependencies entirely
+  - The beans were accidentally changed to constructor injection during the upgrade
+  - Boot uses a plain BeanFactory that cannot resolve any cycles
+  answer: 0
+  explanation: |
+    The core container still defaults allowCircularReferences to true. Spring Boot 2.6+
+    changed its own default to false to discourage cycles, so a setter/field cycle that
+    previously worked now fails fast under Boot. It is a Boot configuration policy, not a
+    change to the container's capability.
+  ref: concepts.md#circular-dependencies-and-injection-styles
+- id: ioc-container-applicationcontext-vs-beanfactory-048
+  difficulty: expert
+  tags:
+  - autowiring
+  - primary
+  - priority
+  - resolution-order
+  question: |
+    Two beans of type MovieCatalog exist: one @Bean method annotated @Primary, and one
+    @Component annotated @Priority(1). A plain by-type @Autowired MovieCatalog injection
+    point is resolved. Which wins, and why?
+  options:
+  - The @Priority(1) bean, because a lower @Priority value always takes precedence over everything
+    else
+  - Neither; the presence of both @Primary and @Priority is contradictory and throws
+    NoUniqueBeanDefinitionException
+  - The @Primary bean, because @Primary takes precedence over @Priority in the resolution order
+  - Whichever bean was defined first during configuration parsing
+  answer: 2
+  explanation: |
+    Spring resolves single-valued ambiguity as @Primary first, then @Priority, then
+    qualifier/bean-name match. Since @Primary outranks @Priority, the @Primary bean is
+    injected. Note @Priority cannot even be placed on @Bean methods (it is class-level).
+  ref: concepts.md#autowiring-resolution-and-ambiguity
+- id: ioc-container-applicationcontext-vs-beanfactory-049
+  difficulty: advanced
+  tags:
+  - autowiring
+  - bean-name-fallback
+  question: |
+    Three beans implement Notifier with no @Primary/@Priority/@Qualifier. A field is
+    declared: @Autowired private Notifier smsNotifier; and one of the beans is named
+    "smsNotifier". What happens?
+  options:
+  - Injection fails with NoUniqueBeanDefinitionException because there are three candidates
+  - The bean named "smsNotifier" is injected, because Spring falls back to matching the
+    injection-point name against bean names
+  - All three are injected as a synthesized composite Notifier
+  - The first bean in registration order is injected
+  answer: 1
+  explanation: |
+    After @Primary and @Priority fail to disambiguate, Spring uses the injection-point
+    name (the field/parameter name) as an implicit qualifier and matches it against bean
+    names. The field name smsNotifier matches the bean named smsNotifier, resolving the
+    ambiguity.
+  ref: concepts.md#autowiring-resolution-and-ambiguity
+- id: ioc-container-applicationcontext-vs-beanfactory-050
+  difficulty: advanced
+  tags:
+  - autowiring
+  - collections
+  - ordering
+  question: |
+    You inject @Autowired private List<Validator> validators; and there are four
+    Validator beans, some annotated @Order. What is true?
+  options:
+  - Injection fails because four candidates are ambiguous for a single injection point
+  - The list is injected empty because collection injection is not supported
+  - Only the @Primary Validator is added to the list
+  - All four beans are injected into the list, ordered according to @Order / Ordered / @Priority
+  answer: 3
+  explanation: |
+    For collection, array, and Map injection points ambiguity is not an error: all
+    matching beans are injected. When ordering annotations are present, the elements are
+    sorted by @Order / Ordered / @Priority.
+  ref: concepts.md#autowiring-resolution-and-ambiguity
+- id: ioc-container-applicationcontext-vs-beanfactory-051
+  difficulty: expert
+  tags:
+  - autowiring
+  - default-candidate
+  - versions
+  question: |
+    A @Bean is declared with defaultCandidate=false and @Qualifier("audit"). Elsewhere a
+    plain by-type injection point @Autowired AuditSink sink exists (no qualifier), and
+    this is the only AuditSink bean. What happens at startup?
+  options:
+  - Injection fails (no eligible candidate by plain type) because defaultCandidate=false excludes it
+    from injection points that lack a matching qualifier
+  - The bean is injected normally because it is the only candidate of its type
+  - Spring auto-adds the "audit" qualifier to the injection point to make it match
+  - The container throws BeanDefinitionOverrideException
+  answer: 0
+  explanation: |
+    A bean with defaultCandidate=false (Spring 6.2+) is only available to injection
+    points that carry a matching qualifier. A plain by-type injection point without the
+    qualifier will not see it, so resolution fails with no eligible candidate — a
+    frequent "expected 1 bean but found 0" surprise.
+  ref: concepts.md#autowiring-resolution-and-ambiguity
+- id: ioc-container-applicationcontext-vs-beanfactory-052
+  difficulty: expert
+  tags:
+  - beanpostprocessor
+  - ordering
+  - order-annotation
+  question: |
+    A developer writes a BeanPostProcessor and annotates the class with @Order(0),
+    expecting it to run before another one. It runs in an unexpected position anyway.
+    What is the root cause?
+  options:
+  - '@Order values must be negative to take effect on post-processors'
+  - BeanPostProcessors cannot be ordered at all; they always run in class-name order
+  - BeanPostProcessor registration ordering honors the PriorityOrdered/Ordered interfaces, not the
+    @Order annotation; the BPP must implement Ordered/PriorityOrdered
+  - The @Order annotation only works on @Configuration classes
+  answer: 2
+  explanation: |
+    For BeanPostProcessor registration, AbstractApplicationContext sorts by the
+    PriorityOrdered and Ordered interfaces (via getOrder()), not by the @Order
+    annotation. To order a BPP reliably you must implement Ordered or PriorityOrdered.
+    @Order does drive sorting of injected collections, but not BPP registration.
+  ref: concepts.md#beanpostprocessor-ordering-and-infrastructure-beans
+- id: ioc-container-applicationcontext-vs-beanfactory-053
+  difficulty: expert
+  tags:
+  - beanpostprocessor
+  - early-instantiation
+  - configuration
+  question: |
+    A @Configuration class declares a non-static @Bean method returning a
+    BeanPostProcessor, and that method also injects a repository bean as a parameter.
+    Users observe that some beans skip AOP proxying and log "not eligible for getting
+    processed by all BeanPostProcessors". Why?
+  options:
+  - Because @Bean methods returning BeanPostProcessors are illegal and silently ignored
+  - Because AOP proxying is disabled whenever any custom BeanPostProcessor exists
+  - Because BeanPostProcessors must be declared in XML, never Java config
+  - Because the non-static BPP factory method forces early instantiation of the configuration class
+    and the injected repository before all BPPs are registered, causing those beans to bypass later
+    post-processing
+  answer: 3
+  explanation: |
+    BeanPostProcessor beans (and their dependencies) are instantiated very early, before
+    the full BPP set is registered. A non-static @Bean BPP method forces the enclosing
+    @Configuration instance and its injected collaborators to be created early, so those
+    collaborators escape post-processing by BPPs registered afterward. Declaring such
+    methods static and dependency-free avoids this.
+  ref: concepts.md#beanpostprocessor-ordering-and-infrastructure-beans
+- id: ioc-container-applicationcontext-vs-beanfactory-054
+  difficulty: advanced
+  tags:
+  - beanfactorypostprocessor
+  - registry-post-processor
+  - ordering
+  question: |
+    Within invokeBeanFactoryPostProcessors(), why do
+    BeanDefinitionRegistryPostProcessors (e.g., ConfigurationClassPostProcessor) run as
+    an earlier sub-phase than ordinary BeanFactoryPostProcessors?
+  options:
+  - Because they are the only post-processors allowed to modify bean instances
+  - Because they add or modify bean definitions that ordinary BeanFactoryPostProcessors must be able
+    to see and operate on afterward
+  - Because they run on a separate thread for performance
+  - Because ordinary BeanFactoryPostProcessors are deprecated in Spring 6
+  answer: 1
+  explanation: |
+    BeanDefinitionRegistryPostProcessor is a sub-interface that can register new bean
+    definitions. Those definitions must exist before regular BeanFactoryPostProcessors
+    run, so the registry post-processors execute first (themselves ordered by
+    PriorityOrdered, then Ordered, then the rest).
+  ref: concepts.md#beanpostprocessor-ordering-and-infrastructure-beans
+- id: ioc-container-applicationcontext-vs-beanfactory-055
+  difficulty: expert
+  tags:
+  - thread-safety
+  - singleton
+  - state
+  question: |
+    A singleton @Service stores per-call data in an instance field and reads it back
+    later in the same method chain. Under load, requests see each other's data. What is
+    the correct diagnosis and fix?
+  options:
+  - Singleton beans are shared across threads and the container does not synchronize your fields;
+    store per-call state in local variables, request/prototype scope, or ThreadLocal
+  - The container failed to synchronize the bean; wrap every method in synchronized
+  - Change the bean to eager initialization to force thread isolation
+  - Mark the bean @Primary so each thread gets its own primary copy
+  answer: 0
+  explanation: |
+    A singleton is one shared instance; mutable instance fields are visible to all
+    threads. The container guarantees single creation but does not isolate your state.
+    Keep singletons stateless — use method-local variables, a narrower scope, or
+    ThreadLocal for per-request data.
+  ref: concepts.md#thread-safety-and-concurrency-in-the-container
+- id: ioc-container-applicationcontext-vs-beanfactory-056
+  difficulty: expert
+  tags:
+  - prototype
+  - lifecycle
+  - destroy
+  question: |
+    Which statement about prototype-scoped beans and lifecycle callbacks is correct?
+  options:
+  - The container invokes @PreDestroy on prototypes when the context closes, just like singletons
+  - Prototype beans never receive @PostConstruct callbacks
+  - The container instantiates and configures a prototype but does not manage its full lifecycle;
+    destroy callbacks are NOT invoked, so cleanup is the caller's responsibility
+  - Prototype beans are cached and reused exactly like singletons after first creation
+  answer: 2
+  explanation: |
+    For prototypes the container runs initialization (including @PostConstruct) and hands
+    the instance over, then forgets it. It does not track prototypes for destruction, so
+    @PreDestroy/DisposableBean.destroy() are not called automatically. Cleanup must be
+    handled by the caller or a custom mechanism.
+  ref: concepts.md#thread-safety-and-concurrency-in-the-container
+- id: ioc-container-applicationcontext-vs-beanfactory-057
+  difficulty: advanced
+  tags:
+  - thread-safety
+  - singleton-creation
+  question: |
+    Two threads call getBean("dataSource") simultaneously for a not-yet-created
+    singleton. What does the container guarantee?
+  options:
+  - Each thread gets its own separate instance to avoid contention
+  - The singleton is created exactly once; creation is guarded by synchronization on the singleton
+    registry, and both threads receive the same instance
+  - One thread receives the bean and the other receives null
+  - The container throws BeanCurrentlyInCreationException for the second thread
+  answer: 1
+  explanation: |
+    Singleton creation in DefaultSingletonBeanRegistry is guarded so a given singleton is
+    created only once even under concurrent first access; both callers get the same
+    shared instance. (Init-time cross-thread lookups of other in-progress singletons can
+    still risk deadlock.)
+  ref: concepts.md#thread-safety-and-concurrency-in-the-container
+- id: ioc-container-applicationcontext-vs-beanfactory-058
+  difficulty: expert
+  tags:
+  - factorybean
+  - name-prefix
+  - getbean
+  question: |
+    myFactory is a bean implementing FactoryBean<Connection> whose getObject() returns a
+    Connection. What do getBean("myFactory") and getBean("&myFactory") return,
+    respectively?
+  options:
+  - Both return the FactoryBean instance
+  - Both return a Connection produced by getObject()
+  - getBean("myFactory") returns the FactoryBean; getBean("&myFactory") throws because & is not a
+    valid character
+  - getBean("myFactory") returns the Connection (the product of getObject()); getBean("&myFactory")
+    returns the FactoryBean instance itself
+  answer: 3
+  explanation: |
+    A FactoryBean contributes its product to the container. getBean("myFactory") returns
+    getObject()'s result (the Connection). The & prefix (BeanFactory.FACTORY_BEAN_PREFIX)
+    dereferences to the FactoryBean instance itself.
+  ref: concepts.md#factorybean-and-the-getbean-name-prefix
+- id: ioc-container-applicationcontext-vs-beanfactory-059
+  difficulty: advanced
+  tags:
+  - factorybean
+  - factory-method
+  - distinction
+  question: |
+    Which statement correctly distinguishes a FactoryBean from a factory method (a @Bean
+    method or XML factory-method)?
+  options:
+  - A FactoryBean is an interface a bean implements so the container injects its getObject() product
+    and supports the & dereference prefix, whereas a factory method is merely a way to instantiate a
+    bean with no &-prefix semantics
+  - They are identical; FactoryBean is just the annotation form of a factory method
+  - A factory method supports the & prefix while a FactoryBean does not
+  - FactoryBean can only be used in XML configuration, never Java config
+  answer: 0
+  explanation: |
+    FactoryBean<T> is an interface whose getObject() supplies the bean the container
+    injects, and it uniquely supports the & dereference prefix. A factory method is just
+    an instantiation strategy (@Bean method / factory-method) and has no such prefix
+    semantics.
+  ref: concepts.md#factorybean-and-the-getbean-name-prefix
+- id: ioc-container-applicationcontext-vs-beanfactory-060
+  difficulty: expert
+  tags:
+  - bean-definition-overriding
+  - registration-order
+  question: |
+    In a plain DefaultListableBeanFactory (framework defaults), two bean definitions are
+    registered under the same name "cache" at different times. What is the result?
+  options:
+  - A ConflictingBeanDefinitionException is thrown immediately
+  - Both definitions coexist and getBean returns a list
+  - The later-registered definition silently overrides the earlier one, because
+    allowBeanDefinitionOverriding defaults to true
+  - The earlier definition always wins; later registrations are ignored
+  answer: 2
+  explanation: |
+    At the framework level allowBeanDefinitionOverriding is true, so a same-name
+    registration silently replaces the previous definition — the later one wins, which
+    makes registration order significant. (Spring Boot flips this default to false,
+    turning it into a BeanDefinitionOverrideException.)
+  ref: concepts.md#bean-definition-overriding-and-registration-order
+- id: ioc-container-applicationcontext-vs-beanfactory-061
+  difficulty: advanced
+  tags:
+  - component-scanning
+  - conflict
+  - exception
+  question: |
+    Two different classes in a scanned package both resolve to the bean name
+    "reportService" (e.g., via default naming). Unlike duplicate @Bean methods, what does
+    component scanning do?
+  options:
+  - Silently keeps whichever class is scanned last
+  - Renames one bean automatically by appending a numeric suffix
+  - Merges the two classes into one composite bean
+  - Throws ConflictingBeanDefinitionException, because scanning cannot infer which class was
+    intended to override the other
+  answer: 3
+  explanation: |
+    Component scanning treats a same-name collision from two distinct classes as an error
+    (ConflictingBeanDefinitionException) because it cannot know intent. This differs from
+    duplicate @Bean methods, where the later definition silently overrides under default
+    framework settings.
+  ref: concepts.md#bean-definition-overriding-and-registration-order
+- id: ioc-container-applicationcontext-vs-beanfactory-062
+  difficulty: advanced
+  tags:
+  - spring-boot
+  - overriding
+  - versions
+  question: |
+    A microservice defines a bean and also imports a library that defines a bean of the
+    same name. It ran on plain Spring but throws BeanDefinitionOverrideException on Spring
+    Boot. What is the cause?
+  options:
+  - Spring Boot removed support for multiple bean definitions
+  - Spring Boot sets allowBeanDefinitionOverriding=false by default, converting the silent override
+    into a startup failure
+  - The library bean is @Primary and Boot forbids @Primary
+  - Boot uses a plain BeanFactory that disallows overriding
+  answer: 1
+  explanation: |
+    Boot defaults allowBeanDefinitionOverriding to false, so a same-name definition that
+    silently overrode on the raw framework now fails at startup with
+    BeanDefinitionOverrideException. It is a Boot policy over the same underlying switch.
+  ref: concepts.md#bean-definition-overriding-and-registration-order
+- id: ioc-container-applicationcontext-vs-beanfactory-063
+  difficulty: expert
+  tags:
+  - scoped-proxy
+  - request-scope
+  - injection
+  question: |
+    A request-scoped bean is injected directly (no proxy) into a singleton controller.
+    What is the problem, and what is the standard fix?
+  options:
+  - The singleton captures a single request-scoped instance at creation time and reuses it forever;
+    inject a scoped proxy (proxyMode=TARGET_CLASS) so each call routes to the current request's
+    instance
+  - No problem; Spring re-injects the correct request instance on every request
+  - The application will not start because request scope cannot be injected at all
+  - The fix is to make the controller prototype-scoped
+  answer: 0
+  explanation: |
+    A singleton is wired once, so a directly injected request-scoped bean would be frozen
+    to one instance. A scoped proxy (ScopedProxyMode.TARGET_CLASS or INTERFACES) injects
+    a proxy that dispatches each invocation to the correct request-scoped target for the
+    current context.
+  ref: concepts.md#scoped-beans-and-proxy-injection
+- id: ioc-container-applicationcontext-vs-beanfactory-064
+  difficulty: advanced
+  tags:
+  - prototype
+  - singleton
+  - lookup-injection
+  question: |
+    A singleton needs a fresh prototype instance on every method invocation. Which
+    mechanisms achieve this? (Choose the most complete answer.)
+  options:
+  - Only changing the singleton to prototype scope
+  - Marking the prototype @Primary
+  - '@Lookup method injection, ObjectProvider<T>.getObject(), or Provider<T>.get() — each resolves
+    a new prototype per call rather than capturing one at wiring time'
+  - Calling refresh() before each invocation
+  answer: 2
+  explanation: |
+    Because a singleton is wired once, injecting a prototype directly captures a single
+    instance. @Lookup method injection, ObjectProvider<T>, and JSR-330 Provider<T> all
+    defer resolution to call time, returning a new prototype on each invocation.
+  ref: concepts.md#scoped-beans-and-proxy-injection
+- id: ioc-container-applicationcontext-vs-beanfactory-065
+  difficulty: advanced
+  tags:
+  - objectprovider
+  - optional-dependency
+  question: |
+    You have an injection point that should tolerate zero or many candidate beans without
+    throwing NoSuchBeanDefinitionException or NoUniqueBeanDefinitionException. Which API
+    is designed for this?
+  options:
+  - A raw @Autowired field, which never throws
+  - ObjectProvider<T>, using getIfAvailable(), getIfUnique(), stream(), or orderedStream()
+  - '@Primary on the injection point'
+  - getBean(Class) inside a static initializer
+  answer: 1
+  explanation: |
+    ObjectProvider<T> provides getIfAvailable() (0 or 1), getIfUnique() (unique or null),
+    and stream()/orderedStream() (0..n), letting you handle optional and multi-valued
+    dependencies gracefully without the exceptions that plain by-type injection would
+    throw.
+  ref: concepts.md#scoped-beans-and-proxy-injection
+- id: ioc-container-applicationcontext-vs-beanfactory-066
+  difficulty: expert
+  tags:
+  - refresh
+  - ordering
+  - bfpp-vs-bpp
+  question: |
+    Consider a @Value("${feature.flag}") placeholder and a custom AOP proxy on the same
+    bean. In refresh(), which ordering of infrastructure makes both work, and why can't a
+    BeanPostProcessor resolve the placeholder?
+  options:
+  - Placeholders are resolved by a BeanPostProcessor after instantiation; AOP happens in a
+    BeanFactoryPostProcessor
+  - Placeholders are resolved lazily at getBean time by the ResourceLoader
+  - Both are handled by the same post-processor in phase 6
+  - PropertySourcesPlaceholderConfigurer is a BeanFactoryPostProcessor that edits bean definitions
+    in phase 5 before instantiation, while the AOP proxy is applied by a BeanPostProcessor during
+    initialization in phase 11 — a BPP is too late to alter definition-level placeholders
+  answer: 3
+  explanation: |
+    Placeholder resolution operates on bean definitions and is done by
+    PropertySourcesPlaceholderConfigurer, a BeanFactoryPostProcessor, before any bean is
+    instantiated. AOP proxying wraps instances via a BeanPostProcessor during
+    initialization. A BeanPostProcessor sees instances, not definitions, so it cannot
+    perform definition-level placeholder substitution.
+  ref: concepts.md#beanpostprocessor-ordering-and-infrastructure-beans
+- id: ioc-container-applicationcontext-vs-beanfactory-067
+  difficulty: advanced
+  tags:
+  - refresh
+  - idempotency
+  - generic-context
+  question: |
+    With a GenericApplicationContext, what happens if you call refresh() a second time
+    after the context is already active?
+  options:
+  - It throws IllegalStateException — GenericApplicationContext supports only a single refresh,
+    unlike contexts backed by a re-loadable definition source
+  - It re-parses definitions and hot-reloads all beans safely
+  - It silently does nothing
+  - It switches the context to lazy initialization mode
+  answer: 0
+  explanation: |
+    GenericApplicationContext is designed for a single refresh; calling refresh() again
+    throws IllegalStateException ("GenericApplicationContext does not support multiple
+    refresh attempts"). XML-backed contexts can be refreshed repeatedly because they can
+    reload their definition source.
+  ref: concepts.md#common-applicationcontext-implementations
+- id: ioc-container-applicationcontext-vs-beanfactory-068
+  difficulty: expert
+  tags:
+  - beanfactory
+  - manual-setup
+  - annotations
+  question: |
+    You build a raw DefaultListableBeanFactory and register a bean whose fields use
+    @Autowired, but injection never happens. What is the minimal fix consistent with how
+    a plain BeanFactory works?
+  options:
+  - Nothing is needed; @Autowired always works because it is a compile-time feature
+  - Switch every field to setter injection, which a BeanFactory always processes
+  - Manually register an AutowiredAnnotationBeanPostProcessor (e.g., via addBeanPostProcessor),
+    because a plain BeanFactory does not auto-detect post-processors
+  - Call preInstantiateSingletons() twice
+  answer: 2
+  explanation: |
+    A plain BeanFactory does not auto-register post-processors. Annotation-driven
+    injection requires manually adding AutowiredAnnotationBeanPostProcessor (and
+    CommonAnnotationBeanPostProcessor for @PostConstruct/@Resource). An
+    ApplicationContext does this automatically.
+  ref: concepts.md#beanfactory-the-basic-container
+- id: ioc-container-applicationcontext-vs-beanfactory-069
+  difficulty: expert
+  tags:
+  - hierarchical-beanfactory
+  - parent-child
+  - lookup
+  question: |
+    In a parent-child context hierarchy (e.g., classic Spring MVC root + DispatcherServlet
+    contexts), a bean of type Foo exists in both. A component in the child context does
+    @Autowired Foo. Which is injected, and can the parent see the child's bean?
+  options:
+  - The parent's Foo is always injected, and the parent can also see the child's bean
+  - Both Foo beans are injected as a List
+  - Injection fails with NoUniqueBeanDefinitionException because two Foo beans exist across the
+    hierarchy
+  - The child's own Foo is injected (child definitions take precedence for its own beans), and the
+    parent CANNOT see beans defined in the child
+  answer: 3
+  explanation: |
+    Contexts form a HierarchicalBeanFactory: a child can see parent beans, but the parent
+    cannot see child beans. When resolving its own injection point, the child's local
+    definition takes precedence over the parent's. Visibility is one-directional
+    (child -> parent).
+  ref: concepts.md#common-applicationcontext-implementations
+- id: ioc-container-applicationcontext-vs-beanfactory-070
+  difficulty: advanced
+  tags:
+  - applicationcontext
+  - eager-init
+  - lazy
+  - failure-mode
+  question: |
+    A misconfigured singleton (e.g., a missing required dependency) exists in the context.
+    It is annotated @Lazy. In an ApplicationContext, when does the failure surface?
+  options:
+  - Immediately at refresh(), because ApplicationContext always eagerly validates all beans
+    regardless of @Lazy
+  - Only when the bean is first requested/injected, because @Lazy defers its creation past the eager
+    preInstantiateSingletons phase
+  - Never; @Lazy beans skip dependency checking entirely
+  - At context close(), during destruction
+  answer: 1
+  explanation: |
+    Eager initialization normally gives fail-fast behavior, but @Lazy opts a bean out of
+    finishBeanFactoryInitialization()'s eager pass. Its creation — and thus its failure —
+    is deferred until first access, sacrificing fail-fast for that bean.
+  ref: concepts.md#applicationcontext-the-enterprise-container
+- id: ioc-container-applicationcontext-vs-beanfactory-071
+  difficulty: expert
+  tags:
+  - factorybean
+  - lifecycle
+  - early-init
+  question: |
+    Why can a FactoryBean whose getObject() is consulted during type matching cause other
+    beans to be instantiated earlier than expected, and how does Spring mitigate it?
+  options:
+  - To answer a by-type getBeanNamesForType query the container may need the FactoryBean
+    instantiated to learn its product type; Spring uses getObjectType() to avoid fully creating the
+    product where possible
+  - It cannot; FactoryBeans are always the last beans created
+  - Spring disables all FactoryBeans during type matching
+  - FactoryBeans are only created at context close()
+  answer: 0
+  explanation: |
+    Determining a FactoryBean's product type for autowiring/type queries may require the
+    FactoryBean itself to be created early. Spring calls getObjectType() to determine the
+    product type without necessarily invoking getObject(), reducing premature
+    instantiation, but poorly implemented FactoryBeans can still trigger early creation.
+  ref: concepts.md#factorybean-and-the-getbean-name-prefix
+- id: ioc-container-applicationcontext-vs-beanfactory-072
+  difficulty: advanced
+  tags:
+  - refresh
+  - listeners
+  - early-events
+  question: |
+    An ApplicationListener bean also depends on a service that publishes an event during
+    its own @PostConstruct. Given the refresh() phase ordering, what determines whether
+    the listener receives that event?
+  options:
+  - Listeners always receive every event regardless of timing
+  - Events published during @PostConstruct are always lost
+  - Events published before initApplicationEventMulticaster()/registerListeners() are buffered as
+    early application events and replayed once the multicaster and listeners are ready; timing
+    relative to those phases governs delivery
+  - The listener must be a BeanFactoryPostProcessor to receive early events
+  answer: 2
+  explanation: |
+    refresh() sets up the event multicaster (phase 8) and registers listeners (phase 10)
+    before finishing bean initialization. Events fired before the multicaster exists are
+    stored as early application events and multicast once listeners are registered, so
+    the phase in which the event is published determines delivery.
+  ref: concepts.md#container-startup-and-the-refresh-method
+- id: ioc-container-applicationcontext-vs-beanfactory-073
+  difficulty: expert
+  tags:
+  - concurrency
+  - deadlock
+  - singleton-lock
+  - versions
+  question: |
+    A singleton's @PostConstruct spawns a background thread that immediately calls
+    getBean() for another singleton still under construction on the main thread. What is
+    the risk, and what changed in Spring 6.2?
+  options:
+  - No risk; singleton creation is lock-free
+  - Because singleton creation holds the singleton lock, the cross-thread getBean can deadlock;
+    Spring 6.2 reworked singleton locking (background/lenient locking) to reduce such deadlocks,
+    though init-time cross-thread lookups remain hazardous
+  - The background thread always gets a fresh prototype, so no contention exists
+  - Spring 6.2 removed singleton scope entirely
+  answer: 1
+  explanation: |
+    Singleton creation is guarded by a lock; init-time cross-thread getBean calls for
+    in-progress singletons can produce lock-ordering deadlocks. Spring 6.2 revised
+    singleton locking to be more lenient/background-aware to mitigate this, but such
+    patterns are still risky and best avoided.
+  ref: concepts.md#thread-safety-and-concurrency-in-the-container
+- id: ioc-container-applicationcontext-vs-beanfactory-074
+  difficulty: advanced
+  tags:
+  - beanfactory
+  - applicationcontext
+  - getbeanprovider
+  question: |
+    Which capability is available on both BeanFactory and ApplicationContext for
+    programmatic, lazy, ambiguity-tolerant access to beans, added to the BeanFactory
+    interface in Spring 5.1?
+  options:
+  - getMessage(...) for internationalization
+  - getResource(...) for resource loading
+  - publishEvent(...) for application events
+  - getBeanProvider(Class), returning an ObjectProvider for deferred and optional/plural resolution
+  answer: 3
+  explanation: |
+    getBeanProvider(Class) / getBeanProvider(ResolvableType) were added to the
+    BeanFactory interface in Spring 5.1 and return an ObjectProvider (the ObjectProvider
+    type itself dates to 4.3), giving lazy, optional (getIfAvailable), unique
+    (getIfUnique), and streaming access. getMessage, publishEvent, and getResource are
+    ApplicationContext-only features.
+  ref: concepts.md#beanfactory-the-basic-container
+- id: ioc-container-applicationcontext-vs-beanfactory-075
+  difficulty: expert
+  tags:
+  - configuration
+  - full-vs-lite
+  - cglib
+  question: |
+    A @Bean method calls another @Bean method directly within a @Configuration class to
+    reuse a singleton. What container mechanism guarantees the second call returns the
+    SAME singleton rather than a new object, and when is that guarantee lost?
+  options:
+  - The @Configuration class is enhanced by a CGLIB subclass that intercepts inter-bean method calls
+    and routes them through the container; the guarantee is lost if the class is treated as a "lite"
+    @Bean source (e.g., proxyBeanMethods=false or plain @Component)
+  - Java's own method caching guarantees it in all cases
+  - The guarantee only holds for prototype beans
+  - Only if the methods are declared static
+  answer: 0
+  explanation: |
+    Full @Configuration classes are CGLIB-enhanced so inter-bean method invocations are
+    intercepted and return the managed singleton. With proxyBeanMethods=false (lite mode)
+    or @Bean methods in a non-@Configuration component, no interception occurs and a direct
+    call creates a new, unmanaged instance.
+  ref: concepts.md#container-startup-and-the-refresh-method
+- id: ioc-container-applicationcontext-vs-beanfactory-076
+  difficulty: advanced
+  tags:
+  - scoped-proxy
+  - proxy-mode
+  - internals
+  question: |
+    For @Scope(value="request", proxyMode=ScopedProxyMode.TARGET_CLASS), how does the
+    injected proxy resolve the correct target on each call?
+  options:
+  - It caches the first request's bean and reuses it for all subsequent requests
+  - It creates a brand-new bean per method call regardless of scope
+  - It is a CGLIB subclass proxy that, per invocation, looks up the current scope's target instance
+    (via the registered Scope) and delegates to it
+  - It throws outside a web request because no proxy can exist
+  answer: 2
+  explanation: |
+    A TARGET_CLASS scoped proxy is a CGLIB subclass that, on each method call, asks the
+    registered Scope (e.g., request scope) for the current context's target and delegates
+    to it — so the singleton holds a stable proxy while the real target varies per scope.
+  ref: concepts.md#scoped-beans-and-proxy-injection
+- id: ioc-container-applicationcontext-vs-beanfactory-077
+  difficulty: advanced
+  tags:
+  - beanfactory
+  - lazy
+  - fail-fast
+  - trade-off
+  question: |
+    A team switches a batch tool from AnnotationConfigApplicationContext to a manually
+    wired DefaultListableBeanFactory to shave startup memory. A typo in a bean's required
+    property now goes unnoticed until production. What container behavior explains the
+    regression?
+  options:
+  - The BeanFactory validated the property but suppressed the error
+  - The typo would have failed at compile time under ApplicationContext
+  - DefaultListableBeanFactory cannot hold property values
+  - A plain BeanFactory initializes singletons lazily on first getBean, so it lost the
+    ApplicationContext's eager, fail-fast validation at startup
+  answer: 3
+  explanation: |
+    ApplicationContext eagerly creates non-lazy singletons at refresh(), catching such
+    errors at startup. A plain BeanFactory defers creation to first getBean, so the
+    misconfiguration surfaces only when the affected bean is first accessed — potentially
+    in production.
+  ref: concepts.md#when-a-plain-beanfactory-would-ever-be-used
+- id: ioc-container-applicationcontext-vs-beanfactory-078
+  difficulty: expert
+  tags:
+  - smartinitializingsingleton
+  - lifecycle
+  - callbacks
+  question: |
+    You need a callback that runs AFTER all singletons in the context have been eagerly
+    instantiated (e.g., to build an index over every bean of a type), still during
+    refresh(). Which mechanism fits best?
+  options:
+  - InitializingBean.afterPropertiesSet(), which runs after every bean including ones created later
+  - SmartInitializingSingleton.afterSingletonsInstantiated(), invoked at the end of
+    preInstantiateSingletons() once all non-lazy singletons exist
+  - A BeanFactoryPostProcessor, since it runs after instantiation
+  - A @PreDestroy method
+  answer: 1
+  explanation: |
+    afterPropertiesSet()/@PostConstruct fire during each individual bean's init, when
+    other beans may not yet exist. SmartInitializingSingleton.afterSingletonsInstantiated()
+    is called once, after all non-lazy singletons have been created at the end of
+    preInstantiateSingletons(), which is exactly when a cross-bean index can be built.
+  ref: concepts.md#container-startup-and-the-refresh-method

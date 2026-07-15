@@ -763,3 +763,742 @@ questions:
       are registered together. @Autowired/@Inject are for dependency injection,
       not config composition.
     ref: "concepts.md#configuration-and-bean"
+
+  - id: configuration-profiles-properties-046
+    difficulty: advanced
+    tags: [configuration, cglib, static-bean, interception]
+    question: |
+      Consider a @Configuration(proxyBeanMethods = true) class in which an
+      instance @Bean method calls a sibling STATIC @Bean method:
+
+        @Configuration
+        public class Cfg {
+            @Bean static B b() { return new B(); }
+            @Bean A a() { return new A(b()); }   // calls the static b() directly
+        }
+
+      How many B instances end up associated with 'a', versus the container's
+      managed B singleton?
+    options:
+      - "The direct call to the static b() is NOT intercepted (static invocations never route through the CGLIB proxy), so b() runs the raw method body and 'a' gets a SECOND, non-managed B distinct from the container's B singleton"
+      - "The b() call is intercepted like any inter-bean call, so 'a' receives the managed B singleton"
+      - "The container throws BeanCurrentlyInCreationException because instance methods cannot call static methods"
+      - "Both a() and b() are skipped because static and instance @Bean methods cannot coexist in one class"
+    answer: 0
+    explanation: |
+      CGLIB interception only replaces virtual (instance) invocations on the
+      enhanced configuration instance. A static @Bean method is invoked directly
+      on the class and never passes through the proxy, so calling b() executes the
+      raw body and produces a second, unmanaged B rather than the container's
+      singleton. The idiomatic fix is to declare B as a parameter of a() (autowired
+      by type) and use that parameter instead of calling b().
+    ref: "concepts.md#configuration-and-bean"
+
+  - id: configuration-profiles-properties-047
+    difficulty: advanced
+    tags: [configuration, cross-class, inter-bean]
+    question: |
+      ConfigA needs the bean produced by ConfigB.dataSource(). A developer writes,
+      inside ConfigA, `return new Service(new ConfigB().dataSource());`. Both are
+      @Configuration classes with proxyBeanMethods=true. What is the outcome?
+    options:
+      - "Service receives the container-managed DataSource singleton because CGLIB enhances all @Configuration classes globally"
+      - "Service receives a brand-new, unmanaged DataSource because `new ConfigB()` is a plain, un-enhanced instance and its @Bean method runs its raw body"
+      - "A compilation error, since @Configuration classes cannot be instantiated with new"
+      - "The container replaces the new ConfigB() with its managed instance via load-time weaving"
+    answer: 1
+    explanation: |
+      Interception only happens on the container's enhanced instance of a
+      configuration class. Manually `new`-ing ConfigB yields an ordinary object
+      whose @Bean method executes normally, bypassing the container. Cross-class
+      references must be expressed as @Bean method parameters (autowired by type)
+      or @Autowired fields.
+    ref: "concepts.md#configuration-and-bean"
+
+  - id: configuration-profiles-properties-048
+    difficulty: expert
+    tags: [configuration, proxybeanmethods, lite-mode, scope]
+    question: |
+      A @Configuration(proxyBeanMethods = false) class declares a prototype bean
+      `@Bean @Scope("prototype") Task task()` and a singleton
+      `@Bean Runner runner() { return new Runner(task()); }`. At runtime, how many
+      Task instances exist relative to how many the developer likely intended, and why?
+    options:
+      - "Exactly one Task, shared, because prototype beans are cached in lite mode"
+      - "The direct task() call in runner() is NOT intercepted (proxyBeanMethods=false), so it runs the method body once giving Runner its own Task; additional container getBean(Task.class) calls would each create fresh prototypes — the inter-bean call does not go through the prototype machinery"
+      - "The container refuses to start because prototype and singleton beans cannot be mixed without proxies"
+      - "Every field access on Runner.task lazily creates a new prototype instance"
+    answer: 1
+    explanation: |
+      With proxyBeanMethods=false there is no CGLIB interception, so runner()'s
+      call to task() simply executes the method body once, giving Runner a single
+      Task obtained outside the container's prototype-creation path. Prototype
+      semantics only apply when the bean is requested through the container. This
+      is a classic reason to keep proxyBeanMethods=true (or inject an
+      ObjectProvider<Task>) when inter-bean calls must respect scope.
+    ref: "concepts.md#configuration-and-bean"
+
+  - id: configuration-profiles-properties-049
+    difficulty: advanced
+    tags: [bean, destroy-method, lifecycle]
+    question: |
+      A @Bean returns an object whose class has a public close() method that must
+      NOT be called on shutdown (closing it prematurely corrupts a shared
+      resource). What is the correct way to prevent Spring from invoking it?
+    options:
+      - "Rename the method to something other than close() or shutdown()"
+      - "Set @Bean(destroyMethod = \"\") to disable destroy-method inference"
+      - "Annotate the bean class with @Lazy"
+      - "Nothing is needed; Spring never auto-detects destroy methods for @Bean"
+    answer: 1
+    explanation: |
+      @Bean's destroyMethod defaults to inferring a public close()/shutdown()
+      method (the value AbstractBeanDefinition.INFER_METHOD). Explicitly setting
+      destroyMethod = "" disables the inference so the container will not call
+      close() at shutdown.
+    ref: "concepts.md#configuration-and-bean"
+
+  - id: configuration-profiles-properties-050
+    difficulty: advanced
+    tags: [propertysource, precedence, ordering]
+    question: |
+      An app sets `app.mode=file` in a classpath app.properties loaded via
+      @PropertySource, but the OS also exports an environment variable
+      APP_MODE=env. In a StandardEnvironment, what does
+      env.getProperty("app.mode") return, and why?
+    options:
+      - "\"file\", because @PropertySource files always override the base sources"
+      - "null, because app.mode and APP_MODE are different keys"
+      - "It throws because the same key is defined twice"
+      - "\"env\", because systemEnvironment is consulted before @PropertySource files (which are appended at the lowest precedence), and SystemEnvironmentPropertySource maps app.mode to APP_MODE"
+    answer: 3
+    explanation: |
+      @PropertySource files are added with addLast, placing them below
+      systemProperties and systemEnvironment. The relaxed lookup in
+      SystemEnvironmentPropertySource maps app.mode -> APP_MODE, so the env var
+      wins. To make the file win you must reorder the sources programmatically.
+    ref: "concepts.md#propertysource-annotation"
+
+  - id: configuration-profiles-properties-051
+    difficulty: expert
+    tags: [propertysource, timing, profiles]
+    question: |
+      A developer places `spring.profiles.active=prod` inside a file loaded by
+      @PropertySource, expecting the prod profile to turn on. It does not. What is
+      the fundamental reason in core Spring Framework?
+    options:
+      - "The key must be spring.profiles.default instead"
+      - "@PropertySource files are processed while parsing @Configuration classes, which is AFTER the Environment's active profiles have already been determined, so a profile cannot be activated from a @PropertySource-loaded file"
+      - "spring.profiles.active is case-sensitive and must be uppercase in files"
+      - "@PropertySource silently ignores any key beginning with 'spring.'"
+    answer: 1
+    explanation: |
+      Profile activation is read from the Environment before @Configuration
+      parsing loads @PropertySource files. Therefore the value arrives too late to
+      influence profile evaluation. Core Spring has no config-data pre-processing
+      that would read profiles from such files (that is a Spring Boot feature).
+    ref: "concepts.md#propertysource-annotation"
+
+  - id: configuration-profiles-properties-052
+    difficulty: advanced
+    tags: [propertysource, yaml, factory]
+    question: |
+      To load a YAML file with @PropertySource in core Spring, you supply a custom
+      PropertySourceFactory. What must that factory's createPropertySource method
+      ultimately produce so the values integrate with the Environment?
+    options:
+      - "A java.util.Properties object returned directly to @Value"
+      - "A Spring Boot YamlPropertiesFactoryBean bean registered in the context"
+      - "A named PropertySource (e.g. a MapPropertySource) built from the flattened YAML key/values, which is then added to the Environment's MutablePropertySources"
+      - "A new Environment instance dedicated to YAML properties"
+    answer: 2
+    explanation: |
+      A PropertySourceFactory returns a PropertySource<?>. For YAML you typically
+      use YamlPropertiesFactoryBean/YamlMapFactoryBean (from spring-beans) to
+      flatten the document into properties, then wrap them in a MapPropertySource
+      or PropertiesPropertySource that @PropertySource registers into the
+      Environment.
+    ref: "concepts.md#propertysource-annotation"
+
+  - id: configuration-profiles-properties-053
+    difficulty: expert
+    tags: [propertysource, name-collision, ordering]
+    question: |
+      Two @PropertySource declarations on different @Configuration classes both
+      point at files that resolve to the SAME derived source name (neither sets an
+      explicit name), and they define overlapping keys. In current Spring
+      Framework, what behavior should you expect?
+    options:
+      - "PropertySourceProcessor detects the name collision and MERGES both files into a single CompositePropertySource, adding the newly processed source first so it wins per overlapping key while the earlier file's non-overlapping keys are preserved"
+      - "The second registration replaces the first in place under the shared name, discarding the earlier file entirely"
+      - "Startup fails with a DuplicatePropertySourceException"
+      - "The keys are merged and numeric duplicates are summed"
+    answer: 0
+    explanation: |
+      When a @PropertySource resolves to a name that already exists,
+      PropertySourceProcessor.addPropertySource wraps them in a
+      CompositePropertySource (or extends an existing one), inserting the newly
+      processed source at the front. Because a composite returns the first match,
+      the later source wins on overlapping keys, but the earlier file's other keys
+      are retained. Assign explicit, distinct names only if you want the sources
+      kept separate and independently ordered rather than merged.
+    ref: "concepts.md#propertysource-annotation"
+
+  - id: configuration-profiles-properties-054
+    difficulty: advanced
+    tags: [environment, system-environment, relaxed-lookup]
+    question: |
+      Given only an OS environment variable API_BASE_URL (no system property, no
+      file), which of these Environment lookups is guaranteed to find it via
+      SystemEnvironmentPropertySource's normalization rules?
+    options:
+      - "env.getProperty(\"apiBaseUrl\")"
+      - "env.getProperty(\"api.base.url\")"
+      - "env.getProperty(\"api-base-url-value\")"
+      - "env.getProperty(\"API.BASE.URL.EXTRA\")"
+    answer: 1
+    explanation: |
+      SystemEnvironmentPropertySource tries the exact name, dots/hyphens replaced
+      by underscores, the uppercased form, and uppercased-with-underscores. So
+      api.base.url maps to API_BASE_URL. camelCase (apiBaseUrl) is not part of the
+      normalization, and the other options change the token set.
+    ref: "concepts.md#environment-abstraction"
+
+  - id: configuration-profiles-properties-055
+    difficulty: expert
+    tags: [environment, mappropertysource, normalization]
+    question: |
+      A developer copies the env-var trick and adds a MapPropertySource containing
+      the key "API_BASE_URL", then calls env.getProperty("api.base.url") expecting
+      the relaxed mapping to apply. What happens?
+    options:
+      - "It resolves to the value, because all PropertySources perform the same relaxed normalization"
+      - "It throws IllegalStateException for an ambiguous key"
+      - "It resolves only if the map is added with addFirst"
+      - "It returns null, because dot-to-underscore/case normalization is implemented ONLY by SystemEnvironmentPropertySource, not by a plain MapPropertySource"
+    answer: 3
+    explanation: |
+      The relaxed name matching is a feature of SystemEnvironmentPropertySource
+      alone. A MapPropertySource looks up the literal key, so api.base.url does
+      not match a stored API_BASE_URL. This is why file/map-based config must use
+      exact key spelling.
+    ref: "concepts.md#environment-abstraction"
+
+  - id: configuration-profiles-properties-056
+    difficulty: advanced
+    tags: [environment, value, caching, runtime-change]
+    question: |
+      At runtime, code calls env.getPropertySources().addFirst(...) to override
+      "feature.x" AFTER the context has fully started. A singleton bean earlier
+      injected @Value("${feature.x}") into a String field. What does that field
+      hold now?
+    options:
+      - "The new overriding value, because @Value fields are re-resolved on every access"
+      - "null, because mutating sources after refresh clears all injected values"
+      - "The original value captured at bean creation, because @Value is resolved once during bean population and cached in the field; only live Environment.getProperty calls see the new source"
+      - "It depends on the JVM's escape analysis"
+    answer: 2
+    explanation: |
+      @Value is resolved during bean population and the result is stored in the
+      field permanently (for a singleton, for the app's lifetime). Later mutations
+      to PropertySources are visible only through live Environment.getProperty
+      calls or refreshable beans (Spring Cloud @RefreshScope), not through the
+      already-injected field.
+    ref: "concepts.md#environment-abstraction"
+
+  - id: configuration-profiles-properties-057
+    difficulty: expert
+    tags: [environment, conversionservice, typed-lookup]
+    question: |
+      A team registers a custom Converter via a ConversionServiceFactoryBean bean
+      so @Value can bind a custom type. But env.getProperty("addr",
+      InetAddress.class) still fails to use the converter. What is the most likely
+      cause?
+    options:
+      - "The Environment uses its OWN ConversionService; you must call ConfigurableEnvironment.setConversionService(...) (or configure the environment) for typed getProperty to use the custom converter"
+      - "Converters cannot be used for typed Environment lookups at all"
+      - "The converter must be annotated @Primary"
+      - "getProperty(key, Class) ignores all ConversionServices and only handles primitives"
+    answer: 0
+    explanation: |
+      The Environment's ConversionService is distinct from the ApplicationContext
+      bean-level ConversionService used for @Value binding. Registering a bean
+      customizes the latter, not the former. To affect typed Environment lookups
+      you must set the ConversionService on the ConfigurableEnvironment.
+    ref: "concepts.md#environment-abstraction"
+
+  - id: configuration-profiles-properties-058
+    difficulty: advanced
+    tags: [value, nested-placeholder, resolution]
+    question: |
+      Given properties env=prod and prod.datasource.url=jdbc:prod, what does
+      @Value("${${env}.datasource.url}") inject?
+    options:
+      - "The literal string ${prod.datasource.url}"
+      - "jdbc:prod, because the inner ${env} is resolved first to 'prod', then ${prod.datasource.url} is resolved"
+      - "null, because nested placeholders are not supported"
+      - "An IllegalArgumentException for malformed placeholder syntax"
+    answer: 1
+    explanation: |
+      Spring resolves placeholders recursively from the inside out: ${env} becomes
+      'prod', forming ${prod.datasource.url}, which then resolves to jdbc:prod.
+      Nested placeholders (and nested defaults like ${a:${b:x}}) are fully
+      supported.
+    ref: "concepts.md#value-with-placeholders-and-defaults"
+
+  - id: configuration-profiles-properties-059
+    difficulty: expert
+    tags: [value, spel, placeholder, ordering]
+    question: |
+      Suppose a property greeting resolves to the literal text #{2+2}. What does
+      @Value("${greeting}") inject, and why?
+    options:
+      - "The string \"4\", because placeholder resolution runs FIRST and SpEL then evaluates the resulting string — so the #{2+2} produced by the placeholder is handed to the SpEL parser and evaluated"
+      - "The literal string \"#{2+2}\", because a placeholder's output is never treated as SpEL"
+      - "A ParseException, because #{ appears in the resolved value"
+      - "null, because #{ is a reserved sequence in property values"
+    answer: 0
+    explanation: |
+      In doResolveDependency the container calls resolveEmbeddedValue (${...}) and
+      THEN evaluateBeanDefinitionString (#{...}) on that result. Because SpEL runs
+      on the post-placeholder string, a #{...} expression that a placeholder
+      produced IS parsed and evaluated, yielding "4". This ordering is precisely
+      why interpolating untrusted property values into @Value is a SpEL-injection
+      risk. (The reverse does not happen: ${...} is not re-scanned after SpEL runs.)
+    ref: "concepts.md#value-with-placeholders-and-defaults"
+
+  - id: configuration-profiles-properties-060
+    difficulty: advanced
+    tags: [value, primitive, conversion, failure]
+    question: |
+      @Value("${retries}") targets an int field, and 'retries' resolves to an
+      empty string (the key exists but has no value). What happens at bean creation?
+    options:
+      - "The field is set to 0, the primitive default"
+      - "A conversion failure (TypeMismatchException wrapping a NumberFormatException) is thrown because an empty string cannot be converted to int"
+      - "The bean is created but the field stays uninitialized"
+      - "Spring silently skips the injection"
+    answer: 1
+    explanation: |
+      An existing-but-empty value still requires conversion to int, and "" cannot
+      be parsed as a number, so injection fails with a TypeMismatch/NumberFormat
+      error. A default in the placeholder only applies when the key is ABSENT, not
+      when it is present-but-empty.
+    ref: "concepts.md#value-with-placeholders-and-defaults"
+
+  - id: configuration-profiles-properties-061
+    difficulty: expert
+    tags: [value, circular-placeholder, failure]
+    question: |
+      Two properties are defined: a=${b} and b=${a}. A bean has @Value("${a}").
+      What does Spring do?
+    options:
+      - "Injects an empty string after giving up"
+      - "Overflows the stack with a StackOverflowError"
+      - "Injects the literal ${a}"
+      - "Throws IllegalArgumentException reporting a circular placeholder reference"
+    answer: 3
+    explanation: |
+      The placeholder resolver detects the cycle a -> b -> a and throws
+      IllegalArgumentException ('Circular placeholder reference'), rather than
+      recursing until the stack overflows.
+    ref: "concepts.md#value-with-placeholders-and-defaults"
+
+  - id: configuration-profiles-properties-062
+    difficulty: advanced
+    tags: [pspc, multiple-configurers, ignore-unresolvable]
+    question: |
+      An application declares two PropertySourcesPlaceholderConfigurer beans (from
+      two modules), each backed by different local properties, both with default
+      settings. Startup fails with 'Could not resolve placeholder' for a key that
+      exists in the SECOND configurer's properties. What is the fix?
+    options:
+      - "Merge both into a single configurer; multiple PSPCs are illegal"
+      - "Mark the second configurer @Primary"
+      - "Set setIgnoreUnresolvablePlaceholders(true) on the earlier-ordered configurer(s) so unresolved placeholders pass through to the next configurer instead of throwing"
+      - "Change the second configurer to a PropertyPlaceholderConfigurer"
+    answer: 2
+    explanation: |
+      Each PSPC is a BeanFactoryPostProcessor that runs in order. With the default
+      ignoreUnresolvablePlaceholders=false, the first one throws before the second
+      can resolve the key. Setting ignoreUnresolvablePlaceholders=true on all but
+      the last configurer lets unresolved placeholders flow through the chain.
+    ref: "concepts.md#propertysourcesplaceholderconfigurer"
+
+  - id: configuration-profiles-properties-063
+    difficulty: expert
+    tags: [pspc, static, cglib, warning]
+    question: |
+      A developer declares a non-static @Bean method returning a
+      PropertySourcesPlaceholderConfigurer inside a @Configuration class. Besides a
+      log warning, what is the concrete side effect on that configuration class?
+    options:
+      - "Nothing changes; the warning is purely cosmetic"
+      - "The enclosing @Configuration class is instantiated too early to be CGLIB-enhanced, so its inter-@Bean method calls lose singleton interception for the rest of the context"
+      - "All @Bean methods in the class become prototype-scoped"
+      - "The context fails to start with a BeanCreationException"
+    answer: 1
+    explanation: |
+      To invoke a non-static BeanFactoryPostProcessor factory method, Spring must
+      instantiate the configuration class before the enhancement step, so it
+      cannot create the CGLIB subclass. The class then behaves like a lite config:
+      inter-bean method calls are no longer intercepted. Declaring the method
+      static avoids instantiating the class at all.
+    ref: "concepts.md#propertysourcesplaceholderconfigurer"
+
+  - id: configuration-profiles-properties-064
+    difficulty: advanced
+    tags: [pspc, bean-reference, lifecycle]
+    question: |
+      Why can a PropertySourcesPlaceholderConfigurer NOT resolve a placeholder by
+      calling a getter on another application bean (e.g. reading a value from a
+      ConfigService bean)?
+    options:
+      - "Because PSPC only reads System.getProperties()"
+      - "Because PSPC is a BeanFactoryPostProcessor that runs before regular singletons are instantiated; it resolves only against the Environment's PropertySources, not against beans"
+      - "Because bean references require XML configuration"
+      - "Because getters are not thread-safe during startup"
+    answer: 1
+    explanation: |
+      As a BeanFactoryPostProcessor, PSPC operates on bean-definition metadata
+      before beans are created, and it resolves purely against the Environment's
+      PropertySources. It has no mechanism to obtain values from not-yet-created
+      application beans. SpEL #{beanName...} can reference beans, but at the later
+      @Value-processing stage.
+    ref: "concepts.md#propertysourcesplaceholderconfigurer"
+
+  - id: configuration-profiles-properties-065
+    difficulty: advanced
+    tags: [profile, registration-time, no-such-bean]
+    question: |
+      A bean is annotated @Profile("prod"). The context starts with NO active
+      profile. Later code calls ctx.getEnvironment().setActiveProfiles("prod") and
+      then ctx.getBean(ThatBean.class). What is the result?
+    options:
+      - "The bean is now available, because setActiveProfiles re-evaluates @Profile conditions"
+      - "The container automatically refreshes and creates the bean"
+      - "A new prototype instance is returned each call"
+      - "NoSuchBeanDefinitionException, because @Profile is evaluated once at bean-definition registration (before refresh) and setting profiles afterward does not create the skipped definition"
+    answer: 3
+    explanation: |
+      @Profile (ProfileCondition) is a registration-time condition evaluated
+      during configuration parsing before refresh. A skipped bean has no
+      definition at all, and changing active profiles afterward does not
+      retroactively register it, so getBean throws NoSuchBeanDefinitionException.
+    ref: "concepts.md#profile"
+
+  - id: configuration-profiles-properties-066
+    difficulty: expert
+    tags: [profile, ambiguity, no-unique-bean]
+    question: |
+      devDataSource is @Profile("dev") and prodDataSource is @Profile("prod");
+      both return DataSource. The app is launched with
+      spring.profiles.active=dev,prod. A component has a single
+      @Autowired DataSource. What happens?
+    options:
+      - "prodDataSource wins automatically because prod sorts after dev"
+      - "Only the first-declared bean is registered; the second is ignored"
+      - "The container merges both into a composite DataSource"
+      - "NoUniqueBeanDefinitionException, because both profiles are active so TWO DataSource beans are registered and the single injection point is ambiguous"
+    answer: 3
+    explanation: |
+      Profiles are not mutually exclusive; activating both dev and prod registers
+      both DataSource beans. A single-valued autowire by type then finds two
+      candidates and throws NoUniqueBeanDefinitionException. Disjoint expressions,
+      @Primary, or @Qualifier are needed to disambiguate.
+    ref: "concepts.md#profile"
+
+  - id: configuration-profiles-properties-067
+    difficulty: expert
+    tags: [profile, expression, precedence, parsing]
+    question: |
+      Which @Profile value throws an IllegalArgumentException due to ambiguous
+      operator precedence?
+    options:
+      - "@Profile(\"(a & b) | c\")"
+      - "@Profile(\"a & (b | c)\")"
+      - "@Profile(\"a & b | c\")"
+      - "@Profile(\"!a & b\")"
+    answer: 2
+    explanation: |
+      Spring's profile-expression parser does not allow mixing & and | at the same
+      level without parentheses; "a & b | c" is rejected as malformed. You must
+      parenthesize to make precedence explicit, e.g. "(a & b) | c".
+    ref: "concepts.md#profile"
+
+  - id: configuration-profiles-properties-068
+    difficulty: advanced
+    tags: [profile, array-form, or-semantics]
+    question: |
+      What is the semantic difference between @Profile({"a", "b"}) and
+      @Profile("a & b")?
+    options:
+      - "They are identical; both require a AND b"
+      - "The array form means OR (active if a OR b is active), while \"a & b\" requires BOTH a and b to be active"
+      - "The array form means AND; \"a & b\" means OR"
+      - "The array form is invalid syntax"
+    answer: 1
+    explanation: |
+      The comma-separated array form matches if ANY listed profile is active (OR
+      semantics). The expression "a & b" uses the AND operator, requiring both to
+      be active. Confusing the two is a common mistake.
+    ref: "concepts.md#profile"
+
+  - id: configuration-profiles-properties-069
+    difficulty: advanced
+    tags: [default-profile, suppression, edge-case]
+    question: |
+      A bean is @Profile("default"), intended as a base fallback. The app is
+      started with spring.profiles.active=metrics (an unrelated profile). Is the
+      @Profile("default") bean registered?
+    options:
+      - "Yes, default beans are always registered alongside any active profile"
+      - "Yes, but only if metrics does not define a bean of the same type"
+      - "It depends on the order of profile activation"
+      - "No, because activating ANY profile empties the 'default in effect' condition, so @Profile(\"default\") beans are skipped even though 'metrics' is unrelated"
+    answer: 3
+    explanation: |
+      Default profiles apply only when the active-profile set is empty. Activating
+      any profile — even an unrelated one like metrics — removes 'default' from
+      effect, so @Profile("default") beans are skipped. To keep a bean in both
+      cases, leave it un-profiled or use @Profile({"default","metrics"}).
+    ref: "concepts.md#default-profile"
+
+  - id: configuration-profiles-properties-070
+    difficulty: expert
+    tags: [profile, empty, null, activation]
+    question: |
+      Which statement about activating profiles is correct regarding empty/null
+      inputs?
+    options:
+      - "Setting the system property spring.profiles.active to an empty string throws at startup"
+      - "spring.profiles.active=\"prod,\" activates prod (the trailing empty token is trimmed/ignored), whereas setActiveProfiles((String) null) throws IllegalArgumentException"
+      - "setActiveProfiles(null) silently clears all profiles"
+      - "An empty spring.profiles.active activates a profile literally named 'empty'"
+    answer: 1
+    explanation: |
+      The property path tolerates emptiness: an empty value means no active
+      profiles, and trailing/blank tokens like in "prod," are trimmed so only prod
+      is activated. The programmatic setActiveProfiles rejects null elements with
+      IllegalArgumentException.
+    ref: "concepts.md#default-profile"
+
+  - id: configuration-profiles-properties-071
+    difficulty: expert
+    tags: [conditional, configuration-phase, register-bean]
+    question: |
+      A custom condition should register a fallback bean ONLY IF no other bean of
+      a given type is already defined. Why must it implement ConfigurationCondition
+      with ConfigurationPhase.REGISTER_BEAN rather than a plain Condition?
+    options:
+      - "Because plain Conditions cannot access the Environment"
+      - "Because ConfigurationCondition is required for any @Bean-level condition"
+      - "Because a 'no other bean of this type' check must run AFTER all bean definitions are known; REGISTER_BEAN defers evaluation to the register-bean phase, whereas the default PARSE_CONFIGURATION phase runs too early to see later definitions"
+      - "Because plain Conditions are evaluated at runtime on every getBean call"
+    answer: 2
+    explanation: |
+      Conditions checking the presence/absence of other bean definitions are
+      order-sensitive. PARSE_CONFIGURATION runs during config-class parsing before
+      all definitions exist; REGISTER_BEAN defers the check until bean-definition
+      registration is complete, so the presence check is reliable. This is the
+      pattern behind Boot's @ConditionalOnMissingBean.
+    ref: "concepts.md#conditional-and-conditional-on-property"
+
+  - id: configuration-profiles-properties-072
+    difficulty: advanced
+    tags: [conditional, condition-context, lifecycle]
+    question: |
+      Inside a Condition.matches implementation, which action is UNSAFE/incorrect
+      because of when conditions are evaluated?
+    options:
+      - "Reading ctx.getEnvironment().getProperty(...)"
+      - "Inspecting AnnotatedTypeMetadata for annotation attributes"
+      - "Calling ctx.getBeanFactory().getBean(SomeService.class) to obtain and use an application bean"
+      - "Checking ctx.getRegistry().containsBeanDefinition(name)"
+    answer: 2
+    explanation: |
+      Conditions are evaluated during configuration parsing/registration before
+      application beans are instantiated. Calling getBean on an application bean is
+      unsafe (it may not exist yet or would force premature instantiation).
+      Reading the Environment, metadata, or the registry is fine.
+    ref: "concepts.md#conditional-and-conditional-on-property"
+
+  - id: configuration-profiles-properties-073
+    difficulty: expert
+    tags: [bean-overriding, ordering, exception]
+    question: |
+      Two imported @Configuration classes both declare `@Bean DataSource ds()`.
+      In a core-Spring AnnotationConfigApplicationContext with the DEFAULT
+      settings, what happens, and how does that differ from Spring Boot's default?
+    options:
+      - "Core Spring throws BeanDefinitionOverrideException; Boot silently overrides"
+      - "Both throw in all cases"
+      - "Both silently keep the first definition and ignore the second"
+      - "Core Spring allows overriding (the later definition wins silently); Spring Boot sets allowBeanDefinitionOverriding=false by default, so the same setup throws BeanDefinitionOverrideException"
+    answer: 3
+    explanation: |
+      DefaultListableBeanFactory allows bean-definition overriding by default in
+      core Spring, so the last-registered same-named definition wins silently.
+      Spring Boot flips allowBeanDefinitionOverriding to false, turning the same
+      collision into a BeanDefinitionOverrideException at startup.
+    ref: "concepts.md#bean-definition-overriding-and-ordering"
+
+  - id: configuration-profiles-properties-074
+    difficulty: expert
+    tags: [import, deferred-import-selector, ordering]
+    question: |
+      Regarding registration order, when are beans contributed by a
+      DeferredImportSelector processed relative to regular @Configuration classes,
+      and why does it matter?
+    options:
+      - "After all regular @Configuration classes are processed, so their definitions can serve as fallbacks (or be overridden by user config); this ordering underpins Boot auto-configuration acting as a backstop"
+      - "Before any regular @Configuration class, so they take priority"
+      - "At a random point determined by classloading"
+      - "Only at runtime on the first getBean call"
+    answer: 0
+    explanation: |
+      DeferredImportSelectors are processed after all regular @Configuration
+      classes, which is precisely how Spring Boot auto-configuration is arranged
+      to defer to user-defined beans (via @ConditionalOnMissingBean) — user config
+      is seen first, auto-config fills gaps afterward.
+    ref: "concepts.md#bean-definition-overriding-and-ordering"
+
+  - id: configuration-profiles-properties-075
+    difficulty: expert
+    tags: [environment, custom-propertysource, bean-trap]
+    question: |
+      A developer declares `@Bean PropertySource<?> myPs() { return new
+      MapPropertySource("my", map); }` expecting its keys to be resolvable via
+      @Value. They are not. Why?
+    options:
+      - "PropertySource beans must be annotated @Primary to take effect"
+      - "MapPropertySource cannot be used with @Value, only PropertiesPropertySource can"
+      - "The bean name must equal the property prefix"
+      - "The Environment is not assembled from beans; a PropertySource returned as a bean is never added to MutablePropertySources — you must mutate env.getPropertySources() directly (e.g. before refresh or in an early BeanFactoryPostProcessor)"
+    answer: 3
+    explanation: |
+      The Environment's property sources are managed independently of the bean
+      registry; defining a PropertySource as a @Bean does not register it with the
+      Environment. You must add it to the MutablePropertySources directly, early
+      enough (before/around refresh) for PSPC to see it.
+    ref: "concepts.md#environment-post-processing-and-custom-propertysources"
+
+  - id: configuration-profiles-properties-076
+    difficulty: advanced
+    tags: [environment, ordering, bfpp, pspc]
+    question: |
+      You add a high-precedence PropertySource inside a custom
+      BeanFactoryPostProcessor so it overrides existing values for @Value. For this
+      to work reliably, what ordering constraint must hold?
+    options:
+      - "Your BeanFactoryPostProcessor must be ordered to run BEFORE the PropertySourcesPlaceholderConfigurer, since PSPC resolves @Value placeholders during the BFPP phase"
+      - "Your post-processor must run after all singletons are created"
+      - "Ordering is irrelevant because PSPC re-reads sources continuously"
+      - "It only works if PSPC is declared non-static"
+    answer: 0
+    explanation: |
+      PSPC resolves placeholders during the BeanFactoryPostProcessor phase, so any
+      post-processor that mutates the Environment's sources must be ordered to run
+      before PSPC (e.g. via PriorityOrdered/Ordered). Otherwise PSPC resolves
+      @Value before your source is present.
+    ref: "concepts.md#environment-post-processing-and-custom-propertysources"
+
+  - id: configuration-profiles-properties-077
+    difficulty: advanced
+    tags: [placeholder, environment-api, resolve]
+    question: |
+      A String read from a bean contains embedded placeholders, e.g.
+      "url=${host}:${port}". Calling env.getProperty("url") returns it verbatim
+      with the ${...} unresolved. Which Environment method resolves the embedded
+      placeholders?
+    options:
+      - "env.getRequiredProperty(\"url\")"
+      - "env.getProperty(\"url\", String.class)"
+      - "env.resolvePlaceholders(theString) (or resolveRequiredPlaceholders for strict mode)"
+      - "env.containsProperty(\"url\")"
+    answer: 2
+    explanation: |
+      getProperty returns the raw stored value without resolving placeholders
+      embedded IN the value. Environment.resolvePlaceholders /
+      resolveRequiredPlaceholders explicitly perform ${...} substitution against
+      the sources. (PSPC does this automatically for @Value and bean definitions,
+      but not for arbitrary getProperty results.)
+    ref: "concepts.md#placeholder-resolution-failure-modes"
+
+  - id: configuration-profiles-properties-078
+    difficulty: expert
+    tags: [propertysource, location-placeholder, failure]
+    question: |
+      @PropertySource("classpath:${config.dir}/app.properties") is used, but
+      config.dir is not defined anywhere and ignoreResourceNotFound=true is set.
+      What happens at startup?
+    options:
+      - "The file is treated as missing and skipped, because ignoreResourceNotFound=true suppresses the error"
+      - "Startup fails because the LOCATION STRING itself cannot be built (unresolvable placeholder in the path); ignoreResourceNotFound only covers a resolved-but-missing file, not an unresolvable location"
+      - "Spring substitutes an empty string for ${config.dir} and loads classpath:/app.properties"
+      - "The placeholder is left literal and Spring looks for a file literally named ${config.dir}"
+    answer: 1
+    explanation: |
+      The placeholder in the resource path must resolve to construct the location.
+      An unresolvable path placeholder throws regardless of ignoreResourceNotFound,
+      which only tolerates a well-formed path pointing to a nonexistent file.
+    ref: "concepts.md#placeholder-resolution-failure-modes"
+
+  - id: configuration-profiles-properties-079
+    difficulty: advanced
+    tags: [value, escape, literal]
+    question: |
+      A configuration value must be injected as the literal text ${notAKey}
+      (dollar-brace included), not resolved. Using the default escape character,
+      which @Value achieves this?
+    options:
+      - "@Value(\"${notAKey}\")"
+      - "@Value(\"\\${notAKey}\")"
+      - "@Value(\"#{notAKey}\")"
+      - "@Value(\"$${notAKey}\")"
+    answer: 1
+    explanation: |
+      The default placeholder escape character is a backslash, so \${notAKey}
+      injects the literal ${notAKey} without attempting resolution. Without the
+      escape, Spring tries to resolve notAKey and throws if it is absent.
+    ref: "concepts.md#value-with-placeholders-and-defaults"
+
+  - id: configuration-profiles-properties-080
+    difficulty: expert
+    tags: [pspc, null-value, primitive, interaction]
+    question: |
+      PSPC is configured with setNullValue("@null"). A property key resolves to
+      the token "@null", and it is injected via @Value("${flag}") into a primitive
+      boolean field. What is the outcome?
+    options:
+      - "The field is set to false, the boolean default"
+      - "A conversion/injection failure occurs, because the resolved value becomes null and null cannot be assigned to a primitive boolean"
+      - "The field is set to the string \"@null\""
+      - "Spring silently leaves the field unset"
+    answer: 1
+    explanation: |
+      With a configured null-value token, resolving to that token yields a null
+      injected value. Assigning null to a primitive boolean is impossible, so
+      injection fails. The null-value feature is safe only for reference-typed
+      targets.
+    ref: "concepts.md#propertysourcesplaceholderconfigurer"
+
+  - id: configuration-profiles-properties-081
+    difficulty: advanced
+    tags: [configuration, import, deferred, order-annotation]
+    question: |
+      A developer puts @Order on two @Configuration classes hoping to control
+      which one's same-named @Bean definition wins. Does @Order on the
+      configuration classes determine the override outcome?
+    options:
+      - "No; @Order on @Configuration classes does not govern bean-definition override precedence — override is decided by the order in which definitions are REGISTERED (import/processing order), with the last registration winning"
+      - "Yes, the highest @Order value's bean always wins"
+      - "Yes, but only if both classes are component-scanned"
+      - "No, @Order is illegal on @Configuration classes"
+    answer: 0
+    explanation: |
+      @Order influences things like collection injection ordering and some
+      selector/processor sequencing, but same-named bean-definition overriding is
+      decided by registration order (last one registered replaces earlier ones).
+      Relying on @Order to pick the winning definition is incorrect.
+    ref: "concepts.md#bean-definition-overriding-and-ordering"

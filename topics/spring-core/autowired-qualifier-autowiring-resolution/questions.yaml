@@ -678,3 +678,755 @@ questions:
       Only one bean per type should be @Primary. Multiple primaries of the same type
       reintroduce ambiguity and cause NoUniqueBeanDefinitionException.
     ref: "concepts.md#qualifier-vs-primary"
+
+  - id: autowired-qualifier-autowiring-resolution-043
+    difficulty: expert
+    tags: [constructor, name-fallback, parameters, failure-mode]
+    question: |
+      A class has a single constructor with two same-typed candidates disambiguated only by
+      parameter names matching bean names (no @Qualifier). It works when run from the IDE but
+      throws NoUniqueBeanDefinitionException in the production JAR. What is the MOST likely cause?
+    options:
+      - "The production JAR was built without the -parameters (or -g debug) flag, so parameter names became arg0/arg1 and the name-based fallback could not match a bean"
+      - "The IDE silently adds @Primary to the first candidate at compile time"
+      - "Constructor injection ignores bean-name fallback entirely, so it only ever worked by accident of classpath ordering"
+      - "Spring caches parameter names from the last successful run and the production process had a cold cache"
+    answer: 0
+    explanation: |
+      Constructor/method parameter-name fallback needs the names to survive compilation. Without
+      -parameters (Java 8+) or debug symbols, names appear as arg0, arg1, ... and Spring cannot
+      match them to bean names, so ambiguity is no longer broken. @Qualifier does not depend on
+      parameter names and is the robust fix. Field-name fallback is unaffected because field names
+      always survive.
+    ref: "concepts.md#how-autowired-resolves-dependencies"
+
+  - id: autowired-qualifier-autowiring-resolution-044
+    difficulty: expert
+    tags: [priority, order, single-value, selection]
+    question: |
+      Three beans of type Handler exist: A (@Priority(1)), B (@Priority(2)), and C (@Order(0),
+      no @Priority). A field `@Autowired Handler h;` (no qualifier, no @Primary) is resolved.
+      Which bean is injected, and why?
+    options:
+      - "C, because @Order(0) is the lowest ordering value and wins single-value selection"
+      - "B, because higher @Priority numbers indicate higher precedence"
+      - "None; NoUniqueBeanDefinitionException, because @Order and @Priority cannot be mixed"
+      - "A, because determineHighestPriorityCandidate uses JSR-250 @Priority (lowest number wins) for single-value ties, and @Order is ignored for single-value selection"
+    answer: 3
+    explanation: |
+      For single-value injection, Spring's determineAutowireCandidate consults @Primary, then
+      @Priority (lowest number = highest precedence), then name fallback. @Order/Ordered only
+      affects collection ordering, never single-bean selection. A has the lowest @Priority number,
+      so A wins; C's @Order is irrelevant here.
+    ref: "concepts.md#nouniquebeandefinitionexception-on-ambiguity"
+
+  - id: autowired-qualifier-autowiring-resolution-045
+    difficulty: expert
+    tags: [priority, primary, precedence]
+    question: |
+      Among candidates of one type, bean X is @Primary and bean Y has @Priority(0) (the highest
+      possible priority). A single-value injection point has no qualifier. Which wins?
+    options:
+      - "X, because determinePrimaryCandidate runs before determineHighestPriorityCandidate"
+      - "Y, because @Priority(0) is the strongest possible precedence and beats @Primary"
+      - "Neither; combining @Primary and @Priority on different beans of one type is a configuration error that throws at startup"
+      - "Whichever bean was registered first in the BeanFactory"
+    answer: 0
+    explanation: |
+      In determineAutowireCandidate, the @Primary check runs first and short-circuits. Only if no
+      primary is found does Spring fall back to the @Priority comparison. So X (the primary) wins
+      over Y despite Y's priority.
+    ref: "concepts.md#nouniquebeandefinitionexception-on-ambiguity"
+
+  - id: autowired-qualifier-autowiring-resolution-046
+    difficulty: advanced
+    tags: [required-false, ambiguity, optional]
+    question: |
+      A field `@Autowired(required = false) PaymentGateway gw;` has TWO matching beans and no
+      qualifier or @Primary. What happens?
+    options:
+      - "NoUniqueBeanDefinitionException is still thrown; required=false suppresses only the zero-candidate case, not ambiguity"
+      - "gw is left null because required=false suppresses all resolution errors"
+      - "One of the two beans is chosen arbitrarily since the dependency is optional"
+      - "gw is populated with a List containing both beans"
+    answer: 0
+    explanation: |
+      required=false relaxes the "no candidate" requirement, letting the field stay null when
+      nothing matches. It does NOT resolve ambiguity: with multiple candidates and no tiebreaker,
+      NoUniqueBeanDefinitionException is still thrown. Optional<T> behaves identically; only
+      ObjectProvider.getIfUnique() returns null on multiplicity.
+    ref: "concepts.md#required-false-and-optional-and-objectprovider"
+
+  - id: autowired-qualifier-autowiring-resolution-047
+    difficulty: expert
+    tags: [objectprovider, ambiguity, getifavailable, getifunique]
+    question: |
+      Two beans of type Cache exist. You inject `ObjectProvider<Cache> provider;` into a singleton.
+      What do provider.getIfAvailable() and provider.getIfUnique() return?
+    options:
+      - "getIfAvailable() throws NoUniqueBeanDefinitionException; getIfUnique() returns null"
+      - "Both throw NoUniqueBeanDefinitionException because two candidates exist"
+      - "Both return null, silently swallowing the ambiguity"
+      - "getIfAvailable() returns the @Primary one or throws if none; getIfUnique() throws NoUniqueBeanDefinitionException"
+    answer: 0
+    explanation: |
+      getIfAvailable() means "give me the single available bean" and still throws
+      NoUniqueBeanDefinitionException when multiple non-primary candidates exist. getIfUnique() is
+      specifically designed to return null when the match is not unique (zero or more than one),
+      making it the safe choice for optional-and-possibly-ambiguous lookups.
+    ref: "concepts.md#required-false-and-optional-and-objectprovider"
+
+  - id: autowired-qualifier-autowiring-resolution-048
+    difficulty: expert
+    tags: [objectprovider, prototype, scope, lazy]
+    question: |
+      A singleton service needs a FRESH prototype-scoped Task on each call. Which injection
+      correctly delivers a new instance every time, and why?
+    options:
+      - "Inject `Task task;` directly by constructor; Spring re-injects a new prototype before each method call"
+      - "Inject `ObjectProvider<Task> tasks;` and call tasks.getObject() per use, because the provider defers the getBean lookup so each call creates a new prototype"
+      - "Inject `Task task;` as a field with @Scope(\"prototype\") on the field"
+      - "Inject `List<Task> tasks;` and remove the first element each call"
+    answer: 1
+    explanation: |
+      Injecting a prototype directly into a singleton resolves it once and freezes that single
+      instance for the singleton's life. ObjectProvider (or ObjectFactory/@Lookup/scoped proxy)
+      defers resolution, so each getObject() triggers a new getBean call and thus a new prototype.
+    ref: "concepts.md#required-false-and-optional-and-objectprovider"
+
+  - id: autowired-qualifier-autowiring-resolution-049
+    difficulty: expert
+    tags: [qualifier, metadata, bean-name, fallback]
+    question: |
+      Two beans both declare @Qualifier("primary") as a class-level annotation. An injection point
+      declares `@Autowired @Qualifier("primary") Foo foo;`. There is NO bean literally named
+      "primary". What happens?
+    options:
+      - "The qualifier string is treated as a bean name; since no bean is named 'primary', NoSuchBeanDefinitionException is thrown"
+      - "NoUniqueBeanDefinitionException is thrown, because the qualifier-metadata path already matched two candidates and the bean-name fallback never runs"
+      - "The first-registered bean wins because @Qualifier metadata matches are ordered"
+      - "Both beans are injected as a collection since they share a qualifier group"
+    answer: 1
+    explanation: |
+      Spring first matches @Qualifier against beans' own qualifier metadata. Two beans carry
+      @Qualifier("primary"), so both match and the injection point is ambiguous. The
+      "treat qualifier as bean name" fallback only runs when the metadata path finds no match, so
+      it never fires here — the result is NoUniqueBeanDefinitionException.
+    ref: "concepts.md#qualifier-vs-primary"
+
+  - id: autowired-qualifier-autowiring-resolution-050
+    difficulty: advanced
+    tags: [qualifier, custom, attributes]
+    question: |
+      Given a custom `@Genre(value, legacy)` qualifier (meta-annotated with @Qualifier), bean
+      ActionA is @Genre(value="action", legacy=true) and ActionB is @Genre(value="action"). The
+      injection point is `@Autowired @Genre(value="action", legacy=true) MovieCatalog c;`. Which
+      bean matches?
+    options:
+      - "Both, because value=\"action\" matches both and legacy is ignored"
+      - "ActionB, because default attribute values take precedence"
+      - "Neither, because custom qualifiers cannot carry more than one attribute"
+      - "ActionA only, because ALL declared qualifier attributes (value AND legacy) must match"
+    answer: 3
+    explanation: |
+      Custom qualifiers match on all their attributes. The injection point requires
+      value=action AND legacy=true, which only ActionA satisfies. ActionB has legacy defaulting to
+      false, so it is excluded. This attribute-level matching is a key advantage of custom
+      qualifiers over plain string qualifiers.
+    ref: "concepts.md#qualifier-vs-primary"
+
+  - id: autowired-qualifier-autowiring-resolution-051
+    difficulty: advanced
+    tags: [primary, injection-point, misuse]
+    question: |
+      A developer places @Primary at the injection point (`@Autowired @Primary Foo foo;`) hoping
+      to break an ambiguity between two Foo beans. What is the effect?
+    options:
+      - "It works: the injection point's @Primary designates the preferred candidate"
+      - "It throws a compile-time error because @Primary is not allowed on fields"
+      - "It disables autowiring for that field, leaving it null"
+      - "It has no disambiguating effect; @Primary is only honored on bean definitions, so NoUniqueBeanDefinitionException still occurs"
+    answer: 3
+    explanation: |
+      @Primary is only meaningful on bean definitions (the producer side). At an injection point it
+      is inert and does not resolve ambiguity. The correct tool at the injection point is
+      @Qualifier. The ambiguity therefore remains unresolved.
+    ref: "concepts.md#qualifier-vs-primary"
+
+  - id: autowired-qualifier-autowiring-resolution-052
+    difficulty: expert
+    tags: [collections, collection-bean, aggregation]
+    question: |
+      A config defines `@Bean List<Notifier> notifiers() { return List.of(a); }` AND there are
+      three individual @Component Notifier beans. What does `@Autowired List<Notifier> list;`
+      receive?
+    options:
+      - "The explicit List<Notifier> bean (containing only a), because a matching bean of the collection type takes precedence over element aggregation"
+      - "A merged list of all four (the @Bean list plus the three components)"
+      - "A list of all three individual Notifier components, ignoring the @Bean List"
+      - "NoUniqueBeanDefinitionException, because both a collection bean and elements match"
+    answer: 0
+    explanation: |
+      If an actual bean of the exact collection type exists, Spring injects that bean rather than
+      aggregating individual element beans. Element aggregation only happens when no single bean of
+      the collection type matches. So the explicit @Bean List<Notifier> wins.
+    ref: "concepts.md#injecting-list-map-and-array-of-beans"
+
+  - id: autowired-qualifier-autowiring-resolution-053
+    difficulty: advanced
+    tags: [collections, map, key-type]
+    question: |
+      What is the difference in behavior between `@Autowired Map<String, Notifier> m1;` and
+      `@Autowired Map<Class<?>, Notifier> m2;` when several Notifier beans exist and no actual Map
+      bean is defined?
+    options:
+      - "Both aggregate all Notifier beans, keyed by bean name vs. by class respectively"
+      - "Both fail because Map injection requires an explicitly defined Map bean"
+      - "m1 fails and m2 aggregates keyed by the runtime Class of each bean"
+      - "m1 aggregates Notifier beans keyed by bean name; m2 does NOT aggregate — it is treated as an ordinary type-matched dependency and fails if no matching Map bean exists"
+    answer: 3
+    explanation: |
+      Map aggregation is only triggered for Map<String, T> (keys are bean names). A Map with any
+      other key type (e.g. Class<?>) is not a recognized aggregation shape; Spring treats it as a
+      normal by-type dependency needing an actual matching Map bean, and fails if none exists.
+    ref: "concepts.md#injecting-list-map-and-array-of-beans"
+
+  - id: autowired-qualifier-autowiring-resolution-054
+    difficulty: expert
+    tags: [collections, ordering, order, priority]
+    question: |
+      An injected `List<Filter>` contains beans: X (@Order(10)), Y (no ordering annotation), and
+      Z (@Order(-5)). What is the resulting element order?
+    options:
+      - "[Z, X, Y] — ordered by @Order ascending, with the unannotated bean placed last"
+      - "[Y, Z, X] — unannotated beans come first"
+      - "[X, Y, Z] — declaration/registration order is preserved regardless of @Order"
+      - "[Z, Y, X] — @Order sorts all beans and Y is treated as @Order(0)"
+    answer: 0
+    explanation: |
+      AnnotationAwareOrderComparator sorts by @Order/Ordered ascending (lower value = earlier).
+      Z(-5) then X(10). A bean with NO ordering annotation is treated as lowest precedence
+      (effectively Ordered.LOWEST_PRECEDENCE) and sorts last, so Y ends up after X. Result:
+      [Z, X, Y].
+    ref: "concepts.md#injecting-list-map-and-array-of-beans"
+
+  - id: autowired-qualifier-autowiring-resolution-055
+    difficulty: expert
+    tags: [constructor, circular, lazy, proxy]
+    question: |
+      Two singletons A and B have a mutual constructor dependency. Adding `@Lazy` to A's
+      constructor parameter of type B fixes the BeanCurrentlyInCreationException. Why does this work
+      even though it is constructor injection?
+    options:
+      - "@Lazy converts the constructor injection into setter injection behind the scenes"
+      - "@Lazy causes Spring to inject a lazy-resolving proxy for B into A's constructor, deferring the real B lookup until first method call, by which time B exists"
+      - "@Lazy disables the singleton cache so both beans are recreated on demand"
+      - "@Lazy marks B as prototype, and prototype beans never participate in cycles"
+    answer: 1
+    explanation: |
+      @Lazy on the injection point makes Spring pass a lazy proxy instead of the real bean. The
+      proxy is created immediately (satisfying A's constructor), and the actual B is resolved only
+      when a method is first invoked on the proxy, breaking the instantiation-time cycle.
+    ref: "concepts.md#autowired-on-constructor-and-single-constructor-optionality"
+
+  - id: autowired-qualifier-autowiring-resolution-056
+    difficulty: expert
+    tags: [circular, prototype, scope, failure-mode]
+    question: |
+      Setter/field injection can resolve a singleton A-to-B/B-to-A cycle but the SAME setter cycle
+      throws BeanCurrentlyInCreationException when both beans are @Scope("prototype"). Why?
+    options:
+      - "Cycle resolution relies on early exposure of a partially-built singleton via the third-level singletonFactories cache; prototypes are never cached or early-exposed, so no reference is available to break the cycle"
+      - "Prototype beans are not proxied, and proxies are required for any injection"
+      - "Prototype beans are created lazily, so neither one ever starts construction"
+      - "Spring forbids @Autowired on prototype-scoped beans entirely"
+    answer: 0
+    explanation: |
+      Singleton cycle resolution depends on exposing a raw, not-yet-populated singleton early (the
+      third-level cache) so the collaborator can wire to it. Prototypes are not stored in the
+      singleton registry and get no early reference, so a prototype-prototype cycle cannot be
+      broken and throws BeanCurrentlyInCreationException.
+    ref: "concepts.md#autowired-on-constructor-and-single-constructor-optionality"
+
+  - id: autowired-qualifier-autowiring-resolution-057
+    difficulty: advanced
+    tags: [constructor, multiple, greedy]
+    question: |
+      A bean has three constructors, all annotated @Autowired(required=false), taking (), (A), and
+      (A, B) respectively. Beans A exists but B does not. Which constructor does Spring use?
+    options:
+      - "The no-arg constructor, because required=false always prefers the simplest"
+      - "The (A) constructor — the greediest constructor whose dependencies are ALL satisfiable"
+      - "The (A, B) constructor, invoking it with null for B"
+      - "None; multiple @Autowired constructors always throw at startup"
+    answer: 1
+    explanation: |
+      With several required=false constructors, Spring picks the greediest (most parameters) whose
+      dependencies can all be satisfied. (A,B) is greediest but B is missing, so it is skipped;
+      (A) is satisfiable and greedier than (), so (A) is chosen.
+    ref: "concepts.md#autowired-on-constructor-and-single-constructor-optionality"
+
+  - id: autowired-qualifier-autowiring-resolution-058
+    difficulty: advanced
+    tags: [resource, by-name, by-type, fallback]
+    question: |
+      A field `@Resource private DataSource metrics;` is declared. There is NO bean named
+      "metrics", but there IS exactly one DataSource bean named "primaryDs" marked @Primary. What
+      is injected?
+    options:
+      - "Nothing; @Resource is strictly by-name, so it throws NoSuchBeanDefinitionException"
+      - "primaryDs, because @Resource falls back to by-type resolution (honoring @Primary) when the name match fails"
+      - "A newly created DataSource named 'metrics'"
+      - "It throws NoUniqueBeanDefinitionException because @Resource cannot use @Primary"
+    answer: 1
+    explanation: |
+      @Resource is name-first, but when the derived/declared name matches no bean it falls back to
+      by-type resolution and at that stage honors @Primary (and a field @Qualifier). With one
+      primary DataSource, primaryDs is injected. This surprises those who assume @Resource is purely
+      name-based.
+    ref: "concepts.md#resource-by-name-vs-inject-vs-autowired"
+
+  - id: autowired-qualifier-autowiring-resolution-059
+    difficulty: advanced
+    tags: [inject, classpath, jsr330, failure-mode]
+    question: |
+      A class uses `@Inject` on a field, but neither jakarta.inject nor javax.inject is on the
+      classpath. What is the runtime behavior?
+    options:
+      - "Startup fails with ClassNotFoundException for the @Inject annotation"
+      - "The annotation is not recognized; the injection point is left unprocessed (a silent no-op), so the field stays null"
+      - "Spring transparently substitutes @Autowired semantics"
+      - "The bean definition is rejected and the bean is not registered"
+    answer: 1
+    explanation: |
+      AutowiredAnnotationBeanPostProcessor only registers support for @Inject if the JSR-330 API is
+      present on the classpath. Without it, @Inject is simply not scanned; the field is never
+      injected and stays null. There is no ClassNotFoundException because the annotation class is
+      only referenced reflectively when present.
+    ref: "concepts.md#resource-by-name-vs-inject-vs-autowired"
+
+  - id: autowired-qualifier-autowiring-resolution-060
+    difficulty: expert
+    tags: [post-processor, ordering, resource, autowired]
+    question: |
+      Which statement about the post-processors handling @Autowired and @Resource is correct?
+    options:
+      - "Both @Autowired and @Resource are handled by AutowiredAnnotationBeanPostProcessor"
+      - "@Resource is resolved at compile time; @Autowired at runtime"
+      - "@Autowired/@Value/@Inject are handled by AutowiredAnnotationBeanPostProcessor; @Resource/@PostConstruct/@PreDestroy by CommonAnnotationBeanPostProcessor, both during the populate-bean phase before @PostConstruct"
+      - "CommonAnnotationBeanPostProcessor handles @Autowired and runs after @PostConstruct"
+    answer: 2
+    explanation: |
+      AutowiredAnnotationBeanPostProcessor processes @Autowired, @Value, and JSR-330 @Inject.
+      CommonAnnotationBeanPostProcessor processes JSR-250 @Resource, @PostConstruct, and
+      @PreDestroy. Both are InstantiationAwareBeanPostProcessors that inject during populateBean,
+      after instantiation and before lifecycle callbacks like @PostConstruct.
+    ref: "concepts.md#resource-by-name-vs-inject-vs-autowired"
+
+  - id: autowired-qualifier-autowiring-resolution-061
+    difficulty: expert
+    tags: [internals, metadata, cache, thread-safety]
+    question: |
+      How does AutowiredAnnotationBeanPostProcessor avoid re-scanning a class's injection points for
+      every instance of that class?
+    options:
+      - "It disables reflection after the first bean is created"
+      - "It caches an InjectionMetadata object per class (keyed by class name) in a ConcurrentHashMap and reuses it for subsequent instances"
+      - "It serializes injection metadata to disk between runs"
+      - "It only supports singleton beans, so there is never more than one instance to scan"
+    answer: 1
+    explanation: |
+      The processor builds InjectionMetadata (the list of annotated fields/methods) once per class
+      and caches it in a concurrent map keyed by class name. New instances of the same class reuse
+      the cached metadata, so reflective scanning is not repeated per instance and lookups stay
+      thread-safe.
+    ref: "concepts.md#autowiring-internals-thread-safety-and-ordering"
+
+  - id: autowired-qualifier-autowiring-resolution-062
+    difficulty: expert
+    tags: [parent-context, hierarchy, ambiguity]
+    question: |
+      A child ApplicationContext defines one Cache bean; its parent context defines another Cache
+      bean. A bean in the child does `@Autowired Cache cache;` with no qualifier. What is the most
+      accurate outcome?
+    options:
+      - "By-type autowiring searches the child factory and its ancestors, so two candidates are visible and NoUniqueBeanDefinitionException can be thrown across the merged set"
+      - "The parent's bean always wins because parents are resolved first"
+      - "Only the child's bean is ever considered; the parent is invisible to autowiring"
+      - "Parent and child beans are automatically merged into a List and injected"
+    answer: 0
+    explanation: |
+      DefaultListableBeanFactory includes ancestor bean definitions when resolving by-type
+      dependencies. So a child injection point sees candidates from both contexts, and ambiguity is
+      computed across the merged set — a NoUniqueBeanDefinitionException can appear only once the
+      contexts are combined.
+    ref: "concepts.md#autowiring-internals-thread-safety-and-ordering"
+
+  - id: autowired-qualifier-autowiring-resolution-063
+    difficulty: advanced
+    tags: [bean-method, parameters, autowiring]
+    question: |
+      In a @Configuration class, `@Bean OrderService orderService(PaymentGateway gw, @Qualifier("fast") Inventory inv) {...}`
+      has no @Autowired on the method or parameters. How are gw and inv supplied?
+    options:
+      - "They must be null unless @Autowired is added to each parameter"
+      - "Only gw is injected; the @Qualifier parameter requires @Autowired to activate"
+      - "Spring passes the raw BeanFactory and you must look them up manually"
+      - "Each @Bean method parameter is autowired by type/qualifier automatically, just like constructor parameters"
+    answer: 3
+    explanation: |
+      Parameters of a @Bean factory method are resolved as dependencies by the container using
+      by-type matching plus any @Qualifier, without needing @Autowired. This is the configuration-
+      class analog of constructor injection.
+    ref: "concepts.md#autowiring-internals-thread-safety-and-ordering"
+
+  - id: autowired-qualifier-autowiring-resolution-064
+    difficulty: expert
+    tags: [bean-post-processor, early-init, null, failure-mode]
+    question: |
+      A developer writes a custom BeanPostProcessor and annotates a collaborator field with
+      @Autowired, but it is null at runtime. What is the underlying reason and the correct fix?
+    options:
+      - "BeanPostProcessors are instantiated very early, before regular-bean autowiring machinery is fully ready, so field @Autowired into them may be skipped; inject via constructor/@Bean or use ObjectProvider/lazy lookup"
+      - "@Autowired only works on beans annotated @Component; BeanPostProcessors must use @Resource"
+      - "BeanPostProcessors cannot have fields; move the dependency to a static block"
+      - "The field must be static for BeanPostProcessors to receive injection"
+    answer: 0
+    explanation: |
+      BeanPostProcessors and other infrastructure beans are created before the full autowiring
+      support for ordinary beans is in place, so annotation-based injection into them is unreliable
+      (often null). Provide dependencies through the constructor (e.g. via a static @Bean method) or
+      resolve them lazily with ObjectProvider.
+    ref: "concepts.md#autowiring-internals-thread-safety-and-ordering"
+
+  - id: autowired-qualifier-autowiring-resolution-065
+    difficulty: advanced
+    tags: [collections, self-reference, aggregation]
+    question: |
+      A @Component EventBus implements Listener and also injects `@Autowired List<Listener> listeners;`.
+      There are two OTHER Listener beans. By default, what does listeners contain?
+    options:
+      - "All three listeners including EventBus itself"
+      - "An empty list, because self-injection is forbidden"
+      - "NoUniqueBeanDefinitionException, because EventBus is both a consumer and a candidate"
+      - "Only the two other listeners; the self bean is excluded from collection aggregation by default"
+    answer: 3
+    explanation: |
+      When aggregating a collection, Spring excludes the currently-created bean (self) from the
+      injected collection by default to avoid a bean grouping itself. So EventBus receives only the
+      two other Listener beans. (Self would be included only if it were the sole candidate.)
+    ref: "concepts.md#injecting-list-map-and-array-of-beans"
+
+  - id: autowired-qualifier-autowiring-resolution-066
+    difficulty: advanced
+    tags: [generics, collections, resolvable-type]
+    question: |
+      Beans exist for Repository<User> (userRepo) and Repository<Order> (orderRepo). What does
+      `@Autowired List<Repository<User>> repos;` receive?
+    options:
+      - "Both repos, because generic type arguments are erased for collection element matching"
+      - "Only userRepo, because Spring's generics-aware matching filters collection elements by the parameterized element type"
+      - "orderRepo, chosen by registration order"
+      - "An empty list, because generic collection injection is unsupported"
+    answer: 1
+    explanation: |
+      Spring resolves the element type as Repository<User> using ResolvableType and only aggregates
+      beans matching that parameterized type. userRepo matches; orderRepo (Repository<Order>) does
+      not. Generics-aware matching applies to collection elements too, not just single injections.
+    ref: "concepts.md#injecting-list-map-and-array-of-beans"
+
+  - id: autowired-qualifier-autowiring-resolution-067
+    difficulty: expert
+    tags: [value, autowired, resolution]
+    question: |
+      A field carries both `@Autowired` and `@Value("${cache.name}")`. How is it resolved?
+    options:
+      - "Type-based autowiring runs first, then @Value overwrites it with the property value"
+      - "@Value supplies an explicit value/expression resolved via the Environment/SpEL, short-circuiting bean-type matching for that field"
+      - "A conflict is detected and startup fails"
+      - "Both are ignored because you cannot combine them"
+    answer: 1
+    explanation: |
+      @Value provides an explicit value resolved through the Environment and SpEL
+      (BeanExpressionResolver), which bypasses type-based bean matching for that injection point.
+      Combining it with @Autowired is redundant, but @Value's explicit value determines the result.
+    ref: "concepts.md#autowiring-internals-thread-safety-and-ordering"
+
+  - id: autowired-qualifier-autowiring-resolution-068
+    difficulty: advanced
+    tags: [optional, nullable, dependency-descriptor]
+    question: |
+      Which set of mechanisms all funnel into Spring treating a single-value dependency as
+      optional (not required)?
+    options:
+      - "@Autowired(required=false), Optional<T>, @Nullable, and a Kotlin nullable type (Foo?)"
+      - "@Qualifier, @Primary, and @Order"
+      - "@Value, @Resource(name=...), and @Named"
+      - "@Lazy, @Scope, and ObjectFactory only"
+    answer: 0
+    explanation: |
+      required=false, Optional<T>, @Nullable, and Kotlin's nullable types all resolve to
+      DependencyDescriptor.isRequired() returning false, so an unsatisfied dependency does not fail
+      startup. The other options are about selection/scoping, not optionality.
+    ref: "concepts.md#required-false-and-optional-and-objectprovider"
+
+  - id: autowired-qualifier-autowiring-resolution-069
+    difficulty: expert
+    tags: [primary, two-primaries, exception]
+    question: |
+      determinePrimaryCandidate finds TWO beans of the same type both marked @Primary while
+      resolving a single-value injection point. What is the result?
+    options:
+      - "The first-registered primary is used"
+      - "Both primaries are demoted and @Priority is consulted instead"
+      - "The bean whose name matches the field is chosen"
+      - "NoUniqueBeanDefinitionException is thrown, with a message about more than one 'primary' bean"
+    answer: 3
+    explanation: |
+      determinePrimaryCandidate explicitly throws NoUniqueBeanDefinitionException when it finds more
+      than one primary candidate among the matches — two primaries are as ambiguous as none. Only a
+      single primary can break the tie.
+    ref: "concepts.md#nouniquebeandefinitionexception-on-ambiguity"
+
+  - id: autowired-qualifier-autowiring-resolution-070
+    difficulty: advanced
+    tags: [lazy, ambiguity, timing]
+    question: |
+      A latent by-type ambiguity exists, but instead of failing at context refresh it only blows up
+      the first time a certain method runs in production. Which injection style most plausibly
+      caused this deferral?
+    options:
+      - "Plain field @Autowired of a singleton, which always fails at refresh"
+      - "Constructor injection, which never detects ambiguity"
+      - "An @Lazy injection or an ObjectProvider/ObjectFactory that defers the actual lookup until first use, so ambiguity is detected only then"
+      - "Map<String,T> injection, which suppresses ambiguity permanently"
+    answer: 2
+    explanation: |
+      By-type ambiguity is reported when the injection point is actually resolved. @Lazy proxies and
+      ObjectProvider/ObjectFactory defer resolution to first use, so a latent ambiguity surfaces at
+      runtime rather than at refresh. Eager singleton field injection would fail at startup instead.
+    ref: "concepts.md#how-autowired-resolves-dependencies"
+
+  - id: autowired-qualifier-autowiring-resolution-071
+    difficulty: expert
+    tags: [priority, tie, exception]
+    question: |
+      Two candidate beans of one type both carry @Priority(1) (the same highest priority) and there
+      is no @Primary and no qualifier. What does determineHighestPriorityCandidate do?
+    options:
+      - "Throws NoUniqueBeanDefinitionException because multiple beans share the same highest priority"
+      - "Falls back to alphabetical bean-name order"
+      - "Picks one arbitrarily since they tie"
+      - "Injects both as a collection"
+    answer: 0
+    explanation: |
+      When two candidates share the same highest @Priority value, the tie cannot be broken and
+      determineHighestPriorityCandidate throws NoUniqueBeanDefinitionException, just as two @Primary
+      beans do. Priorities must be distinct to designate a single winner.
+    ref: "concepts.md#nouniquebeandefinitionexception-on-ambiguity"
+
+  - id: autowired-qualifier-autowiring-resolution-072
+    difficulty: advanced
+    tags: [resource, inject, autowired, comparison]
+    question: |
+      Which statement most precisely distinguishes @Resource, @Inject, and @Autowired regarding
+      constructor injection and optionality?
+    options:
+      - "All three support constructor injection and a required flag"
+      - "Only @Resource supports constructor injection; the others are field-only"
+      - "@Autowired supports constructor injection and required=false; @Inject supports constructor injection but has no required attribute; @Resource supports neither constructor injection nor a required flag"
+      - "@Inject supports required=false; @Autowired and @Resource do not"
+    answer: 2
+    explanation: |
+      @Autowired: constructor injection + required attribute. @Inject: constructor injection but no
+      required attribute (use Provider/Optional). @Resource: field/setter only (no constructor
+      injection) and no required flag. This is the precise three-way distinction.
+    ref: "concepts.md#resource-by-name-vs-inject-vs-autowired"
+
+  - id: autowired-qualifier-autowiring-resolution-073
+    difficulty: expert
+    tags: [self-injection, proxy, aop]
+    question: |
+      A service self-injects `@Autowired MyService self;` to invoke an @Transactional method
+      internally so the transaction advice applies. Why does calling self.method() work when
+      this.method() would not?
+    options:
+      - "Spring injects the AOP proxy (not the raw instance) for self references, so calls through 'self' pass through the transactional advice, whereas 'this' bypasses the proxy"
+      - "this and self are the same reference, so both apply the advice"
+      - "Self-injection is illegal and always throws BeanCurrentlyInCreationException"
+      - "Self-injection disables proxying, so neither applies the advice"
+    answer: 0
+    explanation: |
+      When a bean is proxied (e.g. for @Transactional), self-injection resolves to the proxy, not
+      the target. Calling through the injected 'self' reference goes through the proxy's advice
+      chain; internal 'this' calls invoke the target directly and skip the advice. Self-injection is
+      supported since Spring 4.3.
+    ref: "concepts.md#how-autowired-resolves-dependencies"
+
+  - id: autowired-qualifier-autowiring-resolution-074
+    difficulty: advanced
+    tags: [collections, empty, objectprovider]
+    question: |
+      You want an injected `List<Plugin>` to be an empty list (not a startup failure) when no Plugin
+      beans exist. Which approaches achieve this?
+    options:
+      - "Nothing works; an empty candidate set always fails startup for collections"
+      - "Mark the List field @Primary"
+      - "Use @Autowired(required=false) on the List, or inject ObjectProvider<Plugin> and call stream()/orderedStream()"
+      - "Add @Qualifier(\"none\") to force an empty match"
+    answer: 2
+    explanation: |
+      By default an empty collection is an unsatisfied required dependency and fails. Marking the
+      injection required=false yields an empty (or null) collection, and ObjectProvider's
+      stream()/orderedStream() naturally yields an empty stream with no candidates.
+    ref: "concepts.md#injecting-list-map-and-array-of-beans"
+
+  - id: autowired-qualifier-autowiring-resolution-075
+    difficulty: expert
+    tags: [doresolvedependency, internals, selection-order]
+    question: |
+      In DefaultListableBeanFactory.doResolveDependency, after multiple type matches are found,
+      determineAutowireCandidate applies its tiebreakers in which order before giving up?
+    options:
+      - "bean-name fallback, then @Primary, then @Priority"
+      - "@Priority, then @Primary, then qualifier metadata"
+      - "@Primary, then @Priority (@javax/jakarta), then bean-name/qualifier-name fallback; if none isolate a single bean it returns null and doResolveDependency throws NoUniqueBeanDefinitionException"
+      - "@Order, then @Primary, then @Qualifier"
+    answer: 2
+    explanation: |
+      determineAutowireCandidate runs determinePrimaryCandidate first, then
+      determineHighestPriorityCandidate (@Priority, lowest number wins), then a name-based fallback
+      (injection-point name equals bean name / qualifier). If all fail, it returns null and the
+      caller throws NoUniqueBeanDefinitionException. @Order is not part of single-value selection.
+    ref: "concepts.md#nouniquebeandefinitionexception-on-ambiguity"
+
+  - id: autowired-qualifier-autowiring-resolution-076
+    difficulty: advanced
+    tags: [resource, name-derivation, setter]
+    question: |
+      For `@Resource private DataSource auditLog;` (no name attribute), what bean name does Spring
+      look for first?
+    options:
+      - "The type name DataSource"
+      - "A random UUID until a match is found"
+      - "The field name 'auditLog'"
+      - "The fully-qualified class of the declaring bean"
+    answer: 2
+    explanation: |
+      @Resource without an explicit name derives the name from the field (or the property name for
+      a setter) — here 'auditLog'. It looks for a bean named auditLog first, only falling back to
+      by-type resolution if no such bean exists.
+    ref: "concepts.md#resource-by-name-vs-inject-vs-autowired"
+
+  - id: autowired-qualifier-autowiring-resolution-077
+    difficulty: expert
+    tags: [order, injection-timing, postconstruct]
+    question: |
+      Within a single bean, a developer's field-injected dependency A reads another field-injected
+      dependency B inside a plain method that A's setter calls. Sometimes B is still null. What is
+      the correct principle and remedy?
+    options:
+      - "Field injection order is guaranteed top-to-bottom, so reorder the fields"
+      - "Mark both fields @Lazy so they resolve simultaneously"
+      - "Use @Order on the fields to force injection sequence"
+      - "There is no guaranteed ordering among a bean's field/method injection points; move cross-dependency logic into a @PostConstruct method that runs after all injection completes"
+    answer: 3
+    explanation: |
+      Spring does not guarantee a cross-field injection order you can rely on. Logic that needs all
+      dependencies present must run in @PostConstruct (or the constructor, for constructor
+      injection), which executes after the populate-bean phase completes. @Order does not apply to
+      intra-bean injection ordering.
+    ref: "concepts.md#autowiring-internals-thread-safety-and-ordering"
+
+  - id: autowired-qualifier-autowiring-resolution-078
+    difficulty: advanced
+    tags: [inject, named, provider, optionality]
+    question: |
+      Using strict JSR-330 only, how do you express an optional-and-lazy dependency and select a
+      specific candidate by name?
+    options:
+      - "@Inject @Named(\"fast\") with a required=false attribute on @Inject"
+      - "Inject javax/jakarta inject Provider<T> together with @Named(\"fast\"); Provider.get() defers lookup and @Named selects the candidate, since @Inject has no required attribute"
+      - "@Autowired(required=false) @Qualifier(\"fast\"), which is the only portable form"
+      - "@Resource(name=\"fast\") wrapped in Optional"
+    answer: 1
+    explanation: |
+      JSR-330's @Inject has no required flag, so optionality/laziness is expressed with Provider<T>
+      (its get() defers resolution). @Named selects the specific candidate by name. This is the
+      framework-neutral, JSR-330-portable idiom.
+    ref: "concepts.md#resource-by-name-vs-inject-vs-autowired"
+
+  - id: autowired-qualifier-autowiring-resolution-079
+    difficulty: expert
+    tags: [primary, collections, misconception]
+    question: |
+      A team marks one of five Handler beans @Primary expecting `@Autowired List<Handler> handlers;`
+      to place it first. What actually happens?
+    options:
+      - "The @Primary handler is placed at index 0 of the list"
+      - "Only the @Primary handler is injected, making the list size 1"
+      - "@Primary has no effect on collection injection; all five handlers are injected and order is governed by @Order/Ordered/@Priority (unannotated beans last)"
+      - "NoUniqueBeanDefinitionException is thrown because @Primary conflicts with collection injection"
+    answer: 2
+    explanation: |
+      @Primary only breaks single-value ties; it plays no role in collection aggregation or
+      ordering. All five beans are injected, and element order is determined by @Order/Ordered and
+      @Priority via AnnotationAwareOrderComparator, with unannotated beans placed last.
+    ref: "concepts.md#qualifier-vs-primary"
+
+  - id: autowired-qualifier-autowiring-resolution-080
+    difficulty: advanced
+    tags: [qualifier, collections, map, filtering]
+    question: |
+      Ten Validator beans exist; three carry @Qualifier("payment"). What does
+      `@Autowired @Qualifier("payment") Map<String, Validator> validators;` inject?
+    options:
+      - "All ten validators keyed by bean name; @Qualifier is ignored for Map aggregation"
+      - "Only the three @Qualifier(\"payment\") validators, keyed by their bean names"
+      - "A single validator, because a qualifier on a Map forces single-value selection"
+      - "NoUniqueBeanDefinitionException, because a qualifier cannot be combined with Map injection"
+    answer: 1
+    explanation: |
+      A @Qualifier on a Map<String, T> injection point filters the aggregated entries exactly the way
+      it filters a List/array: only beans carrying the matching qualifier are included, and the map is
+      still keyed by bean name. So the injected map holds precisely the three "payment" validators —
+      qualifier-based grouping works for Map aggregation, not just List/Set/array.
+    ref: "concepts.md#injecting-list-map-and-array-of-beans"
+
+  - id: autowired-qualifier-autowiring-resolution-081
+    difficulty: expert
+    tags: [circular, aop, raw-injection, failure-mode]
+    question: |
+      A singleton A (setter-injected with B) and singleton B (setter-injected with A) form a cycle,
+      and A is subject to an AOP proxy created by a BeanPostProcessor. Startup intermittently throws
+      BeanCurrentlyInCreationException about A. What is the root cause?
+    options:
+      - "Setter injection can never resolve any cycle"
+      - "AOP proxies are prototype-scoped and cannot be early-exposed"
+      - "B may wire to A's raw early-exposed instance before A is wrapped by its AOP proxy, so Spring detects that the final proxied A differs from the injected raw A and refuses to silently allow the mismatch"
+      - "The @Autowired setter is invoked twice, corrupting the singleton cache"
+    answer: 2
+    explanation: |
+      Cycle resolution exposes A's raw instance early. If A must later be wrapped by an AOP proxy,
+      B might have already been injected with the raw (unproxied) A, creating an inconsistency
+      between the early reference and the final proxied bean; Spring guards against this, which can
+      surface as BeanCurrentlyInCreationException. Restructuring the cycle or using @Lazy avoids it.
+    ref: "concepts.md#autowired-on-constructor-and-single-constructor-optionality"
+
+  - id: autowired-qualifier-autowiring-resolution-082
+    difficulty: advanced
+    tags: [objectprovider, orderedstream, ordering]
+    question: |
+      How does ObjectProvider<T>.orderedStream() differ from stream() for multiple candidates?
+    options:
+      - "orderedStream() returns only the @Primary bean; stream() returns all"
+      - "They are identical; orderedStream() is a deprecated alias"
+      - "orderedStream() applies @Order/Ordered/@Priority ordering to the candidates, whereas stream() yields them in the factory's default (registration) order"
+      - "orderedStream() throws NoUniqueBeanDefinitionException when more than one candidate exists"
+    answer: 2
+    explanation: |
+      orderedStream() sorts candidates using AnnotationAwareOrderComparator (honoring
+      @Order/Ordered/@Priority), matching List injection ordering. Plain stream() returns them in
+      the factory's default order without applying ordering annotations.
+    ref: "concepts.md#required-false-and-optional-and-objectprovider"
+

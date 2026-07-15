@@ -107,6 +107,44 @@ of lazily on first access.
   without instantiating the factory.
 - A `FactoryBean` can itself have dependencies injected (it is a normal bean).
 
+### Post-processing: the FactoryBean vs its product
+
+A subtle expert distinction: **`BeanPostProcessor`s are applied to the
+`FactoryBean` instance through the full initialization lifecycle** (both
+`postProcessBeforeInitialization` and `postProcessAfterInitialization`, plus
+`afterPropertiesSet`/init-method), because the factory is a normal managed bean.
+But the **object returned by `getObject()`** is *not* run through Spring's full
+bean-creation lifecycle — Spring does not populate its properties, does not call
+its init methods, and does not apply `postProcessBeforeInitialization` to it.
+Spring **does** pass the product through `postProcessAfterInitialization` (see
+`FactoryBeanRegistrySupport.postProcessObjectFromFactoryBean`), which is exactly
+how AOP auto-proxying still gets a chance to wrap a FactoryBean product. The
+practical consequence: if you rely on `@Autowired`, `@PostConstruct`, or
+`InitializingBean` *inside the object your `getObject()` returns*, none of that
+fires — you must wire and initialize the product yourself inside `getObject()`.
+
+### The infrastructure-ordering trap
+
+Because the container must know a `FactoryBean`'s product **type** during
+autowiring-by-type, it will instantiate the `FactoryBean` itself early (to call
+`getObjectType()`) even though the product stays lazy. More dangerously, if a
+`FactoryBean` *also* implements `BeanPostProcessor` or
+`BeanFactoryPostProcessor`, or is depended upon by one, it is instantiated in
+the very early infrastructure phase — before ordinary `BeanPostProcessor`s are
+registered — so such an early bean (and its dependencies) may silently skip
+post-processing (e.g. miss AOP proxying), producing the familiar
+"not eligible for getting processed by all BeanPostProcessors" log warning.
+
+### getObjectType() before instantiation via generics
+
+Spring can often determine a `FactoryBean`'s product type **without**
+instantiating it by reading the declared generic type argument (e.g.
+`class Foo implements FactoryBean<Bar>` → `Bar`) or the `@Bean` method's
+declared return generics. This is why an `AbstractFactoryBean<T>` subclass that
+fixes `T` supports type matching even when `getObjectType()` would otherwise
+need a live instance. Returning a raw `FactoryBean` (no generic) forces the
+container to instantiate the factory to learn the type — a hidden eager-init.
+
 ---
 
 ## Lazy initialization with @Lazy
@@ -176,6 +214,36 @@ is a pragmatic fix; the cleaner design is usually to remove the cycle.)
   Boot exposes `spring.main.lazy-initialization`; that property is a Boot
   feature, not core Spring.)
 - `@Lazy(false)` explicitly forces eager init even under a lazy default.
+
+### What kind of proxy `@Lazy` injects, and its sharp edges
+
+The injection-point proxy is created by
+`ContextAnnotationAutowireCandidateResolver.buildLazyResolutionProxy`, which uses
+Spring AOP's `ProxyFactory` with a `TargetSource` that resolves the dependency
+lazily on each invocation. Consequences a senior candidate should know:
+
+- **JDK vs CGLIB.** If the declared injection type is an **interface**, a JDK
+  dynamic proxy is created; if it is a **concrete class**, a CGLIB subclass
+  proxy is created (so the target class must be non-final and proxyable).
+- **The proxy is not the bean.** `proxy == realBean` is false, `getClass()`
+  reports the proxy type, and `instanceof` against the concrete class only works
+  for the CGLIB case. Equality/identity-sensitive code can break.
+- **Deferral, not caching semantics.** The `TargetSource` re-resolves through the
+  container; for a singleton dependency that still yields the same singleton, but
+  the very first method call is what triggers creation — so exceptions in the
+  target's construction surface at first *use*, not at startup.
+- **`@Lazy` at the injection point genuinely defers creation** even when the
+  surrounding consumer is an eager singleton — unlike `@Lazy` on the *definition*
+  alone, which an eager consumer overrides (the container must build the lazy
+  bean to satisfy the eager dependency).
+
+### @Lazy for cycle-breaking: why it is a proxy, not magic
+
+When `@Lazy` breaks a constructor cycle, the injected proxy lets bean A finish
+its constructor without B existing yet. But the proxy only helps if A does **not
+call a method on B inside its own constructor** — doing so forces B's resolution
+mid-cycle and reintroduces `BeanCurrentlyInCreationException`. The proxy defers
+the *lookup*, not the eventual need for a real B.
 
 ---
 
@@ -249,6 +317,34 @@ is on the classpath, you can inject `jakarta.inject.Provider<T>` with the same
 "call `.get()` to obtain the bean" semantics. `ObjectProvider` is the
 Spring-native superset (adds `getIfAvailable`, `getIfUnique`, streams).
 
+### Thread-safety, ordering, and stream semantics
+
+- **Thread-safety.** An `ObjectProvider` handle is safe to share across threads;
+  each `getObject()`/`stream()` is an independent container lookup. For a
+  singleton target you get the same shared instance; for a prototype you get a
+  fresh instance per call, and *you* own its lifecycle (Spring does **not** track
+  or destroy prototype instances — destruction callbacks are not invoked).
+- **`stream()` vs `orderedStream()`.** `stream()` returns candidates in
+  registration/definition order and **ignores** `@Order`/`Ordered`;
+  `orderedStream()` sorts by `@Order`, `Ordered`, and `@Priority`. This mirrors
+  the difference between injecting a `List<T>` (ordered) and a `Map<String,T>`.
+- **`@Priority` vs `@Order` in providers.** `orderedStream()` honors JSR-250
+  `jakarta.annotation.Priority`. Note that for single-injection ambiguity
+  resolution, `@Priority` (lowest value wins) participates in candidate
+  selection alongside `@Primary`, whereas plain `@Order` does **not** decide a
+  single-autowire winner — a frequent point of confusion.
+- **`getIfUnique()` and `@Primary`.** With multiple candidates where one is
+  `@Primary`, `getIfUnique()` returns the primary rather than `null` — "unique"
+  means "unambiguously resolvable to one," not "exactly one defined."
+
+### ObjectProvider as a lazy-wiring and cycle-breaking tool
+
+Because injecting an `ObjectProvider<Foo>` does not resolve `Foo`, it is a clean
+alternative to `@Lazy` for breaking cycles or deferring heavy dependencies —
+without a proxy, so `getObject()` returns the *real* bean (identity-safe). The
+trade-off is an explicit `.getObject()` call at the use site instead of a
+transparent field.
+
 ---
 
 ## Lookup method injection with @Lookup
@@ -293,6 +389,34 @@ Key facts:
 subclassing and without an abstract class, and is usually the more modern
 choice. `@Lookup` remains handy when you want the lookup to look like an
 ordinary polymorphic method.
+
+### Failure modes and interactions
+
+- **Silent no-op when CGLIB can't subclass.** `@Lookup` requires the container
+  to instantiate the bean via CGLIB subclassing. If the bean is instantiated by
+  a route that bypasses `CglibSubclassingInstantiationStrategy` — most notably a
+  **`@Bean` factory method** (the return value is a plain object, not a CGLIB
+  subclass) — the `@Lookup` method is **not** overridden and runs its original
+  body. `@Lookup` therefore only works on component-scanned/auto-detected beans
+  whose class Spring itself instantiates, not on instances you `return` from a
+  `@Bean` method or a `Supplier` registration.
+- **Arguments.** `@Lookup` methods with arguments are supported only in the sense
+  that Spring passes them to `getBean(name, args)`; combined with prototype
+  constructor args this works, but the canonical, safest form is a no-arg method.
+- **Concrete (non-abstract) lookup methods** are allowed; the body you write is a
+  throwaway placeholder (often `return null;`) that the CGLIB override replaces.
+- **CGLIB vs the bean being final.** The declaring class must be non-final and
+  the method non-final/non-private/non-static, or subclassing/override fails.
+
+### @Lookup vs ObjectProvider vs scoped proxy — the real trade-offs
+
+All three give a fresh prototype per use, but they differ in mechanism and
+identity: `@Lookup`/`ObjectProvider` return the **real** prototype each call;
+a **scoped proxy** (`@Scope(proxyMode = TARGET_CLASS)`) is a single injected
+proxy object that resolves a new target per method invocation but is itself a
+proxy (so identity/`instanceof` caveats apply, and it is transparent to the
+caller). Scoped proxies are the right tool when you want ordinary field
+injection with no explicit lookup call.
 
 ---
 
@@ -347,6 +471,48 @@ style that underpins much of Spring's AOT/native support.
 - BFPPs (and BDRPPs) operate on **metadata**, before instantiation.
   `BeanPostProcessor` (BPP) operates on **instances**, during initialization.
   Don't confuse the three.
+
+### Ordering of the post-processor phases
+
+The container runs these phases in a fixed order (see
+`PostProcessorRegistrationDelegate`):
+
+1. **All `BeanDefinitionRegistryPostProcessor`s first**, and within them Spring
+   applies `PriorityOrdered` → `Ordered` → the rest, re-scanning the registry
+   between groups (because a BDRPP can register *another* BDRPP). Only after all
+   `postProcessBeanDefinitionRegistry` calls does Spring invoke their
+   `postProcessBeanFactory` methods.
+2. **Then plain `BeanFactoryPostProcessor`s**, again `PriorityOrdered` →
+   `Ordered` → non-ordered.
+3. **Then `BeanPostProcessor`s are registered** (not yet invoked), ordered the
+   same way, and finally beans are instantiated with BPPs applied.
+
+Two classic traps: (a) a `@Bean` method that returns a
+`BeanFactoryPostProcessor` should be **`static`** — a non-static one forces its
+`@Configuration` class to be instantiated very early, before other BFPPs can
+post-process that config class, triggering warnings and disabling `@Bean`
+inter-method proxying for it. (b) Because BFPPs run before ordinary beans exist,
+**you must not fetch regular beans from the `BeanFactory` inside a BFPP**; doing
+so forces premature instantiation that bypasses later post-processors.
+
+### Ordered vs PriorityOrdered vs registration order
+
+`PriorityOrdered` beans are handled as a strictly earlier group than `Ordered`
+beans. For **programmatically added** `BeanPostProcessor`s (via
+`beanFactory.addBeanPostProcessor`), the `Ordered` interface is ignored — they
+run in **registration order** and always before auto-detected BPPs. This matters
+when hand-registering infrastructure in a BFPP.
+
+### The AOT and functional-registration angle
+
+`registerBean(name, type, supplier, customizers...)` and
+`BeanDefinitionCustomizer` produce definitions with an
+**instance supplier** rather than a resolved class-based creation. This is the
+foundation Spring's AOT engine uses to generate `@Configuration`-free
+registration code for GraalVM native images: at build time Spring turns
+reflective bean creation into explicit supplier-style `registerBean` calls, so
+avoiding reflection-heavy custom `FactoryBean`s improves native-image
+compatibility.
 
 ---
 
@@ -417,6 +583,35 @@ implement `Ordered` / `PriorityOrdered` or use `@Order`; registrars can also
 implement `Aware` interfaces (`EnvironmentAware`, `BeanFactoryAware`,
 `ResourceLoaderAware`, `BeanClassLoaderAware`) to receive context callbacks.
 
+### When each hook runs, and why it matters
+
+The `@Import` machinery is driven by `ConfigurationClassPostProcessor`, itself a
+`BeanDefinitionRegistryPostProcessor`. The processing order within configuration
+parsing is: regular `@Import`ed `@Configuration` classes and `ImportSelector`s
+are resolved during parsing; `ImportBeanDefinitionRegistrar`s are collected and
+their `registerBeanDefinitions` run **at the end** of parsing the importing
+config class; and all `DeferredImportSelector`s run **after every other**
+`@Configuration` class has been processed, grouped and ordered so that later
+selections can observe/override earlier ones. This is precisely why registrars
+should not assume beans registered by *other* registrars already exist, and why
+`@ConditionalOnMissingBean`-style overriding relies on the deferred phase.
+
+**Aware callbacks fire, `@Autowired` does not.** A registrar/selector is
+instantiated directly by the config parser, **not** as a managed bean, so field
+`@Autowired`/`@Value` injection does **not** work on it. Only the `Aware`
+interfaces (`EnvironmentAware`, `ResourceLoaderAware`, `BeanFactoryAware`,
+`BeanClassLoaderAware`) are honored, and they are invoked *before*
+`selectImports`/`registerBeanDefinitions`. Needing the `Environment` inside a
+selector is the canonical reason to implement `EnvironmentAware`.
+
+### ImportSelector vs DeferredImportSelector grouping
+
+A `DeferredImportSelector` may return a `getImportGroup()` `Group` class; Spring
+batches selections by group, letting an entire family of imports be ordered and
+de-duplicated together. This grouping mechanism is what makes large-scale
+conditional import sets (like Boot's auto-configuration) deterministic; in plain
+Spring it lets you enforce a total order across many selectors.
+
 ---
 
 ## Conditional registration with Conditional
@@ -465,6 +660,35 @@ Plain Spring Framework ships only the generic `@Conditional` +
 `spring-boot-autoconfigure`. In an interview, be precise: if asked about
 `@ConditionalOnMissingBean`, that is Boot, not core Spring. Core Spring gives
 you the primitive to build such conditions yourself.
+
+### When conditions are evaluated, and the ordering hazard
+
+`@Conditional` is evaluated by `ConditionEvaluator` during **configuration-class
+parsing / bean-definition registration**, *not* at instantiation. A condition
+that inspects the `BeanDefinitionRegistry` for the presence of another bean
+therefore sees only definitions registered **so far** in parse order — so a
+"register only if bean X is absent" condition is order-dependent and unreliable
+unless it runs in a late phase (this is exactly why Boot's bean conditions run in
+the deferred auto-configuration phase). A plain `@Conditional` that queries
+`beanFactory.containsBeanDefinition(...)` against a component-scanned bean can
+give different answers depending on scan order.
+
+### ConfigurationCondition and phases
+
+For conditions that must decide based on other bean definitions, Spring provides
+`ConfigurationCondition`, which adds `getConfigurationPhase()` returning either
+`PARSE_CONFIGURATION` (evaluate while parsing the `@Configuration` class,
+affecting whether the class is even parsed) or `REGISTER_BEAN` (evaluate later,
+when registering individual `@Bean` methods, so more definitions are visible).
+Choosing the wrong phase is a common cause of conditions that "sometimes work."
+
+### Conditions on @Component vs @Bean
+
+`@Conditional` on a `@Component` type is only consulted if the component is
+actually scanned; a condition placed on the class does not run for beans of that
+type registered by other means (e.g. an explicit `@Bean` method returning the
+same type). Conditions are attached to the specific **definition source**, not
+to the Java type globally.
 
 ---
 

@@ -106,6 +106,32 @@ cannot both be constructed — Spring throws `BeanCurrentlyInCreationException` 
 can inject a not-yet-fully-initialized reference after construction, but circular dependencies
 are still a design smell.)
 
+**Multiple constructors and the greedy-matching algorithm.** When a class has more than one
+constructor and none is annotated with `@Autowired` (and there is no no-arg constructor), Spring
+in many cases can still pick a constructor, but the deterministic contract is: annotate exactly
+one constructor with `@Autowired` to force it. A subtle, powerful pattern is annotating
+*several* constructors with `@Autowired(required = false)`. Spring then treats them as
+*candidates* and chooses the **greediest constructor whose dependencies can all be satisfied**
+from the container — a form of constructor auto-selection. Exactly one `@Autowired` with
+`required = true` (the default) forbids this multi-candidate behavior, because a required
+constructor must be used.
+
+**Mixing injected beans and resolved values.** Constructor parameters can freely mix
+container-resolved beans with `@Value`-resolved literals/SpEL and `@Qualifier`-narrowed
+candidates. The parameter annotations (`@Value`, `@Qualifier`, `@Lazy`, `@Nullable`) sit on the
+individual parameters:
+
+```java
+public OrderService(@Qualifier("stripe") PaymentGateway gateway,
+                    @Value("${orders.max-retries:3}") int maxRetries,
+                    @Nullable AuditSink auditSink) { ... }
+```
+
+**Static factory and `@Bean` methods** are the constructor-injection analogue in Java config:
+the `@Bean` method parameters are resolved from the container exactly like constructor arguments.
+Note that lookup-method injection (below) does **not** apply to `@Bean` methods, because there
+the container is not the one invoking `new`.
+
 ## Setter Injection
 
 **Setter injection** supplies dependencies through JavaBean-style setter methods after the bean
@@ -411,6 +437,157 @@ private Map<String, Integer> limits;
 **Combining with `@Qualifier`.** When injecting a single bean but several candidates match, use
 `@Qualifier("beanName")`. When injecting into a collection, a `@Qualifier` on the injection point
 can restrict which qualified beans are collected.
+
+**Generics as an implicit qualifier.** Since Spring 4.0, generic type arguments act as an
+automatic qualifier. `List<Handler<OrderEvent>>` collects only handler beans whose resolvable
+generic type matches `OrderEvent`; a single injection point `Handler<OrderEvent>` unambiguously
+selects the matching bean even when several `Handler` beans exist. This works because Spring
+resolves the full parameterized type via `ResolvableType`, not just the raw class.
+
+## How the Container Resolves an Injection Point
+
+Regardless of injection style, Spring resolves a `@Autowired` point through
+`DefaultListableBeanFactory.doResolveDependency`. Understanding this algorithm explains most
+"which bean wins / why does this throw?" interview traps:
+
+1. **Shortcut resolution** — a previously cached `@Qualifier`/name shortcut or a `@Value` is
+   evaluated first.
+2. **Type match** — find all bean names assignable to the required type (respecting generics
+   via `ResolvableType`, and treating arrays / `Collection` / `Map` / `ObjectProvider` /
+   `Stream` as multi-element wrappers).
+3. **Filter self-references and non-autowire-candidates** — a bean is not injected into itself,
+   and beans marked `autowire-candidate="false"` (or excluded by `defaultCandidate=false` on a
+   qualifier) are skipped.
+4. **Qualifier narrowing** — `@Qualifier` values and custom qualifier annotations filter the
+   candidate set.
+5. **`@Primary`** — if exactly one candidate is `@Primary`, it wins immediately. Two `@Primary`
+   candidates of the same type throw `NoUniqueBeanDefinitionException`.
+6. **`@Priority`** — if no primary, the candidate with the highest `jakarta.annotation.Priority`
+   (lowest numeric value) wins. Note `@Priority` participates in single-injection tie-breaking
+   but `@Order` does **not** (that only affects collection/stream ordering).
+7. **Fallback to name match** — the field/parameter name is matched against the candidate bean
+   names as an implicit qualifier.
+8. If still ambiguous → `NoUniqueBeanDefinitionException`; if none and required →
+   `NoSuchBeanDefinitionException` (wrapped in `UnsatisfiedDependencyException`).
+
+A critical distinction: **`@Primary` vs `@Qualifier` precedence.** `@Qualifier` at the injection
+point is more specific than `@Primary` — if a qualifier matches a specific bean, `@Primary` is
+ignored for that point. `@Primary` is a factory-wide default; `@Qualifier` is a point-specific
+override.
+
+## Ordering, @Order vs @Priority, and Tie-Breaking
+
+Two families of "ordering" behavior are frequently conflated:
+
+- **Collection/stream ordering** — when you inject `List<T>`, `T[]`, or a `Stream<T>` via
+  `ObjectProvider.orderedStream()`, elements are sorted by `@Order`/`Ordered`, with `@Priority`
+  also honored. Lower value = earlier/higher precedence. Plain `Map`/`Collection` injection with
+  no ordering annotation follows registration order, which is **not guaranteed by contract**.
+- **Single-injection tie-breaking** — when a single-valued injection point is ambiguous,
+  `@Order` is *ignored*; only `@Primary` then `@Priority` break the tie. This asymmetry
+  surprises people: adding `@Order(0)` to a bean does *not* make it "win" a single autowire.
+
+`@javax`/`jakarta.annotation.Priority` sits on the class; `@Order` may sit on the class,
+`@Bean` method, or component. For `List` injection both are consulted, but `@Order` and
+`Ordered` are the idiomatic Spring mechanism.
+
+## Circular Dependency Resolution Internals
+
+Spring resolves *singleton* setter/field cycles through a **three-level cache** of singletons in
+`DefaultSingletonBeanRegistry`:
+
+- `singletonObjects` — fully initialized singletons (level 1).
+- `earlySingletonObjects` — raw instances exposed early to break cycles (level 2).
+- `singletonFactories` — `ObjectFactory`s that can produce an early reference, importantly a
+  *proxy* if the bean will be AOP-wrapped (level 3).
+
+When A depends on B and B depends back on A (setter/field), Spring instantiates A, adds a
+singleton factory for A to level 3, begins populating A, creates B, and when B needs A it obtains
+the *early reference* of A from the factory. This is why setter/field cycles resolve but
+**constructor cycles cannot**: with constructor injection the raw instance does not yet exist
+when the dependency is needed, so there is nothing to expose early.
+
+Important gotchas:
+
+- **Constructor cycles always fail** with `BeanCurrentlyInCreationException`, even mixed cycles
+  where the *first* bean in the chain uses constructor injection.
+- **Prototype-scoped cycles can never be resolved** — Spring does not cache prototypes, so there
+  is no early reference. A prototype circular reference throws `BeanCurrentlyInCreationException`
+  regardless of injection style.
+- **AOP + early reference mismatch.** If a bean in a cycle is proxied, the early reference exposed
+  might differ from the final proxied bean, historically producing subtle bugs. Spring detects
+  this and throws `BeanCurrentlyInCreationException` ("Bean with name '...' has been injected into
+  other beans ... in its raw version as part of a circular reference, but has eventually been
+  wrapped") rather than silently injecting an unproxied instance.
+- Since Spring Boot 2.6 circular references are prohibited by default (`spring.main.
+  allow-circular-references=false`); that is a Boot default, not a Framework-core default. The
+  Framework itself still resolves setter cycles unless configured otherwise. Breaking the cycle
+  with `@Lazy` on one injection point (injecting a lazy proxy) is the clean workaround.
+
+## Injection Timing, BeanPostProcessor, and Ordering of Callbacks
+
+Field and setter injection are performed by `AutowiredAnnotationBeanPostProcessor`, an
+`InstantiationAwareBeanPostProcessor` that runs during `populateBean`, *after* the constructor
+returns but *before* initialization callbacks. The full per-bean lifecycle ordering that
+matters for injection:
+
+1. Constructor invoked (constructor injection happens here).
+2. `populateBean` — field and setter injection applied by post-processors.
+3. `Aware` callbacks (`BeanNameAware`, `ApplicationContextAware`, ...).
+4. `@PostConstruct` (via `CommonAnnotationBeanPostProcessor`), then `InitializingBean.
+   afterPropertiesSet`, then custom `init-method`.
+
+Consequences interviewers probe:
+
+- **You must not rely on field/setter-injected dependencies inside the constructor** — they are
+  still `null` there. Logic needing injected collaborators belongs in `@PostConstruct`, not the
+  constructor. With constructor injection this problem disappears because the dependency is a
+  parameter.
+- `@PostConstruct` is the first lifecycle point where *all* injection styles are guaranteed
+  complete, which is why initialization work that touches injected beans is placed there.
+- Ordering among multiple `BeanPostProcessor`s matters; `AutowiredAnnotationBeanPostProcessor`
+  and `CommonAnnotationBeanPostProcessor` (which handles `@Resource`/`@PostConstruct`) are
+  ordered so `@Autowired` and `@Resource` on the same bean both resolve predictably.
+
+## Thread-Safety and Concurrency of Injected State
+
+DI type has direct concurrency implications because most Spring beans are singletons shared
+across all threads:
+
+- **Constructor injection + `final` fields** gives *safe publication* under the Java Memory
+  Model: `final` fields set in the constructor are guaranteed visible to all threads without
+  additional synchronization once the object is safely published. This makes constructor-injected
+  singletons inherently thread-safe with respect to their dependencies.
+- **Setter/field injection loses the `final` guarantee.** The dependency reference is a mutable,
+  non-`final` field. In practice the container publishes the fully-initialized singleton safely
+  (init happens-before the bean is placed in `singletonObjects` and handed to consumers), so
+  reads are usually fine — but nothing prevents application code from *reassigning* a setter later
+  from another thread, reintroducing a visibility hazard. Constructor injection forecloses that
+  entirely.
+- The **stateless singleton** rule still governs everything: injected collaborators should
+  themselves be thread-safe/stateless. DI does not add per-request isolation; for per-request
+  state use request/prototype scope or lookup/`ObjectProvider` access rather than caching mutable
+  state on a singleton.
+
+## ObjectProvider, ObjectFactory, and Provider Semantics
+
+`ObjectProvider<T>` (Spring 4.3+) is the modern, flexible handle for deferred and optional
+resolution and is the preferred alternative to injecting `ApplicationContext`:
+
+- `getObject()` — resolve now, throwing if zero or multiple candidates (like a required
+  dependency).
+- `getIfAvailable()` — returns `null` (or a `Supplier` default) if no bean; still throws on
+  ambiguity.
+- `getIfUnique()` — returns `null` if zero *or* multiple candidates (no exception on ambiguity).
+- `stream()` / `orderedStream()` — iterate all candidates, the latter honoring `@Order`.
+- Injecting `ObjectProvider<Prototype>` and calling `getObject()` per use is the idiomatic
+  singleton-needs-prototype solution — lighter than lookup methods and testable without CGLIB.
+
+`ObjectProvider` extends `ObjectFactory` and the JSR-330 `jakarta.inject.Provider`. The provider
+is itself resolved and injected once (it is a thin handle bound to the factory), so it does not
+suffer the "same instance forever" problem — each `getObject()` re-queries the container and, for
+a prototype target, yields a fresh instance. `Optional<T>` and `@Nullable` are simpler
+alternatives when you only need presence/absence, not repeated lookup.
 
 ## Common follow-up questions
 

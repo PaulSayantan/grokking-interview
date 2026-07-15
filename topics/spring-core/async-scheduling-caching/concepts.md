@@ -54,6 +54,13 @@ Requirements and gotchas:
 
 `@Async` also supports a **value** attribute naming a specific executor bean, e.g. `@Async("emailExecutor")`, so different methods can use different thread pools.
 
+### Advanced gotchas senior interviewers probe
+
+- **Executor resolution precedence.** For a given `@Async` invocation the executor is chosen in this order: (1) the `value` qualifier on `@Async`, resolved as a bean name/qualifier; (2) the executor from `AsyncConfigurer.getAsyncExecutor()`; (3) a unique `TaskExecutor` bean or one named `taskExecutor`; (4) the `SimpleAsyncTaskExecutor` fallback. If you supply *two* `AsyncConfigurer` beans Spring throws — there may be at most one. If `@Async("x")` names a non-existent bean, the invocation fails at call time with an exception looking up the executor, not at startup.
+- **Return type is validated lazily, per call, not at proxy creation.** An unsupported return type (a plain `String`, an `int`, etc.) produces an `IllegalArgumentException`/`AsyncResultNotSupported`-style failure when the method is actually invoked through the proxy, not necessarily during context refresh. The proxy is still created for the bean.
+- **Interaction with `@Transactional`.** `@Async` submits work to another thread, so the transaction/`ThreadLocal`-bound resources of the caller do **not** propagate. An `@Async` method that is also `@Transactional` starts its **own** transaction on the executor thread. Putting `@Transactional` on the caller and expecting the async method to join it is a classic mistake — there is no transaction to join because it runs on a different thread.
+- **Initialization ordering.** Because the async proxy is applied by a `BeanPostProcessor`, `@Async` on a bean whose dependencies (or itself) participate in early initialization can behave synchronously if the proxy is not yet in place. `@Async` on a `@PostConstruct` method never runs asynchronously (the method is invoked directly during initialization, before wiring to the proxy is complete for external callers).
+
 ---
 
 ## Async Return Types void Future and CompletableFuture
@@ -80,6 +87,17 @@ Key points interviewers ask about:
 - **Exception handling differs by return type.** For methods returning a `Future`/`CompletableFuture`, an exception thrown inside is captured and re-thrown when the caller calls `get()`. For `void` methods, the caller never sees the exception; instead it is routed to an `AsyncUncaughtExceptionHandler` (configurable via `AsyncConfigurer.getAsyncUncaughtExceptionHandler()`; the default just logs it).
 - You return a **completed future** (`CompletableFuture.completedFuture(value)`) even though the method body ran on the async thread — the framework returns a *separate* future to the caller and completes it with your returned value. (Since Spring supports returning a real future, you can also return an in-flight `CompletableFuture`.)
 - The return type must be `void` or a supported `Future` subtype; other return types cause an error at proxy time.
+
+### Subtle traps with future-returning async methods
+
+- **Returning `null` from a `Future`-typed `@Async` method.** The method must return a non-null `Future` reference *(the whole point is that the framework has something to hand back and complete)*. Returning `null` yields a `null` from the proxy and a `NullPointerException` for a caller that immediately chains on it. Always return `CompletableFuture.completedFuture(...)`, never `null`.
+- **The `AsyncUncaughtExceptionHandler` only fires for `void` methods.** For `Future`/`CompletableFuture` returns the exception is stored in the future and surfaces on `get()` (wrapped in `ExecutionException`) — it is **never** routed to the handler. A common bug is registering a handler and wondering why exceptions from a `CompletableFuture`-returning method never reach it.
+- **`Future.cancel(true)` does not interrupt an already-running `@Async` task the way people expect.** Spring wraps the call in a task submitted to the executor; cancellation only prevents a not-yet-started task from running (or requests interruption if the executor honors it). It does not magically abort work already in progress that ignores interruption.
+- **Beware wrapping a plain value in an `@Async CompletableFuture` and then `.join()`-ing it on the caller immediately** — that reintroduces blocking and defeats the point; the caller is now synchronously waiting on the async thread.
+
+### Reactive and Kotlin return types
+
+Since Spring 6.x, `@Async` also supports reactive stream return types where the framework subscribes/adapts appropriately, and Kotlin `suspend` functions are supported through coroutine adaptation. These are the modern non-blocking complements to `CompletableFuture` but do not change the proxy/self-invocation rules.
 
 ---
 
@@ -124,6 +142,14 @@ public class AsyncConfig implements AsyncConfigurer {
 
 You can route specific methods to named executors with `@Async("beanName")`. As of Spring 6.1, `ThreadPoolTaskExecutor`/`SimpleAsyncTaskExecutor` also support **virtual threads** (`setVirtualThreads(true)` / `Executors.newVirtualThreadPerTaskExecutor()`), which pairs well with `@Async` fire-and-forget or blocking calls.
 
+### Rejection, saturation, and shutdown semantics
+
+- **The saturation trap.** The `corePoolSize → queue → maxPoolSize` ordering means a **large `queueCapacity` effectively caps you at `corePoolSize`**: the pool will not grow to `maxPoolSize` until the queue is full. If you set `corePoolSize=2, maxPoolSize=50, queueCapacity=Integer.MAX_VALUE`, you will never get more than 2 threads — the queue absorbs everything first. This surprises people expecting more parallelism. For burst parallelism, keep the queue small (or zero, using a `SynchronousQueue`-style handoff).
+- **`SimpleAsyncTaskExecutor` has no queue at all** (each task gets a fresh thread unless a concurrency limit is configured), so under load it can create unbounded threads — the reason it is unsuitable for production without `setConcurrencyLimit(...)`.
+- **Rejection policy.** When queue and `maxPoolSize` are both exhausted the `RejectedExecutionHandler` runs. The default `AbortPolicy` throws `RejectedExecutionException` — on the **caller thread**, synchronously, at submit time. `CallerRunsPolicy` instead runs the task on the caller thread (providing back-pressure but stalling the caller).
+- **Graceful shutdown.** `ThreadPoolTaskExecutor` supports `setWaitForTasksToCompleteOnShutdown(true)` and `setAwaitTerminationSeconds(...)`. On context close the executor's `destroy()` shuts the pool down; in-flight `@Async` tasks may be interrupted or awaited depending on this config. Tasks still sitting in the queue can be silently dropped on an abrupt shutdown.
+- **`ThreadPoolTaskExecutor` vs raw `ThreadPoolExecutor`.** The Spring class is a `FactoryBean`-friendly, lifecycle-aware wrapper: it must be `initialize()`d (done automatically when Spring manages it as a bean) before use, exposes `TaskDecorator` support (e.g. to propagate `MDC`/`SecurityContext`/request-scope to the worker thread), and integrates with Spring's `Lifecycle`. Context propagation across the thread boundary does **not** happen for free — you need a `TaskDecorator` or a context-propagation library.
+
 ---
 
 ## Enabling Scheduling with EnableScheduling and Scheduled
@@ -166,6 +192,19 @@ public TaskScheduler taskScheduler() {
 
 `@Scheduled` and `@Async` are orthogonal but composable: annotating a method with both makes each scheduled trigger run on the async executor rather than blocking the scheduler thread.
 
+### Registration internals and lifecycle
+
+- **When registration happens.** `ScheduledAnnotationBeanPostProcessor` (SABPP) collects `@Scheduled` methods during bean post-processing but registers the actual triggers on the `TaskScheduler` only after the `ContextRefreshedEvent`, i.e. once the whole context is up. This is why a task never fires "half-initialized" and why the scheduler is looked up lazily — you can define the `TaskScheduler` bean anywhere in the context.
+- **Scheduler resolution.** If exactly one `TaskScheduler` bean exists it is used; if multiple exist, SABPP falls back to one named `taskScheduler`, else it creates a single-threaded default. Spring 6.1 added the `scheduler` qualifier on `@Scheduled` itself to pick a specific scheduler per method. Ambiguity (multiple `TaskScheduler` beans, none named `taskScheduler`, no qualifier) throws at startup.
+- **Repeatable `@Scheduled` and overlap.** `@Scheduled` is repeatable. Multiple declarations on one method each register an **independent** trigger, so they can overlap or run back-to-back even on a single-thread scheduler if their fire times coincide.
+- **`@Scheduled` methods run on the scheduler thread by default**, so an exception thrown by a scheduled method does not stop future executions (it is logged and swallowed by the trigger's error handler) but a long-running one blocks the single scheduler thread.
+- **`SimpleAsyncTaskScheduler` (Spring 6.1)** fires each execution on a new (optionally virtual) thread from a single scheduler thread — great for `fixedRate`/`cron`, but fixed-delay tasks are forced onto the single scheduler thread (delay semantics require waiting for completion). Hence the guidance: with virtual threads, prefer `fixedRate`/`cron` over `fixedDelay`.
+- **Programmatic registration.** Implement `SchedulingConfigurer` and use the `ScheduledTaskRegistrar` to register tasks with dynamic triggers (e.g. a `Trigger` whose next execution is computed from data, or a `cron` string resolved at runtime) — something the static annotation cannot express.
+
+### The double-initialization pitfall
+
+Do not put `@Scheduled` on a class that is also instantiated outside the container (e.g. via `@Configurable` load-time weaving *and* registered as a bean), or register the same `@Scheduled` bean twice — each live instance registers its own triggers, so the method fires **multiple times per interval**. Prototype-scoped `@Scheduled` beans are also a smell: every created instance schedules itself.
+
 ---
 
 ## fixedRate vs fixedDelay vs cron
@@ -202,6 +241,21 @@ Spring's **cron format has 6 fields** (unlike the classic Unix 5-field crontab):
 ```
 
 Special values: `*` (any), `?` (no specific value, for day-of-month/day-of-week), `/` (increments, e.g. `0/15`), `-` (ranges), `,` (lists), plus macros like `@hourly`, `@daily` (aka `@midnight`), `@weekly`, `@monthly`, and `@yearly` (aka `@annually`). Note Spring does **not** support the Unix `@reboot` macro. Since Spring 5.3 you can also disable a task with `cron = "-"` (Scheduled.CRON_DISABLED). The values can be supplied via property placeholders / SpEL, e.g. `fixedRateString = "${poll.rate}"` or `cron = "${report.cron}"`.
+
+### fixedRate deep internals — the overlap and "catch-up" traps
+
+- **fixedRate is measured from the *scheduled* (planned) time, not the actual start.** The scheduler computes fire times as `t0, t0+rate, t0+2·rate, …` up front. If execution *N* overruns its slot, the trap depends on the scheduler's thread count:
+  - **Single-threaded scheduler (default):** the next fire cannot start until the current one finishes; missed fires **bunch up** and run back-to-back with no gap — they do *not* run concurrently.
+  - **Multi-threaded scheduler:** a long `fixedRate` execution can **overlap** with the next one, because a different pool thread picks up the on-schedule fire while the previous is still running. This is a real concurrency hazard people forget: `fixedRate` + pooled scheduler = potential concurrent executions of the same method.
+- **`fixedDelay` never overlaps by construction** — the next start is anchored to the previous *completion*, so there is always exactly one execution in flight regardless of pool size.
+- **`initialDelay` requires a `fixedRate`/`fixedDelay`** companion (or `initialDelayString`); it is meaningless with `cron` (a cron trigger has no "first delay" concept — it fires at the next matching wall-clock time).
+- **Time unit.** Numeric `fixedRate`/`fixedDelay`/`initialDelay` are milliseconds unless `timeUnit` (since 5.3.10) overrides it. The `*String` variants also accept ISO-8601 `Duration` syntax (`"PT5S"`), in which case `timeUnit` is ignored.
+
+### Cron edge cases
+
+- **day-of-month and day-of-week are AND-combined when both are restricted** — a deliberate Spring deviation from Unix/Vixie crontab (which OR-combines them). Spring's `CronExpression` fires only when *both* day constraints are satisfied: e.g. `0 0 0 13 * FRI` fires **only on a Friday that is also the 13th**, not on every 13th and every Friday. This surprises people who expect Unix-style OR — a subtle source of "why didn't it fire on the day I expected" bugs. Use `?` in one field to mean "no specific value" and disable that constraint.
+- **DST transitions**: with a `zone`, Spring's `CronExpression` computes fire times in that zone. A daily job at `02:30` may be skipped or run once around a spring-forward/fall-back transition; wall-clock cron does not "make up" a skipped time.
+- Spring cron does not support seconds-less 5-field Unix expressions — a 5-field string is invalid; you must supply all six fields (or a macro).
 
 ---
 
@@ -255,6 +309,39 @@ Important attributes and behaviors:
 
 Spring also supports the **JSR-107 (JCache) annotations** (`@CacheResult`, `@CachePut`, `@CacheRemove`, `@CacheRemoveAll` from `javax.cache.annotation`) when a JCache provider and the corresponding config are present.
 
+### SpEL evaluation context for keys, condition, and unless
+
+The root object exposes: `#root.methodName`, `#root.method`, `#root.target`, `#root.targetClass`, `#root.args` (object array), and `#root.caches` (the `Cache` instances for this operation). Arguments are referenced by name (`#isbn`) when compiled with `-parameters`, else by index (`#a0`/`#p0`). Crucial timing distinction:
+
+- **`condition`** and the `key` for `@Cacheable`/`@CacheEvict` are evaluated **before** the method runs, so `#result` is **not** available there.
+- **`unless`**, and the `key` of `@CachePut` or a `@CacheEvict(beforeInvocation=false)`, are evaluated **after**, where `#result` refers to the return value. For wrapper types like `Optional`/`CompletableFuture`, `#result` is the **unwrapped** value, not the wrapper (e.g. `unless = "#result?.hardback"` on a method returning `Optional<Book>`).
+
+### sync = true — the exact documented limitations (favourite expert trap)
+
+Per the `@Cacheable` Javadoc, turning on `sync` imposes three hard restrictions, and violating them throws at startup:
+
+1. **`unless()` is not supported** (only `condition` is honored — because with a locked combined get-or-compute there is no post-hoc veto point).
+2. **Exactly one cache may be specified** (you cannot list multiple `cacheNames`).
+3. **It cannot be combined with other cache operations** (e.g. via `@Caching`).
+
+Semantically, `sync=true` turns the operation into a single atomic *get-or-compute* callback against the provider (`Cache.get(key, valueLoader)`), rather than the default independent get-then-put. So if the combined access fails there is no separate put retry, and a `CacheErrorHandler` that suppresses get errors cannot fall back to a put. It is also only a **hint** — a provider that lacks atomic compute may not truly serialize.
+
+### Failure semantics and error handling
+
+- **Exception during a cache miss:** if the `@Cacheable` method throws while computing a missing value, **nothing is stored** — the exception propagates to the caller and the cache is left without an entry (next call retries). There is no negative/exception caching by default.
+- **`@CacheEvict(beforeInvocation=false)` (the default) does not evict if the method throws** — the entry survives the failure. Use `beforeInvocation=true` to evict regardless of outcome (important for delete-then-fail scenarios where you must not serve stale data).
+- **`CacheErrorHandler`** (configured via `CachingConfigurer`) governs what happens when the *cache backend itself* fails (e.g. Redis is down): by default `SimpleCacheErrorHandler` rethrows, which can turn a cache outage into an application outage. A custom handler can log-and-continue so the method still runs against the source of truth.
+
+### Concurrency and consistency caveats
+
+- **`@Cacheable` without `sync=true` gives no atomicity** across the get/compute/put window — N concurrent misses on the same key all run the method (cache stampede) and all put. `sync=true` (or a provider-level lock) is the fix.
+- **`@CachePut` + `@Cacheable` on different methods for the same key can race**: there is no ordering guarantee between a put from one method and a concurrent read-through from another.
+- **`allEntries=true` eviction is not transactional** — if two callers evict-all and repopulate concurrently, interleavings can leave stale entries; caching operations are **not** tied to the surrounding transaction unless you register a transaction-aware wrapper.
+
+### Transaction-aware caching
+
+By default cache writes/evictions happen **immediately at method boundaries**, *not* at transaction commit. If a `@Transactional @CacheEvict` method rolls back, the eviction has already happened (data was removed from cache but the DB change was undone → inconsistency). To defer cache operations until after a successful commit, wrap your `CacheManager` in a `TransactionAwareCacheManagerProxy` (or set the transaction-aware flag on managers that support it), which registers cache mutations as transaction synchronizations.
+
 ---
 
 ## The CacheManager Abstraction
@@ -283,6 +370,16 @@ Notes:
 - The abstraction **does not do serialization, TTL, or eviction itself** — those are backend concerns. `ConcurrentMapCacheManager` has no TTL/size limits; if you need expiry, use Caffeine, Redis, or a JCache provider.
 - You can select among multiple cache managers per-annotation with `cacheManager = "..."` or via a `CacheResolver`.
 - The abstraction stores `null` values by default (unless `allowNullValues = false`), so a cached `null` counts as a hit.
+
+### CacheResolver, cacheManager, and key generation precedence
+
+- **`cacheManager` and `cacheResolver` are mutually exclusive**; specifying both throws. `cacheManager` is sugar — behind the scenes a `SimpleCacheResolver` is built around it. Use a full `CacheResolver` when the target cache must be chosen **at runtime** from the invocation context.
+- **`key` and `keyGenerator` are likewise mutually exclusive.** Default key generation uses `SimpleKeyGenerator`: zero args → `SimpleKey.EMPTY`; one arg → that arg *itself* (so the key equals the argument, meaning the argument's `equals`/`hashCode` matter); multiple args → a `SimpleKey` wrapping all of them. If you key on a single mutable object, mutating it after put makes the entry unreachable.
+- **`@CacheConfig`** sets class-level defaults (cacheNames, keyGenerator, cacheManager, cacheResolver) that individual method annotations can override — reducing repetition but occasionally causing "why is it using that cache manager?" surprises.
+
+### allowNullValues and the store-null gotcha
+
+Certain backends cannot store `null` (e.g. some Redis configurations). With `allowNullValues=true` (default), Spring wraps values so `null` is representable and counts as a hit; if you switch a `CacheManager` to `allowNullValues=false`, a method that returns `null` on a miss will **re-execute every time** (the null is never cached), and attempting to store null may throw depending on the manager. This is why `unless = "#result == null"` is often used to *intentionally* skip caching nulls regardless of the manager setting.
 
 ---
 
@@ -326,6 +423,18 @@ Other proxy-related consequences shared by all three:
 
 - Annotations on **private / final / static** methods are not advised by the default proxy mechanisms (CGLIB cannot subclass final classes/methods; JDK proxies only see interface methods). Effective methods should be `public` and non-final.
 - The behavior only applies to **Spring-managed beans**; `new`-ing the object yourself gives you no proxy.
+
+### Advisor ordering when multiple aspects stack
+
+When a method carries several proxy-based concerns — e.g. `@Transactional` + `@Cacheable`, or `@Async` + `@Transactional` — the **order of the advisors** decides the observable behavior, and interviewers probe this:
+
+- **Caching vs transactions.** If the cache advisor runs *outside* the transaction advisor, a cache hit short-circuits before any transaction begins (fast, no DB connection acquired). If the transaction advisor is outer, a transaction is opened even on a cache hit. Spring's default ordering places the cache interceptor at a low-precedence order, so typically caching wraps outside transactions — but this is tunable via the `order` attribute on the `@EnableXxx` annotations.
+- **`@Async` is special.** Because `@Async` hands the call to another thread, whatever advice is *inside* the async advisor (closer to the target) runs on the **executor thread**, and whatever is *outside* runs on the **caller thread**. Ordering `@Async` outermost means a `@Transactional` inside it opens its transaction on the worker thread (usually what you want). Getting this backwards is a source of "my transaction spans the wrong thread" bugs.
+- Each feature exposes an `order` attribute (`@EnableAsync(order=...)`, `@EnableCaching(order=...)`, plus `@EnableTransactionManagement(order=...)`) to place its advisor in the chain. Lower value = higher precedence = outer.
+
+### Why proxies still exist on self-invoked beans
+
+The bean *is* wrapped in a proxy, and external callers hit the advice correctly. Self-invocation fails not because the proxy is missing but because, once control is inside the target instance, `this` is the raw (unproxied) object. `AopContext.currentProxy()` (with `exposeProxy=true`) works precisely because it retrieves the *outer proxy* from a thread-local set up by the proxy on entry — letting you re-enter through the advice deliberately.
 
 ---
 

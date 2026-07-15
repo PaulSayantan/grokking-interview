@@ -104,6 +104,26 @@ Advanced notes:
   the DB until a property is accessed — throwing `EntityNotFoundException` lazily if absent —
   whereas `findById` executes a `SELECT` immediately and returns `Optional.empty()` when missing.
 
+**Deeper internals interviewers probe:**
+
+- **`SimpleJpaRepository` transaction semantics.** Its class-level `@Transactional(readOnly = true)`
+  is *overridden* by method-level `@Transactional` on mutators (`save`, `delete`, etc.), which run
+  read-write. But note the subtlety: if a repository method is already invoked *inside* an existing
+  transaction (e.g., a `@Transactional` service method), the repository's own annotation is
+  ignored because the default `REQUIRED` propagation joins the caller's transaction — the
+  `readOnly` hint only takes effect when the repository method *starts* the transaction. This is why
+  putting `@Transactional` on the service layer, not the repository, is the recommended pattern.
+- **`readOnly = true`** does not merely document intent: Spring sets the JDBC `Connection` to
+  read-only (a hint to the driver/DB) and, crucially, sets the Hibernate `FlushMode` to `MANUAL`,
+  so dirty checking and automatic flush are skipped — a real performance win for read paths, and a
+  trap if you accidentally mutate a managed entity expecting it to be persisted.
+- **Custom fragment ordering.** With multiple fragment interfaces, Spring Data resolves a method to
+  the *first* fragment (in declaration order) that implements it; the base `SimpleJpaRepository` is
+  consulted last. This ordering matters when two fragments could satisfy the same signature.
+- **`@NoRepositoryBean`** marks an intermediate interface (like your own `BaseRepository<T,ID>`) so
+  Spring Data does *not* try to instantiate a proxy for it directly — only concrete
+  entity-specific repositories get proxies.
+
 ---
 
 ## Derived Query Methods
@@ -149,6 +169,30 @@ Key points and gotchas:
 - Derived queries get unwieldy fast. Long predicates (5+ conditions) are a smell — switch to
   `@Query`, the Criteria API, or Query by Example / Specifications.
 - Adding a `Pageable` or `Sort` parameter to a derived method enables paging/sorting on it.
+
+**Edge cases and gotchas that trip up seniors:**
+
+- **`OrderBy` vs a `Sort` argument conflict.** If a method has a static `OrderBy...` in its name and
+  *also* receives a `Sort`/`Pageable` argument, the dynamic `Sort` is *appended* — it does not
+  replace the static ordering. To make ordering fully dynamic, drop the `OrderBy` from the name.
+- **`delete...By` derived deletes are not bulk DML.** A method like `deleteByStatus(Status s)` (or
+  its `removeBy` synonym) is *not* a single `DELETE ... WHERE` statement by default — Spring Data
+  first `SELECT`s the matching entities into the persistence context and then removes them one by
+  one, so lifecycle callbacks (`@PreRemove`) and cascades fire. Returning `int`/`long` gives you the
+  count; returning `List<T>`/the entities returns what was deleted. Contrast this with a
+  `@Modifying @Query("delete ...")` which issues a single bulk `DELETE` and bypasses the context.
+- **`In` vs a large collection.** `findByIdIn(Collection)` expands to a SQL `IN (...)` list; very
+  large collections can blow past database bind-variable limits (e.g., Oracle's 1000-element `IN`
+  cap) — Hibernate may need `IN`-clause padding or chunking.
+- **`First`/`Top` with a `Pageable`.** Combining `findFirstBy...` with a `Pageable` argument: the
+  limiting keyword caps the *total* rows fetched, and paging is applied within that cap — rarely what
+  people intend. Prefer one mechanism.
+- **Nullable primitives.** A derived method returning a primitive `long count...` throws if the
+  provider returns `null`; a boolean `existsBy...` is safe because it is translated to a
+  `SELECT 1 ... LIMIT 1` / count comparison.
+- **Property vs keyword collision.** If an entity legitimately has a property named `containing` or
+  `orderBy`, the parser's greedy keyword matching can misinterpret it; underscores
+  (`findBy_Containing`) or an explicit `@Query` resolve the ambiguity.
 
 ---
 
@@ -202,6 +246,32 @@ Other essentials:
 - **Sort with native queries** and dynamic sorting can be fragile — `Sort` is applied for JPQL but
   for native queries you may need `JpaSort.unsafe(...)`.
 
+**Advanced traps worth internalizing:**
+
+- **The stale-persistence-context trap after a bulk `@Modifying` update.** A bulk
+  `update User u set u.status = ...` runs directly in the database and does *not* touch the
+  first-level cache. Any already-managed `User` in the current persistence context keeps its old
+  in-memory state, so a subsequent read within the same transaction can return stale values. Set
+  `@Modifying(clearAutomatically = true)` to `clear()` the context afterward, and
+  `flushAutomatically = true` to flush pending changes *before* the bulk statement runs. Beware:
+  `clearAutomatically` detaches *all* managed entities and silently discards their un-flushed
+  changes — a subtle data-loss footgun.
+- **JPQL bulk updates skip `@Version` and cascades.** A bulk `update`/`delete` does not increment
+  the optimistic-lock `@Version` column (unless you set it explicitly) and does not cascade to
+  associations or fire entity lifecycle callbacks. This can silently break optimistic locking for
+  other in-flight transactions.
+- **`countQuery` and native paging.** For a paginated native `@Query`, Spring cannot derive the
+  count query by stripping the `ORDER BY`/`SELECT` list the way it does for JPQL; you must supply an
+  explicit `countQuery`. Getting this wrong yields wrong `getTotalElements()` or a runtime error.
+- **`?1` used twice.** With positional parameters, referencing `?1` multiple times is legal in JPQL
+  but a frequent source of confusion; named parameters (`:x`) are clearer and can be reused freely.
+- **SpEL `?#{...}` vs `:#{...}`.** `?#{}` splices a value as a *bind parameter* (safe);
+  string-concatenating user input into the query text invites JPQL/SQL injection. Interviewers like
+  to see you distinguish bound parameters from string interpolation.
+- **Interface projections and `nativeQuery`.** Closed interface projections work with native queries
+  only if the selected column *aliases* exactly match the projection's getter-derived names;
+  otherwise Spring cannot map them.
+
 ---
 
 ## Pageable and Sort
@@ -243,6 +313,28 @@ Notes and pitfalls:
   versions.
 - In web layers, `PageableHandlerMethodArgumentResolver` (from Spring Data Web support) can bind
   `?page=&size=&sort=` request params directly to a `Pageable` controller argument.
+
+**Subtle behaviors experts should know:**
+
+- **The count query is skipped even for `Page`.** Returning `Page<T>` does *not* always run a count
+  query. Spring Data's `PageableExecutionUtils` optimizes it away when it can infer the total from
+  the page contents: if the current page is the first page *and* its content size is smaller than
+  the requested page size, or if a non-first page comes back short, the total is computed
+  arithmetically. So "`Page` = always +1 count query" is an over-simplification.
+- **`Sort` by an unmapped/derived property.** Sorting works on persistent entity properties; sorting
+  by an alias or a function requires `JpaSort.unsafe("FUNCTION('...')")`, and unsafe sort strings are
+  spliced into the query (injection risk if user-controlled).
+- **Deep-offset cost is O(offset).** `LIMIT 20 OFFSET 1000000` still forces the DB to scan and
+  discard a million rows. Keyset (seek) pagination — `WHERE (created_at, id) < (?, ?) ORDER BY ...
+  LIMIT 20` — is O(page size). Spring Data's `Scroll`/`ScrollPosition` (6.x / Spring Data 3.1+)
+  models this with `WindowIterator` and keyset positions.
+- **`Pageable.unpaged()` still honors `Sort`.** In newer Spring Data you can pass a `Sort` to
+  `Pageable.unpaged(sort)`; a returned `Page` from an unpaged request has one page containing all
+  results and `getTotalElements()` equal to the content size (no separate count query).
+- **Immutability and thread-safety.** `PageRequest`, `Sort`, and `Page` are immutable value objects;
+  `next()`/`previous()` return new instances. This makes them safe to share, but reusing a stale
+  `Pageable` after data changes can skip or double-count rows (another reason keyset paging is
+  preferred for mutating datasets).
 
 ---
 
@@ -289,6 +381,36 @@ Key APIs:
 `JdbcTemplate` is **thread-safe once configured** and is normally declared as a singleton bean.
 Use it when you want full SQL control, minimal overhead, or to avoid ORM complexity; use JPA/Spring
 Data JPA when you want object mapping, relationships, and change tracking.
+
+**Internals and pitfalls seniors are expected to know:**
+
+- **Why it is thread-safe.** `JdbcTemplate` holds only the `DataSource` (and immutable config like
+  fetch size) as mutable-after-construction-then-frozen state; per-call working state lives in local
+  variables. It obtains the `Connection` through `DataSourceUtils.getConnection(dataSource)`, which
+  returns the transaction-bound connection when a Spring-managed transaction is active — so
+  `JdbcTemplate` participates correctly in `@Transactional` boundaries and does *not* silently open a
+  second connection.
+- **`queryForObject` for a single row that maps to an entity** uses a `RowMapper` (or
+  `BeanPropertyRowMapper`); `queryForObject(sql, Integer.class)` uses a `SingleColumnRowMapper` and
+  throws `IncorrectResultSizeDataAccessException` if the row has more than one column.
+- **`queryForObject` returning `null`.** If the single row's single column is SQL `NULL`, the method
+  returns `null` (not an exception) — a classic NPE trap when autoboxing to a primitive.
+- **Batch ordering and JDBC batching.** `batchUpdate` sends statements as a JDBC batch, but whether
+  the driver actually batches over the wire depends on the driver and URL flags (e.g. PostgreSQL
+  needs `reWriteBatchedInserts=true` to collapse inserts). Generated keys are generally *not*
+  reliably returned from batch inserts.
+- **`ResultSetExtractor` vs `RowMapper` for joins.** A one-to-many join returns duplicated parent
+  rows; a `RowMapper` (one object per row) cannot deduplicate, so use a `ResultSetExtractor` that
+  reads the whole `ResultSet` and assembles a `Map<parentId, Parent>` — this is how you avoid an
+  N+1 without an ORM.
+- **`SqlExceptionTranslator` resolution order.** By default `JdbcTemplate` uses
+  `SQLErrorCodeSQLExceptionTranslator`, which matches vendor error codes from `sql-error-codes.xml`
+  (keyed by the database product name it reads from `DatabaseMetaData`). If it can't identify the DB,
+  it falls back to `SQLStateSQLExceptionTranslator`. Spring 6.x also offers
+  `SQLExceptionSubclassTranslator` leveraging JDBC 4's `SQLException` subclasses.
+- **Fetch size and streaming.** For huge result sets, set `setFetchSize(...)` and use a
+  `RowCallbackHandler` (which returns nothing and processes rows as they stream) to avoid loading
+  everything into memory.
 
 ---
 
@@ -346,6 +468,31 @@ public class JpaUserDao {
 }
 ```
 
+**When translation does and does not happen — the traps:**
+
+- **Spring Data repositories are always translated.** The generated proxy applies a
+  `PersistenceExceptionTranslationInterceptor` regardless of whether you added `@Repository`, so you
+  get `DataAccessException`s from repository calls out of the box. The `@Repository` mechanism is for
+  *your own* hand-written DAOs.
+- **Translation is boundary-sensitive.** Native exceptions are frequently thrown not at the line you
+  call the `EntityManager`, but at **flush/commit time** — often *outside* the `@Repository`
+  method, when the transaction commits at the service-layer boundary. At that point the AOP advisor
+  around the repository is no longer on the stack, so the exception surfaces as a raw
+  `PersistenceException`/`ConstraintViolationException` unless a translator is invoked at the commit
+  point. Spring's `JpaTransactionManager` does translate on commit for JPA, but this asymmetry is a
+  classic "why is my DataIntegrityViolationException actually a PersistenceException?" puzzle.
+- **`DuplicateKeyException` is not always thrown for a unique violation.** JPA/Hibernate frequently
+  surfaces unique-constraint violations as the more general `DataIntegrityViolationException` because
+  the specific error-code mapping that distinguishes duplicate keys lives in the JDBC translator, not
+  the JPA dialect. Don't rely on catching `DuplicateKeyException` for ORM writes.
+- **Transient vs non-transient branch.** The hierarchy splits into
+  `TransientDataAccessException` (retry may succeed — deadlock loser, lock timeout, connection
+  blip) and `NonTransientDataAccessException` (retry is futile until you fix the cause — bad SQL,
+  constraint violation). This distinction is what `@Retryable`/retry templates key off of.
+- **Custom translation.** You can register a `SQLErrorCodeSQLExceptionTranslator` with a
+  `CustomSQLErrorCodesTranslation`, or supply your own `PersistenceExceptionTranslator` bean, to map
+  vendor-specific codes to a chosen `DataAccessException` subtype.
+
 ---
 
 ## The N plus 1 Problem
@@ -384,6 +531,36 @@ Detection and fixes:
 The N+1 problem is not unique to Hibernate — it affects any lazy-loading ORM. It's a favorite
 interview topic because it shows you understand the cost of the object-relational abstraction.
 
+**Deeper edge cases and the trade-offs between fixes:**
+
+- **`JOIN FETCH` + `Pageable` = in-memory pagination.** When you `join fetch` a collection *and*
+  request a `Pageable`, Hibernate cannot apply `LIMIT`/`OFFSET` in SQL (the join multiplies rows, so
+  a SQL limit would truncate a parent's children). It logs the infamous
+  `HHH000104: firstResult/maxResults specified with collection fetch; applying in memory` warning and
+  fetches the *entire* result set, then paginates in memory — a silent OOM/perf disaster on large
+  tables. The correct fix is a **two-query strategy**: page the parent IDs first (no fetch), then
+  fetch children for that page via an `IN` query or `@EntityGraph`/`@BatchSize`.
+- **`distinct` in JPQL vs `Hibernate.FILTER`.** `select distinct a from Author a join fetch a.books`
+  deduplicates parents in memory. In Hibernate 5.2.2+ the SQL-level `DISTINCT` can be suppressed with
+  the `hibernate.query.passDistinctThrough=false` hint (or `.setHint(HINT_PASS_DISTINCT_THROUGH,
+  false)`), so you get in-memory dedup without an unnecessary and costly SQL `DISTINCT`.
+- **`@BatchSize` semantics.** `@BatchSize(size = 10)` turns N lazy loads into `ceil(N/10)` queries
+  using `WHERE parent_id IN (?, ?, ...)`. It is the *only* fix that also helps when the association
+  is accessed later, outside the original query. `hibernate.default_batch_fetch_size` applies it
+  globally.
+- **Two `EAGER` collections trigger `MultipleBagFetchException`.** Fetching two `List`-typed
+  (`bag`) collections in one query throws
+  `MultipleBagFetchException: cannot simultaneously fetch multiple bags`, because the cartesian
+  product cannot be unambiguously mapped back into two lists. Fixes: change one to a `Set`, use
+  `@OrderColumn` (making it an indexed `List`), or fetch collections in separate queries/`@BatchSize`.
+- **N+1 can hide behind `@ManyToOne(EAGER)` too.** Eager to-one associations without an explicit
+  `JOIN FETCH` in a JPQL query often produce a secondary SELECT per row — an N+1 in the other
+  direction. Always be explicit about fetch plans in queries rather than trusting mapping defaults.
+- **Open Session in View masks N+1.** OSIV keeps the persistence context open during view rendering,
+  so lazy access "just works" — but it converts what should be one query into many, executed during
+  rendering, off any transaction. It hides N+1 rather than fixing it, which is why it's discouraged
+  in Spring services (and disabled explicitly in many configurations).
+
 ---
 
 ## EntityManager vs Session
@@ -418,7 +595,104 @@ Key facts:
   Hibernate-specific; JPA's `persist` returns `void`. Hibernate's `get` hits the DB immediately
   while `load` returns a lazy proxy (analogous to JPA `find` vs `getReference`).
 
+**Subtle semantics staff engineers must nail:**
+
+- **`persist` vs `merge`.** `persist(e)` makes a *transient* entity managed and throws
+  `EntityExistsException` if it already exists; the argument instance itself becomes managed.
+  `merge(e)` copies the state of a *detached* entity onto a managed instance and **returns that
+  managed instance** — the argument you passed in stays detached. Continuing to mutate the original
+  reference after `merge` is a classic bug: your changes are lost because they're on the detached
+  copy, not the managed one. `merge` also issues a `SELECT` to load the current row (unless it's a
+  known new entity), then an `UPDATE` on flush.
+- **`save` in Spring Data is `merge`-or-`persist`.** `SimpleJpaRepository.save` calls `persist` when
+  the entity is new (per `EntityInformation.isNew`, based on the `@Id`/`@Version` being null, or
+  `Persistable.isNew`) and `merge` otherwise. For an entity with an assigned (non-generated) id,
+  `isNew` returns false, so `save` does a `merge` → an extra `SELECT` before every insert. Implement
+  `Persistable` or use `@Version`/a `@CreatedDate` audit field to fix this.
+- **Flush ordering (`ActionQueue`).** Hibernate does *not* execute SQL in the order you call methods.
+  On flush it orders operations by type: inserts, then updates, then collection removals/updates,
+  then deletes — respecting insertion order within each type. This is why a `persist` followed by a
+  `remove` in your code can still deadlock or violate a constraint in an order you didn't expect, and
+  why `saveAndFlush`/manual `flush` is sometimes needed to force ordering.
+- **`flush()` does not commit.** Flushing pushes pending SQL to the DB (so subsequent queries see the
+  changes and constraints fire) but the transaction is still open and can roll back. `AUTO` flush
+  mode also flushes before a query whose results could be affected by pending changes.
+- **First-level cache is per-persistence-context.** Two `find`s for the same id in one transaction
+  return the *same* object instance (identity guarantee) and the second is served from the L1 cache
+  with no SQL. Across transactions there is no such guarantee unless the (optional) L2 cache is
+  enabled.
+- **`StatelessSession`** bypasses the persistence context, L1 cache, dirty checking, and cascades —
+  ideal for bulk ETL, but you lose automatic dirty tracking and must manage everything manually.
+
 ---
+
+## Optimistic and Pessimistic Locking
+
+Concurrency control is where persistence integration meets real production scars.
+
+- **Optimistic locking** uses a `@Version` field (an `int`/`long`/`short`/`Timestamp`). On update,
+  Hibernate appends `WHERE id = ? AND version = ?` and increments the version. If zero rows match
+  (someone else updated first), it throws `OptimisticLockException`, which Spring translates to
+  `OptimisticLockingFailureException`. No database locks are held — it's a bet that conflicts are
+  rare, resolved at flush/commit. The version check fires **only when the entity is dirty and
+  flushed**; a bulk `@Modifying` update or a native SQL update does *not* bump `@Version`, which can
+  silently corrupt the optimistic-locking contract for concurrent readers.
+- **`@Version` gotchas:** the field must not be manually modified; a `merge` of a detached entity
+  compares the detached version against the DB and can throw on merge; and `LockModeType.OPTIMISTIC`
+  vs `OPTIMISTIC_FORCE_INCREMENT` differ in whether the version is bumped even without a change
+  (useful for enforcing an aggregate-level lock when only a child changed).
+- **Pessimistic locking** takes actual DB locks via `LockModeType.PESSIMISTIC_READ` (shared) or
+  `PESSIMISTIC_WRITE` (exclusive, `SELECT ... FOR UPDATE`). In Spring Data, annotate the repository
+  method `@Lock(LockModeType.PESSIMISTIC_WRITE)`. Lock acquisition failures surface as
+  `PessimisticLockingFailureException`/`CannotAcquireLockException`; timeouts can be tuned with
+  `jakarta.persistence.lock.timeout`. Pessimistic locks require an active transaction and are
+  released at commit.
+- **Choosing:** optimistic scales better under low contention and avoids deadlocks; pessimistic is
+  right for hot rows where retrying an optimistic failure repeatedly would be worse. A common
+  senior answer: default to optimistic with a retry loop, escalate to pessimistic only for genuinely
+  contended resources (inventory counters, sequence tables).
+
+## Transaction Semantics in the Data Layer
+
+Persistence behavior is inseparable from transaction boundaries; several data-access surprises are
+really transaction surprises.
+
+- **`LazyInitializationException`.** Accessing a lazy association *after* the persistence context
+  closes (e.g., in the view/controller after the `@Transactional` service returned) throws
+  `LazyInitializationException`. The fix is to fetch what you need inside the transaction
+  (`JOIN FETCH`, `@EntityGraph`, DTO projection), *not* to enable Open Session in View.
+- **Self-invocation defeats `@Transactional`.** Because Spring's transaction management is
+  proxy-based (AOP), calling one `@Transactional` method from another method *in the same bean*
+  bypasses the proxy, so a new/nested transaction annotation is ignored. This equally affects
+  repository fragments that call sibling methods.
+- **`readOnly = true` in the persistence layer** switches Hibernate to `FlushMode.MANUAL` and hints
+  the JDBC connection read-only. Dirty changes are silently not flushed — great for read
+  performance, dangerous if you expected a write.
+- **Rollback rules.** By default Spring rolls back on unchecked (`RuntimeException`) and `Error`, and
+  commits on checked exceptions. Because `DataAccessException` is unchecked, data-access failures
+  trigger rollback automatically — one reason Spring made the hierarchy unchecked. Override with
+  `@Transactional(rollbackFor = ...)`.
+- **`REQUIRES_NEW` and connection pool exhaustion.** A `REQUIRES_NEW` method suspends the current
+  transaction and grabs a *second* connection from the pool while the first is still held. Nesting
+  these under load can deadlock the pool — a subtle production failure mode.
+
+## Persistence Context Lifecycle and Flush Timing
+
+- **When does SQL actually run?** With `FlushMode.AUTO` (the JPA default), Hibernate flushes pending
+  changes before a query that might be affected by them, and always before commit — but *not*
+  necessarily at the moment you call `persist`/`setter`. Insert SQL for a `GenerationType.IDENTITY`
+  id is an exception: it must run immediately on `persist` to obtain the key, whereas `SEQUENCE`/
+  `TABLE` generators can defer the insert and batch it.
+- **Write-behind (transactional write-behind).** The persistence context queues DML and flushes it
+  as late as possible, enabling batching and letting dirty checking coalesce multiple setter calls
+  into one `UPDATE`. This is why the order of your Java calls need not match the emitted SQL order
+  (see `ActionQueue` ordering under EntityManager vs Session).
+- **Dirty checking cost.** On flush Hibernate snapshots and compares every managed entity's state;
+  a context bloated with thousands of managed entities makes each flush expensive. For large batch
+  jobs, periodically `flush()` then `clear()`, use `StatelessSession`, or set a JDBC batch size.
+- **Detachment.** `clear()` detaches everything; `detach(e)` detaches one entity; closing the
+  `EntityManager` detaches all. Detached entities lose dirty tracking — further changes are ignored
+  until `merge`.
 
 ## Common follow-up questions
 

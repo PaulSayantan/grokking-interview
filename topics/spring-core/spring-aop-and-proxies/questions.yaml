@@ -689,3 +689,662 @@ questions:
       Private methods cannot be overridden or intercepted by either proxy mechanism, so Spring AOP never
       advises them. CGLIB also cannot advise final methods, and JDK proxies only see interface methods.
     ref: "concepts.md#jdk-dynamic-proxy-vs-cglib"
+
+  - id: spring-aop-and-proxies-043
+    difficulty: advanced
+    tags: [advice-types, around, return-type-trap]
+    question: |
+      An engineer writes an @Around advice to log timing, declaring it as:
+      `@Around("...") public void logTiming(ProceedingJoinPoint pjp) throws Throwable { pjp.proceed(); }`.
+      The advised service method `String findName()` normally returns a non-null name, but after adding the
+      aspect every caller receives null. What is the root cause?
+    options:
+      - "proceed() must be called twice for the return value to propagate"
+      - "The advice method is declared to return void, so Spring returns null to the caller and discards the value produced by proceed()"
+      - "@Around cannot advise methods that return String; only Object-returning methods are supported"
+      - "The pointcut silently rebound the return value to null because 'returning' was not specified"
+    answer: 1
+    explanation: |
+      A void @Around always returns null to the caller regardless of what proceed() yields. The advice must
+      declare Object (or a matching type) and return the result of proceed(). This is a classic silent
+      corruption bug for non-void targets.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-044
+    difficulty: advanced
+    tags: [advice-types, proceed-arguments, argument-binding]
+    question: |
+      You want an @Around advice to trim and normalize a String argument before the target sees it. Which
+      approach actually changes the argument the target method receives?
+    options:
+      - "Call pjp.proceed(new Object[]{normalized}) passing the modified arguments explicitly"
+      - "Mutate the args array returned by pjp.getArgs() in place; Spring re-reads it before invoking the target"
+      - "Reassign the bound parameter in the advice; Spring forwards the updated local variable automatically"
+      - "Annotate the parameter with @Modifying so the container substitutes it"
+    answer: 0
+    explanation: |
+      Only the proceed(Object[]) overload substitutes arguments for the target. Calling proceed() with no
+      args forwards the originals; mutating getArgs() or reassigning a local does not change what the target
+      receives in Spring's proxy model.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-045
+    difficulty: expert
+    tags: [advice-types, argument-binding, matching]
+    question: |
+      An aspect declares `@AfterReturning(pointcut="execution(* com.app.Repo.load(..))", returning="r")
+      public void audit(List<?> r)`. The method `load()` matches the execution pointcut but sometimes returns
+      a single entity (not a List). What happens on those invocations?
+    options:
+      - "A ClassCastException is thrown when Spring tries to bind the non-List return value"
+      - "The advice runs with r set to null because the type did not match"
+      - "The advice is skipped for that invocation because the returning parameter's type acts as an additional match filter"
+      - "Spring wraps the single entity in a singleton List and passes it to the advice"
+    answer: 2
+    explanation: |
+      The type of the 'returning' parameter narrows the match: @AfterReturning only fires when the actual
+      returned value is assignable to that type. When load() returns a non-List, the advice simply does not
+      run for that invocation — no exception, no null call.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-046
+    difficulty: advanced
+    tags: [advice-types, ordering, same-aspect]
+    question: |
+      Within a SINGLE @Aspect class, both an @Around and a @Before advice match the same join point. On the
+      way IN to the method, in what order do they execute?
+    options:
+      - "@Before runs first, then @Around's pre-proceed code"
+      - "They run concurrently on separate threads"
+      - "Ordering is undefined because they are in the same aspect"
+      - "@Around's pre-proceed code runs first, then @Before, then proceed() reaches the target"
+    answer: 3
+    explanation: |
+      Within one aspect, precedence by advice type is @Around > @Before > @After > @AfterReturning >
+      @AfterThrowing. So the @Around's code before proceed() runs first, then @Before, then the target. Only
+      two advices of the SAME type in the same aspect have undefined relative order.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-047
+    difficulty: expert
+    tags: [advice-types, ordering, after-finally]
+    question: |
+      In a single aspect matching one join point where the target throws, you have an @After, an
+      @AfterThrowing, and an @AfterReturning method. Which run, and in what effective order relative to each
+      other?
+    options:
+      - "Only @AfterThrowing runs; @After and @AfterReturning are skipped"
+      - "@AfterReturning then @After run; @AfterThrowing is skipped"
+      - "@AfterThrowing runs, then @After runs (finally semantics); @AfterReturning does not run"
+      - "All three run in declaration order"
+    answer: 2
+    explanation: |
+      On an exception, @AfterReturning is skipped. @AfterThrowing fires, and @After (after-finally semantics)
+      is effectively invoked after it. Despite @After having higher listed type-precedence, it behaves like a
+      finally block and runs after the returning/throwing advice.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-048
+    difficulty: expert
+    tags: [proxies, this-vs-target, pointcut-designators]
+    question: |
+      A pointcut uses `this(com.app.OrderServiceImpl)` to match. OrderServiceImpl implements OrderService and
+      is proxied with the plain-Spring default (JDK dynamic proxy). Does the advice apply, and why?
+    options:
+      - "No — this() matches the PROXY's type, and a JDK proxy is not an instance of OrderServiceImpl (only of the interface)"
+      - "Yes — the target is an OrderServiceImpl, and this() always matches the target type"
+      - "Yes — this() and target() are aliases in Spring AOP"
+      - "No — this() is not a supported designator in Spring AOP"
+    answer: 0
+    explanation: |
+      this() matches on the proxy object's runtime type. A JDK dynamic proxy implements the interface but is
+      NOT an instance of the concrete class, so this(OrderServiceImpl) fails to match. Using target(OrderServiceImpl)
+      would match because it tests the target instance.
+    ref: "concepts.md#advisor-chain-methodinterceptor-and-matching"
+
+  - id: spring-aop-and-proxies-049
+    difficulty: advanced
+    tags: [proxies, aoputils, target-class]
+    question: |
+      A bean is CGLIB-proxied. You call `advisedBean.getClass().getName()` for logging. What do you observe,
+      and how should you recover the real business class?
+    options:
+      - "You get the original class name; no special handling needed"
+      - "getClass() throws because the proxy has no class metadata"
+      - "You get 'java.lang.reflect.Proxy'; call Proxy.getInvocationHandler() to unwrap"
+      - "You get a generated name like MyService$$SpringCGLIB$$0; use AopProxyUtils.ultimateTargetClass(bean) to get the real class"
+    answer: 3
+    explanation: |
+      A CGLIB proxy is a generated subclass, so getClass() returns a synthetic name (e.g. $$SpringCGLIB$$).
+      AopProxyUtils.ultimateTargetClass() (and AopUtils.isCglibProxy/isAopProxy) let you introspect the real
+      target class behind the proxy.
+    ref: "concepts.md#jdk-dynamic-proxy-vs-cglib"
+
+  - id: spring-aop-and-proxies-050
+    difficulty: expert
+    tags: [proxies, cglib, fields, objenesis]
+    question: |
+      A CGLIB-proxied bean has a public field `count` that its own constructor sets to 10. External code reads
+      `proxy.count` directly (not via a getter). What value is most likely observed and why?
+    options:
+      - "10, because CGLIB copies all field values from the target into the proxy subclass"
+      - "A NullPointerException, because field access on proxies is intercepted and rejected"
+      - "0/default, because the proxy subclass is instantiated via Objenesis without running the constructor, so its own field is uninitialized while the state lives on the target"
+      - "10, because field access is advised just like method access"
+    answer: 2
+    explanation: |
+      Proxies intercept methods, not fields. The CGLIB subclass is created via Objenesis, bypassing the
+      constructor, so its own copy of 'count' stays at the default. Real state lives on the (separately wired)
+      target; direct field reads on the proxy see uninitialized values. Always expose state via methods.
+    ref: "concepts.md#jdk-dynamic-proxy-vs-cglib"
+
+  - id: spring-aop-and-proxies-051
+    difficulty: advanced
+    tags: [self-invocation, async, threading]
+    question: |
+      A bean's method `public void schedule()` internally calls `this.runJob()`, where runJob() is annotated
+      @Async. Callers report the job runs on the request thread and blocks, not in the background. Why?
+    options:
+      - "The self-invocation this.runJob() bypasses the proxy, so the async advice never applies and the method runs synchronously on the caller's thread"
+      - "@Async requires a return type of Future; void @Async methods always run synchronously"
+      - "The task executor pool was exhausted, so Spring fell back to the caller thread"
+      - "@Async cannot be combined with any other bean method in the same class"
+    answer: 0
+    explanation: |
+      Because the call is a self-invocation via 'this', it does not pass through the proxy, so the @Async
+      interceptor never runs. The method executes synchronously on the caller's thread. Fix by moving runJob()
+      to another bean or invoking through a proxy reference.
+    ref: "concepts.md#self-invocation-limitation"
+
+  - id: spring-aop-and-proxies-052
+    difficulty: expert
+    tags: [self-invocation, aopcontext, expose-proxy]
+    question: |
+      Code calls `((OrderService) AopContext.currentProxy()).inner()` to defeat self-invocation, but at runtime
+      it throws IllegalStateException: "Cannot find current proxy". What is the fix?
+    options:
+      - "Add @Transactional to inner() so the proxy is created"
+      - "Switch from CGLIB to JDK proxies"
+      - "Call AopContext.currentProxy() from a @PostConstruct method instead"
+      - "Enable exposeProxy, e.g. @EnableAspectJAutoProxy(exposeProxy = true), so the proxy is bound to the thread-local"
+    answer: 3
+    explanation: |
+      AopContext.currentProxy() reads a ThreadLocal that is only populated when exposeProxy is enabled. Without
+      @EnableAspectJAutoProxy(exposeProxy = true) (or the XML equivalent), the proxy is not exposed and the call
+      throws. Note this adds a small per-call ThreadLocal cost.
+    ref: "concepts.md#self-invocation-limitation"
+
+  - id: spring-aop-and-proxies-053
+    difficulty: expert
+    tags: [self-invocation, constructor, lifecycle]
+    question: |
+      A @Transactional method `refresh()` is invoked from inside the bean's own constructor. No transaction is
+      started. Beyond the usual "this-call bypasses the proxy" reasoning, what is the more fundamental cause?
+    options:
+      - "Constructors cannot participate in transactions by JLS rules"
+      - "The transaction manager bean is initialized after all constructors, so it is null"
+      - "At construction time the AOP proxy does not exist yet — it is created by a BeanPostProcessor after the bean is fully initialized — so there is no proxy to route through at all"
+      - "@Transactional is only read at compile time and constructors are excluded"
+    answer: 2
+    explanation: |
+      The auto-proxy creator wraps the bean in postProcessAfterInitialization, AFTER construction and
+      initialization complete. During the constructor the proxy simply does not exist, so any advised call
+      (self or otherwise) cannot be intercepted. The same applies to @PostConstruct/afterPropertiesSet.
+    ref: "concepts.md#proxy-creation-internals-and-bean-post-processing"
+
+  - id: spring-aop-and-proxies-054
+    difficulty: advanced
+    tags: [proxy-creation, bean-post-processor, timing]
+    question: |
+      At which point in a normally-created singleton bean's lifecycle does the AOP auto-proxy creator wrap it
+      in a proxy?
+    options:
+      - "In postProcessAfterInitialization, after the target is instantiated, populated, and its init callbacks have run"
+      - "During instantiation, before dependencies are injected"
+      - "Lazily, on the first external method call"
+      - "At context refresh, before any bean is instantiated"
+    answer: 0
+    explanation: |
+      AbstractAutoProxyCreator is a BeanPostProcessor that wraps the fully initialized target in
+      postProcessAfterInitialization. This ordering is exactly why constructor- and init-callback-time internal
+      calls run on the raw target and are not advised.
+    ref: "concepts.md#proxy-creation-internals-and-bean-post-processing"
+
+  - id: spring-aop-and-proxies-055
+    difficulty: expert
+    tags: [proxy-creation, circular-dependency, early-reference]
+    question: |
+      Two singleton beans A and B form a circular dependency, and A must be AOP-proxied. How does Spring
+      generally still inject the correct (proxied) A into B?
+    options:
+      - "It fails immediately with BeanCurrentlyInCreationException; circular deps and AOP are incompatible"
+      - "It injects the raw target into B and swaps it for the proxy after context refresh"
+      - "It creates two separate proxy instances, one per injection point"
+      - "It exposes an early bean reference (via getEarlyBeanReference on the auto-proxy creator) so the proxy is created early and B receives the proxy, not the raw target"
+    answer: 3
+    explanation: |
+      For circular singletons, Spring's three-level cache lets a SmartInstantiationAwareBeanPostProcessor
+      supply an early reference via getEarlyBeanReference, letting the auto-proxy creator build the proxy early
+      so B is wired with the proxy. If early exposure is inconsistent, Spring raises an error rather than inject
+      a raw target where a proxy is expected.
+    ref: "concepts.md#proxy-creation-internals-and-bean-post-processing"
+
+  - id: spring-aop-and-proxies-056
+    difficulty: expert
+    tags: [ordering, transactional, custom-aspect]
+    question: |
+      You have a custom @Aspect that must run BEFORE the transaction begins (e.g., to set a tenant context that
+      the transaction's connection must see). By default your aspect seems to run inside the transaction. How do
+      you correctly force it outside?
+    options:
+      - "Move the aspect logic into @PostConstruct"
+      - "Give your aspect a lower @Order value than the transaction advisor so it has higher precedence and runs first on the way in"
+      - "Set proxyTargetClass=true so the aspect is prioritized"
+      - "Annotate the aspect with @Primary"
+    answer: 1
+    explanation: |
+      @Transactional, @Cacheable, @Async and custom aspects are all advisors in one interceptor chain ordered
+      by precedence. The transaction advisor sits at a low precedence (near LOWEST_PRECEDENCE) by default, so
+      giving your aspect a lower @Order value (higher precedence) makes it run before the transaction is opened.
+    ref: "concepts.md#proxy-creation-internals-and-bean-post-processing"
+
+  - id: spring-aop-and-proxies-057
+    difficulty: advanced
+    tags: [aspect-thread-safety, singleton, state]
+    question: |
+      An @Aspect @Component keeps a non-synchronized `private int callCount` field that it increments in advice
+      to "count calls". Under concurrent load the count is wrong. What is the fundamental issue?
+    options:
+      - "The aspect bean is a singleton shared across all threads, so a plain int field is a shared mutable variable subject to race conditions"
+      - "Spring creates a new aspect instance per thread, so counts never aggregate"
+      - "Advice cannot maintain any state whatsoever"
+      - "The proxy resets the field to zero between calls"
+    answer: 0
+    explanation: |
+      Aspects are singletons by default; one instance serves all threads. Mutable fields are shared state and
+      need atomicity (e.g. AtomicInteger/LongAdder) or other synchronization. Per-invocation state should live
+      on the stack, not on the aspect.
+    ref: "concepts.md#thread-safety-and-performance"
+
+  - id: spring-aop-and-proxies-058
+    difficulty: expert
+    tags: [pointcut-performance, static-vs-dynamic-matching]
+    question: |
+      Which pointcut is evaluated on EVERY invocation (runtime/dynamic matching) rather than matched once and
+      cached (static matching)?
+    options:
+      - "execution(* com.app.service.*.*(..))"
+      - "within(com.app.service..*)"
+      - "execution(* com.app.Svc.pay(..)) && args(amount) where amount is a bound, typed runtime parameter"
+      - "@within(com.app.Auditable)"
+    answer: 2
+    explanation: |
+      Pointcuts based purely on method/type structure (execution, within, @within, @annotation) are static and
+      cached. Runtime-binding designators like args()/this()/target() that check the actual argument/object at
+      call time require per-invocation evaluation, which is costlier on hot paths.
+    ref: "concepts.md#advisor-chain-methodinterceptor-and-matching"
+
+  - id: spring-aop-and-proxies-059
+    difficulty: advanced
+    tags: [pointcut-scope, startup-cost, over-proxying]
+    question: |
+      A team adds an aspect with pointcut `execution(* com..*(..))` for a narrow debugging purpose and later
+      notices slower startup and unexpected beans becoming proxies. What best explains this?
+    options:
+      - "The broad pointcut forces the auto-proxy creator to test nearly every bean and wrap all matches, proxying far more beans than intended and adding startup and per-call indirection"
+      - "Wildcard pointcuts disable proxy caching entirely"
+      - "execution with '..' triggers AspectJ load-time weaving automatically"
+      - "The pointcut recompiles on every bean creation"
+    answer: 0
+    explanation: |
+      An overly broad pointcut makes the auto-proxy creator evaluate advisor matches against a huge set of
+      beans and proxy every match, inflating startup work and introducing needless per-call indirection. Scope
+      pointcuts narrowly with within()/bean() to avoid over-proxying.
+    ref: "concepts.md#advisor-chain-methodinterceptor-and-matching"
+
+  - id: spring-aop-and-proxies-060
+    difficulty: expert
+    tags: [advisor-chain, method-interceptor, proceed]
+    question: |
+      In Spring AOP's runtime model, how are @Before/@AfterReturning advices ultimately executed relative to
+      the interceptor chain built for a proxied method?
+    options:
+      - "They are executed by a separate scheduler outside the invocation chain"
+      - "They are inlined into the target bytecode at proxy creation"
+      - "They run only if @Around is also present to drive proceed()"
+      - "They are adapted into MethodInterceptors placed in the chain; a ReflectiveMethodInvocation walks the chain, each interceptor calling proceed() to reach the next link and finally the target"
+    answer: 3
+    explanation: |
+      Every advice becomes an Advisor and is adapted to an org.aopalliance MethodInterceptor. A
+      ReflectiveMethodInvocation (JDK) or CGLIB equivalent walks the chain; each interceptor calls
+      invocation.proceed() to advance, with before/after adapters invoking their advice at the right moment
+      around the target call.
+    ref: "concepts.md#advisor-chain-methodinterceptor-and-matching"
+
+  - id: spring-aop-and-proxies-061
+    difficulty: advanced
+    tags: [configuration-proxy, cglib, distinction]
+    question: |
+      Someone claims "@Configuration classes are proxied by the AOP auto-proxy creator." Why is this incorrect,
+      and what actually proxies them?
+    options:
+      - "@Configuration classes are never proxied under any circumstances"
+      - "They are CGLIB-enhanced by the ConfigurationClassEnhancer to enforce singleton semantics across inter-@Bean method calls — a separate mechanism from the AOP AbstractAutoProxyCreator"
+      - "They are JDK-proxied because @Configuration is an interface"
+      - "They are proxied by the transaction advisor"
+    answer: 1
+    explanation: |
+      @Configuration classes get a CGLIB subclass created by the ConfigurationClassEnhancer so that calling one
+      @Bean method from another returns the shared singleton rather than a new instance. This is distinct from
+      the AOP auto-proxy creator that applies aspects/advisors.
+    ref: "concepts.md#proxy-creation-internals-and-bean-post-processing"
+
+  - id: spring-aop-and-proxies-062
+    difficulty: advanced
+    tags: [proxies, injection, getbean, jdk]
+    question: |
+      With plain-Spring defaults (JDK proxies), a service is proxied and you call
+      `context.getBean(OrderServiceImpl.class)`. What is the likely outcome?
+    options:
+      - "It returns the proxy successfully because the proxy extends OrderServiceImpl"
+      - "It returns the raw unproxied target"
+      - "It returns a new instance of OrderServiceImpl"
+      - "It fails to find a matching bean because the exposed proxy type is the interface, not the concrete class"
+    answer: 3
+    explanation: |
+      Under JDK proxying the bean's exposed type is the interface; the proxy is not an instance of the concrete
+      class. Requesting the bean by concrete type OrderServiceImpl fails to match. Request/inject by the
+      interface type instead (or force CGLIB).
+    ref: "concepts.md#jdk-dynamic-proxy-vs-cglib"
+
+  - id: spring-aop-and-proxies-063
+    difficulty: expert
+    tags: [cglib, final-method, silent-non-advising]
+    question: |
+      A CGLIB-proxied @Service has ONE method marked `final` alongside several non-final methods that an
+      aspect should advise. What actually happens at runtime?
+    options:
+      - "Spring throws an exception at startup because a final method cannot be proxied"
+      - "The whole class fails to be proxied, so none of its methods are advised"
+      - "The proxy is still created and the non-final methods are advised, but the final method is silently NOT advised (Spring may log a warning) because CGLIB cannot override it"
+      - "All methods, including the final one, are advised via a reflection fallback"
+    answer: 2
+    explanation: |
+      CGLIB subclasses the target and overrides methods. A final method cannot be overridden, so it is simply
+      left unadvised (Spring logs an info/warning) while the proxy is still created and the other methods are
+      advised normally. This differs from a final *class*, which cannot be subclassed at all and therefore
+      does prevent CGLIB proxying entirely.
+    ref: "concepts.md#jdk-dynamic-proxy-vs-cglib"
+
+  - id: spring-aop-and-proxies-064
+    difficulty: expert
+    tags: [advice-types, around, exception-swallowing]
+    question: |
+      An @Around advice wraps proceed() in try/catch, logs the exception, and returns null instead of
+      rethrowing. A downstream @AfterThrowing advice in a different, lower-precedence aspect never fires for
+      those failures. Why?
+    options:
+      - "Because the higher-precedence @Around caught the exception and returned normally, the join point appears to complete successfully to the rest of the chain, so @AfterThrowing sees no throw"
+      - "@AfterThrowing only fires for checked exceptions"
+      - "@AfterThrowing and @Around cannot coexist on the same join point"
+      - "Spring disables after-advice whenever @Around is present"
+    answer: 0
+    explanation: |
+      Advice runs as a chain. If a higher-precedence @Around catches the exception and returns a value, the
+      invocation completes normally from the perspective of interceptors closer to the caller, so their
+      @AfterThrowing never triggers (their @AfterReturning might instead). Swallowing exceptions in @Around
+      changes observed outcomes for the rest of the chain.
+    ref: "concepts.md#advisor-chain-methodinterceptor-and-matching"
+
+  - id: spring-aop-and-proxies-065
+    difficulty: advanced
+    tags: [aspectj, ltw, self-invocation]
+    question: |
+      A team must have self-invoked @Transactional calls actually start transactions without restructuring the
+      code. Which approach genuinely achieves this?
+    options:
+      - "Switch all proxies to CGLIB via proxyTargetClass=true"
+      - "Use full AspectJ load-time (or compile-time) weaving, which weaves advice into the bytecode so internal 'this' calls are advised — no proxy to bypass"
+      - "Mark the inner method public and non-final"
+      - "Increase the transaction timeout"
+    answer: 1
+    explanation: |
+      Only bytecode weaving (AspectJ CTW/LTW) removes the self-invocation limitation, because advice lives in
+      the method itself rather than in a wrapping proxy. Changing proxy type or method modifiers does not help;
+      the proxy is still bypassed by 'this' calls.
+    ref: "concepts.md#spring-aop-vs-aspectj"
+
+  - id: spring-aop-and-proxies-066
+    difficulty: expert
+    tags: [proxies, equals-hashcode, collections]
+    question: |
+      Two beans are placed in a HashSet: a JDK-proxied bean and, elsewhere, its raw target. Assuming default
+      behavior, which statement is most accurate about Object methods on the proxy?
+    options:
+      - "The proxy forwards equals/hashCode to the target, so proxy and target are always considered equal"
+      - "Calling hashCode on a proxy throws UnsupportedOperationException"
+      - "The proxy and target always have identical hashCode because CGLIB copies it"
+      - "Object methods like equals/hashCode are generally not routed through advice, and JDK proxies handle equals/hashCode with proxy-level semantics — so proxy and target need not be equal, which can surprise code using them as set/map keys"
+    answer: 3
+    explanation: |
+      equals/hashCode/toString on proxies are generally not advised, and JDK proxies apply their own
+      equals/hashCode handling at the proxy level. Treating a proxy and its target as interchangeable keys in
+      hash-based collections can lead to lookups that miss.
+    ref: "concepts.md#jdk-dynamic-proxy-vs-cglib"
+
+  - id: spring-aop-and-proxies-067
+    difficulty: advanced
+    tags: [advice-types, least-powerful, design]
+    question: |
+      A reviewer flags an aspect that uses @Around merely to record a metric after the method returns, without
+      touching arguments, the return value, or invocation control. What is the correct critique?
+    options:
+      - "@Around is fine and always preferred for metrics"
+      - "The advice should use the least powerful form that suffices — here @AfterReturning (or @After) — because @Around invites bugs like a forgotten proceed(), wrong return type, or swallowed exceptions"
+      - "Metrics can only be captured with @Before"
+      - "@Around must be replaced with a BeanPostProcessor"
+    answer: 1
+    explanation: |
+      Spring's guidance is to use the least powerful advice that meets the need. If you do not need to control
+      invocation or mutate inputs/outputs, @AfterReturning/@After is safer than @Around, which can silently
+      break behavior via a missing proceed(), void return type, or swallowed exception.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-068
+    difficulty: expert
+    tags: [ordering, same-type, undefined]
+    question: |
+      Two @After advice methods declared in the SAME aspect both match one join point. You need a guaranteed
+      execution order between them. What does Spring's model say and what is the recommended fix?
+    options:
+      - "They run in source-declaration order; no fix needed"
+      - "They run in alphabetical method-name order; rename to control it"
+      - "Their relative order is undefined (reflection cannot recover javac declaration order); split them into separate @Aspect classes and order those with @Order, or merge them into one advice"
+      - "The second one is silently ignored"
+    answer: 2
+    explanation: |
+      For two advices of the same type in the same aspect, ordering is undefined because declaration order is
+      not recoverable via reflection. To impose order, refactor into separate aspects (ordered via @Order/
+      Ordered) or collapse them into a single advice method.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-069
+    difficulty: advanced
+    tags: [proxies, transactional, checked-exception-rollback]
+    question: |
+      This is primarily an AOP-mechanics question: a @Transactional method throws a checked IOException and the
+      transaction unexpectedly commits. Ignoring rollback-rule configuration, what does this reveal about how
+      Spring's transaction ADVICE decides to roll back?
+    options:
+      - "The proxy failed to intercept the method, so no transaction existed"
+      - "Checked exceptions bypass all advice by design"
+      - "Self-invocation caused the commit"
+      - "The transaction interceptor (an around-style advisor) applies a default rollback rule of rolling back only on unchecked exceptions and Errors; a checked exception commits unless a rollbackFor rule says otherwise"
+    answer: 3
+    explanation: |
+      @Transactional is implemented as an around-style advisor. Its default rollback policy rolls back on
+      RuntimeException/Error and commits on checked exceptions. The commit is the advice behaving as designed,
+      not a proxy failure — you would add rollbackFor to change it.
+    ref: "concepts.md#advisor-chain-methodinterceptor-and-matching"
+
+  - id: spring-aop-and-proxies-070
+    difficulty: expert
+    tags: [proxies, objenesis, constructor-double-invocation]
+    question: |
+      On a particular locked-down JVM, debug logs show a CGLIB-proxied bean's constructor running TWICE. What
+      does this indicate about how the proxy was instantiated?
+    options:
+      - "Spring intentionally runs constructors twice to validate them"
+      - "The JVM could not bypass constructor invocation via Objenesis, so Spring fell back to normal instantiation, causing the constructor to run for both the proxy subclass and the target"
+      - "There are two aspects, and each creates its own proxy"
+      - "proxyTargetClass=true always doubles construction"
+    answer: 1
+    explanation: |
+      Normally Objenesis creates the CGLIB proxy without invoking the constructor, so it runs once (on the
+      target). If the JVM disallows constructor bypassing, Spring falls back to standard instantiation and the
+      constructor can execute twice — which Spring logs at debug level. Keep constructors side-effect-free.
+    ref: "concepts.md#jdk-dynamic-proxy-vs-cglib"
+
+  - id: spring-aop-and-proxies-071
+    difficulty: advanced
+    tags: [aspect-declaration, aspect-not-advised]
+    question: |
+      An @Aspect @Component class also contains business-like methods that happen to match its own service-layer
+      pointcut. Developers are surprised the aspect does not advise itself. Why does Spring avoid this?
+    options:
+      - "Aspects are compiled separately and cannot be beans"
+      - "Because @Component disables proxying"
+      - "By design, aspect beans are not themselves auto-proxied by the aspects they define, preventing infinite recursion and confusing self-advising; the auto-proxy creator skips advisor/aspect infrastructure beans"
+      - "Because pointcuts cannot use execution() inside an aspect"
+    answer: 2
+    explanation: |
+      The auto-proxy creator treats aspect/advisor infrastructure beans as non-advisable (isInfrastructureClass),
+      so an aspect does not get wrapped by its own advice. This avoids recursive self-advising and keeps the
+      aspect's own methods free of the concern it defines.
+    ref: "concepts.md#proxy-creation-internals-and-bean-post-processing"
+
+  - id: spring-aop-and-proxies-072
+    difficulty: expert
+    tags: [ordering, around-nesting, multiple-aspects]
+    question: |
+      Aspect A (@Order(1)) and Aspect B (@Order(2)) each have an @Around advice on the same method. What is the
+      execution nesting?
+    options:
+      - "B wraps A: B-before, A-before, target, A-after, B-after"
+      - "They run sequentially, A fully then B fully, target executed twice"
+      - "Order is undefined for @Around across aspects"
+      - "A wraps B: A-before, B-before, target, B-after, A-after (A has higher precedence, runs outermost on the way in and last on the way out)"
+    answer: 3
+    explanation: |
+      Lower @Order value = higher precedence = outermost on entry. So A (order 1) runs its pre-proceed code
+      first and its post-proceed code last, wrapping B (order 2), which wraps the target. The target executes
+      once, at the innermost point.
+    ref: "concepts.md#advice-types"
+
+  - id: spring-aop-and-proxies-073
+    difficulty: advanced
+    tags: [thread-safety, proxy-sharing, per-call-state]
+    question: |
+      Why is a single Spring AOP proxy instance safe to share across many concurrent threads, even for an
+      @Around advice that times execution?
+    options:
+      - "Because Spring clones the proxy per thread"
+      - "Because per-invocation state (the MethodInvocation, local variables like start time) lives on each thread's stack, and the proxy/advisor chain themselves are stateless dispatch structures"
+      - "Because proxies serialize all calls through a global lock"
+      - "Because @Around advice is always single-threaded"
+    answer: 1
+    explanation: |
+      The proxy and its interceptor chain are stateless with respect to a given call; each invocation's state
+      (including local timing variables and the MethodInvocation) is on the calling thread's stack. Problems
+      only arise if you add mutable fields to the aspect/target, which are shared.
+    ref: "concepts.md#thread-safety-and-performance"
+
+  - id: spring-aop-and-proxies-074
+    difficulty: expert
+    tags: [pointcut-designators, this-target-binding]
+    question: |
+      A pointcut `@Around("... && target(t)")` binds the target object to parameter `t` typed as an interface
+      `Repo`. Under JDK proxying, what does `t` reference at runtime?
+    options:
+      - "The proxy object"
+      - "Null, because binding is not supported with JDK proxies"
+      - "The raw target (unproxied) instance, because target() binds the target behind the proxy"
+      - "A fresh copy of the target"
+    answer: 2
+    explanation: |
+      target() binds the actual target instance behind the proxy, so t is the raw unproxied object. If you
+      instead call advised methods on t, those internal calls would bypass the proxy (self-invocation).
+      Contrast with this(), which binds the proxy.
+    ref: "concepts.md#advisor-chain-methodinterceptor-and-matching"
+
+  - id: spring-aop-and-proxies-075
+    difficulty: advanced
+    tags: [spring-aop-vs-aspectj, join-point-model]
+    question: |
+      A requirement is to run advice whenever a specific FIELD is written on any object (including objects
+      created with new, not Spring beans). Which technology can satisfy this and why?
+    options:
+      - "Spring AOP, using a get()/set() pointcut on the bean"
+      - "Full AspectJ (compile-time or load-time weaving), because its join point model includes field get/set and it can weave non-Spring, new-created objects — capabilities Spring AOP's method-execution-only proxy model lacks"
+      - "Spring AOP with proxyTargetClass=true"
+      - "Neither can advise field access at all"
+    answer: 1
+    explanation: |
+      Field get/set join points and advising arbitrary (non-Spring, new-created) objects are AspectJ-only
+      capabilities. Spring AOP is limited to method-execution join points on Spring-managed beans via proxies,
+      so it cannot intercept field writes.
+    ref: "concepts.md#spring-aop-vs-aspectj"
+
+  - id: spring-aop-and-proxies-076
+    difficulty: expert
+    tags: [proxy-creation, multiple-bpp, merging]
+    question: |
+      A bean matches advisors from BOTH @Transactional and a custom @Aspect. How many proxy objects wrap the
+      bean, and how are the concerns combined?
+    options:
+      - "Two nested proxies, one per concern, created by two separate auto-proxy creators"
+      - "No proxy — the concerns cancel out"
+      - "One proxy for transactions; the custom aspect is applied via reflection at call time"
+      - "A single proxy whose interceptor chain contains all matching advisors, ordered by advisor precedence; the auto-proxy creator does not re-proxy an already-proxied bean"
+    answer: 3
+    explanation: |
+      A single AnnotationAwareAspectJAutoProxyCreator collects all matching advisors (transaction advisor plus
+      custom aspect advisors) into one proxy's interceptor chain, ordered by precedence. It merges advisors
+      rather than stacking multiple proxies.
+    ref: "concepts.md#proxy-creation-internals-and-bean-post-processing"
+
+  - id: spring-aop-and-proxies-077
+    difficulty: advanced
+    tags: [performance, jdk-vs-cglib-dispatch]
+    question: |
+      Considering pure per-call dispatch cost (ignoring startup), how do JDK and CGLIB proxy invocations
+      generally compare, and how significant is it?
+    options:
+      - "JDK is always dramatically faster because reflection is free"
+      - "CGLIB's generated FastClass/index-based dispatch is generally faster than JDK reflective invocation, but for both the per-call overhead is small and usually negligible next to I/O; it only matters on very hot in-memory paths with broad pointcuts"
+      - "Both are so slow that AOP should be avoided in services"
+      - "There is no difference because both use java.lang.reflect.Method"
+    answer: 1
+    explanation: |
+      CGLIB uses generated dispatch (FastClass/index) that tends to be faster than JDK reflective Method
+      invocation, but the difference is minor. The dominant cost in real services is I/O; proxy overhead only
+      surfaces on tight in-memory loops, especially with dynamic/broad pointcuts.
+    ref: "concepts.md#thread-safety-and-performance"
+
+  - id: spring-aop-and-proxies-078
+    difficulty: expert
+    tags: [advice-types, proceed-multiple, idempotency]
+    question: |
+      An @Around retry advice calls proceed() up to 3 times on failure. The advised method is NOT idempotent
+      (it charges a credit card). What is the crucial correctness concern this design exposes about @Around?
+    options:
+      - "proceed() can only be called once, so retries are impossible"
+      - "Because @Around fully controls invocation and may call proceed() multiple times, it can re-execute a non-idempotent target and cause duplicate side effects (e.g., double charges); retry advice must be paired with idempotency or applied only to safe operations"
+      - "@Around automatically rolls back side effects between attempts"
+      - "Retries are safe because Spring deduplicates identical calls"
+    answer: 1
+    explanation: |
+      @Around's power to call proceed() zero, one, or many times means retry logic will genuinely re-run the
+      target and its side effects. For non-idempotent operations this causes duplicates. The aspect gives no
+      automatic rollback or dedup — the target must be idempotent or retries restricted to safe methods.
+    ref: "concepts.md#advice-types"

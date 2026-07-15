@@ -53,7 +53,7 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 | [Kubernetes](topics/kubernetes/README.md) | 16 | 0 |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 18 | 0 |
 | [Spring Boot](topics/spring-boot/README.md) | 18 | 18 ✅ |
-| [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ◐ (B/I only) |
+| [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ✅ (all tiers) |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 15 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 16 | 0 |
 | [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 16 | 0 |
@@ -76,6 +76,11 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
   341 beginner / 473 intermediate) per user request. Advanced/expert deferred to a later
   deepening pass (reuse the Spring Boot deepen pattern). Built via `spring-core-authoring.js`
   (author → verify). Verify stage rebalanced skewed answer-index distributions + fixed facts.
+- **Session 5 (2026-07-16):** Deepened all 19 Spring Core topics — appended advanced+expert
+  questions and enriched concepts.md via `spring-core-deepen.js` (deepen → verify). Bank
+  grew 814 → **1,511 MCQs** (~78–80/topic; 341 B / 473 I / 344 adv / 353 expert). Verify
+  stage fixed facts (e.g. getBeanProvider added in 5.1 not 4.3), rewrote dupes, re-tagged
+  mislabels. Spring Core now complete across all four tiers. All validates.
 - **Session 3 (2026-07-15):** Deepened all 18 Spring Boot topics — added an `expert`
   difficulty tier (schema + validator) and appended ~40+ hard advanced/expert questions
   per topic via a deepen→verify workflow (`spring-boot-deepen.js`, high effort). Bank

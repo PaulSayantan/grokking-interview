@@ -617,3 +617,543 @@ questions:
     explanation: |
       Both field and setter injection let Spring create the raw instance first and inject afterward, so both can leverage early references. Field injection simply skips the setter method.
     ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-042
+    difficulty: advanced
+    tags: [aop, async, failure-mode]
+    question: |
+      Two singletons form a field-injection cycle: OrderService and PaymentService inject each other. When OrderService is annotated @Transactional, the context starts fine. When you instead annotate OrderService @Async (and set allow-circular-references=true), startup fails with "has been injected into other beans ... in its raw version ... but has eventually been wrapped." Why does @Transactional succeed where @Async fails, given the topology is identical?
+    options:
+      - "@Transactional proxies are JDK dynamic proxies while @Async uses CGLIB, and CGLIB proxies cannot be exposed as early references"
+      - "@Async runs the bean's constructor on a separate thread, so the early reference is never registered in the level-3 cache"
+      - "AbstractAutoProxyCreator (which applies @Transactional) implements getEarlyBeanReference and proxies early, so the exposed and final references match; AsyncAnnotationBeanPostProcessor only wraps in postProcessAfterInitialization, so the raw early reference diverges from the final async proxy"
+      - "@Transactional is applied before property population and @Async after, but both are early-reference aware; the real difference is that @Async requires a TaskExecutor bean that is not yet created"
+    answer: 2
+    explanation: |
+      The auto-proxy creator for @Transactional/@Cacheable/AOP implements SmartInstantiationAwareBeanPostProcessor#getEarlyBeanReference, so it builds the proxy early and records it (earlyProxyReferences); the early reference and final bean are the same proxy. AsyncAnnotationBeanPostProcessor (an AbstractAdvisingBeanPostProcessor) has no getEarlyBeanReference, so the early exposed reference is the raw bean while the final bean is an async proxy — they diverge and Spring fails the consistency check. Proxy type (JDK vs CGLIB) is irrelevant.
+    ref: "concepts.md#the-async-gotcha-not-every-post-processor-supports-early-proxying"
+
+  - id: circular-dependencies-043
+    difficulty: expert
+    tags: [aop, three-level-cache, internals]
+    question: |
+      When an auto-proxied bean caught in a cycle has its early reference pulled via the level-3 ObjectFactory, how does Spring avoid proxying it a SECOND time during the normal postProcessAfterInitialization phase?
+    options:
+      - "It marks the bean prototype-scoped so the second pass is skipped"
+      - "It deletes the bean from singletonObjects and rebuilds it, so no double proxy can exist"
+      - "The second proxy attempt is allowed but the two proxies are merged into one via reflection"
+      - "AbstractAutoProxyCreator records the bean in an earlyProxyReferences map when getEarlyBeanReference proxies it; postProcessAfterInitialization checks that map and skips re-wrapping the already-proxied bean"
+    answer: 3
+    explanation: |
+      AbstractAutoProxyCreator#getEarlyBeanReference puts the bean into earlyProxyReferences. Later, wrapIfNecessary in postProcessAfterInitialization checks whether the earlyProxyReferences entry equals the current bean; if the early proxy was already created for it, it returns the bean as-is rather than proxying again, ensuring a single consistent proxy.
+    ref: "concepts.md#the-async-gotcha-not-every-post-processor-supports-early-proxying"
+
+  - id: circular-dependencies-044
+    difficulty: expert
+    tags: [allow-raw-injection, aop, tradeoffs]
+    question: |
+      A team hits the "raw version ... eventually wrapped" BeanCurrentlyInCreationException on an @Async bean in a cycle and "fixes" it by setting allowRawInjectionDespiteWrapping=true on the bean factory. Startup now succeeds. What is the real consequence?
+    options:
+      - "The injected collaborator holds the raw, un-async'd instance while the context stores the async proxy, so calls through the injected reference silently bypass @Async — the error is suppressed, not fixed"
+      - "Spring now creates two fully independent async proxies, doubling memory but preserving correctness"
+      - "The flag forces @Async to become early-reference aware, so the injected reference is the proxy"
+      - "It converts the cycle to a constructor cycle, which then fails at a later stage"
+    answer: 0
+    explanation: |
+      allowRawInjectionDespiteWrapping (default false) suppresses the consistency check and lets already-injected beans keep the raw reference. So the collaborator holds the raw target (no async behavior) while the container holds the proxy — a silent correctness bug. It exists for backward compatibility and is almost never the right fix.
+    ref: "concepts.md#allowrawinjectiondespitewrapping"
+
+  - id: circular-dependencies-045
+    difficulty: advanced
+    tags: [three-level-cache, lifecycle, reasoning]
+    question: |
+      In a setter cycle A <-> B, at the exact moment B pulls A's early reference from the level-3 factory, which statement about A's state is TRUE?
+    options:
+      - "A is a raw, instantiated object whose properties are NOT yet populated and whose init callbacks have NOT run; B receives this partially-initialized instance (or its early proxy)"
+      - "A has already had its properties populated and its @PostConstruct invoked"
+      - "A does not exist yet as an object; the factory returns a null placeholder"
+      - "A is fully initialized because Spring finishes A before starting B"
+    answer: 0
+    explanation: |
+      Early exposure happens after createBeanInstance but before populateBean and initializeBean. So the exposed A is instantiated but not populated and its @PostConstruct has not run. B legitimately receives a partially-initialized A (or an early proxy of it) — a documented risk of setter/field cycles.
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-046
+    difficulty: expert
+    tags: [postconstruct, lifecycle, failure-mode]
+    question: |
+      Bean B receives an early reference to A through a setter cycle, then B's @PostConstruct immediately calls a method on A that reads a field A initializes in ITS OWN @PostConstruct. What is the outcome?
+    options:
+      - "Spring detects this and delays B's @PostConstruct until A is fully initialized"
+      - "It throws BeanCurrentlyInCreationException because init methods cannot run during a cycle"
+      - "A NullPointerException or stale/default value, because A's @PostConstruct has not run yet at the moment B uses the early reference"
+      - "It always works, because early references are only injected after all @PostConstruct methods complete"
+    answer: 2
+    explanation: |
+      Early exposure hands out A before A's populateBean/@PostConstruct runs. If B's @PostConstruct uses A right away, A's initialized state is not ready — you observe nulls/defaults or an NPE. This partially-initialized-bean hazard is exactly why setter/field cycles are discouraged even when they "resolve."
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-047
+    difficulty: advanced
+    tags: [spring-boot, internals, distinction]
+    question: |
+      A colleague claims "Spring Boot 2.6 added a dependency-graph cycle detector that scans for loops before creating beans." What is the accurate description of what Boot 2.6 actually does?
+    options:
+      - "Boot builds a full topological sort of the bean graph at startup and reports every cycle it finds"
+      - "Boot calls beanFactory.setAllowCircularReferences(false), which skips registering the level-3 factory; the same BeanCurrentlyInCreationException is thrown during creation, and a FailureAnalyzer renders the readable cycle diagram"
+      - "Boot switches all beans to constructor injection so cycles fail naturally"
+      - "Boot adds a BeanFactoryPostProcessor that removes one bean from each detected cycle"
+    answer: 1
+    explanation: |
+      There is no pre-scan graph detector. Boot just disables early exposure (setAllowCircularReferences(false)); with no level-3 factory, the re-entrant getBean during population throws BeanCurrentlyInCreationException, and BeanCurrentlyInCreationFailureAnalyzer turns it into the friendly ASCII report.
+    ref: "concepts.md#how-the-prohibited-check-actually-works"
+
+  - id: circular-dependencies-048
+    difficulty: advanced
+    tags: [ordering, mixed-injection, reasoning]
+    question: |
+      A mixed cycle: A uses constructor injection of B; B uses field injection of A. Sometimes the app starts, sometimes it fails, seemingly depending on unrelated refactors. What most directly governs whether it resolves?
+    options:
+      - "The alphabetical order of the bean class names, which Spring always sorts by"
+      - "Whether the beans are in the same package"
+      - "The number of CPU cores, since creation is parallelized by default"
+      - "Which bean the container begins creating first: if B (the setter side) is created first it can be instantiated and exposed early so A's constructor gets it; if A (the constructor side) is reached first, its constructor needs B before any raw instance exists"
+    answer: 3
+    explanation: |
+      Mixed-cycle resolvability depends on creation order. If the setter-side bean is created first, a raw instance is exposed early and the constructor side can receive it. If the constructor side is reached first, it cannot be built without the other, and it fails. Registration/scan order shifts under refactors, explaining the flakiness.
+    ref: "concepts.md#bean-creation-ordering-and-eager-instantiation"
+
+  - id: circular-dependencies-049
+    difficulty: expert
+    tags: [ordering, lazy, failure-mode]
+    question: |
+      A constructor cycle A(B)/B(A) exists, but the app starts successfully in production because both beans are @Lazy at the class level. Months later it crashes in production on a specific request path. What is the best explanation?
+    options:
+      - "@Lazy silently repaired the cycle, and an unrelated change re-broke it"
+      - "Class-level @Lazy removes the beans from eager pre-instantiation, so the cycle is not triggered at startup; it fires with BeanCurrentlyInCreationException on the first getBean that touches the cycle — turning a startup failure into a latent runtime failure"
+      - "@Lazy converts the beans to prototypes, which fail only under load"
+      - "The cycle only exists in production because of a different active profile"
+    answer: 1
+    explanation: |
+      Class-level @Lazy defers creation past startup, so the constructor cycle is not exercised during context refresh. The first request that resolves the beans triggers creation and the unresolvable constructor cycle throws at runtime. This latency is a key argument for letting constructor cycles fail fast at startup instead of hiding them.
+    ref: "concepts.md#bean-creation-ordering-and-eager-instantiation"
+
+  - id: circular-dependencies-050
+    difficulty: advanced
+    tags: [lazy, proxy, subtle]
+    question: |
+      @Lazy is placed on a CONSTRUCTOR parameter (A's constructor injects @Lazy B) to break a cycle. Which statement about the injected object is correct?
+    options:
+      - "Spring injects null until B is first used, then swaps in the real bean"
+      - "Spring injects a lazy-resolution proxy immediately; the real B is created on first method invocation through that proxy, so A's constructor completes without B being fully built"
+      - "Spring injects the real B but defers its @PostConstruct"
+      - "@Lazy on a constructor parameter is ignored; only class-level @Lazy has an effect"
+    answer: 1
+    explanation: |
+      @Lazy on an injection point causes Spring to inject a proxy that defers target resolution until first use. A's constructor receives this proxy (not the real B), so it completes; B is resolved lazily on the first call routed through the proxy. This is why @Lazy can break even constructor cycles.
+    ref: "concepts.md#how-to-fix-or-avoid-circular-dependencies"
+
+  - id: circular-dependencies-051
+    difficulty: expert
+    tags: [concurrency, thread-safety, internals]
+    question: |
+      Through Spring Framework 6.1, thread T1 is mid-creation of singleton A (holding the creation lock) while thread T2 calls getBean("A"). What happens to T2?
+    options:
+      - "T2 immediately receives A's early reference from the level-3 cache without blocking"
+      - "T2 throws BeanCurrentlyInCreationException because A is flagged in creation"
+      - "T2 blocks until T1 finishes creating A, then receives the fully initialized A; early references are consumed within a single creation thread's stack, not handed across threads"
+      - "T2 creates its own independent copy of A, temporarily violating singleton scope"
+    answer: 2
+    explanation: |
+      getSingleton synchronizes on singletonObjects; a bean in creation on ANOTHER thread makes the requester wait, not throw. BeanCurrentlyInCreationException is only for re-entrant creation on the SAME thread (a real cycle). Early references break cycles within one thread's call stack, not across threads.
+    ref: "concepts.md#concurrency-and-thread-safety-of-singleton-creation"
+
+  - id: circular-dependencies-052
+    difficulty: expert
+    tags: [concurrency, versions, spring-6.2]
+    question: |
+      Spring Framework 6.2 changed the container's internal locking around singleton creation. Which statement is accurate?
+    options:
+      - "6.2 removed the singleton lock entirely, making all bean creation lock-free"
+      - "6.2 introduced a mix of strict and lenient locking (main bootstrap thread strict, other startup threads lenient; background init always lenient) to reduce deadlocks and enable parallel init, without changing cycle-resolution semantics; spring.locking.strict=true (6.2.6+) restores old behavior"
+      - "6.2 changed circular dependency resolution to use a two-level cache"
+      - "6.2 made prototype cycles resolvable by adding a fourth cache level"
+    answer: 1
+    explanation: |
+      6.2 revised locking into a strict/lenient mix to cut startup deadlocks and support background/parallel bean initialization (@Bean(bootstrap=BACKGROUND)). Early-reference cycle semantics are unchanged. Since 6.2.6, spring.locking.strict=true restores the prior always-strict behavior. The three-level cache is untouched.
+    ref: "concepts.md#concurrency-and-thread-safety-of-singleton-creation"
+
+  - id: circular-dependencies-053
+    difficulty: advanced
+    tags: [depends-on, ordering, failure-mode]
+    question: |
+      A developer adds @DependsOn("beanB") to beanA and @DependsOn("beanA") to beanB to "control initialization order." Neither bean references the other via injection. What happens at startup?
+    options:
+      - "Both beans initialize successfully in registration order; @DependsOn is only a hint"
+      - "The three-level cache resolves it exactly as it would an injection cycle"
+      - "Spring detects the @DependsOn cycle and throws a BeanCreationException reporting a circular depends-on relationship"
+      - "It silently picks one @DependsOn and ignores the other"
+    answer: 2
+    explanation: |
+      @DependsOn forces creation order and its own cycles are detected: a mutual @DependsOn is an unsatisfiable ordering constraint, so Spring throws a BeanCreationException for the circular depends-on. The early-reference cache does not apply to depends-on ordering.
+    ref: "concepts.md#bean-creation-ordering-and-eager-instantiation"
+
+  - id: circular-dependencies-054
+    difficulty: advanced
+    tags: [object-provider, deferred-lookup, reasoning]
+    question: |
+      Why does constructor-injecting an ObjectProvider<B> into A break a construction-time cycle, while constructor-injecting B directly does not?
+    options:
+      - "ObjectProvider<B> is a different bean than B, so no cycle exists in the graph at all, ever"
+      - "Injecting ObjectProvider<B> supplies a container-managed factory handle without creating B; B is resolved only when getObject()/getIfAvailable() is called at use time, which is after A's construction completes"
+      - "ObjectProvider forces B to be a prototype, and prototype cycles are always resolvable"
+      - "ObjectProvider eagerly resolves B on a background thread so A's constructor never waits"
+    answer: 1
+    explanation: |
+      ObjectProvider (or jakarta.inject.Provider) is a lazy factory handle. Injecting it does not instantiate B at construction time; B is fetched later via getObject()/getIfAvailable(), deferring resolution past A's construction and breaking the construction-time loop.
+    ref: "concepts.md#how-to-fix-or-avoid-circular-dependencies"
+
+  - id: circular-dependencies-055
+    difficulty: expert
+    tags: [three-level-cache, aop, why-three-levels]
+    question: |
+      Suppose Spring used only TWO levels (final singletonObjects + earlySingletonObjects, no factory level) and eagerly created the early reference/proxy at instantiation for every bean. What concrete problem would this cause?
+    options:
+      - "Nothing; two levels are functionally equivalent and Spring uses three only for historical reasons"
+      - "Every bean would be eagerly proxied even when no cycle exists, and beans never involved in a cycle would still incur early-proxy creation, breaking the invariant that a proxy is only built when actually required and potentially producing proxies where none should exist"
+      - "Prototype beans would start being cached as singletons"
+      - "Constructor cycles would suddenly become resolvable"
+    answer: 1
+    explanation: |
+      The level-3 ObjectFactory defers early-reference (and proxy) creation so it happens ONLY when a cycle forces it. Eagerly materializing early references/proxies for all beans would proxy beans that never needed early exposure, violating the "proxy only when required" invariant. Level 2 then caches the single result so all consumers share it. Two eager levels cannot preserve both properties.
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-056
+    difficulty: advanced
+    tags: [self-reference, aop, transactional]
+    question: |
+      A single bean self-injects (@Autowired private FooService self;) so internal calls go through the proxy to honor @Transactional. Regarding the cycle this creates:
+    options:
+      - "It is an unresolvable constructor cycle and always fails"
+      - "It is a self-referential singleton cycle that Spring resolves via early exposure; the injected 'self' is the AOP proxy, so self.method() correctly applies the transactional advice that a plain this.method() call would bypass"
+      - "It requires spring.main.allow-circular-references=true even for field injection in every Spring version"
+      - "Self-injection is prohibited by the container and throws NoUniqueBeanDefinitionException"
+    answer: 1
+    explanation: |
+      Self-injection is a resolvable singleton self-cycle; Spring exposes the (early) reference and injects the proxy, so calling through 'self' routes internal calls through the proxy and applies @Transactional/@Async advice that a direct this-call would skip. Notably, self-injection is permitted even when general circular references are disabled.
+    ref: "concepts.md#what-is-a-circular-dependency"
+
+  - id: circular-dependencies-057
+    difficulty: expert
+    tags: [configuration, proxy, bean-methods]
+    question: |
+      In a @Configuration(proxyBeanMethods=true) class, two @Bean methods call each other: beanA() invokes beanB() and beanB() invokes beanA() in their bodies. What happens?
+    options:
+      - "Because CGLIB intercepts inter-bean method calls to return the shared singleton, the mutual invocation recurses through the container and produces a BeanCurrentlyInCreationException (an unresolvable cycle), just like constructor injection"
+      - "The methods execute as plain Java calls, silently creating multiple instances but no error"
+      - "The three-level cache resolves it transparently and both beans are singletons"
+      - "proxyBeanMethods has no effect on @Bean method cross-calls"
+    answer: 0
+    explanation: |
+      With proxyBeanMethods=true, CGLIB intercepts @Bean method calls to enforce singleton semantics by delegating to the container's getBean. Mutual calls therefore re-enter creation of a bean already in creation on the same thread — an unresolvable cycle throwing BeanCurrentlyInCreationException, analogous to a constructor cycle since each method needs the other fully created.
+    ref: "concepts.md#why-constructor-injection-cycles-cannot-be-resolved"
+
+  - id: circular-dependencies-058
+    difficulty: advanced
+    tags: [prototype, scope, failure-mode]
+    question: |
+      Two prototype-scoped beans P and Q inject each other by field injection, and allow-circular-references is true. What happens on the first getBean("p")?
+    options:
+      - "It resolves via the three-level cache exactly like a singleton cycle"
+      - "It throws BeanCurrentlyInCreationException, because prototypes are never placed in the singleton caches, so no early reference is ever exposed regardless of injection style or the allow flag"
+      - "Spring creates an infinite number of instances until an OutOfMemoryError"
+      - "It succeeds but silently makes P and Q singletons"
+    answer: 1
+    explanation: |
+      The three-level cache and early exposure apply only to singletons. Prototypes get a fresh instance per request and are never cached, so there is no early reference. A prototype cycle throws BeanCurrentlyInCreationException independent of injection style or the allow-circular-references flag.
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-059
+    difficulty: expert
+    tags: [scope, singleton-prototype, subtle]
+    question: |
+      A SINGLETON bean S field-injects a PROTOTYPE bean P, and P field-injects S, forming a cycle. Assume allow-circular-references is true. What is the most accurate outcome?
+    options:
+      - "It always fails because any cycle touching a prototype is unresolvable"
+      - "Both beans silently become singletons to allow caching"
+      - "Spring injects a fresh prototype into S on every method call, so the cycle never stabilizes"
+      - "S is created first: its raw early reference is exposed; when P is created to inject into S, P receives S's early reference, and P is then injected into S — the cycle can resolve because S (the singleton) provides the early reference the prototype needs"
+    answer: 3
+    explanation: |
+      The unresolvable prototype case is a prototype-to-prototype cycle (no cached early reference on either side). Here the singleton S supplies an early reference; the single prototype P created to populate S can receive S's early reference and be injected into S. Because the singleton anchors an exposable early reference, this mixed-scope cycle can resolve.
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-060
+    difficulty: advanced
+    tags: [exception, diagnosis, distinction]
+    question: |
+      During startup you see UnsatisfiedDependencyException whose root cause is BeanCurrentlyInCreationException. What does this nesting tell you versus seeing BeanCurrentlyInCreationException alone?
+    options:
+      - "Nothing meaningful; the two exceptions are interchangeable aliases"
+      - "It means the cycle involves prototype beans exclusively"
+      - "The UnsatisfiedDependencyException identifies the specific injection point (bean and dependency) that triggered the re-entrant creation, wrapping the underlying BeanCurrentlyInCreationException that reports the bean already in creation — together they pinpoint both the edge and the node of the cycle"
+      - "It indicates the allow-circular-references flag is set to true"
+    answer: 2
+    explanation: |
+      UnsatisfiedDependencyException reports which bean and which dependency/injection point could not be satisfied; its cause, BeanCurrentlyInCreationException, names the bean already under construction. Reading both gives you the failing edge (dependency) and node (bean in creation) of the cycle.
+    ref: "concepts.md#why-constructor-injection-cycles-cannot-be-resolved"
+
+  - id: circular-dependencies-061
+    difficulty: advanced
+    tags: [lazy, proxy, tradeoffs]
+    question: |
+      Which is a genuine downside of using @Lazy to break a cycle, that a senior reviewer should raise?
+    options:
+      - "@Lazy makes the target bean a prototype, breaking singleton guarantees"
+      - "The injected proxy defers real-bean creation and can push a latent failure (e.g. the target bean itself failing to construct, or a downstream cycle) to first use at runtime instead of surfacing at startup, and each proxied call adds a small indirection"
+      - "@Lazy disables all AOP advice on the target bean"
+      - "@Lazy only works if the target bean has a no-arg constructor"
+    answer: 1
+    explanation: |
+      @Lazy trades startup fail-fast for lazy resolution: if the real target cannot be built (its own error or another cycle), you learn on first use in production rather than at startup, plus minor proxy indirection. It works with arg constructors and does not change scope or strip advice, so those are wrong.
+    ref: "concepts.md#how-to-fix-or-avoid-circular-dependencies"
+
+  - id: circular-dependencies-062
+    difficulty: expert
+    tags: [three-level-cache, cache-transition, internals]
+    question: |
+      In getSingleton(beanName, true), a level-3 hit occurs. Which sequence of cache mutations happens, and why in that order?
+    options:
+      - "The factory result is written to singletonObjects (level 1) directly and the factory removed, because the bean is now complete"
+      - "The ObjectFactory is invoked to produce the early object, the object is put into earlySingletonObjects (level 2), and the factory is removed from singletonFactories (level 3) — so subsequent lookups in the same cycle hit the SAME cached early reference in level 2 rather than re-invoking the factory (which could build a second proxy)"
+      - "The object is left in level 3 and also copied to level 2, keeping both so future consumers can choose either"
+      - "Nothing is mutated; the factory is invoked fresh on every lookup to guarantee freshness"
+    answer: 1
+    explanation: |
+      On a level-3 hit, Spring calls the factory once, promotes the result to level 2 (earlySingletonObjects), and removes the level-3 factory. This guarantees any further consumer in the cycle gets the identical early reference from level 2 instead of re-running the factory and potentially producing a second, inconsistent proxy.
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-063
+    difficulty: advanced
+    tags: [design, events, decoupling]
+    question: |
+      A cycle exists because OrderService calls NotificationService after placing an order, and NotificationService calls back into OrderService to mark the order 'notified'. Which redesign removes the cycle most cleanly without proxies or lazy tricks?
+    options:
+      - "Add @Lazy to both injection points and keep the bidirectional references"
+      - "Have OrderService publish an OrderPlaced application event; NotificationService listens and, if it must update state, publishes its own event that OrderService listens for — removing the direct bidirectional bean references entirely"
+      - "Set spring.main.allow-circular-references=true and document the coupling"
+      - "Merge both services into one class regardless of their differing responsibilities"
+    answer: 1
+    explanation: |
+      An event/callback decoupling (ApplicationEventPublisher + listeners) removes the direct references in both directions, eliminating the graph cycle rather than masking it. @Lazy and the allow flag only hide the cycle; blindly merging unrelated responsibilities is a poor design choice.
+    ref: "concepts.md#how-to-fix-or-avoid-circular-dependencies"
+
+  - id: circular-dependencies-064
+    difficulty: expert
+    tags: [factory-bean, ordering, subtle]
+    question: |
+      A cycle involves a FactoryBean: bean A depends on the object produced by FactoryBean FB, and FB (in getObject or via injected fields) depends on A. Why can this be especially tricky compared to an ordinary bean cycle?
+    options:
+      - "FactoryBeans cannot participate in cycles at all, so this always fails immediately"
+      - "The FactoryBean instance itself and the object it produces (getObject()) are managed separately; the produced object is created during getObject() at a different point than the FactoryBean's own initialization, so early-reference exposure may not cover the produced object, making cycle resolution order-sensitive and sometimes unresolvable even for setter injection"
+      - "FactoryBeans always produce prototypes, so every FactoryBean cycle is unresolvable"
+      - "FactoryBeans bypass the singleton cache entirely, so they use a separate four-level cache"
+    answer: 1
+    explanation: |
+      With FactoryBeans there are two managed things: the FactoryBean and its produced object. The produced object is materialized on getObject(), timed differently from the FactoryBean's own lifecycle, and early exposure targets the FactoryBean's creation. This makes FactoryBean-involved cycles order-sensitive and potentially unresolvable even under setter injection. FactoryBeans do not universally produce prototypes, so that is wrong.
+    ref: "concepts.md#bean-creation-ordering-and-eager-instantiation"
+
+  - id: circular-dependencies-065
+    difficulty: advanced
+    tags: [spring-boot, framework, distinction]
+    question: |
+      You maintain a plain Spring Framework application (no Spring Boot) using AnnotationConfigApplicationContext, with a setter-injection singleton cycle. It starts fine. A teammate insists it should fail "because Spring prohibits circular references by default." Who is correct?
+    options:
+      - "The teammate: all Spring 6.x contexts prohibit cycles by default"
+      - "You: the prohibition is a Spring BOOT default (SpringApplication sets allowCircularReferences=false); the raw framework's AbstractAutowireCapableBeanFactory still defaults allowCircularReferences=true, so a resolvable setter cycle starts fine unless you call setAllowCircularReferences(false)"
+      - "Neither: the behavior depends on the JDK version"
+      - "The teammate, but only if the beans are annotated @Component"
+    answer: 1
+    explanation: |
+      Prohibiting circular references is a Spring Boot default applied by SpringApplication. The core framework factory still defaults allowCircularReferences to true, so a resolvable setter/field singleton cycle starts fine in plain Spring unless you explicitly call setAllowCircularReferences(false).
+    ref: "concepts.md#how-the-prohibited-check-actually-works"
+
+  - id: circular-dependencies-066
+    difficulty: expert
+    tags: [bean-post-processor, early-reference, internals]
+    question: |
+      Which interface must a BeanPostProcessor implement so that a bean it proxies can be safely exposed as an early reference during a circular dependency, and what method is the hook?
+    options:
+      - "BeanFactoryPostProcessor#postProcessBeanFactory"
+      - "SmartInstantiationAwareBeanPostProcessor#getEarlyBeanReference, which the level-3 ObjectFactory invokes so the proxy (if any) is created at early-exposure time rather than only in postProcessAfterInitialization"
+      - "DestructionAwareBeanPostProcessor#postProcessBeforeDestruction"
+      - "InitializingBean#afterPropertiesSet"
+    answer: 1
+    explanation: |
+      The level-3 factory calls getEarlyBeanReference, defined on SmartInstantiationAwareBeanPostProcessor. Post-processors that need their wrapping (e.g. AbstractAutoProxyCreator) to appear on the early reference implement it; those that only override postProcessAfterInitialization (like AsyncAnnotationBeanPostProcessor) cannot participate consistently in a cycle.
+    ref: "concepts.md#the-async-gotcha-not-every-post-processor-supports-early-proxying"
+
+  - id: circular-dependencies-067
+    difficulty: advanced
+    tags: [detection, same-thread, internals]
+    question: |
+      Precisely what condition does Spring evaluate to conclude "this is an unresolvable cycle" for a constructor-injection loop, as opposed to normal nested bean creation?
+    options:
+      - "It counts total beans created and fails past a threshold"
+      - "During getBean it finds the requested bean's name already present in singletonsCurrentlyInCreation (added on this thread earlier in the same call stack) AND no early reference is available (no level-3 factory, as with constructor injection), so it throws BeanCurrentlyInCreationException"
+      - "It compares timestamps of bean creation and fails if two are within 1ms"
+      - "It checks whether two beans share the same class loader"
+    answer: 1
+    explanation: |
+      Normal nesting adds/removes names from singletonsCurrentlyInCreation as it descends and returns. A re-entrant request for a name already marked in creation on the same thread signals a cycle; if no early reference is exposable (constructor injection registered no level-3 factory), Spring throws BeanCurrentlyInCreationException.
+    ref: "concepts.md#why-constructor-injection-cycles-cannot-be-resolved"
+
+  - id: circular-dependencies-068
+    difficulty: expert
+    tags: [aop, ordering, gotcha]
+    question: |
+      An @Aspect with a custom pointcut advises OrderService, which is in a setter cycle with InventoryService. The app starts on Spring 5.2 but after upgrading a library the same code throws the "raw version ... eventually wrapped" error. Which change would most plausibly introduce this?
+    options:
+      - "OrderService's proxy now comes from a post-processor that only wraps in postProcessAfterInitialization (no getEarlyBeanReference support), so the early-exposed reference is raw while the final bean is wrapped — the two diverge"
+      - "The upgrade renamed BeanCurrentlyInCreationException, so the message changed but behavior is identical"
+      - "The upgrade switched all beans to prototype scope"
+      - "The JVM started interning the proxy, causing an identity mismatch"
+    answer: 0
+    explanation: |
+      The consistency error appears when the early reference and final bean diverge. If a wrapping post-processor lacks getEarlyBeanReference support (only wraps after initialization), the bean is exposed raw early but wrapped finally — the exact divergence that trips the check. Auto-proxy creators avoid this by proxying early; advising post-processors that don't will fail in a cycle.
+    ref: "concepts.md#the-async-gotcha-not-every-post-processor-supports-early-proxying"
+
+  - id: circular-dependencies-069
+    difficulty: advanced
+    tags: [object-provider, jakarta, versions]
+    question: |
+      To break a cycle with deferred lookup in Spring Framework 6.x, which provider type is namespace-correct, and how does it differ from ObjectProvider?
+    options:
+      - "javax.inject.Provider; it is identical to ObjectProvider in every way"
+      - "org.springframework.inject.Provider, a Spring-only type introduced in 6.0"
+      - "jakarta.inject.Provider (not javax.inject.Provider on 6.x, which runs on Jakarta EE 9+); it offers a single get() method, whereas Spring's ObjectProvider adds richer methods like getIfAvailable(), getIfUnique(), and stream()"
+      - "jakarta.annotation.Resource, which lazily supplies the dependency"
+    answer: 2
+    explanation: |
+      Spring 6.x is on the jakarta.* namespace, so jakarta.inject.Provider is correct (javax.inject.Provider was the 5.x form). Provider exposes a single get(); Spring's own ObjectProvider adds getIfAvailable/getIfUnique/stream and Optional-style handling. @Resource is unrelated to deferred lazy supply.
+    ref: "concepts.md#how-to-fix-or-avoid-circular-dependencies"
+
+  - id: circular-dependencies-070
+    difficulty: expert
+    tags: [three-level-cache, no-cycle, performance]
+    question: |
+      For a singleton bean that is NOT part of any cycle, how much of the three-level cache machinery actually runs during its creation?
+    options:
+      - "All three levels are populated and promoted for every bean, adding significant overhead"
+      - "A level-3 singletonFactory is still registered before population (when early exposure is enabled), but because nothing requests the early reference, the factory is never invoked, no level-2 entry is created, and on completion the factory is discarded as the bean is promoted to level 1 — so the extra cost is essentially registering and discarding one lambda"
+      - "No level-3 factory is registered unless the bean is annotated for a cycle"
+      - "The bean is placed in earlySingletonObjects first, then moved to singletonObjects, for every bean"
+    answer: 1
+    explanation: |
+      When early exposure is enabled, doCreateBean registers a level-3 factory before populateBean for every singleton, but if no cycle consumes it the factory is never called (no level-2 promotion). On completion the bean goes straight to level 1 and the unused factory is cleared. The overhead is just registering/discarding a lambda, not populating all three levels.
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-071
+    difficulty: advanced
+    tags: [allow-flag, constructor, distinction]
+    question: |
+      A Boot 2.7 app has a CONSTRUCTOR cycle. A developer sets spring.main.allow-circular-references=true and is surprised it still fails. What is the correct explanation and remedy?
+    options:
+      - "The property is misspelled; the correct one is spring.beans.allow-cycles"
+      - "The flag only re-enables early singleton exposure for setter/field cycles; constructor injection has no raw instance to expose, so it still throws. Break the cycle with @Lazy on a parameter, an ObjectProvider, or a redesign"
+      - "The flag works only if you also set server.port; add that and it resolves"
+      - "Constructor cycles require setting the flag to false, not true"
+    answer: 1
+    explanation: |
+      allow-circular-references=true merely turns early exposure back on for setter/field cycles. Constructor cycles cannot be resolved by early references because no raw instance exists at injection time, so they still fail. The fix is @Lazy, ObjectProvider/Provider, or redesign.
+    ref: "concepts.md#spring-boot-26-plus-prohibits-circular-references-by-default"
+
+  - id: circular-dependencies-072
+    difficulty: expert
+    tags: [initialization-order, postconstruct, ordering]
+    question: |
+      In a resolved setter cycle A <-> B where A is created first, in what relative order do the @PostConstruct callbacks of A and B run?
+    options:
+      - "A's @PostConstruct runs first, before B is even instantiated"
+      - "B's @PostConstruct runs before A's: A's population triggers B's full creation (including B's @PostConstruct) before control returns to finish A's initialization, so B completes first, then A"
+      - "Both @PostConstruct methods run simultaneously on separate threads"
+      - "Neither @PostConstruct runs until both beans are in singletonObjects"
+    answer: 1
+    explanation: |
+      A is instantiated and exposed early, then populateBean(A) requests B, fully creating B (B receives A's early reference and runs its own @PostConstruct) before returning. Only then does A finish initialization and run its @PostConstruct. So B's init callback completes before A's, despite A being started first — a subtle ordering consequence of cycle resolution.
+    ref: "concepts.md#the-three-level-cache-and-early-references"
+
+  - id: circular-dependencies-073
+    difficulty: advanced
+    tags: [design, extract-component, refactor]
+    question: |
+      UserService and AuditService form a cycle because both need shared 'current tenant / current user' context logic. Which refactor best matches the "extract a third component" principle?
+    options:
+      - "Move AuditService's methods into UserService so only one bean remains, even though their responsibilities differ"
+      - "Extract the shared context logic into a new TenantContext bean that both UserService and AuditService depend on (A -> C <- B), converting the bidirectional cycle into two unidirectional dependencies on a common collaborator"
+      - "Annotate both with @Lazy and leave the mutual references in place"
+      - "Make TenantContext a prototype so it is recreated per call"
+    answer: 1
+    explanation: |
+      Extracting the shared logic into a third bean both depend on turns A <-> B into A -> C <- B, eliminating the cycle by structure. Merging unrelated responsibilities and @Lazy masking are inferior; prototype scope is irrelevant to breaking the cycle here.
+    ref: "concepts.md#how-to-fix-or-avoid-circular-dependencies"
+
+  - id: circular-dependencies-074
+    difficulty: expert
+    tags: [aop, consistency-check, internals]
+    question: |
+      After initializeBean returns exposedObject for a bean in a cycle, Spring compares it against getSingleton(beanName, false). What is the purpose of passing allowEarlyReference=false here, and what does a mismatch trigger?
+    options:
+      - "false forces creation of a new bean; a mismatch is ignored"
+      - "false makes the lookup consult only levels 1 and 2 (not invoke the level-3 factory), retrieving the early reference already handed to other beans; if that earlier-exposed reference is not identical to the final exposedObject (e.g. wrapped afterward), and it was actually injected elsewhere, Spring throws BeanCurrentlyInCreationException unless allowRawInjectionDespiteWrapping is true"
+      - "false disables the singleton cache so the comparison always succeeds"
+      - "false returns the prototype variant of the bean for comparison"
+    answer: 1
+    explanation: |
+      allowEarlyReference=false restricts the lookup to levels 1 and 2 (it will not run the level-3 factory), fetching whatever early reference was already exposed to other beans. If that reference differs from the final exposedObject and was injected into other beans, Spring throws BeanCurrentlyInCreationException about the raw-then-wrapped divergence, unless allowRawInjectionDespiteWrapping suppresses it.
+    ref: "concepts.md#allowrawinjectiondespitewrapping"
+
+  - id: circular-dependencies-075
+    difficulty: advanced
+    tags: [lazy, class-level, tradeoffs]
+    question: |
+      What is the key behavioral difference between putting @Lazy on a single injection point versus @Lazy on the whole bean class, when trying to manage a cycle?
+    options:
+      - "There is no difference; @Lazy behaves identically in both positions"
+      - "@Lazy on the class breaks constructor cycles but @Lazy on a parameter cannot"
+      - "@Lazy on a parameter converts the target to a prototype; class-level @Lazy does not"
+      - "@Lazy on one injection point injects a deferred proxy only at that edge (breaking that specific dependency while the bean is still eagerly created at startup); @Lazy on the class makes the entire bean lazily instantiated, so it is excluded from eager pre-instantiation and any cycle/failure surfaces only on first getBean"
+    answer: 3
+    explanation: |
+      Injection-point @Lazy defers only that one dependency via a proxy while the owning bean is still created eagerly. Class-level @Lazy defers the whole bean's instantiation, removing it from eager startup so problems (including cycles) appear only on first access. Both can help, but they act at different scopes with different fail-fast implications.
+    ref: "concepts.md#bean-creation-ordering-and-eager-instantiation"
+
+  - id: circular-dependencies-076
+    difficulty: expert
+    tags: [concurrency, deadlock, versions]
+    question: |
+      Before Spring 6.2's locking rework, a classic startup deadlock could occur when:
+    options:
+      - "A single thread created beans in a cycle, because the singleton lock is not reentrant"
+      - "The three-level cache overflowed and blocked all threads"
+      - "Two threads each began creating a different singleton (e.g. thread1 creating X, thread2 creating Y) while X's initialization needs Y and Y's needs X; each thread holds progress on one bean and blocks waiting for the other's in-creation bean under the shared singleton lock, producing a cross-thread deadlock"
+      - "Prototype beans acquired the singleton lock and never released it"
+    answer: 2
+    explanation: |
+      With the pre-6.2 global singleton lock, two threads concurrently initializing beans whose dependencies cross (X needs Y, Y needs X) could each wait on the other's in-creation bean, deadlocking at startup. 6.2's strict/lenient locking mix was introduced partly to mitigate such scenarios. The singleton lock is reentrant on one thread, so single-thread cycles are detected, not deadlocked.
+    ref: "concepts.md#concurrency-and-thread-safety-of-singleton-creation"
+
+  - id: circular-dependencies-077
+    difficulty: advanced
+    tags: [diagnosis, mixed-injection, reasoning]
+    question: |
+      You are handed a stack trace: creating bean 'a' -> creating bean 'b' -> UnsatisfiedDependencyException on b's constructor parameter of type A -> BeanCurrentlyInCreationException: bean 'a' is currently in creation. Given only this, which conclusion is BEST supported?
+    options:
+      - "Both A and B use setter injection and the allow flag is off"
+      - "B requires A via its CONSTRUCTOR (the failing parameter), and A was already in creation when B tried to build; since a constructor argument cannot accept an early reference, this edge is unresolvable regardless of how A injects B — the fix must target B's constructor dependency (e.g. @Lazy on it, ObjectProvider, or redesign)"
+      - "A is a prototype and B is a singleton"
+      - "The cycle would resolve if you simply reordered the bean definitions"
+    answer: 1
+    explanation: |
+      The trace shows B's constructor parameter of type A failing while A is in creation. A constructor arg cannot receive an early reference, so this edge is fundamentally unresolvable by early exposure; the remedy targets B's constructor dependency (@Lazy parameter, ObjectProvider, or redesign). The trace says nothing supporting prototype scope or that reordering alone would help.
+    ref: "concepts.md#why-constructor-injection-cycles-cannot-be-resolved"

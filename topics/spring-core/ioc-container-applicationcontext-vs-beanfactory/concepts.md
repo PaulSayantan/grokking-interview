@@ -359,6 +359,232 @@ reason not to — for example, memory consumption in a resource-constrained scen
 
 ---
 
+## Bean creation internals and the singleton cache
+
+`DefaultSingletonBeanRegistry` (the singleton-management superclass of
+`DefaultListableBeanFactory`) maintains a **three-level cache** that is central to
+how singletons are created and how circular references are resolved:
+
+1. **`singletonObjects`** — `Map<String,Object>` of *fully initialized* singletons
+   (the final, post-processed, ready-to-use instances).
+2. **`earlySingletonObjects`** — raw *early references* to beans that have been
+   instantiated but not yet fully populated/initialized.
+3. **`singletonFactories`** — `Map<String,ObjectFactory<?>>` of factories that can
+   produce an early reference on demand (this is what allows an AOP proxy to be
+   exposed *early* if a proxy will be needed).
+
+`getSingleton(beanName, allowEarlyReference)` probes these in order: level 1, then
+level 2, then (if early references are allowed) it invokes the level-3 factory,
+promotes the result into `earlySingletonObjects`, and removes the factory. The key
+sequencing inside `doCreateBean` is:
+
+```
+1. instantiate (call constructor)            // bean exists but is "raw"
+2. addSingletonFactory(...)                  // expose an EARLY reference (level 3)
+3. populateBean(...)                          // inject properties/setters/fields
+4. initializeBean(...)                        // BPPs + @PostConstruct + init methods
+5. move to singletonObjects (level 1)         // fully ready
+```
+
+The early reference is exposed at step 2 — **after** the constructor but **before**
+property population. That single fact explains why setter/field circular
+dependencies can be broken but constructor cycles cannot (see next section).
+`getEarlyBeanReference` runs `SmartInstantiationAwareBeanPostProcessor`s so that if
+the bean will ultimately be an AOP proxy, the *proxy* (not the raw target) is what
+gets injected into the other bean in the cycle.
+
+**Gotcha — early proxy vs final proxy:** if a bean is wrapped by a
+`BeanPostProcessor` *other* than the standard AOP auto-proxy creator (which is a
+`SmartInstantiationAwareBeanPostProcessor`), the early reference handed to a
+circular collaborator may not equal the final object placed in `singletonObjects`.
+Spring detects this mismatch at the end of `doCreateBean` and throws
+`BeanCurrentlyInCreationException` ("Bean with name X has been injected into other
+beans ... in its raw version as part of a circular reference, but has eventually
+been wrapped"). This is a classic, subtle failure mode.
+
+---
+
+## Circular dependencies and injection styles
+
+Whether Spring can resolve an A↔B cycle depends entirely on the **injection style**:
+
+| Cycle via | Resolvable by default? | Why |
+|---|---|---|
+| Setter / field injection | Yes | Early reference is exposed after construction, before population |
+| Constructor injection (both sides) | No | Each side needs the *other* fully constructed before its own constructor can run |
+
+A pure constructor cycle throws **`BeanCurrentlyInCreationException`** during
+`refresh()` (wrapped in a `BeanCreationException` / `UnsatisfiedDependencyException`),
+because there is no point at which an early reference can be published — the bean
+does not exist until its constructor returns.
+
+Ways to break a constructor cycle without switching to setters:
+
+- **`@Lazy` on one injection point** — Spring injects a lazy-initializing proxy for
+  that dependency; the real bean is resolved on first method call, after both beans
+  exist.
+- **`ObjectProvider<T>` / `Provider<T>`** — defer the actual lookup to runtime rather
+  than construction time.
+- **Redesign** — a cycle is usually a design smell; extract a third collaborator.
+
+**Version note:** the framework default is `allowCircularReferences = true` on the
+context. Spring Boot flipped its own default to `false` (Boot 2.6+), so a
+setter/field cycle that "worked" on the raw framework may fail fast under Boot —
+that behavior is a Boot policy, not a change to the core container.
+
+---
+
+## Autowiring resolution and ambiguity
+
+When a single-valued injection point matches more than one candidate by type, Spring
+does **not** pick arbitrarily — it applies a deterministic resolution order and
+otherwise throws `NoUniqueBeanDefinitionException`:
+
+1. **`@Primary`** — a single designated default winner for that type. Having two
+   `@Primary` beans of the same type reintroduces ambiguity and fails.
+2. **`@Priority(n)`** (`jakarta.annotation.Priority`) — when no `@Primary` applies,
+   the candidate with the **lowest** priority value wins. `@Priority` is a
+   class-level annotation and cannot be placed on `@Bean` methods.
+3. **Qualifier / bean-name fallback** — a `@Qualifier("name")`, or the
+   *injection-point name* matching a bean name (e.g., a field named
+   `firstCatalog` selects the bean named `firstCatalog`).
+
+If none disambiguates, injection fails. Note the interaction: `@Primary` takes
+precedence over `@Priority`. For collection/array/`Map` injection points, ambiguity
+is *not* an error — all matching beans are injected, ordered by `@Order` / `Ordered`
+/ `@Priority`.
+
+**Gotcha:** `@Qualifier` on a `@Bean`/component narrows candidacy but a bean with
+`defaultCandidate=false` (Spring 6.2+) or `autowireCandidate=false` is excluded from
+plain by-type injection entirely — a common source of "expected 1 bean but found 0"
+confusion.
+
+---
+
+## BeanPostProcessor ordering and infrastructure beans
+
+`registerBeanPostProcessors()` (phase 6 of `refresh()`) does more than a naive
+scan — it registers `BeanPostProcessor`s in strict groups so that ordering-sensitive
+infrastructure behaves predictably:
+
+1. BPPs implementing **`PriorityOrdered`** first (sorted by `getOrder()`),
+2. then BPPs implementing **`Ordered`** (sorted),
+3. then the remaining regular BPPs (registration order),
+4. then internal `MergedBeanDefinitionPostProcessor`s are re-registered last, and an
+   `ApplicationListenerDetector` is added at the very end.
+
+Critical subtlety: `BeanPostProcessor` ordering honors the **`Ordered` /
+`PriorityOrdered` interfaces**, *not* the `@Order` annotation. Annotating a
+`BeanPostProcessor` with `@Order` alone does **not** reliably order it — you must
+implement the interface. (The `@Order` annotation *is* honored for sorting injected
+collections and for `@WebFilter`-style ordering, but not for BPP registration.)
+
+A related trap: **a `BeanPostProcessor` (or any bean it depends on) is created very
+early**, before the ordinary singletons. If a `BeanPostProcessor` bean pulls in
+application beans as dependencies, those beans get instantiated *before* all BPPs are
+registered — so they may **escape post-processing** (no AOP proxy, no `@Autowired`
+handling by later BPPs). Spring logs a message like "Bean X is not eligible for
+getting processed by all BeanPostProcessors". This is why configuration classes that
+declare `BeanPostProcessor`/`BeanFactoryPostProcessor` `@Bean` methods should keep
+them `static` and dependency-free.
+
+`BeanFactoryPostProcessor`s (phase 5) follow the same three-group ordering, but
+`BeanDefinitionRegistryPostProcessor`s (a sub-interface, e.g.
+`ConfigurationClassPostProcessor`) run as an earlier sub-phase because they add/modify
+*definitions* that later BFPPs must see.
+
+---
+
+## Thread safety and concurrency in the container
+
+- **The container itself is thread-safe for lookups.** `getBean(...)` can be called
+  concurrently; singleton creation is guarded by synchronization on the
+  `singletonObjects` map, so a given singleton is created exactly once even under
+  concurrent first-access.
+- **Singleton beans are shared, so their mutable state is not thread-safe for you.**
+  The container does not synchronize access to *your* fields. Singleton-scoped beans
+  should be stateless (or use thread-safe/immutable state); per-request mutable state
+  belongs in method-local variables, request/prototype scope, or `ThreadLocal`.
+- **Lock-ordering deadlocks are possible.** Because singleton creation holds the
+  singleton lock, a bean whose init logic spawns threads that call back into
+  `getBean` for another in-progress singleton can deadlock. Spring 6.2 reworked
+  singleton locking to reduce such deadlocks (background/lenient locking), but
+  init-time cross-thread bean lookups remain a hazard.
+- **Prototype scope has no full lifecycle management.** The container instantiates,
+  configures, and hands over a prototype, then forgets it: **destroy callbacks are
+  not invoked** for prototypes. Cleanup is the caller's responsibility (or use a
+  custom `BeanPostProcessor`/`DisposableBean` handling).
+
+---
+
+## FactoryBean and the getBean name prefix
+
+A `FactoryBean<T>` is a bean that *produces* another object: the container calls
+`getObject()` and injects **the produced object**, not the factory. This powers many
+framework beans (e.g., `ProxyFactoryBean`, `LocalSessionFactoryBean`).
+
+The naming subtlety interviewers probe:
+
+- `getBean("myFactory")` returns the **product** (`getObject()`), not the factory.
+- `getBean("&myFactory")` — the **`&` prefix** (`BeanFactory.FACTORY_BEAN_PREFIX`)
+  returns the **`FactoryBean` instance itself**.
+- `getBean("myFactory", SomeProductType.class)` returns the product typed as the
+  product.
+
+`FactoryBean.isSingleton()` controls whether `getObject()` results are cached. Do not
+confuse a `FactoryBean` (an interface your bean implements) with a *factory method*
+(`@Bean` method or XML `factory-method`) — the latter is just a way to instantiate a
+bean, with no `&`-prefix semantics.
+
+---
+
+## Bean definition overriding and registration order
+
+In a plain `DefaultListableBeanFactory`, registering two definitions with the **same
+bean name** means the **later one wins** (silently) — `allowBeanDefinitionOverriding`
+defaults to `true` at the framework level. This makes registration order significant:
+XML `<import>` order, `@Configuration` processing order, and `@Bean` method order can
+determine which definition survives.
+
+- **Two `@Bean` methods with the same name** in configuration classes: the later
+  parsed definition overrides the earlier one.
+- **Component scanning collisions** (two `@Component`s that resolve to the same bean
+  name from different classes) throw `ConflictingBeanDefinitionException` — this is
+  *not* silent overriding, because scanning cannot know intent.
+- Spring Boot sets `allowBeanDefinitionOverriding = false` by default, turning silent
+  overrides into a startup `BeanDefinitionOverrideException` — again a Boot policy on
+  top of the same core switch.
+
+`@Primary`, `@Order`, and profile activation are *not* about overriding — they select
+among multiple coexisting definitions; overriding actually *replaces* a definition
+under the same name.
+
+---
+
+## Scoped beans and proxy injection
+
+Injecting a **shorter-lived bean into a longer-lived one** (e.g., a `request`- or
+`prototype`-scoped bean into a `singleton`) is a classic trap: the singleton is wired
+**once** at creation, so it would capture a single stale instance forever.
+
+Solutions:
+
+- **Scoped proxy** — `@Scope(value = "request", proxyMode = ScopedProxyMode.TARGET_CLASS)`
+  injects a CGLIB/JDK proxy into the singleton; each method call is routed to the
+  correct scope instance for the current context.
+- **`ObjectProvider<T>`** — inject a provider and call `getObject()` per use, deferring
+  resolution and yielding a fresh prototype each call.
+- **`@Lookup` method injection** — the container overrides an abstract/lookup method to
+  return a fresh instance from the factory on each invocation.
+- **`Provider<T>`** (`jakarta.inject.Provider`) — the JSR-330 equivalent of
+  `ObjectProvider` for lazy, per-call resolution.
+
+`ObjectProvider` also elegantly handles "0 or 1" and "0 or many": `getIfAvailable()`,
+`getIfUnique()`, `stream()`, and `orderedStream()` avoid `NoSuchBeanDefinitionException`
+/ `NoUniqueBeanDefinitionException` for optional or multi-valued dependencies.
+
+---
+
 ## Common follow-up questions
 
 - **Is `ApplicationContext` a `BeanFactory`?** Yes — `ApplicationContext` extends
