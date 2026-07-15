@@ -48,7 +48,7 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 
 | Domain | Topics | Authored |
 |---|---|---|
-| [System Design](topics/system-design/README.md) | 19 | 0 |
+| [System Design](topics/system-design/README.md) | 23 | 23 ✅ (all tiers) |
 | [Docker](topics/docker/README.md) | 15 | 0 |
 | [Kubernetes](topics/kubernetes/README.md) | 16 | 0 |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 18 | 0 |
@@ -76,6 +76,14 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
   341 beginner / 473 intermediate) per user request. Advanced/expert deferred to a later
   deepening pass (reuse the Spring Boot deepen pattern). Built via `spring-core-authoring.js`
   (author → verify). Verify stage rebalanced skewed answer-index distributions + fixed facts.
+- **Session 6 (2026-07-16):** System Design domain — EXPANDED taxonomy 19 → 23 topics
+  (added event-driven/CQRS/saga/CDC, GenAI/LLM/RAG/vector-DBs, real-time streaming,
+  resilience-trade-offs deep-dive). Authored all 23 across ALL FOUR tiers in one pass via
+  `system-design-authoring.js` (research-heavy author → verify, high effort). **1,739 MCQs**
+  (~70-80/topic; 342 B / 604 I / 524 adv / 269 expert). Deep trade-off-focused concepts.md
+  with comparison tables + estimation; heavy scenario/judgment MCQ style. Modern concepts
+  verified accurate (cell-based arch, HNSW/IVF, S3-FIFO, TrueTime, CDC/outbox, metastable
+  failure). All validates.
 - **Session 5 (2026-07-16):** Deepened all 19 Spring Core topics — appended advanced+expert
   questions and enriched concepts.md via `spring-core-deepen.js` (deepen → verify). Bank
   grew 814 → **1,511 MCQs** (~78–80/topic; 341 B / 473 I / 344 adv / 353 expert). Verify

@@ -1,0 +1,1614 @@
+topic: Design a Distributed Job Scheduler, Task Queue and Cron
+domain: system-design
+topic_slug: design-job-scheduler-task-queue
+version: 1
+questions:
+  - id: design-job-scheduler-task-queue-001
+    difficulty: beginner
+    tags:
+      - fundamentals
+      - framing
+    question: |
+      Which statement best separates a "task queue" from a "distributed cron"?
+    options:
+      - A task queue runs a unit of work soon/at-least-once; a distributed cron fires a recurring schedule
+        once per tick across a fleet
+      - They are identical; the words are interchangeable
+      - A task queue guarantees exactly-once delivery; a cron guarantees at-most-once
+      - A task queue is only for batch jobs; a cron is only for real-time jobs
+    answer: 0
+    explanation: |
+      A task queue dispatches individual units of work (usually at-least-once);
+      distributed cron is about firing a recurring schedule exactly once per tick
+      across many nodes. Neither guarantees exactly-once delivery, and the batch
+      vs real-time framing is wrong.
+    ref: concepts.md#requirements-api-and-problem-framing
+  - id: design-job-scheduler-task-queue-002
+    difficulty: beginner
+    tags:
+      - visibility-timeout
+      - at-least-once
+    question: |
+      In a queue like SQS, what is the purpose of the visibility timeout?
+    options:
+      - It permanently hides messages from all consumers
+      - It temporarily hides a received message so another consumer won't process it, and redelivers it
+        if the worker fails to ack in time
+      - It compresses the message payload to save bandwidth
+      - It guarantees messages are delivered in strict priority order
+    answer: 1
+    explanation: |
+      The visibility timeout makes an in-flight message invisible to other
+      consumers while one worker processes it; if the worker doesn't delete/ack
+      before it expires, the message reappears for redelivery. It does not hide
+      messages forever, compress payloads, or enforce priority order.
+    ref: concepts.md#task-queue-design-visibility-timeout-and-acknowledgements
+  - id: design-job-scheduler-task-queue-003
+    difficulty: beginner
+    tags:
+      - delivery-semantics
+    question: |
+      Most production task queues default to which delivery semantic?
+    options:
+      - At-most-once
+      - Exactly-once delivery, guaranteed end-to-end
+      - At-least-once
+      - No delivery guarantee at all
+    answer: 2
+    explanation: |
+      At-least-once is the dominant default: the worker acks only after
+      processing, so a crash means redelivery rather than loss. At-most-once
+      risks losing work, and true exactly-once delivery is unachievable across a
+      network with crashes.
+    ref: concepts.md#delivery-semantics-and-exactly-once-challenges
+  - id: design-job-scheduler-task-queue-004
+    difficulty: beginner
+    tags:
+      - dlq
+      - retries
+    question: |
+      What is a dead-letter queue (DLQ) primarily used for?
+    options:
+      - Storing successfully completed jobs for analytics
+      - Encrypting sensitive job payloads
+      - Load balancing tasks across regions
+      - Capturing messages that repeatedly fail after exceeding the retry limit, for inspection and possible
+        redrive
+    answer: 3
+    explanation: |
+      A DLQ isolates poison/repeatedly-failing messages after they exceed the
+      retry limit so they can be inspected and later redriven, instead of looping
+      forever or being silently dropped. It is not for completed jobs, encryption,
+      or load balancing.
+    ref: concepts.md#retries-backoff-and-dead-letter-queues
+  - id: design-job-scheduler-task-queue-005
+    difficulty: beginner
+    tags:
+      - idempotency
+    question: |
+      An operation is "idempotent" when:
+    options:
+      - Running it multiple times has the same observable effect as running it once
+      - It can only ever be executed once
+      - It always runs faster on the second attempt
+      - It never touches persistent storage
+    answer: 0
+    explanation: |
+      Idempotency means repeated execution yields the same observable result as a
+      single execution (e.g., a PUT or an upsert). It does not mean the operation
+      is limited to one run, nor does it relate to speed or storage access.
+    ref: concepts.md#idempotency-and-deduplication
+  - id: design-job-scheduler-task-queue-006
+    difficulty: beginner
+    tags:
+      - backoff
+      - retries
+    question: |
+      Why add random jitter to exponential backoff on retries?
+    options:
+      - To make logs easier to read
+      - To prevent many failed jobs from retrying in lockstep and creating a thundering herd on the recovering
+        dependency
+      - To guarantee messages are processed in order
+      - To reduce the size of the payload
+    answer: 1
+    explanation: |
+      Jitter spreads retry attempts over time so thousands of jobs that failed
+      together don't all retry at the same instant and re-overload the
+      dependency. It has nothing to do with log readability, ordering, or payload
+      size.
+    ref: concepts.md#retries-backoff-and-dead-letter-queues
+  - id: design-job-scheduler-task-queue-007
+    difficulty: beginner
+    tags:
+      - delayed-jobs
+      - redis
+    question: |
+      Which data structure is the classic choice for storing delayed jobs keyed
+      by their run time?
+    options:
+      - A plain hash map keyed by job id
+      - A bloom filter
+      - A Redis sorted set with the run-at timestamp as the score
+      - A singly linked list in insertion order
+    answer: 2
+    explanation: |
+      A sorted set (score = run_at epoch) lets you efficiently query "everything
+      due now" via a range query, which is why Sidekiq/Bull use it. A hash map,
+      bloom filter, or insertion-ordered list can't efficiently return items due
+      by time.
+    ref: concepts.md#delayed-jobs-and-timers
+  - id: design-job-scheduler-task-queue-008
+    difficulty: beginner
+    tags:
+      - back-pressure
+    question: |
+      What is "back-pressure" in a task-processing system?
+    options:
+      - Compressing messages to save space
+      - A way to increase producer throughput indefinitely
+      - Encrypting messages in transit
+      - The feedback mechanism that slows producers or sheds load when consumers can't keep up
+    answer: 3
+    explanation: |
+      Back-pressure is the feedback that throttles producers or sheds load before
+      an unbounded backlog collapses the system. It is not compression,
+      encryption, or a throughput booster.
+    ref: concepts.md#back-pressure-and-flow-control
+  - id: design-job-scheduler-task-queue-009
+    difficulty: beginner
+    tags:
+      - leader-election
+      - cron
+    question: |
+      Why does running the same cron on N nodes naively cause problems?
+    options:
+      - Each node fires the scheduled job, so the job runs N times per tick instead of once
+      - It uses too little memory
+      - It automatically dedupes so nothing runs
+      - Cron cannot run on more than one node
+    answer: 0
+    explanation: |
+      Without coordination, every node evaluates the schedule and fires the job,
+      producing N executions per tick. This is exactly why distributed cron needs
+      leader election or tick-level dedup.
+    ref: concepts.md#distributed-cron-and-leader-election
+  - id: design-job-scheduler-task-queue-010
+    difficulty: beginner
+    tags:
+      - components
+    question: |
+      Which component is the durable source of truth for job definitions and
+      their state machine?
+    options:
+      - The load balancer
+      - The job / schedule store (datastore)
+      - The worker's local memory
+      - The client SDK
+    answer: 1
+    explanation: |
+      The job/schedule store durably holds definitions, state, and the time
+      index. Load balancers are stateless routers, worker memory is ephemeral,
+      and the client SDK doesn't own system state.
+    ref: concepts.md#core-architecture-and-components
+  - id: design-job-scheduler-task-queue-011
+    difficulty: beginner
+    tags:
+      - priority
+    question: |
+      A simple way to implement job priority is to:
+    options:
+      - Randomly reorder all jobs
+      - Process jobs strictly in the order received, ignoring priority
+      - Use separate high/medium/low priority queues and drain higher ones first
+      - Delete low priority jobs
+    answer: 2
+    explanation: |
+      Multiple priority queues drained highest-first is the simplest priority
+      scheme. Random reordering ignores priority, strict FIFO ignores priority by
+      definition, and deleting low-priority jobs loses work.
+    ref: concepts.md#priority-fairness-and-multi-tenancy
+  - id: design-job-scheduler-task-queue-012
+    difficulty: beginner
+    tags:
+      - missed-runs
+    question: |
+      If the scheduler is down at a job's scheduled time, "missed-run handling"
+      decides:
+    options:
+      - Which programming language the job uses
+      - How large the job payload can be
+      - Which region the job runs in
+      - Whether to fire the missed run late, skip it, or backfill all missed runs
+    answer: 3
+    explanation: |
+      Missed-run (misfire) handling is the policy for what to do about runs that
+      didn't fire during downtime: fire late, skip, or backfill. It is unrelated
+      to language, payload size, or region.
+    ref: concepts.md#missed-run-handling-and-catch-up-semantics
+  - id: design-job-scheduler-task-queue-013
+    difficulty: beginner
+    tags:
+      - workers
+      - ack
+    question: |
+      In an at-least-once queue, when should a worker acknowledge (delete) a
+      message?
+    options:
+      - After successfully processing it
+      - Before starting to process it
+      - Never; the broker deletes it automatically on receive
+      - Only when the queue is empty
+    answer: 0
+    explanation: |
+      Acking after successful processing is what gives at-least-once semantics: a
+      crash before ack causes redelivery rather than loss. Acking before
+      processing is at-most-once (loses work on crash).
+    ref: concepts.md#task-queue-design-visibility-timeout-and-acknowledgements
+  - id: design-job-scheduler-task-queue-014
+    difficulty: beginner
+    tags:
+      - tools
+      - comparisons
+    question: |
+      Which tool is best described as a durable-execution workflow engine rather
+      than a plain task queue?
+    options:
+      - Sidekiq
+      - Temporal
+      - SQS
+      - Redis lists
+    answer: 1
+    explanation: |
+      Temporal is a durable-execution / workflow engine that persists execution
+      history and orchestrates multi-step processes. Sidekiq, SQS, and Redis
+      lists are task-queue substrates without built-in durable orchestration.
+    ref: concepts.md#comparisons-of-celery-sidekiq-quartz-temporal-and-cloud-queues
+  - id: design-job-scheduler-task-queue-015
+    difficulty: intermediate
+    tags:
+      - visibility-timeout
+      - tuning
+    question: |
+      You set the visibility timeout well BELOW the typical processing time of
+      your jobs. What is the most likely consequence?
+    options:
+      - Messages are lost permanently
+      - The queue refuses new messages
+      - A still-running task's lease expires and a second worker starts it, causing duplicate execution
+      - Jobs are processed in reverse order
+    answer: 2
+    explanation: |
+      Too-short a timeout expires the lease while the first worker is still
+      working, so the message becomes visible and a second worker picks it up,
+      duplicating execution. Messages aren't lost (still redelivered), and the
+      timeout doesn't affect ordering or intake.
+    ref: concepts.md#task-queue-design-visibility-timeout-and-acknowledgements
+  - id: design-job-scheduler-task-queue-016
+    difficulty: intermediate
+    tags:
+      - visibility-timeout
+      - heartbeat
+    question: |
+      Jobs in your queue take anywhere from 1 second to 1 hour. What is the best
+      way to handle the visibility timeout?
+    options:
+      - Set a blanket 1-hour visibility timeout for every message
+      - Set a 1-second timeout for all messages
+      - Disable the visibility timeout entirely
+      - Set a short baseline timeout and have workers heartbeat to extend the lease while actively processing
+    answer: 3
+    explanation: |
+      A heartbeat (periodic ChangeMessageVisibility) extends the lease only for
+      tasks that are genuinely still running, so crashed short tasks recover fast
+      while long tasks stay leased. A blanket 1-hour timeout makes crash recovery
+      of short jobs extremely slow, a 1-second timeout duplicates long jobs, and
+      disabling it breaks redelivery.
+    ref: concepts.md#task-queue-design-visibility-timeout-and-acknowledgements
+  - id: design-job-scheduler-task-queue-017
+    difficulty: intermediate
+    tags:
+      - exactly-once
+      - idempotency
+    question: |
+      Why is true end-to-end "exactly-once delivery" considered unachievable, and
+      what do engineers do instead?
+    options:
+      - A worker can perform a side effect then crash before its ack is recorded, so redelivery is unavoidable;
+        engineers use at-least-once plus idempotent effects
+      - It is achievable with TCP; just enable it
+      - Exactly-once is achievable by disabling retries
+      - It is unachievable, so systems simply drop duplicates randomly
+    answer: 0
+    explanation: |
+      The unavoidable gap is a crash after the side effect but before the ack is
+      durably recorded; the broker can't distinguish "done, ack lost" from "never
+      done" and must redeliver. The robust answer is at-least-once delivery plus
+      idempotency/dedup to make the effect exactly-once. TCP doesn't solve
+      cross-process crashes, and disabling retries just loses work.
+    ref: concepts.md#delivery-semantics-and-exactly-once-challenges
+  - id: design-job-scheduler-task-queue-018
+    difficulty: intermediate
+    tags:
+      - idempotency
+      - atomicity
+    question: |
+      A worker charges a card and then records the idempotency key in a separate
+      step. Why is this insufficient?
+    options:
+      - Idempotency keys must be UUIDs
+      - If it crashes between charging and recording the key, a redelivery re-charges the card; the effect
+        and the key record must be atomic
+      - Recording keys is too slow
+      - Cards can only be charged once by the bank anyway
+    answer: 1
+    explanation: |
+      Splitting the side effect from the dedup record leaves a race: a crash in
+      between means the redelivered message won't see the key and re-charges. The
+      side effect and key recording must be atomic (one transaction) or use a
+      transactional outbox. The key format and speed aren't the issue.
+    ref: concepts.md#idempotency-and-deduplication
+  - id: design-job-scheduler-task-queue-019
+    difficulty: intermediate
+    tags:
+      - db-as-queue
+      - skip-locked
+    question: |
+      Why is `SELECT ... FOR UPDATE SKIP LOCKED` the modern way to use a
+      relational DB as a task queue?
+    options:
+      - It disables transactions for speed
+      - It guarantees exactly-once delivery to external systems
+      - It lets many workers pull disjoint sets of rows concurrently without blocking each other on the
+        same hot rows
+      - It automatically shards the table
+    answer: 2
+    explanation: |
+      SKIP LOCKED skips rows already locked by other workers, so concurrent
+      workers grab disjoint batches without serializing on the same rows. It
+      doesn't disable transactions, doesn't guarantee external exactly-once, and
+      doesn't shard.
+    ref: concepts.md#storage-and-datastore-choices
+  - id: design-job-scheduler-task-queue-020
+    difficulty: intermediate
+    tags:
+      - cron
+      - leader-election
+    question: |
+      In a single-leader distributed cron, what mechanism typically triggers
+      failover when the leader crashes?
+    options:
+      - A human manually restarts the leader every time
+      - The leader never fails, so no mechanism is needed
+      - All nodes become leaders simultaneously
+      - A lease/lock with a TTL that the leader must renew; if renewal stops, the lease expires and another
+        node acquires leadership
+    answer: 3
+    explanation: |
+      Leadership is held via a TTL lease (in ZooKeeper/etcd/Consul/Redis/DB) that
+      the leader heartbeats; if it stops renewing, the lease expires and a new
+      leader is elected. Manual restart doesn't scale, leaders do fail, and
+      all-nodes-leader is exactly what election prevents.
+    ref: concepts.md#distributed-cron-and-leader-election
+  - id: design-job-scheduler-task-queue-021
+    difficulty: intermediate
+    tags:
+      - tick-dedup
+      - cron
+    question: |
+      To guarantee a cron tick is enqueued at most once even if two nodes race,
+      the most robust approach is to:
+    options:
+      - Compute a deterministic execution id from (schedule_id, bucketed_time) and INSERT it under a unique
+        constraint before enqueuing
+      - Trust that only the leader ever enqueues
+      - Add a random delay before enqueuing
+      - Enqueue on every node and hope for the best
+    answer: 0
+    explanation: |
+      A deterministic execution id under a unique constraint makes "fire once per
+      tick" a database uniqueness guarantee: the first writer wins, duplicates hit
+      the constraint. Trusting only-the-leader fails during rebalance/split-brain,
+      random delays don't prevent dupes, and enqueuing everywhere is the bug.
+    ref: concepts.md#deduplicating-a-job-so-it-runs-once-across-nodes
+  - id: design-job-scheduler-task-queue-022
+    difficulty: intermediate
+    tags:
+      - tick-dedup
+      - clock-skew
+    question: |
+      Why is the scheduled time BUCKETED (e.g., floored to the minute) when
+      computing a tick's execution id?
+    options:
+      - To save storage space
+      - Because clock skew across nodes makes raw timestamps differ slightly; bucketing makes all nodes
+        agree on the same id
+      - Because IDs must be human-readable
+      - To make the job run faster
+    answer: 1
+    explanation: |
+      Slightly skewed clocks would produce different raw-timestamp ids on
+      different nodes, defeating dedup. Bucketing to the tick granularity makes
+      every node compute the same execution id. It's not about storage,
+      readability, or speed.
+    ref: concepts.md#deduplicating-a-job-so-it-runs-once-across-nodes
+  - id: design-job-scheduler-task-queue-023
+    difficulty: intermediate
+    tags:
+      - missed-runs
+      - policy
+    question: |
+      A job "refresh cache every 5 minutes" was missed during a 40-minute outage.
+      Which missed-run policy is most appropriate?
+    options:
+      - Backfill all 8 missed runs immediately
+      - Fire the job forever in a loop to catch up
+      - Skip the missed runs and just run at the next scheduled tick
+      - Delete the schedule entirely
+    answer: 2
+    explanation: |
+      A cache refresh is idempotent and only the latest state matters, so running
+      8 stale backfills is wasteful and provides no value; skipping and resuming
+      at the next tick is correct. Backfilling all 8 is a stampede, infinite
+      looping is wrong, and deleting the schedule loses future runs.
+    ref: concepts.md#missed-run-handling-and-catch-up-semantics
+  - id: design-job-scheduler-task-queue-024
+    difficulty: intermediate
+    tags:
+      - pull-vs-push
+      - back-pressure
+    question: |
+      Why does pull-based consumption provide natural back-pressure compared to
+      push-based delivery?
+    options:
+      - Pull is always lower latency
+      - Pull automatically deduplicates messages
+      - Push can never overload a consumer
+      - Workers fetch new work only when they have free capacity, so a slow consumer simply pulls slower
+        instead of being overwhelmed
+    answer: 3
+    explanation: |
+      In pull, a busy worker just doesn't fetch more, so the pipeline throttles to
+      consumer capacity. Push can overwhelm a slow consumer unless you add flow
+      control. Pull is not inherently lower latency (it adds poll interval) and
+      doesn't dedupe.
+    ref: concepts.md#back-pressure-and-flow-control
+  - id: design-job-scheduler-task-queue-025
+    difficulty: intermediate
+    tags:
+      - estimation
+      - littles-law
+    question: |
+      You enqueue 1,000,000 jobs/day, each taking 500 ms, with peak = 5x average.
+      Roughly how many concurrent worker slots do you need at peak (Little's Law)?
+    options:
+      - About 30
+      - About 3
+      - About 3,000
+      - About 300,000
+    answer: 0
+    explanation: |
+      Average rate ~= 1e6/86400 ~= 12/s; peak ~= 60/s. L = lambda*W = 60 * 0.5s =
+      30 concurrent jobs. So ~30 slots plus headroom. This also shows sharding is
+      unnecessary here, an anti-over-engineering signal.
+    ref: concepts.md#scaling-partitioning-and-sharding
+  - id: design-job-scheduler-task-queue-026
+    difficulty: intermediate
+    tags:
+      - dlq
+      - redrive
+    question: |
+      In SQS, which setting routes a message to a DLQ after too many failed
+      processing attempts?
+    options:
+      - The visibility timeout
+      - The maxReceiveCount in the redrive policy
+      - The message retention period
+      - The delay seconds
+    answer: 1
+    explanation: |
+      maxReceiveCount in the redrive policy defines how many receives (failed
+      attempts) before the message moves to the DLQ. Visibility timeout controls
+      lease duration, retention controls how long messages live, and delay defers
+      first delivery.
+    ref: concepts.md#retries-backoff-and-dead-letter-queues
+  - id: design-job-scheduler-task-queue-027
+    difficulty: intermediate
+    tags:
+      - autoscaling
+      - signals
+    question: |
+      What is generally the best signal for autoscaling a worker fleet against an
+      SLA?
+    options:
+      - CPU utilization of the API layer
+      - Number of TCP connections
+      - Age of the oldest message in the queue (backlog latency)
+      - Disk usage on the broker
+    answer: 2
+    explanation: |
+      Oldest-message age directly reflects how late the most delayed job will be,
+      which is what an SLA cares about; raw depth can mislead when message sizes
+      or processing times vary. API CPU, connection count, and disk usage are
+      weak proxies for backlog latency.
+    ref: concepts.md#back-pressure-and-flow-control
+  - id: design-job-scheduler-task-queue-028
+    difficulty: intermediate
+    tags:
+      - tools
+      - celery
+    question: |
+      A known limitation of Celery's periodic-task scheduler (beat) in a
+      distributed deployment is:
+    options:
+      - It cannot run Python code
+      - It guarantees exactly-once delivery
+      - It requires Kafka
+      - Beat is effectively single-node, making it a single point of failure for scheduled jobs unless
+        you add HA
+    answer: 3
+    explanation: |
+      Celery beat runs as a single scheduler process; running two beats
+      double-fires, so it's a cron SPOF unless you add locking/HA. It obviously
+      runs Python, does not guarantee exactly-once, and uses Redis/RabbitMQ, not
+      Kafka.
+    ref: concepts.md#comparisons-of-celery-sidekiq-quartz-temporal-and-cloud-queues
+  - id: design-job-scheduler-task-queue-029
+    difficulty: intermediate
+    tags:
+      - delayed-jobs
+      - sqs
+    question: |
+      You need to schedule a job to run in 30 days. Why is an SQS delay queue
+      alone insufficient?
+    options:
+      - SQS delay queues have a maximum delay of 15 minutes
+      - SQS cannot store JSON
+      - SQS deletes all messages after 1 hour
+      - SQS requires FIFO for any delay
+    answer: 0
+    explanation: |
+      SQS delay queues cap at 15 minutes, so a 30-day delay needs a durable
+      time-indexed store (DB/ZSET/timing wheel) that later enqueues to SQS. SQS
+      stores arbitrary payloads, retention is configurable up to 14 days, and
+      delay doesn't require FIFO.
+    ref: concepts.md#delayed-jobs-and-timers
+  - id: design-job-scheduler-task-queue-030
+    difficulty: intermediate
+    tags:
+      - state-machine
+    question: |
+      Which is a reasonable job state machine for a scheduler?
+    options:
+      - RUNNING -> PENDING -> DELETED only
+      - PENDING -> SCHEDULED -> RUNNING -> {SUCCEEDED | FAILED -> retry | DEAD}
+      - SUCCEEDED -> PENDING -> SUCCEEDED
+      - There is no need to persist state
+    answer: 1
+    explanation: |
+      A durable state machine PENDING->SCHEDULED->RUNNING->terminal (with retry
+      and DEAD) captures the lifecycle needed for recovery, retries, and
+      observability. The other sequences are nonsensical, and not persisting state
+      makes crash recovery and dedup impossible.
+    ref: concepts.md#storage-and-datastore-choices
+  - id: design-job-scheduler-task-queue-031
+    difficulty: intermediate
+    tags:
+      - priority
+      - starvation
+    question: |
+      Strict priority queues (always drain high before low) have which risk, and
+      what mitigates it?
+    options:
+      - Risk of data loss; mitigated by encryption
+      - Risk of duplicate delivery; mitigated by TCP
+      - Risk of starving low-priority jobs; mitigated by aging or weighted fair queuing
+      - No risks; strict priority is always optimal
+    answer: 2
+    explanation: |
+      If high-priority work never drains, low-priority jobs starve; aging
+      (promoting jobs as they wait) or weighted fair queuing bounds the wait.
+      Priority order isn't about data loss, duplicates, or being universally
+      optimal.
+    ref: concepts.md#priority-fairness-and-multi-tenancy
+  - id: design-job-scheduler-task-queue-032
+    difficulty: intermediate
+    tags:
+      - multi-tenancy
+      - isolation
+    question: |
+      To prevent one noisy tenant from starving others in a shared task queue, a
+      strong isolation approach is:
+    options:
+      - Increase the visibility timeout globally
+      - Delete jobs from the busiest tenant
+      - Disable retries for all tenants
+      - Use per-tenant queues/shards with per-tenant rate limits and weighted fair dispatch
+    answer: 3
+    explanation: |
+      Per-tenant queues plus quotas and fair scheduling isolate load so a burst
+      from one tenant doesn't block others. Raising the timeout, deleting jobs, or
+      disabling retries don't address fairness (and cause other harm).
+    ref: concepts.md#priority-fairness-and-multi-tenancy
+  - id: design-job-scheduler-task-queue-033
+    difficulty: intermediate
+    tags:
+      - outbox
+      - cdc
+    question: |
+      What problem does the transactional outbox pattern solve?
+    options:
+      - It atomically writes a business change and an outbox row in one DB transaction, so a relay can
+        reliably publish the event without dual-write inconsistency
+      - It compresses messages
+      - It guarantees strict ordering across all partitions
+      - It eliminates the need for idempotency
+    answer: 0
+    explanation: |
+      The outbox avoids the dual-write problem: the effect and the to-be-published
+      event commit atomically in the same DB transaction, and a relay/CDC process
+      publishes the outbox row (at-least-once to the broker). It doesn't compress,
+      guarantee global ordering, or remove the need for idempotent consumers.
+    ref: concepts.md#idempotency-and-deduplication
+  - id: design-job-scheduler-task-queue-034
+    difficulty: intermediate
+    tags:
+      - polling
+      - latency
+    question: |
+      A scheduler polls "what jobs are due?" every 60 seconds. What is the direct
+      trade-off of increasing the poll interval to 5 minutes?
+    options:
+      - Higher scheduling accuracy but more load
+      - Lower load on the store but jobs can fire up to ~5 minutes late
+      - Guaranteed exactly-once execution
+      - It eliminates the need for a datastore
+    answer: 1
+    explanation: |
+      Longer poll intervals cut store load but increase worst-case scheduling
+      lateness to about the interval. It doesn't improve accuracy, doesn't affect
+      delivery semantics, and doesn't remove the store.
+    ref: concepts.md#delayed-jobs-and-timers
+  - id: design-job-scheduler-task-queue-035
+    difficulty: intermediate
+    tags:
+      - tools
+      - k8s
+    question: |
+      Kubernetes CronJob offers concurrencyPolicy of Allow/Forbid/Replace. What
+      does Forbid do?
+    options:
+      - Deletes the CronJob after one run
+      - Runs the job on every node
+      - Prevents a new run from starting if the previous run is still active
+      - Forbids the job from ever running
+    answer: 2
+    explanation: |
+      Forbid skips a new scheduled run while the prior run is still executing,
+      preventing overlap. It doesn't delete the CronJob, fan out to all nodes, or
+      block all runs.
+    ref: concepts.md#missed-run-handling-and-catch-up-semantics
+  - id: design-job-scheduler-task-queue-036
+    difficulty: advanced
+    tags:
+      - fencing
+      - zombie-worker
+    question: |
+      A worker's lease expired due to a long GC pause; a second worker took over
+      and finished. The first worker then wakes up and tries to write its result.
+      What prevents this stale write from corrupting state?
+    options:
+      - A longer visibility timeout
+      - Retrying the write with backoff
+      - Nothing; this cannot happen
+      - 'A fencing token: a monotonically increasing token attached to the lease so the resource rejects
+        writes carrying an outdated token'
+    answer: 3
+    explanation: |
+      Fencing tokens (monotonic per lease acquisition) let the downstream resource
+      reject the zombie's write because it carries an older token than the current
+      leaseholder's. A longer timeout only widens the window differently, retries
+      don't help, and this race absolutely can happen (GC pauses/partitions).
+    ref: concepts.md#failure-modes-and-how-the-design-degrades
+  - id: design-job-scheduler-task-queue-037
+    difficulty: advanced
+    tags:
+      - split-brain
+      - cron
+      - dedup
+    question: |
+      During a network partition, two scheduler nodes each believe they are the
+      cron leader. Which design ensures the 02:00 job is still enqueued at most
+      once?
+    options:
+      - A tick-dedup unique constraint on execution_id = hash(schedule_id, bucketed_time), so only one
+        INSERT wins regardless of how many leaders exist
+      - Relying solely on the leader lease
+      - Increasing the lease TTL
+      - Letting both leaders enqueue and deduping later by hand
+    answer: 0
+    explanation: |
+      During split-brain the lease alone can be held by two nodes, so you need a
+      substrate-level uniqueness guarantee: the deterministic execution id under a
+      unique constraint lets only one enqueue win. Longer TTL doesn't fix
+      split-brain, and manual dedup is unreliable.
+    ref: concepts.md#deduplicating-a-job-so-it-runs-once-across-nodes
+  - id: design-job-scheduler-task-queue-038
+    difficulty: advanced
+    tags:
+      - kafka
+      - exactly-once
+    question: |
+      Kafka advertises "exactly-once semantics" (EOS). What is the crucial caveat
+      when your consumer writes to an external database via a separate API?
+    options:
+      - EOS makes the external write exactly-once automatically
+      - EOS holds only within Kafka (idempotent producer + transactional offset commits); the external
+        side effect is still at-least-once and needs idempotency
+      - EOS disables all retries
+      - EOS requires FIFO ordering to be turned off
+    answer: 1
+    explanation: |
+      Kafka EOS covers atomicity of producing plus committing offsets inside
+      Kafka. The moment you perform an external side effect, the crash-before-commit
+      gap returns, so you still need idempotent external writes. EOS doesn't extend
+      to arbitrary APIs, doesn't disable retries, and isn't about FIFO.
+    ref: concepts.md#delivery-semantics-and-exactly-once-challenges
+  - id: design-job-scheduler-task-queue-039
+    difficulty: advanced
+    tags:
+      - scenario
+      - store-choice
+    question: |
+      Requirements: ~2,000 jobs/sec, strict no-double-charge on financial jobs,
+      team wants minimal moving parts. Which substrate is the best fit?
+    options:
+      - Cassandra with client-side dedup and eventual consistency
+      - A fire-and-forget UDP-based custom broker
+      - A relational DB as the queue using SELECT ... FOR UPDATE SKIP LOCKED with unique-constraint dedup
+        in the same transaction
+      - Redis lists with no persistence configured
+    answer: 2
+    explanation: |
+      At 2k/sec a single relational DB is comfortable and gives transactional
+      dedup (effect + idempotency key in one commit), which is exactly what
+      no-double-charge needs with minimal moving parts. Cassandra weakens
+      transactions/dedup, UDP fire-and-forget loses work, and non-persistent Redis
+      risks losing financial jobs.
+    ref: concepts.md#storage-and-datastore-choices
+  - id: design-job-scheduler-task-queue-040
+    difficulty: advanced
+    tags:
+      - scenario
+      - scale
+      - store-choice
+    question: |
+      Requirements: 1,000,000 tasks/sec of ad-click enrichment, ordering
+      unimportant, occasional duplicate tolerable, need replay for reprocessing.
+      Which substrate best fits?
+    options:
+      - A single Postgres instance with SKIP LOCKED
+      - Quartz with a JDBC job store
+      - A single-leader in-memory scheduler
+      - A partitioned distributed log (Kafka) with at-least-once consumers and idempotent enrichment
+    answer: 3
+    explanation: |
+      At a firehose of 1M/sec with replay needs and tolerance for duplicates, a
+      partitioned log like Kafka scales horizontally and supports replay; idempotent
+      enrichment covers the rare duplicate. A single Postgres or single-leader
+      scheduler can't sustain that rate, and Quartz is DB-bound and cron-oriented.
+    ref: concepts.md#scaling-partitioning-and-sharding
+  - id: design-job-scheduler-task-queue-041
+    difficulty: advanced
+    tags:
+      - hot-partition
+      - thundering-herd
+    question: |
+      Every tenant schedules a nightly job at exactly 00:00 UTC, and your store is
+      partitioned by run-time bucket. What breaks and what's the fix?
+    options:
+      - The 00:00 partition becomes a hot shard and the fleet stampedes at midnight; fix by jittering
+        scheduled times and/or hash-suffixing keys
+      - Nothing breaks; even distribution is automatic
+      - The jobs run twice; fix by disabling retries
+      - Storage fills up; fix by deleting the schedules
+    answer: 0
+    explanation: |
+      Concentrating all jobs at one instant creates a hot partition and a
+      thundering herd at midnight. Spreading load via time jitter and/or
+      hash-suffixed keys smooths it. It's not a duplicate-execution or storage-full
+      issue.
+    ref: concepts.md#failure-modes-and-how-the-design-degrades
+  - id: design-job-scheduler-task-queue-042
+    difficulty: advanced
+    tags:
+      - retry-budget
+      - outage
+    question: |
+      A downstream dependency is down for 2 hours. Aggressive per-job exponential
+      retries are configured. What additional control most directly prevents
+      retries from amplifying load during the outage?
+    options:
+      - Increase max_retries to infinity
+      - A retry budget / circuit breaker that caps the fraction of traffic that is retries
+      - Reduce the number of workers to zero
+      - Switch the queue to FIFO
+    answer: 1
+    explanation: |
+      A retry budget or circuit breaker bounds retry-driven load so a broad outage
+      doesn't get 2-3x amplification exactly when the dependency is weakest.
+      Infinite retries worsen it, zero workers halts all work, and FIFO doesn't
+      cap retry amplification.
+    ref: concepts.md#retries-backoff-and-dead-letter-queues
+  - id: design-job-scheduler-task-queue-043
+    difficulty: advanced
+    tags:
+      - backfill
+      - catch-up
+    question: |
+      After a 6-hour outage, an hourly billing-aggregation job that must process
+      each hour's data recovers. Which catch-up approach is safest?
+    options:
+      - Skip all missed hours; only run the next scheduled hour
+      - Fire all missed runs simultaneously with unlimited concurrency
+      - Backfill the missed hours but bound concurrency and use a deadline window so overload is controlled
+      - Delete the missed intervals' data
+    answer: 2
+    explanation: |
+      Billing needs each interval processed, so backfill is required, but it must
+      be rate/concurrency-limited with a deadline to avoid a stampede. Skipping
+      drops billable data, unlimited-concurrency backfill overloads the system, and
+      deleting data is data loss.
+    ref: concepts.md#missed-run-handling-and-catch-up-semantics
+  - id: design-job-scheduler-task-queue-044
+    difficulty: advanced
+    tags:
+      - sharded-scheduler
+      - rebalance
+    question: |
+      You shard cron schedule ownership across nodes for scale. What is the main
+      new hazard versus a single leader, and how do you contain it?
+    options:
+      - Higher memory use; contain with compression
+      - Schedules stop firing entirely; contain by disabling sharding
+      - Clock skew disappears; no containment needed
+      - During rebalancing a schedule can briefly be owned by two nodes and double-fire; contain with
+        tick-dedup unique constraints and careful handoff
+    answer: 3
+    explanation: |
+      Sharding scales evaluation but introduces a rebalancing window where
+      ownership overlaps and a tick can double-fire; tick-level dedup and clean
+      handoff protocols contain it. It's not primarily a memory issue, sharding
+      doesn't stop firing, and it doesn't remove clock skew.
+    ref: concepts.md#distributed-cron-and-leader-election
+  - id: design-job-scheduler-task-queue-045
+    difficulty: advanced
+    tags:
+      - temporal
+      - when-to-use
+    question: |
+      For which workload is Temporal (durable execution) most clearly the right
+      choice over SQS + a Lambda?
+    options:
+      - A multi-step order-fulfillment process with retries, human-approval waits over days, and compensating
+        rollbacks (saga)
+      - A single stateless image-thumbnail task fired on upload
+      - Sampling and dropping 90% of telemetry events
+      - A one-line cache invalidation
+    answer: 0
+    explanation: |
+      Temporal shines for long-lived, stateful, multi-step orchestration with
+      waits and compensations, where its durable event history removes hand-rolled
+      state machines. Simple stateless dispatch, lossy sampling, or a one-liner are
+      better served by a lightweight queue.
+    ref: concepts.md#comparisons-of-celery-sidekiq-quartz-temporal-and-cloud-queues
+  - id: design-job-scheduler-task-queue-046
+    difficulty: advanced
+    tags:
+      - back-pressure
+      - interactive-vs-batch
+    question: |
+      On a user-facing hot path, the downstream task system is saturated. Which
+      back-pressure strategy is most appropriate, and why?
+    options:
+      - Block the user request until the queue drains, to avoid losing work
+      - Reject fast with 429 and let the client retry, because blocking would stall the interactive request
+        and cascade slowness upstream
+      - Silently drop the request
+      - Increase the queue size to unbounded
+    answer: 1
+    explanation: |
+      For interactive paths, failing fast (429) preserves responsiveness and lets
+      clients back off, whereas blocking propagates saturation into user latency
+      and can cascade. Silently dropping loses work opaquely, and unbounded queues
+      just defer collapse while destroying latency.
+    ref: concepts.md#back-pressure-and-flow-control
+  - id: design-job-scheduler-task-queue-047
+    difficulty: advanced
+    tags:
+      - timing-wheel
+      - scale
+    question: |
+      Why might a hierarchical timing wheel be preferred over a DB index on
+      next_run_at for a system managing tens of millions of active timers?
+    options:
+      - It provides ACID transactions
+      - It is durable by default without any persistence
+      - It offers O(1) insert/expire per timer and avoids the per-tick scan/poll load a DB index incurs,
+        at the cost of a bounded horizon per wheel level
+      - It guarantees exactly-once delivery
+    answer: 2
+    explanation: |
+      Timing wheels give O(1) scheduling/expiry and avoid heavy polling, which is
+      why Kafka's purgatory uses them at scale; the trade-off is a bounded time
+      horizon per level and more code. They aren't transactional, aren't inherently
+      durable, and don't change delivery semantics.
+    ref: concepts.md#delayed-jobs-and-timers
+  - id: design-job-scheduler-task-queue-048
+    difficulty: advanced
+    tags:
+      - cancellation
+      - running-job
+    question: |
+      A job has already been leased and is executing a side effect. A user
+      requests cancellation. What is the realistic behavior?
+    options:
+      - The system can always instantly preempt and undo the side effect
+      - Cancellation is impossible once enqueued
+      - The broker rolls back the database automatically
+      - You can set a cooperative cancellation flag the worker checks, but you cannot safely preempt an
+        in-flight external side effect; guard with fencing
+    answer: 3
+    explanation: |
+      In practice cancellation is cooperative: the worker polls a cancel flag at
+      safe points; a side effect already committed to an external system can't be
+      forcibly undone by the scheduler, and fencing prevents stale continuation.
+      Neither instant preemption nor automatic broker rollback exists.
+    ref: concepts.md#failure-modes-and-how-the-design-degrades
+  - id: design-job-scheduler-task-queue-049
+    difficulty: advanced
+    tags:
+      - fifo
+      - ordering
+      - throughput
+    question: |
+      What is the primary trade-off of choosing SQS FIFO (with dedup) over a
+      standard queue for a task workload?
+    options:
+      - FIFO gives ordering per message-group and a 5-minute dedup window but at substantially lower throughput
+        than standard queues
+      - FIFO is cheaper and faster with no downsides
+      - FIFO removes the need for idempotency entirely, forever
+      - FIFO guarantees end-to-end exactly-once to external systems
+    answer: 0
+    explanation: |
+      FIFO buys per-group ordering plus a bounded (5-minute) dedup window, paying
+      with lower throughput. Its dedup window is bounded (not forever), and it
+      doesn't extend exactly-once to external side effects. So reserve FIFO for
+      when you actually need ordering, not just dedup.
+    ref: concepts.md#delivery-semantics-and-exactly-once-challenges
+  - id: design-job-scheduler-task-queue-050
+    difficulty: advanced
+    tags:
+      - in-flight-limit
+      - sqs
+    question: |
+      Your SQS-based system uses very long visibility timeouts and slow consumers.
+      You start getting OverLimit errors on receive. What happened?
+    options:
+      - You exceeded the payload size limit
+      - In-flight (received-but-not-deleted) messages hit the ~120k standard-queue limit, so no new messages
+        can be received until some are deleted
+      - The queue ran out of disk
+      - FIFO ordering was violated
+    answer: 1
+    explanation: |
+      Standard queues cap in-flight messages (~120k). Long timeouts plus slow
+      consumers keep messages in-flight, exhausting the limit and blocking new
+      receives. It's not a payload, disk, or ordering problem; shorten timeouts,
+      speed consumers, or add queues.
+    ref: concepts.md#task-queue-design-visibility-timeout-and-acknowledgements
+  - id: design-job-scheduler-task-queue-051
+    difficulty: advanced
+    tags:
+      - cell-based
+      - blast-radius
+    question: |
+      What is the main benefit and main cost of a cell-based architecture for a
+      large multi-region scheduler?
+    options:
+      - 'Benefit: lower code complexity; cost: none'
+      - 'Benefit: exactly-once delivery; cost: higher latency always'
+      - 'Benefit: contained blast radius and independent scaling/deploys per cell; cost: more operational
+        overhead and cross-cell coordination'
+      - 'Benefit: eliminates the need for idempotency; cost: more storage'
+    answer: 2
+    explanation: |
+      Cells isolate failure and poison-load so one cell can't take down others and
+      each scales/deploys independently; the price is running many cells and
+      coordinating across them. It doesn't reduce complexity to zero, provide
+      exactly-once, or remove idempotency needs.
+    ref: concepts.md#scaling-partitioning-and-sharding
+  - id: design-job-scheduler-task-queue-052
+    difficulty: advanced
+    tags:
+      - db-lock-cron
+      - trade-off
+    question: |
+      A team uses "every node tries to INSERT a unique (schedule_id,
+      scheduled_time) row; the winner enqueues" instead of ZooKeeper leader
+      election. What is the key trade-off?
+    options:
+      - It requires a separate consensus service
+      - It cannot prevent double-fire
+      - It only works for delayed jobs, not cron
+      - It avoids a dedicated coordinator and gives at-most-once ticks trivially, but concentrates coordination
+        load on the database
+    answer: 3
+    explanation: |
+      DB-lock-per-tick makes the database the coordinator: no separate ZK/etcd, and
+      uniqueness guarantees one winner per tick, but the DB becomes the coordination
+      bottleneck. It does not need a separate consensus service, it does prevent
+      double-fire, and it works fine for cron.
+    ref: concepts.md#distributed-cron-and-leader-election
+  - id: design-job-scheduler-task-queue-053
+    difficulty: advanced
+    tags:
+      - dedup-ttl
+      - window
+    question: |
+      You dedup on an idempotency key stored in Redis with a TTL. A duplicate is
+      redelivered AFTER the TTL expires. What is the risk and mitigation?
+    options:
+      - The late duplicate is reprocessed because its key aged out; mitigate by setting the TTL beyond
+        the maximum retry/redelivery horizon
+      - No risk; TTL guarantees dedup forever
+      - The message is silently lost; mitigate with FIFO
+      - The Redis instance crashes; mitigate with sharding
+    answer: 0
+    explanation: |
+      TTL bounds memory but reopens a duplicate window after expiry; if a redelivery
+      can arrive later than the TTL, it will be reprocessed. Sizing the TTL beyond
+      the max redelivery horizon closes the gap. It's not lossless-forever, not a
+      loss issue, and not a crash issue.
+    ref: concepts.md#idempotency-and-deduplication
+  - id: design-job-scheduler-task-queue-054
+    difficulty: advanced
+    tags:
+      - lease-ttl
+      - false-failover
+    question: |
+      For fast cron leader failover you shorten the lease TTL aggressively. What
+      is the downside under load?
+    options:
+      - Failover becomes slower
+      - 'More false failovers: a leader under GC/network stress fails to renew in time and is wrongly
+        replaced, causing churn and possible gaps'
+      - Leases can never expire
+      - It guarantees exactly-once execution
+    answer: 1
+    explanation: |
+      Short TTLs speed detection but make transient stalls (GC, brief network
+      blips) look like death, triggering unnecessary failovers and churn. It
+      doesn't slow failover, doesn't stop expiry, and doesn't affect delivery
+      semantics. Tune TTL to balance detection speed vs stability.
+    ref: concepts.md#failure-modes-and-how-the-design-degrades
+  - id: design-job-scheduler-task-queue-055
+    difficulty: advanced
+    tags:
+      - estimation
+      - storage
+    question: |
+      You store 1,000,000 jobs/day at ~1 KB each with 30-day retention. Roughly
+      how much storage for job records, and what does that imply?
+    options:
+      - ~3 TB; you must shard across many DBs immediately
+      - ~300 GB; you need a distributed log
+      - ~30 GB; it comfortably fits a single DB, so sharding the store is not yet justified
+      - ~3 GB; you should use in-memory only
+    answer: 2
+    explanation: |
+      1e6 * 1KB * 30 = ~30 GB, which fits a single modern DB, so you should NOT
+      prematurely shard. The 3 TB and 300 GB figures are off by orders of
+      magnitude, and in-memory-only sacrifices durability.
+    ref: concepts.md#scaling-partitioning-and-sharding
+  - id: design-job-scheduler-task-queue-056
+    difficulty: advanced
+    tags:
+      - at-most-once
+      - scenario
+    question: |
+      For which workload is at-most-once (ack before processing) actually a
+      reasonable choice?
+    options:
+      - Charging customer credit cards
+      - Sending legally-required compliance notifications
+      - Order placement in e-commerce
+      - High-volume telemetry sampling where occasionally losing a data point is acceptable and duplicates
+        would skew metrics
+    answer: 3
+    explanation: |
+      At-most-once trades possible loss for no duplicates and lower overhead, which
+      suits lossy telemetry/sampling. Payments, compliance notices, and orders
+      cannot tolerate silent loss, so they require at-least-once plus idempotency.
+    ref: concepts.md#delivery-semantics-and-exactly-once-challenges
+  - id: design-job-scheduler-task-queue-057
+    difficulty: expert
+    tags:
+      - outbox
+      - cdc
+      - exactly-once
+    question: |
+      A service must update its DB and publish an event with no dual-write
+      inconsistency, at very high throughput. Which approach best balances
+      correctness and performance?
+    options:
+      - Transactional outbox with a CDC-based relay (e.g., reading the DB log) publishing outbox rows
+        at-least-once, with idempotent consumers
+      - Publish to the broker first, then write the DB, ignoring failures
+      - Two-phase commit (XA) across the DB and the broker for every message
+      - Write to the DB and broker in parallel without coordination
+    answer: 0
+    explanation: |
+      Outbox + CDC gives atomic commit of state and event in one DB transaction,
+      then streams the log with high throughput and at-least-once publish; idempotent
+      consumers absorb duplicates. Broker-first or parallel-uncoordinated writes
+      cause dual-write inconsistency, and XA per message is a throughput/availability
+      killer.
+    ref: concepts.md#idempotency-and-deduplication
+  - id: design-job-scheduler-task-queue-058
+    difficulty: expert
+    tags:
+      - temporal
+      - determinism
+    question: |
+      Temporal achieves durable execution by replaying an event history. What
+      constraint does this impose on workflow code, and where do side effects go?
+    options:
+      - Workflow code must be non-deterministic; side effects go in the workflow body
+      - Workflow code must be deterministic (so replay reconstructs identical state); non-deterministic
+        work and external side effects belong in Activities
+      - Workflow code must avoid all loops
+      - There are no constraints; any code works
+    answer: 1
+    explanation: |
+      Because Temporal replays history to rebuild state, workflow code must be
+      deterministic; anything non-deterministic or with external side effects (I/O,
+      random, time-dependent calls) must be an Activity. Non-determinism in the
+      workflow body breaks replay; loops are fine if deterministic.
+    ref: concepts.md#comparisons-of-celery-sidekiq-quartz-temporal-and-cloud-queues
+  - id: design-job-scheduler-task-queue-059
+    difficulty: expert
+    tags:
+      - clock-skew
+      - scheduling
+    question: |
+      Across a globally distributed scheduler fleet, clocks disagree by tens of
+      milliseconds. Which practice is MOST important to keep cron correct?
+    options:
+      - Order leadership decisions purely by wall-clock timestamps
+      - Ignore skew; milliseconds never matter
+      - Bucket scheduled time into ticks for deterministic execution ids and rely on leases/consensus
+        (not raw wall-clock ordering) for coordination, with NTP to bound skew
+      - Use each node's local time as the global truth
+    answer: 2
+    explanation: |
+      Never order distributed decisions by unsynchronized wall clocks. Bucketing
+      time yields consistent execution ids despite skew, and coordination should
+      rest on leases/consensus while NTP bounds drift. Wall-clock ordering and
+      trusting local clocks are exactly the failure modes to avoid.
+    ref: concepts.md#deduplicating-a-job-so-it-runs-once-across-nodes
+  - id: design-job-scheduler-task-queue-060
+    difficulty: expert
+    tags:
+      - scenario
+      - judgment
+      - comprehensive
+    question: |
+      Constraints: 50k jobs/sec, sub-100 ms dispatch latency, duplicates tolerable
+      if effects are idempotent, jobs are short (avg 20 ms), team has strong ops.
+      Which end-to-end design is most appropriate?
+    options:
+      - Single Postgres DB-as-queue with 5-minute polling and one leader
+      - Synchronous RPC from producers directly to workers with no queue
+      - A single-node in-memory queue with at-most-once semantics
+      - Partitioned low-latency broker (e.g., Redis Streams/Kafka) with pull-based worker pools, visibility
+        leases, idempotent handlers, autoscaling on oldest-message age
+    answer: 3
+    explanation: |
+      At 50k/sec with tight latency, you need a partitioned low-latency broker,
+      pull-based pools for back-pressure, leases for at-least-once, idempotent
+      handlers for the tolerable duplicates, and backlog-age autoscaling. A single
+      Postgres with 5-min polling can't hit the rate/latency, synchronous RPC loses
+      buffering/resilience, and single-node in-memory at-most-once loses work and
+      can't scale.
+    ref: concepts.md#trade-offs-and-when-to-use-what
+  - id: design-job-scheduler-task-queue-061
+    difficulty: expert
+    tags:
+      - scenario
+      - judgment
+      - durability
+    question: |
+      Constraints: 200 nightly financial-close jobs, each must run exactly once
+      per day with strong audit trail, latency of minutes is fine, correctness is
+      paramount. Which design is best?
+    options:
+      - A relational store with single-leader scheduling, tick-dedup unique constraints per (job, day),
+        idempotent job bodies, and a DLQ, prioritizing correctness over throughput
+      - A large Kafka cluster with at-most-once consumers
+      - A Redis-only pipeline with no persistence for speed
+      - Fan out each job to every node and let them race
+    answer: 0
+    explanation: |
+      Low volume + paramount correctness + audit favors a transactional relational
+      store, single leader (simple and sufficient at this scale), tick-dedup for
+      exactly-once ticks, idempotent bodies, and a DLQ. Kafka at-most-once risks
+      loss, non-persistent Redis risks losing financial jobs, and racing all nodes
+      is the double-fire anti-pattern.
+    ref: concepts.md#trade-offs-and-when-to-use-what
+  - id: design-job-scheduler-task-queue-062
+    difficulty: expert
+    tags:
+      - primary-trade-off
+      - single-leader
+    question: |
+      What is the PRIMARY trade-off of a single-leader scheduler versus a
+      sharded/partitioned scheduler?
+    options:
+      - Single-leader is harder to make correct
+      - Single-leader is simpler and trivially correct for dedup but caps throughput and has a failover
+        gap; sharding scales but adds coordination and rebalance double-fire risk
+      - Sharding is always strictly better on every axis
+      - They have identical properties
+    answer: 1
+    explanation: |
+      Single-leader trades scale for simplicity/correctness (one enqueuer, easy
+      dedup) but bottlenecks and has an election-gap; sharding removes the
+      bottleneck but needs coordination and risks rebalance double-fire. Single-leader
+      is actually easier to make correct, and sharding is not universally better.
+    ref: concepts.md#distributed-cron-and-leader-election
+  - id: design-job-scheduler-task-queue-063
+    difficulty: expert
+    tags:
+      - failure-tolerance
+      - judgment
+    question: |
+      Your design uses at-least-once delivery, visibility-timeout redelivery,
+      bounded retries with a DLQ, and idempotent consumers. Which failure does
+      this design specifically NOT protect against on its own?
+    options:
+      - A worker crashing mid-task
+      - A poison message looping forever
+      - Silent data corruption inside a downstream service that returns success (a logic bug), which redelivery/idempotency
+        cannot detect
+      - A transient downstream timeout
+    answer: 2
+    explanation: |
+      Redelivery handles crashes, DLQ handles poison messages, backoff handles
+      transient timeouts, and idempotency handles duplicates. None of these detect
+      a downstream that corrupts data yet reports success, that's a correctness/bug
+      problem requiring validation, reconciliation, or auditing, not queue
+      machinery.
+    ref: concepts.md#failure-modes-and-how-the-design-degrades
+  - id: design-job-scheduler-task-queue-064
+    difficulty: expert
+    tags:
+      - saga
+      - compensation
+      - orchestration
+    question: |
+      A multi-step job (reserve inventory, charge card, ship) must roll back
+      earlier steps if a later step fails. Which pattern and property matter most?
+    options:
+      - A single ACID transaction across all three services
+      - At-most-once delivery to avoid duplicate charges
+      - Firing all three steps in parallel
+      - A saga with compensating actions, where each compensation must itself be idempotent because it
+        may be retried
+    answer: 3
+    explanation: |
+      Across independent services you can't hold one ACID transaction, so you use a
+      saga with compensations; crucially those compensations run under at-least-once
+      too and must be idempotent. At-most-once risks losing steps, and parallel
+      firing ignores the required ordering/dependency.
+    ref: concepts.md#comparisons-of-celery-sidekiq-quartz-temporal-and-cloud-queues
+  - id: design-job-scheduler-task-queue-065
+    difficulty: expert
+    tags:
+      - degradation
+      - load-shedding
+    question: |
+      Under sustained overload, what is a sound graceful-degradation ladder for a
+      job system that must not lose durable work?
+    options:
+      - Autoscale workers, then shed/defer low-priority jobs, then rate-limit/429 new submissions, while
+        continuing durable store writes so nothing enqueued is lost
+      - Immediately drop all incoming jobs to protect the workers
+      - Disable the datastore to reduce load
+      - Turn off retries and idempotency to save CPU
+    answer: 0
+    explanation: |
+      The ladder preserves durability first: scale out, then shed low-priority
+      work, then throttle intake, all while still durably persisting accepted jobs.
+      Dropping everything or disabling the datastore loses work, and turning off
+      retries/idempotency undermines correctness precisely when it's needed.
+    ref: concepts.md#failure-modes-and-how-the-design-degrades
+  - id: design-job-scheduler-task-queue-066
+    difficulty: expert
+    tags:
+      - primary-trade-off
+      - kafka-vs-db
+    question: |
+      What is the PRIMARY reason a distributed log (Kafka) is awkward as the
+      backing store for a scheduler that needs frequent per-job cancellation and
+      priority reordering?
+    options:
+      - Kafka has too little throughput
+      - A log is append-only and consumed by offset, so random-access operations like cancel-this-one-job
+        or reorder-by-priority don't map cleanly onto it
+      - Kafka cannot store more than 1 GB
+      - Kafka guarantees exactly-once to external systems, which conflicts with cancellation
+    answer: 1
+    explanation: |
+      Kafka excels at high-throughput sequential consumption and replay but is not
+      a random-access datastore; cancelling or reprioritizing an individual message
+      mid-log is unnatural. Its throughput is high (not the issue), it stores far
+      more than 1 GB, and it does not provide external exactly-once.
+    ref: concepts.md#storage-and-datastore-choices
+  - id: design-job-scheduler-task-queue-067
+    difficulty: intermediate
+    tags:
+      - heartbeat
+      - long-jobs
+    question: |
+      What is the purpose of a worker heartbeating (periodically extending its
+      lease) on a long-running task?
+    options:
+      - To speed up the task
+      - To increase the message priority
+      - To keep the message invisible so a healthy-but-slow worker isn't preempted by lease expiry, while
+        still allowing recovery if it truly dies
+      - To compress the payload over time
+    answer: 2
+    explanation: |
+      Heartbeats extend the visibility lease only while the worker is actively
+      alive, preventing premature redelivery of long tasks yet allowing recovery
+      when heartbeats stop (real crash). It doesn't speed up work, change priority,
+      or compress anything.
+    ref: concepts.md#task-queue-design-visibility-timeout-and-acknowledgements
+  - id: design-job-scheduler-task-queue-068
+    difficulty: intermediate
+    tags:
+      - natural-idempotency
+      - data-model
+    question: |
+      Which operation is naturally idempotent (safe to run twice) without any
+      dedup store?
+    options:
+      - balance = balance + 10
+      - INSERT a new payment row on every call
+      - counter++
+      - SET status = 'SHIPPED' WHERE order_id = 42
+    answer: 3
+    explanation: |
+      An absolute SET/upsert (status = 'SHIPPED') yields the same result no matter
+      how many times it runs, so it's naturally idempotent. Increment-style
+      operations (balance + 10, counter++) and blind INSERTs accumulate effects on
+      repeat and are not idempotent.
+    ref: concepts.md#idempotency-and-deduplication
+  - id: design-job-scheduler-task-queue-069
+    difficulty: intermediate
+    tags:
+      - bounded-queue
+      - back-pressure
+    question: |
+      Why is an unbounded in-memory queue a dangerous default under sustained
+      overload?
+    options:
+      - 'It merely defers collapse: the backlog grows until memory is exhausted and latency explodes,
+        instead of applying back-pressure early'
+      - It guarantees message loss
+      - It automatically shards
+      - It forces exactly-once semantics
+    answer: 0
+    explanation: |
+      Unbounded queues feel resilient but just postpone failure, growing until OOM
+      while latency balloons; a bounded queue is itself the back-pressure signal.
+      It doesn't guarantee loss up front, doesn't shard, and has nothing to do with
+      exactly-once.
+    ref: concepts.md#back-pressure-and-flow-control
+  - id: design-job-scheduler-task-queue-070
+    difficulty: intermediate
+    tags:
+      - quartz
+      - misfire
+    question: |
+      Quartz in clustered mode ensures a scheduled job fires once across the
+      cluster primarily by:
+    options:
+      - Using UDP multicast to elect a leader every second
+      - Coordinating through its shared JDBC job store with row locking, so only one node acquires and
+        fires a given trigger
+      - Running only on a single node ever
+      - Broadcasting the job to all nodes and deduping afterward
+    answer: 1
+    explanation: |
+      Clustered Quartz uses its shared JDBC job store with locking so only one
+      node fires a given trigger, and provides misfire instructions for missed
+      runs. It doesn't rely on UDP multicast, isn't limited to one node, and
+      doesn't broadcast-then-dedup.
+    ref: concepts.md#comparisons-of-celery-sidekiq-quartz-temporal-and-cloud-queues
+  - id: design-job-scheduler-task-queue-071
+    difficulty: intermediate
+    tags:
+      - priority
+      - fairness
+      - edf
+    question: |
+      For jobs with hard completion deadlines (SLAs), which scheduling discipline
+      is most directly appropriate?
+    options:
+      - Random selection
+      - Strict LIFO
+      - Earliest-deadline-first (order by must-finish-by time)
+      - Alphabetical by job name
+    answer: 2
+    explanation: |
+      Earliest-deadline-first orders work by its deadline, directly serving SLA
+      completion targets. Random, LIFO, and alphabetical orderings ignore deadlines
+      and will miss SLAs under load.
+    ref: concepts.md#priority-fairness-and-multi-tenancy
+  - id: design-job-scheduler-task-queue-072
+    difficulty: advanced
+    tags:
+      - transactional-outbox
+      - at-least-once
+    question: |
+      A transactional outbox gives you exactly-once WHERE and at-least-once WHERE?
+    options:
+      - Exactly-once to the broker; at-least-once to the DB
+      - Exactly-once everywhere
+      - At-most-once to both
+      - Exactly-once to the DB (atomic commit of effect + outbox row); at-least-once to the broker (relay
+        may re-publish)
+    answer: 3
+    explanation: |
+      The effect and the outbox row commit atomically in one DB transaction
+      (exactly-once to the DB), but the relay that reads and publishes the outbox
+      row can retry and re-publish, so it's at-least-once to the broker, hence
+      consumers still need idempotency. It is not exactly-once end-to-end.
+    ref: concepts.md#idempotency-and-deduplication
+  - id: design-job-scheduler-task-queue-073
+    difficulty: advanced
+    tags:
+      - scenario
+      - delayed-jobs
+      - durability
+    question: |
+      You must support up to 90-day delayed jobs, millions active, and losing a
+      delayed job is unacceptable. Which storage approach fits best?
+    options:
+      - A durable datastore (e.g., relational or DynamoDB) indexed by run_at with a scheduler that polls
+        due rows, since long horizons and no-loss demand persistence
+      - Redis sorted set with no persistence, for speed
+      - In-process timers on a single worker
+      - SQS delay queues with a 90-day delay
+    answer: 0
+    explanation: |
+      Long horizons plus a no-loss requirement demand a durable, indexed store that
+      survives restarts and scales to millions of rows. Non-persistent Redis and
+      in-process timers lose jobs on crash, and SQS delay queues max out at 15
+      minutes, nowhere near 90 days.
+    ref: concepts.md#delayed-jobs-and-timers
+  - id: design-job-scheduler-task-queue-074
+    difficulty: advanced
+    tags:
+      - election-gap
+      - catch-up
+    question: |
+      Your cron leader dies at 01:59:59 and the critical 02:00 daily job normally
+      fires at 02:00. Re-election takes 20 seconds. What ensures the job still
+      runs, and once?
+    options:
+      - Nothing can be done; the run is lost
+      - On becoming leader, the new node performs missed-run catch-up by comparing next_run_at to now,
+        and the tick-dedup constraint ensures it enqueues exactly once
+      - Both the old and new leader enqueue, guaranteeing it runs
+      - The job is skipped by default and that's always correct
+    answer: 1
+    explanation: |
+      A durable next_run_at lets the new leader detect the missed 02:00 tick and
+      fire it late, while the tick-dedup unique constraint guarantees a single
+      enqueue even if timing overlaps. The run isn't inherently lost, double-enqueue
+      isn't the safeguard, and silently skipping a critical job is wrong.
+    ref: concepts.md#missed-run-handling-and-catch-up-semantics
+  - id: design-job-scheduler-task-queue-075
+    difficulty: expert
+    tags:
+      - primary-trade-off
+      - exactly-once
+      - judgment
+    question: |
+      An interviewer asks you to "guarantee exactly-once execution" for a
+      payment-capture job. What is the strongest honest answer?
+    options:
+      - Enable exactly-once mode on the queue and you're done
+      - Use at-most-once so a payment is never captured twice
+      - Exactly-once delivery is unachievable across crashes, so I'll use at-least-once delivery plus
+        an idempotency key checked atomically with the capture (or a transactional outbox), making the
+        EFFECT exactly-once
+      - Use two-phase commit across the queue and the payment processor for every message
+    answer: 2
+    explanation: |
+      The senior answer names the impossibility of exactly-once delivery and pivots
+      to exactly-once effect via idempotency/outbox with atomic key-plus-capture.
+      A queue 'exactly-once mode' doesn't cover external side effects, at-most-once
+      risks losing a payment, and per-message 2PC across an external processor is
+      impractical and fragile.
+    ref: concepts.md#trade-offs-and-when-to-use-what
+  - id: design-job-scheduler-task-queue-076
+    difficulty: advanced
+    tags:
+      - consistency-latency
+      - table
+    question: |
+      Comparing a relational DB-as-queue vs Redis vs Kafka as the task substrate,
+      which mapping of "dominant strength" is correct?
+    options:
+      - RDBMS -> highest raw throughput; Redis -> strongest transactions; Kafka -> lowest latency
+      - All three are identical in every property
+      - Redis -> best durability; Kafka -> best random-access cancel; RDBMS -> best replay
+      - RDBMS -> transactional dedup/correctness; Redis -> lowest latency; Kafka -> highest write throughput
+        and replay
+    answer: 3
+    explanation: |
+      RDBMS wins on transactional dedup/correctness (SKIP LOCKED + constraints),
+      Redis on latency, Kafka on write throughput and replay. The other options
+      swap these strengths incorrectly (e.g., Redis is not the durability champion,
+      Kafka is not good at random-access cancel).
+    ref: concepts.md#storage-and-datastore-choices
+  - id: design-job-scheduler-task-queue-077
+    difficulty: beginner
+    tags:
+      - components
+      - ingest
+    question: |
+      Where is an idempotency key typically first applied in the pipeline?
+    options:
+      - At the ingest/API layer when the job is submitted and persisted
+      - Only after the job has completed
+      - Inside the load balancer
+      - Never; keys are optional decorations
+    answer: 0
+    explanation: |
+      The idempotency key is assigned/checked at ingest so duplicate submissions
+      and later redeliveries can be recognized against the persisted record. It
+      isn't applied post-completion, isn't a load-balancer function, and is a core
+      correctness tool, not decoration.
+    ref: concepts.md#core-architecture-and-components
+  - id: design-job-scheduler-task-queue-078
+    difficulty: expert
+    tags:
+      - scenario
+      - judgment
+      - tool-selection
+    question: |
+      A platform team must serve three needs: (a) fire-and-forget email tasks at
+      high volume, (b) reliable daily recurring reports, (c) week-long approval
+      workflows with compensations. What is the most appropriate architecture?
+    options:
+      - Force all three into one Kafka topic with at-most-once consumers
+      - 'Compose specialized tools: a task queue (e.g., SQS/Sidekiq) for emails, a distributed cron/scheduler
+        for daily reports, and a workflow engine (Temporal) for the long approval sagas'
+      - Use Temporal for everything, including the fire-and-forget emails
+      - Use cron for everything, including the emails and workflows
+    answer: 1
+    explanation: |
+      Each need maps to a different family: dispatch -> task queue, recurring ->
+      scheduler, long stateful sagas -> workflow engine; composing them fits each
+      workload's trade-offs. Forcing all into one Kafka topic (esp. at-most-once)
+      loses reliability, Temporal-for-everything adds needless weight to trivial
+      emails, and cron-for-everything can't express workflows or high-volume
+      dispatch well.
+    ref: concepts.md#trade-offs-and-when-to-use-what

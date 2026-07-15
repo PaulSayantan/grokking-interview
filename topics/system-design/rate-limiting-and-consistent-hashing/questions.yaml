@@ -1,0 +1,1438 @@
+topic: "Rate Limiting and Consistent Hashing"
+domain: system-design
+topic_slug: rate-limiting-and-consistent-hashing
+version: 1
+questions:
+  - id: rate-limiting-and-consistent-hashing-001
+    difficulty: beginner
+    tags: [rate-limiting, basics, purpose]
+    question: |
+      What is the PRIMARY purpose of a rate limiter in a large-scale system?
+    options:
+      - "To cap how many requests a client may make in a time window, protecting the system from overload and abuse"
+      - "To encrypt requests in transit between the client and the server"
+      - "To guarantee that every request is processed in strict FIFO order"
+      - "To replace the need for horizontal scaling of the service"
+    answer: 0
+    explanation: |
+      A rate limiter bounds request volume per client so the system stays within its
+      capacity-planned envelope and resists abuse/DoS. Encryption is TLS's job (1), FIFO
+      ordering is unrelated (2), and a limiter sheds load but does not remove the need to
+      scale for legitimate traffic (3).
+    ref: "concepts.md#why-rate-limiting-exists"
+  - id: rate-limiting-and-consistent-hashing-002
+    difficulty: beginner
+    tags: [rate-limiting, http, status-codes]
+    question: |
+      Which HTTP status code is conventionally returned when a client exceeds its rate limit?
+    options:
+      - "403 Forbidden"
+      - "429 Too Many Requests"
+      - "500 Internal Server Error"
+      - "503 Service Unavailable"
+    answer: 1
+    explanation: |
+      429 Too Many Requests is the standard, usually accompanied by a Retry-After header.
+      403 means authorization failure (0), 500 is a server bug (2), and 503 signals the
+      whole service is unavailable rather than a per-client limit (3).
+    ref: "concepts.md#why-rate-limiting-exists"
+  - id: rate-limiting-and-consistent-hashing-003
+    difficulty: beginner
+    tags: [token-bucket, algorithms]
+    question: |
+      In the token bucket algorithm, what determines the maximum instantaneous burst a
+      client can send?
+    options:
+      - "The refill rate r"
+      - "The number of gateway nodes"
+      - "The bucket capacity B (maximum number of tokens)"
+      - "The TTL on the Redis key"
+    answer: 2
+    explanation: |
+      The bucket capacity B is the most tokens that can accumulate, so an idle client can
+      fire up to B requests at once. The refill rate r governs the sustained/steady-state
+      rate, not the burst (0). Node count (1) and TTL (3) are unrelated to burst size.
+    ref: "concepts.md#token-bucket"
+  - id: rate-limiting-and-consistent-hashing-004
+    difficulty: beginner
+    tags: [leaky-bucket, algorithms]
+    question: |
+      What is the defining behavior of the leaky bucket algorithm?
+    options:
+      - "It allows large bursts to pass through unchanged"
+      - "It resets its counter at fixed calendar boundaries"
+      - "It stores one timestamp per request"
+      - "It produces a smooth, constant output rate regardless of the input burstiness"
+    answer: 3
+    explanation: |
+      Leaky bucket drains at a fixed rate, smoothing bursty input into a constant output —
+      ideal for traffic shaping. Passing bursts unchanged is the opposite (0). Fixed
+      boundary resets describe fixed-window (1), and per-request timestamps describe the
+      sliding window log (2).
+    ref: "concepts.md#leaky-bucket"
+  - id: rate-limiting-and-consistent-hashing-005
+    difficulty: beginner
+    tags: [fixed-window, algorithms]
+    question: |
+      What is the well-known weakness of the fixed window counter algorithm?
+    options:
+      - "It can allow up to twice the intended rate in a short span straddling a window boundary"
+      - "It requires O(requests) memory per key"
+      - "It cannot be implemented in Redis"
+      - "It always produces a perfectly smooth output rate"
+    answer: 0
+    explanation: |
+      Because the counter resets abruptly, a client can send L requests just before the
+      boundary and L just after, ~2L in a short span — the classic 2x boundary burst.
+      Fixed window uses O(1) memory (1), is trivially done with INCR/EXPIRE in Redis (2),
+      and does not smooth output (3).
+    ref: "concepts.md#fixed-window-counter"
+  - id: rate-limiting-and-consistent-hashing-006
+    difficulty: beginner
+    tags: [sliding-window-log, algorithms]
+    question: |
+      Why is the sliding window log considered the most accurate rate-limiting algorithm?
+    options:
+      - "It approximates the count using two counters and an overlap fraction"
+      - "It keeps a timestamp for every request and counts exactly those within the rolling window"
+      - "It never rejects any request"
+      - "It relies on the client to self-report its rate"
+    answer: 1
+    explanation: |
+      Storing every request timestamp and counting those inside the rolling window gives
+      an exact count with no boundary artifact. The two-counter overlap estimate describes
+      the sliding window counter (0). It does reject when over limit (2), and it never
+      trusts client self-reporting (3).
+    ref: "concepts.md#sliding-window-log"
+  - id: rate-limiting-and-consistent-hashing-007
+    difficulty: beginner
+    tags: [consistent-hashing, basics]
+    question: |
+      What core problem does consistent hashing solve compared to hash(key) mod N?
+    options:
+      - "It makes hashing cryptographically secure"
+      - "It removes the need to hash keys at all"
+      - "It minimizes how many keys must be remapped when a node is added or removed"
+      - "It guarantees perfectly equal load with no additional techniques"
+    answer: 2
+    explanation: |
+      With mod-N almost all keys remap on a resize; consistent hashing moves only ~K/N
+      keys (one arc). It is not about cryptographic security (0), still requires hashing
+      (1), and needs virtual nodes to approach even load (3).
+    ref: "concepts.md#consistent-hashing"
+  - id: rate-limiting-and-consistent-hashing-008
+    difficulty: beginner
+    tags: [virtual-nodes, consistent-hashing]
+    question: |
+      What is the main reason for placing each physical node at many positions (virtual
+      nodes) on a consistent-hash ring?
+    options:
+      - "To make lookups O(1) instead of O(log N)"
+      - "To encrypt the keys before storing them"
+      - "To eliminate the need for replication"
+      - "To spread each node's ownership across many small arcs so load is more balanced and redistributes smoothly on failure"
+    answer: 3
+    explanation: |
+      Many small arcs per node smooth out load imbalance and, on node failure, spread that
+      node's keys across many neighbors rather than dumping them on one. Vnodes do not make
+      lookups O(1) (0), have nothing to do with encryption (1), and are orthogonal to
+      replication (2).
+    ref: "concepts.md#virtual-nodes"
+  - id: rate-limiting-and-consistent-hashing-009
+    difficulty: beginner
+    tags: [distributed, redis]
+    question: |
+      Why do stateless app instances typically share a central store like Redis for rate
+      limiting instead of each keeping its own local counter?
+    options:
+      - "So the whole fleet agrees on one global count; independent local counters would multiply the effective limit by the number of nodes"
+      - "Redis is faster than local memory"
+      - "Because local memory cannot store integers"
+      - "To avoid ever returning a 429"
+    answer: 0
+    explanation: |
+      Independent per-node counters make a global 1000/s limit become 1000*N/s. A shared
+      store provides one source of truth. Local memory is faster than Redis, not slower (1),
+      certainly can store integers (2), and sharing state does not avoid 429s (3).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-010
+    difficulty: beginner
+    tags: [enforcement, gateway]
+    question: |
+      Which is the most common single place to enforce uniform per-API-key rate limits?
+    options:
+      - "Inside the database engine"
+      - "The API gateway or load balancer"
+      - "The client-side SDK only"
+      - "The operating system kernel"
+    answer: 1
+    explanation: |
+      The API gateway is the standard centralized enforcement point: policy applied
+      uniformly, load shed before hitting business logic. Databases don't enforce API
+      limits (0), client-only enforcement is untrusted (2), and the kernel is not where
+      request-level API limits live (3).
+    ref: "concepts.md#where-to-enforce-rate-limits"
+  - id: rate-limiting-and-consistent-hashing-011
+    difficulty: beginner
+    tags: [rendezvous-hashing, basics]
+    question: |
+      In rendezvous (highest random weight) hashing, how is the owner of a key chosen?
+    options:
+      - "The first node clockwise on a ring from the key's position"
+      - "The node with the lowest IP address"
+      - "The node with the highest hash(key, node) score among all nodes"
+      - "A randomly selected node each request"
+    answer: 2
+    explanation: |
+      Rendezvous computes hash(key, node) for every node and picks the maximum score;
+      sorting the scores yields a ranked replica list. The clockwise-successor rule is
+      consistent hashing (0). It is deterministic, not based on IP ordering (1) or random
+      per request (3).
+    ref: "concepts.md#rendezvous-hashing"
+  - id: rate-limiting-and-consistent-hashing-012
+    difficulty: beginner
+    tags: [rate-limiting, headers]
+    question: |
+      What should a well-behaved client do when it receives a 429 with a Retry-After header?
+    options:
+      - "Immediately retry in a tight loop until it succeeds"
+      - "Open more parallel connections to bypass the limit"
+      - "Switch to a different HTTP method"
+      - "Wait and retry using backoff (ideally exponential with jitter)"
+    answer: 3
+    explanation: |
+      The correct behavior is to back off, ideally exponential backoff with jitter, to
+      avoid retry storms. Tight-loop retries (0) and opening more connections (1) worsen
+      the overload, and changing HTTP method (2) does not bypass identity-based limits.
+    ref: "concepts.md#why-rate-limiting-exists"
+  - id: rate-limiting-and-consistent-hashing-013
+    difficulty: beginner
+    tags: [sliding-window-counter, algorithms]
+    question: |
+      The sliding window counter estimates the current rate using which quantities?
+    options:
+      - "The current window count plus the previous window count weighted by its overlap with the sliding window"
+      - "A timestamp for every request in the window"
+      - "Only the current window count"
+      - "The average of all historical windows ever seen"
+    answer: 0
+    explanation: |
+      It combines the current window count with the previous window's count scaled by the
+      overlap fraction, giving O(1) memory and near-exact accuracy. Per-request timestamps
+      are the log (1), current-only ignores smoothing (2), and it does not average all
+      history (3).
+    ref: "concepts.md#sliding-window-counter"
+  - id: rate-limiting-and-consistent-hashing-014
+    difficulty: intermediate
+    tags: [token-bucket, leaky-bucket, trade-offs]
+    question: |
+      A payment gateway downstream can only accept a strictly constant request rate and
+      breaks if it receives bursts. Between token bucket and leaky bucket, which fits best
+      and why?
+    options:
+      - "Token bucket, because it allows bursts up to B which the payment gateway can absorb"
+      - "Leaky bucket, because it enforces a smooth constant output rate and removes bursts"
+      - "Fixed window, because it resets cleanly at each minute"
+      - "Sliding window log, because it is the most accurate"
+    answer: 1
+    explanation: |
+      Leaky bucket's defining feature is a constant, smoothed output rate — exactly what a
+      burst-intolerant downstream needs. Token bucket deliberately permits bursts (0), the
+      wrong property here. Fixed window (2) and sliding window log (3) address accuracy and
+      windows, not output smoothing.
+    ref: "concepts.md#leaky-bucket"
+  - id: rate-limiting-and-consistent-hashing-015
+    difficulty: intermediate
+    tags: [token-bucket, implementation]
+    question: |
+      Why does a production token bucket store (tokens, last_refill_timestamp) and compute
+      refills lazily on each request rather than running a background thread that adds
+      tokens?
+    options:
+      - "Background threads are not allowed in Redis"
+      - "Lazy refill makes the algorithm exact like a sliding window log"
+      - "Lazy computation is O(1) per request and avoids running a timer per key across potentially millions of keys"
+      - "It is required to allow bursts"
+    answer: 2
+    explanation: |
+      Computing tokens = min(B, tokens + elapsed*r) on access is O(1) and avoids a
+      per-key timer that would not scale to millions of keys. It is not a Redis limitation
+      (0), does not change accuracy semantics (1), and burst behavior comes from capacity B
+      not from lazy refill (3).
+    ref: "concepts.md#token-bucket"
+  - id: rate-limiting-and-consistent-hashing-016
+    difficulty: intermediate
+    tags: [sliding-window-log, cost, trade-offs]
+    question: |
+      What is the primary scalability drawback of the sliding window log at high request
+      volume?
+    options:
+      - "It allows 2x bursts at window boundaries"
+      - "It cannot enforce per-request weights"
+      - "It requires a central coordinator to function"
+      - "Its memory and CPU per key grow with the number of requests in the window, which is worst exactly during traffic spikes"
+    answer: 3
+    explanation: |
+      Storing one entry per request means memory/CPU scale with in-window volume, and the
+      purge/count work is heaviest during spikes. The 2x burst is the fixed window's flaw
+      (0); the log naturally supports weights (1) and needs no special coordinator beyond
+      its store (2).
+    ref: "concepts.md#sliding-window-log"
+  - id: rate-limiting-and-consistent-hashing-017
+    difficulty: intermediate
+    tags: [sliding-window-counter, trade-offs, accuracy]
+    question: |
+      Cloudflare found the sliding window counter to be accurate within roughly 0.003% for
+      real traffic. What assumption underlies that estimate and when could it be slightly
+      off?
+    options:
+      - "It assumes requests are uniformly distributed within the previous window; extreme spikiness inside that window can skew the linear-overlap estimate"
+      - "It assumes the clock is perfectly synchronized; NTP drift breaks it entirely"
+      - "It assumes only one node exists; multiple nodes make it exact"
+      - "It assumes keys never expire; TTLs make it inaccurate"
+    answer: 0
+    explanation: |
+      The linear overlap weighting assumes uniform distribution across the previous
+      window; if all traffic clustered at one edge of that window, the estimate can be
+      slightly high or low. Clock sync (1), node count (2), and TTLs (3) are not the source
+      of this approximation error.
+    ref: "concepts.md#sliding-window-counter"
+  - id: rate-limiting-and-consistent-hashing-018
+    difficulty: intermediate
+    tags: [distributed, redis, atomicity]
+    question: |
+      Why is a plain GET-then-compute-then-SET sequence unsafe for a distributed token
+      bucket in Redis, and what is the standard fix?
+    options:
+      - "GET is slower than SET; batch them with pipelining"
+      - "Concurrent instances can interleave read-modify-write and lose updates; run the whole check-and-update as an atomic Lua script"
+      - "Redis cannot store floats; use integers only"
+      - "It leaks memory; add EXPIRE to fix it"
+    answer: 1
+    explanation: |
+      Two instances doing GET then SET can both read the same token count and both allow a
+      request, overcounting — a lost-update race. Executing the read-modify-write atomically
+      as a server-side Lua script fixes it. Pipelining (0) doesn't provide atomicity, float
+      storage (2) is not the issue, and EXPIRE addresses cleanup not races (3).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-019
+    difficulty: intermediate
+    tags: [distributed, failure-modes, availability]
+    question: |
+      Your central Redis rate-limit store becomes unreachable. For a user-facing API,
+      which failure mode is most commonly chosen and why?
+    options:
+      - "Fail closed: reject all requests to guarantee the limit is never exceeded"
+      - "Crash the gateway so a healthy one takes over"
+      - "Fail open (with local fallback): allow requests to preserve availability, accepting temporary loss of limit protection"
+      - "Block until Redis returns, however long that takes"
+    answer: 2
+    explanation: |
+      User-facing systems usually fail open with a local fallback so an outage of the
+      limiter store doesn't take down the whole API; the risk is temporary over-admission.
+      Fail-closed turns a store blip into a full outage (0), crashing worsens availability
+      (1), and blocking indefinitely stalls all traffic (3).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-020
+    difficulty: intermediate
+    tags: [distributed, local-sync, trade-offs]
+    question: |
+      A gateway fleet handles very high QPS and cannot afford a network round trip per
+      request, but still wants a reasonably accurate global limit. Which design fits best?
+    options:
+      - "Central Redis lookup on every single request for exactness"
+      - "No limiting at all, relying on autoscaling"
+      - "A sliding window log stored on each node independently with no sharing"
+      - "Local in-memory counters that make decisions instantly, with asynchronous periodic sync/aggregation to converge on the global limit"
+    answer: 3
+    explanation: |
+      Local decisions (microseconds, no hot-path network hop) plus async aggregation gives
+      near-real-time global convergence — the standard high-scale pattern. Per-request
+      central lookups add latency the scenario forbids (0), no limiting abandons the goal
+      (1), and independent per-node logs give N-fold drift (2).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-021
+    difficulty: intermediate
+    tags: [enforcement, edge, defense-in-depth]
+    question: |
+      Why is the edge/CDN the cheapest place to drop abusive DoS traffic, and what is its
+      limitation?
+    options:
+      - "It drops traffic closest to the source before expensive downstream work, but its limits are coarse (e.g., IP-based) and lack business context like user tier"
+      - "It has full business context but is slow"
+      - "It can enforce per-endpoint weighted costs but cannot see IPs"
+      - "It is the only layer where limits can be enforced at all"
+    answer: 0
+    explanation: |
+      Dropping at the edge avoids paying for downstream processing, but the edge only knows
+      coarse signals (IP, path) and not user tier or per-request cost. It does not have full
+      business context (1), it sees IPs but not fine business cost (2), and it is one of
+      several possible layers, not the only one (3).
+    ref: "concepts.md#where-to-enforce-rate-limits"
+  - id: rate-limiting-and-consistent-hashing-022
+    difficulty: intermediate
+    tags: [consistent-hashing, mod-n, quant]
+    question: |
+      A cache uses hash(key) mod N with N=10 nodes. You add one node (N=11). Approximately
+      what fraction of keys get remapped to a different node?
+    options:
+      - "About 1/11 (~9%)"
+      - "About 10/11 (~91%)"
+      - "About 1/10 (~10%)"
+      - "None; mod-N is stable under resize"
+    answer: 1
+    explanation: |
+      With mod-N, changing the divisor reshuffles almost everything: only keys whose value
+      mod 11 equals their value mod 10 stay, roughly 1/11, so about 10/11 (~91%) move.
+      That is exactly why consistent hashing (which would move ~1/11) is preferred. Options
+      0 (~9%) and 2 (~10%) describe consistent hashing's much smaller movement, and mod-N is
+      definitely not stable (3).
+    ref: "concepts.md#consistent-hashing"
+  - id: rate-limiting-and-consistent-hashing-023
+    difficulty: intermediate
+    tags: [consistent-hashing, failure-modes]
+    question: |
+      On a NAIVE consistent-hash ring (one point per physical node), what happens to the
+      keys of a node that suddenly fails?
+    options:
+      - "They are evenly redistributed across all remaining nodes"
+      - "They are lost permanently"
+      - "They all move to the single next node clockwise, potentially overloading it"
+      - "They stay assigned to the dead node until it recovers"
+    answer: 2
+    explanation: |
+      Without virtual nodes a failed node's entire arc is absorbed by its single clockwise
+      successor, creating a hotspot — the motivation for vnodes. Even redistribution needs
+      vnodes (0), the keys are re-owned not lost (1), and a dead node cannot keep serving
+      (3).
+    ref: "concepts.md#consistent-hashing"
+  - id: rate-limiting-and-consistent-hashing-024
+    difficulty: intermediate
+    tags: [virtual-nodes, trade-offs]
+    question: |
+      What is the main downside of using a very large number of virtual nodes per physical
+      node?
+    options:
+      - "It makes load dramatically more uneven"
+      - "It prevents capacity-based weighting"
+      - "It removes the ability to add nodes"
+      - "It increases ring metadata (memory, gossip traffic) and per-lookup cost with diminishing balance returns"
+    answer: 3
+    explanation: |
+      More vnodes means more ring points to store, gossip, and search through, while
+      balance improvement plateaus (~1/sqrt(V)). Vnodes improve, not worsen, balance (0),
+      they enable weighting (1), and they don't block adding nodes (2).
+    ref: "concepts.md#virtual-nodes"
+  - id: rate-limiting-and-consistent-hashing-025
+    difficulty: intermediate
+    tags: [rendezvous-hashing, trade-offs]
+    question: |
+      What is the principal cost of rendezvous (HRW) hashing relative to a consistent-hash
+      ring?
+    options:
+      - "Lookup is O(N) because you hash the key against every node, versus O(log N) for a ring"
+      - "It cannot produce a ranked list of replicas"
+      - "It remaps almost all keys when a node leaves"
+      - "It requires virtual nodes to balance load"
+    answer: 0
+    explanation: |
+      HRW scores the key against every node, so lookup is O(N) vs the ring's O(log N)
+      binary search. It naturally yields ranked replicas (1), moves minimal keys on
+      membership change like consistent hashing (2), and balances well without vnodes (3).
+    ref: "concepts.md#rendezvous-hashing"
+  - id: rate-limiting-and-consistent-hashing-026
+    difficulty: intermediate
+    tags: [bounded-loads, hotspots]
+    question: |
+      Consistent hashing with bounded loads (CHWBL) primarily guarantees what?
+    options:
+      - "That every key stays on exactly one node forever"
+      - "That no node exceeds (1 + epsilon) times the average load, spilling overflow to the next node with capacity"
+      - "That lookups become O(1)"
+      - "That data is encrypted at rest"
+    answer: 1
+    explanation: |
+      CHWBL enforces a hard per-node cap of (1+epsilon)*average, overflowing to the next
+      node with spare capacity, which prevents hotspot overload. Keys can move on overflow
+      (0), it does not change lookup complexity (2), and it is unrelated to encryption (3).
+    ref: "concepts.md#consistent-hashing-with-bounded-loads"
+  - id: rate-limiting-and-consistent-hashing-027
+    difficulty: intermediate
+    tags: [redis-cluster, sharding]
+    question: |
+      Redis Cluster maps keys with CRC16(key) mod 16384 to fixed hash slots that are
+      assigned to nodes. How does this relate to consistent hashing?
+    options:
+      - "It is unrelated; Redis Cluster uses mod-N over the node count directly"
+      - "It stores one timestamp per key like a sliding window log"
+      - "It is a fixed-slot variant: resizing moves whole slots between nodes rather than rehashing every key, keeping most keys in place"
+      - "It uses rendezvous hashing internally"
+    answer: 2
+    explanation: |
+      The 16384 slots decouple keys from nodes: on resize you migrate slots (arcs), not
+      rehash keys, so most keys stay put — the same churn-minimizing goal as consistent
+      hashing. It is not mod over node count (0), has nothing to do with timestamps (1), and
+      does not use HRW (3).
+    ref: "concepts.md#consistent-hashing-in-caches-sharding-and-load-balancing"
+  - id: rate-limiting-and-consistent-hashing-028
+    difficulty: intermediate
+    tags: [hot-key, coalescing, caching]
+    question: |
+      A single very popular cache key expires and thousands of requests miss simultaneously,
+      hammering the origin. Which technique most directly prevents this stampede?
+    options:
+      - "Increasing the number of virtual nodes"
+      - "Switching from token bucket to leaky bucket"
+      - "Using rendezvous hashing instead of a ring"
+      - "Request coalescing / single-flight so only one request fetches from the origin while others wait for the result"
+    answer: 3
+    explanation: |
+      Single-flight/coalescing collapses concurrent misses into one origin fetch, directly
+      preventing the thundering herd. Vnodes balance ownership but don't dedupe a hot key's
+      misses (0); the limiter algorithm (1) and hashing scheme (2) don't address stampede on
+      one key.
+    ref: "concepts.md#hot-spot-and-hot-key-handling"
+  - id: rate-limiting-and-consistent-hashing-029
+    difficulty: intermediate
+    tags: [modern, llm, token-bucket]
+    question: |
+      How are LLM/GenAI APIs (OpenAI, Anthropic, Bedrock) typically rate limited beyond
+      just requests per minute?
+    options:
+      - "By tokens per minute (TPM) using weighted buckets where each request costs its token count, in addition to requests per minute (RPM)"
+      - "By bytes of the HTTP header only"
+      - "By the number of TCP connections exclusively"
+      - "They cannot be rate limited because outputs are non-deterministic"
+    answer: 0
+    explanation: |
+      LLM cost tracks token consumption, so limits are enforced on TPM (weighted by tokens)
+      alongside RPM. Header bytes (1) and connection count (2) don't reflect model cost, and
+      non-determinism of output does not prevent limiting the input/usage (3).
+    ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+  - id: rate-limiting-and-consistent-hashing-030
+    difficulty: intermediate
+    tags: [fixed-window, sliding-window-counter, trade-offs]
+    question: |
+      You need a "1000 requests per hour" quota for billing where occasional short bursts
+      at the hour boundary are harmless, and you want minimal storage. Which is the most
+      appropriate algorithm?
+    options:
+      - "Sliding window log for perfect precision"
+      - "Fixed window counter, since the window is long and a 2x edge burst is acceptable while memory is just one counter"
+      - "Leaky bucket to smooth output"
+      - "Rendezvous hashing"
+    answer: 1
+    explanation: |
+      For a coarse long-window quota where boundary bursts don't matter, fixed window's
+      single-counter simplicity is the right fit. The log's per-request storage is overkill
+      (0), leaky bucket addresses output pacing not quotas (2), and rendezvous hashing is a
+      key-placement scheme, not a rate limiter (3).
+    ref: "concepts.md#fixed-window-counter"
+  - id: rate-limiting-and-consistent-hashing-031
+    difficulty: advanced
+    tags: [distributed, cap, trade-offs]
+    question: |
+      Why is it impossible to simultaneously have a perfectly accurate global rate limit,
+      zero added per-request latency, and full availability during a limiter-store outage?
+    options:
+      - "Because Redis is single-threaded"
+      - "Because token buckets cannot be distributed"
+      - "Because these goals form a CAP-flavored tension: perfect global accuracy needs coordination (latency) and a consistent store (availability risk); relaxing one is required"
+      - "Because HTTP 429 responses are too slow to generate"
+    answer: 2
+    explanation: |
+      Perfect global accuracy requires per-request agreement (a coordination/latency cost)
+      and a consistent shared store (whose outage threatens availability). You must relax at
+      least one axis — the fundamental accuracy/latency/availability trade-off. Redis
+      threading (0), token bucket distributability (1), and 429 generation speed (3) are not
+      the cause.
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-032
+    difficulty: advanced
+    tags: [scenario, design, distributed]
+    question: |
+      Design target: 1,000,000 req/s spread across 50 gateway nodes, global limit accuracy
+      about 99%, and p99 added latency budget of 1 ms. Which design best meets all three?
+    options:
+      - "Per-request atomic Redis Lua call from every gateway; simplest and most accurate"
+      - "A single global lock acquired per request to serialize all decisions"
+      - "Independent per-gateway limits with no aggregation, set to global_limit/50"
+      - "Local in-memory sliding-window-counter decisions per gateway plus asynchronous aggregation every few hundred ms, failing open on sync errors"
+    answer: 3
+    explanation: |
+      Local O(1) decisions keep hot-path latency near zero (well under 1 ms) while periodic
+      aggregation converges to ~99% global accuracy — the right balance. Per-request Redis
+      (0) risks blowing the 1 ms budget under 1M req/s and makes Redis a bottleneck; a global
+      lock (1) serializes and destroys throughput; pure local splits (2) drift with uneven
+      balancing and fall short of 99% accuracy.
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-033
+    difficulty: advanced
+    tags: [hot-key, distributed, redis]
+    question: |
+      In a central-Redis rate limiter, a single enormous tenant's key receives a huge share
+      of traffic. What is the specific failure this creates and a mitigation?
+    options:
+      - "That key lives on one shard, making it a hot shard/bottleneck; mitigate by splitting the key into sub-buckets (key#0..key#K) and summing"
+      - "Nothing; Redis distributes a single key across all shards automatically"
+      - "The key causes a 2x boundary burst; switch to fixed window"
+      - "It corrupts the ring; add more virtual nodes"
+    answer: 0
+    explanation: |
+      A single key is owned by one shard, so all its traffic concentrates there — a hot
+      shard. Splitting the logical key into K sub-keys spreads load across shards (summing
+      for the global count). Redis does not split one key across shards (1), this is not a
+      window-boundary issue (2), and rate-limit keys aren't a consistent-hash ring problem
+      here (3).
+    ref: "concepts.md#hot-spot-and-hot-key-handling"
+  - id: rate-limiting-and-consistent-hashing-034
+    difficulty: advanced
+    tags: [consistent-hashing, replication, dynamo]
+    question: |
+      In Dynamo-style stores using consistent hashing, how is the set of nodes that store
+      replicas of a key (the preference list) typically chosen?
+    options:
+      - "The single node that owns the key's arc holds all replicas"
+      - "The owning node plus the next R-1 distinct physical nodes walking clockwise on the ring"
+      - "R randomly chosen nodes re-selected on every write"
+      - "The R nodes with the lowest current CPU usage"
+    answer: 1
+    explanation: |
+      Replication writes to the key's owner and the next R-1 distinct physical nodes
+      clockwise, forming the preference list. One node holding all replicas defeats fault
+      tolerance (0), random per-write placement breaks deterministic lookup (2), and CPU-based
+      selection is not how ring replication works (3).
+    ref: "concepts.md#consistent-hashing-in-caches-sharding-and-load-balancing"
+  - id: rate-limiting-and-consistent-hashing-035
+    difficulty: advanced
+    tags: [rendezvous-hashing, scenario, trade-offs]
+    question: |
+      You have ~30 backend nodes, need a deterministic ranked list of the top-3 replicas per
+      key, and want to avoid maintaining ring/vnode metadata. Which scheme is most
+      appropriate?
+    options:
+      - "Consistent hashing with thousands of virtual nodes"
+      - "hash(key) mod 30"
+      - "Rendezvous (HRW) hashing, since O(N) lookup is cheap at N=30 and sorting scores yields a ranked replica list with no ring bookkeeping"
+      - "A central lookup table updated on every request"
+    answer: 2
+    explanation: |
+      With small N, HRW's O(N) cost is negligible and its sorted scores directly give a
+      ranked replica list without ring/vnode maintenance — the cleanest fit. Vnodes add
+      unnecessary metadata (0), mod-N reshuffles massively on resize and gives no ranking (1),
+      and a per-request central table adds a coordination bottleneck (3).
+    ref: "concepts.md#rendezvous-hashing"
+  - id: rate-limiting-and-consistent-hashing-036
+    difficulty: advanced
+    tags: [bounded-loads, epsilon, trade-offs]
+    question: |
+      In consistent hashing with bounded loads, what does tightening epsilon (toward 0) do?
+    options:
+      - "It loosens the per-node cap, allowing bigger hotspots"
+      - "It has no effect on balance, only on lookup speed"
+      - "It converts the scheme into rendezvous hashing"
+      - "It tightens the per-node load cap, improving balance but causing more overflow to non-owner nodes and thus more key movement / worse cache locality"
+    answer: 3
+    explanation: |
+      Smaller epsilon means a tighter cap ((1+epsilon)*avg), so nodes overflow sooner,
+      pushing more keys to non-owners — better balance but reduced locality and more movement.
+      Smaller epsilon tightens, not loosens, the cap (0); it does affect balance (1); and it
+      does not change the algorithm family (2).
+    ref: "concepts.md#consistent-hashing-with-bounded-loads"
+  - id: rate-limiting-and-consistent-hashing-037
+    difficulty: advanced
+    tags: [scenario, enforcement, defense-in-depth]
+    question: |
+      A multi-tenant SaaS wants: (a) cheap DoS filtering, (b) uniform per-API-key quotas,
+      and (c) a business rule of "5 password resets per user per day". What is the best
+      enforcement strategy?
+    options:
+      - "Layer them: coarse IP/DoS limits at the edge, per-API-key limits at the gateway, and the password-reset business rule in the service where it has full context"
+      - "Put all three rules only in the client SDK"
+      - "Enforce all three exclusively at the database"
+      - "Enforce all three only at the edge CDN"
+    answer: 0
+    explanation: |
+      Defense in depth places each rule where it fits: DoS at the edge (cheapest), API-key
+      quotas at the gateway (uniform), and context-rich business rules in the service.
+      Client-only is untrusted (1), the database can't cheaply drop DoS or apply API policy
+      (2), and the edge lacks the business context for a per-user daily reset rule (3).
+    ref: "concepts.md#where-to-enforce-rate-limits"
+  - id: rate-limiting-and-consistent-hashing-038
+    difficulty: advanced
+    tags: [modern, adaptive, netflix]
+    question: |
+      How does an adaptive concurrency limiter (e.g., Netflix concurrency-limits, AIMD-style)
+      fundamentally differ from a fixed-rate limiter?
+    options:
+      - "It hard-codes a static requests-per-second number chosen at deploy time"
+      - "It infers the safe limit dynamically from observed latency/queueing, lowering the limit as latency rises, targeting goodput instead of a fixed number"
+      - "It only works for consistent hashing, not rate limiting"
+      - "It requires storing a timestamp per request like a sliding window log"
+    answer: 1
+    explanation: |
+      Adaptive limiters watch signals like latency (à la TCP congestion control) and adjust
+      the allowed concurrency to protect goodput, self-tuning to real capacity rather than a
+      fixed guess. A static number is precisely what it avoids (0); it is a rate-limiting
+      technique (2) and doesn't require per-request timestamp logs (3).
+    ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+  - id: rate-limiting-and-consistent-hashing-039
+    difficulty: advanced
+    tags: [modern, cell-based, consistent-hashing]
+    question: |
+      In a cell-based architecture, how is consistent hashing often used and what does it buy?
+    options:
+      - "To pick a random cell per request, maximizing spread"
+      - "To encrypt inter-cell traffic"
+      - "To route a given tenant/customer consistently to one isolated cell, bounding blast radius so a failure or a noisy tenant affects only that cell"
+      - "To eliminate the need for rate limiting within a cell"
+    answer: 2
+    explanation: |
+      Hashing on tenant/customer ID pins a tenant to one cell, so faults and noisy neighbors
+      are contained to that cell — fault isolation with limited blast radius. Random per-request
+      routing breaks isolation and affinity (0); it is not about encryption (1); and cells
+      still enforce their own limits (3).
+    ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+  - id: rate-limiting-and-consistent-hashing-040
+    difficulty: advanced
+    tags: [consistent-hashing, lookup, implementation]
+    question: |
+      How is the O(log N) lookup on a consistent-hash ring typically implemented?
+    options:
+      - "A linear scan of all keys in the cluster"
+      - "A single modulo operation over the node count"
+      - "A full hash of the key against every node"
+      - "A binary search over a sorted array of ring positions (vnode hashes) to find the first position >= hash(key)"
+    answer: 3
+    explanation: |
+      Ring positions are kept sorted so a binary search finds the first position at or after
+      the key's hash in O(log N). A linear key scan is far worse (0), modulo over node count is
+      mod-N not consistent hashing (1), and hashing against every node is rendezvous hashing's
+      O(N) approach (2).
+    ref: "concepts.md#consistent-hashing"
+  - id: rate-limiting-and-consistent-hashing-041
+    difficulty: advanced
+    tags: [hot-key, read-heavy, trade-offs]
+    question: |
+      A read-heavy hot key overloads its owning node. You replicate that key to multiple
+      nodes and read from any of them. What is the trade-off you accept?
+    options:
+      - "You gain read spread but pay extra storage and take on consistency complexity (keeping replicas fresh / tolerating staleness)"
+      - "You reduce read spread but improve write latency"
+      - "You make lookups O(N) on every read"
+      - "You eliminate the need for the origin store entirely"
+    answer: 0
+    explanation: |
+      Replicating a hot key spreads reads across nodes but costs extra storage and introduces
+      consistency management (replica freshness/staleness). It increases, not reduces, read
+      spread (1); replication doesn't force O(N) lookups (2); and it doesn't remove the origin
+      (3).
+    ref: "concepts.md#hot-spot-and-hot-key-handling"
+  - id: rate-limiting-and-consistent-hashing-042
+    difficulty: advanced
+    tags: [load-balancing, power-of-two, hotspots]
+    question: |
+      For load balancing to stateful backends, why can "power of two choices" (hash to two
+      candidates, pick the less loaded) outperform picking a single hashed backend?
+    options:
+      - "It guarantees perfect session affinity to one backend"
+      - "Sampling two candidates and choosing the lighter one dramatically lowers the maximum load compared to a single deterministic choice, smoothing hotspots"
+      - "It removes the need to hash keys"
+      - "It makes each backend store all keys"
+    answer: 1
+    explanation: |
+      Choosing the less-loaded of two random/hashed candidates exponentially reduces the
+      expected maximum load — a classic result — smoothing hotspots. It relaxes strict affinity
+      rather than guaranteeing it (0), still uses hashing (2), and doesn't replicate all keys
+      everywhere (3).
+    ref: "concepts.md#hot-spot-and-hot-key-handling"
+  - id: rate-limiting-and-consistent-hashing-043
+    difficulty: expert
+    tags: [scenario, distributed, accuracy-latency]
+    question: |
+      A fintech API must never allow more than exactly N withdrawals per account per minute
+      (regulatory), QPS per account is low, and correctness dominates latency. Which limiter
+      design is most defensible?
+    options:
+      - "Local per-node counters with async sync and fail-open, for lowest latency"
+      - "Fixed window counter at the edge CDN keyed by IP"
+      - "A central atomic check (Redis Lua or a transactional store) implementing a sliding window log or exact counter per account, failing closed on store unavailability"
+      - "Token bucket with a large burst capacity to smooth traffic"
+    answer: 2
+    explanation: |
+      A hard regulatory cap with low QPS and correctness-over-latency calls for a central,
+      atomic, exact check and fail-closed behavior (better to reject than to violate the rule).
+      Local+async fail-open can overshoot the exact cap (0); IP-keyed edge fixed windows are
+      neither per-account nor exact and allow 2x bursts (1); a large burst bucket deliberately
+      permits exceeding the instantaneous cap (3).
+    ref: "concepts.md#sliding-window-log"
+  - id: rate-limiting-and-consistent-hashing-044
+    difficulty: expert
+    tags: [consistent-hashing, quant, movement]
+    question: |
+      A consistent-hash cluster has N=100 nodes storing 1 billion keys roughly uniformly.
+      You add 10 nodes. Approximately how many keys move, ignoring virtual-node smoothing
+      details?
+    options:
+      - "About 1 billion (essentially all)"
+      - "About 10,000"
+      - "Zero, because consistent hashing never moves keys"
+      - "About 90 million (roughly the fraction the 10 new nodes claim, ~10/110 of keys)"
+    answer: 3
+    explanation: |
+      New nodes claim roughly their share of the ring; 10 of the resulting 110 nodes means
+      about 10/110 (~9%) of 1B, ~90M keys move to the new nodes. Moving all keys is the mod-N
+      behavior consistent hashing avoids (0); 10k is far too low (1); and consistent hashing
+      does move some keys on resize (2).
+    ref: "concepts.md#consistent-hashing"
+  - id: rate-limiting-and-consistent-hashing-045
+    difficulty: expert
+    tags: [virtual-nodes, balance, quant]
+    question: |
+      Statistically, how does the load imbalance across nodes scale as you increase the
+      number of virtual nodes V per physical node?
+    options:
+      - "The standard deviation of load falls roughly as 1/sqrt(V), so imbalance shrinks with more vnodes but with diminishing returns"
+      - "Imbalance grows linearly with V"
+      - "Imbalance is unaffected by V"
+      - "Imbalance drops to exactly zero once V exceeds the number of keys"
+    answer: 0
+    explanation: |
+      Adding vnodes is like drawing more independent arc samples; the relative standard
+      deviation of load decreases on the order of 1/sqrt(V), giving diminishing returns.
+      Imbalance shrinks (not grows) with V (1), V clearly matters (2), and it never becomes
+      exactly zero from vnodes alone (3).
+    ref: "concepts.md#virtual-nodes"
+  - id: rate-limiting-and-consistent-hashing-046
+    difficulty: expert
+    tags: [scenario, hashing-choice, trade-offs]
+    question: |
+      A globally distributed cache has thousands of nodes with frequent membership changes,
+      demands low-churn rebalancing and fast lookups, and tolerates only statistical balance.
+      Which scheme fits best?
+    options:
+      - "Rendezvous hashing, because ranked replica lists are convenient"
+      - "Consistent hashing with virtual nodes, giving O(log N) lookups, low churn on membership change, and good statistical balance at very large N"
+      - "hash(key) mod N, for simplicity"
+      - "A single central directory node mapping every key to a node"
+    answer: 1
+    explanation: |
+      At thousands of nodes with frequent churn, consistent hashing + vnodes gives O(log N)
+      lookups, minimal reshuffle per change, and good statistical balance — the right fit.
+      Rendezvous's O(N) lookup hurts at that scale (0); mod-N reshuffles almost everything on
+      each change (2); a central per-key directory becomes a scaling/availability bottleneck (3).
+    ref: "concepts.md#consistent-hashing-in-caches-sharding-and-load-balancing"
+  - id: rate-limiting-and-consistent-hashing-047
+    difficulty: expert
+    tags: [modern, llm, consistent-hashing, affinity]
+    question: |
+      An LLM inference gateway wants to maximize KV-cache/prompt-cache reuse across a fleet
+      of GPU nodes while still balancing load. Which combination is most appropriate?
+    options:
+      - "Round-robin every request to a random GPU to balance load perfectly"
+      - "hash(request_id) mod N so each request is independent"
+      - "Consistent hashing on session/prompt-prefix to route repeat requests to the same GPU for cache reuse, combined with bounded loads to prevent any GPU from overloading"
+      - "Sliding window log per GPU to store request timestamps"
+    answer: 2
+    explanation: |
+      Hashing on session/prompt-prefix pins related requests to the same GPU so its KV-cache
+      is reused, and bounded loads caps any single GPU to avoid hotspots — affinity plus
+      balance. Random/round-robin destroys cache affinity (0); mod on request_id gives no
+      affinity and reshuffles on resize (1); a per-GPU timestamp log is a rate-limiter, not a
+      routing scheme (3).
+    ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+  - id: rate-limiting-and-consistent-hashing-048
+    difficulty: expert
+    tags: [distributed, sync-interval, trade-offs]
+    question: |
+      In a local-counter + async-sync distributed limiter, what is the direct effect of
+      shortening the sync interval (e.g., from 1 s to 100 ms)?
+    options:
+      - "It reduces per-request hot-path latency"
+      - "It converts the limiter into a sliding window log"
+      - "It has no effect on accuracy, only on memory usage"
+      - "It reduces the window in which nodes can collectively overshoot the global limit (tighter accuracy) at the cost of more sync traffic/load on the aggregator"
+    answer: 3
+    explanation: |
+      More frequent syncing narrows the drift window so the fleet overshoots less (better
+      accuracy) but generates more sync traffic and aggregator load — a direct accuracy/cost
+      trade. Hot-path latency is already local and unaffected by sync frequency (0); it doesn't
+      change the algorithm (1); and it clearly affects accuracy (2).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-049
+    difficulty: expert
+    tags: [failure-modes, consistent-hashing, replication]
+    question: |
+      In a ring with replication factor R=3 and virtual nodes, a physical node permanently
+      fails. Which statement about the immediate aftermath is correct?
+    options:
+      - "The failed node's ranges are re-replicated from surviving replicas onto other nodes, and because vnodes scatter its ranges, the re-replication load spreads across many nodes"
+      - "All data on the failed node is lost because only one copy existed"
+      - "The whole cluster must be restarted to rebalance"
+      - "Lookups become O(N) until the node returns"
+    answer: 0
+    explanation: |
+      With R=3, surviving replicas hold the data, and re-replication restores redundancy;
+      vnodes ensure the failed node's many small ranges are picked up by many peers, spreading
+      the recovery load. No data loss with replicas (1), no full restart needed (2), and lookup
+      complexity stays O(log N) (3).
+    ref: "concepts.md#virtual-nodes"
+  - id: rate-limiting-and-consistent-hashing-050
+    difficulty: expert
+    tags: [scenario, algorithm-choice, trade-offs]
+    question: |
+      An API serves a small set of security-critical endpoints (login, OTP) at modest QPS
+      where exact enforcement of "5 attempts per 15 minutes" matters and false-allows are
+      unacceptable. Which algorithm is most appropriate?
+    options:
+      - "Fixed window counter, accepting the 2x boundary burst"
+      - "Sliding window log, for exact rolling-window counting at modest volume where correctness matters most"
+      - "Token bucket with large burst, to be lenient"
+      - "Leaky bucket, to smooth output"
+    answer: 1
+    explanation: |
+      Low volume plus a hard need for exactness on a security endpoint is the textbook case
+      for the sliding window log (its cost is affordable at modest QPS). Fixed window's 2x edge
+      burst could allow 10 attempts (0); a large-burst token bucket is intentionally lenient
+      (2); leaky bucket smooths pacing but isn't about exact attempt counting (3).
+    ref: "concepts.md#sliding-window-log"
+  - id: rate-limiting-and-consistent-hashing-051
+    difficulty: intermediate
+    tags: [token-bucket, weighted, modern]
+    question: |
+      How can token bucket support requests that cost different amounts (e.g., a heavy query
+      vs a cheap one, or an LLM call costing many tokens)?
+    options:
+      - "It cannot; token bucket only supports uniform 1-token requests"
+      - "Add a second bucket per request type with no coordination"
+      - "Deduct N tokens for a request of weight N, so expensive requests consume proportionally more of the budget"
+      - "Switch to fixed window whenever weights differ"
+    answer: 2
+    explanation: |
+      Token bucket naturally supports weights: a request removes N tokens proportional to its
+      cost, so heavy requests draw down the budget faster. It is not limited to unit costs (0);
+      uncoordinated per-type buckets don't bound total cost (1); and switching to fixed window
+      is unnecessary and loses burst control (3).
+    ref: "concepts.md#token-bucket"
+  - id: rate-limiting-and-consistent-hashing-052
+    difficulty: intermediate
+    tags: [enforcement, service, trade-offs]
+    question: |
+      What is the main trade-off of enforcing rate limits deep inside the service (in
+      application code) rather than at the gateway?
+    options:
+      - "It has less business context than the gateway"
+      - "It is impossible to reject requests from application code"
+      - "It automatically protects against DoS at the network edge"
+      - "It gains rich per-endpoint/business context and precision but wastes resources handling requests before rejecting them and scatters limiter logic across services"
+    answer: 3
+    explanation: |
+      In-service enforcement sees full context (user tier, per-endpoint cost) for precise
+      limits, but the request has already consumed resources before rejection and the logic is
+      duplicated per service. It has more, not less, context (0); apps can reject (1); and it is
+      too late/expensive to be your DoS edge defense (2).
+    ref: "concepts.md#where-to-enforce-rate-limits"
+  - id: rate-limiting-and-consistent-hashing-053
+    difficulty: intermediate
+    tags: [comparison, algorithms, memory]
+    question: |
+      Which algorithm has memory cost per key that grows with the number of requests in the
+      window, unlike the others which are O(1)?
+    options:
+      - "Sliding window log"
+      - "Token bucket"
+      - "Sliding window counter"
+      - "Fixed window counter"
+    answer: 0
+    explanation: |
+      The sliding window log stores one entry per request, so its per-key memory grows with
+      in-window volume. Token bucket (1) uses two numbers, sliding window counter (2) uses two
+      counters, and fixed window (3) uses one counter — all O(1).
+    ref: "concepts.md#comparing-the-algorithms"
+  - id: rate-limiting-and-consistent-hashing-054
+    difficulty: intermediate
+    tags: [consistent-hashing, caches, ketama]
+    question: |
+      Why do memcached clients use consistent hashing (e.g., ketama) rather than
+      hash(key) mod N to select a cache node?
+    options:
+      - "To make cache lookups cryptographically secure"
+      - "So that adding or removing a cache node invalidates only ~K/N of the cache instead of nearly the entire cache"
+      - "Because memcached cannot store keys otherwise"
+      - "To guarantee strong consistency across replicas"
+    answer: 1
+    explanation: |
+      Consistent hashing preserves cache warmth: a membership change only remaps ~K/N keys, so
+      most cached entries stay valid, avoiding a full cache-miss storm on the origin. It is not
+      about security (0) or a storage requirement (2), and memcached does not provide strong
+      cross-node consistency (3).
+    ref: "concepts.md#consistent-hashing-in-caches-sharding-and-load-balancing"
+  - id: rate-limiting-and-consistent-hashing-055
+    difficulty: intermediate
+    tags: [leaky-bucket, gcra, implementation]
+    question: |
+      The GCRA (used by redis-cell) implements leaky-bucket-like limiting without an actual
+      queue by doing what?
+    options:
+      - "Storing every request timestamp in a sorted set"
+      - "Running a background scheduler thread that dispenses requests"
+      - "Tracking a theoretical arrival time and rejecting requests that arrive earlier than the allowed spacing"
+      - "Resetting a counter at fixed calendar boundaries"
+    answer: 2
+    explanation: |
+      GCRA tracks a theoretical arrival time (TAT) and rejects requests that come too soon
+      relative to the allowed inter-arrival spacing — smoothing without a real queue. Per-request
+      timestamps are the log (0), a scheduler thread is the queue-based variant (1), and fixed
+      boundary resets are fixed-window (3).
+    ref: "concepts.md#leaky-bucket"
+  - id: rate-limiting-and-consistent-hashing-056
+    difficulty: advanced
+    tags: [scenario, distributed, envoy]
+    question: |
+      A service mesh wants per-route global rate limits shared across all proxy instances
+      without embedding limiter logic in application code. Which approach matches production
+      practice (e.g., Envoy)?
+    options:
+      - "Each proxy keeps a private counter with no sharing"
+      - "Rate limits are enforced only in the client SDK"
+      - "The database rejects excess queries as the rate limit"
+      - "The proxy calls a central external rate-limit service (gRPC) backed by a shared store like Redis, keeping policy out of app code"
+    answer: 3
+    explanation: |
+      Envoy's global rate limiting calls an external gRPC rate-limit service backed by Redis, so
+      all proxies share counts and app code stays clean. Private per-proxy counters give no global
+      limit (0); client-only enforcement is untrusted (1); and pushing limiting into the database
+      is neither per-route nor a proper limiter (2).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-057
+    difficulty: advanced
+    tags: [modern, edge, aggregation]
+    question: |
+      Cloudflare-style edge rate limiting runs at hundreds of points of presence. How is a
+      global limit approximated across all PoPs while keeping the hot path fast?
+    options:
+      - "Each PoP counts locally (e.g., sliding window counter) and asynchronously aggregates counts, trading some exactness for very low latency at global scale"
+      - "Every PoP makes a synchronous call to a single central datacenter per request"
+      - "PoPs do not coordinate at all and each enforces the full global limit independently"
+      - "All traffic is funneled through one PoP to centralize counting"
+    answer: 0
+    explanation: |
+      Edge limiters count locally at each PoP and reconcile asynchronously, accepting slight
+      inaccuracy for minimal latency — the local+sync pattern at planetary scale. Per-request
+      central calls would add huge latency (1); enforcing the full limit per PoP over-permits
+      globally (2); and funneling all traffic through one PoP defeats the edge (3).
+    ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+  - id: rate-limiting-and-consistent-hashing-058
+    difficulty: advanced
+    tags: [consistent-hashing, weighting, heterogeneous]
+    question: |
+      Your cluster mixes large and small machines. How do virtual nodes let you give the
+      bigger machines proportionally more data?
+    options:
+      - "By hashing bigger machines with a stronger hash function"
+      - "By assigning more virtual nodes (ring positions) to higher-capacity machines so they own a larger total arc"
+      - "By placing bigger machines earlier in IP order"
+      - "By replicating all keys to the big machines"
+    answer: 1
+    explanation: |
+      Capacity weighting is done by giving stronger machines more vnodes, so they collectively
+      own a larger fraction of the ring and thus more keys. Hash strength (0) and IP order (2)
+      don't control ownership share, and replicating everything to big machines is not weighting
+      (3).
+    ref: "concepts.md#virtual-nodes"
+  - id: rate-limiting-and-consistent-hashing-059
+    difficulty: advanced
+    tags: [rendezvous-hashing, membership, disruption]
+    question: |
+      When a node is removed under rendezvous hashing, which keys move and where do they go?
+    options:
+      - "All keys move and are randomly reassigned"
+      - "Keys move to the node with the lowest score"
+      - "Only keys whose maximum score was the removed node move, and each goes to its next-highest-scoring node; all other keys are unaffected"
+      - "No keys move; they become unassigned"
+    answer: 2
+    explanation: |
+      Rendezvous gives minimal disruption: only keys that scored the removed node highest move,
+      landing on their next-highest node, while every other key's owner is unchanged. It is not a
+      full random reshuffle (0), keys go to the next-highest not lowest (1), and they must be
+      reassigned, not left unassigned (3).
+    ref: "concepts.md#rendezvous-hashing"
+  - id: rate-limiting-and-consistent-hashing-060
+    difficulty: expert
+    tags: [scenario, bounded-loads, load-balancing]
+    question: |
+      A layer-7 load balancer hashes user sessions to backends for cache affinity, but a few
+      backends periodically get overloaded by popular sessions while others sit idle. Which
+      change best fixes this while preserving most affinity?
+    options:
+      - "Switch to pure round-robin, abandoning affinity"
+      - "Increase the rate limit on the overloaded backends"
+      - "Replace hashing with hash(session) mod N"
+      - "Adopt consistent hashing with bounded loads so overflow above (1+epsilon)*avg spills to the next backend, capping hotspots while most sessions keep their natural backend"
+    answer: 3
+    explanation: |
+      CHWBL keeps sessions on their natural backend until that backend hits its load cap, then
+      spills overflow — capping hotspots while preserving most affinity. Round-robin throws away
+      affinity entirely (0); raising a rate limit doesn't rebalance placement (1); and mod-N gives
+      neither affinity stability on resize nor a load cap (2).
+    ref: "concepts.md#consistent-hashing-with-bounded-loads"
+  - id: rate-limiting-and-consistent-hashing-061
+    difficulty: expert
+    tags: [quant, storage, estimation]
+    question: |
+      You must store token-bucket state for 100 million distinct rate-limit keys, each about
+      100 bytes (tokens, timestamp, overhead). Roughly how much memory is needed, and what does
+      this imply?
+    options:
+      - "About 10 GB, which fits comfortably in a modest Redis cluster, so storage is rarely the limiting factor for rate limiters"
+      - "About 1 TB, so rate limiting is infeasible in memory"
+      - "About 100 MB, negligible even on a single small instance regardless of scale"
+      - "About 100 GB, requiring a dedicated large fleet"
+    answer: 0
+    explanation: |
+      100M * 100 B = 10^10 bytes = ~10 GB, which fits in a small Redis cluster — confirming that
+      limiter state is cheap and storage seldom drives the design (accuracy/latency/availability
+      do). 1 TB (1) and 100 GB (3) overestimate by 100x/10x; 100 MB (2) is off by 100x too low.
+    ref: "concepts.md#why-rate-limiting-exists"
+  - id: rate-limiting-and-consistent-hashing-062
+    difficulty: expert
+    tags: [scenario, consistent-hashing-vs-rendezvous, trade-offs]
+    question: |
+      A client library must select a shard for each request among a set of nodes that rarely
+      changes but can number in the low thousands, and lookups happen on a very hot path where
+      microseconds matter. Which scheme is the better default and why?
+    options:
+      - "Rendezvous hashing, because O(N) hashing over thousands of nodes per request is cheapest"
+      - "Consistent hashing with virtual nodes, because O(log N) binary search over the sorted ring is far cheaper than O(N) per-request scoring at thousands of nodes"
+      - "hash(key) mod N, to avoid any per-request work"
+      - "A central coordinator queried per request for the shard"
+    answer: 1
+    explanation: |
+      At thousands of nodes on a latency-critical path, the ring's O(log N) lookup beats
+      rendezvous's O(N) per-request scoring, and it still gives low churn on the rare changes.
+      Rendezvous's O(N) is the wrong pick at that N (0); mod-N reshuffles on any change (2); a
+      per-request central query adds a network hop that violates the microsecond budget (3).
+    ref: "concepts.md#rendezvous-hashing"
+  - id: rate-limiting-and-consistent-hashing-063
+    difficulty: expert
+    tags: [scenario, distributed, retry-storm]
+    question: |
+      After an incident, thousands of clients retry aggressively, and even your rate limiter's
+      429 responses are overwhelming the gateway. Which combination best addresses the root
+      dynamics?
+    options:
+      - "Remove the rate limiter so clients stop retrying"
+      - "Switch the limiter algorithm from token bucket to fixed window"
+      - "Enforce coarse limits at the edge to drop excess before the gateway, return 429 with Retry-After, and require clients to use exponential backoff with jitter to de-synchronize retries"
+      - "Increase the global limit so all retries succeed"
+    answer: 2
+    explanation: |
+      The fix is layered: shed load at the edge (cheapest), signal Retry-After, and get clients
+      onto backoff-with-jitter so their retries spread out instead of synchronizing into waves.
+      Removing the limiter invites overload (0); the window algorithm choice doesn't address a
+      retry storm (1); and raising the limit just admits the flood (3).
+    ref: "concepts.md#where-to-enforce-rate-limits"
+  - id: rate-limiting-and-consistent-hashing-064
+    difficulty: beginner
+    tags: [consistent-hashing, ring, basics]
+    question: |
+      On a consistent-hash ring, how is the node that owns a given key determined?
+    options:
+      - "The node numerically closest to zero"
+      - "The node with the most virtual nodes"
+      - "A node chosen at random for each key"
+      - "The first node encountered when moving clockwise from the key's hashed position"
+    answer: 3
+    explanation: |
+      A key is owned by the first node clockwise from the key's position on the ring. Proximity
+      to zero (0), vnode count (1), and randomness (2) do not define ring ownership.
+    ref: "concepts.md#consistent-hashing"
+  - id: rate-limiting-and-consistent-hashing-065
+    difficulty: beginner
+    tags: [distributed, hot-key, basics]
+    question: |
+      What is a "hot key" (or hotspot) in the context of hashing and sharding?
+    options:
+      - "A single key or partition that receives a disproportionately large share of traffic, overloading whichever node owns it"
+      - "A key that has expired from the cache"
+      - "An encryption key that has leaked"
+      - "A key that hashes to position zero on the ring"
+    answer: 0
+    explanation: |
+      A hot key is one whose access volume is far above average, concentrating load on its owner
+      node regardless of how evenly the hash spreads keys. It is not about expiry (1), security
+      keys (2), or a specific ring position (3).
+    ref: "concepts.md#hot-spot-and-hot-key-handling"
+  - id: rate-limiting-and-consistent-hashing-066
+    difficulty: intermediate
+    tags: [comparison, token-vs-sliding, trade-offs]
+    question: |
+      Which statement best contrasts token bucket with the sliding window counter?
+    options:
+      - "Both store one timestamp per request and are equally memory-heavy"
+      - "Token bucket models a refilling budget allowing bursts up to capacity, while the sliding window counter estimates a rolling count to bound the rate more strictly with minimal burst"
+      - "Token bucket is exact and the sliding window counter is an exact log"
+      - "Sliding window counter allows larger bursts than token bucket by design"
+    answer: 1
+    explanation: |
+      Token bucket permits bursts up to B via a refilling budget; the sliding window counter
+      approximates the rolling window to keep the rate close to the limit with little burst. Both
+      are O(1), not timestamp-heavy (0); token bucket isn't exact and the counter is an estimate,
+      not a log (2); and the counter permits less burst, not more (3).
+    ref: "concepts.md#comparing-the-algorithms"
+  - id: rate-limiting-and-consistent-hashing-067
+    difficulty: intermediate
+    tags: [distributed, local-only, trade-offs]
+    question: |
+      What is the accuracy problem with giving each of N nodes an independent local limit of
+      global_limit / N?
+    options:
+      - "It adds a network round trip per request"
+      - "It requires a central Redis to function"
+      - "Uneven load balancing means some nodes reject while others have unused quota, so the fleet under-utilizes the true global limit and behaves unfairly"
+      - "It always exceeds the global limit by N times"
+    answer: 2
+    explanation: |
+      Because a load balancer never splits traffic perfectly evenly, some nodes hit their L/N cap
+      and reject while peers have spare budget — the global limit is under-utilized and clients are
+      treated inconsistently. Local-only adds no network hop (0), needs no central store (1), and
+      it under-utilizes rather than exceeding N-fold (3).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-068
+    difficulty: advanced
+    tags: [modern, cdc, event-driven, billing]
+    question: |
+      A metered API needs fast admission decisions on the hot path but also perfectly accurate
+      usage totals for billing. Which architecture reconciles both?
+    options:
+      - "Use the exact billing count as the admission check on every request"
+      - "Bill customers directly from the gateway's in-memory counter with no durable log"
+      - "Reject requests until billing totals are computed"
+      - "Make fast approximate local decisions on the hot path, and emit usage events to a stream (e.g., Kafka) that are aggregated asynchronously to produce the accurate billing truth"
+    answer: 3
+    explanation: |
+      Splitting concerns — fast approximate admission on the hot path plus an async event stream
+      aggregated into an exact billing ledger (CDC/event-driven) — gives both low latency and
+      accurate totals. Using the exact billing count per request adds unacceptable latency (0);
+      billing from volatile memory risks data loss (1); and blocking on billing computation stalls
+      traffic (2).
+    ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+  - id: rate-limiting-and-consistent-hashing-069
+    difficulty: advanced
+    tags: [consistent-hashing, rebalancing, ddia]
+    question: |
+      DDIA warns against "hash mod N" style partitioning for databases mainly because of which
+      rebalancing property?
+    options:
+      - "Changing the number of nodes forces almost all keys to move, causing massive, expensive data migration during scaling"
+      - "It is too slow to compute the modulo"
+      - "It cannot hash string keys"
+      - "It provides too much data locality"
+    answer: 0
+    explanation: |
+      The rebalancing problem is that mod-N reshuffles nearly all keys when N changes, making
+      scaling extremely expensive; DDIA favors approaches (fixed partitions / consistent hashing)
+      that move minimal data. Modulo speed (1), key type (2), and locality (3) are not the concern.
+    ref: "concepts.md#consistent-hashing"
+  - id: rate-limiting-and-consistent-hashing-070
+    difficulty: advanced
+    tags: [scenario, algorithm, burst-tolerance]
+    question: |
+      A public REST API wants to permit occasional short bursts (users clicking rapidly) but
+      hold the sustained rate near 20 req/s per key, with O(1) cost at very high scale. Which
+      algorithm and configuration is the best fit?
+    options:
+      - "Sliding window log with a 1-second window for exactness"
+      - "Token bucket with refill r=20/s and a modest capacity B (e.g., 40) to absorb short bursts while capping the steady rate, at O(1) per key"
+      - "Fixed window of 1 second, accepting 2x boundary bursts"
+      - "Leaky bucket with zero queue to forbid all bursts"
+    answer: 1
+    explanation: |
+      Token bucket with r=20/s and a small burst capacity absorbs brief spikes yet holds the
+      sustained rate, all at O(1) memory/CPU — exactly the requirement. The log is costly at high
+      scale (0); a 1s fixed window allows uncontrolled 2x edge bursts (2); and a zero-queue leaky
+      bucket forbids the very bursts the API wants to allow (3).
+    ref: "concepts.md#token-bucket"
+  - id: rate-limiting-and-consistent-hashing-071
+    difficulty: expert
+    tags: [scenario, failure-tolerance, judgment]
+    question: |
+      Consider a distributed limiter using local counters with async sync and fail-open on store
+      unavailability. Which failure does this design specifically NOT tolerate well?
+    options:
+      - "A brief central-store outage (it keeps serving via local counters)"
+      - "The addition of a new gateway node"
+      - "A requirement that the global limit is never exceeded even momentarily, because during sync gaps or store outages the fleet can overshoot the global limit"
+      - "A single slow client"
+    answer: 2
+    explanation: |
+      Local+async+fail-open trades exactness for availability, so it cannot guarantee the global
+      limit is never momentarily exceeded — a hard no-overshoot requirement is what it fails to
+      meet. It tolerates brief store outages by design (0), handles node additions (1), and a
+      single slow client is a non-issue (3).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-072
+    difficulty: intermediate
+    tags: [hot-key, key-splitting, trade-offs]
+    question: |
+      You split a hot counter key into K sub-keys (key#0..key#K-1) across shards to spread write
+      load. What new cost does this introduce on reads?
+    options:
+      - "Reads become impossible"
+      - "Reads now require the sliding window log"
+      - "Reads bypass the cache entirely"
+      - "A read must fan out to all K sub-keys and sum them, adding read cost and complexity in exchange for spreading write load"
+    answer: 3
+    explanation: |
+      Splitting spreads writes but a correct total requires reading and summing all K sub-keys —
+      more read fan-out and aggregation logic. Reads remain possible (0), the split is unrelated to
+      any rate-limit algorithm choice (1), and it does not force cache bypass (2).
+    ref: "concepts.md#hot-spot-and-hot-key-handling"
+  - id: rate-limiting-and-consistent-hashing-073
+    difficulty: beginner
+    tags: [enforcement, client-side, security]
+    question: |
+      Why should client-side (SDK) rate limiting never be your only line of defense?
+    options:
+      - "Because the client is untrusted and an attacker can simply bypass or modify it"
+      - "Because it adds too much server latency"
+      - "Because SDKs cannot implement token buckets"
+      - "Because it violates the HTTP specification"
+    answer: 0
+    explanation: |
+      Client-side limits improve UX by avoiding wasted round trips but are untrusted — an attacker
+      controls the client and bypasses them, so server-side enforcement is mandatory. It reduces,
+      not adds, server latency (1); SDKs can implement any algorithm (2); and it doesn't violate
+      HTTP (3).
+    ref: "concepts.md#where-to-enforce-rate-limits"
+  - id: rate-limiting-and-consistent-hashing-074
+    difficulty: advanced
+    tags: [comparison, distributed, decision]
+    question: |
+      Which scenario most justifies choosing a central Redis+Lua limiter over local+async sync,
+      despite the added per-request latency?
+    options:
+      - "A hyperscale edge network prioritizing sub-millisecond latency above all"
+      - "A moderate-QPS API where the global limit must be tight and consistent, and a single-network-hop latency and Redis dependency are acceptable"
+      - "A system that must keep functioning fully during a total Redis outage"
+      - "A case where only rough per-node capping is needed"
+    answer: 1
+    explanation: |
+      Central Redis+Lua shines when limits must be tight/consistent and QPS is moderate enough that
+      one network hop and a Redis dependency are tolerable. Hyperscale sub-ms edge (0) favors
+      local+sync; needing full function during a Redis outage (2) argues against a central dependency;
+      and rough per-node capping (3) doesn't justify the central store's cost.
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-075
+    difficulty: expert
+    tags: [scenario, cell-based, consistent-hashing, blast-radius]
+    question: |
+      A SaaS wants to bound the blast radius of failures and noisy tenants across a fleet, route
+      each tenant deterministically to an isolated stack, and rebalance tenants with minimal
+      disruption when adding capacity. Which combination is most appropriate?
+    options:
+      - "One shared global stack with only per-tenant rate limits"
+      - "hash(tenant) mod cell_count so tenants are evenly split"
+      - "Cell-based architecture where tenants are mapped to isolated cells via consistent hashing on tenant ID, with per-cell rate limits, so faults and hot tenants are contained and adding a cell moves only a fraction of tenants"
+      - "Randomly assign each request to any cell for maximal balance"
+    answer: 2
+    explanation: |
+      Cells give fault isolation; consistent hashing on tenant ID pins tenants to a cell (isolation
+      + affinity) and moves only a fraction of tenants when a cell is added; per-cell limits contain
+      noisy tenants. A single shared stack has no blast-radius containment (0); mod cell_count
+      reshuffles most tenants on capacity change (1); and random per-request assignment breaks both
+      isolation and tenant affinity (3).
+    ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+  - id: rate-limiting-and-consistent-hashing-076
+    difficulty: intermediate
+    tags: [modern, headers, standards]
+    question: |
+      Beyond returning 429, what standardized response headers help clients self-regulate against
+      a rate limit?
+    options:
+      - "Content-Type and Content-Length"
+      - "Authorization and Cookie"
+      - "Cache-Control and ETag"
+      - "RateLimit-Limit, RateLimit-Remaining, and RateLimit-Reset (plus Retry-After), telling the client its budget and when it refreshes"
+    answer: 3
+    explanation: |
+      The IETF RateLimit-* headers (and the older X-RateLimit-*) plus Retry-After communicate the
+      limit, remaining budget, and reset time so clients can pace themselves. Content headers (0),
+      auth/cookie headers (1), and caching headers (2) serve unrelated purposes.
+    ref: "concepts.md#why-rate-limiting-exists"
+  - id: rate-limiting-and-consistent-hashing-077
+    difficulty: advanced
+    tags: [rendezvous-hashing, scaling, trade-offs]
+    question: |
+      For very large node counts, what is the standard way to keep rendezvous hashing viable
+      despite its O(N) per-lookup cost?
+    options:
+      - "Introduce hierarchy/sharding of the node set (e.g., score within groups) so each lookup only ranks a small subset rather than all N nodes"
+      - "Abandon determinism and pick randomly"
+      - "Store a timestamp per request to speed scoring"
+      - "Increase the replication factor"
+    answer: 0
+    explanation: |
+      Organizing nodes hierarchically (score across groups, then within a group) bounds the number
+      of scorings per lookup, keeping HRW practical at large N. Random selection loses determinism
+      and affinity (1); timestamps are irrelevant to scoring cost (2); and replication factor doesn't
+      reduce lookup cost (3).
+    ref: "concepts.md#rendezvous-hashing"
+  - id: rate-limiting-and-consistent-hashing-078
+    difficulty: intermediate
+    tags: [consistent-hashing, load-balancing, affinity]
+    question: |
+      Why do load balancers offer a consistent-hash mode (e.g., Envoy ring_hash, NGINX hash) for
+      routing to backends?
+    options:
+      - "To guarantee perfectly equal request counts per backend"
+      - "To route the same client/session to the same backend consistently (session/cache affinity) while tolerating backend churn with minimal reshuffling"
+      - "To encrypt traffic between the LB and backends"
+      - "To eliminate the need for health checks"
+    answer: 1
+    explanation: |
+      Consistent-hash LB modes provide sticky routing (a session/key keeps hitting the same backend
+      for cache/affinity) and only reshuffle a fraction of keys when backends change. They give
+      statistical, not perfect, balance (0); they don't handle encryption (2) or replace health
+      checks (3).
+    ref: "concepts.md#consistent-hashing-in-caches-sharding-and-load-balancing"
+  - id: rate-limiting-and-consistent-hashing-079
+    difficulty: expert
+    tags: [scenario, judgment, algorithm-and-distribution]
+    question: |
+      A global API gateway fleet must enforce per-API-key limits with near-real-time global
+      accuracy, tolerate a limiter-store blip without downtime, keep p99 hot-path overhead well
+      under 1 ms, and smooth away fixed-window boundary bursts. Which overall design best satisfies
+      ALL constraints together?
+    options:
+      - "Per-request central Redis sliding window log, failing closed for exactness"
+      - "Local fixed-window counters with no sync, sized to global_limit/N"
+      - "Local sliding-window-counter decisions per gateway (O(1), smooths boundary bursts) with asynchronous aggregation for near-real-time global convergence, failing open on store unavailability"
+      - "In-service token buckets in each microservice with no gateway involvement"
+    answer: 2
+    explanation: |
+      Local sliding-window-counter decisions keep hot-path cost O(1) and under the latency budget
+      while smoothing boundary bursts; async aggregation delivers near-real-time global accuracy; and
+      fail-open preserves uptime during a store blip — all four constraints met. Per-request central
+      log + fail-closed violates the latency and no-downtime goals (0); no-sync fixed windows miss both
+      accuracy and boundary-smoothing (1); and per-service token buckets abandon the global per-API-key
+      view and duplicate logic (3).
+    ref: "concepts.md#distributed-rate-limiting"
+  - id: rate-limiting-and-consistent-hashing-080
+    difficulty: expert
+    tags: [consistent-hashing, virtual-nodes, quant, imbalance]
+    question: |
+      With a naive one-point-per-node ring of N nodes, the expected worst-case node can own a
+      disproportionate arc; roughly what imbalance factor is typical, and how do vnodes change it?
+    options:
+      - "Perfectly balanced already; vnodes make it worse"
+      - "The busiest node always owns exactly 1/N; vnodes have no effect"
+      - "Imbalance is unbounded and cannot be reduced by any technique"
+      - "The busiest node can own on the order of O(log N / N) fraction — several times the average with few nodes; adding ~100-200 vnodes per node brings imbalance down to a few percent"
+    answer: 3
+    explanation: |
+      With one point per node the maximum arc is skewed (the busiest node can hold several times the
+      average, on the order of O(log N/N)); adding ~100-200 vnodes per node averages the arcs so
+      imbalance drops to a few percent. A naive ring is not already balanced (0), no node owns exactly
+      1/N without smoothing (1), and imbalance is very much reducible via vnodes (2).
+    ref: "concepts.md#virtual-nodes"

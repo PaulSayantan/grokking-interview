@@ -1,0 +1,1198 @@
+topic: "Design a URL Shortener, Pastebin, and Key-Value Store"
+domain: system-design
+topic_slug: design-url-shortener
+version: 1
+questions:
+- id: design-url-shortener-001
+  difficulty: beginner
+  tags: [requirements, read-heavy, basics]
+  question: |
+    What is the single most defining workload characteristic of a URL shortener that
+    drives most of its architecture?
+  options:
+  - "It is read-heavy, with redirects vastly outnumbering creates (often 100:1 or more)"
+  - "It is write-heavy, so writes must be batched"
+  - "It is compute-heavy, requiring GPUs for key generation"
+  - "It has balanced read and write traffic requiring symmetric scaling"
+  answer: 0
+  explanation: |
+    Redirects (reads) dominate creates (writes) by roughly 100:1 to 1000:1, which is why
+    the design centers on aggressive caching, CDN/edge, and a fat read path. It is not
+    write-heavy (1) or balanced (3); key generation is trivial arithmetic, not GPU work (2).
+  ref: "concepts.md#requirements-and-scale-estimation"
+- id: design-url-shortener-002
+  difficulty: beginner
+  tags: [encoding, base62]
+  question: |
+    Why is Base62 the standard alphabet for short keys rather than Base64?
+  options:
+  - "Base62 produces shorter strings than Base64 for the same integer"
+  - "Base64 cannot represent large integers"
+  - "Base62 uses only URL-safe characters ([0-9a-zA-Z]), avoiding '+', '/', '=' that need escaping"
+  - "Base62 is case-insensitive which prevents collisions"
+  answer: 2
+  explanation: |
+    Base64 includes '+', '/', and '=' which are not URL-safe and require percent-encoding.
+    Base62 sticks to alphanumerics that are safe in URLs. Base64 is actually denser, not
+    the reverse (0); both can represent large integers (1); Base62 is case-SENSITIVE, which
+    increases the space, and case-insensitivity would reduce it (3).
+  ref: "concepts.md#key-generation-approaches"
+- id: design-url-shortener-003
+  difficulty: beginner
+  tags: [redirect, http, status-codes]
+  question: |
+    Which HTTP status code lets browsers and CDNs cache a redirect aggressively, skipping
+    your server on repeat clicks?
+  options:
+  - "302 Found"
+  - "301 Moved Permanently"
+  - "307 Temporary Redirect"
+  - "200 OK"
+  answer: 1
+  explanation: |
+    301 Moved Permanently is cached aggressively (often indefinitely) by browsers/proxies/CDNs.
+    302 (0) and 307 (2) are not cached and route every click back to your server. 200 (3) is
+    not a redirect at all.
+  ref: "concepts.md#redirect-301-vs-302"
+- id: design-url-shortener-004
+  difficulty: beginner
+  tags: [caching, read-path]
+  question: |
+    Why is a URL shortener such a good candidate for caching?
+  options:
+  - "Because writes are expensive and must be cached"
+  - "Because URLs are large and compress well"
+  - "Because caching removes the need for a durable database"
+  - "Because the key-to-URL mapping is nearly immutable and popular links are hit repeatedly (power-law)"
+  answer: 3
+  explanation: |
+    Mappings rarely change and traffic follows a Zipfian/power-law distribution, so a small
+    hot working set serves most reads from cache. Writes are rare, not the caching driver (0);
+    URLs are small (1); caches are volatile and still need a durable backing store (2).
+  ref: "concepts.md#read-heavy-caching"
+- id: design-url-shortener-005
+  difficulty: beginner
+  tags: [key-generation, counter]
+  question: |
+    Using a monotonically increasing counter and Base62-encoding it guarantees what property?
+  options:
+  - "Keys are impossible to guess"
+  - "Keys are always exactly 7 characters"
+  - "Keys are globally unique with zero collisions"
+  - "Identical URLs always produce identical keys"
+  answer: 2
+  explanation: |
+    A monotonic integer counter is unique by construction, so Base62-encoding it yields
+    collision-free unique keys. It does NOT hide keys (they are sequential and guessable, 1),
+    key length grows as numbers get larger (1), and it does not deduplicate identical URLs —
+    that is a property of hashing (3).
+  ref: "concepts.md#counter-and-base62-encoding"
+- id: design-url-shortener-006
+  difficulty: beginner
+  tags: [architecture, analytics]
+  question: |
+    Why should click analytics be collected asynchronously rather than during the redirect?
+  options:
+  - "To avoid adding latency and a failure dependency to every redirect on the hot read path"
+  - "Because analytics data is not important"
+  - "Because synchronous writes are impossible in databases"
+  - "Because redirects must be strongly consistent with analytics"
+  answer: 0
+  explanation: |
+    Emitting a fire-and-forget event to a queue keeps the redirect fast and prevents an
+    analytics outage from breaking redirects. Analytics matters (1); synchronous writes are
+    possible but harmful here (2); redirects deliberately do NOT need consistency with
+    analytics (3).
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-007
+  difficulty: beginner
+  tags: [requirements, availability]
+  question: |
+    For the redirect (read) path, which non-functional property is usually prioritized highest?
+  options:
+  - "Strong consistency across all replicas"
+  - "Transactional isolation"
+  - "Exactly-once analytics counting"
+  - "High availability and low latency"
+  answer: 3
+  explanation: |
+    A dead shortener breaks every link ever created, so redirects must always work and be
+    fast; a briefly stale target is acceptable. Strong consistency (0) and transactions (1)
+    matter only for narrow operations like custom aliases; exactly-once analytics (2) is not
+    the read-path priority.
+  ref: "concepts.md#consistency-versus-availability-choices"
+- id: design-url-shortener-008
+  difficulty: beginner
+  tags: [database, access-pattern]
+  question: |
+    What is the dominant database access pattern for a URL shortener?
+  options:
+  - "Complex multi-table joins"
+  - "Primary-key point lookup: given a short key, return the long URL"
+  - "Full-table scans for analytics"
+  - "Range scans over sorted URLs"
+  answer: 1
+  explanation: |
+    The core operation is a single primary-key lookup by short key, which is exactly what
+    key-value/wide-column stores excel at. Joins (0), full scans (2), and range scans (3) are
+    not the hot-path pattern.
+  ref: "concepts.md#database-choice-and-schema"
+- id: design-url-shortener-009
+  difficulty: beginner
+  tags: [pastebin, generalization]
+  question: |
+    What is the primary difference between a URL shortener and a Pastebin at the design level?
+  options:
+  - "The value size is much larger, so the blob typically lives in object storage with only metadata in the DB"
+  - "Pastebin needs no keys"
+  - "Pastebin cannot use caching"
+  - "Pastebin requires strong consistency everywhere"
+  answer: 0
+  explanation: |
+    The building blocks are identical; the only real difference is value size and where the
+    value lives — large pastes go to object storage (S3) with a pointer in the DB. Pastebin
+    still needs keys (1), benefits from caching/CDN (2), and does not need global strong
+    consistency (3).
+  ref: "concepts.md#pastebin-and-generic-key-value-store-generalization"
+- id: design-url-shortener-010
+  difficulty: beginner
+  tags: [expiry, ttl]
+  question: |
+    What is "lazy deletion" of expired links?
+  options:
+  - "A background job that deletes all links every night"
+  - "Never allowing links to expire"
+  - "Deleting links as soon as they are created"
+  - "Checking expires_at at read time and returning 404/410 if expired, deleting later or never"
+  answer: 3
+  explanation: |
+    Lazy deletion checks expiry at read time and treats expired links as gone, leaving the
+    actual row cleanup to later or to native TTL. A nightly sweep is ACTIVE deletion (0);
+    (1) and (2) are nonsensical.
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-011
+  difficulty: beginner
+  tags: [key-generation, hashing]
+  question: |
+    A hashing-based key generator (MD5/SHA truncated to Base62) gives which free benefit?
+  options:
+  - "Guaranteed no collisions"
+  - "Deduplication: the same long URL always maps to the same short key"
+  - "Sequential, sortable keys"
+  - "Shortest possible keys for a given record count"
+  answer: 1
+  explanation: |
+    Because the hash of a URL is deterministic, identical URLs produce identical keys, giving
+    dedup for free. Truncated hashes DO collide (0), hashes are not sequential/sortable (2),
+    and counters (not hashes) give the densest/shortest keys (3).
+  ref: "concepts.md#hashing-and-collision-handling"
+- id: design-url-shortener-012
+  difficulty: beginner
+  tags: [security, abuse]
+  question: |
+    Why do URL shorteners need malware/phishing screening of destination URLs?
+  options:
+  - "To improve redirect latency"
+  - "To reduce storage costs"
+  - "Because short links hide the true destination, making shorteners attractive to spammers and phishers"
+  - "Because screening is required for Base62 encoding"
+  answer: 2
+  explanation: |
+    Short links obscure the real target, so attackers use them to disguise malicious sites;
+    screening against threat feeds (e.g. Safe Browsing) mitigates this. It does not help
+    latency (0) or storage (1), and has nothing to do with encoding (3).
+  ref: "concepts.md#rate-limiting-and-abuse-prevention"
+- id: design-url-shortener-013
+  difficulty: beginner
+  tags: [caching, cdn]
+  question: |
+    What does a CDN/edge cache primarily do for a URL shortener?
+  options:
+  - "Serve the redirect response from a location geographically close to the user, avoiding origin hits"
+  - "Generate new short keys closer to users"
+  - "Store the durable copy of all mappings"
+  - "Run the analytics pipeline"
+  answer: 0
+  explanation: |
+    Because mappings are effectively immutable, the redirect can be cached at the edge and
+    served near the user without touching the origin. The CDN does not mint keys (1), is not
+    the durable store (2), and does not run analytics (3).
+  ref: "concepts.md#read-heavy-caching"
+- id: design-url-shortener-014
+  difficulty: beginner
+  tags: [redirect, analytics]
+  question: |
+    Which redirect code should a commercial shortener like Bit.ly prefer when per-click
+    analytics and the ability to revoke links are core product features?
+  options:
+  - "301 Moved Permanently"
+  - "308 Permanent Redirect"
+  - "302 Found"
+  - "204 No Content"
+  answer: 2
+  explanation: |
+    302 is not cached, so every click returns to the server, preserving analytics and the
+    ability to change/kill a link. 301 (0) and 308 (1) are cached aggressively and lose repeat
+    analytics; 204 (3) is not a redirect.
+  ref: "concepts.md#redirect-301-vs-302"
+- id: design-url-shortener-015
+  difficulty: intermediate
+  tags: [estimation, storage]
+  question: |
+    Assume 100M new URLs/day and ~500 B per stored record. Roughly how much storage is needed
+    over 5 years (order of magnitude)?
+  options:
+  - "~1 TB"
+  - "~100 TB"
+  - "~10 TB"
+  - "~10 PB"
+  answer: 1
+  explanation: |
+    100M/day x 365 x 5 ≈ 182B records x 500 B ≈ ~91 TB, i.e. order ~100 TB. This mandates
+    sharding. 1 TB (0) and 10 TB (2) undercount; 10 PB (3) is two orders too high.
+  ref: "concepts.md#requirements-and-scale-estimation"
+- id: design-url-shortener-016
+  difficulty: intermediate
+  tags: [estimation, key-length, base62]
+  question: |
+    Roughly how many distinct keys does Base62 with length 7 provide, and why choose 7 over 6
+    for a system projecting ~180B records over 5 years?
+  options:
+  - "62^7 ≈ 57 billion; length 6 is larger and preferred"
+  - "62^7 ≈ 3.5 million; length 6 gives more room"
+  - "Length has no effect on the key space"
+  - "62^7 ≈ 3.5 trillion; length 6 (≈57B) is too close to the projected record count, leaving no headroom"
+  answer: 3
+  explanation: |
+    62^7 ≈ 3.5 trillion gives comfortable headroom above ~180B records, whereas 62^6 ≈ 56.8B
+    is dangerously close to the projected count. Option 0 swaps the values, option 1 is off by
+    six orders of magnitude, and option 2 is simply false.
+  ref: "concepts.md#requirements-and-scale-estimation"
+- id: design-url-shortener-017
+  difficulty: intermediate
+  tags: [key-generation, counter, bottleneck]
+  question: |
+    A single global counter guarantees uniqueness but has a serious drawback. What is the
+    standard fix that preserves uniqueness while removing the bottleneck?
+  options:
+  - "Switch to random UUIDs and accept collisions"
+  - "Use one counter per user"
+  - "Have each app server request blocks/ranges of IDs from a central allocator and hand them out locally"
+  - "Round-robin requests across counters that share the same range"
+  answer: 2
+  explanation: |
+    Segmented/ranged allocation (Flickr ticket-server style) lets each server grab a block of
+    IDs and only contact the allocator once per block, cutting coordination ~1000x while
+    staying collision-free. UUIDs (0) bloat keys and abandon the counter benefits; per-user
+    counters (1) still collide across users; shared ranges (3) produce duplicate IDs.
+  ref: "concepts.md#counter-and-base62-encoding"
+- id: design-url-shortener-018
+  difficulty: intermediate
+  tags: [snowflake, id-generation]
+  question: |
+    In a 64-bit Twitter Snowflake ID, which composition allows nodes to mint unique IDs with
+    no per-ID coordination?
+  options:
+  - "timestamp (ms) + machine id + per-ms sequence number"
+  - "hash(url) + random salt + checksum"
+  - "user id + counter + timestamp"
+  - "random 64 bits with a collision-check read"
+  answer: 0
+  explanation: |
+    Snowflake concatenates a ms timestamp, a machine id, and a per-millisecond sequence, so
+    each node generates locally-unique, roughly time-sortable IDs with only one-time machine-id
+    assignment. The other options either require reads/coordination or do not guarantee global
+    uniqueness without it.
+  ref: "concepts.md#distributed-id-generation-with-snowflake"
+- id: design-url-shortener-019
+  difficulty: intermediate
+  tags: [snowflake, clock-skew, failure]
+  question: |
+    What is the classic failure mode of Snowflake-style ID generation, and the standard
+    mitigation?
+  options:
+  - "Running out of machine ids; mitigate by using UUIDs"
+  - "Sequence overflow; mitigate by adding random salt"
+  - "Hash collisions; mitigate with a Bloom filter"
+  - "Clock moving backward (NTP correction) causing duplicate IDs; mitigate by refusing to mint until the clock catches up"
+  answer: 3
+  explanation: |
+    Snowflake depends on a monotonic clock; a backward jump can replay timestamp+sequence
+    combinations and produce duplicates, so nodes refuse to generate until time advances past
+    the last-seen timestamp. Machine-id exhaustion (0) is a capacity issue, sequence overflow
+    is handled by waiting for the next ms (1), and Snowflake does not hash (2).
+  ref: "concepts.md#distributed-id-generation-with-snowflake"
+- id: design-url-shortener-020
+  difficulty: intermediate
+  tags: [kgs, pre-generation]
+  question: |
+    What is the main advantage of a Key Generation Service (KGS) that pre-generates random
+    keys over generating keys at write time?
+  options:
+  - "It eliminates the need for a durable database"
+  - "It gives the fastest write path (pop a cached key) with short, random, non-enumerable keys and guaranteed uniqueness"
+  - "It makes keys sequential for easy sorting"
+  - "It removes the need for caching on reads"
+  answer: 1
+  explanation: |
+    KGS moves uniqueness/dedup work offline, so writes just pop a pre-made key with no hashing,
+    no collision check, and no counter round-trip, yielding short opaque keys. It does not
+    replace the DB (0), keys are random not sequential (2), and read caching is still needed (3).
+  ref: "concepts.md#key-generation-service-and-pre-generation"
+- id: design-url-shortener-021
+  difficulty: intermediate
+  tags: [kgs, availability, batching]
+  question: |
+    Why do app servers request keys from the KGS in batches and cache them in memory?
+  options:
+  - "So the hot write path never blocks on the KGS and a brief KGS outage does not stall link creation"
+  - "To make keys longer"
+  - "To guarantee keys are sequential"
+  - "To avoid using a database at all"
+  answer: 0
+  explanation: |
+    Batch-caching keys locally keeps the KGS off the synchronous write path and lets creation
+    continue during a short KGS outage. It does not affect key length (1) or ordering (2), and
+    a durable DB is still required (3).
+  ref: "concepts.md#key-generation-service-and-pre-generation"
+- id: design-url-shortener-022
+  difficulty: intermediate
+  tags: [database, nosql, ttl]
+  question: |
+    Why are DynamoDB or Cassandra especially well-suited to a large-scale URL shortener?
+  options:
+  - "They support complex multi-row transactions natively"
+  - "They are the only stores that support Base62"
+  - "They eliminate the need for caching"
+  - "They provide effortless horizontal scale for primary-key lookups, built-in TTL for expiry, and tunable (availability-favoring) consistency"
+  answer: 3
+  explanation: |
+    The PK-lookup pattern, native TTL that matches the expiry requirement, and tunable
+    consistency favoring availability align perfectly with a shortener. They are weak at
+    cross-key transactions, not strong (0); encoding is app-level (1); caching is still used (2).
+  ref: "concepts.md#database-choice-and-schema"
+- id: design-url-shortener-023
+  difficulty: intermediate
+  tags: [sharding, hot-spot]
+  question: |
+    Why is hash-based sharding of the short key preferred over range-based sharding?
+  options:
+  - "Hash sharding produces shorter keys"
+  - "Range sharding on sequential keys places consecutive new keys on the same shard, creating a write hot spot"
+  - "Range sharding cannot support point lookups"
+  - "Hash sharding guarantees strong consistency"
+  answer: 1
+  explanation: |
+    With counter/Snowflake-style keys, range sharding clusters recent writes on one shard;
+    hashing spreads keys uniformly. Sharding does not change key length (0), range shards can
+    do point lookups (2), and neither approach inherently guarantees strong consistency (3).
+  ref: "concepts.md#database-choice-and-schema"
+- id: design-url-shortener-024
+  difficulty: intermediate
+  tags: [caching, cache-aside, stampede]
+  question: |
+    In a cache-aside setup, a popular key expires and thousands of concurrent reads miss at
+    once, hammering the DB. What is this called and how is it mitigated?
+  options:
+  - "Cache poisoning; mitigate by encrypting the cache"
+  - "Split-brain; mitigate with quorum writes"
+  - "Cache stampede/thundering herd; mitigate with request coalescing (single-flight), probabilistic early expiry, or staggered TTLs"
+  - "Hot partition; mitigate by resharding"
+  answer: 2
+  explanation: |
+    Simultaneous misses for one hot key create a stampede; single-flight coalescing,
+    probabilistic early recompute, and jittered TTLs prevent the herd. Cache poisoning (0) is
+    an integrity attack, split-brain (1) is a partition/consensus issue, and hot partition (3)
+    is a different (though related) storage-layer problem.
+  ref: "concepts.md#read-heavy-caching"
+- id: design-url-shortener-025
+  difficulty: intermediate
+  tags: [caching, bloom-filter, negative-cache]
+  question: |
+    Attackers spray random non-existent keys, causing constant cache misses and DB lookups.
+    What technique cheaply rejects most of these before hitting the DB?
+  options:
+  - "A Bloom filter (or negative caching of 'not found') in front of the DB to short-circuit lookups for keys that certainly do not exist"
+  - "A larger LRU cache of valid keys"
+  - "Switching all redirects to 301"
+  - "Increasing the key length to 10 characters"
+  answer: 0
+  explanation: |
+    A Bloom filter answers "definitely not present" cheaply (with tunable false positives),
+    and negative caching stores 404s briefly, both shielding the DB from garbage lookups. A
+    bigger cache (1) does not help misses, 301 (2) is unrelated, and longer keys (3) do not
+    stop probing.
+  ref: "concepts.md#read-heavy-caching"
+- id: design-url-shortener-026
+  difficulty: intermediate
+  tags: [custom-alias, consistency]
+  question: |
+    Implementing custom aliases (user-chosen short codes) introduces which requirement into an
+    otherwise availability-first system?
+  options:
+  - "A GPU for text processing"
+  - "A larger cache"
+  - "A strongly consistent (linearizable) uniqueness check so two users cannot claim the same alias"
+  - "Switching to 301 redirects"
+  answer: 2
+  explanation: |
+    Claiming an alias must be atomic and linearizable (unique constraint / conditional put) to
+    prevent double-claims — a small CP island inside an AP system. It has nothing to do with
+    GPUs (0), cache size (1), or redirect codes (3).
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-027
+  difficulty: intermediate
+  tags: [redirect, tradeoff]
+  question: |
+    What is the PRIMARY trade-off of choosing 301 over 302 for redirects?
+  options:
+  - "301 is slower for the first click"
+  - "301 gains near-zero server load via aggressive caching but loses per-click analytics and the ability to revoke/change the target"
+  - "301 uses more storage in the database"
+  - "301 requires strong consistency while 302 does not"
+  answer: 1
+  explanation: |
+    301 lets clients/CDNs cache the redirect, slashing server load, but repeat clicks never
+    return to you (no analytics) and cached clients keep the old target (no revocation). It is
+    not slower on first click (0), uses no extra storage (2), and neither needs strong
+    consistency (3).
+  ref: "concepts.md#redirect-301-vs-302"
+- id: design-url-shortener-028
+  difficulty: intermediate
+  tags: [consistency, read-your-writes]
+  question: |
+    A user creates a link and immediately clicks it, but replication/cache propagation is
+    eventual. How do you guarantee they see their own new link work?
+  options:
+  - "Make the entire system strongly consistent"
+  - "Tell the user to wait 5 minutes"
+  - "Use 301 redirects"
+  - "Provide read-your-writes: route the creator's first read to the primary, or return only after a durable quorum write, or pin their session to the writing region"
+  answer: 3
+  explanation: |
+    Read-your-writes can be provided narrowly by reading from the primary (or quorum) for the
+    creator, without making the whole system strongly consistent (0), which would hurt
+    availability/latency. Waiting (1) is not a design, and 301 (2) is irrelevant.
+  ref: "concepts.md#consistency-versus-availability-choices"
+- id: design-url-shortener-029
+  difficulty: intermediate
+  tags: [analytics, pipeline]
+  question: |
+    Which pipeline best supports high-volume click analytics without slowing redirects?
+  options:
+  - "Synchronous UPDATE of a click_count column on every redirect"
+  - "Writing a log line to the primary DB inside the redirect transaction"
+  - "Fire-and-forget event to Kafka/Kinesis, processed by a stream job into an OLAP store (ClickHouse/Druid/Redshift)"
+  - "Counting clicks in the CDN and never storing them"
+  answer: 2
+  explanation: |
+    Async events to a queue feeding an OLAP store decouple analytics from the redirect path,
+    keeping it fast and resilient. Synchronous counter updates (0) and in-transaction logging
+    (1) add latency and a failure dependency to every read; (3) discards the data.
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-030
+  difficulty: intermediate
+  tags: [architecture, cqrs]
+  question: |
+    Splitting the shortener into a write service (mint + persist) and a read service (mostly
+    cache/edge) is an example of which pattern, and what does it buy you?
+  options:
+  - "CQRS-style read/write separation; it lets you scale and tune the two paths independently"
+  - "Event sourcing; it stores every state change"
+  - "Two-phase commit; it guarantees atomic cross-service writes"
+  - "Sharding; it partitions data by key"
+  answer: 0
+  explanation: |
+    Separating command (write) from query (read) paths is a CQRS split, enabling independent
+    scaling (huge cache/CDN for reads, simple write path). It is not event sourcing (1), 2PC (2),
+    or sharding (3), though it may be combined with them.
+  ref: "concepts.md#high-level-architecture"
+- id: design-url-shortener-031
+  difficulty: intermediate
+  tags: [failure, degradation, cache]
+  question: |
+    If the Redis cache layer goes completely down, what is the expected behavior of a
+    well-designed shortener?
+  options:
+  - "All redirects fail immediately"
+  - "New link creation stops but redirects are unaffected"
+  - "The system silently returns wrong URLs"
+  - "Reads fall through to the DB (and CDN-cached responses still serve), so redirects get slower but keep working"
+  answer: 3
+  explanation: |
+    A cache miss should be slow, not fatal: reads fall through to the DB/replicas and any
+    CDN-cached 301/302s still serve. Redirects should not fail (0); a cache outage does not
+    stop creation, which is the KGS/counter's job (1); it never returns wrong data (2).
+  ref: "concepts.md#failure-modes-and-how-the-design-degrades"
+- id: design-url-shortener-032
+  difficulty: intermediate
+  tags: [modern, edge-compute]
+  question: |
+    What does running redirect lookups at the CDN edge (e.g. Cloudflare Workers + Workers KV)
+    primarily achieve, and what is the trade-off?
+  options:
+  - "Strong global consistency; trade-off is higher latency"
+  - "Redirects resolve within a few ms of users globally with the origin barely touched; trade-off is eventually consistent edge KV with write-propagation delay"
+  - "It removes the need for any key generation; trade-off is larger keys"
+  - "It guarantees analytics accuracy; trade-off is cost"
+  answer: 1
+  explanation: |
+    Edge compute + edge KV serves redirects close to users with minimal origin traffic, but
+    edge KV replicas are eventually consistent and take time to propagate writes. It does not
+    provide strong global consistency (0), affect key generation (2), or improve analytics
+    accuracy (3).
+  ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+- id: design-url-shortener-033
+  difficulty: intermediate
+  tags: [pastebin, object-storage]
+  question: |
+    For a Pastebin storing large text/document blobs, what is the recommended storage layout?
+  options:
+  - "Store the blob in object storage (S3) and keep only metadata plus the S3 pointer in the DB, serving content via CDN"
+  - "Store the entire blob inline in a relational row"
+  - "Store the blob only in Redis"
+  - "Store the blob in the CDN as the source of truth"
+  answer: 0
+  explanation: |
+    Large values belong in object storage with just metadata + pointer in the DB, keeping the
+    DB small and letting the CDN deliver content. Inline blobs (1) bloat the DB, Redis (2) is
+    volatile, and the CDN (3) is a cache, not the durable source of truth.
+  ref: "concepts.md#pastebin-and-generic-key-value-store-generalization"
+- id: design-url-shortener-034
+  difficulty: intermediate
+  tags: [key-generation, hashing, collision]
+  question: |
+    With truncated-hash key generation, how are collisions typically handled at write time?
+  options:
+  - "Ignore them and overwrite the existing mapping"
+  - "Increase the cache size"
+  - "Switch the whole system to 302 redirects"
+  - "Insert under a unique constraint and, on violation, re-hash with a salt / extra chars and retry"
+  answer: 3
+  explanation: |
+    Relying on a DB unique constraint and retrying with a modified input on violation avoids
+    the read-before-write race and resolves collisions. Overwriting (0) corrupts an existing
+    link, and cache size (1) or redirect codes (2) are unrelated.
+  ref: "concepts.md#hashing-and-collision-handling"
+- id: design-url-shortener-035
+  difficulty: intermediate
+  tags: [security, enumeration]
+  question: |
+    A sequential counter makes keys enumerable. Which technique keeps uniqueness and
+    collision-freedom while making outputs look random?
+  options:
+  - "Store keys in Redis"
+  - "Apply a bijective (e.g. Feistel/Optimus-style) permutation to the counter before Base62, so the mapping is 1:1 but non-sequential"
+  - "Use 301 redirects"
+  - "Add a random suffix and check for collisions"
+  answer: 1
+  explanation: |
+    A bijective/Feistel permutation reversibly scrambles the integer so output is opaque yet
+    still unique and collision-free, no lookup needed. Storing in Redis (0) does not hide the
+    pattern, 301 (2) is unrelated, and random suffixes (3) reintroduce collision checks and
+    lose the counter's density.
+  ref: "concepts.md#counter-and-base62-encoding"
+- id: design-url-shortener-036
+  difficulty: intermediate
+  tags: [expiry, key-recycling]
+  question: |
+    What is the main benefit of ACTIVE deletion / native DB TTL over purely lazy expiry?
+  options:
+  - "It makes reads faster"
+  - "It guarantees strong consistency"
+  - "It reclaims storage and can free expired keys for reuse, at the cost of a background delete process"
+  - "It removes the need for a cache"
+  answer: 2
+  explanation: |
+    Active/native-TTL deletion physically removes expired rows, recovering space and enabling
+    key recycling, but adds background delete load. It does not speed reads (0), remove caching
+    (3), or affect consistency guarantees (1).
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-037
+  difficulty: intermediate
+  tags: [caching, cache-warming]
+  question: |
+    What is "cache warming" on link creation, and why do it?
+  options:
+  - "Writing the new key->URL mapping into the cache at creation time so the first redirect is a cache hit"
+  - "Preheating the CPU before generating keys"
+  - "Encrypting the cache for security"
+  - "Deleting the cache when a link is created"
+  answer: 0
+  explanation: |
+    Pre-loading a newly created mapping into cache means the first (often quick) click hits
+    cache instead of the DB, smoothing latency. The other options are unrelated or counterproductive.
+  ref: "concepts.md#read-heavy-caching"
+- id: design-url-shortener-038
+  difficulty: intermediate
+  tags: [database, redis-as-store]
+  question: |
+    Why is using Redis alone as the durable, primary store for all mappings risky?
+  options:
+  - "Redis cannot store strings"
+  - "Redis does not support key-value access"
+  - "Redis is memory-first and volatile; without careful persistence you risk losing the mappings, which are catastrophic to lose"
+  - "Redis is too slow for reads"
+  answer: 2
+  explanation: |
+    Redis is an excellent cache but memory-first with weaker durability guarantees; losing the
+    key->URL mappings breaks every link, so it should be backed by a durable DB. Redis stores
+    strings (0), is very fast (3), and is fundamentally key-value (1).
+  ref: "concepts.md#database-choice-and-schema"
+- id: design-url-shortener-039
+  difficulty: intermediate
+  tags: [architecture, write-path]
+  question: |
+    On the write path, which property matters more than raw latency?
+  options:
+  - "Serving from the nearest edge"
+  - "Correctness/uniqueness of the minted key and durable persistence, since writes are rare"
+  - "Returning a 301 status"
+  - "Caching the response for repeat writes"
+  answer: 1
+  explanation: |
+    Writes are infrequent, so guaranteeing a unique key and durable storage outweighs shaving
+    milliseconds. Edge serving (0) and caching (3) are read-path concerns, and 301 (2) is a
+    redirect (read) concern.
+  ref: "concepts.md#high-level-architecture"
+- id: design-url-shortener-040
+  difficulty: advanced
+  tags: [tradeoff, key-generation, scenario]
+  question: |
+    You must design key generation for a shortener handling 50k writes/s, requiring the
+    shortest possible opaque (non-enumerable) keys and lowest write latency, and you can afford
+    to operate extra infrastructure. Which approach fits best?
+  options:
+  - "Truncated-hash generation with read-before-write collision checks"
+  - "Snowflake IDs Base62-encoded"
+  - "A single global counter with Base62 encoding"
+  - "A Key Generation Service that pre-generates random keys, with app-server batch caching"
+  answer: 3
+  explanation: |
+    KGS gives the fastest write (just pop a cached key), shortest random opaque keys, and
+    guaranteed uniqueness — ideal when you can run the extra service. Hashing (0) adds a
+    collision-check read that becomes a bottleneck at 50k/s; a single counter (2) is a
+    bottleneck and produces enumerable keys; Snowflake (1) yields longer (~11-char) time-leaking
+    keys.
+  ref: "concepts.md#key-generation-service-and-pre-generation"
+- id: design-url-shortener-041
+  difficulty: advanced
+  tags: [tradeoff, snowflake, scenario]
+  question: |
+    A team wants uniqueness at very high write throughput with NO central allocator, and
+    accepts slightly longer, time-sortable keys. Which is the best fit and why?
+  options:
+  - "KGS, because it pre-generates keys"
+  - "Truncated hashing, because it dedups"
+  - "Snowflake IDs, because each node mints unique time-ordered IDs locally with only one-time machine-id assignment"
+  - "Single counter, because it is simplest"
+  answer: 2
+  explanation: |
+    Snowflake removes the central bottleneck (no per-ID coordination) and gives time-sortable
+    IDs, matching the constraints. KGS (0) reintroduces a service and offline generation; a
+    single counter (3) is the central bottleneck they want to avoid; hashing (1) needs
+    collision checks and is not the ask.
+  ref: "concepts.md#distributed-id-generation-with-snowflake"
+- id: design-url-shortener-042
+  difficulty: advanced
+  tags: [tradeoff, cap, custom-alias]
+  question: |
+    Your shortener is AP (availability-first) globally, but product wants custom aliases. What
+    is the cleanest consistency design?
+  options:
+  - "Keep the read path and generated-key writes AP, but make ONLY the custom-alias uniqueness check strongly consistent (a narrow CP island)"
+  - "Make the entire system CP to be safe"
+  - "Drop custom aliases entirely"
+  - "Allow duplicate aliases and resolve at read time"
+  answer: 0
+  explanation: |
+    Match consistency to the operation: keep AP everywhere except the narrow linearizable
+    alias-claim check. Making everything CP (1) needlessly sacrifices redirect availability;
+    duplicate aliases (3) break correctness; dropping the feature (2) is a non-answer.
+  ref: "concepts.md#consistency-versus-availability-choices"
+- id: design-url-shortener-043
+  difficulty: advanced
+  tags: [tradeoff, redirect, scenario]
+  question: |
+    A vanity-link campaign serves 500k clicks/s of a permanent link where per-click analytics
+    are NOT required and cost/latency must be minimal. Which redirect strategy is optimal?
+  options:
+  - "302 Found so every click hits the origin"
+  - "A 200 response with a JavaScript redirect"
+  - "302 with no cache headers to force origin hits"
+  - "301 Moved Permanently so CDNs/browsers cache the redirect and the origin is barely touched"
+  answer: 3
+  explanation: |
+    With no analytics need and permanent targets, 301 lets edges/browsers cache the redirect,
+    minimizing origin load and latency at massive scale. 302 variants (0, 2) force costly
+    origin hits every click; a JS redirect (1) is slower and heavier than an HTTP 301.
+  ref: "concepts.md#redirect-301-vs-302"
+- id: design-url-shortener-044
+  difficulty: advanced
+  tags: [tradeoff, database, scenario]
+  question: |
+    At ~180B records (~100 TB), read-heavy, needing built-in expiry and always-available
+    redirects across regions, which storage choice is most appropriate?
+  options:
+  - "A single large Postgres instance with a read replica"
+  - "DynamoDB (or Cassandra) with hash-partitioned keys, native TTL, and multi-region replication favoring availability"
+  - "A data warehouse like Redshift as the primary store"
+  - "Redis cluster as the sole durable store"
+  answer: 1
+  explanation: |
+    The scale, PK-lookup pattern, native TTL, and availability-first multi-region needs point
+    squarely at DynamoDB/Cassandra. A single Postgres (0) cannot hold ~100 TB or scale writes;
+    Redis alone (3) risks durability; a warehouse (2) is for analytics, not low-latency point
+    lookups.
+  ref: "concepts.md#database-choice-and-schema"
+- id: design-url-shortener-045
+  difficulty: advanced
+  tags: [failure, kgs, degradation]
+  question: |
+    During a KGS outage (and app-server key caches are exhausted), what SHOULD happen in a
+    well-designed system?
+  options:
+  - "New link creation pauses/degrades, but existing redirects (99% of traffic) continue unaffected"
+  - "All redirects immediately fail"
+  - "The system starts reusing existing keys, overwriting live links"
+  - "The DB is wiped to free keys"
+  answer: 0
+  explanation: |
+    Redirects do not depend on the KGS, so only creation degrades — a graceful partial outage
+    keeping the product's core alive. Redirects should not fail (1), and (3)/(2) would cause
+    data loss or corruption.
+  ref: "concepts.md#failure-modes-and-how-the-design-degrades"
+- id: design-url-shortener-046
+  difficulty: advanced
+  tags: [hot-key, viral, scenario]
+  question: |
+    A single link goes viral, sending disproportionate traffic to one shard/cache node. Which
+    combination best mitigates this?
+  options:
+  - "Immediately reshard the entire database"
+  - "Switch the hot link to a longer key"
+  - "Rate-limit all redirects globally"
+  - "Rely on CDN/edge caching to absorb the immutable redirect, plus key-level replication and request coalescing"
+  answer: 3
+  explanation: |
+    A hot link is highly cacheable, so CDN/edge absorbs most traffic; replicating the key and
+    coalescing concurrent misses handle the rest. Full resharding (0) is disruptive and slow,
+    global rate-limiting (2) harms legitimate users, and key length (1) is irrelevant.
+  ref: "concepts.md#failure-modes-and-how-the-design-degrades"
+- id: design-url-shortener-047
+  difficulty: advanced
+  tags: [modern, cdc, propagation]
+  question: |
+    Instead of dual-writing to the DB, cache, edge KV, and analytics, a team streams DB changes
+    to all consumers. What is this pattern and its trade-off?
+  options:
+  - "Two-phase commit; trade-off is latency"
+  - "Change Data Capture (CDC); trade-off is eventual consistency and pipeline operational overhead in exchange for decoupled, reliable propagation"
+  - "Leader election; trade-off is split-brain"
+  - "Sharding; trade-off is hot spots"
+  answer: 1
+  explanation: |
+    CDC (Debezium / DynamoDB Streams / Kafka) fans out DB changes to caches, edge replicas, and
+    analytics, decoupling writers from consumers at the cost of eventual consistency and running
+    the pipeline. It is not 2PC (0), sharding (3), or leader election (2).
+  ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+- id: design-url-shortener-048
+  difficulty: advanced
+  tags: [modern, cell-based, blast-radius]
+  question: |
+    What problem does a cell-based architecture (each cell a full API+cache+DB slice serving a
+    subset of keys) primarily solve for a shortener?
+  options:
+  - "It makes keys shorter"
+  - "It eliminates the need for caching"
+  - "It bounds blast radius so a failing cell only takes down its own slice, at the cost of routing complexity and per-cell overhead"
+  - "It guarantees strong global consistency"
+  answer: 2
+  explanation: |
+    Cells isolate faults so one cell's failure affects only its subset of traffic/keys, trading
+    routing complexity and overhead for fault isolation. It does not affect key length (0),
+    provide global strong consistency (3), or remove caching (1).
+  ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+- id: design-url-shortener-049
+  difficulty: advanced
+  tags: [tradeoff, hashing, dedup]
+  question: |
+    Why do most production shorteners NOT deduplicate identical URLs to the same key, despite
+    hashing making it free?
+  options:
+  - "Because distinct users usually want separate links with independent analytics, and dedup can leak that a URL was already shortened; per-user salting to fix that destroys the dedup benefit"
+  - "Because deduplication is technically impossible"
+  - "Because 302 redirects forbid it"
+  - "Because deduplication doubles storage"
+  answer: 0
+  explanation: |
+    Dedup collapses everyone's link/analytics into one and leaks prior-shortening; adding
+    per-user salt to separate them removes the dedup, so most systems just mint distinct keys.
+    Dedup is possible (1), it SAVES storage rather than doubling it (3), and redirect codes are
+    irrelevant (2).
+  ref: "concepts.md#hashing-and-collision-handling"
+- id: design-url-shortener-050
+  difficulty: advanced
+  tags: [tradeoff, counter, obfuscation, scenario]
+  question: |
+    You want the SHORTEST possible keys with guaranteed uniqueness, and enumeration must be
+    prevented, with minimal extra infrastructure. What is the best design?
+  options:
+  - "Snowflake IDs, accepting ~11-char keys"
+  - "Truncated MD5 hashing with collision retries"
+  - "A segmented counter whose value is passed through a bijective/Feistel permutation before Base62 encoding"
+  - "Random UUIDs truncated to 7 chars"
+  answer: 2
+  explanation: |
+    A segmented counter gives the densest (shortest) collision-free keys; a bijective permutation
+    makes them non-enumerable without extra services. Snowflake (0) is longer; truncated UUIDs (3)
+    collide and need checks; hashing (1) adds collision-check reads and is not the densest.
+  ref: "concepts.md#counter-and-base62-encoding"
+- id: design-url-shortener-051
+  difficulty: advanced
+  tags: [failure, snowflake, uniqueness]
+  question: |
+    Which failure does a naive multi-node Snowflake deployment NOT tolerate without extra care?
+  options:
+  - "A single node crashing and restarting"
+  - "Two nodes being assigned the SAME machine id, which lets them mint identical IDs"
+  - "A cache node going down"
+  - "High read traffic on redirects"
+  answer: 1
+  explanation: |
+    Snowflake's uniqueness depends on globally unique machine ids; duplicate assignment breaks
+    it and produces colliding IDs. A node restart (0) is fine if the clock is monotonic, and
+    read traffic (3) or cache failures (2) are unrelated to ID uniqueness.
+  ref: "concepts.md#distributed-id-generation-with-snowflake"
+- id: design-url-shortener-052
+  difficulty: advanced
+  tags: [analytics, hyperloglog, approximation]
+  question: |
+    To count unique visitors per link at massive scale without storing every visitor, which
+    structure is appropriate and what is the trade-off?
+  options:
+  - "A relational table with one row per visit; no trade-off"
+  - "A B-tree index of all visitors"
+  - "A Bloom filter that returns exact counts"
+  - "HyperLogLog probabilistic cardinality estimation; trade-off is approximate (not exact) unique counts for tiny memory"
+  answer: 3
+  explanation: |
+    HyperLogLog estimates distinct-count in kilobytes regardless of cardinality, trading exactness
+    for huge memory savings. A per-visit table (0) does not scale cheaply, Bloom filters (2) test
+    membership not cardinality and are not exact-count, and a B-tree of all visitors (1) is
+    expensive.
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-053
+  difficulty: advanced
+  tags: [tradeoff, caching, invalidation]
+  question: |
+    A link's target is edited, but 301 responses are cached in browsers and CDNs. What is the
+    fundamental consequence, and the lesson?
+  options:
+  - "The edit propagates instantly everywhere"
+  - "The database becomes inconsistent"
+  - "Clients that cached the 301 keep hitting the OLD target until their cache expires; this is why editable/revocable links should use 302 (or 302 with short max-age), not 301"
+  - "The cache automatically invalidates all 301s on edit"
+  answer: 2
+  explanation: |
+    Because 301s are cached (often indefinitely) client-side and at CDNs you cannot forcibly
+    invalidate, edits/revocations do not reach those clients — so editable links need 302.
+    Edits do not propagate instantly (0), the DB stays consistent (1), and there is no automatic
+    cross-client 301 invalidation (3).
+  ref: "concepts.md#redirect-301-vs-302"
+- id: design-url-shortener-054
+  difficulty: advanced
+  tags: [tradeoff, storage, pastebin, scenario]
+  question: |
+    For a Pastebin serving many multi-MB documents to a global audience, which design minimizes
+    DB cost while keeping reads fast?
+  options:
+  - "Store blobs in S3, keep metadata+pointer in the DB, and serve blob content through a CDN"
+  - "Store blobs inline in the metadata DB and scale the DB vertically"
+  - "Store blobs in Redis and persist snapshots hourly"
+  - "Compress blobs and store them in a single relational table"
+  answer: 0
+  explanation: |
+    Offloading blobs to object storage keeps the DB tiny (metadata only) and lets the CDN handle
+    heavy content delivery. Inline storage (1, 3) bloats and slows the DB; Redis (2) is costly and
+    volatile for multi-MB blobs.
+  ref: "concepts.md#pastebin-and-generic-key-value-store-generalization"
+- id: design-url-shortener-055
+  difficulty: advanced
+  tags: [failure, shard, replication]
+  question: |
+    One database shard fails. What determines whether affected keys stay resolvable, and how do
+    you limit the impact?
+  options:
+  - "Nothing can help; a shard failure always takes the whole system down"
+  - "Switching to 301 redirects fixes it"
+  - "Increasing cache TTL permanently prevents any impact"
+  - "Replication with automatic failover keeps the shard's keys resolvable, and cell-based isolation confines the impact to that slice"
+  answer: 3
+  explanation: |
+    Replicas with automatic failover keep a shard's keys available, and cells bound the blast
+    radius to one slice. A shard failure is not necessarily total (0), redirect codes (1) do not
+    help, and cache TTLs (2) only mask reads for currently-cached keys, not the whole shard.
+  ref: "concepts.md#failure-modes-and-how-the-design-degrades"
+- id: design-url-shortener-056
+  difficulty: advanced
+  tags: [tradeoff, consistency, global-tables]
+  question: |
+    Why is last-writer-wins conflict resolution acceptable for a multi-region active-active
+    shortener using global tables?
+  options:
+  - "Because conflicts never occur"
+  - "Because a key's mapping is effectively immutable, so concurrent writes to the same key are rare and converging on any one value is harmless"
+  - "Because global tables are strongly consistent"
+  - "Because LWW guarantees no data is ever lost"
+  answer: 1
+  explanation: |
+    Mappings rarely change after creation, so cross-region write conflicts on the same key are
+    rare and LWW's convergence is benign. Conflicts can occur in principle (0), global tables are
+    eventually consistent (2), and LWW can drop concurrent updates (3) — acceptable only because
+    of immutability.
+  ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+- id: design-url-shortener-057
+  difficulty: advanced
+  tags: [tradeoff, hashing, scale, scenario]
+  question: |
+    A shortener using truncated-hash keys with read-before-write collision checks is now at 40M
+    stored keys and write latency is climbing. What is the root cause and best remedy?
+  options:
+  - "As the table fills, collision probability (birthday paradox) rises so the collision-check read costs more; move to counter/Snowflake/KGS generation that needs no collision-check read"
+  - "The cache is too small; add more RAM"
+  - "The redirect code should change to 301"
+  - "The URLs are too long; truncate them"
+  answer: 0
+  explanation: |
+    Hashing's collision-check read grows more expensive as the space fills, so switching to a
+    collision-free generator (counter/Snowflake/KGS) removes the read entirely. Cache size (1) does
+    not affect write collision checks, and redirect codes (2) or URL length (3) are unrelated.
+  ref: "concepts.md#hashing-and-collision-handling"
+- id: design-url-shortener-058
+  difficulty: advanced
+  tags: [security, open-redirect, ssrf]
+  question: |
+    Which validation is important when accepting the destination URL at creation time?
+  options:
+  - "Ensuring the URL is shorter than the generated key"
+  - "Requiring the URL to be lowercase"
+  - "Verifying the URL returns HTTP 200 before storing"
+  - "Normalizing/validating the URL and blocking internal addresses and non-http(s) schemes to prevent open-redirect and SSRF abuse"
+  answer: 3
+  explanation: |
+    Validating scheme and blocking internal/link-local addresses prevents the shortener from being
+    weaponized for open redirects or SSRF. Length comparison (0) and lowercasing (1) are irrelevant,
+    and requiring a live 200 (2) is fragile and not a security control.
+  ref: "concepts.md#rate-limiting-and-abuse-prevention"
+- id: design-url-shortener-059
+  difficulty: advanced
+  tags: [tradeoff, edge-kv, consistency, scenario]
+  question: |
+    You deploy redirects at the edge with an eventually-consistent edge KV. A user reports their
+    brand-new link 404s in one region for a few seconds. What is the correct interpretation?
+  options:
+  - "The design is broken and edge KV must be abandoned"
+  - "Expected behavior: edge KV write-propagation is eventual; mitigate with read-your-writes (route creator to origin) or brief origin fallback on edge miss"
+  - "The database lost the record"
+  - "The CDN is misconfigured to cache 404s forever"
+  answer: 1
+  explanation: |
+    Edge KV propagation delay is a known trade-off; a just-created key may not be everywhere yet,
+    so fall back to origin on edge miss or give the creator read-your-writes. It is not a broken
+    design (0) or DB data loss (2); caching 404s forever (3) would be a separate misconfiguration,
+    not the described transient behavior.
+  ref: "concepts.md#modern-patterns-and-where-the-field-is-heading"
+- id: design-url-shortener-060
+  difficulty: advanced
+  tags: [tradeoff, analytics, accuracy]
+  question: |
+    What is the deliberate trade-off made by collecting analytics asynchronously via a queue?
+  options:
+  - "Redirects become slower but analytics are exact"
+  - "Analytics become strongly consistent with the redirect"
+  - "Redirects stay fast and available, but click counts become eventually consistent and possibly approximate"
+  - "The database load increases on every redirect"
+  answer: 2
+  explanation: |
+    Async analytics trade exact, real-time counts for a fast, resilient redirect path — counts lag
+    and may be sampled/approximate. It does not slow redirects (0), does not make analytics strongly
+    consistent (1), and it REDUCES rather than increases per-redirect DB load (3).
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-061
+  difficulty: expert
+  tags: [tradeoff, kgs, concurrency, exactly-once]
+  question: |
+    In a KGS, the hardest correctness problem is ensuring each pre-generated key is handed out
+    exactly once under concurrency. Which mechanism achieves this most robustly?
+  options:
+  - "Atomically move keys from an 'unused' partition to a 'used' state within a transaction (or conditional update) when a batch is fetched, so no key is issued twice"
+  - "Let every app server read the same 'unused' list and pick randomly"
+  - "Rely on the app-server cache to avoid duplicates"
+  - "Use eventual consistency and dedupe later"
+  answer: 0
+  explanation: |
+    An atomic mark-on-fetch (transactional move or conditional update) guarantees a key is claimed
+    exactly once even under concurrent fetches. Random picks from a shared list (1) race, app-server
+    caches (2) do not coordinate across servers, and dedup-later (3) means two live links could share
+    a key in the meantime.
+  ref: "concepts.md#key-generation-service-and-pre-generation"
+- id: design-url-shortener-062
+  difficulty: expert
+  tags: [tradeoff, pacelc, consistency]
+  question: |
+    Applying PACELC to the shortener's read path, which characterization is most accurate?
+  options:
+  - "PC/EC: prioritize consistency during partitions and latency-consistency balance otherwise"
+  - "PC/EL: consistency under partition, latency otherwise"
+  - "PA/EL: favor availability during partitions and favor low latency (over strong consistency) even when the network is healthy, because stale redirects are harmless"
+  - "PA/EC: availability under partition, consistency otherwise"
+  answer: 2
+  explanation: |
+    The read path tolerates staleness, so it favors Availability under Partition and Latency in the
+    Else case (PA/EL) — read nearest replica/cache, accept eventual consistency. The PC/EC (0),
+    PC/EL (1), and PA/EC (3) variants all over-prioritize consistency somewhere the redirect path
+    does not need it.
+  ref: "concepts.md#consistency-versus-availability-choices"
+- id: design-url-shortener-063
+  difficulty: expert
+  tags: [tradeoff, counter, gaps, segmented]
+  question: |
+    With segmented counter allocation, an app server holding a block of 1,000 IDs crashes after
+    using 200. What is the effect and why is it acceptable?
+  options:
+  - "Duplicate IDs are minted; this is a critical bug"
+  - "The unused ~800 IDs are lost, creating gaps in the sequence; harmless because the key space is enormous and uniqueness is preserved"
+  - "The entire counter resets to zero"
+  - "All previously issued IDs become invalid"
+  answer: 1
+  explanation: |
+    A crashed server's unallocated block IDs are simply skipped, producing gaps but never
+    duplicates, and the space (e.g. 62^7) easily absorbs the waste. It does not cause duplicates (0),
+    reset the counter (2), or invalidate issued IDs (3).
+  ref: "concepts.md#counter-and-base62-encoding"
+- id: design-url-shortener-064
+  difficulty: expert
+  tags: [tradeoff, bloom-filter, sizing]
+  question: |
+    You add a Bloom filter to shield the DB from lookups of non-existent keys across ~1B keys at
+    a 1% false-positive rate. Which statement about the trade-off is correct?
+  options:
+  - "The Bloom filter can produce false negatives, occasionally hiding real keys"
+  - "It guarantees zero DB lookups for missing keys"
+  - "It requires the same storage as the full key table"
+  - "It costs roughly ~1.2 GB of memory and may yield false positives (a real-looking miss still checked against the DB), but never false negatives, so no valid key is ever wrongly rejected"
+  answer: 3
+  explanation: |
+    A Bloom filter for 1B keys at 1% FP is ~1.2 GB and has false positives (which just fall through
+    to a DB check) but no false negatives, so it never hides a valid key. It cannot produce false
+    negatives (0), false positives mean it does not guarantee zero DB lookups (1), and it is far
+    smaller than the full table (2).
+  ref: "concepts.md#read-heavy-caching"
+- id: design-url-shortener-065
+  difficulty: expert
+  tags: [tradeoff, custom-alias, namespace]
+  question: |
+    Custom aliases and auto-generated keys share one namespace. What is the cleanest way to prevent
+    an auto-generated key from ever colliding with a custom alias?
+  options:
+  - "Generate keys and hope they never match"
+  - "Only allow custom aliases and drop generated keys"
+  - "Partition the namespace (e.g. reserve a length/prefix for generated keys, or check both spaces atomically on insert) so the two cannot collide"
+  - "Store custom aliases in a separate database with no coordination"
+  answer: 2
+  explanation: |
+    Reserving distinct length/prefix ranges (or an atomic uniqueness check across both) structurally
+    prevents collisions between generated and custom keys. Hoping (0) is not a design, dropping
+    generated keys (1) breaks the core feature, and an uncoordinated separate store (3) still allows
+    the same string to exist in both.
+  ref: "concepts.md#custom-aliases-expiry-and-analytics"
+- id: design-url-shortener-066
+  difficulty: expert
+  tags: [tradeoff, scenario, comprehensive]
+  question: |
+    A startup MVP shortener expects <1M links total, modest traffic, one region, and wants minimal
+    operational burden. Which design is MOST appropriate, avoiding premature complexity?
+  options:
+  - "A single Postgres/MySQL with a segmented counter (or hashing) for keys, a small Redis cache, and 302 redirects — adding sharding/CDN/edge only when scale demands"
+  - "Multi-region DynamoDB Global Tables + KGS + edge compute + cell-based architecture from day one"
+  - "Cassandra multi-DC with Snowflake IDs and CDC to five caches"
+  - "Redis-only storage with no durable backing to maximize speed"
+  answer: 0
+  explanation: |
+    At MVP scale, a single relational DB + small cache + simple key scheme is correct; you add
+    sharding, CDN, edge, and multi-region only when metrics justify them. Options 1 and 2 are massive
+    premature over-engineering for <1M links, and Redis-only (3) risks losing all mappings.
+  ref: "concepts.md#trade-offs-and-when-to-use-what"
+- id: design-url-shortener-067
+  difficulty: expert
+  tags: [tradeoff, redirect, hybrid, scenario]
+  question: |
+    You want SOME edge/browser caching to cut load, but must retain the ability to revoke a link
+    within a bounded time and still capture most analytics. Which redirect configuration best
+    balances this?
+  options:
+  - "301 with no cache control"
+  - "301 with max-age=0"
+  - "200 with a meta-refresh tag"
+  - "302 with a short Cache-Control: max-age (e.g. minutes), so edges cache briefly but the target can be changed/revoked and analytics resume after expiry"
+  answer: 3
+  explanation: |
+    302 plus a short max-age gives limited edge caching while bounding staleness so revocation takes
+    effect within the TTL and analytics resume — the pragmatic hybrid. A 301 (0) is cached
+    indefinitely and hard to revoke; 301 max-age=0 (1) is contradictory/unreliable across clients;
+    meta-refresh (2) is slow and loses HTTP-level control.
+  ref: "concepts.md#redirect-301-vs-302"
+- id: design-url-shortener-068
+  difficulty: expert
+  tags: [tradeoff, snowflake, information-leak]
+  question: |
+    Beyond length, what subtle drawback of Snowflake-encoded keys might matter for a competitive
+    commercial shortener?
+  options:
+  - "They cannot be Base62-encoded"
+  - "Because IDs embed a timestamp (and increase over time), they leak approximate creation time and let competitors estimate your link-creation volume/growth"
+  - "They are not unique across nodes"
+  - "They cannot be stored in DynamoDB"
+  answer: 1
+  explanation: |
+    Snowflake IDs are roughly time-ordered and embed a timestamp, so decoding keys reveals creation
+    timing and growth rate — a business-intelligence leak. They can be Base62-encoded (0), are unique
+    with proper machine-id assignment (2), and store fine in DynamoDB (3).
+  ref: "concepts.md#distributed-id-generation-with-snowflake"
+- id: design-url-shortener-069
+  difficulty: expert
+  tags: [tradeoff, cache, coherence, scenario]
+  question: |
+    A link is deleted, but stale entries linger in Redis and in CDN caches. Which strategy most
+    reliably ensures deletions take effect within a bounded window without heavyweight coordination?
+  options:
+  - "Use modest TTLs on cache/CDN entries (and explicit invalidation where supported), plus a read-time existence/expiry check, accepting bounded staleness"
+  - "Rely solely on 301 redirects and hope caches expire"
+  - "Never cache anything so deletions are instant"
+  - "Store a global version number that all caches must read on every request"
+  answer: 0
+  explanation: |
+    Bounded TTLs plus explicit invalidation and a read-time check give a guaranteed staleness window
+    cheaply. Relying on 301 (1) makes deletion nearly impossible; disabling caching (2) destroys the
+    read-heavy performance model; forcing every request to read a global version (3) reintroduces the
+    coordination/latency the cache exists to avoid.
+  ref: "concepts.md#read-heavy-caching"
+- id: design-url-shortener-070
+  difficulty: expert
+  tags: [tradeoff, generalization, kv-store]
+  question: |
+    An interviewer asks why designing a URL shortener, Pastebin, and a generic key-value store are
+    "the same problem." What is the most precise answer?
+  options:
+  - "They all use the same programming language"
+  - "They all require strong consistency and joins"
+  - "They differ fundamentally in every building block"
+  - "All three reduce to generating a unique key and serving a key->value mapping at read scale; the ONLY substantive differences are value size and where the value physically lives (inline vs object storage), while key-gen, caching, sharding, expiry, and CAP reasoning are identical"
+  answer: 3
+  explanation: |
+    The archetype is key generation + a cached, sharded key->value lookup; only value size and its
+    storage location vary (URL inline, paste in S3, arbitrary bytes in a KV store). Language (0) is
+    irrelevant, none require joins/strong consistency broadly (1), and they share — not differ in —
+    their building blocks (2).
+  ref: "concepts.md#pastebin-and-generic-key-value-store-generalization"

@@ -1,0 +1,1330 @@
+topic: Design Video and Media Platform and Distributed Cache
+domain: system-design
+topic_slug: design-video-platform-distributed-cache
+version: 1
+questions:
+  - id: design-video-platform-distributed-cache-001
+    difficulty: beginner
+    tags: [requirements, cap, read-write-ratio]
+    question: |
+      For a YouTube-style video platform, which consistency/availability
+      stance is the standard default and why?
+    options:
+      - "High availability (AP): a slightly stale view count is invisible, but a video that won't play is a disaster"
+      - "Strong consistency (CP): a stale view count would confuse users, so every read must reflect the latest write"
+      - "Linearizability everywhere so uploads and views never diverge"
+      - "Serializable transactions across the whole system for correctness"
+    answer: 0
+    explanation: |
+      A video platform is a read-heavy, availability-first (AP) system: a
+      view count or recommendation being seconds stale is unnoticeable, but
+      unavailable playback is catastrophic. Strong consistency/linearizability
+      (A, C) and global serializability (D) cost latency and availability for
+      guarantees this domain doesn't need on the hot path. CP is reserved for
+      narrow slices like billing/entitlements.
+    ref: "concepts.md#requirements-and-capacity-estimation"
+  - id: design-video-platform-distributed-cache-002
+    difficulty: beginner
+    tags: [estimation, storage, quant]
+    question: |
+      If a platform ingests 5M uploads/day averaging 300 MB of raw video each,
+      roughly how much raw storage per day does that represent?
+    options:
+      - "About 1.5 TB/day"
+      - "About 150 TB/day"
+      - "About 15 TB/day"
+      - "About 1.5 PB/day"
+    answer: 3
+    explanation: |
+      5,000,000 * 300 MB = 1.5 * 10^9 MB = 1.5 * 10^6 GB = 1.5 * 10^3 TB =
+      1.5 PB/day of raw uploads (before transcoding multiplies it further).
+      This scale is why tiered/cold storage and erasure coding matter. The
+      smaller answers drop factors of 1000.
+    ref: "concepts.md#requirements-and-capacity-estimation"
+  - id: design-video-platform-distributed-cache-003
+    difficulty: beginner
+    tags: [upload, presigned-url, architecture]
+    question: |
+      Why should video bytes be uploaded via a pre-signed URL directly to an
+      object store instead of being proxied through your application servers?
+    options:
+      - "It keeps the stateless app tier cheap and off the path of multi-GB payloads"
+      - "Pre-signed URLs make the upload strongly consistent"
+      - "Object stores encrypt data and app servers cannot"
+      - "App servers cannot speak HTTP to object stores"
+    answer: 0
+    explanation: |
+      Direct-to-blob upload keeps the app tier stateless and small — it never
+      has to carry GB payloads through its fleet. Encryption (C) is available
+      either way. Pre-signed URLs are about access delegation, not consistency
+      (B). App servers certainly can talk to object stores (D); the point is
+      you don't want them to for large files.
+    ref: "concepts.md#video-upload-and-resumable-chunking"
+  - id: design-video-platform-distributed-cache-004
+    difficulty: beginner
+    tags: [cdn, latency, motivation]
+    question: |
+      What is the primary reason a CDN lowers video start-up latency in a way
+      an in-region origin cannot?
+    options:
+      - "CDNs place content in edge PoPs physically close to users, cutting round-trip time bounded by the speed of light"
+      - "CDNs compress video more aggressively"
+      - "CDNs never expire content so hit ratios are always 100%"
+      - "CDNs use faster disks than origin servers"
+    answer: 0
+    explanation: |
+      Geographic proximity defeats speed-of-light RTT: an edge 20 ms away beats
+      an origin 150 ms away regardless of server hardware. Disk speed (D) and
+      compression (B) are not the core lever, and CDNs absolutely expire content
+      (C).
+    ref: "concepts.md#cdn-delivery-and-edge-caching"
+  - id: design-video-platform-distributed-cache-005
+    difficulty: beginner
+    tags: [abr, streaming, intuition]
+    question: |
+      What does Adaptive Bitrate (ABR) streaming primarily let a client do?
+    options:
+      - "Switch video quality per segment based on measured bandwidth so playback doesn't stall"
+      - "Download the entire video in one request before playback"
+      - "Encode the video on the client device"
+      - "Store the whole catalog on the device for offline use"
+    answer: 0
+    explanation: |
+      ABR stores multiple renditions cut into short segments and lets the
+      client pick/switch quality per segment as bandwidth changes, avoiding
+      stalls. It is the opposite of a single whole-file download (B). Clients
+      don't encode (C) or store the catalog (D).
+    ref: "concepts.md#adaptive-bitrate-streaming-hls-and-dash"
+  - id: design-video-platform-distributed-cache-006
+    difficulty: beginner
+    tags: [eviction, lru, cache]
+    question: |
+      What does an LRU (Least Recently Used) eviction policy remove when the
+      cache is full?
+    options:
+      - "The item that was inserted earliest, regardless of use"
+      - "The item that has gone untouched the longest"
+      - "A randomly chosen item"
+      - "The item accessed the fewest total times"
+    answer: 1
+    explanation: |
+      LRU evicts the item untouched for the longest time (recency). Inserted-
+      earliest is FIFO (A), random is random eviction (C), and fewest total
+      accesses is LFU (D).
+    ref: "concepts.md#cache-eviction-policies"
+  - id: design-video-platform-distributed-cache-007
+    difficulty: beginner
+    tags: [partitioning, consistent-hashing]
+    question: |
+      Why do distributed caches prefer consistent hashing over hash(key) % N?
+    options:
+      - "Adding/removing a node with modulo remaps almost all keys, causing a miss storm"
+      - "Consistent hashing keeps keys sorted for range scans"
+      - "Modulo hashing cannot distribute keys evenly"
+      - "Consistent hashing uses less memory per key"
+    answer: 0
+    explanation: |
+      With hash % N, changing N remaps nearly every key, dumping load on the DB
+      via a mass cache miss. Consistent hashing moves only ~K/N keys on resize.
+      Modulo can distribute evenly (C is false); consistent hashing does not
+      sort keys (B); memory per key is unrelated (D).
+    ref: "concepts.md#cache-partitioning-and-consistent-hashing"
+  - id: design-video-platform-distributed-cache-008
+    difficulty: beginner
+    tags: [blob-storage, architecture]
+    question: |
+      Where should the large immutable video files be stored?
+    options:
+      - "As BLOB columns in the relational metadata database"
+      - "In the Redis cache alongside metadata"
+      - "On the application servers' local disks"
+      - "In an object store like S3/GCS/Azure Blob"
+    answer: 3
+    explanation: |
+      Huge immutable read-many objects belong in an object store (cheap,
+      durable, HTTP-native, CDN-friendly). DB BLOBs (A) bloat the DB and kill
+      cache locality; caches (B) are RAM and volatile; app-server local disk
+      (C) is not durable or scalable.
+    ref: "concepts.md#blob-and-object-storage"
+  - id: design-video-platform-distributed-cache-009
+    difficulty: beginner
+    tags: [transcoding, codec, container]
+    question: |
+      A video file's encoding is described by two parts. Which pair is correct?
+    options:
+      - "Container (e.g., .mp4) and codec (e.g., H.264)"
+      - "Manifest and segment"
+      - "Bitrate and resolution only"
+      - "Playlist and DRM key"
+    answer: 0
+    explanation: |
+      Encoding = container (the file format wrapper, e.g., .mp4/.webm) + codec
+      (the compression algorithm, e.g., H.264/AV1). Manifests/segments (B) and
+      playlists (D) belong to packaging/streaming; bitrate/resolution (C) are
+      rendition parameters, not the container/codec pair.
+    ref: "concepts.md#transcoding-pipeline"
+  - id: design-video-platform-distributed-cache-010
+    difficulty: beginner
+    tags: [live-vs-vod, latency]
+    question: |
+      What is the fundamental constraint that makes live streaming harder than
+      VOD?
+    options:
+      - "Live video files are always larger"
+      - "You cannot pre-transcode the future; glass-to-glass latency is the binding constraint"
+      - "Live streams cannot use a CDN"
+      - "Live video does not need adaptive bitrate"
+    answer: 1
+    explanation: |
+      Live is a real-time pipeline: content is transcoded as it arrives and
+      end-to-end latency must be small, so you can't batch or pre-compute. Live
+      absolutely uses CDNs (C) and ABR (D); file size (A) isn't the core issue.
+    ref: "concepts.md#live-streaming-versus-vod"
+  - id: design-video-platform-distributed-cache-011
+    difficulty: beginner
+    tags: [metadata, nosql]
+    question: |
+      The watch path only ever looks up a video by its videoId. What storage
+      model fits the metadata best?
+    options:
+      - "A single-node relational DB with many joins"
+      - "A graph database"
+      - "A horizontally scalable key-value/wide-column store partitioned by videoId"
+      - "A full-text search engine as the primary store"
+    answer: 2
+    explanation: |
+      Point lookups by id at massive scale favor a partitioned KV/wide-column
+      store (Cassandra/DynamoDB/Bigtable) — linear scale, no joins. Joins/graph
+      (A, C) aren't needed on the hot path; search engines (D) complement but
+      aren't the primary store.
+    ref: "concepts.md#metadata-service-and-database"
+  - id: design-video-platform-distributed-cache-012
+    difficulty: beginner
+    tags: [cache-pattern, cache-aside]
+    question: |
+      In the cache-aside (lazy loading) pattern, what happens on a cache miss?
+    options:
+      - "The write fails until the cache is warmed"
+      - "The cache automatically fetches from the DB with no app involvement"
+      - "The request is rejected"
+      - "The application reads from the DB and then populates the cache"
+    answer: 3
+    explanation: |
+      In cache-aside the application itself reads the DB on a miss and then
+      writes the value into the cache. Automatic cache-managed DB access (B) is
+      read-through, a different pattern. Misses don't fail writes or reject
+      requests (A, D).
+    ref: "concepts.md#distributed-cache-architecture-build-a-cache"
+  - id: design-video-platform-distributed-cache-013
+    difficulty: beginner
+    tags: [hot-keys, thundering-herd]
+    question: |
+      What is a "thundering herd" (cache stampede) in a caching system?
+    options:
+      - "A flood of concurrent misses for the same key hitting the DB when it expires or a node dies"
+      - "Too many nodes joining the cluster at once"
+      - "A single client sending malformed requests"
+      - "The cache running out of memory"
+    answer: 0
+    explanation: |
+      A thundering herd is many simultaneous misses for the same (popular) key
+      stampeding the backend when the key expires or its node fails. It's not
+      about cluster membership (B), a single bad client (C), or OOM (D, which is
+      an eviction concern).
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-014
+    difficulty: beginner
+    tags: [cost, egress, cdn]
+    question: |
+      For a large video platform, which cost typically dominates the delivery
+      bill?
+    options:
+      - "CPU for the metadata service"
+      - "CDN/network egress bandwidth for serving video bytes"
+      - "The relational database license"
+      - "DNS query costs"
+    answer: 1
+    explanation: |
+      Serving petabytes of video is dominated by egress bandwidth cost — the
+      reason Netflix built Open Connect and YouTube uses Google Global Cache.
+      Metadata CPU (A), DB licensing (C), and DNS (D) are negligible by
+      comparison.
+    ref: "concepts.md#cost-and-latency-trade-offs-of-edge-caching"
+  - id: design-video-platform-distributed-cache-015
+    difficulty: intermediate
+    tags: [upload, chunking, trade-off]
+    question: |
+      You must choose an upload chunk size for resumable multipart uploads over
+      flaky mobile networks. What is the core trade-off?
+    options:
+      - "Larger chunks always upload faster with no downside"
+      - "Chunk size only affects server storage, not the client"
+      - "Small chunks improve resumability and parallelism but add request/metadata overhead; large chunks reduce overhead but waste more bytes on a failed chunk"
+      - "Smaller chunks require strong consistency in the metadata store"
+    answer: 2
+    explanation: |
+      The trade-off is granularity: small chunks (better resume, more
+      parallelism) cost more requests/metadata; large chunks are efficient but
+      re-uploading a failed large chunk wastes more bandwidth. 5-10 MB is the
+      industry sweet spot. (A) ignores waste-on-failure; (B) and (D) are
+      incorrect framings.
+    ref: "concepts.md#video-upload-and-resumable-chunking"
+  - id: design-video-platform-distributed-cache-016
+    difficulty: intermediate
+    tags: [transcoding, dag, parallelism]
+    question: |
+      Why is the transcoding pipeline commonly modeled as a directed acyclic
+      graph (DAG) of tasks?
+    options:
+      - "To enforce that every rendition is produced strictly one after another"
+      - "To express independent stages that can run in parallel and be retried, with clear dependencies (split -> encode renditions -> package manifests)"
+      - "To avoid using a message queue"
+      - "Because DAGs guarantee strong consistency of the output"
+    answer: 1
+    explanation: |
+      A DAG models dependencies while letting independent tasks (each rendition,
+      thumbnails, audio, subtitles) run in parallel and be retried
+      individually. It is the opposite of strictly serial (A). DAGs don't
+      provide consistency guarantees (D) and are typically driven by
+      queues/orchestrators, not instead of them (C).
+    ref: "concepts.md#transcoding-pipeline"
+  - id: design-video-platform-distributed-cache-017
+    difficulty: intermediate
+    tags: [transcoding, eager-vs-lazy, trade-off]
+    question: |
+      Most uploaded videos get almost no views (long tail). What is the argument
+      for lazy/on-demand transcoding of rare renditions?
+    options:
+      - "It saves compute and storage by only producing renditions that are actually requested, at the cost of higher latency on the first request for a rare rendition"
+      - "It reduces first-view latency for every video"
+      - "It guarantees all renditions are always available instantly"
+      - "It eliminates the need for a CDN"
+    answer: 0
+    explanation: |
+      Lazy transcoding avoids spending CPU/storage on renditions of videos few
+      people watch; the cost is first-view latency when a rare rendition is
+      first requested. It increases (not reduces) first-view latency (B) and
+      does not make everything instantly available (C) or remove the CDN (D).
+    ref: "concepts.md#transcoding-pipeline"
+  - id: design-video-platform-distributed-cache-018
+    difficulty: intermediate
+    tags: [abr, manifest, hls, dash]
+    question: |
+      In HLS/DASH, what is the role of the master (multivariant) manifest?
+    options:
+      - "It stores the actual encoded video bytes"
+      - "It lists the available renditions (bitrate/resolution/codec), each pointing to a media manifest of segment URLs"
+      - "It holds the DRM license keys"
+      - "It records per-user viewing history"
+    answer: 1
+    explanation: |
+      The master manifest is an index of renditions; each entry points to a
+      media manifest listing that rendition's segments. It contains no video
+      bytes (A), no DRM keys (C), and no user history (D).
+    ref: "concepts.md#adaptive-bitrate-streaming-hls-and-dash"
+  - id: design-video-platform-distributed-cache-019
+    difficulty: intermediate
+    tags: [cdn, push-vs-pull, trade-off]
+    question: |
+      A user-generated content platform can't predict which uploads go viral.
+      Which CDN strategy fits best and why?
+    options:
+      - "Pull: edges lazily fetch on first miss and cache, self-tuning to actual demand"
+      - "No CDN: serve everything from origin to avoid staleness"
+      - "Push: pre-populate every edge with every video so there are never misses"
+      - "Push only the oldest videos since they are proven"
+    answer: 0
+    explanation: |
+      Unpredictable UGC favors pull: the edge caches what's actually demanded,
+      avoiding the waste of pushing content that may never be watched. Pushing
+      everything (C) is prohibitively expensive; no CDN (B) melts the origin;
+      pushing old videos (D) misses new virality, which is exactly what needs
+      edge coverage.
+    ref: "concepts.md#cdn-delivery-and-edge-caching"
+  - id: design-video-platform-distributed-cache-020
+    difficulty: intermediate
+    tags: [cdn, netflix, open-connect, push-vs-pull]
+    question: |
+      Netflix pre-positions popular titles onto Open Connect appliances inside
+      ISPs overnight. Why does push/predictive caching work well for Netflix
+      but not for YouTube UGC?
+    options:
+      - "Netflix videos are smaller and easier to move"
+      - "ISPs only allow Netflix appliances"
+      - "YouTube does not use any CDN at all"
+      - "Netflix has a known, finite catalog it can predict demand for, whereas YouTube's UGC firehose is unpredictable"
+    answer: 3
+    explanation: |
+      A fixed, known catalog lets Netflix predict which titles will be hot and
+      push them off-peak; UGC's unpredictable, high-cardinality stream can't be
+      pre-positioned economically, so YouTube pulls. Size (A) and ISP policy (B)
+      aren't the reason, and YouTube does use CDNs/GGC (C).
+    ref: "concepts.md#cdn-delivery-and-edge-caching"
+  - id: design-video-platform-distributed-cache-021
+    difficulty: intermediate
+    tags: [metadata, hot-key, viral]
+    question: |
+      Metadata is partitioned by videoId. A single video goes viral and makes
+      its Cassandra partition hot. What is the appropriate first mitigation?
+    options:
+      - "Replicate the hot key and put a cache (e.g., Redis) in front to absorb reads"
+      - "Re-partition the whole table by a different key"
+      - "Switch the entire store to a single relational primary"
+      - "Delete the video to relieve load"
+    answer: 0
+    explanation: |
+      A single hot key is best mitigated by replication + a fronting cache, not
+      by re-keying the whole dataset (B), which breaks lookups and helps
+      nothing for a single hot key. A single relational primary (C) reduces
+      scalability; deleting content (D) is absurd.
+    ref: "concepts.md#metadata-service-and-database"
+  - id: design-video-platform-distributed-cache-022
+    difficulty: intermediate
+    tags: [metadata, view-count, counters, trade-off]
+    question: |
+      Incrementing a view counter synchronously on the video's row for every
+      view causes a write hot spot on popular videos. What's the standard fix
+      and its trade-off?
+    options:
+      - "Use a distributed lock per view to serialize increments"
+      - "Async aggregation of view events (e.g., stream processing) giving approximate/slightly-lagging counts that scale, trading exactness for throughput"
+      - "Store the counter in a relational DB with SERIALIZABLE isolation"
+      - "Cache the counter with a 1-second TTL and recompute on every read"
+    answer: 1
+    explanation: |
+      Views are aggregated asynchronously (e.g., Kafka + Flink), accepting
+      eventually-consistent/approximate counts to eliminate the write hot spot.
+      A per-view lock (A) or SERIALIZABLE row updates (C) worsen contention; a
+      1-second TTL recompute (D) stampedes the DB and doesn't fix the write
+      hotspot.
+    ref: "concepts.md#metadata-service-and-database"
+  - id: design-video-platform-distributed-cache-023
+    difficulty: intermediate
+    tags: [eviction, lru-vs-lfu, trade-off]
+    question: |
+      When is LFU a better eviction choice than LRU?
+    options:
+      - "When access patterns shift rapidly and recency matters most"
+      - "When you cannot afford any per-key bookkeeping"
+      - "When popularity is stable and Zipfian, so you want to protect genuinely hot keys from being flushed by a burst"
+      - "When the cache is used purely as a FIFO buffer"
+    answer: 2
+    explanation: |
+      LFU protects long-term hot keys under stable Zipfian popularity; it
+      resists a burst/scan evicting the true hot set. Rapidly shifting access
+      favors LRU (A); no-bookkeeping favors random/FIFO (B); FIFO buffering (D)
+      is a different use.
+    ref: "concepts.md#cache-eviction-policies"
+  - id: design-video-platform-distributed-cache-024
+    difficulty: intermediate
+    tags: [eviction, lru, scan-pollution]
+    question: |
+      What is the known weakness of plain LRU that policies like W-TinyLFU aim
+      to fix?
+    options:
+      - "LRU cannot be implemented in O(1)"
+      - "LRU always evicts the most recently used item"
+      - "LRU requires strong consistency"
+      - "A large one-time scan can flush the entire hot set out of the cache (cache pollution)"
+    answer: 3
+    explanation: |
+      A big sequential scan pulls in many one-time items that push out the hot
+      set under LRU. W-TinyLFU/ARC/SLRU resist this by considering frequency.
+      LRU is O(1) with a linked list (A false); it evicts least-recently, not
+      most-recently used (B); consistency is unrelated (C).
+    ref: "concepts.md#cache-eviction-policies"
+  - id: design-video-platform-distributed-cache-025
+    difficulty: intermediate
+    tags: [consistent-hashing, virtual-nodes]
+    question: |
+      Why do consistent-hashing implementations use virtual nodes (multiple ring
+      positions per physical node)?
+    options:
+      - "To smooth load distribution and spread a failed node's keys across all remaining nodes instead of dumping onto one neighbor"
+      - "To reduce the total memory used by the cache"
+      - "To keep keys sorted for range queries"
+      - "To eliminate the need for replication"
+    answer: 0
+    explanation: |
+      Virtual nodes even out the arcs each physical node owns and, on failure,
+      distribute the departed node's keys across many nodes rather than the
+      single clockwise neighbor. They don't reduce memory (B), sort keys (C), or
+      replace replication (D).
+    ref: "concepts.md#cache-partitioning-and-consistent-hashing"
+  - id: design-video-platform-distributed-cache-026
+    difficulty: intermediate
+    tags: [replication, consistency, trade-off]
+    question: |
+      For a pure read cache sitting in front of a durable database, when is it
+      reasonable to run the cache with NO replication?
+    options:
+      - "Never — a cache must always be replicated"
+      - "When cost matters and a node loss just causes misses that refill cheaply from the durable DB"
+      - "Only when the cache is the system of record"
+      - "Only when using strong consistency"
+    answer: 1
+    explanation: |
+      Because the DB is the source of truth, losing a cache node just causes
+      refill-on-miss — many teams skip replication to save memory/cost.
+      Replication is not mandatory (A). If the cache were the system of record
+      (C) you'd need replication for durability, the opposite case. Strong
+      consistency (D) is unrelated to whether you replicate.
+    ref: "concepts.md#cache-replication-and-consistency"
+  - id: design-video-platform-distributed-cache-027
+    difficulty: intermediate
+    tags: [hot-keys, request-coalescing]
+    question: |
+      A popular key expires and 50,000 requests miss simultaneously. Which
+      technique collapses those into a single backend recompute?
+    options:
+      - "Request coalescing / single-flight: only the first miss recomputes; the rest wait for that result"
+      - "Switch eviction from LRU to LFU"
+      - "Increase the cache node count"
+      - "Shard the key across more nodes"
+    answer: 0
+    explanation: |
+      Single-flight/request coalescing dedups concurrent misses for the same key
+      into one recompute. Adding nodes (C) or changing eviction (B) doesn't stop
+      the simultaneous-miss stampede; sharding the key (D) helps read load but
+      not the concurrent-recompute problem on expiry.
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-028
+    difficulty: intermediate
+    tags: [hot-keys, ttl, jitter]
+    question: |
+      A batch of keys was loaded with identical 60-minute TTLs and all expire at
+      the same instant, causing periodic DB spikes. What's the simplest fix?
+    options:
+      - "Set noeviction so nothing is ever removed"
+      - "Switch to write-back caching"
+      - "Disable TTLs entirely"
+      - "Add random jitter to TTLs so expirations spread over time"
+    answer: 3
+    explanation: |
+      Jittered TTLs spread expirations so they don't align into a
+      synchronized avalanche. noeviction (A) is about memory pressure, not TTL
+      alignment; write-back (B) is a write policy; disabling TTLs (C) risks
+      unbounded staleness.
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-029
+    difficulty: intermediate
+    tags: [live-vs-vod, protocols, latency]
+    question: |
+      A mass-audience live sports broadcast needs a few seconds of latency and
+      must scale to millions of concurrent viewers. Which delivery approach
+      fits best?
+    options:
+      - "LL-HLS/LL-DASH over the CDN — HTTP segments cache well and scale to millions at a few seconds latency"
+      - "WebRTC to every viewer for sub-second latency"
+      - "RTMP directly to every viewer"
+      - "Progressive MP4 download"
+    answer: 0
+    explanation: |
+      LL-HLS/LL-DASH serves cacheable HTTP segments through the CDN, scaling to
+      millions at a few-seconds latency. WebRTC (B) gives sub-second but scales
+      poorly to mass audiences; RTMP (C) is an ingest protocol, not mass
+      delivery; progressive download (D) can't do live/ABR well.
+    ref: "concepts.md#live-streaming-versus-vod"
+  - id: design-video-platform-distributed-cache-030
+    difficulty: intermediate
+    tags: [recommendations, vector-db, ann]
+    question: |
+      In a modern two-stage recommender, what is the role of Approximate Nearest
+      Neighbor (ANN) search over embeddings in a vector database?
+    options:
+      - "Final ranking of the chosen videos with rich features"
+      - "Candidate generation: cheaply narrowing millions of videos to hundreds using embedding similarity"
+      - "Storing the raw video bytes"
+      - "Serving the manifest files to the player"
+    answer: 1
+    explanation: |
+      ANN over embeddings is the retrieval/candidate-generation stage that
+      shrinks millions to hundreds cheaply; a heavier model then ranks them (A
+      is the second stage, not ANN's job). Vector DBs don't store video bytes
+      (C) or manifests (D).
+    ref: "concepts.md#recommendations-at-a-high-level"
+  - id: design-video-platform-distributed-cache-031
+    difficulty: intermediate
+    tags: [blob-storage, erasure-coding, trade-off]
+    question: |
+      Compared with triple replication, what does erasure coding (e.g., 10+4)
+      give you for cold video storage?
+    options:
+      - "Lower durability but faster reads"
+      - "Strong consistency of writes"
+      - "Similar durability at ~1.4x overhead instead of 3x, trading extra CPU/latency on reconstruction"
+      - "Elimination of the need for a CDN"
+    answer: 2
+    explanation: |
+      Erasure coding achieves comparable durability at far lower storage
+      overhead (~1.4x vs 3x), paying with CPU and higher reconstruction latency
+      — hence hot data may stay replicated while cold data is EC'd. It doesn't
+      lower durability (A), provide write consistency (B), or affect CDNs (D).
+    ref: "concepts.md#blob-and-object-storage"
+  - id: design-video-platform-distributed-cache-032
+    difficulty: intermediate
+    tags: [cache-topology, proxy-vs-client]
+    question: |
+      What is the main trade-off between client-side sharding and a proxy/router
+      topology for a distributed cache?
+    options:
+      - "Client-side sharding adds a network hop but centralizes topology; proxy removes the hop"
+      - "Proxies cannot do connection pooling"
+      - "Client-side sharding requires strong consistency"
+      - "Client-side sharding gives one-hop latency but embeds routing in every client; a proxy adds a hop but centralizes routing/failover for dumb clients"
+    answer: 3
+    explanation: |
+      Client-side sharding is lowest latency (direct) but every client must
+      know/track the topology; a proxy simplifies clients and centralizes
+      routing/failover at the cost of an extra hop. (A) reverses the hop logic;
+      proxies do pool connections (B); consistency is unrelated (C).
+    ref: "concepts.md#distributed-cache-architecture-build-a-cache"
+  - id: design-video-platform-distributed-cache-033
+    difficulty: intermediate
+    tags: [estimation, bandwidth, quant]
+    question: |
+      1080p H.264 streams at roughly 5 Mbps. Approximately what egress bandwidth
+      do 1,000,000 concurrent 1080p viewers require?
+    options:
+      - "About 5 Tbps"
+      - "About 5 Gbps"
+      - "About 50 Gbps"
+      - "About 500 Mbps"
+    answer: 0
+    explanation: |
+      5 Mbps * 1,000,000 = 5,000,000 Mbps = 5 Tbps. This scale is why egress
+      dominates cost and why hyperscalers build their own CDNs. The other
+      options are off by factors of 100-10,000.
+    ref: "concepts.md#requirements-and-capacity-estimation"
+  - id: design-video-platform-distributed-cache-034
+    difficulty: intermediate
+    tags: [cache-pattern, write-through-vs-write-back, trade-off]
+    question: |
+      What is the primary trade-off of write-back (write-behind) caching versus
+      write-through?
+    options:
+      - "Write-back is slower on writes but always durable"
+      - "Write-back gives fast writes and absorbs bursts but risks data loss if the node fails before the async flush to the DB"
+      - "Write-back guarantees strong consistency between cache and DB"
+      - "Write-back cannot be used with LRU eviction"
+    answer: 1
+    explanation: |
+      Write-back acknowledges the write at the cache and flushes to the DB
+      asynchronously — fast and burst-absorbing, but data can be lost if the
+      node dies pre-flush. Write-through is the durable/slower one (A reverses
+      it); write-back weakens, not guarantees, cache/DB consistency (C);
+      eviction policy is orthogonal (D).
+    ref: "concepts.md#distributed-cache-architecture-build-a-cache"
+  - id: design-video-platform-distributed-cache-035
+    difficulty: intermediate
+    tags: [cache-penetration, bloom-filter]
+    question: |
+      Attackers repeatedly request keys that don't exist, bypassing the cache
+      and hammering the DB every time (cache penetration). Which defense is most
+      appropriate?
+    options:
+      - "Increase all TTLs to hours"
+      - "Switch to write-back caching"
+      - "A Bloom filter (and/or negative caching) to cheaply reject keys that definitely don't exist"
+      - "Add more read replicas to the cache"
+    answer: 2
+    explanation: |
+      A Bloom filter answers "definitely absent" cheaply, and negative caching
+      stores misses briefly — both stop absent-key requests from reaching the
+      DB. Longer TTLs (A) don't help for keys that were never cached; write-back
+      (B) and more replicas (D) don't address non-existent keys.
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-036
+    difficulty: intermediate
+    tags: [abr, segment-length, trade-off]
+    question: |
+      What is the trade-off in choosing short (2s) vs long (10s) media segments?
+    options:
+      - "Short segments are always better with no downside"
+      - "Long segments reduce total storage"
+      - "Segment length only affects DRM"
+      - "Short segments enable faster quality adaptation and lower live latency but add request/manifest overhead; long segments are more efficient but adapt slowly"
+    answer: 3
+    explanation: |
+      Short segments let the client react to bandwidth faster and cut live
+      latency, but multiply requests and manifest churn; long segments are
+      efficient but slow to adapt and raise live latency. (A) ignores overhead;
+      (B) and (C) are incorrect.
+    ref: "concepts.md#adaptive-bitrate-streaming-hls-and-dash"
+  - id: design-video-platform-distributed-cache-037
+    difficulty: advanced
+    tags: [cdn, shield, thundering-herd, trade-off]
+    question: |
+      A brand-new video goes viral. Millions of viewers hit cold edge caches
+      across many PoPs simultaneously, and every PoP miss forwards to origin.
+      Which design best protects the origin while keeping latency reasonable?
+    options:
+      - "Insert a regional shield tier between edges and origin so edge misses collapse at the shield, and the origin sees only a trickle"
+      - "Increase origin database connection limits and hope it holds"
+      - "Disable caching for new videos to avoid stale content"
+      - "Push the video to every global edge before it is even watched"
+    answer: 0
+    explanation: |
+      A hierarchical/shield tier aggregates and collapses edge misses so the
+      origin sees few requests (request collapsing at the shield). Raising DB
+      limits (B) treats a symptom; disabling caching (C) guarantees origin
+      overload; pre-pushing everything (D) is infeasible for unpredictable
+      virality and wasteful.
+    ref: "concepts.md#cdn-delivery-and-edge-caching"
+  - id: design-video-platform-distributed-cache-038
+    difficulty: advanced
+    tags: [hot-keys, local-cache, staleness, trade-off]
+    question: |
+      To relieve a persistently hot key, you add a small local (L1) cache in
+      each app server in front of the distributed cache. What new problem does
+      this introduce and how is it usually bounded?
+    options:
+      - "It increases network hops; bound it by adding more distributed nodes"
+      - "Many uncoordinated local copies can serve stale data; bound it with short L1 TTLs (and/or invalidation)"
+      - "It makes reads strongly consistent; bound it by disabling the distributed cache"
+      - "It has no downside; local caches are always consistent"
+    answer: 1
+    explanation: |
+      Per-server L1 caches slash hot-key load and hops but create many
+      uncoordinated copies that can drift stale; short TTLs (or an invalidation
+      channel) bound the staleness window. L1 reduces hops, not adds them (A);
+      it weakens, not strengthens, consistency (C); it definitely has a downside
+      (D).
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-039
+    difficulty: advanced
+    tags: [replication, pacelc, trade-off]
+    question: |
+      Applying PACELC to a replicated cache, why is synchronous replication
+      often the wrong default for a cache fronting a durable DB?
+    options:
+      - "Sync replication loses data on failover"
+      - "Sync replication cannot survive a node failure"
+      - "Even absent partitions, sync replication trades latency for consistency on every write — paying DB-level coordination cost while defeating the cache's purpose of speed"
+      - "Async replication guarantees read-your-writes"
+    answer: 2
+    explanation: |
+      PACELC: Else (no partition) you still choose Latency vs Consistency —
+      synchronous replication adds write latency to gain consistency the cache
+      usually doesn't need, undercutting its speed rationale. Sync replication
+      prevents (not causes) recent-write loss (A); it improves failure survival
+      (B); async does NOT guarantee read-your-writes (D).
+    ref: "concepts.md#cache-replication-and-consistency"
+  - id: design-video-platform-distributed-cache-040
+    difficulty: advanced
+    tags: [quorum, consistency, dynamo, trade-off]
+    question: |
+      In a Dynamo-style quorum cache with N=3, which W/R setting maximizes read
+      availability and latency while accepting fully eventual consistency?
+    options:
+      - "W=3, R=1"
+      - "W=2, R=2"
+      - "W=3, R=3"
+      - "W=1, R=1"
+    answer: 3
+    explanation: |
+      W=1,R=1 minimizes coordination for both writes and reads (maximum
+      availability/latency) but W+R = 2 <= N so it's fully eventual. W=3,R=1 (A)
+      makes writes costly for strong-ish reads; W=2,R=2 (B) gives quorum overlap
+      (stronger, slower); W=3,R=3 (C) is maximally consistent and slowest.
+    ref: "concepts.md#cache-replication-and-consistency"
+  - id: design-video-platform-distributed-cache-041
+    difficulty: advanced
+    tags: [hot-keys, stale-while-revalidate, trade-off]
+    question: |
+      For an expensive-to-recompute value where brief staleness is acceptable,
+      which technique best avoids both stalls and stampedes?
+    options:
+      - "Stale-while-revalidate: serve the expired value while a single background refresh runs"
+      - "Strict fresh reads that block all readers until recompute finishes"
+      - "Delete the key on expiry and let all readers recompute"
+      - "Set the TTL to infinity"
+    answer: 0
+    explanation: |
+      Stale-while-revalidate serves the last good value during a single
+      background refresh — no reader stalls and no herd. Strict-fresh blocking
+      (B) creates the very stall/herd you want to avoid; delete-on-expiry (C)
+      invites a stampede; infinite TTL (D) never refreshes.
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-042
+    difficulty: advanced
+    tags: [transcoding, per-title-encoding, netflix, trade-off]
+    question: |
+      Netflix uses per-title (and per-shot) encoding rather than a single fixed
+      bitrate ladder for all content. What is the trade-off being made?
+    options:
+      - "It ignores content complexity to simplify the pipeline"
+      - "It spends extra analysis/encode compute to compute an optimal ladder per title, saving delivery bandwidth and improving quality — worthwhile because a fixed catalog amortizes the compute"
+      - "It reduces the number of renditions to exactly one"
+      - "It removes the need for adaptive bitrate"
+    answer: 1
+    explanation: |
+      Per-title/per-shot encoding invests analysis compute to avoid
+      over-encoding simple content, cutting bandwidth and boosting quality;
+      viable because a fixed catalog amortizes that compute. It accounts for (not
+      ignores) complexity (A), still produces multiple renditions (C), and still
+      needs ABR (D).
+    ref: "concepts.md#transcoding-pipeline"
+  - id: design-video-platform-distributed-cache-043
+    difficulty: advanced
+    tags: [cost, edge-caching, zipfian, trade-off]
+    question: |
+      Given a Zipfian popularity distribution, why is caching the entire catalog
+      at every edge a poor economic choice?
+    options:
+      - "Edge caches cannot hold immutable content"
+      - "Caching everything violates DRM"
+      - "The long tail generates little traffic, so caching it yields sharply diminishing hit-ratio returns for high storage cost — size the edge to the knee of the popularity curve"
+      - "Edge caches must be strongly consistent"
+    answer: 2
+    explanation: |
+      Zipfian traffic means a small hot set serves most requests; caching the
+      cold long tail everywhere costs a lot of storage for negligible extra
+      hits. The right move is to cache the top ~5-20% (the curve's knee). Edges
+      handle immutable content well (A); DRM (B) and consistency (D) aren't the
+      economic issue.
+    ref: "concepts.md#cost-and-latency-trade-offs-of-edge-caching"
+  - id: design-video-platform-distributed-cache-044
+    difficulty: advanced
+    tags: [consistent-hashing, bounded-load, hot-shard]
+    question: |
+      Even with consistent hashing and virtual nodes, a single extremely hot key
+      still overloads its owning node. Which additional technique directly
+      addresses the single-hot-key case?
+    options:
+      - "Add more virtual nodes for that physical node"
+      - "Reduce the number of physical nodes"
+      - "Switch from consistent hashing to modulo hashing"
+      - "Replicate the hot key across multiple nodes and load-balance reads across the copies (key splitting/fan-out)"
+    answer: 3
+    explanation: |
+      A single key maps to one position regardless of vnodes, so the fix is to
+      replicate/split that key across nodes and spread reads. More vnodes (A)
+      don't split a single key's traffic; fewer nodes (B) worsens it; modulo (C)
+      reintroduces resize miss storms and doesn't help hot keys.
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-045
+    difficulty: advanced
+    tags: [live, webrtc, ll-hls, trade-off]
+    question: |
+      For an interactive auction where sub-second latency is essential and
+      concurrent viewers are in the low thousands, which delivery approach is
+      justified despite its poor mass scalability?
+    options:
+      - "WebRTC, because sub-second interactivity is required and the audience is small enough to bear its scaling limits"
+      - "Standard HLS with 10s segments"
+      - "VOD transcoding after the fact"
+      - "MPEG-DASH with 6s segments"
+    answer: 0
+    explanation: |
+      WebRTC delivers sub-second latency needed for interactivity; its poor mass
+      scalability is acceptable at low-thousands scale. Standard HLS (B) and
+      6s DASH (D) add seconds of latency; VOD (C) isn't live at all.
+    ref: "concepts.md#live-streaming-versus-vod"
+  - id: design-video-platform-distributed-cache-046
+    difficulty: advanced
+    tags: [eviction, redis, approximate-lfu, trade-off]
+    question: |
+      Redis implements approximate LFU rather than exact LFU. What is gained by
+      the approximation?
+    options:
+      - "Perfect accuracy of access counts"
+      - "O(1) operations and low memory by using probabilistic counters with decay, trading a little counting accuracy for scalability"
+      - "Elimination of eviction entirely"
+      - "Strong consistency across replicas"
+    answer: 1
+    explanation: |
+      Approximate LFU uses small probabilistic counters with decay to keep
+      operations O(1) and memory low, accepting minor counting inaccuracy. It is
+      not perfectly accurate (A), still evicts (C), and doesn't affect
+      cross-replica consistency (D).
+    ref: "concepts.md#cache-eviction-policies"
+  - id: design-video-platform-distributed-cache-047
+    difficulty: advanced
+    tags: [redis-cluster, slots, resharding, trade-off]
+    question: |
+      Redis Cluster uses 16384 fixed hash slots rather than a pure hash ring.
+      What operational advantage does this provide?
+    options:
+      - "It sorts keys for range scans"
+      - "It removes the need for client-side routing"
+      - "Resharding is explicit and bounded: you move whole slots between nodes, making rebalancing easy to reason about and administer"
+      - "It guarantees strong consistency"
+    answer: 2
+    explanation: |
+      Fixed slots make reassignment discrete and bounded — you migrate slots
+      between nodes, which is simpler to administer than an elastic ring. It
+      doesn't sort keys (A), still needs smart clients/redirection (B), and
+      doesn't provide strong consistency (D).
+    ref: "concepts.md#cache-partitioning-and-consistent-hashing"
+  - id: design-video-platform-distributed-cache-048
+    difficulty: advanced
+    tags: [cmaf, hls, dash, storage, trade-off]
+    question: |
+      You must support both HLS (iOS/Safari) and DASH (other platforms) without
+      doubling storage. What is the modern solution?
+    options:
+      - "Store two full sets of segments, one per protocol"
+      - "Drop DASH and force all clients to use HLS"
+      - "Transcode on the client per protocol"
+      - "Package once with CMAF/fMP4 segments and serve both HLS and DASH from the same media"
+    answer: 3
+    explanation: |
+      CMAF (fragmented MP4) lets you package once and serve both HLS and DASH
+      from the same segments, avoiding double storage. Two full sets (A) is the
+      cost you're trying to avoid; dropping DASH (B) loses reach; clients don't
+      transcode (C).
+    ref: "concepts.md#adaptive-bitrate-streaming-hls-and-dash"
+  - id: design-video-platform-distributed-cache-049
+    difficulty: advanced
+    tags: [recommendations, batch-vs-realtime, cold-start, trade-off]
+    question: |
+      A recommendation system precomputes feeds nightly. What is the primary
+      trade-off, and what hybrid mitigates it?
+    options:
+      - "Precomputed feeds are cheap/fast to serve but stale (miss just-watched signals); a hybrid precomputes candidates and does a light real-time rerank"
+      - "Precompute is expensive per request; mitigate by ranking everything at request time"
+      - "Precompute guarantees fresh recommendations; no mitigation needed"
+      - "Precompute solves cold start for new users automatically"
+    answer: 0
+    explanation: |
+      Batch precompute is cheap to serve but stale to recent activity; the
+      common hybrid keeps precomputed candidates but reranks lightly in real
+      time using fresh signals. Precompute is cheap per request, not expensive
+      (B); it is stale, not fresh (C); and it doesn't solve cold start (D).
+    ref: "concepts.md#recommendations-at-a-high-level"
+  - id: design-video-platform-distributed-cache-050
+    difficulty: advanced
+    tags: [blob-storage, master-copy, re-encode, trade-off]
+    question: |
+      Why keep the high-quality master (mezzanine) copy archived long-term even
+      though it costs the most storage and is never streamed directly?
+    options:
+      - "To serve it directly to 4K clients"
+      - "To enable re-encoding the whole catalog to future codecs (e.g., AV1) without re-uploading; archive it to cold tier to control cost"
+      - "Because object stores require a master copy"
+      - "To speed up thumbnail generation"
+    answer: 1
+    explanation: |
+      The master is the source for re-encoding to future codecs across the whole
+      catalog; you archive it to a cold tier so it costs little. It is not
+      streamed directly (A); object stores don't require a master (C); it's not
+      about thumbnails (D).
+    ref: "concepts.md#blob-and-object-storage"
+  - id: design-video-platform-distributed-cache-051
+    difficulty: advanced
+    tags: [thundering-herd, xfetch, probabilistic, trade-off]
+    question: |
+      Probabilistic early recomputation (e.g., XFetch) refreshes a cache entry
+      slightly before its TTL expires, with randomization. What problem does the
+      randomization specifically prevent?
+    options:
+      - "Data loss on node failure"
+      - "Keys being partitioned to the wrong node"
+      - "All replicas/requesters recomputing at the exact same moment when the entry nears expiry"
+      - "Bloom filter false positives"
+    answer: 2
+    explanation: |
+      Randomized early recompute staggers who refreshes, preventing a
+      synchronized recompute burst as expiry approaches. It doesn't address
+      durability (A), partitioning (B), or Bloom filter accuracy (D).
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-052
+    difficulty: advanced
+    tags: [cdn, pop-count, hit-ratio, trade-off]
+    question: |
+      Adding many more small edge PoPs improves proximity but can hurt something.
+      What, and what recovers it?
+    options:
+      - "It hurts durability; recover with replication"
+      - "It hurts DRM enforcement; recover with encryption"
+      - "It hurts consistency; recover with quorums"
+      - "Each edge sees less traffic so its cache is colder (lower per-edge hit ratio); a regional shield tier recovers hit ratio by aggregating misses"
+    answer: 3
+    explanation: |
+      More PoPs split traffic, so each edge's cache is colder and its hit ratio
+      drops; a shield tier aggregates edge misses to restore an effective high
+      hit ratio and offload origin. Durability (A), DRM (B), and consistency (C)
+      aren't the mechanism at play.
+    ref: "concepts.md#cost-and-latency-trade-offs-of-edge-caching"
+  - id: design-video-platform-distributed-cache-053
+    difficulty: advanced
+    tags: [content-addressing, invalidation, immutable]
+    question: |
+      Why is cache invalidation essentially a non-problem for transcoded video
+      segments at the CDN?
+    options:
+      - "Because segments are immutable and content-addressed by videoId/rendition/segment, so new content simply gets a new URL — you never overwrite"
+      - "Because CDNs never cache video"
+      - "Because segments have 1-second TTLs"
+      - "Because the origin pushes invalidations on every view"
+    answer: 0
+    explanation: |
+      Immutable, content-addressed segment URLs mean updates create new URLs
+      instead of mutating cached ones — nothing to invalidate. CDNs do cache
+      video (B); segments use long TTLs, not 1s (C); no per-view invalidation is
+      needed (D).
+    ref: "concepts.md#cdn-delivery-and-edge-caching"
+  - id: design-video-platform-distributed-cache-054
+    difficulty: advanced
+    tags: [eviction, noeviction, trade-off]
+    question: |
+      When is Redis's `noeviction` policy the right choice despite the risk of
+      write errors when memory is full?
+    options:
+      - "When the instance is a pure cache over a durable DB and dropping cold data is fine"
+      - "When the instance is used as a data store/queue where silently dropping data would be worse than rejecting writes"
+      - "When you want maximum hit ratio"
+      - "When TTLs are jittered"
+    answer: 1
+    explanation: |
+      `noeviction` errors on full memory instead of dropping keys — correct when
+      Redis is a store/queue and silent data loss is unacceptable. For a pure
+      cache over a durable DB (A) you'd prefer to evict cold data. It doesn't
+      maximize hit ratio (C) and is unrelated to TTL jitter (D).
+    ref: "concepts.md#cache-eviction-policies"
+  - id: design-video-platform-distributed-cache-055
+    difficulty: expert
+    tags: [scenario, judgment, hot-key, architecture]
+    question: |
+      A single trending video's metadata key is receiving ~1M req/s, overloading
+      the one cache node that owns it, while the rest of the cluster is idle. You
+      have a 5ms read budget and can tolerate ~1s staleness. Which combination is
+      most appropriate?
+    options:
+      - "Add a short-TTL local L1 cache in each app server plus replicate the hot key across several cache nodes; accept ~1s staleness within budget"
+      - "Switch the whole cache to synchronous strong consistency to make it correct"
+      - "Re-key the entire metadata dataset to spread this one key"
+      - "Increase the owning node's CPU and vertical size only"
+    answer: 0
+    explanation: |
+      L1 local caches absorb most of the 1M req/s at the app tier (well within
+      5ms), and replicating the hot key spreads any remaining distributed reads;
+      ~1s staleness is acceptable per the constraint. Re-keying everything (C)
+      doesn't help a single key and breaks lookups; sync strong consistency (B)
+      blows the latency budget for no benefit; vertical scaling one node (D)
+      hits a ceiling and ignores the idle cluster.
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-056
+    difficulty: expert
+    tags: [scenario, judgment, cdn, cost, startup]
+    question: |
+      A well-funded startup at moderate scale (single-digit Tbps peak) is
+      deciding between renting a commercial CDN and building its own Open
+      Connect-style CDN embedded in ISPs. Which recommendation is soundest?
+    options:
+      - "Build your own CDN immediately to save egress from day one"
+      - "Serve directly from origin to avoid CDN costs entirely"
+      - "Use no caching and rely on client-side buffering"
+      - "Rent a commercial CDN now; building your own only pays off at hyperscale where egress savings justify the massive capital and operational investment"
+    answer: 3
+    explanation: |
+      Below hyperscale, a commercial CDN is the right call — building embedded
+      appliances (Netflix Open Connect) only amortizes at enormous, sustained
+      egress. Building early (A) burns capital prematurely; origin-only (B) and
+      no-caching (C) don't scale for video at all.
+    ref: "concepts.md#cost-and-latency-trade-offs-of-edge-caching"
+  - id: design-video-platform-distributed-cache-057
+    difficulty: expert
+    tags: [scenario, judgment, transcoding, workers, cost]
+    question: |
+      Your transcoding fleet is CPU-bound and bursty. Which worker/infra choice
+      best balances cost and reliability for VOD (but NOT live) transcoding?
+    options:
+      - "Run stateless, idempotent workers on spot/preemptible instances behind a durable job queue, retrying interrupted tasks — VOD ingest tolerates the extra latency"
+      - "Run all workers on always-on, on-demand instances for maximum reliability"
+      - "Transcode synchronously in the upload request to avoid a queue"
+      - "Use a single large vertical machine to transcode everything serially"
+    answer: 0
+    explanation: |
+      VOD transcoding is retryable and latency-tolerant, so stateless idempotent
+      workers on cheap spot instances behind a durable queue maximize cost
+      efficiency with retries covering preemptions. Always-on on-demand (B) is
+      needlessly expensive; synchronous in-request transcode (C) blocks uploads
+      and doesn't scale; a single serial machine (D) can't handle bursts.
+    ref: "concepts.md#transcoding-pipeline"
+  - id: design-video-platform-distributed-cache-058
+    difficulty: expert
+    tags: [scenario, judgment, consistency, entitlements]
+    question: |
+      Within an otherwise AP video platform, which sub-system genuinely warrants
+      strong consistency (CP), and why?
+    options:
+      - "The view counter, because users compare counts"
+      - "Billing/entitlements and DRM license issuance, because incorrectly granting or denying paid access has real financial/legal consequences"
+      - "The recommendation feed, because freshness matters"
+      - "The CDN edge cache, because stale segments are unacceptable"
+    answer: 1
+    explanation: |
+      Entitlements/DRM/billing must be correct — wrongly granting paid content or
+      double-charging is a real harm, justifying CP for that narrow slice. View
+      counts (A) and feeds (C) tolerate staleness; CDN segments (D) are immutable
+      and content-addressed, needing no strong consistency.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+  - id: design-video-platform-distributed-cache-059
+    difficulty: expert
+    tags: [scenario, judgment, eviction, workload]
+    question: |
+      A cache serves a video-metadata workload with a stable top-1% of titles
+      driving 60% of reads, but nightly analytics jobs sequentially scan huge
+      cold ranges. Which eviction policy is most appropriate?
+    options:
+      - "Plain LRU, because it is the default"
+      - "FIFO, because inserts are ordered"
+      - "W-TinyLFU (or LFU-leaning admission), because it protects the stable hot set from being flushed by the nightly sequential scans"
+      - "Random eviction, to avoid bookkeeping"
+    answer: 2
+    explanation: |
+      Stable Zipfian popularity plus large scans is the classic case where plain
+      LRU pollutes; W-TinyLFU's frequency-based admission protects the hot set
+      from scan flushing. Plain LRU (A) is exactly the vulnerable policy here;
+      FIFO (B) and random (D) ignore the strong popularity signal.
+    ref: "concepts.md#cache-eviction-policies"
+  - id: design-video-platform-distributed-cache-060
+    difficulty: expert
+    tags: [scenario, judgment, replication, failover, availability]
+    question: |
+      A Redis primary-replica cache uses async replication with automatic
+      failover (Sentinel). During a primary crash and promotion, which failure
+      mode must you explicitly accept or design around?
+    options:
+      - "All keys are lost permanently"
+      - "The cache becomes strongly consistent"
+      - "Consistent hashing stops working"
+      - "Recently-acknowledged writes not yet replicated can be lost on promotion, and clients may briefly read stale data from the new primary"
+    answer: 3
+    explanation: |
+      Async replication means a promoted replica may lack the primary's last
+      un-replicated writes (data loss window) and can serve stale reads — the
+      accepted trade-off for low write latency and availability. Keys aren't all
+      lost (A); failover doesn't make it strongly consistent (B); consistent
+      hashing is unaffected (C).
+    ref: "concepts.md#cache-replication-and-consistency"
+  - id: design-video-platform-distributed-cache-061
+    difficulty: expert
+    tags: [scenario, judgment, live, thundering-herd, cdn]
+    question: |
+      A live stream produces a new 2s segment every 2 seconds, and the newest
+      segment is always a hot key requested by millions at once. Which design
+      best serves it?
+    options:
+      - "Serve segments from the CDN with short TTLs plus a shield tier and request collapsing, so the newest segment's herd collapses to one origin fetch"
+      - "Cache each new segment with a long TTL and pull from origin per client"
+      - "Disable CDN caching for live and stream from origin to each viewer"
+      - "Use WebRTC to broadcast to all millions of viewers"
+    answer: 0
+    explanation: |
+      Each new live segment is a guaranteed hot key; short TTLs (content is
+      time-relevant) plus a shield with request collapsing means the flood for
+      the newest segment resolves to a single origin fetch and fans out from the
+      edge. Long TTLs (B) don't match live freshness and don't solve the herd;
+      origin-per-viewer (C) melts origin; WebRTC (D) doesn't scale to millions.
+    ref: "concepts.md#live-streaming-versus-vod"
+  - id: design-video-platform-distributed-cache-062
+    difficulty: expert
+    tags: [scenario, judgment, partitioning, resharding, availability]
+    question: |
+      You must add capacity to a live distributed cache serving 500k req/s with a
+      tight latency SLO, and you cannot tolerate a cluster-wide miss storm. Which
+      approach is safest?
+    options:
+      - "Switch the hashing to hash(key) % (N+1) and restart all clients"
+      - "Use consistent hashing/slot migration to move only ~K/N keys (or specific slots) to the new node, keeping the rest of the hit ratio intact"
+      - "Flush the entire cache and let it re-warm from the DB"
+      - "Double every node's memory instead of adding a node"
+    answer: 1
+    explanation: |
+      Consistent hashing or Redis-style slot migration relocates only a fraction
+      of keys, preserving most of the hit ratio and avoiding a DB-crushing miss
+      storm. Modulo re-hash (A) remaps nearly all keys; flushing (C) guarantees
+      the storm; vertical scaling (D) may hit ceilings and doesn't address the
+      need to add a node.
+    ref: "concepts.md#cache-partitioning-and-consistent-hashing"
+  - id: design-video-platform-distributed-cache-063
+    difficulty: expert
+    tags: [scenario, judgment, upload, security, presigned]
+    question: |
+      You use pre-signed URLs so clients upload directly to the object store.
+      What is the key security control you must get right, and why?
+    options:
+      - "Make the URL permanent so retries always work"
+      - "Route the upload through app servers after all, for auditing"
+      - "Scope the pre-signed URL tightly (specific key/path, short expiry, size/content limits) because it delegates write access to a bucket location"
+      - "Encrypt the videoId in the metadata DB"
+    answer: 2
+    explanation: |
+      A pre-signed URL grants bearer write access to a bucket path, so it must be
+      narrowly scoped and short-lived to limit abuse. Permanent URLs (A) are a
+      security hole; routing through app servers (B) defeats the purpose of
+      direct upload; encrypting videoId (D) is unrelated to upload authorization.
+    ref: "concepts.md#video-upload-and-resumable-chunking"
+  - id: design-video-platform-distributed-cache-064
+    difficulty: expert
+    tags: [scenario, judgment, recommendations, cold-start, vector-db]
+    question: |
+      A brand-new user with no watch history logs in. Which recommendation
+      strategy handles this cold-start case best, and what's the trade-off vs
+      pure collaborative filtering?
+    options:
+      - "Pure collaborative filtering, which works fine without any interaction data"
+      - "Refuse to recommend until the user watches 100 videos"
+      - "Use exact nearest-neighbor search to compensate for missing data"
+      - "Content-based / popularity and context signals (and generic embeddings) to bootstrap, since collaborative filtering needs interaction data the new user lacks"
+    answer: 3
+    explanation: |
+      Cold-start users lack interaction data, so collaborative filtering can't
+      personalize; content-based, popularity, and contextual signals bootstrap
+      recommendations. Pure CF (A) fails precisely here; blocking recs (B) is
+      bad UX; exact vs approximate NN (C) doesn't create missing interaction
+      data.
+    ref: "concepts.md#recommendations-at-a-high-level"
+  - id: design-video-platform-distributed-cache-065
+    difficulty: expert
+    tags: [scenario, judgment, storage-tiering, cost, latency]
+    question: |
+      A video's popularity has decayed to near-zero after a year. You want to cut
+      storage cost but keep it retrievable. Which tiering decision is best?
+    options:
+      - "Move renditions to infrequent/cold tiers and keep the master in archive; accept higher retrieval latency for the rare future request"
+      - "Delete all renditions and the master to save money"
+      - "Keep everything in the hot standard tier for instant access"
+      - "Move only the master to hot and delete renditions"
+    answer: 0
+    explanation: |
+      Cold/long-tail content belongs in infrequent/cold/archive tiers to slash
+      cost while remaining retrievable (with higher latency on the rare access).
+      Deleting the master (B) forfeits future re-encoding; hot-tiering everything
+      (C) wastes money; moving the master to hot while deleting renditions (D) is
+      backwards.
+    ref: "concepts.md#blob-and-object-storage"
+  - id: design-video-platform-distributed-cache-066
+    difficulty: expert
+    tags: [scenario, judgment, abr, client-vs-server, cacheability]
+    question: |
+      Why does keeping ABR quality-switching decisions on the CLIENT (rather than
+      a server-side per-session bitrate controller) matter for scalability?
+    options:
+      - "Clients have more accurate global network views than servers"
+      - "Client-driven ABR lets edges serve identical static segments with no per-viewer state, so segments cache and fan out to millions; server-side ABR reintroduces per-session state that caches poorly"
+      - "Server-side ABR is impossible to implement"
+      - "Client-side ABR guarantees strong consistency of playback"
+    answer: 1
+    explanation: |
+      With client-driven ABR the edge just serves static, shared segments — no
+      per-session state — which is what makes them cacheable and scalable to
+      millions. Servers don't have a better view of a client's local network (A);
+      server-side ABR is possible but caches poorly (C is false); consistency (D)
+      isn't the point.
+    ref: "concepts.md#adaptive-bitrate-streaming-hls-and-dash"
+  - id: design-video-platform-distributed-cache-067
+    difficulty: expert
+    tags: [scenario, judgment, avalanche, resilience]
+    question: |
+      An entire cache tier fails at peak, dumping full read load onto the
+      database (cache avalanche). Which layered defense best prevents a cascading
+      DB failure?
+    options:
+      - "Rely on a single larger cache node so it never fails"
+      - "Remove the cache so there is nothing to fail"
+      - "Combine multi-tier caching, jittered TTLs, and circuit breakers/rate limiting to the DB so the origin is shielded and degrades gracefully"
+      - "Set all TTLs to infinity so nothing ever expires"
+    answer: 2
+    explanation: |
+      Avalanche resilience is layered: multiple cache tiers reduce blast radius,
+      jittered TTLs prevent synchronized expiry, and circuit breakers/rate
+      limiting protect the DB so it degrades instead of collapsing. A single big
+      node (A) is a single point of failure; removing the cache (B) guarantees
+      overload; infinite TTLs (D) cause unbounded staleness and don't survive a
+      tier failure.
+    ref: "concepts.md#hot-keys-and-thundering-herd"
+  - id: design-video-platform-distributed-cache-068
+    difficulty: expert
+    tags: [scenario, judgment, cdc, event-driven, recommendations]
+    question: |
+      You want near-real-time recommendation updates as users watch, without
+      coupling the recommendation service directly to the primary database.
+      Which modern pattern fits?
+    options:
+      - "Have the recommendation service poll the primary DB every second"
+      - "Run recommendations as a synchronous call inside the video-watch write path"
+      - "Batch-export the DB nightly only"
+      - "Emit watch events to a log (Kafka) and/or use CDC to stream changes to a feature store and near-real-time reranker, decoupling producers from consumers"
+    answer: 3
+    explanation: |
+      An event log/CDC stream decouples the write path from recommendation
+      consumers, feeding a feature store and near-real-time reranker without
+      coupling to the primary DB. Polling (A) is inefficient and coupling-heavy;
+      synchronous in-path recs (B) add latency and coupling; nightly-only batch
+      (C) isn't near-real-time.
+    ref: "concepts.md#recommendations-at-a-high-level"
+  - id: design-video-platform-distributed-cache-069
+    difficulty: intermediate
+    tags: [transcoding, gop, keyframe]
+    question: |
+      Why does the pipeline split video on GOP (Group of Pictures) boundaries
+      before parallel transcoding?
+    options:
+      - "Each GOP starts with an independently decodable keyframe, so segments can be transcoded in parallel and players can switch renditions cleanly at boundaries"
+      - "GOP boundaries mark where audio and video separate"
+      - "GOP splitting compresses the file"
+      - "It is required by object stores"
+    answer: 0
+    explanation: |
+      A GOP begins with an I-frame (keyframe) that decodes on its own, so
+      splitting on GOP boundaries yields independently processable, cleanly
+      switchable segments. It's not about audio separation (B) or compression
+      (C), and object stores don't require it (D).
+    ref: "concepts.md#transcoding-pipeline"
+  - id: design-video-platform-distributed-cache-070
+    difficulty: intermediate
+    tags: [distributed-cache, node-internals, o1]
+    question: |
+      To make both get/set and LRU eviction O(1) on a single cache node, what
+      data structures are combined?
+    options:
+      - "A balanced BST plus a heap"
+      - "A hash map for O(1) lookup plus an intrusive doubly linked list to track recency for O(1) eviction"
+      - "A sorted array plus binary search"
+      - "A Bloom filter plus a trie"
+    answer: 1
+    explanation: |
+      The classic O(1) LRU cache uses a hash map (key -> node) plus a doubly
+      linked list ordered by recency; touching moves a node to the head,
+      eviction pops the tail. A BST/heap (A) or sorted array (C) give log-time;
+      Bloom filter + trie (D) don't implement LRU.
+    ref: "concepts.md#distributed-cache-architecture-build-a-cache"
+  - id: design-video-platform-distributed-cache-071
+    difficulty: intermediate
+    tags: [live, ingest, protocols]
+    question: |
+      Which protocols are typically used to INGEST a live stream from an
+      encoder into the platform (as opposed to delivering to viewers)?
+    options:
+      - "HLS and DASH"
+      - "SMTP and IMAP"
+      - "RTMP and SRT"
+      - "HTTP GET of static segments"
+    answer: 2
+    explanation: |
+      Encoders push live feeds via RTMP or SRT to ingest servers; HLS/DASH (A)
+      are delivery (pull) protocols to viewers. SMTP/IMAP (B) are email;
+      static-segment GET (D) is delivery, not ingest.
+    ref: "concepts.md#live-streaming-versus-vod"
+  - id: design-video-platform-distributed-cache-072
+    difficulty: advanced
+    tags: [drm, security, streaming, trade-off]
+    question: |
+      A premium catalog platform must prevent copying of high-value content.
+      Which combination is standard, and what is the trade-off?
+    options:
+      - "Serve unencrypted segments and rely on obscure URLs"
+      - "Watermarking alone with no encryption"
+      - "Only HTTPS, since TLS prevents copying"
+      - "DRM (Widevine/FairPlay/PlayReady) plus AES-encrypted segments and per-session license issuance — stronger protection at the cost of client complexity and a CP-consistency license path"
+    answer: 3
+    explanation: |
+      Premium content uses DRM plus encrypted segments and license servers; the
+      cost is client/player complexity and a strongly-consistent licensing path.
+      Obscure URLs (A) and watermarking-alone (B) don't prevent copying; TLS (C)
+      protects transit but not local copying after decryption.
+    ref: "concepts.md#adaptive-bitrate-streaming-hls-and-dash"

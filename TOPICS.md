@@ -8,7 +8,7 @@ Frequency = how often the topic shows up in interviews (very-high → low).
 
 ## Domains
 
-- [System Design](#system-design) — 19 topics
+- [System Design](#system-design) — 23 topics
 - [Docker](#docker) — 15 topics
 - [Kubernetes](#kubernetes) — 16 topics
 - [DevOps & CI/CD](#devops-cicd) — 18 topics
@@ -22,7 +22,7 @@ Frequency = how often the topic shows up in interviews (very-high → low).
 <a id="system-design"></a>
 ## System Design
 
-Folder: `topics/system-design/` · 19 topics
+Folder: `topics/system-design/` · 23 topics — see `topics/system-design/README.md` for the authoritative, current topic list (4 modern topics added in Session 6: event-driven/CQRS/saga/CDC, GenAI/LLM system design, real-time streaming, resilience trade-offs).
 
 ### System Design Fundamentals & Interview Framework
 

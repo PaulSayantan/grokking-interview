@@ -1,0 +1,1359 @@
+topic: Distributed Coordination, Locking and Collaborative Editing
+domain: system-design
+topic_slug: design-coordination-locking-collaboration
+version: 1
+questions:
+- id: design-coordination-locking-collaboration-001
+  difficulty: beginner
+  tags: [fundamentals, failure-detection]
+  question: |
+    In a distributed system, why is coordination fundamentally harder than on a single machine?
+  options:
+  - "You cannot reliably distinguish a crashed node from a slow or partitioned node"
+  - "Distributed CPUs are slower than single-machine CPUs"
+  - "Distributed systems cannot store as much data"
+  - "Network cables are physically unreliable and always break"
+  answer: 0
+  explanation: |
+    The core difficulty is that a dead node, a slow node, and a partitioned node all look identical
+    from the outside — you only observe the absence of a timely response. CPU speed and storage
+    capacity are unrelated; "cables always break" is an overstatement — occasional failures, not
+    constant ones, are the issue.
+  ref: concepts.md#why-coordination-is-hard
+- id: design-coordination-locking-collaboration-002
+  difficulty: beginner
+  tags: [process-pause, gc]
+  question: |
+    Why is a stop-the-world garbage-collection pause so dangerous for a process holding a
+    distributed lock with a TTL?
+  options:
+  - "GC pauses corrupt the lock value stored in Redis"
+  - "GC pauses make the network faster, expiring the lock early"
+  - "The process can freeze past the lock's expiry, so the lock is reassigned, yet the process wakes still
+    believing it holds the lock"
+  - "GC prevents the client from ever acquiring the lock"
+  answer: 2
+  explanation: |
+    A pause can exceed the TTL; the lock service reassigns the lock, but the paused client resumes
+    unaware that time passed and acts as though it still holds it — two holders. GC does not corrupt
+    Redis state, does not speed up the network, and does not block acquisition.
+  ref: concepts.md#why-coordination-is-hard
+- id: design-coordination-locking-collaboration-003
+  difficulty: beginner
+  tags: [clocks]
+  question: |
+    Why should you avoid comparing wall-clock timestamps from two different machines to order events?
+  options:
+  - "Timestamps take too much storage"
+  - "Timestamps are always in different time zones"
+  - "Machines cannot read their own clock"
+  - "Clocks drift and can jump backward (e.g., NTP corrections), so cross-machine ordering is unreliable"
+  answer: 3
+  explanation: |
+    Wall clocks drift between nodes and can step backward due to NTP correction or leap seconds, so
+    comparing them across machines gives unreliable ordering. Storage size, time zones (a display
+    concern), and reading the local clock are not the issue.
+  ref: concepts.md#why-coordination-is-hard
+- id: design-coordination-locking-collaboration-004
+  difficulty: beginner
+  tags: [locks, ttl]
+  question: |
+    Why does a distributed lock stored as a single key almost always need a TTL (expiry)?
+  options:
+  - "To make the lock acquire faster"
+  - "So a client that crashes while holding the lock does not deadlock the resource forever"
+  - "To reduce the storage size of the key"
+  - "TTLs are required by the Redis protocol for all keys"
+  answer: 1
+  explanation: |
+    Without a TTL, a crash while holding the lock leaves it held forever — a permanent deadlock. The
+    TTL guarantees eventual release. It does not affect acquire speed or storage meaningfully, and
+    Redis does not require TTLs on keys.
+  ref: concepts.md#distributed-locks-and-their-failure-modes
+- id: design-coordination-locking-collaboration-005
+  difficulty: beginner
+  tags: [locks, ownership]
+  question: |
+    Why should a client store a unique owner token in the lock value and only delete the lock if the
+    value still matches (typically via a Lua script)?
+  options:
+  - "So a client cannot accidentally delete a lock that has expired and been re-acquired by someone else"
+  - "To compress the lock key"
+  - "To let multiple clients hold the same lock"
+  - "Because Redis cannot delete keys otherwise"
+  answer: 0
+  explanation: |
+    The owner check ensures a slow client only releases its own lock, not one that has since expired
+    and been handed to another client. It is not about compression, it does not enable shared holding,
+    and Redis can delete keys freely.
+  ref: concepts.md#distributed-locks-and-their-failure-modes
+- id: design-coordination-locking-collaboration-006
+  difficulty: beginner
+  tags: [zookeeper, etcd, coordination-service]
+  question: |
+    What is a coordination service like ZooKeeper or etcd primarily designed to store?
+  options:
+  - "High-volume application data and user records"
+  - "Large media files and blobs"
+  - "Low-volume, high-value metadata such as configuration, membership, leases, and locks — with strong
+    consistency"
+  - "Analytics event streams at millions of QPS"
+  answer: 2
+  explanation: |
+    These are strongly consistent stores for small, critical metadata (config, membership, leader
+    leases). Every write is a quorum round trip, so they are the wrong place for high-volume
+    application data, blobs, or high-QPS event streams.
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-007
+  difficulty: beginner
+  tags: [leader-election]
+  question: |
+    What problem does leader election solve?
+  options:
+  - "Encrypting traffic between nodes"
+  - "Getting all nodes to agree on exactly one node to be 'in charge' of some responsibility"
+  - "Compressing the replication log"
+  - "Balancing CPU load evenly across nodes"
+  answer: 1
+  explanation: |
+    Leader election picks one node (and gets the cluster to agree on it) to serialize decisions and
+    avoid conflicts. It is not about encryption, log compression, or general CPU load balancing.
+  ref: concepts.md#leader-election
+- id: design-coordination-locking-collaboration-008
+  difficulty: beginner
+  tags: [crdt, collaboration]
+  question: |
+    What is the defining property of a CRDT (Conflict-free Replicated Data Type)?
+  options:
+  - "It requires a central server to resolve every conflict"
+  - "It compresses text better than any other structure"
+  - "It guarantees the merged result always matches human intent"
+  - "Concurrent updates on different replicas merge automatically and deterministically, converging to
+    the same state regardless of order"
+  answer: 3
+  explanation: |
+    A CRDT's structure guarantees convergence to an identical state independent of the order updates
+    arrive, without a coordinator. It does not require a central server, is not a compression scheme,
+    and notably guarantees convergence — not that the result matches user intent.
+  ref: concepts.md#collaborative-editing-with-crdts
+- id: design-coordination-locking-collaboration-009
+  difficulty: beginner
+  tags: [ot, collaboration]
+  question: |
+    In Operational Transformation (OT), what does the "transformation" step actually do?
+  options:
+  - "Adjusts a concurrent operation's parameters (e.g., position) so it still applies correctly after
+    the document has changed underneath it"
+  - "Encrypts operations before sending them"
+  - "Compresses the document into a smaller form"
+  - "Converts text into a CRDT"
+  answer: 0
+  explanation: |
+    OT transforms concurrent operations against each other — e.g., shifting an insert's position to
+    account for another insert — so they converge. It is not encryption, compression, or CRDT
+    conversion.
+  ref: concepts.md#collaborative-editing-with-operational-transformation
+- id: design-coordination-locking-collaboration-010
+  difficulty: beginner
+  tags: [presence]
+  question: |
+    Which best describes the nature of "presence" data (live cursors, typing indicators) in a
+    collaborative app?
+  options:
+  - "Durable, must be persisted forever, and needs strong consistency"
+  - "The same as document state and should share its storage"
+  - "Ephemeral, high-frequency, and disposable — stale presence data is worthless"
+  - "Rarely updated and low frequency"
+  answer: 2
+  explanation: |
+    Presence changes many times a second and is worthless once stale, so it is ephemeral, lossy, and
+    rides a separate cheap channel. It is not durable, not the same as document state, and definitely
+    not low-frequency.
+  ref: concepts.md#presence-and-awareness
+- id: design-coordination-locking-collaboration-011
+  difficulty: beginner
+  tags: [fencing-token]
+  question: |
+    What is a fencing token?
+  options:
+  - "A random UUID that identifies a lock owner"
+  - "An encryption key for lock traffic"
+  - "A timestamp attached to each write"
+  - "A monotonically increasing number issued on each lock grant that the protected resource uses to reject
+    stale writers"
+  answer: 3
+  explanation: |
+    A fencing token is monotonic; the resource records the highest token seen and rejects lower ones,
+    fencing off stale holders. A random UUID has no ordering (Redlock's flaw), it is not an encryption
+    key, and a wall-clock timestamp is not monotonic across machines.
+  ref: concepts.md#fencing-tokens-and-idempotency
+- id: design-coordination-locking-collaboration-012
+  difficulty: beginner
+  tags: [consensus]
+  question: |
+    In a Raft or ZooKeeper cluster of 2f+1 nodes, how many nodes must be available to commit a write?
+  options:
+  - "All 2f+1 nodes"
+  - "A majority (f+1 nodes)"
+  - "Just one node"
+  - "Exactly f nodes"
+  answer: 1
+  explanation: |
+    Consensus commits require a majority quorum (f+1 of 2f+1), which tolerates f failures. Requiring
+    all nodes would make any single failure fatal; a single node gives no fault tolerance; f nodes is
+    a minority and cannot commit safely.
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-013
+  difficulty: intermediate
+  tags: [redlock, criticism, fencing-token]
+  question: |
+    Kleppmann's central argument is that even a perfect distributed lock cannot guarantee correctness
+    by itself. What does he say is required in addition?
+  options:
+  - "A fencing token that the protected resource checks and uses to reject stale writers"
+  - "A longer TTL on the lock"
+  - "More Redis replicas in the quorum"
+  - "Faster network hardware"
+  answer: 0
+  explanation: |
+    Because a client can go stale (pause race), the resource itself must reject out-of-order writers
+    via a monotonic fencing token. A longer TTL, more replicas, or faster hardware never eliminates
+    the pause race — they only change its probability.
+  ref: concepts.md#redlock-and-its-criticisms
+- id: design-coordination-locking-collaboration-014
+  difficulty: intermediate
+  tags: [redlock, fencing-token]
+  question: |
+    Why does Kleppmann argue Redlock specifically cannot provide fencing tokens?
+  options:
+  - "Redlock uses too few nodes"
+  - "Redis cannot store integers"
+  - "Redlock's lock identifier is a random value with no monotonic ordering, and generating a monotonic
+    token would itself require consensus that Redlock lacks"
+  - "Redlock deletes the token on release"
+  answer: 2
+  explanation: |
+    A fencing token must be monotonic; Redlock issues random UUIDs, and producing a truly monotonic
+    counter across independent masters would need consensus Redlock does not implement. Node count,
+    integer storage, and release behavior are not the reason.
+  ref: concepts.md#redlock-and-its-criticisms
+- id: design-coordination-locking-collaboration-015
+  difficulty: intermediate
+  tags: [safety, liveness]
+  question: |
+    Kleppmann notes that Redlock differs from well-designed asynchronous consensus algorithms in a
+    key way. What is it?
+  options:
+  - "Redlock's liveness depends on timing, which is normal and fine"
+  - "Redlock has no timing assumptions at all"
+  - "Redlock guarantees both safety and liveness unconditionally"
+  - "Redlock's safety itself depends on timing assumptions, so bad timing produces wrong decisions, not
+    merely slow ones"
+  answer: 3
+  explanation: |
+    Good async algorithms keep safety regardless of timing and only sacrifice liveness under bad
+    timing. Redlock's *safety* depends on bounded delay/pauses/clock error, so timing violations cause
+    incorrect (two-holder) outcomes. It does have timing assumptions and does not guarantee both
+    properties unconditionally.
+  ref: concepts.md#redlock-and-its-criticisms
+- id: design-coordination-locking-collaboration-016
+  difficulty: intermediate
+  tags: [efficiency-vs-correctness]
+  question: |
+    Kleppmann distinguishes "efficiency" locks from "correctness" locks. For a purely EFFICIENCY lock
+    (occasional duplicate work is merely wasteful, never harmful), what does he recommend?
+  options:
+  - "Always use full Redlock across five masters"
+  - "Use a single Redis instance with SET NX PX and document that the lock is approximate"
+  - "Use ZooKeeper with fencing tokens"
+  - "Do not use any lock; always allow duplicate work"
+  answer: 1
+  explanation: |
+    For efficiency, the five-node Redlock overhead is unjustified; a single Redis SET NX PX is
+    sufficient and should be documented as approximate. ZooKeeper+fencing is for correctness locks;
+    "never lock" ignores that reducing duplicate work still has value.
+  ref: concepts.md#redlock-and-its-criticisms
+- id: design-coordination-locking-collaboration-017
+  difficulty: intermediate
+  tags: [zookeeper, lock-recipe, thundering-herd]
+  question: |
+    In the standard ZooKeeper lock recipe using ephemeral sequential nodes, why does each waiter watch
+    only the node immediately before it rather than watching the lock holder directly?
+  options:
+  - "To avoid a thundering herd — otherwise every waiter wakes and stampedes when the lock is released"
+  - "Because ZooKeeper cannot support more than one watch per client"
+  - "Because the previous node holds the fencing token"
+  - "To make the lock non-blocking"
+  answer: 0
+  explanation: |
+    Watching only your predecessor means only the next-in-line wakes on release, avoiding a herd of
+    all waiters retrying at once. ZooKeeper supports many watches; the predecessor does not hold your
+    token; the lock is still blocking.
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-018
+  difficulty: intermediate
+  tags: [zookeeper, ephemeral-node]
+  question: |
+    What is the purpose of a ZooKeeper "ephemeral" node in a locking or leader-election recipe?
+  options:
+  - "It stores large binary data efficiently"
+  - "It never expires, guaranteeing permanent ownership"
+  - "It is automatically deleted when the client's session heartbeats stop, so lock/leadership is released
+    on crash"
+  - "It replicates data to more nodes than a normal node"
+  answer: 2
+  explanation: |
+    Ephemeral nodes are tied to a session and vanish when heartbeats cease, which is exactly how
+    crash-triggered release works. They are not for large data, they are the opposite of permanent,
+    and they do not change replication.
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-019
+  difficulty: intermediate
+  tags: [etcd, fencing-token]
+  question: |
+    In etcd, which mechanism naturally serves as a fencing token for a write guarded by a key?
+  options:
+  - "The key's TTL value"
+  - "The key's mod_revision, used with a compare-and-swap transaction on write"
+  - "The lease's random ID"
+  - "The client's IP address"
+  answer: 1
+  explanation: |
+    etcd's MVCC assigns a monotonically increasing mod_revision; a txn conditioned on it enforces
+    ordering, acting as a fencing token. A TTL is a duration, the lease ID is not monotonic in the
+    right sense for the resource, and an IP is meaningless as a token.
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-020
+  difficulty: intermediate
+  tags: [consul, service-discovery]
+  question: |
+    When would Consul be the most natural choice among ZooKeeper, etcd, and Consul?
+  options:
+  - "When you need to store terabytes of application data"
+  - "When you need the highest possible write QPS"
+  - "When you want to avoid any consensus protocol"
+  - "When service discovery plus health checking plus a KV store are the primary needs, ideally with built-in
+    DNS"
+  answer: 3
+  explanation: |
+    Consul's first-class service catalog, health checks, and DNS make it the pick when discovery is
+    central. It is not a bulk data store, not a high-QPS write engine, and it still uses Raft
+    consensus.
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-021
+  difficulty: intermediate
+  tags: [leader-election, epoch, split-brain]
+  question: |
+    A newly elected leader carries a monotonically increasing term/epoch number, and followers reject
+    messages from older terms. What problem does this primarily prevent?
+  options:
+  - "A deposed but unaware 'zombie' leader (e.g., one that was partitioned) from continuing to issue commands"
+  - "Network encryption failures"
+  - "Slow disk writes on followers"
+  - "Clients from reading stale data"
+  answer: 0
+  explanation: |
+    The epoch fences a stale leader: its old-term messages are rejected, preventing split-brain
+    damage. It is the leader analog of a fencing token — unrelated to encryption, disk speed, or read
+    staleness directly.
+  ref: concepts.md#leader-election
+- id: design-coordination-locking-collaboration-022
+  difficulty: intermediate
+  tags: [leader-election, flapping, timeouts]
+  question: |
+    Your leader-elected service keeps rapidly re-electing leaders ("flapping") under a jittery network,
+    halting progress each time. What is the most appropriate mitigation?
+  options:
+  - "Reduce the cluster to a single node so no election is needed"
+  - "Remove the majority-quorum requirement to elect faster"
+  - "Use longer, randomized election timeouts with back-off to reduce spurious elections and simultaneous
+    candidacies"
+  - "Switch to wall-clock timestamps for election ordering"
+  answer: 2
+  explanation: |
+    Longer randomized timeouts prevent premature elections and reduce split votes, stabilizing
+    leadership. A single node destroys fault tolerance; dropping the quorum invites split-brain;
+    wall-clock ordering is unreliable across machines.
+  ref: concepts.md#leader-election
+- id: design-coordination-locking-collaboration-023
+  difficulty: intermediate
+  tags: [safety-vs-liveness, partition]
+  question: |
+    For a correctness-critical distributed lock, during a network partition which property should the
+    design sacrifice, and why?
+  options:
+  - "Sacrifice safety, because a stalled system is unacceptable"
+  - "Sacrifice both equally"
+  - "Neither can be sacrificed; both are always guaranteed"
+  - "Sacrifice liveness (block/timeout), because a corrupted system is often unrecoverable while a stalled
+    one is recoverable"
+  answer: 3
+  explanation: |
+    Correct systems keep safety unconditional and let liveness degrade under partition, since data
+    corruption is far worse than a temporary stall. Sacrificing safety risks two holders; both cannot
+    be preserved under partition (that is the fundamental tension).
+  ref: concepts.md#distributed-mutual-exclusion-trade-offs-safety-versus-liveness
+- id: design-coordination-locking-collaboration-024
+  difficulty: intermediate
+  tags: [optimistic-concurrency, contention]
+  question: |
+    Under LOW write contention on independent items, why is optimistic concurrency (version/CAS check
+    on commit) often preferable to pessimistic locking?
+  options:
+  - "It guarantees no two writers ever conflict"
+  - "It avoids holding-cost and lock management, and conflicts are rare so retries are cheap"
+  - "It scales worse but is simpler to reason about"
+  - "It requires a consensus service to work"
+  answer: 1
+  explanation: |
+    With rare conflicts, optimistic concurrency avoids lock overhead and deadlock while retries almost
+    never fire. It does not guarantee no conflicts (it detects and retries them), it scales better not
+    worse, and it needs no consensus service.
+  ref: concepts.md#distributed-mutual-exclusion-trade-offs-safety-versus-liveness
+- id: design-coordination-locking-collaboration-025
+  difficulty: intermediate
+  tags: [consensus, raft]
+  question: |
+    In Raft, when is a log entry considered "committed"?
+  options:
+  - "Once a majority of nodes have persisted it, after which it is applied to the state machine in log
+    order"
+  - "As soon as the leader appends it to its own log"
+  - "When any single follower acknowledges it"
+  - "After all followers acknowledge it"
+  answer: 0
+  explanation: |
+    Commit requires majority persistence; committed entries are then applied in order via
+    state-machine replication. Leader-only append is not durable enough, a single follower is not a
+    majority, and requiring all followers would sacrifice availability.
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-026
+  difficulty: intermediate
+  tags: [ot-vs-crdt, offline]
+  question: |
+    A team is building an offline-first, peer-to-peer note app where users may edit disconnected for
+    days and sync later. Which approach fits best and why?
+  options:
+  - "Operational Transformation, because it needs a central server to order operations"
+  - "A single distributed lock per note to serialize edits"
+  - "CRDTs, because they guarantee convergence without a central coordinator and handle long divergence
+    well"
+  - "Last-writer-wins on the whole document by wall-clock time"
+  answer: 2
+  explanation: |
+    CRDTs converge without a coordinator and tolerate long offline divergence — exactly this use case.
+    OT's central-server dependence fights offline P2P; a per-note lock destroys concurrency and
+    offline editing; whole-document LWW loses most concurrent edits.
+  ref: concepts.md#operational-transformation-versus-crdts-deep-trade-offs
+- id: design-coordination-locking-collaboration-027
+  difficulty: intermediate
+  tags: [ot, google-docs, bandwidth]
+  question: |
+    Why has Google Docs historically favored Operational Transformation over CRDTs for large text
+    documents?
+  options:
+  - "OT requires no server, simplifying deployment"
+  - "OT guarantees the merged result matches user intent perfectly"
+  - "CRDTs cannot represent text at all"
+  - "OT operations are compact on the wire and in storage, avoiding CRDTs' per-character id and tombstone
+    overhead, and Docs already has a central server to order ops"
+  answer: 3
+  explanation: |
+    OT ops are tiny (position + char) and Docs' central server makes transformation tractable, sidestepping
+    CRDT metadata bloat. OT does rely on a server, it does not perfectly preserve intent, and CRDTs can
+    certainly represent text.
+  ref: concepts.md#operational-transformation-versus-crdts-deep-trade-offs
+- id: design-coordination-locking-collaboration-028
+  difficulty: intermediate
+  tags: [figma, hybrid, collaboration]
+  question: |
+    Figma's multiplayer engine uses neither pure OT nor pure CRDT. What best characterizes their
+    approach?
+  options:
+  - "Fully decentralized CRDTs with no server"
+  - "A central server as source of truth with CRDT-inspired last-writer-wins per property, since the server
+    can define event order"
+  - "Operational Transformation with per-character transform functions"
+  - "A single global lock on the whole file"
+  answer: 1
+  explanation: |
+    Figma keeps a server as central authority and does last-writer-wins on each object property, so it
+    drops both OT's transform complexity and pure CRDTs' decentralization overhead. It is not
+    serverless, not classic OT, and not a global lock.
+  ref: concepts.md#operational-transformation-versus-crdts-deep-trade-offs
+- id: design-coordination-locking-collaboration-029
+  difficulty: intermediate
+  tags: [crdt, tombstones]
+  question: |
+    In a sequence CRDT for text, why are deletions typically represented as "tombstones" rather than
+    truly removing the element?
+  options:
+  - "So concurrent operations that reference the deleted element still resolve consistently across replicas"
+  - "To save memory"
+  - "To make the text render faster"
+  - "Because CRDTs cannot delete data"
+  answer: 0
+  explanation: |
+    Tombstones keep the element's identity so concurrent edits referencing it converge correctly.
+    Tombstones actually cost memory (they accumulate and need GC), do not speed rendering, and CRDTs
+    can logically delete — they just mark rather than physically remove immediately.
+  ref: concepts.md#collaborative-editing-with-crdts
+- id: design-coordination-locking-collaboration-030
+  difficulty: intermediate
+  tags: [presence, separation]
+  question: |
+    Why is it a best practice to carry presence data (cursors, typing) on a separate channel from the
+    durable document state?
+  options:
+  - "Presence needs stronger consistency than the document"
+  - "The document channel cannot carry small messages"
+  - "Presence is high-frequency and lossy-tolerant, so mixing it with the durable/convergent document
+    path would waste the expensive path's budget on disposable data"
+  - "Presence must be stored forever for auditing"
+  answer: 2
+  explanation: |
+    Presence is fast, disposable, and can be lost; the document path is durable and convergent. Coupling
+    them forces the costly path to carry junk load. Presence needs *weaker* consistency, and it is not
+    retained for audit.
+  ref: concepts.md#presence-and-awareness
+- id: design-coordination-locking-collaboration-031
+  difficulty: intermediate
+  tags: [when-not-to-lock, idempotency]
+  question: |
+    You need to guarantee an order-processing job never has a harmful double-effect even if requests
+    are retried or a stale worker wakes up. Which approach most directly removes the need for a
+    cluster-wide lock?
+  options:
+  - "A longer lock TTL"
+  - "Idempotency keys plus a dedup store, so a repeated operation becomes a no-op"
+  - "More Redis replicas"
+  - "A faster network between workers"
+  answer: 1
+  explanation: |
+    Idempotency makes retries and stale actors harmless without mutual exclusion — the operation
+    simply no-ops on a seen key. A longer TTL still has the pause race, more replicas do not add
+    idempotency, and network speed is irrelevant to correctness here.
+  ref: concepts.md#when-a-lock-is-the-wrong-tool
+- id: design-coordination-locking-collaboration-032
+  difficulty: intermediate
+  tags: [when-not-to-lock, partitioning]
+  question: |
+    Instead of serializing all writes to entity X with a distributed lock, you route all operations for
+    a given key to a single owner (e.g., a Kafka partition or an actor). What is the main advantage?
+  options:
+  - "It requires a consensus service"
+  - "It guarantees global ordering across all keys"
+  - "It eliminates the need for any storage"
+  - "You get per-key ordering for free with no cross-key contention, and it scales horizontally by key"
+  answer: 3
+  explanation: |
+    Single-writer-per-key gives ordering without a lock and scales out because independent keys never
+    contend. It does not need consensus, does not give *global* ordering (only per-key), and still
+    needs storage. Hot keys remain a risk.
+  ref: concepts.md#when-a-lock-is-the-wrong-tool
+- id: design-coordination-locking-collaboration-033
+  difficulty: intermediate
+  tags: [coordination-service, cluster-size]
+  question: |
+    Why are ZooKeeper/etcd clusters typically sized at an odd number (3 or 5) of voting members?
+  options:
+  - "An odd count avoids ties in majority voting and maximizes fault tolerance per node (3 tolerates 1
+    failure, 5 tolerates 2)"
+  - "Odd numbers use less memory"
+  - "Even numbers are not allowed by Raft"
+  - "Odd numbers make writes faster than even numbers"
+  answer: 0
+  explanation: |
+    Odd sizes avoid split votes and give the best fault-tolerance-per-node ratio; a 4th node adds cost
+    without improving tolerance over 3. Even numbers are technically allowed but wasteful, and writes
+    actually get slower with more voters, not faster.
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-034
+  difficulty: advanced
+  tags: [scenario, correctness-lock, fencing]
+  question: |
+    A payments service must ensure only one worker settles a given transaction, and a double-settle
+    moves real money. Workers run on VMs that occasionally suffer multi-second GC pauses. Which design
+    is correct AND robust?
+  options:
+  - "Redlock across 5 Redis masters with a 30s TTL; whoever holds the lock settles"
+  - "A single Redis SET NX PX with auto-renewing watchdog thread"
+  - "A consensus-backed lock (etcd/ZooKeeper) that issues a monotonic fencing token, and the ledger rejects
+    any settle carrying a token lower than the highest it has seen"
+  - "No lock; let every worker settle and reconcile duplicates nightly"
+  answer: 2
+  explanation: |
+    Only fencing enforced at the ledger survives the pause race for a correctness lock. Redlock issues
+    no fencing token; a watchdog thread pauses along with the process; nightly reconciliation cannot
+    un-move money already sent. The token check at the resource is the load-bearing part.
+  ref: concepts.md#fencing-tokens-and-idempotency
+- id: design-coordination-locking-collaboration-035
+  difficulty: advanced
+  tags: [scenario, ttl, tradeoff]
+  question: |
+    You must pick a TTL for a lease-based lock. Work usually takes 5s but can occasionally take 25s
+    during a GC pause. What is the fundamental trade-off you cannot escape by tuning the TTL alone?
+  options:
+  - "A short TTL guarantees both fast recovery and safety"
+  - "A long TTL eliminates the pause race entirely"
+  - "TTL length has no effect on safety, only on performance"
+  - "A short TTL recovers fast from crashes but risks stealing the lock from a slow-but-alive holder;
+    a long TTL is safe against pauses but stalls long after real crashes — no TTL is both safe and fast"
+  answer: 3
+  explanation: |
+    The TTL dilemma is real: short = fast recovery but steal risk; long = pause-safe but slow crash
+    recovery. No single value is both, which is precisely why fencing tokens exist. A long TTL only
+    reduces (never eliminates) the pause race, and TTL length clearly affects safety.
+  ref: concepts.md#distributed-locks-and-their-failure-modes
+- id: design-coordination-locking-collaboration-036
+  difficulty: advanced
+  tags: [scenario, redlock, antirez]
+  question: |
+    In a debate about Redlock, which statement most fairly captures antirez's rebuttal to Kleppmann?
+  options:
+  - "Redlock provides perfect fencing tokens out of the box"
+  - "Fencing tokens are largely orthogonal — if a resource can check a monotonic token you often need
+    no strong lock at all — and Redlock's timing model is reasonable for many real deployments"
+  - "Redlock is safe because GC pauses cannot happen in production"
+  - "Consensus-based locks are immune to delayed messages, unlike Redlock"
+  answer: 1
+  explanation: |
+    antirez argues fencing is orthogonal (a token-checking resource reduces the need for a strong
+    lock) and that Redlock's synchrony assumptions are acceptable for many systems. Redlock does not
+    ship fencing tokens, GC pauses do happen, and delayed messages also challenge consensus locks — so
+    the other options misstate his position.
+  ref: concepts.md#redlock-and-its-criticisms
+- id: design-coordination-locking-collaboration-037
+  difficulty: advanced
+  tags: [scenario, leader-election, split-brain]
+  question: |
+    During a partition, node A (old leader) is isolated with a minority, and the majority elects node B
+    as leader (higher term). A keeps accepting writes locally, believing it still leads. How does a
+    correctly designed system prevent A's writes from corrupting state?
+  options:
+  - "A cannot commit without a majority quorum, and downstream systems reject A's stale-term (lower epoch)
+    messages, so A's uncommitted writes never take effect"
+  - "A's clock will detect the partition and stop it automatically"
+  - "The system merges A's and B's writes with last-writer-wins"
+  - "A is trusted because it was the original leader"
+  answer: 0
+  explanation: |
+    A is on the minority side, so it cannot achieve quorum to commit, and epoch/term checks cause
+    followers/downstream to reject its stale-term messages. Clocks do not reliably detect partitions,
+    blind LWW merge would corrupt, and seniority confers no authority.
+  ref: concepts.md#leader-election
+- id: design-coordination-locking-collaboration-038
+  difficulty: advanced
+  tags: [scenario, consensus, latency, geo]
+  question: |
+    A team wants linearizable, fault-tolerant writes but is placing the Raft quorum across three
+    continents to "be global." Writes are now painfully slow. What is the correct explanation and
+    remedy?
+  options:
+  - "Raft is buggy; switch to Paxos to remove the latency"
+  - "Add more nodes to the quorum to speed up commits"
+  - "Every committed write costs at least one round trip to a majority; a globe-spanning quorum pays WAN
+    latency per write — keep the quorum within one region and relax consistency or replicate asynchronously
+    across regions"
+  - "Reads are the problem; caching reads will fix write latency"
+  answer: 2
+  explanation: |
+    Linearizable fault-tolerant writes have an irreducible cost of a majority round trip; spanning
+    continents makes that a WAN RTT. Paxos has the same floor, more nodes make writes slower, and read
+    caching does not help write latency. Co-locate the quorum and relax cross-region consistency.
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-039
+  difficulty: advanced
+  tags: [scenario, crdt, convergence, intent]
+  question: |
+    Two users concurrently type overlapping text into a CRDT-backed editor and the merged result,
+    while identical on all replicas, reads as garbled interleaved characters. What is the correct
+    characterization?
+  options:
+  - "The CRDT is broken because replicas disagree"
+  - "This proves OT would have produced the same garbled output"
+  - "The tombstones caused the corruption"
+  - "CRDTs guarantee convergence (all replicas agree) but not intent preservation, so a consistent-yet-garbled
+    interleaving is possible and must be handled at the editor/algorithm level"
+  answer: 3
+  explanation: |
+    Convergence means all replicas reach the same state, not that the state matches human intent;
+    interleaving is a known intent-preservation gap. Replicas do agree (so not broken), OT with server
+    context often handles intent better, and tombstones are about deletions, not this.
+  ref: concepts.md#collaborative-editing-with-crdts
+- id: design-coordination-locking-collaboration-040
+  difficulty: advanced
+  tags: [scenario, when-not-to-lock, judgment]
+  question: |
+    A candidate proposes a distributed lock to ensure a nightly report job runs on exactly one node in
+    a fleet. Which critique-and-alternative is the strongest senior response?
+  options:
+  - "Locks are always fine; ship it"
+  - "This is really a singleton-role problem: use leader election (a scoped lease with epoch fencing)
+    so exactly one node runs it, which is purpose-built and fences a zombie leader — a bare lock lacks
+    that structure"
+  - "Use Redlock across 5 masters for the cron"
+  - "Run the job on every node and deduplicate the outputs with a lock"
+  answer: 1
+  explanation: |
+    "Run this on exactly one node" is leader election, which provides the epoch fencing and role
+    semantics a bare lock lacks. Blindly shipping a lock ignores the pause race and better tools;
+    Redlock is overkill and unfenced; running everywhere then locking is contradictory.
+  ref: concepts.md#when-a-lock-is-the-wrong-tool
+- id: design-coordination-locking-collaboration-041
+  difficulty: advanced
+  tags: [scenario, coordination-service, availability]
+  question: |
+    Your etcd cluster loses network connectivity such that only a minority of members can talk to each
+    other. What behavior should you EXPECT, and is it a bug?
+  options:
+  - "The minority side stops serving writes and linearizable reads to preserve safety; this is by-design
+    CP behavior, not a bug"
+  - "The minority keeps serving writes; this is correct AP behavior"
+  - "The whole cluster keeps serving because etcd is AP"
+  - "etcd silently splits into two independent clusters"
+  answer: 0
+  explanation: |
+    etcd is CP: the minority cannot form a quorum, so it refuses writes/linearizable reads to avoid
+    split-brain — expected behavior. It is not AP, does not keep serving on the minority, and does not
+    split into two live clusters (that would be the split-brain it prevents).
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-042
+  difficulty: advanced
+  tags: [scenario, ot-vs-crdt, judgment]
+  question: |
+    You are choosing collaboration tech for a design tool whose document is a tree of objects with
+    properties (not primarily text), served from a central cloud backend to mostly-online users. Which
+    choice is most appropriate?
+  options:
+  - "Pure decentralized CRDTs, to allow arbitrary P2P sync"
+  - "Character-level OT designed for plain text"
+  - "A server-authoritative model with last-writer-wins per property (Figma-style), dropping both OT transform
+    complexity and pure-CRDT decentralization overhead because the server can define event order"
+  - "A global lock on the file so only one editor at a time"
+  answer: 2
+  explanation: |
+    For an object-graph with a central server, server-authoritative per-property LWW (Figma's model)
+    is leanest and correct. Pure CRDTs add unneeded decentralization overhead, text OT does not fit an
+    object tree, and a global lock kills multiplayer.
+  ref: concepts.md#operational-transformation-versus-crdts-deep-trade-offs
+- id: design-coordination-locking-collaboration-043
+  difficulty: advanced
+  tags: [scenario, presence, capacity]
+  question: |
+    A collaborative doc room has 50 active users; each broadcasts cursor updates at 10 Hz at ~50 bytes.
+    Cursor fan-out is the dominant cost. Which mitigation set is most appropriate for scaling to rooms
+    of thousands?
+  options:
+  - "Persist every cursor frame durably and replicate it via consensus"
+  - "Coalesce/throttle updates (e.g., cap at 20-30 Hz, drop intermediate frames) and fan out via a pub/sub
+    broker or regional edge relays, treating presence as lossy"
+  - "Route presence through the same durable document write path"
+  - "Increase the lock TTL on the document"
+  answer: 1
+  explanation: |
+    Presence fan-out grows with room size; throttling/coalescing plus edge pub/sub keeps it cheap, and
+    loss is acceptable. Durable+consensus persistence of cursors is absurdly expensive, sharing the
+    document write path wastes its budget, and lock TTLs are unrelated to presence.
+  ref: concepts.md#presence-and-awareness
+- id: design-coordination-locking-collaboration-044
+  difficulty: advanced
+  tags: [scenario, optimistic-vs-pessimistic, contention]
+  question: |
+    A hot inventory row is updated by many concurrent writers, and each retry involves an expensive
+    recomputation. Optimistic concurrency is causing a storm of retries and wasted work. What is the
+    most appropriate change?
+  options:
+  - "Keep optimistic concurrency; retries are always cheap"
+  - "Remove all concurrency control and accept lost updates"
+  - "Shard the single hot row across 100 keys to eliminate the semantic constraint"
+  - "Switch to pessimistic locking on that hot row, because under high contention with expensive retries,
+    serializing writers avoids repeated wasted work"
+  answer: 3
+  explanation: |
+    Under high contention with costly retries, optimistic concurrency thrashes; pessimistic locking
+    serializes and avoids the wasted recomputation. Retries are not always cheap here, dropping control
+    loses updates, and you usually cannot shard a single semantic quantity without breaking its
+    invariant.
+  ref: concepts.md#distributed-mutual-exclusion-trade-offs-safety-versus-liveness
+- id: design-coordination-locking-collaboration-045
+  difficulty: advanced
+  tags: [scenario, idempotent-fencing]
+  question: |
+    To make a write path robust against BOTH a stale (paused) actor AND duplicate retries, what
+    combination does the material recommend?
+  options:
+  - "A fencing token to reject stale (out-of-order) writers, plus an idempotency key so a retried write
+    is deduped to a no-op"
+  - "Fencing token only"
+  - "Idempotency key only"
+  - "A longer TTL plus more replicas"
+  answer: 0
+  explanation: |
+    Fencing handles ordering/mutual exclusion (stale actor); idempotency handles duplicates (retries).
+    Each alone leaves a gap: fencing does not dedupe retries, and idempotency alone does not reject an
+    out-of-order stale writer with a fresh key. TTL+replicas addresses neither directly.
+  ref: concepts.md#fencing-tokens-and-idempotency
+- id: design-coordination-locking-collaboration-046
+  difficulty: advanced
+  tags: [scenario, fencing, resource-participation]
+  question: |
+    You want fencing-token protection, but your storage backend is a dumb blob store with no
+    conditional-write or comparison capability. What is the correct conclusion?
+  options:
+  - "Fencing works anyway because the token is attached to the write"
+  - "Blob stores automatically enforce fencing"
+  - "Fencing is impossible here because the protected resource cannot check/reject stale tokens; you must
+    either add a resource that can enforce ordering or accept a weaker guarantee"
+  - "You can enforce fencing purely in the client"
+  answer: 2
+  explanation: |
+    Fencing requires the *resource* to record the max token and reject lower ones; a store with no
+    conditional write cannot do that, so fencing cannot be enforced there. Attaching a token the store
+    ignores does nothing, and a client cannot fence itself (the whole point is the client may be
+    stale).
+  ref: concepts.md#fencing-tokens-and-idempotency
+- id: design-coordination-locking-collaboration-047
+  difficulty: advanced
+  tags: [consensus, flp, partial-synchrony]
+  question: |
+    How do practical consensus systems (Raft/ZAB) escape the FLP impossibility result, which says no
+    deterministic async consensus can guarantee termination with one faulty node?
+  options:
+  - "They prove FLP wrong"
+  - "They use faster hardware to make the system fully synchronous"
+  - "They abandon safety to guarantee termination"
+  - "They add partial-synchrony assumptions (timeouts and failure detectors), trading guaranteed termination
+    for 'terminates when the network behaves,' which is why liveness (not safety) degrades under bad conditions"
+  answer: 3
+  explanation: |
+    FLP holds in the pure async model; real systems add timeouts/failure detectors (partial synchrony)
+    so they terminate when timing is reasonable — sacrificing guaranteed liveness, never safety. They
+    do not disprove FLP, hardware cannot make a network truly synchronous, and they keep safety.
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-048
+  difficulty: advanced
+  tags: [scenario, single-leader, throughput]
+  question: |
+    A single-leader design gives you a clean serialization point and easy strong consistency, but your
+    write throughput has plateaued and failovers cause seconds of unavailability. Which statement best
+    frames the trade-off you are hitting?
+  options:
+  - "Single-leader has no downsides; the plateau must be a bug"
+  - "A single leader is an inherent throughput ceiling (all writes funnel through one node) and introduces
+    a failover gap during re-election; scaling further means partitioning writes or moving to a leaderless
+    model, accepting weaker ordering"
+  - "Adding read replicas will raise write throughput"
+  - "Switching consensus protocol removes the ceiling"
+  answer: 1
+  explanation: |
+    Funneling all writes through one leader is a structural ceiling, and re-election creates a
+    failover gap — both inherent, not bugs. Read replicas do not raise write throughput, and no
+    consensus protocol removes the single-writer ceiling; you must partition or go leaderless (trading
+    global ordering).
+  ref: concepts.md#leader-election
+- id: design-coordination-locking-collaboration-049
+  difficulty: advanced
+  tags: [scenario, mutual-exclusion, granularity]
+  question: |
+    Under heavy contention across MANY independent items, you must choose lock granularity. What is the
+    correct trade-off reasoning?
+  options:
+  - "Use fine-grained per-item locks for high concurrency, accepting more locks to manage and strict lock-ordering
+    rules to avoid deadlock; a coarse lock would serialize independent work into a hotspot"
+  - "Use one coarse lock over everything; it is simplest and concurrency does not matter"
+  - "Fine-grained locks always deadlock, so never use them"
+  - "Granularity has no effect on concurrency"
+  answer: 0
+  explanation: |
+    Independent items under contention benefit from fine-grained locks (concurrency), at the cost of
+    more locks and disciplined ordering to prevent deadlock. A coarse lock creates a hotspot;
+    fine-grained locks do not *always* deadlock (ordering prevents it); granularity clearly affects
+    concurrency.
+  ref: concepts.md#distributed-mutual-exclusion-trade-offs-safety-versus-liveness
+- id: design-coordination-locking-collaboration-050
+  difficulty: expert
+  tags: [scenario, redlock, clock-jump]
+  question: |
+    Redis expiry relies on gettimeofday rather than a monotonic clock. In a Redlock deployment, how can
+    this specifically break the majority-based safety argument?
+  options:
+  - "It cannot; wall-clock time is monotonic"
+  - "It only affects release, never acquisition"
+  - "An NTP step or manual clock change on one or more masters can expire keys early or late, so the set
+    of masters that 'still hold' the lock no longer reflects reality, letting two clients believe they
+    hold a majority"
+  - "Clock jumps make Redlock faster but no less safe"
+  answer: 2
+  explanation: |
+    Wall-clock jumps desynchronize key expiry across masters, undermining the majority reasoning and
+    permitting two simultaneous majority-holders. Wall-clock time is not monotonic, the effect is not
+    limited to release, and it degrades safety, not just speed.
+  ref: concepts.md#redlock-and-its-criticisms
+- id: design-coordination-locking-collaboration-051
+  difficulty: expert
+  tags: [scenario, exactly-once, judgment]
+  question: |
+    Design a distributed scheduler that must trigger each job "exactly once" across a fleet even under
+    pauses and partitions. Which architecture is the most defensible?
+  options:
+  - "A single Redis lock per job with a short TTL; whoever grabs it fires the job"
+  - "Every node fires every job and a nightly batch removes duplicates"
+  - "Redlock across 5 masters, trusting the TTL to prevent double firing"
+  - "Leader election (consensus-backed lease with epoch) to designate one trigger node, PLUS idempotent
+    job execution keyed by job-run-id so any accidental double-trigger is deduped downstream — because
+    true exactly-once triggering is impossible, you make double-triggers harmless"
+  answer: 3
+  explanation: |
+    Exactly-once *delivery/triggering* is impossible under partitions, so the robust design is
+    at-least-once triggering (via a fenced leader) made effectively-once by idempotent, keyed
+    execution. A bare Redis lock or Redlock has the pause race with no fencing; nightly dedup cannot
+    undo side effects already emitted.
+  ref: concepts.md#when-a-lock-is-the-wrong-tool
+- id: design-coordination-locking-collaboration-052
+  difficulty: expert
+  tags: [scenario, safety-liveness, ttl-fencing]
+  question: |
+    A TTL guarantees a crashed holder's lock is eventually released. Precisely which property does the
+    TTL provide, which does it endanger, and how is that restored?
+  options:
+  - "TTL provides safety; endangers liveness; restored by longer TTLs"
+  - "TTL provides liveness (eventual release even if a holder dies) but endangers safety (the pause race
+    can create two holders); safety is restored by fencing tokens enforced at the resource, not by tuning
+    the TTL"
+  - "TTL provides both safety and liveness with no downside"
+  - "TTL only affects performance, not correctness properties"
+  answer: 1
+  explanation: |
+    A TTL is a liveness mechanism (guarantees progress/release) that trades away safety via the pause
+    race; only fencing at the resource restores safety without giving up that liveness. It is not a
+    safety mechanism, it is not free of downside, and it clearly affects correctness.
+  ref: concepts.md#distributed-mutual-exclusion-trade-offs-safety-versus-liveness
+- id: design-coordination-locking-collaboration-053
+  difficulty: expert
+  tags: [scenario, crdt-overhead, gc]
+  question: |
+    An Automerge/Yjs-style CRDT document that has seen millions of edits (many deletions) is growing
+    far beyond its visible content size and slowing sync. What is the correct diagnosis and mitigation?
+  options:
+  - "Accumulated tombstones and per-element ids inflate the structure; mitigate with garbage collection
+    of tombstones, compaction, and columnar/binary encoding (as modern CRDT libraries do)"
+  - "CRDTs cannot grow beyond visible content; this is impossible"
+  - "Switch to storing the document as one giant lock-protected blob"
+  - "The growth is fixed by increasing the lock TTL"
+  answer: 0
+  explanation: |
+    CRDT metadata (tombstones + ids) is exactly what bloats over long histories; GC/compaction and
+    efficient encoding are the known mitigations. Growth beyond visible content is precisely the
+    classic CRDT cost, a lock-protected blob abandons collaboration, and TTLs are unrelated.
+  ref: concepts.md#collaborative-editing-with-crdts
+- id: design-coordination-locking-collaboration-054
+  difficulty: expert
+  tags: [scenario, kraft, operational]
+  question: |
+    Kafka is moving from an external ZooKeeper ensemble to KRaft (embedded Raft). What is the primary
+    architectural motivation and its trade-off?
+  options:
+  - "KRaft makes Kafka an AP system, improving availability during partitions"
+  - "KRaft eliminates the need for any consensus"
+  - "Embedding Raft removes a separately-operated coordination dependency (fewer moving parts, simpler
+    ops, faster metadata propagation), at the cost of folding consensus responsibilities into the broker/controller
+    quorum itself"
+  - "KRaft lets Kafka store metadata without any quorum"
+  answer: 2
+  explanation: |
+    KRaft's motivation is removing the external ZooKeeper operational burden and speeding metadata
+    handling by embedding Raft; consensus still exists (now in the controller quorum). It does not make
+    Kafka AP, does not remove consensus, and still needs a quorum for metadata.
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-055
+  difficulty: expert
+  tags: [scenario, ot-correctness]
+  question: |
+    A team hand-rolls Operational Transformation for a rich editor (text + tables + images) and keeps
+    hitting divergence bugs. Which explanation best matches the known literature?
+  options:
+  - "OT is impossible; convergence can never be achieved"
+  - "Writing correct transformation functions for all operation pairs is notoriously error-prone (several
+    published OT algorithms were later proven incorrect), and complexity explodes with rich content —
+    hence server-ordered variants or CRDTs are often preferred"
+  - "The bug is always in the network layer, never the transforms"
+  - "Tables and images cannot be collaboratively edited by any technique"
+  answer: 1
+  explanation: |
+    OT's correctness burden lives in the transform functions, which are famously hard and have had
+    published errors; rich content multiplies operation-pair combinations. OT can converge (so not
+    impossible), the bug is in transforms not the network, and rich content is editable with proper
+    designs.
+  ref: concepts.md#collaborative-editing-with-operational-transformation
+- id: design-coordination-locking-collaboration-056
+  difficulty: expert
+  tags: [scenario, consensus, quorum-loss]
+  question: |
+    A 5-node etcd cluster spans three racks (2/2/1). A rack failure takes down 2 nodes; later a second
+    rack (2 nodes) partitions away. How many nodes remain able to serve writes, and what happens?
+  options:
+  - "3 nodes remain; writes continue normally"
+  - "The single node promotes itself and serves writes to stay available"
+  - "The cluster automatically reduces its quorum size to 1"
+  - "Only 1 node remains reachable in its partition, which is below the majority of 3, so writes and linearizable
+    reads halt until quorum is restored — safety preserved over availability"
+  answer: 3
+  explanation: |
+    Majority of 5 is 3; after losing 2 and then partitioning off 2 more, the surviving side has 1 node,
+    below quorum, so it must stop serving writes/linearizable reads. A lone node self-promoting or the
+    cluster auto-shrinking quorum would risk split-brain and is not how correct consensus behaves.
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-057
+  difficulty: expert
+  tags: [scenario, lock-vs-alternative, judgment]
+  question: |
+    A senior reviewer says "any time you reach for a distributed lock, first ask whether you can design
+    it away." Which set of alternatives correctly maps to common lock use cases?
+  options:
+  - "Dedup/'process once' -> idempotency keys; 'serialize writes to a key' -> partition by key/single-writer;
+    'prevent lost updates' -> optimistic concurrency (CAS); 'one node runs it' -> leader election; 'merge
+    concurrent edits' -> CRDT/OT"
+  - "All lock use cases must remain locks; there are no alternatives"
+  - "Every case should use Redlock for uniformity"
+  - "Rate limiting should always use a lock to be correct"
+  answer: 0
+  explanation: |
+    Each classic lock use case has a purpose-built, usually cheaper and more robust alternative, which
+    is the senior instinct. Locks are not the only option, Redlock-for-everything ignores fit and the
+    pause race, and rate limiting should use counters/token buckets (locks needlessly serialize).
+  ref: concepts.md#when-a-lock-is-the-wrong-tool
+- id: design-coordination-locking-collaboration-058
+  difficulty: expert
+  tags: [scenario, presence-vs-state, consistency]
+  question: |
+    In a large collaborative app, engineers propose routing live cursor presence through the same Raft
+    log that orders document mutations "for consistency." Why is this the wrong call?
+  options:
+  - "Presence needs even stronger consistency than the document, so Raft is too weak"
+  - "Raft cannot carry small messages"
+  - "Presence is high-frequency and disposable; pushing it through a consensus log wastes the expensive
+    linearizable path on data that is lossy-tolerant and worthless when stale, and would throttle real
+    document throughput"
+  - "It is correct and the standard approach"
+  answer: 2
+  explanation: |
+    Presence tolerates loss and eventual/LWW semantics; consensus-ordering it wastes the costly path
+    and starves real writes. Presence needs *weaker*, not stronger, consistency; Raft can carry small
+    messages; and this is explicitly not the standard approach.
+  ref: concepts.md#presence-and-awareness
+- id: design-coordination-locking-collaboration-059
+  difficulty: intermediate
+  tags: [consul, discovery, comparison]
+  question: |
+    Which pairing of coordination service to its most distinctive strength is correct?
+  options:
+  - "etcd -> native service catalog and DNS-based discovery"
+  - "ZooKeeper -> flat key-value with leases as its signature model"
+  - "Consul -> the tree/znode model used by Hadoop"
+  - "etcd -> Kubernetes-native flat KV with MVCC revisions and gRPC; ZooKeeper -> hierarchical znodes
+    with mature Hadoop/Kafka-era recipes; Consul -> built-in service discovery and health checks"
+  answer: 3
+  explanation: |
+    etcd is K8s-native flat KV/MVCC, ZooKeeper is the hierarchical-znode/recipes veteran, and Consul
+    leads on service discovery/health checks. The other options swap these signatures (service catalog
+    is Consul's, znodes are ZooKeeper's, leases/flat-KV are etcd's).
+  ref: concepts.md#zookeeper-etcd-and-consul-as-coordination-services
+- id: design-coordination-locking-collaboration-060
+  difficulty: intermediate
+  tags: [leader-election, mechanism]
+  question: |
+    What is the most common production mechanism for leader election in modern systems?
+  options:
+  - "The Bully algorithm run over UDP broadcast"
+  - "Racing to create an ephemeral (or lowest sequential) node in a consensus-backed service like ZooKeeper/etcd,
+    or electing via a consensus protocol's own leader (Raft term)"
+  - "Whichever node has the highest IP address, decided by each node independently"
+  - "A random node picked by the client on each request"
+  answer: 1
+  explanation: |
+    Production election typically leans on a consensus-backed service (ephemeral/sequential node) or
+    the consensus protocol's built-in leader, getting correctness for free. Bully/highest-IP schemes
+    assume reliable failure detection and are rarely used; client-random picking gives no agreement.
+  ref: concepts.md#leader-election
+- id: design-coordination-locking-collaboration-061
+  difficulty: intermediate
+  tags: [consensus, protocols, comparison]
+  question: |
+    Which statement about Paxos, Raft, and ZAB is accurate?
+  options:
+  - "Raft was explicitly designed for understandability with explicit leader election and log matching,
+    and is now the default in etcd, Consul, and CockroachDB; ZAB is ZooKeeper's protocol"
+  - "Paxos is the easiest to understand and implement, so it dominates new systems"
+  - "Raft and Paxos avoid electing a leader entirely"
+  - "ZAB is used by etcd and Kubernetes"
+  answer: 0
+  explanation: |
+    Raft's design goal was understandability and it now backs etcd/Consul/CockroachDB; ZAB is
+    ZooKeeper's. Paxos is famously hard (not easy), Multi-Paxos and Raft both use a leader, and etcd
+    uses Raft (not ZAB).
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-062
+  difficulty: intermediate
+  tags: [mutual-exclusion, classic-algorithms]
+  question: |
+    In a central-coordinator mutual-exclusion scheme (request/grant/release), what is the main
+    drawback despite its simplicity and low message count?
+  options:
+  - "It requires monotonic clocks on every node"
+  - "It cannot prevent two holders even without failures"
+  - "The coordinator is a single point of failure — if it dies, no one can acquire or release the critical
+    section until it recovers"
+  - "It needs a full quorum for every entry"
+  answer: 2
+  explanation: |
+    The central coordinator is simple and cheap (3 messages/entry) but is a SPOF whose failure halts
+    all mutual exclusion. It does not require synced clocks, does correctly enforce one holder in the
+    no-failure case, and needs no quorum.
+  ref: concepts.md#distributed-mutual-exclusion-trade-offs-safety-versus-liveness
+- id: design-coordination-locking-collaboration-063
+  difficulty: beginner
+  tags: [consensus, quorum]
+  question: |
+    A cluster of 5 nodes uses majority quorum consensus. How many node failures can it tolerate while
+    still committing writes?
+  options:
+  - "4"
+  - "3"
+  - "0"
+  - "2"
+  answer: 3
+  explanation: |
+    With 2f+1 = 5, f = 2 failures tolerated (a majority of 3 must remain). Tolerating 4 would leave
+    only 1 (a minority); tolerating 3 leaves 2 (also a minority); 0 would be a single node, not a
+    5-node quorum.
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-064
+  difficulty: beginner
+  tags: [locks, redis, primitive]
+  question: |
+    Which Redis command pattern is the standard primitive for acquiring a simple single-instance lock?
+  options:
+  - "INCR lock:key"
+  - "SET lock:key <owner-token> NX PX <ttl-ms>"
+  - "GET lock:key"
+  - "EXPIRE lock:key <ttl>"
+  answer: 1
+  explanation: |
+    SET with NX (only if absent) and PX (millisecond TTL) atomically acquires the lock and sets expiry
+    with an owner token. INCR/GET/EXPIRE alone do not atomically acquire-with-owner-and-TTL, which is
+    what a safe simple lock needs.
+  ref: concepts.md#distributed-locks-and-their-failure-modes
+- id: design-coordination-locking-collaboration-065
+  difficulty: beginner
+  tags: [crdt, examples]
+  question: |
+    Which of these is a real system or library built on CRDTs?
+  options:
+  - "Yjs (and Automerge), used for local-first collaborative editing"
+  - "Google Docs' original text engine"
+  - "The Bully leader-election algorithm"
+  - "Redis SET NX"
+  answer: 0
+  explanation: |
+    Yjs and Automerge are CRDT libraries powering many collaborative editors. Google Docs uses OT (not
+    CRDT), Bully is a leader-election algorithm, and SET NX is a locking primitive — none are CRDTs.
+  ref: concepts.md#collaborative-editing-with-crdts
+- id: design-coordination-locking-collaboration-066
+  difficulty: beginner
+  tags: [ot, central-server]
+  question: |
+    Why does classic Operational Transformation (as in Google Docs) usually rely on a central server?
+  options:
+  - "To encrypt all edits"
+  - "Because clients cannot connect to each other at all"
+  - "The server serializes operations into a single order and transforms/relays them, which makes OT far
+    simpler than fully decentralized transformation"
+  - "To store the document as a CRDT"
+  answer: 2
+  explanation: |
+    A central server gives a single authoritative operation order and does the transform/relay,
+    greatly simplifying OT. It is not about encryption, clients technically could connect (OT just
+    works better centrally), and it does not turn the doc into a CRDT.
+  ref: concepts.md#collaborative-editing-with-operational-transformation
+- id: design-coordination-locking-collaboration-067
+  difficulty: intermediate
+  tags: [safety, liveness, definitions]
+  question: |
+    For a distributed lock, which correctly maps the safety and liveness properties?
+  options:
+  - "Safety = requesters eventually get the lock; Liveness = never two holders"
+  - "Safety = never two holders at once; Liveness = a requester eventually acquires it (no deadlock/starvation)"
+  - "Safety and liveness are the same property"
+  - "Safety = low latency; Liveness = high throughput"
+  answer: 1
+  explanation: |
+    Safety is "nothing bad happens" (never two holders); liveness is "something good eventually
+    happens" (eventual acquisition). The swapped-definition choice reverses them, they are distinct
+    properties, and neither equals raw latency/throughput.
+  ref: concepts.md#distributed-mutual-exclusion-trade-offs-safety-versus-liveness
+- id: design-coordination-locking-collaboration-068
+  difficulty: advanced
+  tags: [scenario, redlock-vs-single-redis, judgment]
+  question: |
+    A team currently uses Redlock (5 masters) purely to reduce duplicate execution of a cheap,
+    idempotent background task where an occasional double-run is harmless. What is the best
+    recommendation?
+  options:
+  - "Keep Redlock; more masters always means more safety"
+  - "Upgrade to ZooKeeper with fencing tokens for this task"
+  - "Add more Redis masters to reach 7 for extra safety"
+  - "Downgrade to a single Redis SET NX PX (or drop the lock and rely on the task's idempotency), because
+    for an efficiency-only lock the 5-node overhead is unjustified"
+  answer: 3
+  explanation: |
+    For an efficiency lock over an idempotent task, Redlock's overhead buys nothing meaningful; a
+    single Redis lock (or leaning on idempotency) is appropriate. More masters do not add correctness
+    value here, and ZooKeeper+fencing is correctness-grade overkill for a harmless double-run.
+  ref: concepts.md#redlock-and-its-criticisms
+- id: design-coordination-locking-collaboration-069
+  difficulty: advanced
+  tags: [scenario, watchdog, pause-race]
+  question: |
+    A library (e.g., Redisson-style) auto-renews the lock TTL via a background "watchdog" thread while
+    work proceeds. Does this eliminate the pause-race correctness problem?
+  options:
+  - "No — a stop-the-world pause freezes the watchdog thread too, so the lease can still expire and be
+    reassigned while the paused process later resumes believing it holds the lock; fencing is still required
+    for correctness"
+  - "Yes, auto-renewal makes the lock fully correct"
+  - "Yes, because the watchdog runs in the OS kernel and never pauses"
+  - "No, but only because of network encryption overhead"
+  answer: 0
+  explanation: |
+    A watchdog improves the TTL dilemma but pauses along with the whole process during a
+    stop-the-world event, so the pause race persists; correctness still needs fencing at the resource.
+    The watchdog is an application thread (not immune in the kernel), and encryption is irrelevant.
+  ref: concepts.md#distributed-locks-and-their-failure-modes
+- id: design-coordination-locking-collaboration-070
+  difficulty: advanced
+  tags: [scenario, crdt-families, tradeoff]
+  question: |
+    You are choosing between a state-based (CvRDT) and operation-based (CmRDT) CRDT for syncing over a
+    constrained mobile network. What is the key trade-off?
+  options:
+  - "State-based is always smaller on the wire"
+  - "Operation-based needs no delivery guarantees at all"
+  - "State-based has simple merge math but ships full/large state (heavy on the wire); operation-based
+    ships lighter operations but requires reliable, causal delivery of those operations"
+  - "They are identical in every practical respect"
+  answer: 2
+  explanation: |
+    CvRDT merges are mathematically simple but transmit bulky state; CmRDT sends compact ops but
+    depends on reliable causal delivery. State-based is generally *heavier* on the wire, op-based does
+    need delivery guarantees, and they are not identical.
+  ref: concepts.md#collaborative-editing-with-crdts
+- id: design-coordination-locking-collaboration-071
+  difficulty: expert
+  tags: [scenario, coordination-cost, hot-path]
+  question: |
+    An architect wants to add a consensus-backed lock on the hottest write path of a 100k-QPS service
+    "to be safe." What is the strongest objection?
+  options:
+  - "Consensus locks are not safe enough for hot paths"
+  - "Consensus locks are free of latency, so the only issue is cost"
+  - "The lock should be fine; 100k QPS is trivial for consensus systems"
+  - "Each lock acquisition is a quorum round trip (often cross-AZ, tens of ms) and serializes through
+    a leader, so it would cap throughput and add latency to the hottest path — coordination belongs on
+    low-volume metadata, not the hot path; redesign via partitioning or idempotency instead"
+  answer: 3
+  explanation: |
+    Consensus coordination costs a quorum RTT and a leader bottleneck — fatal on a 100k-QPS hot path;
+    it is meant for low-volume high-value metadata. The objection is not about safety, consensus is not
+    latency-free, and 100k QPS through a single quorum leader is not trivial.
+  ref: concepts.md#consensus-as-the-foundation
+- id: design-coordination-locking-collaboration-072
+  difficulty: expert
+  tags: [scenario, comparison-table, decision]
+  question: |
+    Match the requirement to the best coordination choice: (a) mostly-online SaaS editing large plain
+    text with minimal bandwidth; (b) offline-first multi-device note sync; (c) a structured object-graph
+    design tool with a central backend.
+  options:
+  - "(a) CRDT, (b) OT, (c) global lock"
+  - "(a) OT, (b) CRDT, (c) server-authoritative last-writer-wins per property (Figma-style)"
+  - "(a) global lock, (b) OT, (c) CRDT P2P"
+  - "(a) CRDT, (b) CRDT, (c) OT text engine"
+  answer: 1
+  explanation: |
+    Large-text online SaaS favors OT's compactness + server ordering; offline-first multi-device favors
+    CRDTs' coordinator-free convergence; a central object-graph tool favors server-authoritative
+    per-property LWW. The other mappings misassign these based on the trade-off analysis.
+  ref: concepts.md#operational-transformation-versus-crdts-deep-trade-offs
+- id: design-coordination-locking-collaboration-073
+  difficulty: intermediate
+  tags: [fencing, resource-check]
+  question: |
+    With fencing tokens in place, what must the protected resource do on each write to actually enforce
+    safety?
+  options:
+  - "Record the highest token it has accepted and reject any write carrying a lower token"
+  - "Accept every write regardless of token"
+  - "Store the token but ignore it during writes"
+  - "Generate a new random token per write"
+  answer: 0
+  explanation: |
+    The resource enforces ordering by tracking the max accepted token and rejecting lower ones, fencing
+    stale writers. Accepting everything or ignoring the token defeats fencing, and the resource must
+    *check* the lock service's monotonic token, not mint its own random one.
+  ref: concepts.md#fencing-tokens-and-idempotency
+- id: design-coordination-locking-collaboration-074
+  difficulty: advanced
+  tags: [scenario, split-brain-lock, independent-stores]
+  question: |
+    Two data centers each run an independent Redis for locking, and the app "acquires" a resource lock
+    in whichever DC it can reach during a partition. What correctness problem does this create?
+  options:
+  - "None; independent locks are always safe"
+  - "Only a performance problem, never correctness"
+  - "Split-brain locking — during a partition, one client can hold the lock in DC-A while another holds
+    it in DC-B, so two holders act simultaneously; the locks share no single source of truth"
+  - "The locks will refuse to grant, causing a deadlock but no double-holder"
+  answer: 2
+  explanation: |
+    Independent per-DC lock stores have no shared agreement, so a partition lets both DCs grant the same
+    lock — classic split-brain with two holders. This is a correctness problem (not just performance),
+    and the locks do grant (that is the danger), not deadlock.
+  ref: concepts.md#distributed-locks-and-their-failure-modes
+- id: design-coordination-locking-collaboration-075
+  difficulty: expert
+  tags: [scenario, irreducible-cost, judgment]
+  question: |
+    Which statement about the "irreducible costs" of coordination is correct to assert in an interview?
+  options:
+  - "With the right algorithm, linearizable fault-tolerant writes can be cheaper than a quorum round trip"
+  - "A single leader has no throughput ceiling if you shard reads"
+  - "TTL locks are correctness-safe as long as the TTL is long enough"
+  - "Any linearizable fault-tolerant write costs at least one quorum round trip; any TTL lock has the
+    pause race and needs fencing for correctness; any single leader is a throughput ceiling; and a CP
+    service is unavailable for writes on the minority side of a partition — by design"
+  answer: 3
+  explanation: |
+    These are the fundamental, unavoidable costs: quorum RTT for linearizable writes, the pause race
+    for TTL locks (needing fencing), the single-leader ceiling, and CP minority unavailability. You
+    cannot beat the quorum RTT, sharding reads does not lift the write ceiling, and no TTL length makes
+    a bare lock correctness-safe.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: design-coordination-locking-collaboration-076
+  difficulty: intermediate
+  tags: [when-not-to-lock, rate-limiting]
+  question: |
+    Why is a distributed lock a poor tool for implementing a rate limiter or quota?
+  options:
+  - "Locks are too fast for rate limiting"
+  - "A lock serializes access (one holder at a time), whereas rate limiting needs concurrent counting;
+    a shared counter / token bucket is the right primitive and does not force serialization"
+  - "Rate limiting requires consensus, which locks cannot provide"
+  - "Locks cannot store numbers"
+  answer: 1
+  explanation: |
+    Rate limiting is about counting concurrent requests against a budget, not mutual exclusion; a lock
+    needlessly serializes and creates a bottleneck, while a token bucket/atomic counter fits naturally.
+    Locks are not "too fast," rate limiting does not require consensus, and storage of numbers is not
+    the issue.
+  ref: concepts.md#when-a-lock-is-the-wrong-tool

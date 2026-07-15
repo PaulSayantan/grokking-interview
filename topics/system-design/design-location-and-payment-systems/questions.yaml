@@ -1,0 +1,1672 @@
+topic: Design Location and Transactional Systems
+domain: system-design
+topic_slug: design-location-and-payment-systems
+version: 1
+questions:
+- id: design-location-and-payment-systems-001
+  difficulty: beginner
+  tags:
+  - framing
+  - cap
+  - consistency
+  question: |
+    Across the three subdomains in this topic, which consistency posture is
+    the best default for each?
+  options:
+  - Location = availability/eventual; payments = strong consistency; booking = strong consistency on the
+    contended resource
+  - Location = strong consistency; payments = eventual; booking = eventual
+  - All three = strong consistency, because user-facing systems must be correct
+  - All three = eventual consistency, because that is what scales
+  answer: 0
+  explanation: |
+    Location tolerates staleness and prizes availability/low latency; payments
+    must be correct (strong consistency on the ledger); booking must not
+    oversell so seat/inventory state is strongly consistent. The others force a
+    single model onto all three, which ignores that consistency should be
+    chosen per component.
+  ref: concepts.md#problem-framing-and-requirements
+- id: design-location-and-payment-systems-002
+  difficulty: beginner
+  tags:
+  - location
+  - write-path
+  - estimation
+  question: |
+    5M active drivers each send a location ping every 4 seconds. Roughly what
+    is the sustained write rate the location ingest must handle?
+  options:
+  - About 20 thousand writes/sec
+  - About 1.25 million writes/sec
+  - About 5 million writes/sec
+  - About 80 thousand writes/sec
+  answer: 1
+  explanation: |
+    5,000,000 / 4 = 1.25M writes/sec. This write rate (not storage) is why
+    location state lives in sharded in-memory/Redis stores rather than a disk
+    RDBMS. 5M would be 1 ping/sec; 20K and 80K are off by orders of magnitude.
+  ref: concepts.md#problem-framing-and-requirements
+- id: design-location-and-payment-systems-003
+  difficulty: beginner
+  tags:
+  - geospatial
+  - fundamentals
+  question: |
+    What is the core trick shared by geohash, S2, and Z-order based indexes to
+    make "find nearby" fast on ordinary indexes?
+  options:
+  - They store latitude and longitude in two separate B-trees and intersect the ranges
+  - They replicate the data across regions so any node can answer locally
+  - They map 2D space onto a 1D space-filling curve so 2D-close points are usually 1D-close, enabling
+    range scans
+  - They keep every point in a single sorted list ordered by distance from the origin
+  answer: 2
+  explanation: |
+    Space-filling curves (Z-order/Morton, Hilbert) linearize 2D so standard 1D
+    indexes work. Two separate B-trees force scanning a whole lat/lng stripe
+    (the thing we want to avoid). Replication and a single distance-sorted list
+    don't solve 2D range queries.
+  ref: concepts.md#geospatial-indexing-fundamentals
+- id: design-location-and-payment-systems-004
+  difficulty: beginner
+  tags:
+  - geospatial
+  - refine
+  - haversine
+  question: |
+    In the standard two-phase proximity query, what is the role of the cell/grid
+    lookup versus the haversine distance computation?
+  options:
+  - The grid returns exact nearest neighbors; haversine is only for display
+  - Haversine finds candidates; the grid does the exact ranking
+  - Both do the same thing; you pick one for redundancy
+  - The grid is a cheap coarse filter that returns candidates; haversine is the exact refine/rank step
+  answer: 3
+  explanation: |
+    Cells cheaply prune to candidate points; exact distance (haversine) then
+    filters and ranks. The grid is never trusted for exact distance — cells are
+    rectangles/hexagons, not circles.
+  ref: concepts.md#geospatial-indexing-fundamentals
+- id: design-location-and-payment-systems-005
+  difficulty: intermediate
+  tags:
+  - geohash
+  - boundary
+  question: |
+    Two drivers are 1 meter apart but on opposite sides of a geohash cell
+    boundary. A rider queries only the exact geohash prefix of their location.
+    What happens and what is the standard fix?
+  options:
+  - The driver in the neighboring cell may be missed; fix by querying the center cell plus its 8 neighbor
+    geohashes and unioning
+  - Both drivers are returned; no fix needed because geohash guarantees neighbors share prefixes
+  - The query errors out; fix by lowering the precision to 1 character
+  - Both drivers are missed; fix by switching to latitude/longitude B-trees
+  answer: 0
+  explanation: |
+    Points across a cell boundary can share no common prefix, so a pure prefix
+    search misses them. The canonical fix is to also query the 8 adjacent
+    geohashes. Geohash does NOT guarantee neighbors share prefixes (that's the
+    boundary problem). Dropping to precision 1 returns a continent of noise.
+  ref: concepts.md#geohash
+- id: design-location-and-payment-systems-006
+  difficulty: beginner
+  tags:
+  - geohash
+  - property
+  question: |
+    What convenient property does a geohash string prefix give you?
+  options:
+  - A longer prefix means a larger geographic cell
+  - 'A prefix denotes containment: any geohash starting with ''9q8y'' lies inside cell ''9q8y'''
+  - Sharing a prefix guarantees two points are within 1 meter
+  - Prefixes encode altitude as well as latitude and longitude
+  answer: 1
+  explanation: |
+    Prefix = spatial containment, which is why prefix range scans work for
+    proximity. Longer prefix = SMALLER cell. Shared prefix implies proximity
+    only loosely (and fails at boundaries). Geohash encodes lat/lng, not
+    altitude.
+  ref: concepts.md#geohash
+- id: design-location-and-payment-systems-007
+  difficulty: intermediate
+  tags:
+  - geohash
+  - redis
+  question: |
+    Redis Geo (GEOADD/GEOSEARCH) implements proximity by storing what in a
+    sorted set?
+  options:
+  - The raw latitude as the score and longitude as the member
+  - A precomputed distance to a fixed origin as the score
+  - A 52-bit interleaved geohash integer as the score, enabling range scans over nearby cells
+  - A quadtree serialized into the member field
+  answer: 2
+  explanation: |
+    Redis encodes the point as a 52-bit geohash integer used as the sorted-set
+    score, so proximity becomes range operations over that ordering. It does
+    not use raw lat as score, a fixed-origin distance, or a serialized
+    quadtree.
+  ref: concepts.md#geohash
+- id: design-location-and-payment-systems-008
+  difficulty: intermediate
+  tags:
+  - quadtree
+  - density
+  question: |
+    What is the defining advantage of a quadtree over a fixed geohash grid?
+  options:
+  - It is a string format that works directly in SQL LIKE queries
+  - It requires no memory because it lives entirely on disk
+  - It guarantees uniform physical cell area across the globe
+  - 'It adapts to point density: dense areas split into small leaves, sparse areas stay coarse, keeping
+    leaf sizes balanced'
+  answer: 3
+  explanation: |
+    A quadtree subdivides only where density is high, balancing points per leaf
+    and query cost. It is an in-memory tree (not a SQL string), does use memory,
+    and does not guarantee uniform global area (that's closer to H3's goal).
+  ref: concepts.md#quadtree
+- id: design-location-and-payment-systems-009
+  difficulty: advanced
+  tags:
+  - quadtree
+  - moving-points
+  - trade-off
+  question: |
+    Why is an in-memory quadtree often a poor fit for millions of fast-moving
+    driver pings, despite being great for Yelp-style POIs?
+  options:
+  - Constantly moving points cross quadrant boundaries, causing continuous re-bucketing/tree churn, and
+    sharding the tree across machines is complex
+  - Quadtrees cannot represent more than 10,000 points total
+  - Quadtrees only work for 1D data
+  - Quadtrees require a relational database transaction per insert
+  answer: 0
+  explanation: |
+    Moving points force frequent re-insertion as they cross boundaries (churn),
+    and distributing/maintaining the tree is harder than sharding a geohash
+    string. Quadtrees shine for static/slow POIs. The other claims are false.
+  ref: concepts.md#quadtree
+- id: design-location-and-payment-systems-010
+  difficulty: advanced
+  tags:
+  - s2
+  - h3
+  - comparison
+  question: |
+    What is the key hierarchy trade-off between Google S2 and Uber H3?
+  options:
+  - H3 has exact nesting; S2 nesting is approximate
+  - S2 has exact parent-child nesting; H3 hexagons cannot perfectly subdivide so its hierarchy is only
+    approximate
+  - Neither supports any hierarchy
+  - Both have exact nesting and are otherwise identical
+  answer: 1
+  explanation: |
+    S2's square cells nest exactly (a cell = 4 children). H3's hexagons can't be
+    divided into 7 perfectly-contained children, so H3's hierarchy is
+    approximate. In exchange H3 gets uniform neighbor distance. Both DO support
+    hierarchy, and they are not identical.
+  ref: concepts.md#s2-and-h3
+- id: design-location-and-payment-systems-011
+  difficulty: advanced
+  tags:
+  - h3
+  - hexagons
+  - movement
+  question: |
+    Why did Uber choose hexagons (H3) for marketplace analytics like surge
+    pricing and supply/demand heatmaps?
+  options:
+  - Hexagons tile the plane with the smallest possible cell IDs
+  - Hexagons are the only shape that nests perfectly hierarchically
+  - Hexagons have a single uniform distance from a cell center to all neighbors, minimizing quantization
+    error for movement/flow analysis
+  - Hexagons allow storing altitude naturally
+  answer: 2
+  explanation: |
+    Hexagons have one neighbor distance (squares have two: edge vs diagonal;
+    triangles three), which is ideal for analyzing motion, gradients, and
+    supply/demand flows. They do NOT nest perfectly (the opposite is true) and
+    have nothing to do with altitude or minimal IDs.
+  ref: concepts.md#s2-and-h3
+- id: design-location-and-payment-systems-012
+  difficulty: intermediate
+  tags:
+  - h3
+  - kring
+  - query
+  question: |
+    When matching, H3's kRing(cell, k) function is used to approximate what?
+  options:
+  - The shortest road route between two cells
+  - The exact haversine distance between two drivers
+  - The optimal number of shards for the location store
+  - A circular search radius by returning all cells within k rings of the center for candidate lookup
+  answer: 3
+  explanation: |
+    kRing returns the concentric hexagon rings out to k, approximating a circle
+    to gather candidate cells (then you refine by exact distance). It's not a
+    routing, exact-distance, or sharding-count function.
+  ref: concepts.md#s2-and-h3
+- id: design-location-and-payment-systems-013
+  difficulty: intermediate
+  tags:
+  - location
+  - storage
+  - hot-cold
+  question: |
+    For a ride-matching location store handling 1M+ pings/sec, what is the
+    recommended way to keep both fast matching and full trip history?
+  options:
+  - Store only the latest value per driver in a sharded in-memory/Redis store for matching, and stream
+    full history to a separate append store (Cassandra/S3) off the hot path
+  - Write every ping into a single strongly-consistent SQL table that also serves matching queries
+  - Discard all history and keep only the last ping in a global lock-protected variable
+  - Store history in Redis and the latest value in S3
+  answer: 0
+  explanation: |
+    Matching needs only current position (last-write-wins in memory, sharded);
+    history is bulky and belongs in a separate append store off the hot path.
+    A single SQL table can't take 1M writes/sec; discarding history loses
+    needed data; the last option inverts the hot/cold roles.
+  ref: concepts.md#real-time-location-updates-and-matching
+- id: design-location-and-payment-systems-014
+  difficulty: advanced
+  tags:
+  - location
+  - out-of-order
+  - idempotency
+  question: |
+    A driver's phone buffers 8 pings during a signal drop and replays them out
+    of order. How should the location store avoid corrupting current position?
+  options:
+  - Always overwrite with the most recently RECEIVED ping
+  - Apply last-write-wins by event TIMESTAMP (not arrival), dropping pings older than the stored one;
+    dedupe by driver+timestamp
+  - Reject the driver entirely until they reconnect cleanly
+  - Average all 8 buffered coordinates into a single point
+  answer: 1
+  explanation: |
+    Order by event time and keep the newest by timestamp; discard stale/duplicate
+    pings (idempotent ingest). Overwriting by arrival order lets a stale ping win;
+    rejecting the driver loses availability; averaging fabricates a wrong location.
+  ref: concepts.md#real-time-location-updates-and-matching
+- id: design-location-and-payment-systems-015
+  difficulty: advanced
+  tags:
+  - location
+  - sharding
+  - hot-shard
+  question: |
+    A stadium empties and thousands request rides from one geo-cell, creating a
+    hot shard in the location store. Which mitigation set is most appropriate?
+  options:
+  - Switch the whole location store to strong consistency to serialize the load
+  - Move all location data into a single global RDBMS to centralize the load
+  - Cell-level splitting/re-sharding of the hot region, load shedding, and geo-partitioning so hot cities
+    stay isolated
+  - Increase the ping frequency so data is fresher
+  answer: 2
+  explanation: |
+    Hot shards are handled by splitting/re-sharding the hot cell, shedding load,
+    and isolating regions. Strong consistency makes it worse (more coordination);
+    a single RDBMS can't take the write rate; higher ping frequency amplifies the
+    overload.
+  ref: concepts.md#real-time-location-updates-and-matching
+- id: design-location-and-payment-systems-016
+  difficulty: intermediate
+  tags:
+  - location
+  - push-pull
+  - websocket
+  question: |
+    For the live "car moving on the map" experience, why do ride apps favor a
+    persistent WebSocket connection over client polling?
+  options:
+  - Polling is impossible over mobile networks
+  - WebSockets guarantee exactly-once delivery of every location update
+  - Polling cannot be encrypted
+  - Server push gives lower-latency updates for the live view, at the cost of holding more per-client
+    connection state
+  answer: 3
+  explanation: |
+    Persistent connections let the server push updates with low latency for the
+    smooth live map, trading extra connection state. Polling is possible (just
+    bursty/higher latency), WebSockets don't guarantee exactly-once, and polling
+    can be encrypted (HTTPS).
+  ref: concepts.md#real-time-location-updates-and-matching
+- id: design-location-and-payment-systems-017
+  difficulty: beginner
+  tags:
+  - payments
+  - ledger
+  - double-entry
+  question: |
+    In double-entry bookkeeping, what must be true of the entries for a single
+    transaction?
+  options:
+  - The debits and credits sum to zero, so money is only moved, never created or destroyed
+  - There is exactly one entry that increments a balance
+  - Each entry mutates the previous entry in place
+  - Entries may be deleted once the transaction settles
+  answer: 0
+  explanation: |
+    Every transaction records offsetting debits/credits that net to zero,
+    enforcing the money-conservation invariant. There are at least two entries;
+    entries are immutable (never mutated or deleted) — corrections are new
+    compensating entries.
+  ref: concepts.md#payment-systems-and-double-entry-ledger
+- id: design-location-and-payment-systems-018
+  difficulty: intermediate
+  tags:
+  - payments
+  - ledger
+  - immutability
+  question: |
+    How should a payment ledger represent a refund/reversal of a prior charge?
+  options:
+  - Update the original entry's amount to zero
+  - Append a new compensating (reversing) entry; never mutate or delete the original
+  - Delete the original charge entries
+  - Overwrite the balance column directly and skip entries
+  answer: 1
+  explanation: |
+    Ledgers are immutable/append-only; a reversal is a new offsetting entry that
+    preserves the full audit trail. Mutating, deleting, or bypassing entries
+    destroys auditability and the ability to reconstruct history.
+  ref: concepts.md#payment-systems-and-double-entry-ledger
+- id: design-location-and-payment-systems-019
+  difficulty: intermediate
+  tags:
+  - payments
+  - balances
+  - trade-off
+  question: |
+    What is the trade-off of maintaining a materialized (cached) balance
+    alongside immutable ledger entries versus summing entries on every read?
+  options:
+  - Materialized balances are always wrong, so summing is the only option
+  - Summing entries is faster and always used in production
+  - Materialized balances give fast reads but must be updated in the same transaction as the entries to
+    stay consistent; summing is always accurate but slow at scale
+  - There is no difference at any scale
+  answer: 2
+  explanation: |
+    Materialized balances trade write-time coupling (update balance + entries
+    atomically) for fast reads. Summing millions of entries per read is accurate
+    but too slow at scale. Real systems keep entries as truth plus materialized
+    balances.
+  ref: concepts.md#payment-systems-and-double-entry-ledger
+- id: design-location-and-payment-systems-020
+  difficulty: advanced
+  tags:
+  - payments
+  - consistency
+  - ledger
+  question: |
+    Why must ledger writes be strongly consistent (ACID) rather than eventually
+    consistent?
+  options:
+  - Because eventual consistency is impossible in databases
+  - Because ACID is always faster than eventual consistency
+  - Because regulators forbid using replicas for any read
+  - Because a temporarily wrong balance can authorize an overdraft or double-spend, and a debit and its
+    credit must commit atomically
+  answer: 3
+  explanation: |
+    Strong consistency prevents acting on a stale/wrong balance and guarantees
+    atomic debit+credit. Eventual consistency is possible (just wrong here);
+    ACID isn't universally faster; replicas can serve eventual reads (receipts,
+    analytics) just not the authoritative balance.
+  ref: concepts.md#payment-systems-and-double-entry-ledger
+- id: design-location-and-payment-systems-021
+  difficulty: beginner
+  tags:
+  - idempotency
+  - retries
+  question: |
+    What problem do idempotency keys primarily solve in a payment API?
+  options:
+  - They ensure a retried 'charge' request produces exactly one charge (exactly-once effect) despite network
+    retries
+  - They encrypt the card number end to end
+  - They speed up the charge by caching the card network response
+  - They shard the ledger across regions
+  answer: 0
+  explanation: |
+    Idempotency keys give exactly-once effect: retries of the same logical
+    operation don't double-charge. They are not encryption, not a latency
+    optimization, and not a sharding mechanism.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-022
+  difficulty: advanced
+  tags:
+  - idempotency
+  - race
+  - atomicity
+  question: |
+    Two retries carrying the same idempotency key arrive concurrently. What is
+    the linchpin that prevents both from charging?
+  options:
+  - A check-then-insert in application code that reads the key then writes it
+  - Atomic uniqueness enforcement (UNIQUE constraint or conditional put with attribute_not_exists) so
+    only one writer can claim the key
+  - A random sleep before processing to space them out
+  - Rejecting all requests that arrive within the same millisecond
+  answer: 1
+  explanation: |
+    Atomic claim of the key (unique constraint / conditional write) serializes
+    concurrent retries — exactly one proceeds. A read-then-write check has a
+    race window that reintroduces the double charge. Sleeps and millisecond
+    rejection are unreliable hacks.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-023
+  difficulty: advanced
+  tags:
+  - idempotency
+  - fingerprint
+  question: |
+    Why should the server store a fingerprint of the request body alongside the
+    idempotency key?
+  options:
+  - To compress the request for storage
+  - To allow the key to be reused for unrelated future requests
+  - 'To detect key reuse: if the same key arrives with a DIFFERENT body it likely indicates a client bug
+    and should be rejected rather than returning a mismatched result'
+  - To avoid needing a TTL on the key
+  answer: 2
+  explanation: |
+    The fingerprint guards against a key being reused for a different operation;
+    the server rejects mismatches instead of returning the stored (wrong)
+    response. It's not compression, not license to reuse keys, and unrelated to
+    TTL.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-024
+  difficulty: intermediate
+  tags:
+  - idempotency
+  - key-generation
+  question: |
+    Where should the idempotency key for a "Pay" tap be generated?
+  options:
+  - A fresh key per HTTP attempt, regenerated on every retry
+  - By the payment processor and never seen by the client
+  - By a load balancer based on the client IP
+  - By the initiator of the logical action (the Pay button), reused across all retries of that same tap
+  answer: 3
+  explanation: |
+    The key identifies the logical operation, so the initiator generates it once
+    and reuses it across retries. A new key per attempt defeats the purpose
+    (each retry becomes a new charge). Processor- or LB-generated keys don't map
+    to the client's logical intent.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-025
+  difficulty: advanced
+  tags:
+  - idempotency
+  - in-flight
+  question: |
+    A retry with a known idempotency key arrives while the first request is
+    still processing. What is the correct behavior?
+  options:
+  - Recognize the in-flight state and return a 'processing/retry-later' (e.g., 409) or block, so the operation
+    is not executed twice
+  - Start a second concurrent execution to be safe
+  - Return the not-yet-existent stored response, which will be null
+  - Delete the key and treat it as a new request
+  answer: 0
+  explanation: |
+    With a per-key state (started -> succeeded/failed), an in-flight retry should
+    wait or get a retry-later response, never a second execution. Returning null
+    or deleting/re-executing the key both risk double charges.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-026
+  difficulty: beginner
+  tags:
+  - saga
+  - distributed-txn
+  question: |
+    What is a saga?
+  options:
+  - A single global ACID transaction spanning all microservices
+  - A sequence of local transactions, each with a compensating action that semantically undoes it if a
+    later step fails
+  - A lock held across all participating databases until the whole flow completes
+  - A read-only report generated after payments settle
+  answer: 1
+  explanation: |
+    A saga chains local transactions with compensations to roll back on failure,
+    trading isolation for availability across services. It is explicitly NOT a
+    global ACID transaction or a cross-DB lock, and not a report.
+  ref: concepts.md#distributed-transactions-and-the-saga-pattern
+- id: design-location-and-payment-systems-027
+  difficulty: advanced
+  tags:
+  - 2pc
+  - blocking
+  - failure
+  question: |
+    What is the classic failure mode of two-phase commit (2PC) that makes it a
+    poor fit for high-scale cross-service workflows?
+  options:
+  - It cannot guarantee atomicity even in the happy path
+  - It requires eventual consistency and thus can lose money
+  - If the coordinator crashes after participants have voted to prepare, participants remain blocked holding
+    locks indefinitely
+  - It only works for read-only transactions
+  answer: 2
+  explanation: |
+    2PC's blocking problem: a coordinator crash after prepare leaves participants
+    holding locks with no way to safely proceed. 2PC does give atomicity in the
+    happy path (that's its point), is strongly consistent, and handles writes.
+  ref: concepts.md#distributed-transactions-and-the-saga-pattern
+- id: design-location-and-payment-systems-028
+  difficulty: advanced
+  tags:
+  - saga
+  - orchestration
+  - choreography
+  question: |
+    A payment flow has 6 steps with complex conditional compensation and needs
+    strong observability and testability. Which saga coordination style fits
+    best and why?
+  options:
+  - Choreography, because a central orchestrator is always a single point of failure with no mitigation
+  - 2PC, because complex flows require global locks
+  - No coordination; let each service decide independently
+  - Orchestration (e.g., Temporal/Step Functions), because the workflow logic is centralized, explicit,
+    testable, and observable; the orchestrator is made durable/replicated to mitigate SPOF
+  answer: 3
+  explanation: |
+    Complex, conditional flows benefit from orchestration: explicit, observable,
+    testable logic in one place, with a durable/replicated orchestrator. Pure
+    choreography smears logic across services and is hard to follow; 2PC blocks;
+    no coordination cannot ensure compensation ordering.
+  ref: concepts.md#distributed-transactions-and-the-saga-pattern
+- id: design-location-and-payment-systems-029
+  difficulty: expert
+  tags:
+  - saga
+  - isolation
+  - semantic-lock
+  question: |
+    Sagas give up isolation, so other transactions can observe intermediate
+    states (e.g., funds reserved but not captured). Which technique set best
+    addresses this?
+  options:
+  - Use semantic locks (a 'pending' status), commutative updates, and idempotent steps/compensations that
+    tolerate partial execution
+  - Acquire a global 2PC lock across all saga steps
+  - Run every step twice to average out inconsistencies
+  - Disable retries so intermediate states never occur
+  answer: 0
+  explanation: |
+    Because there is no global lock, you manage anomalies with semantic locks
+    (pending states), commutative/idempotent operations, and compensations that
+    handle partial completion. Adding 2PC defeats the point; running steps twice
+    or disabling retries doesn't address visibility of intermediate state.
+  ref: concepts.md#distributed-transactions-and-the-saga-pattern
+- id: design-location-and-payment-systems-030
+  difficulty: advanced
+  tags:
+  - 2pc
+  - saga
+  - when-to-use
+  question: |
+    When is 2PC actually a defensible choice over a saga?
+  options:
+  - For high-throughput cross-continent microservice workflows
+  - For a small number of co-located resources needing hard atomicity at low volume within one trust domain
+  - Whenever any money is involved, regardless of scale
+  - Only for read-only analytical queries
+  answer: 1
+  explanation: |
+    2PC suits a few tightly-coupled, co-located resources at modest volume where
+    hard atomicity is worth the blocking risk. At high scale or across
+    services/regions, its blocking/lock costs make sagas preferable. Money alone
+    doesn't mandate 2PC; it's not for read-only queries.
+  ref: concepts.md#distributed-transactions-and-the-saga-pattern
+- id: design-location-and-payment-systems-031
+  difficulty: intermediate
+  tags:
+  - reconciliation
+  - payments
+  question: |
+    Why does a payment platform need reconciliation even if its ledger is
+    perfectly ACID?
+  options:
+  - Because ACID ledgers routinely lose committed transactions
+  - Because reconciliation replaces the need for a ledger
+  - Because the external truth (bank/processor statements) drifts from your ledger due to fees, T+2 settlement
+    timing, failed webhooks, and partial failures — you must detect and repair the drift
+  - Because regulators require the ledger to be eventually consistent
+  answer: 2
+  explanation: |
+    Even a correct internal ledger diverges from external statements due to
+    fees, settlement timing, and integration failures; reconciliation detects and
+    resolves these. ACID ledgers don't lose committed data; reconciliation
+    complements (not replaces) the ledger; ledgers stay strongly consistent.
+  ref: concepts.md#reconciliation-and-consistency-in-payments
+- id: design-location-and-payment-systems-032
+  difficulty: advanced
+  tags:
+  - reconciliation
+  - cdc
+  - streaming
+  question: |
+    What advantage does CDC-based (streaming) reconciliation offer over
+    nightly-batch-only reconciliation, and what is the cost?
+  options:
+  - It eliminates all discrepancies; cost is nothing
+  - It makes the ledger eventually consistent, reducing correctness needs
+  - It removes the need to ever compare against processor statements
+  - It detects drift in near-real-time for faster alerting, at the cost of streaming infrastructure and
+    added complexity
+  answer: 3
+  explanation: |
+    Streaming via CDC surfaces drift quickly (better alerting) but requires
+    streaming infra/complexity; mature orgs run both streaming and a nightly
+    authoritative close. It doesn't eliminate discrepancies, doesn't weaken the
+    ledger, and still requires comparing to external statements.
+  ref: concepts.md#reconciliation-and-consistency-in-payments
+- id: design-location-and-payment-systems-033
+  difficulty: intermediate
+  tags:
+  - webhooks
+  - idempotency
+  - at-least-once
+  question: |
+    A payment processor sends "payment succeeded" webhooks. What delivery
+    guarantee should you assume and how do you handle it?
+  options:
+  - At-least-once; dedupe by event id and make handlers idempotent so replays are safe
+  - Exactly-once; process each webhook immediately with no dedup
+  - At-most-once; ignore any duplicates because they never happen
+  - Ordered exactly-once; rely on arrival order for correctness
+  answer: 0
+  explanation: |
+    Webhooks are at-least-once, so you dedupe by event id and keep handlers
+    idempotent. Assuming exactly-once or at-most-once, or relying on ordering,
+    leads to double-processing or missed events.
+  ref: concepts.md#reconciliation-and-consistency-in-payments
+- id: design-location-and-payment-systems-034
+  difficulty: intermediate
+  tags:
+  - payments
+  - consistency-spectrum
+  question: |
+    In a payment platform, which components can safely be eventually consistent?
+  options:
+  - The ledger and account balances
+  - Receipts, notifications, fraud scoring, and analytics read views
+  - The idempotency store
+  - The atomic decrement of the idempotency key
+  answer: 1
+  explanation: |
+    Derived/read-side concerns (receipts, notifications, fraud scoring,
+    analytics) tolerate lag and can read from CDC/replicas. The ledger, balances,
+    and idempotency store must be strongly consistent.
+  ref: concepts.md#reconciliation-and-consistency-in-payments
+- id: design-location-and-payment-systems-035
+  difficulty: beginner
+  tags:
+  - pci
+  - tokenization
+  question: |
+    What is the guiding principle of PCI-DSS compliant design for most
+    companies?
+  options:
+  - Store the full card number encrypted so it is available for any future use
+  - Log the CVV for dispute handling
+  - 'Minimize scope: keep raw cardholder data out of your systems by using tokenization/hosted fields
+    so you handle only tokens'
+  - Handle all card data yourself to avoid processor fees
+  answer: 2
+  explanation: |
+    Minimizing the systems that touch raw card data (via tokenization/hosted
+    fields) shrinks PCI scope dramatically. Storing PANs, logging CVV (never
+    allowed), or self-handling all card data expands scope and risk.
+  ref: concepts.md#pci-compliance-and-payment-security
+- id: design-location-and-payment-systems-036
+  difficulty: intermediate
+  tags:
+  - pci
+  - tokenization
+  - flow
+  question: |
+    With processor-side tokenization (e.g., hosted fields / Stripe.js), what
+    does your backend actually store and charge against?
+  options:
+  - The raw PAN and CVV
+  - An encrypted copy of the full magnetic stripe
+  - Nothing; charges are impossible without storing the PAN
+  - A token returned by the processor's vault; the raw card number never enters your backend
+  answer: 3
+  explanation: |
+    The card goes client-to-vault; your servers receive and store only a token,
+    keeping raw card data out of scope. You never store PAN/CVV or stripe data,
+    and you can absolutely charge using the token.
+  ref: concepts.md#pci-compliance-and-payment-security
+- id: design-location-and-payment-systems-037
+  difficulty: advanced
+  tags:
+  - pci
+  - build-vs-buy
+  - trade-off
+  question: |
+    What is the trade-off between using a processor's vault versus building your
+    own card vault?
+  options:
+  - Processor vault gives minimal PCI scope but adds lock-in and per-transaction fees; own vault gives
+    control and fewer fees but takes on the full PCI-DSS Level 1 audit burden
+  - Own vault always cheaper and lower risk
+  - Processor vault means you must still store PANs yourself
+  - There is no difference in compliance scope
+  answer: 0
+  explanation: |
+    A processor vault minimizes scope but adds fees/lock-in; a self-built vault
+    avoids some fees and adds control at the cost of the heaviest audit
+    (expensive, risky) — only huge players do it. Processor vaults keep PANs out
+    of your systems, and scope differs sharply.
+  ref: concepts.md#pci-compliance-and-payment-security
+- id: design-location-and-payment-systems-038
+  difficulty: beginner
+  tags:
+  - inventory
+  - holds
+  - ttl
+  question: |
+    Why do booking systems use a hold/reservation with a TTL rather than
+    charging immediately?
+  options:
+  - To make the checkout slower on purpose
+  - To reserve the unit while the buyer completes payment, so the seat isn't lost mid-checkout; the TTL
+    ensures unpaid holds are released so inventory doesn't leak
+  - Because charging is technically impossible before a hold
+  - To permanently remove the unit from sale
+  answer: 1
+  explanation: |
+    A hold secures the unit during payment and the TTL auto-releases it if
+    unpaid, preventing inventory leakage. It's not about slowing checkout, isn't
+    technically required before charging, and is temporary, not permanent.
+  ref: concepts.md#inventory-and-reservation-systems
+- id: design-location-and-payment-systems-039
+  difficulty: intermediate
+  tags:
+  - inventory
+  - counter-vs-seat
+  question: |
+    When is an aggregate "available = N" counter preferable to per-unit seat
+    rows?
+  options:
+  - When each unit must be individually identified (assigned stadium seats)
+  - When you need to draw a seat map
+  - When units are fungible (general admission, hotel room types) so you only need a count, not identity
+    — simpler and higher throughput
+  - Never; per-unit rows are always better
+  answer: 2
+  explanation: |
+    Fungible inventory only needs a count, so an atomic counter is simpler and
+    faster. Assigned seats or seat maps need per-unit rows. Neither is universally
+    better — it depends on whether identity matters.
+  ref: concepts.md#inventory-and-reservation-systems
+- id: design-location-and-payment-systems-040
+  difficulty: advanced
+  tags:
+  - ticketmaster
+  - waiting-room
+  - thundering-herd
+  question: |
+    For a hot on-sale where 500K fans hit "buy" at 10:00:00 for 60K seats, what
+    is the single most important pattern to keep the inventory service alive and
+    fair?
+  options:
+  - Scale the seat database vertically to a very large instance
+  - Optimistic concurrency on every seat so retries resolve conflicts
+  - Charge everyone immediately and refund losers
+  - A virtual waiting room / queue that admits users in controlled batches, converting the spike into
+    a steady drip and providing fairness
+  answer: 3
+  explanation: |
+    The demand:supply ratio is the problem; a waiting room throttles admission to
+    a rate the inventory service can handle and adds fairness. A bigger DB still
+    faces millions of concurrent requests; optimistic concurrency triggers retry
+    storms on hot seats; charge-then-refund is a terrible UX and money churn.
+  ref: concepts.md#inventory-and-reservation-systems
+- id: design-location-and-payment-systems-041
+  difficulty: intermediate
+  tags:
+  - inventory
+  - hold-expiry
+  question: |
+    What breaks if holds are created but never reliably expired?
+  options:
+  - 'Inventory leaks: seats stuck ''held'' but never bought appear unavailable forever, effectively undersellling
+    the event'
+  - Nothing; unexpired holds are harmless
+  - The ledger becomes inconsistent
+  - Geohash cells overflow
+  answer: 0
+  explanation: |
+    Without reliable expiry (TTL + sweeper), abandoned holds permanently lock
+    seats out of the available pool, causing undersell. It doesn't corrupt the
+    ledger or geospatial index, and it is definitely not harmless.
+  ref: concepts.md#inventory-and-reservation-systems
+- id: design-location-and-payment-systems-042
+  difficulty: beginner
+  tags:
+  - concurrency
+  - pessimistic
+  question: |
+    What does SELECT ... FOR UPDATE (pessimistic locking) do?
+  options:
+  - Reads a snapshot without any locking
+  - Locks the selected row so other transactions block until the locker commits, preventing lost updates
+  - Creates an optimistic version number to check later
+  - Decrements a counter atomically in one statement
+  answer: 1
+  explanation: |
+    FOR UPDATE takes a row lock; concurrent writers wait, guaranteeing no lost
+    update. It is not a snapshot read, not optimistic versioning, and not a
+    single-statement atomic decrement.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-043
+  difficulty: advanced
+  tags:
+  - concurrency
+  - optimistic
+  - contention
+  question: |
+    Optimistic concurrency (version/CAS) performs WORST in which scenario, and
+    why?
+  options:
+  - Low contention, because versions rarely change
+  - Read-only workloads, because reads take locks
+  - High contention on hot rows (e.g., the last 5 seats), because many writers collide and retry, producing
+    retry storms and latency spikes exactly when demand peaks
+  - Single-threaded workloads, because there is nothing to compare
+  answer: 2
+  explanation: |
+    Optimistic concurrency assumes conflicts are rare; under high contention the
+    collide-and-retry cycle wastes work and spikes latency — the worst case for
+    hot last-seats. It excels at low contention, doesn't lock reads, and
+    single-threaded workloads never conflict.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-044
+  difficulty: advanced
+  tags:
+  - concurrency
+  - atomic-decrement
+  - oversell
+  question: |
+    Which single statement prevents oversell of a fungible counter in one atomic
+    step?
+  options:
+  - SELECT available FROM seats; then in app code check and UPDATE
+  - UPDATE seats SET available = available - 1 (no guard)
+  - SELECT ... FOR UPDATE without any UPDATE
+  - UPDATE seats SET available = available - 1 WHERE event=? AND available > 0 (check rows-affected)
+  answer: 3
+  explanation: |
+    The guarded decrement atomically ensures the count never goes negative; zero
+    rows affected means sold out. A separate select-then-update has a race; an
+    unguarded decrement can go negative (oversell); FOR UPDATE alone doesn't
+    change the value.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-045
+  difficulty: expert
+  tags:
+  - concurrency
+  - hot-counter
+  - sharding
+  question: |
+    A single popular seat-count row is a hot spot even with an atomic guarded
+    decrement. What is a standard mitigation?
+  options:
+  - Shard the counter into N sub-counters and decrement a random shard, summing shards for availability
+    (trading exact real-time totals for throughput)
+  - Switch to optimistic concurrency to spread the load
+  - Hold a pessimistic lock across the whole event to serialize access
+  - Move the counter to an eventually-consistent store
+  answer: 0
+  explanation: |
+    Splitting one hot counter into N sub-counters distributes contention (a
+    common high-write pattern), at the cost of needing to aggregate shards to
+    read the total. Optimistic concurrency worsens contention; a global lock
+    serializes everything; eventual consistency risks oversell.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-046
+  difficulty: expert
+  tags:
+  - concurrency
+  - lock-across-external-call
+  question: |
+    Why is holding a database row lock across the external payment call a
+    serious anti-pattern in booking systems?
+  options:
+  - Because payment calls are always faster than DB locks
+  - Because the slow, failure-prone payment step ties up the contended row (and DB connections) for seconds,
+    crushing throughput and risking exhaustion; instead hold with a short atomic txn, release, then pay
+    against the hold
+  - Because locks and payments cannot coexist in the same service
+  - Because it makes the ledger eventually consistent
+  answer: 1
+  explanation: |
+    The golden rule: reserve with a short transaction, release the lock, then
+    take payment against the hold (which expires on failure). Holding the lock
+    across the slow external call serializes the hot row for seconds and can
+    exhaust connections. The other statements are false.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-047
+  difficulty: advanced
+  tags:
+  - distributed-lock
+  - redlock
+  - fencing
+  question: |
+    What is a key caveat when using a distributed lock (e.g., Redlock) for
+    mutual exclusion across services?
+  options:
+  - It is provably safer than any database-native atomicity
+  - It guarantees exactly-once delivery of messages
+  - Under GC pauses/clock skew its safety is contested; you need fencing tokens, and DB-native atomicity
+    is preferable when possible
+  - It eliminates the need for idempotency
+  answer: 2
+  explanation: |
+    Distributed locks can be unsafe under process pauses/clock skew (the Redlock
+    debate); fencing tokens are needed, and DB-native atomic operations are safer
+    when applicable. It's not provably safer than DB atomicity, not about message
+    delivery, and doesn't remove the need for idempotency.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-048
+  difficulty: advanced
+  tags:
+  - concurrency
+  - choose
+  - scenario
+  question: |
+    For selling fungible general-admission tickets under heavy but not
+    pathological load, which concurrency approach maximizes throughput while
+    staying oversell-safe?
+  options:
+  - Pessimistic FOR UPDATE on a single counter row
+  - Optimistic concurrency with unlimited retries
+  - A distributed Redlock per ticket
+  - Atomic guarded decrement (available > 0), optionally sharded, so each sale is one oversell-safe round
+    trip with no held locks
+  answer: 3
+  explanation: |
+    A guarded atomic decrement is oversell-safe, lock-free, and high-throughput —
+    ideal for counter inventory. Pessimistic locking on one row serializes
+    everything; unlimited-retry optimistic concurrency risks storms; per-ticket
+    distributed locks add fragile overhead.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-049
+  difficulty: expert
+  tags:
+  - concurrency
+  - assigned-seats
+  - waiting-room
+  question: |
+    For assigned seats during a hot on-sale, which combination best balances
+    correctness and survivability?
+  options:
+  - Short pessimistic locks or per-seat conditional writes behind a virtual waiting room that throttles
+    concurrency so lock contention never explodes
+  - Pure optimistic concurrency on each seat with no admission control
+  - One global pessimistic lock over the entire event
+  - Eventually-consistent seat state with nightly reconciliation to fix oversells
+  answer: 0
+  explanation: |
+    Throttling concurrency with a waiting room keeps per-seat locking/conditional
+    writes from melting down, while guaranteeing no oversell. Pure optimistic
+    concurrency without admission control storms; a single global lock kills
+    throughput; eventual consistency permits oversell, which is unacceptable.
+  ref: concepts.md#concurrency-control-locking-and-oversell-prevention
+- id: design-location-and-payment-systems-050
+  difficulty: beginner
+  tags:
+  - cap
+  - partition
+  question: |
+    What does the CAP theorem force you to choose between during a network
+    partition?
+  options:
+  - Latency and cost
+  - Consistency and Availability
+  - Durability and Throughput
+  - Read speed and write speed
+  answer: 1
+  explanation: |
+    During a partition you must sacrifice either consistency or availability.
+    The latency-vs-consistency trade in the non-partition case is PACELC's
+    'Else' clause, not CAP's core statement.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-051
+  difficulty: intermediate
+  tags:
+  - pacelc
+  - latency
+  question: |
+    What does PACELC add beyond CAP?
+  options:
+  - It replaces consistency with durability
+  - It proves strong consistency is always free
+  - It states that even with no partition (Else), you still trade Latency vs Consistency
+  - It only applies to single-node databases
+  answer: 2
+  explanation: |
+    PACELC: during Partition, choose A or C; Else, choose L or C. It captures the
+    everyday latency cost of consistency. It doesn't replace consistency with
+    durability, doesn't make consistency free, and applies to distributed
+    systems.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-052
+  difficulty: advanced
+  tags:
+  - cap
+  - decomposition
+  - senior
+  question: |
+    What is the hallmark of a senior answer when asked "what consistency model
+    does this system use?"
+  options:
+  - Pick one global consistency model and apply it everywhere
+  - Always choose strong consistency for correctness
+  - Always choose eventual consistency for scale
+  - 'Decompose the system and choose consistency per component: CP for money/seats, AP for location/feeds/analytics'
+  answer: 3
+  explanation: |
+    Consistency is chosen per component, not globally: the wallet is CP while the
+    map is AP within the same app. Forcing one model everywhere sacrifices either
+    correctness or scale unnecessarily.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-053
+  difficulty: advanced
+  tags:
+  - cqrs
+  - consistency
+  question: |
+    How does CQRS help reconcile strong-consistency writes with scalable reads
+    in these systems?
+  options:
+  - It separates a strongly-consistent write model (ledger/seat state) from eventually-consistent denormalized
+    read models, so reads scale without threatening write correctness
+  - It makes the write model eventually consistent to speed it up
+  - It merges reads and writes into a single model to reduce code
+  - It removes the need for a database
+  answer: 0
+  explanation: |
+    CQRS splits the authoritative write model from read-optimized projections;
+    reads scale independently and don't endanger write correctness. It doesn't
+    weaken the write model, doesn't merge the two, and still needs storage.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-054
+  difficulty: advanced
+  tags:
+  - event-sourcing
+  - ledger
+  question: |
+    Why is event sourcing a natural fit for a payment ledger?
+  options:
+  - Because it deletes old events to save space
+  - Because the ledger IS an append-only event log and balances are projections, matching money's need
+    for immutability and audit
+  - Because it makes balances eventually consistent by default
+  - Because it avoids the need for double-entry
+  answer: 1
+  explanation: |
+    Event sourcing treats the immutable event log as truth and derives state
+    (balances) as projections — exactly how a double-entry ledger works. It
+    doesn't delete events, doesn't force eventual balances, and complements
+    double-entry rather than replacing it.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-055
+  difficulty: expert
+  tags:
+  - cdc
+  - ap-from-cp
+  question: |
+    How do you serve eventually-consistent search/analytics views from a
+    strongly-consistent ledger without weakening the ledger?
+  options:
+  - Point analytics queries directly at the primary ledger with table scans
+  - Make the ledger eventually consistent so analytics can read it
+  - Use CDC to stream authoritative ledger changes into derived stores (search, cache, warehouse) with
+    bounded lag
+  - Copy the ledger nightly with a manual export only
+  answer: 2
+  explanation: |
+    CDC propagates committed changes to derived read stores with bounded lag,
+    giving AP read views on a CP source of truth. Table-scanning the primary
+    harms it; weakening the ledger is unacceptable; nightly manual export is
+    slower and more brittle than CDC.
+  ref: concepts.md#reconciliation-and-consistency-in-payments
+- id: design-location-and-payment-systems-056
+  difficulty: expert
+  tags:
+  - cell-based
+  - blast-radius
+  question: |
+    What does cell-based architecture provide for location and ticketing
+    platforms?
+  options:
+  - It merges all regions into one global cell for simplicity
+  - It replaces geospatial indexing
+  - It guarantees strong consistency across all cells
+  - It partitions the whole stack into isolated cells (by geography/customer) so a hot shard, bad deploy,
+    or failure is contained to one cell
+  answer: 3
+  explanation: |
+    Cell-based architecture isolates failures/hot spots to a single cell,
+    limiting blast radius. It does not merge everything into one cell, is
+    unrelated to geospatial indexing, and doesn't by itself provide global strong
+    consistency.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-057
+  difficulty: intermediate
+  tags:
+  - location
+  - redis
+  - durability
+  question: |
+    What is the trade-off of storing live location state in Redis/in-memory grid
+    rather than a durable RDBMS?
+  options:
+  - You gain massive write throughput and sub-ms cell lookups but give up durability (it's a cache; rebuild
+    from Kafka on restart)
+  - You gain durability but lose throughput
+  - You gain strong cross-region consistency but lose read speed
+  - There is no trade-off; Redis is strictly better for all data
+  answer: 0
+  explanation: |
+    In-memory stores handle the ping firehose with fast lookups but aren't
+    durable, so you rebuild from the Kafka log after a restart — acceptable
+    because location is AP. Durability isn't gained, cross-region strong
+    consistency isn't the point, and Redis isn't strictly better for all data
+    (e.g., the ledger).
+  ref: concepts.md#real-time-location-updates-and-matching
+- id: design-location-and-payment-systems-058
+  difficulty: intermediate
+  tags:
+  - geospatial
+  - precision
+  - trade-off
+  question: |
+    For a 1 km "nearby" search using geohash, what happens if you pick too fine
+    a precision (very small cells)?
+  options:
+  - Candidates get too coarse and you must refine millions of points
+  - You must union too many neighbor cells to cover the radius, increasing query fan-out
+  - The prefix property stops working
+  - Distances become exact so no refine step is needed
+  answer: 1
+  explanation: |
+    Too-fine cells mean the search radius spans many cells, so you union many
+    neighbors (more fan-out). Too-coarse cells (the opposite) return too many
+    candidates to refine. The prefix property still holds, and you always need
+    the exact refine step.
+  ref: concepts.md#geospatial-indexing-fundamentals
+- id: design-location-and-payment-systems-059
+  difficulty: intermediate
+  tags:
+  - payments
+  - accounts
+  - external
+  question: |
+    Why does a double-entry system create mirror accounts even for external
+    entities (banks, processors, tax authorities)?
+  options:
+  - To hide money from auditors
+  - Because external accounts replace the need for reconciliation
+  - So every movement still has an offsetting entry and the books always balance, even when money leaves
+    or enters the platform
+  - To avoid using idempotency keys
+  answer: 2
+  explanation: |
+    Mirror/clearing accounts (including 'cash in transit') keep the sum-to-zero
+    invariant intact for money crossing the boundary. It's for correctness/audit,
+    not hiding money; it doesn't replace reconciliation or idempotency.
+  ref: concepts.md#payment-systems-and-double-entry-ledger
+- id: design-location-and-payment-systems-060
+  difficulty: advanced
+  tags:
+  - payments
+  - ledger-db
+  - tigerbeetle
+  question: |
+    Why might a team choose a purpose-built ledger database (e.g., TigerBeetle)
+    over a general RDBMS for high-volume double-entry accounting?
+  options:
+  - Because it relaxes consistency to gain speed
+  - Because it stores card numbers to reduce PCI scope
+  - Because it removes the need for reconciliation
+  - Because it is optimized for millions of double-entry transfers/sec with strict serializability, matching
+    money's correctness needs at scale
+  answer: 3
+  explanation: |
+    Purpose-built ledger DBs deliver very high double-entry throughput while
+    keeping strict serializability — exactly what money needs. They don't relax
+    consistency, don't store PANs, and don't remove reconciliation.
+  ref: concepts.md#payment-systems-and-double-entry-ledger
+- id: design-location-and-payment-systems-061
+  difficulty: intermediate
+  tags:
+  - idempotency
+  - store-consistency
+  question: |
+    What consistency guarantee must the idempotency-key store provide?
+  options:
+  - Strong consistency, because it must serialize concurrent retries so exactly one claim wins
+  - Eventual consistency is fine because retries are rare
+  - No consistency requirement; any store works
+  - Only read-after-write within a single region
+  answer: 0
+  explanation: |
+    The store must strongly serialize the atomic claim of a key; eventual
+    consistency would let two retries both proceed and double charge. It's a
+    correctness-critical component, not best-effort.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-062
+  difficulty: advanced
+  tags:
+  - idempotency
+  - downstream
+  - end-to-end
+  question: |
+    Why must idempotency span the entire side-effecting flow, including the call
+    to the external processor?
+  options:
+  - Because only the first service can ever fail
+  - Because a retry that reaches the processor must also be deduped there; downstream processors accept
+    idempotency keys so a retried charge isn't executed twice
+  - Because the processor ignores all keys anyway
+  - Because the ledger handles all deduplication automatically
+  answer: 1
+  explanation: |
+    Retries can hit the processor directly, so the processor must also dedupe via
+    its own idempotency key — end-to-end protection. Any step can fail;
+    processors do honor keys; the ledger doesn't automatically dedupe external
+    calls.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-063
+  difficulty: advanced
+  tags:
+  - saga
+  - compensation
+  - failure
+  question: |
+    During a payment saga, a compensation (e.g., 'refund') itself fails. What is
+    the correct design stance?
+  options:
+  - Give up and leave the money in an inconsistent state
+  - Immediately fall back to 2PC across all services
+  - Compensations must be idempotent and retried (often via a durable orchestrator) until they succeed
+    or escalate to a manual/exception queue
+  - Reverse the compensation with another compensation, cycling forever
+  answer: 2
+  explanation: |
+    Compensations are made idempotent and retried by a durable orchestrator, with
+    escalation to an ops/exception path if they persistently fail. Leaving
+    inconsistency is unacceptable; switching to 2PC mid-flow isn't feasible;
+    cycling compensations is nonsense.
+  ref: concepts.md#distributed-transactions-and-the-saga-pattern
+- id: design-location-and-payment-systems-064
+  difficulty: intermediate
+  tags:
+  - reconciliation
+  - exceptions
+  question: |
+    Reconciliation flags a transaction present in the processor statement but
+    missing from your ledger. What is this exception class and a typical cause?
+  options:
+  - Amount mismatch caused by a rounding bug
+  - In-yours-not-theirs, caused by an unsent charge
+  - A duplicate, caused by a double webhook
+  - In-theirs-not-yours, often caused by a failed/lost webhook so your system never recorded the event
+  answer: 3
+  explanation: |
+    Present externally but absent internally = in-theirs-not-yours, commonly from
+    a dropped webhook. Amount mismatch, in-yours-not-theirs, and duplicates are
+    distinct exception classes with different causes.
+  ref: concepts.md#reconciliation-and-consistency-in-payments
+- id: design-location-and-payment-systems-065
+  difficulty: intermediate
+  tags:
+  - pci
+  - controls
+  question: |
+    Which practice is explicitly required/allowed under PCI for cardholder data?
+  options:
+  - Never store the CVV after authorization; encrypt data in transit and at rest, segment card-touching
+    systems, and never log the PAN
+  - Store the CVV after authorization for faster re-charges
+  - Log the full PAN for debugging in application logs
+  - Share the PAN across all internal services for convenience
+  answer: 0
+  explanation: |
+    CVV must never be stored post-auth; encryption, segmentation, and never
+    logging the PAN are core controls. Storing CVV, logging the PAN, or spreading
+    it everywhere all violate PCI and expand scope.
+  ref: concepts.md#pci-compliance-and-payment-security
+- id: design-location-and-payment-systems-066
+  difficulty: advanced
+  tags:
+  - inventory
+  - choose
+  - scenario
+  question: |
+    A hotel chain sells room-type inventory (fungible within a type) with modest
+    concurrency. Which design is the best fit?
+  options:
+  - Per-room assigned rows with a global waiting room even off-peak
+  - An aggregate counter per room-type with an atomic guarded decrement and holds with TTL
+  - Optimistic concurrency across a full seat map of every physical room
+  - A distributed Redlock per reservation attempt
+  answer: 1
+  explanation: |
+    Fungible room-type inventory maps to an aggregate counter with a guarded
+    decrement and TTL holds — simple and sufficient at modest concurrency. Per-
+    room seat maps and waiting rooms are overkill; per-attempt Redlock adds
+    fragile overhead.
+  ref: concepts.md#inventory-and-reservation-systems
+- id: design-location-and-payment-systems-067
+  difficulty: expert
+  tags:
+  - scenario
+  - decomposition
+  - ride-hailing
+  question: |
+    You are designing Uber end-to-end. Which per-component consistency mapping is
+    correct?
+  options:
+  - Map/location = CP; wallet/ledger = AP; trip receipts = CP
+  - Everything = CP to be safe
+  - Map/location = AP (low latency, stale OK); wallet/ledger = CP (strong); receipts/notifications = AP
+    (eventual)
+  - Everything = AP to maximize uptime
+  answer: 2
+  explanation: |
+    The live map is AP/low-latency, the wallet/ledger is CP, and receipts/
+    notifications are eventual (AP). Making the map CP adds needless latency;
+    making the wallet AP risks double-spend. One global model for everything is
+    the classic mistake.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-068
+  difficulty: expert
+  tags:
+  - scenario
+  - ticketmaster
+  - end-to-end
+  question: |
+    For a Ticketmaster hot on-sale, which end-to-end design is strongest?
+  options:
+  - No admission control; rely on optimistic concurrency and auto-scaling the seat DB
+  - Charge everyone who clicks, then refund losers, with eventually-consistent seat state
+  - One global pessimistic lock on the event plus 2PC across payment and inventory
+  - Virtual waiting room throttling admission, per-seat conditional writes/short locks for oversell safety,
+    holds with TTL + sweeper, and payment taken against the hold (lock released first)
+  answer: 3
+  explanation: |
+    The winning combination throttles concurrency (waiting room), guarantees no
+    oversell per seat, expires holds, and decouples payment from the lock. No
+    admission control storms; charge-then-refund with eventual seats oversells and
+    churns money; a global lock + 2PC destroys throughput and blocks.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: design-location-and-payment-systems-069
+  difficulty: expert
+  tags:
+  - scenario
+  - payments
+  - saga-vs-2pc
+  question: |
+    You must coordinate reserve-funds, charge-processor, credit-driver, and
+    confirm-trip across four services at high volume. Which approach and why?
+  options:
+  - An orchestrated saga with idempotent steps and compensations, because it preserves availability and
+    scale across services while achieving atomic-effect via compensation
+  - 2PC, because money always requires global atomic commit
+  - A single shared database transaction across all four services
+  - Fire-and-forget events with no compensation, trusting retries
+  answer: 0
+  explanation: |
+    Cross-service, high-volume money flows use orchestrated sagas: local
+    transactions + compensations, idempotent, observable. 2PC blocks and doesn't
+    scale across services; a shared DB txn across independent services isn't
+    possible; fire-and-forget without compensation can't roll back partial
+    failures.
+  ref: concepts.md#distributed-transactions-and-the-saga-pattern
+- id: design-location-and-payment-systems-070
+  difficulty: beginner
+  tags:
+  - estimation
+  - ticketmaster
+  - scarcity
+  question: |
+    A 60K-seat stadium on-sale draws 500K fans clicking "buy" at the same
+    instant, many retrying. What quantity most directly dictates the architecture?
+  options:
+  - The total storage of the seat map in bytes
+  - The demand:supply (scarcity) ratio and burst concurrency, which is why a waiting room/queue is essential
+  - The average color depth of the seat-map image
+  - The number of geohash cells covering the stadium
+  answer: 1
+  explanation: |
+    The huge demand:supply ratio and instantaneous burst drive the need for
+    admission control (waiting room). Storage size, image details, and geohash
+    cells are irrelevant to the contention problem.
+  ref: concepts.md#problem-framing-and-requirements
+- id: design-location-and-payment-systems-071
+  difficulty: intermediate
+  tags:
+  - estimation
+  - payments
+  - ledger-growth
+  question: |
+    At 10K payments/sec, each producing 4 ledger lines of ~300 bytes, roughly
+    what is the ledger ingest rate?
+  options:
+  - About 120 KB/sec
+  - About 1.2 GB/sec
+  - About 12 MB/sec (~1 TB/day), which is why ledgers are append-only and tiered/archived
+  - About 3 MB/sec
+  answer: 2
+  explanation: |
+    10,000 x 4 x 300 B = 12,000,000 B/s ~= 12 MB/s, roughly 1 TB/day, motivating
+    archival tiers for an ever-growing append-only ledger. The other figures are
+    off by orders of magnitude or miscompute the product.
+  ref: concepts.md#problem-framing-and-requirements
+- id: design-location-and-payment-systems-072
+  difficulty: advanced
+  tags:
+  - location
+  - kafka
+  - ingest
+  question: |
+    Why route the driver ping firehose through Kafka (keyed by driver/city)
+    before updating the location store?
+  options:
+  - To make location strongly consistent across regions
+  - To store the authoritative current location permanently in Kafka
+  - To replace the need for a geospatial index
+  - To absorb the write burst, enable stream processing (surge/ETA/heatmap), decouple ingest from the
+    state store, and provide a durable log to rebuild the in-memory store
+  answer: 3
+  explanation: |
+    Kafka buffers the burst, feeds stream processors, decouples producers from the
+    store, and serves as the durable replay log. It doesn't provide cross-region
+    strong consistency, isn't the query store for current location, and doesn't
+    replace spatial indexing.
+  ref: concepts.md#real-time-location-updates-and-matching
+- id: design-location-and-payment-systems-073
+  difficulty: intermediate
+  tags:
+  - inventory
+  - semantic-lock
+  - status
+  question: |
+    In a reservation flow that spans a hold and a later payment, what role does a
+    "pending/held" status play?
+  options:
+  - It is a semantic lock signaling the unit is temporarily unavailable so concurrent buyers and other
+    transactions don't grab it, without holding a DB lock across payment
+  - It permanently marks the seat sold
+  - It disables idempotency for the transaction
+  - It forces the whole system into strong consistency
+  answer: 0
+  explanation: |
+    A pending/held status is a semantic lock that reserves the unit during
+    checkout without holding a physical DB lock across the slow payment step. It's
+    not a permanent sale, doesn't disable idempotency, and isn't a global
+    consistency switch.
+  ref: concepts.md#inventory-and-reservation-systems
+- id: design-location-and-payment-systems-074
+  difficulty: advanced
+  tags:
+  - trade-offs
+  - anti-patterns
+  question: |
+    Which of the following is a genuine senior-level anti-pattern to avoid?
+  options:
+  - Decomposing consistency per component (CP for money, AP for location)
+  - Putting the payment ledger in an eventually-consistent store and using pure optimistic concurrency
+    for the last hot seats
+  - Using idempotency keys with atomic uniqueness for charges
+  - Reserving inventory with a short transaction, then paying against the hold
+  answer: 1
+  explanation: |
+    An eventually-consistent ledger risks double-spend, and pure optimistic
+    concurrency melts down on hot last-seats — both are classic mistakes. The
+    other three are recommended best practices.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: design-location-and-payment-systems-075
+  difficulty: expert
+  tags:
+  - scenario
+  - geospatial
+  - choose
+  question: |
+    Your ride platform needs both fast "nearby driver" candidate lookup AND
+    supply/demand heatmaps plus surge computed over uniform neighborhoods. Which
+    geospatial choice best serves both, and what is the caveat?
+  options:
+  - Quadtree, but it can't do analytics
+  - Two separate lat/lng B-trees, with no caveat
+  - 'H3 hexagonal cells (uniform neighbor distance ideal for surge/heatmaps, kRing for candidate lookup);
+    caveat: its hierarchy is only approximate'
+  - S2 only, because hexagons cannot be indexed
+  answer: 2
+  explanation: |
+    H3 gives uniform neighbors (great for flow/surge analytics) and kRing for
+    candidate lookup, at the cost of approximate hierarchical nesting. Quadtrees
+    churn on moving points; separate B-trees can't do efficient 2D queries; S2 is
+    fine for coverings but H3's uniform neighbors better fit surge/heatmap
+    analytics.
+  ref: concepts.md#s2-and-h3
+- id: design-location-and-payment-systems-076
+  difficulty: intermediate
+  tags:
+  - payments
+  - availability
+  - trade-off
+  question: |
+    Under a severe partition, a payment ledger should prefer which behavior?
+  options:
+  - Stay available and accept possibly-inconsistent balances to avoid downtime
+  - Randomly pick per request
+  - Switch to eventual consistency automatically
+  - 'Prefer consistency: reject/queue writes rather than risk double-spend, accepting brief unavailability'
+  answer: 3
+  explanation: |
+    Money is CP: during a partition it's better to refuse or queue than to
+    corrupt balances. Choosing availability here risks double-spend; random or
+    automatic-eventual behavior abandons the correctness guarantee money requires.
+  ref: concepts.md#strong-consistency-trade-offs-cap-and-pacelc
+- id: design-location-and-payment-systems-077
+  difficulty: beginner
+  tags:
+  - inventory
+  - oversell
+  question: |
+    What is "overselling" in a booking system and why is it so bad?
+  options:
+  - Selling the same finite unit (seat/room) more than once due to a concurrency race; it causes refunds,
+    angry customers, and legal exposure
+  - Selling below cost; it reduces profit
+  - Selling too slowly during an on-sale
+  - Selling tickets in the wrong currency
+  answer: 0
+  explanation: |
+    Overselling means two buyers get the same unit because the check-and-reserve
+    wasn't atomic — a serious failure with financial and legal fallout. It's not
+    about pricing, speed, or currency.
+  ref: concepts.md#inventory-and-reservation-systems
+- id: design-location-and-payment-systems-078
+  difficulty: expert
+  tags:
+  - scenario
+  - idempotency
+  - ledger
+  - combined
+  question: |
+    A charge request is retried and, separately, a duplicate processor webhook
+    arrives for the same payment. Which combination correctly guarantees a single
+    charge and a single ledger effect?
+  options:
+  - Rely on TCP retransmission ordering for both
+  - Idempotency key with atomic uniqueness on the charge path AND webhook dedup by event id with idempotent
+    ledger handlers
+  - A global pessimistic lock on the user's account for all payment activity
+  - Eventually-consistent ledger writes that will converge later
+  answer: 1
+  explanation: |
+    Two independent at-least-once paths (client retry, webhook redelivery) each
+    need their own exactly-once-effect guard: idempotency key on charges, event-id
+    dedup + idempotent handlers on webhooks. TCP ordering doesn't dedupe logical
+    operations; a global account lock kills throughput and still needs dedup;
+    eventual convergence can double-apply.
+  ref: concepts.md#idempotency-and-exactly-once-charges
+- id: design-location-and-payment-systems-079
+  difficulty: intermediate
+  tags:
+  - geospatial
+  - comparison
+  question: |
+    Which statement about geospatial index selection is most accurate?
+  options:
+  - S2 and H3 are interchangeable with identical hierarchy semantics
+  - Quadtree is best for millions of fast-moving points
+  - Geohash for simplicity on Redis/SQL, quadtree for skewed static density, S2 for exact hierarchical
+    coverings, H3 for uniform-neighbor movement analytics
+  - Geohash cells have perfectly uniform physical area worldwide
+  answer: 2
+  explanation: |
+    Each index has a niche: geohash=simplicity, quadtree=skewed static, S2=exact
+    coverings, H3=uniform movement analytics. S2/H3 differ (exact vs approximate
+    nesting); quadtrees churn on fast-moving points; geohash cells vary in area by
+    latitude.
+  ref: concepts.md#s2-and-h3
+- id: design-location-and-payment-systems-080
+  difficulty: advanced
+  tags:
+  - reconciliation
+  - prevention-vs-detection
+  question: |
+    What is the meta-principle about consistency in payment platforms that
+    interviewers look for?
+  options:
+  - Design only to prevent all drift; if you engineer well enough, reconciliation is unnecessary
+  - Drift is acceptable and never needs correction
+  - Reconciliation should replace strong consistency in the ledger
+  - You cannot prevent all drift with external systems, so you must design to detect and reconcile it,
+    not just prevent it
+  answer: 3
+  explanation: |
+    Because external systems, timing, and failures guarantee some drift, mature
+    designs detect and reconcile it — designing only for prevention is a red flag.
+    Drift does need correction, and reconciliation complements (not replaces)
+    strong-consistency ledgers.
+  ref: concepts.md#reconciliation-and-consistency-in-payments

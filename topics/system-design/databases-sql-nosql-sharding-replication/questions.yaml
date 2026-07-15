@@ -1,0 +1,1444 @@
+topic: "Databases: SQL vs NoSQL, Indexing, Sharding and Replication"
+domain: system-design
+topic_slug: databases-sql-nosql-sharding-replication
+version: 1
+
+questions:
+  # ---------------- Relational model ----------------
+- id: databases-sql-nosql-sharding-replication-001
+  difficulty: beginner
+  tags: [relational, sql, fundamentals]
+  question: |
+    What is the defining characteristic of a relational database's query model
+    compared to most NoSQL stores?
+  options:
+  - "You declare what data you want (SQL) and an optimizer picks the access path, with joins across normalized tables"
+  - "It stores data as opaque blobs retrievable only by primary key"
+  - "It cannot enforce data types or constraints"
+  - "It always scales writes horizontally without any single primary"
+  answer: 0
+  explanation: |
+    Relational DBs offer a declarative query language and a cost-based optimizer
+    that chooses join order and index usage; they support joins across normalized
+    tables. Blob-by-key is a key-value store; relational DBs enforce types and
+    constraints; and a single primary bounds write throughput (not horizontal by
+    default).
+  ref: "concepts.md#relational-databases-and-the-relational-model"
+
+- id: databases-sql-nosql-sharding-replication-002
+  difficulty: beginner
+  tags: [relational, wal, durability]
+  question: |
+    Why do relational engines write changes to a write-ahead log (WAL / redo log)
+    before flushing data pages to disk?
+  options:
+  - "To compress the data before storage"
+  - "To enable durability and crash recovery: the log is a durable record that can replay committed changes"
+  - "To avoid needing any indexes"
+  - "To allow the database to skip ACID guarantees"
+  answer: 1
+  explanation: |
+    The WAL makes a write durable and recoverable before the (random) page flush
+    happens; on crash the engine replays the log. It is not about compression or
+    skipping indexes/ACID — in fact the WAL is a core part of the D in ACID.
+  ref: "concepts.md#relational-databases-and-the-relational-model"
+
+- id: databases-sql-nosql-sharding-replication-003
+  difficulty: intermediate
+  tags: [relational, scaling, tradeoffs]
+  question: |
+    A team says "relational databases don't scale, so we must start on Cassandra."
+    What is the most accurate critique of this reasoning?
+  options:
+  - "Correct: relational databases cannot exceed a few hundred QPS"
+  - "Cassandra provides ACID transactions across all rows, so it is strictly better"
+  - "A single relational primary scales reads via caching/replicas and writes via partitioning far beyond most needs; NoSQL should be chosen for a specific forcing constraint, not preemptively"
+  - "Relational databases cannot store JSON or do full-text search"
+  answer: 2
+  explanation: |
+    Relational primaries scale much further than assumed (caching, read replicas,
+    partitioning, and modern Postgres does JSON/FTS/vectors). NoSQL trades away
+    joins/transactions/ad-hoc queries; pick it for a concrete constraint (extreme
+    write volume, flexible model), not by default. Cassandra does not give
+    cross-row ACID by default.
+  ref: "concepts.md#relational-databases-and-the-relational-model"
+
+  # ---------------- NoSQL data models ----------------
+- id: databases-sql-nosql-sharding-replication-004
+  difficulty: beginner
+  tags: [nosql, data-models]
+  question: |
+    Which NoSQL family is the best fit for storing and traversing "friends of
+    friends" relationships in a social network?
+  options:
+  - "Key-value store"
+  - "Wide-column store"
+  - "Document database"
+  - "Graph database"
+  answer: 3
+  explanation: |
+    Graph databases (Neo4j, Neptune) model nodes and edges and make multi-hop
+    traversals first-class and efficient. Key-value serves only key lookups;
+    wide-column and document stores can hold the data but make traversals awkward
+    and expensive.
+  ref: "concepts.md#nosql-data-models-document-key-value-wide-column-graph"
+
+- id: databases-sql-nosql-sharding-replication-005
+  difficulty: beginner
+  tags: [nosql, key-value, use-cases]
+  question: |
+    For storing user session tokens with sub-millisecond lookups purely by session
+    ID, which store type is most appropriate?
+  options:
+  - "An in-memory key-value store like Redis"
+  - "A graph database"
+  - "A data warehouse"
+  - "A relational database with a complex join schema"
+  answer: 0
+  explanation: |
+    Sessions are accessed by a single key and need very low latency, which is
+    exactly the key-value sweet spot (Redis/Memcached). A graph DB or warehouse is
+    the wrong model; a heavily-joined relational schema is overkill for a pure
+    key lookup.
+  ref: "concepts.md#nosql-data-models-document-key-value-wide-column-graph"
+
+- id: databases-sql-nosql-sharding-replication-006
+  difficulty: intermediate
+  tags: [nosql, wide-column, modeling]
+  question: |
+    In a wide-column store like Cassandra, what does "design a table per query"
+    mean and why is it necessary?
+  options:
+  - "Cassandra automatically normalizes data, so each query gets its own view"
+  - "Because Cassandra has no ad-hoc joins and queries must hit the partition key, you model (often denormalized) tables shaped around each access pattern up front"
+  - "Each query requires a separate physical database instance"
+  - "It means you must run a MapReduce job for every read"
+  answer: 1
+  explanation: |
+    Wide-column stores restrict efficient queries to the partition/clustering key
+    and offer no joins, so you denormalize and create a table matching each query
+    pattern (query-first modeling). It is not about separate instances,
+    auto-normalization, or MapReduce per read.
+  ref: "concepts.md#nosql-data-models-document-key-value-wide-column-graph"
+
+- id: databases-sql-nosql-sharding-replication-007
+  difficulty: intermediate
+  tags: [nosql, document, tradeoffs]
+  question: |
+    A product catalog stores each product as a self-contained JSON document with
+    nested attributes, read and written as a whole. Which store fits best and what
+    is the main trade-off accepted?
+  options:
+  - "Wide-column; you accept losing sub-millisecond key lookups"
+  - "Graph database; you accept higher write throughput limits"
+  - "Document store (e.g., MongoDB); you accept weaker cross-document joins and multi-document transactions in exchange for flexible schema and whole-aggregate reads"
+  - "Pure key-value; you accept losing the ability to store nested fields"
+  answer: 2
+  explanation: |
+    A self-contained aggregate read/written as a unit is the document-store sweet
+    spot; the classic trade-off is weaker cross-document joins/transactions.
+    Key-value can't query nested fields; graph is for relationships; wide-column
+    is for massive append-heavy patterns.
+  ref: "concepts.md#nosql-data-models-document-key-value-wide-column-graph"
+
+  # ---------------- ACID vs BASE ----------------
+- id: databases-sql-nosql-sharding-replication-008
+  difficulty: beginner
+  tags: [acid, base, consistency]
+  question: |
+    What does the "I" (Isolation) in ACID guarantee?
+  options:
+  - "Data is stored on isolated physical disks"
+  - "Each user gets an isolated copy of the entire database"
+  - "The database is isolated from the network"
+  - "Concurrent transactions behave as if they ran in some serial order, not interfering with each other's intermediate state"
+  answer: 3
+  explanation: |
+    Isolation ensures concurrent transactions don't see each other's uncommitted
+    intermediate state; the strongest level (serializable) makes them equivalent
+    to some serial execution. It is not about physical disks, per-user copies, or
+    network isolation.
+  ref: "concepts.md#acid-versus-base"
+
+- id: databases-sql-nosql-sharding-replication-009
+  difficulty: intermediate
+  tags: [acid, base, tradeoffs]
+  question: |
+    A high-traffic feature tracks how many times posts are viewed, displayed
+    approximately on each post. Which consistency model is the appropriate choice
+    and why?
+  options:
+  - "BASE / eventual consistency, because approximate counts tolerate temporary staleness and this avoids the coordination cost that would throttle throughput"
+  - "Strict ACID with serializable transactions, because every count must be exact at all times"
+  - "Two-phase commit across all replicas for every view"
+  - "Synchronous cross-region replication for each increment"
+  answer: 0
+  explanation: |
+    View counts are a classic BASE fit: approximate/eventually-consistent is fine,
+    and avoiding per-write coordination lets it scale cheaply. Serializable
+    transactions, 2PC, or sync cross-region replication per view would add huge
+    latency and cost for no user-visible benefit.
+  ref: "concepts.md#acid-versus-base"
+
+- id: databases-sql-nosql-sharding-replication-010
+  difficulty: advanced
+  tags: [acid, isolation-levels, anomalies]
+  question: |
+    Two transactions each read a shared invariant, then update different rows based
+    on what they read, and both commit — leaving the invariant violated even though
+    neither overwrote the other's row. Which anomaly is this, and which isolation
+    level prevents it?
+  options:
+  - "Dirty read; prevented by Read Committed"
+  - "Write skew; prevented by Serializable isolation"
+  - "Non-repeatable read; prevented by Repeatable Read"
+  - "Lost update; prevented by Read Uncommitted"
+  answer: 1
+  explanation: |
+    This is write skew — each transaction's write is fine in isolation but their
+    combination breaks the invariant. Only Serializable isolation prevents it.
+    Dirty/non-repeatable reads are different anomalies; Read Uncommitted is the
+    weakest level and prevents nothing here.
+  ref: "concepts.md#acid-versus-base"
+
+- id: databases-sql-nosql-sharding-replication-011
+  difficulty: advanced
+  tags: [acid, mvcc, concurrency]
+  question: |
+    How does MVCC (multi-version concurrency control) let readers avoid blocking
+    writers and vice versa?
+  options:
+  - "It locks the entire table for both reads and writes"
+  - "It disables durability to gain speed"
+  - "Writers create new versions of rows while readers see a consistent snapshot of older versions, so reads don't block writes"
+  - "It serializes all transactions onto a single thread"
+  answer: 2
+  explanation: |
+    MVCC keeps multiple row versions: readers see a snapshot as of their start,
+    while writers create new versions, so readers and writers don't block each
+    other. It does not lock whole tables, disable durability, or single-thread
+    transactions.
+  ref: "concepts.md#acid-versus-base"
+
+  # ---------------- Normalization vs denormalization ----------------
+- id: databases-sql-nosql-sharding-replication-012
+  difficulty: beginner
+  tags: [normalization, schema]
+  question: |
+    What is the primary goal of normalizing a relational schema (e.g., to 3NF)?
+  options:
+  - "To duplicate data so reads are faster"
+  - "To remove all indexes"
+  - "To store everything in a single wide table"
+  - "To eliminate redundancy so each fact is stored once, avoiding update anomalies"
+  answer: 3
+  explanation: |
+    Normalization removes redundancy so a fact lives in one place, preventing
+    update anomalies and saving storage. Duplicating for read speed is
+    denormalization; it is unrelated to removing indexes or single wide tables.
+  ref: "concepts.md#normalization-versus-denormalization"
+
+- id: databases-sql-nosql-sharding-replication-013
+  difficulty: intermediate
+  tags: [denormalization, reads, tradeoffs]
+  question: |
+    An interviewer notes reads outnumber writes 500:1 on the home feed. You propose
+    storing each post with the author's display name embedded rather than joining
+    to the users table. What is the key trade-off you are accepting?
+  options:
+  - "Faster reads (no join) at the cost of update fan-out — if an author renames, you must update the copy in every post"
+  - "Reads get slower but storage shrinks"
+  - "You gain referential integrity automatically"
+  - "You lose the ability to ever query by author"
+  answer: 0
+  explanation: |
+    Denormalization (embedding the name) speeds reads by removing the join but
+    creates update fan-out and duplication risk when the source value changes. It
+    doesn't shrink storage, doesn't add referential integrity, and doesn't prevent
+    querying by author.
+  ref: "concepts.md#normalization-versus-denormalization"
+
+- id: databases-sql-nosql-sharding-replication-014
+  difficulty: advanced
+  tags: [denormalization, source-of-truth, cdc]
+  question: |
+    When you denormalize a read path aggressively, what is the recommended way to
+    keep the duplicated data correct without scattering write logic?
+  options:
+  - "Delete the normalized source once the denormalized copies exist"
+  - "Keep a normalized system of record and derive denormalized copies (via app logic, materialized views, or CDC) so there is one authoritative place to fix data"
+  - "Never update the denormalized copies; treat stale data as acceptable forever"
+  - "Denormalize by turning off all constraints and hoping for consistency"
+  answer: 1
+  explanation: |
+    Best practice is to keep a normalized source of truth and derive the
+    denormalized read copies (materialized views / CDC / app projections), so
+    corrections happen in one place. Deleting the source, never updating copies, or
+    abandoning constraints all lead to unrecoverable inconsistency.
+  ref: "concepts.md#normalization-versus-denormalization"
+
+  # ---------------- Indexing ----------------
+- id: databases-sql-nosql-sharding-replication-015
+  difficulty: beginner
+  tags: [indexing, btree]
+  question: |
+    Why are B+tree indexes the default in relational databases rather than hash
+    indexes?
+  options:
+  - "Hash indexes cannot store integers"
+  - "B+trees never need to be updated on writes"
+  - "B+trees support both point lookups and ordered range scans / sorting, whereas hash indexes only do equality lookups"
+  - "Hash indexes require more disk than any B+tree"
+  answer: 2
+  explanation: |
+    B+trees keep keys sorted, so they serve equality, range scans, and ordered
+    iteration; hash indexes give O(1) equality but no ranges or ordering. Both need
+    updating on writes, and the choice isn't about integer storage or a blanket
+    disk claim.
+  ref: "concepts.md#indexing-and-index-data-structures"
+
+- id: databases-sql-nosql-sharding-replication-016
+  difficulty: beginner
+  tags: [indexing, writes, tradeoffs]
+  question: |
+    What is the main cost of adding many indexes to a table?
+  options:
+  - "Reads on indexed columns get slower"
+  - "The table can no longer be queried at all"
+  - "It disables the query optimizer"
+  - "Every insert/update must maintain all relevant indexes, slowing writes and using more storage"
+  answer: 3
+  explanation: |
+    Indexes speed matching reads but each write must update every relevant index,
+    so writes slow and storage grows (write amplification). Indexes don't slow the
+    reads they serve, don't block querying, and don't disable the optimizer.
+  ref: "concepts.md#indexing-and-index-data-structures"
+
+- id: databases-sql-nosql-sharding-replication-017
+  difficulty: intermediate
+  tags: [indexing, composite, leftmost-prefix]
+  question: |
+    You have a composite index on (tenant_id, created_at). Which query can it serve
+    efficiently by the leftmost-prefix rule?
+  options:
+  - "WHERE tenant_id = 42 ORDER BY created_at"
+  - "WHERE created_at > '2026-01-01' (no tenant_id filter)"
+  - "WHERE status = 'active'"
+  - "A filter on created_at only, ignoring tenant_id entirely"
+  answer: 0
+  explanation: |
+    A composite index on (a, b) serves filters that start with the leftmost
+    column: filtering tenant_id and ordering by created_at uses it fully. Filtering
+    only created_at (skipping the leading column) or an unrelated column can't use
+    the index efficiently.
+  ref: "concepts.md#indexing-and-index-data-structures"
+
+- id: databases-sql-nosql-sharding-replication-018
+  difficulty: intermediate
+  tags: [indexing, covering-index]
+  question: |
+    What is a "covering index" and why is it useful?
+  options:
+  - "An index that covers every column in the database"
+  - "An index that includes all columns a query needs, so the query is answered from the index alone without touching the base table"
+  - "An index that automatically covers for a failed replica"
+  - "A backup copy of an index kept on another node"
+  answer: 1
+  explanation: |
+    A covering index contains all columns the query reads (filter + select), so the
+    engine can satisfy the query index-only, avoiding base-table lookups. It's not
+    "every column", not a failover mechanism, and not a backup.
+  ref: "concepts.md#indexing-and-index-data-structures"
+
+- id: databases-sql-nosql-sharding-replication-019
+  difficulty: advanced
+  tags: [indexing, cardinality, selectivity]
+  question: |
+    Why might indexing a low-cardinality boolean column (e.g., is_deleted) often be
+    counterproductive?
+  options:
+  - "Boolean columns cannot be indexed at all"
+  - "Indexes on booleans always corrupt the table"
+  - "The index has low selectivity — it matches a large fraction of rows — so the optimizer often prefers a sequential scan, while the index still slows writes"
+  - "It forces the table into 3NF"
+  answer: 2
+  explanation: |
+    Low-cardinality columns return many rows per value (low selectivity), so an
+    index scan plus row fetches is usually costlier than a sequential scan; you pay
+    write overhead for little read benefit. Booleans can be indexed (partial
+    indexes can even help), and indexing has nothing to do with corruption or
+    normalization.
+  ref: "concepts.md#indexing-and-index-data-structures"
+
+- id: databases-sql-nosql-sharding-replication-020
+  difficulty: advanced
+  tags: [indexing, vector, ann, genai]
+  question: |
+    For a RAG system doing nearest-neighbor search over millions of text
+    embeddings, which index type is appropriate and what is the core trade-off?
+  options:
+  - "A B+tree on the raw vector bytes, giving exact ordering"
+  - "A hash index, giving exact nearest neighbors in O(1)"
+  - "A full-text inverted index, since embeddings are text"
+  - "An ANN index such as HNSW or IVF-PQ, trading a small loss of recall for large gains in query speed and (for PQ) memory"
+  answer: 3
+  explanation: |
+    High-dimensional similarity search uses approximate nearest neighbor indexes
+    (HNSW, IVF-PQ) that trade a little recall for big speed/memory wins. B+tree and
+    hash indexes do exact key comparisons, not distance-based nearest neighbors;
+    an inverted index matches tokens, not vector distance.
+  ref: "concepts.md#indexing-and-index-data-structures"
+
+  # ---------------- Query optimization ----------------
+- id: databases-sql-nosql-sharding-replication-021
+  difficulty: intermediate
+  tags: [query-optimization, explain]
+  question: |
+    EXPLAIN ANALYZE on a slow query shows a sequential scan of a 50M-row table for
+    a highly selective WHERE predicate. What is the most likely fix?
+  options:
+  - "Add an index on the filtered column so the optimizer can do an index scan"
+  - "Rewrite the query to SELECT *"
+  - "Add more read replicas"
+  - "Increase the isolation level to Serializable"
+  answer: 0
+  explanation: |
+    A seq scan for a selective predicate usually means no usable index — adding one
+    lets the optimizer do an index scan. SELECT * makes things worse; replicas
+    don't change a single query's plan; and higher isolation adds locking overhead
+    without fixing the access path.
+  ref: "concepts.md#query-optimization-and-execution-plans"
+
+- id: databases-sql-nosql-sharding-replication-022
+  difficulty: intermediate
+  tags: [query-optimization, n-plus-1]
+  question: |
+    An API endpoint runs one query to fetch 100 orders, then one query per order to
+    fetch its customer — 101 queries total. What is this anti-pattern and the fix?
+  options:
+  - "It's the write-amplification problem; fix with more indexes"
+  - "It's the N+1 query problem; fix by batching (IN clause) or a single join"
+  - "It's replication lag; fix with synchronous replication"
+  - "It's a hot partition; fix by resharding"
+  answer: 1
+  explanation: |
+    Issuing one query per parent row is the N+1 problem; batch the child fetches
+    with an IN clause or use a single join. It isn't write amplification,
+    replication lag, or a partition hotspot.
+  ref: "concepts.md#query-optimization-and-execution-plans"
+
+- id: databases-sql-nosql-sharding-replication-023
+  difficulty: advanced
+  tags: [query-optimization, sargability]
+  question: |
+    Which query change is most likely to make a predicate "sargable" (able to use
+    an index on the created_at column)?
+  options:
+  - "Wrap created_at in more functions"
+  - "Add ORDER BY RAND()"
+  - "Change WHERE DATE(created_at) = '2026-07-15' to WHERE created_at >= '2026-07-15' AND created_at < '2026-07-16'"
+  - "Cast created_at to text before comparing"
+  answer: 2
+  explanation: |
+    Applying a function to an indexed column (DATE(created_at)) prevents index use;
+    rewriting to a range on the raw column is sargable and uses the index. Adding
+    functions/casts or ORDER BY RAND() only hurts.
+  ref: "concepts.md#query-optimization-and-execution-plans"
+
+  # ---------------- Storage engines ----------------
+- id: databases-sql-nosql-sharding-replication-024
+  difficulty: intermediate
+  tags: [storage-engine, lsm, btree]
+  question: |
+    Which statement best contrasts LSM-trees and B-trees?
+  options:
+  - "LSM-trees update pages in place; B-trees only append"
+  - "B-trees cannot support range scans; LSM-trees can"
+  - "LSM-trees never require compaction"
+  - "LSM-trees buffer writes in memory and flush sequentially (high write throughput); B-trees update pages in place (predictable single-lookup reads)"
+  answer: 3
+  explanation: |
+    LSM-trees append via memtable→SSTable flushes and merge with compaction, giving
+    high write throughput; B-trees update in place with a WAL, giving predictable
+    single-lookup reads. B-trees do support range scans, and LSM-trees very much
+    require compaction.
+  ref: "concepts.md#storage-engines-lsm-tree-versus-b-tree"
+
+- id: databases-sql-nosql-sharding-replication-025
+  difficulty: intermediate
+  tags: [storage-engine, bloom-filter]
+  question: |
+    What role do bloom filters play in an LSM-tree read path?
+  options:
+  - "They let a read quickly skip SSTables that definitely do not contain a key, avoiding needless disk I/O (no false negatives, tunable false positives)"
+  - "They store the actual row values in memory"
+  - "They replace the WAL for durability"
+  - "They guarantee a key exists before reading it"
+  answer: 0
+  explanation: |
+    A bloom filter is a probabilistic set-membership structure: it can say
+    "definitely not present" (no false negatives) so reads skip SSTables lacking
+    the key, cutting disk I/O. It has false positives (so it can't guarantee
+    presence), doesn't store values, and isn't a WAL replacement.
+  ref: "concepts.md#storage-engines-lsm-tree-versus-b-tree"
+
+- id: databases-sql-nosql-sharding-replication-026
+  difficulty: advanced
+  tags: [storage-engine, workload-fit, tradeoffs]
+  question: |
+    A time-series metrics platform ingests 1M writes/sec with mostly recent-range
+    reads. Which storage engine choice and rationale is best?
+  options:
+  - "B-tree, because in-place updates minimize write amplification for append-heavy loads"
+  - "LSM-tree, because sequential append writes give high write throughput and good compression, and bloom filters plus recency keep reads acceptable"
+  - "B-tree, because bloom filters only exist in B-trees"
+  - "Neither; time-series data must use a graph database"
+  answer: 1
+  explanation: |
+    Write-heavy ingest is the LSM sweet spot: sequential appends, high throughput,
+    strong compression; reads lean on bloom filters and recency. B-trees do random
+    in-place writes (worse for this), bloom filters are an LSM feature, and graph
+    DBs are irrelevant to time-series.
+  ref: "concepts.md#storage-engines-lsm-tree-versus-b-tree"
+
+- id: databases-sql-nosql-sharding-replication-027
+  difficulty: expert
+  tags: [storage-engine, amplification, compaction]
+  question: |
+    Which statement about amplification trade-offs in LSM-trees is correct?
+  options:
+  - "LSM-trees have low write amplification and low space amplification with no compaction cost"
+  - "LSM-trees eliminate read amplification entirely because a key is only ever in one file"
+  - "LSM-trees reduce write random-I/O but compaction introduces write amplification and can cause read-latency spikes; space amplification is higher until compaction reclaims old versions"
+  - "Compaction reduces read amplification but has no effect on space usage"
+  answer: 2
+  explanation: |
+    LSM writes are sequential but compaction rewrites data (write amplification) and
+    can spike read latency; old/overwritten versions inflate space until compaction
+    reclaims them. A key can exist in multiple SSTables (read amplification exists),
+    and compaction reclaims space, so the other options are wrong.
+  ref: "concepts.md#storage-engines-lsm-tree-versus-b-tree"
+
+  # ---------------- Sharding ----------------
+- id: databases-sql-nosql-sharding-replication-028
+  difficulty: beginner
+  tags: [sharding, partitioning, fundamentals]
+  question: |
+    What problem does horizontal sharding primarily solve that read replicas do
+    not?
+  options:
+  - "It scales read throughput"
+  - "It removes the need for any indexes"
+  - "It guarantees strong consistency across all data"
+  - "It scales write throughput and total storage by splitting the dataset across multiple primaries"
+  answer: 3
+  explanation: |
+    Sharding partitions data across multiple primaries, scaling writes and storage;
+    read replicas only scale reads (writes still hit one primary). Sharding doesn't
+    remove indexes or guarantee global strong consistency — in fact cross-shard
+    consistency gets harder.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-029
+  difficulty: intermediate
+  tags: [sharding, range, hash, tradeoffs]
+  question: |
+    What is the main trade-off between range partitioning and hash partitioning?
+  options:
+  - "Range gives even distribution but no range scans; hash gives hotspots but great range scans"
+  - "Range preserves ordering for range scans but risks hotspots on skewed/monotonic keys; hash distributes evenly but destroys range-scan locality"
+  - "They are identical in every respect"
+  - "Hash partitioning cannot distribute data across more than two nodes"
+  answer: 1
+  explanation: |
+    Range keeps keys ordered (great for range scans) but can hotspot on skewed or
+    monotonic keys; hashing spreads load evenly but loses range-scan locality. The
+    first option reverses the properties; they aren't identical; and hashing scales
+    to many nodes.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-030
+  difficulty: intermediate
+  tags: [sharding, shard-key, hotspots]
+  question: |
+    A system shards by an auto-incrementing order ID. Writes concentrate on one
+    shard and it becomes a bottleneck. Why, and what is a better key?
+  options:
+  - "Monotonic keys route all new writes to the last shard (hotspot); use a high-cardinality, evenly-distributed key such as hash(order_id) or a well-distributed business key"
+  - "The ID is too random; use a monotonic timestamp instead"
+  - "The shard count is too high; reduce to one shard"
+  - "Auto-increment IDs cannot be used as a primary key"
+  answer: 0
+  explanation: |
+    Monotonically increasing keys send every new write to the highest range/shard,
+    creating a write hotspot; hashing the ID (or choosing an evenly distributed
+    key) spreads writes. A timestamp is also monotonic (worse), reducing to one
+    shard defeats sharding, and auto-increment IDs are valid PKs.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-031
+  difficulty: advanced
+  tags: [sharding, scatter-gather, shard-key]
+  question: |
+    Your app shards users by user_id, but a new feature must query "all orders
+    placed in the last hour across all users." What is the performance concern?
+  options:
+  - "None; sharding makes all queries faster"
+  - "It becomes a scatter-gather query that must fan out to every shard and merge results, bounded by the slowest shard"
+  - "It will automatically hit only one shard"
+  - "It violates ACID and cannot run"
+  answer: 1
+  explanation: |
+    A query that doesn't include the shard key (user_id) must fan out to all shards
+    and merge — scatter-gather — and is limited by the slowest shard. Sharding
+    doesn't make cross-shard queries faster, won't hit one shard, and this is a
+    performance issue, not an ACID violation.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-032
+  difficulty: advanced
+  tags: [sharding, resharding, consistent-hashing]
+  question: |
+    Why do systems like Cassandra use consistent hashing with virtual nodes instead
+    of hash(key) % N for partitioning?
+  options:
+  - "Because % N is faster to compute at scale"
+  - "Because consistent hashing guarantees zero replication lag"
+  - "Because changing N in hash(key) % N remaps nearly all keys; consistent hashing moves only ~1/N of keys when a node is added/removed, and vnodes smooth imbalance"
+  - "Because % N cannot handle string keys"
+  answer: 2
+  explanation: |
+    With modulo hashing, changing the node count reshuffles almost every key;
+    consistent hashing limits movement to about 1/N of keys and virtual nodes even
+    out load. It's not about raw compute speed, replication lag, or string keys.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-033
+  difficulty: advanced
+  tags: [sharding, directory, tradeoffs]
+  question: |
+    What is the primary trade-off of directory/lookup-based sharding versus pure
+    hash-based sharding?
+  options:
+  - "The directory eliminates all hotspots automatically"
+  - "Directory sharding cannot rebalance data at all"
+  - "Hash sharding requires a directory anyway, so there is no difference"
+  - "The directory gives maximum rebalancing flexibility (just edit the map) but adds a lookup hop and becomes a potential bottleneck / single point of failure"
+  answer: 3
+  explanation: |
+    A directory maps keys to shards, so you rebalance by editing the map — very
+    flexible — but every request consults it, adding a hop and a potential
+    SPOF/bottleneck (usually made HA). It doesn't auto-eliminate hotspots, it can
+    rebalance, and hash sharding needs no directory.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-034
+  difficulty: expert
+  tags: [sharding, dynamodb, write-sharding]
+  question: |
+    A DynamoDB table has a partition key "event_type" where one value ("click")
+    receives 90% of writes, throttling that partition. Which mitigation directly
+    addresses the hot partition?
+  options:
+  - "Write-shard the hot key by appending a bounded random/computed suffix (e.g., click#0..click#N) to spread writes across partitions, and query all suffixes on read"
+  - "Increase the read capacity units on the table"
+  - "Enable strongly consistent reads"
+  - "Switch the table to a graph model"
+  answer: 0
+  explanation: |
+    A single hot partition key concentrates writes; adding a suffix (write sharding)
+    spreads them across many physical partitions, at the cost of gather-on-read.
+    Read capacity and consistent reads don't fix a write hotspot, and switching data
+    models is unnecessary.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+  # ---------------- Replication topologies ----------------
+- id: databases-sql-nosql-sharding-replication-035
+  difficulty: beginner
+  tags: [replication, leader-follower]
+  question: |
+    In single-leader (leader-follower) replication, where do writes go?
+  options:
+  - "To any replica the client chooses"
+  - "Only to the leader, which streams changes to read-only followers"
+  - "To all replicas simultaneously by the client"
+  - "Writes are not allowed; the system is read-only"
+  answer: 1
+  explanation: |
+    In leader-follower, all writes go to the single leader, which replicates to
+    read-only followers. Clients don't write to arbitrary replicas or to all at
+    once, and the system does accept writes (at the leader).
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+- id: databases-sql-nosql-sharding-replication-036
+  difficulty: intermediate
+  tags: [replication, multi-leader, conflicts]
+  question: |
+    What new problem does multi-leader (master-master) replication introduce that
+    single-leader replication does not?
+  options:
+  - "Read scaling"
+  - "The need for indexes"
+  - "Write conflicts — the same row can be edited on two leaders and must be reconciled (LWW, app merge, CRDTs)"
+  - "Durability of committed writes"
+  answer: 2
+  explanation: |
+    With multiple leaders accepting writes, the same record can be modified in two
+    places concurrently, requiring conflict resolution. Single-leader avoids this
+    because there's one write path. Read scaling and durability aren't unique
+    new problems, and indexes are unrelated.
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+- id: databases-sql-nosql-sharding-replication-037
+  difficulty: advanced
+  tags: [replication, leaderless, quorum]
+  question: |
+    In a leaderless (Dynamo-style) store with N=3 replicas, which quorum
+    configuration guarantees a read observes the latest acknowledged write?
+  options:
+  - "W=1, R=1 (W + R = 2)"
+  - "W=1, R=2 (W + R = 3 = N)"
+  - "W=3, R=0 (reads skip replicas)"
+  - "W=2, R=2 (W + R = 4 > N)"
+  answer: 3
+  explanation: |
+    Overlap requires W + R > N. With N=3, W=2 and R=2 gives 4 > 3, guaranteeing the
+    read set intersects the write set. W+R equal to or below N (2 or 3) doesn't
+    guarantee overlap, and R=0 reads nothing.
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+- id: databases-sql-nosql-sharding-replication-038
+  difficulty: advanced
+  tags: [replication, topology-choice, scenario]
+  question: |
+    A collaborative document editor must let users keep editing offline and sync
+    later across regions, converging automatically. Which replication approach fits
+    best?
+  options:
+  - "Multi-leader (or leaderless) replication with conflict resolution such as CRDTs, enabling local writes and eventual convergence"
+  - "Single-leader with synchronous replication to one region"
+  - "A single primary with all reads and writes routed globally to it"
+  - "Read replicas only, with writes disabled offline"
+  answer: 0
+  explanation: |
+    Offline, multi-region, always-writable editing needs multiple write points and
+    automatic convergence — multi-leader/leaderless with CRDTs. A single leader
+    (sync or global) can't accept local offline writes across regions, and
+    read-only replicas can't take writes at all.
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+- id: databases-sql-nosql-sharding-replication-039
+  difficulty: expert
+  tags: [replication, failover, split-brain]
+  question: |
+    During an async single-leader failover, the old leader briefly comes back
+    thinking it is still leader while a new leader has been promoted. What is the
+    danger and a standard mitigation?
+  options:
+  - "No danger; both can accept writes safely"
+  - "Split-brain — two leaders accept divergent writes; mitigate with fencing tokens/epochs and quorum-based leader election so the stale leader is rejected"
+  - "The danger is only slower reads; mitigate with more replicas"
+  - "The danger is index corruption; mitigate by rebuilding indexes"
+  answer: 1
+  explanation: |
+    Two nodes believing they're leader (split-brain) causes divergent, conflicting
+    writes and possible data loss. Fencing tokens/epoch numbers plus quorum
+    election ensure the stale leader's writes are rejected. It's not a mere read
+    slowdown or index issue.
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+  # ---------------- Sync vs async / lag ----------------
+- id: databases-sql-nosql-sharding-replication-040
+  difficulty: beginner
+  tags: [replication, sync, async]
+  question: |
+    What is the key difference between synchronous and asynchronous replication on
+    write acknowledgement?
+  options:
+  - "Sync acks immediately; async waits for replicas"
+  - "Both wait for all replicas before acking"
+  - "Sync waits for replica(s) to confirm before acking (no data loss, higher latency); async acks immediately and replicates in background (low latency, possible data loss on leader crash)"
+  - "Neither ever loses data under any failure"
+  answer: 2
+  explanation: |
+    Synchronous replication waits for replica confirmation (durable, slower);
+    asynchronous acks first and copies later (fast, but a leader crash can lose the
+    un-replicated tail). The other options invert or overstate the guarantees.
+  ref: "concepts.md#synchronous-versus-asynchronous-replication-and-replication-lag"
+
+- id: databases-sql-nosql-sharding-replication-041
+  difficulty: intermediate
+  tags: [replication, read-your-writes, lag]
+  question: |
+    A user updates their profile, is immediately redirected to a page that reads
+    from an async replica, and sees the old data. What is happening and a clean fix?
+  options:
+  - "The database is corrupt; restore from backup"
+  - "The index is missing; add an index"
+  - "The write never committed; retry it"
+  - "Replication lag: the replica hasn't applied the write yet. Fix with read-your-writes — read from the primary for a short window, or track the write's LSN/version and route accordingly"
+  answer: 3
+  explanation: |
+    The write committed on the primary but the async replica lags, so the read is
+    stale. Read-your-writes routing (read the primary briefly, or use version/LSN
+    tracking) fixes it. It's not corruption, a missing index, or a failed write.
+  ref: "concepts.md#synchronous-versus-asynchronous-replication-and-replication-lag"
+
+- id: databases-sql-nosql-sharding-replication-042
+  difficulty: advanced
+  tags: [replication, monotonic-reads]
+  question: |
+    A user refreshes a page twice; the first read hits a fresh replica and the
+    second hits a more-lagged replica, so a comment they just saw disappears. Which
+    guarantee is violated and how is it typically provided?
+  options:
+  - "Monotonic reads; provided by pinning a given user's reads to the same replica (so they never go backward in time)"
+  - "Read-your-writes; provided by synchronous cross-region replication"
+  - "Durability; provided by adding a WAL"
+  - "Atomicity; provided by 2PC"
+  answer: 0
+  explanation: |
+    Seeing data then not seeing it (time going backward) violates monotonic reads;
+    pinning a user to one replica (consistent hashing on user id) prevents it.
+    That's distinct from read-your-writes, durability, or atomicity.
+  ref: "concepts.md#synchronous-versus-asynchronous-replication-and-replication-lag"
+
+- id: databases-sql-nosql-sharding-replication-043
+  difficulty: advanced
+  tags: [replication, semi-sync, quorum, tradeoffs]
+  question: |
+    Why do many production systems use semi-synchronous / majority-quorum commit
+    instead of fully synchronous replication to all replicas?
+  options:
+  - "It guarantees zero latency"
+  - "Waiting for only a majority (or at least one) bounds data loss while limiting latency to the fastest majority, so a single slow/failed replica doesn't stall all writes"
+  - "It disables durability to gain speed"
+  - "Fully synchronous replication is impossible to implement"
+  answer: 1
+  explanation: |
+    Requiring a majority ack (Raft/Paxos style) bounds data loss yet only waits on
+    the fastest majority, so one lagging replica can't block commits — unlike
+    wait-for-all sync. It doesn't give zero latency, doesn't disable durability, and
+    full sync is implementable (just fragile).
+  ref: "concepts.md#synchronous-versus-asynchronous-replication-and-replication-lag"
+
+  # ---------------- Read replicas ----------------
+- id: databases-sql-nosql-sharding-replication-044
+  difficulty: beginner
+  tags: [read-replicas, scaling]
+  question: |
+    What is the primary benefit of adding read replicas to a leader-follower setup?
+  options:
+  - "It scales write throughput"
+  - "It guarantees every read is perfectly fresh"
+  - "It offloads read queries from the primary, scaling read capacity and isolating reporting/analytics"
+  - "It eliminates the need for a primary"
+  answer: 2
+  explanation: |
+    Read replicas serve reads, scaling read capacity and isolating heavy analytics
+    from the primary. They don't scale writes (still one primary), don't guarantee
+    freshness (async lag), and the primary is still required for writes.
+  ref: "concepts.md#read-replicas-and-read-scaling"
+
+- id: databases-sql-nosql-sharding-replication-045
+  difficulty: intermediate
+  tags: [read-replicas, ordering, scaling]
+  question: |
+    A read-heavy service is close to overloading its primary. Following a sensible
+    scaling progression, what should you typically try before adding many read
+    replicas?
+  options:
+  - "Immediately shard the database"
+  - "Switch to multi-leader replication"
+  - "Rewrite the app in another language"
+  - "Add caching (e.g., read-through Redis) to absorb hot reads, since it cuts load cheaply before you fan out to replicas"
+  answer: 3
+  explanation: |
+    Caching absorbs hot reads cheaply and is a lower-complexity earlier step than
+    spinning up many replicas or sharding. Sharding and multi-leader add far more
+    complexity, and language choice is irrelevant to the bottleneck.
+  ref: "concepts.md#read-replicas-and-read-scaling"
+
+- id: databases-sql-nosql-sharding-replication-046
+  difficulty: advanced
+  tags: [read-replicas, replication-lag, failure-mode]
+  question: |
+    Under a sustained write burst, your read replicas fall further and further
+    behind. What failure mode is this and what does it imply for reads?
+  options:
+  - "Growing replication lag — replicas replaying heavy writes can't keep up, so reads served from them become increasingly stale"
+  - "Split-brain; reads become unavailable"
+  - "Write amplification; reads become faster"
+  - "Deadlock; the primary stops accepting writes"
+  answer: 0
+  explanation: |
+    Heavy write volume can outpace replica apply throughput, so lag grows and
+    replica reads get staler. It's not split-brain (that's dual leaders), not write
+    amplification's effect, and not a deadlock on the primary.
+  ref: "concepts.md#read-replicas-and-read-scaling"
+
+  # ---------------- Distributed txns / 2PC ----------------
+- id: databases-sql-nosql-sharding-replication-047
+  difficulty: intermediate
+  tags: [distributed-transactions, two-phase-commit]
+  question: |
+    In two-phase commit, what happens in the "prepare" phase?
+  options:
+  - "Participants immediately commit and release locks"
+  - "The coordinator asks each participant to vote yes/no and hold locks; only if all vote yes does it then send commit"
+  - "The coordinator picks a new leader"
+  - "Data is hashed and partitioned"
+  answer: 1
+  explanation: |
+    Phase one is prepare/vote: participants durably prepare and hold locks, voting
+    yes or no; phase two commits only if all voted yes (else abort). It's not an
+    immediate commit, a leader election, or partitioning.
+  ref: "concepts.md#distributed-transactions-and-two-phase-commit"
+
+- id: databases-sql-nosql-sharding-replication-048
+  difficulty: advanced
+  tags: [distributed-transactions, 2pc, blocking]
+  question: |
+    What is the fundamental availability weakness of classic 2PC?
+  options:
+  - "It uses too little network bandwidth"
+  - "It cannot guarantee atomicity"
+  - "It is blocking: if the coordinator crashes after participants prepare, they hold locks in an uncertain state until it recovers, stalling those resources"
+  - "It only works on a single node"
+  answer: 2
+  explanation: |
+    2PC's core flaw is blocking on coordinator failure: prepared participants hold
+    locks and can't unilaterally decide, freezing resources until recovery. It does
+    guarantee atomicity (that's its point) and is inherently multi-node; bandwidth
+    isn't the issue.
+  ref: "concepts.md#distributed-transactions-and-two-phase-commit"
+
+- id: databases-sql-nosql-sharding-replication-049
+  difficulty: advanced
+  tags: [distributed-transactions, saga, tradeoffs]
+  question: |
+    A cross-service order workflow (payment, inventory, shipping) needs atomic-ish
+    behavior without distributed locks. Choosing a saga over 2PC, what do you gain
+    and give up?
+  options:
+  - "Gain serializable isolation; give up availability"
+  - "Gain strong consistency; give up nothing"
+  - "Gain single-node simplicity; give up the ability to undo steps"
+  - "Gain availability and no distributed locks; give up isolation and strong consistency — you must design idempotent compensating actions and tolerate visible intermediate states"
+  answer: 3
+  explanation: |
+    Sagas run local transactions with compensations, gaining availability and
+    avoiding cross-service locks, but they provide only eventual consistency and no
+    isolation, so you must handle idempotency, compensation, and intermediate
+    visibility. They don't give serializable isolation or free strong consistency.
+  ref: "concepts.md#distributed-transactions-and-two-phase-commit"
+
+- id: databases-sql-nosql-sharding-replication-050
+  difficulty: expert
+  tags: [distributed-transactions, colocation, design]
+  question: |
+    What is the most robust design principle for minimizing the need for
+    distributed transactions in a sharded system?
+  options:
+  - "Choose the shard key so that data updated together in a transaction colocates on the same shard, turning most transactions into single-shard local transactions"
+  - "Always use 2PC for every write"
+  - "Disable transactions entirely"
+  - "Replicate every shard synchronously to every other shard"
+  answer: 0
+  explanation: |
+    If you pick a partition key so related, co-updated data lives on one shard, most
+    transactions become single-shard and need no distributed protocol. Blanket 2PC
+    is slow/blocking, disabling transactions loses correctness, and cross-shard sync
+    replication doesn't solve transactional atomicity.
+  ref: "concepts.md#distributed-transactions-and-two-phase-commit"
+
+  # ---------------- CDC ----------------
+- id: databases-sql-nosql-sharding-replication-051
+  difficulty: intermediate
+  tags: [cdc, sync, kafka]
+  question: |
+    What does Change Data Capture (CDC) do?
+  options:
+  - "It caches query results in memory"
+  - "It tails the database's replication log (WAL/binlog/oplog) and streams row-level change events so downstream systems (search, cache, warehouse) stay in sync"
+  - "It compresses the database backups"
+  - "It shards the database automatically"
+  answer: 1
+  explanation: |
+    CDC reads the DB's commit log and publishes change events (via tools like
+    Debezium → Kafka) so derived stores stay current in near-real-time. It is not a
+    cache, a backup compressor, or an auto-sharder.
+  ref: "concepts.md#change-data-capture-and-keeping-systems-in-sync"
+
+- id: databases-sql-nosql-sharding-replication-052
+  difficulty: advanced
+  tags: [cdc, dual-write, outbox]
+  question: |
+    Why is CDC (or the transactional outbox pattern) preferred over having the
+    application write to both the database and Kafka directly?
+  options:
+  - "Dual-writes are faster and always consistent"
+  - "Kafka cannot receive events any other way"
+  - "A dual-write is not atomic — a crash between the two writes leaves them inconsistent; CDC/outbox derives events from the committed DB state, keeping one source of truth"
+  - "CDC removes the need for a database entirely"
+  answer: 2
+  explanation: |
+    Writing to the DB and to Kafka separately can't be made atomic; a failure
+    between them causes divergence. Outbox (write event in the same DB transaction)
+    plus CDC ensures events reflect committed state with one source of truth.
+    Dual-writes aren't consistent, and CDC doesn't replace the DB.
+  ref: "concepts.md#change-data-capture-and-keeping-systems-in-sync"
+
+- id: databases-sql-nosql-sharding-replication-053
+  difficulty: advanced
+  tags: [cdc, search-index, scenario]
+  question: |
+    You must keep an Elasticsearch index in sync with your Postgres system of
+    record with minimal coupling and near-real-time freshness. Which approach is
+    best?
+  options:
+  - "Have the application write to Postgres and Elasticsearch in the same request path (dual-write)"
+  - "Run a nightly full re-index and accept 24h staleness"
+  - "Query Elasticsearch as the primary and Postgres as a cache"
+  - "Stream Postgres WAL changes via CDC (e.g., Debezium → Kafka) into an indexer that updates Elasticsearch"
+  answer: 3
+  explanation: |
+    CDC from the WAL decouples the systems and gives near-real-time indexing with
+    Postgres as the source of truth. Dual-write risks inconsistency, nightly
+    re-index is far too stale, and treating Elasticsearch as primary inverts the
+    source of truth.
+  ref: "concepts.md#change-data-capture-and-keeping-systems-in-sync"
+
+  # ---------------- Polyglot persistence ----------------
+- id: databases-sql-nosql-sharding-replication-054
+  difficulty: intermediate
+  tags: [polyglot-persistence, tradeoffs]
+  question: |
+    What is the main downside of polyglot persistence (using several specialized
+    databases)?
+  options:
+  - "Operational complexity: more systems to run, monitor, secure, and back up, plus keeping duplicated data consistent across them"
+  - "Each store is worse at its job than a general-purpose one"
+  - "It is impossible to keep data in sync at all"
+  - "It always costs less than a single database"
+  answer: 0
+  explanation: |
+    Polyglot persistence matches each workload to an ideal store but multiplies
+    operational burden and cross-store consistency work (via CDC/sagas). Each store
+    is better at its niche, sync is possible (just extra work), and it usually costs
+    more, not less.
+  ref: "concepts.md#polyglot-persistence-and-choosing-the-right-store"
+
+- id: databases-sql-nosql-sharding-replication-055
+  difficulty: advanced
+  tags: [polyglot-persistence, boring-technology, judgment]
+  question: |
+    A startup proposes launching with Postgres, MongoDB, Cassandra, Neo4j, Redis,
+    and Elasticsearch on day one. What is the strongest principal-engineer critique?
+  options:
+  - "They forgot to add a vector database too"
+  - "Start with one general-purpose store (often Postgres, which does JSON, FTS, geo, and vectors) and add specialized stores only when a concrete access pattern proves a bottleneck; six systems on day one is unjustified operational load"
+  - "Postgres cannot be used with any other database"
+  - "They should use only Cassandra for everything, including transactions"
+  answer: 1
+  explanation: |
+    Each store must be justified by a real access pattern the incumbent can't serve;
+    premature polyglot persistence adds enormous ops/on-call cost. Postgres covers
+    many needs early. Adding more stores (vector) isn't the fix, Postgres composes
+    fine, and Cassandra-for-everything (incl. transactions) is a poor fit.
+  ref: "concepts.md#polyglot-persistence-and-choosing-the-right-store"
+
+  # ---------------- Vector DBs ----------------
+- id: databases-sql-nosql-sharding-replication-056
+  difficulty: intermediate
+  tags: [vector-db, genai, rag]
+  question: |
+    In a RAG pipeline, what is the primary job of a vector database?
+  options:
+  - "To store the LLM's model weights"
+  - "To generate the embeddings from raw text"
+  - "To index embeddings and return the approximate nearest-neighbor vectors to a query embedding, so relevant context can ground the LLM"
+  - "To fine-tune the LLM on each query"
+  answer: 2
+  explanation: |
+    A vector DB indexes embeddings and serves ANN similarity search to retrieve
+    relevant chunks for grounding. It doesn't store model weights, generate
+    embeddings (an embedding model does that), or fine-tune the LLM.
+  ref: "concepts.md#vector-databases-and-similarity-search"
+
+- id: databases-sql-nosql-sharding-replication-057
+  difficulty: advanced
+  tags: [vector-db, pgvector, judgment]
+  question: |
+    A team already runs Postgres and needs semantic search over a few million
+    chunks with metadata filtering. What is a reasonable first choice and why?
+  options:
+  - "Immediately adopt a dedicated distributed vector DB cluster for maximum scale"
+  - "Store vectors as JSON strings and scan them linearly on every query"
+  - "Use a graph database, since embeddings are relationships"
+  - "Use pgvector inside the existing Postgres, gaining vector ANN plus SQL metadata filters without operating a new system; move to a dedicated vector DB only at much larger scale"
+  answer: 3
+  explanation: |
+    pgvector adds ANN indexing to Postgres, letting you combine vector search with
+    SQL metadata filters and avoid a new system at this scale; escalate to a
+    dedicated vector DB later. A full distributed cluster is premature, linear JSON
+    scans don't scale, and graphs don't model embeddings.
+  ref: "concepts.md#vector-databases-and-similarity-search"
+
+- id: databases-sql-nosql-sharding-replication-058
+  difficulty: expert
+  tags: [vector-db, hnsw, ivf-pq, tradeoffs]
+  question: |
+    Comparing HNSW and IVF-PQ ANN indexes, which statement captures the trade-off?
+  options:
+  - "HNSW offers excellent recall/latency but is memory-hungry; IVF-PQ clusters and compresses vectors (product quantization) to cut memory at some recall/precision cost"
+  - "HNSW uses less memory than IVF-PQ but has worse recall"
+  - "IVF-PQ gives exact results while HNSW is always approximate"
+  - "Both require storing full-precision vectors and neither compresses"
+  answer: 0
+  explanation: |
+    HNSW graphs give strong recall and low latency but consume a lot of memory;
+    IVF-PQ uses clustering plus product quantization to shrink memory, trading some
+    recall/precision. Both are approximate, and PQ specifically compresses vectors,
+    so the other options are wrong.
+  ref: "concepts.md#vector-databases-and-similarity-search"
+
+  # ---------------- NewSQL ----------------
+- id: databases-sql-nosql-sharding-replication-059
+  difficulty: intermediate
+  tags: [newsql, spanner, cockroachdb]
+  question: |
+    What problem does NewSQL / distributed SQL (Spanner, CockroachDB) aim to solve?
+  options:
+  - "Making a single-node database even faster for one machine"
+  - "Providing SQL and ACID transactions together with horizontal scalability and fault tolerance, avoiding the old 'scale or consistency' choice"
+  - "Replacing SQL with a key-value-only API"
+  - "Eliminating the need for replication"
+  answer: 1
+  explanation: |
+    NewSQL combines relational SQL + ACID with horizontal scale and HA via consensus
+    replication. It's not about single-node speed, isn't key-value-only, and relies
+    heavily on replication (consensus groups), not its elimination.
+  ref: "concepts.md#newsql-and-distributed-sql-spanner-cockroachdb"
+
+- id: databases-sql-nosql-sharding-replication-060
+  difficulty: advanced
+  tags: [newsql, raft, consensus]
+  question: |
+    How do CockroachDB and TiDB replicate each data range to survive node/zone
+    failure without losing committed writes?
+  options:
+  - "Asynchronous single-leader replication with best-effort catch-up"
+  - "Two-phase commit to a single backup node"
+  - "A consensus protocol (Raft) that commits a write once a majority of the replica group has durably accepted it"
+  - "Client-side quorum with no server coordination"
+  answer: 2
+  explanation: |
+    Each range is a Raft group; a write commits when a majority persists it, so any
+    minority failure loses nothing. Async single-leader can lose the tail, 2PC to
+    one backup isn't a consensus quorum, and these systems coordinate on the server
+    via Raft.
+  ref: "concepts.md#newsql-and-distributed-sql-spanner-cockroachdb"
+
+- id: databases-sql-nosql-sharding-replication-061
+  difficulty: expert
+  tags: [newsql, spanner, truetime]
+  question: |
+    How does Google Spanner use TrueTime to provide externally consistent
+    (linearizable) global transactions?
+  options:
+  - "It ignores clocks and relies purely on network round-trip counts"
+  - "It uses a single global lock server that serializes all writes worldwide"
+  - "It assumes clocks are perfectly synchronized with zero error"
+  - "TrueTime (GPS + atomic clocks) exposes a bounded clock-uncertainty interval; Spanner assigns commit timestamps and waits out the uncertainty (commit-wait) so ordering is globally consistent"
+  answer: 3
+  explanation: |
+    TrueTime bounds clock error to an interval ε; Spanner assigns a commit timestamp
+    and waits out ε (commit-wait) before releasing locks, guaranteeing globally
+    ordered, externally consistent commits. It doesn't ignore clocks, use one global
+    lock server, or assume zero clock error (the whole point is bounding it).
+  ref: "concepts.md#newsql-and-distributed-sql-spanner-cockroachdb"
+
+- id: databases-sql-nosql-sharding-replication-062
+  difficulty: advanced
+  tags: [newsql, tradeoffs, judgment]
+  question: |
+    A multi-region SaaS needs relational data with joins, ACID transactions, and
+    survival of a full region outage, growing beyond a single primary. Weighing
+    options, which is the best fit and the trade-off you accept?
+  options:
+  - "Distributed SQL (Spanner/CockroachDB); you accept higher per-transaction latency from consensus and cross-region commits in exchange for scalable ACID and regional fault tolerance"
+  - "Sharded MySQL with hand-rolled 2PC; you accept blocking coordinator failures"
+  - "A single large Postgres instance; you accept that a region outage takes you fully offline"
+  - "Eventually-consistent Cassandra; you accept losing transactions and joins that the business requires"
+  answer: 0
+  explanation: |
+    The requirements (SQL, joins, ACID, region survival, beyond one primary) point
+    to distributed SQL, whose cost is higher commit latency. Hand-rolled 2PC on
+    MySQL is fragile/blocking, a single Postgres can't survive a region loss or
+    scale writes, and Cassandra sacrifices the required transactions and joins.
+  ref: "concepts.md#newsql-and-distributed-sql-spanner-cockroachdb"
+
+  # ---------------- CAP / PACELC ----------------
+- id: databases-sql-nosql-sharding-replication-063
+  difficulty: intermediate
+  tags: [cap, consistency, availability]
+  question: |
+    According to CAP, during a network partition a distributed database must
+    sacrifice which pair of properties' co-existence?
+  options:
+  - "Durability and atomicity"
+  - "Consistency and availability — it must choose one during the partition"
+  - "Indexing and sharding"
+  - "Latency and throughput"
+  answer: 1
+  explanation: |
+    CAP says under a partition (P) you must choose between consistency (C) and
+    availability (A). It's not about durability/atomicity, indexing/sharding, or
+    latency/throughput (that's PACELC's else-branch, not the partition case).
+  ref: "concepts.md#cap-pacelc-and-the-consistency-availability-latency-tension"
+
+- id: databases-sql-nosql-sharding-replication-064
+  difficulty: advanced
+  tags: [pacelc, latency, consistency]
+  question: |
+    What does PACELC add beyond CAP?
+  options:
+  - "It says partitions never happen"
+  - "It replaces consistency with durability"
+  - "It notes that even with no partition (Else), you still trade Latency against Consistency"
+  - "It only applies to single-node databases"
+  answer: 2
+  explanation: |
+    PACELC extends CAP: on Partition choose Availability or Consistency; Else (no
+    partition) choose Latency or Consistency. It doesn't claim partitions never
+    happen, doesn't swap in durability, and applies to distributed systems.
+  ref: "concepts.md#cap-pacelc-and-the-consistency-availability-latency-tension"
+
+- id: databases-sql-nosql-sharding-replication-065
+  difficulty: advanced
+  tags: [cap, classification, scenario]
+  question: |
+    A payments ledger must never expose an inconsistent balance, even if that means
+    rejecting writes on the minority side of a partition. How is this classified and
+    which store fits?
+  options:
+  - "AP; use Cassandra in eventual mode"
+  - "PA/EL; use DynamoDB in eventual mode"
+  - "It doesn't fit CAP because ledgers are single-node"
+  - "CP; use a single-leader relational DB or Spanner/CockroachDB that refuses writes on the minority side to preserve consistency"
+  answer: 3
+  explanation: |
+    Prioritizing consistency over availability during a partition is CP; single-
+    leader relational or consensus-based distributed SQL fit. AP stores (Cassandra
+    eventual, DynamoDB eventual) would serve possibly-stale/divergent data, wrong
+    for a ledger; ledgers can absolutely be distributed.
+  ref: "concepts.md#cap-pacelc-and-the-consistency-availability-latency-tension"
+
+  # ---------------- Trade-offs / decision guide ----------------
+- id: databases-sql-nosql-sharding-replication-066
+  difficulty: beginner
+  tags: [tradeoffs, scaling-order]
+  question: |
+    Following a sensible scaling progression for a read-heavy relational workload,
+    which sequence is most appropriate?
+  options:
+  - "Index and tune queries → add caching → add read replicas → denormalize/materialized views → vertically scale → partition → shard only if forced"
+  - "Shard first, then add indexes, then maybe cache"
+  - "Rewrite in a new language → buy bigger disks → shard immediately"
+  - "Enable Serializable isolation → add multi-leader replication → shard"
+  answer: 0
+  explanation: |
+    The low-risk progression escalates complexity gradually: indexing/tuning,
+    caching, read replicas, denormalization, vertical scaling, functional
+    partitioning, and only then horizontal sharding. Sharding first, language
+    rewrites, or jumping to multi-leader/serializable are premature and costly.
+  ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+- id: databases-sql-nosql-sharding-replication-067
+  difficulty: intermediate
+  tags: [tradeoffs, sharding-vs-replication]
+  question: |
+    "Sharding scales ___ and replication scales ___." Fill in the blanks.
+  options:
+  - "reads; writes"
+  - "writes and storage; reads and availability"
+  - "consistency; latency"
+  - "indexes; joins"
+  answer: 1
+  explanation: |
+    Sharding partitions data across primaries to scale write throughput and
+    storage; replication copies data to scale reads and provide availability/HA.
+    They're orthogonal and usually combined. The other pairings misattribute what
+    each mechanism does.
+  ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+- id: databases-sql-nosql-sharding-replication-068
+  difficulty: advanced
+  tags: [tradeoffs, shard-key, checklist]
+  question: |
+    Which set of properties describes a GOOD shard key?
+  options:
+  - "Low cardinality, monotonically increasing, unrelated to queries"
+  - "A boolean flag with two values"
+  - "High cardinality, evenly-distributed access, and aligned with the dominant query so most reads hit a single shard"
+  - "The current timestamp, so data stays ordered"
+  answer: 2
+  explanation: |
+    Good shard keys have high cardinality, even access distribution, and match the
+    dominant query so most requests are single-shard. Low-cardinality, monotonic
+    (timestamp), boolean, or query-misaligned keys cause hotspots and scatter-gather.
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-069
+  difficulty: expert
+  tags: [tradeoffs, capacity, estimation]
+  question: |
+    A service ingests 200M writes/day of ~1KB records. Roughly what average write
+    rate and one-year raw storage should you plan for (order of magnitude)?
+  options:
+  - "~230 writes/s and ~7 GB/year"
+  - "~23,000 writes/s and ~730 GB/year"
+  - "~2.3 writes/s and ~7 PB/year"
+  - "~2,300 writes/s and ~73 TB/year"
+  answer: 3
+  explanation: |
+    200M/86,400s ≈ 2,300 writes/s average (peak higher). Storage: 200M × 1KB =
+    ~200 GB/day × 365 ≈ 73 TB/year. That volume clearly exceeds a single node and
+    motivates sharding + an LSM/write-optimized store. The other magnitudes are off
+    by 10–1000×.
+  ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+- id: databases-sql-nosql-sharding-replication-070
+  difficulty: expert
+  tags: [tradeoffs, feed, denormalization, scenario]
+  question: |
+    Designing a social home feed at scale (reads ≫ writes), which combination best
+    balances read latency and correctness?
+  options:
+  - "Denormalized precomputed feed (fan-out on write) in a write-optimized/LSM store for fast reads, a normalized source of truth for posts, and CDC to keep derived data in sync — accepting eventual consistency on the feed"
+  - "Fully normalized relational schema, join at read time on every feed load, strong consistency for likes"
+  - "Store the entire feed in a single graph database and traverse it per request"
+  - "Serve every feed read with a cross-shard scatter-gather query for freshness"
+  answer: 0
+  explanation: |
+    With reads dominating, denormalize the read path (precomputed feed, LSM store),
+    keep a normalized source of truth, and sync via CDC, accepting eventual
+    consistency on the feed. Join-per-read doesn't scale, per-request graph
+    traversal is costly, and scatter-gather on every read is the slowest option.
+  ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+- id: databases-sql-nosql-sharding-replication-071
+  difficulty: intermediate
+  tags: [acid, nosql, modern]
+  question: |
+    Why is the classic "SQL = ACID, NoSQL = BASE" dichotomy considered outdated
+    today?
+  options:
+  - "Because all databases are now eventually consistent"
+  - "Because modern DynamoDB and MongoDB support transactions, and Spanner/CockroachDB provide ACID at horizontal scale — the line between the camps has blurred"
+  - "Because SQL databases dropped ACID guarantees"
+  - "Because BASE was proven mathematically impossible"
+  answer: 1
+  explanation: |
+    The dichotomy blurred: several NoSQL stores added transactions and NewSQL gives
+    ACID at scale, so consistency is now a tunable design choice rather than a fixed
+    camp. Not all DBs are eventual, SQL didn't drop ACID, and BASE is a valid model.
+  ref: "concepts.md#acid-versus-base"
+
+- id: databases-sql-nosql-sharding-replication-072
+  difficulty: beginner
+  tags: [replication, availability, failover]
+  question: |
+    In a leader-follower setup with asynchronous replication, what happens to writes
+    if the leader crashes before a follower is promoted?
+  options:
+  - "Writes continue seamlessly on all followers"
+  - "All data is immediately lost permanently"
+  - "The system typically becomes read-only for writes until a follower is promoted (failover), and any un-replicated writes may be lost"
+  - "Followers automatically start accepting writes with no coordination"
+  answer: 2
+  explanation: |
+    With one leader, a crash means no writes until a follower is promoted, and async
+    lag means the un-replicated tail can be lost. Followers don't take writes without
+    promotion/coordination, and existing replicated data isn't lost.
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+- id: databases-sql-nosql-sharding-replication-073
+  difficulty: intermediate
+  tags: [geo-partitioning, cell-based, modern]
+  question: |
+    A global service partitions users into isolated regional "cells," each with its
+    own database and stack. What is the primary benefit of this cell-based
+    architecture?
+  options:
+  - "It guarantees strong global consistency across all cells for free"
+  - "It removes the need to shard within a cell"
+  - "It makes cross-cell joins trivial"
+  - "It bounds blast radius (a failure or bad deploy affects only one cell) and keeps data close to users, improving latency and fault isolation"
+  answer: 3
+  explanation: |
+    Cell-based / geo-partitioning isolates failures to a single cell and localizes
+    data for latency. It doesn't provide free global consistency, doesn't eliminate
+    intra-cell sharding, and cross-cell queries remain hard (that's an accepted
+    cost).
+  ref: "concepts.md#partitioning-and-sharding-strategies"
+
+- id: databases-sql-nosql-sharding-replication-074
+  difficulty: expert
+  tags: [replication, quorum, availability, tradeoffs]
+  question: |
+    In a leaderless store with N=3, you set W=3, R=1 to make reads cheap and always
+    fresh. What availability problem does this introduce for writes?
+  options:
+  - "Writes require all 3 replicas to ack, so if any single replica is down or slow, writes fail or stall — sacrificing write availability for read simplicity"
+  - "None; W=3 improves write availability"
+  - "Reads will now be stale"
+  - "It causes split-brain between the replicas"
+  answer: 0
+  explanation: |
+    W=3 means every write needs all replicas; losing even one blocks writes, hurting
+    write availability (though W+R>N gives fresh reads). Reads at R=1 with W=3 are
+    fresh, not stale, and this isn't split-brain (a leaderless-quorum config, not
+    dual leaders).
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+- id: databases-sql-nosql-sharding-replication-075
+  difficulty: intermediate
+  tags: [indexing, clustered, secondary]
+  question: |
+    In InnoDB, a secondary index stores the indexed column(s) plus the primary key,
+    not a direct row pointer. What is the consequence for a query using a
+    non-covering secondary index?
+  options:
+  - "The query never touches the primary key index"
+  - "It performs a second lookup into the clustered (primary key) index to fetch the remaining columns — a 'bookmark lookup', which extra I/O a covering index would avoid"
+  - "It cannot return any columns beyond the indexed one"
+  - "It automatically rewrites the table into a heap"
+  answer: 1
+  explanation: |
+    A non-covering secondary index yields the PK, then InnoDB looks up the clustered
+    index to get the full row (bookmark lookup), adding I/O; a covering index avoids
+    the second lookup. It can return other columns (via that lookup) and doesn't
+    convert the table to a heap.
+  ref: "concepts.md#indexing-and-index-data-structures"
+
+- id: databases-sql-nosql-sharding-replication-076
+  difficulty: advanced
+  tags: [nosql, cassandra, discord, scenario]
+  question: |
+    Discord stores trillions of chat messages with enormous write volume and reads
+    that are mostly "recent messages in a channel." Which storage approach matches
+    this, and why?
+  options:
+  - "A single-node relational DB with a normalized messages table"
+  - "A graph database traversing message relationships per read"
+  - "A wide-column LSM store (Cassandra/ScyllaDB) partitioned by channel with messages clustered by time — high write throughput and efficient recent-range reads within a partition"
+  - "An in-memory-only key-value store with no durability"
+  answer: 2
+  explanation: |
+    Massive writes plus per-channel recent-range reads fit a wide-column LSM store
+    partitioned by channel and clustered by time (Discord's actual design). A single
+    relational node can't hold trillions of rows, graph traversal doesn't fit
+    message reads, and an in-memory-only store loses durability.
+  ref: "concepts.md#nosql-data-models-document-key-value-wide-column-graph"
