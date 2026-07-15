@@ -123,10 +123,26 @@ def main() -> int:
         print(f"No questions.yaml found under {root} (nothing to validate yet).")
         return 0
 
-    seen_ids: dict[str, Path] = {}
+    # Question ids only need to be unique WITHIN a domain (the id already embeds the
+    # topic-slug, and two different domains may legitimately reuse a topic-slug, e.g.
+    # spring-boot and spring-core both have "configuration-profiles-properties"). So we
+    # dedupe per domain, keyed by the domain folder directly under topics/.
+    def domain_of(path: Path) -> str:
+        parts = path.parts
+        if "topics" in parts:
+            i = parts.index("topics")
+            if i + 1 < len(parts):
+                return parts[i + 1]
+        return str(path.parent.parent)
+
+    per_domain_ids: dict[str, dict[str, Path]] = {}
     all_errors: list[str] = []
+    total_q = 0
     for f in files:
+        seen_ids = per_domain_ids.setdefault(domain_of(f), {})
+        before = len(seen_ids)
         all_errors.extend(validate_file(f, seen_ids))
+        total_q += len(seen_ids) - before
 
     if all_errors:
         print(f"❌ {len(all_errors)} problem(s) found:\n")
@@ -134,7 +150,6 @@ def main() -> int:
             print(f"  - {e}")
         return 1
 
-    total_q = len(seen_ids)
     print(f"✅ Validated {len(files)} file(s), {total_q} question(s). All good.")
     return 0
 

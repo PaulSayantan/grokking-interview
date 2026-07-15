@@ -60,7 +60,7 @@ questions:
 
 | Field | Required | Notes |
 |---|---|---|
-| `id` | yes | Globally unique. Format `<topic-slug>-<3-digit-seq>`. |
+| `id` | yes | Unique **within its domain**. Format `<topic-slug>-<3-digit-seq>`. (Two different domains may reuse a topic-slug — e.g. `spring-boot` and `spring-core` both have `configuration-profiles-properties` — so ids collide across domains but not within one; the domain folder disambiguates.) |
 | `difficulty` | yes | One of `beginner`, `intermediate`, `advanced`, `expert`. `expert` = deep internals, tricky edge cases, and senior/staff-level scenario questions. |
 | `tags` | no | Lowercase kebab tokens; used for cross-topic filtering. |
 | `question` | yes | The prompt. Multi-line ok (use `|`). |
