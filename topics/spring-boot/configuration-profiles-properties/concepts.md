@@ -130,6 +130,29 @@ class MailConfig {
   in the constructor if injected on fields (use constructor injection for
   early availability).
 
+**Advanced internals — how `${}` is actually resolved.** Field/method `${...}`
+placeholders are resolved by a `PropertySourcesPlaceholderConfigurer`
+(a `BeanFactoryPostProcessor`) that Spring Boot auto-registers. Because it is a
+`BeanFactoryPostProcessor`, resolution happens during bean instantiation — which
+is why a missing placeholder without a default fails the bean, not the whole
+`Environment` build. SpEL `#{...}` expressions, by contrast, are evaluated by the
+`BeanExpressionResolver` (`StandardBeanExpressionResolver`) against the bean
+factory's expression context. Order of expansion matters: Spring first resolves
+`${...}` placeholders in the string, *then* evaluates `#{...}` SpEL. This is why
+`#{'${app.list}'.split(',')}` works (placeholder first, SpEL second) but you
+cannot put a SpEL result inside a placeholder key.
+
+- **Gotcha — `@Value` and empty vs missing.** `@Value("${app.key:}")` (empty
+  default) binds an empty `String`, but for a wrapper/primitive target an empty
+  string can throw a conversion error. `@Value("${app.timeout:}")` into a
+  `Duration` fails because `""` is not a valid `Duration`; supply a real default.
+- **Gotcha — escaping.** To inject a literal `${` use `\` is *not* how you escape;
+  Spring has no placeholder escape in `@Value` other than not matching the
+  pattern. To emit a literal default containing `:` you sometimes need SpEL.
+- **Gotcha — `@Value` sees the fully-merged `Environment`**, so it *does* read
+  from env vars/system properties — the relaxed-binding limitation is only about
+  the *name shape*, not about which sources are visible.
+
 ## @ConfigurationProperties and Type-Safe Binding
 
 **Definition.** `@ConfigurationProperties(prefix = "...")` binds a whole tree of
@@ -180,6 +203,42 @@ public record MailProperties(String host, int port, List<String> recipients) {}
   (`ignoreUnknownFields = true`); a mistyped key silently does nothing unless
   you enable failure or use metadata tooling.
 
+**Binding internals — the `Binder` and collection semantics.**
+`@ConfigurationProperties` binding is performed by
+`ConfigurationPropertiesBindingPostProcessor` (a `BeanPostProcessor`) which
+delegates to the `Binder`. The `Binder` walks the *merged* set of
+`ConfigurationPropertySource`s (a relaxed view over the `Environment`'s
+`PropertySource`s). Two crucial rules interviewers probe:
+
+- **Collections are replaced, not merged, across sources.** For a `List` or array
+  property, the single highest-precedence source that supplies *any* index
+  "wins" and defines the *entire* list; Boot does not merge index 0 from a
+  low-priority file with index 1 from a high-priority one. So if
+  `application.yml` sets `app.servers[0..2]` and an env var sets
+  `APP_SERVERS_0_`, you may end up with a one-element list — a classic
+  "my list got truncated in prod" bug. `Map` properties, by contrast, *are*
+  merged key-by-key across sources.
+- **Mutable-collection requirement.** A setter-less collection field binds only
+  if it is pre-initialized with a *mutable* implementation
+  (`new ArrayList<>()`), because the binder adds to the existing instance.
+  `List.of()` / `Collections.emptyList()` are immutable and silently stay empty.
+
+**Scope & lifecycle.** `@ConfigurationProperties` beans are ordinary singletons;
+binding happens once, at bean creation. They therefore capture a *snapshot* of the
+`Environment` — they do **not** live-refresh when a property source changes at
+runtime (that requires Spring Cloud's `@RefreshScope` / `/actuator/refresh`).
+
+**JavaBean vs constructor binding — nullability.** With JavaBean (setter)
+binding, an absent property simply leaves the field at its initializer/default.
+With constructor binding, an absent property binds `null` for objects (or the
+type default) *unless* you provide `@DefaultValue`. Records with primitive
+components and no `@DefaultValue` therefore fail binding when the key is absent.
+
+- **`@ConfigurationProperties` on `@Bean` methods.** You can annotate a `@Bean`
+  factory method with `@ConfigurationProperties` to bind onto a third-party
+  object you don't own (e.g. a `DataSource`). This is the idiomatic way to
+  externalize config for classes you cannot annotate.
+
 ## @Value vs @ConfigurationProperties
 
 | Feature | `@Value` | `@ConfigurationProperties` |
@@ -225,6 +284,23 @@ an underscore).
 **Binding maps** keep the original case/format of the key (relaxation is not
 applied to map keys, other than to lowercase in some cases). For list indexes use
 `app.person.roles[0]` or the env form `APP_PERSON_ROLES_0_`.
+
+**Map keys are the big exception to relaxed binding.** For a
+`Map<String,String>` property, the *key* is taken verbatim and is
+case-sensitive; relaxed binding does **not** normalize it. So
+`app.labels.myKey` and `app.labels.my-key` are two *different* map entries, and a
+key that contains characters not usable in a scalar name (dots, special chars)
+must be wrapped in brackets: `app.labels[my.dotted.key]=v`. This is also why map
+keys often can't be supplied cleanly via environment variables — the env-var
+canonicalization would mangle the intended key.
+
+**Why kebab-case is safest, mechanically.** Relaxed binding builds a canonical
+name by lower-casing and stripping non-alphanumerics for comparison. Env-var
+resolution goes the *other* direction and cannot recover a dash that was dropped,
+so `MYAPP_PAGESIZE` maps to `myapp.pagesize` → canonical `myapppagesize`, which
+matches a field `pageSize` under prefix `myapp` only because the canonical forms
+collapse. Writing kebab-case in files keeps the file, the field name, and the
+env-var form all reconciling to the same canonical token.
 
 **Gotchas:**
 
@@ -296,6 +372,26 @@ last):
 - `@TestPropertySource` beats `@SpringBootTest(properties=...)`.
 - You can disable command-line property source with
   `SpringApplication.setAddCommandLineProperties(false)`.
+
+**Precedence is per-key, first-source-wins, not "merge".** The `Environment`
+holds an *ordered* `MutablePropertySources` list. On `getProperty(key)` it walks
+the list in order and returns the value from the **first** source that contains
+the key — it does not consult lower sources. This means precedence is resolved
+independently per key: env var can win for `server.port` while a file wins for
+`app.name`. Understanding this list-walk is the mental model behind every
+precedence question.
+
+**`spring.config.import` precedence subtlety.** An imported document is inserted
+*immediately below* (i.e. **higher priority than**) the document that declared
+the import, and is only imported once regardless of how many times it is
+declared. So `dev.properties` imported from `application.properties` overrides
+keys in `application.properties`. But the entire config-data tier still sits
+*below* env vars and command-line args — importing does not elevate a file above
+the environment.
+
+**Two `@ConfigurationProperties`/`@Value` reading the same key always agree**,
+because both ultimately read the same ordered `Environment`; the difference is
+only name-matching (relaxed vs exact), never source visibility.
 
 ## Config Data Files and Location Precedence
 
@@ -542,6 +638,141 @@ way to activate multiple profiles together.
 **Trap:** `spring.profiles.include` adds profiles *unconditionally* and, unlike
 `active`, may be used to layer profiles even from profile-specific documents in
 some cases — but modern guidance is to use **profile groups**.
+
+**Correction / precise rule (Boot 2.4+):** `spring.profiles.active`,
+`spring.profiles.default`, `spring.profiles.include`, and
+`spring.profiles.group` **can only be used in non-profile-specific documents** —
+none of them may appear in a profile-specific file or a document gated by
+`spring.config.activate.on-profile`. Boot raises
+`InactiveConfigDataAccessException` / `InvalidConfigDataPropertyException` if you
+try. `include` profiles are added *before* `active` profiles, and — a subtle
+point — `spring.profiles.include` is processed *per property source*, so the
+usual list-merge rules do **not** apply to it (each source's includes are all
+honored rather than the highest source replacing the list).
+
+**`spring.config.activate.on-cloud-platform`.** A document can also be gated on
+the detected `CloudPlatform` (e.g. `kubernetes`). When combined with `on-profile`
+in the same document, both conditions must hold (AND). This is how you write
+"only when running on Kubernetes AND in prod" activation without code.
+
+## Config Data Loading Internals and Failure Modes
+
+Since Boot 2.4 the whole config-data pipeline runs inside
+`ConfigDataEnvironmentPostProcessor`, an `EnvironmentPostProcessor` that executes
+during the `ApplicationEnvironmentPreparedEvent` — *before* the
+`ApplicationContext` exists. It resolves locations via `ConfigDataLocationResolver`
+implementations and loads them via `ConfigDataLoader`s (discovered through
+`spring.factories` / `META-INF/spring/...ConfigDataLocationResolver.imports`).
+
+**Two-phase profile processing.** Config data is processed in two passes: an
+*initial* (no-profiles) pass that reads base documents to discover which profiles
+should be active (from `spring.profiles.active`/`include`/`group`), then a
+*profile-specific* pass that loads `application-{profile}` documents. This is
+exactly why `spring.profiles.active` can only live in a non-profile document:
+by the time profile-specific documents are read, profile *selection* is already
+frozen.
+
+**Failure modes worth naming:**
+
+- **`ConfigDataLocationNotFoundException`** — a non-`optional:` location or import
+  target doesn't exist. Wrap with the `optional:` prefix (e.g.
+  `optional:file:./config/`) or set
+  `spring.config.on-not-found=ignore` to tolerate it.
+- **Unresolvable `spring.config.import`** — a bare `spring.config.import=configserver:`
+  fails fast if the server is unreachable; `optional:configserver:` degrades
+  gracefully.
+- **`InvalidConfigDataPropertyException`** — using a moved/illegal property in the
+  wrong place (e.g. the removed `spring.profiles` document key, or
+  `spring.profiles.active` inside a profile document).
+- **Importing from within a profile-specific document** is allowed, but the
+  ordering/activation interplay is a common source of "my override didn't apply"
+  confusion.
+
+## EnvironmentPostProcessor vs Later Hooks: Ordering and Custom Sources
+
+The safest place to inject a custom `PropertySource` that must beat files (but
+still lose to env/CLI, or win over everything if you insert at the front) is an
+`EnvironmentPostProcessor`. Registration and ordering nuances:
+
+- Register in `META-INF/spring/org.springframework.boot.env.EnvironmentPostProcessor.imports`
+  (Boot 2.7+/3.x) — the old `spring.factories` key still works but is legacy.
+- `EnvironmentPostProcessor`s can implement `Ordered`; they run before the
+  context refreshes, so beans are **not** available (don't `@Autowired` — take
+  the `Environment`/`SpringApplication` passed to the callback).
+- Where you *insert* into `MutablePropertySources` decides precedence:
+  `addFirst()` beats even command-line args; `addLast()` is a low-priority
+  default; `addBefore(name, ...)` / `addAfter(name, ...)` position relative to a
+  named source (e.g. after `systemEnvironment`).
+
+Contrast the hooks by *timing*, lowest-to-highest availability:
+`EnvironmentPostProcessor` (pre-context) → `ApplicationContextInitializer`
+(context created, not refreshed) → `BeanFactoryPostProcessor` (bean defs loaded)
+→ `BeanPostProcessor`/`@PostConstruct` (beans instantiating). `@PropertySource`
+and `@Bean`-returned sources land in the middle of this and thus cannot influence
+early-read settings like `logging.*`, `spring.main.*`, or profile activation.
+
+## Property Origin, Debugging, and the `env` Actuator
+
+Every resolved property in Boot carries an `Origin` (which file + line, or which
+env var). Debugging precedence fights:
+
+- Enable `--debug` to print the auto-configuration report, and inspect the
+  ordered property sources programmatically via
+  `((ConfigurableEnvironment) env).getPropertySources()`.
+- The `/actuator/env` endpoint lists every `PropertySource` in precedence order
+  and shows the winning value plus shadowed values per key — the fastest way to
+  answer "why is this key this value?". Note it **sanitizes** keys matching
+  `password`, `secret`, `key`, `token`, etc.
+- `@ConfigurationProperties` binding errors report the `Origin`, so a bad value
+  points at the exact file/line — a big advantage over `@Value`.
+
+## Records, Immutability, and Nested Constructor Binding
+
+For constructor-bound properties, `@DefaultValue` supplies defaults that JavaBean
+initializers would otherwise provide:
+
+```java
+@ConfigurationProperties(prefix = "app")
+public record AppProps(
+        @DefaultValue("8080") int port,
+        @DefaultValue List<String> tags,          // empty list default
+        @NestedConfigurationProperty Retry retry) {
+    public record Retry(@DefaultValue("3") int maxAttempts,
+                        @DefaultValue("1s") Duration backoff) {}
+}
+```
+
+- **`@NestedConfigurationProperty`** tells the metadata processor that a field is
+  a nested properties group (needed when the nested type isn't an inner type that
+  the processor would otherwise treat as nested) so IDE hints work; binding of
+  inner records is automatic.
+- Constructor binding **cannot be combined with JSR-303 on the class via setters**
+  — validation still works, but you validate the constructed (immutable) object.
+- A record component that is a primitive with no `@DefaultValue` will **fail
+  binding** if the key is absent (no null to fall back to). Prefer wrapper types
+  or defaults.
+- Mixing: you may have *some* setter-bound and *some* constructor-bound classes in
+  one app, but a single class is one or the other — a stray setter on an
+  otherwise constructor-bound class is ignored, and a stray non-default
+  constructor triggers constructor binding unexpectedly.
+
+## Concurrency, Thread-Safety, and Refresh
+
+- The `Environment` and its `PropertySource`s are effectively read-only after
+  startup; concurrent `getProperty` reads are thread-safe. Mutating
+  `getPropertySources()` at runtime from multiple threads is **not** safe and is
+  discouraged outside controlled hooks.
+- `@ConfigurationProperties` singletons are immutable snapshots; safe to share
+  across threads *if* your own code doesn't mutate them. Setter-bound classes are
+  technically mutable — treat the setters as write-once (binding time) and don't
+  call them at runtime.
+- **`@RefreshScope` (Spring Cloud)** recreates the bean lazily on the next access
+  after `/actuator/refresh`, re-binding from the (re-loaded) `Environment`. This
+  introduces a visibility/consistency concern: a request in flight may hold the
+  old instance while a new one is built. `@Value` fields in a `@RefreshScope`
+  bean are re-resolved on re-creation; plain singletons never update.
+- `SPRING_APPLICATION_JSON` and command-line args are parsed once at startup;
+  there is no runtime re-read.
 
 ## Common follow-up questions
 

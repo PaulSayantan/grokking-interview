@@ -77,6 +77,44 @@ Advanced gotchas:
   bypasses the whole chain (no security headers, no CSRF), which is rarely what
   you want for anything but truly static assets.
 
+**`AuthorizationFilter` runs on every *dispatch*, not just the initial request.**
+Since Spring Security 6, `AuthorizationFilter.shouldFilterAllDispatcherTypes`
+defaults to `true`, so authorization is re-applied to `FORWARD`, `ERROR`, and
+`INCLUDE` dispatches — not only the `REQUEST` dispatch. This is a frequent
+"why do I get 403 on my error page / Thymeleaf view?" trap: when the container
+does an internal `FORWARD` to render a view, or an `ERROR` dispatch to
+`/error`, the filter authorizes *that* path too. The idiomatic fix is to permit
+those dispatcher types explicitly:
+
+```java
+http.authorizeHttpRequests(auth -> auth
+    .dispatcherTypeMatchers(DispatcherType.FORWARD, DispatcherType.ERROR).permitAll()
+    .requestMatchers("/app/**").hasRole("USER")
+    .anyRequest().denyAll());
+```
+
+(This differs from Security 5's `FilterSecurityInterceptor`, which by default
+only ran on the `REQUEST` dispatch.)
+
+**Anonymous requests are not "unauthenticated" internally.** Late in the chain,
+`AnonymousAuthenticationFilter` populates the `SecurityContext` with an
+`AnonymousAuthenticationToken` (principal `"anonymousUser"`, authority
+`ROLE_ANONYMOUS`) *if nothing else authenticated the request*. So
+`SecurityContextHolder.getContext().getAuthentication()` is almost never `null`
+inside the chain — it's an anonymous token. That's why the DSL distinguishes
+`authenticated()` (rejects anonymous) from `anonymous()`/`permitAll()`, and why
+`ExceptionTranslationFilter` sends an anonymous user hitting a protected URL to
+the **entry point (401/redirect to login)** rather than 403 — the
+`AuthenticationTrustResolver` recognizes the token as anonymous.
+
+**`AuthorizationManager` replaced the voter architecture.** Security 6 removed
+`AccessDecisionManager`/`AccessDecisionVoter`/`ConfigAttribute` in favor of the
+single-method `AuthorizationManager<T>`. `authorizeHttpRequests` also *defers*
+the `Authentication` lookup: for `permitAll()`/`denyAll()` rules the
+`Supplier<Authentication>` is never invoked, so the session isn't loaded and no
+`AnonymousAuthenticationToken` is built — a measurable performance win on hot
+public paths.
+
 ---
 
 ## SecurityFilterChain and the lambda DSL
@@ -120,6 +158,40 @@ Notes / traps:
 - `@EnableWebSecurity` is auto-applied by Boot, but it is common to add it
   explicitly on the config class.
 
+**`securityMatcher` vs `requestMatchers` — two different levels.**
+`http.securityMatcher(...)` decides *which requests this whole
+`SecurityFilterChain` handles* (chain selection at `FilterChainProxy`).
+`authorizeHttpRequests().requestMatchers(...)` decides *authorization rules
+within* an already-selected chain. Confusing the two produces a subtle bug: if
+chain A has `securityMatcher("/api/**")` and a request for `/other` arrives,
+chain A is skipped entirely (its `permitAll`/`authenticated` rules never run) —
+the next chain (or the default chain) handles it. A request that matches *no*
+`securityMatcher` and no default chain is simply not processed by Security.
+
+**Ordering multiple chains.** Give the more specific chain the lower `@Order`
+value. A classic mistake is registering a broad chain (no `securityMatcher`, so
+it matches everything) with a lower order than the `/api/**` chain — the broad
+chain wins for *every* request and the API chain is dead code. The default
+Boot chain effectively behaves like `anyRequest()` and should be last.
+
+**Role hierarchy.** To make `ROLE_ADMIN` automatically satisfy `hasRole("USER")`
+without granting both authorities, declare a `RoleHierarchy` bean:
+
+```java
+@Bean
+static RoleHierarchy roleHierarchy() {
+  return RoleHierarchyImpl.withDefaultRolePrefix()
+      .role("ADMIN").implies("USER")
+      .build();
+}
+```
+
+Gotcha: the web-request `RoleHierarchy` and the *method-security* one are wired
+differently. For `@PreAuthorize` you must expose it through a
+`MethodSecurityExpressionHandler` (`DefaultMethodSecurityExpressionHandler`),
+otherwise the hierarchy applies to URL rules but silently *not* to method
+annotations.
+
 ---
 
 ## SecurityContext and SecurityContextHolder
@@ -149,6 +221,38 @@ Collection<? extends GrantedAuthority> authorities = auth.getAuthorities();
   `SecurityContextPersistenceFilter`.
 - The context is **cleared** at the end of each request to avoid leaking
   identity across pooled threads.
+
+**Concurrency / propagation depth.** Because the default strategy is
+`ThreadLocal`, propagating identity to other threads is a recurring
+senior-level topic:
+- `@Async` methods run on a task executor thread with an *empty* context unless
+  you wrap the executor in `DelegatingSecurityContextExecutor` /
+  `DelegatingSecurityContextAsyncTaskExecutor`, or set the global strategy to
+  `MODE_INHERITABLETHREADLOCAL`. Note `MODE_INHERITABLETHREADLOCAL` only copies
+  the context at thread *creation* — it does **not** work reliably with pooled
+  threads (a pooled thread created under user A keeps A's context for a task
+  later submitted by user B), which is a genuine security bug. Prefer the
+  delegating executors, which copy-on-submit and clear afterward.
+- Set the strategy *very early* (before the context is used). Boot exposes
+  `spring.security.strategy` or you call
+  `SecurityContextHolder.setStrategyName(...)`.
+- **Virtual threads (Java 21 / Boot 3.2+):** `ThreadLocal` still works, but
+  since virtual threads are cheap and short-lived, the "reuse pooled thread"
+  leak is less of an issue; still use delegating executors for structured
+  concurrency fan-out.
+
+**`getContext()` is never null but `getAuthentication()` can be.** The holder
+lazily creates an *empty* `SecurityContext` on first access on a thread, so
+`SecurityContextHolder.getContext()` never returns `null`, but
+`getAuthentication()` returns `null` on a fresh/other thread. Guarding only for
+a null *context* (instead of a null *authentication*) is a common NPE trap.
+
+**Immutability change in 6.x.** `SecurityContextHolder.getContext()` returns a
+context you should treat as effectively read-only for the current request; to
+change the principal you create a *new* `SecurityContextImpl`, set it via
+`setContext(...)`, and (for stateful flows) persist it with the
+`SecurityContextRepository`. Mutating the shared instance in place is
+discouraged and interacts badly with the deferred/lazy loading.
 
 ---
 
@@ -212,6 +316,40 @@ Advanced:
 - `eraseCredentials` is true by default — the raw password is removed from the
   authentication after success.
 
+**`ProviderManager` semantics that trip people up:**
+- Providers are tried **in order**; the *first* one whose `supports(Class)`
+  returns true **and** that does not throw is used. But an
+  `AuthenticationException` thrown by a supporting provider does **not**
+  automatically fall through to the next provider — `ProviderManager` remembers
+  the last exception and, only if *no* provider authenticated, rethrows it (or
+  tries the parent). So two providers supporting the same token type is subtle:
+  if the first throws `BadCredentialsException`, the second still gets a chance,
+  but the *first* success short-circuits the rest.
+- **Parent manager**: `ProviderManager` can delegate to a parent
+  `AuthenticationManager` if none of its own providers authenticate. The global
+  `AuthenticationManager` built by `AuthenticationConfiguration` is typically
+  that shared parent. `eraseCredentialsAfterAuthentication` is only applied by
+  the manager that produced the result, and there's a documented gotcha where a
+  parent erasing credentials can surprise a child.
+- **Obtaining the manager in Boot 3**: if you define a single `UserDetailsService`
+  + `PasswordEncoder`, Boot auto-builds a `DaoAuthenticationProvider` and you can
+  inject `AuthenticationManager` via
+  `AuthenticationConfiguration.getAuthenticationManager()`. If you instead call
+  `http.authenticationProvider(...)` / build via `AuthenticationManagerBuilder`,
+  you may get a **local** manager scoped to that `HttpSecurity` — mixing the two
+  styles is a common cause of "my custom provider is never called."
+- **`AuthenticationProvider` vs `UserDetailsService`**: implement a custom
+  `AuthenticationProvider` when you need full control of the auth *decision*
+  (e.g. call a remote IdP, multi-factor); implement `UserDetailsService` when you
+  only need to *load* a user and let `DaoAuthenticationProvider` do the password
+  check. Overriding the provider means the `PasswordEncoder` is *your*
+  responsibility.
+
+**Distinction: `AuthenticationManager` vs `AuthenticationProvider`.** The manager
+is the coordinator (`ProviderManager`) that owns the provider list and the
+credential-erasure/parent logic; a provider is one pluggable strategy that knows
+how to verify a specific `Authentication` subtype.
+
 ---
 
 ## PasswordEncoder and BCrypt
@@ -241,6 +379,34 @@ PasswordEncoder passwordEncoder() {
   `{bcrypt}` prefix as part of the hash. Match the encoder to your stored format.
 - Never log or return the encoded password; higher cost = slower login (a DoS
   vs brute-force trade-off).
+
+**`upgradeEncoding` and transparent rehashing.** `PasswordEncoder` has a third
+method, `boolean upgradeEncoding(String encoded)`, which `DelegatingPasswordEncoder`
+returns `true` for when the stored hash uses an *older* id or a *weaker* cost
+than the current default. Spring does **not** rehash automatically — *you* check
+it after a successful `matches()` (you have the raw password in hand only then)
+and re-encode + persist. This is how you migrate `{md5}`/low-cost bcrypt to
+`{argon2}` without forcing a password reset.
+
+**BCrypt's 72-byte truncation.** BCrypt only hashes the first **72 bytes** of the
+input and silently ignores the rest. Two passwords sharing a 72-byte prefix
+therefore verify as equal — a real concern for very long passphrases or when
+pre-hashing. Argon2/PBKDF2 don't have this limit. Also, the `$2a$` vs `$2b$`/`$2y$`
+prefix denotes bcrypt variants fixing a sign-extension bug; Spring's
+`BCryptPasswordEncoder` handles the common ones but the *version* is part of the
+stored string.
+
+**Timing / enumeration hardening.** `DaoAuthenticationProvider` deliberately runs
+the password encoder against a dummy hash even when the user is **not found**
+(`hideUserNotFoundExceptions` + a fixed "userNotFoundEncodedPassword"), so the
+response time doesn't reveal whether the username exists. If you write a custom
+provider and short-circuit on "user not found," you reintroduce a **timing
+side-channel** for user enumeration.
+
+**Argon2/scrypt need extra care in Spring.** `Argon2PasswordEncoder` and
+`SCryptPasswordEncoder` pull in BouncyCastle and have tunable memory/parallelism
+params; misconfiguring them low defeats the point, while too high can OOM or DoS
+your own login path under load. BCrypt cost 10–12 is a safe default for most.
 
 ---
 
@@ -300,6 +466,33 @@ In Boot 3 the modern approach uses `spring-boot-starter-oauth2-resource-server`
 with `http.oauth2ResourceServer(o -> o.jwt(...))`, which validates the signature
 via a `JwtDecoder` (JWK set or shared secret) — you rarely hand-roll JWT parsing.
 
+**Resource-server internals worth knowing:**
+- `BearerTokenAuthenticationFilter` extracts the `Authorization: Bearer` token
+  and hands it to an `AuthenticationManager` whose `JwtAuthenticationProvider`
+  calls the `JwtDecoder`. Failures produce a `401` with a
+  `WWW-Authenticate: Bearer error="invalid_token"` header via
+  `BearerTokenAuthenticationEntrypoint` — note **401**, not 403, for a
+  bad/expired token (it's an authentication failure).
+- **Decoder vs validation** are separate: `NimbusJwtDecoder` verifies the
+  signature; a chain of `OAuth2TokenValidator`s (via `setJwtValidator`) checks
+  `exp`/`nbf` (`JwtTimestampValidator`, default) plus `iss`/`aud`. Setting
+  `issuer-uri` enables `JwtIssuerValidator` and JWK-set discovery; audience
+  validation you usually add yourself. Just verifying the signature and
+  forgetting `aud`/`iss` is a real vulnerability (token-substitution across
+  services).
+- **Authority mapping default:** claims are mapped by
+  `JwtGrantedAuthoritiesConverter`, which reads the **`scope`/`scp`** claim and
+  prefixes each with **`SCOPE_`** (so `hasAuthority("SCOPE_read")` or
+  `hasRole` won't match roles from a `roles` claim unless you supply a custom
+  `JwtAuthenticationConverter`). Expecting `ROLE_` authorities out of the box is
+  a classic 403 surprise.
+- **Symmetric (HS256) secret** via `spring.security.oauth2.resourceserver.jwt.secret-key`
+  vs **asymmetric (RS256)** via `jwk-set-uri`/`public-key-location`. Prefer
+  asymmetric so the resource server only holds the *public* key and can't mint
+  tokens.
+- **Clock skew:** `JwtTimestampValidator` allows 60s default skew; tune it for
+  clock drift between issuer and resource server rather than widening `exp`.
+
 **JWT trap:** never accept `alg: none`; always validate `exp`, issuer (`iss`),
 audience (`aud`), and signature. Storing JWT in `localStorage` exposes it to XSS;
 an `HttpOnly` cookie avoids XSS reads but reintroduces CSRF concerns.
@@ -326,6 +519,35 @@ session cookie — the attacker never sees it.
   deferred token loading) — SPAs typically use the
   `CookieCsrfTokenRepository.withHttpOnlyFalse()` so JS can read the token and
   echo it in a header.
+
+**Security 6 CSRF internals (a rich source of "why does my SPA break?"):**
+- The **default request handler is `XorCsrfTokenRequestAttributeHandler`**, which
+  provides **BREACH protection** by XOR-encoding random bytes into the token so
+  the rendered value *changes on every response* even though the persisted raw
+  token is stable. It decodes the submitted value back to the raw token before
+  comparing.
+- **The classic SPA bug:** with `CookieCsrfTokenRepository.withHttpOnlyFalse()`,
+  JavaScript reads the **raw** token from the `XSRF-TOKEN` cookie and echoes it in
+  the `X-XSRF-TOKEN` header — but the default XOR handler expects the *encoded*
+  value, so validation fails with 403 on POST. In Spring Security 6 the fix is a
+  custom `CsrfTokenRequestHandler` (the reference "SpaCsrfTokenRequestHandler":
+  XOR-render the token but resolve the raw value from the header), or swap in the
+  plain `CsrfTokenRequestAttributeHandler` to opt out of BREACH. Spring Security
+  **7.0** later added the `http.csrf(c -> c.spa())` convenience method that bundles
+  this SPA wiring.
+- **Deferred/lazy loading:** the `CsrfToken` is now loaded lazily (as a
+  `Supplier`/`DeferredCsrfToken`) so the session isn't touched on every request.
+  A side effect: a token generated during the request may not be materialized
+  unless something actually reads the `_csrf` request attribute — plain server
+  templates that reference `${_csrf}` force materialization; a pure JSON API
+  returning the cookie needs the `CsrfCookieFilter`/`spa()` wiring to ensure the
+  cookie is written.
+- On login/logout, `CsrfAuthenticationStrategy` and `CsrfLogoutHandler` **rotate**
+  the CSRF token (and clear the cookie) to prevent fixation — so a token cached
+  by the client *before* login is stale afterward.
+- CSRF protection needs the request body/params to *not* be consumed first; a
+  filter that reads the POST body before `CsrfFilter` can break token
+  resolution.
 
 ---
 
@@ -394,6 +616,46 @@ Enable with `@EnableMethodSecurity` (Boot 3; replaces the deprecated
 - `@PostAuthorize` throwing after the method already ran means side effects may
   have occurred — don't rely on it for methods that mutate state.
 
+**Method security is now `AuthorizationManager`-based, with per-annotation
+interceptors at fixed advisor orders** (`AuthorizationInterceptorsOrder`):
+`@PreFilter`=100, `@PreAuthorize`=200 (`@Secured`=300, JSR-250=400 sit between),
+`@PostAuthorize`=500, `@PostFilter`=600. This ordering matters relative to
+**`@Transactional`**:
+
+- **`@PostAuthorize` + `@Transactional` on the same write method is dangerous:**
+  by default the transaction advisor can wrap *outside* the post-authorize check,
+  so the DB write commits *before* authorization is evaluated. If it then denies,
+  you've already mutated state (and the rollback depends on whether the thrown
+  `AccessDeniedException` triggers rollback). The docs' guidance: read with
+  `@PostAuthorize`, write separately — or ensure `@EnableTransactionManagement`
+  is registered *before* `@EnableMethodSecurity` so security advice runs first.
+- **Multiple annotations "and" together.** `@PreAuthorize` + `@PostAuthorize` on
+  one method both must pass. You **cannot repeat** the same annotation (two
+  `@PreAuthorize`) — use SpEL `||`/`&&` instead. Conflicting annotations are
+  detected at startup.
+- **Inheritance:** annotations are inherited from superclasses/interfaces and the
+  *whole* type hierarchy is searched; a method-level annotation overrides a
+  class-level one. But inheriting the *same* annotation from **two different
+  interfaces** is ambiguous and **fails at startup** — put it on the concrete
+  method.
+
+**`@EnableMethodSecurity(proxyTargetClass=...)` and CGLIB.** Method security uses
+Spring AOP proxies. If the bean implements an interface, a JDK dynamic proxy is
+used by default and you must call through the interface type; class-based
+(CGLIB) proxying can't advise `final` classes/methods. AspectJ mode
+(`mode = AdviceMode.ASPECTJ`) weaves at bytecode level and *can* secure private
+methods and self-invocation, at the cost of load-time/compile-time weaving.
+
+**Unannotated methods are NOT secured.** Annotation-based method security is
+opt-in per method; forgetting `@PreAuthorize` leaves a method wide open (subject
+only to URL rules). A common hardening pattern is a catch-all `anyRequest()`
+authorization rule plus reviewing service methods, or using a meta-annotation.
+
+**`@PreFilter`/`@PostFilter`** filter *collection* arguments/returns element by
+element with SpEL (`filterObject`), e.g.
+`@PostFilter("filterObject.owner == authentication.name")` prunes a returned
+`List` — a capability plain role checks lack.
+
 ---
 
 ## RBAC vs ABAC
@@ -443,6 +705,76 @@ In Spring: `spring-boot-starter-oauth2-client` for acting as a client
 (`http.oauth2Login(...)`), and `spring-boot-starter-oauth2-resource-server`
 (`http.oauth2ResourceServer(o -> o.jwt(...))`) for validating incoming access
 tokens on an API.
+
+---
+
+## Security response headers
+
+`spring-security` adds a defensive set of HTTP response headers by default via
+`HeaderWriterFilter`, and these are easy to misconfigure:
+
+- Default headers include `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` (clickjacking), `Cache-Control: no-cache, no-store...`,
+  and (over HTTPS) `Strict-Transport-Security`.
+- **`X-Frame-Options: DENY` breaks framed content** (e.g. the H2 console, or an
+  app embedded in an iframe). The fix is
+  `http.headers(h -> h.frameOptions(f -> f.sameOrigin()))`, not disabling all
+  headers. This is one of the most common "my H2 console is blank" questions.
+- **HSTS is only sent over HTTPS** by default and only makes sense there;
+  enabling `includeSubDomains`/`preload` has long-lived browser-caching
+  consequences (you can lock yourself out of HTTP subdomains).
+- **Content-Security-Policy is NOT added by default** — you must configure it
+  (`headers(h -> h.contentSecurityPolicy(...))`). Relying on Spring for XSS
+  defense via CSP without configuring it is a false sense of security.
+- `HeaderWriterFilter` runs early so headers are present even on error/denied
+  responses.
+
+---
+
+## Accessing the principal and testing security
+
+Ways to read the current user in a controller/service, and their trade-offs:
+
+- **`@AuthenticationPrincipal`** resolves the `Authentication.getPrincipal()`
+  (e.g. your `UserDetails` or an OIDC `OidcUser`) as a method argument. It uses a
+  `HandlerMethodArgumentResolver`, so it only works in **web (MVC/WebFlux)
+  controller** methods, not arbitrary beans. `@AuthenticationPrincipal(expression=...)`
+  can even navigate a SpEL path on the principal.
+- Injecting `Authentication`/`Principal` as a controller parameter also works
+  (resolved from the `SecurityContext`), but returns `null` for anonymous unless
+  you handle it.
+- `SecurityContextHolder.getContext().getAuthentication()` works **anywhere**
+  but couples code to the static holder and is null/anonymous-sensitive (see the
+  SecurityContext section).
+
+**Testing:** `spring-security-test` provides `@WithMockUser`,
+`@WithUserDetails` (loads a real `UserDetailsService` user), and
+`@WithSecurityContext` for custom setups, plus request post-processors
+(`SecurityMockMvcRequestPostProcessors.user(...)`, `.csrf()`, `.jwt(...)`). A
+frequent test bug: a `MockMvc` POST fails with 403 because CSRF is on and the
+test didn't add `.with(csrf())`; another is `@WithMockUser(roles="ADMIN")`
+granting `ROLE_ADMIN` while `authorities=` does **not** add the prefix — mirror
+the `hasRole`/`hasAuthority` distinction.
+
+---
+
+## Logout, remember-me, and authentication events
+
+- **Logout** (`LogoutFilter`) by default matches `POST /logout` (a `GET` won't
+  work when CSRF is enabled, since logout is state-changing), invalidates the
+  `HttpSession`, clears the `SecurityContext`, and deletes the remember-me and
+  `JSESSIONID` cookies. For a stateless JWT API, server-side logout is largely a
+  no-op — you rely on token expiry/denylist (see the JWT section).
+- **Remember-me** issues a separate long-lived cookie so a user stays logged in
+  across sessions. The resulting `RememberMeAuthenticationToken` is
+  authenticated but **not "fully authenticated"** — that's why `fullyAuthenticated()`
+  (vs `authenticated()`) exists: sensitive operations (change password) should
+  require a fresh login, not just a remember-me cookie.
+- **Events:** Spring publishes `AuthenticationSuccessEvent`,
+  `AbstractAuthenticationFailureEvent` (e.g. `AuthenticationFailureBadCredentialsEvent`),
+  and authorization events (`AuthorizationGrantedEvent`/`AuthorizationDeniedEvent`).
+  These are the idiomatic hook for audit logging and brute-force lockout counters
+  rather than sprinkling logging in filters.
 
 ---
 

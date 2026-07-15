@@ -27,7 +27,7 @@ try:
 except ImportError:
     sys.exit("PyYAML is required: pip install pyyaml")
 
-ALLOWED_DIFFICULTY = {"beginner", "intermediate", "advanced"}
+ALLOWED_DIFFICULTY = {"beginner", "intermediate", "advanced", "expert"}
 REQUIRED_Q_FIELDS = {"id", "difficulty", "question", "options", "answer", "explanation"}
 
 

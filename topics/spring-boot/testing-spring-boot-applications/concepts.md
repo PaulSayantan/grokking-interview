@@ -80,6 +80,34 @@ class OrderApiIT {
 - Because it loads the full context, it's the slowest option — don't reach for
   it when a slice test would do.
 
+**How the config class is discovered (the `@SpringBootConfiguration` search):**
+`@SpringBootTest` does *not* scan for `@Configuration` classes. It walks **up the
+package hierarchy** from the test class looking for exactly one
+`@SpringBootConfiguration` (your `@SpringBootApplication` is meta-annotated with
+it). If it finds **none** it throws `IllegalStateException: Unable to find a
+@SpringBootConfiguration`; if it finds **more than one** it also fails. This is
+why your test package structure must mirror the main package structure — a test in
+a package *above* the application class won't find it. You can bypass the search
+by passing explicit `classes = {...}` to `@SpringBootTest`, but doing so means
+auto-configuration and component scanning are **not** contributed unless those
+classes bring them in.
+
+**`MOCK` still needs `@AutoConfigureMockMvc` semantics:** with `webEnvironment =
+MOCK`, `MockMvc` is only auto-configured on a `@SpringBootTest` if you add
+`@AutoConfigureMockMvc` (or use the `@WebMvcTest` slice, which includes it).
+Merely writing `@SpringBootTest` and autowiring `MockMvc` will fail with a
+"no qualifying bean of type MockMvc" error unless `@AutoConfigureMockMvc` is
+present.
+
+**`DEFINED_PORT` and CI parallelism:** `DEFINED_PORT` binds the real configured
+port (default 8080) and, unlike `MOCK`/`RANDOM_PORT`, is **not** transactional by
+default in the same way — more importantly it makes tests non-parallelizable and
+flaky under CI where the port may be taken. Prefer `RANDOM_PORT`. Note also that
+with a real server (`RANDOM_PORT`/`DEFINED_PORT`) the server thread runs in its
+**own** transaction, so a test-method `@Transactional` rollback does **not** roll
+back what the server-side handler committed — a classic reason integration data
+leaks between tests.
+
 ---
 
 ## @WebMvcTest (web slice)
@@ -116,6 +144,31 @@ class OrderControllerTest {
   return 401/403 unless you add `@WithMockUser` or configure security. This
   surprises people who expected an open endpoint.
 - For WebFlux controllers use **`@WebFluxTest`** (auto-configures `WebTestClient`).
+
+**What is and isn't in the slice (subtle boundaries):**
+- `@WebMvcTest` includes `WebMvcConfigurer`, `HandlerMethodArgumentResolver`,
+  `Filter`, `HandlerInterceptor`, `@ControllerAdvice`, `@JsonComponent`,
+  `Converter`/`GenericConverter`, and the Jackson `ObjectMapper` — but **not**
+  your `@Configuration` classes that are ordinary `@Component`s, and not
+  `@Service`/`@Repository`. If a `@ControllerAdvice` depends on a `@Service`,
+  the advice loads but its dependency does not, so you must `@MockitoBean` it or
+  the context fails.
+- Passing a controller class narrows the slice: `@WebMvcTest(OrderController.class)`
+  registers *only* that controller. But `@ControllerAdvice` beans are **global**
+  and are still loaded — so a global exception handler will affect the narrowed
+  slice, which can be surprising when an advice you didn't expect maps your
+  exception to a different status.
+- **`MockMvc` matchers see the resolved response, not the raw exception:** if a
+  handler throws and no advice maps it, `@WebMvcTest` returns 500 and, by
+  default, may **rethrow** the unresolved exception so `mvc.perform(...)` throws
+  rather than returning a 500 result. Use `.andExpect(status().isInternalServerError())`
+  only when an advice actually produces the response.
+
+**`addFilters` and security filters:** `@AutoConfigureMockMvc(addFilters =
+false)` disables the servlet filter chain (including Spring Security's
+`FilterChainProxy`), which is a common way to sidestep 401s without wiring test
+security — but it also disables *any* custom filter, so it can mask real
+behavior.
 
 ---
 
@@ -158,6 +211,38 @@ class UserRepositoryTest {
   `@Commit` when you need to test commit-time behavior.
 - Testing against H2 while production uses Postgres can hide dialect-specific
   bugs — hence Testcontainers with `replace = Replace.NONE`.
+
+**The first-level cache masks `findById` bugs:** after `em.persist(entity)`, the
+same entity instance lives in the persistence context. A subsequent
+`repo.findById(id)` returns the **identical object from the first-level cache**
+without hitting the DB — so a broken column mapping (wrong `@Column` name, missing
+getter) can pass. To test a true round-trip, call `em.flush()` then `em.clear()`
+(or `TestEntityManager.clear()`) to detach everything and force a fresh SELECT.
+
+**Auto-generated schema vs your migrations:** `@DataJpaTest` sets
+`spring.jpa.hibernate.ddl-auto` behavior such that Hibernate creates the schema
+from your `@Entity` mappings by default on the embedded DB. This means Flyway/
+Liquibase migrations are **not** the source of truth in the slice — a test can pass
+against the Hibernate-generated schema while the real migration is broken. Use
+`@AutoConfigureTestDatabase(replace = NONE)` + Testcontainers + migrations to test
+the actual schema. (Flyway/Liquibase auto-configuration *does* run in
+`@DataJpaTest` if present, which can itself conflict with Hibernate DDL.)
+
+**`@DataJpaTest` and multiple `DataSource`s:** the slice expects a single
+`DataSource`. If your app defines several, the auto-replacement and repository
+wiring become ambiguous and you generally must fall back to `@SpringBootTest`
+with explicit configuration.
+
+**Repository query method verification:** validation timing differs by query kind.
+`@Query` **JPQL/HQL** is parsed by Hibernate at `EntityManagerFactory` bootstrap,
+and **derived** query methods are parsed by Spring Data (PartTree → property paths)
+at repository initialization — so with the default (eager) bootstrap mode both a
+JPQL typo and a derived-query property typo typically fail at **context startup**
+(a `@DataJpaTest` catches them even without calling the method). The real blind spot
+is a **native** query (`@Query(nativeQuery = true)`): its SQL is an opaque string
+not validated until it actually executes against the DB, so a `@DataJpaTest` that
+never invokes it won't catch a bad column/table name. (With lazy/deferred bootstrap
+mode, even derived-query validation is deferred to first use.)
 
 ---
 
@@ -204,6 +289,27 @@ class WeatherClientTest {
 to a single concern (JSON shape / outbound HTTP contract) without loading the
 whole app.
 
+**`@RestClientTest` binding gotcha:** `MockRestServiceServer` binds to the
+`RestTemplate`/`RestClient` **that the slice built for your client** via the
+auto-configured `RestTemplateBuilder`/`RestClient.Builder`. If your client
+constructs its own `new RestTemplate()` internally instead of accepting a builder,
+the mock server is bound to a different instance and your expectations are **never
+matched / never satisfied** (`server.verify()` reports no calls, or real HTTP
+leaks out). Always inject the builder.
+
+**Expectation ordering and counts:** by default `MockRestServiceServer` expects
+requests in the **declared order** and **exactly once** each. Use
+`ExpectedCount.manyTimes()`, `.times(n)`, `never()`, or build the server with
+`ignoreExpectOrder(true)` when the client makes calls in a nondeterministic order.
+Forgetting `server.verify()` means unfulfilled expectations pass silently.
+
+**`@JsonTest` uses the app's `ObjectMapper` customizations:** it applies your
+`Jackson2ObjectMapperBuilderCustomizer` beans and `spring.jackson.*` properties,
+so it reflects real serialization config (e.g. `WRITE_DATES_AS_TIMESTAMPS=false`,
+property naming strategy). A plain `new ObjectMapper()` in a unit test would
+**not** — which is exactly why `@JsonTest` catches config-dependent bugs a POJO
+test misses.
+
 ---
 
 ## Slice tests and context caching
@@ -233,6 +339,40 @@ property `spring.test.context.cache.maxSize`).
 **Interview trap:** mutating a shared bean's state in a test can leak into later
 tests that reuse the cached context. Either avoid stateful singletons in tests,
 use `@DirtiesContext`, or reset state in `@AfterEach`.
+
+**Exactly what goes into the cache key (`MergedContextConfiguration`):** the key
+is composed of the *locations/classes*, *context initializers*, *active
+profiles*, *property sources* (`@TestPropertySource` inline + files),
+*`ContextCustomizer`s* (which include the set of `@MockitoBean`/`@MockBean`
+definitions, `@DynamicPropertySource`, `webEnvironment`, `@MockMvcPrint`, etc.),
+the *`ContextLoader`*, and the *parent context*. Two test classes share a context
+**iff all of these are equal**. Consequences interviewers probe:
+- Even the **field name** of a `@MockitoBean` participates (via its
+  `ContextCustomizer`'s equals/hashCode in recent versions) — inconsistent naming
+  of the same mock across classes can create redundant contexts.
+- `properties = {"a=1","b=2"}` and `properties = {"b=2","a=1"}` are normalized, so
+  ordering there doesn't matter — but a value that differs (even a timestamp) does.
+- `@DynamicPropertySource` values are resolved lazily, but their **presence**
+  contributes a customizer, so tests with and without it don't share a context.
+
+**Cache statistics for debugging:** enable `logging.level.org.springframework.
+test.context.cache=DEBUG` to log hit/miss/size. A suite that is mysteriously slow
+often has dozens of near-identical-but-not-equal configurations thrashing the
+32-entry LRU — each miss triggers a full context build, and eviction **closes**
+the evicted context (running `@PreDestroy`, shutting embedded servers).
+
+**`@DirtiesContext` modes and timing:** `classMode`
+(`AFTER_CLASS`/`AFTER_EACH_TEST_METHOD`/`BEFORE_CLASS`) and `methodMode`
+(`BEFORE_METHOD`/`AFTER_METHOD`) control *when* eviction happens. `AFTER_CLASS` is
+usually the least-bad option because it still shares the context within the class.
+`hierarchyMode` controls whether the whole context hierarchy or just the current
+level is evicted.
+
+**Parallel execution caveat:** the context cache is thread-safe and shared, but
+tests that mutate shared singleton/mock state are **not** safe to run in parallel
+against the same cached context. JUnit 5 parallelism plus `@MockitoBean` on a
+shared context is a well-known source of flakiness because mock reset and
+concurrent stubbing race.
 
 ---
 
@@ -276,6 +416,39 @@ Spring test does **not** put it in the context; the real bean is still autowired
 and your "mock" is ignored. You almost always want `@MockBean`/`@MockitoBean`
 there.
 
+**Bean resolution rules for `@MockitoBean` (deep):**
+- On a **field**, the target is resolved **by type**. If several beans of that
+  type exist, Spring uses the field name (or a `@Qualifier`) as a fallback
+  qualifier; if still ambiguous, the context **fails** with an error telling you
+  to disambiguate.
+- **`@MockitoBean` uses the `REPLACE_OR_CREATE` strategy:** if **no** bean of the
+  type exists, it **creates a new one** rather than failing. That means a typo in
+  the type or a bean that isn't actually in the slice will silently add a brand-new
+  mock bean instead of replacing anything — a subtle source of "my stub does
+  nothing" bugs. Set `enforceOverride = true` (`REPLACE` strategy) to require an
+  existing bean and fail otherwise.
+- **`@MockitoSpyBean` uses the `WRAP` strategy** and requires **exactly one**
+  existing candidate; zero candidates is an error (it cannot create one), and
+  multiple candidates need a qualifier.
+- **Scoped-proxy beans cannot be spied** (`@Scope(proxyMode = TARGET_CLASS)`)
+  — the attempt fails. Non-singleton (prototype/request) beans are **converted to
+  singleton** when mocked/spied.
+- For a `FactoryBean`, mocking replaces it with a mock of the **produced object
+  type**, not the factory.
+
+**Why `@MockitoBean` fields are static-safe but reset-sensitive:** the mock lives
+in the (possibly cached) context, but Spring Boot resets it around every test
+method. So a stub set in `@BeforeAll` (static, runs once) is **wiped** before the
+first test unless re-stubbed in `@BeforeEach` — a frequent "stub disappeared"
+gotcha.
+
+**`@Mock` + `MockitoExtension` inside a Spring test:** if you *do* add
+`@ExtendWith(MockitoExtension.class)` alongside `@SpringBootTest`, the two
+extensions can conflict over lifecycle and, with strict stubbing, throw
+`UnnecessaryStubbingException` for stubs that Spring-injected beans never touched
+(because your `@Mock` isn't the injected instance). Keep Mockito's extension out of
+Spring tests and use `@MockitoBean`.
+
 ---
 
 ## MockMvc vs TestRestTemplate vs WebTestClient
@@ -310,6 +483,28 @@ the idiomatic choice for WebFlux and increasingly for MVC too.
 **Trap:** using `TestRestTemplate` with the default `MOCK` web environment fails
 because there is no listening port — switch to `RANDOM_PORT`.
 
+**MockMvc's Hamcrest style vs `MockMvcTester` (Spring Framework 6.2+):** classic
+`MockMvc` uses static-imported Hamcrest matchers (`status()`, `jsonPath()`),
+requires `throws Exception` on the test method, and needs special handling for
+async (`asyncDispatch`). **`MockMvcTester`** is the newer AssertJ-based entry point
+(`MockMvcTester.from(context)` / `.create(mockMvc)`): both request building and
+assertions are fluent (`assertThat(mvc.get().uri("/x")).hasStatusOk()`), it
+**handles unresolved exceptions itself** so tests need not declare `throws
+Exception`, and async results are **complete by default** with no `asyncDispatch`.
+It coexists with plain MockMvc and can be created from an existing `MockMvc`.
+
+**MockMvc does not run real filters unless configured:** with `@WebMvcTest`/
+`@SpringBootTest` MockMvc *does* register the Spring-managed filter chain by
+default (including Security). But it still bypasses the servlet container's own
+request lifecycle (no real `ServletContext` request parsing, no connector). And
+`forward`/`redirect` are asserted via `forwardedUrl`/`redirectedUrl` matchers —
+MockMvc does not actually perform the forward.
+
+**`WebTestClient.bindToController`/`bindToApplicationContext`:** `WebTestClient`
+can test MVC controllers **without a server** (mock request/response, like
+MockMvc) via `MockMvcWebTestClient`, or hit a real `RANDOM_PORT` server. So the
+"WebTestClient == reactive only" belief is wrong; it's the unified fluent client.
+
 ---
 
 ## @TestConfiguration and test-specific beans
@@ -341,6 +536,22 @@ in some setups, or use `@MockitoBean` which is designed to replace.)
 **Contrast with `@Configuration`:** a plain `@Configuration` placed in the test
 source tree *can* be component-scanned and leak into production-style contexts;
 `@TestConfiguration` is explicitly scoped to opt-in test usage.
+
+**Bean overriding rules and `@Primary`:** since Spring Boot 2.1,
+`spring.main.allow-bean-definition-overriding` defaults to **false**, so a
+`@TestConfiguration` `@Bean` that has the **same name** as a production bean throws
+`BeanDefinitionOverrideException` at startup unless you enable overriding or the
+test bean is `@Primary` (which resolves by-type injection without a name clash) or
+you give it a distinct name. This is why `@MockitoBean` (which *replaces* rather
+than *redefines*) is often cleaner than a `@TestConfiguration` override — it
+sidesteps the override flag entirely.
+
+**`@Import` vs nested vs `@ContextConfiguration`:** a nested static
+`@TestConfiguration` is auto-detected **only** for the test class that encloses it;
+a top-level `@TestConfiguration` must be `@Import`ed (or referenced) and is *not*
+picked up by another test's component scan. Importantly, `@Import`ing a
+`@TestConfiguration` **adds** to the discovered `@SpringBootConfiguration` rather
+than replacing it — so you still get full auto-configuration plus your test beans.
 
 ---
 
@@ -381,6 +592,37 @@ Two integration styles in Spring Boot 3.1+:
 Pair with `@DataJpaTest` + `@AutoConfigureTestDatabase(replace = Replace.NONE)` to
 run repository tests against a real DB. Downsides: requires Docker and is slower —
 so keep these tests near the top of the pyramid.
+
+**Container reuse and the singleton-container pattern:** starting a container per
+class (even `static`) is still expensive across many classes. Two techniques:
+1. **`.withReuse(true)`** plus `testcontainers.reuse.enable=true` in
+   `~/.testcontainers.properties` keeps the container **alive between JVM runs**
+   (great for local iteration; usually disabled in CI). Reuse requires a stable
+   container config so Testcontainers can match the existing one by hash.
+2. **Singleton container pattern:** declare the container `static` in a base class
+   and **start it manually** (`pg.start()` in a static block) *without* the
+   `@Testcontainers`/`@Container` JUnit lifecycle, so a single container is shared
+   across all test classes and never stopped (Ryuk cleans it up at JVM exit). This
+   maximizes reuse and pairs well with a **shared cached context**.
+
+**`@ServiceConnection` vs `@DynamicPropertySource` precedence:** `@ServiceConnection`
+works through `ConnectionDetails` beans, which take precedence over ordinary
+properties. If you register both, the `ConnectionDetails` win — mixing them can
+mask a mistyped `@DynamicPropertySource`. `@ServiceConnection` only works for
+container types Boot recognizes (Postgres, MySQL, Mongo, Redis, Kafka, etc.);
+for arbitrary containers you still need `@DynamicPropertySource`.
+
+**Boot 3.1 `@Testcontainers` at development time:** `@ImportTestcontainers` and the
+`spring-boot-testcontainers` module let you define containers as `@Bean`s
+(`@TestConfiguration`) and even run the app locally against them (`SpringApplication`
+`.from(...).with(...)`), unifying test and dev-time infra.
+
+**Startup ordering trap:** `@DynamicPropertySource` methods run **before** the
+context is refreshed, and `static @Container` fields are started by the
+`TestcontainersExtension` before that too — but only if `@Testcontainers` is
+present. If you forget `@Testcontainers`, a `static` container is **never
+started**, and `getJdbcUrl()` is called on a stopped container, yielding a
+confusing `IllegalStateException`.
 
 ---
 
@@ -426,6 +668,45 @@ class PricingTest {
 }
 ```
 
+**Deeper Mockito traps interviewers use:**
+- **Strictness levels:** `MockitoExtension` defaults to `Strictness.STRICT_STUBS`
+  (unused stubs fail, argument mismatches are flagged). Override per class with
+  `@MockitoSettings(strictness = Strictness.LENIENT)` or per-stub with
+  `lenient().when(...)`. JUnit 4's `MockitoJUnitRunner` had `WARN` legacy
+  behavior; plain `MockitoAnnotations.openMocks` has **no** strictness enforcement.
+- **`@InjectMocks` injection algorithm:** Mockito tries **constructor injection
+  first** (biggest constructor it can satisfy), then setter, then field. If the
+  biggest constructor has a parameter with **no matching mock**, that parameter is
+  injected as `null` — no error — which surfaces later as an NPE. Multiple mocks of
+  the same type are matched **by field name**; a name mismatch leaves the field
+  null.
+- **`any()` vs `null` and primitives:** the **no-arg `any()`** matches
+  *anything, including `null`* (and varargs); it is **`any(Class)`** that
+  **excludes `null`** since Mockito 2.1.0 — use `isNull()` / `nullable(Class)` to
+  match null there. Separately, `anyInt()`/`anyLong()` must be used for primitives —
+  passing the object matcher `any()` for a primitive parameter returns `null`,
+  which unboxes and throws an NPE.
+- **Mixing matchers and raw values:** if one argument uses a matcher, **all** must
+  (`eq("x")` for the literal), or Mockito throws
+  `InvalidUseOfMatchersException`.
+- **`spy()` self-invocation (contrast with AOP):** a Mockito spy is a ByteBuddy
+  **subclass** with the real object's state copied in — every call on the spy
+  reference, *including internal `this.other()` self-invocations*, dispatches
+  through the spy subclass and **is** intercepted, so a stubbed self-invoked method
+  **does** return its stub. This is the **opposite** of Spring AOP/`@Transactional`
+  proxies, where `this` is the raw target and self-invocation bypasses the proxy.
+  (The reason to prefer `doReturn(x).when(spy).m()` over `when(spy.m())` is
+  different: the latter *executes the real `m()`* while setting up the stub.)
+- **Static/final and mocking:** mocking `static` methods needs
+  `mockito-inline`/`mockStatic` (a `MockedStatic` scoped in try-with-resources,
+  thread-local — must be closed or it leaks to other tests on the same thread).
+
+**`@ParameterizedTest` + `@MethodSource` gotcha:** the factory method must be
+`static` (unless the class is `@TestInstance(PER_CLASS)`) and its name must match
+or be given explicitly. Argument type coercion for `@CsvSource` follows implicit
+conversion rules — a common surprise is that an empty string becomes `""` while a
+missing value becomes `null`.
+
 ---
 
 ## Verifying transactions and rollback in tests
@@ -455,6 +736,83 @@ that only check the entry method can miss this. Verify by calling through the
 proxied (injected) bean.
 
 ---
+
+## Slice internals: @AutoConfigure*, @ImportAutoConfiguration, filters
+
+Every slice annotation is assembled from smaller pieces, and understanding them
+lets you extend a slice without escalating to `@SpringBootTest`:
+
+- **`@ImportAutoConfiguration`** imports a *specific* auto-configuration class into
+  a slice that wouldn't otherwise include it (e.g. pulling `FlywayAutoConfiguration`
+  into a `@DataJpaTest`). Unlike `@EnableAutoConfiguration`, it imports **only**
+  what you name (and its `META-INF/spring/...AutoConfiguration.imports` group),
+  keeping the slice minimal.
+- **`@AutoConfigure...` companions** (`@AutoConfigureTestDatabase`,
+  `@AutoConfigureJson`, `@AutoConfigureMockMvc`, `@AutoConfigureWebTestClient`,
+  `@AutoConfigureDataJpa`) each contribute a slice of auto-config. They are
+  additive: you can stack `@WebMvcTest` + `@AutoConfigureRestDocs`.
+- **`@TypeExcludeFilters`** is *how* slices keep other components out. Each slice
+  registers a filter (e.g. `WebMvcTypeExcludeFilter`) that lets through only the
+  slice's stereotypes and drops `@Service`/`@Repository`/`@Component`. Your custom
+  `@ComponentScan` `includeFilters` won't re-add them inside a slice.
+- **`@ContextConfiguration(initializers = ...)`** and `ApplicationContextInitializer`
+  run **before** the context refreshes and can register additional property
+  sources or bean definitions — the mechanism `@DynamicPropertySource` and
+  Testcontainers integrations build on.
+
+**Extending a slice with real collaborators:** to include one extra real bean in a
+web slice, `@Import` its `@Configuration` or use `@AutoConfigureXxx` — but if you
+find yourself importing many, you've outgrown the slice and should use
+`@SpringBootTest` with `@AutoConfigureMockMvc`.
+
+## Flaky tests, ordering, isolation, and parallelism
+
+Senior interviews probe *why suites flake*:
+
+- **Test ordering:** JUnit 5 runs methods in a **deterministic but intentionally
+  non-obvious** order by default (`MethodOrderer` not applied). Never rely on
+  method order; use `@TestMethodOrder(OrderAnnotation.class)` only when genuinely
+  needed. Order-dependence usually signals **shared mutable state** — a leaked
+  static, a committed row (real-server integration test), or a mutated cached
+  singleton.
+- **State leakage across the cached context:** because contexts are shared,
+  a `@Component` that caches data, a static field, or a `@MockitoBean` whose stub
+  from a prior class lingers (it shouldn't — it's reset — but a **manually created**
+  Mockito mock stored in a bean would) all cause order-dependent failures. The fix
+  is usually `@AfterEach` cleanup, `@DirtiesContext` (last resort), or redesigning
+  away shared state.
+- **Time and randomness:** inject a `Clock` and mock it (`Clock.fixed`) rather than
+  calling `Instant.now()`; seed randomness. `@Scheduled`/`@Async` beans running in
+  the background during a test are a classic flake source — disable scheduling in
+  tests (`spring.task.scheduling.*` / conditional `@EnableScheduling`) or use
+  `Awaitility` to await instead of `Thread.sleep`.
+- **Parallelism:** JUnit 5 parallel execution
+  (`junit.jupiter.execution.parallel.enabled=true`) can dramatically speed suites,
+  but `@SpringBootTest` classes sharing a cached context that mutate state, or two
+  `DEFINED_PORT` servers, will collide. Use `@ResourceLock` or
+  `@Execution(SAME_THREAD)` to serialize the risky ones.
+- **Testing `@Async`:** a method annotated `@Async` returns before completion; a
+  test must await the returned `CompletableFuture` or use `Awaitility`. If the test
+  is `@Transactional`, the async thread runs in a **different** transaction (and
+  can't see the test's uncommitted data) — a subtle correctness trap.
+
+## Testing security and web layers deeply
+
+- **`@WithMockUser` / `@WithUserDetails` / `@WithSecurityContext`** populate the
+  `SecurityContext` for a test method. `@WithMockUser(roles = "ADMIN")` sets
+  authority `ROLE_ADMIN`; specifying `authorities` instead sets them verbatim
+  (no `ROLE_` prefix) — mixing these up is a common cause of unexpected 403s.
+- **`SecurityMockMvcRequestPostProcessors`** (`with(user(...))`, `with(csrf())`,
+  `with(jwt())`) apply security per-request without an annotation. **CSRF:** for
+  state-changing MockMvc requests against a Security-enabled slice you must add
+  `with(csrf())` or the request is 403 — a frequent "my POST test returns 403"
+  surprise.
+- **`spring-security-test`** is a separate dependency; without it the annotations
+  and post-processors aren't available.
+- **`@WebMvcTest` + method security (`@PreAuthorize`)**: method-level security is
+  applied by an AOP interceptor on the *service* layer, which the web slice does
+  **not** load. So `@PreAuthorize` on a service is **not** exercised by
+  `@WebMvcTest`; only URL-based `HttpSecurity` rules are.
 
 ## Common follow-up questions
 
@@ -495,7 +853,13 @@ proxied (injected) bean.
   https://docs.spring.io/spring-framework/reference/testing/testcontext-framework.html
 - Spring Framework — `@MockitoBean` / `@MockitoSpyBean` (bean overriding):
   https://docs.spring.io/spring-framework/reference/testing/annotations/integration-spring/annotation-mockitobean.html
+- Spring Framework — MockMvcTester (AssertJ MockMvc integration):
+  https://docs.spring.io/spring-framework/reference/testing/mockmvc/assertj.html
+- Spring Security — Testing (`@WithMockUser`, MockMvc post-processors):
+  https://docs.spring.io/spring-security/reference/servlet/test/index.html
 - Testcontainers for Java: https://java.testcontainers.org/
+- Testcontainers — container reuse:
+  https://java.testcontainers.org/features/reuse/
 - Spring Boot + Testcontainers (`@ServiceConnection`):
   https://docs.spring.io/spring-boot/reference/testing/testcontainers.html
 - Baeldung — Testing in Spring Boot: https://www.baeldung.com/spring-boot-testing

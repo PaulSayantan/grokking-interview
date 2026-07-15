@@ -164,6 +164,25 @@ is bound to the Reactor context, not a ThreadLocal.
 `ReactiveTransactionManager` extend the empty marker interface
 `TransactionManager`.
 
+**`DataSourceTransactionManager` vs `JdbcTransactionManager`:** Spring 5.3
+introduced `JdbcTransactionManager` as a drop-in subclass of
+`DataSourceTransactionManager` that additionally performs **SQLException
+translation** (via a `SQLExceptionTranslator`) on commit/rollback failures,
+converting them into Spring's `DataAccessException` hierarchy. Spring Boot's
+`DataSourceTransactionManagerAutoConfiguration` registers a
+`JdbcTransactionManager` for plain-JDBC setups. Functionally they behave
+identically for demarcation; the difference is exception translation.
+
+**`getTransaction` semantics:** the method name is misleading — it does *not*
+always "get" (create) a physical transaction. Depending on propagation it may
+create one, join the existing one, suspend it, or return a status representing
+"no transaction." The returned `TransactionStatus` exposes `isNewTransaction()`
+(true only for the outermost participant that actually began the physical
+transaction), `isRollbackOnly()`, `hasSavepoint()`, and `setRollbackOnly()`.
+When a REQUIRED method *joins*, `commit()` on the inner status is essentially a
+**no-op** — only the outermost `commit()` (the one that owns the new
+transaction) actually commits to the database.
+
 ---
 
 ## Propagation
@@ -389,6 +408,174 @@ modifies the bytecode directly rather than using a proxy.) Also, on CGLIB, a
 **Bonus trap:** `@Transactional` on an interface method with JDK proxies works,
 but Spring recommends annotating **concrete classes**, because CGLIB proxies
 can't see interface-level annotations.
+
+---
+
+## Transaction synchronization & lifecycle callbacks
+
+Spring exposes hooks to run code at well-defined points in a transaction's
+lifecycle via `TransactionSynchronization` (registered through
+`TransactionSynchronizationManager.registerSynchronization(...)`), or, more
+ergonomically, `@TransactionalEventListener`.
+
+**The classic ordering trap:** `beforeCommit` runs *before* the physical
+commit; `afterCommit` and `afterCompletion` run *after*. Work that must be
+visible to other transactions (e.g. publishing a Kafka/SNS message, evicting a
+distributed cache, sending an email) belongs in **`afterCommit`** — if you fire
+it inside the transaction and the commit later fails, you have published a
+message for data that was never persisted (a "dual-write"/phantom-notification
+bug). Conversely, `afterCommit` is **not guaranteed to have its own
+transaction**: any data access you perform there runs *outside* the committed
+transaction unless you open a new one.
+
+```java
+@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+public void on(OrderPlaced e) {
+    // runs only if the tx committed; NOT inside that tx anymore
+    notificationClient.send(e);       // safe: order is durably persisted
+}
+```
+
+Key gotchas:
+- `@TransactionalEventListener` with the default `AFTER_COMMIT` phase **silently
+  does nothing** if the event is published with **no active transaction** —
+  unless you set `fallbackExecution = true`. This is a very common "my listener
+  never fires in a unit test" bug.
+- Exceptions thrown from `afterCommit` **cannot** roll back the transaction (it
+  already committed) — they propagate to the caller and can leave you in a
+  half-done state; `afterCompletion` swallows/ logs exceptions.
+- `TransactionSynchronizationManager.isActualTransactionActive()` tells you
+  whether a *real* physical transaction is bound (as opposed to just
+  synchronization being active), useful for defensive assertions.
+
+---
+
+## Locking: optimistic vs pessimistic
+
+Isolation levels alone don't solve the **lost update** problem for
+read-modify-write cycles across separate transactions. Two complementary tools:
+
+**Optimistic locking** — add a `@Version` column (int/long/timestamp).
+Hibernate appends `WHERE id = ? AND version = ?` on updates and bumps the
+version; if zero rows match, someone else changed it first and Hibernate throws
+`OptimisticLockException` / Spring's `ObjectOptimisticLockingFailureException`.
+No DB locks are held between read and write — great for low-contention, high-read
+workloads. The failure surfaces at **flush/commit**, so you must handle it there
+(often with a retry).
+
+**Pessimistic locking** — acquire a DB row lock up front:
+`@Lock(LockModeType.PESSIMISTIC_WRITE)` on a query method (issues `SELECT ... FOR
+UPDATE`), blocking other writers until your tx ends. Use for high-contention
+hotspots (inventory counters, sequence tables). Risks: lock wait timeouts,
+deadlocks, reduced throughput. `PESSIMISTIC_READ` (shared) vs `PESSIMISTIC_WRITE`
+(exclusive); a `jakarta.persistence.lock.timeout` hint bounds the wait.
+
+**Gotcha:** optimistic locking only protects entities you actually load *and*
+version. A bulk JPQL `UPDATE` bypasses the version check and dirty checking
+entirely. Also, `@Version` conflicts throw at flush time, which may be at commit
+— so a `try/catch` inside the method body won't catch it unless you force a
+flush.
+
+---
+
+## Connection acquisition, flush timing & lazy loading
+
+**When is the JDBC connection acquired?** With Hibernate's default
+`connection.handling_mode` (`DELAYED_ACQUISITION_AND_RELEASE_AFTER_TRANSACTION`
+for resource-local JPA), the physical connection is obtained **lazily** — on the
+first statement, not when the transaction opens. So a `@Transactional` method
+that never touches the DB may never borrow a connection. This matters for pool
+sizing and for `REQUIRES_NEW` reasoning.
+
+**Flush vs commit:** `flush()` pushes pending SQL (INSERT/UPDATE/DELETE) to the
+DB so it's visible **within** the transaction and to subsequent queries, but it
+does **not** commit — a rollback still undoes it. Auto-flush is triggered before
+queries (to keep results consistent) and at commit. `readOnly = true` sets flush
+mode to MANUAL so this doesn't happen.
+
+**`LazyInitializationException`:** the persistence context (Hibernate `Session`)
+lives only for the transaction. Accessing a lazy association *after* the
+`@Transactional` service method returns (e.g. in the view/controller layer)
+throws `LazyInitializationException` because the session is closed. The
+anti-pattern fix is Open-Session-In-View (OSIV, on by default in Spring Boot —
+`spring.jpa.open-in-view=true`), which keeps the session open for the whole
+request; the proper fix is to fetch what you need inside the transaction (fetch
+joins, entity graphs, DTO projections). OSIV can silently hold a connection for
+the entire request and hide N+1 problems.
+
+---
+
+## @Transactional in tests & @Transactional class-level defaults
+
+**Tests:** `@Transactional` on a JUnit test (or test class) makes Spring
+**roll back** the transaction after each test method by default, keeping the DB
+clean between tests. Use `@Commit` or `@Rollback(false)` to override. A key
+trap: because everything runs in one transaction, `flush`/`commit`-time
+constraints (unique keys, `@Version`, deferred FKs) may **not** surface during
+the test the way they would in production; and `@TransactionalEventListener`
+`AFTER_COMMIT` handlers never fire because the test transaction never commits.
+
+**Class-level annotation & merging:** a method-level `@Transactional` fully
+**overrides** (does not merge with) the class-level one for that method — you
+re-specify every attribute you want, defaults apply to the rest. Spring resolves
+the most specific annotation (method > class > superclass/interface) via
+`AnnotationTransactionAttributeSource`.
+
+---
+
+## Failure modes & advanced gotchas
+
+- **`@Transactional` on a bean created before the tx infrastructure** (e.g. a
+  `BeanPostProcessor`, `@Configuration` class methods, or an infrastructure
+  bean) may not be proxied — advice ordering matters.
+- **Multiple transaction managers:** with two `DataSource`s you must
+  disambiguate via `@Transactional("orderTxManager")` (the `value`/
+  `transactionManager` attribute) or a `@Primary` manager; otherwise Spring
+  can't decide and startup may fail or the wrong DB is used. A single
+  `@Transactional` **cannot span two non-XA `DataSource`s** — that needs JTA/XA
+  or the chained/best-effort-1PC pattern.
+- **`@Async` + `@Transactional` on the same method:** the async proxy and the
+  tx proxy interplay means the transaction runs on the **executor thread**, and
+  the caller's transaction (if any) is *not* propagated. Ordering of the two
+  advices is set by `@Order`; get it wrong and you may commit before the async
+  work runs.
+- **Rollback-only "poisoning":** in a REQUIRED chain, once any participant sets
+  rollback-only, the whole transaction is doomed. Catching the inner exception
+  in the outer method does **not** rescue it — you get `UnexpectedRollbackException`
+  at the top. To let the outer survive the inner's failure, the inner must be
+  `REQUIRES_NEW` (or `NESTED` with savepoint support).
+- **Silent no-op self-invocation** applies to *all* proxy-based advice, not just
+  transactions (also `@Cacheable`, `@Async`, `@PreAuthorize`).
+- **`Propagation.NESTED` + JPA:** even where savepoints work, the `EntityManager`
+  is shared, so a nested rollback to savepoint does **not** reset the in-memory
+  persistence-context state — entities modified before the savepoint remain
+  "dirty" in the session, which can cause surprising re-flushes. Often you must
+  `clear()` the context.
+- **Read-only + write:** on some setups a write in a `readOnly` Hibernate tx is
+  silently discarded (flush skipped); on others (e.g. connection set read-only at
+  the driver) it throws. Never rely on `readOnly` for correctness.
+
+---
+
+## Distributed / XA transactions
+
+A single Spring transaction over one resource is 1-phase (simple commit). Across
+**multiple resources** (two databases, DB + JMS broker) you need **XA / 2-phase
+commit (2PC)** coordinated by a JTA transaction manager (`JtaTransactionManager`
+delegating to Atomikos, Narayana, or a Jakarta EE server). Phase 1 = prepare
+(each resource votes), phase 2 = commit/rollback all.
+
+Trade-offs & alternatives:
+- 2PC is slow, holds locks across the prepare window, and has a **blocking**
+  failure mode if the coordinator dies after prepare.
+- Modern microservice guidance avoids distributed transactions in favor of the
+  **Saga pattern** (a sequence of local transactions with compensating actions)
+  or the **transactional outbox** (write the event to an outbox table in the
+  *same* local transaction, relay it asynchronously) for exactly-once-ish
+  messaging without XA.
+- `ChainedTransactionManager` (now deprecated) offered "best-effort 1PC" —
+  commit resources in sequence; it can still leave you inconsistent if the second
+  commit fails after the first succeeded.
 
 ---
 

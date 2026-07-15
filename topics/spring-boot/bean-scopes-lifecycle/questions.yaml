@@ -509,21 +509,23 @@ questions:
     ref: "concepts.md#beanpostprocessor"
 
   - id: bean-scopes-lifecycle-031
-    difficulty: advanced
-    tags: [beanpostprocessor, ordering, caveat]
+    difficulty: intermediate
+    tags: [beanpostprocessor, callbacks, timing]
     question: |
-      A logging BeanPostProcessor depends on a @Transactional service bean. What is a
-      well-known risk?
+      A BeanPostProcessor needs to inspect a bean's populated fields BEFORE that bean's
+      @PostConstruct / afterPropertiesSet initialization callbacks run. Which callback should
+      it use?
     options:
-      - "The service will be created twice"
-      - "The service is forced into early instantiation to satisfy the BPP and may skip auto-proxying (not eligible for auto-proxying warning)"
-      - "The BPP will never run"
-      - "Transactions will be applied to the BPP itself"
-    answer: 1
+      - "postProcessBeforeInitialization"
+      - "postProcessAfterInitialization"
+      - "postProcessBeanFactory"
+      - "afterPropertiesSet"
+    answer: 0
     explanation: |
-      BPPs are created before regular beans. A bean that a BPP depends on gets instantiated
-      early, before the auto-proxy BPP is ready, so it may miss proxying — Spring logs a
-      'not eligible for auto-proxying' warning.
+      postProcessBeforeInitialization runs after property population but before the init
+      callbacks (@PostConstruct → afterPropertiesSet → init-method). postProcessAfterInitialization
+      runs after them and is where AOP proxies are substituted; postProcessBeanFactory and
+      afterPropertiesSet are unrelated (BFPP and an init callback respectively).
     ref: "concepts.md#beanpostprocessor"
 
   - id: bean-scopes-lifecycle-032
@@ -993,3 +995,825 @@ questions:
       Spring singletons are per-container. Two contexts each create their own Foo instance,
       confirming Spring's singleton is not the JVM-wide GoF singleton.
     ref: "concepts.md#singleton-scope"
+
+
+  - id: bean-scopes-lifecycle-059
+    difficulty: expert
+    tags: [circular-dependency, constructor-injection, startup]
+    question: |
+      Beans A and B each require the other via CONSTRUCTOR injection, both singletons. What
+      happens when the context refreshes?
+    options:
+      - "Spring resolves it transparently using the three-level cache, as with setter injection"
+      - "One bean is silently injected with null and the app starts"
+      - "Spring throws BeanCurrentlyInCreationException at startup because there is no post-instantiation moment to expose an early reference for a constructor-injected bean"
+      - "Spring falls back to prototype scope for one of the beans to break the cycle"
+    answer: 2
+    explanation: |
+      The three-level cache works by exposing an early reference AFTER instantiation but
+      before population. Constructor injection needs the collaborator DURING instantiation,
+      so no early reference can exist — Spring fails fast with BeanCurrentlyInCreationException.
+    ref: "concepts.md#circular-dependencies-and-the-three-level-cache"
+
+  - id: bean-scopes-lifecycle-060
+    difficulty: expert
+    tags: [circular-dependency, three-level-cache, aop]
+    question: |
+      In the three-level singleton cache, what is the specific purpose of the third level
+      (singletonFactories / ObjectFactory), as opposed to just a two-level cache?
+    options:
+      - "So that when a bean must be AOP-proxied, the early reference exposed to a circular collaborator is the SAME proxy that ends up as the final bean, keeping references consistent"
+      - "To make prototype beans cacheable"
+      - "To store bean definitions before instantiation"
+      - "To allow lazy beans to be created on a background thread"
+    answer: 0
+    explanation: |
+      The level-3 ObjectFactory invokes getEarlyBeanReference, letting a
+      SmartInstantiationAwareBeanPostProcessor create the proxy early. Without it, a collaborator
+      in a cycle could receive the raw bean while the container later publishes a proxy, producing
+      two different references for the same bean.
+    ref: "concepts.md#circular-dependencies-and-the-three-level-cache"
+
+  - id: bean-scopes-lifecycle-061
+    difficulty: advanced
+    tags: [circular-dependency, spring-boot, defaults]
+    question: |
+      A codebase upgraded to Spring Boot 2.6+ suddenly fails at startup with a circular
+      reference error, even though the beans use FIELD injection and the same code worked on
+      Boot 2.4. What changed?
+    options:
+      - "Field injection was removed in Boot 2.6"
+      - "The three-level cache was removed from Spring Framework 5.3"
+      - "Boot 2.6 forces all beans to constructor injection"
+      - "Spring Boot 2.6+ sets spring.main.allow-circular-references=false by default, so even resolvable setter/field cycles now fail unless the flag is re-enabled or one side is marked @Lazy"
+    answer: 3
+    explanation: |
+      Boot 2.6 flipped the default to prohibit circular references. The cycle is still
+      technically resolvable, but the guardrail now rejects it. Fix by refactoring, adding
+      @Lazy to one injection point, or setting allow-circular-references=true.
+    ref: "concepts.md#circular-dependencies-and-the-three-level-cache"
+
+  - id: bean-scopes-lifecycle-062
+    difficulty: expert
+    tags: [circular-dependency, async, proxy]
+    question: |
+      Two singletons form a resolvable field-injection cycle, and allow-circular-references is
+      true — but one of them is annotated @Async. Startup still fails with
+      BeanCurrentlyInCreationException. Why?
+    options:
+      - "@Async is not allowed on singleton beans"
+      - "@Async forces prototype scope, which cannot participate in the cache"
+      - "The @Async proxy is created in postProcessAfterInitialization and NOT via getEarlyBeanReference, so the early reference injected into the collaborator is the raw bean while the final published bean is the async proxy — Spring detects the mismatch and fails"
+      - "The cycle exceeds the maximum cache depth of two"
+    answer: 2
+    explanation: |
+      Auto-proxying for AOP participates in early reference creation, but @Async's proxy is
+      applied late (after initialization) without an early-reference hook. The early raw
+      reference already injected elsewhere no longer equals the final proxy, so Spring throws.
+    ref: "concepts.md#circular-dependencies-and-the-three-level-cache"
+
+  - id: bean-scopes-lifecycle-063
+    difficulty: advanced
+    tags: [lazy, injection-point, circular-dependency]
+    question: |
+      Placing @Lazy on ONE injection point of a circular pair breaks the cycle. What does
+      @Lazy at an injection point actually inject?
+    options:
+      - "A lazy-resolving proxy that defers looking up the real target bean until a method is first invoked on it, so the real bean need not exist at wiring time"
+      - "Null, until the bean is manually created"
+      - "A brand-new prototype instance"
+      - "The bean definition object rather than an instance"
+    answer: 0
+    explanation: |
+      @Lazy on an injection point injects a proxy; the target singleton is resolved on first
+      method call. Because the collaborator isn't needed during wiring, the chicken-and-egg
+      cycle is broken.
+    ref: "concepts.md#startup-ordering-dependson-and-lazy"
+
+  - id: bean-scopes-lifecycle-064
+    difficulty: expert
+    tags: [configuration, proxybeanmethods, bean-identity]
+    question: |
+      Consider:
+      ```java
+      @Configuration
+      public class Cfg {
+          @Bean Foo foo() { return new Foo(); }
+          @Bean Bar bar() { return new Bar(foo()); }   // calls foo()
+      }
+      ```
+      With the DEFAULT settings, how many Foo instances exist and why?
+    options:
+      - "Two — each foo() call constructs a new Foo"
+      - "Zero — foo() is never invoked because Bar overrides it"
+      - "One, but only because Foo is annotated @Singleton"
+      - "One — @Configuration defaults to proxyBeanMethods=true, so the CGLIB-enhanced subclass intercepts the foo() call and returns the shared singleton"
+    answer: 3
+    explanation: |
+      Full @Configuration (proxyBeanMethods=true) creates a CGLIB subclass that intercepts
+      inter-bean method calls and returns the container-managed singleton, so bar() gets the
+      same Foo the container manages.
+    ref: "concepts.md#configuration-class-proxying-configuration-full-vs-lite"
+
+  - id: bean-scopes-lifecycle-065
+    difficulty: expert
+    tags: [configuration, lite-mode, trap]
+    question: |
+      A developer sets @Configuration(proxyBeanMethods = false) on the Cfg class from the
+      previous scenario (bar() calls foo()). What is the consequence?
+    options:
+      - "Startup fails because lite-mode configs cannot have inter-bean references"
+      - "bar() now receives a NEW, unmanaged Foo instance because lite mode skips the CGLIB proxy and runs @Bean methods as plain Java, so the Foo inside Bar is distinct from the container's Foo singleton"
+      - "Nothing changes; Spring still returns the singleton for foo()"
+      - "Both foo() and bar() become prototype-scoped"
+    answer: 1
+    explanation: |
+      Lite mode (proxyBeanMethods=false) does not proxy the config class, so a direct method
+      call foo() constructs a fresh object rather than resolving the singleton. This silently
+      breaks bean identity for beans wired via method calls — a subtle regression.
+    ref: "concepts.md#configuration-class-proxying-configuration-full-vs-lite"
+
+  - id: bean-scopes-lifecycle-066
+    difficulty: intermediate
+    tags: [configuration, performance, lite-mode]
+    question: |
+      Why does Spring Boot auto-configuration heavily favor proxyBeanMethods = false?
+    options:
+      - "Because lite mode enables circular references"
+      - "Because lite mode makes all beans prototype for faster GC"
+      - "It avoids CGLIB subclassing of the config class, reducing startup cost and easing native-image/GraalVM compatibility, since auto-config classes rarely rely on inter-bean method-call identity"
+      - "It is required for @ConditionalOnMissingBean to work"
+    answer: 2
+    explanation: |
+      Lite mode skips CGLIB enhancement, cutting startup overhead and reflection/proxy needs
+      that hurt AOT/native images. Auto-config classes are written to not depend on
+      cross-method singleton semantics, so lite mode is safe there.
+    ref: "concepts.md#configuration-class-proxying-configuration-full-vs-lite"
+
+  - id: bean-scopes-lifecycle-067
+    difficulty: expert
+    tags: [factorybean, ampersand, lifecycle]
+    question: |
+      A bean named "conn" is a FactoryBean<Connection>. Calling context.getBean("conn")
+      returns a Connection. How do you obtain the FactoryBean instance itself, and how is the
+      PRODUCED Connection's lifecycle handled?
+    options:
+      - "getBean(\"&conn\"); the produced object is NOT run through @PostConstruct/@Autowired processing (the container didn't instantiate it), though the FactoryBean's own callbacks do fire"
+      - "getBean(\"conn.factory\"); the produced object gets full @PostConstruct/@Autowired processing"
+      - "getBean(\"@conn\"); both objects share one lifecycle"
+      - "You cannot retrieve the FactoryBean; it is hidden"
+    answer: 0
+    explanation: |
+      The '&' prefix (getBean("&conn")) returns the FactoryBean itself. The object from
+      getObject() is created by the factory, not the container, so annotation-based init/DI is
+      not applied to it automatically; the FactoryBean's own lifecycle callbacks do run.
+    ref: "concepts.md#factorybean-vs-factory-beans-vs-lifecycle"
+
+  - id: bean-scopes-lifecycle-068
+    difficulty: advanced
+    tags: [dependson, ordering, destruction]
+    question: |
+      Bean Registrar has no injected reference to Bean Driver, but Registrar must initialize
+      only AFTER Driver and be destroyed BEFORE Driver. Which mechanism expresses this?
+    options:
+      - "@Order(1) on Driver and @Order(2) on Registrar"
+      - "@DependsOn(\"driver\") on Registrar, which guarantees Driver initializes first and is destroyed after Registrar"
+      - "@Priority on both beans"
+      - "Marking Driver as @Lazy"
+    answer: 1
+    explanation: |
+      @DependsOn establishes an init-order (and reverse destroy-order) edge without an injected
+      reference. @Order does not control singleton instantiation order; it orders injected
+      collections and similar, not creation.
+    ref: "concepts.md#startup-ordering-dependson-and-lazy"
+
+  - id: bean-scopes-lifecycle-069
+    difficulty: advanced
+    tags: [order, misconception, instantiation]
+    question: |
+      A developer adds @Order(1) and @Order(2) to two unrelated singleton services expecting
+      the first to be constructed before the second. What actually happens?
+    options:
+      - "@Order strictly controls singleton instantiation order"
+      - "The context fails to start due to conflicting order values"
+      - "Both beans become prototype-scoped"
+      - "@Order does NOT affect singleton creation order; it orders injected collections (List<T>), some import/handler chains, and web components — creation order still follows registration and dependency edges"
+    answer: 3
+    explanation: |
+      A common misconception: @Order does not sequence bean instantiation. It affects the
+      order elements appear in injected collections and certain framework chains. Use
+      @DependsOn (or a dependency edge) to force creation order.
+    ref: "concepts.md#startup-ordering-dependson-and-lazy"
+
+  - id: bean-scopes-lifecycle-070
+    difficulty: expert
+    tags: [smartlifecycle, phase, ordering]
+    question: |
+      Three SmartLifecycle beans: X (phase -10), Y (phase 0, actually a plain Lifecycle), Z
+      (phase left at default). In what order do they START and STOP?
+    options:
+      - "Start order X, Y, Z (low to high: -10, 0, Integer.MAX_VALUE); Stop order Z, Y, X (reverse)"
+      - "Start: Z, Y, X; Stop: X, Y, Z"
+      - "Start and stop are both random without @Order"
+      - "Start: Y, X, Z; Stop: Z, X, Y"
+    answer: 0
+    explanation: |
+      Default SmartLifecycle phase is Integer.MAX_VALUE, so Z is highest. Startup goes low→high
+      (X at -10, then Y at 0, then Z). Shutdown reverses: Z stops first, then Y, then X.
+    ref: "concepts.md#smartlifecycle-internals-and-phases"
+
+  - id: bean-scopes-lifecycle-071
+    difficulty: expert
+    tags: [smartlifecycle, stop-callback, shutdown]
+    question: |
+      A SmartLifecycle bean overrides stop(Runnable callback) to close connections
+      asynchronously but forgets to ever call callback.run(). What is the observable effect
+      on context shutdown?
+    options:
+      - "Shutdown fails immediately with an exception"
+      - "The LifecycleProcessor blocks for that phase until timeoutPerShutdownPhase (default 30s) elapses, delaying shutdown, then proceeds"
+      - "Nothing — Spring detects completion automatically"
+      - "The plain stop() is called instead as a fallback"
+    answer: 1
+    explanation: |
+      The LifecycleProcessor calls only stop(Runnable) on a SmartLifecycle and waits for the
+      callback to signal completion. Never invoking it makes shutdown stall until the
+      per-phase timeout (default 30s) expires.
+    ref: "concepts.md#smartlifecycle-internals-and-phases"
+
+  - id: bean-scopes-lifecycle-072
+    difficulty: advanced
+    tags: [smartlifecycle, postconstruct, timing]
+    question: |
+      Why is a network listener (e.g. a Kafka/JMS consumer) better started in
+      SmartLifecycle.start() than in @PostConstruct?
+    options:
+      - "@PostConstruct cannot open sockets"
+      - "@PostConstruct runs on a background thread and SmartLifecycle does not"
+      - "SmartLifecycle.start() fires at the end of refresh() after ALL singletons are fully initialized, whereas @PostConstruct runs mid-refresh when other beans the listener depends on may not yet be ready"
+      - "SmartLifecycle beans are exempt from the three-level cache"
+    answer: 2
+    explanation: |
+      @PostConstruct fires during that single bean's initialization, potentially before other
+      beans are ready. SmartLifecycle.start() runs in finishRefresh() once the whole context
+      is initialized, so it is the safe place to begin accepting/consuming traffic.
+    ref: "concepts.md#smartlifecycle-internals-and-phases"
+
+  - id: bean-scopes-lifecycle-073
+    difficulty: expert
+    tags: [prototype, destruction, leak]
+    question: |
+      A prototype-scoped bean opens a JDBC connection in @PostConstruct and closes it in
+      @PreDestroy. Under load the app leaks connections. What is the precise reason and the
+      correct remedy?
+    options:
+      - "The container never tracks prototype instances, so @PreDestroy is never invoked; the client must close it explicitly (try-with-resources, ObjectProvider + manual destroy, or a custom scope that calls registerDestructionCallback)"
+      - "Prototypes are cached, so @PreDestroy never has new work; increase the pool size"
+      - "@PostConstruct does not run on prototypes, so the connection is never opened"
+      - "Switch to singleton scope so the single connection is reused forever"
+    answer: 0
+    explanation: |
+      Plain prototype scope tracks nothing after handing the instance back, so destruction
+      callbacks never fire — a classic resource leak. The owner must manage cleanup, or use a
+      scope/tracking mechanism that registers a destruction callback.
+    ref: "concepts.md#prototype-scope"
+
+  - id: bean-scopes-lifecycle-074
+    difficulty: expert
+    tags: [scoped-proxy, scope-not-active, async]
+    question: |
+      A @Scheduled method (running on a background scheduler thread) calls a method on a
+      request-scoped bean injected as a scoped proxy. What happens and why?
+    options:
+      - "It works because scoped proxies carry the last request's instance"
+      - "It silently returns a fresh singleton instance"
+      - "It throws ScopeNotActiveException/IllegalStateException because no RequestAttributes are bound to the scheduler thread — there is no active request scope to resolve the target instance"
+      - "The scheduler thread inherits the request scope automatically"
+    answer: 2
+    explanation: |
+      Request scope is thread-bound via RequestContextHolder, populated by
+      RequestContextFilter/Listener on request threads. A scheduler/async thread has no bound
+      request, so resolving the scoped proxy's target fails with a scope-not-active error.
+      Context must be propagated explicitly.
+    ref: "concepts.md#scope-proxy-and-lifecycle-edge-cases"
+
+  - id: bean-scopes-lifecycle-075
+    difficulty: advanced
+    tags: [scoped-proxy, postconstruct, timing]
+    question: |
+      For a request-scoped bean injected into a singleton via a scoped proxy, when does the
+      request-scoped bean's @PostConstruct run?
+    options:
+      - "When the singleton holding the proxy is created at context startup"
+      - "Each time a new request creates a fresh instance (i.e., on first access within that request), NOT at singleton-creation time"
+      - "Once, the first time the application context refreshes"
+      - "It never runs because the proxy replaces the bean"
+    answer: 1
+    explanation: |
+      The proxy is created at startup, but the real request-scoped instance (and its
+      @PostConstruct) is created lazily per request on first use. Its @PreDestroy runs when the
+      request ends, tracked via registerDestructionCallback.
+    ref: "concepts.md#scope-proxy-and-lifecycle-edge-cases"
+
+  - id: bean-scopes-lifecycle-076
+    difficulty: advanced
+    tags: [session-scope, serialization, clustering]
+    question: |
+      In a clustered deployment with session replication/passivation, a session-scoped bean
+      intermittently causes NotSerializableException on failover. What is the requirement?
+    options:
+      - "Session-scoped beans must be prototype instead"
+      - "You must annotate the bean with @Transient"
+      - "Session scope is incompatible with clustering; use singleton"
+      - "The session-scoped bean (and its serialized fields) must implement Serializable, because the servlet container may serialize the session for replication/passivation"
+    answer: 3
+    explanation: |
+      When a container serializes sessions (clustering, disk passivation), any session-stored
+      bean must be Serializable, or serialization fails on failover. This is easy to miss in a
+      single-node dev environment.
+    ref: "concepts.md#scope-proxy-and-lifecycle-edge-cases"
+
+  - id: bean-scopes-lifecycle-077
+    difficulty: expert
+    tags: [destruction, shutdown-hook, durability]
+    question: |
+      Which statement about singleton destruction callbacks is accurate?
+    options:
+      - "Destruction runs in REVERSE creation order (honoring @DependsOn so dependents die first) and is triggered by context.close()/the JVM shutdown hook — but a kill -9 skips it entirely, so it must not be relied on for critical durability"
+      - "@PreDestroy is guaranteed to run even on kill -9, so it is safe for critical durability writes"
+      - "Destruction runs in the SAME order as creation"
+      - "An exception in a destroy callback aborts the entire shutdown, leaving remaining beans alive"
+    answer: 0
+    explanation: |
+      Shutdown destroys beans in reverse creation order, respects @DependsOn, and fires via
+      close()/the shutdown hook. SIGKILL bypasses it, and exceptions in destroy callbacks are
+      logged and swallowed so shutdown continues.
+    ref: "concepts.md#destructionawarebeanpostprocessor-and-shutdown-mechanics"
+
+  - id: bean-scopes-lifecycle-078
+    difficulty: expert
+    tags: [beanpostprocessor, ordering, early-instantiation]
+    question: |
+      You register a BeanPostProcessor whose constructor @Autowires a @Transactional
+      DataService. At runtime, DataService's transactions do not work. What is the most likely
+      cause?
+    options:
+      - "@Transactional is incompatible with @Autowired"
+      - "The BPP disables the transaction manager"
+      - "Transactions only work on prototype beans"
+      - "BPPs are instantiated before ordinary beans, so DataService is force-created early to satisfy the BPP — before the transaction auto-proxy BPP is ready — leaving it un-proxied (Spring logs 'not eligible for auto-proxying')"
+    answer: 3
+    explanation: |
+      A BPP and everything it depends on must exist before regular post-processing runs.
+      DataService gets instantiated too early, bypassing the auto-proxy creator, so no
+      transactional proxy wraps it. Break the dependency (e.g. ObjectProvider/lazy lookup).
+    ref: "concepts.md#beanpostprocessor"
+
+  - id: bean-scopes-lifecycle-079
+    difficulty: advanced
+    tags: [beanpostprocessor, proxy, return-value]
+    question: |
+      In postProcessAfterInitialization a BeanPostProcessor returns an object DIFFERENT from
+      the one passed in (a proxy). What is the container's obligation?
+    options:
+      - "It ignores the return value and keeps the original bean"
+      - "It must use the returned object as the bean for all subsequent injections and getBean calls — this is exactly how AOP proxies replace raw beans"
+      - "It throws because BPPs must return the same instance"
+      - "It caches both and randomly picks one per request"
+    answer: 1
+    explanation: |
+      The container adopts whatever object the BPP returns. Auto-proxying leverages this:
+      postProcessAfterInitialization returns a proxy wrapping the initialized bean, and the
+      container wires that proxy everywhere.
+    ref: "concepts.md#beanpostprocessor"
+
+  - id: bean-scopes-lifecycle-080
+    difficulty: expert
+    tags: [thread-safety, prototype, misconception]
+    question: |
+      A developer 'fixes' a thread-safety bug by changing a stateful service from singleton to
+      prototype, keeping the field @Autowired into a singleton controller. The bug persists.
+      Why?
+    options:
+      - "Prototype beans are actually shared across threads"
+      - "Prototype scope silently reverts to singleton for injected fields"
+      - "Injecting a prototype into a singleton resolves ONCE at controller-creation time, so the controller still holds a single shared prototype instance for all threads — scope change alone does nothing"
+      - "The @Autowired annotation caches the field value in a static variable"
+    answer: 2
+    explanation: |
+      Prototype-in-singleton injection freezes one instance at injection time. All requests
+      still share it, so the concurrency bug remains. Real fixes: statelessness, method-local
+      state, or per-call lookup (@Lookup/ObjectProvider), not merely changing scope.
+    ref: "concepts.md#prototype-scope"
+
+  - id: bean-scopes-lifecycle-081
+    difficulty: advanced
+    tags: [threadlocal, memory-leak, thread-pool]
+    question: |
+      A singleton stores per-request data in a ThreadLocal but never removes it. On a servlet
+      container using a thread pool, what problem arises?
+    options:
+      - "Because pooled threads are reused across requests, stale ThreadLocal values leak into later requests (correctness/security bug) and can retain objects, causing a memory leak; you must remove() in a finally block"
+      - "Nothing; ThreadLocals are cleared automatically after each request"
+      - "Every request gets a fresh JVM, so there is no leak"
+      - "ThreadLocal cannot be used inside singletons"
+    answer: 0
+    explanation: |
+      Pool threads outlive requests, so unremoved ThreadLocal state bleeds into subsequent
+      requests and pins objects in memory. Always clear ThreadLocals (finally/filter) — this is
+      why request scope is often preferable for per-request state.
+    ref: "concepts.md#thread-safety-of-singletons"
+
+  - id: bean-scopes-lifecycle-082
+    difficulty: expert
+    tags: [lifecycle, order, aware, code-analysis]
+    question: |
+      A singleton bean implements ApplicationContextAware and BeanNameAware, has a
+      @PostConstruct method, implements InitializingBean, and is declared with
+      @Bean(initMethod="ready"). What is the exact callback order?
+    options:
+      - "@PostConstruct → setBeanName → setApplicationContext → afterPropertiesSet → ready"
+      - "setApplicationContext → setBeanName → ready → afterPropertiesSet → @PostConstruct"
+      - "setBeanName → setApplicationContext → @PostConstruct → afterPropertiesSet → ready"
+      - "setBeanName → setApplicationContext → afterPropertiesSet → @PostConstruct → ready"
+    answer: 2
+    explanation: |
+      Aware order: BeanNameAware first, then (ApplicationContext-level) ApplicationContextAware.
+      Then init callbacks in order: @PostConstruct → InitializingBean.afterPropertiesSet() →
+      custom init-method (ready).
+    ref: "concepts.md#full-bean-lifecycle"
+
+  - id: bean-scopes-lifecycle-083
+    difficulty: advanced
+    tags: [beanfactorypostprocessor, static, configuration]
+    question: |
+      Why is a @Bean method that returns a BeanFactoryPostProcessor (e.g.
+      PropertySourcesPlaceholderConfigurer) conventionally declared 'static'?
+    options:
+      - "Static methods run faster"
+      - "It is required by the Java language for post-processors"
+      - "Because a BFPP must be instantiated very early — before the @Configuration class is fully processed/instantiated; a non-static factory method would force premature instantiation of the enclosing config class (and its dependencies), triggering warnings and possibly skipping post-processing"
+      - "Static prevents the BFPP from being a singleton"
+    answer: 2
+    explanation: |
+      BFPPs run before regular bean instantiation. A non-static @Bean method needs its
+      @Configuration instance created first, which is too early and can bypass other
+      post-processors. Declaring it static lets Spring create the BFPP without instantiating the
+      config class.
+    ref: "concepts.md#beanfactorypostprocessor"
+
+  - id: bean-scopes-lifecycle-084
+    difficulty: expert
+    tags: [bdrpp, bfpp, ordering, code-analysis]
+    question: |
+      A BeanDefinitionRegistryPostProcessor implements both postProcessBeanDefinitionRegistry
+      and postProcessBeanFactory. Relative to a plain BeanFactoryPostProcessor's
+      postProcessBeanFactory, what is the overall invocation order?
+    options:
+      - "BDRPP.postProcessBeanDefinitionRegistry (all of them) runs first, THEN BDRPP.postProcessBeanFactory, THEN the plain BFPP.postProcessBeanFactory — registry callbacks precede all factory callbacks"
+      - "All postProcessBeanFactory methods run before any postProcessBeanDefinitionRegistry"
+      - "The plain BFPP runs entirely before the BDRPP"
+      - "They interleave unpredictably"
+    answer: 0
+    explanation: |
+      Spring invokes all postProcessBeanDefinitionRegistry callbacks first (they can register
+      new definitions), then all postProcessBeanFactory callbacks (BDRPPs' own, then plain
+      BFPPs'). Registry phase always precedes the factory phase.
+    ref: "concepts.md#beandefinitionregistrypostprocessor"
+
+  - id: bean-scopes-lifecycle-085
+    difficulty: expert
+    tags: [scoped-proxy, cglib, final, code-analysis]
+    question: |
+      A bean is declared @Scope(value="request", proxyMode=ScopedProxyMode.TARGET_CLASS) but
+      the class is declared 'final'. What happens?
+    options:
+      - "It works; CGLIB can subclass final classes"
+      - "Context startup fails because CGLIB cannot subclass a final class (or final methods), so the TARGET_CLASS proxy cannot be created"
+      - "Spring silently switches to a JDK dynamic proxy"
+      - "The bean is downgraded to singleton scope"
+    answer: 1
+    explanation: |
+      TARGET_CLASS uses CGLIB subclassing, which is impossible for final classes/methods,
+      producing a proxy-creation failure. Use ScopedProxyMode.INTERFACES (JDK proxy) with an
+      interface, or remove final.
+    ref: "concepts.md#scoped-proxies-and-the-injection-mismatch-problem"
+
+  - id: bean-scopes-lifecycle-086
+    difficulty: advanced
+    tags: [self-invocation, proxy, transactional, code-analysis]
+    question: |
+      ```java
+      @Service
+      class Svc {
+          @Transactional public void outer() { inner(); }
+          @Transactional(propagation = REQUIRES_NEW) public void inner() { ... }
+      }
+      ```
+      When outer() is called from another bean, does inner() run in a NEW transaction?
+    options:
+      - "Yes, REQUIRES_NEW always creates a new transaction"
+      - "It throws because nested @Transactional is illegal"
+      - "inner() runs with no transaction at all"
+      - "No — inner() is called via 'this' (self-invocation), bypassing the proxy, so the REQUIRES_NEW advice never applies; inner() runs in outer()'s existing transaction"
+    answer: 3
+    explanation: |
+      Proxy-based AOP only intercepts external calls through the proxy. Self-invocation
+      (this.inner()) goes direct to the target, so REQUIRES_NEW is ignored — the same
+      limitation scoped proxies have. Refactor to a separate bean or use self-injection/AopContext.
+    ref: "concepts.md#scoped-proxies-and-the-injection-mismatch-problem"
+
+  - id: bean-scopes-lifecycle-087
+    difficulty: intermediate
+    tags: [objectprovider, prototype, lazy]
+    question: |
+      What is a key advantage of ObjectProvider<T> over a plain @Autowired field for obtaining
+      a prototype dependency?
+    options:
+      - "ObjectProvider makes the prototype thread-safe automatically"
+      - "ObjectProvider converts the prototype into a singleton"
+      - "getObject()/getIfAvailable() are called on demand, returning a fresh prototype per invocation, and it gracefully handles absent/multiple candidates without failing injection"
+      - "It runs @PreDestroy on prototypes automatically"
+    answer: 2
+    explanation: |
+      ObjectProvider defers resolution to call time (fresh prototype each getObject()) and adds
+      null-safe/optional lookup (getIfAvailable, getIfUnique), avoiding hard startup failures
+      when zero or many candidates exist.
+    ref: "concepts.md#prototype-scope"
+
+  - id: bean-scopes-lifecycle-088
+    difficulty: expert
+    tags: [smartlifecycle, webserver, boot]
+    question: |
+      In Spring Boot, why does the embedded web server (Tomcat/Jetty) only begin accepting
+      connections after the context is essentially fully initialized?
+    options:
+      - "Because the web server is started by a SmartLifecycle bean (WebServerStartStopLifecycle) whose start() fires at the end of refresh(), after all singletons are initialized — so traffic is accepted only when the app is ready"
+      - "Because the servlet is a @PostConstruct bean"
+      - "Because Boot uses a background thread that sleeps for 5 seconds"
+      - "Because the server waits for the first HTTP request to trigger initialization"
+    answer: 0
+    explanation: |
+      Boot wraps the web server in a SmartLifecycle, so it starts in finishRefresh() once
+      beans are ready. This prevents serving requests against a half-initialized context.
+    ref: "concepts.md#smartlifecycle-internals-and-phases"
+
+  - id: bean-scopes-lifecycle-089
+    difficulty: advanced
+    tags: [factorybean, singleton, caching]
+    question: |
+      A FactoryBean<T> returns isSingleton() == true. How many times is getObject() invoked
+      across many getBean calls, and where is the result stored?
+    options:
+      - "Once per getBean call; results are never cached"
+      - "Never; the FactoryBean itself is returned"
+      - "Twice — once for the '&' name and once for the plain name"
+      - "Once; the produced object is cached by the container (in FactoryBeanRegistrySupport's factoryBeanObjectCache) and reused for subsequent lookups"
+    answer: 3
+    explanation: |
+      When a FactoryBean reports singleton, the container invokes getObject() once and caches
+      the product, returning the same instance on later lookups. Non-singleton FactoryBeans
+      invoke getObject() each time.
+    ref: "concepts.md#factorybean-vs-factory-beans-vs-lifecycle"
+
+  - id: bean-scopes-lifecycle-090
+    difficulty: expert
+    tags: [scope, proxy, equals-hashcode, trap]
+    question: |
+      A prototype/request-scoped bean is injected as a CGLIB scoped proxy and later used as a
+      key in a HashMap or compared with ==. What subtle problem can occur?
+    options:
+      - "None; proxies delegate equals/hashCode perfectly to the current target"
+      - "The proxy is a distinct object from the underlying target instance(s); == comparisons against a raw target fail, and if equals/hashCode aren't overridden to delegate, map lookups can behave unexpectedly across scope changes"
+      - "HashMap silently rejects proxy keys"
+      - "The proxy throws on equals() by design"
+    answer: 1
+    explanation: |
+      A scoped proxy is a separate object that resolves the target per call. Identity (==)
+      against the real instance won't match, and the proxy resolves potentially different
+      targets over time, so using it as a stable map key or for identity comparisons is
+      error-prone.
+    ref: "concepts.md#scope-proxy-and-lifecycle-edge-cases"
+
+  - id: bean-scopes-lifecycle-091
+    difficulty: expert
+    tags: [lifecycle, exception, postconstruct, startup]
+    question: |
+      A singleton bean's @PostConstruct method throws a RuntimeException during context
+      startup. What is the outcome?
+    options:
+      - "The exception is logged and the bean is left partially initialized but usable"
+      - "Spring retries @PostConstruct three times then continues"
+      - "Startup aborts: the exception propagates as a BeanCreationException, refresh() fails, and already-created singletons are destroyed — the ApplicationContext does not start"
+      - "Only that bean is skipped; the rest of the context starts normally"
+    answer: 2
+    explanation: |
+      An init-callback failure wraps into BeanCreationException and fails refresh(). Spring then
+      tears down the singletons it already created and the context fails to start — the fail-fast
+      benefit of eager singleton initialization.
+    ref: "concepts.md#full-bean-lifecycle"
+
+  - id: bean-scopes-lifecycle-092
+    difficulty: advanced
+    tags: [request-scope, streaming, async, dispatch]
+    question: |
+      With async request processing (e.g. returning DeferredResult/Callable or reactive
+      types), what is a known hazard for request-scoped beans?
+    options:
+      - "The request scope may be closed when the original container thread returns, so accessing a request-scoped bean from the async worker thread can fail or read a completed scope unless the request context is properly propagated to that thread"
+      - "Request scope is doubled per async dispatch"
+      - "Async requests promote request beans to singleton"
+      - "Request-scoped beans are prohibited in async controllers"
+    answer: 0
+    explanation: |
+      Request scope is bound to the servlet thread. Async processing hands work to another
+      thread and may complete/close the original request context, so request-scoped access from
+      the worker requires deliberate context propagation, or it hits a closed/absent scope.
+    ref: "concepts.md#scope-proxy-and-lifecycle-edge-cases"
+
+  - id: bean-scopes-lifecycle-093
+    difficulty: intermediate
+    tags: [smartlifecycle, lifecycle, difference]
+    question: |
+      Which statement best distinguishes Lifecycle/SmartLifecycle start-stop from
+      @PostConstruct/@PreDestroy init-destroy?
+    options:
+      - "They are identical; SmartLifecycle is just newer syntax"
+      - "@PostConstruct supports phases; SmartLifecycle does not"
+      - "SmartLifecycle only works for prototype beans"
+      - "init/destroy run once at bean creation/container shutdown; start/stop can be invoked repeatedly (context.start()/stop()) to run/pause active components, with phased ordering across beans"
+    answer: 3
+    explanation: |
+      Init/destroy are one-shot creation/teardown hooks. Lifecycle start/stop model an active
+      component that can be started and stopped (potentially multiple times) and support phased,
+      ordered startup/shutdown across beans.
+    ref: "concepts.md#smartlifecycle"
+
+  - id: bean-scopes-lifecycle-094
+    difficulty: expert
+    tags: [beanpostprocessor, postprocessbeforeinitialization, aware]
+    question: |
+      ApplicationContextAware and friends are set on beans even though the bean never registers
+      anything for it. What mechanism actually invokes these ApplicationContext-level Aware
+      callbacks?
+    options:
+      - "The DefaultListableBeanFactory calls them directly during instantiation"
+      - "They are called during postProcessAfterInitialization after AOP proxying"
+      - "An ApplicationContextAwareProcessor (a BeanPostProcessor) invokes them in postProcessBeforeInitialization; the low-level BeanFactory-level Aware interfaces (BeanNameAware/BeanFactoryAware) are instead called directly by the bean factory"
+      - "A BeanFactoryPostProcessor sets them before instantiation"
+    answer: 2
+    explanation: |
+      ApplicationContextAwareProcessor, a BPP registered by the ApplicationContext, wires
+      EnvironmentAware/ResourceLoaderAware/ApplicationContextAware etc. in
+      postProcessBeforeInitialization. The bean-factory-level Aware callbacks are invoked directly
+      by the factory (initializeBean), not via that BPP.
+    ref: "concepts.md#beanpostprocessor"
+
+  - id: bean-scopes-lifecycle-095
+    difficulty: advanced
+    tags: [prototype, scoped-proxy, request-in-prototype]
+    question: |
+      Is a scoped proxy needed when injecting a request-scoped bean into a PROTOTYPE-scoped
+      bean that is itself obtained fresh per request?
+    options:
+      - "It depends on lifetimes: if the prototype is created within an active request and lives only for that request's handling, a plain injection resolves the current request instance fine; the proxy is essential when a LONGER-lived bean (singleton) holds a shorter-lived one"
+      - "Yes, always — any web scope requires a proxy"
+      - "No, request scope can never be injected into prototype"
+      - "Only if the prototype is also a FactoryBean"
+    answer: 0
+    explanation: |
+      The mismatch problem is about a longer-lived bean freezing a shorter-lived reference. If a
+      prototype is created during the active request and discarded with it, direct injection
+      resolves the right request instance. The proxy matters for singleton→request/session/prototype.
+    ref: "concepts.md#scope-proxy-and-lifecycle-edge-cases"
+
+  - id: bean-scopes-lifecycle-096
+    difficulty: expert
+    tags: [configuration, cglib, proxybeanmethods, constraints]
+    question: |
+      For a @Configuration class in FULL mode (proxyBeanMethods=true), what constraint does
+      the CGLIB enhancement impose on the class and its @Bean methods?
+    options:
+      - "The class and its @Bean methods must not be final or private, because Spring creates a CGLIB subclass that overrides the @Bean methods to intercept inter-bean calls"
+      - "The class must be declared final so CGLIB can cache the enhanced version"
+      - "Every @Bean method must be static"
+      - "There are no constraints; CGLIB can enhance any class or method"
+    answer: 0
+    explanation: |
+      Full-mode @Configuration is backed by a CGLIB subclass whose overrides intercept @Bean
+      method calls and return the container-managed singleton. CGLIB cannot subclass a final
+      class or override final/private methods, so both the config class and its @Bean methods
+      must be non-final and non-private. Lite mode (proxyBeanMethods=false) does no subclassing,
+      so that restriction disappears (but inter-bean interception is lost).
+    ref: "concepts.md#configuration-class-proxying-configuration-full-vs-lite"
+
+  - id: bean-scopes-lifecycle-097
+    difficulty: advanced
+    tags: [smartlifecycle, restart, isRunning]
+    question: |
+      Why must a SmartLifecycle implementation maintain an accurate isRunning() flag (typically
+      volatile)?
+    options:
+      - "isRunning() controls the bean's scope"
+      - "The LifecycleProcessor uses isRunning() to decide whether to call start()/stop() and to avoid double-start/double-stop; an incorrect flag can cause stop() to be skipped at shutdown (leaked resources) or start() to be re-invoked"
+      - "isRunning() determines the getPhase() value at runtime"
+      - "It is only used for logging and has no functional effect"
+    answer: 1
+    explanation: |
+      The processor consults isRunning() to drive lifecycle transitions. If it wrongly reports
+      not-running, stop() won't be called at shutdown (resource leak); if wrongly running,
+      start() may be re-invoked. It should be thread-visible (volatile) since start/stop and
+      isRunning may touch different threads.
+    ref: "concepts.md#smartlifecycle-internals-and-phases"
+
+  - id: bean-scopes-lifecycle-098
+    difficulty: expert
+    tags: [prototype, application-context, memory, getBean]
+    question: |
+      A developer repeatedly calls applicationContext.getBean(MyPrototype.class) in a tight
+      loop and observes heap growth even though each returned reference goes out of scope
+      quickly. Besides normal allocation, is Spring itself retaining these instances?
+    options:
+      - "No — the container does not retain prototype instances; once the caller drops the reference they are eligible for GC. Retention would come from the developer's own structures or from destruction callbacks the container is NOT tracking"
+      - "Yes — the singleton registry caches every prototype it creates"
+      - "Yes — prototypes are stored in the three-level cache"
+      - "Yes — getBean pins prototypes until context.close()"
+    answer: 0
+    explanation: |
+      Spring does not track/cache prototype instances. Heap pressure is ordinary allocation
+      churn plus anything the caller holds. The related pitfall is that no destruction callback
+      runs, so resources aren't auto-released — but the objects themselves are GC-eligible once
+      unreferenced.
+    ref: "concepts.md#singleton-vs-prototype"
+
+  - id: bean-scopes-lifecycle-099
+    difficulty: advanced
+    tags: [dependson, destruction, ordering, code-analysis]
+    question: |
+      Given @DependsOn("cache") on bean Warmer, in what relative order are 'cache' and 'warmer'
+      destroyed at shutdown?
+    options:
+      - "warmer is destroyed first, then cache — @DependsOn reverses for destruction so the dependent dies before the dependency"
+      - "cache is destroyed first, then warmer"
+      - "They are destroyed simultaneously"
+      - "Destruction order is unrelated to @DependsOn"
+    answer: 0
+    explanation: |
+      @DependsOn makes 'cache' initialize before 'warmer' and, symmetrically, destroy AFTER
+      'warmer'. Dependents are torn down before the beans they depend on, so warmer's
+      destruction can still safely use cache.
+    ref: "concepts.md#startup-ordering-dependson-and-lazy"
+
+  - id: bean-scopes-lifecycle-100
+    difficulty: expert
+    tags: [lifecycle, proxy, postconstruct, target]
+    question: |
+      When @Transactional wraps a bean whose @PostConstruct writes to the database, does the
+      @PostConstruct method run inside a transaction?
+    options:
+      - "Yes — the proxy wraps @PostConstruct like any other method"
+      - "Only if the class implements InitializingBean"
+      - "No — @PostConstruct runs on the target during initialization, BEFORE postProcessAfterInitialization creates the transactional proxy, so no transactional advice is applied to it"
+      - "Yes, but only for prototype beans"
+    answer: 2
+    explanation: |
+      Init callbacks run on the raw target during initializeBean; the AOP proxy is created
+      afterward in postProcessAfterInitialization. Therefore @PostConstruct executes without the
+      transactional proxy — a frequent surprise when init logic assumes a transaction.
+    ref: "concepts.md#full-bean-lifecycle"
+
+  - id: bean-scopes-lifecycle-101
+    difficulty: advanced
+    tags: [custom-scope, registerDestructionCallback, thread-scope]
+    question: |
+      When implementing a custom Scope that should run @PreDestroy-style cleanup, which Scope
+      method is responsible for enabling that, and what is SimpleThreadScope's limitation here?
+    options:
+      - "get(); SimpleThreadScope calls it twice"
+      - "registerDestructionCallback(name, callback); the scope must store and later run these callbacks when the conversation/scope ends — SimpleThreadScope notably does NOT honor them, so destruction cleanup never runs"
+      - "resolveContextualObject(); SimpleThreadScope returns null"
+      - "getConversationId(); SimpleThreadScope throws"
+    answer: 1
+    explanation: |
+      A Scope receives destruction callbacks via registerDestructionCallback and must invoke
+      them at end-of-scope. SimpleThreadScope's documented caveat is that it ignores destruction
+      callbacks, so beans in it never get @PreDestroy — a reason it's not registered by default.
+    ref: "concepts.md#websocket-and-custom-scopes"
+
+  - id: bean-scopes-lifecycle-102
+    difficulty: expert
+    tags: [bean-identity, scoped-proxy, getBean, code-analysis]
+    question: |
+      A request-scoped bean 'ctx' uses proxyMode=TARGET_CLASS. What does
+      applicationContext.getBean("ctx") return, and how does that relate to the injected field?
+    options:
+      - "It returns the raw current-request instance directly, bypassing the proxy"
+      - "It throws because request-scoped beans cannot be fetched via getBean"
+      - "It returns the SAME scoped proxy object that is injected elsewhere; the proxy (registered under the bean name) delegates to the current request's target, while the real target is registered under a name like 'scopedTarget.ctx'"
+      - "It returns a new proxy each call with independent state"
+    answer: 2
+    explanation: |
+      With a scoped proxy, the bean name resolves to the proxy (the same one injected into
+      collaborators). Spring registers the real target under 'scopedTarget.<name>'. Every proxy
+      call resolves the active request's target instance.
+    ref: "concepts.md#scope-proxy-and-lifecycle-edge-cases"

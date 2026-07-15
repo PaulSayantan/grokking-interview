@@ -1041,3 +1041,918 @@ questions:
       with MockRestServiceServer verifies the outbound HTTP request/response contract
       — each fast and narrowly scoped.
     ref: "concepts.md#jsontest-and-restclienttest-other-slices"
+
+  - id: testing-spring-boot-applications-059
+    difficulty: expert
+    tags: [springboottest, config-discovery, failure-mode]
+    question: |
+      A @SpringBootTest class lives in package com.acme.orders.web, while the
+      @SpringBootApplication class is in com.acme.orders. A second app-style
+      @Configuration annotated with @SpringBootConfiguration was accidentally added
+      in com.acme.orders.testsupport. The test now fails before any assertion runs.
+      What is the most precise explanation?
+    options:
+      - "@SpringBootTest scans the classpath and randomly picks one @SpringBootConfiguration, so the failure is nondeterministic"
+      - "The test package is below the application package, so no @SpringBootConfiguration can ever be found"
+      - "@SpringBootTest walks up from the test package and finds more than one @SpringBootConfiguration, so it throws IllegalStateException for an ambiguous configuration"
+      - "Two @SpringBootConfiguration classes are merged, doubling every bean definition and causing a BeanDefinitionOverrideException"
+    answer: 2
+    explanation: |
+      @SpringBootTest searches upward for exactly one @SpringBootConfiguration.
+      Zero matches throw "Unable to find a @SpringBootConfiguration"; more than one
+      (as here — the app class plus the stray one both discoverable) throws an
+      IllegalStateException about finding multiple candidates. It does not merge or
+      randomly select them.
+    ref: "concepts.md#springboottest-and-webenvironment-options"
+
+  - id: testing-spring-boot-applications-060
+    difficulty: advanced
+    tags: [springboottest, mockmvc, autoconfigure]
+    question: |
+      A developer writes @SpringBootTest (default webEnvironment) and autowires
+      MockMvc, but startup fails with "No qualifying bean of type
+      org.springframework.test.web.servlet.MockMvc available." @WebMvcTest is not
+      used. What is the correct fix?
+    options:
+      - "Switch webEnvironment to RANDOM_PORT so MockMvc is created against the real server"
+      - "MockMvc cannot be used with @SpringBootTest at all; you must use TestRestTemplate"
+      - "Add @EnableWebMvc to the test class"
+      - "Add @AutoConfigureMockMvc — plain @SpringBootTest does not auto-configure MockMvc on its own"
+    answer: 3
+    explanation: |
+      With MOCK env, @SpringBootTest loads the web layer but does NOT register
+      MockMvc unless you add @AutoConfigureMockMvc (the @WebMvcTest slice bundles
+      it, which is why it "just works" there). RANDOM_PORT would give a real server,
+      not MockMvc.
+    ref: "concepts.md#springboottest-and-webenvironment-options"
+
+  - id: testing-spring-boot-applications-061
+    difficulty: expert
+    tags: [springboottest, random-port, transactions, data-leak]
+    question: |
+      An integration test uses @SpringBootTest(webEnvironment = RANDOM_PORT) and is
+      annotated @Transactional, expecting each test's writes to roll back. Rows
+      created via HTTP calls through TestRestTemplate persist across tests anyway.
+      Why?
+    options:
+      - "@Transactional is ignored on any class annotated @SpringBootTest"
+      - "The rollback only applies to reads, not writes"
+      - "The HTTP request is handled on a separate server thread with its own transaction that commits independently of the test method's transaction, so the test's rollback never covers it"
+      - "TestRestTemplate opens a second datasource that bypasses the transaction manager"
+    answer: 2
+    explanation: |
+      With a real server, the request runs on a container worker thread and the
+      controller/service open their own transaction, which commits. The test
+      method's @Transactional (and its rollback) is a different transaction on a
+      different thread and cannot roll back the server-side commit. This is why
+      RANDOM_PORT tests need explicit cleanup.
+    ref: "concepts.md#springboottest-and-webenvironment-options"
+
+  - id: testing-spring-boot-applications-062
+    difficulty: advanced
+    tags: [webmvctest, controlleradvice, scope]
+    question: |
+      @WebMvcTest(OrderController.class) is used to narrow the slice to one
+      controller. A @ControllerAdvice exception handler that maps DomainException to
+      HTTP 409 lives elsewhere in the app and depends on a MessageService bean. The
+      context fails to start. Which statement is correct?
+    options:
+      - "@ControllerAdvice beans are global and still loaded by the slice; the advice's MessageService dependency is not loaded, so it must be provided as @MockitoBean"
+      - "Narrowing to OrderController excludes all @ControllerAdvice beans, so the failure must be unrelated"
+      - "@ControllerAdvice is a @Service-level bean and is never loaded in @WebMvcTest"
+      - "You must switch to @SpringBootTest because slices cannot load any advice"
+    answer: 0
+    explanation: |
+      @WebMvcTest loads @ControllerAdvice globally even when you name a single
+      controller. If the advice depends on a service that the slice excludes, the
+      context fails unless you supply that collaborator as a @MockitoBean.
+    ref: "concepts.md#webmvctest-web-slice"
+
+  - id: testing-spring-boot-applications-063
+    difficulty: expert
+    tags: [webmvctest, method-security, preauthorize]
+    question: |
+      A service method carries @PreAuthorize("hasRole('ADMIN')"). The team asserts
+      in a @WebMvcTest that a non-admin user is rejected by this rule. The test
+      passes the call through even for non-admins. What is the accurate reason?
+    options:
+      - "@PreAuthorize only works with @WithMockUser, which the test forgot"
+      - "@PreAuthorize requires webEnvironment = RANDOM_PORT to activate"
+      - "@WebMvcTest disables all Spring Security"
+      - "Method security is enforced by an AOP interceptor on the service bean, which the web slice does not load; @WebMvcTest only exercises URL/HttpSecurity rules, not @PreAuthorize on services"
+    answer: 3
+    explanation: |
+      @PreAuthorize is applied by a method-security AOP proxy around the service.
+      @WebMvcTest excludes @Service beans, so that interceptor never runs. Only
+      HttpSecurity URL rules are exercised in the web slice; method-security tests
+      need the service bean and @EnableMethodSecurity in scope.
+    ref: "concepts.md#testing-security-and-web-layers-deeply"
+
+  - id: testing-spring-boot-applications-064
+    difficulty: advanced
+    tags: [webmvctest, csrf, security]
+    question: |
+      In a Security-enabled @WebMvcTest, a POST to /orders with a valid mock user
+      returns 403 even though the user is authorized. The GET tests work fine. What
+      is the most likely cause and fix?
+    options:
+      - "The controller is missing @ResponseBody; add it"
+      - "MockMvc cannot send POST requests; use TestRestTemplate"
+      - "CSRF protection rejects the state-changing POST; add .with(csrf()) (or disable CSRF for the test)"
+      - "The user needs authorities set with a ROLE_ prefix on the GET as well"
+    answer: 2
+    explanation: |
+      Spring Security enables CSRF protection by default. State-changing MockMvc
+      requests (POST/PUT/DELETE) are rejected with 403 unless you add the
+      SecurityMockMvcRequestPostProcessors.csrf() post-processor (or disable CSRF).
+      GETs are unaffected because they are not CSRF-protected.
+    ref: "concepts.md#testing-security-and-web-layers-deeply"
+
+  - id: testing-spring-boot-applications-065
+    difficulty: expert
+    tags: [security, withmockuser, roles, authorities]
+    question: |
+      An endpoint is secured with .hasAuthority("ORDER_WRITE"). A test uses
+      @WithMockUser(roles = "ORDER_WRITE") and gets 403. The same endpoint with
+      .hasRole("ORDER_WRITE") would pass with that annotation. What explains the
+      difference?
+    options:
+      - "roles and authorities are identical; the 403 must come from CSRF"
+      - "@WithMockUser cannot set authorities at all"
+      - "@WithMockUser(roles = \"ORDER_WRITE\") grants the authority ROLE_ORDER_WRITE, but hasAuthority(\"ORDER_WRITE\") checks the literal authority without the ROLE_ prefix, so it does not match"
+      - "hasAuthority always requires a JWT, not a mock user"
+    answer: 2
+    explanation: |
+      roles = "X" is stored as authority ROLE_X, and hasRole("X") checks ROLE_X.
+      hasAuthority("ORDER_WRITE") checks the exact string with no prefix, so the
+      ROLE_ORDER_WRITE granted by roles = ... doesn't match. Use
+      @WithMockUser(authorities = "ORDER_WRITE") instead.
+    ref: "concepts.md#testing-security-and-web-layers-deeply"
+
+  - id: testing-spring-boot-applications-066
+    difficulty: advanced
+    tags: [webmvctest, addfilters, security]
+    question: |
+      To avoid dealing with authentication, a developer adds
+      @AutoConfigureMockMvc(addFilters = false) to a @WebMvcTest. Endpoints now
+      return 200 without any credentials. What is the important trade-off being
+      made?
+    options:
+      - "Nothing is lost; addFilters = false only skips authentication"
+      - "It switches MockMvc to make real HTTP calls"
+      - "It permanently disables security for the whole application"
+      - "It disables the entire servlet filter chain — including Spring Security AND any custom Filter/HandlerInterceptor logic — so filter-based behavior is no longer tested and real security misconfigurations can be masked"
+    answer: 3
+    explanation: |
+      addFilters = false removes the servlet Filter chain that MockMvc would apply,
+      which includes Security's FilterChainProxy but also any custom filters. It's a
+      blunt instrument: convenient, but it stops exercising filter logic and can
+      hide genuine security wiring bugs.
+    ref: "concepts.md#webmvctest-web-slice"
+
+  - id: testing-spring-boot-applications-067
+    difficulty: expert
+    tags: [datajpatest, first-level-cache, false-positive]
+    question: |
+      A @DataJpaTest persists a User via em.persist(user), then asserts
+      repo.findById(user.getId()) returns an object whose mapped 'displayName'
+      column is correct. The @Column mapping for displayName is actually wrong
+      (typo), yet the test passes. What must you add to make the test catch the bug?
+    options:
+      - "Call em.flush() then em.clear() before findById, so the entity is detached and Hibernate must issue a real SELECT that exercises the column mapping"
+      - "Add @Commit so the transaction commits"
+      - "Replace findById with findAll"
+      - "Switch to @SpringBootTest — @DataJpaTest cannot detect mapping errors"
+    answer: 0
+    explanation: |
+      After persist, the same instance is in the first-level cache, so findById
+      returns it without a SELECT — the broken column mapping is never used. flush()
+      pushes the INSERT and clear() detaches the entity, forcing a fresh SELECT that
+      hydrates via the (broken) mapping, surfacing the bug.
+    ref: "concepts.md#datajpatest-persistence-slice"
+
+  - id: testing-spring-boot-applications-068
+    difficulty: expert
+    tags: [datajpatest, schema, migrations, gotcha]
+    question: |
+      Repository tests under @DataJpaTest (embedded H2, default settings) all pass,
+      but production deployment fails because a Flyway migration has a bug. Why did
+      the slice not catch it?
+    options:
+      - "@DataJpaTest by default builds the schema from Hibernate entity mappings on the embedded DB, so the tests validated the Hibernate-generated schema rather than the actual migration scripts"
+      - "Flyway never runs in any Spring test"
+      - "H2 auto-corrects broken migrations"
+      - "The tests ran against production, which hid the error"
+    answer: 0
+    explanation: |
+      In @DataJpaTest the embedded DB schema is generated from @Entity mappings by
+      Hibernate DDL by default, so migrations are not the source of truth. To test
+      the real migration you need the real DB dialect (Testcontainers) with
+      replace = NONE and migrations driving the schema.
+    ref: "concepts.md#datajpatest-persistence-slice"
+
+  - id: testing-spring-boot-applications-069
+    difficulty: advanced
+    tags: [datajpatest, rollback, commit-behavior]
+    question: |
+      A @DataJpaTest wants to verify that a database CHECK constraint fires on
+      commit (a deferred constraint). The test persists an invalid row and expects
+      an exception, but none is thrown. Which change most directly reproduces
+      commit-time behavior?
+    options:
+      - "Add @Rollback(false)/@Commit so the transaction actually commits and the deferred constraint is checked (or use TestTransaction to flag-for-commit and end the transaction)"
+      - "Add @DirtiesContext"
+      - "Increase the context cache size"
+      - "Replace @DataJpaTest with @JsonTest"
+    answer: 0
+    explanation: |
+      Deferred constraints are only evaluated at commit. Because @DataJpaTest rolls
+      back by default, commit never happens. Forcing a commit (@Commit /
+      @Rollback(false)) — or programmatically ending a committing TestTransaction —
+      triggers the deferred check.
+    ref: "concepts.md#verifying-transactions-and-rollback-in-tests"
+
+  - id: testing-spring-boot-applications-070
+    difficulty: advanced
+    tags: [jsontest, objectmapper, config]
+    question: |
+      A unit test builds new ObjectMapper() and asserts an Instant serializes as a
+      number; it passes. In production the same object serializes as an ISO-8601
+      string and a downstream consumer breaks. A @JsonTest would have caught this.
+      Why?
+    options:
+      - "@JsonTest uses a stricter JSON parser"
+      - "@JsonTest always serializes dates as numbers, matching the unit test"
+      - "@JsonTest disables the JavaTimeModule"
+      - "@JsonTest applies the application's Jackson configuration (spring.jackson.* and Jackson2ObjectMapperBuilderCustomizer beans, e.g. WRITE_DATES_AS_TIMESTAMPS=false and JavaTimeModule), whereas a bare new ObjectMapper() does not reflect that config"
+    answer: 3
+    explanation: |
+      A raw ObjectMapper ignores Spring Boot's Jackson auto-configuration. @JsonTest
+      wires the same customized ObjectMapper the app uses, so it reflects date
+      handling, naming strategy, and module registration — catching config-dependent
+      serialization differences.
+    ref: "concepts.md#jsontest-and-restclienttest-other-slices"
+
+  - id: testing-spring-boot-applications-071
+    difficulty: expert
+    tags: [restclienttest, binding, failure-mode]
+    question: |
+      A @RestClientTest(WeatherClient.class) sets up MockRestServiceServer
+      expectations, but they are never matched and a real network call is attempted.
+      Inspection shows WeatherClient does `this.rest = new RestTemplate();` in its
+      constructor. What is the root cause?
+    options:
+      - "MockRestServiceServer only works with WebClient, not RestTemplate"
+      - "The @RestClientTest must use RANDOM_PORT"
+      - "MockRestServiceServer binds to the RestTemplate the slice created via the auto-configured RestTemplateBuilder; because the client built its own RestTemplate, the mock server is bound to a different instance and never intercepts the calls"
+      - "The client must be annotated @Service to be intercepted"
+    answer: 2
+    explanation: |
+      @RestClientTest customizes the RestTemplate produced by the injected
+      RestTemplateBuilder and binds MockRestServiceServer to it. A self-constructed
+      new RestTemplate() is a different, un-instrumented instance, so expectations
+      never match and real HTTP leaks. Inject the builder.
+    ref: "concepts.md#jsontest-and-restclienttest-other-slices"
+
+  - id: testing-spring-boot-applications-072
+    difficulty: advanced
+    tags: [restclienttest, mockrestserviceserver, ordering]
+    question: |
+      A client makes two GET calls whose order depends on a HashMap iteration and is
+      therefore nondeterministic. A @RestClientTest sets two expectations and
+      intermittently fails with an assertion about an unexpected request. What is
+      the correct remedy?
+    options:
+      - "Add Thread.sleep between the calls"
+      - "Call server.reset() before each expectation"
+      - "Build the server with MockRestServiceServer bindTo(...).ignoreExpectOrder(true) (or use the createServer variant that ignores order), since by default expectations must arrive in declared order"
+      - "Use @DirtiesContext to rebuild the client each run"
+    answer: 2
+    explanation: |
+      By default MockRestServiceServer enforces the declared request order. When the
+      client's call order is nondeterministic, enable ignoreExpectOrder so any
+      declared expectation can match any incoming request regardless of sequence.
+    ref: "concepts.md#jsontest-and-restclienttest-other-slices"
+
+  - id: testing-spring-boot-applications-073
+    difficulty: expert
+    tags: [context-caching, cache-key, mockitobean]
+    question: |
+      Two @SpringBootTest classes have byte-for-byte identical configuration EXCEPT
+      one declares `@MockitoBean PaymentGateway gateway;` and the other declares
+      `@MockitoBean PaymentGateway paymentGateway;` (same type, different field
+      name). Both mock the same single bean. What is the effect on the context
+      cache?
+    options:
+      - "They always share one context because the mocked type is identical"
+      - "Neither context is cached because @MockitoBean disables caching"
+      - "The second class fails to start due to a duplicate mock"
+      - "They may create two separate cached contexts, because the mock definition (including the field/qualifier name used for resolution) contributes to the ContextCustomizer that is part of the cache key"
+    answer: 3
+    explanation: |
+      The set of bean-override definitions is folded into a ContextCustomizer that
+      participates in the MergedContextConfiguration cache key. Differing field/
+      qualifier names can make the customizers unequal, producing two contexts.
+      Naming mocks consistently across classes maximizes cache reuse.
+    ref: "concepts.md#slice-tests-and-context-caching"
+
+  - id: testing-spring-boot-applications-074
+    difficulty: advanced
+    tags: [context-caching, dirtiescontext, lifecycle]
+    question: |
+      When a cached ApplicationContext is evicted from the TestContext cache (LRU
+      overflow or @DirtiesContext), what actually happens to that context?
+    options:
+      - "It is closed — @PreDestroy callbacks run and managed resources like embedded servers and connection pools are shut down"
+      - "It is kept in memory forever but marked stale"
+      - "Only its bean definitions are cleared; singletons remain live"
+      - "Nothing; eviction only frees the cache key"
+    answer: 0
+    explanation: |
+      Eviction closes the context, invoking destruction callbacks and releasing
+      resources (embedded servers, datasources, thread pools). This is why
+      thrashing the cache is doubly costly — teardown plus a full rebuild on the
+      next miss.
+    ref: "concepts.md#slice-tests-and-context-caching"
+
+  - id: testing-spring-boot-applications-075
+    difficulty: expert
+    tags: [context-caching, dynamicpropertysource, key]
+    question: |
+      Test class A uses @DynamicPropertySource to register a Testcontainers JDBC
+      URL. Test class B has otherwise-identical configuration but no
+      @DynamicPropertySource (it relies on application-test.properties). Assuming the
+      resolved property values end up the same, do A and B share a cached context?
+    options:
+      - "Yes, because the effective property values are equal at runtime"
+      - "No, because @DynamicPropertySource forces @DirtiesContext"
+      - "Yes, because @DynamicPropertySource is resolved lazily and ignored by the cache key"
+      - "No — the presence of @DynamicPropertySource contributes a ContextCustomizer, so the merged configurations differ and the contexts are not shared"
+    answer: 3
+    explanation: |
+      The cache key is structural, not the resolved values. @DynamicPropertySource
+      adds a customizer to A's merged configuration that B lacks, so their keys
+      differ and each gets its own context even if the final property values would
+      coincide.
+    ref: "concepts.md#slice-tests-and-context-caching"
+
+  - id: testing-spring-boot-applications-076
+    difficulty: advanced
+    tags: [context-caching, performance, debugging]
+    question: |
+      A CI suite of 300 tests is slow; you suspect context thrashing. Which is the
+      most direct way to confirm how many distinct contexts are being built and
+      whether the 32-entry cache is overflowing?
+    options:
+      - "Add @DirtiesContext everywhere to force clean measurements"
+      - "Increase spring.test.context.cache.maxSize to 1000 and see if it speeds up"
+      - "Enable DEBUG logging on org.springframework.test.context.cache to observe hit/miss/size counts"
+      - "Run each test class in a separate JVM"
+    answer: 2
+    explanation: |
+      The cache logger reports cache hits, misses, size, and parent contexts at
+      DEBUG. That reveals whether many near-identical configurations are missing and
+      evicting each other — the actionable diagnosis before you consolidate configs.
+    ref: "concepts.md#slice-tests-and-context-caching"
+
+  - id: testing-spring-boot-applications-077
+    difficulty: expert
+    tags: [mockitobean, replace-or-create, failure-mode]
+    question: |
+      A @SpringBootTest declares `@MockitoBean NotificationClient client;` but,
+      because of a conditional, NotificationClient is NOT actually present in the
+      loaded context. The stubbing appears to have no effect on the real code path.
+      What happened?
+    options:
+      - "The context failed to start due to a missing bean"
+      - "The mock replaced a random bean of a different type"
+      - "Spring silently downgraded @MockitoBean to @Mock"
+      - "@MockitoBean's default REPLACE_OR_CREATE strategy created a brand-new mock bean (since none existed to replace); real code that never injects NotificationClient is unaffected, so your stub does nothing"
+    answer: 3
+    explanation: |
+      @MockitoBean uses REPLACE_OR_CREATE: with no existing bean it creates a new
+      mock rather than failing. If nothing injects that type, the mock is inert.
+      Setting enforceOverride = true (REPLACE) would make the test fail fast when the
+      target bean is absent.
+    ref: "concepts.md#mockbean--mockitobean-vs-mockito-mock"
+
+  - id: testing-spring-boot-applications-078
+    difficulty: expert
+    tags: [mockitospybean, wrap, scoped-proxy]
+    question: |
+      Which scenario will cause a @MockitoSpyBean (WRAP strategy) declaration to
+      fail at context startup?
+    options:
+      - "The target bean is a plain singleton with exactly one candidate"
+      - "There are zero beans of the target type in the context, because WRAP requires exactly one existing candidate and cannot create one"
+      - "The target bean has a @Primary annotation"
+      - "The spy is declared on a private field"
+    answer: 1
+    explanation: |
+      Unlike @MockitoBean (REPLACE_OR_CREATE), @MockitoSpyBean uses WRAP and must
+      wrap an existing instance; zero candidates is an error. (Multiple candidates
+      also fail without a qualifier; a scoped-proxy target also fails to be spied.)
+      Private fields are fine.
+    ref: "concepts.md#mockbean--mockitobean-vs-mockito-mock"
+
+  - id: testing-spring-boot-applications-079
+    difficulty: advanced
+    tags: [mockitobean, reset, lifecycle, beforeall]
+    question: |
+      A test class stubs a @MockitoBean once in a static @BeforeAll method and reads
+      it in three @Test methods. The first test sees the stub; but debugging shows
+      the stub is gone. What is the cause?
+    options:
+      - "@BeforeAll cannot access Spring beans, so the stub was on a null reference"
+      - "Spring Boot resets @MockitoBean/@MockBean mocks around each test method, wiping the stub configured once in @BeforeAll; re-stub in @BeforeEach instead"
+      - "Static methods run after the tests, so the stub was applied too late"
+      - "The mock is a new instance per test method"
+    answer: 1
+    explanation: |
+      Spring's mock-reset listener resets these mocks before/after each test method.
+      A stub set once in @BeforeAll is cleared before the first (or by the second)
+      test. Configure stubs per-method (@BeforeEach or inside the test) so they
+      survive the reset.
+    ref: "concepts.md#mockbean--mockitobean-vs-mockito-mock"
+
+  - id: testing-spring-boot-applications-080
+    difficulty: advanced
+    tags: [mockitobean, ambiguity, qualifier]
+    question: |
+      A context has two beans of type Clock (a system clock and a UTC clock). A test
+      declares `@MockitoBean Clock clock;` and the context fails with an error about
+      an ambiguous bean. Which is the correct way to disambiguate which bean to
+      replace?
+    options:
+      - "Rename the field to match one bean's name, add a @Qualifier, or use @MockitoBean(name = \"...\") to target a specific bean"
+      - "You cannot mock a type that has two beans"
+      - "Add @Primary to the @MockitoBean field"
+      - "Use two @MockitoBean fields of the same type without names"
+    answer: 0
+    explanation: |
+      By-type resolution is ambiguous with two candidates. @MockitoBean falls back to
+      the field name as a qualifier, and you can also use @Qualifier or the name
+      attribute to pick the exact bean to replace. @Primary is not applicable to the
+      override field itself.
+    ref: "concepts.md#mockbean--mockitobean-vs-mockito-mock"
+
+  - id: testing-spring-boot-applications-081
+    difficulty: expert
+    tags: [mockito, injectmocks, null-injection]
+    question: |
+      A pure Mockito test uses @InjectMocks on a service whose largest constructor
+      takes (OrderRepo repo, AuditLog audit, Clock clock). The test declares @Mock
+      for repo and clock but NOT audit. No error occurs at setup, but a test throws
+      NPE inside the service on audit.write(). Why?
+    options:
+      - "@InjectMocks requires all constructor parameters to be mocked or it fails at setup"
+      - "Mockito injected a real AuditLog instance"
+      - "@InjectMocks always uses field injection, so the constructor is irrelevant"
+      - "Mockito chose the largest constructor it could use and injected null for the unmocked AuditLog parameter, so audit is null at runtime"
+    answer: 3
+    explanation: |
+      @InjectMocks prefers the biggest constructor and injects available mocks;
+      parameters with no matching mock are passed as null (no error). AuditLog was
+      null, so calling it NPEs. Declare a @Mock AuditLog to fix it.
+    ref: "concepts.md#junit-5-and-mockito-basics"
+
+  - id: testing-spring-boot-applications-082
+    difficulty: advanced
+    tags: [mockito, matchers, primitives]
+    question: |
+      Which stubbing line throws InvalidUseOfMatchersException at runtime in modern
+      Mockito?
+    options:
+      - "when(svc.calc(5, anyLong())).thenReturn(9) — a raw literal 5 alongside the anyLong() matcher"
+      - "when(repo.findByStatus(anyInt())).thenReturn(list) — for an int parameter"
+      - "when(repo.find(any())).thenReturn(x) — relying on the no-arg any() to also match a null argument at call time"
+      - "when(repo.findById(anyLong())).thenReturn(opt) — for a long parameter"
+    answer: 0
+    explanation: |
+      Mockito's rule: if ANY argument uses a matcher, then EVERY argument must use
+      one. Passing a raw literal (5) beside anyLong() throws
+      InvalidUseOfMatchersException — wrap it as eq(5). The others are fine:
+      anyInt()/anyLong() correctly handle primitives, and the no-arg any() matches
+      anything INCLUDING null (only any(Class) excludes null since Mockito 2.1.0,
+      where you would use isNull()/nullable()).
+    ref: "concepts.md#junit-5-and-mockito-basics"
+
+  - id: testing-spring-boot-applications-083
+    difficulty: expert
+    tags: [mockito, spy, self-invocation, aop-contrast]
+    question: |
+      A Mockito spy of a class where publicA() internally calls this.publicB(). The
+      test does `doReturn(42).when(spy).publicB();` then calls spy.publicA(). What
+      happens, and how does this contrast with Spring's @Transactional self-invocation?
+    options:
+      - "publicA() sees the stubbed 42, because a Mockito spy is a subclass with copied state so self-invoked this.publicB() dispatches through the spy and IS intercepted — the OPPOSITE of Spring AOP proxies, where this.method() bypasses the proxy"
+      - "publicA() runs the real publicB(), because Mockito spies delegate to the untouched original object exactly like an AOP proxy, so self-invocation is never intercepted"
+      - "The context fails because you cannot stub a self-invoked method on a spy"
+      - "It behaves identically to an @Transactional self-call: the inner method's stub is ignored"
+    answer: 0
+    explanation: |
+      A Mockito spy is a ByteBuddy SUBCLASS whose state is copied from the real
+      object — it does not delegate to the original instance. So every call on the
+      spy reference, including internal this.publicB() self-invocations, is
+      intercepted, and the stub returns 42. This is the reverse of Spring AOP /
+      @Transactional proxies, where 'this' is the raw target and self-invocation
+      bypasses the proxy. (doReturn().when(spy) is still preferred over
+      when(spy.publicB()) only because the latter executes the real method while
+      stubbing.)
+    ref: "concepts.md#junit-5-and-mockito-basics"
+
+  - id: testing-spring-boot-applications-084
+    difficulty: advanced
+    tags: [mockito, strictness, unnecessarystubbing]
+    question: |
+      A team migrating from JUnit 4's MockitoJUnitRunner to JUnit 5's
+      MockitoExtension suddenly sees UnnecessaryStubbingException failures on tests
+      that previously passed. What changed, and what is the least-invasive way to
+      keep a specific legitimate-but-unused stub?
+    options:
+      - "MockitoExtension defaults to STRICT_STUBS (vs the runner's more lenient default); mark the intentional stub with lenient().when(...) or set @MockitoSettings(strictness = LENIENT)"
+      - "JUnit 5 removed stubbing; rewrite with real objects"
+      - "The extension disables verification; add verifyNoMoreInteractions"
+      - "Downgrade Mockito to restore behavior; there is no per-stub option"
+    answer: 0
+    explanation: |
+      MockitoExtension enforces STRICT_STUBS by default, flagging unused stubs. Use
+      lenient().when(...) for a single stub, or @MockitoSettings(strictness =
+      Strictness.LENIENT) for the class, rather than abandoning strictness wholesale.
+    ref: "concepts.md#junit-5-and-mockito-basics"
+
+  - id: testing-spring-boot-applications-085
+    difficulty: expert
+    tags: [mockito, static-mock, thread-local, leak]
+    question: |
+      A test uses `try (MockedStatic<Instant> m = mockStatic(Instant.class)) { ... }`
+      to freeze time, but a later unrelated test on the same thread intermittently
+      sees frozen time. Which explanation and remedy are correct?
+    options:
+      - "mockStatic is global; you must call unmockStatic() manually"
+      - "The leak is caused by strict stubbing and is fixed by lenient()"
+      - "Static mocking is impossible in Mockito; the behavior is a JVM bug"
+      - "A MockedStatic registration is thread-local and active until closed; if a code path escapes the try-with-resources (e.g. an exception before close, or reuse across threads), it leaks. Ensure the MockedStatic is always closed (try-with-resources) and confined to one thread"
+    answer: 3
+    explanation: |
+      mockStatic returns a thread-local MockedStatic scoped registration that stays
+      active until closed. If it isn't closed on the same thread (leaked scope or
+      cross-thread use), subsequent tests observe the mock. Always use
+      try-with-resources and keep it single-threaded.
+    ref: "concepts.md#junit-5-and-mockito-basics"
+
+  - id: testing-spring-boot-applications-086
+    difficulty: advanced
+    tags: [mockmvc, mockmvctester, spring-6-2]
+    question: |
+      What is a correct distinction between classic MockMvc (Hamcrest style) and the
+      MockMvcTester introduced in Spring Framework 6.2?
+    options:
+      - "MockMvcTester provides a fluent AssertJ-based API for both requests and assertions, handles unresolved exceptions itself (so tests need not declare throws Exception), and treats async results as complete by default"
+      - "MockMvcTester makes real HTTP calls whereas MockMvc does not"
+      - "MockMvcTester only works with WebFlux"
+      - "MockMvcTester replaces the need for a Spring context entirely"
+    answer: 0
+    explanation: |
+      MockMvcTester is the AssertJ entry point: fluent request building and
+      assertions, no required static imports, consistent handling of unresolved
+      exceptions (no throws Exception needed), and async results complete by default.
+      Neither MockMvc nor MockMvcTester makes real network calls.
+    ref: "concepts.md#mockmvc-vs-testresttemplate-vs-webtestclient"
+
+  - id: testing-spring-boot-applications-087
+    difficulty: advanced
+    tags: [webtestclient, mvc, binding]
+    question: |
+      Which statement about WebTestClient is accurate?
+    options:
+      - "It can only be used against reactive WebFlux applications over a real server"
+      - "It can bind to a running server (RANDOM_PORT), to a WebFlux application context, OR to Spring MVC controllers without a server via MockMvc integration — making it a unified client for both stacks"
+      - "It cannot assert on response bodies, only status codes"
+      - "It requires the Reactor Netty server to be running"
+    answer: 1
+    explanation: |
+      WebTestClient is a unified fluent test client. Besides real-server and WebFlux
+      context binding, MockMvcWebTestClient lets it drive MVC controllers in-process
+      without a server. The reactive-only belief is a common misconception.
+    ref: "concepts.md#mockmvc-vs-testresttemplate-vs-webtestclient"
+
+  - id: testing-spring-boot-applications-088
+    difficulty: intermediate
+    tags: [mockmvc, forward, assertions]
+    question: |
+      In a MockMvc test of a controller that returns a view name resulting in a
+      server-side forward to "/WEB-INF/views/order.jsp", which assertion verifies the
+      forward target?
+    options:
+      - "andExpect(redirectedUrl(\"/WEB-INF/views/order.jsp\"))"
+      - "andExpect(status().isFound())"
+      - "andExpect(forwardedUrl(\"/WEB-INF/views/order.jsp\"))"
+      - "andExpect(header().string(\"Location\", \"/WEB-INF/views/order.jsp\"))"
+    answer: 2
+    explanation: |
+      MockMvc records but does not actually execute the forward; forwardedUrl(...)
+      asserts the forward target. redirectedUrl / Location / 302 are for client
+      redirects, not server-side forwards.
+    ref: "concepts.md#mockmvc-vs-testresttemplate-vs-webtestclient"
+
+  - id: testing-spring-boot-applications-089
+    difficulty: expert
+    tags: [testconfiguration, override, bean-definition-override]
+    question: |
+      A @TestConfiguration nested in a @SpringBootTest defines
+      `@Bean PaymentGateway paymentGateway() { return new StubGateway(); }` with the
+      SAME bean name as the production bean. Startup fails with
+      BeanDefinitionOverrideException. Which options both resolve it correctly?
+    options:
+      - "Only setting spring.main.allow-bean-definition-overriding=true"
+      - "Annotate the production bean @Lazy"
+      - "Rename the production bean at runtime"
+      - "Either enable spring.main.allow-bean-definition-overriding=true, OR replace the @TestConfiguration override with a @MockitoBean (which replaces rather than redefines and sidesteps the override flag)"
+    answer: 3
+    explanation: |
+      Since Boot 2.1 bean-definition overriding is disabled by default, so a
+      same-named @Bean throws. You can enable overriding, or avoid the redefinition
+      entirely by using @MockitoBean, which registers a replacement through the
+      bean-override mechanism rather than a conflicting definition.
+    ref: "concepts.md#testconfiguration-and-test-specific-beans"
+
+  - id: testing-spring-boot-applications-090
+    difficulty: advanced
+    tags: [testconfiguration, import, autoconfig]
+    question: |
+      When you @Import a top-level @TestConfiguration into a @SpringBootTest, how does
+      it interact with the discovered @SpringBootConfiguration?
+    options:
+      - "It replaces the @SpringBootConfiguration, so auto-configuration no longer runs"
+      - "It is added on top of the discovered configuration, so you still get full auto-configuration plus the test beans"
+      - "It is ignored unless the test also adds @EnableAutoConfiguration"
+      - "It only works if declared as a nested static class"
+    answer: 1
+    explanation: |
+      @Import of a @TestConfiguration supplements the primary configuration; the
+      normal @SpringBootConfiguration/auto-configuration still applies and the test
+      beans are added. (Nested static @TestConfiguration is auto-detected without
+      @Import for that class only.)
+    ref: "concepts.md#testconfiguration-and-test-specific-beans"
+
+  - id: testing-spring-boot-applications-091
+    difficulty: expert
+    tags: [testcontainers, singleton-container, performance]
+    question: |
+      A large suite spins up a fresh PostgreSQLContainer per test class (static
+      @Container) and is still too slow because there are 40 classes. Which pattern
+      minimizes container startups the most while remaining CI-safe?
+    options:
+      - "Make the container non-static so it starts per method"
+      - "Set testcontainers.reuse.enable=true in CI to keep containers between builds"
+      - "Add @DirtiesContext to every class"
+      - "Use the singleton-container pattern: declare a static container in a base class and start it once in a static initializer (not via @Container lifecycle), sharing it across all classes so it starts a single time per JVM"
+    answer: 3
+    explanation: |
+      The singleton-container pattern starts one container in a static block shared
+      by all test classes (Ryuk reaps it at JVM exit), so it starts once per run —
+      ideal when combined with a shared cached context. Reuse across builds is a
+      local-dev optimization, typically disabled in CI.
+    ref: "concepts.md#testcontainers-for-real-integration"
+
+  - id: testing-spring-boot-applications-092
+    difficulty: advanced
+    tags: [testcontainers, serviceconnection, precedence]
+    question: |
+      A test declares both a @ServiceConnection on a PostgreSQLContainer AND a
+      @DynamicPropertySource setting spring.datasource.url to a typo'd value. The app
+      still connects correctly. Why?
+    options:
+      - "@ServiceConnection produces a ConnectionDetails bean that takes precedence over the datasource URL property, so the correct container-derived URL is used and the typo'd property is overridden"
+      - "@DynamicPropertySource is always ignored when a container is present"
+      - "Spring merges both URLs and picks the shorter one"
+      - "The typo is auto-corrected by Testcontainers"
+    answer: 0
+    explanation: |
+      @ServiceConnection registers ConnectionDetails beans that outrank ordinary
+      properties for connection setup. So the container's real coordinates win, and
+      the mistyped @DynamicPropertySource value is effectively shadowed — which can
+      mask configuration mistakes.
+    ref: "concepts.md#testcontainers-for-real-integration"
+
+  - id: testing-spring-boot-applications-093
+    difficulty: expert
+    tags: [testcontainers, lifecycle, ordering, failure-mode]
+    question: |
+      A test class declares `static PostgreSQLContainer<?> pg = new
+      PostgreSQLContainer<>("postgres:16");` and a @DynamicPropertySource calling
+      pg::getJdbcUrl, but FORGOT the @Testcontainers annotation on the class. What is
+      the likely failure?
+    options:
+      - "The container starts twice"
+      - "Nothing — @Testcontainers is optional for static containers"
+      - "The TestcontainersExtension never runs, so the static container is never started; getJdbcUrl() is called on a non-running container and fails (IllegalStateException / connection errors)"
+      - "The context loads but every query returns null"
+    answer: 2
+    explanation: |
+      Without @Testcontainers there is no extension to manage @Container lifecycle,
+      so the static container isn't started. @DynamicPropertySource then queries a
+      stopped container's mapped URL/port, throwing. Add @Testcontainers (or start
+      the container manually in the singleton pattern).
+    ref: "concepts.md#testcontainers-for-real-integration"
+
+  - id: testing-spring-boot-applications-094
+    difficulty: expert
+    tags: [transactions, testtransaction, propagation]
+    question: |
+      Within one @Transactional test method you need to (1) insert a row, (2) confirm
+      it is actually committed and visible to a fresh connection, then (3) continue
+      asserting. Which approach works?
+    options:
+      - "Use TestTransaction.flagForCommit(); TestTransaction.end(); then TestTransaction.start() to run the commit and begin a new transaction for further work"
+      - "Call entityManager.getTransaction().commit() directly"
+      - "Annotate the method @Commit — that commits mid-method"
+      - "There is no way to commit mid-method in a managed test transaction"
+    answer: 0
+    explanation: |
+      TestTransaction gives programmatic control of the test-managed transaction:
+      flagForCommit() then end() commits it, and start() opens a new one for
+      subsequent steps. @Commit only affects end-of-method behavior, and calling the
+      JPA EntityManager transaction directly conflicts with the managed transaction.
+    ref: "concepts.md#verifying-transactions-and-rollback-in-tests"
+
+  - id: testing-spring-boot-applications-095
+    difficulty: expert
+    tags: [transactions, async, isolation]
+    question: |
+      A @SpringBootTest is @Transactional. Inside the test, code calls an @Async
+      service method that reads a row the test just inserted (but not committed). The
+      async method reports the row as missing. Why?
+    options:
+      - "@Async methods disable transactions globally"
+      - "The @Async method runs on a different thread with its own transaction/connection and cannot see the test's uncommitted changes (which live in the test thread's transaction that hasn't committed)"
+      - "The row was rolled back before the async call"
+      - "@Transactional tests cannot call async methods at all"
+    answer: 1
+    explanation: |
+      The test's insert is uncommitted and bound to the test thread's transaction.
+      The @Async method executes on a separate thread with a separate transaction and
+      connection, so under normal isolation it cannot see the uncommitted row. Commit
+      first (or restructure) to make it visible.
+    ref: "concepts.md#flaky-tests-ordering-isolation-and-parallelism"
+
+  - id: testing-spring-boot-applications-096
+    difficulty: advanced
+    tags: [flaky, ordering, shared-state]
+    question: |
+      A suite passes when run whole but a single test fails when run in isolation
+      (and vice versa in another case). What is the most likely root cause and the
+      most principled fix?
+    options:
+      - "JUnit 5 randomizes methods; pin the order with @TestMethodOrder"
+      - "Mockito strict stubbing; switch to lenient"
+      - "The context cache is too small; raise maxSize"
+      - "Hidden inter-test coupling via shared mutable state (a committed row from a real-server test, a mutated cached singleton, or a static field); fix by eliminating shared state / cleaning up in @AfterEach rather than depending on execution order"
+    answer: 3
+    explanation: |
+      Order-dependence is a symptom of leaked shared state, not a reason to enforce
+      an order. The durable fix is to remove the coupling — clean up committed data,
+      avoid mutating shared singletons/cached-context beans, reset statics — so any
+      order passes.
+    ref: "concepts.md#flaky-tests-ordering-isolation-and-parallelism"
+
+  - id: testing-spring-boot-applications-097
+    difficulty: advanced
+    tags: [flaky, async, awaitility]
+    question: |
+      A test triggers an @Async handler and then immediately asserts a side effect,
+      failing intermittently. Which is the best fix?
+    options:
+      - "Add a fixed Thread.sleep(500) before the assertion"
+      - "Await the condition with Awaitility (or await the returned CompletableFuture), polling until the side effect is observed or a timeout elapses"
+      - "Annotate the test @Repeat(10)"
+      - "Make the handler synchronous only in production"
+    answer: 1
+    explanation: |
+      Fixed sleeps are flaky and slow. Awaitility polls for the expected condition
+      with a timeout, or you can join the returned CompletableFuture — deterministic
+      and fast when the async work finishes early.
+    ref: "concepts.md#flaky-tests-ordering-isolation-and-parallelism"
+
+  - id: testing-spring-boot-applications-098
+    difficulty: expert
+    tags: [parallelism, junit5, mockitobean]
+    question: |
+      A team enables JUnit 5 parallel execution and several @SpringBootTest classes
+      that share one cached context and use @MockitoBean start failing
+      intermittently. What is the underlying problem?
+    options:
+      - "Parallel execution is unsupported with Spring at all"
+      - "The context cache is not thread-safe, so it must be disabled"
+      - "Concurrent tests share the same mock instances in the cached context; mock reset and concurrent stubbing/verification race across threads, corrupting each other's expectations — serialize the risky classes (@ResourceLock / @Execution(SAME_THREAD)) or avoid sharing mutable context state"
+      - "@MockitoBean cannot be used with more than one test class"
+    answer: 2
+    explanation: |
+      The context cache itself is thread-safe, but the shared mock beans are not
+      safe to stub/verify/reset concurrently. Parallel tests on the same context race
+      over mock state. Serialize them or redesign to avoid shared mutable state.
+    ref: "concepts.md#flaky-tests-ordering-isolation-and-parallelism"
+
+  - id: testing-spring-boot-applications-099
+    difficulty: advanced
+    tags: [slice-internals, importautoconfiguration]
+    question: |
+      You want a @DataJpaTest to also run your Flyway migrations (which the slice
+      normally may not fully wire for your setup) without escalating to
+      @SpringBootTest. Which mechanism most precisely adds just that
+      auto-configuration to the slice?
+    options:
+      - "@EnableAutoConfiguration on the test, pulling in everything"
+      - "@ImportAutoConfiguration(FlywayAutoConfiguration.class), which imports only the named auto-configuration into the slice"
+      - "@ComponentScan(\"org.flywaydb\")"
+      - "@Import(Flyway.class)"
+    answer: 1
+    explanation: |
+      @ImportAutoConfiguration adds specific auto-configuration classes to a slice
+      without turning on full auto-configuration, keeping the context minimal while
+      enabling exactly the piece you need.
+    ref: "concepts.md#slice-internals-autoconfigure-importautoconfiguration-filters"
+
+  - id: testing-spring-boot-applications-100
+    difficulty: advanced
+    tags: [slice-internals, typeexcludefilters]
+    question: |
+      Inside a @WebMvcTest you add @ComponentScan with an includeFilter to bring your
+      @Service back into the slice, but it still isn't registered. What is the
+      mechanism preventing it?
+    options:
+      - "Services can never be beans in tests"
+      - "The slice's @TypeExcludeFilters (e.g. WebMvcTypeExcludeFilter) exclude non-web stereotypes and take precedence, so @Service beans are filtered out regardless of your includeFilter"
+      - "@ComponentScan is illegal on test classes"
+      - "The service needs @Primary to survive filtering"
+    answer: 1
+    explanation: |
+      Slices enforce a @TypeExcludeFilters that drops components outside the slice's
+      scope. That exclusion wins over a user includeFilter, so services stay out.
+      Provide the service as @MockitoBean, @Import its config, or use @SpringBootTest.
+    ref: "concepts.md#slice-internals-autoconfigure-importautoconfiguration-filters"
+
+  - id: testing-spring-boot-applications-101
+    difficulty: intermediate
+    tags: [security, spring-security-test, dependency]
+    question: |
+      A test tries to use @WithMockUser and SecurityMockMvcRequestPostProcessors but
+      the symbols don't resolve at compile time. What is missing?
+    options:
+      - "The spring-security-test dependency, which provides the test-only security annotations and MockMvc post-processors"
+      - "@EnableWebSecurity on the test"
+      - "The spring-boot-starter-security dependency alone is enough; the code has a typo"
+      - "A custom SecurityFilterChain bean"
+    answer: 0
+    explanation: |
+      @WithMockUser, @WithUserDetails, and SecurityMockMvcRequestPostProcessors live
+      in spring-security-test, a separate test dependency. The runtime security
+      starter does not include these test utilities.
+    ref: "concepts.md#testing-security-and-web-layers-deeply"
+
+  - id: testing-spring-boot-applications-102
+    difficulty: intermediate
+    tags: [junit5, methodsource, parameterized]
+    question: |
+      A @ParameterizedTest uses @MethodSource("cases") but fails at runtime because
+      the factory method cannot be found/used. Which requirement is most likely
+      violated?
+    options:
+      - "The factory method must return void"
+      - "The factory method must be static (unless the test class is @TestInstance(PER_CLASS)) and provide a Stream/Collection/array of arguments"
+      - "@MethodSource can only reference methods in a different class"
+      - "The factory method must be annotated @Test"
+    answer: 1
+    explanation: |
+      @MethodSource factory methods must be static by default (or the class must use
+      PER_CLASS lifecycle) and return a Stream/Iterable/array of arguments. A void or
+      @Test-annotated method won't work.
+    ref: "concepts.md#junit-5-and-mockito-basics"
+
+  - id: testing-spring-boot-applications-103
+    difficulty: expert
+    tags: [datajpatest, native-query, validation]
+    question: |
+      A repository declares a native query
+      `@Query(value = "SELECT * FROM ordrs WHERE customer_id = ?1", nativeQuery = true)`
+      (note the typo 'ordrs'). A @DataJpaTest exists for the repository but never
+      invokes this method, and the whole suite is green — yet production fails. In
+      contrast, a typo in a DERIVED query method name (e.g. findByCustmerId) would
+      have failed the same @DataJpaTest at context startup. What explains the
+      difference?
+    options:
+      - "Native query SQL is an opaque string that is NOT parsed against the entity metamodel; it is only validated when the DB actually executes it, so an uncalled native query hides its error — whereas derived query method names ARE parsed by Spring Data at repository bootstrap (default eager mode), failing fast even if never called"
+      - "Native queries are validated at bootstrap but derived queries are not"
+      - "H2 silently ignores unknown table names, but Postgres does not"
+      - "@DataJpaTest disables validation for native queries only"
+    answer: 0
+    explanation: |
+      Derived query methods are parsed by Spring Data (PartTree → property paths) at
+      repository initialization, and JPQL @Query strings by Hibernate at
+      EntityManagerFactory bootstrap — so with the default eager bootstrap mode their
+      typos fail at startup regardless of invocation. A NATIVE query's SQL is opaque
+      to Hibernate/Spring Data and is only checked when the database executes it, so
+      an uncalled native query with a bad table/column name goes undetected. Add a
+      test that actually invokes each native query.
+    ref: "concepts.md#datajpatest-persistence-slice"

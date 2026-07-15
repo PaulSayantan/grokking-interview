@@ -985,3 +985,834 @@ questions:
       directly on the database without loading/updating managed entities, so the
       listener never fires.
     ref: "concepts.md#auditing"
+  - id: spring-data-jpa-persistence-061
+    difficulty: expert
+    tags: [repository-hierarchy, transaction, internals]
+    question: |
+      A non-transactional service method calls userRepo.findById(1L) and then, on the
+      returned managed entity, calls order.getItems().size() where items is LAZY. It
+      throws LazyInitializationException even though SimpleJpaRepository methods are
+      transactional. Why?
+    options:
+      - "SimpleJpaRepository.findById runs in its own transaction that commits and closes the persistence context before the method returns, so the returned entity is already detached when the lazy collection is touched"
+      - "findById never opens a persistence context; only save() does"
+      - "LAZY collections cannot be initialized inside a repository at all"
+      - "The exception is spurious; findById always eagerly loads collections"
+    answer: 0
+    explanation: |
+      Each SimpleJpaRepository call is its own transaction/persistence context (class-level
+      @Transactional). It commits and closes before returning, so the entity is detached
+      and the lazy collection can't initialize. A service-layer @Transactional keeps one
+      context open across the read and the access.
+    ref: "concepts.md#repository-hierarchy"
+  - id: spring-data-jpa-persistence-062
+    difficulty: expert
+    tags: [repository-hierarchy, custom-fragment, dispatch]
+    question: |
+      You add a custom fragment UserRepositoryImpl implementing a save(User) method that
+      logs and delegates, alongside JpaRepository's inherited save. When code calls
+      userRepository.save(u), which implementation runs and why?
+    options:
+      - "SimpleJpaRepository.save, because base methods always take priority over fragments"
+      - "Your UserRepositoryImpl.save, because custom fragment implementations are matched before the base repository implementation in the proxy's interceptor chain"
+      - "It is ambiguous and fails at startup"
+      - "Both run in sequence, base first then fragment"
+    answer: 1
+    explanation: |
+      The repository proxy resolves a call as: custom fragment first, then base
+      (SimpleJpaRepository), then query method. So a fragment method with a matching
+      signature overrides the inherited base implementation.
+    ref: "concepts.md#repository-hierarchy"
+  - id: spring-data-jpa-persistence-063
+    difficulty: advanced
+    tags: [repository-hierarchy, base-class]
+    question: |
+      To change behavior (e.g. soft-delete) for ALL repositories in the application, what
+      is the correct mechanism?
+    options:
+      - "Add @Override save/delete to each repository interface"
+      - "Annotate the entity with @SoftDelete only"
+      - "Provide a custom base class extending SimpleJpaRepository, mark the shared base interface @NoRepositoryBean, and set @EnableJpaRepositories(repositoryBaseClass=...)"
+      - "Register a BeanPostProcessor that rewrites every repository bean"
+    answer: 2
+    explanation: |
+      A custom repositoryBaseClass extending SimpleJpaRepository lets you override base
+      CRUD behavior for every repository at once; the intermediate base interface is marked
+      @NoRepositoryBean so Spring does not try to instantiate it.
+    ref: "concepts.md#repository-hierarchy"
+  - id: spring-data-jpa-persistence-064
+    difficulty: expert
+    tags: [derived-queries, delete, lifecycle]
+    question: |
+      What is the key behavioral difference between a derived deleteByStatus(Status s)
+      method and a @Modifying @Query("delete from User u where u.status = :s")?
+    options:
+      - "They are compiled to identical SQL"
+      - "deleteByStatus issues a single bulk DELETE; the @Modifying version loads entities first"
+      - "Neither requires a transaction"
+      - "The derived deleteByStatus first SELECTs matching entities and removes them one-by-one so cascade/orphanRemoval/@PreRemove fire; the @Modifying bulk DELETE goes straight to the DB, skipping all of that"
+    answer: 3
+    explanation: |
+      Derived delete methods are entity operations: Spring Data selects then calls
+      EntityManager.remove per row, firing cascades and callbacks. A @Modifying bulk delete
+      bypasses the persistence context entirely, so it is faster but lifecycle-unaware.
+    ref: "concepts.md#derived-query-methods"
+  - id: spring-data-jpa-persistence-065
+    difficulty: advanced
+    tags: [derived-queries, stream, resource-leak]
+    question: |
+      A repository method Stream<User> streamAllByActiveTrue() is consumed in a service
+      without a try-with-resources and without a surrounding transaction. What is the risk?
+    options:
+      - "None; streams are fully materialized eagerly"
+      - "It always throws IncorrectResultSizeDataAccessException"
+      - "The underlying JDBC ResultSet/connection is not released (leak) because the Stream must be closed and consumed within an open transaction"
+      - "The stream silently returns an empty result"
+    answer: 2
+    explanation: |
+      Streaming query results keep the ResultSet/connection open until the Stream is closed.
+      They must be consumed inside the transaction and closed (try-with-resources), otherwise
+      resources leak or a LazyInitialization/connection error occurs.
+    ref: "concepts.md#derived-query-methods"
+  - id: spring-data-jpa-persistence-066
+    difficulty: intermediate
+    tags: [query, like, params]
+    question: |
+      Which @Query correctly performs a case-containing LIKE search binding a parameter
+      named term?
+    options:
+      - "@Query(\"select u from User u where u.name like %:term%\")"
+      - "@Query(\"select u from User u where u.name like '%:term%'\")"
+      - "@Query(\"select u from User u where u.name = concat(:term)\")"
+      - "@Query(\"select u from User u where u.name contains :term\")"
+    answer: 0
+    explanation: |
+      Wildcards inside quotes make :term a literal, not a bind parameter. Spring Data
+      expands like %:term% (or use concat('%', :term, '%')). 'contains' is not JPQL.
+    ref: "concepts.md#query-jpql-vs-native"
+  - id: spring-data-jpa-persistence-067
+    difficulty: expert
+    tags: [query, in-clause, edge-case]
+    question: |
+      A @Query("select u from User u where u.id in :ids") is called with an empty list.
+      On many databases this fails. Why?
+    options:
+      - "Spring Data forbids collection parameters"
+      - "JPQL does not support the IN operator"
+      - "The empty collection expands to IN () which is invalid SQL on many databases; guard against empty lists before calling"
+      - "The parameter must be positional for IN to work"
+    answer: 2
+    explanation: |
+      An empty collection produces IN () which is a syntax error on many databases. Guard
+      for empty input in code (return early / skip the predicate) rather than passing an
+      empty list.
+    ref: "concepts.md#query-jpql-vs-native"
+  - id: spring-data-jpa-persistence-068
+    difficulty: expert
+    tags: [query, native, projection]
+    question: |
+      You write @Query(value="select new com.x.UserDto(name, email) from users",
+      nativeQuery=true). Why does this fail?
+    options:
+      - "DTO records cannot be used as projections at all"
+      - "You must add @Modifying"
+      - "Native queries can only return Object[]"
+      - "The 'new' constructor expression is JPQL syntax and is not valid in native SQL; use an interface projection or @SqlResultSetMapping/@NamedNativeQuery instead"
+    answer: 3
+    explanation: |
+      The JPQL constructor expression (select new ...) is not native SQL. For native queries
+      use an interface-based projection (columns matching getters) or a @SqlResultSetMapping
+      with @ConstructorResult.
+    ref: "concepts.md#query-jpql-vs-native"
+  - id: spring-data-jpa-persistence-069
+    difficulty: expert
+    tags: [modifying, flush, clear, ordering]
+    question: |
+      For @Modifying(flushAutomatically=true, clearAutomatically=true) on a bulk UPDATE,
+      what is the effective execution order and why does it matter?
+    options:
+      - "clear first, then run the bulk update, then flush — so pending changes are reloaded"
+      - "flush pending managed changes to the DB, run the bulk statement (so it sees them), then clear the context (detach everything) so later reads reload fresh"
+      - "flush and clear happen only if the update throws"
+      - "The order is undefined and provider-specific"
+    answer: 1
+    explanation: |
+      flushAutomatically pushes pending dirty state so the bulk statement operates on it;
+      then the statement runs; then clearAutomatically detaches managed entities so
+      subsequent reads reflect the bulk change rather than stale L1 copies.
+    ref: "concepts.md#modifying-updates--deletes"
+  - id: spring-data-jpa-persistence-070
+    difficulty: advanced
+    tags: [modifying, transaction, shared-context]
+    question: |
+      A @Modifying(clearAutomatically=true) method is invoked inside a larger service
+      @Transactional that has already loaded and modified several entities. What is the
+      subtle danger?
+    options:
+      - "The bulk update opens a new transaction automatically"
+      - "Nothing; clear only affects the repository's private context"
+      - "clearAutomatically detaches the shared persistence context's entities — including the ones the caller modified but not yet flushed — silently losing their pending changes"
+      - "The service transaction is rolled back"
+    answer: 2
+    explanation: |
+      The persistence context is shared within one transaction. clearAutomatically clears
+      that shared context, detaching entities the caller still holds and discarding
+      unflushed changes. Scope bulk operations carefully or flush first.
+    ref: "concepts.md#modifying-updates--deletes"
+  - id: spring-data-jpa-persistence-071
+    difficulty: expert
+    tags: [specifications, count-query, criteria]
+    question: |
+      A Specification's toPredicate always calls root.fetch("orders") and query.distinct(true).
+      findAll(spec, pageable) then throws when building the COUNT query. What is the fix?
+    options:
+      - "Remove pagination; specifications cannot be paginated"
+      - "Add @Modifying to the repository method"
+      - "Only guard the fetch/distinct when the query result type is not Long/long, since Spring Data reuses the same Specification for the COUNT query and fetch joins are illegal in a count"
+      - "Switch to a native query"
+    answer: 2
+    explanation: |
+      findAll(spec, pageable) applies the Specification to both the data and COUNT queries.
+      fetch() is illegal in a count and distinct changes the count. Detect the count query
+      via query.getResultType() == Long/long and skip the fetch/distinct there.
+    ref: "concepts.md#specifications--criteria-api"
+  - id: spring-data-jpa-persistence-072
+    difficulty: advanced
+    tags: [specifications, join, duplicate]
+    question: |
+      Composing three Specifications that each call root.join("orders") produces a query
+      with three separate joins to the orders table, causing a row explosion. What is the
+      standard remedy?
+    options:
+      - "Set fetch=EAGER on orders"
+      - "Reuse a single join by checking root.getJoins() (or caching the Join) instead of creating a new join in each specification"
+      - "Add DISTINCT to every specification"
+      - "Nothing can be done; specifications cannot share joins"
+    answer: 1
+    explanation: |
+      Each root.join creates a new SQL join. To avoid duplicates, look up and reuse an
+      existing join from root.getJoins() (or share a Join reference), producing one join.
+    ref: "concepts.md#specifications--criteria-api"
+  - id: spring-data-jpa-persistence-073
+    difficulty: advanced
+    tags: [projections, open, closed]
+    question: |
+      An interface projection has getters getFirstName(), getLastName(), and
+      getFullName() annotated with @Value("#{target.firstName + ' ' + target.lastName}").
+      What is the SQL/loading consequence?
+    options:
+      - "Only first_name and last_name columns are selected"
+      - "It fails to compile"
+      - "full_name must be a database column"
+      - "The presence of any @Value/SpEL getter makes the whole projection OPEN, so Spring loads the full entity rather than optimizing the SELECT to specific columns"
+    answer: 3
+    explanation: |
+      A single SpEL/@Value getter turns the projection open. Open projections reference the
+      backing entity, so Spring cannot restrict the SELECT and loads the entire entity.
+    ref: "concepts.md#projections"
+  - id: spring-data-jpa-persistence-074
+    difficulty: advanced
+    tags: [projections, dto, osiv]
+    question: |
+      Why is a class-based DTO/record projection safe to return from a controller even when
+      spring.jpa.open-in-view=false?
+    options:
+      - "Because DTOs enable OSIV automatically"
+      - "Because a DTO instantiated per row is not a managed entity and holds no lazy proxies/session reference, so there is nothing to lazy-initialize after the context closes"
+      - "Because DTOs cache their data in the second-level cache"
+      - "It is not safe; DTOs also throw LazyInitializationException"
+    answer: 1
+    explanation: |
+      Constructor/DTO projections copy scalar values into a plain object with no persistence
+      context attachment, so no lazy loading can occur later. That makes them ideal for the
+      web layer with OSIV disabled.
+    ref: "concepts.md#projections"
+  - id: spring-data-jpa-persistence-075
+    difficulty: expert
+    tags: [pagination, count-optimization, internals]
+    question: |
+      Returning Page<User> for repo.findByStatus(ACTIVE, PageRequest.of(0, 50)) on a table
+      with only 12 matching rows. How many queries does Spring Data typically run?
+    options:
+      - "Always two: the data query plus a COUNT query"
+      - "Three: data, COUNT, and a warm-up query"
+      - "One: PageableExecutionUtils skips the COUNT because the first page's returned size (12) is less than the page size (50), so the total is derived as offset + content.size()"
+      - "Zero until getTotalElements() is called"
+    answer: 2
+    explanation: |
+      PageableExecutionUtils omits the COUNT when the result fits within the page at offset 0
+      (or on the last page), deriving the total from offset + content size. So a small first
+      page runs a single query.
+    ref: "concepts.md#pagination--sorting-pageable"
+  - id: spring-data-jpa-persistence-076
+    difficulty: expert
+    tags: [pagination, keyset, performance]
+    question: |
+      A dashboard paginates a 50-million-row table and page 100000 is extremely slow, and
+      occasionally rows are skipped or duplicated between page loads. What is the root cause
+      and the modern fix?
+    options:
+      - "Missing index on the id column; add an index and keep offset pagination"
+      - "Page always caches results, so it is a cache bug"
+      - "Slice must be used; Page cannot paginate large tables"
+      - "LIMIT/OFFSET is O(offset) — the DB scans and discards all preceding rows, and concurrent inserts shift offsets; switch to keyset/seek pagination (WHERE (sort_col, id) < (?, ?) ORDER BY ... LIMIT n) or the Scroll API with KeysetScrollPosition"
+    answer: 3
+    explanation: |
+      Offset pagination forces the DB to scan and throw away all rows before the offset
+      (linear cost) and is unstable under concurrent writes. Keyset/seek pagination filters
+      by the last seen sort key, giving O(page size) and stable results; Spring Data 3.1's
+      Scroll API with KeysetScrollPosition supports this.
+    ref: "concepts.md#pagination--sorting-pageable"
+  - id: spring-data-jpa-persistence-077
+    difficulty: advanced
+    tags: [pagination, scroll, spring-data-3.1]
+    question: |
+      Which Spring Data 3.1+ API supports both offset and keyset scrolling without issuing
+      a COUNT query and returns a cursor-aware result?
+    options:
+      - "Window<T> scroll(..., ScrollPosition) where ScrollPosition can be OffsetScrollPosition or KeysetScrollPosition; the Window exposes hasNext() and positionAt(...)"
+      - "Page<T> with PageRequest only"
+      - "Slice<T> findAll(Sort)"
+      - "Stream<T> with a manual cursor"
+    answer: 0
+    explanation: |
+      The Scroll API returns Window<T>, driven by a ScrollPosition (offset or keyset). It
+      advances via the returned cursor and reports hasNext() without a COUNT — the framework
+      way to do keyset pagination.
+    ref: "concepts.md#pagination--sorting-pageable"
+  - id: spring-data-jpa-persistence-078
+    difficulty: expert
+    tags: [save, persistable, assigned-id]
+    question: |
+      An @Entity uses an assigned String natural key as its @Id. On every save() of a brand
+      new instance, Hibernate issues a SELECT before the INSERT. Why, and how do you avoid it?
+    options:
+      - "It is a Hibernate bug; upgrade the version"
+      - "Because SimpleJpaRepository.isNew() returns false for a non-null id, so save() calls merge() (which SELECTs first); implement Persistable with a custom isNew(), or use @Version, or extend AbstractPersistable"
+      - "Because assigned ids require nativeQuery"
+      - "Because the id column is not indexed"
+    answer: 1
+    explanation: |
+      isNew() defaults to a null-id check. An assigned id is never null, so save() treats the
+      entity as detached and calls merge(), which SELECTs before INSERT. Implement
+      Persistable/isNew() (often a @Transient 'isNew' flag), or rely on a null @Version, to
+      signal newness.
+    ref: "concepts.md#save-vs-saveandflush"
+  - id: spring-data-jpa-persistence-079
+    difficulty: advanced
+    tags: [save, batch, jdbc]
+    question: |
+      A developer expects repo.saveAll(list) of 10,000 IDENTITY-keyed entities to batch the
+      inserts. It does not. Why?
+    options:
+      - "saveAll always disables batching intentionally"
+      - "Batching requires nativeQuery=true"
+      - "saveAll just loops save(); and even with hibernate.jdbc.batch_size set, GenerationType.IDENTITY forces each INSERT to execute immediately to obtain the generated key, so inserts cannot be batched"
+      - "Lists over 1000 elements silently disable batching"
+    answer: 2
+    explanation: |
+      saveAll is a loop over save. JDBC insert batching additionally requires
+      hibernate.jdbc.batch_size AND an id strategy that does not need the key immediately.
+      IDENTITY must run each INSERT to read the generated id, defeating batching; use SEQUENCE
+      with a pooled optimizer instead.
+    ref: "concepts.md#save-vs-saveandflush"
+  - id: spring-data-jpa-persistence-080
+    difficulty: expert
+    tags: [entity-lifecycle, persist, remove]
+    question: |
+      Inside one transaction you call em.remove(entity) and then, before any flush, call
+      em.persist(entity) on the same instance. What happens?
+    options:
+      - "EntityExistsException is thrown immediately"
+      - "Both a DELETE and an INSERT are issued"
+      - "The persist is ignored and the row is deleted"
+      - "The removal is cancelled and the entity returns to the managed state (no DELETE is issued at flush)"
+    answer: 3
+    explanation: |
+      persist on a removed (but not yet flushed) entity re-schedules it as managed, cancelling
+      the pending removal. After a flush deletes the row, re-persisting would instead insert a
+      new row.
+    ref: "concepts.md#entity-lifecycle-states"
+  - id: spring-data-jpa-persistence-081
+    difficulty: advanced
+    tags: [entity-lifecycle, session, nonunique]
+    question: |
+      Using Hibernate's native Session.update(detachedEntity) throws NonUniqueObjectException.
+      What does this indicate compared to JPA merge()?
+    options:
+      - "update() re-attaches the SAME instance and fails because a different managed instance with the same id already exists in the context; merge() would instead copy state into the existing managed instance"
+      - "update() and merge() are identical and both would throw"
+      - "The entity has no @Id"
+      - "The database row was deleted"
+    answer: 0
+    explanation: |
+      Session.update re-attaches the given instance itself, which conflicts if the context
+      already holds another managed instance with the same id (NonUniqueObjectException).
+      merge copies state onto the existing managed instance and returns it, avoiding the clash.
+    ref: "concepts.md#entity-lifecycle-states"
+  - id: spring-data-jpa-persistence-082
+    difficulty: expert
+    tags: [persistence-context, threading, thread-safety]
+    question: |
+      A service loads a managed entity, then hands it to an @Async method running on a
+      thread-pool thread that reads a lazy association. Which statement is correct?
+    options:
+      - "It is safe because managed entities are thread-safe"
+      - "Spring automatically propagates the persistence context to async threads"
+      - "The EntityManager/Session and its managed entities are not thread-safe and are bound to the original thread via a ThreadLocal, so the async thread sees a detached entity (LazyInitializationException) or corrupts shared session state"
+      - "It works only if open-in-view=true"
+    answer: 2
+    explanation: |
+      The persistence context is bound to the thread (TransactionSynchronizationManager
+      ThreadLocal) and the Session is not thread-safe. Passing managed entities across threads
+      leads to detached-access exceptions or unsafe concurrent Session use. Pass ids/DTOs and
+      reload in the new context.
+    ref: "concepts.md#persistence-context"
+  - id: spring-data-jpa-persistence-083
+    difficulty: advanced
+    tags: [persistence-context, readonly, flush]
+    question: |
+      What does @Transactional(readOnly=true) actually do at the Hibernate level?
+    options:
+      - "It makes all loaded entities immutable and throws on any setter"
+      - "It disables the persistence context entirely"
+      - "It sets the Hibernate FlushMode to MANUAL so no automatic flush/dirty-check UPDATE occurs, and hints the driver/replica routing — but it does not make entities immutable"
+      - "It forces every query to be native SQL"
+    answer: 2
+    explanation: |
+      readOnly=true switches the session to MANUAL flush (dirty checking still runs but nothing
+      is auto-flushed) and provides a read-only hint. Entities are not made immutable; an
+      explicit flush could still write.
+    ref: "concepts.md#persistence-context"
+  - id: spring-data-jpa-persistence-084
+    difficulty: expert
+    tags: [entitymanager, getreference, proxy]
+    question: |
+      You use getReferenceById(deptId) to set a Department on a new Employee and save it,
+      without ever reading Department fields. What is the benefit and the risk?
+    options:
+      - "There is no benefit; it always SELECTs the Department"
+      - "Benefit: no SELECT for Department (a proxy holding just the FK is used for the INSERT). Risk: if that Department id does not exist, you get an EntityNotFoundException (or an FK violation) only later, on proxy access or flush"
+      - "It eagerly loads the whole Department graph"
+      - "It silently inserts a new Department row"
+    answer: 1
+    explanation: |
+      getReference returns a proxy without a SELECT, so associating it only needs the FK for
+      the INSERT — efficient. But existence is not verified up front; a missing row surfaces
+      as EntityNotFoundException on access or a foreign-key violation at flush.
+    ref: "concepts.md#entitymanager-vs-session"
+  - id: spring-data-jpa-persistence-085
+    difficulty: advanced
+    tags: [dirty-checking, element-collection, performance]
+    question: |
+      An @ElementCollection<String> tags is modified by adding one element, and the SQL log
+      shows Hibernate DELETEs all tag rows then re-INSERTs them. What is the usual cause?
+    options:
+      - "orphanRemoval is missing"
+      - "The collection must be EAGER"
+      - "@Modifying is required for collection updates"
+      - "Element collections/value types are identified by value; without good equals/hashCode (or an @OrderColumn) Hibernate cannot track individual row changes and recreates the whole collection"
+    answer: 3
+    explanation: |
+      Value-type collections have no identity; Hibernate diffs by value. Poor equals/hashCode
+      or lack of an order column makes per-row change tracking impossible, so it clears and
+      re-inserts the entire collection — a known performance trap.
+    ref: "concepts.md#dirty-checking"
+  - id: spring-data-jpa-persistence-086
+    difficulty: expert
+    tags: [dirty-checking, bytecode-enhancement, performance]
+    question: |
+      A read-heavy transaction loads 50,000 entities and flush is slow even though few
+      change. Which explanation and mitigation are correct?
+    options:
+      - "Flush is slow because of the second-level cache; disable L2"
+      - "Default dirty checking deep-compares every managed entity to its snapshot at flush (cost ~ entities x attributes); mitigate with readOnly=true (MANUAL flush), clear()/detach, StatelessSession, or bytecode-enhancement dirty tracking (SelfDirtinessTracker)"
+      - "Flush is slow because of missing indexes; add indexes"
+      - "It is caused by @DynamicUpdate; remove it"
+    answer: 1
+    explanation: |
+      Snapshot-based dirty checking scales with managed entities x fields per flush. Reducing
+      the managed set (clear/detach/StatelessSession), MANUAL flush via readOnly, or bytecode
+      enhancement (entities self-report dirty fields) removes the O(n*fields) scan.
+    ref: "concepts.md#dirty-checking"
+  - id: spring-data-jpa-persistence-087
+    difficulty: expert
+    tags: [flush-modes, ordering, constraints]
+    question: |
+      In one transaction you do persist(childReferencingParent); then remove(parent); with a
+      single flush at commit and an FK from child to parent. It fails with a constraint
+      violation despite "correct" code order. Why?
+    options:
+      - "Hibernate randomizes statement order"
+      - "persist and remove cannot be combined in one transaction"
+      - "At flush Hibernate executes by operation type in a fixed order (inserts, then updates, then collection ops, then deletes), so the child INSERT and parent DELETE are not ordered as written; insert a manual flush between them or restructure"
+      - "The FK must be deferred; there is no application-side fix"
+    answer: 2
+    explanation: |
+      Flush ordering is by action type, not code order: all inserts, then updates, then
+      collection removals/updates/inserts, then entity deletes. So an insert referencing a
+      row you later delete may violate the FK. A manual flush between the operations forces
+      the intended order.
+    ref: "concepts.md#flush-modes"
+  - id: spring-data-jpa-persistence-088
+    difficulty: advanced
+    tags: [flush-modes, identity, batching]
+    question: |
+      Why does GenerationType.IDENTITY cause an immediate flush of an INSERT on persist(),
+      regardless of FlushMode?
+    options:
+      - "Because IDENTITY entities are never cached"
+      - "Because IDENTITY forces FlushModeType.ALWAYS"
+      - "It does not; SEQUENCE and IDENTITY behave identically"
+      - "Because the generated primary key is only available after the INSERT executes, so Hibernate must run it immediately to make the entity managed with an id — which also disables JDBC insert batching"
+    answer: 3
+    explanation: |
+      With IDENTITY the id comes from the DB after insert, so Hibernate can't defer the INSERT
+      to flush time and can't batch inserts. SEQUENCE/TABLE pre-allocate ids, allowing deferred,
+      batched inserts.
+    ref: "concepts.md#flush-modes"
+  - id: spring-data-jpa-persistence-089
+    difficulty: expert
+    tags: [fetch-types, proxy, equals]
+    question: |
+      A lazy @ManyToOne Department dept returns a Hibernate proxy. Code does
+      if (emp.getDept() instanceof HeadOffice) and also compares departments with an equals()
+      that reads fields directly (not via getters). What breaks?
+    options:
+      - "Nothing; proxies behave exactly like the real class"
+      - "instanceof against a subclass fails because the proxy is a subclass of the base type (not the concrete subtype), and field-based equals reads uninitialized proxy fields (null) instead of the loaded values; use getters and avoid instanceof on proxies"
+      - "The proxy throws immediately on getDept()"
+      - "equals always returns true for proxies"
+    answer: 1
+    explanation: |
+      A lazy to-one proxy is a generated subclass of the declared type; it is not an instance
+      of concrete subtypes, and its fields are uninitialized (access must go through getters,
+      which trigger loading). Field-based equals sees nulls. Use getters and id-based equals,
+      or unproxy via Hibernate.unproxy.
+    ref: "concepts.md#fetch-types-lazy-vs-eager"
+  - id: spring-data-jpa-persistence-090
+    difficulty: expert
+    tags: [fetch-types, hibernate-6, deprecation]
+    question: |
+      In Hibernate 6, how do you achieve a truly lazy @ManyToOne without a proxy (loading no
+      target until accessed), given @LazyToOne(LazyToOneOption.NO_PROXY) was removed?
+    options:
+      - "Use @LazyToOne(NO_PROXY) as before; it still exists"
+      - "Set fetch=EAGER; it is equivalent"
+      - "Enable build-time bytecode enhancement (hibernate-enhance-maven-plugin with lazy loading); Hibernate 6 relies on the global enhancement configuration rather than the removed @LazyToOne annotation"
+      - "It is impossible in Hibernate 6"
+    answer: 2
+    explanation: |
+      Hibernate 6 dropped @LazyToOne/LazyToOneOption.NO_PROXY (and deprecated @LazyCollection).
+      True no-proxy lazy to-one loading now depends on enabling bytecode enhancement globally
+      rather than a per-field annotation.
+    ref: "concepts.md#fetch-types-lazy-vs-eager"
+  - id: spring-data-jpa-persistence-091
+    difficulty: expert
+    tags: [n-plus-one, multiple-bag]
+    question: |
+      A query fetch-joins two List-typed collections (orders and reviews) on the same entity
+      and throws MultipleBagFetchException. Why, and what is a correct fix?
+    options:
+      - "Because Lists cannot be fetched at all; use arrays"
+      - "Because fetching two bags (unordered Lists) simultaneously creates an unresolvable Cartesian product; fix by making one/both a Set, adding @OrderColumn to make them indexed Lists, or fetching them in separate queries / with @BatchSize"
+      - "Because DISTINCT is missing"
+      - "Because the collections must be EAGER"
+    answer: 1
+    explanation: |
+      Two bag (List without order column) fetch joins produce an ambiguous Cartesian product,
+      hence MultipleBagFetchException. Use Sets, @OrderColumn indexed Lists, or fetch each
+      collection separately (or via batch fetching) to avoid it.
+    ref: "concepts.md#n1-problem--fixes"
+  - id: spring-data-jpa-persistence-092
+    difficulty: advanced
+    tags: [n-plus-one, entity-graph, semantics]
+    question: |
+      What is the difference between a jakarta.persistence.fetchgraph and a loadgraph hint
+      when applying an @EntityGraph?
+    options:
+      - "They are identical"
+      - "loadgraph forces everything eager; fetchgraph forces everything lazy"
+      - "fetchgraph treats every attribute NOT listed in the graph as LAZY (ignoring the mapped fetch type), while loadgraph keeps unlisted attributes' mapped fetch types and eagerly fetches the listed ones"
+      - "Only fetchgraph works with derived queries"
+    answer: 2
+    explanation: |
+      With a fetchgraph, attributes absent from the graph become LAZY regardless of their
+      mapping. With a loadgraph, absent attributes retain their declared fetch type; only the
+      graph's attributes are additionally made eager.
+    ref: "concepts.md#n1-problem--fixes"
+  - id: spring-data-jpa-persistence-093
+    difficulty: expert
+    tags: [n-plus-one, batch-size, in-clause]
+    question: |
+      After enabling hibernate.default_batch_fetch_size=1000 globally to fix N+1, an Oracle
+      deployment starts failing on certain reads. What is the likely cause?
+    options:
+      - "Batch fetching is unsupported on Oracle"
+      - "Batched loads generate large IN (...) lists that can exceed Oracle's ~1000 expression limit; the batch size must respect DB parameter/expression limits"
+      - "default_batch_fetch_size disables the query cache"
+      - "It forces EAGER fetching which Oracle rejects"
+    answer: 1
+    explanation: |
+      Batch fetching issues IN (...) with up to batch-size ids. Very large batch sizes can hit
+      database limits (e.g. Oracle's 1000-item IN limit), causing failures. Tune the batch size
+      to stay within DB constraints.
+    ref: "concepts.md#n1-problem--fixes"
+  - id: spring-data-jpa-persistence-094
+    difficulty: advanced
+    tags: [cascade, database, on-delete]
+    question: |
+      What is the practical difference between CascadeType.REMOVE (JPA) and Hibernate's
+      @OnDelete(action=CASCADE) / a DDL ON DELETE CASCADE?
+    options:
+      - "They are the same mechanism"
+      - "@OnDelete requires orphanRemoval=true"
+      - "CascadeType.REMOVE issues a single bulk DELETE"
+      - "CascadeType.REMOVE deletes children application-side (one DELETE per child, firing @PreRemove and honoring the persistence context); @OnDelete/DDL cascade pushes deletion to the database (fast, but bypasses the context, callbacks, and orphan tracking, potentially leaving stale L1 entities)"
+    answer: 3
+    explanation: |
+      JPA cascade is application-driven and lifecycle-aware but chatty. Database-level cascade
+      is efficient for large graphs but skips JPA callbacks/context, so managed children can
+      become stale. Choose based on graph size and callback needs.
+    ref: "concepts.md#cascade-types"
+  - id: spring-data-jpa-persistence-095
+    difficulty: advanced
+    tags: [cascade, transient, persist]
+    question: |
+      persist(order) where order has a new OrderItem in its items collection throws
+      "object references an unsaved transient instance". What is the fix?
+    options:
+      - "Call saveAndFlush instead of persist"
+      - "Add CascadeType.PERSIST (or ALL) to the items association so persist cascades to the new child, or persist the child first"
+      - "Set orphanRemoval=true"
+      - "Make items EAGER"
+    answer: 1
+    explanation: |
+      Without cascade persist, the new child is transient at flush and violates the FK from a
+      persisted parent. Adding CascadeType.PERSIST/ALL propagates persist to children (or
+      persist the child explicitly first).
+    ref: "concepts.md#cascade-types"
+  - id: spring-data-jpa-persistence-096
+    difficulty: expert
+    tags: [cache, l2, concurrency-strategy]
+    question: |
+      For frequently-read, occasionally-updated entities in a clustered app WITHOUT JTA, which
+      L2 CacheConcurrencyStrategy is generally appropriate, and what does it do?
+    options:
+      - "READ_ONLY, because it allows updates without locking"
+      - "TRANSACTIONAL, because it needs no transaction manager"
+      - "READ_WRITE, which uses soft locks with timestamps to serialize writes and invalidate entries without requiring an XA/JTA transaction"
+      - "NONSTRICT_READ_WRITE, because it guarantees strong consistency"
+    answer: 2
+    explanation: |
+      READ_WRITE uses soft locks/timestamps to coordinate concurrent access and works without
+      JTA. READ_ONLY forbids updates; NONSTRICT_READ_WRITE may serve briefly stale data;
+      TRANSACTIONAL requires a JTA/transactional cache.
+    ref: "concepts.md#first-level-vs-second-level-cache"
+  - id: spring-data-jpa-persistence-097
+    difficulty: expert
+    tags: [cache, query-cache, dehydrated]
+    question: |
+      With the query cache enabled but the entity L2 region cold/disabled, a repeated cached
+      query still issues N SELECTs. Why?
+    options:
+      - "The query cache is broken"
+      - "Query caching requires nativeQuery=true"
+      - "Because the query cache stores full entities but ignores them"
+      - "The query cache stores only result identifiers; it resolves each id against the entity L2 region, so a cold entity region forces one SELECT per id — the query cache is only useful together with entity caching"
+    answer: 3
+    explanation: |
+      The query cache holds result primary keys (plus query/params key), not entities. Those
+      ids must be resolved from the entity L2 cache; without it each id triggers a DB SELECT,
+      so query caching alone gives little benefit.
+    ref: "concepts.md#first-level-vs-second-level-cache"
+  - id: spring-data-jpa-persistence-098
+    difficulty: expert
+    tags: [locking, force-increment, aggregate]
+    question: |
+      Adding an OrderItem child should mark the Order aggregate as changed for optimistic
+      locking, but modifying only the child does not bump Order's @Version. Which lock mode
+      solves this?
+    options:
+      - "LockModeType.OPTIMISTIC on the child"
+      - "LockModeType.PESSIMISTIC_READ on the order"
+      - "No lock; @Version increments automatically for child changes"
+      - "LockModeType.OPTIMISTIC_FORCE_INCREMENT on the Order, which increments the parent's version even without a direct field change to it"
+    answer: 3
+    explanation: |
+      OPTIMISTIC_FORCE_INCREMENT forces the parent aggregate's version to advance even when only
+      a child changed, implementing aggregate-level optimistic locking so concurrent structural
+      changes to the Order are detected.
+    ref: "concepts.md#optimistic-vs-pessimistic-locking"
+  - id: spring-data-jpa-persistence-099
+    difficulty: expert
+    tags: [locking, pessimistic, stale-snapshot]
+    question: |
+      An entity is already in the persistence context (loaded earlier). You then acquire
+      LockModeType.PESSIMISTIC_WRITE on it. A colleague warns you may be locking stale data.
+      Why, and what ensures a fresh read under the lock?
+    options:
+      - "Acquiring a lock always re-reads; the warning is wrong"
+      - "By default the lock is taken without re-selecting the row, so the in-context snapshot may be stale; use em.refresh(entity, PESSIMISTIC_WRITE) (or PessimisticLockScope.EXTENDED) to re-read the row under the lock"
+      - "You must clear the whole context first"
+      - "Pessimistic locks cannot apply to already-managed entities"
+    answer: 1
+    explanation: |
+      Locking an already-managed entity does not necessarily re-fetch it, so you may lock a
+      stale snapshot. em.refresh with the lock mode re-reads the current row while holding the
+      lock, guaranteeing you act on fresh data.
+    ref: "concepts.md#optimistic-vs-pessimistic-locking"
+  - id: spring-data-jpa-persistence-100
+    difficulty: expert
+    tags: [version, merge, lost-update]
+    question: |
+      To "fix" sporadic OptimisticLockExceptions, a developer re-fetches the current entity,
+      copies the client's fields onto it (leaving the DB's current version), and saves. What
+      is the consequence?
+    options:
+      - "Optimistic locking now works correctly"
+      - "It defeats the version check entirely: because the version now matches the DB, the update always succeeds and silently overwrites concurrent changes made between load and save — a lost update"
+      - "It throws a different exception"
+      - "It forces pessimistic locking"
+    answer: 1
+    explanation: |
+      Optimistic locking relies on the UPDATE carrying the version the client originally saw.
+      Overwriting it with the fresh DB version makes the WHERE version=? always match, so
+      concurrent modifications are silently clobbered — the exact lost-update it was meant to
+      prevent.
+    ref: "concepts.md#version-optimistic-locking"
+  - id: spring-data-jpa-persistence-101
+    difficulty: advanced
+    tags: [version, timestamp, resolution]
+    question: |
+      Why can a @Version based on a millisecond Timestamp/Instant still permit lost updates,
+      whereas a numeric version cannot?
+    options:
+      - "Timestamps are not supported as versions"
+      - "Timestamps overflow after 2038"
+      - "Two updates landing within the timestamp's resolution can read and write the same timestamp value, so the version check passes for both; a monotonically incremented numeric version always differs"
+      - "Numeric versions are cached but timestamps are not"
+    answer: 2
+    explanation: |
+      If two concurrent writes fall within the clock/column resolution they may share the same
+      timestamp, so both version checks pass and one update is lost. A numeric version strictly
+      increments per update, eliminating this window.
+    ref: "concepts.md#version-optimistic-locking"
+  - id: spring-data-jpa-persistence-102
+    difficulty: expert
+    tags: [identifier-generation, sequence, allocation]
+    question: |
+      A @GeneratedValue(strategy=SEQUENCE) entity uses allocationSize=50, but across two app
+      instances you observe duplicate/colliding ids. What is the most likely misconfiguration?
+    options:
+      - "SEQUENCE cannot be used with multiple instances"
+      - "allocationSize must always be 1"
+      - "The id column is not the primary key"
+      - "The JPA allocationSize (50) does not match the optimizer/DB sequence semantics — e.g. the legacy hilo optimizer with a DB sequence that INCREMENTs BY 1 hands overlapping blocks; use the pooled/pooled-lo optimizer with matching increments"
+    answer: 3
+    explanation: |
+      Safe id-block allocation across instances requires the pooled/pooled-lo optimizer whose
+      interpretation matches the DB sequence increment. A mismatch (e.g. legacy hilo assuming a
+      larger increment than the sequence actually uses) causes overlapping blocks and collisions.
+    ref: "concepts.md#identifier-generation-strategies"
+  - id: spring-data-jpa-persistence-103
+    difficulty: intermediate
+    tags: [enum, mapping, ordinal]
+    question: |
+      Why is @Enumerated(EnumType.ORDINAL) (the default) considered dangerous for persisted
+      enums?
+    options:
+      - "It stores the enum name, which wastes space"
+      - "It stores the enum's positional index, so reordering or inserting a constant silently remaps existing rows to the wrong value; prefer EnumType.STRING or an AttributeConverter"
+      - "It cannot be indexed"
+      - "It only supports up to 10 constants"
+    answer: 1
+    explanation: |
+      ORDINAL persists the ordinal position. Changing the enum's declaration order (or inserting
+      a new constant in the middle) shifts positions and corrupts the meaning of already-stored
+      rows. STRING (or a converter) is stable against reordering.
+    ref: "concepts.md#enum-temporal--converter-mappings"
+  - id: spring-data-jpa-persistence-104
+    difficulty: expert
+    tags: [transaction, propagation, self-invocation]
+    question: |
+      A public method a() (no @Transactional) in a bean calls this.b(), where b() is
+      annotated @Transactional(propagation=REQUIRES_NEW). No new transaction starts. Why?
+    options:
+      - "REQUIRES_NEW is ignored for public methods"
+      - "REQUIRES_NEW only works with JTA"
+      - "Spring's @Transactional is implemented via an AOP proxy; a self-invocation (this.b()) bypasses the proxy, so the transactional advice never runs — extract b() to another bean or call it through the injected proxy"
+      - "b() must also be annotated on the interface"
+    answer: 2
+    explanation: |
+      Proxy-based AOP only intercepts calls that go through the proxy. Internal self-invocation
+      calls the raw method directly, skipping the transactional advice. Move b() to a separate
+      bean (or self-inject the proxy) so the call is proxied.
+    ref: "concepts.md#transaction-management--propagation-with-jpa"
+  - id: spring-data-jpa-persistence-105
+    difficulty: advanced
+    tags: [transaction, rollback, checked-exception]
+    question: |
+      A @Transactional service method throws a checked IOException after a repository save().
+      To the developer's surprise, the row is committed, not rolled back. Why?
+    options:
+      - "save() commits immediately, ignoring the transaction"
+      - "Spring rolls back only on RuntimeException/Error by default; checked exceptions do NOT trigger rollback unless you specify rollbackFor=IOException.class (or Exception.class)"
+      - "Checked exceptions always commit and cannot be configured"
+      - "The transaction manager was not created"
+    answer: 1
+    explanation: |
+      Spring's default rollback policy triggers only on unchecked exceptions and Errors. A
+      thrown checked exception commits unless you declare @Transactional(rollbackFor=...) to
+      include it.
+    ref: "concepts.md#transaction-management--propagation-with-jpa"
+  - id: spring-data-jpa-persistence-106
+    difficulty: expert
+    tags: [statelesssession, bulk, memory]
+    question: |
+      A batch job iterating one million rows with a normal Session grows memory and slows down
+      quadratically. Which explanations/fixes are correct?
+    options:
+      - "The Session's L1 cache retains every managed entity and each flush re-scans all of them (O(n^2)); mitigate with periodic flush()+clear() per batch, or use a StatelessSession which has no persistence context, dirty checking, or cascade"
+      - "Only increasing the JVM heap can help"
+      - "StatelessSession keeps the L1 cache but compresses it"
+      - "The slowdown is caused by the second-level cache only"
+    answer: 0
+    explanation: |
+      A regular Session keeps all entities managed, so memory grows and dirty-check flush cost
+      scales with the managed set. Periodic flush+clear bounds it; StatelessSession avoids the
+      context entirely (no L1, no dirty checking, no cascade) for pure bulk work.
+    ref: "concepts.md#statelesssession--bulk-processing"
+  - id: spring-data-jpa-persistence-107
+    difficulty: advanced
+    tags: [statelesssession, tradeoffs]
+    question: |
+      Which capability do you LOSE when switching bulk logic from a normal Session to a
+      Hibernate StatelessSession?
+    options:
+      - "The ability to execute SQL at all"
+      - "Only lazy loading; everything else works"
+      - "Automatic dirty checking, cascade, lazy loading, first/second-level cache interaction, and lifecycle events/automatic @Version increment — all must be handled manually"
+      - "Nothing; StatelessSession is a strict superset"
+    answer: 2
+    explanation: |
+      StatelessSession trades away the persistence context and everything built on it: no dirty
+      checking, cascade, lazy loading, caches, callbacks, or automatic version management. You
+      operate with direct insert/update/delete and manage those concerns yourself.
+    ref: "concepts.md#statelesssession--bulk-processing"
+  - id: spring-data-jpa-persistence-108
+    difficulty: intermediate
+    tags: [embeddables, element-collection]
+    question: |
+      Which statement about @Embeddable value types versus @Entity child types is correct?
+    options:
+      - "Embeddables have their own identity and can be queried independently"
+      - "An @Embeddable is a value type with no identity that shares the owner's lifecycle and is stored inline in the owner's table (or, for @ElementCollection, a dependent table); use a child @Entity when you need identity or sharing"
+      - "Embeddables require their own @Id"
+      - "@ElementCollection elements can be shared between owners"
+    answer: 1
+    explanation: |
+      Embeddables/value types have no identity and are wholly owned by the parent (inline
+      columns, or a dependent table for @ElementCollection). Anything requiring an identity,
+      independent querying, or sharing must be modeled as a child @Entity.
+    ref: "concepts.md#embeddables-elementcollection--value-types"

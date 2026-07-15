@@ -1015,3 +1015,811 @@ questions:
       marker on nested object references. It does neither group selection nor method-validation
       enablement (that's `@Validated`).
     ref: "concepts.md#cascading-validation"
+
+  - id: exception-handling-validation-061
+    difficulty: expert
+    tags: [method-validation, spring6.1, handler-method-validation, upgrade]
+    question: |
+      A Spring Boot 3.2 controller class is annotated with class-level `@Validated` and has
+      `@GetMapping List<X> list(@RequestParam @Min(1) int page)`. The team expected a clean 400 with
+      field details from the new built-in method validation, but `page=0` produces a 500 with a raw
+      `ConstraintViolationException`. What is the correct explanation?
+    options:
+      - "The presence of class-level `@Validated` routes validation through the legacy AOP proxy path, which throws `ConstraintViolationException` (no default 400 mapping); you must REMOVE class-level `@Validated` to activate MVC's built-in `HandlerMethodValidationException` support"
+      - "`@Min` is not supported on `int` parameters in Boot 3.2; it must be a boxed `Integer`"
+      - "The built-in method validation only produces `HandlerMethodValidationException` for `@PathVariable`, never for `@RequestParam`"
+      - "You must additionally set `spring.mvc.method-validation.enabled=true` for the built-in path to engage"
+    answer: 0
+    explanation: |
+      Spring 6.1 has two mutually-exclusive method-validation paths per controller. Class-level
+      `@Validated` forces the AOP-proxy path (raw `ConstraintViolationException` → 500 unless handled).
+      Removing it lets MVC's built-in, non-AOP support run, which raises `HandlerMethodValidationException`
+      (an `ErrorResponse`) → 400 with per-parameter detail.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-062
+    difficulty: expert
+    tags: [method-validation, spring6.1, valid, constraint-trigger]
+    question: |
+      In a Spring 6.1 controller WITHOUT class-level `@Validated`, which single handler parameter
+      declaration will, by itself, trigger method-level validation (and thus a possible
+      `HandlerMethodValidationException`)?
+    options:
+      - "`@RequestParam @Valid String q` — because `@Valid` always triggers method validation"
+      - "`@RequestParam @NotNull String q` — because `@NotNull` is a real constraint annotation, and a constraint directly on a parameter triggers built-in method validation"
+      - "`@RequestBody @Valid Foo f` — a single command object always causes `HandlerMethodValidationException`"
+      - "`@RequestParam String q` with no annotation — any `@RequestParam` is validated by default in 6.1"
+    answer: 1
+    explanation: |
+      `@Valid` is not a constraint; alone it only marks a parameter for nested/cascaded validation and
+      does not trigger method validation. A genuine constraint like `@NotNull` placed directly on a
+      simple parameter does trigger the built-in method validation. A single `@Valid @RequestBody`
+      command object goes through individual validation → `MethodArgumentNotValidException`, not
+      `HandlerMethodValidationException`.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-063
+    difficulty: advanced
+    tags: [method-validation, exception-type, decision-rule]
+    question: |
+      A Spring 6.1 handler (no class-level `@Validated`) is
+      `create(@Valid @RequestBody User u)` with NO `BindingResult`. The body fails a `@NotBlank`
+      on `User.name`. Which exception is thrown?
+    options:
+      - "`HandlerMethodValidationException`, because 6.1 unified everything into method validation"
+      - "`ConstraintViolationException`, because bean validation on a body always produces it"
+      - "`MethodArgumentNotValidException`, because a single command object with `@Valid` (and no trailing `Errors`) goes through individual/command-object validation"
+      - "`HttpMessageNotReadableException`, because a blank name cannot be deserialized"
+    answer: 2
+    explanation: |
+      A single command object (`@RequestBody`/`@ModelAttribute`/`@RequestPart`) marked `@Valid` with no
+      following `Errors`/`BindingResult` uses individual validation, which raises
+      `MethodArgumentNotValidException` (400). Constraints placed *directly on* simple parameters are
+      what produce `HandlerMethodValidationException`.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-064
+    difficulty: expert
+    tags: [method-validation, aop, adapt-constraint-violations]
+    question: |
+      On the AOP method-validation path for a `@Validated` service bean, how do you make Spring raise
+      `MethodValidationException` (with violations adapted to `MessageSourceResolvable`/`FieldError`s
+      grouped per parameter) instead of the raw `ConstraintViolationException`?
+    options:
+      - "Annotate the service with `@Validated(adapt = true)`"
+      - "Set `spring.validation.adapt-constraint-violations=true` in application.properties"
+      - "Implement `MessageSourceResolvable` on your custom exception"
+      - "Call `setAdaptConstraintViolations(true)` on a custom `MethodValidationPostProcessor` bean"
+    answer: 3
+    explanation: |
+      `MethodValidationPostProcessor.setAdaptConstraintViolations(true)` switches the AOP path to raise
+      `MethodValidationException`, whose `ParameterValidationResult`/`ParameterErrors` expose adapted
+      `FieldError`s suitable for message-source rendering.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-065
+    difficulty: advanced
+    tags: [method-validation, mixed-params, supersede]
+    question: |
+      A Spring 6.1 handler (no class `@Validated`) mixes a constrained simple parameter and a
+      cascaded body: `save(@RequestParam @Min(1) int id, @Valid @RequestBody Order o)`. Both `id=0`
+      and an invalid `Order` field are sent. What happens?
+    options:
+      - "Method-level validation supersedes individual command-object validation for that method, so a single `HandlerMethodValidationException` is raised covering both (with a `ParameterErrors` result for the cascaded body)"
+      - "Two separate exceptions are thrown and merged into a 500"
+      - "Only the `@RequestParam` violation is reported; the body is ignored"
+      - "`MethodArgumentNotValidException` wins because a `@RequestBody` is present"
+    answer: 0
+    explanation: |
+      When any parameter requires method validation, it supersedes individual command-object validation
+      on that method; Spring raises one `HandlerMethodValidationException` whose `ParameterValidationResult`
+      list includes a `ParameterErrors` (an `Errors`/`FieldError` view) for the cascaded `@Valid` body.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-066
+    difficulty: intermediate
+    tags: [method-validation, robust-advice]
+    question: |
+      For a robust `@RestControllerAdvice` in a Spring Boot 3.2 app that validates both request bodies
+      and path/query params (built-in path), which set of exceptions should you handle to cover
+      validation failures?
+    options:
+      - "Only `MethodArgumentNotValidException`"
+      - "Both `MethodArgumentNotValidException` and `HandlerMethodValidationException`"
+      - "Only `ConstraintViolationException`"
+      - "Only `BindException`"
+    answer: 1
+    explanation: |
+      Body/command-object validation yields `MethodArgumentNotValidException`; constrained simple
+      parameters yield `HandlerMethodValidationException`. A complete advice handles both (both are
+      `ErrorResponse` in Spring 6 and default to 400).
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-067
+    difficulty: expert
+    tags: [binding-result, global-errors, cross-field, bug]
+    question: |
+      A DTO has a class-level cross-field constraint (`password == confirmPassword`). Your
+      `handleMethodArgumentNotValid` override builds the response by iterating
+      `ex.getBindingResult().getFieldErrors()`. The password-mismatch message never appears in
+      responses. Why?
+    options:
+      - "Class-level constraints are validated last and get truncated"
+      - "Cross-field constraints are not supported by `MethodArgumentNotValidException`"
+      - "A class-level constraint produces an `ObjectError`/global error, which lives in `getGlobalErrors()`, not `getFieldErrors()`; iterating only field errors drops it"
+      - "`getFieldErrors()` throws for class-level violations, silently caught by Spring"
+    answer: 2
+    explanation: |
+      Field constraints become `FieldError`s; class/type-level constraints become `ObjectError`
+      (global) errors. Only reading `getFieldErrors()` omits global errors — iterate `getAllErrors()`
+      (or also `getGlobalErrors()`) to include cross-field messages.
+    ref: "concepts.md#methodargumentnotvalidexception-internals--bindingresult-vs-errors"
+
+  - id: exception-handling-validation-068
+    difficulty: expert
+    tags: [ordering, hibernate-validator, determinism]
+    question: |
+      A test asserts that the FIRST field error in a `MethodArgumentNotValidException` response is
+      always `email`, but it flakes across runs and JVMs. What is the accurate root cause and fix?
+    options:
+      - "Hibernate Validator caches errors by hashcode; disable the cache"
+      - "The flakiness is a Jackson serialization bug; register a custom serializer"
+      - "You must annotate the DTO with `@GroupSequence` to force field order"
+      - "The order in which constraint violations are reported is not guaranteed by Bean Validation / Hibernate Validator; do not depend on it — sort the errors (e.g. by field name) before responding/asserting"
+    answer: 3
+    explanation: |
+      Constraint iteration order is unspecified; relying on a particular first error is inherently
+      flaky. Impose a deterministic order yourself (sort by field/code) for stable payloads and tests.
+    ref: "concepts.md#methodargumentnotvalidexception-internals--bindingresult-vs-errors"
+
+  - id: exception-handling-validation-069
+    difficulty: advanced
+    tags: [message-codes, field-error, message-source]
+    question: |
+      For a `@NotBlank` failure on `UserDto.name`, which of the following is a valid message-resolution
+      code that Spring generates for the `FieldError` (usable as a key in `messages.properties`)?
+    options:
+      - "`NotBlank.userDto.name`"
+      - "`error.userDto.name.notBlank`"
+      - "`validation:name:NotBlank`"
+      - "`jakarta.NotBlank[name]`"
+    answer: 0
+    explanation: |
+      Spring generates a hierarchy of codes from most to least specific, e.g. `NotBlank.userDto.name`,
+      `NotBlank.name`, `NotBlank.java.lang.String`, `NotBlank`. Any of these can be a message-source key
+      to override the default message.
+    ref: "concepts.md#methodargumentnotvalidexception-internals--bindingresult-vs-errors"
+
+  - id: exception-handling-validation-070
+    difficulty: expert
+    tags: [jackson, ordering, type-coercion, request-body]
+    question: |
+      A DTO field is `@Positive Integer age`. The client sends `{"age": "not-a-number"}`. What does
+      the client receive, and why?
+    options:
+      - "400 with a `@Positive` violation message, because validation coerces then checks"
+      - "400 from `HttpMessageNotReadableException`, because Jackson cannot deserialize the value into `Integer` and body reading fails BEFORE Bean Validation runs"
+      - "500, because `@Positive` throws `NumberFormatException`"
+      - "400 with a `@NotNull` violation, because the field ends up null"
+    answer: 1
+    explanation: |
+      Deserialization runs first. A non-numeric string that can't bind to `Integer` produces
+      `HttpMessageNotReadableException` (400) before any constraint executes; the object is never
+      constructed, so `@Positive` never fires. You cannot express "must be numeric" with `@Positive`.
+    ref: "concepts.md#jackson-deserialization-vs-bean-validation-ordering--type-coercion"
+
+  - id: exception-handling-validation-071
+    difficulty: expert
+    tags: [jackson, primitives, notnull, gotcha]
+    question: |
+      A request DTO declares `@NotNull private long id;` (primitive `long`). A client sends a JSON
+      body that omits `id` entirely. What is the validation outcome?
+    options:
+      - "Validation fails with 'id must not be null' because the property was missing"
+      - "`HttpMessageNotReadableException` because a missing primitive is a parse error"
+      - "Validation passes — the missing primitive defaults to `0`, which is non-null, so `@NotNull` is satisfied; use a boxed `Long` to make it truly required"
+      - "500, because `@NotNull` cannot be applied to primitives"
+    answer: 2
+    explanation: |
+      A missing JSON property leaves a primitive at its default (`0L`), which is never null, so
+      `@NotNull` is trivially satisfied and the omission goes undetected. Boxed reference types
+      (`Long`) are required for meaningful presence checks.
+    ref: "concepts.md#jackson-deserialization-vs-bean-validation-ordering--type-coercion"
+
+  - id: exception-handling-validation-072
+    difficulty: advanced
+    tags: [jackson, enum, ordering]
+    question: |
+      An endpoint binds `{"status": "SHIPPPED"}` (typo) to a DTO field `@NotNull OrderStatus status`
+      where `OrderStatus` is an enum. What is the most likely default result?
+    options:
+      - "`@NotNull` violation → 400, because the invalid enum becomes null"
+      - "The value is silently coerced to the first enum constant"
+      - "500 `ConstraintViolationException`"
+      - "`HttpMessageNotReadableException` → 400, because Jackson cannot map the unknown value to the enum during deserialization (before validation)"
+    answer: 3
+    explanation: |
+      An unknown enum literal is a deserialization failure (`HttpMessageNotReadableException` → 400) by
+      default, occurring before Bean Validation. (Only with `READ_UNKNOWN_ENUM_VALUES_AS_NULL` would it
+      bind to null and then trip `@NotNull`.)
+    ref: "concepts.md#jackson-deserialization-vs-bean-validation-ordering--type-coercion"
+
+  - id: exception-handling-validation-073
+    difficulty: expert
+    tags: [validator, thread-safety, concurrency]
+    question: |
+      A custom `ConstraintValidator` stores the value it receives in an instance field during
+      `isValid` to "remember the last checked value" for logging. Under load, logs show mismatched
+      values. What is the fundamental problem?
+    options:
+      - "`ConstraintValidator` instances are cached and reused concurrently across threads; storing per-invocation state in instance fields is not thread-safe. Validators must be stateless apart from immutable config captured in `initialize`"
+      - "Hibernate Validator creates a fresh validator per call, so the field is always null"
+      - "The field must be `volatile` to work"
+      - "Logging inside `isValid` is prohibited and corrupts state"
+    answer: 0
+    explanation: |
+      Validator instances are reused across concurrent requests. Only immutable configuration set in
+      `initialize(annotation)` is safe; per-call mutable state in instance fields causes races. Keep
+      validators stateless.
+    ref: "concepts.md#validator-lifecycle-thread-safety--performance"
+
+  - id: exception-handling-validation-074
+    difficulty: expert
+    tags: [validator, regex, redos, performance]
+    question: |
+      A public endpoint validates a free-text field with `@Pattern(regexp = "(a+)+$")` and no length
+      constraint. What senior-level risk does this introduce?
+    options:
+      - "None; `@Pattern` short-circuits on the first mismatch"
+      - "A catastrophic-backtracking (ReDoS) risk: a crafted input can make the regex engine run for exponential time, consuming a request thread. Bound input length (`@Size`) first and use a linear/anchored pattern"
+      - "It throws `PatternSyntaxException` at startup"
+      - "`@Pattern` treats null as invalid, causing spurious 400s"
+    answer: 1
+    explanation: |
+      Nested quantifiers like `(a+)+` cause catastrophic backtracking; attacker-controlled input can
+      pin a thread with exponential matching time (ReDoS). Constrain length before pattern matching and
+      write linear, anchored regexes.
+    ref: "concepts.md#validator-lifecycle-thread-safety--performance"
+
+  - id: exception-handling-validation-075
+    difficulty: expert
+    tags: [validator, uniqueness, toctou, concurrency]
+    question: |
+      A `@UniqueEmail` validator queries the DB in `isValid`. Two concurrent registrations with the
+      same email both pass validation, then one insert fails. What is the correct characterization and
+      remedy?
+    options:
+      - "The validator is buggy; add `synchronized` to `isValid`"
+      - "Bean Validation runs in a serializable transaction, so this cannot happen"
+      - "This is an inherent time-of-check/time-of-use (TOCTOU) race; the DB unique constraint is the real source of truth — keep it and handle the resulting `DataIntegrityViolationException` (map to 409)"
+      - "Move the check to a `@PostConstruct` method"
+    answer: 2
+    explanation: |
+      A validation-time uniqueness check can never be atomic with the later insert under concurrency
+      (TOCTOU). Rely on the database unique constraint and translate `DataIntegrityViolationException`
+      into a clean 409; the validator is best-effort UX.
+    ref: "concepts.md#validator-lifecycle-thread-safety--performance"
+
+  - id: exception-handling-validation-076
+    difficulty: advanced
+    tags: [validator-factory, singleton, performance]
+    question: |
+      Which statement about `Validator`/`ValidatorFactory` lifecycle in a Spring Boot app is correct?
+    options:
+      - "You should build a new `ValidatorFactory` per request for isolation"
+      - "`Validator` is not thread-safe and must be pooled"
+      - "The factory is recreated on every `@Valid` invocation by Spring"
+      - "`LocalValidatorFactoryBean` is a thread-safe singleton; building a `ValidatorFactory` is expensive, so it is created once and reused — do not call `Validation.buildDefaultValidatorFactory()` per request"
+    answer: 3
+    explanation: |
+      `ValidatorFactory`/`Validator` are thread-safe; factory construction is costly. Spring exposes a
+      single `LocalValidatorFactoryBean`; reuse it rather than constructing factories per request.
+    ref: "concepts.md#validator-lifecycle-thread-safety--performance"
+
+  - id: exception-handling-validation-077
+    difficulty: expert
+    tags: [group-sequence, short-circuit, performance]
+    question: |
+      You want cheap format checks to run before an expensive DB-backed uniqueness check, skipping the
+      DB call if the format is already invalid. Which mechanism achieves ordered, short-circuiting
+      validation?
+    options:
+      - "`@GroupSequence` defining an ordered list of groups — if an earlier group fails, later groups are not evaluated"
+      - "Declaration order of the annotations on the field"
+      - "`@Order` on the `ConstraintValidator`"
+      - "`@ReportAsSingleViolation`"
+    answer: 0
+    explanation: |
+      Within a single group, constraint order is unspecified and all run. `@GroupSequence` imposes
+      ordering across groups and short-circuits: if an earlier group has violations, subsequent groups
+      are skipped — the supported way to gate expensive checks behind cheap ones.
+    ref: "concepts.md#validator-lifecycle-thread-safety--performance"
+
+  - id: exception-handling-validation-078
+    difficulty: advanced
+    tags: [cascading, collections, dos, size]
+    question: |
+      Why is `@Valid List<@Valid LineItem> items;` on an unbounded request collection considered a
+      potential denial-of-service surface, and what's the mitigation?
+    options:
+      - "It isn't; cascaded validation is constant time"
+      - "Cascaded validation is O(elements × constraints); a huge list forces enormous validation work on a request thread. Bound it with `@Size(max = ...)` (validated first) to cap the cost"
+      - "Lists cannot be cascaded, so it throws at runtime"
+      - "Only the first element is validated, so there is no cost concern"
+    answer: 1
+    explanation: |
+      Cascading validates every element's every constraint; an attacker sending a massive list drives
+      CPU on the request path. A `@Size` bound (evaluated cheaply) caps the element count before the
+      per-element cascade dominates.
+    ref: "concepts.md#validator-lifecycle-thread-safety--performance"
+
+  - id: exception-handling-validation-079
+    difficulty: expert
+    tags: [controller-advice, controller-local, ordering, precedence, internals]
+    question: |
+      A controller `OrderController` has a LOCAL `@ExceptionHandler(Exception.class)` method. Separately,
+      a `@RestControllerAdvice` bean annotated `@Order(Ordered.HIGHEST_PRECEDENCE)` declares a specific
+      `@ExceptionHandler(OrderNotFoundException.class)`. `OrderController` throws `OrderNotFoundException`.
+      Which handler wins?
+    options:
+      - "The advice's specific `OrderNotFoundException` handler, because `HIGHEST_PRECEDENCE` beats any controller-local handler"
+      - "The controller-local `Exception` handler, because controller-local `@ExceptionHandler` methods are always tried before ANY advice, regardless of the advice's `@Order`"
+      - "Neither; a local handler plus a matching advice handler is an ambiguity error at startup"
+      - "The most-specific match globally wins, so the advice's `OrderNotFoundException` handler runs"
+    answer: 1
+    explanation: |
+      `ExceptionHandlerExceptionResolver` first looks for a matching `@ExceptionHandler` on the
+      controller (handler bean) itself; only if none matches does it consult `@ControllerAdvice` beans in
+      `@Order`. So a controller-local handler — even a broad `Exception` one — wins over any advice,
+      irrespective of the advice's precedence. Advice `@Order` only orders advices relative to each other.
+    ref: "concepts.md#order-advice-selection-and-multiple-controlleradvice-internals"
+
+  - id: exception-handling-validation-080
+    difficulty: advanced
+    tags: [controller-advice, ordering, tie]
+    question: |
+      Two `@RestControllerAdvice` beans both declare `@Order(Ordered.LOWEST_PRECEDENCE)` and each has a
+      handler that could match a thrown exception. What can you rely on for which one wins?
+    options:
+      - "Alphabetical bean-name order, guaranteed by Spring"
+      - "Declaration order in the source file"
+      - "The one in the package closest to the controller"
+      - "Nothing — the relative order of advices with the same `@Order` is undefined; assign distinct orders (e.g. give the true catch-all the lowest precedence and others higher)"
+    answer: 3
+    explanation: |
+      Equal `@Order` values leave relative ordering undefined. Never depend on it; give each advice a
+      distinct, intentional order so shadowing behavior is deterministic.
+    ref: "concepts.md#order-advice-selection-and-multiple-controlleradvice-internals"
+
+  - id: exception-handling-validation-081
+    difficulty: expert
+    tags: [exception-handler, ambiguous, startup]
+    question: |
+      A `@RestControllerAdvice` class contains two methods: `@ExceptionHandler(IllegalArgumentException.class)`
+      on `handleA` and `@ExceptionHandler(IllegalArgumentException.class)` on `handleB`. What happens?
+    options:
+      - "An `IllegalStateException` ('Ambiguous @ExceptionHandler method mapped') is raised when the resolver builds its method cache — effectively at startup/first use, not per request"
+      - "At request time Spring randomly picks one"
+      - "Both run in declaration order"
+      - "It compiles and the second silently overrides the first"
+    answer: 0
+    explanation: |
+      Two handlers mapping the exact same exception type in one class are ambiguous; the resolver's
+      method cache construction throws `IllegalStateException` ("Ambiguous @ExceptionHandler method
+      mapped"). It's a wiring error surfaced early, not a runtime coin-flip.
+    ref: "concepts.md#exceptionhandler-resolution-edge-cases--failure-modes"
+
+  - id: exception-handling-validation-082
+    difficulty: expert
+    tags: [exception-handler, handler-throws, failure-mode]
+    question: |
+      Inside a matched `@ExceptionHandler`, the handler body itself throws a new exception (e.g. an NPE
+      building the error DTO). What does Spring do?
+    options:
+      - "It re-dispatches the new exception to other `@ExceptionHandler` methods until one matches"
+      - "The new exception is NOT re-routed to other handlers; it propagates out of the resolver and typically results in a container 500 (Whitelabel/`/error`). Handlers must be defensive"
+      - "It falls back to the original exception's `@ResponseStatus`"
+      - "It retries the handler up to three times"
+    answer: 1
+    explanation: |
+      Exception-handler methods are not recursively re-resolved; an exception escaping a handler
+      propagates and usually yields a raw 500 via error-dispatch. Keep handlers simple and null-safe.
+    ref: "concepts.md#exceptionhandler-resolution-edge-cases--failure-modes"
+
+  - id: exception-handling-validation-083
+    difficulty: advanced
+    tags: [exception-handler, async, deferred-result]
+    question: |
+      A controller returns `CompletableFuture<Order>` and the future completes exceptionally with
+      `OrderNotFoundException`. Is your `@ExceptionHandler(OrderNotFoundException.class)` invoked?
+    options:
+      - "No — async results bypass exception resolvers entirely"
+      - "Only if you annotate the method with `@Async`"
+      - "Yes — when the async result is dispatched back, the completing exception is routed through the same `@ExceptionHandler` machinery"
+      - "Only for `DeferredResult`, never `CompletableFuture`"
+    answer: 2
+    explanation: |
+      On async dispatch, an exception that completed the `CompletableFuture`/`DeferredResult`
+      exceptionally is handled by the normal `@ExceptionHandler`/advice resolution. (A synchronous throw
+      while producing the wrapper is handled inline.)
+    ref: "concepts.md#exceptionhandler-resolution-edge-cases--failure-modes"
+
+  - id: exception-handling-validation-084
+    difficulty: advanced
+    tags: [exception-handler, restcontrolleradvice, view-name, misconfig]
+    question: |
+      A handler in a plain `@ControllerAdvice` (NOT `@RestControllerAdvice`) returns a `String`
+      `"An error occurred"` intending it as the JSON body. What is the likely result?
+    options:
+      - "The client receives the literal JSON string body"
+      - "A 204 No Content with the string in a header"
+      - "Compilation fails"
+      - "Spring treats the `String` as a VIEW NAME and tries to resolve a view called 'An error occurred', typically failing (500 / view-not-found). Use `@RestControllerAdvice` or `@ResponseBody`"
+    answer: 3
+    explanation: |
+      Without `@ResponseBody` (which `@RestControllerAdvice` adds), a returned `String` is interpreted
+      as a logical view name and goes through view resolution — not serialized as the body. This is a
+      classic advice misconfiguration.
+    ref: "concepts.md#order-advice-selection-and-multiple-controlleradvice-internals"
+
+  - id: exception-handling-validation-085
+    difficulty: advanced
+    tags: [resolver-chain, fallthrough, error-dispatch]
+    question: |
+      No local `@ExceptionHandler` and no `@ControllerAdvice` handler matches a thrown exception. In
+      what order are the remaining resolvers/mechanisms consulted?
+    options:
+      - "`ExceptionHandlerExceptionResolver` → `ResponseStatusExceptionResolver` → `DefaultHandlerExceptionResolver` → servlet error-dispatch (`/error`)"
+      - "`DefaultHandlerExceptionResolver` → `ResponseStatusExceptionResolver` → servlet error-dispatch"
+      - "It immediately renders the Whitelabel page, skipping all resolvers"
+      - "It is routed back to the controller's first handler method"
+    answer: 0
+    explanation: |
+      The default resolver chain is `ExceptionHandlerExceptionResolver` (annotation handlers), then
+      `ResponseStatusExceptionResolver` (`@ResponseStatus`/`ResponseStatusException`), then
+      `DefaultHandlerExceptionResolver` (built-in MVC exceptions). If none handles it, it falls through
+      to servlet error-dispatch and `/error`.
+    ref: "concepts.md#exceptionhandler-resolution-edge-cases--failure-modes"
+
+  - id: exception-handling-validation-086
+    difficulty: expert
+    tags: [group-sequence, default-redefinition]
+    question: |
+      Placing `@GroupSequence({BasicChecks.class, MyEntity.class})` directly ON the class `MyEntity`
+      accomplishes what?
+    options:
+      - "It disables the `Default` group entirely for `MyEntity`"
+      - "It redefines the `Default` group for `MyEntity` to be an ordered sequence (BasicChecks first, then MyEntity's own default constraints), short-circuiting if BasicChecks fails — so callers validating the default group get ordered validation without naming groups"
+      - "It makes every constraint belong to `BasicChecks`"
+      - "It causes a `GroupDefinitionException` because a class cannot reference itself"
+    answer: 1
+    explanation: |
+      A class-level `@GroupSequence` listing the class itself redefines that class's `Default` group as
+      an ordered sequence with short-circuiting between phases, letting default-group validation run
+      cheap checks before expensive ones without callers selecting groups explicitly.
+    ref: "concepts.md#validation-groups-sequences-inheritance--default-group-redefinition"
+
+  - id: exception-handling-validation-087
+    difficulty: expert
+    tags: [groups, inheritance, default]
+    question: |
+      Given `interface OnUpdate extends Default {}` and a DTO with `@NotBlank private String name;`
+      (no group → Default) plus `@NotNull(groups = OnUpdate.class) private Long id;`. A request uses
+      `@Validated(OnUpdate.class)`. Which constraints are evaluated?
+    options:
+      - "Only the `@NotNull` on `id`, because only the `OnUpdate` group was requested"
+      - "Only the `@NotBlank` on `name`"
+      - "Both the `@NotNull` on `id` AND the `@NotBlank` on `name`, because `OnUpdate extends Default` so validating `OnUpdate` also validates the `Default` group"
+      - "Neither, because groups and default cannot be mixed"
+    answer: 2
+    explanation: |
+      Because `OnUpdate extends Default`, requesting `OnUpdate` also pulls in the `Default` group, so
+      both the default `@NotBlank` and the `OnUpdate`-scoped `@NotNull` run. Group inheritance is the
+      idiomatic way to say "everything default, plus update-only rules."
+    ref: "concepts.md#validation-groups-sequences-inheritance--default-group-redefinition"
+
+  - id: exception-handling-validation-088
+    difficulty: expert
+    tags: [convert-group, cascade, groups]
+    question: |
+      `@ConvertGroup(from = Default.class, to = Strict.class)` is placed alongside `@Valid` on a nested
+      `Address` field. What does it do, and where is it valid?
+    options:
+      - "It converts the top-level requested group before validation begins; valid on any parameter"
+      - "It merges the two groups into a combined group for the whole object graph"
+      - "It is an alias for `@GroupSequence`"
+      - "It remaps the group ONLY as validation cascades into the nested `Address` (so when the parent is validated with `Default`, `Address` is validated with `Strict`); it is meaningful only on a cascaded `@Valid` reference"
+    answer: 3
+    explanation: |
+      `@ConvertGroup` only applies at a cascade boundary (`@Valid`), translating the group as validation
+      descends into the nested bean. It cannot convert the top-level requested group.
+    ref: "concepts.md#validation-groups-sequences-inheritance--default-group-redefinition"
+
+  - id: exception-handling-validation-089
+    difficulty: advanced
+    tags: [groups, cascade, propagation, bug]
+    question: |
+      A parent is validated with `@Validated(OnCreate.class)` and has `@Valid Address address;`.
+      `Address.zip` is annotated `@NotBlank` with NO group (i.e. `Default`). The zip is blank but no
+      violation is reported. Why?
+    options:
+      - "The requested group `OnCreate` propagates down the cascade unchanged; `Address.zip`'s constraint is in the `Default` group, which is not being validated, so it doesn't run. Assign it to `OnCreate` (or make `OnCreate extends Default`, or use `@ConvertGroup`)"
+      - "`@Valid` does not cascade groups at all"
+      - "Nested validation always uses the `Default` group regardless of the parent"
+      - "`@NotBlank` is ignored on nested beans"
+    answer: 0
+    explanation: |
+      The active group propagates unchanged across `@Valid` (absent `@ConvertGroup`). A nested
+      `Default`-group constraint won't fire when only `OnCreate` is validated. Align the groups or
+      convert them.
+    ref: "concepts.md#validation-groups-sequences-inheritance--default-group-redefinition"
+
+  - id: exception-handling-validation-090
+    difficulty: expert
+    tags: [response-status, reason, message-source]
+    question: |
+      A custom exception is annotated `@ResponseStatus(value = HttpStatus.FORBIDDEN, reason = "Access denied")`
+      and is thrown. What is a correct and important consequence of specifying `reason`?
+    options:
+      - "The `reason` becomes an extension member of a `ProblemDetail`"
+      - "Specifying `reason` causes Spring to call `HttpServletResponse.sendError(...)`, which routes through the container error page / `/error` dispatch rather than writing the body directly — so a body you tried to return is discarded"
+      - "`reason` is ignored unless combined with `@ExceptionHandler`"
+      - "`reason` sets the `Location` header"
+    answer: 1
+    explanation: |
+      When `@ResponseStatus` has a `reason`, `ResponseStatusExceptionResolver` uses
+      `response.sendError(status, reason)`, triggering error-dispatch (`/error`) instead of a direct
+      body write. This surprises developers expecting to also control the body.
+    ref: "concepts.md#mapping-exceptions-to-status-codes"
+
+  - id: exception-handling-validation-091
+    difficulty: advanced
+    tags: [response-status-exception, error-response, spring6]
+    question: |
+      In Spring 6, how does a thrown `ResponseStatusException` integrate with RFC 7807 responses?
+    options:
+      - "It cannot produce `ProblemDetail`; you must catch and convert it"
+      - "It always renders as plain text"
+      - "`ResponseStatusException` implements `ErrorResponse` and carries a `ProblemDetail`, so it can be rendered as `application/problem+json` (and you can set properties on its body)"
+      - "It is deprecated in favor of `ProblemDetailException`"
+    answer: 2
+    explanation: |
+      In Spring 6, `ResponseStatusException` implements `ErrorResponse`, exposing a `ProblemDetail` body
+      and headers, enabling uniform RFC 7807 rendering.
+    ref: "concepts.md#global-exception-handling--consistent-error-responses-problemdetail--rfc-7807"
+
+  - id: exception-handling-validation-092
+    difficulty: expert
+    tags: [problemdetail, spring6, jackson, non-null]
+    question: |
+      You return a `ProblemDetail` but only see `type`, `title`, `status`, `detail`, `instance` — your
+      `setProperty("traceId", null)` value is missing from the JSON. Which explanation is most accurate?
+    options:
+      - "`setProperty` silently rejects null keys"
+      - "Extension members are never serialized"
+      - "You must call `flushProperties()` before returning"
+      - "`ProblemDetail` serialization typically omits null-valued members (and `type` defaults to `about:blank` if unset); a null extension value simply isn't emitted — set a non-null value if you need the field present"
+    answer: 3
+    explanation: |
+      Null values are not rendered (standard JSON null-omission behavior for the problem body), and an
+      unset `type` defaults to `about:blank`. To surface a field, give it a non-null value.
+    ref: "concepts.md#global-exception-handling--consistent-error-responses-problemdetail--rfc-7807"
+
+  - id: exception-handling-validation-093
+    difficulty: expert
+    tags: [problemdetail, controlleradvice, content-negotiation]
+    question: |
+      A global handler returns a `ProblemDetail`, but a client sending `Accept: application/xml`
+      receives a 406 instead of the problem body. What is the underlying cause?
+    options:
+      - "Content negotiation still applies to error responses: the configured message converters could not produce a representation matching the `Accept` header (no XML/problem+xml converter registered), so a 406 results. Register an appropriate converter or the client must accept `application/problem+json`/`application/json`"
+      - "`ProblemDetail` can only be JSON; it never supports XML"
+      - "`ProblemDetail` disables content negotiation globally"
+      - "The advice must be annotated `@Produces`"
+    answer: 0
+    explanation: |
+      Error responses go through the same `HttpMessageConverter`/content-negotiation pipeline. If no
+      converter can satisfy the requested `Accept`, you get 406. Ensure a converter for the requested
+      media type exists (or constrain what clients accept).
+    ref: "concepts.md#global-exception-handling--consistent-error-responses-problemdetail--rfc-7807"
+
+  - id: exception-handling-validation-094
+    difficulty: advanced
+    tags: [self-invocation, method-validation, proxy]
+    question: |
+      A `@Validated` service bean has `public void a()` calling `this.b(null)` where
+      `public void b(@NotNull String s)`. `a()` is invoked externally. Is `b`'s `@NotNull` enforced?
+    options:
+      - "Yes — validation applies to all internal calls"
+      - "No — `this.b(...)` is a self-invocation that bypasses the AOP proxy, so method validation on `b` is skipped (same limitation as `@Transactional` self-invocation)"
+      - "Yes, but only if `b` is `private`"
+      - "It throws `ConstraintDeclarationException` at startup"
+    answer: 1
+    explanation: |
+      The AOP-based method validation only intercepts calls that go through the proxy. An internal
+      `this.b(...)` call bypasses the proxy, so `b`'s parameter constraint is not enforced.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-095
+    difficulty: expert
+    tags: [method-validation, return-value, aop]
+    question: |
+      On a `@Validated` service bean, a method is annotated with a constraint on its RETURN value:
+      `@NotNull public Foo find(...)`, and it returns null. What happens and when?
+    options:
+      - "Nothing; return-value constraints are not supported"
+      - "The null is validated before the method runs, so the body never executes"
+      - "A `ConstraintViolationException` is thrown AFTER the method executes (the proxy validates the returned value), so the caller sees the violation rather than the null"
+      - "It is validated only if the caller adds `@Valid`"
+    answer: 2
+    explanation: |
+      Method validation supports return-value constraints: the proxy invokes the method, then validates
+      the returned value; a null return against `@NotNull` triggers `ConstraintViolationException`
+      post-invocation.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-096
+    difficulty: advanced
+    tags: [custom-message, el, interpolation, security]
+    question: |
+      A validator builds a message with `ctx.buildConstraintViolationWithTemplate("Value " + userInput + " rejected")`
+      where `userInput` is attacker-controlled and may contain `${...}`. What is the risk?
+    options:
+      - "None; templates are plain strings"
+      - "It always throws `PatternSyntaxException`"
+      - "The message is truncated to 255 chars"
+      - "The default message interpolator evaluates `${...}` / EL-like expressions in the template, so interpolating untrusted input into the template can lead to expression-injection/information disclosure. Put dynamic values in message PARAMETERS/attributes, not concatenated into the template"
+    answer: 3
+    explanation: |
+      Message templates are subject to parameter/EL interpolation. Concatenating untrusted input into
+      the template risks expression evaluation of `${...}`. Pass dynamic content via attributes/message
+      parameters (or escape it), never by building the template from raw user input.
+    ref: "concepts.md#custom-constraint-validators"
+
+  - id: exception-handling-validation-097
+    difficulty: expert
+    tags: [report-as-single-violation, composed-constraint]
+    question: |
+      A composed constraint `@StrongPassword` meta-annotates `@Size(min=8)`, `@Pattern(digit)`,
+      `@Pattern(upper)`. Without `@ReportAsSingleViolation`, a weak password produces multiple messages;
+      the team wants exactly one "password not strong enough" message. What is the correct change?
+    options:
+      - "Add `@ReportAsSingleViolation` to the `@StrongPassword` annotation definition so the composing constraints' violations are collapsed into a single reported violation using the composed constraint's message"
+      - "Set `groups` on each composing constraint"
+      - "Add `@ReportAsSingleViolation` to the field usage site"
+      - "Override `getConstraintDescriptor` in a validator"
+    answer: 0
+    explanation: |
+      `@ReportAsSingleViolation` on the composed constraint definition suppresses the individual
+      composing violations and reports one violation with the composed constraint's message.
+    ref: "concepts.md#custom-constraint-validators"
+
+  - id: exception-handling-validation-098
+    difficulty: advanced
+    tags: [class-level-constraint, null-payload, cross-field]
+    question: |
+      A class-level cross-field validator (`@PasswordsMatch` on the type) receives the bean instance in
+      `isValid`. If the whole object could be null (e.g. an optional nested `@Valid` reference that is
+      null), what is the recommended handling?
+    options:
+      - "Throw `NullPointerException` to signal misuse"
+      - "Return `true` when the object is null (let a separate `@NotNull` on the reference handle nullness), keeping the cross-field validator focused only on comparing fields of a present object"
+      - "Return `false` to reject nulls"
+      - "Class-level validators never receive null; no handling needed"
+    answer: 1
+    explanation: |
+      Following the null convention, a class-level validator should return `true` for a null target and
+      leave presence to `@NotNull`, so constraints stay composable and NPE-free.
+    ref: "concepts.md#custom-constraint-validators"
+
+  - id: exception-handling-validation-099
+    difficulty: expert
+    tags: [filter, security, exception-handler, edge-case]
+    question: |
+      A Spring Security authentication filter throwing `AuthenticationException` runs before the
+      DispatcherServlet. A team adds `@ExceptionHandler(AuthenticationException.class)` in a
+      `@RestControllerAdvice` but it never fires for auth failures. Why, and what's the right layer?
+    options:
+      - "The advice needs `@Order(0)`"
+      - "`AuthenticationException` is checked and cannot be handled"
+      - "Filter-thrown exceptions occur OUTSIDE DispatcherServlet's handler invocation, so `@ExceptionHandler`/advice cannot see them; auth errors must be handled at the filter layer (e.g. `AuthenticationEntryPoint`/`AccessDeniedHandler`) or via an error-page mapping"
+      - "You must annotate the filter with `@ControllerAdvice`"
+    answer: 2
+    explanation: |
+      `@ExceptionHandler`/`@ControllerAdvice` resolution only covers exceptions within the handler
+      invocation. Security filters run earlier; their exceptions are handled by Security's
+      `AuthenticationEntryPoint`/`AccessDeniedHandler` (or servlet error pages), not MVC advice.
+    ref: "concepts.md#exceptionhandler-resolution-edge-cases--failure-modes"
+
+  - id: exception-handling-validation-100
+    difficulty: advanced
+    tags: [webflux, reactive, error-signal, edge-case]
+    question: |
+      In a WebFlux `@RestControllerAdvice`, an `@ExceptionHandler(BusinessException.class)` handles
+      errors from most endpoints but misses one where the exception is thrown inside a `.map(...)`
+      lambda that was written to `throw` rather than signal. Which statement is most accurate?
+    options:
+      - "WebFlux never supports `@ExceptionHandler`"
+      - "You must use `@ControllerAdvice` not `@RestControllerAdvice` in WebFlux"
+      - "Reactive errors always yield 500 regardless of handlers"
+      - "To be routed to `@ExceptionHandler`, the error must be propagated as an error SIGNAL in the reactive pipeline; a `throw` inside an operator is generally captured by the operator and turned into an error signal, but code that escapes the reactive chain (e.g. thrown before the pipeline is assembled, or on a different thread) will not be caught"
+    answer: 3
+    explanation: |
+      Reactive error handling depends on errors flowing as error signals through the pipeline. Throws
+      inside standard operators are captured into signals and reach `@ExceptionHandler`, but exceptions
+      that escape assembly-time or run off the reactive chain are not routed to the advice.
+    ref: "concepts.md#exceptionhandler-resolution-edge-cases--failure-modes"
+
+  - id: exception-handling-validation-101
+    difficulty: expert
+    tags: [handler-method-validation, visitor, api]
+    question: |
+      To render structured per-parameter details from a `HandlerMethodValidationException`, which API
+      does Spring provide?
+    options:
+      - "`ex.visitResults(new HandlerMethodValidationException.Visitor(){...})` plus `getAllValidationResults()`/`getParameterValidationResults()`, exposing `ParameterValidationResult`/`ParameterErrors` grouped by parameter (with typed callbacks for `requestParam`, `pathVariable`, `modelAttribute`, etc.)"
+      - "`ex.getBindingResult().getFieldErrors()` — it extends `BindException`"
+      - "`ex.getConstraintViolations()` — it wraps `ConstraintViolationException`"
+      - "There is no structured API; only `getMessage()`"
+    answer: 0
+    explanation: |
+      `HandlerMethodValidationException` exposes `ParameterValidationResult`s (and `ParameterErrors` for
+      cascaded objects) and a `Visitor` with typed callbacks (`requestParam`, `pathVariable`,
+      `modelAttribute`, `other`) for building tailored error payloads.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-102
+    difficulty: advanced
+    tags: [required-flag, notnull, best-practice, spring6.1]
+    question: |
+      For a required `@RequestBody` in Spring 6.1+, which approach does the framework guidance prefer
+      for enforcing presence, and why?
+    options:
+      - "Put `@NotNull` on the `@RequestBody` parameter, because it reads most naturally"
+      - "Use the `required` flag of `@RequestBody` (`@RequestBody(required = true)`, the default) rather than adding a constraint like `@NotNull` on the parameter — adding a bare constraint would push the whole method into method-level validation semantics unnecessarily"
+      - "Return `Optional<T>` from the deserializer"
+      - "Add a class-level `@Validated`"
+    answer: 1
+    explanation: |
+      The `required` flag already enforces body presence. Adding `@NotNull` (a constraint) directly on
+      the parameter would trigger method-level validation for the method — usually not what you want for
+      a command object; prefer the `required` flag.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-103
+    difficulty: expert
+    tags: [binding-result, method-validation, spring6.1, edge-case]
+    question: |
+      In Spring 6.1 built-in method validation, a handler is
+      `search(@RequestParam @Min(1) int page, @RequestParam @Max(50) int size, BindingResult result)`.
+      A request sends `page=0` (violates `@Min`). Given the built-in support's rule about `Errors`
+      parameters, what happens?
+    options:
+      - "The method is invoked normally with the error recorded in `result`, always"
+      - "`BindingResult` is illegal with `@RequestParam` and fails at startup"
+      - "The method is invoked ONLY if all validation errors are on parameters immediately followed by an `Errors`/`BindingResult`; since `page` (the erroring param) is not immediately followed by an `Errors`, `HandlerMethodValidationException` is raised instead"
+      - "It always throws `ConstraintViolationException`"
+    answer: 2
+    explanation: |
+      The built-in support only proceeds into the method when every error is on a parameter directly
+      followed by an `Errors`. A constrained simple param not paired that way makes Spring raise
+      `HandlerMethodValidationException` rather than silently passing the error via `BindingResult`.
+    ref: "concepts.md#method-validation-internals-spring-61--handlermethodvalidationexception"
+
+  - id: exception-handling-validation-104
+    difficulty: intermediate
+    tags: [validation-groups, default, notnull-null-combo]
+    question: |
+      A DTO field is `@Null(groups = OnCreate.class) @NotNull(groups = OnUpdate.class) Long id;`.
+      Which statement is correct?
+    options:
+      - "The two constraints conflict and cause a startup error"
+      - "Both constraints always run regardless of group"
+      - "`@Null` and `@NotNull` cannot coexist on one field"
+      - "On create (`@Validated(OnCreate.class)`) `id` must be null, and on update (`@Validated(OnUpdate.class)`) `id` must be non-null — the same field enforces opposite rules per group"
+    answer: 3
+    explanation: |
+      Group-scoped constraints let one field enforce different rules per operation: `@Null` for
+      `OnCreate` (id must be absent) and `@NotNull` for `OnUpdate` (id required). Only the constraints in
+      the requested group run, so there is no conflict.
+    ref: "concepts.md#valid-vs-validated-groups"

@@ -61,6 +61,8 @@ Critical gotchas:
 - **The container does NOT manage the full lifecycle of a prototype.** Spring instantiates, populates, and runs initialization callbacks (`@PostConstruct`), then hands the bean to the caller and **forgets about it**. `@PreDestroy` / `DisposableBean.destroy()` are **NOT called** by the container for prototypes. Cleanup is the client's responsibility (or a custom `BeanPostProcessor` / explicit `destroyBean`). This is the famous "prototype destruction caveat."
 - **Injection timing**: injecting a prototype into a singleton gives the singleton **one** prototype instance created at singleton-creation time — you do NOT get a fresh prototype per method call. To get a new instance each time, use one of: method injection via `@Lookup`, `ObjectProvider<T>`/`ObjectFactory<T>`, `Provider<T>` (JSR-330), or a scoped proxy.
 
+Deeper gotcha on prototype destruction: the "container forgets it" statement has one important exception. If a prototype is wrapped in a **scoped proxy**, or if you register a `DestructionAwareBeanPostProcessor`, or if the prototype is referenced by a bean that itself is destroyed, destruction still is not automatically driven — Spring genuinely holds no reference to the raw prototype after handing it back. The one case where prototype destruction *does* run is when the prototype is obtained through a scope that tracks its instances (custom scopes can call `registerDestructionCallback`). Plain prototype scope does not track instances at all, which is precisely why `@PreDestroy` is skipped and why prototypes that hold OS resources (sockets, file handles, native memory) are a classic leak source. `ObjectProvider`/`getBean` for a prototype returns an untracked instance every time.
+
 ```java
 @Component
 public class OrderProcessor {
@@ -313,6 +315,72 @@ When a **shorter-lived** bean (prototype/request/session) is injected into a **l
 This is analogous to how `@Transactional` proxies work, and it shares the same **self-invocation caveat**: calling another method on the same object internally (`this.foo()`) bypasses the proxy, so scope/transaction semantics don't apply to internal calls.
 
 ---
+
+## Circular dependencies and the three-level cache
+
+Circular references between singletons are resolved (for setter/field injection) by a three-level cache inside `DefaultSingletonBeanRegistry`:
+
+| Level | Map | Holds |
+|---|---|---|
+| 1 | `singletonObjects` | fully initialized, ready singletons |
+| 2 | `earlySingletonObjects` | early references — instantiated but not yet fully populated/initialized |
+| 3 | `singletonFactories` | `ObjectFactory` producing an early reference (needed so AOP returns the *proxy*, not the raw bean) |
+
+Resolution of `A → B → A` with field/setter injection: A is instantiated and its `ObjectFactory` is placed in level 3; while populating A, B is created; B needs A, finds A's factory in level 3, promotes the early A reference to level 2, and injects it into B; B finishes (level 1) and is injected into A; A finishes.
+
+Key senior-level points:
+
+- **Constructor-injection cycles cannot be resolved** — there is no post-instantiation moment at which to expose an early reference, so Spring throws `BeanCurrentlyInCreationException` at startup. This is a fail-fast, not a runtime, error.
+- **Spring Boot 2.6+ forbids circular references by default** (`spring.main.allow-circular-references=false`). Even setter/field cycles now fail at startup unless you flip the flag or annotate one side `@Lazy`. `@Lazy` on one injection point injects a lazy proxy, breaking the cycle because the real bean isn't needed until first use.
+- **The third-level factory exists purely for AOP**: if A is proxied, B must be injected with A's *proxy*, and the proxy must be identical to the one placed in level 1. The `getEarlyBeanReference` callback (via `SmartInstantiationAwareBeanPostProcessor`) creates the proxy early so both references match.
+- **`@Async` cycles still break** even with the flag on: `@Async` proxies are not created through `getEarlyBeanReference`, so an early reference exposed for a cycle will be the *raw* bean while the final reference is the async proxy — Spring detects the mismatch and throws `BeanCurrentlyInCreationException`.
+
+## FactoryBean vs factory beans vs lifecycle
+
+`FactoryBean<T>` is a special bean whose `getObject()` produces the *actual* bean; `getBean("x")` returns the product, while `getBean("&x")` returns the `FactoryBean` itself (the `&` prefix). Lifecycle nuance:
+
+- The `FactoryBean` instance's own lifecycle callbacks (`@PostConstruct`, `afterPropertiesSet`) run when the factory is created.
+- The **produced object's** lifecycle is only partly managed: if `isSingleton()` is true, the product is cached; `@PostConstruct`/`@Autowired` are **not** processed on objects returned from `getObject()` unless you wire them yourself — the container did not instantiate them. Destruction callbacks on the product only run if the `FactoryBean` implements the destruction contract or the product is a `DisposableBean` that the container tracks.
+- Do not confuse `FactoryBean` (an interface) with "factory bean" (a `@Bean` method / static/instance factory method). The former is a lower-level SPI used by things like `SqlSessionFactoryBean`.
+
+## Startup ordering, @DependsOn, and @Lazy
+
+Beyond the per-bean lifecycle, the *order in which distinct beans* are created matters:
+
+- **`@DependsOn("other")`** forces `other` to be fully initialized before this bean, and destroyed *after* it — useful when there is no injected reference but an initialization-order requirement (e.g. a bean that registers a JDBC driver must come up first).
+- **`@Lazy` at class level** delays creation of that singleton until first access; `@Lazy` at an *injection point* injects a lazy-resolving proxy, which is a legitimate way to break init-order coupling or a circular reference.
+- **`@Order` does NOT affect instantiation order** of ordinary singletons — it only orders injected collections (`List<T>`), `@Configuration` import processing in some cases, and web components; a common misconception is that `@Order` controls bean creation sequence.
+- Spring instantiates singletons roughly in registration order, but dependency edges override that: a dependency is always created before its dependent.
+
+## Configuration class proxying (@Configuration full vs lite)
+
+`@Configuration(proxyBeanMethods = true)` (the default) makes Spring create a **CGLIB subclass** of the config class so that inter-`@Bean` method calls (`this.foo()` inside `bar()`) return the shared singleton rather than a new instance. This is "full" mode. Setting `proxyBeanMethods = false` ("lite" mode) skips the CGLIB proxy: `@Bean` methods run as plain Java, so calling one `@Bean` method from another creates a **new, unmanaged instance**. Lite mode is faster and startup-friendly (Spring Boot's own auto-configuration uses it heavily) but you must not rely on cross-method singleton semantics. This is a frequent trap: moving to `proxyBeanMethods = false` silently changes bean identity for beans wired via method calls.
+
+## DestructionAwareBeanPostProcessor and shutdown mechanics
+
+Destruction callbacks (`@PreDestroy`, `DisposableBean`, `destroy-method`) are driven at container shutdown only for beans the container tracks (singletons, and scoped beans via `registerDestructionCallback`). Mechanics worth knowing:
+
+- `@PreDestroy`/`@Resource`-style destruction is implemented by `CommonAnnotationBeanPostProcessor`, which is a `DestructionAwareBeanPostProcessor`.
+- Shutdown runs in **reverse creation order** and honors `@DependsOn` (dependents destroyed first).
+- A JVM **shutdown hook** (`registerShutdownHook()`, auto-registered by Spring Boot) triggers `close()`; if the process is `kill -9`ed, no destruction callbacks run at all — never rely on `@PreDestroy` for critical durability.
+- Exceptions thrown from a destroy callback are logged and swallowed; they do not stop the rest of shutdown.
+
+## SmartLifecycle internals and phases
+
+Precise semantics that separate seniors from juniors:
+
+- `SmartLifecycle.DEFAULT_PHASE == Integer.MAX_VALUE`, so an auto-start `SmartLifecycle` with no overridden phase starts **last** and stops **first**. Plain `Lifecycle` beans behave as phase `0`.
+- Startup goes low→high phase; shutdown reverses (high→low). Beans in the same phase start together (and the processor may stop same-phase beans concurrently).
+- `stop(Runnable callback)` is the *only* stop method the `LifecycleProcessor` calls on a `SmartLifecycle`; plain `stop()` is not invoked unless your `stop(Runnable)` delegates to it. You **must** call `callback.run()` when done, or shutdown blocks until `timeoutPerShutdownPhase` (default 30s) elapses.
+- `SmartLifecycle.start()` fires at the very end of `refresh()` (via `finishRefresh()`), strictly after every singleton's `@PostConstruct`/`afterPropertiesSet`. This is why network servers, Kafka listeners, and schedulers belong in `SmartLifecycle`, not `@PostConstruct` — at `@PostConstruct` time, other beans they depend on may not yet be initialized.
+- Spring's own `WebServerStartStopLifecycle` (embedded Tomcat/Jetty) and message-listener containers are `SmartLifecycle` beans, which is how Boot delays accepting traffic until the context is fully ready.
+
+## Scope proxy and lifecycle edge cases
+
+- A scoped-proxy target bean's `@PostConstruct` runs when the **real** short-lived instance is first created (per request/session), not when the singleton holding the proxy is created. Its `@PreDestroy` runs when that scope ends (request completes / session invalidates) — this *is* tracked via `registerDestructionCallback`, unlike plain prototype.
+- Injecting a **shorter into shorter** or same scope needs no proxy; the mismatch problem only arises when a longer-lived bean holds a shorter-lived one.
+- A `session`-scoped bean must be `Serializable` if the servlet container serializes/replicates sessions (clustering, passivation), or you risk `NotSerializableException` on failover.
+- `ScopeNotActiveException` (introduced to give a clearer message) is thrown when a scoped-proxy method is invoked with no active request/session — e.g. from a `@Scheduled` background thread or an `@Async` thread that lacks the request context. `RequestContextFilter`/`RequestContextListener` are what bind the request to the thread; async threads need explicit context propagation.
 
 ## Common follow-up questions
 

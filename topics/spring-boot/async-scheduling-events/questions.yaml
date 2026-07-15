@@ -501,7 +501,7 @@ questions:
       - "fixedRateString (e.g. fixedRateString = \"${job.rate:5000}\")"
     answer: 3
     explanation: |
-      fixedRateString (and fixedDelayString / initialDelayString) accept property placeholders and, since Spring 6, ISO-8601 duration strings like "PT5S". The numeric fixedRate cannot reference properties directly.
+      fixedRateString (and fixedDelayString / initialDelayString) accept property placeholders and, since Spring 5.3, ISO-8601 duration strings like "PT5S". The numeric fixedRate cannot reference properties directly.
     ref: "concepts.md#fixedrate-vs-fixeddelay-vs-cron"
 
   - id: async-scheduling-events-034
@@ -878,3 +878,633 @@ questions:
     explanation: |
       A cron value of "-" is a special disabled trigger, letting you externalize the cron string and turn a job off (e.g. via a property) without removing the annotation.
     ref: "concepts.md#fixedrate-vs-fixeddelay-vs-cron"
+
+  - id: async-scheduling-events-059
+    difficulty: expert
+    tags: [scheduled, exception-handling, error-handler]
+    question: |
+      A @Scheduled(fixedRate = 60000) job throws an unchecked exception on every run. Using Spring's default configuration, what happens to subsequent executions?
+    options:
+      - "The task is permanently cancelled after the first exception, exactly like raw ScheduledExecutorService.scheduleAtFixedRate."
+      - "The exception propagates to the application's main thread and terminates the context."
+      - "Spring retries the failed run immediately with exponential backoff until it succeeds."
+      - "Spring's default error handler logs and suppresses the exception, and the next execution is still scheduled — the job keeps firing every 60s."
+    answer: 3
+    explanation: |
+      Spring wraps scheduled invocations in a DelegatingErrorHandlingRunnable. For repeating tasks the default TaskUtils.LOG_AND_SUPPRESS_ERROR_HANDLER logs and swallows the exception, and Spring re-schedules the next run — so the job keeps firing. This differs from raw scheduleAtFixedRate, where an uncaught exception silently kills all future executions.
+    ref: "concepts.md#scheduled-task-exception-handling"
+
+  - id: async-scheduling-events-060
+    difficulty: expert
+    tags: [scheduled, error-handler, custom]
+    question: |
+      A team wants a throwing @Scheduled fixedRate task to emit a metric on failure but also keep running on schedule. They register a custom ErrorHandler that increments a counter and then re-throws the exception. What is the likely outcome?
+    options:
+      - "It works perfectly; re-throwing from an ErrorHandler never affects scheduling."
+      - "The metric is emitted, but re-throwing can cause the underlying ScheduledExecutorService to cancel future executions of that task, so the schedule dies."
+      - "Spring ignores custom ErrorHandlers for fixedRate tasks."
+      - "The task switches to fixedDelay semantics automatically."
+    answer: 1
+    explanation: |
+      The reason the default handler swallows exceptions is precisely to keep the schedule alive: an exception that propagates out of the runnable into a ScheduledThreadPoolExecutor's periodic task cancels future runs. A custom ErrorHandler for repeating tasks should record-and-return (not re-throw), otherwise it re-introduces the JDK footgun of a dead schedule.
+    ref: "concepts.md#scheduled-task-exception-handling"
+
+  - id: async-scheduling-events-061
+    difficulty: advanced
+    tags: [scheduled, error-handler, one-shot]
+    question: |
+      How does Spring's DEFAULT error handling differ between a one-shot scheduled task and a repeating (fixedRate/fixedDelay/cron) task?
+    options:
+      - "Both use LOG_AND_SUPPRESS_ERROR_HANDLER identically."
+      - "Repeating tasks propagate; one-shot tasks suppress."
+      - "One-shot tasks use LOG_AND_PROPAGATE_ERROR_HANDLER while repeating tasks use LOG_AND_SUPPRESS_ERROR_HANDLER (so the schedule survives)."
+      - "One-shot tasks are never wrapped in an error handler at all."
+    answer: 2
+    explanation: |
+      TaskUtils selects LOG_AND_PROPAGATE_ERROR_HANDLER for one-shot tasks (propagating is harmless since there is no future run to protect) and LOG_AND_SUPPRESS_ERROR_HANDLER for repeating tasks, so a thrown exception is swallowed and the recurring schedule is preserved.
+    ref: "concepts.md#scheduled-task-exception-handling"
+
+  - id: async-scheduling-events-062
+    difficulty: expert
+    tags: [simple-async-task-scheduler, virtual-threads, fixed-delay]
+    question: |
+      With a SimpleAsyncTaskScheduler configured for virtual threads, which trigger types are recommended, and why is fixedDelay discouraged?
+    options:
+      - "fixedDelay is recommended; fixedRate can overwhelm virtual threads."
+      - "All three are equivalent because virtual threads make scheduling free."
+      - "fixedRate and cron are recommended; fixedDelay tasks run on the single scheduling thread (next start depends on prior completion), so a long fixedDelay body blocks the scheduler."
+      - "Only cron is supported; fixedRate and fixedDelay throw at startup."
+    answer: 2
+    explanation: |
+      SimpleAsyncTaskScheduler uses one scheduling thread and fires each execution on a new (virtual) thread — except fixedDelay, whose next start depends on the previous completion, so it must run on the single scheduling thread. A long fixedDelay body therefore blocks the scheduler, so Spring recommends fixedRate or cron with this scheduler.
+    ref: "concepts.md#simpleasynctaskscheduler-and-virtual-thread-scheduling"
+
+  - id: async-scheduling-events-063
+    difficulty: expert
+    tags: [thread-pool-task-scheduler, simple-async-task-scheduler, concurrency]
+    question: |
+      What is the fundamental concurrency difference between ThreadPoolTaskScheduler and SimpleAsyncTaskScheduler?
+    options:
+      - "ThreadPoolTaskScheduler caps concurrent task bodies at its pool size (timing and execution share the pool); SimpleAsyncTaskScheduler times on one thread but spawns a new thread per execution, allowing unbounded concurrent bodies."
+      - "SimpleAsyncTaskScheduler is single-threaded for everything; ThreadPoolTaskScheduler is unbounded."
+      - "They are identical except for the thread name prefix."
+      - "ThreadPoolTaskScheduler cannot run cron; SimpleAsyncTaskScheduler cannot run fixedRate."
+    answer: 0
+    explanation: |
+      ThreadPoolTaskScheduler is backed by a fixed ScheduledThreadPoolExecutor whose threads both time and run tasks, so pool size caps concurrency and a slow task can delay others' timing. SimpleAsyncTaskScheduler dedicates one thread to timing and launches each execution on a fresh (virtual) thread, giving unbounded body concurrency — appropriate for virtual threads, dangerous for platform threads.
+    ref: "concepts.md#simpleasynctaskscheduler-and-virtual-thread-scheduling"
+
+  - id: async-scheduling-events-064
+    difficulty: advanced
+    tags: [virtual-threads, boot-3.2, task-execution]
+    question: |
+      After setting spring.threads.virtual.enabled=true in Boot 3.2 on Java 21, why do the spring.task.execution.pool.core-size / max-size properties stop having an effect on @Async?
+    options:
+      - "Because @Async is disabled when virtual threads are on."
+      - "Because the properties are renamed to spring.threads.virtual.pool.*."
+      - "Because virtual threads force a fixed pool of exactly the CPU count."
+      - "Because the @Async executor becomes a virtual-thread SimpleAsyncTaskExecutor which does not pool threads (a new virtual thread per task), so pool-size properties are irrelevant."
+    answer: 3
+    explanation: |
+      With virtual threads enabled, Boot supplies a SimpleAsyncTaskExecutor backed by virtual threads for @Async/task execution. It creates a new virtual thread per task rather than pooling, so core/max pool size and queue-capacity settings no longer apply.
+    ref: "concepts.md#simpleasynctaskscheduler-and-virtual-thread-scheduling"
+
+  - id: async-scheduling-events-065
+    difficulty: expert
+    tags: [scheduler, graceful-shutdown, lifecycle]
+    question: |
+      A ThreadPoolTaskScheduler runs a long batch job. The application shuts down mid-job with the scheduler's DEFAULT shutdown settings. What most likely happens?
+    options:
+      - "Spring always waits indefinitely for scheduled jobs to finish before shutting down."
+      - "The job is guaranteed to complete because SmartLifecycle blocks the JVM."
+      - "Spring persists the job state and resumes it on next startup."
+      - "With defaults (waitForTasksToCompleteOnShutdown=false, awaitTerminationSeconds=0) shutdown does not wait; the in-flight job can be abruptly interrupted, leaving work half-done."
+    answer: 3
+    explanation: |
+      By default the scheduler does not wait for running tasks at shutdown. To drain gracefully you must set setWaitForTasksToCompleteOnShutdown(true) and setAwaitTerminationSeconds(n) (or the Boot spring.task.scheduling.shutdown.* properties); otherwise a running scheduled job may be interrupted mid-execution.
+    ref: "concepts.md#scheduler-lifecycle-and-graceful-shutdown"
+
+  - id: async-scheduling-events-066
+    difficulty: advanced
+    tags: [scheduler, lifecycle, spring-6.1]
+    question: |
+      Which capability did Spring Framework 6.1 add to ThreadPoolTaskScheduler via SmartLifecycle integration?
+    options:
+      - "Automatic clustering of scheduled jobs across nodes."
+      - "Persistence of missed executions to a database."
+      - "Guaranteed exactly-once execution semantics."
+      - "Pause/resume of scheduling plus graceful shutdown, with scheduled tasks cancelled on context close."
+    answer: 3
+    explanation: |
+      As of 6.1 ThreadPoolTaskScheduler participates in Spring's lifecycle, providing pause/resume and graceful shutdown; on context close Spring cancels scheduled tasks (including the next trigger and any active reactive subscription). Clustering and durable persistence are not provided (that is Quartz/ShedLock territory).
+    ref: "concepts.md#scheduler-lifecycle-and-graceful-shutdown"
+
+  - id: async-scheduling-events-067
+    difficulty: expert
+    tags: [cron, dst, time-zone]
+    question: |
+      A job is defined @Scheduled(cron = "0 30 2 * * *", zone = "Europe/Paris") to run at 02:30 daily. What happens on the "spring-forward" DST day (when clocks jump from 02:00 to 03:00) and on the "fall-back" day?
+    options:
+      - "It runs exactly once on both days; cron is immune to DST."
+      - "The job silently switches to UTC to avoid DST entirely."
+      - "Spring throws an exception during DST transitions."
+      - "On spring-forward the 02:30 wall-clock time does not exist so the run is skipped; on fall-back 02:30 occurs twice so it may run twice."
+    answer: 3
+    explanation: |
+      Cron matches wall-clock time in the given zone, so on the spring-forward day the non-existent 02:30 causes the run to be skipped, and on the fall-back day 02:30 occurs twice and the job can fire twice. fixedRate/fixedDelay count elapsed real time and are unaffected by DST.
+    ref: "concepts.md#advanced-cron-expressions-and-time-zones"
+
+  - id: async-scheduling-events-068
+    difficulty: advanced
+    tags: [cron, last, expressions]
+    question: |
+      What does the Spring cron expression "0 0 0 L * *" fire on?
+    options:
+      - "The first day of every month at midnight."
+      - "Every day at midnight (L is treated as a wildcard)."
+      - "Midnight on the last day of every month."
+      - "The last Sunday of every month at midnight."
+    answer: 2
+    explanation: |
+      In the day-of-month field, L means the last day of the month. So "0 0 0 L * *" fires at 00:00:00 on the final calendar day of each month. (L-3 would be the third-to-last day; 5L in day-of-week would be the last Friday.)
+    ref: "concepts.md#advanced-cron-expressions-and-time-zones"
+
+  - id: async-scheduling-events-069
+    difficulty: expert
+    tags: [cron, nth-weekday, hash]
+    question: |
+      Which Spring cron expression fires at midnight on the second Tuesday of every month?
+    options:
+      - "0 0 0 ? * 2#2 (day-of-week 2 = Tuesday, #2 = second occurrence)"
+      - "0 0 0 2#2 * *"
+      - "0 0 0 * * TUE-2"
+      - "0 0 0 L2 * TUE"
+    answer: 0
+    explanation: |
+      The d#n syntax in the day-of-week field selects the nth occurrence. Spring strictly follows cron numbering (0/7=SUN, 1=MON, 2=TUE, 3=WED), so 2#2 means the second Tuesday; the equivalent unambiguous form is TUE#2. (Note this differs from Quartz, which uses 1-7 for SUN-SAT.) The '?' in day-of-month avoids conflict with the day-of-week field.
+    ref: "concepts.md#advanced-cron-expressions-and-time-zones"
+
+  - id: async-scheduling-events-070
+    difficulty: intermediate
+    tags: [cron, question-mark]
+    question: |
+      What is the purpose of the '?' character in a Spring cron expression?
+    options:
+      - "It matches any value, identical to '*' in all fields."
+      - "It means 'no specific value', used in the day-of-month or day-of-week field when the other of the two is set, to avoid ambiguity."
+      - "It disables the trigger entirely."
+      - "It represents the current second at parse time."
+    answer: 1
+    explanation: |
+      '?' means "no specific value" and is used in exactly one of day-of-month / day-of-week when the other is specified, since specifying both concrete day fields is contradictory. To disable a trigger entirely you use cron = "-".
+    ref: "concepts.md#advanced-cron-expressions-and-time-zones"
+
+  - id: async-scheduling-events-071
+    difficulty: advanced
+    tags: [scheduled, one-time, initial-delay]
+    question: |
+      What is the effect of @Scheduled(initialDelay = 5000) with NO fixedRate, fixedDelay, or cron attribute?
+    options:
+      - "Startup fails because a trigger type is required."
+      - "It runs every 5 seconds indefinitely."
+      - "It runs exactly once, 5 seconds after the context starts (a one-time task)."
+      - "It runs immediately and ignores initialDelay."
+    answer: 2
+    explanation: |
+      Since Spring 6, @Scheduled with only initialDelay and no repeating trigger schedules a single one-shot execution after the delay — a lightweight alternative to a deferred CommandLineRunner.
+    ref: "concepts.md#reactive-and-one-time-scheduled-tasks"
+
+  - id: async-scheduling-events-072
+    difficulty: expert
+    tags: [scheduled, reactive, spring-6.1]
+    question: |
+      In Spring 6.1, a @Scheduled(fixedDelay = 1000) method returns a Mono<Void>. How does Spring treat it, and what is the risk if the method body calls .subscribe() itself and returns void instead?
+    options:
+      - "Spring blocks on the Mono synchronously either way; there is no difference."
+      - "Spring converts the Mono to a CompletableFuture and always waits on the calling thread."
+      - "Reactive return types are rejected by @Scheduled; only void is allowed."
+      - "Spring subscribes to the returned publisher and uses its completion to time the next fixedDelay run; if you subscribe yourself and return void, Spring loses that integration and fixedDelay timing is based on the (instant) method return, not the async completion."
+    answer: 3
+    explanation: |
+      Spring 6.1 supports reactive @Scheduled by subscribing to the returned Publisher and treating that subscription as the execution, so fixedDelay measures from the publisher's completion. If the method self-subscribes and returns void, the method returns instantly and fixedDelay starts counting from that instant rather than from real completion, breaking the intended spacing and losing shutdown cancellation.
+    ref: "concepts.md#reactive-and-one-time-scheduled-tasks"
+
+  - id: async-scheduling-events-073
+    difficulty: expert
+    tags: [task-decorator, security-context, thread-local]
+    question: |
+      An @Async method reads SecurityContextHolder.getContext().getAuthentication() and gets null, even though the caller was authenticated. What is the correct root cause and fix?
+    options:
+      - "The user was logged out; re-authenticate inside the async method."
+      - "SecurityContext must be passed as a method parameter; there is no other way."
+      - "@Async methods run before Spring Security initializes; move the annotation."
+      - "SecurityContext is stored in a ThreadLocal that is not propagated across the executor thread boundary; supply a TaskDecorator (or DelegatingSecurityContextAsyncTaskExecutor) to capture and reinstate it."
+    answer: 3
+    explanation: |
+      SecurityContextHolder uses a ThreadLocal by default, which does not cross to the worker thread. A TaskDecorator captures the context on the submitting thread and reinstates it on the worker thread (Spring Security's DelegatingSecurityContextAsyncTaskExecutor does exactly this). MDC and observation context have the same issue and the same fix.
+    ref: "concepts.md#context-propagation-with-taskdecorator"
+
+  - id: async-scheduling-events-074
+    difficulty: expert
+    tags: [task-decorator, closure, capture]
+    question: |
+      A developer writes a TaskDecorator whose returned Runnable reads MDC.getCopyOfContextMap() INSIDE the wrapper (on the worker thread) rather than capturing it when decorate() is called. Why is this wrong?
+    options:
+      - "It is fine; MDC is global and thread-independent."
+      - "It works but doubles memory usage."
+      - "It causes a compilation error because TaskDecorator forbids ThreadLocal access."
+      - "decorate() runs on the submitting thread but the wrapper runs on the worker thread; reading MDC inside the wrapper reads the worker thread's (empty) context, not the caller's — you must capture eagerly in decorate()."
+    answer: 3
+    explanation: |
+      decorate() executes on the caller (submitting) thread, while the returned Runnable executes later on the worker thread. Context must be captured eagerly inside decorate() and reinstated inside the wrapper; reading the ThreadLocal lazily in the wrapper reads the worker's own empty context, defeating the purpose.
+    ref: "concepts.md#context-propagation-with-taskdecorator"
+
+  - id: async-scheduling-events-075
+    difficulty: advanced
+    tags: [task-decorator, composite]
+    question: |
+      You need both MDC propagation and Micrometer observation propagation on the same @Async executor. What is the cleanest built-in way to combine multiple TaskDecorators?
+    options:
+      - "Only one TaskDecorator can be set; you must merge the logic manually into one class."
+      - "Register them as separate beans; Spring auto-chains all TaskDecorator beans."
+      - "Use CompositeTaskDecorator, which runs the supplied decorators sequentially around the task."
+      - "Set them via spring.task.execution.decorators as a comma-separated list."
+    answer: 2
+    explanation: |
+      setTaskDecorator accepts a single decorator, but org.springframework.core.task.support.CompositeTaskDecorator wraps several decorators and applies them in order, letting you compose MDC, security, and observation propagation cleanly.
+    ref: "concepts.md#context-propagation-with-taskdecorator"
+
+  - id: async-scheduling-events-076
+    difficulty: expert
+    tags: [events, error-handler, multicaster, transaction]
+    question: |
+      A synchronous @EventListener is throwing, and it used to roll back the publisher's @Transactional method. After someone sets an ErrorHandler on the SimpleApplicationEventMulticaster, the rollback stops happening. Why?
+    options:
+      - "The ErrorHandler moved the listener onto a background thread."
+      - "The ErrorHandler forces every listener into REQUIRES_NEW."
+      - "ErrorHandlers only apply to async listeners, so this is a coincidence."
+      - "Setting an ErrorHandler makes the multicaster catch listener exceptions and route them to the handler instead of propagating them to publishEvent(), so the publisher's transaction no longer sees the failure."
+    answer: 3
+    explanation: |
+      An ErrorHandler on the multicaster intercepts listener exceptions for ALL listeners (even synchronous ones) and no longer lets them bubble up to publishEvent(). Since the exception never reaches the publisher, it cannot trigger the caller's transaction rollback — a subtle change to failure semantics.
+    ref: "concepts.md#event-error-handling-and-the-multicaster"
+
+  - id: async-scheduling-events-077
+    difficulty: expert
+    tags: [events, async-multicaster, exceptions]
+    question: |
+      Once a taskExecutor is set on the SimpleApplicationEventMulticaster (global async events), what is the ONLY way to observe listener exceptions, and why?
+    options:
+      - "A try/catch around publishEvent(), because the exception still bubbles up."
+      - "There is no way; async listener exceptions are permanently invisible."
+      - "An ErrorHandler on the multicaster (or AsyncUncaughtExceptionHandler for @Async listeners), because the caller has already returned so exceptions cannot propagate to publishEvent()."
+      - "Checking the return value of publishEvent(), which becomes a Future."
+    answer: 2
+    explanation: |
+      With an async multicaster, publishEvent() returns before listeners finish, so exceptions cannot propagate to the caller. The multicaster's ErrorHandler (or, for @Async listeners, the AsyncUncaughtExceptionHandler) is the only place to catch them. publishEvent() returns void, not a Future.
+    ref: "concepts.md#event-error-handling-and-the-multicaster"
+
+  - id: async-scheduling-events-078
+    difficulty: expert
+    tags: [events, generics, type-erasure]
+    question: |
+      You have @EventListener void on(EntityCreatedEvent<Person> e). You publish new EntityCreatedEvent<>(aPerson) using the raw generic class directly (no subclass). Why might the listener NOT fire, and what interface fixes it?
+    options:
+      - "It always fires; generics are fully retained at runtime."
+      - "The listener only fires if Person implements Serializable."
+      - "You must annotate the event with @EventType(Person.class)."
+      - "Type erasure means the runtime event cannot resolve <Person>, so the typed listener isn't matched; having the event implement ResolvableTypeProvider lets Spring resolve the type parameter at runtime."
+    answer: 3
+    explanation: |
+      Because of type erasure, a raw EntityCreatedEvent<Person> instance does not carry its type argument, so Spring can't match it to the EntityCreatedEvent<Person> listener. Either publish a concrete subclass that fixes the type, or implement ResolvableTypeProvider so the event reports its ResolvableType (e.g. via forInstance(getSource())).
+    ref: "concepts.md#generic-events-and-resolvabletypeprovider"
+
+  - id: async-scheduling-events-079
+    difficulty: advanced
+    tags: [events, lazy, listener-registration]
+    question: |
+      A bean carrying @EventListener methods is annotated @Lazy, and its events silently never get handled. Why?
+    options:
+      - "@Lazy beans handle events on a delay, so they eventually catch up."
+      - "The events are handled, but only after the first HTTP request."
+      - "@EventListener overrides @Lazy, so this cannot happen."
+      - "Spring honors the laziness and does not instantiate the bean to register its listeners, so the listener methods are never wired up."
+    answer: 3
+    explanation: |
+      Registering @EventListener methods requires instantiating the bean. If it is @Lazy, Spring respects that and won't create it eagerly, so the listeners are never registered and matching events go unhandled. Listener-bearing beans must be eagerly initialized.
+    ref: "concepts.md#generic-events-and-resolvabletypeprovider"
+
+  - id: async-scheduling-events-080
+    difficulty: expert
+    tags: [events, async, chaining, return-value]
+    question: |
+      A synchronous @EventListener returns an OrderShippedEvent to chain a follow-up event, and it works. A teammate adds @Async to the same listener and the follow-up event stops being published. Why?
+    options:
+      - "Return-value event chaining is unsupported for asynchronous listeners; an @Async listener's return value is ignored, so it must inject ApplicationEventPublisher and publish manually."
+      - "Async listeners execute too fast for the chained event to register."
+      - "@Async changed the method's return type to void at compile time."
+      - "The chained event is published, but on a thread that has no multicaster."
+    answer: 0
+    explanation: |
+      Spring re-publishes the return value of a synchronous listener as a new event, but this feature is explicitly unsupported for async listeners — their return value is discarded. To chain from an async listener, inject ApplicationEventPublisher and call publishEvent() directly.
+    ref: "concepts.md#async-event-limitations"
+
+  - id: async-scheduling-events-081
+    difficulty: expert
+    tags: [transactional-event-listener, async, after-commit, db-write]
+    question: |
+      A listener is annotated @Async and @TransactionalEventListener(phase = AFTER_COMMIT). It performs a JPA save() with no other annotations. The row is never persisted. What is the most complete explanation?
+    options:
+      - "The listener runs on a pool thread after the original transaction committed, with no active transaction and no bound EntityManager, so the save has no transaction to commit into; it needs its own @Transactional (e.g. REQUIRES_NEW)."
+      - "AFTER_COMMIT listeners cannot use JPA at all."
+      - "The @Async annotation rolls back the save automatically."
+      - "The event fired before the entity existed."
+    answer: 0
+    explanation: |
+      Combining @Async with AFTER_COMMIT means the work runs on a separate thread once the original transaction has already committed — there is no active transaction or thread-bound persistence context. Any DB write must open its own transaction (typically @Transactional(REQUIRES_NEW)) to be committed.
+    ref: "concepts.md#async-event-limitations"
+
+  - id: async-scheduling-events-082
+    difficulty: advanced
+    tags: [transactional-event-listener, before-commit, ordering]
+    question: |
+      What distinguishes a BEFORE_COMMIT @TransactionalEventListener from an AFTER_COMMIT one with respect to the ability to affect the transaction outcome?
+    options:
+      - "BEFORE_COMMIT runs while the transaction is still open, so throwing there can still roll back the commit; AFTER_COMMIT runs after commit, so it cannot undo it."
+      - "Both run after commit; only the log message differs."
+      - "AFTER_COMMIT can veto the commit; BEFORE_COMMIT cannot."
+      - "BEFORE_COMMIT runs on a separate thread, AFTER_COMMIT on the same thread."
+    answer: 0
+    explanation: |
+      BEFORE_COMMIT fires before the commit is flushed while the transaction is still active, so an exception can prevent/roll back the commit. AFTER_COMMIT fires once the commit has already succeeded and cannot reverse it (the data is already durable).
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: async-scheduling-events-083
+    difficulty: expert
+    tags: [transactional-event-listener, nested-publish, after-commit]
+    question: |
+      Inside an AFTER_COMMIT @TransactionalEventListener (synchronous), you publish another event intended for a second AFTER_COMMIT listener. By default, does that second listener fire?
+    options:
+      - "Not by default: you are already past commit with no active transaction, so a new @TransactionalEventListener(AFTER_COMMIT) finds no transaction and is dropped unless fallbackExecution=true or a new transaction is started."
+      - "Yes, it fires reliably because a new transaction is auto-created."
+      - "Yes; AFTER_COMMIT listeners share the committed transaction."
+      - "It throws IllegalStateException immediately."
+    answer: 0
+    explanation: |
+      AFTER_COMMIT code runs outside any transaction. A freshly published event targeting another AFTER_COMMIT listener has no active transaction to bind to, so by default it is silently skipped. You would need fallbackExecution=true or to wrap the publish in a new (REQUIRES_NEW) transaction.
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: async-scheduling-events-084
+    difficulty: advanced
+    tags: [async, exception, void, future]
+    question: |
+      Consider two @Async methods: (A) void doWork() and (B) CompletableFuture<Void> doWork(). Both throw a RuntimeException. A caller wraps each invocation in try/catch. Which statement is correct?
+    options:
+      - "Both try/catch blocks catch the exception at the call site."
+      - "Neither exception is ever observable anywhere."
+      - "For (A) the call-site try/catch catches nothing (exception goes to AsyncUncaughtExceptionHandler); for (B) the try/catch also catches nothing at the call site, but the exception is stored in the future and surfaces via get()/exceptionally/whenComplete."
+      - "For (A) the exception surfaces at get(); for (B) it goes to the handler."
+    answer: 2
+    explanation: |
+      A call-site try/catch never catches an async exception because submission returns immediately. For a void method the exception is routed to the AsyncUncaughtExceptionHandler; for a CompletableFuture-returning method it is captured in the future and observed later via get() (ExecutionException) or composition callbacks.
+    ref: "concepts.md#asyncuncaughtexceptionhandler-and-exception-handling"
+
+  - id: async-scheduling-events-085
+    difficulty: expert
+    tags: [thread-pool-task-executor, rejection, caller-runs]
+    question: |
+      A ThreadPoolTaskExecutor uses corePoolSize=8, maxPoolSize=8, queueCapacity=100, and CallerRunsPolicy. Under a burst where the queue is full and all 8 threads are busy, what happens to the next submitted task, and what is a side effect on throughput?
+    options:
+      - "It is run synchronously on the submitting thread (CallerRunsPolicy); this throttles the producer but can block the calling thread (e.g. a web request or scheduler thread), causing back-pressure."
+      - "It is silently discarded, reducing latency."
+      - "A TaskRejectedException is thrown, identical to AbortPolicy."
+      - "The pool grows beyond maxPoolSize to absorb the burst."
+    answer: 0
+    explanation: |
+      CallerRunsPolicy executes the rejected task in the calling thread, providing natural back-pressure by slowing the producer. The side effect is that the caller (which may be a request thread or the scheduler thread) is blocked running the task, which can stall other work if not anticipated.
+    ref: "concepts.md#custom-taskexecutor-for-async"
+
+  - id: async-scheduling-events-086
+    difficulty: expert
+    tags: [thread-pool-task-executor, sizing, queue]
+    question: |
+      You want a ThreadPoolTaskExecutor to actually scale from 4 to 20 threads under load. It currently stays at 4. Which single change most directly achieves scaling to maxPoolSize?
+    options:
+      - "Set a bounded, small queueCapacity (or 0 with a SynchronousQueue) so the queue fills quickly, prompting the pool to grow toward maxPoolSize=20."
+      - "Increase queueCapacity to Integer.MAX_VALUE."
+      - "Set allowCoreThreadTimeOut=true."
+      - "Increase corePoolSize to 20 and remove maxPoolSize."
+    answer: 0
+    explanation: |
+      A ThreadPoolExecutor only grows past corePoolSize when the queue is FULL. With a large/unbounded queue it never grows. Using a small bounded queue (or queueCapacity=0 -> SynchronousQueue) makes the queue fill fast, triggering thread creation up to maxPoolSize. Increasing the queue does the opposite of what's wanted.
+    ref: "concepts.md#custom-taskexecutor-for-async"
+
+  - id: async-scheduling-events-087
+    difficulty: advanced
+    tags: [async, self-invocation, proxy, order]
+    question: |
+      A class has a public @Async method asyncWork() and a public non-async method entry() that calls this.asyncWork(). It is injected elsewhere and entry() is called through the proxy. Does asyncWork() run asynchronously?
+    options:
+      - "No, because once execution is inside the target object, this.asyncWork() is a direct call on the target that bypasses the proxy — only entry()'s entry point went through the proxy."
+      - "Yes, because entry() was invoked through the proxy, so the nested call is also proxied."
+      - "Yes, because @Async is transitive across method calls in the same bean."
+      - "It throws because you cannot mix async and non-async methods in one class."
+    answer: 0
+    explanation: |
+      The proxy only intercepts the initial external call to entry(). Inside the target instance, this.asyncWork() is a plain Java call on the target object, never touching the proxy, so the async advice does not run and asyncWork() executes synchronously. The self-invocation trap is unaffected by how the outer method was entered.
+    ref: "concepts.md#async-proxy-self-invocation-caveat"
+
+  - id: async-scheduling-events-088
+    difficulty: expert
+    tags: [async, completable-future, composition]
+    question: |
+      Two @Async methods return CompletableFuture<A> and CompletableFuture<B> from the SAME single-threaded executor (corePoolSize=1, unbounded queue). A caller does fa.thenCombine(fb, ...).join(). Assuming the caller is NOT one of the pool threads, what is the risk?
+    options:
+      - "Guaranteed deadlock, because thenCombine always runs on the pool."
+      - "No parallelism: with a single pool thread the two tasks run sequentially, so total time is the sum, not the max — and if the caller thread itself were the pool thread it could deadlock."
+      - "The two futures run truly in parallel because CompletableFuture uses ForkJoinPool."
+      - "thenCombine throws because the futures come from different threads."
+    answer: 1
+    explanation: |
+      Both @Async calls are submitted to the same single-thread executor, so they execute one after another (no parallelism; time ≈ sum). Deadlock is a separate hazard that arises specifically when the blocking/join caller is itself the sole pool thread waiting on work queued behind it. A larger pool is needed for real parallelism.
+    ref: "concepts.md#custom-taskexecutor-for-async"
+
+  - id: async-scheduling-events-089
+    difficulty: advanced
+    tags: [events, ordering, order-annotation]
+    question: |
+      Three synchronous listeners for the same event are annotated @Order(10), @Order(-5), and no @Order. In what order does Spring invoke them?
+    options:
+      - "@Order(-5) first, then @Order(10), then the unannotated one (which defaults to LOWEST_PRECEDENCE)."
+      - "Declaration order in the source file, ignoring @Order."
+      - "The unannotated one first, then @Order(-5), then @Order(10)."
+      - "Random order, because @Order is advisory only."
+    answer: 0
+    explanation: |
+      Lower @Order value = higher precedence = earlier. -5 runs before 10. A listener without @Order defaults to Ordered.LOWEST_PRECEDENCE (Integer.MAX_VALUE), so it runs last. Ordering is deterministic for synchronous listeners.
+    ref: "concepts.md#application-events-applicationevent-applicationeventpublisher-and-eventlistener"
+
+  - id: async-scheduling-events-090
+    difficulty: expert
+    tags: [events, ordering, async, threads]
+    question: |
+      Three listeners for one event have @Order(1), @Order(2), @Order(3) and all are @Async on a multi-threaded executor. What ordering guarantee holds?
+    options:
+      - "Their completion is guaranteed in the order 1, 2, 3."
+      - "@Order controls the order in which they are DISPATCHED/submitted, but once running on different threads there is no completion-ordering guarantee."
+      - "@Order is ignored entirely for async listeners."
+      - "They are guaranteed to run on the same thread in order."
+    answer: 1
+    explanation: |
+      @Order still determines the sequence in which Spring dispatches (submits) the listeners, but since they execute concurrently on different pool threads, the order in which they actually finish is unspecified.
+    ref: "concepts.md#async-event-limitations"
+
+  - id: async-scheduling-events-091
+    difficulty: advanced
+    tags: [scheduled, fixed-rate, pool-size, concurrency]
+    question: |
+      Two DIFFERENT @Scheduled methods, jobA (fixedRate=1000, takes 5s) and jobB (fixedRate=1000, takes 50ms), run on a ThreadPoolTaskScheduler with poolSize=1. What is the observed behavior of jobB?
+    options:
+      - "jobB runs every 1s unaffected, because each job gets its own thread."
+      - "jobB is starved: while jobA occupies the single pool thread for 5s, jobB cannot run and its ticks pile up/skip until the thread is free."
+      - "jobB runs concurrently with jobA on the same thread via time-slicing."
+      - "jobB throws a TaskRejectedException."
+    answer: 1
+    explanation: |
+      A single scheduler thread is shared across ALL scheduled tasks. While jobA monopolizes it for 5s, jobB cannot be dispatched, so its 1s ticks are delayed/coalesced. Sizing poolSize >= number of independent jobs (or isolating jobs) prevents cross-job starvation.
+    ref: "concepts.md#threadpooltaskscheduler"
+
+  - id: async-scheduling-events-092
+    difficulty: expert
+    tags: [scheduled, fixed-rate, catch-up, misfire]
+    question: |
+      A @Scheduled(fixedRate=1000) task on a pool with 4 threads occasionally takes 4s. Spring's default fixedRate does NOT run the same task concurrently. When the 4s run finishes, how does Spring handle the ~3 missed ticks?
+    options:
+      - "It fires 3 catch-up executions back-to-back immediately to 'make up' for the missed ticks."
+      - "It fires exactly one execution immediately (the scheduled time is in the past) and then resumes the 1s cadence; it does NOT queue one run per missed tick."
+      - "It skips ahead and waits a full 1s before the next run."
+      - "It throws because the task overran its rate."
+    answer: 1
+    explanation: |
+      Spring's ReschedulingRunnable for a single fixedRate task does not overlap executions of that task; after a long run it schedules the next execution for a time already in the past, so it runs once immediately and then continues at the fixed rate. It does not enqueue one make-up run per missed interval.
+    ref: "concepts.md#fixedrate-vs-fixeddelay-vs-cron"
+
+  - id: async-scheduling-events-093
+    difficulty: intermediate
+    tags: [async, reactive, anti-pattern]
+    question: |
+      Why is it generally an anti-pattern to put @Async on a method that returns Mono or Flux?
+    options:
+      - "Because reactive types cannot be serialized across threads."
+      - "Because reactive types are lazy and already control their own execution/scheduling; @Async only offloads the (trivial) assembly of the pipeline to another thread, not the actual work, adding confusion without benefit."
+      - "Because @Async deletes the reactive operators."
+      - "Because Spring throws an exception at startup for reactive @Async methods."
+    answer: 1
+    explanation: |
+      A method returning Mono/Flux typically just assembles a lazy pipeline that executes on subscription via its own schedulers (subscribeOn/publishOn). @Async would merely move the cheap assembly to another thread while the real work still runs on the reactive scheduler — so it adds a pointless thread hop and muddles the execution model.
+    ref: "concepts.md#async-return-types"
+
+  - id: async-scheduling-events-094
+    difficulty: expert
+    tags: [events, transaction, propagation, requires-new]
+    question: |
+      A @Transactional(REQUIRES_NEW) method M is called; inside it, an event is published to a synchronous @TransactionalEventListener(AFTER_COMMIT). Which transaction's commit triggers the listener?
+    options:
+      - "The outer transaction's commit."
+      - "The inner REQUIRES_NEW transaction's commit (that is the transaction active at publish time)."
+      - "Neither; AFTER_COMMIT never fires with REQUIRES_NEW."
+      - "Both, once per transaction."
+    answer: 1
+    explanation: |
+      @TransactionalEventListener binds to whatever transaction is active when publishEvent() is called. Inside a REQUIRES_NEW method, the active transaction is the new inner one, so the listener fires after THAT inner transaction commits — independently of the outer transaction's eventual outcome.
+    ref: "concepts.md#transactionaleventlistener"
+
+  - id: async-scheduling-events-095
+    difficulty: expert
+    tags: [async, exception, future, silent-loss]
+    question: |
+      An @Async method returns CompletableFuture<T> and throws an exception, but the calling code fires it off and NEVER calls get()/join() nor attaches exceptionally/whenComplete. Where does the exception end up?
+    options:
+      - "It is automatically routed to the AsyncUncaughtExceptionHandler because the future was ignored."
+      - "It is captured inside the (never-observed) completed-exceptionally future and is effectively lost — no handler runs and nothing is logged, so the failure is silent."
+      - "Spring re-throws it on the caller's thread at submission time."
+      - "It crashes the executor thread and kills the pool."
+    answer: 1
+    explanation: |
+      The AsyncUncaughtExceptionHandler fires only for void-returning @Async methods. For a Future/CompletableFuture return, Spring stores the exception in the future; if the caller never inspects it (get/join/exceptionally/whenComplete) the exception is silently swallowed — a common source of invisible async failures. Either always consume the future or use a void method (which does route to the handler).
+    ref: "concepts.md#asyncuncaughtexceptionhandler-and-exception-handling"
+
+  - id: async-scheduling-events-096
+    difficulty: expert
+    tags: [events, payload-application-event, wrapping]
+    question: |
+      When you call publishEvent(someArbitraryPojo) where the POJO does NOT extend ApplicationEvent, what does Spring actually deliver to ApplicationListener implementations, and how can such a listener be typed?
+    options:
+      - "It delivers the raw POJO to ApplicationListener<Object> only."
+      - "It refuses to publish non-ApplicationEvent objects."
+      - "It wraps the POJO in a PayloadApplicationEvent<T>; an interface-style listener can target it as ApplicationListener<PayloadApplicationEvent<TheType>> (while @EventListener can bind the payload type directly)."
+      - "It converts the POJO to JSON and delivers a String event."
+    answer: 2
+    explanation: |
+      Arbitrary payloads are wrapped in a PayloadApplicationEvent<T> whose getPayload() returns the object. Interface listeners use ApplicationListener<PayloadApplicationEvent<T>>, whereas @EventListener methods can declare the payload type directly as the parameter and Spring unwraps it.
+    ref: "concepts.md#generic-events-and-resolvabletypeprovider"
+
+  - id: async-scheduling-events-097
+    difficulty: advanced
+    tags: [scheduled, shutdown, boot-properties]
+    question: |
+      Which Spring Boot properties let you make the auto-configured scheduler drain in-flight scheduled tasks on shutdown instead of interrupting them?
+    options:
+      - "spring.task.scheduling.graceful=true only."
+      - "spring.task.scheduling.shutdown.await-termination=true and spring.task.scheduling.shutdown.await-termination-period=<duration>."
+      - "server.shutdown=graceful only (it covers scheduler tasks too)."
+      - "There are no such properties; you must define a bean."
+    answer: 1
+    explanation: |
+      Boot exposes spring.task.scheduling.shutdown.await-termination and .await-termination-period (mirroring setWaitForTasksToCompleteOnShutdown / setAwaitTerminationSeconds). server.shutdown=graceful drains web requests, not scheduler tasks, and the properties do exist so a custom bean isn't required.
+    ref: "concepts.md#scheduler-lifecycle-and-graceful-shutdown"
+
+  - id: async-scheduling-events-098
+    difficulty: expert
+    tags: [async, boot, default-executor, ambiguity]
+    question: |
+      In a Spring Boot 3 app, you define your own ThreadPoolTaskExecutor @Bean named "reportExecutor" but do NOT implement AsyncConfigurer and do NOT put @Async("reportExecutor"). You still have Boot's applicationTaskExecutor. Which executor do bare @Async methods use?
+    options:
+      - "reportExecutor, because a user-defined executor always wins."
+      - "It fails to start due to two Executor beans."
+      - "The Boot-provided applicationTaskExecutor, because it remains the designated default; your bean is only used when explicitly qualified via @Async(\"reportExecutor\")."
+      - "It alternates between the two round-robin."
+    answer: 2
+    explanation: |
+      Bare @Async resolves the default executor. Boot's applicationTaskExecutor is the recognized default; an additional, differently named Executor bean does not become the default merely by existing — you must select it via @Async("reportExecutor") or make it the default through AsyncConfigurer/primary designation. (If exactly one unique Executor existed, that would be used, but here the applicationTaskExecutor default remains in play.)
+    ref: "concepts.md#custom-taskexecutor-for-async"
+
+  - id: async-scheduling-events-099
+    difficulty: advanced
+    tags: [events, condition, spel, timing]
+    question: |
+      At what point is the SpEL condition on @EventListener(condition = "...") evaluated, and what is a consequence?
+    options:
+      - "At bean creation time, once — so it cannot depend on event data."
+      - "After the listener body runs, to decide whether to keep the result."
+      - "Before the listener body is invoked, against the event (and args); if it evaluates false the listener body is skipped entirely — useful to avoid unnecessary work, but the expression itself runs on the dispatching thread every publish."
+      - "Only for asynchronous listeners; synchronous ones ignore it."
+    answer: 2
+    explanation: |
+      The condition is evaluated per event, before invoking the listener body, with #root.event/#args/named-arg access. A false result skips the body. Because it runs on every matching publish on the dispatch thread, an expensive SpEL condition adds per-event overhead.
+    ref: "concepts.md#application-events-applicationevent-applicationeventpublisher-and-eventlistener"
+
+  - id: async-scheduling-events-100
+    difficulty: expert
+    tags: [scheduled, distributed, clustering, gotcha]
+    question: |
+      A @Scheduled(cron="0 0 3 * * *") "nightly cleanup" job is deployed to 4 identical instances behind a load balancer. Operators are surprised it runs 4 times each night. What is the correct explanation and the standard remedy?
+    options:
+      - "Spring should elect a leader automatically; this is a bug — file an issue."
+      - "@Scheduled is per-JVM with no cross-node coordination, so every instance fires it; use a distributed lock (e.g. ShedLock) or a clustered scheduler (Quartz with a JDBC job store) to ensure single execution."
+      - "The load balancer duplicated the trigger; enable sticky sessions."
+      - "Set spring.task.scheduling.cluster=single to make it run once."
+    answer: 1
+    explanation: |
+      Spring's @Scheduled has no notion of a cluster — each JVM independently evaluates the trigger, so N instances run the job N times. To guarantee single execution across nodes you add distributed locking (ShedLock) or use a cluster-aware scheduler like Quartz with a shared JDBC job store. No such spring.task.scheduling.cluster property exists.
+    ref: "concepts.md#threadpooltaskscheduler"

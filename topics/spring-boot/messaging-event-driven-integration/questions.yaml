@@ -1040,3 +1040,840 @@ questions:
       Consumption is load-balanced WITHIN a group but each distinct group gets its own copy of the
       whole topic. So billing and analytics each read every message independently.
     ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-061
+    difficulty: expert
+    tags: [eda, spring, transactional-event-listener]
+    question: |
+      A service publishes a DomainEvent inside a @Transactional method. The listener is
+      annotated @TransactionalEventListener (default phase) and performs a JPA save() with no
+      further annotations. The save appears to do nothing — no row is persisted, no error.
+      Why?
+    options:
+      - "The default phase is AFTER_COMMIT, which runs after the original transaction committed, so there is no active transaction for the save to flush/commit; it needs REQUIRES_NEW"
+      - "@TransactionalEventListener always runs on a separate thread with no persistence context"
+      - "Events published inside a transaction are discarded before commit"
+      - "JPA save() is a no-op unless called from a @RestController"
+    answer: 0
+    explanation: |
+      AFTER_COMMIT (the default) fires once the original transaction has committed. There is no
+      surrounding transaction at that point, so a JPA save is not flushed/committed. The listener
+      must open a new transaction (Propagation.REQUIRES_NEW) for its own writes to persist.
+    ref: "concepts.md#event-driven-architecture"
+
+  - id: messaging-event-driven-integration-062
+    difficulty: advanced
+    tags: [eda, spring, exceptions]
+    question: |
+      A synchronous @EventListener throws a RuntimeException while handling an event published
+      via ApplicationEventPublisher.publishEvent(...) from inside a @Transactional service
+      method. What is the effect?
+    options:
+      - "The exception is swallowed and the publisher continues normally"
+      - "The exception is routed to an AsyncUncaughtExceptionHandler"
+      - "The exception propagates up through publishEvent to the caller and can roll back the caller's transaction"
+      - "Spring automatically retries the listener three times before failing"
+    answer: 2
+    explanation: |
+      Synchronous listeners run on the publisher's thread within its call stack, so an unchecked
+      exception propagates back through publishEvent to the transactional method and, by default,
+      marks the transaction for rollback. Isolation would require @Async (which then diverts the
+      exception to an AsyncUncaughtExceptionHandler and loses propagation).
+    ref: "concepts.md#event-driven-architecture"
+
+  - id: messaging-event-driven-integration-063
+    difficulty: expert
+    tags: [eda, transactional-event-listener, outbox]
+    question: |
+      For a transactional outbox implemented with Spring events, which @TransactionalEventListener
+      phase writes the outbox row so it commits atomically with the business data?
+    options:
+      - "BEFORE_COMMIT, so the outbox INSERT participates in the same transaction and commits atomically with the business changes"
+      - "AFTER_COMMIT, so the outbox is written only once the business data is durable"
+      - "AFTER_ROLLBACK, so the outbox captures failed operations"
+      - "AFTER_COMPLETION, because it runs regardless of outcome"
+    answer: 0
+    explanation: |
+      The outbox must be part of the same atomic unit as the business write, so BEFORE_COMMIT is
+      correct — the INSERT joins the still-open transaction. AFTER_COMMIT would write it in a
+      separate transaction, reintroducing the dual-write window the outbox is meant to eliminate.
+    ref: "concepts.md#event-driven-architecture"
+
+  - id: messaging-event-driven-integration-064
+    difficulty: advanced
+    tags: [eda, saga, choreography]
+    question: |
+      Which statement best captures the trade-off between choreography-based and
+      orchestration-based sagas?
+    options:
+      - "Choreography uses two-phase commit; orchestration uses compensating actions"
+      - "Orchestration is fully decoupled with no coordinator; choreography always has a central controller"
+      - "Choreography is highly decoupled but the end-to-end flow is implicit and hard to trace; orchestration centralizes control, easing reasoning and compensation at the cost of a coordinator"
+      - "Only orchestration can implement distributed transactions"
+    answer: 2
+    explanation: |
+      In choreography, services react to each other's events with no central brain — maximally
+      decoupled but the workflow is emergent and hard to observe. Orchestration adds a coordinator
+      that issues commands and drives compensations, trading some coupling for clarity. Neither
+      uses 2PC; both rely on compensating actions.
+    ref: "concepts.md#event-driven-architecture"
+
+  - id: messaging-event-driven-integration-065
+    difficulty: intermediate
+    tags: [eda, transactional-event-listener]
+    question: |
+      An event is published via publishEvent(...) OUTSIDE any transaction, and the only listener
+      is a plain @TransactionalEventListener (fallbackExecution left at default). What happens?
+    options:
+      - "The listener runs immediately on the current thread"
+      - "Spring throws IllegalStateException"
+      - "The listener is skipped entirely because there is no transaction to bind its phase to"
+      - "The event is queued until the next transaction begins"
+    answer: 2
+    explanation: |
+      A @TransactionalEventListener binds to a transaction phase; with no active transaction and
+      fallbackExecution=false (default), there is nothing to bind to, so the callback is silently
+      skipped. Set fallbackExecution=true to have it run as a regular listener in that case.
+    ref: "concepts.md#event-driven-architecture"
+
+  - id: messaging-event-driven-integration-066
+    difficulty: expert
+    tags: [jms, spring, caching-connection-factory]
+    question: |
+      A DefaultMessageListenerContainer is set to concurrentConsumers=10 and points at a
+      CachingConnectionFactory left at its default sessionCacheSize. Throughput is poor and JMX
+      shows sessions being constantly opened and closed. What is the fix?
+    options:
+      - "Set acknowledgeMode to CLIENT_ACKNOWLEDGE"
+      - "Disable message conversion"
+      - "Switch to a SingleConnectionFactory"
+      - "Raise sessionCacheSize on the CachingConnectionFactory to at least the max concurrent consumers so each consumer's session is actually cached"
+    answer: 3
+    explanation: |
+      The default sessionCacheSize is 1. With 10 concurrent consumers each needing its own
+      session, 9 sessions cannot be cached and are churned. Sizing sessionCacheSize >= the number
+      of concurrent consumers lets the cache retain them.
+    ref: "concepts.md#jms-java-message-service"
+
+  - id: messaging-event-driven-integration-067
+    difficulty: expert
+    tags: [jms, transactions, xa]
+    question: |
+      A team wants a DB update and a JMS send to commit atomically without paying for XA/2PC.
+      They order the JMS commit to run last, immediately after the DB commit. What guarantee does
+      this "best-effort 1PC" actually provide?
+    options:
+      - "True atomicity identical to XA"
+      - "Exactly-once end-to-end with no further work"
+      - "Near-atomic behavior, but a crash in the narrow window after the DB commits and before the JMS commit can still duplicate/lose the message, so idempotent consumers are still required"
+      - "It rolls the database back automatically if the JMS commit fails"
+    answer: 2
+    explanation: |
+      Best-effort-1PC minimizes the failure window by committing the DB first and the message
+      last, but it is not true 2PC: a crash between the two commits can leave them inconsistent.
+      That residual window is exactly why downstream idempotency is still needed.
+    ref: "concepts.md#jms-java-message-service"
+
+  - id: messaging-event-driven-integration-068
+    difficulty: advanced
+    tags: [jms, jmstemplate, receive]
+    question: |
+      Why is calling JmsTemplate.receive() (synchronous receive) a poor choice for high-throughput
+      consuming, and what is the specific default-configuration hazard?
+    options:
+      - "It only supports TextMessage, so other types are dropped"
+      - "It commits offsets before processing, causing message loss"
+      - "It bypasses the MessageConverter and returns raw bytes"
+      - "It performs a blocking poll and, with the default receiveTimeout, can block the calling thread indefinitely; a listener container (async push) should be used instead"
+    answer: 3
+    explanation: |
+      JmsTemplate.receive() blocks the caller waiting for a message; the default receiveTimeout is
+      indefinite, so it can hang a thread forever. It also competes with any listener container on
+      the same destination. Asynchronous message-driven consumption via a listener container is
+      the right tool.
+    ref: "concepts.md#jms-java-message-service"
+
+  - id: messaging-event-driven-integration-069
+    difficulty: intermediate
+    tags: [jms, delivery-mode, durability]
+    question: |
+      A JMS producer sends messages with the default delivery mode. The broker restarts and the
+      messages survive. Which delivery mode was in effect, and what is the trade-off versus the
+      alternative?
+    options:
+      - "PERSISTENT (default) — the broker writes to its store so messages survive restart, at the cost of throughput versus NON_PERSISTENT"
+      - "NON_PERSISTENT (default) — fastest, but messages are lost on broker crash"
+      - "DUPS_OK — messages are duplicated to survive restart"
+      - "TRANSACTED — the only mode that survives restart"
+    answer: 0
+    explanation: |
+      JMS defaults to PERSISTENT, which forces the broker to write the message to durable storage
+      so it survives a restart. NON_PERSISTENT skips the store for higher throughput but loses
+      in-flight messages if the broker crashes.
+    ref: "concepts.md#jms-java-message-service"
+
+  - id: messaging-event-driven-integration-070
+    difficulty: expert
+    tags: [rabbitmq, requeue, poison-message]
+    question: |
+      A Spring AMQP @RabbitListener (AcknowledgeMode.AUTO, defaultRequeueRejected at its default)
+      throws a NullPointerException on a malformed message. The same message is redelivered in a
+      tight loop, pinning CPU. Which change does NOT stop the loop?
+    options:
+      - "Throwing AmqpRejectAndDontRequeueException instead so the message is rejected without requeue"
+      - "Setting defaultRequeueRejected=false so a rejected message dead-letters on the first failure"
+      - "Adding a stateless retry interceptor with a RepublishMessageRecoverer that routes to a DLQ after N attempts"
+      - "Increasing the consumer prefetch count so more messages are delivered at once"
+    answer: 3
+    explanation: |
+      The loop happens because AUTO mode nacks with requeue=true by default, re-delivering the
+      poison message forever. Raising prefetch changes how many unacked messages a consumer holds
+      but does nothing about the requeue loop. The other three each break the loop by not
+      requeuing or by capping attempts and dead-lettering.
+    ref: "concepts.md#rabbitmq-exchanges-queues-bindings-routing-keys-ack"
+
+  - id: messaging-event-driven-integration-071
+    difficulty: expert
+    tags: [rabbitmq, quorum-queues, ha]
+    question: |
+      Since RabbitMQ 3.8+, which HA primitive replaced classic mirrored queues and provides native
+      poison-message handling via a delivery-count limit?
+    options:
+      - "Lazy queues, using x-max-length"
+      - "Federated exchanges over shovel plugins"
+      - "Fanout exchanges with multiple bindings"
+      - "Quorum queues (Raft-replicated), which track a per-message delivery-count and dead-letter automatically once x-delivery-limit is exceeded"
+    answer: 3
+    explanation: |
+      Quorum queues use the Raft consensus protocol for replication and are the recommended
+      replacement for the deprecated classic mirrored queues. They natively count deliveries and
+      honor x-delivery-limit, dead-lettering poison messages without the TTL/DLX workaround.
+    ref: "concepts.md#rabbitmq-exchanges-queues-bindings-routing-keys-ack"
+
+  - id: messaging-event-driven-integration-072
+    difficulty: advanced
+    tags: [rabbitmq, single-active-consumer, ordering]
+    question: |
+      You need strict per-queue ordering with automatic failover if the active consumer dies,
+      while keeping multiple consumers connected as hot standbys. Which RabbitMQ feature fits best?
+    options:
+      - "Set x-single-active-consumer on the queue so only one consumer receives messages at a time, with the broker promoting a standby on failure"
+      - "Bind all consumers to a fanout exchange"
+      - "Set prefetch=0 (unlimited) on every consumer"
+      - "Enable publisher confirms"
+    answer: 0
+    explanation: |
+      Single Active Consumer routes to exactly one consumer while others wait as standbys,
+      preserving order and giving seamless failover — cleaner than prefetch=1 with a single
+      connection. Fanout, prefetch=0, and confirms address different concerns.
+    ref: "concepts.md#rabbitmq-exchanges-queues-bindings-routing-keys-ack"
+
+  - id: messaging-event-driven-integration-073
+    difficulty: advanced
+    tags: [rabbitmq, publisher-confirms]
+    question: |
+      Which statement about RabbitMQ publisher confirms is correct and often overlooked?
+    options:
+      - "A confirm is always positive; the broker never sends a negative acknowledgement"
+      - "Confirms guarantee the message was consumed and processed"
+      - "The broker can send a negative confirm (nack) — e.g., on an internal error — so producer code must handle the negative-confirm callback, and confirms may arrive out of order or batched"
+      - "Confirms are synchronous and block the publisher until every consumer replies"
+    answer: 2
+    explanation: |
+      Confirms are producer-side and asynchronous. The broker may nack a message (internal error,
+      certain full-disk cases), confirms can be delivered out of order, and the multiple-flag lets
+      the broker confirm a range at once. Correct code tracks outstanding sequence numbers and
+      handles nacks — it is not a consumer-processing guarantee.
+    ref: "concepts.md#rabbitmq-exchanges-queues-bindings-routing-keys-ack"
+
+  - id: messaging-event-driven-integration-074
+    difficulty: advanced
+    tags: [rabbitmq, lazy-queues, memory]
+    question: |
+      A consumer outage lets a queue grow to millions of messages and the broker starts hitting
+      memory alarms. Which queue configuration most directly bounds and stabilizes memory use?
+    options:
+      - "Switch the exchange to headers type"
+      - "Set the queue to auto-delete"
+      - "Increase the routing key length"
+      - "Configure the queue as a lazy queue (or use a quorum queue) so message bodies are stored on disk from the start rather than held in RAM"
+    answer: 3
+    explanation: |
+      Lazy queues (and quorum queues, which behave lazily) page message bodies to disk
+      immediately, trading a little latency for far lower, predictable memory use with deep
+      backlogs. The default keeps bodies in RAM until pressure forces paging, which is what
+      triggers the memory alarm here.
+    ref: "concepts.md#rabbitmq-exchanges-queues-bindings-routing-keys-ack"
+
+  - id: messaging-event-driven-integration-075
+    difficulty: expert
+    tags: [kafka, poll-loop, timeouts]
+    question: |
+      A Kafka consumer's listener occasionally does a very slow blocking call. Heartbeats keep
+      flowing (background thread), yet the broker still evicts the consumer and rebalances. Which
+      timeout is being violated?
+    options:
+      - "max.poll.interval.ms, which bounds the time between successive poll() calls on the application thread and is independent of the heartbeat thread"
+      - "session.timeout.ms, because heartbeats stopped"
+      - "request.timeout.ms on the producer"
+      - "transaction.timeout.ms"
+    answer: 0
+    explanation: |
+      Since KIP-62 heartbeats run on a background thread (governed by session.timeout.ms), while
+      max.poll.interval.ms independently bounds how long the application thread may take between
+      polls. A slow listener keeps heartbeating but blows max.poll.interval.ms, so the coordinator
+      evicts it and rebalances.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-076
+    difficulty: expert
+    tags: [kafka, spring, concurrency, thread-safety]
+    question: |
+      A @KafkaListener bean holds a non-synchronized HashMap as instance state and the container
+      runs with concurrency=4 on a 4-partition topic. Occasionally the map is corrupted. Why?
+    options:
+      - "ConcurrentMessageListenerContainer creates 4 KafkaConsumers on 4 threads, all invoking the single listener bean concurrently, so shared mutable non-thread-safe state races"
+      - "KafkaTemplate is not thread-safe"
+      - "HashMap is deprecated in Spring Kafka 3.x"
+      - "The container serializes all calls, so corruption is impossible and must be a JVM bug"
+    answer: 0
+    explanation: |
+      concurrency=N spins up N child containers, each with its own single-threaded KafkaConsumer
+      on its own thread, and all of them invoke the same listener bean. Shared mutable state in
+      the bean must be thread-safe (or per-partition/thread-local); a plain HashMap will corrupt
+      under concurrent writes.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-077
+    difficulty: expert
+    tags: [kafka, auto-offset-reset]
+    question: |
+      A consumer group has been running for weeks with committed offsets. Someone sets
+      auto.offset.reset=latest expecting each restart to skip backlog. After a restart, the
+      consumer still reads the accumulated backlog. Why?
+    options:
+      - "latest only works with enable.auto.commit=true"
+      - "latest was ignored because the group has more than one consumer"
+      - "The topic must be compacted for latest to take effect"
+      - "auto.offset.reset applies ONLY when there is no valid committed offset for the group; an existing committed offset always takes precedence, so the consumer resumes from it"
+    answer: 3
+    explanation: |
+      auto.offset.reset is a fallback used only when the group has no committed offset (or it was
+      aged out). With valid committed offsets, the consumer resumes from them regardless of the
+      reset policy. To actually skip backlog you must seek/reset the committed offset explicitly.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-078
+    difficulty: advanced
+    tags: [kafka, static-membership, rebalance]
+    question: |
+      During a rolling restart of a Kafka consumer deployment, you want a bouncing pod to rejoin
+      with the SAME partitions without triggering a group rebalance. Which mechanism achieves this?
+    options:
+      - "Set enable.idempotence=true"
+      - "Switch to acks=all"
+      - "Increase the replication factor"
+      - "Assign each consumer a stable group.instance.id (static membership), so a rejoin within session.timeout.ms keeps its existing assignment"
+    answer: 3
+    explanation: |
+      Static membership (KIP-345) via group.instance.id lets a consumer that leaves and rejoins
+      within the session timeout retain its previous partition assignment, avoiding the
+      rebalance churn typical of rolling restarts. Idempotence, replication, and acks are
+      unrelated to membership.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-079
+    difficulty: advanced
+    tags: [kafka, cooperative-rebalance]
+    question: |
+      What does the CooperativeStickyAssignor (incremental cooperative rebalancing) change versus
+      the older eager RangeAssignor/RoundRobinAssignor?
+    options:
+      - "It removes the need for consumer groups entirely"
+      - "It guarantees exactly-once delivery"
+      - "It revokes only the partitions that must move to rebalance, rather than every consumer revoking all partitions in a stop-the-world step"
+      - "It lets more consumers than partitions all consume in parallel"
+    answer: 2
+    explanation: |
+      Eager assignors revoke every partition from every consumer (stop-the-world) and then
+      reassign. Cooperative rebalancing revokes only the partitions that actually need to move,
+      so unaffected consumers keep processing — reducing pause time during rebalances.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-080
+    difficulty: expert
+    tags: [kafka, spring, ackmode, offsets]
+    question: |
+      With Spring AckMode.MANUAL_IMMEDIATE versus MANUAL, what is the precise difference?
+    options:
+      - "MANUAL commits synchronously to the broker; MANUAL_IMMEDIATE never commits"
+      - "MANUAL disables idempotence; MANUAL_IMMEDIATE enables it"
+      - "MANUAL_IMMEDIATE commits the offset right away when acknowledge() is called; MANUAL queues the acknowledgement to be committed at the next poll cycle"
+      - "They are identical aliases"
+    answer: 2
+    explanation: |
+      Both give you an Acknowledgment object. MANUAL defers the actual commit until the next poll
+      loop iteration (batching commits), while MANUAL_IMMEDIATE performs the commit as soon as you
+      call acknowledge(). The immediate variant reduces the reprocessing window at the cost of
+      more commit traffic.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-081
+    difficulty: expert
+    tags: [kafka, offsets, semantics]
+    question: |
+      A consumer processes record at offset 42 in partition 0 and commits. What value is stored as
+      the committed offset, and what does it mean?
+    options:
+      - "43 (last-processed + 1), meaning 'the offset of the NEXT record to read' on resume"
+      - "42, meaning 'the last record consumed'"
+      - "0, because offsets reset on commit"
+      - "The current wall-clock timestamp"
+    answer: 0
+    explanation: |
+      Kafka stores the offset of the next record to fetch, i.e., last-processed + 1. On restart
+      the consumer resumes from that offset. This 'next position' semantics is why an
+      off-by-one when manually managing offsets replays or skips a record.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-082
+    difficulty: intermediate
+    tags: [kafka, topics, partitions]
+    question: |
+      Which statement about Kafka partitions and throughput is TRUE?
+    options:
+      - "Adding consumers beyond the partition count linearly increases throughput"
+      - "Partition count has no effect on ordering"
+      - "A single partition can be actively consumed by many consumers in the same group simultaneously"
+      - "Consumer parallelism within a group is capped at the partition count; to add parallel consumers you must add partitions"
+    answer: 3
+    explanation: |
+      Each partition is owned by exactly one consumer in a group, so within-group parallelism is
+      hard-capped at the partition count; extra consumers idle. Increasing parallelism requires
+      more partitions (which can disrupt key ordering). A single partition is never split across
+      group members.
+    ref: "concepts.md#apache-kafka-with-spring-template-listener-topics-partitions-groups-offsets"
+
+  - id: messaging-event-driven-integration-083
+    difficulty: expert
+    tags: [delivery-semantics, idempotent-producer, ordering]
+    question: |
+      Why does the idempotent producer cap max.in.flight.requests.per.connection at 5 to still
+      guarantee ordering, rather than allowing an arbitrary number?
+    options:
+      - "5 is an arbitrary marketing number with no technical basis"
+      - "Because acks=all limits in-flight requests to 5 by definition"
+      - "Because TCP only allows 5 concurrent connections"
+      - "The broker retains the last 5 batch sequence numbers per producer/partition, so it can detect gaps/duplicates and preserve order up to 5 in-flight; beyond that it cannot guarantee ordering on retry"
+    answer: 3
+    explanation: |
+      The broker deduplicates and orders by tracking a bounded window of the most recent
+      per-partition sequence numbers (5). Within that window it can reject out-of-order or
+      duplicate batches and preserve ordering across retries; allowing more in-flight than the
+      tracked window would let a retried earlier batch land after a later one.
+    ref: "concepts.md#delivery-semantics-at-most--at-least--exactly-once--idempotent-producer"
+
+  - id: messaging-event-driven-integration-084
+    difficulty: expert
+    tags: [kafka, transactions, fencing]
+    question: |
+      A pod running a transactional Kafka producer crashes mid-transaction; Kubernetes starts a
+      replacement with the SAME transactional.id, and later the original pod briefly comes back
+      and tries to commit. What prevents the zombie from committing stale writes?
+    options:
+      - "The broker deletes all data written by crashed producers"
+      - "acks=all blocks the zombie automatically"
+      - "On initTransactions() the broker bumps the producer epoch, fencing the old instance; the zombie's commit fails with ProducerFencedException"
+      - "The consumer's read_committed setting rewrites the zombie's records"
+    answer: 2
+    explanation: |
+      transactional.id is stable across restarts, and initTransactions() increments the epoch so
+      only the latest producer instance for that id can proceed. The stale (zombie) producer is
+      fenced and its commit throws ProducerFencedException — this is what makes read-process-write
+      safe across restarts.
+    ref: "concepts.md#delivery-semantics-at-most--at-least--exactly-once--idempotent-producer"
+
+  - id: messaging-event-driven-integration-085
+    difficulty: expert
+    tags: [kafka, eos, read-process-write]
+    question: |
+      In Kafka's exactly-once read-process-write loop, how are the CONSUMED input offsets made
+      atomic with the PRODUCED output records?
+    options:
+      - "The consumer commits offsets separately after the producer commits, in a best-effort second step"
+      - "isolation.level=read_committed commits the offsets for you"
+      - "The broker infers offsets from the output topic automatically"
+      - "producer.sendOffsetsToTransaction(offsets, groupMetadata) includes the input offsets in the same producer transaction as the output, so both commit or neither does"
+    answer: 3
+    explanation: |
+      sendOffsetsToTransaction writes the consumed offsets to the internal offsets topic as part
+      of the producer's transaction. On commit, both the output records and the offset advance
+      become visible atomically; on abort, neither does — giving true exactly-once for the
+      consume-transform-produce cycle.
+    ref: "concepts.md#delivery-semantics-at-most--at-least--exactly-once--idempotent-producer"
+
+  - id: messaging-event-driven-integration-086
+    difficulty: advanced
+    tags: [kafka, eos, scope]
+    question: |
+      A team enables Kafka transactions (EOS) for a pipeline whose consumer writes results to an
+      external PostgreSQL database. They claim end-to-end exactly-once. What is wrong with that
+      claim?
+    options:
+      - "Kafka's exactly-once covers Kafka-to-Kafka (offsets + output topic); a write to an external DB is outside the Kafka transaction, so the DB write still needs idempotency or its own transactional sink"
+      - "Kafka EOS is only marketing and provides no guarantees at all"
+      - "PostgreSQL cannot participate in any transaction"
+      - "EOS requires acks=0, which loses data to the DB"
+    answer: 0
+    explanation: |
+      Kafka transactions make consumed offsets and produced Kafka records atomic within Kafka.
+      An external side effect (the DB write) is not part of that transaction, so a crash between
+      the DB write and the offset commit can duplicate the DB effect. Exactly-once to external
+      systems still needs an idempotent write or a transactional/CDC sink.
+    ref: "concepts.md#delivery-semantics-at-most--at-least--exactly-once--idempotent-producer"
+
+  - id: messaging-event-driven-integration-087
+    difficulty: advanced
+    tags: [delivery-semantics, transactions, lso]
+    question: |
+      A consumer running with isolation.level=read_committed stops making progress even though its
+      producer is healthy and new records keep being appended; an UNRELATED transactional producer
+      on the same partition has left a transaction open for a long time. Why does that stall the
+      read_committed consumer?
+    options:
+      - "read_committed silently switches the consumer to manual offset commits, which were never called"
+      - "An open transaction physically deletes all committed records after it on the partition"
+      - "read_committed consumers can only advance up to the Last Stable Offset (LSO) — the offset just before the first still-open transaction — so an open transaction blocks reads past it until it commits or aborts"
+      - "read_committed forces max.poll.records=1, throttling throughput to near zero"
+    answer: 2
+    explanation: |
+      A read_committed consumer never reads past the Last Stable Offset (LSO): the offset of the
+      first record belonging to a still-open (uncommitted) transaction. Until that transaction
+      commits or aborts, records at or after the LSO — even committed ones from other producers —
+      stay invisible, so consumption stalls. This is why long-running/abandoned transactions and a
+      too-large transaction.timeout.ms hurt read_committed consumers.
+    ref: "concepts.md#delivery-semantics-at-most--at-least--exactly-once--idempotent-producer"
+
+  - id: messaging-event-driven-integration-088
+    difficulty: advanced
+    tags: [activemq, spring-boot-3, artemis]
+    question: |
+      A Spring Boot 2 app relied on the auto-configured EMBEDDED ActiveMQ Classic broker. After
+      upgrading to Spring Boot 3, the embedded broker no longer starts automatically. What is the
+      accurate explanation?
+    options:
+      - "Spring Boot 3 removed the embedded ActiveMQ Classic broker auto-configuration; the activemq starter is now a client for an external broker, and the embedded-broker convenience lives with Artemis"
+      - "Spring Boot 3 dropped all JMS support"
+      - "ActiveMQ Classic is incompatible with the JVM used by Boot 3"
+      - "You must switch the entire app to Kafka"
+    answer: 0
+    explanation: |
+      Spring Boot 3 removed auto-configuration for the embedded ActiveMQ Classic broker. The
+      spring-boot-starter-activemq remains as a client that connects to an external broker, while
+      Artemis (spring-boot-starter-artemis) provides the modern embedded/high-performance path.
+    ref: "concepts.md#activemq"
+
+  - id: messaging-event-driven-integration-089
+    difficulty: advanced
+    tags: [activemq, message-groups, ordering]
+    question: |
+      In ActiveMQ Classic, you need per-customer ordering while still processing different
+      customers in parallel across many consumers on one queue. Which feature does this?
+    options:
+      - "Set JMSXGroupID to the customer id, pinning each customer's messages to a single consumer while other groups run in parallel"
+      - "Enable AMQP 1.0 transport"
+      - "Use a fanout of topics per customer"
+      - "Set acks=all on the JMS producer"
+    answer: 0
+    explanation: |
+      Message groups (JMSXGroupID) route all messages sharing a group id to the same consumer,
+      giving per-group (per-customer) ordering, while different groups can be handled by different
+      consumers concurrently — the JMS analog of Kafka's per-key partition ordering.
+    ref: "concepts.md#activemq"
+
+  - id: messaging-event-driven-integration-090
+    difficulty: intermediate
+    tags: [activemq, redelivery, dlq]
+    question: |
+      In ActiveMQ, after a consumer repeatedly fails to process a message and the RedeliveryPolicy
+      exhausts its max redeliveries, where does the message go by default?
+    options:
+      - "It is silently discarded"
+      - "It is requeued forever with no limit"
+      - "It is moved to a dead-letter queue (default ActiveMQ.DLQ), configurable per destination"
+      - "It is sent back to the producer"
+    answer: 2
+    explanation: |
+      ActiveMQ's client-side RedeliveryPolicy retries with backoff up to a maximum; once exhausted
+      the broker routes the message to a dead-letter queue (default ActiveMQ.DLQ, or a per-
+      destination DLQ via an individualDeadLetterStrategy) for later inspection.
+    ref: "concepts.md#activemq"
+
+  - id: messaging-event-driven-integration-091
+    difficulty: expert
+    tags: [kafka, retryabletopic, ordering]
+    question: |
+      A payment service uses @RetryableTopic to avoid head-of-line blocking on transient failures.
+      A reviewer warns this can be wrong for their use case. What is the specific risk?
+    options:
+      - "@RetryableTopic disables idempotence on the producer"
+      - "Non-blocking retry forwards the failed record to retry topics and reprocesses it later, so it can be reordered relative to newer records on the main topic — breaking per-key ordering across the retry gap"
+      - "@RetryableTopic requires exactly-once and cannot coexist with acks=all"
+      - "Retry topics are consumed by a different application, causing data loss"
+    answer: 1
+    explanation: |
+      @RetryableTopic gains liveness by moving the failing record aside to retry topics and
+      processing it after a delay, while later records on the main partition continue. That
+      reorders the retried record relative to subsequent ones, which is unacceptable when strict
+      per-key ordering must hold across the failure. Blocking retry preserves order but blocks the
+      partition.
+    ref: "concepts.md#message-ordering-retries-and-dead-letter-queues"
+
+  - id: messaging-event-driven-integration-092
+    difficulty: expert
+    tags: [kafka, error-handling, batch]
+    question: |
+      A Spring Kafka BATCH listener processes 500 records and the 300th throws. With a
+      DefaultErrorHandler configured, what must the listener do so the handler retries/recovers
+      only the failing record instead of the whole batch?
+    options:
+      - "Return normally and let the container figure it out"
+      - "Throw a BatchListenerFailedException indicating the index of the failing record, so the handler can commit up to it and retry/recover just that record"
+      - "Set enable.auto.commit=true"
+      - "Throw a plain RuntimeException, which the handler maps to the correct index automatically"
+    answer: 1
+    explanation: |
+      For batch listeners the container cannot know which record failed from a generic exception,
+      so it would retry/recover the entire batch. Throwing BatchListenerFailedException with the
+      failed index lets DefaultErrorHandler commit the successful prefix and apply retry/recovery
+      to the specific record.
+    ref: "concepts.md#message-ordering-retries-and-dead-letter-queues"
+
+  - id: messaging-event-driven-integration-093
+    difficulty: expert
+    tags: [kafka, deserialization, poison]
+    question: |
+      A single corrupt record that cannot be deserialized causes a @KafkaListener to loop forever
+      (it fails before the listener body even runs). Which mechanism fixes this cleanly?
+    options:
+      - "Increase max.poll.interval.ms"
+      - "Wrap the deserializers with ErrorHandlingDeserializer, which catches the failure and passes a null value plus the exception in a header so the error handler / DLT path can process it"
+      - "Set acks=0 on the consumer"
+      - "Reduce the replication factor of the topic"
+    answer: 1
+    explanation: |
+      A deserialization failure throws inside poll processing before your code runs, so ordinary
+      error handling never gets the record and it is redelivered endlessly. ErrorHandlingDeserializer
+      intercepts the exception, substitutes a null value, and stashes the error in a header so the
+      DefaultErrorHandler/DeadLetterPublishingRecoverer can route it to a DLT.
+    ref: "concepts.md#message-ordering-retries-and-dead-letter-queues"
+
+  - id: messaging-event-driven-integration-094
+    difficulty: advanced
+    tags: [kafka, default-error-handler, classification]
+    question: |
+      With Spring Kafka's DefaultErrorHandler, a DeserializationException and a validation
+      exception are, by default, treated how compared to a transient downstream timeout?
+    options:
+      - "All exceptions are retried the same number of times"
+      - "Certain exceptions (e.g., deserialization, validation) are classified as NOT retryable and sent straight to the recoverer, while a transient exception is retried per the configured BackOff"
+      - "Deserialization exceptions are always retried infinitely"
+      - "Validation exceptions crash the container"
+    answer: 1
+    explanation: |
+      DefaultErrorHandler distinguishes retryable from non-retryable exceptions. Non-retryable
+      ones (deserialization, validation, etc.) bypass retries and go directly to the recoverer
+      (e.g., DLT), since retrying bad data is pointless; transient exceptions are retried according
+      to the BackOff before recovery.
+    ref: "concepts.md#message-ordering-retries-and-dead-letter-queues"
+
+  - id: messaging-event-driven-integration-095
+    difficulty: advanced
+    tags: [dlq, replay, operations]
+    question: |
+      Why is blind auto-replay of a DLQ/DLT back onto the main topic considered risky in
+      production?
+    options:
+      - "Replaying always corrupts the offsets topic"
+      - "If the root cause (bad data or downstream outage) is unresolved, replay re-triggers the same failure, and re-injecting old records can also violate ordering — so DLQ handling usually needs a human/tooling gate"
+      - "DLQs cannot be read by any consumer"
+      - "Replay requires disabling replication"
+    answer: 1
+    explanation: |
+      A DLQ captures records that already failed. Automatically pushing them back without fixing
+      the cause just recreates the failure loop, and inserting old records after newer ones breaks
+      ordering. Sound practice is a controlled, gated replay after remediation, not blind
+      auto-replay.
+    ref: "concepts.md#message-ordering-retries-and-dead-letter-queues"
+
+  - id: messaging-event-driven-integration-096
+    difficulty: expert
+    tags: [idempotent-consumer, race, dedup]
+    question: |
+      A dedup implementation does: SELECT to check if the message id was processed; if not, do the
+      side effect and INSERT the id. Under concurrent redelivery to two pods, duplicates still slip
+      through. What is the correct fix?
+    options:
+      - "Add a longer sleep before the SELECT"
+      - "Rely on the broker's exactly-once delivery instead"
+      - "Attempt the INSERT of the idempotency key first and let a UNIQUE constraint reject the duplicate atomically, performing the side effect and the INSERT in the same transaction"
+      - "Cache processed ids in a plain in-memory HashMap per pod"
+    answer: 2
+    explanation: |
+      The SELECT-then-INSERT is a check-then-act (TOCTOU) race: two concurrent handlers both see
+      'not processed'. Letting the database's unique constraint arbitrate — INSERT the key first,
+      catch the violation to skip — turns the decision into an atomic operation. Doing it in the
+      same transaction as the side effect closes the crash window. Per-pod memory can't coordinate
+      across pods.
+    ref: "concepts.md#idempotent-consumers"
+
+  - id: messaging-event-driven-integration-097
+    difficulty: expert
+    tags: [idempotent-consumer, ordering, versioning]
+    question: |
+      A consumer is idempotent (dedups by message id) yet occasionally persists a STALE value
+      because an older update is reprocessed after a newer one. What additional guard is required?
+    options:
+      - "A larger dedup cache TTL"
+      - "A monotonic version/sequence in the payload plus a conditional write (UPDATE ... WHERE version < :incoming) so out-of-order/stale updates are ignored"
+      - "Switching the broker to at-most-once"
+      - "Increasing consumer concurrency"
+    answer: 1
+    explanation: |
+      Idempotency prevents duplicates from double-applying, but it does nothing about ordering; a
+      reordered older update can overwrite a newer one. Carrying a version and applying updates
+      conditionally (ignore if incoming version <= stored) makes stale/out-of-order writes no-ops.
+      Idempotency and ordering are orthogonal concerns.
+    ref: "concepts.md#idempotent-consumers"
+
+  - id: messaging-event-driven-integration-098
+    difficulty: advanced
+    tags: [idempotent-consumer, external-effects]
+    question: |
+      Your consumer's side effect is calling an external payment API (a non-transactional effect).
+      A DB dedup marker still leaves a window where you charged the card but crashed before
+      recording the marker. What is the most robust mitigation?
+    options:
+      - "Record the marker before calling the API"
+      - "Pass a provider-side idempotency key on the payment API call so the external system itself deduplicates the charge"
+      - "Wrap the HTTP call in a Kafka transaction"
+      - "Retry the charge until it succeeds without any key"
+    answer: 1
+    explanation: |
+      A local DB marker cannot make an external, non-transactional call atomic with the DB write.
+      The reliable approach is to send a provider-side idempotency key (e.g., Stripe-style) so the
+      external system recognizes and dedups a repeated charge. Recording the marker first risks
+      not charging at all; a Kafka transaction doesn't cover the HTTP effect.
+    ref: "concepts.md#idempotent-consumers"
+
+  - id: messaging-event-driven-integration-099
+    difficulty: advanced
+    tags: [sync-vs-async, request-reply, reply-queue]
+    question: |
+      In async request/reply over RabbitMQ, a team uses a single SHARED, fixed reply queue across
+      many service instances but does not correlate responses. What goes wrong?
+    options:
+      - "Replies are compressed and cannot be read"
+      - "Replies are delivered round-robin among the instances, so an instance can receive a reply meant for a request another instance sent; correlation-id matching is required"
+      - "The reply queue automatically deletes all messages"
+      - "RabbitMQ refuses to create shared reply queues"
+    answer: 1
+    explanation: |
+      A shared reply queue with competing consumers delivers each reply to whichever instance the
+      broker picks, not necessarily the requester. Without a correlation id to match reply to
+      request (and often per-instance routing), instances get each other's replies. Spring's
+      templates handle correlation; a naive shared queue does not.
+    ref: "concepts.md#sync-requestresponse-vs-async-messaging"
+
+  - id: messaging-event-driven-integration-100
+    difficulty: expert
+    tags: [sync-vs-async, request-reply, threading]
+    question: |
+      Under high load, a servlet endpoint calls rabbitTemplate.convertSendAndReceive(...) and waits
+      for the reply before responding to the HTTP client. Why is this an anti-pattern at scale?
+    options:
+      - "convertSendAndReceive is deprecated"
+      - "It ties up the servlet thread for the entire async round trip, giving the latency of async plus the thread-consumption of sync, so it exhausts the thread pool under load"
+      - "It bypasses the MessageConverter"
+      - "It cannot set a timeout, so it always deadlocks"
+    answer: 1
+    explanation: |
+      Blocking a request thread on an async round trip combines the worst of both models: the
+      request thread is held for the full messaging latency, so throughput collapses when the
+      thread pool saturates. Prefer non-blocking/reactive handling or fire-and-forget plus a later
+      notification. (A timeout is still mandatory to avoid indefinite blocking.)
+    ref: "concepts.md#sync-requestresponse-vs-async-messaging"
+
+  - id: messaging-event-driven-integration-101
+    difficulty: advanced
+    tags: [kafka-vs-rabbitmq, backpressure]
+    question: |
+      How does backpressure/flow control fundamentally differ between RabbitMQ and Kafka?
+    options:
+      - "Both push messages and block the producer when consumers are slow"
+      - "RabbitMQ pushes to consumers bounded by prefetch (broker-driven), while Kafka is pull-based — a slow consumer just accumulates lag without back-pressuring the producer, so you monitor consumer lag rather than queue depth"
+      - "Kafka pushes and RabbitMQ pulls"
+      - "Neither has any form of flow control"
+    answer: 1
+    explanation: |
+      RabbitMQ pushes messages, using prefetch (and connection.blocked under memory/disk alarms)
+      to limit flow. Kafka consumers pull at their own pace, so a slow consumer simply falls
+      behind (growing lag) without slowing the producer. The operational signal differs: queue
+      depth for Rabbit, consumer lag for Kafka.
+    ref: "concepts.md#comparing-kafka-vs-rabbitmq"
+
+  - id: messaging-event-driven-integration-102
+    difficulty: advanced
+    tags: [kafka-vs-rabbitmq, selective-consumption]
+    question: |
+      A requirement says "consumer A should receive only high-priority orders; consumer B gets the
+      rest, from the same published stream." Which broker supports this naturally, and why?
+    options:
+      - "Kafka, using log compaction to filter by priority"
+      - "RabbitMQ, via bindings/headers/selectors so different consumers get different subsets; Kafka has no server-side filtering, so consumers read whole partitions and must filter client-side"
+      - "Kafka, because each consumer group can subscribe to a subset of records"
+      - "Neither can do selective consumption"
+    answer: 1
+    explanation: |
+      RabbitMQ can route subsets to different queues/consumers using routing keys, header
+      matching, or selectors. Kafka delivers whole partitions to group members with no server-side
+      filter, so any per-message selection must be done client-side after reading everything.
+    ref: "concepts.md#comparing-kafka-vs-rabbitmq"
+
+  - id: messaging-event-driven-integration-103
+    difficulty: intermediate
+    tags: [kafka-vs-rabbitmq, amqp-versions]
+    question: |
+      A candidate says "RabbitMQ's exchange/binding model is defined by AMQP 1.0." Why is this
+      inaccurate?
+    options:
+      - "RabbitMQ does not implement any AMQP version"
+      - "The exchange/queue/binding model is part of AMQP 0-9-1; AMQP 1.0 is a different wire-level standard that does not define exchanges, though RabbitMQ can support 1.0 separately"
+      - "AMQP 1.0 is an older version than 0-9-1"
+      - "Exchanges are a Kafka concept, not AMQP at all"
+    answer: 1
+    explanation: |
+      RabbitMQ's core routing model (exchanges, bindings, routing keys) comes from AMQP 0-9-1.
+      AMQP 1.0 is a separate, lower-level messaging standard (used by ActiveMQ, Azure Service Bus)
+      that does not define the exchange model. RabbitMQ can speak AMQP 1.0 too, but that's not
+      where its exchange concept originates.
+    ref: "concepts.md#comparing-kafka-vs-rabbitmq"
+
+  - id: messaging-event-driven-integration-104
+    difficulty: expert
+    tags: [kafka-vs-rabbitmq, scaling, partitions]
+    question: |
+      Which statement captures the single most consequential OPERATIONAL difference in how the two
+      brokers scale consumer parallelism?
+    options:
+      - "RabbitMQ requires exactly one consumer per queue; Kafka allows unlimited consumers per partition"
+      - "RabbitMQ lets you add arbitrarily many competing consumers to a queue (order sacrificed), while Kafka caps in-group parallelism at the partition count, coupling scaling to a partition-count decision often made up front"
+      - "Both cap parallelism at the partition/queue count identically"
+      - "Kafka scales by adding exchanges; RabbitMQ scales by adding partitions"
+    answer: 1
+    explanation: |
+      RabbitMQ decouples scaling from topology — you can throw more competing consumers at a queue
+      to drain it faster (losing strict order). Kafka couples parallelism to partition count: to
+      add consumers you must add partitions, and that can disrupt key ordering. This coupling vs
+      decoupling is the defining operational contrast.
+    ref: "concepts.md#comparing-kafka-vs-rabbitmq"

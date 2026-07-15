@@ -43,6 +43,33 @@ rejected (it already happened). Naming: commands are imperative, events are past
   (synchronous by default; add `@Async` for async) — distinct from cross-service brokered
   messaging.
 
+**Expert — Spring event internals & `@TransactionalEventListener`:** Synchronous
+`@EventListener` invocations run on the **publisher's thread inside the publisher's call
+stack**, so a `RuntimeException` thrown by a listener propagates back to `publishEvent(...)`
+and can roll back the caller's transaction — listeners are *not* isolated. Ordering among
+multiple listeners for the same event is controlled by `@Order` (lower value = earlier);
+without it, order is undefined. `@TransactionalEventListener` binds the callback to a
+transaction phase — `AFTER_COMMIT` (default), `AFTER_ROLLBACK`, `AFTER_COMPLETION`,
+`BEFORE_COMMIT`. A classic trap: an `AFTER_COMMIT` listener runs **after** the transaction
+committed, so any DB write it performs needs a *new* transaction (`REQUIRES_NEW`) or it
+silently does nothing because there is no active transaction to flush/commit (by default the
+handler is not wrapped in one). If the event is published outside any transaction, an
+`@TransactionalEventListener` is **skipped entirely** unless `fallbackExecution=true`. This
+is exactly the hook the **outbox** pattern uses: write the outbox row `BEFORE_COMMIT` so it
+is part of the same atomic unit.
+
+**Async events:** making the multicaster async requires an `ApplicationEventMulticaster`
+bean with a `TaskExecutor` (or `@Async` on the listener + `@EnableAsync`). Once async, the
+exception no longer propagates to the publisher — it is handled by the executor's
+`AsyncUncaughtExceptionHandler`, and there is no automatic retry.
+
+**Choreography vs orchestration (sagas):** in **choreography** each service reacts to events
+and emits its own, with no central coordinator — highly decoupled but the end-to-end flow is
+implicit and hard to trace. In **orchestration** a central saga orchestrator sends commands
+and awaits reply events — easier to reason about and to implement compensations, at the cost
+of a coordinator. Distributed transactions across services use **compensating actions**
+(semantic rollback), not 2PC.
+
 ## JMS (Java Message Service)
 
 **Beginner:** JMS is a **Java API specification** (not a product) for message-oriented
@@ -87,6 +114,35 @@ commit together.
 single thread; `ConnectionFactory` and `Connection` are thread-safe. In Spring, use a
 `CachingConnectionFactory` to avoid re-creating connections/sessions/producers per send —
 without caching, `JmsTemplate` opens and closes a connection on every call (very slow).
+
+**Expert — `CachingConnectionFactory` gotcha with listener containers:** `DefaultMessage`
+`ListenerContainer` (DMLC) holds long-lived consumers. If you point a DMLC at a
+`CachingConnectionFactory` with the default `sessionCacheSize=1`, each concurrent consumer
+needs its own session, so raising `concurrentConsumers` above the cache size causes sessions
+to be created and destroyed rather than cached — set `sessionCacheSize >= maxConcurrent`
+`Consumers`. Also, the Spring cache assumes a **single** underlying connection by default; a
+network blip that kills that connection is recovered, but `cacheConsumers=true` combined with
+per-message temporary reply queues can leak consumers.
+
+**`JmsTemplate` synchronous-receive trap:** `JmsTemplate.receive()` performs a **blocking**
+synchronous poll with `receiveTimeout` (default is indefinite / `RECEIVE_TIMEOUT_INDEFINITE`
+= block forever). It should **never** be used inside a `@JmsListener` or for high-throughput
+consuming — that is what the listener container (async push) is for. Mixing a synchronous
+`JmsTemplate.receive` with a container on the same destination causes the two to compete for
+messages.
+
+**`sessionTransacted` vs external transaction manager:** `JmsTemplate.setSessionTransacted`
+(true)` or the container's `sessionTransacted=true` uses the **local JMS transaction** — send
+and ack commit together at the session level, but this is *not* synchronized with a database
+transaction. To make DB + JMS commit atomically you either need an XA `JtaTransactionManager`
+(true 2PC, expensive and often avoided) or the **best-effort-1PC** pattern
+(`ChainedTransactionManager`-style ordering) where the JMS commit is the last step after the
+DB commit — which still has a small window and is why idempotent consumers remain necessary.
+
+**Delivery mode & TTL:** JMS `PERSISTENT` (default) writes messages to the broker store so
+they survive a broker restart; `NON_PERSISTENT` is faster but lost on crash. Per-message TTL
+(`timeToLive`) and priority (0-9) are standard JMS features; note that priority ordering is a
+provider-*optional* hint, not a guarantee.
 
 ## RabbitMQ (Exchanges, Queues, Bindings, Routing Keys, Ack)
 
@@ -138,6 +194,38 @@ returns, nack on exception), `MANUAL` (you call `channel.basicAck`), `NONE` (fir
   logic itself (contrast Kafka's dumb broker / smart consumer).
 - Consumer ordering is per-queue and best-effort; requeue-to-head can reorder. Use a single
   consumer with prefetch=1 if strict order per queue is required.
+
+**Expert — requeue storm / poison-message loop:** In Spring AMQP, if a listener throws a
+plain exception under `AcknowledgeMode.AUTO` and the container's default requeue behavior is
+on (`defaultRequeueRejected=true`), the message is nacked with `requeue=true` and immediately
+redelivered — a tight infinite loop that pins a CPU and never makes progress (there is no
+built-in retry/backoff by default). Fixes: (1) throw `AmqpRejectAndDontRequeueException` (or
+`ImmediateRequeueAmqpException` for the opposite), (2) configure a stateful/stateless
+`RetryTemplate` interceptor with a `RepublishMessageRecoverer` to route to a DLQ after N
+attempts, or (3) set `defaultRequeueRejected=false` so failures dead-letter on the first
+error. A `MessageConversionException` (bad payload) is inherently non-recoverable and should
+never be requeued.
+
+**Quorum vs classic mirrored queues:** since RabbitMQ 3.8+, **quorum queues** (Raft-based
+replication) are the recommended HA primitive, replacing the deprecated classic *mirrored*
+queues. Quorum queues track a per-message **delivery-count** header and support
+`x-delivery-limit` for native poison-message handling — after the limit the message is dead-
+lettered automatically, something classic queues cannot do without the TTL/DLX trick.
+
+**Lazy queues & memory:** by default RabbitMQ keeps message bodies in RAM and only pages to
+disk under pressure; **lazy queues** (or quorum queues, which are effectively lazy) store on
+disk from the start, trading latency for much lower and more predictable memory use with deep
+backlogs — important when a consumer outage lets a queue grow to millions of messages.
+
+**Single Active Consumer (SAC):** setting `x-single-active-consumer` makes the broker route
+to only **one** consumer at a time (others are hot standbys), giving strict ordering with
+failover — a cleaner alternative to prefetch=1 with a single connection.
+
+**Publisher confirms are async & can be nacked:** a `confirm` is not always positive — the
+broker can send a `nack` (e.g., on internal error or a full disk with an unroutable durable
+message). Correct producer code must handle the negative-confirm callback, not just assume
+success. Confirms also arrive out of order and may be batched (multiple-flag), so you track
+outstanding sequence numbers.
 
 ## Apache Kafka with Spring (Template, Listener, Topics, Partitions, Groups, Offsets)
 
@@ -191,6 +279,44 @@ rebalances.
 - Log compaction (`cleanup.policy=compact`) keeps only the latest record per key — used for
   changelog/state topics.
 
+**Expert — poll loop, heartbeats, and the two liveness timeouts:** Since KIP-62, the consumer
+has **two independent liveness mechanisms**. A background **heartbeat thread** sends
+heartbeats every `heartbeat.interval.ms`; if none arrive within `session.timeout.ms` the
+broker considers the member dead. Separately, `max.poll.interval.ms` bounds the time between
+*successive `poll()` calls on the application thread* — this is what catches a consumer that
+is alive (heartbeating) but stuck in slow processing. So a hung listener still heartbeats yet
+is evicted for exceeding `max.poll.interval.ms`. When Spring's listener detects the container
+is being revoked, the offending record is reprocessed after the rebalance. Mitigations:
+reduce `max.poll.records`, raise `max.poll.interval.ms`, or use the container's async
+`Pausing`/`pause()` behavior.
+
+**`RECORD` vs `BATCH` ack and the "commit only advances" rule:** Spring's `AckMode.BATCH`
+commits the offsets of the whole poll batch *after* the batch is processed; `RECORD` commits
+after each record (safer, slower). Kafka offsets are **monotonic per partition** — you commit
+the offset of the *next* record to read (last-processed + 1). You cannot "un-commit"; to
+reprocess you must `seek()`. `MANUAL` gives you an `Acknowledgment` to call `acknowledge()`;
+`MANUAL_IMMEDIATE` commits synchronously right away rather than queuing for the next poll.
+
+**`ConcurrentMessageListenerContainer` thread model:** `concurrency=N` creates N child
+`KafkaMessageListenerContainer`s, each with **its own `KafkaConsumer` on its own thread**
+(a `KafkaConsumer` is single-threaded and not thread-safe). Partitions are split across the N
+consumers by the assignor; if `N > partitions`, the surplus consumers idle. A single listener
+instance may therefore be invoked concurrently from different threads for different
+partitions, so listener state must be thread-safe. Setting concurrency higher than partitions
+does not increase throughput.
+
+**Static membership & cooperative rebalancing:** `group.instance.id` (static membership,
+KIP-345) lets a bouncing consumer rejoin with the *same* partitions without triggering a
+rebalance, avoiding churn during rolling restarts. The `CooperativeStickyAssignor`
+(incremental cooperative rebalancing) revokes only the partitions that must move rather than
+the stop-the-world "revoke everything, then reassign" of the older `RangeAssignor`/
+`RoundRobinAssignor`.
+
+**`auto.offset.reset` only fires with no committed offset:** `earliest`/`latest`/`none`
+apply **only** when there is no valid committed offset for the group (new group, or the
+committed offset was aged out). A common misconception is that `latest` skips backlog on
+every start — it does not; an existing committed offset always wins.
+
 ## Delivery Semantics (At-Most / At-Least / Exactly-Once) & Idempotent Producer
 
 **Beginner definitions:**
@@ -222,6 +348,27 @@ rebalances.
 after processing ≈ at-least-once. True exactly-once generally isn't offered — you achieve
 effective-once with idempotent consumers + dedup.
 
+**Expert — why in-flight <= 5 preserves order with idempotence:** The broker keeps the last 5
+batch sequence numbers per producer/partition. With `enable.idempotence=true` and up to 5
+in-flight requests, the broker can detect an out-of-order or duplicate batch (sequence gap)
+and reject/reorder it, so ordering *and* dedup hold. Above 5 it loses the ability to
+guarantee ordering on retry, which is why 5 is the hard cap. Setting `retries=0` disables
+idempotence's protection against the reordering-on-retry problem (there's no retry to
+reorder, but you also lose delivery on transient errors).
+
+**Transaction fencing & zombies:** `transactional.id` is stable across producer restarts; on
+`initTransactions()` the broker bumps an **epoch** and fences the previous instance, so a
+"zombie" producer from a crashed pod that comes back cannot commit stale writes
+(`ProducerFencedException`). This is what makes read-process-write safe across restarts.
+`transaction.timeout.ms` bounds an open transaction; exceeding it aborts and fences.
+
+**EOS v2 (`sendOffsetsToTransaction`):** the read-process-write loop calls
+`producer.sendOffsetsToTransaction(offsets, consumerGroupMetadata)` so the *consumed* offsets
+are committed **inside the same producer transaction** as the produced output. Either both the
+output records and the offset advance commit, or neither does — that atomicity is the whole
+point. Spring wires this automatically when a `KafkaTransactionManager` drives a listener
+container with a transactional `KafkaTemplate`.
+
 ## ActiveMQ
 
 **Beginner:** ActiveMQ is Apache's popular **JMS provider** (message broker). Two lines:
@@ -242,6 +389,25 @@ selectors, and per-message priority/TTL — without Kafka's log/replay model. It
 
 **Gotchas:** enabling persistence (KahaDB / JDBC store) is required for durability across
 restarts; `ObjectMessage` deserialization is a security risk (set trusted-packages).
+
+**Expert — Classic vs Artemis architecture:** ActiveMQ *Classic* (5.x) is thread-per-
+connection with a KahaDB message store; it can hit throughput/latency ceilings under high
+connection counts. *Artemis* uses an asynchronous, non-blocking journal (append-only,
+optionally backed by Linux AIO/libaio) and a Netty-based transport, achieving far higher
+throughput and lower latency — which is why `spring-boot-starter-artemis` is the forward-
+looking choice. Note Spring Boot **3.x removed the auto-configuration for the embedded
+ActiveMQ *Classic* broker** (`spring-boot-starter-activemq` still exists as a client, but you
+point it at an external broker); the embedded-broker convenience story now lives with Artemis.
+
+**Message groups & exclusive consumers:** ActiveMQ Classic supports `JMSXGroupID` (all
+messages with the same group id pin to one consumer, giving per-group ordering with parallel
+groups) and **exclusive consumers** (`consumer.exclusive=true`) for strict total ordering on
+a queue with automatic failover — the JMS-broker analog of Rabbit's single-active-consumer
+and Kafka's per-partition ordering.
+
+**Redelivery policy & DLQ:** ActiveMQ has a client-side `RedeliveryPolicy` (max redeliveries,
+exponential backoff); after exhaustion the message goes to the broker's dead-letter queue
+(default `ActiveMQ.DLQ`, configurable per-destination via an `individualDeadLetterStrategy`).
 
 ## Message Ordering, Retries, and Dead-Letter Queues
 
@@ -276,6 +442,35 @@ be processed (repeated failures, deserialization errors, TTL expiry). Lets you q
 backoff *blocks the whole partition* (head-of-line blocking) because you can't advance the
 offset. `@RetryableTopic` avoids this by moving the record to a separate retry topic.
 
+**Expert — `@RetryableTopic` semantics & the ordering trade-off:** Non-blocking retry
+**reorders** relative to the source partition: the failed record is forwarded to
+`<topic>-retry-0`, `<topic>-retry-1`, ... (or a single time-based retry topic) and reprocessed
+later, while newer records on the main topic proceed. So `@RetryableTopic` trades strict
+ordering for liveness — do **not** use it where per-key order across the retry gap matters;
+use blocking retry (`DefaultErrorHandler` with a `BackOff`) there and accept head-of-line
+blocking, or key-partition so only the affected key stalls. `@RetryableTopic` retry topics are
+consumed by the *same* application; the delay is implemented by the consumer pausing/seeking
+based on the record timestamp, not by the broker.
+
+**`DefaultErrorHandler` details:** replaced `SeekToCurrentErrorHandler` (2.8). It classifies
+exceptions as retryable vs **not-retryable** (via `addNotRetryableExceptions`) — e.g.,
+`DeserializationException`, `MethodArgumentNotValidException` are non-retryable by default and
+go straight to the recoverer. A `FixedBackOff`/`ExponentialBackOff` bounds attempts; after
+exhaustion the configured recoverer (commonly `DeadLetterPublishingRecoverer`) runs, then the
+offset advances. With batch listeners you must throw `BatchListenerFailedException` (index-
+aware) so the handler knows which record in the batch failed — otherwise the whole batch is
+retried/recovered.
+
+**Deserialization poison records:** a record that cannot be deserialized would throw before
+the listener even runs and would loop forever. `ErrorHandlingDeserializer` wraps the
+key/value deserializer, catches the failure, and passes a null value plus the exception in a
+header so the `DefaultErrorHandler`/DLT path can handle it instead of the container spinning.
+
+**DLQ replay is not free:** re-publishing from a DLT/DLQ back to the main topic can violate
+ordering and re-trigger the original failure if the root cause (bad data, downstream outage)
+is unresolved. Production DLQ handling usually needs a human/tooling gate, not blind
+auto-replay.
+
 ## Idempotent Consumers
 
 **Beginner:** Because most systems are at-least-once, a consumer **will** occasionally see the
@@ -294,6 +489,22 @@ times it processes a given message. This is the practical substitute for exactly
 message may legitimately update state — use versioning). Combining an outbox on the producer
 (no duplicate *emits* from dual-write) with an idempotent consumer (tolerate broker
 duplicates) gives robust effective-once end-to-end without Kafka transactions.
+
+**Expert — dedup-check vs unique-constraint race:** The naive pattern "SELECT to check if
+processed, then INSERT + do work" has a **check-then-act race**: two concurrent redeliveries
+(different threads/pods) both see "not processed" and both proceed. The robust version relies
+on the database's atomicity: attempt the `INSERT` of the idempotency key first and let a
+**unique constraint** reject the duplicate (catch the constraint violation and skip), all in
+the *same* transaction as the side effect. This turns a TOCTOU race into an atomic DB
+decision. For non-transactional external effects (send email, call payment API), a DB marker
+still leaves a window between "did the effect" and "recorded the effect" — use a provider-side
+idempotency key (Stripe-style) so the *external* system dedups.
+
+**Ordering vs idempotency are orthogonal:** idempotency stops *duplicates* from corrupting
+state, but a *reordered* pair of updates can still land the wrong final value. Guard with a
+monotonic version/sequence in the payload and a conditional write
+(`UPDATE ... WHERE version < :incoming`) so stale/out-of-order updates are ignored — the
+combination of version-guarded writes + idempotency keys is what makes at-least-once safe.
 
 ## Sync Request/Response vs Async Messaging
 
@@ -319,6 +530,22 @@ temporal coupling.
 **When to choose which:** use sync when the caller genuinely needs the result now (a user
 query, validation). Use async for work that can happen later, fan-out, spiky load, long-running
 tasks, or cross-service integration where you want resilience and decoupling.
+
+**Expert — the correlation-id/reply-queue pitfalls:** Async request/reply reintroduces
+temporal coupling and adds failure modes sync calls don't have. If the requester crashes
+after sending, the reply is orphaned — a **temporary/exclusive reply queue** dies with the
+connection (reply lost), while a **shared/fixed reply queue** requires correlation-id matching
+and risks one instance receiving a reply meant for another (Spring's
+`RabbitTemplate`/`ReplyingKafkaTemplate` handle correlation, but a naive shared queue without
+correlation delivers replies round-robin to the wrong instance). `ReplyingKafkaTemplate`
+requires a dedicated reply topic and sets a `KafkaHeaders.CORRELATION_ID`; you must configure
+the reply-topic partitions the requester listens on. Timeouts are mandatory — without one, a
+lost reply blocks the caller forever, negating the resilience you sought.
+
+**Blocking a thread-per-request server on async reply is an anti-pattern at scale:** doing
+`convertSendAndReceive` on a servlet thread ties up that thread for the whole round trip,
+giving you the latency of async *and* the thread cost of sync. Prefer truly async handling
+(callbacks, reactive, or fire-and-forget with a later notification) if throughput matters.
 
 ## Comparing Kafka vs RabbitMQ
 
@@ -347,6 +574,30 @@ and retention.
   reply, transactional JMS-style semantics** → RabbitMQ (or ActiveMQ).
 - Kafka's "smart consumer" means clients manage offsets and reprocessing; Rabbit's "smart
   broker" means the broker manages state/redelivery.
+
+**Expert — competing consumers vs partition parallelism:** In RabbitMQ you scale a queue by
+adding consumers arbitrarily — 100 consumers can drain one queue (order is sacrificed). In
+Kafka, consumer parallelism within a group is **hard-capped at the partition count**; to get
+more parallel consumers you must add partitions (which, as noted, can disrupt key ordering).
+This is the single most consequential operational difference: Rabbit decouples scaling from
+topology, Kafka couples it to partition count decided up front.
+
+**Selective consumption / competing routing:** RabbitMQ can route a *subset* of messages to a
+consumer via bindings/headers/selectors so different consumers see different messages from the
+same publish. Kafka has no server-side filtering — every consumer in a group reads whole
+partitions and must filter client-side, so "give consumer A only high-priority orders" is
+natural in Rabbit and awkward in Kafka.
+
+**Backpressure semantics differ:** Rabbit pushes to consumers bounded by prefetch (broker-
+driven flow control, plus TCP back-pressure / `connection.blocked` when memory/disk alarms
+fire). Kafka is **pull-based**: the consumer decides when and how much to fetch, so a slow
+consumer simply falls behind (lag grows) without back-pressuring the producer — you monitor
+**consumer lag**, not queue depth.
+
+**AMQP 1.0 vs 0-9-1 confusion:** RabbitMQ's core model is AMQP **0-9-1** (exchanges/bindings);
+AMQP **1.0** is a different, wire-level standard (what ActiveMQ/Azure Service Bus speak).
+RabbitMQ supports AMQP 1.0 via a plugin/native in newer versions, but the exchange model is a
+0-9-1 concept, not part of AMQP 1.0.
 
 ## Common follow-up questions
 

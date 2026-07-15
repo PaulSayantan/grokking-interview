@@ -71,3 +71,9 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
   (author → fact/schema verify), guided by two user-provided reference syllabi
   (ChatGPT 46-section + Gemini 14-section PDFs). All content validates. Also fixed a
   GitHub-anchor slug bug in `validate_content.py` (`&` leaves a double-dash).
+- **Session 3 (2026-07-15):** Deepened all 18 Spring Boot topics — added an `expert`
+  difficulty tier (schema + validator) and appended ~40+ hard advanced/expert questions
+  per topic via a deepen→verify workflow (`spring-boot-deepen.js`, high effort). Bank
+  grew 1,044 → **1,851 MCQs** (~98–115/topic; 659 advanced + 424 expert). concepts.md
+  enriched with advanced-internals subsections. Verify stage rewrote semantic dupes and
+  fact-checked. All validates.

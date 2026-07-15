@@ -974,3 +974,785 @@ questions:
       may change. Wrapping results in PagedModel (Spring HATEOAS / Spring Data) or a custom
       response DTO gives you a stable, controlled representation.
     ref: "concepts.md#pagination-sorting--filtering"
+  - id: spring-mvc-rest-apis-059
+    difficulty: expert
+    tags: [dispatcherservlet, internals, ordering]
+    question: |
+      A request matches both a controller handler and (separately) triggers an exception
+      inside that handler. Within a single doDispatch invocation, in which relative order do
+      these run: interceptor.afterCompletion, HandlerExceptionResolver, and the message
+      converter that writes the error body?
+    options:
+      - "afterCompletion runs first, then the HandlerExceptionResolver, then the converter writes the body"
+      - "The HandlerExceptionResolver runs (which uses a message converter to write the error body), and only then is afterCompletion called for the interceptors that passed preHandle"
+      - "The converter writes the body first, then afterCompletion, then the resolver"
+      - "HandlerExceptionResolver and afterCompletion run concurrently on separate threads"
+    answer: 1
+    explanation: |
+      In processDispatchResult, if handling produced an exception, DispatcherServlet invokes the
+      HandlerExceptionResolver chain (which, for an @ExceptionHandler returning a body, uses an
+      HttpMessageConverter to serialize it). Only afterward does it call
+      triggerAfterCompletion, so afterCompletion is the last hook — analogous to a finally block
+      wrapping the whole dispatch.
+    ref: "concepts.md#dispatcherservlet-front-controller-flow"
+  - id: spring-mvc-rest-apis-060
+    difficulty: expert
+    tags: [exception-handling, controlleradvice, ordering]
+    question: |
+      A controller has a local @ExceptionHandler(RuntimeException.class), and a
+      @ControllerAdvice defines @ExceptionHandler(IllegalStateException.class). The handler
+      throws an IllegalStateException. Which handler is invoked?
+    options:
+      - "The controller-local handler, because controller-local @ExceptionHandler methods are always consulted before any @ControllerAdvice, regardless of type specificity"
+      - "The @ControllerAdvice handler, because it matches the more specific exception type"
+      - "Neither; ambiguity causes a 500"
+      - "Both, in order of registration"
+    answer: 0
+    explanation: |
+      Exception resolution first searches the controller's own @ExceptionHandler methods; only if
+      none matches does it consult @ControllerAdvice beans. Since the local handler matches
+      IllegalStateException (a RuntimeException), it wins even though the advice declares a more
+      specific type — locality beats specificity across the controller/advice boundary.
+    ref: "concepts.md#exception-handling--controlleradvice"
+  - id: spring-mvc-rest-apis-061
+    difficulty: expert
+    tags: [exception-handling, spring-security, filters]
+    question: |
+      Spring Security's authentication filter throws an AuthenticationException for an
+      unauthenticated request. A @RestControllerAdvice defines an @ExceptionHandler for it, yet
+      it never fires. Why?
+    options:
+      - "@ControllerAdvice only handles checked exceptions"
+      - "AuthenticationException is final and cannot be caught"
+      - "You must annotate the advice with @Order(HIGHEST_PRECEDENCE) for it to run"
+      - "The exception is thrown in the servlet filter chain before the DispatcherServlet selects a handler, so MVC's ExceptionHandlerExceptionResolver never sees it; it must be handled by an AuthenticationEntryPoint"
+    answer: 3
+    explanation: |
+      @ExceptionHandler / @ControllerAdvice only handle exceptions raised after a handler has been
+      mapped inside the DispatcherServlet. Security runs as filters ahead of the DispatcherServlet,
+      so its exceptions bypass MVC exception resolution entirely — they are handled by
+      AuthenticationEntryPoint / AccessDeniedHandler in the security chain.
+    ref: "concepts.md#exception-handling--controlleradvice"
+  - id: spring-mvc-rest-apis-062
+    difficulty: advanced
+    tags: [exception-handling, response-status, error-controller]
+    question: |
+      A custom exception is annotated @ResponseStatus(HttpStatus.NOT_FOUND) and thrown from a
+      handler in a Spring Boot app with no @ExceptionHandler for it. What mechanism produces the
+      final response?
+    options:
+      - "The message converter serializes the exception object directly as the body"
+      - "The DispatcherServlet returns 200 with an empty body"
+      - "ResponseStatusExceptionResolver calls response.sendError(404), which triggers a forward to /error handled by BasicErrorController"
+      - "A ViewResolver renders the exception's class name as a view"
+    answer: 2
+    explanation: |
+      ResponseStatusExceptionResolver honors @ResponseStatus by invoking sendError with the status.
+      In Boot that error dispatch is forwarded to /error, where BasicErrorController produces the
+      default JSON/HTML error body. Throwing ResponseStatusException is the programmatic equivalent.
+    ref: "concepts.md#exception-handling--controlleradvice"
+  - id: spring-mvc-rest-apis-063
+    difficulty: advanced
+    tags: [exception-handling, problemdetail, rfc9457]
+    question: |
+      What is the correct media type and a distinguishing field set for a Spring 6 ProblemDetail
+      (RFC 9457) error response?
+    options:
+      - "application/json with fields error, message, timestamp, path"
+      - "application/problem+json with fields type, title, status, detail, instance (plus custom properties)"
+      - "text/plain containing the stack trace"
+      - "application/hal+json with _links to the error documentation"
+    answer: 1
+    explanation: |
+      RFC 9457 (which obsoletes RFC 7807) defines application/problem+json with the members type,
+      title, status, detail, and instance, plus extensible custom properties. Spring's ProblemDetail
+      models exactly this and ResponseEntityExceptionHandler renders it for built-in exceptions.
+    ref: "concepts.md#exception-handling--controlleradvice"
+  - id: spring-mvc-rest-apis-064
+    difficulty: expert
+    tags: [exception-handling, gotcha]
+    question: |
+      An @ExceptionHandler method itself throws a new exception while building the error response.
+      What happens?
+    options:
+      - "The new exception is re-dispatched through the HandlerExceptionResolver chain and matched against other @ExceptionHandler methods"
+      - "Spring silently swallows it and returns 200"
+      - "The new exception propagates out of the resolver to the servlet container, typically surfacing as a raw 500 (and in Boot, /error)"
+      - "The original exception is returned instead"
+    answer: 2
+    explanation: |
+      Exceptions thrown from within an @ExceptionHandler are not recursively fed back through the
+      exception resolvers. They propagate up to the container, so you generally lose your nice
+      formatted error and get the container/Boot default error handling. Keep exception handlers
+      defensive and side-effect-free.
+    ref: "concepts.md#exception-handling--controlleradvice"
+  - id: spring-mvc-rest-apis-065
+    difficulty: expert
+    tags: [validation, method-validation, spring61]
+    question: |
+      In Spring Framework 6.1+, a controller (NOT annotated @Validated at class level) has a
+      method: getUser(@RequestParam @Min(1) int id). A request sends id=0. Which exception is
+      raised and what status results by default?
+    options:
+      - "ConstraintViolationException, surfacing as 500 because no AOP proxy is configured"
+      - "MethodArgumentNotValidException, 400"
+      - "No exception; id is silently clamped to 1"
+      - "HandlerMethodValidationException, 400 (built-in MVC method validation, no class-level @Validated needed)"
+    answer: 3
+    explanation: |
+      Spring 6.1 added built-in MVC method validation: constraint annotations directly on method
+      parameters are detected without a class-level @Validated and raise
+      HandlerMethodValidationException, which DefaultHandlerExceptionResolver maps to 400.
+      MethodArgumentNotValidException is for @Valid on a whole @RequestBody/@ModelAttribute object.
+    ref: "concepts.md#bean-validation--method-validation"
+  - id: spring-mvc-rest-apis-066
+    difficulty: expert
+    tags: [validation, validated, legacy, status-code]
+    question: |
+      The same @Min(1) constraint on a @RequestParam surfaces as a 500 in one service and a 400
+      in another. Which explanation is most plausible?
+    options:
+      - "The 500 service keeps a class-level @Validated, using the pre-6.1 AOP-proxy path that throws ConstraintViolationException (unhandled → 500); the 400 service relies on Spring 6.1 built-in method validation (HandlerMethodValidationException → 400)"
+      - "One service uses GET and the other POST"
+      - "The 500 service uses records and the 400 service uses classes"
+      - "ConstraintViolationException always maps to 400; the 500 must be a bug in Jackson"
+    answer: 0
+    explanation: |
+      Leaving class-level @Validated on the controller keeps the older AOP method-validation
+      interceptor, which throws jakarta ConstraintViolationException; without an @ExceptionHandler
+      for it, that is a 500. Removing @Validated lets Spring 6.1's built-in MVC method validation
+      run, producing HandlerMethodValidationException → 400. This version/config nuance is a classic
+      trap.
+    ref: "concepts.md#bean-validation--method-validation"
+  - id: spring-mvc-rest-apis-067
+    difficulty: advanced
+    tags: [validation, binding-result]
+    question: |
+      A handler is create(@Valid @RequestBody UserDto dto, BindingResult errors). The body fails
+      validation. What happens?
+    options:
+      - "MethodArgumentNotValidException is thrown before the method body runs"
+      - "A 422 is returned automatically without entering the method"
+      - "The dto is set to null and the method runs"
+      - "The method IS invoked and you must inspect errors.hasErrors() yourself, because a BindingResult/Errors parameter immediately follows the validated argument"
+    answer: 3
+    explanation: |
+      When an Errors/BindingResult parameter immediately follows a validated argument, Spring does
+      NOT throw; it hands you the errors so you can decide how to respond. Remove the BindingResult
+      and the same failure becomes a thrown MethodArgumentNotValidException (→ 400).
+    ref: "concepts.md#bean-validation--method-validation"
+  - id: spring-mvc-rest-apis-068
+    difficulty: advanced
+    tags: [validation, valid, validated, groups]
+    question: |
+      Which statement about @Valid vs @Validated is correct?
+    options:
+      - "@Valid supports validation groups; @Validated does not"
+      - "@Validated (Spring) supports validation groups and can be placed on parameters/classes; @Valid (Jakarta) triggers cascade but has no group attribute"
+      - "They are identical aliases"
+      - "@Valid can only be used on @RequestBody and @Validated only on @RequestParam"
+    answer: 1
+    explanation: |
+      @Validated is Spring's variant that adds a value() attribute for validation groups
+      (e.g. @Validated(OnCreate.class)). @Valid is the standard Jakarta annotation that triggers
+      cascaded/nested validation but cannot select groups. Both can validate a @RequestBody object.
+    ref: "concepts.md#bean-validation--method-validation"
+  - id: spring-mvc-rest-apis-069
+    difficulty: expert
+    tags: [async, threading, deferredresult]
+    question: |
+      A handler returns a DeferredResult<String> and stores it; a message-listener thread later
+      calls setResult("ok"). Which statement about thread usage is accurate?
+    options:
+      - "The controller returns on the initial container thread (which is then released to the pool); setResult runs on the external listener thread and triggers an ASYNC dispatch onto a fresh container thread to write the response"
+      - "The controller and setResult both run on the same servlet container thread"
+      - "The controller blocks the container thread until setResult is called"
+      - "setResult must be called from Spring's AsyncTaskExecutor or it is ignored"
+    answer: 0
+    explanation: |
+      With DeferredResult, after the controller returns Spring calls startAsync and the original
+      container thread unwinds back to the pool. Any application thread may call setResult; that
+      completes the DeferredResult and dispatches back (ASYNC) onto a container thread to serialize
+      and write the body. Unlike Callable, Spring does not run any work on its executor here.
+    ref: "concepts.md#async-request-processing"
+  - id: spring-mvc-rest-apis-070
+    difficulty: expert
+    tags: [async, interceptors, threadlocal]
+    question: |
+      A timing HandlerInterceptor stores System.nanoTime() in a ThreadLocal in preHandle and reads
+      it in afterCompletion. Controllers returning Callable now report garbage timings or misses.
+      Why?
+    options:
+      - "ThreadLocal is deprecated in Spring 6"
+      - "Callable disables all interceptors"
+      - "preHandle is skipped entirely for async handlers"
+      - "Under async, the interceptor gets afterConcurrentHandlingStarted on the initial thread instead of afterCompletion; afterCompletion later runs on a different (ASYNC-dispatch) container thread, where the original thread's ThreadLocal is absent"
+    answer: 3
+    explanation: |
+      For async handlers, AsyncHandlerInterceptor.afterConcurrentHandlingStarted fires on the
+      initial request thread in place of postHandle/afterCompletion. The real postHandle/
+      afterCompletion run later during the ASYNC dispatch on a potentially different container
+      thread, so a ThreadLocal set in preHandle on the first thread is not visible — the timing
+      breaks. Use request attributes or CallableProcessingInterceptor instead.
+    ref: "concepts.md#async-request-processing"
+  - id: spring-mvc-rest-apis-071
+    difficulty: advanced
+    tags: [async, callable, deferredresult, comparison]
+    question: |
+      What is the key difference between returning Callable<T> and DeferredResult<T> from an MVC
+      handler?
+    options:
+      - "Callable is reactive; DeferredResult is blocking"
+      - "DeferredResult can only return void"
+      - "Callable is submitted by Spring to its AsyncTaskExecutor (Spring owns the thread); DeferredResult is completed by arbitrary application code from any thread (you own completion)"
+      - "Callable cannot be used with @ResponseBody"
+    answer: 2
+    explanation: |
+      With Callable, Spring runs the task on its configured AsyncTaskExecutor. With DeferredResult,
+      Spring does not execute anything; you complete it from whatever thread produces the value
+      (a message arrives, another service responds, etc.), which decouples completion from any
+      particular executor.
+    ref: "concepts.md#async-request-processing"
+  - id: spring-mvc-rest-apis-072
+    difficulty: expert
+    tags: [async, security, context-propagation]
+    question: |
+      A Callable-returning handler calls a downstream service that relies on
+      SecurityContextHolder, but the SecurityContext is empty on the executor thread. What is the
+      root cause and a correct remedy?
+    options:
+      - "SecurityContextHolder uses a ThreadLocal that is not automatically propagated to Spring's async executor thread; propagate it (e.g. DelegatingSecurityContextRunnable / MODE_INHERITABLETHREADLOCAL / context-propagation) "
+      - "SecurityContext is null because @Async is required; add @Async to the controller"
+      - "You must switch to WebFlux; MVC cannot access security in async"
+      - "The SecurityContext is fine; the downstream service is misconfigured"
+    answer: 0
+    explanation: |
+      SecurityContextHolder, RequestContextHolder, and transaction state are ThreadLocal-based and
+      do not cross to the async executor thread automatically. Propagate the context explicitly
+      (DelegatingSecurityContextRunnable, an inheritable strategy, or Micrometer context
+      propagation) so the downstream call sees the authenticated principal.
+    ref: "concepts.md#async-request-processing"
+  - id: spring-mvc-rest-apis-073
+    difficulty: advanced
+    tags: [async, streaming, sse]
+    question: |
+      When streaming with SseEmitter and the client disconnects mid-stream, what is the correct
+      handling contract?
+    options:
+      - "Call emitter.complete() immediately when you detect the socket is closed"
+      - "The JVM sends a SIGPIPE that you must trap"
+      - "A send() to the dead connection throws IOException; you should NOT call complete()/completeWithError() yourself — the container fires an AsyncListener error and Spring calls completeWithError for you"
+      - "Spring automatically retries the send three times"
+    answer: 2
+    explanation: |
+      The Servlet API gives no disconnect callback; you only learn of it when a write fails with
+      IOException. Per Spring's guidance you must not then call complete/completeWithError yourself;
+      the container's AsyncListener onError fires and Spring invokes completeWithError, dispatching
+      back through exception handling.
+    ref: "concepts.md#async-request-processing"
+  - id: spring-mvc-rest-apis-074
+    difficulty: advanced
+    tags: [async, executor, performance]
+    question: |
+      Why is Spring MVC's default async task executor considered unsuitable for production load,
+      and what is the fix?
+    options:
+      - "It uses a fixed pool of one thread; increase it to two"
+      - "It runs everything on the container thread, defeating async"
+      - "It only supports Callable, not DeferredResult"
+      - "The default SimpleAsyncTaskExecutor creates a new thread per task with no pooling/backpressure, risking thread exhaustion; configure a bounded ThreadPoolTaskExecutor via WebMvcConfigurer#configureAsyncSupport"
+    answer: 3
+    explanation: |
+      By default MVC async uses SimpleAsyncTaskExecutor, which spawns an unbounded number of new
+      threads. Under load this exhausts resources. Register a bounded executor (and a default
+      timeout) through configureAsyncSupport so Callable/WebAsyncTask work runs on a managed pool.
+    ref: "concepts.md#async-request-processing"
+  - id: spring-mvc-rest-apis-075
+    difficulty: expert
+    tags: [message-converter, config, gotcha]
+    question: |
+      A developer overrides WebMvcConfigurer#configureMessageConverters to add a custom converter,
+      and afterwards JSON responses break (String bodies work, objects fail). What is the likely
+      cause?
+    options:
+      - "configureMessageConverters replaces the entire default converter list, so Jackson is no longer registered; they should have used extendMessageConverters to add without wiping defaults"
+      - "Custom converters are not allowed in Spring 6"
+      - "You must annotate the converter with @Bean for it to work"
+      - "String bodies require a separate ObjectMapper"
+    answer: 0
+    explanation: |
+      configureMessageConverters, when it adds to the passed list, takes over and Spring does NOT
+      register the defaults (including MappingJackson2HttpMessageConverter). extendMessageConverters
+      lets you append to / reorder the default list without losing Jackson. This is a frequent
+      self-inflicted 406/broken-serialization bug.
+    ref: "concepts.md#httpmessageconverter--jackson-internals"
+  - id: spring-mvc-rest-apis-076
+    difficulty: advanced
+    tags: [jackson, boot-defaults, deserialization]
+    question: |
+      A JSON payload contains an extra field not present in the target DTO. With Spring Boot's
+      default Jackson configuration, what happens on @RequestBody deserialization?
+    options:
+      - "A 400 is returned because FAIL_ON_UNKNOWN_PROPERTIES is on by default"
+      - "The DTO is set to null"
+      - "Jackson throws a 500 InvalidDefinitionException"
+      - "The unknown field is silently ignored, because Boot disables FAIL_ON_UNKNOWN_PROPERTIES (unlike raw Jackson defaults)"
+    answer: 3
+    explanation: |
+      Raw Jackson defaults FAIL_ON_UNKNOWN_PROPERTIES to true, but Spring Boot's auto-configuration
+      disables it, so unknown JSON properties are ignored by default. This supports tolerant-reader
+      evolution. You can re-enable it globally or per class with @JsonIgnoreProperties(ignoreUnknown=false).
+    ref: "concepts.md#httpmessageconverter--jackson-internals"
+  - id: spring-mvc-rest-apis-077
+    difficulty: advanced
+    tags: [jackson, dates, jsr310]
+    question: |
+      Why do Instant/LocalDateTime fields serialize as ISO-8601 strings rather than numeric epoch
+      timestamps in a default Spring Boot 3 app?
+    options:
+      - "Boot registers jackson-datatype-jsr310 and disables WRITE_DATES_AS_TIMESTAMPS, so java.time types render as ISO-8601 by default"
+      - "Java records force ISO-8601"
+      - "The DispatcherServlet rewrites dates"
+      - "It is undefined behavior and varies per request"
+    answer: 0
+    explanation: |
+      Spring Boot auto-registers the JavaTimeModule (jackson-datatype-jsr310) and disables the
+      SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, so java.time types serialize as ISO-8601
+      strings. Customize via Jackson2ObjectMapperBuilderCustomizer or spring.jackson.* properties.
+    ref: "concepts.md#httpmessageconverter--jackson-internals"
+  - id: spring-mvc-rest-apis-078
+    difficulty: expert
+    tags: [message-converter, content-negotiation, ordering]
+    question: |
+      For a handler with no produces attribute returning a POJO, and a request with
+      Accept: application/xml, application/json;q=0.9 where both Jackson JSON and Jackson XML
+      converters are present, which representation is written?
+    options:
+      - "JSON, because Jackson JSON is always registered first"
+      - "XML, because the client's Accept ranks application/xml higher (q=1.0 implicit) and a converter supports it"
+      - "406 Not Acceptable, because two converters conflict"
+      - "Whichever converter was added last"
+    answer: 1
+    explanation: |
+      Content negotiation honors the client's Accept quality values: application/xml has implicit
+      q=1.0 and outranks application/json;q=0.9. Spring picks the media type the client prefers that
+      a converter can write, so the XML converter is chosen. Converter registration order only
+      breaks ties among equally acceptable media types.
+    ref: "concepts.md#content-negotiation-json-vs-xml"
+  - id: spring-mvc-rest-apis-079
+    difficulty: expert
+    tags: [thread-safety, controller, concurrency]
+    question: |
+      A @RestController has a private int requestCount field incremented on each request and
+      returned. Under concurrent load the totals are wrong. What is the correct diagnosis?
+    options:
+      - "Spring creates a new controller instance per request, so the field resets"
+      - "@RestController disables field access"
+      - "The field must be static to be thread-safe"
+      - "The controller is a singleton shared across all request threads; a plain int field is a shared-mutable-state data race (lost updates / visibility). Use an AtomicInteger, a request-scoped bean, or externalize the state"
+    answer: 3
+    explanation: |
+      Controllers are singletons by default and invoked concurrently on many container threads.
+      A mutable instance field is shared, so ++ (read-modify-write) races and lacks visibility
+      guarantees. Fix with AtomicInteger/AtomicLong, request scope, or an external counter — or keep
+      controllers stateless.
+    ref: "concepts.md#controller-thread-safety"
+  - id: spring-mvc-rest-apis-080
+    difficulty: advanced
+    tags: [thread-safety, model-attribute, gotcha]
+    question: |
+      An unannotated complex-type parameter appears in a handler: process(SearchCriteria criteria).
+      The developer expected the JSON body to bind, but instead individual query params populate
+      the object and the body is ignored. Why?
+    options:
+      - "Unannotated complex types default to @RequestBody binding"
+      - "Spring throws an ambiguous-argument exception"
+      - "An unannotated non-simple type is resolved as a @ModelAttribute, bound from request/query/form params — not from the JSON body; add @RequestBody to deserialize the body"
+      - "The parameter is always null unless annotated"
+    answer: 2
+    explanation: |
+      The default argument-resolver chain treats an unannotated complex (non-simple) parameter as an
+      @ModelAttribute, binding from request parameters (query string / form fields), not the request
+      body. To deserialize a JSON body you must annotate it @RequestBody.
+    ref: "concepts.md#ambiguous-mappings--argument-resolution"
+  - id: spring-mvc-rest-apis-081
+    difficulty: expert
+    tags: [request-mapping, ambiguous, specificity]
+    question: |
+      Two mappings exist: @GetMapping("/users/{id}") and @GetMapping("/users/me"). A request GET
+      /users/me arrives. What happens?
+    options:
+      - "IllegalStateException: Ambiguous handler methods, because both patterns match"
+      - "The {id} handler wins and id is bound to the string me"
+      - "A 300 Multiple Choices response is returned"
+      - "The literal mapping /users/me wins because it is more specific than the {id} template; the {id} handler is not invoked"
+    answer: 3
+    explanation: |
+      Spring ranks candidate patterns by specificity: a fully literal segment beats a variable
+      segment. /users/me is more specific than /users/{id}, so it is selected without ambiguity.
+      True ambiguity (equal specificity) is required for the IllegalStateException.
+    ref: "concepts.md#ambiguous-mappings--argument-resolution"
+  - id: spring-mvc-rest-apis-082
+    difficulty: advanced
+    tags: [request-mapping, trailing-slash, spring6]
+    question: |
+      After upgrading to Spring Boot 3 / Spring 6, requests to /users/ (trailing slash) that
+      previously hit @GetMapping("/users") now return 404. Why?
+    options:
+      - "Trailing-slash matching is disabled by default in Spring 6 (setUseTrailingSlashMatch deprecated/removed); /users and /users/ are now distinct, so add an explicit mapping or a redirect"
+      - "Trailing slashes are reserved for WebSocket endpoints"
+      - "The DispatcherServlet mapping changed to /app"
+      - "PathPattern cannot parse trailing slashes"
+    answer: 0
+    explanation: |
+      Spring 6 removed the default lenient trailing-slash matching that older versions provided.
+      /users/ no longer implicitly matches /users. To support both you add an explicit route or a
+      redirect (e.g. via a filter or configured path matching), rather than relying on the old
+      behavior.
+    ref: "concepts.md#ambiguous-mappings--argument-resolution"
+  - id: spring-mvc-rest-apis-083
+    difficulty: expert
+    tags: [argument-resolver, ordering, customization]
+    question: |
+      You add a custom HandlerMethodArgumentResolver via WebMvcConfigurer#addArgumentResolvers to
+      change how @RequestParam is resolved, but it never runs for @RequestParam parameters. Why?
+    options:
+      - "Custom resolvers require @Bean, not the configurer"
+      - "@RequestParam cannot be customized under any circumstances"
+      - "Resolvers registered via addArgumentResolvers are appended AFTER the built-in resolvers; the built-in RequestParamMethodArgumentResolver already claims @RequestParam via supportsParameter, so yours is never consulted for it"
+      - "The resolver must return null to defer to built-ins"
+    answer: 2
+    explanation: |
+      Custom argument resolvers are added after the default ones in the resolver list, and the first
+      resolver whose supportsParameter returns true wins. The built-in @RequestParam resolver
+      handles the parameter first, so a custom resolver targeting @RequestParam is never reached.
+      Overriding it requires replacing the adapter's resolver list, not appending.
+    ref: "concepts.md#ambiguous-mappings--argument-resolution"
+  - id: spring-mvc-rest-apis-084
+    difficulty: expert
+    tags: [etag, conditional, performance]
+    question: |
+      A team enables ShallowEtagHeaderFilter hoping to reduce server CPU for an expensive endpoint.
+      Bandwidth drops on repeat requests but CPU does not. Why, and what actually saves the compute?
+    options:
+      - "ShallowEtag only works over HTTP/2; upgrade the protocol"
+      - "It caches the body in memory, so the second call is free"
+      - "You must also enable GZIP for CPU to drop"
+      - "The shallow filter still executes the handler and generates the full body (then hashes it and may return 304), so it saves bandwidth but not computation; to skip the work, check request.checkNotModified(version/eTag) BEFORE building the body"
+    answer: 3
+    explanation: |
+      ShallowEtagHeaderFilter buffers the fully generated response, computes an MD5 ETag, and
+      returns 304 if If-None-Match matches — the handler still ran, so CPU is unchanged. To avoid
+      the expensive work, perform an application-level conditional check (e.g.
+      ServletWebRequest.checkNotModified) using a cheap version/timestamp and short-circuit before
+      producing the body.
+    ref: "concepts.md#etags--conditional-requests"
+  - id: spring-mvc-rest-apis-085
+    difficulty: advanced
+    tags: [etag, optimistic-concurrency, status]
+    question: |
+      A client sends PUT /docs/7 with If-Match: "v3" but the current server ETag is "v5". For
+      correct optimistic-concurrency semantics, what should the server return?
+    options:
+      - "200 OK and overwrite anyway"
+      - "409 Conflict"
+      - "412 Precondition Failed, so the stale write is rejected and lost updates are prevented"
+      - "304 Not Modified"
+    answer: 2
+    explanation: |
+      If-Match expresses a precondition on the current representation. When the supplied ETag no
+      longer matches, the precondition fails and the server returns 412 Precondition Failed,
+      rejecting the update based on stale state. 304 is for If-None-Match on reads; 409 is a more
+      generic conflict not tied to the conditional header.
+    ref: "concepts.md#etags--conditional-requests"
+  - id: spring-mvc-rest-apis-086
+    difficulty: advanced
+    tags: [http-status, put, create, idempotency]
+    question: |
+      A REST API supports PUT /widgets/{clientGeneratedId} to create-or-replace. A client issues
+      the identical PUT twice due to a retry. Which behavior is spec-correct?
+    options:
+      - "The second PUT must return 409 Conflict because the resource already exists"
+      - "Because PUT is idempotent, both requests leave the resource in the same final state; the first may return 201 Created and the second 200 OK (or 204), with no duplicate resource"
+      - "The second PUT must create a second widget with a new id"
+      - "PUT cannot be used for creation, so both return 405"
+    answer: 1
+    explanation: |
+      PUT to a known URI is idempotent: repeating it yields the same final state. A common pattern
+      is 201 on first creation and 200/204 on subsequent identical PUTs. It must not create a
+      duplicate — that non-idempotent behavior is POST's domain.
+    ref: "concepts.md#put-vs-patch-vs-post"
+  - id: spring-mvc-rest-apis-087
+    difficulty: expert
+    tags: [patch, json-patch, semantics]
+    question: |
+      Using JSON Patch (RFC 6902) with Content-Type application/json-patch+json, a client sends
+      [{"op":"test","path":"/version","value":3},{"op":"replace","path":"/status","value":"DONE"}].
+      What is the purpose of the first operation and the effect if it fails?
+    options:
+      - "test asserts the current value equals the given value (an optimistic-concurrency guard); if it fails the entire patch is rejected and no operations are applied"
+      - "test logs the value; failure is ignored and replace still applies"
+      - "test creates the field if missing"
+      - "test is a no-op reserved for future use"
+    answer: 0
+    explanation: |
+      In JSON Patch, the test op asserts a value at a path; if the assertion fails the whole patch
+      document must fail atomically and no operations take effect. This gives conditional/optimistic
+      updates within the patch itself, distinct from JSON Merge Patch which has no such operation.
+    ref: "concepts.md#put-vs-patch-vs-post"
+  - id: spring-mvc-rest-apis-088
+    difficulty: expert
+    tags: [patch, merge-patch, null-semantics]
+    question: |
+      With JSON Merge Patch (RFC 7386, application/merge-patch+json), what does sending
+      {"nickname": null} mean, and why can this be hard to implement in Java with a DTO?
+    options:
+      - "It sets nickname to the string \"null\"; no difficulty"
+      - "null is ignored, identical to omitting the field"
+      - "null explicitly REMOVES/clears the nickname field; the challenge is distinguishing an explicit null (remove) from an absent field (leave unchanged) once JSON is bound to a plain DTO where both look like a null reference"
+      - "Merge Patch forbids null values"
+    answer: 2
+    explanation: |
+      In JSON Merge Patch, a null value means delete/clear that member, whereas an absent member
+      means leave it unchanged. A naive DTO collapses both cases to a Java null, so you cannot tell
+      remove from unchanged. Solutions include JsonNode/Map traversal, JsonNullable (openapi-jackson-
+      nullable), or Optional-wrapped fields with a custom deserializer.
+    ref: "concepts.md#put-vs-patch-vs-post"
+  - id: spring-mvc-rest-apis-089
+    difficulty: expert
+    tags: [cors, exposed-headers, gotcha]
+    question: |
+      A cross-origin fetch succeeds and the server returns a custom X-Total-Count response header,
+      but browser JavaScript reads null for it via response.headers.get("X-Total-Count") even though
+      the header is visible in DevTools. What is the cause and the Spring fix?
+    options:
+      - "Custom response headers cannot be sent cross-origin at all"
+      - "By default JS can only read the CORS-safelisted response headers (Cache-Control, Content-Language, Content-Length, Content-Type, Expires, Last-Modified, Pragma); the server must list X-Total-Count in Access-Control-Expose-Headers — in Spring via CorsConfiguration/CorsRegistry .exposedHeaders(...) or @CrossOrigin(exposedHeaders=...)"
+      - "The header is stripped because the request was not a preflight; add an OPTIONS mapping"
+      - "You must set Access-Control-Allow-Headers: X-Total-Count on the response"
+    answer: 1
+    explanation: |
+      For cross-origin responses, JavaScript may only read the CORS-safelisted response headers by
+      default; any other header (like X-Total-Count) is hidden even though the browser received it.
+      The server must opt it in with Access-Control-Expose-Headers. In Spring you configure this via
+      exposedHeaders(...) on the CorsConfiguration/CorsRegistry mapping (or @CrossOrigin's
+      exposedHeaders). Access-Control-Allow-Headers is the mirror concept for request headers on
+      preflight, not response-header exposure.
+    ref: "concepts.md#cors"
+  - id: spring-mvc-rest-apis-090
+    difficulty: advanced
+    tags: [cors, preflight, methods]
+    question: |
+      Which combination will trigger a CORS preflight (OPTIONS) rather than being a "simple"
+      request?
+    options:
+      - "GET with only an Accept header"
+      - "POST with Content-Type: text/plain and no custom headers"
+      - "PUT with Content-Type: application/json and an Authorization header"
+      - "POST with Content-Type: application/x-www-form-urlencoded"
+    answer: 2
+    explanation: |
+      Simple requests are limited to GET/HEAD/POST with only CORS-safelisted headers and content
+      types (application/x-www-form-urlencoded, multipart/form-data, text/plain). A PUT, an
+      application/json content type, and a custom/Authorization header each independently force a
+      preflight OPTIONS.
+    ref: "concepts.md#cors"
+  - id: spring-mvc-rest-apis-091
+    difficulty: advanced
+    tags: [content-negotiation, produces, 406, 415]
+    question: |
+      A POST handler is @PostMapping(value="/x", consumes="application/json",
+      produces="application/json"). A client sends Content-Type: text/xml with Accept:
+      application/json. What status results and why?
+    options:
+      - "406 Not Acceptable, because Accept is unsatisfiable"
+      - "415 Unsupported Media Type, because the request Content-Type text/xml does not match the consumes constraint"
+      - "400 Bad Request, because the body is malformed"
+      - "200 OK, because Accept matches produces"
+    answer: 1
+    explanation: |
+      consumes narrows by the request Content-Type. text/xml does not match application/json, so
+      the mapping's consume condition fails and Spring returns 415 Unsupported Media Type. 406 would
+      apply if instead the Accept header could not be satisfied by produces.
+    ref: "concepts.md#request-mapping-annotations"
+  - id: spring-mvc-rest-apis-092
+    difficulty: intermediate
+    tags: [response-entity, void, headers]
+    question: |
+      You need to return 204 No Content but include a custom response header. Which is correct?
+    options:
+      - "return ResponseEntity.noContent().header(\"X-Trace-Id\", id).build();"
+      - "return ResponseEntity.ok().body(null);"
+      - "return null; and set the header on the request"
+      - "You cannot add headers to a 204 response"
+    answer: 0
+    explanation: |
+      ResponseEntity.noContent() yields a 204 builder to which you can attach headers before
+      build(). ResponseEntity<Void> plus build() sends no body. 204 responses can carry headers;
+      only a body is disallowed.
+    ref: "concepts.md#responseentity"
+  - id: spring-mvc-rest-apis-093
+    difficulty: advanced
+    tags: [request-lifecycle, filter-order, ordering]
+    question: |
+      Two servlet filters A and B are registered via FilterRegistrationBean with A order 1 and B
+      order 2. In what order do their pre-processing (before chain.doFilter) and post-processing
+      (after chain.doFilter) run?
+    options:
+      - "Pre: A then B; Post: A then B"
+      - "Pre: A then B; Post: B then A (filters nest like an onion — lower order is outermost)"
+      - "Pre: B then A; Post: A then B"
+      - "Order is nondeterministic across requests"
+    answer: 1
+    explanation: |
+      Filters nest: the lowest order runs its pre-logic first and its post-logic last. So pre-order
+      is A, B and post-order (after the inner chain returns) is B, A. Interceptors behave the same
+      way with preHandle forward and postHandle/afterCompletion reversed.
+    ref: "concepts.md#request-lifecycle"
+  - id: spring-mvc-rest-apis-094
+    difficulty: expert
+    tags: [request-lifecycle, interceptors, order-reverse]
+    question: |
+      Three interceptors I1, I2, I3 are registered in that order and all return true from preHandle.
+      For a successful request, what is the order of postHandle and afterCompletion calls?
+    options:
+      - "postHandle: I1,I2,I3; afterCompletion: I1,I2,I3 (everything in registration order)"
+      - "postHandle: I3,I2,I1; afterCompletion: I3,I2,I1 (both post-execution callbacks run in reverse registration order)"
+      - "postHandle: I1,I2,I3; afterCompletion: I3,I2,I1"
+      - "postHandle: I3,I2,I1; afterCompletion: I1,I2,I3"
+    answer: 1
+    explanation: |
+      preHandle runs in registration order (I1,I2,I3). Both postHandle and afterCompletion run in
+      the reverse order (I3,I2,I1), mirroring the nested/onion model where the first interceptor to
+      enter is the last to finish. This symmetry is why cleanup in afterCompletion unwinds in the
+      opposite order to setup in preHandle.
+    ref: "concepts.md#request-lifecycle"
+  - id: spring-mvc-rest-apis-095
+    difficulty: advanced
+    tags: [pagination, sort, injection]
+    question: |
+      When binding ?sort=name,asc directly to a Spring Data Sort/Pageable that is passed into a
+      dynamically built query, what is a security concern and mitigation?
+    options:
+      - "None; sort values are always safe"
+      - "A client can sort by arbitrary property names, potentially exposing timing/ordering on unindexed or sensitive columns; validate/allowlist sortable properties before applying"
+      - "Sort direction can execute SQL; disable sorting entirely"
+      - "Sort forces a full table lock"
+    answer: 1
+    explanation: |
+      The sort property is client-controlled. Blindly binding it can let callers sort by columns you
+      did not intend (information disclosure, or expensive scans on unindexed columns). Restrict to
+      an allowlist of sortable fields and cap page size to bound cost.
+    ref: "concepts.md#pagination-sorting--filtering"
+  - id: spring-mvc-rest-apis-096
+    difficulty: expert
+    tags: [dispatcherservlet, forward, once-per-request]
+    question: |
+      A request is dispatched to /a, whose handler forwards to /b within the same DispatcherServlet.
+      A filter extending OncePerRequestFilter wraps both. How many times does its doFilterInternal
+      run, and how many times does the DispatcherServlet's doDispatch run?
+    options:
+      - "doFilterInternal: 1; doDispatch: 1"
+      - "doFilterInternal: 1 (guaranteed once per request); doDispatch: 2 (once per dispatch — original plus the forward)"
+      - "doFilterInternal: 2; doDispatch: 2"
+      - "doFilterInternal: 2; doDispatch: 1"
+    answer: 1
+    explanation: |
+      OncePerRequestFilter guards against re-execution on nested dispatches, so its body runs once.
+      A forward is a new dispatch through the servlet, so DispatcherServlet.doDispatch executes again
+      for /b — twice total. This is why interceptors can fire per-dispatch while a once-per-request
+      filter does not.
+    ref: "concepts.md#request-lifecycle"
+  - id: spring-mvc-rest-apis-097
+    difficulty: advanced
+    tags: [controller, restcontroller, responsestatus]
+    question: |
+      A @RestController method is annotated @ResponseStatus(HttpStatus.CREATED) and returns a DTO
+      (not a ResponseEntity). What status is sent, and what happens if the method instead returns a
+      ResponseEntity with status 200?
+    options:
+      - "@ResponseStatus always wins, so both cases return 201"
+      - "Returning the DTO sends 201 (from @ResponseStatus); but a returned ResponseEntity's own status takes precedence, so that case sends 200 and @ResponseStatus is ignored"
+      - "Both cases return 200"
+      - "The combination throws an IllegalStateException at startup"
+    answer: 1
+    explanation: |
+      @ResponseStatus sets the status when the handler does not itself specify one (e.g. returns a
+      body object). But a ResponseEntity explicitly carries its own status, which takes precedence
+      over @ResponseStatus. Mixing them and expecting @ResponseStatus to win is a common mistake.
+    ref: "concepts.md#responseentity"
+  - id: spring-mvc-rest-apis-098
+    difficulty: expert
+    tags: [jackson, serialization, lazy, dto]
+    question: |
+      Returning a JPA entity with a LAZY @OneToMany directly from a @RestController (open-session-in-
+      view disabled) intermittently throws during response writing. What is the precise failure and
+      why does a DTO fix it?
+    options:
+      - "StackOverflowError from a cyclic toString; DTOs have no toString"
+      - "406 Not Acceptable because entities lack an XML converter"
+      - "OptimisticLockException because Jackson writes to the entity"
+      - "LazyInitializationException: Jackson accesses the lazy collection during serialization after the persistence transaction/session has closed, so the proxy cannot initialize; a DTO is populated inside the transaction, decoupling serialization from the session"
+    answer: 3
+    explanation: |
+      Serialization happens in the message converter after the controller returns and the
+      transaction/Hibernate session has closed. Touching an uninitialized lazy association then
+      throws LazyInitializationException. A DTO assembled within the transactional service layer
+      captures exactly the needed data, so serialization never touches a detached proxy — one of the
+      core reasons to expose DTOs.
+    ref: "concepts.md#dto-data-transfer-objects"
+  - id: spring-mvc-rest-apis-099
+    difficulty: expert
+    tags: [jackson, jsonview, dto]
+    question: |
+      You want one User DTO to expose different field subsets for a list endpoint vs a detail
+      endpoint without creating two classes. Which Jackson/Spring feature fits best?
+    options:
+      - "@JsonView interfaces on fields plus @JsonView(...) on each handler method to select the active view"
+      - "@JsonIgnore on the shared fields"
+      - "Two @RequestMapping paths with the same method"
+      - "Set produces to different media types"
+    answer: 0
+    explanation: |
+      @JsonView lets you tag fields with view marker classes and annotate each handler method with
+      @JsonView(SomeView.class); Spring configures the ObjectMapper writer for that view per
+      response, emitting different field subsets from one DTO. @JsonIgnore is static (all endpoints).
+    ref: "concepts.md#httpmessageconverter--jackson-internals"
+  - id: spring-mvc-rest-apis-100
+    difficulty: advanced
+    tags: [hateoas, methodon, linkbuilder]
+    question: |
+      In Spring HATEOAS, what does linkTo(methodOn(UserController.class).getUser(id)) actually do at
+      runtime with methodOn(...)?
+    options:
+      - "It invokes getUser(id) and links to its return value"
+      - "It performs an HTTP call to discover the URL"
+      - "methodOn returns a proxy that records the method invocation (and captured args) without executing real controller logic, so linkTo can build the URI from the mapping metadata"
+      - "It reads a static routes file generated at build time"
+    answer: 2
+    explanation: |
+      methodOn creates a proxy of the controller that captures which method was called and with what
+      arguments, without running the real body. WebMvcLinkBuilder.linkTo then reconstructs the URI
+      from the @RequestMapping metadata and captured path/query values. This keeps links in sync with
+      mappings and avoids hardcoded URIs.
+    ref: "concepts.md#hateoas"
+  - id: spring-mvc-rest-apis-101
+    difficulty: expert
+    tags: [dispatcherservlet, root-context, child-context]
+    question: |
+      In a classic (non-Boot) setup with a root context (services, repositories) loaded by
+      ContextLoaderListener and a DispatcherServlet child context (controllers), a controller in the
+      child context autowires a service — fine. But a @Bean in the root context tries to autowire a
+      controller and fails. Why?
+    options:
+      - "Controllers cannot be autowired anywhere"
+      - "Autowiring across contexts is disabled by @EnableWebMvc"
+      - "The root context loads after the child, so timing prevents it"
+      - "The child (web) context sees parent (root) beans, but the parent cannot see child beans; the controller lives only in the child context and is invisible to the root context"
+    answer: 3
+    explanation: |
+      Context hierarchy is one-directional: a child context resolves beans from its parent, but the
+      parent has no knowledge of child-context beans. Controllers registered in the DispatcherServlet
+      child context are therefore not injectable into root-context beans. Boot's single-context model
+      sidesteps this, but the classic hierarchy still enforces it.
+    ref: "concepts.md#dispatcherservlet-front-controller-flow"

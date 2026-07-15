@@ -189,6 +189,26 @@ use (or provide a no-arg + `@Autowired` on one).
 Boot tip: with Lombok, `@RequiredArgsConstructor` generates a constructor for all `final`
 fields, giving clean constructor injection with no boilerplate.
 
+**Multiple-constructor resolution rules (often misremembered).** If a class has several
+constructors and none is annotated, Spring uses the no-arg constructor if present. You may
+annotate at most **one** constructor with `@Autowired(required=true)`. If you want Spring
+to *choose* among constructors, annotate several with `@Autowired(required=false)` — Spring
+then picks the "greediest" constructor whose dependencies can all be satisfied, falling
+back to a default constructor if none can. A single constructor is always used implicitly,
+even without `@Autowired`, even if it is non-public.
+
+**Field injection's subtle testing failure.** Beyond needing reflection, field injection
+into a `final`-less field means a test that forgets to set a collaborator gets a silent
+`NullPointerException` at method-call time rather than a clear "missing dependency" at
+construction. Constructor injection makes the required set an unforgeable part of the
+type's contract.
+
+**Setter injection and re-entrancy.** Setters can be called more than once and after the
+object is otherwise in use, which is both the feature (reconfiguration) and the hazard
+(a bean can be observed in a partially wired state by another thread during startup). For
+mandatory collaborators this is a real thread-visibility concern that constructor
+injection with `final` fields eliminates (see the concurrency section).
+
 ---
 
 ## @Autowired resolution algorithm
@@ -226,6 +246,27 @@ Advanced: `@Autowired` is processed by `AutowiredAnnotationBeanPostProcessor`. G
 are considered part of the type: `@Autowired Repository<Order>` will only match a bean
 whose generic type is `Repository<Order>`. Arrays, `Collection`, `List`, `Set`, and `Map`
 of a type are injected with *all* matching beans (see collections injection).
+
+**Subtleties senior candidates should know:**
+- **`@Qualifier` narrows the candidate set *before* `@Primary` is considered.** The
+  resolution isn't a flat "primary then qualifier" — a `@Qualifier` filters candidates,
+  and only among the survivors does `@Primary`/`@Priority`/name-fallback break ties. This
+  is why a `@Qualifier` at the injection point "beats" a `@Primary` marked elsewhere.
+- **Name-based fallback uses the injection point name, not arbitrary matching.** For a
+  field it's the field name; for a constructor/method parameter it's the parameter name —
+  which requires parameter names to be retained in the bytecode (`-parameters`, on by
+  default for Spring Boot builds) or the fallback silently fails.
+- **`@Primary` on multiple beans of the same type is itself an error:** if two candidates
+  are both `@Primary`, resolution throws `NoUniqueBeanDefinitionException` ("more than one
+  'primary' bean found").
+- **Spring 6.2 added `@Fallback`** — the inverse of `@Primary`. A `@Fallback` bean is only
+  chosen when no non-fallback candidate exists, useful for supplying a default that any
+  user-defined bean automatically supersedes without needing `@ConditionalOnMissingBean`.
+- **Exact exceptions:** *zero* candidates for a required point →
+  `NoSuchBeanDefinitionException`; *multiple* indistinguishable candidates →
+  `NoUniqueBeanDefinitionException`. Both are subclasses of `BeansException` and, at
+  startup, surface wrapped in a `UnsatisfiedDependencyException` /
+  `BeanCreationException`.
 
 ---
 
@@ -276,6 +317,26 @@ Key points:
   vendor-neutral. Requires the `jakarta.inject`/`javax.inject` dependency on the classpath.
 - `@Autowired` supports `required=false`; `@Resource` and `@Inject` do not (an `@Inject`
   optional dependency is expressed via `Provider<T>` or Spring's `ObjectProvider<T>`).
+
+**Different post-processors, different bootstrapping.** `@Resource`, `@PostConstruct`, and
+`@PreDestroy` (JSR-250) are handled by `CommonAnnotationBeanPostProcessor`, while
+`@Autowired`, `@Value`, and `@Inject` are handled by
+`AutowiredAnnotationBeanPostProcessor`. A consequence that trips people up: **you cannot
+use these injection annotations inside your own `BeanPostProcessor` or
+`BeanFactoryPostProcessor`** — those infrastructure beans are instantiated so early that
+the post-processors that would inject them haven't run yet. Wire them via constructor
+arguments in an `@Bean` method instead.
+
+**`@Resource` disambiguation trick.** Because `@Resource` matches by name first, it neatly
+resolves the self-injection / same-`@Configuration` `@Bean` reference problem: it fetches
+the bean back by its unique name (obtaining the proxy) without engaging type-based
+candidate selection at all.
+
+**`@Resource` name resolution order.** With an explicit `name` it looks that up directly;
+without one it derives the name from the field/property and matches by name; only if no
+name match exists does it fall back to a by-type match (and then a `@Qualifier`, if
+present, is honored). If the derived name matches no bean and multiple beans of the type
+exist, you get a resolution failure rather than a silent type match.
 
 **Jakarta EE / Spring Boot 3.x note:** Spring Framework 6 / Spring Boot 3 migrated from
 the `javax.*` namespace to `jakarta.*`. So it's now `jakarta.annotation.Resource` and
@@ -354,6 +415,21 @@ Details that come up in interviews:
 - A `@Qualifier` on a collection injection point restricts it to beans carrying that
   qualifier — useful for grouping a subset.
 
+Advanced collection details:
+- **Constructor/factory multi-element points resolve to empty, not failure.** Although a
+  scalar constructor argument is required by default, an array/collection/`Map` constructor
+  parameter resolves to an *empty* instance when no beans match — different from an
+  `@Autowired` field collection, which is required by default and fails when empty.
+- **`@Order` affects the injected list order but NOT bean creation/startup order.** Startup
+  order is governed by the dependency graph and `@DependsOn`; `@Order` only reorders the
+  elements handed to an injection point (and the results of `ObjectProvider.stream()`
+  when using `.orderedStream()`).
+- **A bean can be excluded from a same-type collection by `@Qualifier` grouping**, and a
+  self-referencing bean is *not* added to a collection of its own type (self references are
+  fallback-only and never participate in normal candidate selection).
+- **`Map<String, T>` requires a `String` key.** A `Map` with any other key type is treated
+  as an ordinary bean to inject, not as a "collect all beans of T" request.
+
 ---
 
 ## Circular dependencies and the three-level singleton cache
@@ -406,6 +482,32 @@ cycle (redesign, extract a third bean, or use `@Lazy` / `ObjectProvider` /
 proxy instead of the real bean, deferring the real lookup until first use, which breaks
 the construction-time cycle (works even with constructor injection).
 
+**The AOP-proxy-in-a-cycle failure mode (a classic senior trap).** The three-level cache
+normally exposes an early reference that already accounts for AOP proxying. But if the
+early reference is exposed as the *raw* object and the bean is only proxied *later* (in a
+post-processor after property population), the collaborator that grabbed the early
+reference ends up holding the raw target while the container's own copy is the proxy. In
+older/edge cases Spring detects this inconsistency and throws
+`BeanCurrentlyInCreationException` with a message like "Bean with name 'x' has been
+injected into other beans ... in its raw version as part of a circular reference, but has
+eventually been wrapped." The usual triggers are `@Async` (whose proxy is created by a
+different post-processor than the `SmartInstantiationAwareBeanPostProcessor` used for early
+references) combined with a cycle. The fix is to break the cycle or use `@Lazy`.
+
+**Why constructor cycles are fundamentally unresolvable.** The early-reference trick
+requires an *instance to already exist* so it can be placed in level 3 before its
+properties are populated. A constructor cycle needs the collaborator *before* the instance
+exists, so there is nothing to expose early. `spring.main.allow-circular-references=true`
+therefore does **not** rescue a pure constructor cycle — it only re-enables the
+setter/field early-reference mechanism that was disabled by default in Boot 2.6.
+
+**Cache promotion is one-directional and eager-cleared.** Once an object is promoted from
+level 3 to level 2, its factory is removed from level 3, and once fully initialized it
+moves to level 1 and is removed from level 2 — the three maps are mutually exclusive at
+any instant. Prototype-scoped beans are *never* placed in these caches, which is why
+prototype↔prototype cycles are always unresolvable (Spring can't track "currently in
+creation" across independent prototype instances) and throw immediately.
+
 ---
 
 ## @Lazy injection and when beans are created
@@ -442,6 +544,106 @@ properties/inject → `BeanNameAware`/`*Aware` → `BeanPostProcessor.before` �
 `@PostConstruct` → `InitializingBean.afterPropertiesSet` → custom `init-method` →
 `BeanPostProcessor.after` (proxy often created here) → bean ready. (Covered in depth in
 the Bean Scopes & Lifecycle topic.)
+
+---
+
+## Scope mismatch and injecting shorter-lived beans
+
+A common senior-level trap: injecting a **shorter-lived** bean (prototype, request,
+session) into a **longer-lived** one (singleton). Because a singleton is wired **once** at
+creation, a plain injected prototype is resolved a single time and then effectively behaves
+like a singleton — you get the *same* instance forever, not a fresh one per use.
+
+```java
+@Component @Scope("prototype")
+class Task { }
+
+@Service
+class Runner {
+    @Autowired private Task task;   // resolved ONCE — same Task every call, not "prototype"
+}
+```
+
+Correct ways to get a fresh instance each time from a singleton:
+- **`ObjectProvider<Task>` / JSR-330 `Provider<Task>`** — call `getObject()` per use.
+- **`@Lookup` method injection** — Spring overrides an abstract/concrete method with a CGLIB
+  subclass that returns a fresh `getBean` result on each call.
+- **Scoped proxy** — `@Scope(value="prototype", proxyMode=TARGET_CLASS)`; the injected proxy
+  delegates to a new (or scope-appropriate) instance per invocation.
+
+For `request`/`session` beans injected into singletons, a **scoped proxy** is mandatory:
+the proxy resolves the real bean from the currently active scope on each method call. Injecting
+the real bean directly fails outside an active request, or captures one request's instance forever.
+
+`@Lookup` internals: Spring uses CGLIB to create a runtime subclass overriding the lookup
+method, so the method must not be `private`, `final`, or `static`, and the bean must be
+subclassable. This is "method injection" and is one of the few places the container
+subclasses your class purely for wiring.
+
+---
+
+## Programmatic access, ApplicationContextAware, and Service Locator
+
+Sometimes you need the container itself — e.g., to resolve a bean whose type is chosen at
+runtime. Options, from most to least "Spring-idiomatic":
+
+- **`ObjectProvider<T>`** injected as a dependency — lazy, type-safe, no container coupling.
+- **`ApplicationContextAware`** / `BeanFactoryAware` — the container injects itself via the
+  aware callback; you then call `getBean`. This is the Service Locator pattern and couples
+  your code to Spring, so it's a fallback, not a default.
+- **`@Autowired ApplicationContext ctx`** — the context is itself a resolvable dependency.
+
+`Aware` callbacks (`BeanNameAware`, `BeanFactoryAware`, `ApplicationContextAware`, etc.) are
+invoked by dedicated `BeanPostProcessor`s (e.g. `ApplicationContextAwareProcessor`) **after
+property population but before `@PostConstruct`**. Ordering among aware interfaces:
+`BeanNameAware` → `BeanClassLoaderAware` → `BeanFactoryAware`, then the context-level aware
+interfaces from `ApplicationContextAwareProcessor`.
+
+Preferring `ObjectProvider`/`@Autowired` over `ApplicationContextAware` keeps beans testable
+as POJOs and avoids the Service Locator anti-pattern (which hides dependencies and reintroduces
+the coupling DI was meant to remove).
+
+---
+
+## Thread-safety and concurrency of injection
+
+- **Singleton beans are created single-threaded during context refresh**, but are then shared
+  across all request threads. The container guarantees a singleton is fully initialized (all
+  injection + `@PostConstruct` done) before it's published to `singletonObjects`, so
+  application threads never see a partially wired singleton — *provided* you don't leak `this`
+  early (e.g., registering a listener in a constructor) or rely on setter re-injection at runtime.
+- **`final` fields set via constructor injection get the JMM's final-field publication
+  guarantee**: their values are safely visible to other threads without extra synchronization.
+  Setter/field-injected non-final fields do **not** carry that guarantee, so a bean observed
+  through a data race could see a stale/null collaborator. This is a concrete, if subtle,
+  argument for constructor injection in concurrent apps.
+- **The three-level cache maps are guarded by synchronization** on the singleton mutex inside
+  `DefaultSingletonBeanRegistry`; concurrent `getBean` calls for a not-yet-created singleton
+  are serialized so the bean is created exactly once. Prototypes have no such guard — every
+  request builds a new instance.
+- **Bean *state* is your responsibility.** DI makes the wiring thread-safe; it does nothing to
+  make a mutable singleton's fields thread-safe. A singleton holding mutable request state is a
+  classic concurrency bug regardless of how it was injected.
+
+---
+
+## Bean overriding, definition order, and startup ordering
+
+- **Bean definition overriding** (two beans registered under the same name) was allowed by
+  default historically but is **disabled by default since Spring Boot 2.1**. A duplicate name
+  now throws `BeanDefinitionOverrideException` at startup unless
+  `spring.main.allow-bean-definition-overriding=true`. This is distinct from having two beans
+  of the same *type* under different names (which is a *resolution* problem solved by
+  `@Primary`/`@Qualifier`).
+- **`@DependsOn`** forces initialization order between beans that have no direct injection
+  edge (e.g., a bean that must run after some infrastructure bean side-effect). It controls
+  creation *and* destruction order but does not create an injection relationship.
+- **`@Order`/`Ordered`** does **not** affect singleton startup order — only the order of
+  elements at collection injection points and in ordered streams, plus things like servlet
+  filter chains and `@ControllerAdvice`. Startup order is dependency-driven.
+- **`@Priority`** participates in autowiring tie-breaks for a *single* injection (lower value
+  wins) and in collection ordering, but `jakarta.annotation.Priority` cannot be placed on a
+  `@Bean` *method* — model that with `@Order` plus `@Primary`/`@Fallback`.
 
 ---
 

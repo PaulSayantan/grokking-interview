@@ -94,7 +94,17 @@ public class LoggingAspect {
 
 **Key gotchas / advanced:**
 - Only `@Around` receives a `ProceedingJoinPoint`; the others receive a plain
-  `JoinPoint` (if they declare one).
+  `JoinPoint` (if they declare one). `ProceedingJoinPoint extends JoinPoint`, and it
+  is only valid to declare it in an `@Around` method — declaring it elsewhere throws
+  `IllegalArgumentException` at proxy time.
+- `pjp.proceed()` vs `pjp.proceed(Object[])`: the no-arg form re-uses the original
+  arguments; the array form lets an `@Around` **rewrite** the arguments passed to the
+  target. The array's length/types must line up with the method signature or you get
+  an `IllegalArgumentException` from the reflective invocation. This is how "argument
+  massaging" aspects (trimming strings, decrypting fields) work.
+- `proceed()` may be called **zero, one, or many times**. Calling it more than once
+  (e.g. a retry aspect) re-executes the *rest of the interceptor chain and the target*,
+  which is a correctness hazard if other advice in the chain has side effects.
 - `@Around` **must** return a value (usually the result of `pjp.proceed()`) — forget
   it and the caller gets `null` even though the target ran.
 - `@Around` **must** re-throw or `throws Throwable`; swallowing the exception silently
@@ -223,11 +233,28 @@ only of its interfaces).
 
 **CGLIB constraints (advanced):**
 - Class must not be `final`; the method to advise must not be `final`, `private`, or
-  `static` (CGLIB works by subclassing and overriding).
-- The target's constructor is invoked when the proxy subclass is created; historically
-  CGLIB required a no-arg constructor and used Objenesis to bypass it — modern Spring
-  bundles CGLIB and Objenesis so this is largely transparent.
-- CGLIB `final`/`private` methods silently run **un-advised** rather than erroring.
+  `static` (CGLIB works by subclassing and overriding). Package-private methods in a
+  parent class from a different package are effectively private and cannot be advised
+  either.
+- **Constructor invocation:** Spring instantiates the CGLIB proxy subclass via
+  **Objenesis**, which bypasses the constructor, so your target's constructor is *not*
+  called a second time on the proxy instance. The Spring reference is explicit: "The
+  constructor of your proxied object will not be called twice, since the CGLIB proxy
+  instance is created through Objenesis. However, if your JVM does not allow for
+  constructor bypassing, you might see double invocations and corresponding debug log
+  entries from Spring's AOP support." This is why you must **never put business logic /
+  side effects in a proxied bean's constructor** — and why field initializers on the
+  proxy subclass run against a bypassed-constructor instance (a subtle source of "my
+  field is null in the proxy" bugs when logic depends on subclass field init).
+- CGLIB is repackaged **into `spring-core`** (`org.springframework.cglib.*`), so you
+  don't add a separate CGLIB dependency; Objenesis is likewise bundled/repackaged.
+- CGLIB `final`/`private` methods silently run **un-advised** rather than erroring —
+  the proxy simply can't override them, so calls resolve to the inherited target
+  implementation with no advice. There is no startup failure, which makes this a
+  quiet correctness trap.
+- **Two instances exist:** for a CGLIB-proxied `@Configuration`/service bean there is
+  the raw target instance *and* the proxy subclass instance. Spring publishes the proxy
+  as the bean; the raw instance is only reachable inside the target's own `this`.
 
 **Why interviewers care:** injecting a bean by its concrete class when a JDK proxy is
 in play fails because the proxy only implements the interface. This drove the shift to
@@ -487,6 +514,157 @@ Servlet Filter (post) → Client
 **Execution order for one request:** Filter (pre) → Interceptor `preHandle` → Aspect
 around controller → Controller → Aspect (after) → Interceptor `postHandle` →
 Interceptor `afterCompletion` → Filter (post).
+
+---
+
+## Proxy creation internals and failure modes
+
+Understanding *when* and *how* the proxy is built explains most "why didn't my advice
+fire?" incidents.
+
+- **When proxies are created.** `AnnotationAwareAspectJAutoProxyCreator` is a
+  `SmartInstantiationAwareBeanPostProcessor`. It wraps a bean in
+  `postProcessAfterInitialization` (i.e. *after* the raw bean is fully constructed and
+  initialized). This ordering has two consequences:
+  1. Any code that runs **during** bean construction / `@PostConstruct` sees the *raw*
+     target (`this`), never the proxy — advice on methods called from a constructor or
+     `@PostConstruct` does **not** fire.
+  2. If a bean is needed *before* the auto-proxy creator itself is instantiated (a common
+     hazard when a `BeanPostProcessor` or its dependencies are advised), you get the
+     famous log: *"Bean X is not eligible for getting processed by all
+     BeanPostProcessors (for example: not eligible for auto-proxying)."* — the bean is
+     created too early and ends up **un-proxied**, so `@Transactional`/aspects silently
+     no-op. Fix: avoid making infrastructure beans (or their dependencies) depend on
+     advised beans; use `@Lazy`.
+- **Circular references + proxies.** When two singletons reference each other and one is
+  advised, Spring's early-reference mechanism exposes an early proxy via
+  `getEarlyBeanReference`. If a later `BeanPostProcessor` would have wrapped it
+  differently, Spring raises `BeanCurrentlyInCreationException`. Spring Boot 2.6+ sets
+  `spring.main.allow-circular-references=false` by default, so such graphs now fail fast
+  at startup rather than limping along with a possibly-unproxied bean.
+- **`@Lazy` and scoped-proxy interplay.** A `@Lazy` injection point or a scoped bean
+  (`@Scope(proxyMode = ...)`) already introduces *its own* proxy. Stacking AOP on top
+  produces a proxy-of-a-proxy; `AopProxyUtils.ultimateTargetClass` / `AopUtils.isAopProxy`
+  are the introspection helpers interviewers expect you to know.
+- **`@Async` return-type rule.** An `@Async` method must return `void`, `Future`,
+  `CompletableFuture`, or a reactive type; returning a plain value means the caller gets
+  a value produced on a *different* thread that the proxy cannot hand back synchronously,
+  so Spring only supports the async-friendly return types. Exceptions from a `void`
+  `@Async` method are swallowed unless you register an `AsyncUncaughtExceptionHandler`.
+
+---
+
+## Argument, return, and annotation binding in pointcuts
+
+Beyond selecting *where* advice runs, pointcut designators can **bind** context into
+advice parameters, which is both powerful and a common source of "advice didn't match"
+confusion.
+
+- `args()`, `@annotation()`, `@within()`, `target()`, `this()` can each **bind** a value
+  when given a *parameter name* instead of a type literal, e.g.
+  `@Before("execution(* *(..)) && args(id,..)")` binds the first argument to the advice
+  parameter `id`. The parameter's declared type acts as an implicit runtime `instanceof`
+  filter, so `args(String)` only matches when the runtime argument is a `String`.
+- **Runtime vs static matching.** `execution`, `within`, `@within`, `@annotation` are
+  matched statically at proxy-creation time. `args`, `this`, `target` (when they bind or
+  test a subtype) may require **per-invocation** runtime checks, adding a small cost and
+  meaning the same join point can match on one call and not another.
+- **Parameter name resolution.** Binding relies on parameter names being available. With
+  older bytecode or aggressive optimization, names may be lost; you then need the
+  `argNames` attribute (`@Before(value="...", argNames="id")`) or compilation with
+  `-parameters`. This is a real "works on my machine" trap.
+- **`@annotation` binding gives you the annotation instance:**
+  `@Around("@annotation(audited)") ... Object advise(ProceedingJoinPoint pjp, Audited
+  audited)` hands you the annotation so you can read its attributes — the standard way to
+  build configurable custom aspects.
+- **CGLIB and generics:** a pointcut on a bridge method / generic signature can behave
+  surprisingly; Spring matches against the *most specific* method, but interviewers
+  sometimes probe whether advice fires on synthetic bridge methods (it generally does
+  not on the bridge itself).
+
+---
+
+## Filters: registration, ordering, and concurrency
+
+- **Auto-registration double-firing.** If you annotate a `Filter` with `@Component`
+  *and* also register it in a `FilterRegistrationBean`, Spring Boot registers it
+  **twice** (once by bean auto-detection, once explicitly). The fix is to either not use
+  `@Component`, or set `registration.setEnabled(false)` on the auto-detected one — or
+  keep the filter a plain bean referenced only by the `FilterRegistrationBean`.
+- **Ordering scope.** `FilterRegistrationBean.setOrder()` and `@Order` order filters
+  **relative to each other**, but Spring Security's chain is registered at
+  `SecurityProperties.DEFAULT_FILTER_ORDER` (`-100`). To run a custom filter before or
+  after security you must pick an order relative to `-100`, not just relative to your own
+  filters.
+- **`Ordered.HIGHEST_PRECEDENCE` = `Integer.MIN_VALUE` runs first**; higher numbers run
+  later — the same convention as aspects, and the opposite of what "highest number wins"
+  intuition suggests.
+- **Thread-safety.** A `Filter` bean is a **singleton shared across all request
+  threads**; storing per-request state in an instance field is a data-race bug. Use
+  method-local variables, request attributes, or `ThreadLocal`/MDC that you **clear in a
+  `finally`** — a `ThreadLocal` left un-cleared leaks across pooled request threads and
+  causes cross-request data bleed (a classic correlation-ID / security-context leak).
+- **Response already committed.** Once `chain.doFilter` has flushed/committed the
+  response, post-chain code in the filter can no longer change status or headers
+  (`response.isCommitted()` returns true). Buffering wrappers
+  (`ContentCachingResponseWrapper`) exist precisely so you can inspect/modify the body
+  before it is committed — but you must call `copyBodyToResponse()` or nothing is
+  written to the client.
+- **Async/error dispatch.** By default a filter is invoked for `REQUEST` dispatches
+  only. To also run on `ASYNC`, `ERROR`, `FORWARD`, or `INCLUDE` dispatches you must set
+  `setDispatcherTypes(...)`. `OncePerRequestFilter` additionally guards against running
+  twice within the same dispatch cycle.
+
+---
+
+## Interceptors: async, ordering, and the postHandle trap
+
+- **`@ResponseBody`/`ResponseEntity` bodies are already committed before `postHandle`.**
+  Per the Spring reference, for these handlers the response is written and committed
+  inside the `HandlerAdapter` *before* `postHandle` runs — so you **cannot** add headers
+  or alter the body from `postHandle`. Use `ResponseBodyAdvice` (a `@ControllerAdvice`)
+  or a servlet `Filter` instead. `postHandle`'s `ModelAndView` argument is also `null`
+  for `@ResponseBody`/REST handlers (there is no view/model).
+- **Async requests use `AsyncHandlerInterceptor`.** When a controller returns a
+  `Callable`/`DeferredResult`/reactive type, the container releases the request thread
+  and Spring calls `afterConcurrentHandlingStarted(...)` **instead of**
+  `postHandle`/`afterCompletion` on the initial dispatch. When the async result is ready
+  the request is *re-dispatched* and `preHandle` → `postHandle` → `afterCompletion` run
+  again on the second dispatch. Interceptors doing timing/cleanup must account for this
+  two-phase lifecycle or they under/over-count.
+- **`afterCompletion` ordering is reversed.** Interceptors run `preHandle` in
+  registration order; `postHandle` and `afterCompletion` run in **reverse** registration
+  order (LIFO, like nested try/finally). And `afterCompletion` is only invoked for
+  interceptors whose `preHandle` **already returned true** — if interceptor #2's
+  `preHandle` returns `false`, only interceptors #1..#2's already-completed preHandles
+  are unwound.
+- **Interceptors are singletons too** — same thread-safety caveats as filters; never
+  hold per-request state in fields.
+- **Not a security boundary.** The Spring reference explicitly warns that interceptors
+  are not ideal as a security layer because their path matching can mismatch annotated
+  controller path matching; use Spring Security (filter-based) for authz.
+
+---
+
+## Transaction, AOP interaction edge cases
+
+Because `@Transactional`, `@Cacheable`, `@Async`, `@Retryable` are *all* just AOP advice,
+their subtle behaviors reduce to proxy mechanics:
+
+- **Advice ordering matters for correctness.** If a caching aspect wraps *outside* the
+  transaction aspect, a cache hit skips the transaction entirely (often desirable); if
+  it wraps *inside*, you open a transaction even for cache hits. `@Transactional`'s order
+  is `LOWEST_PRECEDENCE` by default, so most custom aspects run outside it unless you set
+  their order lower.
+- **`@Transactional` visibility.** On a CGLIB proxy, `@Transactional` on a
+  `protected`/package-private/private method is **ignored** (proxy can't override /
+  the call isn't public). Spring will not error; the method just runs non-transactionally.
+- **Checked-exception rollback.** Proxy tx advice only rolls back on `RuntimeException`
+  and `Error` by default; a checked exception commits unless you specify
+  `rollbackFor`. This is advice behavior, not a database rule.
+- **Self-invocation applies uniformly.** A `@Cacheable` method calling another
+  `@Cacheable` method on the same bean via `this` gets **no second cache lookup** — the
+  same proxy-bypass rule as transactions.
 
 ---
 

@@ -58,6 +58,22 @@ read models.
 - Right-sizing: a service should map to a *bounded context* (DDD), not to a single class or
   a single table.
 
+**Staff-level deep dive — decomposition strategy and communication.**
+- **Strangler Fig migration:** extract services incrementally from a monolith by routing
+  specific paths through a facade/gateway to the new service while the rest stays in the
+  monolith — never a big-bang rewrite. The seam is usually a bounded context with low coupling.
+- **Sync vs async coupling has two dimensions:** *temporal* coupling (both parties must be up
+  at the same time — synchronous REST/gRPC) and *behavioral/afferent* coupling. Async events
+  remove temporal coupling but introduce eventual consistency and out-of-order/duplicate
+  delivery. A long *synchronous* call chain A→B→C→D multiplies latency and failure probability:
+  if each hop is 99.9% available, four hops give ~99.6%, and p99 latencies compound.
+- **Shared libraries are a hidden coupling vector.** A shared "common" jar with domain logic
+  forces lockstep upgrades across services — a compile-time distributed monolith. Keep shared
+  code to stable, generic utilities (or none).
+- **Two-pizza / team ownership:** service boundaries that cut across team boundaries create
+  cross-team release coordination — the organizational form of a distributed monolith
+  (Conway's Law working against you).
+
 ---
 
 ## API Gateway (Spring Cloud Gateway)
@@ -113,6 +129,32 @@ there.
 - **Aggregation** (composing multiple downstream calls into one response) is best done in a
   BFF/composition service, not in generic gateway filters.
 
+**Staff-level deep dive — filter internals, ordering, and pitfalls.**
+- **GlobalFilter vs GatewayFilter:** a `GatewayFilter` applies to a single route (declared in
+  its `filters:` list or produced by a `GatewayFilterFactory`); a `GlobalFilter` applies to
+  every route. Internally globals are adapted to `GatewayFilterFactory` and merged into each
+  route's chain, then the whole chain is sorted by `Ordered`. Lower `getOrder()` runs earlier
+  on the *pre* side and (because it's a single reactive chain that unwinds) later on the *post*
+  side. `NettyWriteResponseFilter` runs near the end (Ordered around `-1`) to write the
+  proxied response.
+- **Pre vs post logic in one filter:** in a reactive filter, code before
+  `chain.filter(exchange)` is the *pre* phase; code in `.then(Mono.fromRunnable(...))` after it
+  is the *post* phase. You cannot mutate the response body length in a naive post filter without
+  a `ModifyResponseBody`/`ModifyRequestBody` filter because the body is a streaming
+  `Flux<DataBuffer>` — buffering it defeats back-pressure and can OOM on large payloads.
+- **`ServerWebExchange` mutation is copy-on-write:** `exchange.mutate().request(...)` returns a
+  new exchange; forgetting to pass the mutated exchange down the chain silently loses your
+  header/path change.
+- **Retry filter + non-idempotent methods:** the SCG `Retry` filter by default retries only
+  `GET`. Enabling it for `POST` without idempotency keys can double-submit. It also retries on
+  connection failures where the request may or may not have reached the backend.
+- **`lb://` requires a `ReactorLoadBalancerExchangeFilterFunction`/`ReactiveLoadBalancer`** on
+  the classpath (spring-cloud-loadbalancer). Without a discovery client + LB, `lb://service-id`
+  resolves to nothing and you get a 503 / `NotFoundException`.
+- **`X-Forwarded-*` and `Forwarded` headers:** SCG adds them by default (`ForwardedHeadersFilter`,
+  `XForwardedHeadersFilter`). If you double-proxy (external LB → SCG → service) and the backend
+  trusts these blindly, a client can spoof `X-Forwarded-For`; strip/normalize at the trusted edge.
+
 ---
 
 ## Service Discovery (Eureka)
@@ -156,6 +198,28 @@ public class RegistryApp { }
 - Alternatives: **Consul**, **Zookeeper**, **etcd**, **Nacos** — Spring Cloud has starters for
   Consul/Zookeeper. Eureka is AP; Zookeeper/etcd are CP.
 
+**Staff-level deep dive — the propagation-delay math and the "deregistration gap".**
+- **Total time for a client to see a new instance** is roughly the sum of several caches, not
+  just one: instance registers → server's response cache (`responseCacheUpdateIntervalMs`,
+  default 30s) → client fetches delta (`registryFetchIntervalSeconds`, default 30s) → the
+  load balancer's own `ServiceInstanceListSupplier` cache. Worst case can approach **2–3
+  minutes** with defaults. This is why fresh instances get no traffic immediately and why a
+  scaled-down instance can still receive requests for tens of seconds.
+- **The deregistration gap is the dangerous one:** when an instance shuts down, other clients
+  keep the stale entry until their caches expire, sending requests to a dead host. Mitigate
+  with (a) graceful shutdown + `eureka.client.shouldUnregisterOnShutdown=true` (explicit
+  cancel), (b) short cache/lease intervals, and (c) retry-on-next-instance in the load balancer.
+  Self-preservation makes this worse because it suppresses eviction.
+- **`preferIpAddress`:** by default Eureka registers the hostname; in containers the hostname
+  is often non-resolvable, so `eureka.instance.prefer-ip-address=true` avoids "connection
+  refused to <podname>" errors.
+- **Peer replication is asynchronous and best-effort** across Eureka server nodes — two clients
+  talking to two different Eureka peers can briefly see different registries. Eureka does not do
+  quorum writes; it prioritizes availability.
+- **`minimum-number-of-calls` for self-preservation** is governed by the renewal threshold
+  (`eureka.server.renewalPercentThreshold`, default 0.85) — if received renewals drop below
+  85% of expected, self-preservation kicks in.
+
 ---
 
 ## Distributed and Centralized Configuration (Spring Cloud Config and Bus)
@@ -194,6 +258,28 @@ e.g. /order-service/prod   ->  merges application.yml + order-service-prod.yml
   client can fail to boot. Use `spring.cloud.config.fail-fast` + retry, or a local fallback.
 - Config drift and secrets in Git are common pitfalls; prefer Vault or encrypted values and
   audit the repo.
+
+**Staff-level deep dive — `@RefreshScope` internals and its traps.**
+- **How `@RefreshScope` works:** it's a custom Spring scope backed by a caching proxy. Every
+  injection point holds a CGLIB proxy; on `RefreshScopeRefreshedEvent` the scope disposes the
+  cached target so the *next* method call lazily re-creates the bean from the (now re-bound)
+  `Environment`. The refresh sequence: `Environment` is rebuilt from all property sources,
+  then `@ConfigurationProperties` beans are re-bound and `@RefreshScope` beans are cleared.
+- **The stale-reference trap:** if bean A (a plain singleton) captured a *field* from a
+  `@RefreshScope` bean B at construction (e.g. copied `b.getUrl()` into its own field), A keeps
+  the old value forever — only calls *through* B's proxy see new values. Inject the refresh-scoped
+  bean and call it, don't snapshot its state.
+- **Not everything can refresh:** the `@Bean` for a `DataSource`/connection pool, the servlet
+  container port, `@Scheduled` cron expressions bound at startup, and Logback levels (unless via
+  `/actuator/loggers`) generally do not change on refresh. Some, like `DataSource`, can be made
+  refreshable but it drops existing connections.
+- **Refresh is not atomic across a fleet:** even with Spring Cloud Bus, instances refresh at
+  slightly different times, so during a rollout two instances can serve requests with different
+  config. Design config changes to be backward/forward compatible (no coordinated flips).
+- **`spring.config.import` ordering:** with `configserver:`, remote properties are imported at
+  the *import* location in the property-source order. `optional:configserver:` lets the app boot
+  when the server is unreachable. Understand that command-line args and OS env still win over
+  imported remote config (standard Boot precedence).
 
 ---
 
@@ -235,6 +321,30 @@ restTemplate.getForObject("http://order-service/orders/1", Order.class);
 - SCL is reactive under the hood; when used with a blocking `RestTemplate` a blocking bridge
   is used.
 
+**Staff-level deep dive — supplier delegation, retries, and per-client config isolation.**
+- **`ServiceInstanceListSupplier` is a decorator chain,** not a single class. A typical stack:
+  `DiscoveryClientServiceInstanceListSupplier` (source) → `CachingServiceInstanceListSupplier`
+  (TTL cache) → optional `HealthCheckServiceInstanceListSupplier` /
+  `ZonePreferenceServiceInstanceListSupplier` / `RequestBasedStickySessionServiceInstanceListSupplier`
+  / `SameInstancePreferenceServiceInstanceListSupplier`. You enable each via
+  `spring.cloud.loadbalancer.configurations` or by declaring the bean. Order matters:
+  caching should wrap the discovery source, and filters should wrap caching.
+- **Retry semantics:** SCL retry (`spring.cloud.loadbalancer.retry.*`) can retry on the
+  *same* instance and/or the *next* instance, and only on configured statuses/methods.
+  `retryOnAllOperations=false` by default restricts retries to `GET`. This is separate from
+  Resilience4j retry and from Feign's `Retryer`; stacking all three can multiply attempts
+  (e.g. Feign retry × LB retry × Resilience4j retry) — a common "why did we hit the backend 27
+  times" bug.
+- **The `@Configuration` isolation trap (repeat for emphasis):** a `@LoadBalancerClient`
+  configuration class must NOT be discovered by the main `@ComponentScan`, otherwise it becomes
+  the *global* default for all clients. Place it in a package outside the scan or exclude it.
+- **Round-robin is stateful per-JVM:** `RoundRobinLoadBalancer` uses an `AtomicInteger`
+  position, so distribution is even only within one process; across many client instances each
+  starts its own counter, so a specific backend can still see skew under low volume.
+- **Blocking bridge cost:** `@LoadBalanced RestTemplate` uses `BlockingLoadBalancerClient`,
+  which resolves the instance synchronously; on a Netty/WebFlux app prefer `@LoadBalanced
+  WebClient` to stay non-blocking.
+
 ---
 
 ## Declarative REST Clients (OpenFeign)
@@ -271,6 +381,29 @@ public interface OrderClient {
   JDK `HttpURLConnection`.
 - `@SpringQueryMap` binds a POJO to query params; `@PathVariable`/`@RequestParam` **require the
   explicit name** on interfaces (parameter-name inference is unreliable without `-parameters`).
+
+**Staff-level deep dive — fallback vs fallbackFactory, config scope, and thread context.**
+- **`fallback` vs `fallbackFactory`:** `fallback` gives a static degraded implementation but
+  hides *why* the call failed; `fallbackFactory` receives the `Throwable`, so you can branch on
+  a 404 vs a timeout vs a `CallNotPermittedException`. A subtle trap: with Resilience4j-backed
+  Feign, the fallback fires for `CircuitBreaker`/`FeignException`, but the exception seen is the
+  *decoded* one — a custom `ErrorDecoder` changes what your `fallbackFactory` sees.
+- **Configuration precedence:** properties under `feign.client.config.<name>` override
+  `feign.client.config.default`, which override programmatic `@Configuration`. Naming the client
+  `default` sets the global fallback config. A per-client `@Configuration` referenced by
+  `@FeignClient(configuration=...)` must again be kept out of the main component scan (same trap
+  as LoadBalancer config).
+- **Header propagation and thread context:** a `RequestInterceptor` reading from
+  `RequestContextHolder` or a trace context only works if that context is present on the calling
+  thread. Feign calls dispatched to a *different* thread (async, `@Async`, reactor scheduler,
+  `ThreadPoolBulkhead`) lose `ThreadLocal`-based context unless it's propagated — a frequent
+  "the auth header is missing only under load / only async" bug.
+- **`FeignException` and connection reuse:** the default JDK `HttpURLConnection` client does not
+  pool connections; under load switch to Apache HttpClient 5 or OkHttp (`feign-hc5`/`feign-okhttp`)
+  for keep-alive and a bounded pool, or you'll exhaust ephemeral ports (`TIME_WAIT` build-up).
+- **`Retryer` is stateful and NOT thread-safe as a shared singleton** for the *default* impl —
+  Feign clones it per request. If you supply a custom `Retryer`, implement `clone()` correctly
+  or concurrent requests will corrupt each other's attempt counters.
 
 ---
 
@@ -330,6 +463,29 @@ public Order fallback(Long id, Throwable t) { return Order.cached(id); }
 - The breaker records the *result of the whole decorated call*; combine with TimeLimiter so a
   hung call counts as a failure rather than blocking forever.
 
+**Staff-level deep dive — window internals, HALF_OPEN concurrency, and self-calls.**
+- **COUNT_BASED vs TIME_BASED window internals:** the count-based window is a circular array of
+  the last N calls' outcomes (`O(1)` aggregate via incremental totals). The time-based window is
+  a ring of `N` one-second partial aggregates (`slidingWindowSize` = seconds); a call's result is
+  added to the current second's bucket, and buckets older than the window are evicted. So
+  `slidingWindowSize=10` means "last 10 calls" (count) vs "last 10 seconds" (time) — a very
+  different failure-rate denominator under bursty load.
+- **HALF_OPEN is bounded, not gated:** `permittedNumberOfCallsInHalfOpenState` permits exactly
+  that many concurrent trial calls; extra calls are rejected with `CallNotPermittedException`
+  while in HALF_OPEN. Only after all permitted trial calls complete is the aggregate failure
+  rate evaluated to decide CLOSED vs OPEN. `automaticTransitionFromOpenToHalfOpenEnabled=false`
+  by default means the OPEN→HALF_OPEN move happens on the *next call after the wait elapses*, not
+  via a background timer — a totally idle breaker stays OPEN indefinitely until someone calls.
+- **Self-invocation / proxy trap:** `@CircuitBreaker` (like `@Transactional`) is AOP-proxy based.
+  A method calling another `@CircuitBreaker`-annotated method on `this` bypasses the proxy, so the
+  inner breaker never engages. Split into separate beans or use self-injection.
+- **The breaker is a shared singleton keyed by `name`:** two methods annotated with the same
+  `name` share one `CircuitBreaker` instance and one sliding window — failures on one open the
+  other. This is by design (per-dependency), but surprising if you reuse a name across unrelated
+  calls. State is held in a thread-safe `AtomicReference`-based state machine.
+- **`recordFailurePredicate` / result-based failures:** you can count a *successful* return that
+  carries an error payload as a failure via a predicate, not just thrown exceptions.
+
 ---
 
 ## Resilience4j Retry, Rate Limiter, Bulkhead, Time Limiter
@@ -387,6 +543,29 @@ resilience4j.timelimiter.instances.orderService:
   retries feed the breaker's failure count.
 - Every decorator emits **Micrometer metrics** and events for observability.
 
+**Staff-level deep dive — rate limiter internals and bulkhead rejection semantics.**
+- **`AtomicRateLimiter` internals:** the default `RateLimiter` is a lock-free, nanosecond-based
+  implementation. It divides time into cycles of `limitRefreshPeriod`; each cycle grants
+  `limitForPeriod` permits. A caller that finds no permit waits up to `timeoutDuration` for the
+  next cycle, computed without a background thread (permits are calculated on-demand from the
+  clock). `timeoutDuration=0` means fail immediately with `RequestNotPermitted`. Because it's
+  cycle-based (not a smooth token bucket), you can get bursty behavior at cycle boundaries —
+  akin to a fixed window, not a leaky bucket.
+- **SemaphoreBulkhead rejection is immediate-ish:** `maxWaitDuration` controls how long a caller
+  blocks trying to acquire a permit; `0` rejects instantly with `BulkheadFullException`. It
+  isolates concurrency but the call still runs on the *caller's* thread, so a truly hung call
+  holds its permit until it returns — a slow dependency drains permits and blocks new callers.
+- **ThreadPoolBulkhead can't be combined with TimeLimiter naively via annotations order:** the
+  `TimeLimiter` must wrap the `ThreadPoolBulkhead`'s `CompletableFuture` for cancellation to
+  work; `cancelRunningFuture=true` interrupts the worker thread, but interruption only helps if
+  the blocking call responds to `Thread.interrupt()` (many JDBC drivers/socket reads do not).
+- **Queue-full behavior:** `ThreadPoolBulkhead` with a full `queueCapacity` and all threads busy
+  rejects with `BulkheadFullException` — it does *not* run the task on the caller thread (no
+  `CallerRunsPolicy` by default), which is what you want for isolation.
+- **Retry + RateLimiter interaction:** with default order Retry(outer) → RateLimiter, each retry
+  attempt reacquires a permit, so a retry storm can be *throttled* by the rate limiter but also
+  wastes permits legitimate first-attempts need.
+
 ---
 
 ## Distributed Tracing (Sleuth and Micrometer Tracing)
@@ -428,6 +607,29 @@ Boot 3:  micrometer-tracing-bridge-brave  +  zipkin-reporter-brave
 - Manual spans: inject `Tracer` (Micrometer) or `ObservationRegistry` and wrap custom work; on
   Sleuth you used `Tracer`/`@NewSpan`.
 
+**Staff-level deep dive — Observation API model, context leaks, and sampling nuances.**
+- **One `Observation`, many signals:** the Observation API is the single instrumentation point;
+  registered `ObservationHandler`s turn each observation into a Micrometer timer *and* a tracing
+  span *and* (optionally) log context. Order of `start()`/`stop()`/`error()` on an `Observation`
+  drives span lifecycle. Registering a `MeterRegistry`-based handler alone gives metrics but no
+  spans; you need the tracing handler (from `micrometer-tracing`) for spans.
+- **Context propagation across threads is opt-in:** `@Async`/executors lose the trace scope
+  unless you wrap them. Micrometer's `ContextSnapshot`/`ContextSnapshotFactory` captures the
+  current `ThreadLocal`s (trace context, MDC) and restores them on the target thread; Reactor
+  requires `Hooks.enableAutomaticContextPropagation()` (Reactor 3.5+) or manual
+  `contextWrite`/`ContextPropagation` so the trace id flows through operators. Forgetting this is
+  the classic "spans break at the reactive/async boundary" symptom.
+- **Sampling vs recording:** the sampling decision (a single bit in `traceparent`'s flags) is
+  made at the trace root and propagated. A downstream service **must not** re-decide — it honors
+  the parent's sampled flag, which is why probability should effectively be set at the edge.
+  Unsampled traces still propagate ids (so logs correlate) but export no spans.
+- **B3 vs W3C interop:** if one service emits B3 and another only reads `traceparent`, the trace
+  breaks into two. Configure `management.tracing.propagation.type` consistently (e.g. `W3C`,
+  `B3`, or both) across the fleet.
+- **Cardinality trap:** adding high-cardinality tags (user id, order id) as *low-cardinality*
+  Observation key-values explodes Micrometer metric time-series and can OOM the meter registry —
+  put those on the span (high-cardinality) not the metric.
+
 ---
 
 ## Saga Pattern (Distributed Transactions)
@@ -462,6 +664,29 @@ Order saga (orchestration):
   publishes the event — avoids the dual-write problem where the DB commits but the broker send
   fails (or vice versa).
 - Every step and compensation must be **idempotent** because messages can be redelivered.
+
+**Staff-level deep dive — compensation ordering, pivot steps, and outbox mechanics.**
+- **Pivot transaction / retriable vs compensatable steps:** model each saga step as
+  *compensatable* (can be semantically undone), the single *pivot* (the go/no-go commit point —
+  once it succeeds the saga must complete forward), or *retriable* (idempotent, guaranteed to
+  eventually succeed, only ever runs after the pivot). Compensations run only for steps *before*
+  the pivot; steps after must be retried forward, never compensated. Getting the pivot wrong
+  (e.g. treating a post-pivot step as compensatable) causes money/inventory inconsistencies.
+- **Compensations run in reverse order and must themselves be idempotent and commutative-safe**
+  because a compensation message can also be redelivered, and a "late success" of the original
+  step can arrive after its compensation (the ABA problem). Semantic locks (`PENDING` status)
+  guard against a compensation racing a delayed success.
+- **Outbox relay mechanics:** two flavors — *polling publisher* (a scheduled job `SELECT ... FOR
+  UPDATE SKIP LOCKED` the unpublished rows, publishes, marks sent) and *transaction-log tailing*
+  (CDC, e.g. Debezium reads the DB's WAL/binlog). CDC gives lower latency and no read load but
+  publishes in commit order and needs careful handling of schema changes. Both deliver
+  *at-least-once*, so consumers must dedupe.
+- **Ordering guarantees:** the outbox preserves per-aggregate ordering only if you publish by a
+  key (e.g. Kafka partition key = aggregate id). Cross-aggregate ordering is not guaranteed and
+  should not be relied on.
+- **Orchestrator persistence:** an orchestration saga must persist its own state machine (which
+  step, compensation status) transactionally, or a crash mid-saga leaves it unable to resume.
+  Frameworks (Axon, Eventuate Tram, Temporal-style) persist the saga instance and rehydrate it.
 
 ---
 
@@ -498,6 +723,26 @@ of truth.
 few high-value bounded contexts with complex behavior/audit needs. Applying it everywhere adds
 huge accidental complexity (the "CQRS everywhere" anti-pattern).
 
+**Staff-level deep dive — read-model consistency, optimistic concurrency, and replay.**
+- **Read-your-own-writes:** because the read model lags, a user who just posted a command may
+  query the stale read side and not see their change. Mitigations: return the projected result
+  from the command directly, read from the write model for that user briefly (session
+  stickiness), or use a version token the client passes until the projection catches up.
+- **Aggregate concurrency in ES:** the event store enforces optimistic concurrency by appending
+  with an *expected version* (`expectedVersion` = last known sequence for the aggregate). Two
+  concurrent command handlers appending at the same version — one wins, the other gets a
+  concurrency exception and must reload and retry. This is the ES analog of an optimistic lock.
+- **Idempotent projections:** a projection consuming events at-least-once must track the last
+  processed event sequence per aggregate (or a processed-event table) so replays/redeliveries
+  don't double-apply (e.g. incrementing a counter twice). Rebuilding a projection = reset the
+  checkpoint and replay from event 0.
+- **Snapshots are an optimization, not truth:** a snapshot stores aggregate state at version N;
+  loading replays only events > N. A buggy snapshot must be discardable — never treat it as
+  authoritative over the event log.
+- **Upcasting:** when an event schema changes, old serialized events are transformed on read by
+  an *upcaster* chain (v1→v2→v3) rather than migrating the immutable store. You never rewrite
+  history; you evolve the read-time transformation.
+
 ---
 
 ## Idempotency
@@ -529,6 +774,27 @@ duplicates.
   outbox) or you can process twice on a crash between them.
 - Idempotency is required for **safe retries** (Resilience4j retry, gateway retry filter) and
   for **saga** steps/compensations.
+
+**Staff-level deep dive — the concurrency race, key scoping, and non-determinism.**
+- **The check-then-act race:** a naive "SELECT key; if absent INSERT + process" is not
+  idempotent under concurrency — two simultaneous retries both see "absent" and both process.
+  Fixes: a UNIQUE constraint on the idempotency key with the *insert happening first* (the
+  second insert fails and you return the stored/in-progress result), or `INSERT ... ON CONFLICT
+  DO NOTHING` returning whether you won. Store an *in-progress* marker so a concurrent duplicate
+  can wait/return 409 rather than re-execute.
+- **Scope the key correctly:** an idempotency key must be scoped to the *operation + payload*.
+  Reusing the same key for a *different* request body should be rejected (409), otherwise a
+  client bug silently returns the wrong stored response. Persist a hash of the request with the
+  key to detect this.
+- **TTL vs correctness:** expiring keys too soon reopens the duplicate window (a slow retry
+  after TTL re-executes); too long bloats storage. Match TTL to the maximum realistic
+  retry/redelivery horizon (often hours to a day for payments).
+- **Non-deterministic operations break replay-return:** if the stored result includes a
+  server-generated timestamp/id, returning it on replay is correct only if the *effect* was the
+  same. For "create", store and return the originally created id; do not create a new one.
+- **Idempotency ≠ deduplication of side effects to third parties:** if step 1 already emailed
+  the customer and the retry re-runs step 2, you still must not re-send the email — dedupe each
+  external side effect independently, not just the overall HTTP response.
 
 ---
 
@@ -562,6 +828,28 @@ usage/quotas.
 - Rate limiter (throughput) vs bulkhead/concurrency limit (in-flight) vs circuit breaker
   (failure-based) — different levers, often combined.
 
+**Staff-level deep dive — algorithm edge cases and the atomicity of distributed counting.**
+- **Fixed-window boundary burst (the "double burst"):** a fixed window of 100/min lets 100
+  requests at 00:00:59 and another 100 at 00:01:00 — 200 in ~1 second across the boundary.
+  Sliding-window-counter smooths this by weighting the previous window's count into the current
+  one (`count = prev_window_count * overlap_fraction + current_count`), a cheap approximation of
+  a sliding log without storing every timestamp.
+- **Token bucket vs leaky bucket in practice:** token bucket permits bursts up to capacity then
+  throttles to the refill rate (good for APIs that tolerate bursts); leaky bucket (queue + fixed
+  drain) *smooths* output to a constant rate and can add latency/queueing — better for
+  protecting a strictly rate-limited downstream (e.g. a legacy system, a paid third-party API).
+- **Distributed counting must be atomic:** implementing a Redis limiter with `GET`/`INCR`/`SET`
+  in separate round-trips races under concurrency and overcounts. Use a single atomic Lua script
+  (SCG's `RedisRateLimiter` ships one) or `INCR` + `EXPIRE` pipelined so the check-and-decrement
+  is atomic on the Redis single-threaded command loop.
+- **Fail-open vs fail-closed on limiter backend outage:** if Redis is down, does the gateway
+  allow all traffic (fail-open, risking overload) or deny all (fail-closed, self-inflicted
+  outage)? SCG defaults tend toward denying when it can't determine the count; decide
+  deliberately and alert on it.
+- **Cost-based / weighted limiting:** not all requests are equal — a bulk endpoint may consume
+  more permits than a cheap read. Token-bucket permits-per-request (weight) models this;
+  fixed-count limiters cannot.
+
 ---
 
 ## Graceful Degradation and Fallbacks
@@ -589,6 +877,28 @@ but useful functionality when a dependency is unavailable, instead of failing en
   SIGTERM — related but distinct from degradation.
 - Combine with **bulkheads** so a failing dependency's degradation stays isolated to its
   compartment.
+
+**Staff-level deep dive — cache-based degradation hazards and load shedding.**
+- **Stale-cache fallback needs freshness signaling:** serving stale data on failure is great,
+  but a fallback that silently returns *very* stale prices/inventory can be worse than an error
+  (overselling). Attach staleness metadata, cap the acceptable staleness, and prefer
+  "soft-TTL/hard-TTL" (serve stale up to hard-TTL, then fail) patterns.
+- **Fallbacks must not call the failing dependency:** a fallback that itself calls the same sick
+  service (or shares its thread pool / connection pool) defeats the breaker and can deadlock —
+  fallbacks should hit a *different* resource (cache, local default, cheaper service).
+- **Load shedding vs rate limiting:** rate limiting enforces a *contractual* cap per client;
+  load shedding *drops* low-priority work when the *server itself* is near saturation
+  (queue depth, CPU, thread pool). Prioritized shedding (e.g. reject anonymous/low-tier first,
+  protect checkout) keeps the golden path alive under overload — this is adaptive/admission
+  control, not a fixed quota.
+- **Timeout budgets across a call chain:** each hop should get a *shrinking* timeout budget so an
+  edge request with a 2s SLA doesn't wait on a downstream that itself waits 2s on its downstream
+  (nested timeouts must sum to less than the parent). Propagate a deadline, not a fixed per-hop
+  timeout.
+- **Circuit-breaker fallback + graceful shutdown interaction:** during a rolling deploy, an
+  instance draining (graceful shutdown) should ideally deregister first (see Eureka
+  deregistration gap) so callers' breakers don't trip on connection-refused from an
+  already-terminated instance.
 
 ---
 

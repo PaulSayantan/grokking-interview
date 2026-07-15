@@ -1090,3 +1090,935 @@ questions:
     itself), not the method name. Different methods sharing a cache can collide.
     Fix by using distinct cacheNames or an explicit key including the method name.
   ref: concepts.md#key-generation--spel-keys
+- id: caching-abstraction-057
+  difficulty: expert
+  tags:
+  - reactive
+  - cacheable
+  - spring61
+  question: |
+    In Spring Framework 6.1+, a method is declared `@Cacheable("books") public
+    Mono<Book> findBook(String isbn)` and the CacheManager is a plain
+    CaffeineCacheManager configured with default settings. What is the most likely
+    outcome at runtime?
+  options:
+  - It fails / does not cache as expected because async caching of a Mono requires the CaffeineCacheManager to have setAsyncCacheMode(true); otherwise the async adaptation is not available
+  - Caching silently degrades to no-op because Mono cannot be serialized by Caffeine
+  - Caching works transparently because Caffeine always supports CompletableFuture-based retrieval
+  - The Mono is cached as a raw reactive publisher, so every subscriber replays the same stale emission forever
+  answer: 0
+  explanation: |
+    Spring 6.1 adapts Mono/Flux/CompletableFuture, but the backing cache must
+    support CompletableFuture-based retrieval. ConcurrentMapCacheManager adapts
+    automatically; CaffeineCacheManager requires setAsyncCacheMode(true). Without
+    it, the async cache path is unavailable. Spring stores the emitted object (not
+    the publisher), so the "raw publisher replay" option is also wrong.
+  ref: concepts.md#cacheable
+- id: caching-abstraction-058
+  difficulty: expert
+  tags:
+  - reactive
+  - flux
+  - semantics
+  question: |
+    How does Spring 6.1 cache the result of a `@Cacheable` method returning
+    `Flux<Book>`, and what is the key caveat?
+  options:
+  - The emitted items are collected into a List and that List is cached; it is coarse-grained and not suitable for streaming or back-pressure-sensitive interactions
+  - The Flux itself (the publisher instance) is stored, so a second caller re-subscribes to the original upstream
+  - Each emitted Book is cached under its own key; back-pressure is preserved end-to-end
+  - Only the first emitted element is cached; subsequent elements bypass the cache
+  answer: 0
+  explanation: |
+    For Flux, Spring collects the emitted elements into a List, caches the List,
+    and re-emits it as a Flux on a hit (backed by a CompletableFuture for the
+    list). This is deliberately coarse-grained: it materializes the whole stream
+    and is unsuitable for large/infinite streams or fine-grained back-pressure.
+  ref: concepts.md#cacheable
+- id: caching-abstraction-059
+  difficulty: advanced
+  tags:
+  - optional
+  - unless
+  - spel
+  question: |
+    A method is `@Cacheable(cacheNames="book", unless="#result.hardback")
+    public Optional<Book> findBook(String name)`. Reads intermittently throw
+    EvaluationException. What is the correct diagnosis and fix?
+  options:
+  - The key must be specified explicitly whenever the return type is Optional
+  - '#result refers to the Optional wrapper, so you must call #result.get().hardback'
+  - unless cannot be used with Optional return types at all; remove it
+  - '#result refers to the unwrapped Book (or null for an empty Optional), so calling .hardback on a null result NPEs/throws; use null-safe navigation: unless = "#result?.hardback"'
+  answer: 3
+  explanation: |
+    Spring unwraps Optional: #result is the Book, and an empty Optional yields a
+    null #result. Evaluating #result.hardback on null throws, so the idiomatic fix
+    is safe navigation #result?.hardback. #result is never the Optional wrapper.
+  ref: concepts.md#condition-and-unless
+- id: caching-abstraction-060
+  difficulty: expert
+  tags:
+  - cacheresolver
+  - cachemanager
+  - exclusivity
+  question: |
+    A method is annotated `@Cacheable(cacheNames="books", cacheManager="cm1",
+    cacheResolver="cr1")`. What happens?
+  options:
+  - Both are honored; cr1 resolves caches and cm1 is used as a fallback
+  - cm1 wins and cr1 is ignored, because cacheManager has higher precedence
+  - cr1 wins only if it is also annotated @Primary
+  - It is an error: cacheManager and cacheResolver are mutually exclusive, since the CacheResolver owns cache selection and would ignore any CacheManager
+  answer: 3
+  explanation: |
+    cacheManager and cacheResolver are mutually exclusive. A CacheResolver fully
+    controls which Cache instances an operation targets, so specifying a
+    CacheManager alongside it is contradictory and rejected.
+  ref: concepts.md#cacheresolver-cacheconfig-and-multiple-cachemanagers
+- id: caching-abstraction-061
+  difficulty: advanced
+  tags:
+  - cacheconfig
+  - override
+  question: |
+    A class is annotated `@CacheConfig(cacheNames="global", keyGenerator="genA")`.
+    A method inside it is annotated `@Cacheable(key="#id")`. Which caches/key
+    strategy apply to that method?
+  options:
+  - cacheNames="global" from @CacheConfig, but key="#id" overrides genA at the operation level
+  - Nothing is cached because @CacheConfig disables per-method annotations
+  - key="#id" AND genA are both applied, producing a composite key
+  - cacheNames is empty because @Cacheable did not repeat it, so startup fails
+  answer: 0
+  explanation: |
+    @CacheConfig supplies class-level defaults (cacheNames, keyGenerator, etc.)
+    that operation-level attributes override. The method inherits cacheNames=global
+    but its explicit key="#id" overrides the class-level keyGenerator (and since
+    key and keyGenerator are mutually exclusive, genA is not applied here).
+  ref: concepts.md#cacheresolver-cacheconfig-and-multiple-cachemanagers
+- id: caching-abstraction-062
+  difficulty: intermediate
+  tags:
+  - cacheconfig
+  question: |
+    Which statement about @CacheConfig is correct?
+  options:
+  - It enables caching for the whole class, replacing @EnableCaching
+  - It shares common cache settings (names, keyGenerator, cacheManager, cacheResolver) across a class's operations but does NOT itself enable any caching
+  - It can only be applied to interfaces, not classes
+  - It forces all methods in the class to be @Cacheable
+  answer: 1
+  explanation: |
+    @CacheConfig is purely a convenience for sharing defaults across a class's
+    caching annotations. It does not enable caching (you still need @EnableCaching)
+    and does not turn methods into cached operations by itself.
+  ref: concepts.md#cacheresolver-cacheconfig-and-multiple-cachemanagers
+- id: caching-abstraction-063
+  difficulty: expert
+  tags:
+  - cacheerrorhandler
+  - failure-modes
+  question: |
+    Your Redis-backed @Cacheable method occasionally throws
+    RedisConnectionFailureException to callers during Redis blips. Business logic
+    could tolerate running against the DB instead. What is the cleanest Spring-idiomatic
+    fix?
+  options:
+  - Register a custom CacheErrorHandler (via CachingConfigurer) that logs and swallows GET errors so a cache failure degrades to a cache miss
+  - Wrap every @Cacheable call site in try/catch and re-invoke the repository manually
+  - Set spring.cache.type=none in production so Redis is never contacted
+  - Switch to @CachePut, which ignores cache-store exceptions by design
+  answer: 0
+  explanation: |
+    By default cache-store exceptions propagate (SimpleCacheErrorHandler rethrows).
+    A custom CacheErrorHandler lets you handle get/put/evict/clear failures
+    independently — commonly swallowing GET errors so the method runs against the
+    source of truth. try/catch at every call site is brittle; disabling caching
+    everywhere is overkill; @CachePut does not swallow errors.
+  ref: concepts.md#cacheerrorhandler--failure-modes
+- id: caching-abstraction-064
+  difficulty: advanced
+  tags:
+  - cacheerrorhandler
+  - eviction-risk
+  question: |
+    A team writes a CacheErrorHandler that silently swallows ALL four callbacks
+    (get, put, evict, clear). Which subtle correctness risk does swallowing EVICT
+    errors introduce that swallowing GET errors does not?
+  options:
+  - Swallowing evict errors doubles memory usage per entry
+  - A failed-but-swallowed evict leaves a stale entry in the cache, so subsequent reads return outdated data even though the underlying store changed
+  - Swallowing evict errors disables TTL on the cache
+  - It causes the CacheManager bean to be recreated on each call
+  answer: 1
+  explanation: |
+    A swallowed GET error just degrades to a miss (safe: you hit the source of
+    truth). A swallowed EVICT error means invalidation silently failed, so the
+    cache keeps serving stale data that no longer matches the datastore — a
+    correctness hazard. Evict/put failures deserve more caution than get failures.
+  ref: concepts.md#cacheerrorhandler--failure-modes
+- id: caching-abstraction-065
+  difficulty: expert
+  tags:
+  - advice-ordering
+  - transaction
+  question: |
+    A @Transactional method also carries @CachePut. If the caching advice runs
+    OUTSIDE (before) the transaction advice, what dangerous outcome is possible?
+  options:
+  - The value is written to the cache but the surrounding transaction later rolls back, leaving the cache holding data that was never committed to the database
+  - The cache put is silently skipped because transactions block cache writes
+  - The transaction never commits because the cache holds a lock
+  - Nothing dangerous; ordering between transaction and cache advice is irrelevant
+  answer: 0
+  explanation: |
+    If cache advice is outermost, the put happens around the whole call while the
+    transaction (inner) may roll back afterward, so the cache retains uncommitted
+    data. You generally want transaction advice outermost (cache ops inside the tx),
+    or use TransactionAwareCacheManagerProxy to defer writes to commit.
+  ref: concepts.md#interception-internals--advice-ordering
+- id: caching-abstraction-066
+  difficulty: expert
+  tags:
+  - transaction-aware
+  - read-after-write
+  question: |
+    Using TransactionAwareCacheManagerProxy, inside a single transaction you call
+    an @CachePut update method and then immediately call the @Cacheable read
+    method for the same key (still within the same transaction). What do you observe?
+  options:
+  - The read sees the freshly put value because the proxy applies puts eagerly
+  - The transaction is forced to commit early to make the value visible
+  - The read throws because the cache is locked until commit
+  - The read does NOT see the put — puts are deferred to AFTER_COMMIT, but lookups read current cache state immediately, so the read reflects the pre-update cache (or misses)
+  answer: 3
+  explanation: |
+    The transaction-aware proxy only defers the write side (put/evict) until
+    AFTER_COMMIT. A @Cacheable lookup reads current state immediately, so a
+    read-after-write in the same transaction won't see the deferred put. This is a
+    frequently-missed nuance of the proxy.
+  ref: concepts.md#cachemanager-abstraction
+- id: caching-abstraction-067
+  difficulty: advanced
+  tags:
+  - simplekey
+  - equals
+  - collision
+  question: |
+    A team writes a custom multi-field key class used across @Cacheable methods but
+    forgets to override equals()/hashCode(). What is the most likely production symptom?
+  options:
+  - Every call is a guaranteed cache miss, so behavior is merely slow but correct
+  - The application fails to start with a KeyGenerationException
+  - Spring automatically falls back to SimpleKeyGenerator and logs a warning
+  - Cache lookups almost never hit (identity-based equals means new key objects never match stored ones), so it degrades to no caching — and if any keys DO collide by identity reuse, wrong values could be returned
+  answer: 3
+  explanation: |
+    Without equals/hashCode, key objects use identity semantics: a freshly built
+    key on each call never equals the stored one, so lookups miss and caching is
+    effectively disabled. The historical DefaultKeyGenerator bug (using only
+    hashCode) could even return wrong values on collisions — value-based keys are
+    mandatory for correctness.
+  ref: concepts.md#key-generation--spel-keys
+- id: caching-abstraction-068
+  difficulty: expert
+  tags:
+  - simplekeygenerator
+  - history
+  question: |
+    Why was DefaultKeyGenerator deprecated in favor of SimpleKeyGenerator for
+    multi-argument methods?
+  options:
+  - DefaultKeyGenerator included the method name, causing keys to be too long
+  - DefaultKeyGenerator combined only the arguments' hashCode() values (not equals), so distinct argument tuples that happened to share a combined hash would collide and return each other's cached values
+  - DefaultKeyGenerator could not handle null arguments
+  - DefaultKeyGenerator required the -parameters flag while SimpleKeyGenerator does not
+  answer: 1
+  explanation: |
+    Pre-4.0 DefaultKeyGenerator derived the key from argument hashCodes only, so
+    different argument sets with a colliding combined hash mapped to the same key —
+    a real correctness bug (spring-framework#14870). SimpleKeyGenerator wraps all
+    args in a SimpleKey with proper equals/hashCode over the full tuple.
+  ref: concepts.md#key-generation--spel-keys
+- id: caching-abstraction-069
+  difficulty: advanced
+  tags:
+  - mutable-key
+  - concurrency
+  question: |
+    Which practice most reliably causes an entry to become "lost" (unreachable)
+    in a local cache after it was successfully stored?
+  options:
+  - Using an immutable String as the key
+  - Using a mutable object (or array) as the key and mutating it after the put, so its hashCode/equals shift and no future lookup can locate the entry
+  - Using @CachePut instead of @Cacheable
+  - Setting unless = "#result == null"
+  answer: 1
+  explanation: |
+    Most local providers store the key by reference. If the key is mutable and you
+    change fields that affect hashCode/equals after insertion, the entry lands in
+    the wrong hash bucket relative to any future lookup key and becomes
+    unreachable. Always use immutable, value-based keys.
+  ref: concepts.md#key-generation--spel-keys
+- id: caching-abstraction-070
+  difficulty: expert
+  tags:
+  - sync
+  - cacheput
+  - constraints
+  question: |
+    A developer wants stampede protection on an update method and writes
+    `@CachePut(cacheNames="books", sync=true)`. What is wrong?
+  options:
+  - Nothing; sync provides stampede protection on @CachePut as well
+  - The sync attribute is declared only on @Cacheable — @CachePut (and @CacheEvict) have no sync attribute, so this does not even compile
+  - sync=true silently converts @CachePut into @Cacheable
+  - sync=true is valid but requires proxyTargetClass=true to be set as well
+  answer: 1
+  explanation: |
+    sync is an attribute of @Cacheable only; @CachePut and @CacheEvict do not
+    declare it, so the code fails to compile. Conceptually sync is also
+    meaningless for @CachePut, which always executes the method rather than
+    coordinating concurrent misses on a lookup. (sync=true itself is further
+    restricted to a single cache and is incompatible with unless.)
+  ref: concepts.md#cache-stampede
+- id: caching-abstraction-071
+  difficulty: expert
+  tags:
+  - sync
+  - scope
+  - distributed
+  question: |
+    Two application nodes both run @Cacheable(sync=true) against a Caffeine cache.
+    A hot key expires simultaneously on both. How many backend computations occur
+    in the worst case?
+  options:
+  - Exactly one across the whole cluster, because sync coordinates globally
+  - Zero, because the stale value is always served
+  - Up to one per node (two total): sync serializes only within a single JVM's cache, not across nodes, unless the provider itself is distributed-lock aware
+  - Unbounded, because sync has no effect on Caffeine
+  answer: 2
+  explanation: |
+    sync=true coordinates concurrent misses within one JVM via the local cache's
+    atomic loader. It does not coordinate across nodes with a local provider like
+    Caffeine, so each node can independently run one load — cross-node stampede
+    protection needs a distributed lock or a distributed cache.
+  ref: concepts.md#cache-stampede
+- id: caching-abstraction-072
+  difficulty: advanced
+  tags:
+  - redis
+  - allentries
+  - performance
+  question: |
+    A service calls @CacheEvict(allEntries=true) on a large Redis-backed cache on
+    every write. Why is this a performance concern compared to the same call on a
+    Caffeine cache?
+  options:
+  - On Caffeine allEntries=true is a cheap in-memory Map.clear(), but on Redis it must delete all keys under the cache's prefix (historically a KEYS/pattern scan), which can be expensive/blocking on a large keyspace
+  - Redis cannot support allEntries=true, so it throws
+  - Redis replicates the clear synchronously to every client, doubling latency
+  - allEntries=true on Redis silently only clears the local node's connection pool
+  answer: 0
+  explanation: |
+    Caffeine's clear is an O(1)-ish in-heap map operation. Redis has no single
+    "clear this logical cache" primitive, so RedisCacheManager must find and delete
+    all keys under the cache prefix; on large keyspaces this pattern scan is costly.
+    Frequent allEntries=true against Redis is a known footgun.
+  ref: concepts.md#cache-eviction--ttl
+- id: caching-abstraction-073
+  difficulty: advanced
+  tags:
+  - caffeine
+  - eviction
+  - internals
+  question: |
+    Which statement about Caffeine's size-based eviction is accurate?
+  options:
+  - Caffeine uses a strict LRU policy and evicts synchronously the instant maximumSize is exceeded
+  - Caffeine uses Window TinyLFU (frequency + recency) and its maximumSize eviction is amortized, so the cache may briefly exceed the configured size before catching up
+  - Caffeine evicts randomly to avoid lock contention
+  - Caffeine never evicts by size; it only supports TTL-based expiry
+  answer: 1
+  explanation: |
+    Caffeine's admission policy is Window TinyLFU, which considers access frequency
+    as well as recency, typically beating plain LRU on hit ratio. Its maximumSize
+    enforcement is amortized/eventual, so transient overshoot is normal, not a bug.
+  ref: concepts.md#cache-eviction--ttl
+- id: caching-abstraction-074
+  difficulty: expert
+  tags:
+  - caching
+  - ordering
+  - hit-behavior
+  question: |
+    A method has `@Caching(cacheable=@Cacheable("books"),
+    evict=@CacheEvict(cacheNames="stats", key="#isbn"))`. On a cache HIT for the
+    cacheable operation, what happens to the evict?
+  options:
+  - On a hit, @Cacheable short-circuits and returns the stored value without invoking the method; because the method body is skipped the behavior around the sibling evict is subtle/unreliable, which is why mixing them like this is discouraged
+  - The evict is guaranteed to run first, then the cached value is returned
+  - The evict always runs after the method regardless of hit/miss, in a deterministic order
+  - The whole @Caching block is ignored on a hit
+  answer: 0
+  explanation: |
+    @Cacheable short-circuits on a hit (method body skipped). @Caching does not
+    guarantee ordering among its grouped operations, and combining a short-circuiting
+    cacheable with an evict in one @Caching yields subtle behavior. For anything
+    order-sensitive, split into separate proxied methods.
+  ref: concepts.md#caching
+- id: caching-abstraction-075
+  difficulty: advanced
+  tags:
+  - cacheput
+  - key-alignment
+  question: |
+    A read method uses @Cacheable(cacheNames="books", key="#isbn") where isbn is a
+    String. The update method uses @CachePut(cacheNames="books", key="#book").
+    After an update, reads still miss. Why?
+  options:
+  - '@CachePut cannot write to a cache that @Cacheable reads from'
+  - The two operations produce different keys (the String isbn vs the whole Book object as a SimpleKey), so the put lands under a different slot than the read looks up
+  - key="#book" is invalid SpEL and is ignored
+  - '@CachePut only updates entries that already exist'
+  answer: 1
+  explanation: |
+    For the read-through-write pattern to work, both operations must compute the
+    exact same key. Here the reader keys on the String isbn while the writer keys
+    on the Book instance (wrapped as a key), so they never align and the next read
+    misses. Align on key="#book.isbn".
+  ref: concepts.md#cacheput
+- id: caching-abstraction-076
+  difficulty: expert
+  tags:
+  - enablecaching
+  - missing-cachemanager
+  question: |
+    @EnableCaching is present, @Cacheable methods exist, but there is NO
+    CacheManager bean and no cache provider on the classpath at all (auto-config
+    cannot supply one). What is the outcome?
+  options:
+  - Silent no-op: the annotations are ignored like when @EnableCaching is missing
+  - It lazily creates a ConcurrentMapCacheManager on first cached call
+  - It defaults to NoOpCacheManager and works silently
+  - Startup fails: the caching infrastructure requires a CacheManager (or CacheResolver) bean and cannot resolve one
+  answer: 3
+  explanation: |
+    Unlike a missing @EnableCaching (which is a silent no-op), having @EnableCaching
+    with no resolvable CacheManager/CacheResolver bean fails context startup — the
+    interceptor has no cache to operate on. In plain Spring Boot the simple
+    ConcurrentMapCacheManager is auto-provided, but "no provider at all" breaks it.
+  ref: concepts.md#interception-internals--advice-ordering
+- id: caching-abstraction-077
+  difficulty: expert
+  tags:
+  - self-invocation
+  - internals
+  question: |
+    Which precisely explains WHY a `this.findBook()` self-call skips @Cacheable
+    advice in PROXY mode?
+  options:
+  - Because the CacheInterceptor advice lives on the proxy object; a this-call targets the raw target instance directly, so the invocation never passes through the proxy's invocation handler where the advice fires
+  - Because the JVM inlines self-calls and strips annotations
+  - Because SpEL cannot evaluate keys for internal calls
+  - Because @Cacheable requires the caller and callee to be in different packages
+  answer: 0
+  explanation: |
+    The advice is applied by the proxy's invocation handler (JDK) or the CGLIB
+    subclass's method override. A this.method() call executes against the target
+    instance's own method reference, bypassing the proxy entirely, so no
+    CacheInterceptor is invoked. AspectJ weaving fixes this by advising the bytecode.
+  ref: concepts.md#proxy-self-invocation-caveat
+- id: caching-abstraction-078
+  difficulty: advanced
+  tags:
+  - final-method
+  - cglib
+  question: |
+    A @Service (no interface) has `@Cacheable public final Book findBook(String
+    isbn)`. Spring Boot uses CGLIB proxies by default. What happens to caching?
+  options:
+  - It works normally; final only affects inheritance, not proxying
+  - Caching works but only single-threaded
+  - The context fails to start with a fatal proxy error
+  - CGLIB cannot override a final method, so the proxy cannot advise it and caching is silently NOT applied (Spring may also log a warning that the method is not proxyable)
+  answer: 3
+  explanation: |
+    CGLIB proxies subclass the target and override methods to insert advice. A
+    final method cannot be overridden, so it is not advised — caching silently does
+    nothing on it (Spring can log a warning). private and static methods are
+    similarly non-proxyable.
+  ref: concepts.md#proxy-self-invocation-caveat
+- id: caching-abstraction-079
+  difficulty: intermediate
+  tags:
+  - cacheresolver
+  - runtime
+  question: |
+    When would you reach for a custom CacheResolver instead of just naming caches
+    on the annotation?
+  options:
+  - When you want to change the TTL per entry
+  - When you want to generate the key from multiple fields
+  - When you need to disable caching in tests
+  - When the target cache(s) must be selected dynamically at runtime based on the method arguments or context, rather than being fixed at compile time
+  answer: 3
+  explanation: |
+    A CacheResolver controls which Cache instances an operation uses and is
+    resolved per invocation, so it can pick caches based on runtime arguments
+    (e.g. tenant-specific caches). Static cacheNames cannot express that. TTL, test
+    disabling, and key generation are separate concerns.
+  ref: concepts.md#cacheresolver-cacheconfig-and-multiple-cachemanagers
+- id: caching-abstraction-080
+  difficulty: expert
+  tags:
+  - beforeinvocation
+  - allentries
+  - failure
+  question: |
+    A bulk-reload method is annotated @CacheEvict(cacheNames="catalog",
+    allEntries=true, beforeInvocation=true) and the reload throws halfway through.
+    What is the cache state afterward, and why might beforeInvocation=true be the
+    RIGHT choice here despite the failure?
+  options:
+  - The cache is fully repopulated because eviction rolls back with the method
+  - Only the successfully-reloaded entries were evicted
+  - Nothing was evicted because exceptions cancel before-invocation eviction
+  - The cache was cleared before the method ran, so it is now empty; this is often acceptable because an empty cache (all misses -> reload from source) is safer than serving a half-stale catalog after a partial failure
+  answer: 3
+  explanation: |
+    With beforeInvocation=true the clear happens before the body, so a mid-method
+    exception leaves the cache empty. That can be the desired safety property: an
+    empty cache falls back to the authoritative source on every read, avoiding
+    serving stale/partial data that a post-invocation (default) evict would leave
+    intact after a failure.
+  ref: concepts.md#cacheevict
+- id: caching-abstraction-081
+  difficulty: advanced
+  tags:
+  - null
+  - condition
+  - lookup
+  question: |
+    @Cacheable(cacheNames="books", condition="#includeDetails") on
+    findBook(String isbn, boolean includeDetails). A caller invokes with
+    includeDetails=false. What is the caching behavior?
+  options:
+  - The result is cached under a key that encodes includeDetails=false
+  - condition is false, so there is NO cache lookup and NO store — the method just runs uncached every time for includeDetails=false calls
+  - The result is looked up but never stored
+  - Spring throws because condition references a boolean
+  answer: 1
+  explanation: |
+    For @Cacheable, condition gates both lookup and store. When false, there is no
+    cache interaction at all: the method executes as if uncached. So
+    includeDetails=false calls bypass the cache entirely.
+  ref: concepts.md#condition-and-unless
+- id: caching-abstraction-082
+  difficulty: expert
+  tags:
+  - condition
+  - unless
+  - difference
+  question: |
+    For @Cacheable, what is a behavioral difference between using condition to
+    exclude some inputs versus using unless, beyond the #result availability?
+  options:
+  - condition when false skips the cache LOOKUP too (so even a previously-stored value is not returned), whereas unless only vetoes STORING the result and never suppresses returning an existing cached hit
+  - There is no difference other than #result availability
+  - unless is evaluated before the method, condition after
+  - condition affects only @CachePut, unless only @Cacheable
+  answer: 0
+  explanation: |
+    If condition is false, Spring performs no lookup, so an already-cached value is
+    NOT returned for that call. unless is post-invocation and only decides whether
+    to store; it can never prevent returning a value that was already cached on a
+    hit. This asymmetry matters when a key sometimes qualifies and sometimes not.
+  ref: concepts.md#condition-and-unless
+- id: caching-abstraction-083
+  difficulty: advanced
+  tags:
+  - composite
+  - fallback
+  - noop
+  question: |
+    CompositeCacheManager is configured with setFallbackToNoOpCache(true) and two
+    delegates. A @Cacheable references cache name "reports" that none of the
+    delegates know. What happens?
+  options:
+  - Startup fails because the cache name is unknown
+  - The first delegate is forced to create the cache
+  - CompositeCacheManager creates a new ConcurrentMap cache named "reports"
+  - The fallback NoOp cache handles "reports": operations are accepted but nothing is stored, so the method is invoked every time
+  answer: 3
+  explanation: |
+    With fallbackToNoOpCache=true, any cache name not resolved by the delegates is
+    served by a no-op cache instead of throwing. That means caching for "reports"
+    silently does nothing (every call runs the method) — convenient for mixed
+    environments but a subtle "why isn't it caching?" trap.
+  ref: concepts.md#cachemanager-abstraction
+- id: caching-abstraction-084
+  difficulty: expert
+  tags:
+  - interception
+  - order
+  - flow
+  question: |
+    Considering the CacheInterceptor's internal flow, in what order are these
+    handled for a single method carrying both @CacheEvict(beforeInvocation=true)
+    and @Cacheable?
+  options:
+  - Cacheable lookup, then before-invocation evict, then method
+  - Both operations run only after the method returns
+  - Method runs first, then evict, then lookup
+  - Before-invocation evict runs first; then the Cacheable lookup — and on a hit the method is skipped, so the target never runs
+  answer: 3
+  explanation: |
+    The interceptor runs beforeInvocation=true evictions first, then performs the
+    @Cacheable lookup. On a hit it returns the stored value without proceeding to
+    the target. So a before-invocation evict clears the entry, but a separate
+    cacheable can still short-circuit if its key hits.
+  ref: concepts.md#interception-internals--advice-ordering
+- id: caching-abstraction-085
+  difficulty: advanced
+  tags:
+  - cacheput
+  - reactive
+  - spring61
+  question: |
+    In Spring 6.1, a method `@CachePut("books") public Mono<Book> save(Book b)` is
+    invoked but the returned Mono is never subscribed to. Does the cache get updated?
+  options:
+  - No — for reactive return types the put occurs when the produced publisher completes; if nothing subscribes, the pipeline never runs and no put happens
+  - Yes, immediately when the method returns, regardless of subscription
+  - Yes, but only the key is stored, not the value
+  - It throws because @CachePut cannot return Mono
+  answer: 0
+  explanation: |
+    For reactive/async types the cache put/evict is tied to completion of the
+    produced publisher/future. A Mono is lazy: without a subscriber the work never
+    executes, so the cache is not updated. This mirrors normal reactive semantics
+    and is a common surprise when adopting reactive caching.
+  ref: concepts.md#cacheput
+- id: caching-abstraction-086
+  difficulty: expert
+  tags:
+  - redis
+  - serialization
+  - versioning
+  question: |
+    A Redis cache uses default JDK serialization. A new deployment changes a cached
+    class by adding a field (without setting serialVersionUID). During rolling
+    deploy, reads of old entries start failing. What is the root cause and a robust fix?
+  options:
+  - JDK serialization ties entries to the class's computed serialVersionUID; changing the class changes it, so deserializing old bytes throws InvalidClassException — switch to a versioning-tolerant serializer (e.g. JSON) and/or set an explicit serialVersionUID plus a TTL/namespace strategy
+  - Redis corrupted the entries; flush the whole database on every deploy
+  - The @Cacheable key changed, so entries are simply missed (no error)
+  - Redis TTL expired all entries simultaneously
+  answer: 0
+  explanation: |
+    Default JDK serialization is brittle across class changes: an auto-computed
+    serialVersionUID shifts and old bytes fail to deserialize (InvalidClassException).
+    Teams commonly switch to JSON (GenericJackson2JsonRedisSerializer) which
+    tolerates additive changes, and/or namespace cache keys per schema version and
+    keep TTLs short so stale-format entries age out.
+  ref: concepts.md#cache-providers
+- id: caching-abstraction-087
+  difficulty: advanced
+  tags:
+  - coherence
+  - invalidation
+  - design
+  question: |
+    A local Caffeine cache across N nodes needs writes on one node to invalidate
+    the entry on all nodes. Which approach directly achieves cross-node coherence
+    while keeping reads local and fast?
+  options:
+  - Increase the Caffeine maximumSize on every node
+  - Publish an invalidation event (e.g. via Redis pub/sub or a message bus) that each node consumes to evict the key locally — a "near cache" / broadcast-eviction pattern
+  - Set expireAfterAccess to zero
+  - Wrap the Caffeine manager in TransactionAwareCacheManagerProxy
+  answer: 1
+  explanation: |
+    Broadcast eviction (near-cache pattern): keep the fast local read path but
+    propagate invalidations over pub/sub or a message bus so every node evicts the
+    stale key. Sizing, zero-TTL, and the transaction-aware proxy do not solve
+    cross-node coherence.
+  ref: concepts.md#when-caching-helps-vs-hurts
+- id: caching-abstraction-088
+  difficulty: expert
+  tags:
+  - sync
+  - null
+  - store
+  question: |
+    With @Cacheable(sync=true), the loader (method) returns null on a miss. Compared
+    to the default (sync=false) behavior of caching nulls, what is the key concern
+    about sync + null?
+  options:
+  - Because sync uses the atomic get(key, valueLoader) path and cannot express unless, you lose the usual unless-based null veto; whether a null is stored depends on the provider's valueLoader/null-handling semantics, so behavior is less controllable
+  - sync=true never caches nulls under any provider, guaranteeing recomputation
+  - sync=true converts null results into empty Optionals automatically
+  - null with sync=true always throws IllegalStateException
+  answer: 0
+  explanation: |
+    sync=true routes through the cache's atomic loader and forbids unless, so the
+    familiar unless="#result==null" veto is unavailable. How a null loader result is
+    treated (stored vs. not, whether the lock is held) is provider-dependent — a
+    reason to be careful combining sync with methods that can return null.
+  ref: concepts.md#cache-stampede
+- id: caching-abstraction-089
+  difficulty: advanced
+  tags:
+  - keygenerator
+  - global
+  - configurer
+  question: |
+    You want ALL cache operations in the application to use a custom KeyGenerator by
+    default, without annotating each method. What is the correct mechanism?
+  options:
+  - Annotate every method with keyGenerator="myGen"
+  - Register the KeyGenerator with @Primary and Spring auto-wires it everywhere
+  - Set spring.cache.key-generator in application.properties
+  - Implement CachingConfigurer and override keyGenerator() to return the bean, establishing the global default (overridable per class via @CacheConfig or per operation)
+  answer: 3
+  explanation: |
+    CachingConfigurer#keyGenerator() sets the application-wide default KeyGenerator
+    (also where you override cacheManager/cacheResolver/errorHandler). Class-level
+    @CacheConfig and operation-level attributes can still override it. There is no
+    such property, and @Primary alone does not wire the caching default.
+  ref: concepts.md#cacheresolver-cacheconfig-and-multiple-cachemanagers
+- id: caching-abstraction-090
+  difficulty: expert
+  tags:
+  - jsr107
+  - annotations
+  - difference
+  question: |
+    A codebase mixes Spring's @Cacheable with JSR-107's @CacheResult on different
+    methods. Which statement is accurate about running both under Spring?
+  options:
+  - They are identical annotations with different package names
+  - Spring supports the JSR-107 (JCache) annotations (@CacheResult, @CachePut, @CacheRemove, @CacheRemoveAll) alongside its own when the JCache API and a compliant provider are present; semantics differ subtly (e.g. JCache's @CachePut uses a @CacheValue parameter, and exception caching differs)
+  - JSR-107 annotations are ignored unless mode=ASPECTJ
+  - Using both throws a conflicting-annotation error at startup
+  answer: 1
+  explanation: |
+    Spring can process the standard JSR-107 annotations in addition to its own,
+    given the JCache API on the classpath. They are not identical: JCache's
+    @CachePut marks the cached argument with @CacheValue, key generation defaults
+    differ, and JCache supports caching exceptions — subtleties that bite when
+    mixing the two families.
+  ref: concepts.md#cache-providers
+- id: caching-abstraction-091
+  difficulty: advanced
+  tags:
+  - condition
+  - argument
+  - lookup-store-symmetry
+  question: |
+    @Cacheable(cacheNames="u", key="#id", condition="#id > 0"). Suppose id=5 is
+    cached. Later a bug passes id=-5, then again id=5. Does the id=-5 call disturb
+    the cached id=5 entry?
+  options:
+  - Yes, id=-5 overwrites the id=5 entry due to key collision
+  - No — condition is false for id=-5, so that call performs no lookup and no store; it cannot touch the id=5 entry, which remains intact for the later id=5 call
+  - Yes, id=-5 evicts all entries as a safety measure
+  - The id=5 entry is refreshed by the id=-5 call
+  answer: 1
+  explanation: |
+    condition=false means the id=-5 invocation bypasses the cache entirely (no
+    lookup, no store, no evict). It cannot affect the separately-keyed id=5 entry,
+    which is served normally on the subsequent id=5 call.
+  ref: concepts.md#condition-and-unless
+- id: caching-abstraction-092
+  difficulty: advanced
+  tags:
+  - exception
+  - caching
+  - semantics
+  question: |
+    A @Cacheable method throws an exception on a miss (e.g. the DB is down). What
+    does Spring store in the cache for that key?
+  options:
+  - It stores the exception so future calls re-throw quickly
+  - It stores null so future calls return null
+  - It stores a poison marker that must be manually evicted
+  - Nothing is stored — the exception propagates and no cache entry is created, so the next call will attempt the method again
+  answer: 3
+  explanation: |
+    Spring's core caching does not cache exceptions: if the target throws, no value
+    is put and the exception propagates. The next invocation retries the method.
+    (JSR-107 @CacheResult, by contrast, can be configured to cache exceptions.)
+  ref: concepts.md#cacheable
+- id: caching-abstraction-093
+  difficulty: advanced
+  tags:
+  - refreshafterwrite
+  - expireafterwrite
+  - distinction
+  question: |
+    In Caffeine, how do refreshAfterWrite and expireAfterWrite interact for a key
+    that is read after its refresh interval but before its expire interval?
+  options:
+  - The read blocks until a synchronous reload completes
+  - The read returns the existing (stale) value immediately and triggers an asynchronous reload; only after expireAfterWrite would a read become a hard, blocking miss
+  - The entry is treated as absent and the caller gets null
+  - refreshAfterWrite and expireAfterWrite cannot be configured together
+  answer: 1
+  explanation: |
+    refreshAfterWrite reloads asynchronously while serving the current value, so
+    reads stay fast and one reload is triggered. expireAfterWrite is the hard limit
+    after which the entry is gone and a read must block/miss. Setting refresh <
+    expire gives smooth background refresh with a stale-tolerance window.
+  ref: concepts.md#cache-stampede
+- id: caching-abstraction-094
+  difficulty: expert
+  tags:
+  - proxy
+  - startup
+  - injection
+  question: |
+    A bean self-injects its own proxy for caching (`@Autowired private BookService
+    self;`) but the field is a concrete class and the bean has an interface with
+    proxyTargetClass=false. What problem arises?
+  options:
+  - Nothing; JDK proxies implement the concrete class too
+  - The JDK dynamic proxy implements only the interface, not the concrete class, so injecting the proxy into a field typed as the concrete class fails (BeanNotOfRequiredType) — self-inject the interface type instead, or use CGLIB (proxyTargetClass=true)
+  - Self-injection always causes a circular-dependency startup failure
+  - The proxy is injected but caching is disabled for self-calls anyway
+  answer: 1
+  explanation: |
+    A JDK dynamic proxy is an instance of the interface(s), not the concrete class.
+    Autowiring it into a field typed as the concrete class throws a type-mismatch.
+    Fix by typing the self-reference as the interface, or switch to CGLIB proxies
+    so the proxy is a subclass of the concrete type. (Self-injection itself is
+    allowed and resolves the proxy.)
+  ref: concepts.md#proxy-self-invocation-caveat
+- id: caching-abstraction-095
+  difficulty: advanced
+  tags:
+  - cacheput
+  - unless
+  - result
+  question: |
+    Which is a VALID and meaningful use of unless on @CachePut?
+  options:
+  - '@CachePut(cacheNames="books", unless="#result == null || #result.draft") to skip storing null or draft entities while still always executing the method'
+  - unless is not supported on @CachePut
+  - '@CachePut(unless="#isbn == null") to avoid running the method'
+  - '@CachePut(unless="true") to make it behave like @Cacheable'
+  answer: 0
+  explanation: |
+    @CachePut always executes the method but supports unless (with #result) to veto
+    STORING the returned value. So skipping storage for null/draft results is valid.
+    unless cannot prevent method execution (that is condition's before-invocation
+    role) and cannot turn @CachePut into @Cacheable.
+  ref: concepts.md#cacheput
+- id: caching-abstraction-096
+  difficulty: expert
+  tags:
+  - autoconfig
+  - order
+  - customizer
+  question: |
+    Spring Boot's cache auto-configuration finds both Caffeine and Redis on the
+    classpath and spring.cache.type is unset. Which provider is chosen, and how do
+    you override just the RedisCacheConfiguration without abandoning auto-config?
+  options:
+  - Redis is selected ahead of Caffeine in the detection order; to tune it while keeping auto-config, expose a RedisCacheConfiguration bean (or a RedisCacheManagerBuilderCustomizer) rather than replacing the CacheManager
+  - Caffeine wins (it is later only alphabetically); provide a full @Bean CacheManager to change Redis
+  - Both are used simultaneously via an implicit CompositeCacheManager
+  - The application fails to start due to ambiguous providers
+  answer: 0
+  explanation: |
+    Boot's detection order considers Redis before Caffeine, so Redis is chosen when
+    both are present and the type is unset. To customize without replacing
+    auto-config, contribute a RedisCacheConfiguration bean or a
+    RedisCacheManagerBuilderCustomizer; defining your own CacheManager bean backs
+    off the auto-configuration entirely.
+  ref: concepts.md#cache-providers
+- id: caching-abstraction-097
+  difficulty: intermediate
+  tags:
+  - cacheresolver
+  - cacheconfig
+  - precedence
+  question: |
+    Which list correctly orders caching configuration precedence from LOWEST to
+    HIGHEST?
+  options:
+  - Operation-level attributes -> @CacheConfig -> global CachingConfigurer
+  - Global CachingConfigurer defaults -> class-level @CacheConfig -> operation-level attributes
+  - '@CacheConfig -> operation-level attributes -> global defaults'
+  - They all have equal precedence; the last one wins arbitrarily
+  answer: 1
+  explanation: |
+    The override hierarchy is: global defaults (CachingConfigurer) are the base,
+    class-level @CacheConfig overrides those, and operation-level attributes on the
+    specific annotation have the highest precedence.
+  ref: concepts.md#cacheresolver-cacheconfig-and-multiple-cachemanagers
+- id: caching-abstraction-098
+  difficulty: expert
+  tags:
+  - stampede
+  - sync
+  - vs-refresh
+  question: |
+    Contrast @Cacheable(sync=true) with Caffeine's refreshAfterWrite as stampede
+    mitigations. Which statement is the most accurate?
+  options:
+  - sync=true blocks concurrent callers on a cold/expired key until one thread computes (callers wait, no stale value served), whereas refreshAfterWrite serves the existing stale value and reloads asynchronously (callers do not wait) — different latency/staleness trade-offs
+  - They are interchangeable and both serve stale data during reload
+  - refreshAfterWrite requires sync=true to function
+  - sync=true serves stale values while refreshAfterWrite blocks all readers
+  answer: 0
+  explanation: |
+    sync=true coordinates the FIRST load: on a cold/expired key concurrent callers
+    block until one computes (no stale value, but they wait). refreshAfterWrite
+    trades freshness for latency: it returns the stale value immediately and
+    reloads in the background. They address stampede differently and can even be
+    combined thoughtfully.
+  ref: concepts.md#cache-stampede
+- id: caching-abstraction-099
+  difficulty: advanced
+  tags:
+  - condition
+  - keygenerator
+  - evaluation
+  question: |
+    For @Cacheable with both condition and a custom keyGenerator, in what order are
+    the key and the condition computed relative to the method invocation on a miss?
+  options:
+  - The method runs first, then condition, then the key
+  - condition and key are both evaluated after the method, only unless runs before
+  - The key is generated after the method returns, using #result
+  - condition is evaluated before invocation; if true, the key is generated and the cache is probed; on a miss the method runs and the (possibly unless-vetoed) result is stored under that key
+  answer: 3
+  explanation: |
+    condition is the pre-invocation gate. If it passes, the key is computed (before
+    the body, so no #result) and used for the lookup; a miss runs the method, then
+    unless decides whether to store the result under that already-computed key.
+  ref: concepts.md#condition-and-unless
+- id: caching-abstraction-100
+  difficulty: expert
+  tags:
+  - self-invocation
+  - aspectj
+  - tradeoff
+  question: |
+    Switching @EnableCaching(mode=ASPECTJ) fixes self-invocation, but what is a
+    real trade-off/requirement compared to the default PROXY mode?
+  options:
+  - AspectJ mode only works with Redis
+  - It requires setting up the AspectJ weaver (compile-time or load-time weaving), adding build/agent complexity; it also advises ALL matching calls including internal ones, which can surprise code that relied on internal calls being uncached
+  - AspectJ mode disables condition and unless
+  - AspectJ mode makes every cache operation synchronous
+  answer: 1
+  explanation: |
+    ASPECTJ mode weaves the aspect into bytecode (compile-time or load-time weaving
+    via the AspectJ weaver/agent), which adds build/runtime setup. Because it no
+    longer relies on a proxy boundary, even internal this-calls get advised — a
+    behavior change that can surprise code assuming internal calls skip caching.
+  ref: concepts.md#proxy-self-invocation-caveat

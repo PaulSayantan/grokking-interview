@@ -650,23 +650,25 @@ questions:
 
   - id: transaction-management-037
     difficulty: advanced
-    tags: [rollback, unexpected-rollback-exception, scenario]
+    tags: [programmatic, rollback, platform-transaction-manager]
     question: |
-      outer() (REQUIRED) calls inner() (also REQUIRED, same physical
-      transaction). inner() throws a RuntimeException which outer() catches and
-      swallows, then outer() returns normally. What is the likely result at
-      commit time?
+      You demarcate a transaction with the raw PlatformTransactionManager
+      (getTransaction/commit/rollback) directly, instead of @Transactional or
+      TransactionTemplate. Your business code throws a RuntimeException. What must
+      you do to ensure the transaction actually rolls back?
     options:
-      - "outer() commits successfully; inner()'s failure is ignored."
-      - "Only inner()'s changes roll back; outer()'s changes commit."
-      - "A deadlock occurs."
-      - "Spring throws UnexpectedRollbackException because inner()'s failure already marked the shared transaction rollback-only."
-    answer: 3
+      - "Nothing — the PlatformTransactionManager automatically rolls back on any RuntimeException, exactly like @Transactional."
+      - "Call txManager.rollback(status) yourself in a catch block; the raw API applies NO automatic rollback rules, so an uncaught/unhandled exception leaves the transaction neither committed nor rolled back until you act."
+      - "Call status.setRollbackOnly() and the transaction manager commits it as a rollback automatically at JVM shutdown."
+      - "Re-annotate the surrounding method with @Transactional(rollbackFor = RuntimeException.class)."
+    answer: 1
     explanation: |
-      When a participating REQUIRED method fails, the shared transaction is
-      marked rollback-only. Even if outer() swallows the exception, the eventual
-      commit fails with UnexpectedRollbackException.
-    ref: "concepts.md#rollback-rules-rollbackfor"
+      The declarative rollback rules (unchecked + Error) live in the
+      TransactionInterceptor and TransactionTemplate, NOT in
+      PlatformTransactionManager itself. With the raw API you own the try/catch:
+      commit(status) on success and rollback(status) on failure. Omitting the
+      catch leaves the transaction dangling.
+    ref: "concepts.md#declarative-vs-programmatic-transaction-management"
 
   - id: transaction-management-038
     difficulty: intermediate
@@ -1015,4 +1017,937 @@ questions:
       a method-level annotation overrides the class-level defaults for that
       method.
     ref: "concepts.md#declarative-vs-programmatic-transaction-management"
+
+  - id: transaction-management-057
+    difficulty: expert
+    tags: [transaction-synchronization, events, ordering, scenario]
+    question: |
+      A service method is @Transactional and publishes a domain event; a handler
+      annotated @TransactionalEventListener (default phase) sends an SNS
+      notification. In an integration test the method runs but the SNS
+      notification is never sent, even though the method completes without error.
+      What is the MOST likely explanation?
+    options:
+      - "The default phase is AFTER_COMMIT and, in the test, the surrounding transaction is rolled back at the end (Spring's default test rollback), so the commit — and thus the listener — never fires."
+      - "@TransactionalEventListener only works with JMS, not SNS, so it is silently skipped."
+      - "The event was published on a different thread, so the listener could not be found in the ApplicationContext."
+      - "@TransactionalEventListener requires @Async, and without it the listener is never registered."
+    answer: 0
+    explanation: |
+      AFTER_COMMIT listeners only run when the transaction actually commits.
+      Spring's test support rolls back by default, so the commit never happens
+      and the listener is skipped. Adding @Commit/@Rollback(false), or
+      fallbackExecution = true, or asserting differently, resolves it.
+    ref: "concepts.md#transaction-synchronization--lifecycle-callbacks"
+
+  - id: transaction-management-058
+    difficulty: expert
+    tags: [transaction-synchronization, dual-write, design]
+    question: |
+      You must publish a Kafka message after persisting an order, and it is
+      critical you never publish a message for an order that was not durably
+      saved. Which approach is the most correct within a single-service
+      @Transactional method?
+    options:
+      - "Publish inside the transaction body immediately after repository.save(), so it is atomic with the insert."
+      - "Publish from a TransactionSynchronization.beforeCommit callback so it happens just before the commit."
+      - "Publish from an AFTER_COMMIT synchronization/listener (or use a transactional outbox), so the message only goes out once the DB commit has durably succeeded."
+      - "Publish from afterCompletion regardless of status, since it always runs last."
+    answer: 2
+    explanation: |
+      Publishing inside the tx (or in beforeCommit) risks emitting a message for
+      data whose commit later fails. AFTER_COMMIT guarantees the data is durable
+      first; an outbox makes it fully atomic. afterCompletion fires on rollback
+      too, so it is wrong here.
+    ref: "concepts.md#transaction-synchronization--lifecycle-callbacks"
+
+  - id: transaction-management-059
+    difficulty: advanced
+    tags: [transaction-synchronization, after-commit, gotcha]
+    question: |
+      Which statement about an AFTER_COMMIT @TransactionalEventListener callback
+      is correct?
+    options:
+      - "The transaction has already committed, so the callback runs outside that transaction; database access there is non-transactional unless you open a new transaction, and exceptions cannot undo the commit."
+      - "Any exception it throws will roll back the just-committed transaction."
+      - "It runs within the original transaction, so lazy associations can still be loaded safely."
+      - "It is guaranteed to run on the same thread pool as @Async listeners."
+    answer: 0
+    explanation: |
+      AFTER_COMMIT runs after the physical commit; the original transaction and
+      its persistence context are gone. New DB work needs its own transaction,
+      and thrown exceptions cannot reverse the commit (they propagate/are logged).
+    ref: "concepts.md#transaction-synchronization--lifecycle-callbacks"
+
+  - id: transaction-management-060
+    difficulty: advanced
+    tags: [locking, optimistic, version, scenario]
+    question: |
+      Two transactions load the same entity (version = 5), both modify it, and
+      both flush. The entity has a @Version field. What happens?
+    options:
+      - "Both commit; the second write silently overwrites the first (last-writer-wins), losing the first update."
+      - "The database blocks the second transaction until the first commits, then the second proceeds without error."
+      - "The first flush to reach the DB succeeds and bumps version to 6; the second finds WHERE version = 5 matches zero rows and throws an optimistic-locking exception (OptimisticLockException / ObjectOptimisticLockingFailureException)."
+      - "Both transactions are automatically retried by Hibernate until one wins."
+    answer: 2
+    explanation: |
+      Optimistic locking appends the version predicate to the UPDATE and bumps
+      it. The loser's UPDATE matches zero rows, so Hibernate raises an optimistic
+      lock exception — the application must catch and retry. It does not block
+      (no DB lock is held between read and write).
+    ref: "concepts.md#locking-optimistic-vs-pessimistic"
+
+  - id: transaction-management-061
+    difficulty: advanced
+    tags: [locking, optimistic, bulk-update, gotcha]
+    question: |
+      Why can a bulk JPQL "UPDATE Product p SET p.price = ... WHERE ..." statement
+      defeat the protection you expected from @Version optimistic locking?
+    options:
+      - "Bulk JPQL updates bypass the persistence context, dirty checking, and the version-column check, so they neither verify nor increment the version unless you explicitly update it in the statement."
+      - "Bulk JPQL updates run in a separate REQUIRES_NEW transaction automatically."
+      - "@Version columns cannot appear in a WHERE clause, so the statement is rejected at parse time."
+      - "Bulk updates always downgrade the isolation level to READ_UNCOMMITTED."
+    answer: 0
+    explanation: |
+      Bulk JPQL/HQL DML operates directly on the database, skipping the
+      persistence context and Hibernate's automatic version handling. The version
+      is neither checked nor bumped (and in-memory entities become stale) unless
+      you manage it in the statement.
+    ref: "concepts.md#locking-optimistic-vs-pessimistic"
+
+  - id: transaction-management-062
+    difficulty: advanced
+    tags: [locking, pessimistic, scenario]
+    question: |
+      For a high-contention inventory counter where many concurrent transactions
+      decrement the same row, which strategy minimizes lost updates AND avoids a
+      flood of retry-on-conflict cycles?
+    options:
+      - "Optimistic locking with @Version and no retry logic."
+      - "READ_UNCOMMITTED isolation to avoid blocking."
+      - "Pessimistic write locking (@Lock(PESSIMISTIC_WRITE) / SELECT ... FOR UPDATE), so each transaction serializes on the row lock instead of colliding and retrying."
+      - "Setting readOnly = true to serialize access."
+    answer: 2
+    explanation: |
+      Under heavy write contention, optimistic locking causes many conflicts and
+      retries. A pessimistic write lock serializes access at the DB, avoiding
+      repeated conflict/retry churn — at the cost of blocking and potential lock
+      waits/deadlocks.
+    ref: "concepts.md#locking-optimistic-vs-pessimistic"
+
+  - id: transaction-management-063
+    difficulty: expert
+    tags: [locking, optimistic, flush-timing, scenario]
+    question: |
+      A developer wraps entity.setX(...) in a try/catch for
+      OptimisticLockException inside a @Transactional method, but the exception is
+      never caught there — it surfaces to the caller instead. Why?
+    options:
+      - "The conflicting UPDATE is not issued at setX() time; Hibernate defers it to auto-flush, which typically happens at commit — after the method body (and its try/catch) has already returned."
+      - "Optimistic lock exceptions are checked exceptions and cannot be caught with a generic catch."
+      - "Spring rethrows the exception from the proxy, bypassing the method's own catch block."
+      - "@Version disables local exception handling inside transactional methods."
+    answer: 0
+    explanation: |
+      Dirty-checked updates flush at commit by default, which is outside the
+      method body, so a try/catch around the mutation won't see the failure. You
+      must force a flush (entityManager.flush()) inside the try to catch it there.
+    ref: "concepts.md#locking-optimistic-vs-pessimistic"
+
+  - id: transaction-management-064
+    difficulty: advanced
+    tags: [lazy-loading, persistence-context, osiv, scenario]
+    question: |
+      A @Transactional service returns a JPA entity with a LAZY collection. A
+      controller then iterates that collection to build the response, and (with
+      OSIV disabled) a LazyInitializationException is thrown. What is the precise
+      root cause?
+    options:
+      - "The persistence context (Hibernate Session) is bound to the transaction, which closed when the service method returned; accessing the uninitialized proxy afterward has no Session to load it."
+      - "The collection was never mapped, so Hibernate cannot resolve it."
+      - "The controller runs on a different thread, so the ThreadLocal transaction is missing."
+      - "LAZY collections require SERIALIZABLE isolation to be initialized."
+    answer: 0
+    explanation: |
+      The Session/persistence context lives for the transaction. Once the
+      @Transactional method returns, it closes; touching an uninitialized lazy
+      proxy afterward throws LazyInitializationException. Fix by fetching within
+      the tx (fetch join, entity graph, DTO) — OSIV masks it but has its own costs.
+    ref: "concepts.md#connection-acquisition-flush-timing--lazy-loading"
+
+  - id: transaction-management-065
+    difficulty: advanced
+    tags: [osiv, connection-pool, tradeoff]
+    question: |
+      What is a well-known downside of Spring Boot's default
+      spring.jpa.open-in-view=true (Open Session In View)?
+    options:
+      - "It disables the second-level cache for the whole request."
+      - "It forces every request into a SERIALIZABLE transaction."
+      - "It keeps the persistence context/database connection bound for the entire HTTP request (including view rendering), which can hold connections longer, hide N+1 problems, and stress the connection pool under load."
+      - "It prevents lazy loading entirely, causing exceptions."
+    answer: 2
+    explanation: |
+      OSIV keeps the Session open across the request so lazy loading works in the
+      view layer, but it holds the connection longer, encourages N+1 queries, and
+      can exhaust the pool. Many teams disable it and fetch explicitly.
+    ref: "concepts.md#connection-acquisition-flush-timing--lazy-loading"
+
+  - id: transaction-management-066
+    difficulty: expert
+    tags: [flush, commit, visibility, scenario]
+    question: |
+      Within one @Transactional method you persist an entity, then run a native
+      SQL COUNT(*) query against the same table before the method returns. Assume
+      default flush behavior. What do you observe, and is it durable?
+    options:
+      - "Hibernate auto-flushes the pending INSERT before the query so the COUNT includes the new row (visible within this transaction), but it is only durable once the transaction commits — a rollback would still undo it."
+      - "The COUNT does not include the new row, and it is never durable."
+      - "The COUNT includes the row and it is immediately durable, independent of commit."
+      - "A LazyInitializationException is thrown because the entity is not yet committed."
+    answer: 0
+    explanation: |
+      Auto-flush before a query pushes pending SQL so the query sees consistent
+      state within the transaction, but flush is not commit; durability and
+      visibility to other transactions require the commit to succeed.
+    ref: "concepts.md#connection-acquisition-flush-timing--lazy-loading"
+
+  - id: transaction-management-067
+    difficulty: advanced
+    tags: [connection-acquisition, requires-new, pool, internals]
+    question: |
+      With Hibernate's default delayed connection acquisition, when is the
+      physical JDBC connection typically borrowed from the pool for a resource-
+      local @Transactional method?
+    options:
+      - "Lazily, on the first actual statement/JDBC interaction — so a transactional method that never touches the DB may never borrow a connection."
+      - "The moment getTransaction() is called, before any SQL."
+      - "Only at commit time, in a single batch."
+      - "Once per bean at application startup and reused forever."
+    answer: 0
+    explanation: |
+      Default DELAYED acquisition means the connection is obtained on first use,
+      not at transaction start. This affects pool sizing and REQUIRES_NEW
+      reasoning (the suspended outer still holds its connection if it already
+      acquired one).
+    ref: "concepts.md#connection-acquisition-flush-timing--lazy-loading"
+
+  - id: transaction-management-068
+    difficulty: expert
+    tags: [rollback, requires-new, unexpected-rollback, scenario]
+    question: |
+      outer() (REQUIRED) calls inner() (REQUIRED, same tx); inner() throws a
+      RuntimeException; outer() catches it, logs it, and returns normally
+      intending to "recover." At commit, what happens and what is the fix to let
+      outer() genuinely survive inner()'s failure?
+    options:
+      - "outer() commits fine because it caught the exception; no fix needed."
+      - "Only inner()'s writes roll back; outer() commits; use noRollbackFor on inner()."
+      - "Commit throws UnexpectedRollbackException because the shared transaction is already marked rollback-only; to let outer() survive, inner() must run as REQUIRES_NEW (or NESTED with savepoint support) so its failure is isolated."
+      - "A deadlock occurs; the fix is to raise the isolation level."
+    answer: 2
+    explanation: |
+      A failed REQUIRED participant marks the single physical transaction
+      rollback-only, so the outer commit fails with UnexpectedRollbackException
+      even though the exception was swallowed. Isolating inner() in its own
+      physical tx (REQUIRES_NEW) or a savepoint (NESTED) is required.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-069
+    difficulty: expert
+    tags: [nested, savepoint, jpa, persistence-context, scenario]
+    question: |
+      Even in a JDBC setup where Propagation.NESTED savepoints ARE supported,
+      what subtle problem can arise when using NESTED with JPA/Hibernate?
+    options:
+      - "Rolling back to a savepoint reverts the database rows, but the shared EntityManager's in-memory state is NOT reset — entities modified before the savepoint remain dirty in the persistence context and may be re-flushed, so you often must clear() the context."
+      - "Savepoints force the connection into READ_UNCOMMITTED."
+      - "NESTED silently upgrades to REQUIRES_NEW, opening a second connection."
+      - "Hibernate cannot issue savepoints at all, so NESTED is a no-op."
+    answer: 0
+    explanation: |
+      A savepoint rollback affects the database, but the persistence context is
+      shared and unaware of it, so previously-modified entities stay dirty and can
+      be re-flushed, causing surprising behavior. Clearing the context avoids it.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-070
+    difficulty: advanced
+    tags: [multiple-datasources, qualifier, scenario]
+    question: |
+      An application has two DataSources and two transaction managers
+      (orderTxManager, auditTxManager) with none marked @Primary. A method is
+      annotated with a bare @Transactional. What is the likely outcome?
+    options:
+      - "Spring cannot resolve which transaction manager to use (ambiguous), leading to a startup/qualifier error or use of the wrong one; you must specify @Transactional(\"orderTxManager\") or mark one @Primary."
+      - "Spring merges both managers and enlists both DataSources in one transaction."
+      - "Spring automatically upgrades to a JTA/XA transaction spanning both."
+      - "The method runs non-transactionally as a safe default."
+    answer: 0
+    explanation: |
+      With multiple candidate transaction managers and no @Primary, a bare
+      @Transactional is ambiguous. You must qualify it by name (the value/
+      transactionManager attribute) or designate a primary manager. A single
+      non-XA @Transactional cannot span both DataSources.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-071
+    difficulty: expert
+    tags: [multiple-datasources, xa, atomicity, design]
+    question: |
+      You need a single atomic unit of work that writes to two independent
+      relational databases (no shared server). Which statement is correct?
+    options:
+      - "A single Spring @Transactional with DataSourceTransactionManager can commit both atomically if you set REQUIRES_NEW."
+      - "Two DataSourceTransactionManagers can be chained to guarantee full ACID atomicity across both databases."
+      - "Atomic commit across two independent resources requires XA / two-phase commit via a JtaTransactionManager (Atomikos/Narayana); otherwise you fall back to sagas or a transactional outbox for eventual consistency."
+      - "Setting isolation = SERIALIZABLE on one manager makes both databases commit atomically."
+    answer: 2
+    explanation: |
+      True atomicity across independent resources needs XA/2PC coordinated by
+      JTA. Resource-local managers (even chained) cannot guarantee it —
+      best-effort 1PC can leave inconsistency. Modern designs often prefer sagas
+      or the outbox pattern over XA.
+    ref: "concepts.md#distributed--xa-transactions"
+
+  - id: transaction-management-072
+    difficulty: expert
+    tags: [xa, two-phase-commit, failure-mode]
+    question: |
+      What is the classic blocking failure mode of two-phase commit (2PC)?
+    options:
+      - "If the coordinator crashes after resources have voted to commit (prepared) but before it delivers the phase-2 decision, the prepared resources hold their locks and remain blocked until the coordinator recovers."
+      - "Phase 1 can never complete because resources refuse to prepare."
+      - "2PC automatically rolls back everything if any single query is slow."
+      - "2PC requires all resources to share one physical connection, which is impossible across databases."
+    answer: 0
+    explanation: |
+      In 2PC, once resources are prepared they hold locks awaiting the
+      coordinator's decision. A coordinator crash in that window leaves them
+      blocked/in-doubt until recovery — the well-known blocking problem of 2PC.
+    ref: "concepts.md#distributed--xa-transactions"
+
+  - id: transaction-management-073
+    difficulty: advanced
+    tags: [outbox, saga, messaging, design]
+    question: |
+      Why does the transactional outbox pattern reliably avoid the "message sent
+      but DB rolled back" (dual-write) problem without XA?
+    options:
+      - "It writes the outgoing event into an outbox table within the SAME local database transaction as the business data, so the event is persisted atomically with the data; a separate relay process publishes it afterward."
+      - "It sends the message twice to guarantee delivery."
+      - "It uses SERIALIZABLE isolation to make the broker and DB consistent."
+      - "It publishes the message from a beforeCommit callback so the broker and DB commit together."
+    answer: 0
+    explanation: |
+      The outbox row and the business change commit atomically in one local
+      transaction. A relay then reads committed outbox rows and publishes them,
+      so a message is never emitted for data that did not commit — no distributed
+      transaction required.
+    ref: "concepts.md#distributed--xa-transactions"
+
+  - id: transaction-management-074
+    difficulty: expert
+    tags: [async, transactional, threadlocal, ordering, scenario]
+    question: |
+      A method is annotated with BOTH @Async and @Transactional. A caller (with
+      an active transaction) invokes it. Which statement is correct?
+    options:
+      - "The method executes on an executor thread with its OWN new transaction; the caller's transaction is NOT propagated (transaction context is thread-bound), and the caller continues without waiting for the commit."
+      - "The method joins the caller's transaction on the caller's thread and runs synchronously."
+      - "Spring throws because @Async and @Transactional are mutually exclusive."
+      - "The transaction always commits before the async task starts, guaranteeing consistency."
+    answer: 0
+    explanation: |
+      @Async hands execution to another thread, and transaction context is
+      thread-bound, so the caller's transaction does not propagate. The async
+      method starts its own transaction. This decoupling is a common source of
+      "the data wasn't there yet" bugs.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-075
+    difficulty: advanced
+    tags: [test, rollback, gotcha]
+    question: |
+      A @Transactional integration test inserts rows that would violate a unique
+      constraint at flush/commit, yet the test passes without the expected
+      DataIntegrityViolationException. What is the most likely reason?
+    options:
+      - "Unique constraints are ignored inside transactions."
+      - "Spring disables all constraints for @Transactional tests."
+      - "The test's transaction is rolled back at the end rather than committed, and without an explicit flush the constraint check (deferred to flush/commit) may never be triggered during the test."
+      - "H2 databases do not support unique constraints."
+    answer: 2
+    explanation: |
+      Test transactions roll back by default and never commit, so commit-time
+      constraint checks may not fire unless you force a flush. This is why some
+      constraint/version issues only appear in production. Use flush or @Commit to
+      surface them.
+    ref: "concepts.md#transactional-in-tests--transactional-class-level-defaults"
+
+  - id: transaction-management-076
+    difficulty: advanced
+    tags: [class-level, override, merging, scenario]
+    question: |
+      A class is annotated @Transactional(readOnly = true, timeout = 30). One
+      method overrides it with @Transactional(propagation = REQUIRES_NEW). What
+      attributes apply to that method?
+    options:
+      - "readOnly = true, timeout = 30, propagation = REQUIRES_NEW (attributes merge across class and method)."
+      - "The method throws because it conflicts with the class-level annotation."
+      - "Only propagation = REQUIRES_NEW plus the framework defaults for the rest (readOnly = false, default timeout); the method-level annotation fully replaces the class-level one rather than merging with it."
+      - "readOnly = true only; propagation is ignored on overriding methods."
+    answer: 2
+    explanation: |
+      A method-level @Transactional does not merge with the class-level one; it
+      overrides it entirely. Attributes you do not specify fall back to framework
+      defaults (readOnly = false, TIMEOUT_DEFAULT), not the class-level values.
+    ref: "concepts.md#transactional-in-tests--transactional-class-level-defaults"
+
+  - id: transaction-management-077
+    difficulty: expert
+    tags: [self-invocation, requires-new, scenario]
+    question: |
+      In one bean, transactional outer() (REQUIRED) calls this.audit() where
+      audit() is @Transactional(REQUIRES_NEW). At runtime, in what transaction
+      does audit() execute?
+    options:
+      - "A brand-new independent transaction, because REQUIRES_NEW always suspends and starts fresh."
+      - "No transaction at all, because REQUIRES_NEW requires an interface."
+      - "It participates in outer()'s existing REQUIRED transaction, because the internal this.audit() call bypasses the proxy so the REQUIRES_NEW attribute is never applied."
+      - "It throws IllegalTransactionStateException due to the propagation mismatch."
+    answer: 2
+    explanation: |
+      Self-invocation bypasses the proxy, so the TransactionInterceptor never
+      reads audit()'s REQUIRES_NEW. The code simply runs inside outer()'s already-
+      active transaction — a classic reason "my audit log rolled back with the
+      main transaction."
+    ref: "concepts.md#the-self-invocation--private-method-trap-proxy-bypass"
+
+  - id: transaction-management-078
+    difficulty: expert
+    tags: [rollback, resolution, rule-based, code-analysis]
+    question: |
+      A method is annotated @Transactional(rollbackFor = Exception.class,
+      noRollbackFor = IllegalArgumentException.class). The body throws a
+      NumberFormatException (which extends IllegalArgumentException, which extends
+      RuntimeException). Does the transaction roll back?
+    options:
+      - "Yes — rollbackFor = Exception.class matches everything, so it always wins."
+      - "Yes — noRollbackFor is ignored whenever rollbackFor is also present."
+      - "No — NumberFormatException's closest matching rule by class-hierarchy distance is noRollbackFor = IllegalArgumentException.class (a superclass 1 level away) versus rollbackFor = Exception.class (further away), so the more specific no-rollback rule wins and it commits."
+      - "It throws a configuration error because the two rules conflict."
+    answer: 2
+    explanation: |
+      RuleBasedTransactionAttribute chooses the rule with the smallest hierarchy
+      distance to the thrown type. IllegalArgumentException is closer to
+      NumberFormatException than Exception, so noRollbackFor wins and the
+      transaction commits.
+    ref: "concepts.md#rollback-rules-rollbackfor"
+
+  - id: transaction-management-079
+    difficulty: advanced
+    tags: [platform-transaction-manager, jdbc-transaction-manager, internals]
+    question: |
+      What did Spring 5.3's JdbcTransactionManager add relative to its parent
+      DataSourceTransactionManager?
+    options:
+      - "Support for XA/two-phase commit across multiple databases."
+      - "Reactive (R2DBC) transaction handling."
+      - "Automatic savepoint support for JPA NESTED propagation."
+      - "SQLException translation on commit/rollback failures into Spring's DataAccessException hierarchy; demarcation behavior is otherwise identical."
+    answer: 3
+    explanation: |
+      JdbcTransactionManager is a drop-in subclass that adds exception
+      translation (via SQLExceptionTranslator) for commit/rollback SQLExceptions,
+      converting them to DataAccessException. Boot registers it for plain-JDBC
+      setups.
+    ref: "concepts.md#platformtransactionmanager"
+
+  - id: transaction-management-080
+    difficulty: expert
+    tags: [transaction-status, internals, commit, scenario]
+    question: |
+      In a REQUIRED chain, inner() obtains a TransactionStatus by joining outer()'s
+      transaction and then calls the transaction manager's commit(status) on
+      return. What actually happens at that inner commit()?
+    options:
+      - "The database transaction is physically committed immediately, before outer() finishes."
+      - "It throws because you cannot commit a joined transaction."
+      - "It creates a savepoint and commits up to that point."
+      - "It is effectively a no-op for the physical transaction: status.isNewTransaction() is false for the participant, so only the outermost commit() (the one that began the physical transaction) performs the real database commit."
+    answer: 3
+    explanation: |
+      Only the outermost participant that started the physical transaction owns
+      the commit. A joining participant's commit does not hit the database; it
+      just returns control. isNewTransaction() distinguishes the owner.
+    ref: "concepts.md#platformtransactionmanager"
+
+  - id: transaction-management-081
+    difficulty: advanced
+    tags: [isolation, mysql, phantom, nuance]
+    question: |
+      A candidate says "REPEATABLE_READ always allows phantom reads." How should a
+      senior engineer refine this for MySQL InnoDB specifically?
+    options:
+      - "MySQL InnoDB does not support REPEATABLE_READ at all."
+      - "Phantoms are impossible at any isolation level in MySQL."
+      - "MySQL InnoDB's REPEATABLE_READ is actually weaker than READ_COMMITTED."
+      - "By the SQL standard REPEATABLE_READ permits phantoms, but MySQL InnoDB's REPEATABLE_READ uses MVCC snapshots plus next-key (gap) locking that prevents most phantom reads in practice."
+    answer: 3
+    explanation: |
+      The SQL standard allows phantoms at REPEATABLE_READ, but InnoDB's
+      implementation uses consistent snapshots and next-key locking that block
+      most phantoms — a nuance interviewers probe to see if you know
+      implementation differs from the standard.
+    ref: "concepts.md#isolation-levels--anomalies"
+
+  - id: transaction-management-082
+    difficulty: expert
+    tags: [isolation, lost-update, anomalies, scenario]
+    question: |
+      Two transactions both do SELECT balance (reads 100), compute balance - 10 in
+      application code, and UPDATE balance = 90. Both run at READ_COMMITTED with
+      no locking or @Version. What anomaly occurs and why does READ_COMMITTED not
+      prevent it?
+    options:
+      - "A dirty read, because READ_COMMITTED allows reading uncommitted data."
+      - "No anomaly; READ_COMMITTED guarantees the final balance is 80."
+      - "A phantom read, because the row count changed between reads."
+      - "A lost update: each read committed data, but the read-modify-write cycles interleave so the second UPDATE overwrites the first; READ_COMMITTED only governs read visibility, not read-then-write atomicity, so you need optimistic (@Version) or pessimistic (SELECT ... FOR UPDATE) locking."
+    answer: 3
+    explanation: |
+      This is the lost-update problem. Isolation levels below SERIALIZABLE don't
+      make a read-modify-write atomic; both transactions read 100 and write 90.
+      Prevent it with optimistic locking, pessimistic SELECT ... FOR UPDATE, or an
+      atomic UPDATE ... SET balance = balance - 10.
+    ref: "concepts.md#locking-optimistic-vs-pessimistic"
+
+  - id: transaction-management-083
+    difficulty: expert
+    tags: [readonly, replica, hibernate, scenario]
+    question: |
+      A team sets @Transactional(readOnly = true) on a method that, due to a bug,
+      performs an entity mutation. Which outcome is MOST consistent with how
+      readOnly actually behaves?
+    options:
+      - "Spring throws a compile-time error preventing the write."
+      - "The transaction is automatically upgraded to read-write and the change commits."
+      - "The write always succeeds and commits normally, because readOnly is purely a routing hint."
+      - "The behavior is not guaranteed: because readOnly sets Hibernate flush mode to MANUAL, the dirty change may simply never be flushed (silently lost); on setups where the JDBC connection is set read-only at the driver, the write may instead throw at execution — so readOnly must not be relied on as a write guard."
+    answer: 3
+    explanation: |
+      readOnly is an optimization/intent hint, not a hard guard. With Hibernate's
+      manual flush the change may be silently dropped; with a driver-level
+      read-only connection it may throw. Relying on readOnly for correctness is a
+      mistake.
+    ref: "concepts.md#readonly"
+
+  - id: transaction-management-084
+    difficulty: advanced
+    tags: [timeout, enforcement, internals]
+    question: |
+      Why might @Transactional(timeout = 2) fail to interrupt a single long-running
+      SQL statement even after 2 seconds elapse?
+    options:
+      - "Because timeout is measured in minutes, not seconds."
+      - "Because the timeout resets on every SQL statement."
+      - "Because timeouts only apply to REQUIRES_NEW transactions."
+      - "Because the timeout is enforced cooperatively — Spring propagates it to the JDBC statement query timeout and checks at the next resource interaction; a statement already executing that the driver does not interrupt (or a driver that ignores queryTimeout) can overrun."
+    answer: 3
+    explanation: |
+      Transaction timeout is cooperative: it's applied via statement query
+      timeouts and checked at the next interaction. If a driver doesn't honor
+      queryTimeout or a statement doesn't yield, a single long query can exceed
+      the transaction timeout.
+    ref: "concepts.md#timeout"
+
+  - id: transaction-management-085
+    difficulty: expert
+    tags: [propagation, requires-new, deadlock, scenario]
+    question: |
+      A method holds a row lock (SELECT ... FOR UPDATE on row R) in the outer
+      REQUIRED transaction, then calls a REQUIRES_NEW method that also tries to
+      SELECT ... FOR UPDATE the SAME row R. With a HikariCP pool of size 1, what
+      is the likely result?
+    options:
+      - "The inner transaction reuses the outer's connection, so it sees its own lock and proceeds instantly."
+      - "The inner transaction is automatically downgraded to REQUIRED to avoid deadlock."
+      - "Spring detects the conflict and merges the two into one transaction."
+      - "A self-deadlock / connection starvation: REQUIRES_NEW suspends the outer (which still holds the connection and the lock) and needs a SECOND connection, but the pool is exhausted at size 1, so the inner blocks forever waiting for a connection that the outer will not release until it completes."
+    answer: 3
+    explanation: |
+      REQUIRES_NEW needs an additional physical connection while the suspended
+      outer keeps its own. With a pool of 1, the inner can never obtain a
+      connection, and even with more connections it would deadlock on the row lock
+      the outer holds. Pool sizing and lock ordering matter.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-086
+    difficulty: expert
+    tags: [self-invocation, self-injection, code-analysis]
+    question: |
+      A developer fixes self-invocation by self-injecting the bean
+      (@Autowired private OrderService self) and calling self.inner() from
+      outer(). Which statement about this approach is correct?
+    options:
+      - "It cannot work because a bean cannot depend on itself; Spring throws a circular-dependency error at startup."
+      - "It only works with JDK dynamic proxies, never CGLIB."
+      - "It works only if inner() is private."
+      - "It works: the injected 'self' is the transactional PROXY, so calling self.inner() routes through the TransactionInterceptor and the @Transactional attribute on inner() is honored."
+    answer: 3
+    explanation: |
+      Spring injects the proxy (not the raw target) for self-references, so
+      self.inner() crosses the proxy boundary and the transaction advice runs. It
+      works with both proxy types; AopContext.currentProxy() is an alternative.
+    ref: "concepts.md#the-self-invocation--private-method-trap-proxy-bypass"
+
+  - id: transaction-management-087
+    difficulty: advanced
+    tags: [aop-proxy, ordering, cacheable, gotcha]
+    question: |
+      A method has both @Transactional and @Cacheable. A colleague reports that on
+      a cache HIT, no transaction is started at all. Why is that expected?
+    options:
+      - "@Cacheable disables all transactions in the bean."
+      - "Cache hits always run in a REQUIRES_NEW transaction."
+      - "@Transactional is ignored whenever @Cacheable is present."
+      - "It depends on advice ordering: if the caching advice runs OUTSIDE the transaction advice, a cache hit short-circuits and returns before the transaction interceptor's target invocation would start a transaction."
+    answer: 3
+    explanation: |
+      Multiple advices form a chain ordered by precedence. If caching wraps
+      transactions, a cache hit returns the cached value without proceeding to the
+      transactional target invocation, so no transaction begins. Advice ordering
+      (@Order) governs this.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-088
+    difficulty: intermediate
+    tags: [locking, lock-mode, jpa]
+    question: |
+      Which JPA annotation/lock mode issues a SELECT ... FOR UPDATE to acquire an
+      exclusive database row lock for the duration of the transaction?
+    options:
+      - "@Lock(LockModeType.OPTIMISTIC)"
+      - "@Version"
+      - "@Lock(LockModeType.PESSIMISTIC_WRITE)"
+      - "@Transactional(readOnly = true)"
+    answer: 2
+    explanation: |
+      PESSIMISTIC_WRITE acquires an exclusive lock (SELECT ... FOR UPDATE),
+      blocking other writers. OPTIMISTIC/@Version rely on a version check with no
+      held lock; readOnly is unrelated to locking.
+    ref: "concepts.md#locking-optimistic-vs-pessimistic"
+
+  - id: transaction-management-089
+    difficulty: intermediate
+    tags: [transaction-synchronization, fallback-execution]
+    question: |
+      A @TransactionalEventListener (default AFTER_COMMIT phase) must also run when
+      the event is published with NO active transaction (e.g. in some tests or
+      non-transactional flows). Which setting enables that?
+    options:
+      - "phase = TransactionPhase.BEFORE_COMMIT"
+      - "propagation = REQUIRES_NEW on the publisher"
+      - "@Async on the listener"
+      - "fallbackExecution = true"
+    answer: 3
+    explanation: |
+      By default an AFTER_COMMIT @TransactionalEventListener is skipped when
+      there's no active transaction. Setting fallbackExecution = true makes it run
+      immediately in that case.
+    ref: "concepts.md#transaction-synchronization--lifecycle-callbacks"
+
+  - id: transaction-management-090
+    difficulty: expert
+    tags: [propagation, nested, requires-new, comparison, scenario]
+    question: |
+      A batch job processes 1000 records; each record's work must be independently
+      rolled back on failure WITHOUT aborting the whole batch, while committing all
+      successful records together only at the very end. Which propagation on the
+      per-record method best fits, assuming a savepoint-capable JDBC setup?
+    options:
+      - "REQUIRES_NEW, because each record needs to commit independently right away."
+      - "MANDATORY, to force each record into the batch transaction."
+      - "NOT_SUPPORTED, so each record runs without a transaction."
+      - "NESTED, because a per-record savepoint lets a failed record roll back to its savepoint while the outer transaction continues and commits everything successful in one final commit."
+    answer: 3
+    explanation: |
+      NESTED savepoints allow per-record rollback within the single outer
+      transaction, which then commits all survivors together at the end.
+      REQUIRES_NEW would commit each record immediately (not 'all at the end'),
+      and it consumes extra connections.
+    ref: "concepts.md#propagation"
+
+  - id: transaction-management-091
+    difficulty: advanced
+    tags: [rollback, error, default, code-analysis]
+    question: |
+      A @Transactional method (no rollbackFor/noRollbackFor) throws a
+      java.lang.StackOverflowError before returning. With default rollback rules,
+      what happens to the transaction?
+    options:
+      - "It commits, because only RuntimeException triggers rollback by default, and Error is not a RuntimeException."
+      - "It commits, because Errors are always swallowed by Spring AOP."
+      - "It hangs, because Errors cannot be handled by the interceptor."
+      - "It rolls back, because the default rollback rule covers unchecked exceptions AND Error (i.e., Throwable that is a RuntimeException or Error)."
+    answer: 3
+    explanation: |
+      Spring's default rollback rule is 'rollback on RuntimeException or Error.'
+      StackOverflowError is an Error, so the transaction rolls back. Checked
+      exceptions are the ones that commit by default.
+    ref: "concepts.md#rollback-rules-rollbackfor"
+
+  - id: transaction-management-092
+    difficulty: expert
+    tags: [propagation, requires-new, visibility, isolation, scenario]
+    question: |
+      An outer REQUIRED transaction inserts row X (not yet committed), then calls a
+      REQUIRES_NEW method that runs a query expecting to see row X. Assuming
+      READ_COMMITTED, what does the REQUIRES_NEW method see?
+    options:
+      - "It sees row X, because both run in the same application thread."
+      - "It does NOT see row X: REQUIRES_NEW runs in a separate physical transaction, and under READ_COMMITTED it cannot see the outer transaction's uncommitted insert (that would be a dirty read)."
+      - "It sees row X only if isolation is SERIALIZABLE."
+      - "It throws because two transactions cannot touch the same table."
+    answer: 1
+    explanation: |
+      REQUIRES_NEW is a distinct physical transaction; the outer's uncommitted
+      insert is invisible to it under READ_COMMITTED (seeing it would be a dirty
+      read). This surprises developers who assume 'same thread' means 'same data.'
+    ref: "concepts.md#propagation"
+
+  - id: transaction-management-093
+    difficulty: advanced
+    tags: [aop-proxy, startup, bean-post-processor, gotcha]
+    question: |
+      Why might @Transactional silently fail to apply on a bean that is itself an
+      infrastructure component such as a BeanPostProcessor or is referenced very
+      early in the context lifecycle?
+    options:
+      - "Infrastructure beans are always transactional by default, so the annotation is redundant."
+      - "Such beans may be instantiated before the transaction AOP infrastructure (advisor/auto-proxy creator) is fully in place, so they are not wrapped by the transactional proxy."
+      - "BeanPostProcessors run in their own JTA transaction automatically."
+      - "@Transactional on any @Component is ignored unless it is a @Service."
+    answer: 1
+    explanation: |
+      Beans created before the auto-proxy creator/advisor is ready (e.g. BPPs,
+      some early infrastructure beans) escape proxying, so their @Transactional is
+      not honored. This is a subtle ordering pitfall.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-094
+    difficulty: expert
+    tags: [saga, compensation, design, tradeoff]
+    question: |
+      Compared to XA/2PC, what is the fundamental consistency trade-off of the Saga
+      pattern for a multi-service workflow?
+    options:
+      - "Sagas provide stronger-than-serializable isolation across all services."
+      - "Sagas give up global atomicity and isolation: each step commits its own local transaction, so intermediate states are visible to others, and failures are handled by compensating transactions rather than a single rollback — yielding eventual consistency, not ACID."
+      - "Sagas require a central coordinator that holds locks across all services, exactly like 2PC."
+      - "Sagas guarantee that no other transaction can observe intermediate states."
+    answer: 1
+    explanation: |
+      Sagas trade global ACID for availability: local commits are immediately
+      visible (no isolation across steps), and failures trigger compensations
+      instead of an atomic rollback. You get eventual consistency and must design
+      idempotent, compensable steps.
+    ref: "concepts.md#distributed--xa-transactions"
+
+  - id: transaction-management-095
+    difficulty: advanced
+    tags: [transaction-synchronization, is-active, internals]
+    question: |
+      Which call reliably tells you whether a REAL physical transaction is
+      currently bound to the thread (as opposed to merely having synchronization
+      active)?
+    options:
+      - "TransactionSynchronizationManager.isSynchronizationActive()"
+      - "TransactionSynchronizationManager.isActualTransactionActive()"
+      - "PlatformTransactionManager.getTransaction() returning null"
+      - "EntityManager.isOpen()"
+    answer: 1
+    explanation: |
+      isActualTransactionActive() reports whether an actual physical transaction
+      is bound. isSynchronizationActive() can be true even without a real
+      transaction (e.g. read-only or synchronization-only scenarios), so it's not
+      equivalent.
+    ref: "concepts.md#transaction-synchronization--lifecycle-callbacks"
+
+  - id: transaction-management-096
+    difficulty: advanced
+    tags: [propagation, mandatory, design, scenario]
+    question: |
+      A repository-helper method must NEVER run on its own and must always be part
+      of a caller's transaction (so that its writes participate in the caller's
+      atomic unit). Which propagation makes this a fail-fast contract, and what
+      happens if the contract is violated?
+    options:
+      - "SUPPORTS — it runs non-transactionally if there's no transaction, which is safe."
+      - "MANDATORY — it joins an existing transaction, and throws IllegalTransactionStateException immediately if invoked with no active transaction, enforcing the contract."
+      - "REQUIRED — it creates a transaction if none exists, which satisfies the contract silently."
+      - "NEVER — it forbids running in a transaction, which is the opposite requirement."
+    answer: 1
+    explanation: |
+      MANDATORY enforces 'must be called within an existing transaction' and
+      throws IllegalTransactionStateException otherwise — a fail-fast contract.
+      REQUIRED would silently create one; SUPPORTS/NEVER don't express this rule.
+    ref: "concepts.md#propagation"
+
+  - id: transaction-management-097
+    difficulty: intermediate
+    tags: [distributed, jta, boot]
+    question: |
+      Which transaction manager does Spring use to coordinate an XA transaction
+      spanning a database and a JMS broker?
+    options:
+      - "DataSourceTransactionManager"
+      - "JpaTransactionManager"
+      - "JtaTransactionManager (delegating to a JTA provider such as Atomikos or Narayana)"
+      - "R2dbcTransactionManager"
+    answer: 2
+    explanation: |
+      Coordinating multiple XA resources (DB + JMS) requires JTA. Spring's
+      JtaTransactionManager delegates to a JTA provider (Atomikos, Narayana, or a
+      Jakarta EE server) to run two-phase commit.
+    ref: "concepts.md#distributed--xa-transactions"
+
+  - id: transaction-management-098
+    difficulty: expert
+    tags: [rollback, requires-new, catch, scenario]
+    question: |
+      process() (REQUIRED) calls audit() (REQUIRES_NEW, different bean) inside a
+      try/catch. audit() throws a RuntimeException, which process() catches and
+      swallows, then process() continues and returns normally. What is the final
+      state?
+    options:
+      - "process() fails at commit with UnexpectedRollbackException because audit()'s failure marked the shared transaction rollback-only."
+      - "audit()'s independent transaction rolls back, but because process() caught the exception and audit() ran in a SEPARATE physical transaction, process()'s transaction is unaffected and commits successfully."
+      - "Both transactions roll back regardless of the catch."
+      - "process() commits, and audit()'s partial writes also commit."
+    answer: 1
+    explanation: |
+      Because audit() is REQUIRES_NEW, its rollback is isolated to its own
+      physical transaction and does NOT mark process()'s transaction
+      rollback-only. Catching the exception then lets process() commit normally —
+      the opposite of the REQUIRED-participant case.
+    ref: "concepts.md#propagation"
+
+  - id: transaction-management-099
+    difficulty: advanced
+    tags: [readonly, join, propagation, scenario]
+    question: |
+      A read-write outer transaction (REQUIRED) calls an inner REQUIRED method
+      annotated @Transactional(readOnly = true). What is the effect of readOnly on
+      the inner call?
+    options:
+      - "The inner method's readOnly = true switches the shared transaction to read-only for its duration, then back."
+      - "readOnly is effectively ignored for the inner call because it merely joins the existing read-write physical transaction; readOnly only takes effect when a NEW transaction begins."
+      - "Spring throws IllegalTransactionStateException due to the read-only mismatch."
+      - "The inner method silently starts a REQUIRES_NEW read-only transaction."
+    answer: 1
+    explanation: |
+      Like isolation and timeout, readOnly applies when a new physical
+      transaction is created. A joining participant cannot flip the already-active
+      read-write transaction to read-only; the attribute is essentially ignored.
+    ref: "concepts.md#readonly"
+
+  - id: transaction-management-100
+    difficulty: expert
+    tags: [isolation, validate-existing, internals, scenario]
+    question: |
+      By default, if a REQUIRED method requesting isolation = SERIALIZABLE joins a
+      transaction already running at READ_COMMITTED, Spring does NOT throw. What
+      configuration makes Spring instead reject this mismatch with
+      IllegalTransactionStateException?
+    options:
+      - "Setting global rollback-on-commit-failure = true."
+      - "Enabling validateExistingTransaction on the transaction manager (setValidateExistingTransaction(true)), which validates that a participating transaction's isolation and read-only flags match the requested ones."
+      - "Switching to JtaTransactionManager."
+      - "Annotating the method with @Isolation(strict = true)."
+    answer: 1
+    explanation: |
+      AbstractPlatformTransactionManager has validateExistingTransaction (default
+      false). When enabled, it checks that a participating transaction's isolation
+      level and read-only flag are compatible with what's requested, throwing
+      IllegalTransactionStateException on mismatch instead of silently ignoring it.
+    ref: "concepts.md#isolation-levels--anomalies"
+
+  - id: transaction-management-101
+    difficulty: advanced
+    tags: [reactive, r2dbc, context, scenario]
+    question: |
+      In a Spring WebFlux + R2DBC service, why does binding transaction state to
+      the Reactor Context (rather than a ThreadLocal) matter?
+    options:
+      - "Because reactive code never uses transactions."
+      - "Because a reactive pipeline may execute across multiple threads as it processes signals, so a ThreadLocal-bound transaction would be lost on thread hops; the Reactor Context travels with the subscription instead."
+      - "Because R2DBC does not support commit or rollback."
+      - "Because the Reactor Context is faster than ThreadLocal for blocking JDBC."
+    answer: 1
+    explanation: |
+      Reactive operators can run on different threads, so ThreadLocal binding
+      would break. Carrying the transaction in the Reactor Context keeps it
+      associated with the subscriber chain regardless of which thread executes a
+      given signal.
+    ref: "concepts.md#platformtransactionmanager"
+
+  - id: transaction-management-102
+    difficulty: expert
+    tags: [connection-acquisition, requires-new, pool-sizing, design]
+    question: |
+      A service has methods that frequently call REQUIRES_NEW sub-operations while
+      an outer transaction is active. When sizing the HikariCP pool, what is the
+      key consideration this pattern imposes?
+    options:
+      - "Nothing special; REQUIRES_NEW reuses the outer connection."
+      - "Each active REQUIRES_NEW nesting level can hold an ADDITIONAL connection simultaneously (the suspended outer keeps its connection while the inner acquires a new one), so the pool must be sized for the maximum concurrent nesting depth times concurrency, or requests will queue/deadlock."
+      - "The pool can always be size 1 because transactions are serialized."
+      - "REQUIRES_NEW releases the outer connection, so it never increases connection demand."
+    answer: 1
+    explanation: |
+      Suspending the outer transaction does not release its connection while the
+      inner REQUIRES_NEW borrows another. Peak connection demand scales with
+      nesting depth and concurrency; undersizing the pool causes queuing or
+      deadlock.
+    ref: "concepts.md#failure-modes--advanced-gotchas"
+
+  - id: transaction-management-103
+    difficulty: intermediate
+    tags: [test, rollback, commit]
+    question: |
+      What is the default transaction behavior of a test method annotated
+      @Transactional in a Spring test, and how do you make it actually persist?
+    options:
+      - "It commits by default; use @Rollback to undo it."
+      - "It rolls back at the end of each test method by default (to isolate tests); annotate with @Commit or @Rollback(false) to make changes persist."
+      - "It neither commits nor rolls back; the data leaks between tests."
+      - "It always requires a real JTA transaction manager."
+    answer: 1
+    explanation: |
+      Spring's TestContext framework rolls back @Transactional test methods by
+      default to keep the database clean. @Commit or @Rollback(false) overrides
+      that so the transaction commits.
+    ref: "concepts.md#transactional-in-tests--transactional-class-level-defaults"
+
+  - id: transaction-management-104
+    difficulty: advanced
+    tags: [chained-transaction-manager, best-effort-1pc, gotcha]
+    question: |
+      What is the correctness limitation of the (now-deprecated)
+      ChainedTransactionManager / best-effort-1PC approach for two databases?
+    options:
+      - "It provides full XA atomicity, so there is no limitation."
+      - "It commits the resources sequentially, so if the SECOND commit fails after the FIRST already succeeded, you are left inconsistent (the first is committed and cannot be rolled back) — it is best-effort, not truly atomic."
+      - "It requires all resources to be reactive."
+      - "It only works when both databases are the same vendor."
+    answer: 1
+    explanation: |
+      Best-effort-1PC commits in sequence; a failure after an earlier resource has
+      committed cannot be undone, leaving inconsistency. That's why it is
+      best-effort and why true atomicity needs XA/2PC (or a saga/outbox design).
+    ref: "concepts.md#distributed--xa-transactions"
 

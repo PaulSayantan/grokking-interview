@@ -367,19 +367,23 @@ questions:
   difficulty: advanced
   tags:
   - autowired
-  - beanpostprocessor
-  - internals
+  - exceptions
+  - startup
   question: |
-    Which infrastructure component processes @Autowired annotations at bean creation?
+    At startup a required @Autowired dependency cannot be satisfied. The underlying
+    NoSuchBeanDefinitionException or NoUniqueBeanDefinitionException typically reaches
+    the developer wrapped inside which exception?
   options:
-  - CommonAnnotationBeanPostProcessor
-  - ConfigurationClassPostProcessor
-  - PropertySourcesPlaceholderConfigurer
-  - AutowiredAnnotationBeanPostProcessor
-  answer: 3
+  - UnsatisfiedDependencyException (itself a BeanCreationException)
+  - ClassNotFoundException
+  - NullPointerException thrown at first method call
+  - IllegalArgumentException with no wrapping
+  answer: 0
   explanation: |
-    AutowiredAnnotationBeanPostProcessor handles @Autowired (and @Value, @Inject).
-    CommonAnnotationBeanPostProcessor handles JSR-250 @Resource/@PostConstruct/@PreDestroy.
+    NoSuchBeanDefinitionException (zero candidates) and NoUniqueBeanDefinitionException
+    (multiple indistinguishable candidates) are the root causes, but during context startup
+    they surface wrapped in an UnsatisfiedDependencyException / BeanCreationException that
+    names the failing bean and its injection point.
   ref: concepts.md#autowired-resolution-algorithm
 - id: ioc-dependency-injection-021
   difficulty: beginner
@@ -804,22 +808,23 @@ questions:
     injection. Other options do not address the cycle.
   ref: concepts.md#circular-dependencies-and-the-three-level-singleton-cache
 - id: ioc-dependency-injection-043
-  difficulty: beginner
+  difficulty: intermediate
   tags:
   - bean-creation
-  - singleton
-  - eager
+  - request-scope
+  - session-scope
   question: |
-    By default, when is a singleton bean created in a Spring Boot application?
+    When is a request-scoped or session-scoped bean instance actually created?
   options:
-  - On the first HTTP request that needs it
-  - Eagerly during application context startup
-  - Only when explicitly requested via getBean
-  - Never; singletons must be created manually
-  answer: 1
+  - Eagerly at context startup, like a singleton
+  - Once, then cached for the lifetime of the application
+  - When its scope begins (e.g., a new HTTP request or session), a fresh instance per scope
+  - Never automatically; you must call getBean manually each time
+  answer: 2
   explanation: |
-    Singleton beans are eagerly instantiated at context startup by default, which
-    surfaces configuration errors early (fail fast).
+    Beans in scopes such as request and session are created when their scope begins — a new
+    instance per HTTP request or per session — not eagerly at startup. Singletons, by
+    contrast, are eagerly instantiated during context refresh.
   ref: concepts.md#lazy-injection-and-when-beans-are-created
 - id: ioc-dependency-injection-044
   difficulty: intermediate
@@ -1052,3 +1057,930 @@ questions:
     defers the real lookup, breaking the construction-time cycle while keeping constructor
     injection.
   ref: concepts.md#circular-dependencies-and-the-three-level-singleton-cache
+- id: ioc-dependency-injection-056
+  difficulty: expert
+  tags:
+  - autowired
+  - resolution
+  - qualifier
+  - primary
+  question: |
+    A type has three candidate beans. One is @Primary. An injection point uses
+    @Qualifier("beta"), and two of the three beans (not the @Primary one) carry the
+    qualifier "beta". What is the outcome?
+  options:
+  - NoUniqueBeanDefinitionException, because @Qualifier first narrows to the two "beta" beans and @Primary cannot break that tie (it is not among them)
+  - The @Primary bean is injected, because @Primary outranks any @Qualifier
+  - The first "beta" bean by registration order is injected silently
+  - NoSuchBeanDefinitionException, because @Qualifier and @Primary conflict
+  answer: 0
+  explanation: |
+    Resolution applies the @Qualifier as a filter first, reducing candidates to the two
+    "beta" beans. @Primary only breaks ties among the surviving candidates, and the
+    @Primary bean is not one of them, so it cannot help. With two equally-qualified beans
+    and no further disambiguation, the container throws NoUniqueBeanDefinitionException.
+  ref: concepts.md#autowired-resolution-algorithm
+- id: ioc-dependency-injection-057
+  difficulty: expert
+  tags:
+  - autowired
+  - primary
+  - failure-mode
+  question: |
+    Two beans of the same type are BOTH annotated @Primary and are both eligible at an
+    injection point that has no @Qualifier. What happens?
+  options:
+  - The container picks the one declared first and logs a warning
+  - Startup fails with NoUniqueBeanDefinitionException reporting more than one 'primary' bean
+  - Both are injected as a List because ambiguity implies a collection
+  - The @Primary annotations cancel out and name-based fallback is used
+  answer: 1
+  explanation: |
+    @Primary designates a single default. If two candidates of the same type are both
+    @Primary, Spring cannot choose a default and throws NoUniqueBeanDefinitionException
+    indicating that more than one 'primary' bean was found among the candidates.
+  ref: concepts.md#qualifier-vs-primary
+- id: ioc-dependency-injection-058
+  difficulty: advanced
+  tags:
+  - autowired
+  - parameter-names
+  - name-fallback
+  question: |
+    Name-based fallback resolution for a constructor parameter (matching the parameter
+    name to a bean name) can silently stop working in which situation?
+  options:
+  - When the constructor has more than two parameters
+  - When the bean is a singleton rather than a prototype
+  - When the class is compiled without parameter name metadata (no -parameters flag) so the real parameter names are not available at runtime
+  - When the injection uses @Inject instead of @Autowired
+  answer: 2
+  explanation: |
+    Parameter-name fallback relies on the actual parameter names being present in the
+    bytecode. If the code is compiled without -parameters (and no debug info), the names
+    are lost, the fallback cannot match, and resolution fails or picks unexpectedly.
+    Spring Boot enables -parameters by default, but hand-built or misconfigured builds
+    can lose it.
+  ref: concepts.md#autowired-resolution-algorithm
+- id: ioc-dependency-injection-059
+  difficulty: expert
+  tags:
+  - fallback
+  - spring-6.2
+  - resolution
+  question: |
+    Spring Framework 6.2 introduced @Fallback. How does a @Fallback bean behave during
+    autowiring when a user-defined non-fallback bean of the same type also exists?
+  options:
+  - The @Fallback bean always wins, like an inverse @Primary
+  - Both beans are injected and merged
+  - Startup fails because @Fallback conflicts with the user-defined bean
+  - The @Fallback bean is ignored during selection whenever any non-fallback candidate exists, so the user-defined bean is chosen
+  answer: 3
+  explanation: |
+    @Fallback is the inverse of @Primary: a fallback bean is only selected when no
+    non-fallback candidate of the type exists. It lets a framework or library supply a
+    default that any user-defined bean automatically supersedes, without needing
+    @ConditionalOnMissingBean.
+  ref: concepts.md#autowired-resolution-algorithm
+- id: ioc-dependency-injection-060
+  difficulty: advanced
+  tags:
+  - autowired
+  - beanpostprocessor
+  - bootstrapping
+  question: |
+    Why can you NOT use @Autowired or @Value inside your own custom BeanPostProcessor
+    implementation and expect them to be injected?
+  options:
+  - The annotations are themselves processed by BeanPostProcessors, and BPP beans are instantiated too early (before those processors run) to have them applied
+  - '@Autowired only works on classes annotated @Service or @Component'
+  - BeanPostProcessors are prototype-scoped and prototypes never get autowired
+  - Custom BeanPostProcessors run in a separate class loader that cannot see annotations
+  answer: 0
+  explanation: |
+    @Autowired/@Value/@Resource/@Inject are handled by BeanPostProcessor implementations
+    (AutowiredAnnotationBeanPostProcessor, CommonAnnotationBeanPostProcessor). Your own
+    BPP must be instantiated very early in the bootstrap, before those processors are
+    active, so annotation-driven injection into it does not run. You must wire such beans
+    explicitly (constructor args in an @Bean method).
+  ref: concepts.md#resource-vs-inject-vs-autowired
+- id: ioc-dependency-injection-061
+  difficulty: expert
+  tags:
+  - scope-mismatch
+  - prototype
+  - singleton
+  question: |
+    A prototype-scoped bean is injected via a plain @Autowired field into a singleton
+    service. At runtime the singleton's method uses that field many times. What actually
+    happens?
+  options:
+  - A new prototype instance is created on every method call
+  - The same single prototype instance (resolved once at singleton creation) is reused for every call
+  - The field is null because prototypes cannot be injected into singletons
+  - Spring throws BeanCurrentlyInCreationException on first use
+  answer: 1
+  explanation: |
+    A singleton is wired exactly once, so the prototype dependency is resolved a single
+    time and then behaves like a singleton for that consumer. To get a fresh instance per
+    use you need ObjectProvider/Provider, @Lookup method injection, or a scoped proxy.
+  ref: concepts.md#scope-mismatch-and-injecting-shorter-lived-beans
+- id: ioc-dependency-injection-062
+  difficulty: expert
+  tags:
+  - lookup
+  - method-injection
+  - internals
+  question: |
+    @Lookup method injection lets a singleton obtain a fresh prototype on each call. Which
+    constraint does its implementation impose, and why?
+  options:
+  - The lookup method must be static, because Spring calls it before the bean exists
+  - The lookup method must return void and set a field via reflection
+  - The lookup method must not be private, final, or static, because Spring creates a CGLIB subclass that overrides it to return a fresh getBean result
+  - The lookup method must be annotated @Transactional to trigger proxying
+  answer: 2
+  explanation: |
+    @Lookup is implemented by generating a CGLIB subclass whose overridden method returns
+    a fresh bean from the container. Overriding requires the method to be non-final,
+    non-static, and at least package/protected/public (not private), and the class itself
+    must be subclassable.
+  ref: concepts.md#scope-mismatch-and-injecting-shorter-lived-beans
+- id: ioc-dependency-injection-063
+  difficulty: advanced
+  tags:
+  - request-scope
+  - scoped-proxy
+  - singleton
+  question: |
+    A request-scoped bean must be injected into a singleton controller. What is required
+    for this to work correctly across many concurrent requests?
+  options:
+  - Nothing special; request beans inject directly into singletons like any other bean
+  - The bean must be marked @Lazy so it is created on first request
+  - The controller must also be request-scoped
+  - A scoped proxy (proxyMode=TARGET_CLASS or INTERFACES) so each method call resolves the bean from the currently active request scope
+  answer: 3
+  explanation: |
+    Injecting a request-scoped bean directly into a singleton would capture one request's
+    instance forever (or fail with no active request). A scoped proxy is injected instead;
+    on each method call it looks up the real bean bound to the current thread's active
+    request scope, giving correct per-request instances.
+  ref: concepts.md#scope-mismatch-and-injecting-shorter-lived-beans
+- id: ioc-dependency-injection-064
+  difficulty: expert
+  tags:
+  - three-level-cache
+  - aop
+  - failure-mode
+  question: |
+    A singleton A is advised by @Async and participates in a field-injection cycle with B.
+    The context fails with a message that A "has been injected ... in its raw version as
+    part of a circular reference, but has eventually been wrapped." What is the root cause?
+  options:
+  - The @Async proxy is created by a different post-processor than the one that produced A's early reference, so B captured A's raw target while the container's A became a proxy
+  - Spring ran out of cache levels and evicted A prematurely
+  - '@Async beans cannot be singletons and must be prototypes'
+  - B was created before A was registered in the bean definition map
+  answer: 0
+  explanation: |
+    The early reference exposed for cycle resolution is normally the proxied form when a
+    SmartInstantiationAwareBeanPostProcessor handles it. @Async proxying happens in a
+    later, separate post-processor, so the early reference handed to B was the raw target
+    while A itself ended up wrapped. Spring detects the mismatch and fails. Break the cycle
+    or use @Lazy.
+  ref: concepts.md#circular-dependencies-and-the-three-level-singleton-cache
+- id: ioc-dependency-injection-065
+  difficulty: expert
+  tags:
+  - circular-dependency
+  - prototype
+  question: |
+    Two prototype-scoped beans depend on each other (via any injection style). What does
+    Spring do?
+  options:
+  - Resolves the cycle using the three-level cache, as with singletons
+  - Throws BeanCurrentlyInCreationException, because prototypes are never placed in the singleton caches and cannot expose an early reference
+  - Creates one shared instance to satisfy both
+  - Silently injects null into one side
+  answer: 1
+  explanation: |
+    The early-reference mechanism lives in the singleton registry. Prototypes are never
+    cached there, so there is no way to expose an early reference or even track them as
+    "currently in creation" across independent instances. A prototype-to-prototype cycle
+    therefore always throws BeanCurrentlyInCreationException.
+  ref: concepts.md#circular-dependencies-and-the-three-level-singleton-cache
+- id: ioc-dependency-injection-066
+  difficulty: expert
+  tags:
+  - circular-dependency
+  - allow-circular-references
+  question: |
+    An application has a pure constructor-injection cycle. A developer sets
+    spring.main.allow-circular-references=true to fix it. What is the result?
+  options:
+  - The cycle is resolved and the app starts normally
+  - The two beans are automatically converted to setter injection
+  - The app still fails, because that flag only re-enables the setter/field early-reference mechanism and cannot resolve a constructor cycle
+  - The app starts but one dependency is null
+  answer: 2
+  explanation: |
+    allow-circular-references only re-enables the early-reference (level-2/3) mechanism
+    that Boot 2.6 disabled by default. That mechanism requires an already-instantiated
+    object to expose early, which a constructor cycle can never provide. The startup still
+    fails with BeanCurrentlyInCreationException; the real fixes are redesign or @Lazy.
+  ref: concepts.md#circular-dependencies-and-the-three-level-singleton-cache
+- id: ioc-dependency-injection-067
+  difficulty: advanced
+  tags:
+  - three-level-cache
+  - invariants
+  question: |
+    Which statement about the three singleton cache maps in DefaultSingletonBeanRegistry
+    is correct at any single instant during a bean's creation?
+  options:
+  - A bean can appear in all three maps simultaneously for redundancy
+  - Prototype beans are stored in level 3 until fully initialized
+  - Level 1 holds factories and level 3 holds finished beans
+  - 'The maps are mutually exclusive per bean: promotion to a higher level removes the entry from the lower level(s)'
+  answer: 3
+  explanation: |
+    The maps partition a bean's lifecycle: its factory sits in level 3 (singletonFactories);
+    when an early reference is produced it moves to level 2 (earlySingletonObjects) and the
+    factory is removed; when fully initialized it moves to level 1 (singletonObjects) and
+    is removed from level 2. A given bean is in exactly one at a time. Prototypes are never
+    stored in these maps.
+  ref: concepts.md#circular-dependencies-and-the-three-level-singleton-cache
+- id: ioc-dependency-injection-068
+  difficulty: expert
+  tags:
+  - concurrency
+  - final-fields
+  - jmm
+  question: |
+    From a Java Memory Model standpoint, why does constructor injection into final fields
+    give a concurrency advantage over setter/field injection of non-final fields?
+  options:
+  - The JMM guarantees safe publication of properly-constructed final fields, so their values are visible to other threads without extra synchronization
+  - Final fields are stored in a separate thread-local heap
+  - Setter injection uses volatile writes automatically
+  - Final fields disable the CPU cache for that object
+  answer: 0
+  explanation: |
+    The JMM's final-field semantics guarantee that if an object is not leaked during
+    construction, other threads see correctly-initialized final field values without
+    synchronization. Non-final fields set after construction (setter/field injection) carry
+    no such guarantee, so a bean seen through a data race could observe a stale/null
+    collaborator.
+  ref: concepts.md#thread-safety-and-concurrency-of-injection
+- id: ioc-dependency-injection-069
+  difficulty: advanced
+  tags:
+  - concurrency
+  - singleton
+  - visibility
+  question: |
+    Why do application request threads never observe a partially-wired singleton bean under
+    normal usage?
+  options:
+  - Because every singleton method is synchronized by the container
+  - Because the container finishes all injection and @PostConstruct before publishing the bean into singletonObjects, from where application code retrieves it
+  - Because singletons are recreated per thread
+  - Because Spring injects a defensive copy per thread
+  answer: 1
+  explanation: |
+    Singleton creation (instantiation, injection, init callbacks) completes before the bean
+    is placed in singletonObjects, the map application code reads from. Threads therefore
+    see a fully-initialized bean, provided the bean does not leak 'this' early (e.g., during
+    construction) and you do not re-inject via setters at runtime.
+  ref: concepts.md#thread-safety-and-concurrency-of-injection
+- id: ioc-dependency-injection-070
+  difficulty: intermediate
+  tags:
+  - concurrency
+  - state
+  - singleton
+  question: |
+    Which of the following does dependency injection guarantee about thread-safety?
+  options:
+  - It makes any singleton bean fully thread-safe, including its mutable fields
+  - It converts singletons to thread-local instances automatically
+  - It only ensures the wiring is thread-safe; mutable state in a singleton is still your responsibility to protect
+  - It serializes all method calls on singleton beans
+  answer: 2
+  explanation: |
+    DI guarantees the container wires and publishes the bean safely. It does nothing about
+    the thread-safety of the bean's own mutable state; a singleton holding mutable request
+    data shared across threads is a classic concurrency bug regardless of injection style.
+  ref: concepts.md#thread-safety-and-concurrency-of-injection
+- id: ioc-dependency-injection-071
+  difficulty: advanced
+  tags:
+  - bean-overriding
+  - spring-boot-2.1
+  question: |
+    Two @Bean methods in different configuration classes both declare a bean named
+    "dataSource". On Spring Boot 2.1+, what happens by default at startup?
+  options:
+  - The second definition silently overrides the first
+  - The first definition wins and a warning is logged
+  - Both beans are kept and injected as a List
+  - Startup fails with BeanDefinitionOverrideException unless spring.main.allow-bean-definition-overriding=true
+  answer: 3
+  explanation: |
+    Bean definition overriding is disabled by default since Spring Boot 2.1. Two definitions
+    sharing a name throw BeanDefinitionOverrideException at startup unless you explicitly set
+    spring.main.allow-bean-definition-overriding=true. This is different from two beans of
+    the same type under different names, which is a resolution (not overriding) concern.
+  ref: concepts.md#bean-overriding-definition-order-and-startup-ordering
+- id: ioc-dependency-injection-072
+  difficulty: advanced
+  tags:
+  - order
+  - startup-order
+  - dependson
+  question: |
+    A developer adds @Order(1) to bean X and @Order(2) to bean Y hoping X is created before
+    Y at startup. Does @Order achieve this?
+  options:
+  - No, @Order does not affect singleton startup order; use @DependsOn (or a real dependency) to force creation order
+  - Yes, @Order directly controls singleton instantiation order
+  - Yes, but only if both beans are lazy
+  - No, ordering of bean creation is impossible in Spring
+  answer: 0
+  explanation: |
+    @Order governs the order of elements at collection injection points and ordered streams
+    (and things like filter chains), not singleton startup order. Instantiation order is
+    determined by the dependency graph; to force one bean to be created before another
+    without an injection edge, use @DependsOn.
+  ref: concepts.md#bean-overriding-definition-order-and-startup-ordering
+- id: ioc-dependency-injection-073
+  difficulty: expert
+  tags:
+  - priority
+  - order
+  - bean-method
+  question: |
+    You want a specific @Bean method's bean to win autowiring tie-breaks using
+    jakarta.annotation.Priority. What is the catch?
+  options:
+  - '@Priority works on @Bean methods exactly like @Order'
+  - '@Priority (jakarta.annotation.Priority) cannot be declared on a method, so you cannot put it on a @Bean method; model the intent with @Order plus @Primary/@Fallback instead'
+  - '@Priority only works if the bean is a prototype'
+  - '@Priority must be combined with @Qualifier to compile'
+  answer: 1
+  explanation: |
+    jakarta.annotation.Priority has a target that does not include methods, so it cannot be
+    placed on a @Bean factory method (only on types). To express equivalent precedence for a
+    method-defined bean, use @Order together with @Primary or @Fallback.
+  ref: concepts.md#bean-overriding-definition-order-and-startup-ordering
+- id: ioc-dependency-injection-074
+  difficulty: advanced
+  tags:
+  - collections-injection
+  - constructor
+  - empty
+  question: |
+    A collection dependency has no matching beans. Contrast an @Autowired FIELD of type
+    List<Foo> with a CONSTRUCTOR parameter of type List<Foo>.
+  options:
+  - Both fail startup with NoSuchBeanDefinitionException
+  - Both are injected as empty lists
+  - The field injection is required by default and fails when empty; the constructor parameter resolves to an empty list
+  - The field gets an empty list; the constructor parameter fails
+  answer: 2
+  explanation: |
+    An @Autowired collection field is required by default and fails when no candidates
+    exist (unless required=false). A multi-element constructor/factory parameter, however,
+    resolves to an empty collection rather than failing. This asymmetry surprises many
+    developers.
+  ref: concepts.md#collections-and-map-injection
+- id: ioc-dependency-injection-075
+  difficulty: expert
+  tags:
+  - self-injection
+  - proxy
+  - transactional
+  question: |
+    A service method annotated @Transactional calls another @Transactional method on the
+    same class via 'this.other()'. The second transaction's propagation seems ignored. Why,
+    and what is the container-oriented fix?
+  options:
+  - Because @Transactional is broken; there is no fix
+  - Because transactions require prototype scope
+  - Because the second method must be static
+  - Because 'this' bypasses the AOP proxy; a fix is to self-inject the bean (e.g., @Autowired the same type, or @Resource by name) and call through the injected proxy reference
+  answer: 3
+  explanation: |
+    Proxy-based AOP only intercepts calls that go through the proxy. An internal 'this' call
+    invokes the raw target and skips the transactional advice. One remedy is to obtain the
+    proxy of the same bean (self-injection via @Autowired/@Resource, or AopContext) and
+    invoke the method through that reference so the advice applies. Note self-injection is a
+    fallback candidate and never primary.
+  ref: concepts.md#programmatic-access-applicationcontextaware-and-service-locator
+- id: ioc-dependency-injection-076
+  difficulty: advanced
+  tags:
+  - applicationcontextaware
+  - service-locator
+  - lifecycle
+  question: |
+    When is the setApplicationContext callback of an ApplicationContextAware bean invoked
+    relative to other lifecycle steps?
+  options:
+  - After property population/injection but before @PostConstruct
+  - Before the constructor runs
+  - After @PostConstruct and after the bean is fully in singletonObjects
+  - Only when getBean is first called on the bean
+  answer: 0
+  explanation: |
+    Aware callbacks are invoked by dedicated BeanPostProcessors after the bean is
+    instantiated and its properties are injected, but before initialization callbacks like
+    @PostConstruct and InitializingBean.afterPropertiesSet. So the context is available in
+    @PostConstruct but not in the constructor.
+  ref: concepts.md#programmatic-access-applicationcontextaware-and-service-locator
+- id: ioc-dependency-injection-077
+  difficulty: intermediate
+  tags:
+  - service-locator
+  - anti-pattern
+  - objectprovider
+  question: |
+    Why is injecting ApplicationContext and calling getBean() generally discouraged compared
+    with injecting an ObjectProvider<T>?
+  options:
+  - getBean is slower by several orders of magnitude
+  - It couples the bean to the Spring container (Service Locator anti-pattern), hides real dependencies, and hurts POJO testability, whereas ObjectProvider is type-safe and lazy
+  - ApplicationContext cannot be injected at all
+  - getBean only works for prototype beans
+  answer: 1
+  explanation: |
+    Reaching into the container via getBean reintroduces the coupling DI removes and hides a
+    class's true dependencies, making it harder to test as a plain object. ObjectProvider<T>
+    gives lazy, type-safe access to the same capability while keeping the dependency explicit
+    in the constructor.
+  ref: concepts.md#programmatic-access-applicationcontextaware-and-service-locator
+- id: ioc-dependency-injection-078
+  difficulty: expert
+  tags:
+  - beanfactory
+  - applicationcontext
+  - refresh
+  question: |
+    Which statement about BeanFactoryPostProcessor vs BeanPostProcessor timing during
+    context refresh is correct?
+  options:
+  - BeanPostProcessors run first to modify bean definitions, then BeanFactoryPostProcessors modify instances
+  - Both operate on instances and are interchangeable
+  - BeanFactoryPostProcessors run first and can modify bean DEFINITIONS (before beans are instantiated); BeanPostProcessors run later and operate on bean INSTANCES
+  - Neither is invoked by an ApplicationContext automatically
+  answer: 2
+  explanation: |
+    BeanFactoryPostProcessors (e.g., PropertySourcesPlaceholderConfigurer,
+    ConfigurationClassPostProcessor) run during refresh before bean instantiation and can
+    alter bean definitions/metadata. BeanPostProcessors run during each bean's creation and
+    operate on the instantiated objects (e.g., proxying, @Autowired). An ApplicationContext
+    registers both automatically.
+  ref: concepts.md#beanfactory-vs-applicationcontext
+- id: ioc-dependency-injection-079
+  difficulty: advanced
+  tags:
+  - context-hierarchy
+  - resolution
+  - primary
+  question: |
+    A bean of type Clock exists in BOTH the parent (root) and child context, and the parent's
+    is @Primary. A component in the CHILD context autowires a Clock with no qualifier. Which
+    is injected?
+  options:
+  - The parent's @Primary Clock, because @Primary crosses context boundaries first
+  - Neither; cross-context autowiring is forbidden
+  - NoUniqueBeanDefinitionException, because both contexts have a Clock
+  - The child's Clock, because resolution is child-first and a local unique match is used before delegating to the parent
+  answer: 3
+  explanation: |
+    Resolution is child-first. The child context finds its own unique Clock and injects it
+    without delegating upward, so the parent's @Primary is irrelevant here. @Primary only
+    disambiguates among candidates within the same resolution scope, not across the
+    hierarchy boundary.
+  ref: concepts.md#context-hierarchy
+- id: ioc-dependency-injection-080
+  difficulty: expert
+  tags:
+  - objectprovider
+  - ordering
+  - stream
+  question: |
+    You inject ObjectProvider<Handler> and call orderedStream(). How are the resulting
+    Handler beans ordered, and how does this differ from stream()?
+  options:
+  - orderedStream() honors @Order/Ordered/@Priority; stream() returns them in the context's default (registration) order without applying @Order
+  - Both stream() and orderedStream() sort by bean name alphabetically
+  - orderedStream() reverses registration order; stream() uses forward order
+  - There is no difference; the method names are aliases
+  answer: 0
+  explanation: |
+    orderedStream() applies the ordering semantics (Ordered/@Order/@Priority) to the
+    returned beans, whereas stream() yields them in the container's default order without
+    that sorting. This mirrors how @Order affects List injection but not startup order.
+  ref: concepts.md#collections-and-map-injection
+- id: ioc-dependency-injection-081
+  difficulty: advanced
+  tags:
+  - value
+  - autowired
+  - beanpostprocessor
+  question: |
+    Which single BeanPostProcessor is responsible for processing @Autowired, @Value, and
+    @Inject on beans?
+  options:
+  - CommonAnnotationBeanPostProcessor
+  - AutowiredAnnotationBeanPostProcessor
+  - PersistenceAnnotationBeanPostProcessor
+  - ConfigurationClassPostProcessor
+  answer: 1
+  explanation: |
+    AutowiredAnnotationBeanPostProcessor handles @Autowired, @Value, and JSR-330 @Inject.
+    CommonAnnotationBeanPostProcessor handles the JSR-250 set (@Resource, @PostConstruct,
+    @PreDestroy). ConfigurationClassPostProcessor is a BeanFactoryPostProcessor that parses
+    @Configuration classes.
+  ref: concepts.md#autowired-resolution-algorithm
+- id: ioc-dependency-injection-082
+  difficulty: expert
+  tags:
+  - configuration
+  - self-reference
+  - static-bean
+  question: |
+    Inside a @Configuration class, one @Bean method calls another @Bean method to obtain a
+    dependency. This is effectively a self-reference. Which technique decouples such a bean
+    (e.g., a BeanFactoryPostProcessor) from the configuration instance's lifecycle?
+  options:
+  - Making the configuration class implement ApplicationContextAware
+  - Annotating the configuration class with @Lazy
+  - Marking the @Bean method static, so it does not depend on the configuration instance
+  - Adding @Primary to the referenced @Bean method
+  answer: 2
+  explanation: |
+    Declaring the @Bean method static decouples it from the @Configuration instance,
+    avoiding a self-reference and premature instantiation ordering issues. This is the
+    recommended pattern for BeanFactoryPostProcessor/BeanPostProcessor @Bean methods, which
+    must be created very early.
+  ref: concepts.md#programmatic-access-applicationcontextaware-and-service-locator
+- id: ioc-dependency-injection-083
+  difficulty: expert
+  tags:
+  - constructor-injection
+  - multiple-constructors
+  - resolution
+  question: |
+    A bean class has two constructors, both annotated @Autowired(required=false), taking
+    different dependency sets. Only some dependencies are available in the context. How does
+    Spring choose?
+  options:
+  - It always uses the constructor with the fewest parameters
+  - It merges the two constructors' parameters into one call
+  - It throws because two constructors are annotated
+  - It picks the constructor with the greatest number of satisfiable dependencies, falling back to a default constructor if none can be fully satisfied
+  answer: 3
+  explanation: |
+    When multiple constructors are annotated @Autowired(required=false), Spring treats them
+    as candidates and selects the "greediest" one whose dependencies can all be satisfied,
+    falling back to a default/primary constructor otherwise. Only one constructor may use
+    required=true.
+  ref: concepts.md#constructor-vs-setter-vs-field-injection
+- id: ioc-dependency-injection-084
+  difficulty: advanced
+  tags:
+  - self-injection
+  - candidate-selection
+  question: |
+    Regarding self-injection (a bean autowiring a dependency of its own type), which
+    statement is accurate?
+  options:
+  - 'A self reference is a fallback only: it never participates in normal candidate selection and is never treated as primary, ending up at lowest precedence'
+  - A self reference has the same precedence as any other candidate
+  - Self injection is forbidden and always throws
+  - A self reference is always preferred over external beans
+  answer: 0
+  explanation: |
+    @Autowired supports self references but only as a last-resort fallback. Regular
+    dependencies on other beans always take precedence; a self reference is never primary
+    and is chosen only when nothing else matches. This is why an external bean of the same
+    type wins over the self reference.
+  ref: concepts.md#programmatic-access-applicationcontextaware-and-service-locator
+- id: ioc-dependency-injection-085
+  difficulty: expert
+  tags:
+  - generics
+  - qualifier
+  - resolution
+  question: |
+    Given beans of type Converter<String,Integer> and Converter<Integer,String>, an
+    injection point declares Converter<String,Integer>. What resolves, and what happens if
+    only the RAW type Converter is declared at the injection point with both beans present?
+  options:
+  - Both cases inject the first bean by registration order
+  - The parameterized point matches only the String,Integer bean; the raw point is ambiguous and throws NoUniqueBeanDefinitionException (unless disambiguated)
+  - The parameterized point throws because generics are erased; the raw point works
+  - Both cases throw because Converter is a functional interface
+  answer: 1
+  explanation: |
+    Spring uses resolvable generics as an implicit qualifier, so Converter<String,Integer>
+    matches only the matching parameterization. A raw Converter injection point cannot use
+    generics to disambiguate, so with two candidates it throws NoUniqueBeanDefinitionException
+    unless a @Qualifier/@Primary/name match narrows it.
+  ref: concepts.md#autowired-resolution-algorithm
+- id: ioc-dependency-injection-086
+  difficulty: advanced
+  tags:
+  - lazy
+  - bean-definition
+  - eager-consumer
+  question: |
+    Bean B is annotated @Lazy (on its @Component/@Bean definition). Eager singleton A
+    injects B via a plain @Autowired field (no @Lazy at the injection point). When is B
+    created?
+  options:
+  - Eagerly at startup, when A is created and its dependency on B is resolved
+  - Never, because @Lazy on the definition always wins
+  - On the first HTTP request regardless of A
+  - Only if spring.main.lazy-initialization=true is also set
+  answer: 0
+  explanation: |
+    @Lazy on a bean definition only delays creation until the bean is first needed. A
+    non-lazy consumer that injects it directly (no @Lazy proxy at the injection point) needs
+    the real instance at wiring time, which forces B's creation during A's eager startup.
+    To truly defer, the injection point itself must be @Lazy (injecting a proxy).
+  ref: concepts.md#lazy-injection-and-when-beans-are-created
+- id: ioc-dependency-injection-087
+  difficulty: expert
+  tags:
+  - postconstruct
+  - jakarta
+  - spring-boot-3
+  question: |
+    An app migrated to Spring Boot 3 still imports javax.annotation.PostConstruct, and the
+    method silently stops being invoked. What is the underlying reason?
+  options:
+  - '@PostConstruct was removed entirely from Spring Boot 3'
+  - The method must now be static
+  - '@PostConstruct only works on prototype beans in Boot 3'
+  - Spring Boot 3 / Spring 6 processes jakarta.annotation.PostConstruct; the old javax.* annotation is no longer on the classpath/recognized, so the lifecycle callback is not run
+  answer: 3
+  explanation: |
+    Spring Framework 6 / Boot 3 moved to the jakarta.* namespace. CommonAnnotationBeanPostProcessor
+    recognizes jakarta.annotation.PostConstruct; a leftover javax.annotation.PostConstruct is
+    not the annotation Spring scans for (and the javax artifact may be absent), so the init
+    method is quietly skipped. This is a common migration bug.
+  ref: concepts.md#resource-vs-inject-vs-autowired
+- id: ioc-dependency-injection-088
+  difficulty: advanced
+  tags:
+  - objectprovider
+  - getifunique
+  - getifavailable
+  question: |
+    You inject ObjectProvider<Cache> and call getIfUnique(). There are TWO Cache beans and
+    neither is @Primary. What does getIfUnique() return?
+  options:
+  - null, because the candidate is not unique (getIfUnique returns the bean only if exactly one candidate, or one is primary)
+  - The first Cache by registration order
+  - It throws NoUniqueBeanDefinitionException
+  - A List of both caches
+  answer: 0
+  explanation: |
+    getIfUnique() returns the bean only when there is exactly one candidate or one is marked
+    primary; otherwise it returns null instead of throwing. getIfAvailable(), by contrast,
+    would throw NoUniqueBeanDefinitionException when multiple non-primary candidates exist.
+  ref: concepts.md#requiredfalse-and-optional-injection
+- id: ioc-dependency-injection-089
+  difficulty: expert
+  tags:
+  - postconstruct
+  - constructor
+  - proxy
+  question: |
+    A bean is advised (e.g., @Transactional/@Async). Its @PostConstruct method calls another
+    of its own advised methods. Is the advice applied during @PostConstruct, and why?
+  options:
+  - Yes, because the proxy is fully active before construction
+  - No, because @PostConstruct runs on the raw target instance before the AOP proxy is created by the post-processor, so a self-call is not intercepted
+  - Yes, because @PostConstruct methods are always run through the proxy
+  - No, because @PostConstruct is never invoked on advised beans
+  answer: 1
+  explanation: |
+    Initialization callbacks like @PostConstruct run on the target instance during bean
+    creation; the AOP proxy is typically created by a BeanPostProcessor's postProcessAfter-
+    Initialization step, i.e., after @PostConstruct. So calls made during @PostConstruct
+    (especially self-calls) hit the raw target and are not advised.
+  ref: concepts.md#lazy-injection-and-when-beans-are-created
+- id: ioc-dependency-injection-090
+  difficulty: advanced
+  tags:
+  - dependson
+  - ordering
+  - destruction
+  question: |
+    What does @DependsOn("audit") on bean 'reporter' guarantee?
+  options:
+  - The 'audit' bean is injected into 'reporter' automatically
+  - The 'reporter' bean becomes a child context of 'audit'
+  - The 'audit' bean is initialized before 'reporter' and destroyed after 'reporter', without creating an injection relationship
+  - The 'audit' bean is marked @Primary for 'reporter'
+  answer: 2
+  explanation: |
+    @DependsOn forces initialization order (and reverse destruction order) between beans
+    that have no direct injection edge — useful when a bean relies on another's side effect.
+    It does not inject 'audit' into 'reporter'; it only orders their lifecycles.
+  ref: concepts.md#bean-overriding-definition-order-and-startup-ordering
+- id: ioc-dependency-injection-091
+  difficulty: expert
+  tags:
+  - qualifier
+  - collections-injection
+  - grouping
+  question: |
+    Five beans implement Notifier; three are annotated @Qualifier("urgent"). An injection
+    point declares `@Autowired @Qualifier("urgent") List<Notifier> urgent;`. What is injected?
+  options:
+  - All five Notifier beans
+  - Only the first "urgent" bean by order
+  - A NoUniqueBeanDefinitionException, because @Qualifier cannot apply to a List
+  - Only the three beans carrying the "urgent" qualifier
+  answer: 3
+  explanation: |
+    A @Qualifier on a collection injection point restricts the collected beans to those
+    carrying that qualifier. This is the idiomatic way to inject a labeled subset of all
+    beans of a type, here the three "urgent" Notifiers.
+  ref: concepts.md#collections-and-map-injection
+- id: ioc-dependency-injection-092
+  difficulty: intermediate
+  tags:
+  - beanfactory
+  - lazy
+  - fail-fast
+  question: |
+    A developer bootstraps with a raw BeanFactory (e.g., DefaultListableBeanFactory) instead
+    of an ApplicationContext and is surprised that a misconfigured singleton does not fail at
+    startup. Why?
+  options:
+  - A raw BeanFactory instantiates singletons lazily on first getBean, so the error surfaces only when that bean is first requested, not at bootstrap
+  - BeanFactory validates all beans eagerly, so this cannot happen
+  - BeanFactory never reports configuration errors
+  - The bean was silently replaced with a default implementation
+  answer: 0
+  explanation: |
+    Unlike ApplicationContext, a raw BeanFactory does not pre-instantiate singletons; they
+    are created lazily on first getBean. So a wiring error appears only when the bean is
+    first requested, losing the fail-fast behavior an ApplicationContext provides.
+  ref: concepts.md#beanfactory-vs-applicationcontext
+- id: ioc-dependency-injection-093
+  difficulty: expert
+  tags:
+  - scoped-proxy
+  - proxymode
+  - internals
+  question: |
+    A request-scoped bean is a concrete class with no interface, injected into a singleton.
+    Which proxyMode must the scoped proxy use, and what technology backs it?
+  options:
+  - INTERFACES, backed by a JDK dynamic proxy
+  - TARGET_CLASS, backed by a CGLIB subclass proxy, because there is no interface to proxy
+  - NO, because concrete classes cannot be proxied
+  - DEFAULT, which always uses reflection without a proxy
+  answer: 1
+  explanation: |
+    With no interface available, an interface-based JDK proxy cannot be created, so the
+    scoped proxy must use proxyMode=TARGET_CLASS, which generates a CGLIB subclass proxy of
+    the concrete type. INTERFACES mode requires the bean to implement an interface.
+  ref: concepts.md#scope-mismatch-and-injecting-shorter-lived-beans
+- id: ioc-dependency-injection-094
+  difficulty: advanced
+  tags:
+  - optional
+  - nullable
+  - constructor
+  question: |
+    Which technique makes a CONSTRUCTOR-injected dependency optional (injecting null when no
+    bean is present) most cleanly, given required=false is awkward on a single constructor?
+  options:
+  - Marking the field transient
+  - Adding @Lazy to the parameter
+  - Using @Nullable on the parameter, or wrapping it in Optional<T>/ObjectProvider<T>
+  - Declaring the parameter final
+  answer: 2
+  explanation: |
+    For constructor injection, the clean ways to express optionality are @Nullable on the
+    parameter (inject null if absent), Optional<T> (Optional.empty()), or ObjectProvider<T>
+    (deferred, getIfAvailable). required=false is only meaningful with multiple constructors,
+    so it is awkward for a single constructor.
+  ref: concepts.md#requiredfalse-and-optional-injection
+- id: ioc-dependency-injection-095
+  difficulty: expert
+  tags:
+  - three-level-cache
+  - proxy
+  - two-level
+  question: |
+    Suppose Spring used only a two-level cache (finished singletons + early raw instances)
+    with no factory level. For a cyclic bean that needs an AOP proxy, what specific problem
+    arises?
+  options:
+  - Nothing; two levels are sufficient in all cases
+  - The context would start twice
+  - Prototype beans would be cached incorrectly
+  - The early raw instance would be handed to the collaborator, but the bean itself later becomes a proxy, so the collaborator ends up referencing a different (unproxied) object
+  answer: 3
+  explanation: |
+    Without the factory level, Spring would expose the raw instance early. If the bean later
+    needs a proxy, the collaborator holds the raw target while the container's bean is the
+    proxy — two different objects. The factory level lets Spring produce the correct proxy
+    exactly once, lazily, so every reference is consistent.
+  ref: concepts.md#circular-dependencies-and-the-three-level-singleton-cache
+- id: ioc-dependency-injection-096
+  difficulty: advanced
+  tags:
+  - resource
+  - qualifier
+  - resolution
+  question: |
+    @Resource is used WITHOUT a name attribute on a field named 'primaryCache', but no bean
+    named 'primaryCache' exists; there are two beans of the field's type, one @Primary. What
+    happens?
+  options:
+  - It falls back to a by-type match and, finding two candidates, selects the @Primary one
+  - It fails, because @Resource ignores @Primary and cannot find a name match
+  - It injects null silently
+  - It always injects the first bean by registration order
+  answer: 0
+  explanation: |
+    @Resource matches by name first; with no bean named 'primaryCache' it falls back to a
+    by-type match. Among multiple type candidates it honors @Primary (and any @Qualifier),
+    so the @Primary bean is injected. If no primary/qualifier existed, it would be ambiguous.
+  ref: concepts.md#resource-vs-inject-vs-autowired
+- id: ioc-dependency-injection-097
+  difficulty: expert
+  tags:
+  - lazy
+  - fail-fast
+  - trade-offs
+  question: |
+    A team enables spring.main.lazy-initialization=true to speed up local startup, then a
+    typo'd bean reference reaches production undetected. What is the causal chain that best
+    explains this outcome?
+  options:
+  - Lazy init corrupts the bean definition map
+  - Global lazy init defers each bean's creation to first use, so the wiring error no longer fails startup and only surfaces when the affected code path first executes in production
+  - Lazy init disables @Autowired entirely
+  - Lazy init converts all beans to prototypes, hiding the error
+  answer: 1
+  explanation: |
+    Global lazy initialization trades fail-fast for faster startup: beans (and thus their
+    wiring validation) are created on first use. A misconfiguration that would have failed an
+    eager startup instead lies dormant until the code path runs — potentially in production.
+    This is why global lazy init is discouraged for prod.
+  ref: concepts.md#lazy-injection-and-when-beans-are-created
+- id: ioc-dependency-injection-098
+  difficulty: advanced
+  tags:
+  - aware
+  - lifecycle-order
+  - internals
+  question: |
+    In what relative order are BeanNameAware, BeanFactoryAware, and ApplicationContextAware
+    callbacks invoked on a bean that implements all three?
+  options:
+  - ApplicationContextAware, then BeanFactoryAware, then BeanNameAware
+  - All three are invoked simultaneously on separate threads
+  - BeanNameAware, then BeanFactoryAware, then ApplicationContextAware
+  - BeanFactoryAware, then BeanNameAware, then ApplicationContextAware
+  answer: 2
+  explanation: |
+    The invocation order is BeanNameAware (and BeanClassLoaderAware) first, then
+    BeanFactoryAware — these are handled inside the factory's initializeBean — followed by the
+    context-level aware interfaces (EnvironmentAware, ApplicationContextAware, etc.) applied by
+    ApplicationContextAwareProcessor. All run after injection and before @PostConstruct.
+  ref: concepts.md#programmatic-access-applicationcontextaware-and-service-locator
+- id: ioc-dependency-injection-099
+  difficulty: expert
+  tags:
+  - collections-injection
+  - map
+  - key-type
+  question: |
+    A developer writes `@Autowired Map<Class<?>, Handler> handlers;` expecting Spring to
+    collect all Handler beans keyed somehow. What actually happens?
+  options:
+  - Spring keys the map by each bean's class object
+  - Spring injects an empty map
+  - Spring keys the map by bean name cast to Class
+  - Spring does NOT treat it as a collect-all-beans injection because the key is not String; it tries to find a single bean assignable to Map<Class<?>,Handler>, likely failing
+  answer: 3
+  explanation: |
+    The "collect all beans of type T into a Map" feature only triggers when the key type is
+    String (keys become bean names). With a non-String key, Spring treats the point as an
+    ordinary dependency on a Map bean and looks for a matching bean, typically failing with
+    NoSuchBeanDefinitionException unless one is defined.
+  ref: concepts.md#collections-and-map-injection

@@ -800,17 +800,17 @@ questions:
     ref: "concepts.md#writing-custom-auto-configuration"
   - id: fundamentals-autoconfiguration-starters-057
     difficulty: intermediate
-    tags: [starters, servers, exclusion, scenario]
+    tags: [embedded-server, random-port, port-discovery]
     question: |
-      Given a pom using spring-boot-starter-web, a developer wants Jetty. Which change set is correct?
+      An integration test sets `server.port=0`. What does this do, and how can the test learn the actual port the server bound to?
     options:
-      - "Add spring-boot-starter-jetty only; both Tomcat and Jetty will coexist harmoniously."
-      - "Set server.jetty.enabled=true; no dependency changes needed."
-      - "Exclude spring-boot-starter-tomcat from spring-boot-starter-web, then add spring-boot-starter-jetty, so only Jetty's ServletWebServerFactory is present."
-      - "Replace spring-boot-starter-web with spring-boot-starter-jetty (Jetty is a full web starter replacement)."
+      - "It disables the web server entirely; there is no port to discover."
+      - "It pins the server to port 0, which is a privileged port requiring root."
+      - "It makes the embedded server bind to an OS-assigned random free port; the resolved value is exposed as the `local.server.port` property (injectable with `@LocalServerPort`) and via `WebServerInitializedEvent`."
+      - "It rotates the port on every request, so no single port can be discovered."
     answer: 2
     explanation: |
-      Leaving Tomcat on the classpath alongside Jetty leads to ambiguity/conflicts. You must exclude the Tomcat starter and add the Jetty starter so a single embedded server factory is auto-configured.
+      `server.port=0` tells the embedded container to bind to an ephemeral (OS-chosen) free port, which avoids conflicts in parallel tests. Boot publishes the actual bound port as the `local.server.port` environment property; you read it with `@LocalServerPort` (or `@Value("${local.server.port}")`) or by listening for `WebServerInitializedEvent`/`event.getWebServer().getPort()`.
     ref: "concepts.md#embedded-server"
   - id: fundamentals-autoconfiguration-starters-058
     difficulty: beginner
@@ -854,3 +854,591 @@ questions:
     explanation: |
       `spring-boot:repackage` turns the standard JAR into an executable fat JAR and preserves the original thin JAR as `*.jar.original`. The thin JAR alone is not runnable via `java -jar`.
     ref: "concepts.md#fatexecutable-jar-and-layered-jar"
+  - id: fundamentals-autoconfiguration-starters-061
+    difficulty: expert
+    tags: [auto-configuration, conditional-on-class, internals, noclassdeffound]
+    question: |
+      An auto-configuration class is annotated `@ConditionalOnClass(RedisClient.class)`, yet the application starts fine even when `RedisClient` is NOT on the classpath — no `NoClassDefFoundError` is thrown while evaluating that annotation. Which explanation is correct?
+    options:
+      - "Boot reads the annotation's referenced type names as strings from the class's bytecode using ASM metadata (SimpleMetadataReader) instead of loading the Class, so the missing type is never linked; the autoconfigure-metadata filter also pre-excludes such classes."
+      - "Boot catches and swallows the NoClassDefFoundError inside the condition evaluator, logging it at TRACE."
+      - "The JVM lazily resolves .class literals only on first use, so RedisClient.class never triggers loading during condition evaluation."
+      - "@ConditionalOnClass is a compile-time-only annotation stripped by the annotation processor, so it has no runtime effect at all."
+    answer: 0
+    explanation: |
+      Condition evaluation inspects annotation attributes via ASM-based metadata readers (string class names), so the referenced type is never linked/loaded. The build-time `spring-autoconfigure-metadata.properties` filter further short-circuits candidates whose required classes are absent, before heavy evaluation. `.class` literals in Java ARE resolved eagerly at class-load time, so option 3 is false; Boot does not rely on swallowing linkage errors.
+    ref: "concepts.md#auto-configuration-mechanism"
+  - id: fundamentals-autoconfiguration-starters-062
+    difficulty: expert
+    tags: [conditional, configuration-condition, phase, ordering, bug]
+    question: |
+      A developer writes a custom condition implementing the bare `Condition` interface that checks whether a bean of type `CacheManager` exists, and puts it on a `@Bean` method. It behaves nondeterministically — sometimes the bean is created even though a `CacheManager` clearly exists. What is the root cause?
+    options:
+      - "Custom conditions cannot inspect the bean factory at all; only Boot's built-in conditions can."
+      - "The condition must be annotated @Order(HIGHEST_PRECEDENCE) or it runs after bean instantiation."
+      - "A bare Condition is evaluated in the PARSE_CONFIGURATION phase, before all bean definitions are registered; bean-inspecting conditions must implement ConfigurationCondition returning REGISTER_BEAN phase (as @ConditionalOnBean does) to see a complete bean factory."
+      - "The condition should have been placed on the @Configuration class, not the @Bean method; conditions are ignored on methods."
+    answer: 2
+    explanation: |
+      `@ConditionalOnBean`/`@ConditionalOnMissingBean` implement `ConfigurationCondition` with `ConfigurationPhase.REGISTER_BEAN` so they run after all definitions are registered. A plain `Condition` defaults to the parse phase and sees a partially-populated factory, producing order-dependent, nondeterministic results. Conditions do work on `@Bean` methods, so option 4 is wrong.
+    ref: "concepts.md#conditional-annotations"
+  - id: fundamentals-autoconfiguration-starters-063
+    difficulty: advanced
+    tags: [conditional, combining, or-logic, nested-condition]
+    question: |
+      You want an auto-configuration bean to be created when EITHER property `feature.a` is true OR property `feature.b` is true. Stacking `@ConditionalOnProperty` twice does not work. Why, and what is the correct approach?
+    options:
+      - "Multiple @Conditional annotations are combined with AND, so both must match; for OR you must extend AnyNestedCondition (or write a custom Condition) and reference it via @Conditional."
+      - "Stacking works fine; the developer simply mistyped the property names."
+      - "Multiple @Conditional annotations are combined with OR by default, so the bean is created too often; use @ConditionalOnExpression to force AND."
+      - "@ConditionalOnProperty can only appear once per class due to Java's repeatable-annotation limits, so the second is ignored silently."
+    answer: 0
+    explanation: |
+      All `@Conditional...` annotations on the same element are ANDed — every one must match. Boot provides `AnyNestedCondition`/`AllNestedConditions`/`NoneNestedConditions` base classes to compose OR/AND/NONE logic, which you then attach with `@Conditional(YourAnyNestedCondition.class)`.
+    ref: "concepts.md#conditional-annotations"
+  - id: fundamentals-autoconfiguration-starters-064
+    difficulty: expert
+    tags: [auto-configuration, ordering, autoconfigure-order, deferred-import-selector]
+    question: |
+      Two auto-configurations, `AConfig` (`@AutoConfigureOrder(0)`) and `BConfig` (`@AutoConfigureOrder(-100)`), plus a user `@Configuration` `UConfig`, all define a `@Bean Foo` guarded by `@ConditionalOnMissingBean`. Which one actually contributes the `Foo` bean?
+    options:
+      - "AConfig, because a higher (less negative) @AutoConfigureOrder wins over user config."
+      - "BConfig, because -100 gives it the highest precedence, running before UConfig."
+      - "UConfig, because all user configuration is processed before any auto-configuration regardless of @AutoConfigureOrder, so its Foo is registered first and both auto-configs back off."
+      - "The application fails with BeanDefinitionOverrideException because three definitions of Foo conflict."
+    answer: 2
+    explanation: |
+      `@AutoConfigureOrder`/`@AutoConfigureBefore/After` only order auto-config classes **relative to each other**; user `@Configuration` is always processed first (auto-config is a `DeferredImportSelector`). `UConfig`'s `Foo` registers first, so both auto-configs' `@ConditionalOnMissingBean` back off. No conflict occurs because back-off prevents duplicate definitions.
+    ref: "concepts.md#auto-configuration-mechanism"
+  - id: fundamentals-autoconfiguration-starters-065
+    difficulty: advanced
+    tags: [conditional, on-property, having-value, empty, edge-case]
+    question: |
+      Given `@ConditionalOnProperty(prefix = "app", name = "mode")` with NO `havingValue` and NO `matchIfMissing`, when does the condition match?
+    options:
+      - "When app.mode is present and set to any value other than 'false' (case-insensitive); if the property is absent it does not match."
+      - "Only when app.mode is explicitly set to the string 'true'."
+      - "Always, because an empty havingValue means 'don't care'."
+      - "Never, because havingValue is required for the annotation to compile."
+    answer: 0
+    explanation: |
+      With no `havingValue`, Boot treats the condition as matching when the property exists and is not equal to `false` (case-insensitive). An absent property fails the condition unless `matchIfMissing=true`. `havingValue` is optional, so the annotation compiles.
+    ref: "concepts.md#conditional-annotations"
+  - id: fundamentals-autoconfiguration-starters-066
+    difficulty: expert
+    tags: [conditional, on-missing-bean, generics, factory-bean, trap]
+    question: |
+      A library auto-config declares `@Bean @ConditionalOnMissingBean public Converter<String, Money> moneyConverter() {...}`. A consumer registers their own money converter via a raw `FactoryBean` that returns `Converter` without generic type information. What is the likely outcome?
+    options:
+      - "The auto-config always backs off because bean names collide."
+      - "The consumer's converter is ignored because FactoryBeans are invisible to @ConditionalOnMissingBean."
+      - "Both beans may end up registered: because the FactoryBean exposes an erased/raw Converter type, the parameterized @ConditionalOnMissingBean may fail to detect it and not back off, yielding a duplicate."
+      - "Startup fails immediately with a generics resolution error at class-load time."
+    answer: 2
+    explanation: |
+      `@ConditionalOnMissingBean` resolves generics where the bean definition carries them, but a raw `FactoryBean` exposing `Converter` (no type args) can defeat the parameterized match, so the auto-config does not back off and you get two beans (and likely a `NoUniqueBeanDefinitionException` at injection). Declaring precise generic return types avoids this.
+    ref: "concepts.md#conditional-annotations"
+  - id: fundamentals-autoconfiguration-starters-067
+    difficulty: advanced
+    tags: [config-properties, value, relaxed-binding, trap]
+    question: |
+      `application.properties` contains `server.max-connections=200`. A field is injected with `@Value("${server.maxConnections}")`. What happens at startup?
+    options:
+      - "It fails (or falls back to a default/placeholder error) because @Value does exact placeholder resolution and does NOT apply relaxed binding, so 'server.maxConnections' is not found."
+      - "It binds successfully to 200 because @Value supports relaxed binding just like @ConfigurationProperties."
+      - "It silently injects null without any error."
+      - "It binds to 200 because Spring normalizes all property names to camelCase internally."
+    answer: 0
+    explanation: |
+      `@Value` performs literal placeholder resolution against the `Environment`; it does not apply the relaxed-binding rules that `@ConfigurationProperties` uses. `server.maxConnections` won't match `server.max-connections`, so resolution fails (unless a default is supplied). This is a core reason to prefer `@ConfigurationProperties` for real configuration.
+    ref: "concepts.md#configurationproperties-vs-value"
+  - id: fundamentals-autoconfiguration-starters-068
+    difficulty: advanced
+    tags: [config-properties, registration, trap, silent-failure]
+    question: |
+      A developer creates `@ConfigurationProperties(prefix = "billing") class BillingProps { ... }` with getters/setters, but injecting it yields a `NoSuchBeanDefinitionException` (or all-null values). What is the fix, and why?
+    options:
+      - "Add @Value to every field; @ConfigurationProperties only works in combination with @Value."
+      - "Nothing is wrong; @ConfigurationProperties beans are always registered automatically once the prefix exists in properties."
+      - "The class is never registered as a bean by itself: add @EnableConfigurationProperties(BillingProps.class), or @ConfigurationPropertiesScan, or annotate it with @Component."
+      - "Rename the prefix to match the class name exactly; the prefix must equal the simple class name."
+    answer: 2
+    explanation: |
+      `@ConfigurationProperties` alone does not create a bean. You must register it via `@EnableConfigurationProperties(BillingProps.class)`, enable `@ConfigurationPropertiesScan`, or make it a component. Without registration Boot never binds it, so injection fails or values are null.
+    ref: "concepts.md#configurationproperties-vs-value"
+  - id: fundamentals-autoconfiguration-starters-069
+    difficulty: expert
+    tags: [config-properties, constructor-binding, records, immutability]
+    question: |
+      You define `@ConfigurationProperties(prefix="mail") public record MailProps(String host, int port) {}` in Spring Boot 3 and register it with `@EnableConfigurationProperties(MailProps.class)`. Which statement is accurate?
+    options:
+      - "This cannot work: records have no setters, and @ConfigurationProperties requires JavaBean setters for binding."
+      - "You must add @ConstructorBinding on the record component accessors for it to bind."
+      - "Constructor binding is used automatically (a single parameterized constructor infers @ConstructorBinding), so the immutable record is bound from mail.host/mail.port without setters."
+      - "Records are only supported with @Value, not @ConfigurationProperties."
+    answer: 2
+    explanation: |
+      Boot supports constructor binding; with a single parameterized constructor (as records have) `@ConstructorBinding` is inferred and no setters are needed. `@ConstructorBinding` is only required explicitly to disambiguate multiple constructors. This yields immutable, validated configuration objects.
+    ref: "concepts.md#configurationproperties-vs-value"
+  - id: fundamentals-autoconfiguration-starters-070
+    difficulty: advanced
+    tags: [externalized-config, precedence, command-line, env-var]
+    question: |
+      `application.properties` sets `server.port=8080`. The app is launched with OS env var `SERVER_PORT=9090` AND command-line argument `--server.port=7070` AND JVM flag `-Dserver.port=6060`. Which port does the app bind to?
+    options:
+      - "8080 — the properties file always wins because it is the canonical source."
+      - "9090 — OS environment variables have the highest precedence of these."
+      - "6060 — Java system properties (-D) outrank everything else here."
+      - "7070 — command-line arguments outrank system properties, OS env vars, and the properties file."
+    answer: 3
+    explanation: |
+      Precedence (high→low) among these: command-line args (`--server.port=7070`) > Java system properties (`-D`, 6060) > OS environment variables (9090) > `application.properties` (8080). So the app binds to 7070.
+    ref: "concepts.md#externalized-configuration-and-property-source-ordering"
+  - id: fundamentals-autoconfiguration-starters-071
+    difficulty: advanced
+    tags: [externalized-config, relaxed-binding, env-var, containers]
+    question: |
+      In a Kubernetes deployment you cannot mount a properties file, so you set the environment variable `SPRING_DATASOURCE_URL=jdbc:...`. Why does this correctly configure `spring.datasource.url`?
+    options:
+      - "Because Boot applies relaxed binding for environment variables: names are matched by uppercasing and replacing '.' and '-' with '_', so SPRING_DATASOURCE_URL maps to spring.datasource.url."
+      - "Because Boot runs a background thread that watches all env vars and rewrites application.properties."
+      - "Because Kubernetes automatically converts env vars into a Spring PropertySource with dotted names."
+      - "It does not work; you must use SPRING.DATASOURCE.URL with literal dots in the env var name."
+    answer: 0
+    explanation: |
+      Boot's relaxed binding maps canonical dotted/kebab property names to an uppercase-underscore form for environment variables. `SPRING_DATASOURCE_URL` therefore binds to `spring.datasource.url`. Dots are usually illegal in env var names, which is exactly why the underscore mapping exists.
+    ref: "concepts.md#externalized-configuration-and-property-source-ordering"
+  - id: fundamentals-autoconfiguration-starters-072
+    difficulty: expert
+    tags: [externalized-config, config-data, profiles, boot24, migration]
+    question: |
+      After upgrading to Boot 2.4+, an app that set `spring.profiles.active=prod` inside `application-prod.yml` stops activating the prod-specific beans as before. Why?
+    options:
+      - "spring.profiles.active was renamed to spring.profiles.enabled in 2.4."
+      - "YAML files are no longer supported for profile activation; only .properties are."
+      - "Profiles must now be activated exclusively via the --spring.profiles.active command-line flag."
+      - "The config-data model (2.4+) forbids activating profiles from within a profile-specific document; you must use spring.config.activate.on-profile and spring.profiles.group, and set active profiles from a profile-agnostic source."
+    answer: 3
+    explanation: |
+      Boot 2.4's config-data processing disallows setting `spring.profiles.active` (or include) inside profile-specific documents to avoid ordering paradoxes. Use `spring.config.activate.on-profile` to gate a document and `spring.profiles.group` to expand profiles; activate profiles from a non-profile-specific location.
+    ref: "concepts.md#externalized-configuration-and-property-source-ordering"
+  - id: fundamentals-autoconfiguration-starters-073
+    difficulty: advanced
+    tags: [externalized-config, spring-config-import, secrets]
+    question: |
+      Which statement about `spring.config.import` (Boot 2.4+) is correct?
+    options:
+      - "Imported documents are inserted immediately below the importing document, their values take precedence over the importer, and the 'optional:' prefix prevents startup failure when the location is missing."
+      - "It behaves exactly like spring.config.location and replaces the default config locations."
+      - "Imports are processed at the very end, so imported values always have the lowest precedence."
+      - "It can only import classpath resources, not files, config trees, or env-based configs."
+    answer: 0
+    explanation: |
+      `spring.config.import` adds config data; each import is inserted just below the declaring document and its values override the importer. It supports `file:`, `classpath:`, `configtree:` (K8s/Docker secrets), and `env:` locations, and `optional:` tolerates a missing location. It does not replace default locations the way legacy `spring.config.location` did.
+    ref: "concepts.md#externalized-configuration-and-property-source-ordering"
+  - id: fundamentals-autoconfiguration-starters-074
+    difficulty: advanced
+    tags: [bean-overriding, definition-conflict, boot21, default]
+    question: |
+      Since Spring Boot 2.1, what happens by default when two bean definitions register under the same bean name?
+    options:
+      - "Startup fails with a BeanDefinitionOverrideException because bean-definition overriding is disabled by default; re-enable with spring.main.allow-bean-definition-overriding=true."
+      - "The last definition silently overrides the first, as in classic Spring."
+      - "Both beans are kept and injected as a List automatically."
+      - "The first definition always wins and the second is discarded with a warning."
+    answer: 0
+    explanation: |
+      Boot 2.1 flipped the default so overriding is disabled: a duplicate bean name throws `BeanDefinitionOverrideException` at startup, surfacing accidental clashes. You can opt back in with `spring.main.allow-bean-definition-overriding=true`, though it is rarely advisable.
+    ref: "concepts.md#bean-overriding-and-definition-conflicts"
+  - id: fundamentals-autoconfiguration-starters-075
+    difficulty: expert
+    tags: [conditional, on-single-candidate, primary, auto-config]
+    question: |
+      An auto-configuration declares a bean guarded by `@ConditionalOnSingleCandidate(ObjectMapper.class)`. The context contains two `ObjectMapper` beans, one annotated `@Primary`. Does the condition match?
+    options:
+      - "No — @ConditionalOnSingleCandidate strictly requires exactly one bean of the type, and there are two."
+      - "No — @Primary is ignored by all @Conditional annotations."
+      - "Yes — but only because ObjectMapper is a framework type; user types would not match."
+      - "Yes — it matches when there is exactly one candidate OR multiple candidates with exactly one marked @Primary, so the @Primary one is the resolvable single candidate."
+    answer: 3
+    explanation: |
+      `@ConditionalOnSingleCandidate` matches when a type has exactly one bean, or when several exist but exactly one is `@Primary` (making it unambiguously resolvable). The `@Primary` `ObjectMapper` satisfies it, so the condition matches.
+    ref: "concepts.md#bean-overriding-and-definition-conflicts"
+  - id: fundamentals-autoconfiguration-starters-076
+    difficulty: expert
+    tags: [conditional, on-missing-bean, subtype, assignability, trap]
+    question: |
+      An auto-config has `@Bean @ConditionalOnMissingBean(DataSource.class) DataSource ds() {...}`. The consumer registers a bean of type `HikariDataSource` (which implements `DataSource`) but never mentions `DataSource` explicitly. Does the auto-config bean get created?
+    options:
+      - "Yes — @ConditionalOnMissingBean only checks for an exact type match on DataSource, and HikariDataSource is a different type."
+      - "Yes — but both beans are created and the consumer's is marked @Primary automatically."
+      - "No — @ConditionalOnMissingBean checks assignability, so a HikariDataSource (a subtype of DataSource) triggers back-off; the auto-config bean is NOT created."
+      - "No — the application fails because two DataSource-related definitions conflict."
+    answer: 2
+    explanation: |
+      `@ConditionalOnMissingBean` matches by assignability, not exact class. A `HikariDataSource` is a `DataSource`, so the auto-config's `@ConditionalOnMissingBean(DataSource.class)` sees an existing assignable bean and backs off. This assignability behavior is a frequent "why is my auto-config bean missing?" surprise.
+    ref: "concepts.md#bean-overriding-and-definition-conflicts"
+  - id: fundamentals-autoconfiguration-starters-077
+    difficulty: advanced
+    tags: [failure-analysis, failure-analyzer, diagnostics]
+    question: |
+      When a Boot app fails to start because no datasource is configured, it prints a clean "Description / Action" message instead of a raw stack trace. Which mechanism produces this?
+    options:
+      - "A FailureAnalyzer (e.g. DataSourceBeanCreationFailureAnalyzer), registered in spring.factories, that converts an exception into a FailureAnalysis with a description and an action."
+      - "A global try/catch in the main() method generated by the Boot Maven plugin."
+      - "The Condition Evaluation Report, which always prints on any failure."
+      - "Actuator's /health endpoint, which intercepts startup exceptions."
+    answer: 0
+    explanation: |
+      `FailureAnalyzer` implementations, registered via `spring.factories`, translate specific startup exceptions into human-readable `FailureAnalysis` (description + suggested action). They run at failure time before the context is usable, so they must not depend on beans. Libraries can ship their own.
+    ref: "concepts.md#failure-analysis-and-diagnostics"
+  - id: fundamentals-autoconfiguration-starters-078
+    difficulty: advanced
+    tags: [diagnostics, application-startup, actuator]
+    question: |
+      You need to find which auto-configuration or bean dominates your service's cold-start time. Which built-in Boot facility is the modern, structured way to do this?
+    options:
+      - "Wrap SpringApplication.run in a manual StopWatch and log the total; there is no per-step data."
+      - "Enable spring.main.lazy-initialization=true, which prints per-bean timings."
+      - "Record startup steps with BufferingApplicationStartup and inspect them via the /actuator/startup endpoint (ApplicationStartup, Boot 2.4+)."
+      - "Parse the Condition Evaluation Report, which includes millisecond timings per condition."
+    answer: 2
+    explanation: |
+      Boot 2.4+ exposes `ApplicationStartup`; using `BufferingApplicationStartup` records fine-grained startup steps that `/actuator/startup` surfaces, letting you attribute cold-start time to specific beans/auto-configs. The condition report shows matches, not timings; lazy-init defers rather than measures.
+    ref: "concepts.md#failure-analysis-and-diagnostics"
+  - id: fundamentals-autoconfiguration-starters-079
+    difficulty: expert
+    tags: [run-flow, lazy-initialization, failure-mode, trap]
+    question: |
+      A team sets `spring.main.lazy-initialization=true` to cut startup time. Which consequence is the most important production risk of this change?
+    options:
+      - "Beans become prototype-scoped, so state is no longer shared."
+      - "Auto-configuration is disabled entirely under lazy initialization."
+      - "Startup failures for mis-wired beans are deferred until the bean is first used (e.g. first request), so a fatal misconfiguration may surface as a runtime 500 rather than a boot failure."
+      - "The embedded server no longer starts until the first HTTP request arrives."
+    answer: 2
+    explanation: |
+      Lazy initialization defers bean creation to first use, which also defers construction/validation errors. A misconfiguration that would normally fail fast at boot can instead manifest as a runtime error on the first request that touches the bean — usually undesirable in production. Scope is unchanged and the server still starts at refresh.
+    ref: "concepts.md#springapplicationrun-flow"
+  - id: fundamentals-autoconfiguration-starters-080
+    difficulty: expert
+    tags: [run-flow, environment-post-processor, ordering, trap]
+    question: |
+      A custom `EnvironmentPostProcessor` registered in `spring.factories` tries to `@Autowire` a repository bean to load config from a database. It fails. Why?
+    options:
+      - "EnvironmentPostProcessor runs during environment preparation, BEFORE the ApplicationContext exists, so no beans are available to inject; it can only manipulate PropertySources."
+      - "EnvironmentPostProcessor must be annotated @Component to receive injection."
+      - "Autowiring works only in @Configuration classes, and EnvironmentPostProcessor is not one; add @Configuration to fix it."
+      - "The repository must be marked @Lazy so it is created early enough."
+    answer: 0
+    explanation: |
+      `EnvironmentPostProcessor` executes while the `Environment` is being prepared (around `ApplicationEnvironmentPreparedEvent`), long before the context/beans exist. It can add/modify `PropertySource`s but cannot inject or reference beans. Loading config from a DB at this phase requires a raw JDBC connection, not a Spring repository.
+    ref: "concepts.md#springapplicationrun-flow"
+  - id: fundamentals-autoconfiguration-starters-081
+    difficulty: advanced
+    tags: [run-flow, runners, ready-event, ordering]
+    question: |
+      A `CommandLineRunner` throws an exception during startup. What is the observable effect on `ApplicationReadyEvent` and process exit?
+    options:
+      - "ApplicationReadyEvent still fires (runners are decoupled from readiness), and the app keeps running."
+      - "The runner exception is logged and ignored; the app becomes ready normally."
+      - "Only ApplicationStartedEvent is skipped; ApplicationReadyEvent fires as usual."
+      - "ApplicationReadyEvent does NOT fire; instead the failure propagates, an ApplicationFailedEvent is published, and SpringApplication.run() throws (typically exiting the process)."
+    answer: 3
+    explanation: |
+      Runners execute after the context is refreshed and `ApplicationStartedEvent` but before `ApplicationReadyEvent`. If a runner throws, readiness is never reached: an `ApplicationFailedEvent` is published and `run()` rethrows, normally terminating the process. This is why readiness probes gate traffic only after runners succeed.
+    ref: "concepts.md#springapplicationrun-flow"
+  - id: fundamentals-autoconfiguration-starters-082
+    difficulty: expert
+    tags: [layered-jar, jarmode, tools, cds, aot, boot32]
+    question: |
+      In Spring Boot 3.2+, what does `java -Djarmode=tools -jar app.jar extract` (without `--layers`) produce, and why is it recommended for production containers?
+    options:
+      - "It re-signs the jar; the signature speeds up class verification."
+      - "It converts the jar into a WAR for external Tomcat deployment."
+      - "It produces an exploded layout (an application jar plus a lib/ folder of dependency jars) that starts faster than nested-jar loading and is CDS/AOT-cache-friendly because those caches want real files on disk."
+      - "It strips all dependencies, leaving only application classes, so the image is smaller."
+    answer: 2
+    explanation: |
+      The `tools` jarmode (which supersedes the deprecated `layertools`) can extract an exploded structure: an app jar plus a `lib/` directory. Running the exploded form avoids the small nested-jar read cost and, crucially, plays well with Class Data Sharing and AOT caches that require on-disk files, so it is preferred for optimized production images.
+    ref: "concepts.md#fatexecutable-jar-and-layered-jar"
+  - id: fundamentals-autoconfiguration-starters-083
+    difficulty: expert
+    tags: [fat-jar, class-loading, launcher, boot32, package]
+    question: |
+      Which statement about the Spring Boot fat-jar launcher is accurate for Boot 3.2+?
+    options:
+      - "The launcher classes moved to the org.springframework.boot.loader.launch package (e.g. JarLauncher), and the manifest's Main-Class points to the launcher while Start-Class names your application's main."
+      - "In Boot 3.2 the JVM natively loads nested jars, so the custom launcher and class loader were removed."
+      - "Main-Class in the manifest points directly to your @SpringBootApplication class; there is no separate launcher."
+      - "The launcher requires unpacking the jar to a temp directory on every start because the JVM cannot read nested entries at all."
+    answer: 0
+    explanation: |
+      Boot 3.2 relocated loader classes to `org.springframework.boot.loader.launch` (e.g. `JarLauncher`). The manifest's `Main-Class` is the launcher; `Start-Class` records your real main. A custom class loader reads `BOOT-INF/lib/*.jar` in place — the JVM still cannot load nested jars natively, so the launcher remains necessary (though the exploded/`tools` layout can avoid the nested-read cost).
+    ref: "concepts.md#fatexecutable-jar-and-layered-jar"
+  - id: fundamentals-autoconfiguration-starters-084
+    difficulty: advanced
+    tags: [profiles, conditional, ordering, auto-config]
+    question: |
+      Why does a `@Profile("prod")`-guarded user bean still reliably cause an auto-config's `@ConditionalOnMissingBean` to back off (when prod is active), despite `@Profile` being evaluated as a condition during refresh?
+    options:
+      - "Because @Profile forces the bean to register before the Environment is prepared."
+      - "Because auto-configuration is processed last; by the time its @ConditionalOnMissingBean is evaluated, the profile decision for the user bean has already been resolved and (under prod) the bean is registered."
+      - "Because @Profile beans are always @Primary and thus preempt auto-config."
+      - "Because @ConditionalOnMissingBean ignores profiles entirely and only checks the classpath."
+    answer: 1
+    explanation: |
+      Auto-config runs after user configuration (deferred import). The profile condition on the user bean is settled during the earlier user-config processing, so when the auto-config's `@ConditionalOnMissingBean` runs, the (prod-active) user bean already exists and the auto-config backs off deterministically.
+    ref: "concepts.md#profiles-and-environment"
+  - id: fundamentals-autoconfiguration-starters-085
+    difficulty: intermediate
+    tags: [profiles, activation, groups]
+    question: |
+      What does `spring.profiles.group.prod=prod,monitoring,metrics` accomplish?
+    options:
+      - "It renames the prod profile to include the words monitoring and metrics."
+      - "It disables the monitoring and metrics profiles whenever prod is active."
+      - "It defines a profile group so that activating 'prod' also activates 'monitoring' and 'metrics'."
+      - "It sets the order in which the three profiles' properties files are loaded, but does not activate any of them."
+    answer: 2
+    explanation: |
+      `spring.profiles.group.<name>` expands one activated profile into a set. Activating `prod` then also activates `monitoring` and `metrics`, letting you compose related profiles with a single activation.
+    ref: "concepts.md#profiles-and-environment"
+  - id: fundamentals-autoconfiguration-starters-086
+    difficulty: advanced
+    tags: [spring-factories-loader, caching, class-loader, internals]
+    question: |
+      Which statement about how `SpringFactoriesLoader` operates is accurate?
+    options:
+      - "It scans every class on the classpath with reflection to find factory implementations."
+      - "It uses META-INF/services/<interface> files, one per interface, exactly like java.util.ServiceLoader."
+      - "It reads all META-INF/spring.factories files reachable from a given ClassLoader, caches the parsed results per class loader, and can order results via @Order/Ordered."
+      - "It instantiates factories lazily only when the first HTTP request arrives."
+    answer: 2
+    explanation: |
+      `SpringFactoriesLoader` aggregates entries from all `META-INF/spring.factories` files visible to the class loader, caches parsed names per class loader, and integrates with Spring ordering. It does NOT use `META-INF/services` (that's `ServiceLoader`) and does not reflectively scan the whole classpath.
+    ref: "concepts.md#springfactoriesloader"
+  - id: fundamentals-autoconfiguration-starters-087
+    difficulty: expert
+    tags: [custom-auto-config, conditional-on-class, inner-class, technique]
+    question: |
+      A library's `@AutoConfiguration` class must define beans that depend on an optional type `com.foo.OptionalClient` which may be absent at the consumer. Which design keeps the auto-config parseable even when the type is missing?
+    options:
+      - "Reference OptionalClient.class directly at the class level with @ConditionalOnClass; the JVM tolerates missing types in annotations."
+      - "Put OptionalClient in the AutoConfiguration.imports file so it is loaded first."
+      - "Isolate the OptionalClient-dependent @Bean methods inside a nested @Configuration static class guarded by @ConditionalOnClass(OptionalClient.class) (or use the name attribute), so the outer class parses without linking the missing type."
+      - "Add OptionalClient as a compile-scope dependency so it is never actually missing."
+    answer: 2
+    explanation: |
+      The idiomatic technique is to place methods that reference an optional type inside a nested static `@Configuration` guarded by `@ConditionalOnClass`, or to use the String `name` attribute — so the outer auto-config's metadata can be read without linking the absent type. A direct `.class` reference in a method signature would risk a linkage error when the type is missing.
+    ref: "concepts.md#writing-custom-auto-configuration"
+  - id: fundamentals-autoconfiguration-starters-088
+    difficulty: advanced
+    tags: [custom-auto-config, proxy-bean-methods, performance, internals]
+    question: |
+      `@AutoConfiguration` is meta-annotated with `@Configuration(proxyBeanMethods = false)`. What is the practical implication of `proxyBeanMethods = false`?
+    options:
+      - "Bean methods cannot be called at all; they must be static."
+      - "All beans become prototype-scoped automatically."
+      - "The @Configuration class is not CGLIB-enhanced, so calling one @Bean method from another does NOT return the shared singleton but creates a new instance; inject dependencies as method parameters instead."
+      - "It disables all conditions on the class."
+    answer: 2
+    explanation: |
+      With `proxyBeanMethods=false` (the 'lite' mode), Spring skips CGLIB subclassing for speed/startup. Inter-bean method calls are plain Java calls, so calling `beanA()` from `beanB()` yields a new object, not the container-managed singleton. Auto-config uses this mode because bean methods take dependencies as parameters rather than calling each other, so it's safe and faster.
+    ref: "concepts.md#writing-custom-auto-configuration"
+  - id: fundamentals-autoconfiguration-starters-089
+    difficulty: expert
+    tags: [custom-auto-config, ordering, before-after, failure-mode]
+    question: |
+      Your custom `@AutoConfiguration` defines a `DataSource` and you annotate it `@AutoConfigureBefore(DataSourceAutoConfiguration.class)` so yours wins. Yet Boot's `DataSourceAutoConfiguration` still sometimes creates the datasource. What is the most likely subtle cause?
+    options:
+      - "@AutoConfigureBefore only affects the order among auto-configs; if Boot's DataSourceAutoConfiguration guards its bean with @ConditionalOnMissingBean, your earlier-ordered bean should suppress it — but if your bean is itself conditional and doesn't match, Boot's runs and creates the default."
+      - "@AutoConfigureBefore is ignored unless you also add @Order(0)."
+      - "You must register your class in spring.factories, not AutoConfiguration.imports, for ordering to take effect."
+      - "Boot's DataSourceAutoConfiguration cannot be reordered because it is final."
+    answer: 0
+    explanation: |
+      Ordering only guarantees your auto-config is evaluated first. If your own `DataSource` bean is gated by a condition that fails to match (wrong property, missing class), your bean isn't registered, so Boot's `@ConditionalOnMissingBean`-guarded default no longer sees an existing bean and creates its own. Ordering is necessary but not sufficient — the earlier bean must actually be registered.
+    ref: "concepts.md#writing-custom-auto-configuration"
+  - id: fundamentals-autoconfiguration-starters-090
+    difficulty: advanced
+    tags: [starters, validation, boot23, trap]
+    question: |
+      A team upgrades from an older Boot version and their `@Valid`/`@NotNull` request-body validation silently stops firing, even though `spring-boot-starter-web` is present. What is the cause?
+    options:
+      - "Bean Validation must be enabled with @EnableValidation on the main class in newer Boot."
+      - "Validation now requires the reactive stack; switch to spring-boot-starter-webflux."
+      - "Since Boot 2.3, spring-boot-starter-web no longer transitively includes Bean Validation (Hibernate Validator); you must add spring-boot-starter-validation explicitly."
+      - "Validation annotations moved to a paid module and are unavailable in open-source Boot."
+    answer: 2
+    explanation: |
+      Boot 2.3 removed the transitive Bean Validation dependency from `spring-boot-starter-web`. Without a validator implementation on the classpath, method/argument validation quietly no-ops. Adding `spring-boot-starter-validation` (Hibernate Validator) restores it.
+    ref: "concepts.md#starter-dependencies"
+  - id: fundamentals-autoconfiguration-starters-091
+    difficulty: advanced
+    tags: [custom-starter, optional-dependency, conditional-on-class, degrade]
+    question: |
+      When building a custom starter that can optionally integrate with a third-party library the consumer may or may not use, what is the recommended dependency + condition strategy?
+    options:
+      - "Declare the third-party library as a required (compile) dependency so it is always present, and skip conditions."
+      - "Put the third-party library in the AutoConfiguration.imports file so it loads only when needed."
+      - "Ship two separate starters and require consumers to pick, since conditions cannot express optionality."
+      - "Mark the third-party library optional (so it is not forced onto consumers) and guard the beans that use it with @ConditionalOnClass, so the starter degrades gracefully when the library is absent."
+    answer: 3
+    explanation: |
+      Best practice: make optional third-party libs `optional` (don't force them transitively) and guard the beans that need them with `@ConditionalOnClass`. If the consumer doesn't add the library, those beans simply don't activate — graceful degradation without breaking startup.
+    ref: "concepts.md#creating-a-custom-starter"
+  - id: fundamentals-autoconfiguration-starters-092
+    difficulty: intermediate
+    tags: [custom-starter, configuration-processor, additional-metadata]
+    question: |
+      You added `spring-boot-configuration-processor` to your autoconfigure module. Where does the generated property metadata live, and what is it for?
+    options:
+      - "It generates META-INF/spring-configuration-metadata.json, which IDEs use for autocompletion and documentation of your @ConfigurationProperties keys."
+      - "It generates META-INF/spring.factories to register your auto-config."
+      - "It generates META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports."
+      - "It generates a fat jar with all dependencies bundled."
+    answer: 0
+    explanation: |
+      The annotation processor emits `META-INF/spring-configuration-metadata.json` describing your `@ConfigurationProperties` (names, types, defaults, descriptions), which IDEs consume for autocompletion and inline docs. It does not register auto-config (that's the imports file) or build jars.
+    ref: "concepts.md#creating-a-custom-starter"
+  - id: fundamentals-autoconfiguration-starters-093
+    difficulty: advanced
+    tags: [bom, dependency-management, gradle, difference]
+    question: |
+      In Gradle, what is the difference between applying the `io.spring.dependency-management` plugin versus using `implementation platform('org.springframework.boot:spring-boot-dependencies:3.3.0')`?
+    options:
+      - "Both add all Boot dependencies to the build automatically."
+      - "The dependency-management plugin emulates Maven-style dependencyManagement (including BOM import and version-property overrides via ext[...]), whereas platform() uses Gradle's native BOM support to constrain versions; both manage versions only and add nothing themselves."
+      - "platform() inherits the spring-boot-starter-parent, while the plugin does not."
+      - "Only the plugin can manage versions; platform() requires you to specify every version explicitly."
+    answer: 1
+    explanation: |
+      Both approaches only constrain/manage versions and add no dependencies on their own. The Spring plugin reproduces Maven's `dependencyManagement` semantics (and Boot's version properties); Gradle's `platform()` is the native BOM/constraint mechanism. You still declare the starters you want.
+    ref: "concepts.md#dependency-and-version-management-bom"
+  - id: fundamentals-autoconfiguration-starters-094
+    difficulty: expert
+    tags: [bom, override, transitive, downgrade, trap]
+    question: |
+      Under spring-boot-starter-parent, you set `<jackson.version>2.13.0</jackson.version>` to pin an older Jackson, but a build that also pulls a newer library keeps resolving a higher Jackson version. Which explanation is most accurate?
+    options:
+      - "Maven ignores version properties entirely; you must delete the BOM."
+      - "The property override changes what the BOM MANAGES, but a transitive dependency that declares its own explicit Jackson version (not managed by the BOM) or a directly-declared version can still win by Maven's resolution rules; dependencyManagement only governs unversioned/managed declarations."
+      - "Version properties only affect Gradle, not Maven."
+      - "matchIfMissing must be added to the property for it to apply."
+    answer: 1
+    explanation: |
+      Overriding the managed version property changes the version the BOM imposes on managed dependencies. But Maven's `dependencyManagement` only controls versions where they aren't otherwise pinned; an explicit version on a direct dependency, or a transitive that isn't governed by the BOM, can resolve differently (nearest-wins/explicit-wins). You may need explicit `<dependencyManagement>` entries or exclusions to truly force the version.
+    ref: "concepts.md#dependency-and-version-management-bom"
+  - id: fundamentals-autoconfiguration-starters-095
+    difficulty: advanced
+    tags: [embedded-server, war, servlet-initializer, why]
+    question: |
+      When packaging a Boot app as a deployable WAR for an external container, why must you extend `SpringBootServletInitializer` and override `configure(...)`?
+    options:
+      - "To disable auto-configuration, which is incompatible with WAR deployment."
+      - "Because in an external container there is no main() bootstrap; SpringBootServletInitializer hooks into the servlet container's WebApplicationInitializer mechanism (via onStartup) to build the SpringApplication and register the DispatcherServlet."
+      - "To convert jakarta.servlet back to javax.servlet for older containers."
+      - "Because WAR files cannot use embedded Tomcat, so the initializer replaces it with Jetty."
+    answer: 1
+    explanation: |
+      In external containers your `main()` isn't invoked. `SpringBootServletInitializer` implements Servlet 3.0+'s `WebApplicationInitializer`, so the container calls `onStartup`, and your overridden `configure(SpringApplicationBuilder)` supplies the primary sources to bootstrap the Spring context and register the `DispatcherServlet`. The embedded starter is set to `provided` so it doesn't clash with the container.
+    ref: "concepts.md#embedded-server"
+  - id: fundamentals-autoconfiguration-starters-096
+    difficulty: expert
+    tags: [embedded-server, servlet-factory, customization, ordering]
+    question: |
+      You want to programmatically tweak the embedded Tomcat (e.g. add a connector) without abandoning Boot's auto-configuration of the server. Which approach is idiomatic?
+    options:
+      - "Define your own TomcatServletWebServerFactory @Bean, replacing Boot's — this is the only way and it disables all server auto-config properties."
+      - "Register a WebServerFactoryCustomizer<TomcatServletWebServerFactory> (or ConfigurableTomcatWebServerFactory) bean; Boot applies customizers to the auto-configured factory, so server.* properties still work and you only override what you need."
+      - "Set server.tomcat.custom=true and edit tomcat.xml on disk."
+      - "Override the DispatcherServlet bean to add the connector."
+    answer: 1
+    explanation: |
+      `WebServerFactoryCustomizer<T>` beans are applied to the auto-configured `ServletWebServerFactory`, letting you customize incrementally while keeping `server.*` property binding intact. Defining your own factory bean is possible but replaces Boot's and forfeits its property-driven configuration — the customizer is the surgical, idiomatic hook.
+    ref: "concepts.md#embedded-server"
+  - id: fundamentals-autoconfiguration-starters-097
+    difficulty: expert
+    tags: [convention-over-configuration, jackson, auto-config, override]
+    question: |
+      In a `spring-boot-starter-web` app, you register your own `@Bean ObjectMapper customMapper()`. What is the effect on Boot's Jackson auto-configuration and the message converters?
+    options:
+      - "Boot ignores your bean; the auto-configured ObjectMapper always wins for HTTP message conversion."
+      - "JacksonAutoConfiguration's ObjectMapper is guarded by @ConditionalOnMissingBean, so it backs off and your ObjectMapper is used; the MappingJackson2HttpMessageConverter then wires to your instance."
+      - "You get two ObjectMappers and a startup failure due to ambiguity."
+      - "Your bean only affects direct injection, never the HTTP layer; you must also register a MappingJackson2HttpMessageConverter manually."
+    answer: 1
+    explanation: |
+      `JacksonAutoConfiguration` defines the `ObjectMapper` with `@ConditionalOnMissingBean`, so a user-provided `ObjectMapper` causes it to back off, and the web auto-config's Jackson message converter is wired with your instance. This is the classic 'define your own bean and Boot steps aside' pattern.
+    ref: "concepts.md#convention-over-configuration"
+  - id: fundamentals-autoconfiguration-starters-098
+    difficulty: advanced
+    tags: [spring-vs-boot, application-context, misconception]
+    question: |
+      Which statement best corrects the misconception that "Spring Boot makes Spring faster at runtime"?
+    options:
+      - "Boot rewrites the IoC container in native code, so runtime is genuinely faster."
+      - "Boot uses the same ApplicationContext and bean lifecycle as plain Spring; it accelerates SETUP (auto-config, starters, embedded server), not steady-state request handling. Runtime performance is essentially the same for equivalent bean graphs."
+      - "Boot is slower at runtime because auto-configuration runs on every request."
+      - "Boot caches HTTP responses automatically, which is what makes it faster."
+    answer: 1
+    explanation: |
+      Boot is a configuration/convenience layer over the same core container. Auto-configuration runs once at startup, not per request. It reduces setup effort and boilerplate; it does not change the fundamental runtime cost of an equivalent bean graph and request pipeline.
+    ref: "concepts.md#spring-vs-spring-boot"
+  - id: fundamentals-autoconfiguration-starters-099
+    difficulty: expert
+    tags: [springbootapplication, auto-configuration-package, entity-scan, trap]
+    question: |
+      An app moves its `@SpringBootApplication` main class into `com.acme.app.config`, while JPA `@Entity` classes remain in `com.acme.app.domain`. Component scanning is fixed via `scanBasePackages="com.acme.app"`, but Hibernate now reports the entities as unmanaged. Why, and what fixes it?
+    options:
+      - "scanBasePackages also controls entity scanning; the entities must be a sub-package of config."
+      - "@AutoConfigurationPackage (imported by @EnableAutoConfiguration) defaults JPA entity scanning to the MAIN CLASS's package (com.acme.app.config), not scanBasePackages; add @EntityScan(\"com.acme.app.domain\") or move the main class to a root package."
+      - "Hibernate requires entities to be listed in AutoConfiguration.imports."
+      - "You must annotate each entity with @Component so component scan picks it up."
+    answer: 1
+    explanation: |
+      Entity scanning defaults to the package registered by `@AutoConfigurationPackage`, which is the main class's package — independent of `@ComponentScan`/`scanBasePackages`. With the main class in `.config`, `.domain` isn't scanned for entities. Fix with `@EntityScan("com.acme.app.domain")` or relocate the main class to the root package.
+    ref: "concepts.md#springbootapplication"
+  - id: fundamentals-autoconfiguration-starters-100
+    difficulty: advanced
+    tags: [imports-file, autoconfiguration-annotation, boot3, requirement, trap]
+    question: |
+      A library author lists a plain `@Configuration` class (not `@AutoConfiguration`) in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` for Boot 3.x. What is the consequence?
+    options:
+      - "It works identically to @AutoConfiguration; the annotation is optional."
+      - "The application fails to compile."
+      - "Classes registered via the imports file are expected to be @AutoConfiguration; a plain @Configuration will be imported but loses auto-config ordering semantics (@AutoConfigureBefore/After) and lite-mode/back-off guarantees the framework relies on — Boot's contract expects @AutoConfiguration there."
+      - "Boot silently converts it to @Component."
+    answer: 2
+    explanation: |
+      The imports mechanism is designed for `@AutoConfiguration` classes, which carry the ordering support and `proxyBeanMethods=false` lite semantics auto-config depends on. Registering a plain `@Configuration` there does not follow the documented contract and forfeits the auto-config ordering/behavior; use `@AutoConfiguration`.
+    ref: "concepts.md#springfactories-vs-autoconfigurationimports"
+  - id: fundamentals-autoconfiguration-starters-101
+    difficulty: intermediate
+    tags: [disabling, spring-autoconfigure-exclude, property, behavior]
+    question: |
+      What is a key behavioral difference between excluding an auto-config via `spring.autoconfigure.exclude` (property) versus the `exclude` attribute referencing a `.class` literal?
+    options:
+      - "The property form removes the JAR from the classpath, while the annotation form does not."
+      - "The property (and excludeName) take a String FQCN and thus work even when the class is not on the classpath, whereas exclude=SomeAutoConfig.class requires a compile-time class reference and errors if the referenced class is not an auto-config candidate."
+      - "There is no difference; both require the class to be on the classpath."
+      - "The property form only works in test profiles."
+    answer: 1
+    explanation: |
+      The property and `excludeName` accept string FQCNs, so they work without the class being present at compile time. The `exclude` attribute needs a `.class` literal (class on the classpath) and will error if you point it at something that isn't an auto-configuration candidate. Neither removes the JAR — they only suppress the auto-config's contribution.
+    ref: "concepts.md#disabling-auto-configuration"
+  - id: fundamentals-autoconfiguration-starters-102
+    difficulty: expert
+    tags: [run-flow, web-application-type, classpath, deduction, trap]
+    question: |
+      A project has BOTH spring-boot-starter-web (MVC/servlet) and spring-boot-starter-webflux on the classpath and does not set spring.main.web-application-type. Which WebApplicationType does Boot deduce, and what is the practical takeaway?
+    options:
+      - "REACTIVE — WebFlux always takes priority when both are present."
+      - "SERVLET — when servlet MVC classes (DispatcherServlet) are present, Boot deduces SERVLET even if WebFlux is also on the classpath; to run reactive you must explicitly set spring.main.web-application-type=reactive."
+      - "NONE — the ambiguity makes Boot fall back to a non-web app."
+      - "The application fails to start because two web stacks conflict."
+    answer: 1
+    explanation: |
+      Boot's deduction favors SERVLET: if the servlet MVC `DispatcherServlet` class is present, it picks SERVLET regardless of WebFlux also being present. WebFlux 'wins' only when MVC is absent. Mixing both is a common accident; force the intended stack with `spring.main.web-application-type`.
+    ref: "concepts.md#springapplicationrun-flow"

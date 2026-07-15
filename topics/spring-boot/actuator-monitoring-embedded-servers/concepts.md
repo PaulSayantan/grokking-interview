@@ -23,6 +23,17 @@ Add the dependency:
 
 **Advanced:** Actuator endpoints are discovered via `@Endpoint` (technology-agnostic), `@WebEndpoint` (web only), and `@JmxEndpoint` (JMX only), with operations annotated `@ReadOperation` (GET), `@WriteOperation` (POST), `@DeleteOperation` (DELETE). The `@ReadOperation` returning `null` yields HTTP 404. Endpoints are served under the base path `/actuator` by default (configurable via `management.endpoints.web.base-path`).
 
+**Expert — operation return semantics and `@Selector`:** The status codes are asymmetric between read and write operations, which trips people up:
+- `@ReadOperation` returning a value → 200; returning `null` → **404**.
+- `@WriteOperation`/`@DeleteOperation` returning a value → 200; returning `null`/void → **204 No Content** (NOT 404).
+- A missing or unconvertible **required** parameter → **400 Bad Request**. Operation parameters are required by default; make them optional with `@Nullable` (JSpecify) or Kotlin nullability.
+
+`@Selector` on an operation parameter turns it into a path variable (`GET /actuator/loggers/{name}` is `@ReadOperation` with a `@Selector String name`). `@Selector(Match=ALL_REMAINING)` on the last parameter captures every remaining path segment into a `String[]`-compatible type.
+
+**Expert — endpoint response caching:** Actuator **automatically caches responses to read operations that take no parameters** (parameter-less `@ReadOperation`s). This is why repeatedly hitting `/actuator/health` (no selector) can serve a cached result, but `/actuator/health/{group}` or `/actuator/loggers/{name}` (parameterized) is never cached. TTL is configurable per endpoint: `management.endpoint.<id>.cache.time-to-live=10s`. This caching is a common "why didn't my custom parameter-less endpoint re-run?" gotcha.
+
+**Expert — the discovery page:** A discovery page (a JSON document of `_links` to every exposed endpoint) is served at the base path root (`/actuator`). It moves automatically to the root of a custom management context path, and is **disabled** when the management base path is `/` (to avoid clashing with application mappings). Disable it with `management.endpoints.web.discovery.enabled=false`.
+
 ---
 
 ## Key endpoints overview
@@ -49,6 +60,15 @@ The most interview-relevant built-in endpoints (all under `/actuator` by default
 
 Key trap: `/metrics` is NOT Prometheus format. `/metrics` returns a JSON list of meter names; `/metrics/{name}` drills into one meter. Prometheus scraping uses `/actuator/prometheus`.
 
+**Advanced — enabled vs exposed vs available vs access (the four-way distinction):** Since Spring Boot 3.4 the per-endpoint `enabled` boolean and `enabled-by-default` are **deprecated** in favor of a three-valued **access** model:
+- `management.endpoint.<id>.access = none | read-only | unrestricted` (replaces `enabled=false/true`).
+- `management.endpoints.access.default` (replaces `enabled-by-default`).
+- `management.endpoints.access.max-permitted` — an application-wide **ceiling** that overrides both the default and any individual endpoint's `access`. Setting it to `none` disables everything regardless of other settings; `read-only` caps everything at read.
+
+An endpoint is **available** only when access is permitted AND it is exposed. Crucially, `access=none` **removes the endpoint bean from the context entirely** (stronger than un-exposing) — if you only want to hide it from HTTP while keeping the bean, use exposure `exclude` instead. By default all endpoints have unrestricted access **except `shutdown` and `heapdump`**.
+
+**Advanced — CORS:** Actuator has its own CORS config independent of the app: it is disabled until you set `management.endpoints.web.cors.allowed-origins` (plus `allowed-methods`, etc.). This matters for browser-based dashboards hitting actuator from another origin.
+
 ---
 
 ## /health endpoint and health details
@@ -74,6 +94,12 @@ management.endpoint.health.group.custom.show-details=always
 ```
 
 Accessible at `/actuator/health/custom`. Groups are the mechanism behind liveness/readiness. You can also configure per-group status mapping and `additional-path` to expose a group on the main server port.
+
+**Expert — health caching and slow indicators:** The `/health` response (parameter-less read) is subject to actuator's response cache and can be tuned via `management.endpoint.health.cache.time-to-live`. Because all indicators are invoked **serially on the request thread by default**, one slow indicator (e.g. a DB check with a long socket timeout) stalls the whole `/health` response — which can cascade: a Kubernetes readiness probe times out, the pod is pulled from the load balancer, latency spikes elsewhere. Mitigations: keep checks fast, set tight JDBC/HTTP timeouts inside indicators, or move an expensive check out of the readiness group. The `DataSourceHealthIndicator` runs a validation query (`SELECT 1` style, or the driver's `isValid`); if that query blocks, `/health` blocks.
+
+**Expert — `additional-path` and per-group HTTP mapping:** `management.endpoint.health.group.readiness.additional-path=server:/readyz` exposes the readiness group on the **main application port** (not just the management port) at `/readyz` — useful when the management port is firewalled off from the K8s kubelet but probes must hit the app port. Each group can override `show-details`, `show-components`, its own `StatusAggregator`, and its own `HttpCodeStatusMapper` (`management.endpoint.health.group.<name>.status.http-mapping.DOWN=...`).
+
+**Expert — custom status severity:** If you introduce a custom status string (e.g. `"FROZEN"`) it is treated as **unknown severity** and, by the default `SimpleStatusAggregator` rules, sorts as **less severe than DOWN but the exact position depends on config** — to make it influence the overall status you must register a `StatusAggregator` bean (or set `management.endpoint.health.status.order`) and an `HttpCodeStatusMapper` so it maps to a sensible HTTP code (otherwise it defaults to 200).
 
 ---
 
@@ -104,6 +130,12 @@ This appears as `downstream` under `components` in `/actuator/health`.
 **Intermediate:** For reactive apps implement `ReactiveHealthIndicator` (returns `Mono<Health>`). To signal a fatal-but-not-fully-down state use `Health.status("OUT_OF_SERVICE")`. Custom status strings need a `StatusAggregator`/`HttpCodeStatusMapper` if they should influence overall status or HTTP code.
 
 **Advanced — `AbstractHealthIndicator`:** Extend it and implement `doHealthCheck(Health.Builder)` to get built-in exception handling. Auto-configured indicators (`DataSourceHealthIndicator`, `DiskSpaceHealthIndicator`, `RedisHealthIndicator`, etc.) can be toggled with `management.health.<name>.enabled=false`. Note `management.health.defaults.enabled=false` disables all auto-configured indicators. A slow health indicator can make `/health` slow — keep checks fast or cache; a hanging DB check can cascade into failing K8s probes.
+
+**Expert — `HealthContributor` vs `HealthIndicator`, and composites:** `HealthIndicator` is a leaf. `CompositeHealthContributor` lets one bean contribute a tree of named children (e.g. one "downstreams" contributor exposing per-dependency sub-checks). Both implement the marker `HealthContributor`. In reactive apps the parallel hierarchy is `ReactiveHealthContributor` / `ReactiveHealthIndicator` / `CompositeReactiveHealthContributor`; a blocking `HealthIndicator` used in a WebFlux app is adapted but runs on a bounded elastic scheduler.
+
+**Expert — exception handling and detail leakage:** If a `HealthIndicator.health()` throws, the bean is reported `DOWN` and the exception message/type may be surfaced under `details` (respecting `show-details`). `AbstractHealthIndicator` catches the exception for you and calls `builder.down(ex)`. Note that `Health.down(ex)` includes the exception class + message in details, so a raw exception can leak internal info (SQL, hostnames) when `show-details=always` — sanitize what you put in details for publicly reachable health endpoints.
+
+**Expert — `SlowIndicator` ordering & registry vs bean name:** The component key derives from the **bean name** (suffix `HealthIndicator`/`HealthContributor` stripped, first letter lowercased). If you register the bean under a different name (e.g. `@Bean("paymentsCheck")`), the key becomes `paymentsCheck`, not the class-derived name — a subtle gotcha when a health-group `include` references the wrong key and silently contributes nothing (unknown includes are ignored, not errors).
 
 ---
 
@@ -138,6 +170,12 @@ class StateManager {
 ```
 
 During graceful shutdown, Spring Boot automatically flips readiness to `REFUSING_TRAFFIC` so the load balancer drains the pod before shutdown completes. Liveness/readiness are backed by `LivenessStateHealthIndicator` and `ReadinessStateHealthIndicator`, mapped into the `liveness`/`readiness` health groups.
+
+**Expert — probe group contents and the startup gap:** When probes are enabled, `liveness` maps only to `livenessState` and `readiness` maps to `readinessState` **plus any `readinessState`-adjacent indicators you add**. Critically, by default the DB/disk indicators are NOT in the liveness group — that is intentional (liveness must not restart on external outages). If you naively add `db` to the liveness group you reintroduce the "DB down → whole fleet restarts" anti-pattern. A separate `startup` probe (Kubernetes `startupProbe`) is often pointed at readiness or a dedicated group to cover slow-starting apps before liveness kicks in.
+
+**Expert — event timing and self-healing:** `LivenessState.BROKEN` and `ReadinessState.REFUSING_TRAFFIC` are just in-memory availability state; publishing an `AvailabilityChangeEvent` to flip back to `CORRECT`/`ACCEPTING_TRAFFIC` is legitimate and lets an app self-heal readiness (e.g. after a downstream recovers) without a restart. But once liveness reports `BROKEN` and K8s restarts the pod, in-app recovery is moot — so reserve `BROKEN` for truly unrecoverable states (deadlock, unrecoverable OOM signal), not transient issues.
+
+**Expert — HTTP codes probes return:** `/actuator/health/liveness` returns 200 for `CORRECT` and 503 for `BROKEN`; `/actuator/health/readiness` returns 200 for `ACCEPTING_TRAFFIC` and 503 for `REFUSING_TRAFFIC`. Kubernetes treats any non-2xx/3xx (or connection failure) as probe failure. Because readiness returns 503 during graceful shutdown, the kubelet stops sending traffic even before the endpoint slice update propagates.
 
 ---
 
@@ -186,6 +224,12 @@ SecurityFilterChain actuatorSecurity(HttpSecurity http) throws Exception {
 
 `EndpointRequest.toAnyEndpoint()` matches all actuator endpoints regardless of base path. Exposing `env`, `beans`, `configprops`, `heapdump`, or `threaddump` publicly leaks secrets and internals — always secure or exclude them. In Spring Boot 3.x, `env`/`configprops` values are **fully sanitized by default** (`show-values` defaults to `never`, so every value is masked as `******`). `management.endpoint.env.show-values` / `configprops.show-values` (never | always | when-authorized) control whether real values are shown; even when set to `always`/`when-authorized`, keys matching sensitive patterns (`password`, `secret`, `key`, `token`, credentials, `vcap_services`, etc., via `SanitizingFunction`) remain masked.
 
+**Expert — separate management port changes the security context:** When `management.server.port` differs from `server.port`, the management endpoints run in a **separate `WebServerApplicationContext` (a child context)** with its own Tomcat/Jetty connector. Consequences: (1) `EndpointRequest.toAnyEndpoint()` still works, but a `SecurityFilterChain` you define may only apply to the main context unless placed appropriately; (2) servlet `Filter`s/`interceptor`s registered for the main port do NOT run for management requests; (3) `@LocalManagementPort` (not `@LocalServerPort`) injects the actuator port in tests. Binding `management.server.address=127.0.0.1` restricts actuator to loopback so only node-local agents (a sidecar, the kubelet via hostNetwork, a scraper) can reach it.
+
+**Expert — `EndpointRequest` matcher pitfalls:** `EndpointRequest.to(...)` targets specific endpoints; `EndpointRequest.toAnyEndpoint()` targets all but you can chain `.excluding(...)`. A frequent mistake: writing `securityMatcher("/actuator/**")` breaks the moment someone changes `management.endpoints.web.base-path`, and it also fails to match the discovery page or a separate management port — `EndpointRequest` is base-path- and port-aware and should be preferred. Another trap: with a separate management port, `PathRequest`/`EndpointRequest` still resolve correctly, but ordering of multiple `SecurityFilterChain` beans (`@Order`) determines which one wins for a given request — the actuator chain must be ordered before the catch-all app chain.
+
+**Expert — sanitization is post-resolution:** `/env` masking happens on the **serialized value**, but the `POST /actuator/env` write operation (when `management.endpoint.env.post.enabled=true`) can still inject values into a `MapPropertySource` at the top of precedence — a write-access foothold. This is why `env` should be `read-only` access (the default) and write access gated behind auth. Also, `show-values=when-authorized` uses the same role config as health (`management.endpoint.env.roles`), and falls back to "any authenticated user" if no roles are set.
+
 ---
 
 ## /info, /env, /beans, /mappings
@@ -201,6 +245,10 @@ SecurityFilterChain actuatorSecurity(HttpSecurity http) throws Exception {
 **`/beans`:** Lists every bean: name, type, scope, dependencies, resource. Great for debugging "which bean got created / why is there a duplicate."
 
 **`/mappings`:** All request mappings — `@RequestMapping` handlers, servlet filters, and actuator endpoints — with their conditions (paths, methods, produces/consumes). Invaluable for "why is my endpoint 404-ing / which handler matches this URL."
+
+**Expert — `InfoContributor` ordering and custom contributors:** `/info` aggregates all `InfoContributor` beans into one JSON object; contributors are invoked in `@Order` order and later ones can overwrite keys written by earlier ones. Write a custom one by implementing `InfoContributor.contribute(Info.Builder builder)`. The `build` contributor requires `META-INF/build-info.properties` (Maven `spring-boot-maven-plugin` `build-info` goal / Gradle `springBoot { buildInfo() }`); if that file is absent the contributor simply produces nothing (no error) — a common "why is build info empty in my IDE run?" (the goal didn't run).
+
+**Expert — `/env` precedence resolution vs display:** `/env` shows sources in precedence order, but the **effective** value of a property is the one from the **highest-precedence** source that defines it — `/env/{propertyName}` shows the resolved value plus every source that contributes a value, which is the definitive tool for "why is this property not the value I set?" debugging (e.g. an env var overriding your `application.yml`). Relaxed binding means `MY_PROP`, `my.prop`, `my-prop` may all map to the same property; `/env` reflects the canonical resolution.
 
 ---
 
@@ -220,6 +268,10 @@ Content-Type: application/json
 Sending `{"configuredLevel": null}` resets the logger to inherit from its parent. This is the go-to for turning on DEBUG in production to diagnose an incident, then turning it off — no redeploy.
 
 **Advanced:** Works with Logback, Log4j2, and JUL through Spring Boot's `LoggingSystem` abstraction. Levels: `TRACE, DEBUG, INFO, WARN, ERROR, FATAL, OFF`. There's also a `group` concept (`management.endpoint.loggers` and logging groups like `logging.group.sql=org.hibernate.SQL,...`) so you can flip several loggers at once via `/actuator/loggers/sql`.
+
+**Expert — configured vs effective level, and write access:** `GET /actuator/loggers/{name}` returns both `configuredLevel` (explicitly set on that logger, may be null) and `effectiveLevel` (what it resolves to after inheritance). Changing a level via `POST` is a **write operation** — it therefore requires the `loggers` endpoint to have `unrestricted` access (or `read-only` will reject the POST with 405/403). This is a common "I exposed loggers but can't change levels" trap: exposure is not enough; access must permit writes. Runtime changes are **not persisted** — a restart reverts to the level in properties/`logback-spring.xml`.
+
+**Expert — the NONE sentinel and log4shell-era hardening:** Two built-in logging systems that don't support level changes report the special value `null`/`NONE`. Also note the loggers endpoint is a prime tool during incident response (flip a package to DEBUG, capture, flip back to null), but on a shared/public actuator it is a foot-gun: an attacker toggling `ROOT` to `TRACE` can cause log-volume DoS and leak sensitive payloads. Keep it behind auth.
 
 ---
 
@@ -255,6 +307,12 @@ MeterRegistryCustomizer<MeterRegistry> commonTags(
 ```
 
 Spring Boot auto-configures many binders: JVM (memory, GC, threads), system (CPU), Logback, Tomcat, HikariCP, HTTP client/server. `http.server.requests` (a `Timer`) is auto-instrumented for every MVC/WebFlux endpoint.
+
+**Expert — `MeterFilter` is the control plane, and the global registry trap:** A `MeterFilter` bean can deny/accept meters, rename tags, map IDs, or cap cardinality. All `MeterFilter` beans are auto-bound to Spring's managed `MeterRegistry`. Critically: instrument via the **injected** `MeterRegistry`, NOT the static `io.micrometer.core.instrument.Metrics.globalRegistry` — the global registry is separate from Spring's and won't pick up your `MeterFilter`s, common tags, or the Prometheus registry, so those metrics silently never get exported. `MeterFilter` order matters: filters run in registration order and the first `deny()`/`accept()` decision wins.
+
+**Expert — `http.server.requests` URI tagging rules:** The `uri` tag uses the **route template before variable substitution** (`/orders/{id}`, not `/orders/42`), which is what bounds cardinality. Special values: request to app root → `root`; unmatched path (404) → `NOT_FOUND`; 3xx → `REDIRECTION`; no resolvable template → `UNKNOWN`. If a controller reads the raw path or uses regex mappings that don't yield a template, you can still get high-cardinality `uri` values. A safety valve exists: `management.metrics.web.server.max-uri-tags` (default 100) — once exceeded, a **deny `MeterFilter` is installed and further `http.server.requests` meters are dropped with a WARN log**. Bumping the limit without fixing the missing template just delays the OOM.
+
+**Expert — registration idempotency and meter identity:** A meter's identity is name + tag set. `registry.counter("x", "k", "v")` and `Counter.builder("x").tag("k","v").register(registry)` return the **same cached meter** for the same identity — repeated calls are cheap and safe. But registering the *same name* with a **different set of tag keys** than an existing meter throws or produces a distinct series depending on registry; Prometheus in particular rejects the same metric name with inconsistent label key sets. Keep the tag key set stable for a given meter name.
 
 ---
 
@@ -296,6 +354,12 @@ jvm_memory_used_bytes{area="heap",id="G1 Eden Space"} 1.2E7
   Prefer `percentiles-histogram` (bucket-based, aggregatable across instances via `histogram_quantile()`) over pre-computed `percentiles` (not aggregatable).
 - **Push vs pull:** Prometheus is pull-based; for short-lived jobs use the **Pushgateway** (`micrometer-registry-prometheus` supports it) or **OpenTelemetry** push. In Spring Boot 3.2+, `PrometheusExemplars` can attach trace IDs (exemplars) to metrics for metric-to-trace correlation.
 
+**Expert — counter vs histogram vs summary semantics on the wire:** A Micrometer `Timer` with `percentiles-histogram=true` publishes Prometheus **histogram** buckets (`_bucket{le="..."}` cumulative counts) plus `_count` and `_sum`; `histogram_quantile(0.99, sum(rate(..._bucket[5m])) by (le))` computes a fleet-wide p99. `slo`/`service-level-objectives` **add specific bucket boundaries** (`le` values) so you can query "fraction under 100ms" precisely. Pre-computed `percentiles` publish separate `{quantile="0.99"}` time series that are **not aggregatable** — averaging two instances' p99s is statistically meaningless. So: cross-instance quantiles ⇒ histogram/SLO buckets; single-instance quick view ⇒ percentiles.
+
+**Expert — scrape staleness and counter resets:** Prometheus derives rates from monotonic counters; on app restart a counter resets to 0 and Prometheus's `rate()` handles the reset via its counter-reset detection — but if you export a **gauge** where a counter belongs, resets silently corrupt rates. Also, the Prometheus registry is **cumulative** (values accumulate across scrapes and only reset on JVM restart), unlike step-based registries (e.g. some SaaS registries publish per-step deltas); mixing mental models causes "my counter looks too high" confusion. `management.prometheus.metrics.export.step` should generally be left alone for pull-based Prometheus.
+
+**Expert — exemplars require the OTel-style trace context:** Exemplars attach a `traceID` label to a bucket sample so Grafana can jump metric→trace. They need a tracer on the classpath and OpenMetrics exposition format (`Accept: application/openmetrics-text`), and Prometheus must be configured with exemplar storage enabled. Without OpenMetrics negotiation the exemplars are dropped even though the timers carry them.
+
 ---
 
 ## Custom metrics
@@ -326,6 +390,12 @@ class OrderService {
 - `@Timed` on a controller/method (needs `TimedAspect` bean) and `@Counted` (needs `CountedAspect`) provide declarative metrics.
 
 **Advanced:** Don't cache the `Counter`/`Timer` incorrectly across dynamic tags — building a meter per request with a unique tag value is high cardinality. Use `registry.counter(name, tags)` which is idempotent per unique name+tags (registry caches meters). `@Timed(histogram = true, percentiles = {0.95, 0.99})` configures distribution stats. To measure the JVM or a third-party object, register a `MeterBinder`.
+
+**Expert — `Timer` recording pitfalls:** `timer.record(Runnable)` and `timer.record(() -> ...)` measure wall-clock around the lambda; for manual timing use `Timer.start(registry)` + `sample.stop(timer)`, and note the timer you stop against can carry tags decided *after* the operation (e.g. tag by outcome/exception). A classic bug: creating the `Timer` outside but resolving dynamic tags inside a per-request builder — that re-creates a distinct series per request. For measuring exceptions, prefer `@Timed` which auto-adds an `exception` tag, or record in a `finally` with an outcome tag. `LongTaskTimer` (`@Timed(longTask=true)`, which **requires a different metric name** than the short-task timer) reports the duration of *in-flight* executions — use it for batch/long jobs where you want to see "how long has the current run been going," which a normal `Timer` (records only on completion) cannot show.
+
+**Expert — gauge strong-reference and thread-safety:** `Gauge.builder(name, obj, fn)` holds a **weak reference** to `obj`; if `obj` is GC'd the gauge reports `NaN`. The sampling function `fn` is invoked by the **registry's publishing thread** (or on scrape for Prometheus), not your thread — so it must be thread-safe and fast/non-blocking (never do I/O in a gauge function; a blocking gauge stalls the scrape). Prefer gauging a stable, long-lived object (a collection, an `AtomicInteger`) you keep a field reference to. `registry.gauge(name, obj, fn)` returns the *object*, not the gauge, which surprises people expecting a handle.
+
+**Expert — `@Timed`/`@Counted` proxying rules:** These annotations work via `TimedAspect`/`CountedAspect` (Spring AOP). They only fire on **Spring-managed beans invoked through the proxy** — self-invocation (a method in the same class calling another `@Timed` method) bypasses the proxy and is NOT timed, exactly like `@Transactional`/`@Async`. Private and final methods also can't be advised with the default JDK/CGLIB proxying.
 
 ---
 
@@ -358,11 +428,17 @@ class OrderService {
 |---|---|---|
 | **Tomcat** | Yes (spring-boot-starter-web) | Most widely used, mature, best-documented |
 | **Jetty** | No | Lightweight, good for many long-lived connections/WebSockets |
-| **Undertow** | No | High-performance, non-blocking, low memory (JBoss) — no longer maintained by Red Hat as of 2024 but still supported by Boot |
+| **Undertow** | No | High-performance, non-blocking, low memory (JBoss/Red Hat) — still actively maintained and supported by Boot |
 
 **Intermediate — WebFlux:** For reactive `spring-boot-starter-webflux`, the default embedded server is **Netty** (Reactor Netty), not Tomcat. Tomcat/Jetty/Undertow can also run WebFlux (on their non-blocking connectors), but Netty is the reactive default.
 
 **Advanced — customization:** Configure via `server.*` properties (`server.port`, `server.tomcat.threads.max`, `server.tomcat.accept-count`, `server.tomcat.max-connections`, `server.compression.enabled`). For programmatic tuning implement `WebServerFactoryCustomizer<TomcatServletWebServerFactory>`. `server.port=0` picks a random free port (useful in tests; read it via `@LocalServerPort`). `server.port=-1` disables HTTP entirely.
+
+**Expert — the Tomcat connection pipeline (acceptor → poller → worker):** Requests flow acceptor thread → `acceptCount` OS backlog queue → NIO poller → worker thread pool (`server.tomcat.threads.max`, default 200). Once all `max` worker threads are busy, new connections queue in the `max-connections` (default 8192) NIO layer, and beyond that the OS `accept-count` (default 100) backlog; excess connections are refused. A common production incident: thread pool exhausted by slow downstream calls → requests queue → latency climbs → readiness may still say UP because the pool isn't "down." Tune `threads.max`, add timeouts, and consider `server.tomcat.max-keep-alive-requests`. Virtual threads (`spring.threads.virtual.enabled=true`, Java 21+) change this model: each request gets a virtual thread, sidestepping platform-thread pool limits for blocking I/O.
+
+**Expert — Loom / virtual threads:** With `spring.threads.virtual.enabled=true` on Boot 3.2+/Java 21, Tomcat's request-handling uses a virtual-thread-per-request executor, and `@Async`/scheduled executors also switch to virtual threads. Caveat: `synchronized` blocks around blocking I/O **pin** the carrier thread (pre-JDK 24), undermining scalability; prefer `ReentrantLock`. Thread-pool metrics (`tomcat.threads.busy`) become less meaningful under virtual threads.
+
+**Expert — Jetty/Undertow differences that matter:** Undertow uses XNIO worker/IO threads (`server.undertow.threads.io` / `worker`) rather than a single pool; Jetty uses a `QueuedThreadPool`. Undertow does **not** support `server.compression` the same way and has historically had different WebSocket wiring. Undertow remains actively maintained (Red Hat) and supported by Boot; Tomcat is still the most common default choice.
 
 ---
 
@@ -379,6 +455,12 @@ class OrderService {
 6. After refresh, a `WebServerStartStopLifecycle` finalizes startup and publishes `ServletWebServerInitializedEvent` / `ApplicationReadyEvent`.
 
 **Advanced — gotchas:** The web server binds the port *during* context refresh (`onRefresh`), so if bean creation later fails the port may briefly bind then release. `ServletContextInitializer` beans (including `ServletRegistrationBean`, `FilterRegistrationBean`) are the Boot mechanism replacing `web.xml`. There is no `web.xml`; the `DispatcherServlet` is mapped to `/` by default. In a traditional WAR deployment you instead extend `SpringBootServletInitializer` and set packaging to `war`, and the *external* container starts, not the embedded one.
+
+**Expert — create vs start split and `WebServerStartStopLifecycle`:** Subtle but important: `onRefresh()` → `createWebServer()` **creates** the `WebServer` and, for Tomcat, actually **binds and starts the connector** early (Tomcat starts its protocol handler on creation). The port is then listening even though bean initialization is still finishing. The final "graceful" start (marking the server ready to serve, and the phase where graceful shutdown hooks live) is driven by `WebServerStartStopLifecycle` at the **`SmartLifecycle` phase** near `Integer.MAX_VALUE`, after the context is fully refreshed. This ordering is why `ApplicationReadyEvent` fires after the server is accepting traffic, and why a bean failing late in refresh can leave a briefly-bound port.
+
+**Expert — `ApplicationContextInitializedEvent` vs `WebServerInitializedEvent` vs `ApplicationReadyEvent`:** `ServletWebServerInitializedEvent` (has the actual port) fires when the server is initialized; `ApplicationReadyEvent` fires after all `CommandLineRunner`/`ApplicationRunner` beans complete. To read the real bound port programmatically use `@EventListener(WebServerInitializedEvent.class)` and `event.getWebServer().getPort()`, or `@LocalServerPort` in tests — reading `server.port` from the `Environment` returns `0` when configured as random.
+
+**Expert — filter/servlet registration ordering:** `FilterRegistrationBean.setOrder(...)` controls filter chain order; `@Order`/`Ordered` on a raw `@Component Filter` is also honored via Boot's registration. A filter registered as both a `@Bean Filter` and wrapped in a `FilterRegistrationBean` can be **registered twice** (double execution) — a real gotcha; use `registration.setEnabled(false)` on the auto-registration or don't expose it as a bean directly. `DelegatingFilterProxy` (Spring Security's `springSecurityFilterChain`) sits at a low order to run early.
 
 ---
 
@@ -400,6 +482,12 @@ spring.lifecycle.timeout-per-shutdown-phase=30s
 Readiness state automatically flips to `REFUSING_TRAFFIC` at shutdown start, so the load balancer stops routing.
 
 **Advanced:** Graceful shutdown requires the JVM to actually receive SIGTERM (not SIGKILL) and enough `terminationGracePeriodSeconds` in K8s (must exceed the shutdown timeout). `@PreDestroy` and `DisposableBean.destroy()` run during context close *after* the grace period. Beware `kill -9` / short K8s grace periods that cut the drain short. The `/actuator/shutdown` endpoint (POST, disabled by default) triggers a full application shutdown — different from graceful request draining; it's rarely enabled in prod.
+
+**Expert — the SmartLifecycle phase ordering during shutdown:** Graceful shutdown is driven by `SmartLifecycle` phases run in **reverse** on stop. The web server's lifecycle (`WebServerGracefulShutdownLifecycle`, phase `SmartLifecycle.DEFAULT_PHASE - 1024` region, i.e. very high) stops **first** — it stops accepting new connections and waits (up to `spring.lifecycle.timeout-per-shutdown-phase`, default 30s, applied **per phase**) for in-flight requests. Only after that do lower-phase beans stop and `@PreDestroy`/`DisposableBean` run. So the drain window is bounded by the timeout of the web-server phase, and beans like DB connection pools are torn down **after** requests drain — the correct order.
+
+**Expert — the K8s race and preStop hook:** Even with graceful shutdown, there's a race: when a pod is deleted, K8s simultaneously (a) sends SIGTERM and (b) removes the pod from Endpoints/EndpointSlices. Endpoint removal propagates asynchronously to kube-proxy/ingress, so for a brief window the pod may receive new traffic **after** it started refusing (503) — causing errors. The standard fix is a `preStop` hook with a small `sleep` (e.g. 5–10s) so the pod keeps serving during propagation before the app begins its drain; and ensure `terminationGracePeriodSeconds > preStop sleep + shutdown timeout`. Boot flips readiness to REFUSING_TRAFFIC on SIGTERM which helps, but the LB-propagation race is a K8s-level concern Boot alone can't close.
+
+**Expert — what "immediate" vs "graceful" actually change:** With the default `server.shutdown=immediate`, the connector is closed abruptly and in-flight requests may be cut (client sees connection reset). `graceful` inserts the wait phase. Note graceful shutdown covers HTTP request draining only — it does NOT wait for `@Async` tasks, `@Scheduled` jobs, or message-listener containers unless those are separately configured (e.g. `spring.task.execution.shutdown.await-termination=true`, container `setShutdownTimeout`). A common bug: expecting graceful shutdown to drain a Kafka/JMS consumer — it won't unless the listener container's own shutdown is configured.
 
 ---
 
@@ -427,6 +515,12 @@ management.zipkin.tracing.endpoint=http://localhost:9411/api/v2/spans
 - **Context propagation:** trace context is carried across HTTP via W3C `traceparent` header (OTel default) or B3 headers (Brave/Zipkin default). Across threads use Micrometer's `ContextPropagation` / `ContextSnapshot` (or `ThreadLocalAccessor`) so trace + MDC survive thread hops in async/reactive code.
 - **Jaeger** now natively ingests OTLP, so the OTel bridge + OTLP exporter is the modern path; Zipkin uses the Brave bridge or the OTel Zipkin exporter.
 
+**Expert — two bridges on the classpath = broken:** You must have **exactly one** tracing bridge. If both `micrometer-tracing-bridge-brave` and `micrometer-tracing-bridge-otel` are present, auto-configuration produces two `Tracer` beans and startup fails or tracing behaves unpredictably — a frequent "it worked then I added a dependency" incident. Similarly, the propagation format must match across services: Brave defaults to B3, OTel to W3C `traceparent`; a Brave service calling an OTel service without configuring shared propagation drops the trace at the boundary (new trace starts). Configure `management.tracing.propagation.type` to align them.
+
+**Expert — sampling is head-based and per-trace, not per-span:** `management.tracing.sampling.probability` is a **head sampler** decision made at the root span and propagated via the `sampled` flag in `traceparent`/B3 — all downstream services honor the upstream decision, so you can't "sample more" downstream. This means partial traces are rare but also that a low probability at the edge silently drops entire traces for downstream teams. For always-on capture in specific flows, use a custom `Sampler`/`SamplerFunction` or bump probability to 1.0. Sampling affects **spans/traces exported**, not the metric side of an `Observation` — the timer is always recorded even when the span is not sampled.
+
+**Expert — Observation lifecycle and `ObservationHandler`:** An `Observation` has `start()` → `openScope()` (binds ThreadLocal context, e.g. MDC/trace) → `close()` scope → `stop()`. `ObservationHandler`s (metrics handler, tracing handler) hook these events. If you manually create observations, forgetting `openScope()`/scope close means the span won't be current and child spans/log correlation break. `@Observed` (needs `ObservedAspect` bean) manages the lifecycle for you but is subject to the same AOP self-invocation limitation as `@Timed`.
+
 ---
 
 ## MDC and correlation IDs
@@ -442,6 +536,10 @@ management.zipkin.tracing.endpoint=http://localhost:9411/api/v2/spans
 So every log line for a request shows its trace/span IDs — you can jump from logs to the trace in Zipkin/Jaeger and back.
 
 **Advanced:** You can add your own correlation ID via a servlet `Filter` that reads an incoming header (or generates a UUID) and calls `MDC.put("correlationId", id)` — always `MDC.remove`/`clear` in a `finally` to avoid leaking values onto pooled threads. For async/reactive, plain `ThreadLocal` MDC does not propagate automatically; use `TaskDecorator` (for `@Async`/executors) or Micrometer context-propagation `ThreadLocalAccessor` / Reactor's `Hooks.enableAutomaticContextPropagation()` to carry MDC across threads.
+
+**Expert — why reactive MDC breaks and the correct fix:** In WebFlux a single request hops across event-loop threads, so `ThreadLocal`-backed MDC set at the start is empty by the time a downstream operator logs. The Boot 3 fix is Micrometer **context-propagation**: register `ThreadLocalAccessor`s (Boot auto-registers ones for trace context), store values in the Reactor `Context`, and enable `Hooks.enableAutomaticContextPropagation()` so the framework restores ThreadLocals around each operator on each thread. Manually calling `MDC.put` in a reactive chain is an anti-pattern — it "works" only if the very next operator runs on the same thread. For `@Async`/`ThreadPoolTaskExecutor`, wrap with a `TaskDecorator` that snapshots the parent MDC (`MDC.getCopyOfContextMap()`) and restores it in the worker, clearing in `finally`.
+
+**Expert — trace-context MDC keys and the accessor ordering:** Boot puts `traceId`/`spanId` into MDC via a `ThreadLocalAccessor` tied to the tracer, not by manual `MDC.put`. If you clear the entire MDC in a filter's `finally` (`MDC.clear()`) you can wipe trace keys mid-request if ordering is wrong; prefer `MDC.remove("yourKey")` for keys you own rather than a blanket clear. Under virtual threads, `ThreadLocal`/MDC still works per-virtual-thread, but very large numbers of virtual threads each holding an MDC map can add memory pressure — keep MDC entries small.
 
 ---
 
@@ -483,6 +581,12 @@ Config file conventions: `logback-spring.xml` (Logback) or `log4j2-spring.xml` (
 - Log4j2 with the disruptor (async logger) can outperform Logback under heavy load; Logback also has `AsyncAppender`.
 - **Log4Shell (CVE-2021-44228):** applied to Log4j2 ≤ 2.14 (JNDI lookup RCE) — not Logback or SLF4J; a frequent trivia trap. Fixed in Log4j2 2.17+.
 - For JSON/structured logging, Spring Boot 3.4+ has built-in support (`logging.structured.format.console=ecs|logstash|gelf`); earlier versions used `logstash-logback-encoder`.
+
+**Expert — logging initialization timing:** The `LoggingSystem` is initialized very early — before the `ApplicationContext` refreshes — by `LoggingApplicationListener` reacting to `ApplicationEnvironmentPreparedEvent`. This is why `logback.xml` (loaded directly by Logback's own init) can't see `<springProfile>`/`<springProperty>`: those need Spring, and by the time Spring could process them plain `logback.xml` is already applied. `logback-spring.xml` defers to Spring's initializer. It's also why logging config can't reference beans and why very early log output uses defaults until the system is configured.
+
+**Expert — bridges and classpath conflicts:** Boot routes JUL (via `jul-to-slf4j`), log4j 1.x, and JCL into SLF4J. A classic trap is having **both** a real logging backend and a leftover bridge that points the other way (e.g. `slf4j-log4j12` alongside Logback), causing `SLF4J: Class path contains multiple SLF4J bindings` or `StackOverflowError` from a bridge loop (`jcl-over-slf4j` + `commons-logging`). Exclude conflicting bindings. When switching to Log4j2, you must exclude `spring-boot-starter-logging` **everywhere it's transitively pulled**, or Logback stays on the classpath and SLF4J may bind to it instead.
+
+**Expert — async logging semantics and loss:** Logback `AsyncAppender` and Log4j2's disruptor-based async loggers decouple the app thread from I/O, but on a hard crash / `kill -9` the in-flight ring buffer/queue is **lost** (not flushed) — a reason to keep audit/security logs synchronous. Logback `AsyncAppender` also **drops** events below a threshold when the queue is 80% full by default (`discardingThreshold`) — TRACE/DEBUG/INFO can silently vanish under load unless you set `neverBlock`/`discardingThreshold=0`. This "where did my logs go under load?" behavior is a senior-level gotcha.
 
 ---
 

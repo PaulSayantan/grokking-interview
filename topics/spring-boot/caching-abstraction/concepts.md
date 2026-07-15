@@ -81,6 +81,20 @@ Key points and gotchas:
   stampede. Not all providers support it, and it restricts you to a single cache
   with no `unless`.
 
+**Async/reactive returns (Spring 6.1+):** `@Cacheable` now natively adapts to
+`CompletableFuture<T>`, `Mono<T>` and `Flux<T>` return types. The value is cached
+when the future/publisher completes; a lookup returns a completed future/publisher
+wrapping the cached value. For `Flux` the emitted items are collected into a `List`
+and that list is cached (coarse-grained — no per-element streaming or back-pressure
+awareness). This requires the cache to support `CompletableFuture`-based retrieval:
+`ConcurrentMapCacheManager` adapts automatically, but `CaffeineCacheManager`
+requires `setAsyncCacheMode(true)`.
+
+**`Optional<T>` unwrapping:** when a method returns `Optional<Book>`, Spring stores
+the *unwrapped* `Book` (or `null` for an empty `Optional`) and, on a hit, re-wraps
+it. Crucially, `#result` in `unless`/`key` refers to the unwrapped `Book`, never the
+`Optional`, so use null-safe navigation: `unless = "#result?.hardback"`.
+
 ---
 
 ## @CachePut
@@ -103,6 +117,18 @@ refresh," use `@CachePut`; if you want "skip if present," use `@Cacheable`.
 
 A common pattern: `@Cacheable` on the read method and `@CachePut` (with the same
 key expression) on the update method so reads see fresh data without an eviction.
+
+**Key-alignment gotcha:** the `@CachePut` on the writer must produce *exactly* the
+same key (same cache, same key expression, same argument identity/`equals`) that the
+`@Cacheable` reader uses, or you silently populate a different slot and the next read
+still misses. If the reader keys on `#isbn` (a `String`) but the writer keys on
+`#book` (the whole entity, keyed via `SimpleKey`), they never align.
+
+**Nuanced exception to "never combine":** Spring's own docs allow `@Cacheable` and
+`@CachePut` together *only* when their `condition`s are mutually exclusive (so at
+most one ever fires). Because that decision is made up-front, such conditions
+**must not** reference `#result`. In practice this corner case is rarely worth the
+confusion; prefer separate methods.
 
 ---
 
@@ -156,6 +182,15 @@ public void deleteBook(Book book) { ... }
 Use it when you need several evictions/puts with distinct keys — Java (pre-repeatable
 annotations in this API) does not otherwise allow two `@CacheEvict` on one method.
 
+**Gotcha — no guaranteed ordering between the grouped operations.** `@Caching` does
+not define the execution order of the puts vs. evicts it contains, and you should not
+rely on, say, an evict running before a cacheable within the same `@Caching`. If you
+need ordering guarantees (evict-then-load), split into separate proxied methods. Also,
+a `@Cacheable` inside `@Caching` still short-circuits the method on a hit, meaning the
+sibling `evict`/`put` operations that were supposed to run alongside it may not behave
+as you expect when the read hits — another reason to prefer explicit, single-purpose
+methods for anything subtle.
+
 ---
 
 ## Key generation & SpEL keys
@@ -195,6 +230,20 @@ the method runs). To use a custom key generator instead of `key`, set
 
 Gotcha: relying on parameter names (`#isbn`) requires the `-parameters` compiler
 flag (default in Spring Boot's Maven/Gradle plugins) or you must use `#p0`/`#a0`.
+
+**`SimpleKey` equals/hashCode history:** for multi-argument methods the default
+generator builds a `SimpleKey` whose `equals`/`hashCode` are computed over **all**
+arguments. This was fixed in Spring 4.0 — the earlier `DefaultKeyGenerator` used only
+`hashCode()` (not `equals`) and could therefore produce colliding keys for distinct
+argument tuples (a real correctness bug, spring-framework#14870). If you supply your
+own multi-field key object, it **must** implement `equals`/`hashCode` correctly, or
+you get silent cross-key collisions (wrong cached value returned) — this is the single
+most common home-grown-key bug.
+
+**Mutable keys are a landmine.** The key object is stored by reference in most local
+providers. If you use a mutable object (or an array) as the key and later mutate it,
+its `hashCode`/`equals` shift and the entry becomes unreachable (or worse, collides).
+Prefer immutable, value-based keys (strings, records, boxed primitives).
 
 ---
 
@@ -257,6 +306,69 @@ without touching business code. Notable implementations:
 `evict` until the surrounding transaction commits, so a rolled-back transaction
 doesn't leave the cache holding data that was never persisted.
 
+**Subtle limits of `TransactionAwareCacheManagerProxy`:**
+- It only defers the *write side* (`put`/`evict`). A `@Cacheable` **lookup** still
+  reads the current cache state immediately, so within the same transaction a
+  read-after-write does **not** see the deferred put.
+- Deferral happens on the `AFTER_COMMIT` synchronization. If there is no active
+  transaction, writes pass straight through (no deferral).
+- It does not make the cache transactional/rollback-safe against other threads:
+  between commit and the deferred cache write there is a small window where the DB is
+  updated but the cache still holds the old value.
+
+## CacheResolver, @CacheConfig, and multiple CacheManagers
+
+When a single `CacheManager` isn't enough, Spring layers three more concepts:
+
+- **`cacheManager` attribute** — pick a specific `CacheManager` bean per operation:
+  `@Cacheable(cacheNames="books", cacheManager="l2CacheManager")`.
+- **`CacheResolver`** — the SPI that actually decides *which `Cache` instances* an
+  operation targets at runtime. The default resolver just looks up `cacheNames`
+  against the configured `CacheManager`, but a custom `CacheResolver` can choose
+  caches based on the method arguments. Reference it with
+  `@Cacheable(cacheResolver="runtimeCacheResolver")`.
+- **`cacheManager` and `cacheResolver` are mutually exclusive.** Specifying both is
+  an error — the `CacheResolver` owns cache selection, so a `CacheManager` would be
+  ignored. (Since Spring 4.1, `cacheNames`/`value` is even optional when a resolver
+  supplies the caches.)
+- **`@CacheConfig`** — a class-level annotation that shares common settings
+  (`cacheNames`, `keyGenerator`, `cacheManager`, `cacheResolver`) across all cache
+  operations in the class, so you don't repeat them. It **does not enable caching by
+  itself**, and any attribute set on the individual operation **overrides** it.
+
+The override hierarchy (lowest → highest precedence) is: global defaults (via
+`CachingConfigurer`) → class-level `@CacheConfig` → operation-level attributes.
+
+## CacheErrorHandler & failure modes
+
+By default, exceptions thrown by the underlying cache store (e.g. Redis is down,
+a serialization error, a timeout) **propagate to the caller** — a caching problem
+becomes an application error. To change this, register a `CacheErrorHandler` (via
+`CachingConfigurer.errorHandler()`), whose four callbacks handle failures of `get`,
+`put`, `evict`, and `clear` independently:
+
+```java
+@Configuration
+@EnableCaching
+public class CacheConfig implements CachingConfigurer {
+    @Override
+    public CacheErrorHandler errorHandler() {
+        return new SimpleCacheErrorHandler() { // default: rethrows everything
+            @Override public void handleCacheGetError(RuntimeException e, Cache c, Object k) {
+                log.warn("cache get failed, falling back to source", e); // swallow -> treat as miss
+            }
+        };
+    }
+}
+```
+
+The built-in `SimpleCacheErrorHandler` rethrows every exception. A common resilience
+pattern is a handler that logs and **swallows GET errors** (so a cache outage
+degrades to a cache miss and the method runs against the source of truth) while still
+being careful about PUT/EVICT errors (a swallowed evict can leave stale data).
+`CachingConfigurer` is also where you override the global `keyGenerator`,
+`cacheManager`, and `cacheResolver`.
+
 ---
 
 ## Cache providers
@@ -306,7 +418,16 @@ time- and size-based expiry come from the provider.
 
 `expireAfterWrite` (TTL from creation) vs `expireAfterAccess` (TTL from last read)
 is a frequent distinction. Eviction *policies* (LRU/LFU/size-based) are the
-provider's job.
+provider's job. Caffeine notably uses **Window TinyLFU**, not plain LRU, giving
+higher hit ratios by admitting entries based on frequency as well as recency.
+
+**`@CacheEvict(allEntries=true)` cost by provider:** on `ConcurrentMap`/Caffeine it is
+a cheap `Map.clear()`. On Redis with `RedisCacheManager`, clearing a cache deletes all
+keys under the cache's key prefix; historically this used a `KEYS`/pattern operation
+that can be expensive/blocking on large keyspaces (newer versions use a batched
+`SCAN`). Frequent `allEntries=true` on a large Redis cache is a real performance
+footgun. Also note Caffeine's `maximumSize` eviction is **not immediate** — it is
+amortized and may briefly overshoot the configured size before catching up.
 
 ---
 
@@ -371,6 +492,34 @@ Fixes for self-invocation: (1) move the cached method to a **separate bean**;
 or use `AopContext.currentProxy()` with `exposeProxy=true`; (3) switch to
 **AspectJ weaving** (`mode = AdviceMode.ASPECTJ`), which weaves the aspect into
 the bytecode so `this`-calls are also advised.
+
+## Interception internals & advice ordering
+
+Under `mode=PROXY`, `@EnableCaching` registers a
+`BeanFactoryCacheOperationSourceAdvisor` whose advice is the
+`CacheInterceptor` (a `MethodInterceptor` extending `CacheAspectSupport`). At
+invocation time the interceptor:
+
+1. resolves the `CacheOperation`s for the method via the `CacheOperationSource`;
+2. runs any `beforeInvocation=true` evictions;
+3. for `@Cacheable`, computes the key and probes the caches; on a hit it returns the
+   stored value **without proceeding** to the target method;
+4. on a miss (or for `@CachePut`) invokes the target, then evaluates `unless`, and
+   stores the result (`@CachePut` always stores; `@Cacheable` stores on a miss);
+5. runs `beforeInvocation=false` evictions.
+
+**Ordering vs. `@Transactional`:** both are AOP advisors and their relative order
+matters. The cache advisor's `order` defaults to `Ordered.LOWEST_PRECEDENCE`. In the
+common case you want the **transaction advice to be the outermost** (lower order
+value / higher precedence) so cache operations execute *inside* the transaction —
+otherwise a `@CachePut` could commit a value the DB later rolls back. When ordering
+is unspecified, the AOP subsystem's default determines the sequence, which is why
+`TransactionAwareCacheManagerProxy` exists as a more robust guarantee than relying on
+advisor ordering.
+
+**Empty/absent `CacheManager`:** if `@EnableCaching` is present but no `CacheManager`
+bean can be found, context startup fails with a "no unique/qualifying bean of type
+CacheManager" error — unlike the missing-`@EnableCaching` case, which fails silently.
 
 ---
 
@@ -439,6 +588,18 @@ locks for multi-node.
 **Q: Local vs distributed cache?** Local (Caffeine) = fastest, per-node copy,
 coherence issues on writes. Distributed (Redis/Hazelcast) = shared view, network +
 serialization cost, survives restarts.
+
+**Q: What happens if Redis is unreachable during a `@Cacheable` call?** By default
+the exception propagates and the call fails. Register a `CacheErrorHandler` that
+swallows GET errors to degrade gracefully to a cache miss.
+
+**Q: Can I use different `CacheManager`s per method?** Yes — set the
+`cacheManager` attribute per operation, or supply a custom `CacheResolver`
+(mutually exclusive with `cacheManager`).
+
+**Q: Are reactive return types supported?** Since Spring 6.1, `Mono`/`Flux`/
+`CompletableFuture` are adapted natively, but the cache must support
+`CompletableFuture` retrieval (Caffeine needs `setAsyncCacheMode(true)`).
 
 ---
 

@@ -1043,3 +1043,900 @@ questions:
       can only carry one @Component, so scanning can't easily yield multiple
       configured instances of that single class.
     ref: "concepts.md#bean-vs-component"
+
+  - id: core-annotations-stereotypes-057
+    difficulty: expert
+    tags: [configuration, cglib, static-bean, post-processor]
+    question: |
+      A team declares a BeanPostProcessor via a NON-static @Bean method inside a
+      @Configuration class, and the same @Configuration class has an @Value-annotated
+      field it reads inside other @Bean methods. At startup they see a log warning that
+      the config class "is not eligible for getting processed by all BeanPostProcessors"
+      and the @Value field is null in some beans. What is the correct explanation and fix?
+    options:
+      - "The @Value field must be static so the config class can be loaded early; make the field static and the warning disappears."
+      - "BeanPostProcessors cannot be defined with @Bean at all; they must be registered via @Import of an ImportBeanDefinitionRegistrar."
+      - "The BeanPostProcessor must be instantiated very early; because the @Bean method is non-static, Spring instantiates the enclosing @Configuration class prematurely (before annotation-processing BeanPostProcessors run), so its @Value isn't injected. Declare the post-processor @Bean method static."
+      - "The warning is benign; the null @Value is caused by a missing default and is unrelated to the post-processor declaration."
+    answer: 2
+    explanation: |
+      Post-processor beans are created before the container has finished setting up the
+      annotation-processing BeanPostProcessors. A non-static @Bean factory method forces
+      early instantiation of its enclosing @Configuration instance, so @Autowired/@Value
+      on that instance are not yet applied — hence the warning and null values. Declaring
+      the post-processor @Bean method static decouples it from the config instance and
+      resolves both issues.
+    ref: "concepts.md#configuration-full-vs-lite-mode-cglib-proxying-of-bean-methods"
+
+  - id: core-annotations-stereotypes-058
+    difficulty: expert
+    tags: [configuration, cglib, final, private-bean]
+    question: |
+      In a full @Configuration class (proxyBeanMethods=true), a developer marks one
+      @Bean method private and another @Bean method final, then has a public @Bean method
+      call both directly. What is the most accurate outcome?
+    options:
+      - "Compilation fails because @Bean cannot be applied to private or final methods."
+      - "The private and final @Bean methods cannot be overridden by the CGLIB subclass, so direct calls to them are NOT intercepted and create new instances instead of returning the container singletons — a silent correctness bug."
+      - "The container refuses to start with a BeanDefinitionParsingException naming the private/final methods."
+      - "All three methods behave identically; visibility and finality have no effect on interception in full mode."
+    answer: 1
+    explanation: |
+      Full @Configuration relies on a CGLIB subclass overriding @Bean methods to insert
+      container-lookup interception. A private method is not overridable (not visible to
+      the subclass) and a final method cannot be overridden, so calls to them run the
+      original body every time, producing new instances rather than the shared singleton.
+      Spring does not fail the build for this; it silently loses singleton semantics for
+      those methods.
+    ref: "concepts.md#configuration-full-vs-lite-mode-cglib-proxying-of-bean-methods"
+
+  - id: core-annotations-stereotypes-059
+    difficulty: advanced
+    tags: [configuration, constructor-injection, cglib]
+    question: |
+      Which statement about constructors on a full @Configuration class is TRUE?
+    options:
+      - "A @Configuration class must have a public no-arg constructor or the context fails."
+      - "@Configuration classes cannot use constructor injection; dependencies must be @Autowired fields."
+      - "A @Configuration class constructor must be private to prevent direct instantiation."
+      - "A @Configuration class may declare a constructor (including one for @Autowired/constructor injection); it only must not be final and must be subclassable by CGLIB."
+    answer: 3
+    explanation: |
+      The only CGLIB-imposed restriction is that the class not be final (so it can be
+      subclassed) and be instantiable by the generated subclass. Any constructor is
+      allowed, including a single non-default constructor for default injection or an
+      @Autowired constructor — a no-arg constructor is not required.
+    ref: "concepts.md#configuration-full-vs-lite-mode-cglib-proxying-of-bean-methods"
+
+  - id: core-annotations-stereotypes-060
+    difficulty: expert
+    tags: [configuration, lite-mode, scenario, code-analysis]
+    question: |
+      Consider:
+
+          @Component
+          class Cfg {
+            @Bean Clock clock() { return Clock.systemUTC(); }
+            @Bean TimeService ts() { return new TimeService(clock()); }
+          }
+
+      TimeService is also injected elsewhere via @Autowired. How many Clock instances
+      exist, and why?
+    options:
+      - "One — @Component classes are proxied like @Configuration so clock() is intercepted."
+      - "Two — the container creates one Clock bean from clock(), and ts()'s direct call to clock() (lite mode, no CGLIB) creates a second unmanaged Clock."
+      - "Zero — @Bean methods are illegal on @Component classes and the context won't start."
+      - "Unbounded — a new Clock is created every time any bean references TimeService."
+    answer: 1
+    explanation: |
+      @Bean methods on a @Component (not @Configuration) run in lite mode: no CGLIB
+      subclass, so ts()'s direct call to clock() is a plain Java call creating a fresh
+      Clock. The container separately creates its own Clock singleton from the clock()
+      definition. Result: two Clock instances. Passing Clock as a method parameter
+      (ts(Clock clock)) would inject the singleton.
+    ref: "concepts.md#configuration-vs-component"
+
+  - id: core-annotations-stereotypes-061
+    difficulty: advanced
+    tags: [primary, ambiguity, failure-mode]
+    question: |
+      Two DataSource @Bean methods are BOTH annotated @Primary, and an injection point
+      autowires a single DataSource with no @Qualifier. What happens?
+    options:
+      - "Spring injects the first-declared @Primary bean."
+      - "Spring merges them into a composite DataSource."
+      - "The context starts but the injection point receives null."
+      - "NoUniqueBeanDefinitionException — @Primary resolves ambiguity only when exactly one primary candidate exists; two primaries leave it ambiguous."
+    answer: 3
+    explanation: |
+      @Primary designates a single preferred candidate. With two primaries of the same
+      type, the "exactly one primary" condition fails and the ambiguity is unresolved, so
+      Spring throws NoUniqueBeanDefinitionException (reporting more than one primary bean).
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-062
+    difficulty: expert
+    tags: [fallback, primary, spring-6.2]
+    question: |
+      A library ships a default @Bean of type MessageSender annotated @Fallback (Spring
+      Framework 6.2+). An application defines its own MessageSender @Bean with no special
+      annotation. Which is injected for a single-valued MessageSender dependency, and why?
+    options:
+      - "The application's bean, because @Fallback demarcates a NON-preferred bean; with one non-fallback (regular) candidate remaining, that regular bean is effectively primary."
+      - "The library's @Fallback bean, because @Fallback marks the preferred bean like @Primary."
+      - "Neither — @Fallback plus a regular bean is an ambiguity and throws."
+      - "Both are injected as a List regardless of the single-valued type."
+    answer: 0
+    explanation: |
+      @Fallback is the inverse of @Primary: it marks beans as non-preferred. When only one
+      regular (non-fallback) candidate remains, it becomes effectively primary and is
+      chosen. This lets a library provide a default that any user-supplied bean
+      automatically supersedes.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-063
+    difficulty: expert
+    tags: [autowiring, order, priority, resolution]
+    question: |
+      For a SINGLE-valued injection point with multiple type matches (no @Qualifier, no
+      @Primary), which mechanism can still break the tie, and how does it differ from
+      @Order used on a List<T> injection?
+    options:
+      - "@Order breaks the single-value tie; @Priority is only for collections."
+      - "Neither @Order nor @Priority affects single-value resolution; only bean-name fallback can."
+      - "@Priority (JSR-250, class-level, lower value wins) can break a single-value tie after @Primary; whereas for a List<T> injection @Order/Ordered/@Priority only SORT the elements and never filter which are injected."
+      - "@Order and @Priority are interchangeable and both filter single-value injection identically."
+    answer: 2
+    explanation: |
+      In single-valued resolution, after @Qualifier and @Primary, Spring consults
+      @Priority (class-level JSR-250, lower value = higher priority) to break the tie. For
+      collection injection, @Order/Ordered/@Priority determine element ordering but never
+      exclude candidates — all matching beans are injected.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-064
+    difficulty: advanced
+    tags: [order, startup-order, misconception]
+    question: |
+      A developer adds @Order to two singleton @Service beans hoping to control which is
+      constructed first during startup. What actually happens?
+    options:
+      - "@Order has no effect on singleton instantiation order (that follows the dependency graph and @DependsOn); it only influences ordering when the beans are injected as a collection or act as ordered advisors."
+      - "@Order forces bean instantiation order; the lower value is created first."
+      - "@Order causes a startup failure because it is not allowed on stereotypes."
+      - "@Order makes both beans lazy until the ordered position is reached."
+    answer: 0
+    explanation: |
+      Singleton creation order is determined by dependency relationships and @DependsOn,
+      not @Order. @Order only affects the order of elements handed to a collection
+      injection point (List/array/Set) and the ordering of AOP advisors / config classes.
+      To force creation order, use @DependsOn.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-065
+    difficulty: expert
+    tags: [import, deferredimportselector, autoconfiguration, ordering]
+    question: |
+      Why must Spring Boot's auto-configuration use a DeferredImportSelector rather than a
+      plain ImportSelector?
+    options:
+      - "DeferredImportSelector runs on a background thread, speeding up startup."
+      - "A plain ImportSelector cannot read the classpath, but a deferred one can."
+      - "DeferredImportSelector allows importing non-@Configuration POJOs, which a plain ImportSelector forbids."
+      - "DeferredImportSelector is processed AFTER all regular @Configuration classes are parsed, so user beans and @Conditional state are known — enabling @ConditionalOnMissingBean back-off and letting auto-config be overridden and ordered (via Group / @AutoConfigureBefore/After)."
+    answer: 3
+    explanation: |
+      Auto-configuration must yield to user configuration (back off when a user bean
+      exists) and be evaluated last with full knowledge of the context. A
+      DeferredImportSelector runs after all other config classes are processed and its
+      Group mechanism sorts/batches imports, honoring @AutoConfigureOrder/Before/After.
+      A plain ImportSelector runs inline during parsing, too early for these decisions.
+    ref: "concepts.md#import"
+
+  - id: core-annotations-stereotypes-066
+    difficulty: advanced
+    tags: [import, importselector, aware, timing]
+    question: |
+      An ImportSelector needs to decide which configuration classes to register based on
+      an active Spring profile / Environment property. How does it access the Environment,
+      and what can it NOT do?
+    options:
+      - "It @Autowires the Environment field like any bean; it can also inject other application beans."
+      - "It implements EnvironmentAware (or one of BeanFactoryAware/ResourceLoaderAware/BeanClassLoaderAware) to receive the Environment before selectImports runs; it cannot inject or reference live application beans because it executes at configuration-parsing time before beans are instantiated."
+      - "It reads System.getenv directly because Spring's Environment is not yet available at import time."
+      - "It must be registered as a @Bean first, then Spring calls selectImports after refresh."
+    answer: 1
+    explanation: |
+      ImportSelectors/Registrars run during configuration parsing, before bean
+      instantiation, so they cannot autowire application beans. To make environment-based
+      decisions they implement the relevant *Aware callbacks (EnvironmentAware, etc.),
+      which Spring invokes before selectImports/registerBeanDefinitions.
+    ref: "concepts.md#import"
+
+  - id: core-annotations-stereotypes-067
+    difficulty: intermediate
+    tags: [import, registrar, non-configuration-bean]
+    question: |
+      What does @Import(MyPlainPojo.class) do when MyPlainPojo is a regular class that is
+      neither @Configuration, nor an ImportSelector, nor an ImportBeanDefinitionRegistrar?
+    options:
+      - "It is ignored because only configuration-related classes can be imported."
+      - "It throws IllegalArgumentException at startup."
+      - "Since Spring 4.2, the plain class is registered directly as a bean — a concise way to register a single bean without a stereotype or @Bean method."
+      - "It scans MyPlainPojo's package for components."
+    answer: 2
+    explanation: |
+      As of Spring 4.2, @Import can take a regular component class and register it directly
+      as a bean definition. This is a lesser-known mechanism to register one bean without
+      adding a stereotype annotation or writing a @Bean method.
+    ref: "concepts.md#import"
+
+  - id: core-annotations-stereotypes-068
+    difficulty: expert
+    tags: [value, bean-post-processor, timing, failure]
+    question: |
+      A custom BeanFactoryPostProcessor has a field annotated @Value("${feature.enabled}").
+      At runtime the field is always false/null even though the property is set. Why?
+    options:
+      - "@Value only works on singletons and BeanFactoryPostProcessors are prototypes."
+      - "@Value is applied by an annotation-processing BeanPostProcessor that runs LATER than BeanFactoryPostProcessors; the post-processor is instantiated too early for @Value injection, so read the value from the Environment directly."
+      - "The property name has a typo; @Value is otherwise fully supported in BeanFactoryPostProcessors."
+      - "@Value requires the field to be non-final; making it final fixes it."
+    answer: 1
+    explanation: |
+      @Value and @Autowired are handled by AutowiredAnnotationBeanPostProcessor, a
+      BeanPostProcessor. BeanFactoryPostProcessors (and BeanPostProcessors themselves) are
+      created before that infrastructure is active, so their @Value fields are never
+      injected. Read such configuration directly from the injected Environment instead.
+    ref: "concepts.md#value-and-property-injection"
+
+  - id: core-annotations-stereotypes-069
+    difficulty: advanced
+    tags: [value, relaxed-binding, configuration-properties]
+    question: |
+      An app defines the environment variable MY_APP_TIMEOUT and expects
+      @Value("${my.app.timeout}") to pick it up via relaxed binding the way
+      @ConfigurationProperties(prefix="my.app") does. What is the accurate statement?
+    options:
+      - "@Value performs the same relaxed binding as @ConfigurationProperties, so MY_APP_TIMEOUT maps to my.app.timeout automatically and this works."
+      - "@Value never reads environment variables; only application.properties keys."
+      - "Relaxed binding is a JVM feature, so both @Value and @ConfigurationProperties get it for free."
+      - "@Value does NOT perform relaxed binding; it resolves the exact placeholder key. It works only because Spring's system-environment PropertySource also exposes the canonical dotted form; but any name-shape mismatch that relaxed binding would tolerate will fail with @Value."
+    answer: 3
+    explanation: |
+      Relaxed binding (case/dash/underscore-insensitive) is a feature of
+      @ConfigurationProperties binding, not of @Value placeholder resolution. @Value
+      resolves the literal key against PropertySources; env-var lookup works via the
+      SystemEnvironmentPropertySource's name mapping, but @Value will not tolerate the
+      broader name variations relaxed binding allows.
+    ref: "concepts.md#value-and-property-injection"
+
+  - id: core-annotations-stereotypes-070
+    difficulty: expert
+    tags: [value, constructor, field, timing, code-analysis]
+    question: |
+      Given:
+
+          @Component
+          class Cache {
+            @Value("${cache.size:100}") private int size;
+            private final int[] buckets;
+            Cache() { this.buckets = new int[size]; }  // uses size in constructor
+          }
+
+      What is the length of buckets after the bean is created?
+    options:
+      - "100, the default value, because @Value defaults are applied before construction."
+      - "0 — field @Value is injected by a BeanPostProcessor AFTER construction, so 'size' is still 0 when the constructor runs."
+      - "The configured cache.size, because Spring resolves @Value eagerly during instantiation."
+      - "The context fails to start because @Value fields cannot be read in constructors."
+    answer: 1
+    explanation: |
+      Field @Value injection happens after the object is constructed (via reflection by the
+      annotation-processing BeanPostProcessor). During the constructor, size is still its
+      default primitive value 0, so buckets has length 0. To use the value at construction
+      time, inject it as a constructor parameter: Cache(@Value("${cache.size:100}") int size).
+    ref: "concepts.md#value-and-property-injection"
+
+  - id: core-annotations-stereotypes-071
+    difficulty: intermediate
+    tags: [value, static-field]
+    question: |
+      A developer annotates a private static field with @Value("${app.region}") and finds
+      it is never populated. Why?
+    options:
+      - "Static fields need @Value on the class, not the field."
+      - "The property is missing; static injection otherwise works."
+      - "Static @Value requires proxyBeanMethods=true on the enclosing class."
+      - "Spring injects @Value only into instance fields via the bean instance; it does not populate static fields. Use a non-static field or a setter that stores into the static field."
+    answer: 3
+    explanation: |
+      Spring's dependency injection operates on bean instances and does not inject into
+      static fields. A common workaround is a non-static setter (or @PostConstruct) that
+      copies the injected instance value into the static field, though shared mutable
+      static state is discouraged.
+    ref: "concepts.md#value-and-property-injection"
+
+  - id: core-annotations-stereotypes-072
+    difficulty: expert
+    tags: [spel, evaluation-context, security]
+    question: |
+      Which statement about SpEL evaluation contexts is correct?
+    options:
+      - "All SpEL, including @Value and @PreAuthorize, uses the same StandardEvaluationContext with full type/bean access."
+      - "@Value SpEL uses a StandardEvaluationContext (T(...), @beanRef, ctor calls allowed), while method-security/cache SpEL uses a MethodBasedEvaluationContext exposing #argName and #root; evaluating untrusted input against StandardEvaluationContext risks SpEL injection, so SimpleEvaluationContext should be used for untrusted expressions."
+      - "SpEL cannot reference beans in any context for security reasons."
+      - "The Elvis operator ?: is only available in the MethodBasedEvaluationContext."
+    answer: 1
+    explanation: |
+      @Value expressions evaluate against a full StandardEvaluationContext (type
+      references, bean references, constructors). Spring Security/cache expressions use a
+      MethodBasedEvaluationContext that exposes method arguments (#name) and root objects.
+      Because StandardEvaluationContext is powerful, evaluating untrusted strings enables
+      SpEL injection (e.g. T(java.lang.Runtime)); use SimpleEvaluationContext to lock it
+      down.
+    ref: "concepts.md#spel-basics-and-use-cases"
+
+  - id: core-annotations-stereotypes-073
+    difficulty: advanced
+    tags: [spel, projection, selection, code-analysis]
+    question: |
+      Given a list 'jobs' of objects each with a 'name' and 'priority', what does
+      #{jobs.![name]} produce (note the ! projection operator)?
+    options:
+      - "A filtered list of jobs whose name is truthy."
+      - "The single job with the highest priority."
+      - "A new list containing the 'name' value of every job (projection maps each element to its name)."
+      - "A boolean indicating whether all jobs have a name."
+    answer: 2
+    explanation: |
+      .![expr] is SpEL projection: it evaluates the expression against each element and
+      collects the results into a new collection. So jobs.![name] yields the list of all
+      job names. (.?[] is selection/filter, .^[]/.$[] select first/last matching element.)
+    ref: "concepts.md#spel-basics-and-use-cases"
+
+  - id: core-annotations-stereotypes-074
+    difficulty: advanced
+    tags: [spel, placeholder, order, code-analysis]
+    question: |
+      A property list.csv=a,b,c is defined. What does
+      @Value("#{'${list.csv}'.split(',')}") private String[] items resolve to, and in what
+      order are the two resolutions applied?
+    options:
+      - "SpEL runs first producing '${list.csv}' unchanged, then placeholder resolution fails; startup error."
+      - "Both run simultaneously and the result is a single-element array ['a,b,c']."
+      - "It injects the literal string \"#{'${list.csv}'.split(',')}\"."
+      - "The placeholder ${list.csv} is resolved FIRST to the string 'a,b,c', then SpEL evaluates 'a,b,c'.split(',') producing [a, b, c]."
+    answer: 3
+    explanation: |
+      Property placeholders (${...}) are resolved before SpEL (#{...}) is evaluated. The
+      placeholder becomes the literal 'a,b,c', then SpEL calls String.split(',') to yield
+      the three-element array. This ordering is why placeholders can be embedded inside SpEL.
+    ref: "concepts.md#value-and-property-injection"
+
+  - id: core-annotations-stereotypes-075
+    difficulty: expert
+    tags: [meta-annotations, inherited, transactional, code-analysis]
+    question: |
+      An interface method carries @Transactional. A concrete class implements it without
+      re-declaring @Transactional. Standard Java reflection (getAnnotation with @Inherited
+      semantics) would NOT report the annotation as present on the class's method, yet
+      Spring applies the transaction. Why?
+    options:
+      - "Because @Transactional is meta-annotated with @Inherited, which propagates to implementations."
+      - "Because Spring uses MergedAnnotations/AnnotatedElementUtils with a type-hierarchy search that considers implemented interfaces and superclasses — independent of Java's @Inherited, which only covers class-level annotations on superclasses and ignores interfaces."
+      - "Because the JVM automatically copies interface annotations to implementing methods at class load."
+      - "It does not — Spring cannot honor interface-level @Transactional; the example is incorrect."
+    answer: 1
+    explanation: |
+      Java's @Inherited only propagates class-level (not method-level) annotations down a
+      superclass chain and never through interfaces. Spring performs its own merged,
+      interface-and-hierarchy-aware annotation search (MergedAnnotations /
+      AnnotatedElementUtils), so it detects @Transactional declared on an interface method
+      and applies transactional advice to the implementation.
+    ref: "concepts.md#meta-annotations"
+
+  - id: core-annotations-stereotypes-076
+    difficulty: expert
+    tags: [meta-annotations, aliasfor, failure]
+    question: |
+      A custom annotation uses @AliasFor to alias 'value' and 'path' to each other, but the
+      two attributes declare different return types (String vs String[]). When is the
+      problem detected and how?
+    options:
+      - "At compile time; the annotation processor rejects it."
+      - "Never; Spring silently picks the first attribute."
+      - "At the first runtime resolution of the annotation, Spring throws AnnotationConfigurationException because @AliasFor requires aliased attributes to share the same return type (and each declare a default)."
+      - "At context refresh only, and only if the annotation is on a bean."
+    answer: 2
+    explanation: |
+      @AliasFor imposes a contract (same return type, a declared default, mutual aliasing).
+      Violations are not caught by the compiler; Spring validates them when it first
+      resolves/merges the annotation and throws AnnotationConfigurationException.
+    ref: "concepts.md#meta-annotations"
+
+  - id: core-annotations-stereotypes-077
+    difficulty: advanced
+    tags: [component-scanning, inheritance, abstract]
+    question: |
+      A concrete class ConcreteHandler extends an abstract class AbstractHandler that is
+      annotated @Component. ConcreteHandler itself has no stereotype. Is ConcreteHandler
+      registered as a bean by default component scanning?
+    options:
+      - "Yes — @Component is @Inherited so the subclass is scanned automatically."
+      - "Yes, but only if AbstractHandler is also concrete."
+      - "Only if useDefaultFilters=false."
+      - "No — the default component-scan filter does not traverse superclasses for the stereotype, and abstract classes are not candidate components; annotate the concrete class itself."
+    answer: 3
+    explanation: |
+      The default AnnotationTypeFilter for @Component considers meta-annotations but does
+      not walk superclasses, and abstract classes are not eligible candidate components.
+      So a subclass inheriting a stereotype from an abstract base is not auto-registered;
+      put the stereotype on the concrete class.
+    ref: "concepts.md#component-scanning-how-it-works-filters-basepackages"
+
+  - id: core-annotations-stereotypes-078
+    difficulty: advanced
+    tags: [component-scanning, naming, collision, code-analysis]
+    question: |
+      Two classes named Handler exist in packages com.a and com.b, both annotated
+      @Component, both under the scanned base package. What happens at startup?
+    options:
+      - "Both register fine as 'com.a.Handler' and 'com.b.Handler' — fully-qualified names are the default."
+      - "ConflictingBeanDefinitionException — both default to the same bean name 'handler' from the decapitalized simple class name; fix with an explicit @Component(\"name\") or a FullyQualifiedAnnotationBeanNameGenerator."
+      - "The second one silently overrides the first."
+      - "Spring appends a numeric suffix to the second bean name automatically."
+    answer: 1
+    explanation: |
+      AnnotationBeanNameGenerator uses the decapitalized simple class name, so both map to
+      'handler'. Two scanned definitions with the same name throw
+      ConflictingBeanDefinitionException. Resolve by giving explicit names, or by using
+      FullyQualifiedAnnotationBeanNameGenerator so the fully-qualified class name is used.
+    ref: "concepts.md#bean-naming-and-beannamegenerator"
+
+  - id: core-annotations-stereotypes-079
+    difficulty: expert
+    tags: [bean-naming, decapitalize, code-analysis]
+    question: |
+      A scanned @Component class is named URLParser (two leading capitals). What is its
+      default bean name?
+    options:
+      - "URLParser — java.beans.Introspector.decapitalize leaves names with two or more consecutive leading capitals unchanged."
+      - "uRLParser"
+      - "urlParser"
+      - "url.parser"
+    answer: 0
+    explanation: |
+      AnnotationBeanNameGenerator delegates to Introspector.decapitalize, which does NOT
+      lowercase the first letter when the first two characters are both uppercase. So
+      URLParser stays URLParser (whereas UserService becomes userService). This surprises
+      people relying on autowire-by-name.
+    ref: "concepts.md#bean-naming-and-beannamegenerator"
+
+  - id: core-annotations-stereotypes-080
+    difficulty: advanced
+    tags: [bean-definition-overriding, spring-boot, failure]
+    question: |
+      In a default Spring Boot 3 app, a scanned @Component named 'reportService' and a
+      @Bean method named reportService both exist. What is the default outcome?
+    options:
+      - "The @Bean silently wins because programmatic definitions always override scanned ones."
+      - "The scanned @Component always wins."
+      - "Startup fails with a bean-definition-overriding error, because Spring Boot defaults spring.main.allow-bean-definition-overriding to false; you must rename one or explicitly enable overriding."
+      - "Both beans are registered under auto-generated distinct names."
+    answer: 2
+    explanation: |
+      Since Spring Boot 2.1 the default for spring.main.allow-bean-definition-overriding is
+      false, so a name clash between differently-sourced definitions fails fast at startup
+      rather than silently overriding. Rename one, use @Qualifier/distinct names, or opt in
+      to overriding explicitly.
+    ref: "concepts.md#bean-naming-and-beannamegenerator"
+
+  - id: core-annotations-stereotypes-081
+    difficulty: expert
+    tags: [scoped-proxy, singleton, prototype, code-analysis]
+    question: |
+      A @RequestScope bean RequestContext is injected as a plain field into a singleton
+      service. Requests see stale/shared data. What is the root cause and the idiomatic fix?
+    options:
+      - "The singleton captured the first RequestContext instance at wiring time and reuses it forever; inject via a scoped proxy (@RequestScope already sets proxyMode=TARGET_CLASS) or an ObjectProvider so each call resolves the current request's instance."
+      - "Request scope is not supported for injection into singletons; make the service request-scoped too."
+      - "The RequestContext must be marked @Primary to refresh per request."
+      - "Add @Lazy to the singleton to force per-request creation."
+    answer: 0
+    explanation: |
+      A singleton is created once and its dependencies wired once, so a directly-injected
+      shorter-lived bean is frozen to the first instance. A scoped proxy (which @RequestScope
+      configures) delegates each method call to the instance for the current scope; an
+      ObjectProvider is an alternative that fetches the current instance on demand.
+    ref: "concepts.md#bean-scopes-and-scoped-proxy-interaction-with-stereotypes"
+
+  - id: core-annotations-stereotypes-082
+    difficulty: advanced
+    tags: [prototype, lifecycle, predestroy]
+    question: |
+      Which statement about prototype-scoped beans is TRUE?
+    options:
+      - "Spring calls @PreDestroy on prototypes when the context closes."
+      - "Spring fully manages the prototype lifecycle including destruction callbacks."
+      - "Prototypes are cached like singletons after first creation."
+      - "Spring creates and configures (and runs @PostConstruct on) each prototype instance but does NOT manage its destruction — @PreDestroy/DisposableBean are not invoked by the container; the caller is responsible for cleanup."
+    answer: 3
+    explanation: |
+      For prototypes, the container instantiates, populates, and runs initialization
+      callbacks, then hands the instance to the caller. It does not track the instance
+      afterward, so destruction callbacks are not called automatically — a known source of
+      resource leaks unless you manage cleanup yourself (e.g. via a custom BeanPostProcessor
+      or explicit destroy call).
+    ref: "concepts.md#bean-scopes-and-scoped-proxy-interaction-with-stereotypes"
+
+  - id: core-annotations-stereotypes-083
+    difficulty: advanced
+    tags: [lazy, circular-dependency, code-analysis]
+    question: |
+      Two singleton beans A and B require each other via constructor injection, causing a
+      startup BeanCurrentlyInCreationException. Which change most directly breaks the cycle
+      without switching to setter/field injection?
+    options:
+      - "Mark both A and B @Primary."
+      - "Annotate one constructor parameter (e.g. B in A's constructor) with @Lazy, so Spring injects a lazy-resolving proxy for B and defers its actual initialization until first use."
+      - "Add @Order to both beans."
+      - "Make both beans prototype-scoped."
+    answer: 1
+    explanation: |
+      Constructor-injection cycles cannot be resolved by Spring's early-reference mechanism
+      (which relies on setter/field injection). Placing @Lazy on one injection point makes
+      Spring inject a proxy that resolves the real bean lazily, so neither constructor needs
+      the other fully built at creation time, breaking the cycle. (Redesigning to remove the
+      cycle is the cleaner long-term fix.)
+    ref: "concepts.md#lazy-initialization-and-lazy-nuances"
+
+  - id: core-annotations-stereotypes-084
+    difficulty: advanced
+    tags: [lazy, spring-boot, tradeoffs]
+    question: |
+      What is a real downside of enabling spring.main.lazy-initialization=true globally?
+    options:
+      - "It disables component scanning entirely."
+      - "It converts all singletons to prototypes."
+      - "Wiring errors, missing-property (@Value) failures, and other misconfigurations that normally fail fast at startup are deferred until a bean is first used, shifting failures to runtime and adding latency to the first request that triggers creation."
+      - "It prevents @Configuration classes from being CGLIB-proxied."
+    answer: 2
+    explanation: |
+      Global lazy initialization speeds up startup by deferring bean creation, but it also
+      defers the fail-fast validation Spring normally performs at startup. Broken wiring or
+      unresolved placeholders surface only when the affected bean is first accessed, and the
+      first request can pay initialization latency.
+    ref: "concepts.md#lazy-initialization-and-lazy-nuances"
+
+  - id: core-annotations-stereotypes-085
+    difficulty: expert
+    tags: [conditional, ordering, conditionalonbean, autoconfiguration]
+    question: |
+      A developer puts @ConditionalOnMissingBean on a @Bean inside their own regular
+      @Configuration class and finds it behaves inconsistently, sometimes backing off and
+      sometimes not. What is the underlying reason?
+    options:
+      - "@ConditionalOnMissingBean is deprecated in Spring Boot 3."
+      - "It requires @Primary on the conditional bean to work."
+      - "It only works for beans defined via component scanning, not @Bean methods."
+      - "@ConditionalOnBean/@ConditionalOnMissingBean are evaluated at definition-registration time and only see beans/definitions registered SO FAR; they are order-sensitive and reliable only in auto-configuration (which is ordered and processed after user config), not in ordinary user @Configuration."
+    answer: 3
+    explanation: |
+      These conditions are checked as configuration classes are parsed and bean definitions
+      registered, so the outcome depends on how many relevant definitions already exist at
+      that moment. Because user @Configuration ordering isn't guaranteed relative to other
+      user config, the result is fragile. Auto-configurations are explicitly ordered and run
+      after user config, which is why the annotations are intended for that context.
+    ref: "concepts.md#conditional-bean-registration-conditional-family"
+
+  - id: core-annotations-stereotypes-086
+    difficulty: intermediate
+    tags: [conditional, profile, meta-annotation]
+    question: |
+      How is @Profile implemented under the hood?
+    options:
+      - "As a special keyword handled directly by the JVM class loader."
+      - "As a @Conditional(ProfileCondition.class) meta-annotation — @Profile is just a condition that checks the active profiles in the Environment at registration time."
+      - "As an ImportBeanDefinitionRegistrar that scans profile-specific packages."
+      - "As a BeanPostProcessor that removes beans after the context starts."
+    answer: 1
+    explanation: |
+      @Profile is a composed annotation meta-annotated with @Conditional(ProfileCondition.class).
+      The condition consults the Environment's active/default profiles when deciding whether
+      to register the annotated bean definition, making profiles a specialization of the
+      general @Conditional mechanism.
+    ref: "concepts.md#conditional-bean-registration-conditional-family"
+
+  - id: core-annotations-stereotypes-087
+    difficulty: expert
+    tags: [aot, native, proxybeanmethods, cglib]
+    question: |
+      Why is @Configuration(proxyBeanMethods=false) especially favored in Spring Boot 3
+      GraalVM native-image / AOT builds?
+    options:
+      - "Because lite mode enables reflection that native images require."
+      - "Because native images cannot run @Bean methods at all in full mode."
+      - "Because proxyBeanMethods=false turns off component scanning, which native images forbid."
+      - "Because it avoids the runtime CGLIB subclass generation (bytecode generation is problematic in a closed-world native image), while AOT resolves inter-bean references at build time; it also lowers footprint. Auto-configs already lean on lite mode plus method-parameter injection."
+    answer: 3
+    explanation: |
+      Native images use a closed world and cannot generate bytecode at runtime, so CGLIB
+      subclassing of full @Configuration classes is undesirable. Lite mode skips that
+      subclass; combined with method-parameter (constructor) injection instead of inter-bean
+      method calls, it fits the AOT model well and reduces footprint.
+    ref: "concepts.md#aot-graalvm-native-image-and-proxies"
+
+  - id: core-annotations-stereotypes-088
+    difficulty: advanced
+    tags: [proxy, self-invocation, transactional, repository]
+    question: |
+      Inside a proxied bean (e.g. a @Repository or a @Transactional @Service), method m1()
+      calls this.m2() where m2() is @Transactional/translated. Does the advice on m2() apply?
+    options:
+      - "Yes — Spring rewrites this-references to go through the proxy."
+      - "No — self-invocation via 'this' bypasses the proxy, so proxy-based advice (transactions, exception translation, caching) on m2() does not run; only external calls through the proxy trigger it."
+      - "Yes, but only for CGLIB proxies, not JDK proxies."
+      - "Only if m2() is public and m1() is private."
+    answer: 1
+    explanation: |
+      Spring AOP is proxy-based: advice runs when a call passes through the proxy. An
+      internal this.m2() call goes straight to the target instance, bypassing the proxy and
+      its advice. Workarounds include self-injecting the proxy, splitting into two beans, or
+      using AspectJ weaving.
+    ref: "concepts.md#repository-exception-translation"
+
+  - id: core-annotations-stereotypes-089
+    difficulty: expert
+    tags: [repository, exception-translation, jdbc, sqlexception]
+    question: |
+      A hand-written @Repository uses a raw JDBC Connection/PreparedStatement (not
+      JdbcTemplate) and lets a SQLException propagate out. Is it translated into a
+      DataAccessException by the PersistenceExceptionTranslationPostProcessor?
+    options:
+      - "Yes — @Repository translates all persistence exceptions including SQLException."
+      - "Yes, but only if @Transactional is also present."
+      - "No — PersistenceExceptionTranslationPostProcessor chains PersistenceExceptionTranslator beans that target JPA/Hibernate runtime exceptions; a checked SQLException from raw JDBC is not translated. Use JdbcTemplate (which applies a SQLExceptionTranslator via SQLState/error codes) to get DataAccessException."
+      - "No, because @Repository never adds any runtime behavior."
+    answer: 2
+    explanation: |
+      The @Repository post-processor applies registered PersistenceExceptionTranslators,
+      which handle ORM runtime exceptions (JPA/Hibernate). A checked SQLException from raw
+      JDBC has no matching translator in that chain, so it is not converted. JdbcTemplate is
+      what translates SQLException (via SQLExceptionTranslator using SQLState/vendor codes).
+    ref: "concepts.md#repository-exception-translation"
+
+  - id: core-annotations-stereotypes-090
+    difficulty: advanced
+    tags: [restcontroller, responsebody, string, code-analysis]
+    question: |
+      A @RestController method has return type String and returns "home". Assuming default
+      Spring Boot MVC configuration, what does the client receive?
+    options:
+      - "A rendered view named 'home' resolved by the ViewResolver."
+      - "A redirect to /home."
+      - "The literal text 'home' written to the response body (as text/plain via the String message converter), because @RestController implies @ResponseBody — no view resolution occurs."
+      - "A JSON string \"home\" with application/json content type by default."
+    answer: 2
+    explanation: |
+      @RestController applies @ResponseBody to every method, so the returned String is
+      written directly to the body by the StringHttpMessageConverter (text/plain by default),
+      not resolved as a view name. This is the key behavioral difference from a plain
+      @Controller returning a String (which would be a view name).
+    ref: "concepts.md#component--service--repository--controller--restcontroller-differences"
+
+  - id: core-annotations-stereotypes-091
+    difficulty: expert
+    tags: [autowiring, objectprovider, optional, resolution]
+    question: |
+      A component may have zero, one, or many implementations of interface Plugin at
+      runtime, and you want to handle "none present" and "exactly one present" cleanly
+      without failing startup. Which injection approach is most idiomatic?
+    options:
+      - "@Autowired(required=false) Plugin plugin — works for the many case too."
+      - "@Autowired ObjectProvider<Plugin> plugins — use getIfAvailable()/getIfUnique() for 0-or-1 and orderedStream() for many, avoiding NoSuchBean/NoUniqueBean failures and giving lazy resolution."
+      - "@Autowired Plugin plugin with @Primary on all implementations."
+      - "@Qualifier(\"any\") Plugin plugin."
+    answer: 1
+    explanation: |
+      ObjectProvider<T> is designed exactly for optional/multiple dependencies: getIfAvailable
+      returns null (or a supplied default) when absent, getIfUnique returns the single
+      candidate or null when ambiguous, and orderedStream()/stream() iterate all candidates in
+      order. It is lazy and avoids the NoSuchBeanDefinition/NoUniqueBeanDefinition exceptions
+      that a plain injection would throw.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-092
+    difficulty: advanced
+    tags: [resource, autowired, resolution-order, jsr250]
+    question: |
+      A field private DataSource auditDs is annotated with @Resource (JSR-250), and beans
+      'auditDs' and 'primaryDs' (marked @Primary) both exist. Which bean is injected?
+    options:
+      - "primaryDs, because @Primary always wins."
+      - "Neither; @Resource throws on ambiguity."
+      - "auditDs, because @Resource resolves by NAME first (matching the field name 'auditDs'), only falling back to type — the opposite default of @Autowired which is type-first."
+      - "A new DataSource instance is created."
+    answer: 2
+    explanation: |
+      @Resource matches by name first (defaulting to the field/property name), then by type.
+      Since a bean named 'auditDs' exists, it is chosen regardless of @Primary. @Autowired,
+      by contrast, is type-first and would consult @Primary. This name-vs-type default is a
+      classic distinction.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-093
+    difficulty: expert
+    tags: [qualifier, custom-qualifier, meta-annotation]
+    question: |
+      You define @Qualifier-meta-annotated @interface DataStore { StoreType value(); } with
+      an enum attribute, annotate two beans @DataStore(SQL) and @DataStore(NOSQL), and
+      inject with @DataStore(NOSQL). How does Spring resolve it?
+    options:
+      - "It ignores the enum attribute and matches only by bean name."
+      - "It throws because custom qualifiers cannot carry attributes."
+      - "It injects both beans as a List because two candidates carry @DataStore."
+      - "Spring matches candidates whose @DataStore qualifier has value==NOSQL — custom qualifier annotations are matched on ALL their attributes, not just a name string."
+    answer: 3
+    explanation: |
+      A custom annotation meta-annotated with @Qualifier acts as a typed qualifier; Spring
+      matches injection points to candidates by comparing all qualifier attribute values.
+      @DataStore(NOSQL) therefore selects exactly the bean annotated @DataStore(NOSQL),
+      giving type-safe qualification beyond a plain string name.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-094
+    difficulty: intermediate
+    tags: [map-injection, autowiring, code-analysis]
+    question: |
+      You inject Map<String, Validator> validators where three Validator beans named
+      'emailValidator', 'phoneValidator', 'addressValidator' exist. What is the map's
+      content?
+    options:
+      - "An empty map unless @Qualifier is used."
+      - "A map with three entries whose keys are the bean names and whose values are the corresponding Validator beans (String-keyed Map injection maps bean name -> bean)."
+      - "A single entry keyed by the @Primary bean's name."
+      - "A map keyed by the validators' class names."
+    answer: 1
+    explanation: |
+      When you inject a Map with a String key type, Spring populates it with every bean of
+      the value type, using bean names as keys. This is a handy way to get a name-addressable
+      registry of all implementations. For non-String key types this special handling does
+      not apply.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-095
+    difficulty: expert
+    tags: [configuration, inter-bean, scope, code-analysis]
+    question: |
+      In a full @Configuration class, a prototype-scoped @Bean method proto() is called
+      directly from two different singleton @Bean methods a() and b(). How many proto
+      instances are created for a and b?
+    options:
+      - "One shared instance, because CGLIB always returns the same object."
+      - "Two — CGLIB interception respects the bean's scope, so each intercepted call to a prototype @Bean method asks the container for a NEW prototype instance; a and b get different ones."
+      - "Zero until the prototype is first accessed via getBean."
+      - "Unbounded — a new instance on every method entry regardless of scope."
+    answer: 1
+    explanation: |
+      The CGLIB interceptor does not blindly cache; it delegates to the container honoring
+      the bean's scope. For a singleton @Bean method it returns the shared instance, but for
+      a prototype @Bean method each intercepted call produces a fresh instance. So a() and b()
+      each receive their own prototype proto.
+    ref: "concepts.md#configuration-full-vs-lite-mode-cglib-proxying-of-bean-methods"
+
+  - id: core-annotations-stereotypes-096
+    difficulty: advanced
+    tags: [component-scanning, indexer, performance, aot]
+    question: |
+      For a very large application, which mechanism can replace runtime classpath scanning
+      to speed startup by using a compile-time-generated index of components?
+    options:
+      - "Setting useDefaultFilters=false."
+      - "Marking every @Component as @Lazy."
+      - "The Spring Context Indexer (spring-context-indexer), an annotation processor that generates META-INF/spring.components at build time; Spring reads that index instead of ASM-scanning the classpath (largely superseded by AOT/native processing in Boot 3)."
+      - "Enabling spring.main.allow-bean-definition-overriding."
+    answer: 2
+    explanation: |
+      spring-context-indexer generates a META-INF/spring.components index at compile time so
+      the container performs an index lookup rather than scanning the classpath with ASM at
+      startup — beneficial for large apps. In Spring Boot 3 much of this benefit is provided
+      by AOT/native-image processing.
+    ref: "concepts.md#component-scanning-how-it-works-filters-basepackages"
+
+  - id: core-annotations-stereotypes-097
+    difficulty: expert
+    tags: [meta-annotation, retention, custom-stereotype, failure]
+    question: |
+      A developer builds a custom stereotype @MyService, meta-annotated with @Component, but
+      forgets to add @Retention(RUNTIME) (leaving the default). Classes annotated
+      @MyService are not discovered by component scanning. Why?
+    options:
+      - "Custom stereotypes must extend @Component via inheritance, not meta-annotation."
+      - "Custom stereotypes require registration in application.properties."
+      - "@Component cannot be used as a meta-annotation on user-defined annotations."
+      - "The default retention is CLASS, so @MyService is not visible via runtime reflection/ASM metadata reading the way scanning requires; it must be @Retention(RUNTIME)."
+    answer: 3
+    explanation: |
+      Annotations default to CLASS retention, which is not available for runtime discovery.
+      Component scanning (and Spring's annotation metadata reading) needs the annotation to be
+      retained at runtime, so a custom stereotype must declare @Retention(RetentionPolicy.RUNTIME)
+      (and an appropriate @Target) to be picked up.
+    ref: "concepts.md#meta-annotations"
+
+  - id: core-annotations-stereotypes-098
+    difficulty: advanced
+    tags: [configuration, order, config-class, bean-order]
+    question: |
+      @Order is placed on a @Configuration class. What does it affect?
+    options:
+      - "It orders the @Bean methods within that class for collection injection."
+      - "It orders the evaluation of that configuration class relative to other configuration classes during startup; it does NOT set the ordering of the beans produced by its @Bean methods — each @Bean needs its own @Order for collection ordering."
+      - "It sets the instantiation priority of every bean the class defines."
+      - "It has no effect anywhere."
+    answer: 1
+    explanation: |
+      @Order on a configuration class only influences the order in which config classes are
+      processed among the set of config classes. It does not propagate to the ordering of the
+      beans created by its @Bean methods; for collection-injection ordering, annotate each
+      @Bean method with its own @Order.
+    ref: "concepts.md#primary-vs-qualifier"
+
+  - id: core-annotations-stereotypes-099
+    difficulty: expert
+    tags: [spel, simpleevaluationcontext, security, untrusted-input]
+    question: |
+      An application evaluates user-supplied SpEL strings (e.g. dynamic filter expressions).
+      What is the correct security posture?
+    options:
+      - "Use a StandardEvaluationContext but sanitize input with a regex denylist of dangerous methods."
+      - "Use a SimpleEvaluationContext, which restricts SpEL to property access and a configured feature set while disabling type references (T(...)), bean references (@...), and constructor invocation — preventing SpEL-injection RCE like T(java.lang.Runtime)."
+      - "SpEL is always safe; no special context is needed."
+      - "Disable SpEL entirely; it cannot be secured for untrusted input under any configuration."
+    answer: 1
+    explanation: |
+      SimpleEvaluationContext is purpose-built for untrusted/data-binding scenarios: it
+      exposes a limited feature set (typically property/collection access) and disables the
+      powerful capabilities (type references, bean references, constructors) that enable SpEL
+      injection. StandardEvaluationContext is full-power and unsafe for untrusted expressions;
+      denylists are error-prone.
+    ref: "concepts.md#spel-basics-and-use-cases"
+
+  - id: core-annotations-stereotypes-100
+    difficulty: advanced
+    tags: [import, deduplication, configuration, code-analysis]
+    question: |
+      Configuration class Root @Imports both SecurityConfig and WebConfig, and WebConfig
+      ALSO @Imports SecurityConfig. How many times is SecurityConfig processed and how many
+      of each of its beans exist?
+    options:
+      - "Twice, producing duplicate beans that then collide at startup."
+      - "Twice, but the second processing silently overrides the first."
+      - "Once — Spring de-duplicates imported @Configuration classes, so SecurityConfig is processed a single time and its beans exist once."
+      - "It fails with a circular-import exception."
+    answer: 2
+    explanation: |
+      The configuration-class parser tracks imported classes and processes each @Configuration
+      class only once regardless of how many import paths reach it. SecurityConfig's @Bean
+      definitions are registered a single time, so there are no duplicate beans or collisions.
+    ref: "concepts.md#import"
+
+  - id: core-annotations-stereotypes-101
+    difficulty: expert
+    tags: [autowired, self-injection, transactional, code-analysis]
+    question: |
+      To make an internal call honor @Transactional despite the self-invocation limitation, a
+      developer @Autowires the bean's own type into a field of itself and calls
+      self.transactionalMethod(). Which statement is accurate?
+    options:
+      - "This is impossible; Spring forbids a bean depending on itself."
+      - "The self-injected field is the raw target, so the transaction still does not apply."
+      - "Self-injection always creates a second instance of the bean."
+      - "Spring supports self-injection as a last-resort fallback; the injected reference is the PROXY, so calling self.transactionalMethod() goes through the proxy and the transaction advice applies. Note a self-reference is never treated as @Primary and has lowest precedence."
+    answer: 3
+    explanation: |
+      Spring permits self-injection as a fallback; the injected object is the AOP proxy, so
+      invoking a method through it triggers the advice (transactions/caching) that plain
+      this.method() would bypass. Spring documents self-references as last-resort, never
+      participating as primary and having lowest autowiring precedence.
+    ref: "concepts.md#primary-vs-qualifier"

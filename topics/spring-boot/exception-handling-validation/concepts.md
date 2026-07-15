@@ -285,6 +285,8 @@ public class ProductController {
 
 **Spring Boot 3.2+ change (advanced):** Spring Framework 6.1 introduced improved method validation where controller method-parameter constraint violations can be adapted into `HandlerMethodValidationException` (which is an `ErrorResponse` → 400) instead of a raw `ConstraintViolationException`, giving field-error-like details and proper 400 status without a custom handler in many cases. Still, class-level `@Validated` remains the trigger.
 
+**Important correction / nuance for Spring 6.1 built-in method validation (advanced):** The statement above ("class-level `@Validated` remains the trigger") is only true for the *legacy AOP path*. Spring MVC 6.1 added **built-in, non-AOP** method validation directly in the handler-adapter machinery, and it behaves differently — see the dedicated section [Method validation internals (Spring 6.1) & HandlerMethodValidationException](#method-validation-internals-spring-61--handlermethodvalidationexception) below. The short version: if the controller class carries `@Validated`, validation runs through the AOP proxy and throws `ConstraintViolationException`; if you **remove** the class-level `@Validated`, MVC's built-in support kicks in and throws `HandlerMethodValidationException` (a proper 400 `ErrorResponse`) instead. You generally want the built-in path for controllers now.
+
 ---
 
 ## Custom constraint validators
@@ -364,6 +366,117 @@ public class Address {
 - Cascading is recursive: `@Valid` on `OrderDto` param + `@Valid` on `shippingAddress` + `@Valid` on `items` validates the whole tree in one pass, aggregating all violations.
 - **Groups + cascade:** the validated group propagates down the cascade. Use `@ConvertGroup(from = X.class, to = Y.class)` to translate groups across a cascade boundary.
 - `@Valid` (cascade) is the spec annotation; `@Validated` does not cascade — remember the two roles of `@Valid`: (1) trigger validation of a controller parameter, (2) mark a nested reference for cascading.
+
+---
+
+## Method validation internals (Spring 6.1) & HandlerMethodValidationException
+
+Spring Framework 6.1 (Boot 3.2) split controller method validation into **two distinct paths**, and a senior candidate must be able to explain which one runs, when, and why.
+
+**Path 1 — legacy AOP proxy (`MethodValidationPostProcessor`).** Triggered by putting `@Validated` at the **class level** on a bean (controller *or* any Spring bean such as a `@Service`). The post-processor wraps the bean in an AOP proxy and validates parameters/return values on every proxied call. Failures throw raw `jakarta.validation.ConstraintViolationException` (no default 400 mapping → 500 unless handled). Subject to all proxy caveats: self-invocation bypasses it; `final` methods/classes can't be proxied by CGLIB; only public methods are advised by default.
+
+**Path 2 — MVC built-in method validation (new in 6.1, no AOP).** Wired into the `HandlerMethodArgumentResolver`/handler-adapter layer. It activates **automatically** — with **no** class-level `@Validated` — whenever a handler parameter carries a *constraint* annotation directly (`@Min`, `@NotBlank`, `@Pattern` on `@RequestParam`/`@PathVariable`/`@RequestHeader`, etc.). Failures throw **`HandlerMethodValidationException`**, which implements `ErrorResponse` and maps to **400** with per-parameter details, no custom handler needed.
+
+**Critical trap:** the two paths are mutually exclusive per controller. If you *keep* class-level `@Validated`, the AOP path takes over and you're back to `ConstraintViolationException`/500 semantics — you must **remove** `@Validated` from the controller class to get the nicer built-in `HandlerMethodValidationException` behavior. Migrating a Boot 2.x controller by "just bumping the version" leaves `@Validated` in place and silently keeps the old exception type.
+
+**`@Valid` alone does not trigger method validation.** `@Valid` is not a constraint; by itself it only marks a parameter for *nested/cascaded* validation. `@NotNull` (a real constraint) on a parameter *does* trigger method validation. So `@RequestParam @Valid Foo f` triggers nothing at the method level, but `@RequestParam @NotNull String q` does.
+
+**Two levels, two exceptions — the decision rule Spring uses:**
+
+| Handler parameter shape | Exception thrown | Default status |
+|---|---|---|
+| Single command object (`@RequestBody`/`@ModelAttribute`/`@RequestPart`) with `@Valid`, **no** `Errors`/`BindingResult` after it | `MethodArgumentNotValidException` | 400 |
+| Same, but with `Errors`/`BindingResult` immediately after | none (you inspect `BindingResult`) | — |
+| Constraint annotation *directly on* a simple parameter (`@RequestParam @Min`, `@PathVariable @Pattern`), no class `@Validated` | `HandlerMethodValidationException` | 400 |
+| Same param constraints but class has `@Validated` | `ConstraintViolationException` (AOP) | 500 (unless handled) |
+| `@Validated` service bean method params | `ConstraintViolationException` (AOP) | 500 (unless handled) |
+
+Note: method-level validation *supersedes* individual command-object validation on the same method — if a method mixes a `@Valid @RequestBody` object and a constrained `@RequestParam`, the whole method goes through method validation and you can get a `HandlerMethodValidationException` covering both (its `ParameterValidationResult`s include a `ParameterErrors` for the cascaded body). Handle **both** `MethodArgumentNotValidException` and `HandlerMethodValidationException` in a robust advice.
+
+**`setAdaptConstraintViolations(true)`:** on the AOP path, you can configure `MethodValidationPostProcessor` to raise `MethodValidationException` (violations adapted to `MessageSourceResolvable`/`FieldError`s grouped by parameter) instead of the raw `ConstraintViolationException` — useful for uniform, message-source-driven error rendering on service beans.
+
+---
+
+## MethodArgumentNotValidException internals & BindingResult vs Errors
+
+`MethodArgumentNotValidException` extends `BindException` (since Spring 6 it also implements `ErrorResponse`). It carries a `BindingResult` you access via `getBindingResult()`. That result contains two error categories that trip people up:
+
+- **`FieldError`** — a rejected value for a specific field. `getField()`, `getRejectedValue()`, `getDefaultMessage()`, plus `getCode()`/`getCodes()` (the message-resolution codes like `NotBlank.userDto.name`, `NotBlank.name`, `NotBlank.java.lang.String`, `NotBlank`).
+- **`ObjectError` / global errors** — errors not tied to a field, e.g. a **class-level constraint** (`password == confirmPassword`). These appear in `getGlobalErrors()`, **not** `getFieldErrors()`. A handler that only iterates `getFieldErrors()` will silently drop cross-field violation messages — a common bug.
+
+**Ordering / determinism gotcha:** the *order* of violations is **not guaranteed**. Hibernate Validator does not promise a deterministic iteration order of constraints on a bean, so response payloads and "first error" logic must not assume ordering. If you need stable output, sort by field name yourself.
+
+**`@Valid` on `@RequestBody` runs after deserialization.** Jackson binds the JSON first; if the JSON is malformed or a type can't be coerced, you get `HttpMessageNotReadableException` (400) *before* any constraint runs. So a `@NotNull` field will never report "must not be null" if the whole body failed to parse — the two failure modes are ordered, not merged.
+
+---
+
+## Jackson deserialization vs Bean Validation ordering & type coercion
+
+A subtle but frequently-probed area: **what actually fails first**, binding or validation?
+
+1. **Body reading / deserialization** (`HttpMessageConverter` → Jackson) happens first. Unknown JSON token shapes, a string where an `int` is expected that can't coerce, an invalid enum value, or a malformed date → `HttpMessageNotReadableException` (400). Bean Validation never sees these because the object was never constructed.
+2. **Bean Validation** runs only on the successfully-bound object.
+
+**Consequences and gotchas:**
+- A `@Positive Integer age` given `"age": "abc"` yields `HttpMessageNotReadableException`, **not** a `@Positive` violation — you cannot express "must be a number and positive" purely with `@Positive`; the type error is a binding failure.
+- With Jackson, a missing JSON property leaves a reference type `null` (then `@NotNull` catches it) but a **primitive** field becomes its default (`0`, `false`) unless configured otherwise — so `@NotNull long id` on a primitive is meaningless; `0` is a valid non-null primitive. Use boxed types for "required" numeric fields.
+- `@JsonCreator`/constructor binding can throw inside the constructor before validation; those surface as `HttpMessageNotReadableException` with the cause wrapped.
+- Constructor-based (immutable) binding via `record`s: field constraints on record components are validated after Jackson constructs the record, but a failing *canonical constructor* (e.g. a compact-constructor guard throwing) again short-circuits to a read error.
+
+---
+
+## Validator lifecycle, thread-safety & performance
+
+**`ConstraintValidator` instances must be thread-safe.** Hibernate Validator caches and *reuses* validator instances across concurrent requests. `initialize(annotation)` is called once per instance to capture the annotation attributes; `isValid(...)` is then invoked concurrently from many threads. Therefore:
+- Never store per-request/mutable state in validator instance fields. Only immutable configuration captured in `initialize` is safe.
+- Injected Spring beans must themselves be thread-safe (repositories, `RestTemplate`, etc. usually are).
+
+**`Validator`/`ValidatorFactory` are thread-safe and expensive to build** — Spring's `LocalValidatorFactoryBean` is a singleton; don't create `Validation.buildDefaultValidatorFactory()` per request.
+
+**Performance & failure-mode considerations for interviews:**
+- Constraints run in an unspecified order and **all** constraints in the targeted group(s) are evaluated (Bean Validation does not short-circuit the way `&&` does) — a `@Pattern` with a catastrophic-backtracking regex on user input is a ReDoS vector; validate length first / use anchored, linear regexes.
+- DB-querying validators (uniqueness checks) put a network/DB call on the request's validation path and are subject to TOCTOU races — a `@UniqueEmail` check can pass validation and still hit a unique-constraint violation at insert time under concurrency; treat the DB constraint as the source of truth and handle `DataIntegrityViolationException`.
+- Cascaded validation over large collections is O(elements × constraints); `@Valid List<@Valid T>` on an unbounded list is a DoS surface — bound collection size with `@Size` first.
+
+**`GroupSequence` and short-circuiting:** `@GroupSequence` *does* impose ordering and short-circuits between groups — if group A fails, group B is not evaluated. This is the supported way to get "cheap checks before expensive checks" (e.g. format before DB lookup). Within a single group, no ordering guarantee.
+
+---
+
+## @Order, advice selection, and multiple ControllerAdvice internals
+
+`@ControllerAdvice` beans are collected at startup by `ExceptionHandlerExceptionResolver`, which builds a cache of `ControllerAdviceBean`s sorted by `@Order`/`Ordered`/`@Priority`. On an exception, the resolver iterates advices **in sorted order** and, within the first advice that has a matching `@ExceptionHandler`, picks the most-specific method. Key internal facts senior candidates should know:
+
+- The scan for a matching handler stops at the **first advice** that yields any match; it does not continue looking for a more-specific handler in a lower-priority advice. Hence a broad `@ExceptionHandler(Exception.class)` in a high-priority advice shadows specific handlers elsewhere.
+- **Controller-local `@ExceptionHandler` methods are always tried before any advice**, regardless of `@Order`.
+- If **no** advice/local handler matches, the exception propagates to the next `HandlerExceptionResolver` (`ResponseStatusExceptionResolver`, then `DefaultHandlerExceptionResolver`), and finally to servlet error-dispatch (`/error`).
+- Two advices with the **same `@Order`** have undefined relative order — never rely on it; give the catch-all advice `@Order(Ordered.LOWEST_PRECEDENCE)`.
+- An `@ExceptionHandler` whose own body throws an exception is **not** re-dispatched to other handlers; it propagates and typically yields a container 500. Handlers must be defensive.
+
+**Return-type mixing within an advice:** a single advice can host handlers returning `ResponseEntity`, `ProblemDetail`, a `@ResponseBody` DTO, or `void`. With `@RestControllerAdvice` a returned `String` is a serialized body, not a view name — mixing a plain `@ControllerAdvice` (expecting view names) with REST handlers is a classic misconfiguration that renders `"someString"` as an attempted view lookup and 500s.
+
+---
+
+## @ExceptionHandler resolution edge cases & failure modes
+
+Beyond the basics, these edge cases separate seniors:
+
+- **Ambiguity error at startup:** two `@ExceptionHandler` methods in the *same* class mapping the *exact same* exception type cause an `IllegalStateException` ("Ambiguous @ExceptionHandler method mapped") when the resolver builds its method cache — not at request time.
+- **Most-specific match uses depth in the class hierarchy**, and among equally specific candidates it also considers cause-chain depth; the algorithm computes a "match depth" for both the direct type and the cause and picks the lowest.
+- **`@ResponseStatus` on the handler method is ignored when returning `ResponseEntity`** (the entity's status wins) but honored for a plain body.
+- **Async / `DeferredResult` / `CompletableFuture` returns:** exceptions completing the async result exceptionally are routed back through the same `@ExceptionHandler` machinery on dispatch — but exceptions thrown *synchronously while producing* the async wrapper are handled inline.
+- **`@ExceptionHandler` cannot see exceptions thrown by:** servlet `Filter`s, `HandlerInterceptor.preHandle` returning before dispatch, message-conversion of the *response* after the handler returned (in some cases), or `@ModelAttribute`/`@InitBinder` failures that occur outside the mapped-handler invocation boundary in specific setups. Filter-thrown exceptions require a `Filter`-level try/catch or an error-page mapping.
+- **WebFlux difference:** in reactive stacks, an error signal in the returned `Mono`/`Flux` is routed to `@ExceptionHandler`, but errors must be *signaled* (not thrown) to be caught — a `throw` inside a non-blocking operator that isn't wrapped in the reactive pipeline can escape.
+
+---
+
+## Validation groups: sequences, inheritance & Default group redefinition
+
+Deeper group mechanics that experts are expected to know:
+
+- **`Default` group and inheritance:** validating a group `G` that `extends Default` validates *both* `G`'s constraints and the `Default` ones. This is how "validate everything for update, plus the update-only rules" is modeled: `interface OnUpdate extends Default {}`.
+- **`@GroupSequence({A.class, B.class})`** defines an ordered sequence with short-circuiting between the phases — if any constraint in `A` fails, `B` is skipped. Applied to a *class* via `@GroupSequence` on the type, it can redefine what `Default` means for that class (`@GroupSequence({BasicChecks.class, MyEntity.class})` re-sequences the default group), enabling ordered validation without callers naming groups.
+- **`@ConvertGroup(from=, to=)`** only makes sense on a **cascaded** (`@Valid`) reference; it remaps the group as validation descends into the nested bean. It cannot be used to convert the top-level requested group.
+- **`@Validated` group selection is not inherited by cascade unless converted:** the requested group propagates down `@Valid` references unchanged (subject to `@ConvertGroup`), so a nested bean's constraints must be assigned to the *same* group (or `Default`) to run — a frequent "why isn't my nested constraint firing under group X?" bug.
 
 ---
 

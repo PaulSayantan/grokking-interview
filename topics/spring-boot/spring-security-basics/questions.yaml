@@ -246,20 +246,22 @@ questions:
 
   - id: spring-security-basics-014
     difficulty: advanced
-    tags: [securitycontext, persistence, migration]
+    tags: [securitycontext, immutability, migration]
     question: |
-      In Spring Security 6, after programmatically setting an Authentication for
-      a form-login-style flow, why might it not persist across requests?
+      In Spring Security 6, what is the recommended way to change the current
+      principal at runtime (e.g. to switch to an elevated identity)?
     options:
-      - "The context is always saved automatically, so this scenario cannot happen"
-      - "SecurityContextHolderFilter no longer auto-saves the context; you must save it explicitly via the SecurityContextRepository"
-      - "ThreadLocal contexts are serialized to disk between requests"
-      - "You must annotate the method with @PersistSecurityContext"
+      - "Mutate the existing SecurityContext returned by getContext() in place by calling setAuthentication(...) on it"
+      - "Create a NEW SecurityContext (e.g. new SecurityContextImpl(auth)), install it via SecurityContextHolder.setContext(...), and persist it via the SecurityContextRepository for stateful flows"
+      - "Call SecurityContextHolder.setStrategyName(MODE_GLOBAL) so the change applies to all threads"
+      - "Reassign the field directly with reflection because there is no public setter"
     answer: 1
     explanation: |
-      Security 6's SecurityContextHolderFilter replaced the eager-saving
-      SecurityContextPersistenceFilter. For programmatic login you must call
-      securityContextRepository.saveContext(...) yourself.
+      In 6.x the context obtained from getContext() should be treated as
+      effectively read-only; the idiomatic pattern is to build a fresh
+      SecurityContextImpl, set it via setContext(...), and (for stateful flows)
+      persist it with the SecurityContextRepository. Mutating the shared instance
+      in place interacts badly with the deferred/lazy loading introduced in 6.x.
     ref: "concepts.md#securitycontext-and-securitycontextholder"
 
   - id: spring-security-basics-015
@@ -1065,4 +1067,909 @@ questions:
       SecurityAutoConfiguration locks down every endpoint, enables form login and
       HTTP Basic, and generates a random password for the default 'user',
       printed in the startup log — until you supply your own configuration.
+    ref: "concepts.md#securityfilterchain-and-the-lambda-dsl"
+
+  - id: spring-security-basics-061
+    difficulty: expert
+    tags: [filter-chain, dispatcher-types, authorizationfilter, gotcha]
+    question: |
+      Your app renders views via server-side FORWARD and has this config:
+      ```
+      http.authorizeHttpRequests(auth -> auth
+          .requestMatchers("/dashboard").hasRole("USER")
+          .anyRequest().denyAll());
+      ```
+      A logged-in USER hits /dashboard; the controller forwards to
+      /WEB-INF/views/dashboard.jsp to render. The initial request is allowed but
+      the user gets a 403 during rendering. What is the root cause in Spring
+      Security 6?
+    options:
+      - "The JSP path needs its own hasRole('USER') rule because forwards are treated as new authenticated users"
+      - "Server-side forwards strip the SecurityContext, so the forwarded dispatch is anonymous and denied"
+      - "AuthorizationFilter runs on every dispatch (shouldFilterAllDispatcherTypes defaults to true), so the internal FORWARD to the JSP path hits anyRequest().denyAll()"
+      - "The CsrfFilter blocks the forward because it is a state-changing dispatch"
+    answer: 2
+    explanation: |
+      Since Security 6, AuthorizationFilter applies to REQUEST, FORWARD, ERROR,
+      and INCLUDE dispatches by default. The forward to the JSP path is authorized
+      against the rules and matches anyRequest().denyAll(). The idiomatic fix is
+      .dispatcherTypeMatchers(FORWARD, ERROR).permitAll(). The SecurityContext is
+      NOT lost across a forward, so the "anonymous" explanations are wrong.
+    ref: "concepts.md#security-filter-chain-and-request-flow"
+
+  - id: spring-security-basics-062
+    difficulty: advanced
+    tags: [anonymous, trust-resolver, 401-vs-403]
+    question: |
+      An unauthenticated browser (no session, no credentials) requests a URL
+      protected by .authenticated(). Inside the chain, what does
+      SecurityContextHolder.getContext().getAuthentication() hold at the point
+      AuthorizationFilter evaluates the rule, and what response results?
+    options:
+      - "An AnonymousAuthenticationToken; the AuthenticationTrustResolver recognizes it as anonymous, so the entry point (401 / login redirect) is triggered, not 403"
+      - "null; ExceptionTranslationFilter returns 403 Forbidden because there is no principal"
+      - "A fully authenticated UsernamePasswordAuthenticationToken for 'anonymousUser'; the request is permitted"
+      - "null; the request is silently permitted because null means 'no rule applies'"
+    answer: 0
+    explanation: |
+      AnonymousAuthenticationFilter populates an AnonymousAuthenticationToken when
+      nothing else authenticated. authenticated() rejects it, and because the
+      trust resolver classifies the token as anonymous, ExceptionTranslationFilter
+      launches the authentication entry point (401 or login redirect) rather than
+      403. An anonymous token is authenticated=true but is not a "real" user.
+    ref: "concepts.md#security-filter-chain-and-request-flow"
+
+  - id: spring-security-basics-063
+    difficulty: expert
+    tags: [authorizationmanager, performance, deferred-auth]
+    question: |
+      Why can .requestMatchers("/health").permitAll() be measurably faster than
+      .requestMatchers("/health").authenticated() on a stateful app, beyond the
+      obvious authorization outcome?
+    options:
+      - "permitAll() caches the response body so the controller is skipped entirely"
+      - "authenticated() forces HTTPS while permitAll() allows HTTP"
+      - "permitAll() bypasses the entire FilterChainProxy, running zero filters"
+      - "For permitAll()/denyAll(), AuthorizationManager never invokes the Supplier<Authentication>, so the HttpSession isn't loaded and no anonymous token is built"
+    answer: 3
+    explanation: |
+      authorizeHttpRequests defers the Authentication lookup: for always-allow or
+      always-deny rules the Supplier<Authentication> is never called, so the
+      session isn't deserialized and no AnonymousAuthenticationToken is created.
+      permitAll() still runs the rest of the filter chain (headers, etc.); it does
+      not bypass FilterChainProxy.
+    ref: "concepts.md#security-filter-chain-and-request-flow"
+
+  - id: spring-security-basics-064
+    difficulty: advanced
+    tags: [authorizationmanager, voters, migration]
+    question: |
+      In the migration to Spring Security 6's authorizeHttpRequests, which legacy
+      authorization abstractions were replaced by the single AuthorizationManager
+      interface?
+    options:
+      - "AuthenticationManager and AuthenticationProvider"
+      - "AccessDecisionManager, AccessDecisionVoter, and ConfigAttribute/metadata sources"
+      - "SecurityContextRepository and SecurityContextHolderStrategy"
+      - "HandlerInterceptor and HandlerMethodArgumentResolver"
+    answer: 1
+    explanation: |
+      authorizeHttpRequests uses the simplified AuthorizationManager API instead
+      of the older metadata sources, config attributes, AccessDecisionManager, and
+      AccessDecisionVoter architecture. The authentication-side abstractions were
+      not part of this change.
+    ref: "concepts.md#security-filter-chain-and-request-flow"
+
+  - id: spring-security-basics-065
+    difficulty: expert
+    tags: [securitymatcher, requestmatchers, multiple-chains, gotcha]
+    question: |
+      You register two chains: chain A (@Order(1)) has NO securityMatcher and
+      formLogin; chain B (@Order(2)) has securityMatcher("/api/**") and stateless
+      bearer auth. Requests to /api/data hit the form-login chain and redirect to
+      /login instead of returning 401. Why?
+    options:
+      - "securityMatcher and requestMatchers are aliases, so B never scopes anything"
+      - "@Order is ignored for SecurityFilterChain beans; ordering is alphabetical by bean name"
+      - "Chain A has no securityMatcher, so it matches every request; being ordered before B, it wins for /api/** and B is effectively dead code"
+      - "Stateless chains cannot be ordered after stateful ones"
+    answer: 2
+    explanation: |
+      A chain with no securityMatcher matches all requests. FilterChainProxy uses
+      the FIRST matching chain by order, so chain A (order 1) handles /api/**
+      before chain B is considered. Give the specific /api chain the lower order,
+      or add a securityMatcher to chain A. securityMatcher selects the chain;
+      requestMatchers configures rules within it.
+    ref: "concepts.md#securityfilterchain-and-the-lambda-dsl"
+
+  - id: spring-security-basics-066
+    difficulty: expert
+    tags: [role-hierarchy, method-security, gotcha]
+    question: |
+      You declare a RoleHierarchy bean (ROLE_ADMIN implies ROLE_USER). URL rules
+      like requestMatchers("/user/**").hasRole("USER") now pass for admins, but
+      @PreAuthorize("hasRole('USER')") on a service method still returns 403 for
+      an admin. What is the most likely reason?
+    options:
+      - "The RoleHierarchy is wired into web authorization but not into the MethodSecurityExpressionHandler, which needs it set explicitly"
+      - "@PreAuthorize ignores role hierarchy entirely; it is impossible to apply"
+      - "RoleHierarchy only works for hasAuthority, never hasRole"
+      - "The admin lost ROLE_USER because hierarchy replaces rather than augments authorities"
+    answer: 0
+    explanation: |
+      A RoleHierarchy bean is picked up for web (request) authorization, but
+      method security uses a separate MethodSecurityExpressionHandler. You must
+      inject the RoleHierarchy into a DefaultMethodSecurityExpressionHandler bean
+      for @PreAuthorize to honor the hierarchy — otherwise it applies only to URL
+      rules.
+    ref: "concepts.md#securityfilterchain-and-the-lambda-dsl"
+
+  - id: spring-security-basics-067
+    difficulty: expert
+    tags: [securitycontext, inheritablethreadlocal, thread-pool, concurrency]
+    question: |
+      A team sets spring.security.strategy=MODE_INHERITABLETHREADLOCAL to make
+      @Async tasks see the user. Under load they observe tasks occasionally
+      running as the WRONG user. What is the fundamental flaw?
+    options:
+      - "MODE_INHERITABLETHREADLOCAL disables the SecurityContextHolder entirely under load"
+      - "INHERITABLETHREADLOCAL serializes the context to disk, and concurrent reads corrupt it"
+      - "The property name is wrong, so nothing is propagated and every task is anonymous"
+      - "INHERITABLETHREADLOCAL copies the context only when a child thread is created; a pooled thread created under user A keeps A's context for later tasks submitted by user B"
+    answer: 3
+    explanation: |
+      InheritableThreadLocal snapshots the parent's value at thread CREATION. With
+      a thread pool, threads are reused: a worker spawned while serving user A
+      retains A's context and will leak it into a later task submitted by user B.
+      Use DelegatingSecurityContextExecutor/AsyncTaskExecutor, which copy the
+      context per submission and clear it afterward.
+    ref: "concepts.md#securitycontext-and-securitycontextholder"
+
+  - id: spring-security-basics-068
+    difficulty: advanced
+    tags: [securitycontext, null-safety, gotcha]
+    question: |
+      Which statement about SecurityContextHolder null-handling is correct?
+    options:
+      - "getContext() can return null on a fresh thread, so you must null-check the context before calling getAuthentication()"
+      - "getContext() lazily creates an empty context and never returns null, but getAuthentication() can return null (e.g., on a thread with no auth), which is the real check to make"
+      - "Both getContext() and getAuthentication() are guaranteed non-null inside a filter chain"
+      - "getAuthentication() throws IllegalStateException when no user is authenticated"
+    answer: 1
+    explanation: |
+      The holder lazily creates an empty SecurityContext on first access per
+      thread, so getContext() is never null. getAuthentication() can be null on a
+      thread that was never populated. Guarding only the context (not the
+      authentication) is a common NPE source.
+    ref: "concepts.md#securitycontext-and-securitycontextholder"
+
+  - id: spring-security-basics-069
+    difficulty: advanced
+    tags: [securitycontext, persistence, programmatic-login, boot3]
+    question: |
+      In Spring Security 6 you log a user in programmatically inside a controller:
+      you build an Authentication, put it in a new SecurityContext, and call
+      SecurityContextHolder.setContext(ctx). The user is authenticated for THIS
+      request but not on the next one. What is missing?
+    options:
+      - "You must call SecurityContextHolder.clearContext() first"
+      - "Nothing is missing; ThreadLocal contexts always persist automatically in 6.x"
+      - "You must persist the context via the SecurityContextRepository (e.g. saveContext), because SecurityContextHolderFilter no longer auto-saves like the old persistence filter"
+      - "You must switch the strategy to MODE_GLOBAL for the login to stick"
+    answer: 2
+    explanation: |
+      Security 6 replaced the eager-saving SecurityContextPersistenceFilter with
+      SecurityContextHolderFilter, which does not automatically write the context
+      back. For programmatic login you must explicitly save via a
+      SecurityContextRepository (e.g. HttpSessionSecurityContextRepository) so it
+      persists across requests.
+    ref: "concepts.md#securitycontext-and-securitycontextholder"
+
+  - id: spring-security-basics-070
+    difficulty: expert
+    tags: [providermanager, ordering, exception-handling]
+    question: |
+      A ProviderManager holds [ProviderX, ProviderY], both of which support
+      UsernamePasswordAuthenticationToken. For a given login, ProviderX throws
+      BadCredentialsException and ProviderY would authenticate successfully. What
+      does ProviderManager return?
+    options:
+      - "It tries ProviderY after ProviderX throws; ProviderY succeeds, so authentication succeeds"
+      - "It immediately rethrows ProviderX's BadCredentialsException and never tries ProviderY"
+      - "It requires BOTH providers to succeed, so it fails"
+      - "It returns null because the first provider threw"
+    answer: 0
+    explanation: |
+      ProviderManager iterates providers; an AuthenticationException from one
+      supporting provider does not abort the loop. It records the last exception
+      and continues; if a later provider authenticates, that success is returned.
+      Only if no provider (and no parent) authenticates does it rethrow the
+      remembered exception. A success short-circuits remaining providers.
+    ref: "concepts.md#authenticationmanager-and-authenticationprovider"
+
+  - id: spring-security-basics-071
+    difficulty: advanced
+    tags: [authenticationmanager, local-vs-global, boot3, gotcha]
+    question: |
+      You define a custom AuthenticationProvider bean AND call
+      http.authenticationProvider(myProvider) inside the SecurityFilterChain, then
+      inject AuthenticationManager via AuthenticationConfiguration in a login
+      controller. Your provider is never invoked from the controller path. What is
+      the most likely explanation?
+    options:
+      - "Custom AuthenticationProviders can only be used by filters, never by an injected AuthenticationManager"
+      - "The provider bean must be annotated @Primary or it is ignored everywhere"
+      - "AuthenticationConfiguration always returns a no-op manager in Boot 3"
+      - "http.authenticationProvider(...) registers the provider on a local AuthenticationManager scoped to that HttpSecurity, which is not the same instance the global AuthenticationConfiguration builds/exposes"
+    answer: 3
+    explanation: |
+      Registering a provider via http.authenticationProvider(...) builds a local
+      AuthenticationManager for that HttpSecurity's filters. The manager obtained
+      from AuthenticationConfiguration is the global one and may not include that
+      local provider. Mixing local and global wiring is a classic cause of "my
+      provider is never called." Expose one AuthenticationManager consistently.
+    ref: "concepts.md#authenticationmanager-and-authenticationprovider"
+
+  - id: spring-security-basics-072
+    difficulty: expert
+    tags: [userdetailsservice, timing-attack, enumeration]
+    question: |
+      DaoAuthenticationProvider runs the PasswordEncoder against a dummy hash even
+      when loadUserByUsername reports the user does not exist. What attack does
+      this specifically defend against, and what breaks it?
+    options:
+      - "It defends against rainbow-table attacks; disabling BCrypt salting breaks it"
+      - "It defends against a timing side-channel for username enumeration; a custom AuthenticationProvider that returns early on 'user not found' reintroduces the timing difference"
+      - "It defends against CSRF; disabling the CsrfFilter breaks it"
+      - "It defends against replay attacks; short token expiry breaks it"
+    answer: 1
+    explanation: |
+      By encoding against a fixed dummy password when the user is absent, the
+      provider keeps response times similar for "no such user" and "wrong
+      password," preventing timing-based user enumeration. A custom provider that
+      short-circuits on missing users measurably speeds up that path and leaks
+      which usernames exist.
+    ref: "concepts.md#userdetailsservice-and-userdetails"
+
+  - id: spring-security-basics-073
+    difficulty: expert
+    tags: [passwordencoder, upgradeEncoding, migration]
+    question: |
+      You want to transparently upgrade legacy {md5} and low-cost bcrypt hashes to
+      {argon2} without forcing password resets. Which mechanism enables this, and
+      when can you actually perform the rehash?
+    options:
+      - "You call encoder.rehash(oldHash) at application startup for every stored user"
+      - "DelegatingPasswordEncoder rehashes automatically on every matches() call with no code needed"
+      - "PasswordEncoder.upgradeEncoding(encoded) signals a hash is outdated; you rehash right after a successful matches(), when you still hold the raw password, then persist the new hash"
+      - "You cannot upgrade without a reset because you never have the raw password"
+    answer: 2
+    explanation: |
+      DelegatingPasswordEncoder.upgradeEncoding returns true when a stored hash
+      uses an older id or weaker parameters. Spring does not rehash automatically;
+      you must re-encode after a successful matches() (the only moment you have the
+      raw password) and save the new value. That migrates users seamlessly on next
+      login.
+    ref: "concepts.md#passwordencoder-and-bcrypt"
+
+  - id: spring-security-basics-074
+    difficulty: advanced
+    tags: [bcrypt, truncation, gotcha]
+    question: |
+      A system pre-hashes user input and then BCrypt-encodes it, and separately
+      allows very long passphrases. Why might two distinct long inputs
+      unexpectedly authenticate against the same stored BCrypt hash?
+    options:
+      - "BCrypt only processes the first 72 bytes of input and silently ignores the rest, so inputs sharing a 72-byte prefix collide"
+      - "BCrypt lowercases all input, collapsing case variants"
+      - "BCrypt strips whitespace, so trailing spaces are ignored"
+      - "BCrypt uses a global salt, so all hashes collide"
+    answer: 0
+    explanation: |
+      BCrypt hashes at most 72 bytes and ignores everything beyond. Passphrases
+      (or pre-hashed hex strings) that share the same first 72 bytes verify as
+      equal. Argon2/PBKDF2 don't have this limit; if you pre-hash, base64-encode a
+      full digest so it fits within 72 bytes distinctly.
+    ref: "concepts.md#passwordencoder-and-bcrypt"
+
+  - id: spring-security-basics-075
+    difficulty: expert
+    tags: [jwt, resource-server, authority-mapping, gotcha]
+    question: |
+      An OAuth2 resource server (http.oauth2ResourceServer(o -> o.jwt(...))) has
+      requestMatchers("/admin/**").hasRole("ADMIN"). The incoming JWT contains
+      "roles": ["ADMIN"], the signature is valid, yet every /admin call is 403.
+      What is the default behavior causing this?
+    options:
+      - "JWTs must place roles in the 'sub' claim to be recognized"
+      - "hasRole cannot be used with JWT authentication; only hasAuthority works"
+      - "The resource server strips all authorities from JWTs for safety"
+      - "The default JwtGrantedAuthoritiesConverter reads the scope/scp claim and prefixes SCOPE_; it ignores a custom 'roles' claim, so no ROLE_ADMIN authority is produced"
+    answer: 3
+    explanation: |
+      By default authorities come from the scope/scp claim, each mapped to a
+      SCOPE_ prefixed authority. A custom "roles" claim is not read and no
+      ROLE_ADMIN is created, so hasRole('ADMIN') fails. Supply a custom
+      JwtAuthenticationConverter/JwtGrantedAuthoritiesConverter to map the roles
+      claim (with the ROLE_ prefix) if you want hasRole to work.
+    ref: "concepts.md#jwt-stateless-authentication"
+
+  - id: spring-security-basics-076
+    difficulty: advanced
+    tags: [jwt, resource-server, 401-vs-403]
+    question: |
+      On a resource server, a request arrives with an expired bearer JWT. What
+      status and header does Spring Security's default handling return?
+    options:
+      - "403 Forbidden with no special header, because the token is present but invalid"
+      - "401 Unauthorized with a WWW-Authenticate: Bearer error=\"invalid_token\" header, because a bad/expired token is an authentication failure"
+      - "302 redirect to the OAuth2 authorization server to re-authenticate"
+      - "200 OK, because expiry is only advisory unless you validate it manually"
+    answer: 1
+    explanation: |
+      An expired or otherwise invalid token is an authentication failure, so
+      BearerTokenAuthenticationEntryPoint returns 401 with WWW-Authenticate: Bearer
+      and an invalid_token error. 403 is reserved for a valid token that lacks the
+      required authority. Expiry is validated by JwtTimestampValidator by default.
+    ref: "concepts.md#jwt-stateless-authentication"
+
+  - id: spring-security-basics-077
+    difficulty: expert
+    tags: [jwt, validation, audience, security]
+    question: |
+      Service A and Service B both trust tokens from the same issuer and both only
+      verify the signature and expiry. An attacker replays a valid token minted
+      for Service A against Service B and succeeds. Which validation was missing?
+    options:
+      - "Signature verification (the token was forged)"
+      - "The exp claim (the token was expired)"
+      - "Audience (aud) validation — each service should reject tokens not intended for it, even if issuer and signature are valid"
+      - "The alg header check (the token used none)"
+    answer: 2
+    explanation: |
+      A valid, signed, unexpired token from the shared issuer passes signature and
+      timestamp checks. Without audience (aud) validation, Service B accepts a
+      token meant for Service A — a token-substitution/confused-deputy issue. Each
+      resource server must validate aud (and typically iss) via an
+      OAuth2TokenValidator in addition to the signature.
+    ref: "concepts.md#jwt-stateless-authentication"
+
+  - id: spring-security-basics-078
+    difficulty: expert
+    tags: [jwt, algorithm-confusion, rs256, hs256]
+    question: |
+      An "algorithm confusion" attack against a naive JWT verifier that uses the
+      RSA public key as the secret works because:
+    options:
+      - "The attacker changes alg from RS256 to HS256 and HMAC-signs the token using the well-known RSA PUBLIC key as the HMAC secret; a verifier that keys off the token's alg header verifies it successfully"
+      - "The attacker sets alg to none, which all libraries accept"
+      - "RS256 signatures are reversible, letting the attacker recompute the private key"
+      - "HS256 tokens cannot carry an exp claim, so they never expire"
+    answer: 0
+    explanation: |
+      If the verifier trusts the token's alg header and shares one key, an attacker
+      switches RS256 to HS256 and HMACs the token using the public key (which they
+      know) as the secret. The server, expecting RSA, instead HMAC-verifies with
+      that same public key and accepts the forgery. Mitigation: pin the expected
+      algorithm/key type rather than trusting the header.
+    ref: "concepts.md#jwt-stateless-authentication"
+
+  - id: spring-security-basics-079
+    difficulty: expert
+    tags: [csrf, xor, breach, spa, gotcha]
+    question: |
+      A Spring Security 6 app uses CookieCsrfTokenRepository.withHttpOnlyFalse().
+      The SPA reads the XSRF-TOKEN cookie and sends its value in the X-XSRF-TOKEN
+      header, but POSTs still get 403. With the default CSRF configuration, why?
+    options:
+      - "Cookies cannot be read by JavaScript even with HttpOnly=false"
+      - "The header name must be Authorization, not X-XSRF-TOKEN"
+      - "CookieCsrfTokenRepository is deprecated and always returns 403"
+      - "The default XorCsrfTokenRequestAttributeHandler expects the XOR-encoded token value, but JavaScript only has the raw token from the cookie, so the submitted value fails to match after decoding"
+    answer: 3
+    explanation: |
+      Security 6 defaults to XorCsrfTokenRequestAttributeHandler for BREACH
+      protection, which encodes randomness into each rendered token. The SPA reads
+      only the raw token from the cookie; when submitted it decodes to something
+      that doesn't match. In Security 6 the fix is a custom CsrfTokenRequestHandler
+      (the reference SpaCsrfTokenRequestHandler) or the plain
+      CsrfTokenRequestAttributeHandler (opting out of BREACH). Spring Security 7.0
+      later added the http.csrf(c -> c.spa()) convenience method for this.
+    ref: "concepts.md#csrf-protection-and-why-disabled-for-stateless-apis"
+
+  - id: spring-security-basics-080
+    difficulty: advanced
+    tags: [csrf, token-rotation, login, gotcha]
+    question: |
+      A test logs in, then reuses a CSRF token it captured BEFORE authenticating,
+      and the subsequent POST fails with 403. What Spring Security behavior
+      explains this?
+    options:
+      - "CSRF tokens expire after exactly 30 seconds regardless of login"
+      - "CsrfAuthenticationStrategy rotates (regenerates) the CSRF token on successful authentication, so a pre-login token is stale afterward"
+      - "The CsrfFilter only validates the very first POST of a session"
+      - "Login disables CSRF entirely, so any token is rejected"
+    answer: 1
+    explanation: |
+      On authentication success, CsrfAuthenticationStrategy generates a new CSRF
+      token (and CsrfLogoutHandler clears it on logout) to defend against fixation.
+      A token grabbed before login no longer matches the persisted post-login
+      token. The client must read the refreshed token after authenticating.
+    ref: "concepts.md#csrf-protection-and-why-disabled-for-stateless-apis"
+
+  - id: spring-security-basics-081
+    difficulty: intermediate
+    tags: [csrf, cookie-repository, httponly]
+    question: |
+      Why does CookieCsrfTokenRepository.withHttpOnlyFalse() set HttpOnly=false,
+      and what is the security trade-off versus new CookieCsrfTokenRepository()?
+    options:
+      - "It makes the cookie encrypted; the trade-off is slower requests"
+      - "It marks the cookie Secure so it only travels over HTTPS; there is no trade-off"
+      - "It lets client-side JavaScript read the token to echo it in a header; the trade-off is the token becomes readable by any XSS on the page"
+      - "It disables CSRF checks for that cookie; the trade-off is CORS must be enabled"
+    answer: 2
+    explanation: |
+      HttpOnly=false allows JavaScript (e.g. Angular) to read the XSRF-TOKEN cookie
+      and send it back in a header. The cost is that XSS can also read it; if JS
+      doesn't need to read it, the plain CookieCsrfTokenRepository (HttpOnly) is
+      more secure.
+    ref: "concepts.md#csrf-protection-and-why-disabled-for-stateless-apis"
+
+  - id: spring-security-basics-082
+    difficulty: advanced
+    tags: [cors, configuration, corsconfigurationsource]
+    question: |
+      What is the idiomatic way to make Spring Security honor your cross-origin
+      rules, and how does http.cors() discover them?
+    options:
+      - "Annotate the config class with @EnableCors and list origins in application.properties only"
+      - "Expose a CorsConfigurationSource bean and enable http.cors(Customizer.withDefaults()); the DSL picks up that bean to build the CorsFilter"
+      - "Call http.addFilter(new CorsFilter()) with no bean; Spring infers origins from the Origin header automatically"
+      - "Set allowedOrigins on the SecurityFilterChain's securityMatcher"
+    answer: 1
+    explanation: |
+      The standard wiring is a CorsConfigurationSource bean plus
+      http.cors(Customizer.withDefaults()); the CORS DSL locates that bean and uses
+      it to configure the CorsFilter (placed early so preflights are answered).
+      There is no @EnableCors, and origins are never inferred from the request.
+    ref: "concepts.md#cors"
+
+  - id: spring-security-basics-083
+    difficulty: intermediate
+    tags: [cors, non-browser, misconception]
+    question: |
+      A developer claims "our CORS config with a strict allowedOrigins list
+      protects the API from unauthorized backends and scripts." Why is this
+      reasoning flawed?
+    options:
+      - "CORS is identical to CSRF protection, so it already covers this"
+      - "CORS only works over HTTP/2, so most clients bypass it"
+      - "CORS actually blocks all cross-origin requests including same-origin ones"
+      - "CORS is enforced by the browser; non-browser clients (curl, servers, mobile) ignore Access-Control headers, so CORS is not an access-control mechanism for the server"
+    answer: 3
+    explanation: |
+      CORS relaxes the browser same-origin policy; it is enforced client-side by
+      the browser. Servers, curl, and mobile apps simply ignore the
+      Access-Control-* headers, so CORS provides no server-side authorization.
+      Real access control still comes from authentication/authorization.
+    ref: "concepts.md#cors"
+
+  - id: spring-security-basics-084
+    difficulty: expert
+    tags: [method-security, transactional, ordering, gotcha]
+    question: |
+      A repository-backed service method has both @Transactional and
+      @PostAuthorize("returnObject.owner == authentication.name") and it also
+      performs a write. Why is this combination dangerous by default?
+    options:
+      - "@PostAuthorize cannot read returnObject, so it always denies"
+      - "The transaction advisor can wrap outside the post-authorize check, so the DB write may commit before authorization runs; if denied, state was already mutated"
+      - "@Transactional silently disables @PostAuthorize"
+      - "@PostAuthorize forces a new transaction, causing a deadlock"
+    answer: 1
+    explanation: |
+      @PostAuthorize evaluates after the method returns. With default advisor
+      ordering the transaction can commit before the security check, so a write
+      persists even when access is ultimately denied. Guidance: use @PostAuthorize
+      only on reads, or ensure @EnableTransactionManagement is ordered before
+      @EnableMethodSecurity so security advice runs first.
+    ref: "concepts.md#method-security"
+
+  - id: spring-security-basics-085
+    difficulty: expert
+    tags: [method-security, inheritance, startup-failure]
+    question: |
+      A concrete class implements two interfaces, and it inherits @PreAuthorize
+      from BOTH (with different expressions) on the same method signature, with no
+      annotation on the concrete method. What happens?
+    options:
+      - "The two expressions are ORed together at runtime"
+      - "The first interface (alphabetically) wins silently"
+      - "The application fails at startup due to ambiguous/conflicting inherited annotations; you must place the annotation on the concrete method to resolve it"
+      - "Both are ignored and the method is unsecured"
+    answer: 2
+    explanation: |
+      Method security searches the whole type hierarchy for annotations. Inheriting
+      the same annotation from two different interfaces is ambiguous and fails at
+      startup. Resolve by annotating the concrete method (which overrides
+      inherited annotations).
+    ref: "concepts.md#method-security"
+
+  - id: spring-security-basics-086
+    difficulty: advanced
+    tags: [method-security, unannotated, hardening]
+    question: |
+      With @EnableMethodSecurity and annotation-based rules, a new service method
+      is added WITHOUT any @PreAuthorize. From method security's perspective, what
+      is its access status, and what is the recommended safeguard?
+    options:
+      - "It is unsecured by method security (annotation security is opt-in); safeguard with a catch-all authorization rule in HttpSecurity and code review"
+      - "It is denied by default (fail-closed); no safeguard needed"
+      - "It inherits ROLE_ADMIN automatically"
+      - "It throws AccessDeniedException until annotated"
+    answer: 0
+    explanation: |
+      Annotation-based method security is opt-in: unannotated methods are not
+      guarded by it (they're subject only to URL rules). This fails open at the
+      method layer, so a catch-all authorizeHttpRequests rule (anyRequest
+      authenticated/denyAll) plus review is the standard safeguard.
+    ref: "concepts.md#method-security"
+
+  - id: spring-security-basics-087
+    difficulty: advanced
+    tags: [method-security, prefilter, postfilter]
+    question: |
+      Which capability is unique to @PreFilter/@PostFilter compared with
+      @PreAuthorize/@PostAuthorize?
+    options:
+      - "They can call remote services during evaluation"
+      - "They automatically add the ROLE_ prefix to authorities"
+      - "They run before the AOP proxy is created"
+      - "They evaluate a SpEL expression per element of a Collection argument (@PreFilter) or return value (@PostFilter), pruning non-matching elements via filterObject"
+    answer: 3
+    explanation: |
+      @PreFilter/@PostFilter iterate collections and remove elements for which the
+      SpEL (referencing filterObject) is false — e.g. returning only rows the
+      caller owns. @PreAuthorize/@PostAuthorize make a single allow/deny decision
+      and cannot prune collection contents.
+    ref: "concepts.md#method-security"
+
+  - id: spring-security-basics-088
+    difficulty: expert
+    tags: [method-security, aspectj, self-invocation]
+    question: |
+      You need @PreAuthorize enforced even on private methods and internal
+      self-invocations within the same bean. Which configuration achieves this,
+      and what is the cost?
+    options:
+      - "@EnableMethodSecurity(prePostEnabled=false); no cost"
+      - "@EnableMethodSecurity(mode=AdviceMode.ASPECTJ) uses bytecode weaving instead of proxies, so private/self-invoked calls are advised; the cost is load-time or compile-time weaving setup"
+      - "Mark the methods final; the JVM then enforces security"
+      - "Inject the bean into itself with @Lazy; this makes proxies intercept private calls"
+    answer: 1
+    explanation: |
+      Default proxy-based AOP cannot intercept private methods or this-invocations.
+      Switching to AspectJ mode weaves advice into the bytecode, enforcing security
+      on those calls, at the cost of setting up load-time/compile-time weaving.
+      Self-injection helps self-invocation for public methods but not private ones.
+    ref: "concepts.md#method-security"
+
+  - id: spring-security-basics-089
+    difficulty: intermediate
+    tags: [method-security, combining, repeat]
+    question: |
+      Which statement about combining method-security annotations on one method is
+      correct?
+    options:
+      - "You may place @PreAuthorize twice to express two independent conditions"
+      - "Only one method-security annotation is allowed per class"
+      - "@PreAuthorize and @PostAuthorize can coexist and are effectively ANDed (both must pass), but you cannot repeat the same annotation; use SpEL &&/|| instead"
+      - "@PreAuthorize and @Secured on the same method are ORed"
+    answer: 2
+    explanation: |
+      Different annotation types combine and are all evaluated (ANDed). Repeating
+      the same annotation (two @PreAuthorize) is unsupported; combine conditions
+      with SpEL boolean operators or delegate to a bean. Conflicting configs are
+      flagged at startup.
+    ref: "concepts.md#method-security"
+
+  - id: spring-security-basics-090
+    difficulty: advanced
+    tags: [headers, frame-options, h2-console, gotcha]
+    question: |
+      After enabling Spring Security, the embedded H2 console renders as a blank
+      page and the browser console shows it refused to display in a frame. What is
+      the correct, minimal fix?
+    options:
+      - "http.headers(h -> h.frameOptions(f -> f.sameOrigin())) because the default X-Frame-Options: DENY blocks the console's iframe"
+      - "Disable all security headers with http.headers(HeadersConfigurer::disable)"
+      - "Add the console path to web.ignoring() so no filters run"
+      - "Set Content-Security-Policy to default-src *"
+    answer: 0
+    explanation: |
+      Spring sends X-Frame-Options: DENY by default, and the H2 console uses
+      frames. Switching frame options to sameOrigin lets the console (same origin)
+      render while still blocking cross-origin framing. Disabling all headers or
+      bypassing the chain is overbroad and insecure.
+    ref: "concepts.md#security-response-headers"
+
+  - id: spring-security-basics-091
+    difficulty: advanced
+    tags: [headers, csp, misconception]
+    question: |
+      A team assumes Spring Security protects them from XSS "because it adds
+      security headers by default." Which statement is accurate?
+    options:
+      - "Content-Security-Policy is added by default and blocks all inline scripts"
+      - "The default HSTS header prevents XSS"
+      - "X-XSS-Protection: 1 fully prevents XSS in modern browsers"
+      - "Content-Security-Policy is NOT added by default; you must configure it explicitly, so relying on Spring for CSP-based XSS defense without configuring it is a false sense of security"
+    answer: 3
+    explanation: |
+      Spring adds nosniff, frame-options, cache-control, and (over HTTPS) HSTS by
+      default, but NOT Content-Security-Policy — you must configure it. Assuming
+      CSP is on without setting it leaves XSS largely unmitigated by headers. HSTS
+      and nosniff address different threats.
+    ref: "concepts.md#security-response-headers"
+
+  - id: spring-security-basics-092
+    difficulty: advanced
+    tags: [authentication-principal, argument-resolver, gotcha]
+    question: |
+      A developer injects @AuthenticationPrincipal into a plain @Service method
+      (not a controller) and finds it is always null. Why?
+    options:
+      - "@AuthenticationPrincipal only reads the JWT, which services cannot access"
+      - "@AuthenticationPrincipal is resolved by a Spring MVC HandlerMethodArgumentResolver, which only applies to web controller handler methods, not arbitrary bean methods"
+      - "Services run on a different SecurityContextHolder strategy"
+      - "@AuthenticationPrincipal requires @EnableMethodSecurity to function anywhere"
+    answer: 1
+    explanation: |
+      @AuthenticationPrincipal is wired through an MVC/WebFlux argument resolver,
+      so it only populates controller handler method parameters. In a service, read
+      the principal from SecurityContextHolder.getContext().getAuthentication()
+      instead.
+    ref: "concepts.md#accessing-the-principal-and-testing-security"
+
+  - id: spring-security-basics-093
+    difficulty: advanced
+    tags: [testing, mockmvc, csrf, gotcha]
+    question: |
+      A @WebMvcTest MockMvc POST to a protected endpoint returns 403 even though
+      the test uses @WithMockUser with the right role. What is the most common
+      cause and fix?
+    options:
+      - "MockMvc cannot test POST endpoints; switch to WebTestClient"
+      - "@WithMockUser does not work with MockMvc; use a real login"
+      - "CSRF protection is active in the test; add .with(csrf()) to the request (or the token) so the state-changing POST passes CSRF validation"
+      - "The endpoint needs @CrossOrigin to accept test requests"
+    answer: 2
+    explanation: |
+      CSRF is enabled by default, and a MockMvc POST without a token fails CSRF
+      (403) regardless of the mock user's roles. Add
+      SecurityMockMvcRequestPostProcessors.csrf() via .with(csrf()) to supply a
+      valid token in the test.
+    ref: "concepts.md#accessing-the-principal-and-testing-security"
+
+  - id: spring-security-basics-094
+    difficulty: intermediate
+    tags: [testing, withmockuser, roles-vs-authorities]
+    question: |
+      What is the difference between @WithMockUser(roles = "ADMIN") and
+      @WithMockUser(authorities = "ADMIN")?
+    options:
+      - "roles = \"ADMIN\" grants authority ROLE_ADMIN (prefix added), while authorities = \"ADMIN\" grants the literal authority ADMIN (no prefix)"
+      - "They are identical"
+      - "authorities = \"ADMIN\" grants ROLE_ADMIN; roles adds no prefix"
+      - "roles works only with @Secured; authorities works only with @PreAuthorize"
+    answer: 0
+    explanation: |
+      roles="ADMIN" produces ROLE_ADMIN (the prefix is added), matching
+      hasRole('ADMIN'). authorities="ADMIN" produces exactly ADMIN with no prefix,
+      matching hasAuthority('ADMIN'). Mixing them causes tests to pass/fail
+      unexpectedly, mirroring the role-vs-authority distinction.
+    ref: "concepts.md#accessing-the-principal-and-testing-security"
+
+  - id: spring-security-basics-095
+    difficulty: advanced
+    tags: [remember-me, fully-authenticated, session]
+    question: |
+      Why does Spring Security distinguish fullyAuthenticated() from
+      authenticated(), and when does it matter?
+    options:
+      - "fullyAuthenticated() requires MFA; authenticated() requires a password"
+      - "There is no functional difference; fullyAuthenticated() is deprecated"
+      - "fullyAuthenticated() means the session is not expired; authenticated() ignores expiry"
+      - "authenticated() accepts remember-me tokens, while fullyAuthenticated() rejects remember-me and demands a fresh login — useful to gate sensitive operations like changing a password"
+    answer: 3
+    explanation: |
+      A RememberMeAuthenticationToken is authenticated but not "fully"
+      authenticated. authenticated() allows it; fullyAuthenticated() does not, so
+      you can require the user to re-enter credentials for high-value actions
+      rather than relying on a persisted remember-me cookie.
+    ref: "concepts.md#logout-remember-me-and-authentication-events"
+
+  - id: spring-security-basics-096
+    difficulty: advanced
+    tags: [logout, csrf, http-method, gotcha]
+    question: |
+      With default configuration (CSRF enabled), a link that does GET /logout does
+      not log the user out. Why, and what is the correct approach?
+    options:
+      - "Logout is disabled by default; you must call SecurityContextHolder.clearContext() manually"
+      - "By default LogoutFilter matches POST /logout (a state-changing action needing a CSRF token); a GET does not trigger logout, so submit a POST with the CSRF token"
+      - "GET /logout works but only after the session times out"
+      - "Logout requires the Authorization header to be cleared client-side first"
+    answer: 1
+    explanation: |
+      Because logout changes state, with CSRF enabled the default LogoutFilter
+      matches POST /logout and requires a CSRF token; a plain GET link won't log
+      out. Use a form POST (with token) or, if you must use GET, configure a
+      logoutRequestMatcher accordingly (less safe).
+    ref: "concepts.md#logout-remember-me-and-authentication-events"
+
+  - id: spring-security-basics-097
+    difficulty: intermediate
+    tags: [events, audit, brute-force]
+    question: |
+      What is the idiomatic Spring Security mechanism for implementing audit
+      logging and a failed-login lockout counter, rather than editing filters?
+    options:
+      - "Override DispatcherServlet to log every request"
+      - "Parse the server access log after the fact"
+      - "Listen for published authentication events such as AuthenticationSuccessEvent and AuthenticationFailureBadCredentialsEvent (and authorization events) via ApplicationListeners"
+      - "Set a ThreadLocal counter inside BCryptPasswordEncoder"
+    answer: 2
+    explanation: |
+      Spring publishes authentication success/failure and authorization
+      granted/denied events. Subscribing with ApplicationListeners is the clean
+      extension point for audit trails and brute-force lockout logic, keeping the
+      filter chain untouched.
+    ref: "concepts.md#logout-remember-me-and-authentication-events"
+
+  - id: spring-security-basics-098
+    difficulty: expert
+    tags: [session, stateless, csrf, interaction]
+    question: |
+      An API sets SessionCreationPolicy.STATELESS but leaves CSRF enabled with the
+      default HttpSessionCsrfTokenRepository. Clients authenticate with a bearer
+      header. What is the practical consequence?
+    options:
+      - "CSRF validation is effectively broken/awkward because the synchronizer token has nowhere to persist without a session, while CSRF is also unnecessary for header-token auth — so CSRF should be disabled here"
+      - "Everything works perfectly; STATELESS and CSRF are fully compatible"
+      - "STATELESS forces the creation of a session anyway to hold the CSRF token"
+      - "The bearer token is rejected because CSRF requires form login"
+    answer: 0
+    explanation: |
+      The default CSRF repository stores the synchronizer token in the HttpSession,
+      but STATELESS means no session is created, so token persistence/validation
+      falls apart. Moreover, header-token auth isn't auto-attached cross-site, so
+      CSRF isn't needed. The correct config for such an API is to disable CSRF.
+    ref: "concepts.md#session-management"
+
+  - id: spring-security-basics-099
+    difficulty: expert
+    tags: [oauth2, oidc, access-token, misuse]
+    question: |
+      A resource server treats a valid OAuth2 access token's presence as proof of
+      the end user's identity and reads user attributes straight from it. Why is
+      this an anti-pattern, and what is the correct construct?
+    options:
+      - "Access tokens are encrypted, so reading them is impossible; use the refresh token instead"
+      - "You must decode the access token with the client secret to get identity"
+      - "Access tokens never contain a subject, so identity must come from the session cookie"
+      - "OAuth2 access tokens are authorization artifacts whose format/claims are opaque to the client and may lack verified identity; identity should come from an OIDC ID token (or the userinfo endpoint), not by mining the access token"
+    answer: 3
+    explanation: |
+      OAuth2 concerns delegated authorization; the access token grants API access
+      and its contents are not a contract for the client. OpenID Connect adds
+      authentication via the ID token (and userinfo). Using a bare access token as
+      an identity assertion is the classic OAuth-as-authentication mistake.
+    ref: "concepts.md#oauth2-grant-types-and-pkce"
+
+  - id: spring-security-basics-100
+    difficulty: expert
+    tags: [oauth2, pkce, interception, mechanism]
+    question: |
+      Precisely how does PKCE defeat an authorization-code interception attack on a
+      public client?
+    options:
+      - "It encrypts the authorization code so interception yields ciphertext"
+      - "The client sends a hashed code_challenge with the auth request; at token exchange it must present the matching plaintext code_verifier, so an intercepted code is useless without the verifier the attacker never saw"
+      - "It embeds the client secret in the redirect URI"
+      - "It shortens the code's lifetime to zero, so codes cannot be reused"
+    answer: 1
+    explanation: |
+      PKCE binds the code to a one-time secret: the client registers
+      SHA256(code_verifier) as code_challenge up front and must supply the original
+      code_verifier at exchange. An attacker who intercepts the code cannot redeem
+      it without the verifier, which never travels on the front channel.
+    ref: "concepts.md#oauth2-grant-types-and-pkce"
+
+  - id: spring-security-basics-101
+    difficulty: advanced
+    tags: [custom-filter, once-per-request, gotcha]
+    question: |
+      A custom JWT authentication filter added via addFilterBefore(...) sometimes
+      runs twice per request (e.g. on ERROR dispatch), causing duplicate work and
+      odd logs. What is the standard remedy?
+    options:
+      - "Register it as a servlet Listener instead of a Filter"
+      - "Add @Order(Integer.MIN_VALUE) to the filter"
+      - "Extend OncePerRequestFilter so it executes at most once per request dispatch, avoiding re-execution on forwards/errors"
+      - "Move the filter after AuthorizationFilter"
+    answer: 2
+    explanation: |
+      Filters can be invoked on multiple dispatches (forward/error/include).
+      OncePerRequestFilter guarantees a single execution per request via a request
+      attribute guard, which is why nearly all Spring Security auth filters extend
+      it. Ordering tricks don't solve re-dispatch.
+    ref: "concepts.md#security-filter-chain-and-request-flow"
+
+  - id: spring-security-basics-102
+    difficulty: expert
+    tags: [filter-chain, exception-translation, controller, gotcha]
+    question: |
+      An AccessDeniedException is thrown from deep inside a @Service (via
+      @PreAuthorize) during a web request. It is translated to a clean 403. But the
+      same exception thrown from a @Scheduled job just propagates and crashes the
+      task. Why the difference?
+    options:
+      - "ExceptionTranslationFilter only sits in the servlet filter chain; it converts AccessDeniedException/AuthenticationException to HTTP responses only for requests flowing through the chain, not for non-web threads"
+      - "@Scheduled methods have no SecurityContext, so no exception is thrown there"
+      - "Scheduled jobs run with ROLE_ADMIN and cannot be denied"
+      - "AccessDeniedException is a checked exception outside web requests"
+    answer: 0
+    explanation: |
+      ExceptionTranslationFilter is a servlet filter; it only handles exceptions on
+      requests passing through the filter chain, mapping them to 401/403. A
+      @Scheduled task runs off the request path, so nothing translates the
+      AccessDeniedException and it propagates. You must handle it yourself in
+      non-web contexts.
+    ref: "concepts.md#security-filter-chain-and-request-flow"
+
+  - id: spring-security-basics-103
+    difficulty: advanced
+    tags: [passwordencoder, delegating, default, boot3]
+    question: |
+      In a Boot 3 app you declare only a UserDetailsService with users stored as
+      {bcrypt}$2a$10$... but no PasswordEncoder bean. Login works. Which encoder is
+      actually used, and why does the {bcrypt} prefix matter?
+    options:
+      - "NoOpPasswordEncoder; the prefix is ignored"
+      - "Plaintext comparison, because no encoder bean means no hashing"
+      - "A bare BCryptPasswordEncoder, which requires you to strip the prefix first"
+      - "A DelegatingPasswordEncoder (the framework default when no PasswordEncoder bean is defined), which reads the {bcrypt} id prefix to select BCrypt for matching"
+    answer: 3
+    explanation: |
+      When no PasswordEncoder bean is present, Spring Security defaults to a
+      DelegatingPasswordEncoder (via PasswordEncoderFactories). It uses the {id}
+      prefix to pick the right algorithm, so {bcrypt}-prefixed hashes verify with
+      BCrypt. This is why the default handles prefixed hashes seamlessly.
+    ref: "concepts.md#passwordencoder-and-bcrypt"
+
+  - id: spring-security-basics-104
+    difficulty: expert
+    tags: [authorizehttprequests, matcher-ordering, startup, gotcha]
+    question: |
+      Consider:
+      ```
+      http.authorizeHttpRequests(auth -> auth
+          .requestMatchers("/api/**").authenticated()
+          .requestMatchers("/api/public/**").permitAll()
+          .anyRequest().denyAll());
+      ```
+      What is the effective behavior for GET /api/public/info?
+    options:
+      - "It is permitted, because permitAll() is more specific and always wins"
+      - "It requires authentication, because /api/** is listed first and first-match-wins means /api/public/** is shadowed"
+      - "It fails at startup with an ambiguous-matcher error"
+      - "It is denied by anyRequest().denyAll() because /api/public paths never match /api/**"
+    answer: 1
+    explanation: |
+      Rules are evaluated top-down, first match wins. /api/public/info matches
+      /api/** first, so it requires authentication and the later, more specific
+      /api/public/** permitAll() rule is never reached. Order specific rules before
+      broader ones to fix this.
     ref: "concepts.md#securityfilterchain-and-the-lambda-dsl"

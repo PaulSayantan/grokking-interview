@@ -61,7 +61,7 @@ questions:
 | Field | Required | Notes |
 |---|---|---|
 | `id` | yes | Globally unique. Format `<topic-slug>-<3-digit-seq>`. |
-| `difficulty` | yes | One of `beginner`, `intermediate`, `advanced`. |
+| `difficulty` | yes | One of `beginner`, `intermediate`, `advanced`, `expert`. `expert` = deep internals, tricky edge cases, and senior/staff-level scenario questions. |
 | `tags` | no | Lowercase kebab tokens; used for cross-topic filtering. |
 | `question` | yes | The prompt. Multi-line ok (use `|`). |
 | `options` | yes | 3–5 options. Exactly one correct (single-answer MCQ v1). |

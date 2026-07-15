@@ -77,6 +77,14 @@ public class MyApp {
 
 **Advanced.** You can customize before running: `new SpringApplicationBuilder(MyApp.class).web(WebApplicationType.NONE).run(args)`, add listeners, set a `Banner`, or set `setLazyInitialization(true)`.
 
+**Why `EnvironmentPostProcessor` and `ApplicationListener` run so early (expert).** The `Environment` is prepared and `ApplicationEnvironmentPreparedEvent` fires **before** the `ApplicationContext` is even created. This is why an `EnvironmentPostProcessor` (registered in `spring.factories`) can mutate property sources that later influence which beans/auto-configs match — but it also means such a post-processor **cannot** `@Autowire` anything or reference beans; the container doesn't exist yet. Config Data (`application.properties`/`.yml`, `spring.config.import`) is itself processed by `ConfigDataEnvironmentPostProcessor` at this stage.
+
+**Lazy initialization gotcha.** `spring.main.lazy-initialization=true` defers bean creation until first use, speeding startup — but it also **defers startup failures** (a mis-wired bean throws on first request, not at boot) and delays `@PostConstruct`/validation. Fatal-fast behavior is usually preferable in production; use `@Lazy(false)` on critical beans to opt them back in.
+
+**`ApplicationReadyEvent` vs runners (subtle).** `CommandLineRunner`/`ApplicationRunner` execute **before** `ApplicationReadyEvent` is published. So if a runner throws, the app fails and `ApplicationReadyEvent` never fires (an `ApplicationFailedEvent` fires instead). Readiness probes keyed to `ApplicationReadyEvent` therefore won't flip to "ready" until all runners have completed successfully — a deliberate ordering for correct traffic gating.
+
+**Thread-safety at startup.** Singleton bean instantiation during `refresh()` happens on the **main (bootstrap) thread**, single-threaded by default, so bean construction order is deterministic. Background bootstrapping (`spring.main.background-initialization` via `BackgroundPreinitializer`, or `@Async`/`SmartInitializingSingleton` tricks) can move work off the main thread, but naive parallel bean init is not something Boot does implicitly — do not assume constructors run concurrently.
+
 ---
 
 ## Convention over Configuration
@@ -110,6 +118,10 @@ public class MyApp {
 **Key ordering guarantee (trap).** Auto-configuration classes are **always processed last**, after your own user-defined configuration. That is *why* `@ConditionalOnMissingBean` works: by the time an auto-config bean is evaluated, your own bean (if any) is already registered, so Boot backs off. Your explicit beans win.
 
 **Advanced internals.** `AutoConfigurationImportSelector` implements `DeferredImportSelector`, which is the reason auto-config runs after regular `@Import`/`@Configuration` processing. Results are cached; the `spring-autoconfigure-metadata.properties` file (generated at build time) provides condition metadata used by the filters for fast exclusion.
+
+**How `@ConditionalOnClass` avoids `NoClassDefFoundError` (deep internal).** A naive reading suggests that referencing an absent class in `@ConditionalOnClass(SomeType.class)` would itself fail to load the condition. Boot avoids this two ways. First, condition evaluation reads annotation attributes as **strings via ASM metadata** (`SimpleMetadataReader`) rather than resolving the `Class` — so the annotated class's bytecode is inspected without loading the referenced type. Second, when a `.class` literal is unavoidable, Boot places the condition on a **nested** static class or uses the `name` (String) attribute so the enclosing auto-config can be parsed even when the type is missing. This is why you'll see auto-config written with `@ConditionalOnClass(name = "...")` or split into inner classes. The `spring-autoconfigure-metadata.properties` filter step short-circuits most of this before the class is even considered.
+
+**`DeferredImportSelector.Group` and ordering (staff-level).** `AutoConfigurationImportSelector` uses an inner `AutoConfigurationGroup` that collects all candidates across every `@EnableAutoConfiguration` source, then sorts them **once** using `@AutoConfigureOrder` (coarse, integer, default 0) followed by `@AutoConfigureBefore`/`@AutoConfigureAfter` (fine, dependency-graph based). These ordering hints only order auto-config classes **relative to each other** — they have no effect on user `@Configuration` (which always precedes all of them) and are ignored if applied to a regular `@Component`.
 
 **Debugging.** Run with `--debug` (or set `debug=true`) to print the **Condition Evaluation Report**: `Positive matches`, `Negative matches`, `Exclusions`, `Unconditional classes`.
 
@@ -175,7 +187,13 @@ public class MyDataAutoConfiguration {
 
 **Ordering trap for `@ConditionalOnBean`/`OnMissingBean`.** These inspect the *current* state of the bean factory, so they are **order-sensitive**. Spring's guidance: only use them on **auto-configuration** classes (which run last), *not* on user configuration, because during user-config processing the bean you're checking for may not have been registered yet, giving nondeterministic results. `@ConditionalOnMissingBean` without a type defaults to the return type of the `@Bean` method.
 
-**`matchIfMissing` (trap).** `@ConditionalOnProperty(name="feature.enabled", havingValue="true", matchIfMissing=true)` matches when the property is absent *or* equals `true`. Without `matchIfMissing`, an absent property means **no match**.
+**`matchIfMissing` (trap).** `@ConditionalOnProperty(name="feature.enabled", havingValue="true", matchIfMissing=true)` matches when the property is absent *or* equals `true`. Without `matchIfMissing`, an absent property means **no match**. Subtlety: `havingValue=""` (empty) is special — it matches when the property is set to **anything other than `false`**. And `@ConditionalOnProperty` is case-**insensitive** for `havingValue` comparison against the resolved property string.
+
+**`@ConditionalOnBean` type erasure & generics (advanced).** `@ConditionalOnMissingBean( repository = ...)` and the plain type form work off **bean definition types**, so beans whose type is only known via a `FactoryBean` or a `@Bean` method with an erased/generic return type can be missed. Boot resolves generics where possible (e.g. `Converter<String, Foo>`) but a bean registered without full generic type information (such as one produced by a raw `FactoryBean`) can defeat a parameterized `@ConditionalOnMissingBean`, causing a duplicate bean. Prefer declaring precise return types on `@Bean` methods.
+
+**Custom `@Conditional` and `ConfigurationCondition` (expert).** A plain `Condition` is evaluated during the "parse configuration classes" phase. But `@ConditionalOnBean`/`@ConditionalOnMissingBean` implement `ConfigurationCondition` with `ConfigurationPhase.REGISTER_BEAN`, forcing them to be evaluated **after** all bean *definitions* have been registered (not merely during class parsing). If you write a bean-inspecting condition as a bare `Condition` (phase `PARSE_CONFIGURATION`), it runs too early and sees an incomplete bean factory — a classic source of nondeterministic "sometimes the bean is there, sometimes not" bugs.
+
+**Combining conditions: AND semantics (trap).** Multiple `@Conditional...` annotations on the same class/method are combined with **AND** — every one must match. There is no built-in OR across annotations; for OR logic you must write a custom `AnyNestedCondition` (Boot provides `AnyNestedCondition` and `AllNestedConditions`/`NoneNestedConditions` base classes precisely for this).
 
 ---
 
@@ -372,7 +390,9 @@ app.jar
 3. `snapshot-dependencies`
 4. `application` (your code — changes most often)
 
-Extract them with `java -Djarmode=layertools -jar app.jar extract` (Boot 2.3–3.1) or the newer `-Djarmode=tools extract --layers` (3.2+), then `COPY` each layer as a separate Docker layer so a code-only change re-ships only the small `application` layer.
+Extract them with `java -Djarmode=layertools -jar app.jar extract` (Boot 2.3–3.1) or the newer `-Djarmode=tools -jar app.jar extract --layers` (Boot 3.2+; `layertools` is deprecated in favor of the `tools` jarmode), then `COPY` each layer as a separate Docker layer so a code-only change re-ships only the small `application` layer.
+
+**`tools` jarmode beyond layers (Boot 3.2+).** The `tools` jarmode does more than layer extraction. `java -Djarmode=tools -jar app.jar extract` (no `--layers`) produces an **exploded** structure (application jar + a `lib/` folder of dependency jars) that starts faster than the nested-jar layout because the custom class loader no longer pays the small cost of reading nested jars. This exploded layout is also **CDS- and AOT-cache-friendly** (Class Data Sharing / ahead-of-time caches want real files on disk, not entries inside a jar), which is why production Docker images increasingly run the extracted form rather than `java -jar app.jar` directly.
 
 **Fat JAR vs thin/traditional (trap).** A fat JAR is self-contained but large and duplicates deps across microservices; a plain library JAR is not runnable. `spring-boot:repackage` keeps the original thin JAR as `*.jar.original`. WAR packaging is for external containers, not `java -jar` (though Boot WARs are also executable).
 
@@ -393,6 +413,75 @@ Boot uses it during `SpringApplication` startup to load `ApplicationContextIniti
 **Relationship to auto-config (trap).** Historically `SpringFactoriesLoader` loaded auto-configuration via the `EnableAutoConfiguration` key. In Boot 2.7+, auto-config moved to `AutoConfiguration.imports` (loaded by an `ImportCandidates` mechanism, not `SpringFactoriesLoader`). But `SpringFactoriesLoader` is **still used** for the *other* factory types above — it was not removed. So the correct statement is: auto-configuration *registration* left `spring.factories`, but `SpringFactoriesLoader` and `spring.factories` remain for the rest.
 
 **Advanced.** `SpringFactoriesLoader.loadFactoryNames(Class, ClassLoader)` returns the class names; `loadFactories(...)` instantiates them. Results are cached per class loader. Order among providers can be influenced with `@Order`/`Ordered`. `ServiceLoader` differs: it uses `META-INF/services/<FQCN>` files (one file per interface) and always instantiates, whereas `spring.factories` is a single properties file holding many keys and lets Spring control instantiation and ordering.
+
+---
+
+## Externalized Configuration and Property Source Ordering
+
+**Beginner definition.** Boot lets configuration live outside code — properties/YAML files, environment variables, command-line args, etc. — and merges them into a single `Environment` composed of ordered `PropertySource`s.
+
+**Precedence (highest wins; abbreviated, Boot 3.x).** Later/higher sources override earlier ones:
+1. Devtools global settings (when devtools active)
+2. `@TestPropertySource` on tests
+3. `@DynamicPropertySource` / `properties` attr on `@SpringBootTest`
+4. **Command-line arguments** (`--server.port=9000`)
+5. `SPRING_APPLICATION_JSON` (inline JSON in an env var / system property)
+6. `ServletConfig` / `ServletContext` init params
+7. JNDI (`java:comp/env`)
+8. **Java system properties** (`-Dserver.port=...`)
+9. **OS environment variables** (`SERVER_PORT`)
+10. Profile-specific `application-{profile}.properties` (outside jar, then inside)
+11. `application.properties`/`.yml` (Config Data)
+12. `@PropertySource` on `@Configuration`
+13. `SpringApplication.setDefaultProperties(...)` (lowest)
+
+**Relaxed binding + env var mapping (trap).** `server.port`, `SERVER_PORT`, `server_port`, and `serverPort` all bind to the same property because Boot uses **relaxed binding**. Environment variables in particular are matched by uppercasing and replacing `.`/`-` with `_`, so `spring.datasource.url` ← `SPRING_DATASOURCE_URL`. This is how you configure Boot in containers without a properties file.
+
+**`spring.config.import` (Boot 2.4+).** Replaces the older, order-fragile `spring.config.location` chaining for pulling in extra config: `spring.config.import=optional:configtree:/run/secrets/` (Kubernetes/Docker secrets), `optional:file:./dev.properties`, `env:MY_JSON`. Imported documents are inserted **immediately below** the importing document and their values take precedence over the importer; the `optional:` prefix prevents a startup failure if the location is absent.
+
+**Boot 2.4 config-data ordering change (gotcha).** Boot 2.4 replaced the legacy property-loading order with the "config data" model. Two consequences bite migrators: (a) profile-specific documents now always override profile-agnostic ones **regardless of file order**, and (b) `spring.profiles.active` **cannot** be set from within a profile-specific document — use `spring.config.activate.on-profile` and `spring.profiles.group` instead. `spring.profiles` (the old key) was removed.
+
+---
+
+## @ConfigurationProperties vs @Value
+
+**Beginner definition.** Both read externalized config. `@Value("${a.b}")` injects a single resolved value into a field/param; `@ConfigurationProperties(prefix="a")` binds a whole tree of properties onto a POJO.
+
+**Why `@ConfigurationProperties` is preferred for real config.** It supports **relaxed binding**, type conversion, `Duration`/`DataSize` parsing, nested objects, `List`/`Map` binding, JSR-303 validation (`@Validated`), and IDE metadata via `spring-boot-configuration-processor`. `@Value` supports SpEL (`#{...}`) but **not** relaxed binding and gives poor errors for missing/typo'd keys.
+
+**Constructor binding (Boot 2.2+/immutable, expert).** Annotate the properties class with `@ConfigurationProperties` and use a constructor (records work great in Boot 3). To activate it you either put `@EnableConfigurationProperties(MyProps.class)` on a config class, add `@ConfigurationPropertiesScan`, or annotate the class with `@ConfigurationProperties` **and** register it as a bean. With constructor binding the class need not have setters and can be `final`/immutable; `@ConstructorBinding` is now inferred when there's a single parameterized constructor (explicit annotation only needed to disambiguate multiple constructors).
+
+**Common trap.** A bare `@ConfigurationProperties` POJO annotated only with `@ConfigurationProperties` (no `@Component`, not in `@EnableConfigurationProperties`, no `@ConfigurationPropertiesScan`) is **never registered as a bean** and silently does nothing. Also: `@Value` is resolved by a `BeanPostProcessor` and does not see relaxed-bound names, so `@Value("${serverPort}")` fails where `server.port` is defined.
+
+---
+
+## Bean Overriding and Definition Conflicts
+
+**The Boot 2.1+ default (trap).** Bean definition overriding is **disabled by default** since Boot 2.1. If two beans register the same name, startup fails with `BeanDefinitionOverrideException` rather than one silently clobbering the other. Re-enable (rarely advisable) with `spring.main.allow-bean-definition-overriding=true`.
+
+**`@Primary`, `@Qualifier`, and `@ConditionalOnSingleCandidate` interplay.** When multiple candidates of a type exist, injection needs a `@Primary` bean or a `@Qualifier` at the injection point, else `NoUniqueBeanDefinitionException`. `@ConditionalOnSingleCandidate(T.class)` matches when there is exactly one bean of `T` **or** multiple but exactly one marked `@Primary` — auto-config uses this to safely consume a user-provided bean only when it's unambiguous.
+
+**Auto-config back-off is name-and-type aware.** `@ConditionalOnMissingBean` by default matches on **type**, but you can scope it by `name`, `value` (types), `annotation`, or `ignored` types. A user bean of a *subtype* still triggers back-off of a supertype `@ConditionalOnMissingBean` because assignability is checked — a frequent "why didn't my auto-config bean appear?" surprise.
+
+---
+
+## Failure Analysis and Diagnostics
+
+**`FailureAnalyzer` (advanced).** Registered in `spring.factories`, a `FailureAnalyzer` turns a raw exception into a readable `FailureAnalysis` with a description and an "action". This is why "Failed to configure a DataSource" prints a tidy, actionable message instead of a stack trace — `DataSourceBeanCreationFailureAnalyzer` produced it. Custom libraries can ship their own analyzers; they run at startup failure time, before the context is usable, so they must not depend on beans.
+
+**Condition Evaluation Report on failure.** When startup fails, Boot can still print the condition report (with `debug=true`) — invaluable for "why did/didn't auto-config X apply?" investigations. `/actuator/conditions` exposes the same data at runtime for a healthy app.
+
+**Startup timing (`ApplicationStartup`).** Boot 2.4+ can record fine-grained startup steps via `BufferingApplicationStartup`; `/actuator/startup` exposes them so you can find which bean/auto-config dominates cold-start time — the modern replacement for ad-hoc `StopWatch` logging.
+
+---
+
+## Profiles and Environment
+
+**Definition.** A **profile** is a named logical group of beans/config activated via `spring.profiles.active` (or `SPRING_PROFILES_ACTIVE`). `@Profile("prod")` on a bean/config includes it only when active; `@Profile("!prod")` negates.
+
+**Interaction with auto-config (trap).** `@Profile` is evaluated as an ordinary condition during context refresh, so a profile-guarded **user** bean may or may not exist when an auto-config's `@ConditionalOnMissingBean` runs — but because auto-config runs last, the profile decision is already settled by then, so back-off is still reliable. Activating profiles from *within* profile-specific documents is forbidden (see config-data note above).
+
+**Programmatic activation.** `SpringApplication.setAdditionalProfiles(...)` or `spring.profiles.include` add profiles without replacing the active set. `spring.profiles.group.prod=prod,monitoring` expands one activated profile into several.
 
 ---
 
@@ -424,3 +513,9 @@ Boot uses it during `SpringApplication` startup to load `ApplicationContextIniti
 - Baeldung — "Spring Boot Starters": https://www.baeldung.com/spring-boot-starters
 - Baeldung — "Create a Custom Auto-Configuration with Spring Boot": https://www.baeldung.com/spring-boot-custom-auto-configuration
 - Baeldung — "@ConditionalOnProperty and friends": https://www.baeldung.com/spring-conditionalonproperty
+- Spring Boot Reference — "Externalized Configuration" (property source order, relaxed binding, spring.config.import): https://docs.spring.io/spring-boot/reference/features/external-config.html
+- Spring Boot Reference — "Type-safe Configuration Properties" (@ConfigurationProperties, constructor binding): https://docs.spring.io/spring-boot/reference/features/external-config.html#features.external-config.typesafe-configuration-properties
+- Spring Boot Reference — "Profiles": https://docs.spring.io/spring-boot/reference/features/profiles.html
+- Spring Boot 2.4 Config Data Migration Guide: https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-Config-Data-Migration-Guide
+- Spring Boot Reference — "Efficient Container Images" (tools jarmode, CDS/AOT): https://docs.spring.io/spring-boot/reference/packaging/efficient.html
+- Spring Framework — `ConfigurationCondition` and `AnyNestedCondition` Javadoc: https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/context/annotation/ConfigurationCondition.html

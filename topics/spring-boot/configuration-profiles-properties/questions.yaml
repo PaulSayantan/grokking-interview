@@ -994,3 +994,822 @@ questions:
       When @Profile is on a @Configuration class, it gates every bean defined in
       that class — none are registered unless the profile is active.
     ref: "concepts.md#profile-and-conditional-beans"
+
+  - id: configuration-profiles-properties-057
+    difficulty: expert
+    tags: [configuration-properties, collections, merge-vs-replace, gotcha]
+    question: |
+      application.yml (bundled) defines app.servers[0]=a, app.servers[1]=b,
+      app.servers[2]=c. In production an environment variable APP_SERVERS_0_=z is
+      set. A @ConfigurationProperties(prefix="app") binds List<String> servers.
+      What does the bound list contain at runtime?
+    options:
+      - "[\"z\", \"b\", \"c\"] — only index 0 is overridden, the rest merge from the file"
+      - "[\"a\", \"b\", \"c\", \"z\"] — the env value is appended after the file entries"
+      - "[\"z\"] — the highest-precedence source that supplies any index defines the entire list, so the file entries are dropped"
+      - "[\"a\", \"b\", \"c\"] — environment variables cannot bind indexed list elements"
+    answer: 2
+    explanation: |
+      For lists/arrays, the Binder does NOT merge indexes across sources. The single
+      highest-precedence source that contributes any index wins and defines the
+      whole collection. The env var (higher precedence than the file) supplies only
+      index 0, so the list becomes ["z"] and the file's three entries vanish — a
+      classic "list truncated in prod" bug. Maps, unlike lists, merge per key.
+    ref: "concepts.md#configurationproperties-and-type-safe-binding"
+
+  - id: configuration-profiles-properties-058
+    difficulty: expert
+    tags: [configuration-properties, collections, mutable, gotcha]
+    question: |
+      A setter-less @ConfigurationProperties field is declared as
+      private List<String> tags = List.of(); and properties set app.tags[0]=x.
+      After binding, what is the value of tags?
+    options:
+      - "[] — binding adds into the existing instance, but List.of() is immutable so nothing is added (or it fails silently)"
+      - "[\"x\"] — Boot replaces the immutable list with a new mutable one"
+      - "[\"x\"] — the field initializer is always discarded before binding"
+      - "A ConversionFailedException is thrown at startup"
+    answer: 0
+    explanation: |
+      A setter-less collection binds only when pre-initialized with a MUTABLE
+      implementation, because the Binder appends into the existing instance. List.of()
+      is immutable, so the elements cannot be added and the field stays empty. Use
+      new ArrayList<>() (or add a setter, or use constructor binding).
+    ref: "concepts.md#configurationproperties-and-type-safe-binding"
+
+  - id: configuration-profiles-properties-059
+    difficulty: expert
+    tags: [relaxed-binding, maps, case-sensitivity, gotcha]
+    question: |
+      A property maps to Map<String,String> labels under prefix app. The file
+      contains app.labels.myKey=1 and app.labels.my-key=2. How many entries does the
+      map contain and why?
+    options:
+      - "One entry, because relaxed binding canonicalizes both keys to 'mykey' and the last wins"
+      - "One entry 'my-key', because map keys are always kebab-normalized"
+      - "Two entries ('myKey' and 'my-key'), because relaxed binding is NOT applied to map keys — they are taken verbatim and are case-sensitive"
+      - "Startup fails with a duplicate-key error"
+    answer: 2
+    explanation: |
+      Map keys are the big exception to relaxed binding: the key is used verbatim and
+      is case-sensitive, so 'myKey' and 'my-key' are two distinct entries. Keys with
+      dots or special characters must be bracketed, e.g. app.labels[my.key]. This is
+      also why map keys bind poorly from environment variables.
+    ref: "concepts.md#relaxed-binding"
+
+  - id: configuration-profiles-properties-060
+    difficulty: advanced
+    tags: [precedence, per-key, environment, internals]
+    question: |
+      An env var sets server.port=8082 while application.yml sets app.name=shop
+      (and does not set server.port). How does the Environment resolve each key?
+    options:
+      - "Precedence is resolved independently per key by walking the ordered sources and returning the first that contains that key: env wins server.port, the file wins app.name"
+      - "The env var source, being higher precedence, hides ALL keys from lower sources, so app.name resolves to null"
+      - "Both keys are merged into a single source, so order is irrelevant"
+      - "The file wins both because files are loaded last"
+    answer: 0
+    explanation: |
+      The Environment holds an ordered list of PropertySources and, per getProperty
+      call, returns the value from the FIRST source containing that specific key. A
+      high-precedence source only overrides the keys it actually defines; unrelated
+      keys still resolve from lower sources. So env wins server.port and the file
+      still supplies app.name.
+    ref: "concepts.md#property-source-precedence-order"
+
+  - id: configuration-profiles-properties-061
+    difficulty: expert
+    tags: [config-import, precedence, spring-boot-2.4]
+    question: |
+      application.properties contains:
+        spring.application.name=base
+        spring.config.import=optional:file:./override.properties
+      and override.properties contains spring.application.name=imported.
+      What is the resolved spring.application.name, and why?
+    options:
+      - "'imported', because an imported document is inserted immediately below the importing one, giving it higher precedence"
+      - "'base', because the importing file is processed first and its earlier values win"
+      - "It is undefined; importing the same logical key is illegal"
+      - "'imported', but only if override.properties is also on the default search path"
+    answer: 0
+    explanation: |
+      An imported document is inserted immediately BELOW (higher priority than) the
+      document that declared the import, so values in override.properties take
+      precedence over application.properties. The whole config-data tier still sits
+      below env vars and command-line args, however.
+    ref: "concepts.md#config-data-files-and-location-precedence"
+
+  - id: configuration-profiles-properties-062
+    difficulty: expert
+    tags: [profiles, config-data, two-phase, internals]
+    question: |
+      Why can spring.profiles.active only be set in a non-profile-specific document,
+      even though it is just another property?
+    options:
+      - "Because config data is processed in two passes: profile SELECTION is frozen after the initial no-profiles pass, before profile-specific documents are read"
+      - "Because profile-specific files are encrypted and cannot contain profile keys"
+      - "Because spring.profiles.active is a reserved SpEL keyword"
+      - "Because the property is only legal in YAML, not in profile-specific properties files"
+    answer: 0
+    explanation: |
+      ConfigDataEnvironmentPostProcessor first reads base documents to discover which
+      profiles to activate, then does a second pass loading application-{profile}
+      documents. Since selection is already frozen by the time profile-specific
+      documents load, setting active/include/group/default there is disallowed and
+      raises InvalidConfigDataPropertyException.
+    ref: "concepts.md#config-data-loading-internals-and-failure-modes"
+
+  - id: configuration-profiles-properties-063
+    difficulty: advanced
+    tags: [profiles, include, group, restrictions]
+    question: |
+      Which of the following may legally appear inside a document gated by
+      spring.config.activate.on-profile=prod?
+    options:
+      - "spring.profiles.include=metrics"
+      - "spring.profiles.active=metrics"
+      - "spring.profiles.group.prod=prod-db"
+      - "An ordinary property such as app.datasource.url=jdbc:..."
+    answer: 3
+    explanation: |
+      spring.profiles.active, .default, .include, and .group can ONLY be used in
+      non-profile-specific documents; none may appear in a profile-gated document.
+      Ordinary configuration properties, however, are exactly what such a document is
+      for.
+    ref: "concepts.md#profile-specific-configuration-files-and-profile-groups"
+
+  - id: configuration-profiles-properties-064
+    difficulty: expert
+    tags: [environment-post-processor, ordering, custom-source, internals]
+    question: |
+      In an EnvironmentPostProcessor you want a custom property source to override
+      even command-line arguments. Which call achieves that?
+    options:
+      - "environment.getPropertySources().addFirst(source)"
+      - "environment.getPropertySources().addLast(source)"
+      - "environment.getPropertySources().addAfter(\"systemEnvironment\", source)"
+      - "It is impossible; command-line args always win"
+    answer: 0
+    explanation: |
+      Precedence is determined by position in the ordered MutablePropertySources
+      list; addFirst() places the source at the very top, above command-line args.
+      addLast() makes it the lowest-priority default, and addAfter positions it
+      relative to a named source. Command-line args are not immovable.
+    ref: "concepts.md#environmentpostprocessor-vs-later-hooks-ordering-and-custom-sources"
+
+  - id: configuration-profiles-properties-065
+    difficulty: advanced
+    tags: [environment-post-processor, registration, spring-boot-3]
+    question: |
+      Where do you register a custom EnvironmentPostProcessor so Boot 3.x discovers
+      it before the ApplicationContext is created?
+    options:
+      - "In META-INF/spring/org.springframework.boot.env.EnvironmentPostProcessor.imports"
+      - "As a @Bean in the main @SpringBootApplication class"
+      - "By annotating it with @Component and @Order"
+      - "In application.yml under spring.factories.post-processors"
+    answer: 0
+    explanation: |
+      EnvironmentPostProcessors run before the context exists, so they cannot be
+      beans. Boot 2.7+/3.x discovers them via
+      META-INF/spring/org.springframework.boot.env.EnvironmentPostProcessor.imports
+      (the legacy META-INF/spring.factories key still works but is deprecated).
+    ref: "concepts.md#environmentpostprocessor-vs-later-hooks-ordering-and-custom-sources"
+
+  - id: configuration-profiles-properties-066
+    difficulty: expert
+    tags: [value, spel, placeholder, evaluation-order]
+    question: |
+      Given app.list=a,b,c, what does @Value("#{'${app.list}'.split(',')}") inject,
+      and why does the ordering of resolution matter?
+    options:
+      - "[\"a\", \"b\", \"c\"], because ${...} placeholders are resolved FIRST, then the resulting string 'a,b,c' is evaluated by SpEL and split"
+      - "It fails, because SpEL cannot appear inside a @Value with a placeholder"
+      - "[\"${app.list}\"], because SpEL runs before placeholder resolution"
+      - "\"a,b,c\" as a single string, because split is not a SpEL method"
+    answer: 0
+    explanation: |
+      Spring expands ${...} property placeholders first, producing '#{'a,b,c'.split(',')}',
+      then the SpEL engine evaluates it, calling String.split to yield ["a","b","c"].
+      The fixed order (placeholder then SpEL) is why nesting a placeholder inside SpEL
+      works but not the reverse.
+    ref: "concepts.md#value-annotation"
+
+  - id: configuration-profiles-properties-067
+    difficulty: advanced
+    tags: [value, conversion, duration, gotcha]
+    question: |
+      A field is declared @Value("${app.timeout:}") private Duration timeout; and
+      app.timeout is not set anywhere. What happens at startup?
+    options:
+      - "timeout is null, treated as no timeout"
+      - "timeout becomes Duration.ZERO"
+      - "It fails with a conversion error, because the empty-string default cannot be converted to a Duration"
+      - "It uses a hidden default of 30 seconds"
+    answer: 2
+    explanation: |
+      The empty default (:) yields an empty string, which is a valid String but not a
+      valid Duration, so conversion fails. Supply a real default like ${app.timeout:30s}
+      or use a wrapper/Optional. This is a subtle @Value default pitfall for typed
+      targets.
+    ref: "concepts.md#value-annotation"
+
+  - id: configuration-profiles-properties-068
+    difficulty: expert
+    tags: [configuration-properties, refresh, snapshot, concurrency]
+    question: |
+      A plain (non-@RefreshScope) singleton @ConfigurationProperties bean is bound at
+      startup. Later, an operator changes the backing file and triggers
+      /actuator/refresh (without Spring Cloud @RefreshScope on this bean). What does
+      the bean now return?
+    options:
+      - "The original values, because binding happens once at bean creation and the bean holds an immutable snapshot"
+      - "The new values, because @ConfigurationProperties beans live-track the Environment"
+      - "A mix, re-reading only changed keys lazily"
+      - "It throws IllegalStateException on the next getter call"
+    answer: 0
+    explanation: |
+      Ordinary @ConfigurationProperties beans are singletons bound once at creation;
+      they capture a snapshot and do NOT re-read at runtime. Live updates require
+      Spring Cloud's @RefreshScope (which recreates the bean and re-binds) plus an
+      actuator refresh — otherwise the original values persist.
+    ref: "concepts.md#concurrency-thread-safety-and-refresh"
+
+  - id: configuration-profiles-properties-069
+    difficulty: expert
+    tags: [records, constructor-binding, default-value, gotcha]
+    question: |
+      Given a properties record component int port with NO @DefaultValue and the key
+      app.port absent from all sources, what happens?
+    options:
+      - "port binds to 0, the primitive default"
+      - "port binds to null and is autoboxed lazily"
+      - "Binding fails, because there is no value and a primitive int cannot be null"
+      - "The record is skipped and the bean is not created"
+    answer: 2
+    explanation: |
+      With constructor binding, an absent property binds null for the parameter unless
+      @DefaultValue is present. A primitive int cannot accept null, so binding fails.
+      Use @DefaultValue("0"), a wrapper Integer, or ensure the key is always present.
+    ref: "concepts.md#records-immutability-and-nested-constructor-binding"
+
+  - id: configuration-profiles-properties-070
+    difficulty: advanced
+    tags: [records, nested, metadata, annotation-processor]
+    question: |
+      What is the purpose of @NestedConfigurationProperty on a field of a
+      @ConfigurationProperties class?
+    options:
+      - "It is required at runtime or the nested object will not bind"
+      - "It enables relaxed binding for the nested object's map keys"
+      - "It hints the configuration metadata processor to treat the field as a nested properties group so IDE autocompletion works; it does not affect runtime binding"
+      - "It makes the nested object a separate Spring bean"
+    answer: 2
+    explanation: |
+      @NestedConfigurationProperty is a compile-time hint for the
+      spring-boot-configuration-processor so it generates metadata for a nested type
+      that it would not otherwise recognize as nested (e.g. a type from another
+      package). Runtime binding of nested objects happens regardless.
+    ref: "concepts.md#records-immutability-and-nested-constructor-binding"
+
+  - id: configuration-profiles-properties-071
+    difficulty: expert
+    tags: [precedence, spring-application-json, system-property]
+    question: |
+      SPRING_APPLICATION_JSON='{"server":{"port":9000}}' is set as an env var, an OS
+      env var SERVER_PORT=8082 is also set, and application.yml sets server.port=8080.
+      Which port is used?
+    options:
+      - "8080, the config file"
+      - "8082, the plain OS env var"
+      - "9000, because SPRING_APPLICATION_JSON sits ABOVE OS env vars and system properties in precedence"
+      - "It fails due to conflicting server.port definitions"
+    answer: 2
+    explanation: |
+      SPRING_APPLICATION_JSON is ranked higher than OS environment variables and
+      system properties (only command-line args and test sources are higher). So its
+      server.port=9000 beats both the plain env var (8082) and the file (8080).
+    ref: "concepts.md#property-source-precedence-order"
+
+  - id: configuration-profiles-properties-072
+    difficulty: advanced
+    tags: [actuator, env, origin, debugging]
+    question: |
+      A teammate cannot explain why app.token resolves to an unexpected value across
+      several sources. What does the /actuator/env endpoint give you that helps most?
+    options:
+      - "It rewrites the property to the correct value automatically"
+      - "It disables all but the highest-precedence source"
+      - "It lists every PropertySource in precedence order, showing the winning value plus shadowed values per key, with sensitive keys sanitized"
+      - "It shows only the final flattened map with no source information"
+    answer: 2
+    explanation: |
+      /actuator/env enumerates all PropertySources in precedence order and shows, per
+      key, the winning value and the shadowed candidates — the fastest way to answer
+      "why is this value what it is?". It sanitizes keys matching password/secret/key/
+      token patterns.
+    ref: "concepts.md#property-origin-debugging-and-the-env-actuator"
+
+  - id: configuration-profiles-properties-073
+    difficulty: expert
+    tags: [config-data, optional, failure-modes]
+    question: |
+      spring.config.import=configserver:http://cfg:8888 is declared (no optional:
+      prefix) and the config server is unreachable at startup. What happens, and how
+      do you make it non-fatal?
+    options:
+      - "The app starts anyway; imports are always best-effort"
+      - "The app retries forever silently"
+      - "Startup fails; prefix the location with optional: (optional:configserver:...) to degrade gracefully"
+      - "Startup fails and the only fix is removing the import"
+    answer: 2
+    explanation: |
+      A non-optional spring.config.import that cannot be resolved fails fast
+      (ConfigDataResourceNotFoundException / connection failure). Prefixing with
+      optional: makes the import best-effort so the app still boots if the target is
+      absent or unreachable.
+    ref: "concepts.md#config-data-loading-internals-and-failure-modes"
+
+  - id: configuration-profiles-properties-074
+    difficulty: advanced
+    tags: [config-data, on-cloud-platform, on-profile]
+    question: |
+      A YAML document declares BOTH
+      spring.config.activate.on-cloud-platform=kubernetes and
+      spring.config.activate.on-profile=prod. When is the document active?
+    options:
+      - "Whenever either Kubernetes is detected OR the prod profile is active"
+      - "Only when running on Kubernetes; the profile clause is ignored"
+      - "Only when Kubernetes is detected AND the prod profile is active (both conditions must hold)"
+      - "Never; the two activation keys are mutually exclusive"
+    answer: 2
+    explanation: |
+      Multiple activation conditions on one document are ANDed: the document activates
+      only when the detected CloudPlatform is kubernetes AND at least one of the
+      on-profile expressions matches (here, prod).
+    ref: "concepts.md#profile-specific-configuration-files-and-profile-groups"
+
+  - id: configuration-profiles-properties-075
+    difficulty: expert
+    tags: [profiles, include, per-source, internals]
+    question: |
+      Why does the documentation warn that "the usual complex-type list-merging rules
+      do not apply" to spring.profiles.include?
+    options:
+      - "Because include is a scalar, not a list"
+      - "Because include is deprecated and ignored"
+      - "Because include can only ever hold one profile"
+      - "Because spring.profiles.include is processed per property source, so each source's includes are all honored rather than the highest source replacing the list"
+    answer: 3
+    explanation: |
+      Unlike a normal list property (where the highest-precedence source replaces the
+      whole list), spring.profiles.include is evaluated for every property source, so
+      includes declared in different sources all accumulate. Included profiles are also
+      added before spring.profiles.active profiles.
+    ref: "concepts.md#profile-specific-configuration-files-and-profile-groups"
+
+  - id: configuration-profiles-properties-076
+    difficulty: expert
+    tags: [value, configuration-properties, ordering, bean-lifecycle]
+    question: |
+      A bean has a constructor parameter @Value("${app.mode}") and, in its no-arg
+      init, reads a @ConfigurationProperties bean's field. Both depend on the same
+      property source. Which statement is accurate about how each obtains its value?
+    options:
+      - "@Value is resolved by a PropertySourcesPlaceholderConfigurer (BeanFactoryPostProcessor) during bean creation, while @ConfigurationProperties is bound by a BeanPostProcessor; both read the same fully-merged Environment"
+      - "@Value reads directly from disk while @ConfigurationProperties reads from the Environment, so they can disagree"
+      - "@ConfigurationProperties is resolved before the Environment is built, so it may see stale values"
+      - "@Value bypasses the Environment and reads only system properties"
+    answer: 0
+    explanation: |
+      @Value placeholders are resolved by the auto-registered
+      PropertySourcesPlaceholderConfigurer; @ConfigurationProperties is bound by
+      ConfigurationPropertiesBindingPostProcessor via the Binder. Both consult the
+      SAME ordered Environment, so they never disagree on a value — only on
+      name-matching (exact vs relaxed).
+    ref: "concepts.md#value-vs-configurationproperties"
+
+  - id: configuration-profiles-properties-077
+    difficulty: advanced
+    tags: [profiles, negation, none-active, edge-case]
+    question: |
+      No profile is explicitly activated. A bean is annotated @Profile("!prod"). Is it
+      registered?
+    options:
+      - "No, because with no active profiles nothing negated can match"
+      - "Only if application-default.yml sets a profile"
+      - "It throws because negation requires at least one active profile"
+      - "Yes, because 'prod' is not among the active profiles, so the negation !prod is satisfied"
+    answer: 3
+    explanation: |
+      A negation profile expression matches when the negated profile is NOT active.
+      With no profiles active, prod is not active, so !prod evaluates true and the bean
+      is registered. (The literal 'default' profile being applied does not make prod
+      active.)
+    ref: "concepts.md#profile-and-conditional-beans"
+
+  - id: configuration-profiles-properties-078
+    difficulty: expert
+    tags: [profiles, groups, default, interaction]
+    question: |
+      spring.profiles.group.default=audit is configured, and the app is started with
+      NO explicit active profile. What profiles end up active?
+    options:
+      - "None; groups only apply to explicitly activated profiles"
+      - "Only audit, replacing default"
+      - "Startup fails because 'default' cannot be a group name"
+      - "default and audit, because the 'default' profile is active when nothing else is, and its group expands to include audit"
+    answer: 3
+    explanation: |
+      When no profile is active, the 'default' profile applies. A profile group keyed
+      on 'default' therefore expands, activating its members (audit) alongside default.
+      Groups can thus layer extra profiles onto the default state.
+    ref: "concepts.md#active-and-default-profiles"
+
+  - id: configuration-profiles-properties-079
+    difficulty: advanced
+    tags: [config-data, location-not-found, optional]
+    question: |
+      spring.config.additional-location=file:/etc/myapp/ is set but that directory
+      does not exist. Startup fails with ConfigDataLocationNotFoundException. Which fix
+      keeps the app booting when the directory is absent?
+    options:
+      - "Switch to spring.config.location instead"
+      - "Rename the directory to config/"
+      - "Move the property to a profile-specific file"
+      - "Prefix with optional: e.g. optional:file:/etc/myapp/ (or set spring.config.on-not-found=ignore)"
+    answer: 3
+    explanation: |
+      A non-optional config location that is missing fails fast by design in Boot 2.4+.
+      Prefixing the location with optional: (or globally setting
+      spring.config.on-not-found=ignore) tolerates the absent directory.
+    ref: "concepts.md#config-data-loading-internals-and-failure-modes"
+
+  - id: configuration-profiles-properties-080
+    difficulty: expert
+    tags: [precedence, propertysource, config-data]
+    question: |
+      A @PropertySource("classpath:extra.properties") sets app.color=blue, and the
+      bundled application.properties sets app.color=red. Both files are present. Which
+      value does app.color resolve to, and why?
+    options:
+      - "blue, because @PropertySource is loaded explicitly and therefore takes priority over application.properties"
+      - "red, because config data files (application.properties) rank HIGHER in precedence than @PropertySource sources"
+      - "blue, because the more specific file name always wins"
+      - "It is undefined; two sources defining the same key causes a startup error"
+    answer: 1
+    explanation: |
+      In Spring Boot's documented precedence, @PropertySource annotations sit BELOW the
+      config-data tier (application.properties/.yml). So application.properties (higher
+      priority) overrides a key defined in a @PropertySource file — a common surprise,
+      since developers expect an explicitly-imported file to win. Values in
+      @PropertySource only win over defaults set via setDefaultProperties.
+    ref: "concepts.md#property-source-precedence-order"
+
+  - id: configuration-profiles-properties-081
+    difficulty: intermediate
+    tags: [configuration-properties, bean-method, third-party]
+    question: |
+      You need to externalize configuration onto a third-party class you cannot
+      annotate (e.g. a DataSource). What is the idiomatic approach?
+    options:
+      - "Subclass it and add @ConfigurationProperties"
+      - "Copy each field with @Value in a @PostConstruct"
+      - "It is impossible without owning the source"
+      - "Put @ConfigurationProperties(prefix=\"...\") on the @Bean factory method that creates it"
+    answer: 3
+    explanation: |
+      @ConfigurationProperties can annotate a @Bean method, binding the matching
+      properties onto the object the method returns. This is the standard way to
+      externalize config for classes you do not own.
+    ref: "concepts.md#configurationproperties-and-type-safe-binding"
+
+  - id: configuration-profiles-properties-082
+    difficulty: expert
+    tags: [refresh-scope, concurrency, value, spring-cloud]
+    question: |
+      A bean is annotated @RefreshScope and injects @Value("${feature.flag}"). After
+      /actuator/refresh with a changed value, how does the bean reflect the update, and
+      what consistency concern exists?
+    options:
+      - "The existing instance mutates its field in place; no concern"
+      - "@Value fields never update even under @RefreshScope; only @ConfigurationProperties do"
+      - "Refresh blocks all threads until every bean is rebuilt atomically"
+      - "The bean is recreated lazily on next access and re-binds the @Value; an in-flight request may still hold the old instance while the new one is built"
+    answer: 3
+    explanation: |
+      @RefreshScope disposes the bean and recreates it lazily on the next access,
+      re-resolving @Value and re-binding properties from the reloaded Environment.
+      Because recreation is lazy and per-proxy, a request already holding the old
+      instance keeps old values — a visibility/consistency nuance to design around.
+    ref: "concepts.md#concurrency-thread-safety-and-refresh"
+
+  - id: configuration-profiles-properties-083
+    difficulty: advanced
+    tags: [precedence, test, active-profiles, override]
+    question: |
+      A test class has @SpringBootTest, application.yml sets spring.profiles.active=dev,
+      and the test adds @ActiveProfiles("test"). Which profile(s) are active in the
+      test context?
+    options:
+      - "dev and test, merged additively"
+      - "dev — file settings always win in tests"
+      - "Neither; the conflict fails the context"
+      - "test — @ActiveProfiles overrides the file-based spring.profiles.active for the test context"
+    answer: 3
+    explanation: |
+      @ActiveProfiles is the test-specific mechanism and replaces (does not merge with)
+      the file-configured spring.profiles.active for that test's ApplicationContext, so
+      only 'test' is active.
+    ref: "concepts.md#active-and-default-profiles"
+
+  - id: configuration-profiles-properties-084
+    difficulty: expert
+    tags: [multi-document, ordering, last-wins, delimiter]
+    question: |
+      A single application.yml has three documents in order: base (no gate),
+      on-profile: dev, and on-profile: prod — each setting app.url. The app runs with
+      spring.profiles.active=prod,dev. Which document's app.url wins?
+    options:
+      - "The prod document, because it appears last in the file"
+      - "The dev document, because dev is listed last in the active profiles (last-wins by profile order), overriding both base and prod"
+      - "The base document, because ungated documents always win"
+      - "prod, because it is more specific than dev"
+    answer: 1
+    explanation: |
+      With multiple active profiles a last-wins-by-profile-order strategy applies:
+      dev is listed last in prod,dev, so property values from the dev-activated
+      document override the prod one (and both override base). Document order in the
+      file is not what decides it here — active-profile order is.
+    ref: "concepts.md#active-and-default-profiles"
+
+  - id: configuration-profiles-properties-085
+    difficulty: advanced
+    tags: [environment, property-sources, inspection]
+    question: |
+      At runtime you want to programmatically inspect the exact precedence order of
+      all property sources. Which API do you use?
+    options:
+      - "Environment.getActiveProfiles()"
+      - "((ConfigurableEnvironment) env).getPropertySources() returns the ordered MutablePropertySources"
+      - "Environment.getSystemProperties()"
+      - "ApplicationContext.getBeanDefinitionNames()"
+    answer: 1
+    explanation: |
+      ConfigurableEnvironment.getPropertySources() exposes the ordered
+      MutablePropertySources list, letting you iterate sources in precedence order
+      (and even reorder them). The plain Environment interface does not expose this.
+    ref: "concepts.md#the-environment-abstraction"
+
+  - id: configuration-profiles-properties-086
+    difficulty: expert
+    tags: [configuration-properties, binding-error, origin, fail-fast]
+    question: |
+      A @ConfigurationProperties Duration field receives the value "30 apples" from
+      application-prod.yml line 12. Compared to the same value injected via @Value,
+      what is the key diagnostic advantage of @ConfigurationProperties here?
+    options:
+      - "@ConfigurationProperties silently ignores the bad value while @Value fails"
+      - "The binding failure reports the Origin (file and line), pinpointing application-prod.yml:12, whereas @Value gives a less precise placeholder error"
+      - "There is no difference; both throw identical stack traces"
+      - "@Value validates types but @ConfigurationProperties does not"
+    answer: 1
+    explanation: |
+      Every property tracked by the config-data machinery carries an Origin, so a
+      @ConfigurationProperties bind failure names the exact source file and line — a
+      major debugging advantage over @Value, whose conversion error only references the
+      placeholder/bean.
+    ref: "concepts.md#property-origin-debugging-and-the-env-actuator"
+
+  - id: configuration-profiles-properties-087
+    difficulty: intermediate
+    tags: [hooks, timing, ordering]
+    question: |
+      Order these extension points from EARLIEST to LATEST in the startup lifecycle:
+      BeanPostProcessor, EnvironmentPostProcessor, BeanFactoryPostProcessor,
+      ApplicationContextInitializer.
+    options:
+      - "EnvironmentPostProcessor, ApplicationContextInitializer, BeanFactoryPostProcessor, BeanPostProcessor"
+      - "ApplicationContextInitializer, EnvironmentPostProcessor, BeanPostProcessor, BeanFactoryPostProcessor"
+      - "BeanFactoryPostProcessor, BeanPostProcessor, EnvironmentPostProcessor, ApplicationContextInitializer"
+      - "BeanPostProcessor, BeanFactoryPostProcessor, ApplicationContextInitializer, EnvironmentPostProcessor"
+    answer: 0
+    explanation: |
+      Timeline: EnvironmentPostProcessor (pre-context) -> ApplicationContextInitializer
+      (context created, not refreshed) -> BeanFactoryPostProcessor (bean defs loaded)
+      -> BeanPostProcessor (beans instantiating). This ordering explains why only the
+      earliest hooks can influence logging/profile activation.
+    ref: "concepts.md#environmentpostprocessor-vs-later-hooks-ordering-and-custom-sources"
+
+  - id: configuration-profiles-properties-088
+    difficulty: expert
+    tags: [relaxed-binding, env-var, canonical, gotcha]
+    question: |
+      A field pageSize under prefix myApp exists. An env var MYAPP_PAGE_SIZE is set and
+      binds successfully, but MYAPP_PAGESIZE also binds. Meanwhile a property file key
+      myApp.pageSize binds too. What underlying mechanism reconciles all these?
+    options:
+      - "Spring stores every alias separately and picks one at random"
+      - "Relaxed binding reduces each candidate name to a canonical, lowercased, non-alphanumeric-stripped token, and matches when the canonical forms collapse to the same value"
+      - "Only the exact camelCase form ever binds; the others are ignored"
+      - "Environment variables are converted to camelCase before matching"
+    answer: 1
+    explanation: |
+      The Binder compares canonical forms: names are lowercased and non-alphanumerics
+      are removed for matching. myApp.pageSize, MYAPP_PAGE_SIZE, and MYAPP_PAGESIZE all
+      canonicalize toward the same token as the field pageSize under myApp, so they all
+      bind. Writing kebab-case in files keeps every form reconciling cleanly.
+    ref: "concepts.md#relaxed-binding"
+
+  - id: configuration-profiles-properties-089
+    difficulty: advanced
+    tags: [yaml, multi-document, duplicate-keys, gotcha]
+    question: |
+      Within a SINGLE YAML document (no --- separators), the same key server.port
+      appears twice with different values. What happens when Boot loads it?
+    options:
+      - "The last occurrence silently wins, like .properties"
+      - "The YAML parser rejects the document with a duplicate-key error"
+      - "Both values are collected into a list"
+      - "The first occurrence wins"
+    answer: 1
+    explanation: |
+      YAML forbids duplicate keys within a document, so the SnakeYAML parser errors out
+      at load time. This differs from .properties, which silently keeps the last value.
+      (Across separate --- documents the keys are allowed and later documents override.)
+    ref: "concepts.md#applicationproperties-vs-applicationyml"
+
+  - id: configuration-profiles-properties-090
+    difficulty: expert
+    tags: [configuration-properties, ignore-unknown, fail-on-error]
+    question: |
+      You want a mistyped property under your prefix to FAIL the build instead of being
+      silently ignored. Which approach accomplishes strict binding?
+    options:
+      - "Set @ConfigurationProperties(ignoreUnknownFields = true)"
+      - "There is no way; unknown fields are always ignored"
+      - "Use @ConfigurationProperties(ignoreInvalidFields = false) to reject unknown keys"
+      - "Enable failure on unknown/invalid fields (e.g. ignoreUnknownFields=false / ignoreInvalidFields=false) so binding surfaces mismatches"
+    answer: 3
+    explanation: |
+      Binding is tolerant by default (ignoreUnknownFields=true). Setting
+      ignoreUnknownFields=false makes an unmapped key under the prefix a bind error, and
+      ignoreInvalidFields controls behavior on type-mismatch. Combined with metadata
+      tooling, this catches typos early. Note option A leaves the default lenient
+      behavior unchanged.
+    ref: "concepts.md#configurationproperties-and-type-safe-binding"
+
+  - id: configuration-profiles-properties-091
+    difficulty: advanced
+    tags: [config-location, replace-vs-add, gotcha]
+    question: |
+      An ops team sets spring.config.location=file:/etc/app/prod.yml expecting it to
+      ADD their file. The app suddenly can't find keys that were in the bundled
+      application.yml. Why?
+    options:
+      - "spring.config.location REPLACES the default search locations entirely, so the bundled application.yml is no longer searched"
+      - "The bundled file was deleted during packaging"
+      - "prod.yml has a syntax error"
+      - "spring.config.location only works for .properties files"
+    answer: 0
+    explanation: |
+      spring.config.location REPLACES the default locations wholesale — the classpath
+      application.yml is no longer on the search path. To keep defaults and add a file,
+      use spring.config.additional-location instead.
+    ref: "concepts.md#config-data-files-and-location-precedence"
+
+  - id: configuration-profiles-properties-092
+    difficulty: expert
+    tags: [profiles, group, ordering, last-wins]
+    question: |
+      spring.profiles.group.prod=prod-db,prod-cache and the app starts with
+      spring.profiles.active=prod. Both application-prod.yml and
+      application-prod-cache.yml define cache.ttl. Which consideration determines the
+      winner, and what is a safe design stance?
+    options:
+      - "Group-member expansion order is a documented, stable contract you can rely on for overrides"
+      - "The docs do NOT guarantee intra-group ordering, so relying on prod-cache overriding prod for the same key is fragile; keep group members' keys disjoint or set the value explicitly"
+      - "Alphabetical order of profile names always decides"
+      - "The base application.yml always wins over any grouped profile"
+    answer: 1
+    explanation: |
+      Spring's documentation does not promise a specific ordering among group members,
+      so depending on one grouped profile overriding another for the same key is
+      brittle. The robust design is to keep grouped profiles' keys non-overlapping (or
+      set the decisive value in an explicit, higher-precedence source).
+    ref: "concepts.md#profile-specific-configuration-files-and-profile-groups"
+
+  - id: configuration-profiles-properties-093
+    difficulty: intermediate
+    tags: [value, environment, visibility, gotcha]
+    question: |
+      True or false, with justification: @Value("${server.port}") cannot read from OS
+      environment variables because @Value does not do relaxed binding.
+    options:
+      - "True — @Value ignores environment variables entirely"
+      - "False — @Value reads the fully-merged Environment (env vars included); the relaxed-binding limitation is only about the NAME SHAPE, not which sources are visible"
+      - "True — env vars are only visible to @ConfigurationProperties"
+      - "False — @Value reads only system properties, never env vars"
+    answer: 1
+    explanation: |
+      @Value resolves placeholders against the same merged Environment as everything
+      else, so env vars ARE visible. The limitation is purely about name matching: it
+      matches the exact key shape and won't map alternative name forms the way relaxed
+      binding does.
+    ref: "concepts.md#value-annotation"
+
+  - id: configuration-profiles-properties-094
+    difficulty: expert
+    tags: [configuration-properties, maps, merge, sources]
+    question: |
+      application.yml sets app.limits.cpu=2 and app.limits.mem=4Gi; an env var sets
+      APP_LIMITS_CPU=8 (higher precedence). For a Map<String,String> limits, what is
+      the resulting map?
+    options:
+      - "{cpu=8} — the higher-precedence source replaces the whole map"
+      - "{cpu=8, mem=4Gi} — maps merge per key across sources, so cpu is overridden while mem survives"
+      - "{cpu=2, mem=4Gi} — env vars cannot bind map keys"
+      - "{} — conflicting map definitions cancel out"
+    answer: 1
+    explanation: |
+      Unlike lists (replaced wholesale), maps MERGE per key across sources: the env var
+      overrides the cpu entry while the mem entry from the file is preserved. Note the
+      env-var key APP_LIMITS_CPU canonicalizes to the 'cpu' map key here.
+    ref: "concepts.md#configurationproperties-and-type-safe-binding"
+
+  - id: configuration-profiles-properties-095
+    difficulty: advanced
+    tags: [validation, constructor-binding, jakarta, cascade]
+    question: |
+      A record-based @Validated @ConfigurationProperties has a nested record component
+      with its own @Min constraint. What is needed for the nested constraint to be
+      enforced, and when does validation run?
+    options:
+      - "Nothing; nested validation always cascades for records"
+      - "@Valid on the nested component to cascade, with validation running against the constructed immutable object after binding"
+      - "@Validated must be repeated on the nested record, and validation runs before binding"
+      - "Nested validation is impossible with constructor binding"
+    answer: 1
+    explanation: |
+      JSR-303 cascading requires @Valid on the nested field/component regardless of
+      whether binding is setter- or constructor-based. With constructor binding the
+      object is built first, then validated; a failure aborts startup (fail-fast).
+    ref: "concepts.md#validation-of-configuration-properties"
+
+  - id: configuration-profiles-properties-096
+    difficulty: expert
+    tags: [profiles, programmatic, additive, ordering]
+    question: |
+      SpringApplication.setAdditionalProfiles("audit") is called and the launch also
+      passes --spring.profiles.active=prod. What is the resulting active-profile set?
+    options:
+      - "Only prod; programmatic profiles are overridden by command-line"
+      - "Only audit; programmatic profiles replace command-line"
+      - "prod AND audit; setAdditionalProfiles ADDS to (does not replace) the profiles activated by other means"
+      - "Startup fails because two activation mechanisms conflict"
+    answer: 2
+    explanation: |
+      setAdditionalProfiles is additive by design (note the name): it layers audit on
+      top of whatever else activates profiles, so both prod (from the CLI) and audit are
+      active. To replace rather than add, you'd manipulate ConfigurableEnvironment
+      directly.
+    ref: "concepts.md#active-and-default-profiles"
+
+  - id: configuration-profiles-properties-097
+    difficulty: advanced
+    tags: [config-data, import, once, dedup]
+    question: |
+      spring.config.import=optional:classpath:shared.properties is declared in both
+      application.properties and application-dev.properties (dev active). How many times
+      is shared.properties actually imported into the Environment?
+    options:
+      - "Twice, once per declaring document, with the later one winning"
+      - "Once — an import is only processed a single time no matter how many times it is declared"
+      - "Zero, because duplicate imports cancel"
+      - "Three times, including a default re-scan"
+    answer: 1
+    explanation: |
+      Boot deduplicates imports: a given import location is processed only once
+      regardless of how many documents declare it, so shared.properties contributes a
+      single PropertySource.
+    ref: "concepts.md#config-data-files-and-location-precedence"
+
+  - id: configuration-profiles-properties-098
+    difficulty: expert
+    tags: [concurrency, environment, thread-safety, mutation]
+    question: |
+      Which statement about thread-safety of configuration access in a running Boot app
+      is most accurate?
+    options:
+      - "Environment.getProperty is not thread-safe and must be synchronized by callers"
+      - "Concurrent Environment.getProperty reads are safe, but mutating getPropertySources() from multiple threads at runtime is not safe and is discouraged"
+      - "@ConfigurationProperties setters should be called at runtime to refresh values across threads"
+      - "The Environment rebuilds itself on every getProperty call, so staleness is impossible"
+    answer: 1
+    explanation: |
+      After startup the Environment and its PropertySources are effectively read-only;
+      concurrent getProperty reads are safe. Mutating the MutablePropertySources list at
+      runtime from multiple threads is not thread-safe and should be avoided outside
+      controlled hooks. Setter-bound properties should be treated as write-once at
+      binding time.
+    ref: "concepts.md#concurrency-thread-safety-and-refresh"

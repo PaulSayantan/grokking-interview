@@ -465,6 +465,215 @@ the **browser**, not the server (server just declares what's allowed via headers
 
 ---
 
+## Exception handling & @ControllerAdvice
+
+Spring MVC turns exceptions into responses through an ordered chain of
+`HandlerExceptionResolver`s. Boot registers (in order):
+
+1. `ExceptionHandlerExceptionResolver` — dispatches to `@ExceptionHandler` methods
+   (local to a controller, then `@ControllerAdvice`).
+2. `ResponseStatusExceptionResolver` — handles `@ResponseStatus`-annotated
+   exceptions and `ResponseStatusException`.
+3. `DefaultHandlerExceptionResolver` — maps standard Spring MVC exceptions
+   (e.g. `HttpRequestMethodNotSupportedException` → 405,
+   `HttpMediaTypeNotAcceptableException` → 406, `MethodArgumentNotValidException` → 400).
+
+```java
+@RestControllerAdvice
+class ApiExceptionHandler extends ResponseEntityExceptionHandler {
+  @ExceptionHandler(EntityNotFoundException.class)
+  ProblemDetail notFound(EntityNotFoundException ex) {
+    var pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+    pd.setType(URI.create("https://api.example.com/errors/not-found"));
+    return pd;                                   // RFC 9457 body, 404
+  }
+}
+```
+
+**Ordering / resolution rules (frequently tested):**
+- A **controller-local** `@ExceptionHandler` wins over a `@ControllerAdvice` one
+  for the same exception. Among advices, `@Order`/`Ordered`/`@Priority` decides
+  precedence.
+- `@ExceptionHandler` resolution picks the **most specific** exception type. If a
+  handler method itself throws, the new exception is **not** re-dispatched through
+  the resolvers — it propagates to the container (risk of a raw 500).
+- `@ExceptionHandler` only sees exceptions thrown **after** the handler was
+  selected — an exception thrown inside a `Filter` (e.g. Spring Security) never
+  reaches `@ControllerAdvice`; it must be handled by an `AuthenticationEntryPoint`
+  / filter-level error handling.
+- `@ResponseStatus` on a custom exception makes the container use `sendError`,
+  which triggers a **forward to `/error`** (`BasicErrorController` in Boot) rather
+  than direct body writing. Throwing `ResponseStatusException` is the programmatic
+  equivalent without a dedicated exception class.
+- `ResponseEntityExceptionHandler` (extend it in an advice) centralizes handling of
+  the built-in Spring MVC exceptions and, since Spring 6, renders `ProblemDetail`.
+
+**ProblemDetail (RFC 9457, Spring 6):** `application/problem+json` with fields
+`type`, `title`, `status`, `detail`, `instance` plus custom properties. Enable the
+built-in exception → ProblemDetail conversion with
+`spring.mvc.problemdetails.enabled=true`.
+
+---
+
+## Bean validation & method validation
+
+Two distinct validation paths exist and they throw **different** exceptions —
+a classic senior trap:
+
+| Scenario | Exception | Default status |
+|---|---|---|
+| `@Valid`/`@Validated` on a `@RequestBody`/`@ModelAttribute`/`@RequestPart` object | `MethodArgumentNotValidException` (subclass of `BindException`) | 400 |
+| Constraint annotations (`@Min`, `@NotBlank`, …) directly on `@RequestParam`/`@PathVariable`/`@RequestHeader` | `HandlerMethodValidationException` (Spring 6.1+) / historically `ConstraintViolationException` | 400 |
+
+- **Pre-6.1**: constraints on simple params only fired if the controller class was
+  annotated `@Validated` (method validation via an AOP proxy), producing a
+  `ConstraintViolationException` that, without a handler, surfaced as **500**.
+- **Spring Framework 6.1+**: MVC has **built-in** method validation. Constraints on
+  method parameters are detected and raise `HandlerMethodValidationException`
+  (→ 400) **without** a class-level `@Validated`. In fact you should *remove*
+  class-level `@Validated` to use the built-in support; leaving it reverts to the
+  older AOP-proxy path (`ConstraintViolationException`).
+- `@Valid` alone does **not** trigger method validation — it only cascades into a
+  nested object. But a plain constraint (e.g. `@NotNull`) on a parameter does.
+- If a `BindingResult`/`Errors` parameter immediately follows the validated
+  argument, Spring passes control to the method with the errors instead of
+  throwing — you inspect `bindingResult.hasErrors()` yourself.
+- Groups: `@Validated(OnCreate.class)` selects validation groups; `@Valid` cannot.
+
+---
+
+## Async request processing
+
+Spring MVC async is built on Servlet 3+ `request.startAsync()`: the controller
+returns an async handle, the **original container thread is released back to the
+pool** (the whole filter→DispatcherServlet chain unwinds), and later the result
+triggers an **`ASYNC` dispatch** onto a fresh container thread that re-maps the
+handler but uses the stored value instead of re-invoking it.
+
+| Return type | Controller runs on | Result produced on |
+|---|---|---|
+| `Callable<T>` / `WebAsyncTask<T>` | container thread (just returns the task) | Spring's `AsyncTaskExecutor` thread |
+| `DeferredResult<T>` | container thread | **any** app/external thread calling `setResult`/`setErrorResult` |
+| `ResponseBodyEmitter` / `SseEmitter` | container thread | any thread calling `emitter.send()` |
+| `StreamingResponseBody` | container thread | executor thread writing raw `OutputStream` |
+| `Mono`/`Flux` (via ReactiveAdapterRegistry) | container thread | writes still **blocking** on the async executor (not WebFlux non-blocking I/O) |
+
+**Gotchas:**
+- Filters must be `asyncSupported=true` and mapped for the `ASYNC` dispatch or the
+  async dispatch breaks. Boot's registration does this automatically.
+- Interceptors implementing `AsyncHandlerInterceptor` get
+  `afterConcurrentHandlingStarted` on the initial request **instead of**
+  `postHandle`/`afterCompletion`; those run later on the async dispatch. A plain
+  timing interceptor using `ThreadLocal` set in `preHandle` and read in
+  `afterCompletion` will read from the **wrong thread** under async.
+- `@Transactional`/`SecurityContext`/`RequestContextHolder` are `ThreadLocal`-based;
+  they do **not** automatically propagate to a `Callable`/`@Async` thread. Use
+  context-propagation (e.g. `DelegatingSecurityContextRunnable`, Micrometer context
+  propagation) if needed.
+- The default MVC async executor (`SimpleAsyncTaskExecutor`) creates a new thread
+  per task and is **not** production-suitable under load; configure a bounded pool
+  via `WebMvcConfigurer#configureAsyncSupport`.
+- On client disconnect the servlet API gives no callback; a write to a dead
+  `SseEmitter` throws `IOException` — do **not** then call `complete()`; Spring
+  fires `completeWithError` via an `AsyncListener`.
+
+---
+
+## HttpMessageConverter & Jackson internals
+
+`@RequestBody`/`@ResponseBody` bodies flow through an ordered list of
+`HttpMessageConverter`s. Selection: for reading, the first converter whose
+`canRead(type, contentType)` is true; for writing, Spring walks the client's
+`Accept` values against each converter's `canWrite` + supported media types.
+
+- Order matters: `MappingJackson2HttpMessageConverter` is registered before/after
+  string and byte converters. Adding a custom converter via
+  `WebMvcConfigurer#extendMessageConverters` (append/reorder) vs.
+  `configureMessageConverters` (**replaces the entire default list** — usually not
+  what you want) is a common mistake.
+- **Jackson defaults in Boot**: `FAIL_ON_UNKNOWN_PROPERTIES` is **disabled** by Boot
+  (unknown JSON fields are ignored, not rejected) even though raw Jackson defaults
+  to `true`. `WRITE_DATES_AS_TIMESTAMPS` is disabled (ISO-8601 via
+  `jackson-datatype-jsr310`, which Boot auto-registers). A single shared
+  `ObjectMapper` is auto-configured; customize with
+  `Jackson2ObjectMapperBuilderCustomizer` rather than replacing the bean.
+- `@JsonView`, `@JsonIgnore`, and mixins let one DTO serialize differently per
+  endpoint; `@JsonComponent` registers serializers as beans.
+- The `ObjectMapper` is thread-safe for read/write once configured; reconfiguring it
+  at runtime is not.
+- Streaming huge responses: returning a big `List` buffers/serializes fully; prefer
+  `StreamingResponseBody` or Jackson's streaming to bound memory.
+
+---
+
+## Controller thread-safety
+
+By default a `@Controller`/`@RestController` bean is a **singleton** and is invoked
+concurrently on many container threads. Therefore controllers **must be stateless**:
+mutable instance fields shared across requests are a data race.
+
+- Request-scoped state belongs in method-local variables, `@RequestScope` beans, or
+  `ThreadLocal`s that are cleaned up. An `int counter` field on a controller is a
+  classic bug (lost updates, visibility issues).
+- Injected collaborators (services, repositories) should themselves be thread-safe
+  singletons.
+- Method parameters (`@PathVariable`, `@RequestBody` object, etc.) are per-invocation
+  and safe.
+- `@Scope("request")`/`@Scope("prototype")` on a controller changes lifecycle but is
+  rarely needed and costs a proxy per request.
+- `HttpServletRequest`/`HttpServletResponse` injected as method params are the
+  current request's objects; storing them in fields for later use across requests is
+  a bug.
+
+---
+
+## Ambiguous mappings & argument resolution
+
+When multiple handler methods could match a request, `RequestMappingInfoHandlerMapping`
+uses `RequestMappingInfo` comparison to pick the **most specific** by, roughly:
+patterns (fewer wildcards / more literal characters win) → HTTP method → params →
+headers → `consumes` → `produces`. Two mappings that are equally specific for a
+concrete request throw `IllegalStateException: Ambiguous handler methods` at request
+time.
+
+- A more specific path template (`/users/me`) wins over `/users/{id}` for the
+  request `/users/me` even though both structurally match.
+- `produces`/`consumes` narrowing affects specificity and can turn what looks like a
+  conflict into two distinct mappings selected by `Accept`/`Content-Type`.
+- **Argument resolver ordering**: `HandlerMethodArgumentResolver`s are consulted in
+  order; the first whose `supportsParameter` returns true wins. Custom resolvers
+  added via `addArgumentResolvers` run **after** the built-ins, so you cannot
+  override how `@RequestParam` is resolved by adding one — you'd have to replace the
+  adapter's list.
+- A `String` parameter with no annotation is treated as a `@RequestParam` by the
+  default resolver order only in specific cases; an unannotated complex type is
+  treated as a `@ModelAttribute` (bound from request params), which surprises people
+  expecting `@RequestBody` behavior.
+- Trailing-slash matching (`/users` vs `/users/`) is **no longer** matched by default
+  since Spring 6 (`setUseTrailingSlashMatch` removed/deprecated); a trailing slash
+  now yields 404 unless you add an explicit redirect.
+
+---
+
+## ETags & conditional requests
+
+Conditional requests let clients cache and avoid redundant transfers.
+
+- `ShallowEtagHeaderFilter` computes an MD5 `ETag` over the buffered response body;
+  if the client's `If-None-Match` matches, it returns **304 Not Modified** with an
+  empty body. "Shallow" = it still generates the body then discards it, so it saves
+  bandwidth but **not** server work.
+- `ResponseEntity` supports `.eTag("...")` and `.lastModified(...)`; combine with
+  `request.checkNotModified(...)` (via `ServletWebRequest`) to short-circuit before
+  building the body — this is the way to also save computation.
+- `If-Match` / `If-Unmodified-Since` enable **optimistic concurrency** on writes:
+  a PUT with a stale `If-Match` ETag should return **412 Precondition Failed**,
+  preventing lost updates.
+- ETags interact with compression/proxies; a weak ETag (`W/"..."`) signals
+  semantic (not byte-for-byte) equivalence.
+
+---
+
 ## Common follow-up questions
 
 - **Walk me through what happens from the moment a request hits Tomcat until the
@@ -486,6 +695,18 @@ the **browser**, not the server (server just declares what's allowed via headers
   forbids it; use `allowedOriginPatterns`.)
 - **Difference between 401 and 403? 400 vs 422? 302 vs 307 vs 308?**
 - **How does content negotiation pick XML vs JSON, and what returns 406 vs 415?**
+- **Why does a `@Min` on a `@RequestParam` return 500 in one app and 400 in another?**
+  (Pre-6.1 AOP `@Validated` path throws `ConstraintViolationException` → 500 if
+  unhandled; Spring 6.1 built-in method validation throws
+  `HandlerMethodValidationException` → 400.)
+- **Under async (`Callable`/`DeferredResult`), which thread runs the controller vs
+  produces the result, and why does my `ThreadLocal` timing interceptor break?**
+- **A counter field on a `@RestController` gives wrong totals — why?** (Singleton
+  bean invoked concurrently; controllers must be stateless.)
+- **Why doesn't my `@ControllerAdvice` catch the exception Spring Security throws?**
+  (It's thrown in the filter chain, before the DispatcherServlet selects a handler.)
+- **`/users/` returns 404 after upgrading to Spring Boot 3 — what changed?**
+  (Trailing-slash matching is off by default in Spring 6.)
 
 ## References
 
@@ -503,6 +724,12 @@ the **browser**, not the server (server just declares what's allowed via headers
   https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods ,
   https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
 - RFC 9110 (HTTP Semantics — methods, status, idempotency); RFC 9457 (Problem Details).
+- Spring MVC method validation:
+  https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html
+- Spring MVC async requests:
+  https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-async.html
+- Error handling / ProblemDetail:
+  https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html
 - Baeldung: PUT vs PATCH (https://www.baeldung.com/http-put-patch-difference-spring),
   ResponseEntity (https://www.baeldung.com/spring-response-entity),
   REST API versioning (https://www.baeldung.com/rest-versioning).

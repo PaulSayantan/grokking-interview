@@ -122,6 +122,16 @@ If you use the simple `subscribe(consumer)` overloads, Reactor requests
 `Long.MAX_VALUE` (unbounded demand — effectively "no backpressure applied by
 this subscriber").
 
+**Prefetch and demand batching (internals):** Even when a downstream subscriber
+requests `Long.MAX_VALUE`, most Reactor operators do **not** propagate an
+unbounded request upstream. Operators that queue items (`flatMap`, `publishOn`,
+`concatMap`, etc.) request a bounded **prefetch** amount (default
+`Queues.SMALL_BUFFER_SIZE` = **256**), and replenish demand once ~75% of a batch
+has been consumed (the "limit"/replenish threshold). This is why an operator like
+`publishOn` needs an internal queue sized to the prefetch and why tuning prefetch
+matters for throughput vs memory. So "unbounded downstream demand" does not mean
+"the source is asked for everything at once."
+
 **Backpressure strategies** when a source cannot be slowed (e.g., mouse events,
 `Flux.create`): `onBackpressureBuffer` (queue, risk OOM), `onBackpressureDrop`
 (discard overflow), `onBackpressureLatest` (keep newest), `onBackpressureError`
@@ -166,6 +176,24 @@ Flux<User> users = idFlux.flatMap(id -> userRepo.findById(id));  // async, unord
 **Trap:** using `map` where the function returns a publisher yields
 `Flux<Mono<T>>`; you need `flatMap`. Conversely using `flatMap` for a pure
 synchronous transform is wasteful.
+
+**`flatMap` concurrency (senior detail):** `flatMap` has a `concurrency`
+parameter that defaults to `Queues.SMALL_BUFFER_SIZE` = **256** — meaning it
+subscribes to at most 256 inner publishers simultaneously. This is a hidden
+throttle: fan-out over a large `Flux` of IDs will cap in-flight downstream calls
+at 256 (protecting the downstream), and a lower explicit value
+(`flatMap(fn, 8)`) is a common way to bound concurrent DB/HTTP calls. `concatMap`
+is effectively `flatMap` with concurrency 1 plus ordering. `flatMapSequential`
+subscribes eagerly (up to `concurrency`) but buffers to emit in subscription
+order — so a slow first inner **holds back** later completed inners (potential
+memory growth), unlike `flatMap` which emits the instant any inner produces.
+
+**`switchMap` vs `concatMap` under bursts:** `switchMap` cancels the previous
+inner on each new source item, so under a rapid burst it may only ever complete
+the *last* inner — earlier work is cancelled mid-flight (side effects like a DB
+write started in the cancelled inner may or may not have committed). `concatMap`
+runs every inner to completion in order, so it never drops work but can build a
+backlog.
 
 **`zip`** — combines the *latest* item from each of several publishers pairwise
 into a tuple/combined value, completing when the shortest completes. Great for
@@ -400,6 +428,35 @@ operators. Netty event-loop threads should only run non-blocking work.
 `BlockHound` is a tool that instruments the JVM to **detect blocking calls on
 non-blocking threads** at runtime — a favorite for catching pitfalls in tests.
 
+**Multiple `subscribeOn` (gotcha):** Only the `subscribeOn` **closest to the
+source** takes effect for where subscription begins; a second `subscribeOn`
+further downstream is essentially ignored for thread placement of the source (it
+changes the thread on which the subscription signal propagates upstream from that
+point, but the earlier one has already switched it). By contrast you can chain
+several `publishOn` calls and each one re-routes everything below it.
+
+**`subscribeOn` does NOT parallelize:** A single `subscribeOn` moves the whole
+chain to *one* worker thread of the pool — it does not run operators in parallel.
+For real parallelism use `flatMap` with inner publishers each on
+`subscribeOn(Schedulers.parallel()/boundedElastic())`, or the `ParallelFlux` API
+via `.parallel(n).runOn(scheduler)`.
+
+**`publishOn` and blocking (subtle):** `publishOn(boundedElastic())` shifts
+*downstream* operators onto a blocking-safe pool, so blocking code placed *after*
+it is safe — but everything *upstream* of the `publishOn` still runs wherever it
+was (possibly the event loop). Placement is load-bearing: to protect a blocking
+call, ensure that call executes downstream of the `publishOn` (or wrap it with
+`subscribeOn` on its own inner publisher).
+
+**Thread affinity within a chain:** Reactor guarantees signals for one subscriber
+are serialized, but a chain can hop threads at each `publishOn`. Never assume an
+operator sees the same thread as the one before it; capture context explicitly
+rather than relying on `ThreadLocal`.
+
+**Non-blocking sleep:** `Thread.sleep` blocks the loop; use
+`Mono.delay(Duration)` / `.delayElement(...)` which schedule on
+`Schedulers.parallel()` via a timer and never block.
+
 ---
 
 ## Error handling in reactive chains
@@ -432,6 +489,39 @@ service.find(id)
 emission errors. `onErrorContinue` requires operator support and can be
 surprising — prefer `onErrorResume` inside `flatMap` for per-item recovery.
 
+**`onErrorContinue` vs `onErrorResume` (deep distinction):** `onErrorResume`
+handles the error signal *conventionally* — it terminates the failing sequence
+and switches to a fallback publisher. `onErrorContinue` is fundamentally
+different: it reaches **upstream** via the Reactor `Context` and instructs
+compatible operators (like `map`/`flatMap`) to **drop the offending element and
+continue** the same sequence, without a terminal signal. Because it mutates
+upstream behavior through context, it only works with operators that opted in,
+and it can "leak" past a `flatMap` boundary into inner publishers unexpectedly.
+Rule of thumb: to recover the *whole* stream, use `onErrorResume`; to skip
+*individual* bad items, wrap the risky call in `flatMap(x ->
+process(x).onErrorResume(...))` rather than relying on `onErrorContinue`.
+
+**`retry` resubscribes the COLD source (gotcha):** `retry`/`retryWhen` work by
+**re-subscribing** to the upstream. On a cold publisher (e.g. a fresh WebClient
+call) that re-executes the request — good. But if upstream is hot or has
+side-effects already performed, retry won't "rewind" them. Also, retry counts the
+number of *retries* not total attempts: `retry(3)` = up to 4 executions.
+`Retry.backoff` adds jitter by default (50%) to avoid thundering-herd
+resubscription.
+
+**Error inside `flatMap` cancels siblings:** If one inner publisher in a
+`flatMap` errors and you don't handle it inside the inner, the error propagates
+and Reactor **cancels the other in-flight inners** and terminates the outer
+`Flux`. To make per-item failures isolated, attach `onErrorResume`/`onErrorReturn`
+to the *inner* publisher so the outer sequence never sees the error.
+
+**`ResponseStatusException` vs `@ExceptionHandler`:** In WebFlux you still use
+`@ExceptionHandler` / `@ControllerAdvice` (they return reactive types) or a
+custom `WebExceptionHandler`/`AbstractErrorWebExceptionHandler`. Throwing
+imperatively inside a lambda is fine only if it happens during assembly;
+emission-time failures must be signalled via `Mono.error(...)` so they travel as
+`onError`, not as a thrown exception that escapes the reactive boundary.
+
 ---
 
 ## Reactive data access and context
@@ -454,6 +544,29 @@ Reactor 3.5 / Micrometer, `ContextPropagation` bridges `ThreadLocal`s.
 **Transactions:** reactive apps use `ReactiveTransactionManager` +
 `TransactionalOperator` (or `@Transactional` on reactive types with a reactive
 tx manager). The classic JPA `PlatformTransactionManager` is blocking.
+
+**Reactive `@Transactional` binds to the SUBSCRIBER context, not a
+`ThreadLocal`:** In blocking Spring, transaction/connection state lives in a
+`ThreadLocal`; in reactive Spring the R2DBC connection and transaction context
+ride in the Reactor `Context`. This means a `@Transactional` reactive method only
+governs the operations that are part of the **same reactive chain** it returns.
+If you call `.subscribe()` on a nested publisher (breaking the chain into an
+independent subscription with a fresh context), that work runs **outside** the
+transaction. Always compose with `flatMap`/`then` so everything shares one
+subscription and one transactional `Context`.
+
+**`Context` is immutable and written bottom-up:** `contextWrite` affects
+operators **upstream** of it (the context is assembled from the subscriber
+downward and read as it flows up during subscription), so a value written by
+`contextWrite` near the end of a chain is visible to `deferContextual` earlier in
+the chain. This "reads backwards" behavior is a classic interview trap.
+
+**Micrometer Context Propagation (Boot 3 / Reactor 3.5+):** the
+`context-propagation` library plus `Hooks.enableAutomaticContextPropagation()`
+(default-on for WebFlux in recent Boot 3.x) bridges registered `ThreadLocal`
+accessors (MDC, Micrometer tracing, Security) to/from the Reactor `Context`
+automatically across `publishOn`/`subscribeOn` boundaries — reducing the need for
+manual `contextWrite`.
 
 ---
 
@@ -500,6 +613,176 @@ Mono<Data> okBlocking() {
 - **`subscribe()` swallowing errors** — always provide an error consumer or use
   `.onError*` operators; unhandled errors go to a dropped-error hook.
 - Detect blocking in tests with **BlockHound**.
+
+---
+
+## Assembly time vs subscription time vs runtime
+
+A frequently-probed mental model: a Reactor pipeline has **three distinct
+phases**, and confusing them causes real bugs.
+
+- **Assembly time** — when the operator chain is *built* (each operator wraps the
+  previous in a new `Publisher`). Runs eagerly, on the declaring thread. Code
+  written *directly* in the method body (not inside a lambda/`defer`) executes
+  here, once, regardless of subscriptions.
+- **Subscription time** — when `subscribe()` walks the chain from the bottom up,
+  wiring `onSubscribe` and propagating the Reactor `Context` upstream. Happens
+  once per subscriber (per subscription for cold sources).
+- **Runtime** — the actual `onNext`/`onError`/`onComplete` signal flow downstream.
+
+```java
+Mono<Long> m = Mono.just(System.currentTimeMillis()); // captured at ASSEMBLY
+Mono<Long> d = Mono.defer(() ->
+        Mono.just(System.currentTimeMillis()));         // captured per SUBSCRIPTION
+```
+
+`Mono.just(expensiveCall())` runs `expensiveCall()` **eagerly at assembly** — a
+classic bug when people expect laziness. Wrap it in `Mono.fromCallable(...)` or
+`Mono.defer(...)` so it executes lazily per subscription. Likewise `Flux.just`,
+`Mono.error(new Exc())` all evaluate their argument at assembly time; use `defer`
+to make the value/exception per-subscription.
+
+---
+
+## Sinks, multicasting, and hot streams
+
+`Sinks` (Reactor 3.4+, replacing the deprecated `Processor`/`DirectProcessor`
+family) are the programmatic way to **push** signals into a reactive stream —
+building a hot publisher from an imperative source.
+
+```java
+Sinks.Many<Event> sink = Sinks.many().multicast().onBackpressureBuffer();
+Flux<Event> flux = sink.asFlux();
+// producer side (thread-safe emit with explicit failure handling):
+Sinks.EmitResult r = sink.tryEmitNext(event);
+```
+
+Key variants:
+
+| Factory | Semantics |
+|---|---|
+| `Sinks.many().multicast()` | fan-out to N subscribers; late subscribers miss prior items (warm-up buffer only until first subscriber) |
+| `Sinks.many().unicast()` | at most **one** subscriber; buffers until it subscribes |
+| `Sinks.many().replay()` | replays history (all or last N) to every subscriber |
+| `Sinks.one()` | a single-value hot `Mono` |
+
+**`emitNext` vs `tryEmitNext`:** `tryEmitNext` returns an `EmitResult` you must
+inspect (e.g. `FAIL_NON_SERIALIZED`, `FAIL_OVERFLOW`, `FAIL_TERMINATED`).
+`emitNext(v, EmitFailureHandler)` throws/handles for you. Because Reactive
+Streams forbids concurrent `onNext`, sinks detect concurrent emission and fail
+with `FAIL_NON_SERIALIZED` rather than corrupting the stream — you must serialize
+emissions yourself (or use `EmitFailureHandler.busyLooping`).
+
+**`share()` / `publish().refCount()` / `replay()`** turn a cold `Flux` hot:
+`share()` = `publish().refCount(1)` — the source is subscribed once when the
+first subscriber arrives and cancelled when the last leaves. `cache()` replays to
+all. These are how you avoid re-running an expensive cold source per subscriber.
+
+---
+
+## WebClient internals, connection pooling, and timeouts
+
+`WebClient` is backed by Reactor Netty's `HttpClient`, which owns a **shared
+connection pool** (`ConnectionProvider`) and the event-loop group. Getting this
+wrong is a common production incident.
+
+- **Reuse one `WebClient`/`ConnectionProvider`.** Building a `WebClient` per
+  request (especially `WebClient.create()` in a hot path) can spin up new
+  resources and defeat pooling. Inject the auto-configured `WebClient.Builder`.
+- **Timeout layers** (all distinct): connection-acquire timeout (pool), TCP
+  connect timeout (`CONNECT_TIMEOUT_MILLIS`), response timeout
+  (`responseTimeout`), read/write idle timeouts (`ReadTimeoutHandler`), and the
+  Reactor `.timeout(Duration)` operator (cancels the subscription). Relying only
+  on `.timeout()` cancels the Mono but the underlying connection handling is
+  governed by Netty; configure both.
+- **`retrieve()` vs `exchangeToMono()`:** `exchange()` is **deprecated** because
+  the returned `ClientResponse` must have its body consumed/released or the
+  connection leaks back-pressuring the pool to exhaustion. `exchangeToMono`
+  guarantees release. `retrieve()` auto-handles the body.
+- **Pool exhaustion symptom:** `PoolAcquirePendingLimitException` /
+  acquire timeouts under load usually mean responses aren't being consumed,
+  timeouts are too long, or `maxConnections` is too low — not that you need more
+  threads.
+- WebClient works fine in an MVC app; `.block()` on it is legal on servlet
+  threads but forbidden on event-loop threads.
+
+---
+
+## Testing reactive code: StepVerifier and virtual time
+
+`StepVerifier` subscribes to a publisher and asserts the exact signal sequence;
+`.verify()` (or `verifyComplete`/`verifyError`) is **terminal and blocking** —
+nothing is asserted until you call it (forgetting it is a silent no-op test).
+
+```java
+StepVerifier.create(service.find("1"))
+    .expectNext(user)
+    .expectComplete()
+    .verify(Duration.ofSeconds(1));
+```
+
+**Virtual time** tests time-based operators without real waiting:
+
+```java
+StepVerifier.withVirtualTime(() -> Flux.interval(Duration.ofHours(1)).take(2))
+    .thenAwait(Duration.ofHours(2))   // fast-forwards the virtual clock
+    .expectNext(0L, 1L)
+    .verifyComplete();
+```
+
+The supplier lambda is required so the time-based publisher is **assembled inside
+the virtual-time scheduler's scope**. `StepVerifier.create(...).expectNext(...)`
+also supports `.expectNextCount`, `.thenRequest(n)` (to drive backpressure), and
+`.expectError(Class)`. `WebTestClient` tests at the HTTP layer (bind to a
+controller, router function, or a running server).
+
+---
+
+## Streaming, SSE, WebSocket, and JSON serialization
+
+WebFlux distinguishes how a `Flux` response body is serialized by **media type**:
+
+- `application/json` — a `Flux<T>` is rendered as a **single JSON array**; the
+  server still buffers/aggregates conceptually and emits one array. Backpressure
+  applies but the client sees one document.
+- `application/x-ndjson` (newline-delimited JSON) / `text/event-stream` — each
+  item is flushed as it is produced, enabling true streaming and per-item
+  backpressure over the connection.
+- `text/event-stream` (SSE) — use `Flux<ServerSentEvent<T>>` or a `Flux<T>` with
+  `produces = MediaType.TEXT_EVENT_STREAM_VALUE`. `ServerSentEvent` lets you set
+  `id`, `event`, `retry`, and comments.
+
+**WebSocket** uses `WebSocketHandler` with `handle(WebSocketSession)` returning
+`Mono<Void>`; you compose `session.receive()` (inbound `Flux<WebSocketMessage>`)
+and `session.send(...)`. The returned `Mono<Void>` represents session lifetime —
+completing it closes the socket, so you typically `.then()` the send/receive
+pipelines.
+
+**Backpressure over HTTP:** for a streaming media type, Reactor Netty maps
+downstream demand onto TCP flow control — if the client (or a slow consumer)
+stops reading, the OS TCP window fills, Netty stops reading, and the server
+`Flux` sees reduced demand. This end-to-end propagation only holds for streaming
+media types, not the single-array JSON case.
+
+---
+
+## Cancellation and resource cleanup
+
+Cancellation is a first-class signal that flows **upstream** (opposite of data).
+When a WebFlux client disconnects, the framework **cancels** the subscription; a
+well-behaved source (WebClient call, R2DBC query) then aborts its work.
+
+- `switchMap`, `timeout`, `take(n)`, and downstream `cancel()` all trigger
+  upstream cancellation. `flatMap` cancels its inners when the outer is cancelled
+  or errors.
+- Use `doOnCancel`, `doFinally(signalType -> ...)` (fires on complete, error, or
+  cancel), and `using`/`usingWhen` for resource acquisition/release bound to the
+  reactive lifecycle.
+- **Gotcha:** side effects started in a cancelled inner (e.g. a partial DB write)
+  are **not** rolled back by cancellation alone — cancellation stops further
+  signals, it does not undo work. Design idempotent or transactional operations.
+- A hanging request that never completes and is never cancelled ties up a Netty
+  connection; always bound with `timeout`.
 
 ---
 

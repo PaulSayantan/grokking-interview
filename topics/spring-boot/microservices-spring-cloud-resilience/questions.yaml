@@ -1031,3 +1031,843 @@ questions:
       Ribbon (client LB) -> Spring Cloud LoadBalancer; Hystrix (circuit breaker) -> Resilience4j;
       Zuul 1 (gateway) -> Spring Cloud Gateway. These Netflix components are in maintenance/EOL.
     ref: "concepts.md#client-side-load-balancing-spring-cloud-loadbalancer"
+
+  - id: microservices-spring-cloud-resilience-061
+    difficulty: advanced
+    tags: [microservices, availability, latency, call-chain]
+    question: |
+      A request fans out synchronously through a chain A -> B -> C -> D, where each service has
+      99.9% availability and a p99 latency of 150ms for its own hop. Ignoring parallelism, what
+      is the most accurate staff-level observation?
+    options:
+      - "Composite availability is roughly the product (~99.6%), and p99 latencies compound down the chain, so a deep synchronous chain multiplies both failure probability and tail latency"
+      - "Overall availability improves because more services share the load"
+      - "Availability is determined solely by the least-available service, and latency is the max of the four hops"
+      - "Because calls are over HTTP, availability is guaranteed to be 100% as long as the network is up"
+    answer: 0
+    explanation: |
+      Serial dependencies multiply: 0.999^4 ~ 0.996, and each hop's latency adds up (tail
+      latencies compound and can be worse than a simple sum due to variance). This is why deep
+      synchronous chains are discouraged in favor of async/event choreography or aggregation.
+    ref: "concepts.md#monolith-vs-microservices-trade-offs"
+
+  - id: microservices-spring-cloud-resilience-062
+    difficulty: advanced
+    tags: [microservices, shared-library, coupling, distributed-monolith]
+    question: |
+      A platform team ships a "common-domain" JAR containing shared entity classes and business
+      rules that every service depends on. Why is this a staff-level smell?
+    options:
+      - "Shared JARs are forbidden by the Java Language Specification"
+      - "It improves independent deployability because everyone gets the same code"
+      - "It creates compile-time lockstep coupling: a change to shared domain logic forces coordinated rebuilds/redeploys of all services — a distributed monolith at the build level"
+      - "It only matters if the JAR is larger than 10MB"
+    answer: 2
+    explanation: |
+      Sharing domain logic couples services at build time, so they must upgrade in lockstep,
+      destroying independent deployability. Shared code should be limited to stable, generic
+      utilities; domain models should be owned per service (often duplicated deliberately).
+    ref: "concepts.md#monolith-vs-microservices-trade-offs"
+
+  - id: microservices-spring-cloud-resilience-063
+    difficulty: intermediate
+    tags: [strangler-fig, migration]
+    question: |
+      What best describes the Strangler Fig pattern for monolith-to-microservices migration?
+    options:
+      - "Rewrite the entire monolith at once and cut over on a single release date"
+      - "Duplicate the monolith into N copies, one per team"
+      - "Freeze the monolith and never touch it again"
+      - "Incrementally route specific capabilities/paths through a facade to new services while the monolith keeps serving the rest, shrinking the monolith over time"
+    answer: 3
+    explanation: |
+      Strangler Fig extracts bounded contexts incrementally behind a facade/gateway, migrating
+      traffic path-by-path so the monolith is gradually "strangled" — avoiding a risky big-bang
+      rewrite.
+    ref: "concepts.md#monolith-vs-microservices-trade-offs"
+
+  - id: microservices-spring-cloud-resilience-064
+    difficulty: expert
+    tags: [spring-cloud-gateway, global-filter, ordering, reactive]
+    question: |
+      In Spring Cloud Gateway you register two GlobalFilters, F1 with getOrder()=-100 and F2
+      with getOrder()=100. Each logs "PRE" before chain.filter(exchange) and "POST" in
+      .then(...) after it. In what order do the four log lines appear for one request?
+    options:
+      - "F1 PRE, F2 PRE, F2 POST, F1 POST"
+      - "F2 PRE, F1 PRE, F1 POST, F2 POST"
+      - "F1 PRE, F2 PRE, F1 POST, F2 POST"
+      - "F1 PRE, F1 POST, F2 PRE, F2 POST"
+    answer: 0
+    explanation: |
+      The chain is sorted ascending by order for the PRE phase, so F1 (-100) runs before F2
+      (100). The reactive chain then unwinds LIFO, so POST phases run in reverse: F2 POST before
+      F1 POST. Lower order = earlier pre, later post.
+    ref: "concepts.md#api-gateway-spring-cloud-gateway"
+
+  - id: microservices-spring-cloud-resilience-065
+    difficulty: expert
+    tags: [spring-cloud-gateway, response-body, backpressure, streaming]
+    question: |
+      A developer writes a custom post-filter that reads the entire downstream response into a
+      String to redact a field, then rewrites it. Under high load with large payloads the
+      gateway OOMs and back-pressure breaks. What is the correct staff-level explanation/fix?
+    options:
+      - "The gateway is single-threaded; add more threads and the problem disappears"
+      - "Post-filters cannot modify bodies at all, so the code never ran"
+      - "The response body is a streaming Flux<DataBuffer>; fully buffering it defeats back-pressure and can exhaust heap. Use ModifyResponseBody filter with a streaming-aware transform and release DataBuffers"
+      - "Rewriting bodies requires switching the gateway to the servlet stack; there is no reactive option"
+    answer: 2
+    explanation: |
+      In reactive SCG the body is a stream of DataBuffers. Naively collecting it into memory
+      removes back-pressure and risks OOM, plus leaks DataBuffers if not released. The
+      ModifyResponseBody GatewayFilter is the supported, streaming-aware way to transform bodies.
+    ref: "concepts.md#api-gateway-spring-cloud-gateway"
+
+  - id: microservices-spring-cloud-resilience-066
+    difficulty: expert
+    tags: [spring-cloud-gateway, exchange-mutation, headers]
+    question: |
+      A custom filter does `exchange.getRequest().mutate().header("X-Tenant", tenant).build();`
+      then calls `return chain.filter(exchange);`. Downstream never sees X-Tenant. Why?
+    options:
+      - "Headers named X-* are stripped by Netty automatically"
+      - "Request headers are immutable in SCG and cannot be changed at all"
+      - "You must annotate the filter with @Order for mutations to apply"
+      - "mutate()...build() returns a NEW ServerHttpRequest; you must build a mutated exchange (exchange.mutate().request(newRequest).build()) and pass THAT down the chain"
+    answer: 3
+    explanation: |
+      mutate() is copy-on-write and returns a new request object; the original exchange still
+      carries the old request. You must wrap the new request in a mutated exchange and pass the
+      mutated exchange to chain.filter, otherwise the change is discarded.
+    ref: "concepts.md#api-gateway-spring-cloud-gateway"
+
+  - id: microservices-spring-cloud-resilience-067
+    difficulty: advanced
+    tags: [spring-cloud-gateway, x-forwarded-for, security]
+    question: |
+      Your topology is: internet -> external ALB -> Spring Cloud Gateway -> service. The service
+      trusts X-Forwarded-For to identify the client IP for rate limiting. What is the risk and
+      the mitigation?
+    options:
+      - "No risk; X-Forwarded-For is cryptographically signed by browsers"
+      - "The risk is only that the header is too long; truncate it"
+      - "A client can spoof X-Forwarded-For; the trusted edge (ALB/gateway) must overwrite/normalize it and downstreams must trust only the value set by the last trusted proxy, not arbitrary client-supplied values"
+      - "X-Forwarded-For is disabled in SCG so there is nothing to worry about"
+    answer: 2
+    explanation: |
+      Clients can send arbitrary X-Forwarded-For. Only the trusted edge should append/rewrite it;
+      downstreams must use the value written by the last trusted hop (or ALB's own header), not
+      blindly trust the whole chain, or attackers bypass IP-based rate limits.
+    ref: "concepts.md#api-gateway-spring-cloud-gateway"
+
+  - id: microservices-spring-cloud-resilience-068
+    difficulty: expert
+    tags: [eureka, propagation-delay, caches]
+    question: |
+      With all Eureka/LoadBalancer defaults, why can a freshly registered instance take up to
+      ~2 minutes to receive traffic from other services?
+    options:
+      - "Multiple caches stack: the server response cache (~30s), the client registry-fetch interval (~30s), and the load balancer's supplier cache, plus initial registration/heartbeat delay — they sum, not overlap"
+      - "Eureka intentionally sleeps new instances for 2 minutes for warm-up"
+      - "The JVM JIT compiler blocks the instance for 2 minutes"
+      - "DNS TTL is hard-coded to 120 seconds in Eureka"
+    answer: 0
+    explanation: |
+      Registration is eventually consistent through several caches: the server's response cache,
+      each client's periodic delta fetch, and the LB's instance-list cache. In the worst case
+      these delays add up to a couple of minutes with defaults.
+    ref: "concepts.md#service-discovery-eureka"
+
+  - id: microservices-spring-cloud-resilience-069
+    difficulty: expert
+    tags: [eureka, deregistration-gap, graceful-shutdown]
+    question: |
+      During a rolling deploy, callers keep hitting instances that were just terminated,
+      producing connection-refused errors for tens of seconds. What is the root cause and the
+      best mitigation?
+    options:
+      - "Eureka is broken; switch to round-robin DNS"
+      - "The terminated instances did not flush their logs; increase log buffer size"
+      - "The deregistration gap: other clients keep the stale registry entry until their caches expire. Mitigate with explicit deregistration on shutdown, shorter cache/lease intervals, and load-balancer retry-on-next-instance"
+      - "Self-preservation is disabled; enabling it removes the stale entries instantly"
+    answer: 2
+    explanation: |
+      When an instance dies, peers keep the cached entry until it expires and route to the dead
+      host. Explicit cancel-on-shutdown, shorter intervals, and retrying the next instance close
+      the gap. Self-preservation actually worsens it by suppressing eviction.
+    ref: "concepts.md#service-discovery-eureka"
+
+  - id: microservices-spring-cloud-resilience-070
+    difficulty: advanced
+    tags: [eureka, containers, prefer-ip-address]
+    question: |
+      A Dockerized service registers with Eureka but callers get "UnknownHostException" trying
+      to reach it by the registered address. What is the typical fix?
+    options:
+      - "Run each container with --privileged"
+      - "Disable Eureka and hard-code the container name"
+      - "Increase the heartbeat interval to 5 minutes"
+      - "Set eureka.instance.prefer-ip-address=true so it registers its resolvable IP instead of a non-resolvable container hostname"
+    answer: 3
+    explanation: |
+      By default Eureka registers the hostname, which inside containers is often the container id
+      and not resolvable by other hosts. prefer-ip-address=true registers the routable IP,
+      avoiding the resolution failure.
+    ref: "concepts.md#service-discovery-eureka"
+
+  - id: microservices-spring-cloud-resilience-071
+    difficulty: expert
+    tags: [config, refresh-scope, stale-reference]
+    question: |
+      Bean A (a plain @Component singleton) does `this.url = props.getUrl();` in its constructor,
+      where `props` is a @RefreshScope/@ConfigurationProperties bean. After a Git change and
+      POST /actuator/refresh, A still uses the old URL. Why?
+    options:
+      - "A snapshotted the value into its own field at construction; only calls made THROUGH the refresh-scoped proxy see new values. A must read props.getUrl() at call time, not cache it"
+      - "Refresh only works on prototype beans"
+      - "@ConfigurationProperties beans never refresh under any circumstance"
+      - "The refresh endpoint requires a full JVM restart to take effect"
+    answer: 0
+    explanation: |
+      @RefreshScope rebinds the target bean, but a singleton that copied a value into a field at
+      construction keeps the stale copy. Only invocations through the proxy pick up rebound
+      values, so read the property at use time rather than snapshotting it.
+    ref: "concepts.md#distributed-and-centralized-configuration-spring-cloud-config-and-bus"
+
+  - id: microservices-spring-cloud-resilience-072
+    difficulty: advanced
+    tags: [config, refresh-scope, non-refreshable]
+    question: |
+      Which of the following will a POST /actuator/refresh (or busrefresh) most reliably NOT
+      change on a running instance without extra work?
+    options:
+      - "A @Value in a @RefreshScope-annotated bean"
+      - "A field on a @ConfigurationProperties bean"
+      - "A string used by a @RefreshScope bean read at call time"
+      - "The embedded server's HTTP port (server.port) and an already-created connection pool's size"
+    answer: 3
+    explanation: |
+      Things bound once at startup — the server port, an existing DataSource/connection pool —
+      do not change live on refresh. @RefreshScope and @ConfigurationProperties beans are
+      re-bound; the server port requires a restart.
+    ref: "concepts.md#distributed-and-centralized-configuration-spring-cloud-config-and-bus"
+
+  - id: microservices-spring-cloud-resilience-073
+    difficulty: advanced
+    tags: [config, spring-config-import, precedence]
+    question: |
+      Using spring.config.import=configserver:, a property `feature.flag` is set to `true` in the
+      Config Server, `false` in the packaged application.yml, and passed as `--feature.flag=off`
+      on the command line. Which wins?
+    options:
+      - "The packaged application.yml (false), because local files always win"
+      - "It is undefined and throws a BindException"
+      - "The Config Server (true), because remote config always overrides everything"
+      - "The command-line argument, because command-line args sit at the top of Spring Boot's property-source precedence, above imported remote config"
+    answer: 3
+    explanation: |
+      Command-line args are near the top of Boot's ordered property sources, above imported
+      configserver properties, which are above the packaged application.yml. So --feature.flag
+      wins. Remote config overrides the packaged file but not command-line/env of higher priority.
+    ref: "concepts.md#distributed-and-centralized-configuration-spring-cloud-config-and-bus"
+
+  - id: microservices-spring-cloud-resilience-074
+    difficulty: expert
+    tags: [load-balancer, retry-stacking, feign, resilience4j]
+    question: |
+      A single logical call unexpectedly hits the backend ~27 times. The stack is: Feign client
+      with a custom Retryer (3 attempts), Spring Cloud LoadBalancer retry (retry next instance,
+      3 instances), and a Resilience4j @Retry (3 attempts) around the Feign call. What is the
+      staff-level diagnosis?
+    options:
+      - "Retries multiply across independent layers: Resilience4j (3) x Feign Retryer (3) x LB next-instance (3) ~ 27 attempts. Consolidate retry to ONE layer and disable it in the others"
+      - "One of the layers is broken and double-counting"
+      - "This is expected and correct; 27 attempts improves reliability"
+      - "Eureka is duplicating the request"
+    answer: 0
+    explanation: |
+      Retry logic at multiple layers composes multiplicatively (3x3x3=27). The fix is to own
+      retry in exactly one layer (e.g. Resilience4j) and set the others to no-retry, otherwise a
+      transient blip becomes a self-inflicted load spike.
+    ref: "concepts.md#client-side-load-balancing-spring-cloud-loadbalancer"
+
+  - id: microservices-spring-cloud-resilience-075
+    difficulty: expert
+    tags: [load-balancer, configuration-isolation, component-scan]
+    question: |
+      A developer defines a custom load-balancer configuration as a top-level
+      @Configuration in the same package as the main application, intending it only for the
+      "order-service" client via @LoadBalancerClient. What actually happens?
+    options:
+      - "It applies only to order-service as intended"
+      - "Spring throws a startup error because LB configs cannot be @Configuration"
+      - "It is picked up by the main @ComponentScan and becomes the GLOBAL default LB config for ALL clients, not just order-service"
+      - "It is ignored entirely because @LoadBalancerClient overrides it"
+    answer: 2
+    explanation: |
+      A @LoadBalancerClient (or Feign) configuration class inside the main component scan is
+      registered globally, becoming the default for every client. It must live outside the scan
+      (or be excluded) and be referenced explicitly per client to stay isolated.
+    ref: "concepts.md#client-side-load-balancing-spring-cloud-loadbalancer"
+
+  - id: microservices-spring-cloud-resilience-076
+    difficulty: advanced
+    tags: [load-balancer, supplier-chain, caching]
+    question: |
+      In Spring Cloud LoadBalancer, why should CachingServiceInstanceListSupplier wrap the
+      DiscoveryClientServiceInstanceListSupplier rather than the other way around?
+    options:
+      - "Order does not matter; the suppliers are commutative"
+      - "Because caching suppliers cannot delegate to discovery suppliers at all"
+      - "Because discovery must always run on every request for correctness"
+      - "So the cache sits in front of the (relatively expensive) discovery lookup, serving a cached instance list and only periodically refreshing from discovery — wrapping the cache by discovery would bypass caching"
+    answer: 3
+    explanation: |
+      The supplier chain is a decorator stack; caching should decorate the discovery source so
+      each request reads the cached list and the discovery lookup runs only on refresh. Inverting
+      it would defeat the cache's purpose.
+    ref: "concepts.md#client-side-load-balancing-spring-cloud-loadbalancer"
+
+  - id: microservices-spring-cloud-resilience-077
+    difficulty: expert
+    tags: [openfeign, thread-context, request-interceptor, async]
+    question: |
+      A Feign RequestInterceptor copies the incoming JWT from RequestContextHolder onto outbound
+      requests. It works for normal calls but the header is missing whenever the Feign call is
+      made from a @Async method or a ThreadPoolBulkhead worker. Why?
+    options:
+      - "Feign disables interceptors for async calls"
+      - "@Async methods cannot call Feign clients at all"
+      - "RequestContextHolder / trace context are stored in ThreadLocals bound to the request thread; a different worker thread has no such context unless it is explicitly propagated"
+      - "The JWT expired exactly when async was used"
+    answer: 2
+    explanation: |
+      Interceptors that read ThreadLocal-based context only work on the thread that holds it.
+      Dispatching to another thread (async/bulkhead/reactor) loses it unless you propagate the
+      context (e.g. task decorators, ContextSnapshot). This is a classic "missing header only
+      under async/load" bug.
+    ref: "concepts.md#declarative-rest-clients-openfeign"
+
+  - id: microservices-spring-cloud-resilience-078
+    difficulty: advanced
+    tags: [openfeign, fallback, fallbackfactory]
+    question: |
+      Why might a team prefer @FeignClient(fallbackFactory=...) over fallback=...?
+    options:
+      - "fallbackFactory receives the causing Throwable, so the fallback can branch on the failure type (404 vs timeout vs CallNotPermittedException) and log/handle accordingly, whereas a plain fallback hides the cause"
+      - "fallbackFactory is faster at runtime"
+      - "fallback= does not support circuit breakers"
+      - "fallbackFactory is the only option that works with discovery"
+    answer: 0
+    explanation: |
+      fallbackFactory<T> is given the Throwable that triggered the fallback, enabling
+      cause-specific behavior and observability. A plain fallback returns a fixed degraded value
+      with no visibility into why it fired.
+    ref: "concepts.md#declarative-rest-clients-openfeign"
+
+  - id: microservices-spring-cloud-resilience-079
+    difficulty: expert
+    tags: [openfeign, connection-pool, time-wait, http-client]
+    question: |
+      Under sustained high throughput, a Feign client using the default configuration starts
+      failing with ephemeral-port exhaustion / TIME_WAIT buildup. What is the best explanation
+      and fix?
+    options:
+      - "Feign leaks memory; increase heap"
+      - "The service registry is opening the sockets; restart Eureka"
+      - "The default JDK HttpURLConnection client does not pool connections, so each call opens/closes a socket; switch to Apache HttpClient 5 or OkHttp (feign-hc5 / feign-okhttp) for a bounded, keep-alive connection pool"
+      - "TIME_WAIT is unrelated to Feign; it is a DNS issue"
+    answer: 2
+    explanation: |
+      The default JDK client opens a fresh connection per request with no pooling, so at high
+      RPS closed sockets pile up in TIME_WAIT and exhaust ephemeral ports. A pooling client
+      (HttpClient 5 / OkHttp) reuses keep-alive connections and bounds the pool.
+    ref: "concepts.md#declarative-rest-clients-openfeign"
+
+  - id: microservices-spring-cloud-resilience-080
+    difficulty: advanced
+    tags: [openfeign, config-precedence]
+    question: |
+      Given both `feign.client.config.default.connectTimeout=1000` and
+      `feign.client.config.orderClient.connectTimeout=5000`, what connect timeout does the
+      "orderClient" Feign client use, and why?
+    options:
+      - "1000ms, because default always wins"
+      - "It throws a conflict error at startup"
+      - "It averages to 3000ms"
+      - "5000ms, because the client-specific config (feign.client.config.<name>) overrides feign.client.config.default"
+    answer: 3
+    explanation: |
+      Named client configuration overrides the "default" configuration. orderClient's specific
+      5000ms wins over the default 1000ms. Property-based config also generally overrides
+      programmatic @Configuration.
+    ref: "concepts.md#declarative-rest-clients-openfeign"
+
+  - id: microservices-spring-cloud-resilience-081
+    difficulty: expert
+    tags: [resilience4j, circuit-breaker, self-invocation, aop]
+    question: |
+      In one @Service, method a() calls this.b(), and b() is annotated
+      @CircuitBreaker(name="dep"). The breaker never engages for calls that arrive via a(). Why?
+    options:
+      - "@CircuitBreaker is AOP-proxy based; a self-invocation (this.b()) bypasses the proxy, so the aspect never wraps the call. Split into separate beans or self-inject"
+      - "The breaker name is invalid"
+      - "Circuit breakers only work on controllers"
+      - "b() must be static for the breaker to apply"
+    answer: 0
+    explanation: |
+      Like @Transactional, Resilience4j annotations work through a proxy. Calling this.b()
+      invokes the raw method directly, skipping the proxy and the aspect. Externalize b() to
+      another bean or use self-injection so the call goes through the proxy.
+    ref: "concepts.md#resilience4j-circuit-breaker"
+
+  - id: microservices-spring-cloud-resilience-082
+    difficulty: expert
+    tags: [resilience4j, circuit-breaker, half-open, auto-transition]
+    question: |
+      A breaker is OPEN with waitDurationInOpenState=10s and
+      automaticTransitionFromOpenToHalfOpenEnabled left at its default (false). No calls arrive
+      for 5 minutes. What state is it in, and what triggers HALF_OPEN?
+    options:
+      - "It auto-transitions to HALF_OPEN after 10s via a background timer"
+      - "It transitions to CLOSED automatically after 10s"
+      - "It stays OPEN indefinitely; the OPEN -> HALF_OPEN transition happens lazily on the NEXT call made after the wait duration has elapsed, since no background thread drives it by default"
+      - "It throws an error because no calls were made"
+    answer: 2
+    explanation: |
+      With automatic transition disabled (default), there is no timer; the breaker evaluates the
+      elapsed wait on the next invocation and only then moves to HALF_OPEN. An idle breaker stays
+      OPEN until someone calls it.
+    ref: "concepts.md#resilience4j-circuit-breaker"
+
+  - id: microservices-spring-cloud-resilience-083
+    difficulty: expert
+    tags: [resilience4j, sliding-window, count-vs-time]
+    question: |
+      Two breakers both set sliding-window-size=10. Breaker X uses COUNT_BASED, breaker Y uses
+      TIME_BASED. Under a burst of 500 calls in 2 seconds, how do their failure-rate denominators
+      differ?
+    options:
+      - "They are identical; the window type is cosmetic"
+      - "Both evaluate over exactly 500 calls"
+      - "X evaluates over the last 10 seconds; Y over the last 10 calls"
+      - "X evaluates over the last 10 CALLS, so its rate reflects only the 10 most recent outcomes; Y evaluates over the last 10 SECONDS, aggregating potentially hundreds of calls into per-second buckets"
+    answer: 3
+    explanation: |
+      COUNT_BASED keeps a ring of the last N call outcomes (denominator = N calls). TIME_BASED
+      keeps N one-second aggregate buckets (denominator = all calls in the last N seconds). Under
+      bursts these give very different failure rates.
+    ref: "concepts.md#resilience4j-circuit-breaker"
+
+  - id: microservices-spring-cloud-resilience-084
+    difficulty: advanced
+    tags: [resilience4j, shared-instance, naming]
+    question: |
+      Two unrelated methods are both annotated @CircuitBreaker(name="shared"). A burst of
+      failures in the first method causes the SECOND method's calls to fail fast with
+      CallNotPermittedException even though its dependency is healthy. Why?
+    options:
+      - "A CircuitBreaker is a shared singleton keyed by name; both methods share ONE breaker and ONE sliding window, so failures recorded by either open the breaker for both"
+      - "It is a bug in Resilience4j"
+      - "The second method inherited the annotation via reflection"
+      - "CallNotPermittedException is thrown randomly"
+    answer: 0
+    explanation: |
+      Resilience4j resolves the breaker by name from a registry — the same name means the same
+      instance and shared state. Reusing a name across unrelated dependencies conflates their
+      health. Use distinct names per dependency.
+    ref: "concepts.md#resilience4j-circuit-breaker"
+
+  - id: microservices-spring-cloud-resilience-085
+    difficulty: expert
+    tags: [resilience4j, time-limiter, interruption, thread-pool-bulkhead]
+    question: |
+      A blocking JDBC call is wrapped with @TimeLimiter(timeoutDuration=2s) and executed via
+      @Bulkhead(type=THREADPOOL) with cancelRunningFuture=true. The timeout fires but the query
+      keeps running on the worker thread for 30s. Why might cancellation fail to stop it?
+    options:
+      - "TimeLimiter cannot be combined with ThreadPoolBulkhead"
+      - "The timeout duration must be in milliseconds, so 2s means 2000 minutes"
+      - "cancelRunningFuture interrupts the worker thread, but interruption only stops work that responds to Thread.interrupt(); many JDBC drivers/socket reads ignore interruption, so the query runs to completion"
+      - "The Future was never created"
+    answer: 2
+    explanation: |
+      Cancellation sends an interrupt to the worker thread, but blocking I/O that doesn't honor
+      interruption (typical JDBC/socket reads) won't abort. Real cancellation of such calls needs
+      driver-level query timeouts / statement cancellation, not just thread interruption.
+    ref: "concepts.md#resilience4j-retry-rate-limiter-bulkhead-time-limiter"
+
+  - id: microservices-spring-cloud-resilience-086
+    difficulty: expert
+    tags: [resilience4j, ratelimiter, atomic, fixed-window]
+    question: |
+      Resilience4j's default AtomicRateLimiter grants limitForPeriod permits per
+      limitRefreshPeriod cycle. Why can it exhibit fixed-window-like bursts rather than smooth
+      token-bucket pacing?
+    options:
+      - "Because it uses a background thread that sleeps between permits"
+      - "Because it is actually a leaky bucket that queues requests"
+      - "Because it randomly drops permits"
+      - "Because permits are granted per discrete cycle (all limitForPeriod become available at the cycle start), so a caller can consume the full allotment at the start of a cycle and again at the next cycle boundary"
+    answer: 3
+    explanation: |
+      AtomicRateLimiter refills the whole allotment at each cycle boundary rather than trickling
+      tokens continuously, so it behaves like a fixed window and can allow back-to-back bursts
+      across a boundary — not the smoothing of a leaky bucket.
+    ref: "concepts.md#resilience4j-retry-rate-limiter-bulkhead-time-limiter"
+
+  - id: microservices-spring-cloud-resilience-087
+    difficulty: advanced
+    tags: [resilience4j, semaphore-bulkhead, slow-dependency]
+    question: |
+      A SemaphoreBulkhead has maxConcurrentCalls=20 and maxWaitDuration=0. The downstream becomes
+      very slow (each call takes 30s but does not fail). What happens to the 21st concurrent
+      caller and why?
+    options:
+      - "It waits patiently forever until a permit frees"
+      - "It runs anyway on a new thread the bulkhead spawns"
+      - "It is rejected immediately with BulkheadFullException, because the 20 permits are held by the slow in-flight calls (which run on the caller threads and don't release until they return), and maxWaitDuration=0 means no waiting"
+      - "It succeeds because slow calls don't consume permits"
+    answer: 2
+    explanation: |
+      A semaphore bulkhead counts in-flight permits; a slow (not failing) call still holds its
+      permit until it returns. With all 20 held and zero wait, the next caller is rejected
+      immediately with BulkheadFullException — showing why slow dependencies drain bulkheads.
+    ref: "concepts.md#resilience4j-retry-rate-limiter-bulkhead-time-limiter"
+
+  - id: microservices-spring-cloud-resilience-088
+    difficulty: advanced
+    tags: [resilience4j, thread-pool-bulkhead, rejection]
+    question: |
+      When a Resilience4j ThreadPoolBulkhead has all threads busy AND its queue is full, what
+      happens to a new submission by default?
+    options:
+      - "It is rejected with BulkheadFullException — the task does NOT run on the caller thread, preserving isolation"
+      - "It runs on the caller's thread (CallerRunsPolicy)"
+      - "It silently drops and returns null"
+      - "It blocks the caller indefinitely"
+    answer: 0
+    explanation: |
+      Unlike a raw ThreadPoolExecutor with CallerRunsPolicy, the ThreadPoolBulkhead rejects with
+      BulkheadFullException when threads and queue are saturated. Running on the caller thread
+      would break the isolation guarantee the bulkhead exists to provide.
+    ref: "concepts.md#resilience4j-retry-rate-limiter-bulkhead-time-limiter"
+
+  - id: microservices-spring-cloud-resilience-089
+    difficulty: expert
+    tags: [tracing, reactor, context-propagation]
+    question: |
+      In a Spring Boot 3 WebFlux app, trace ids appear in controller logs but vanish inside a
+      Reactor operator chain (flatMap/subscribeOn). What is the correct staff-level fix?
+    options:
+      - "Increase the sampling probability to 1.0"
+      - "Switch the whole app to the servlet stack"
+      - "Enable automatic context propagation (Reactor 3.5+ Hooks.enableAutomaticContextPropagation()) or use ContextPropagation so ThreadLocal-based trace context is captured/restored across operator threads"
+      - "Add @NewSpan to every operator"
+    answer: 2
+    explanation: |
+      Reactor executes operators on scheduler threads without ThreadLocals. Micrometer's context
+      propagation (enabled via the Reactor hook / ContextPropagation) captures the trace context
+      and restores it around operator execution so the trace id flows through the chain.
+    ref: "concepts.md#distributed-tracing-sleuth-and-micrometer-tracing"
+
+  - id: microservices-spring-cloud-resilience-090
+    difficulty: expert
+    tags: [tracing, sampling, propagation]
+    question: |
+      Service A (edge) is configured with sampling probability 0.1; service B downstream is
+      configured with probability 1.0. For a request that A decides NOT to sample, what does B do
+      with its spans?
+    options:
+      - "B samples the request at 100% and exports its spans, creating a partial trace"
+      - "B re-samples every span independently"
+      - "B throws an error due to conflicting sampling configs"
+      - "B honors the propagated sampled=false flag from the traceparent and does NOT export spans; the sampling decision is made once at the root and propagated, so B's local probability is irrelevant for this trace"
+    answer: 3
+    explanation: |
+      The sampled bit is set at the trace root and carried in traceparent flags. Downstreams
+      honor it rather than re-deciding, so B exports nothing for an unsampled trace regardless of
+      its own probability. This keeps traces consistent end-to-end (avoids partial traces).
+    ref: "concepts.md#distributed-tracing-sleuth-and-micrometer-tracing"
+
+  - id: microservices-spring-cloud-resilience-091
+    difficulty: advanced
+    tags: [tracing, observation-api, handlers]
+    question: |
+      A team adds micrometer-core and creates Observations but sees timers in /actuator/metrics
+      yet NO spans in Zipkin. What is missing?
+    options:
+      - "The tracing ObservationHandler (from micrometer-tracing bridge, e.g. bridge-brave) plus a reporter; a MeterRegistry handler alone produces metrics but no spans"
+      - "They need to raise the sampling probability above 1.0"
+      - "Observations cannot produce spans, only metrics"
+      - "They must annotate every method with @Timed"
+    answer: 0
+    explanation: |
+      One Observation drives multiple handlers. With only a meter handler you get timers; spans
+      require the tracing handler contributed by micrometer-tracing (Brave/OTel bridge) and an
+      exporter/reporter to Zipkin.
+    ref: "concepts.md#distributed-tracing-sleuth-and-micrometer-tracing"
+
+  - id: microservices-spring-cloud-resilience-092
+    difficulty: expert
+    tags: [tracing, cardinality, metrics]
+    question: |
+      A developer attaches the order id as a low-cardinality Observation key-value on a heavily
+      used endpoint. Days later the Micrometer meter registry consumes gigabytes of heap. What
+      went wrong?
+    options:
+      - "Order ids are too long as strings"
+      - "The registry should have been configured with more heap; nothing is fundamentally wrong"
+      - "High-cardinality values (order id) as metric tags create a distinct time series per value, exploding the registry's memory. Such values belong on the span (high-cardinality), not on the metric (which must stay low-cardinality)"
+      - "Tracing was disabled, forcing everything into metrics"
+    answer: 2
+    explanation: |
+      Every unique tag value is a separate metric time series. Unbounded values like order ids
+      cause cardinality explosion and OOM. Put high-cardinality data on spans (where it's
+      expected) and keep metric tags to a small bounded set.
+    ref: "concepts.md#distributed-tracing-sleuth-and-micrometer-tracing"
+
+  - id: microservices-spring-cloud-resilience-093
+    difficulty: expert
+    tags: [saga, pivot-transaction, compensation]
+    question: |
+      In saga design, a step is classified as compensatable, pivot, or retriable. What is the
+      defining rule about the pivot transaction?
+    options:
+      - "The pivot is the first step and can always be compensated"
+      - "There can be many pivots and all of them are compensated on failure"
+      - "The pivot is any step that calls an external API"
+      - "The pivot is the go/no-go commit point: steps before it are compensatable (can be undone), but once the pivot succeeds the saga MUST complete forward via retriable steps that are never compensated"
+    answer: 3
+    explanation: |
+      The pivot is the point of no return. Everything before it is compensatable; everything
+      after must be retriable (idempotent, eventually succeeds) and is driven forward, never
+      compensated. Mis-classifying a post-pivot step as compensatable causes inconsistencies.
+    ref: "concepts.md#saga-pattern-distributed-transactions"
+
+  - id: microservices-spring-cloud-resilience-094
+    difficulty: expert
+    tags: [saga, compensation, aba-problem, ordering]
+    question: |
+      A saga sends a compensation for step 3, but due to redelivery a delayed SUCCESS of the
+      original step 3 arrives AFTER the compensation has run, re-creating the reserved resource.
+      What is this hazard and a mitigation?
+    options:
+      - "It's an ordering/ABA hazard from at-least-once delivery; mitigate with semantic locks (status fields like RESERVED/RELEASED) and version checks so a late success is rejected when the aggregate is already in a compensated state"
+      - "This is impossible in a saga"
+      - "Mitigate by disabling compensations entirely"
+      - "Mitigate by using at-most-once delivery, which guarantees ordering"
+    answer: 0
+    explanation: |
+      Redelivery/late messages can make an original action land after its compensation (an ABA
+      problem). A semantic lock / status state machine plus version checks lets the aggregate
+      reject a stale success once it has moved to a compensated state.
+    ref: "concepts.md#saga-pattern-distributed-transactions"
+
+  - id: microservices-spring-cloud-resilience-095
+    difficulty: advanced
+    tags: [saga, outbox, cdc, polling]
+    question: |
+      Contrast the two common transactional-outbox relay implementations.
+    options:
+      - "Polling publisher reads the DB's WAL directly; CDC uses a scheduled SELECT"
+      - "Both provide exactly-once delivery so consumers need not dedupe"
+      - "Polling publisher runs a scheduled query (e.g. SELECT ... FOR UPDATE SKIP LOCKED) to find and publish unsent rows; log-tailing CDC (e.g. Debezium) reads the DB transaction log/WAL for lower latency and no read load, but both deliver at-least-once so consumers must dedupe"
+      - "CDC requires two-phase commit between the DB and broker"
+    answer: 2
+    explanation: |
+      Polling scans an outbox table on a schedule; CDC tails the transaction log for lower
+      latency and no query overhead. Both are at-least-once, so idempotent/deduping consumers are
+      required regardless.
+    ref: "concepts.md#saga-pattern-distributed-transactions"
+
+  - id: microservices-spring-cloud-resilience-096
+    difficulty: advanced
+    tags: [saga, outbox, ordering, partitioning]
+    question: |
+      Your outbox publishes to Kafka. Which statement about event ordering is correct?
+    options:
+      - "Kafka globally orders all events across every partition"
+      - "The outbox pattern makes ordering irrelevant"
+      - "Ordering is guaranteed as long as you use a single consumer group"
+      - "Per-aggregate ordering is preserved only if events for a given aggregate use the same partition key; cross-aggregate ordering is NOT guaranteed and should not be relied upon"
+    answer: 3
+    explanation: |
+      Kafka orders within a partition. Keying by aggregate id keeps that aggregate's events
+      ordered; different aggregates land on different partitions with no cross-partition ordering
+      guarantee. Design consumers to not assume global order.
+    ref: "concepts.md#saga-pattern-distributed-transactions"
+
+  - id: microservices-spring-cloud-resilience-097
+    difficulty: expert
+    tags: [event-sourcing, optimistic-concurrency, expected-version]
+    question: |
+      Two command handlers concurrently load aggregate "acct-1" at version 7 and each try to
+      append a new event. How does an event store typically prevent a lost update?
+    options:
+      - "It locks the entire event store for the duration of each command"
+      - "It merges both events automatically"
+      - "It appends with an expectedVersion; the first append at expectedVersion=7 succeeds (bumping to 8), the second's expectedVersion=7 no longer matches, so it fails with a concurrency exception and must reload and retry"
+      - "It silently keeps the last writer's event and discards the other with no error"
+    answer: 2
+    explanation: |
+      Event stores use optimistic concurrency keyed on the aggregate's expected version. Only one
+      append at a given version can win; the loser gets a concurrency conflict and must re-read
+      the new events and retry its command — the ES analog of an optimistic lock.
+    ref: "concepts.md#cqrs-and-event-sourcing"
+
+  - id: microservices-spring-cloud-resilience-098
+    difficulty: expert
+    tags: [cqrs, read-your-writes, consistency]
+    question: |
+      In a CQRS system the read model is updated asynchronously from the write model. A user
+      submits a command and immediately queries, but doesn't see their change. Which is NOT a
+      valid mitigation for read-your-own-writes?
+    options:
+      - "Make the read model strongly consistent by wrapping the command and all projections in one distributed ACID transaction across services"
+      - "Have the client pass a version/sequence token and poll/wait until the projection reaches it"
+      - "Briefly read that user's data from the write model until the projection catches up"
+      - "Return the projected result directly from the command handler's response"
+    answer: 0
+    explanation: |
+      Returning the projection from the command, version-token waiting, and reading the write
+      model temporarily are all valid. Forcing a cross-service distributed ACID transaction
+      defeats the entire point of CQRS/microservices and is impractical — that's the invalid
+      "mitigation".
+    ref: "concepts.md#cqrs-and-event-sourcing"
+
+  - id: microservices-spring-cloud-resilience-099
+    difficulty: advanced
+    tags: [event-sourcing, projection, idempotency, replay]
+    question: |
+      A projection consumes events at-least-once and maintains a "total orders" counter. After a
+      broker redelivery the counter is too high. What is the correct fix?
+    options:
+      - "Switch the broker to at-most-once delivery"
+      - "Stop using event sourcing"
+      - "Make the projection idempotent by tracking the last processed event sequence (or a processed-event id table) so redelivered/replayed events are skipped rather than re-applied"
+      - "Add a circuit breaker around the projection"
+    answer: 2
+    explanation: |
+      At-least-once delivery means duplicates. A projection must dedupe by tracking processed
+      event sequences/ids so a redelivery doesn't double-increment. This also makes full replays
+      (reset checkpoint, replay from 0) safe.
+    ref: "concepts.md#cqrs-and-event-sourcing"
+
+  - id: microservices-spring-cloud-resilience-100
+    difficulty: expert
+    tags: [idempotency, concurrency, race, unique-constraint]
+    question: |
+      A payment handler does: `if (SELECT by idempotencyKey is null) { INSERT key; charge(); }`.
+      Two retries arrive simultaneously and BOTH charge the customer. What is the flaw and the
+      fix?
+    options:
+      - "The SELECT is too slow; add an index"
+      - "Use a longer TTL on the idempotency key"
+      - "Retries should be disabled for payments"
+      - "It's a check-then-act race: both transactions see 'null' before either inserts. Fix by INSERTing the key FIRST under a UNIQUE constraint (or INSERT ... ON CONFLICT DO NOTHING) so exactly one wins, and treat the conflict as 'already processing/processed'"
+    answer: 3
+    explanation: |
+      Reading-then-inserting is not atomic under concurrency; both callers observe absence and
+      proceed. Inserting the key first behind a UNIQUE constraint (or ON CONFLICT DO NOTHING)
+      makes exactly one caller win; the other detects the conflict and returns the stored/in-flight
+      result instead of charging again.
+    ref: "concepts.md#idempotency"
+
+  - id: microservices-spring-cloud-resilience-101
+    difficulty: expert
+    tags: [idempotency, key-scoping, payload-hash]
+    question: |
+      A client reuses the same Idempotency-Key header but sends a DIFFERENT request body (a bug).
+      A naive implementation returns the previously stored response for the FIRST body. What is
+      the robust staff-level behavior?
+    options:
+      - "Store a hash of the original request alongside the key; if a later request presents the same key with a different payload, reject it (e.g. HTTP 422/409) rather than silently returning the wrong stored result"
+      - "Always return the stored response regardless of body; that's what idempotency means"
+      - "Overwrite the stored result with the new body's result"
+      - "Ignore the idempotency key when bodies differ and process both"
+    answer: 0
+    explanation: |
+      An idempotency key is scoped to a specific request. Persisting a request fingerprint (hash)
+      lets the server detect key reuse with a mismatched payload and reject it, preventing a
+      client bug from returning a response that doesn't correspond to the submitted request.
+    ref: "concepts.md#idempotency"
+
+  - id: microservices-spring-cloud-resilience-102
+    difficulty: expert
+    tags: [rate-limiting, redis, atomicity, lua]
+    question: |
+      A team implements a distributed limiter with Redis using separate GET, then INCR, then
+      conditional SET round-trips. Under load it overcounts and lets too many requests through.
+      What is the fix?
+    options:
+      - "Add more Redis replicas to spread the reads"
+      - "Cache the count locally in each instance to reduce Redis calls"
+      - "Perform the check-and-decrement atomically — a single Lua script (as SCG's RedisRateLimiter uses) or an INCR+EXPIRE that executes atomically on Redis's single-threaded command loop — so concurrent callers cannot interleave the read and the update"
+      - "Switch from token bucket to fixed window; that removes the race"
+    answer: 2
+    explanation: |
+      Splitting the limiter across multiple non-atomic round-trips lets concurrent requests
+      interleave and overcount. A single atomic operation (Lua script or atomic INCR/EXPIRE)
+      makes the check-and-consume indivisible on Redis's single command thread, enforcing the
+      global limit correctly.
+    ref: "concepts.md#rate-limiting-and-throttling"
+
+  - id: microservices-spring-cloud-resilience-103
+    difficulty: advanced
+    tags: [rate-limiting, fixed-window, sliding-window-counter]
+    question: |
+      Why can a fixed-window limiter of 100 requests/minute effectively allow ~200 requests in a
+      one-second span, and how does a sliding-window-counter mitigate it cheaply?
+    options:
+      - "It can't; fixed windows are perfectly smooth"
+      - "It only happens if the clock is unsynchronized"
+      - "The mitigation is to use a leaky bucket that queues all requests forever"
+      - "Bursts at the window boundary (100 at 00:00:59 + 100 at 00:01:00) fall in different windows. A sliding-window-counter weights the previous window's count by the overlap fraction into the current window, approximating a sliding log without storing every timestamp"
+    answer: 3
+    explanation: |
+      Fixed windows reset abruptly, so back-to-back bursts across the boundary double the
+      allowance in a short span. The sliding-window-counter blends the prior window's count
+      proportionally with the current one, smoothing the boundary at O(1) memory versus a full
+      timestamp log.
+    ref: "concepts.md#rate-limiting-and-throttling"
+
+  - id: microservices-spring-cloud-resilience-104
+    difficulty: expert
+    tags: [graceful-degradation, fallback, deadlock, resource-sharing]
+    question: |
+      A circuit-breaker fallback for the recommendations call itself invokes the same
+      recommendations service (a "retry with defaults" path) using the SAME connection pool and
+      thread pool as the primary call. Under a downstream outage this makes things worse. Why?
+    options:
+      - "The fallback hits the same sick dependency and shares its exhausted pools, so it defeats the breaker, adds load to the failing service, and can deadlock waiting on the very resources that are saturated — fallbacks must use a DIFFERENT resource (cache/local default/cheaper service)"
+      - "Fallbacks are not allowed to make network calls"
+      - "The fallback runs on the same thread, which is always fine"
+      - "It only matters if the fallback is annotated @Async"
+    answer: 0
+    explanation: |
+      A fallback that calls the failing dependency (and shares its saturated thread/connection
+      pools) nullifies the breaker's protection, increases load on the sick service, and risks
+      deadlock/exhaustion. Fallbacks should degrade to an independent resource — cache, static
+      default, or a cheaper service.
+    ref: "concepts.md#graceful-degradation-and-fallbacks"
+
+  - id: microservices-spring-cloud-resilience-105
+    difficulty: expert
+    tags: [graceful-degradation, timeout-budget, deadline-propagation]
+    question: |
+      An edge request has a 2s SLA and calls A, which calls B, which calls C. Each service sets a
+      fixed 2s client timeout on its downstream. Why is this wrong, and what is the correct
+      pattern?
+    options:
+      - "It's fine; each hop independently enforcing 2s guarantees the 2s SLA"
+      - "The fix is to raise every timeout to 10s"
+      - "Nested fixed timeouts can each wait the full 2s, so total time far exceeds 2s. Instead propagate a shrinking DEADLINE (remaining budget) so each hop's timeout is less than its parent's remaining time"
+      - "Timeouts should be removed so calls never fail"
+    answer: 2
+    explanation: |
+      Fixed per-hop timeouts sum: A waits up to 2s on B, which waits up to 2s on C, blowing the
+      2s SLA. Deadline propagation passes the remaining budget so each downstream timeout shrinks
+      (e.g. A gives B 1.8s, B gives C 1.5s), keeping the end-to-end within the SLA.
+    ref: "concepts.md#graceful-degradation-and-fallbacks"
