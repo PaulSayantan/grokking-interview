@@ -1,8 +1,8 @@
 # Content Schema & Authoring Spec
 
 This document is the **contract** between the Markdown study library, the MCQ files,
-and the TUI application. Anyone (human or AI) authoring content MUST follow it so the
-app can reliably parse questions and link to study material.
+and the web application. Anyone (human or AI) authoring content MUST follow it so the
+site can reliably parse questions and link to study material.
 
 ## Directory convention
 
@@ -83,4 +83,4 @@ questions:
 
 `scripts/validate_content.py` checks every `questions.yaml` against this schema
 (unique ids, valid answer index, options count, ref anchors resolve). Run it before
-committing new content. The TUI refuses to load a file that fails validation.
+committing new content. The web app's content sync refuses to build a file that fails validation.

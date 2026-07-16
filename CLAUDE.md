@@ -5,12 +5,17 @@ and `ROADMAP.md` at the start of every session to recover context.
 
 ## What this project is
 
-A learner's library of interview Q&A (Markdown) + a Python/Textual TUI to practice
-them as MCQs. See `README.md` for the full picture and `TOPICS.md` for the taxonomy.
+A learner's library of interview Q&A (Markdown) + a responsive **web app** (Astro) that
+publishes the concepts as HTML and lets learners practice them as MCQs on laptop or phone.
+See `README.md` for the full picture and `TOPICS.md` for the taxonomy.
 
 ## Key decisions (do not re-litigate without user sign-off)
 
-- **TUI stack:** Python 3.11+ with [Textual](https://textual.textualize.io/) + Rich.
+- **Web stack:** [Astro](https://astro.build/) (static output) + Tailwind CSS, with a
+  small Preact island for the interactive practice quiz. Lives in `web/`. A prebuild
+  `sync-content.mjs` step reads `topics/` and generates content-collection entries +
+  per-pool question JSON. Static `dist/` deploys to Netlify/Vercel.
+  (A Python/Textual TUI was considered early on and **dropped** — do not reintroduce it.)
 - **Content model:** study content in `concepts.md`; MCQs in a separate
   `questions.yaml` per topic, linked via a `ref: concepts.md#anchor` field.
 - **Content contract:** `docs/content-schema.md` is authoritative. Follow it exactly.
@@ -27,11 +32,15 @@ them as MCQs. See `README.md` for the full picture and `TOPICS.md` for the taxon
 5. Update the progress checklist in `ROADMAP.md` and the Claude memory index.
 6. Use the `authoring-content` skill in `.claude/skills/` for the full loop.
 
-### When building the app
-1. Follow the architecture in `ROADMAP.md` (data layer → core quiz engine → UI).
-2. App code lives under `app/src/interview_practice/`.
-3. The app reads content from `../topics/` via the loader in `core/`.
-4. Use the `tui-development` skill in `.claude/skills/`.
+### When building the web app
+1. The site lives in `web/` (Astro). Read `web/CONTRACT.md` for the data shapes,
+   route map, layout, and design tokens before adding pages.
+2. Content is read-only source of truth: `web/scripts/sync-content.mjs` reads `topics/`
+   and generates the content collection + question JSON pools. Never edit `topics/` from
+   the web app.
+3. Run `cd web && npm run dev` (runs sync then astro dev). `npm run build` produces `dist/`.
+4. Generated artifacts (content collection copies, question JSON, `dist/`) are gitignored —
+   only source is committed.
 
 ## Progress tracking (IMPORTANT)
 
@@ -47,5 +56,6 @@ This is how future sessions stay smooth — treat it as non-optional.
 
 - Markdown: one `# H1` per file; `## H2` per subtopic (these are MCQ anchor targets).
 - YAML: 2-space indent; `answer` is a **0-based** index into `options`.
-- Python: type hints, `ruff`/`black` friendly, no heavy deps beyond Textual + PyYAML.
-- Keep commits scoped: content commits separate from app-code commits.
+- Web app: TypeScript; Astro + Tailwind + Preact; minimalist, responsive, accessible.
+- `scripts/validate_content.py` (content validator) still runs on Python + PyYAML.
+- Keep commits scoped: content commits separate from web-app commits.

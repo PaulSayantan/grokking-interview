@@ -1,19 +1,21 @@
-# Interview Prep — Learner's Library & Practice TUI
+# Interview Prep — Learner's Library & Practice Website
 
 A personal, growing library of **interview questions and answers** across system
 design, DevOps (Docker, Kubernetes, CI/CD), and backend frameworks (Spring Boot,
 Spring Core, Hibernate/JPA, Apache Tomcat, JVM, messaging & databases) — stored as
-plain Markdown so it's readable anywhere, plus an **interactive terminal (TUI)
-application** to practice the material as multiple-choice quizzes.
+plain Markdown so it's readable anywhere, plus a **responsive web app** (Astro) that
+publishes the concepts as HTML and lets learners practice the material as
+multiple-choice quizzes on laptop or phone.
 
 ## Project goals
 
 1. **Document** the topics & subtopics frequently asked in interviews as a
    structured Markdown study library (`topics/`).
 2. **Author MCQs** for each topic in structured YAML linked back to the study docs.
-3. **Build a TUI app** (Python + [Textual](https://textual.textualize.io/)) that lets
-   a learner practice questions by topic or at random, tracks scores, and links back
-   to the relevant study material.
+3. **Build a web app** ([Astro](https://astro.build/) + Tailwind, with a Preact
+   quiz island) that renders the concepts as web pages and lets a learner study any
+   topic and practice 25-question MCQ sessions by subtopic or domain, with score
+   tracking and deep links back to the study material — all mobile-friendly.
 
 ## Repository layout
 
@@ -32,12 +34,12 @@ interview-prep/
 ├── content-templates/      ← copy-me templates for new topics
 │   ├── concepts.template.md
 │   └── questions.template.yaml
-├── app/                    ← the Textual TUI practice application
-│   ├── pyproject.toml
-│   └── src/interview_practice/
+├── web/                    ← the Astro practice website (see web/CONTRACT.md)
+│   ├── scripts/sync-content.mjs  ← generates pages + question pools from topics/
+│   └── src/                      ← pages, layouts, practice island
 ├── scripts/                ← helper scripts (content validation, stats)
 ├── docs/                   ← schema & authoring specs
-└── .claude/skills/         ← reusable AI workflows for authoring & app dev
+└── .claude/skills/         ← reusable AI workflows for authoring content
 ```
 
 ## Domains covered
@@ -60,10 +62,11 @@ interview-prep/
 This project is built incrementally across multiple AI-assisted sessions. See
 **[ROADMAP.md](./ROADMAP.md)** for the current phase and what's done vs. pending.
 
-## Practicing (once the app exists)
+## Running the website
 
 ```bash
-cd app
-pip install -e .
-interview-practice          # launch the TUI
+cd web
+npm install
+npm run dev        # runs content sync, then starts Astro dev server
+npm run build      # generates static dist/ (deploy to Netlify/Vercel)
 ```

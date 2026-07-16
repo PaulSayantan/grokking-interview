@@ -6,7 +6,8 @@ Update this file at the end of every session. It is the single source of truth f
 ## Phases
 
 ### Phase 0 — Foundation ✅ (Session 1)
-- [x] Decide stack (Python + Textual) and content model (linked YAML MCQs).
+- [x] Decide content model (linked YAML MCQs). Delivery stack: **Astro web app**
+      (an early Python/Textual TUI idea was dropped — see CLAUDE.md).
 - [x] Scaffold repo structure.
 - [x] Write `README.md`, `CLAUDE.md`, `docs/content-schema.md`.
 - [x] Create content templates.
@@ -23,19 +24,22 @@ Progress legend: ☐ not started · ◐ concepts done · ● concepts + MCQs don
 
 See the per-domain checklist in **"Content progress"** below (generated from TOPICS.md).
 
-### Phase 2 — TUI application (multiple sessions)
-- [ ] `core/` data models + content loader (parse topics/ into memory).
-- [ ] `core/` quiz engine (topic mode, random mode, scoring, session results).
-- [ ] `ui/` Textual screens: home / topic-picker / quiz / results.
-- [ ] Progress persistence (per-user score history, e.g. `~/.interview-practice/`).
-- [ ] Deep-link "Learn more" → renders `concepts.md` section with Glamour/Rich md.
-- [ ] Packaging: `pip install -e .`, `interview-practice` entry point.
-- [ ] Tests for loader + engine.
+### Phase 2 — Web application (Astro) (multiple sessions)
+- [ ] Scaffold Astro + Tailwind + Preact in `web/`; content sync (`sync-content.mjs`)
+      that reads `topics/` → content collection + per-pool question JSON.
+- [ ] Pages: landing → grouped catalog → domain (grouped subtopics + filter) →
+      subtopic hub → study (concepts.md rendered to HTML) → practice.
+- [ ] Practice engine: 25-MCQ sessions (subtopic / group / domain level), shuffled
+      questions + options, immediate per-question feedback, score + localStorage history.
+- [ ] Deep-link "Learn more" from a question → study page heading anchor.
+- [ ] Deploy: static `dist/` to Netlify/Vercel.
+- [ ] Tests / smoke checks for the sync pipeline + practice logic.
 
 ### Phase 3 — Polish (later)
 - [ ] Spaced-repetition / weak-topic focus mode.
 - [ ] Import/export progress, stats dashboard.
 - [ ] Multi-answer & code-snippet question types.
+- [ ] Search across all topics.
 
 ## Content progress
 
