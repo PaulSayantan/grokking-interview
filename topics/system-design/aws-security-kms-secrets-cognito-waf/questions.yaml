@@ -1,0 +1,1437 @@
+topic: "Data Protection and App Security: KMS, Secrets, Cognito, and WAF"
+domain: system-design
+topic_slug: aws-security-kms-secrets-cognito-waf
+version: 1
+
+questions:
+  # ---------------- Encryption at rest vs in transit ----------------
+  - id: aws-security-kms-secrets-cognito-waf-001
+    difficulty: beginner
+    tags: [encryption-at-rest, fundamentals]
+    question: |
+      What threat does encryption at rest primarily protect against?
+    options:
+      - "A stolen disk, mis-shared snapshot, or someone reading raw storage media"
+      - "A network eavesdropper reading packets on the wire"
+      - "A stolen IAM credential calling GetObject on your data"
+      - "A DDoS attack exhausting your compute"
+    answer: 0
+    explanation: |
+      Encryption at rest protects data on disk (stolen drives, leaked snapshots, raw
+      storage access). It does NOT stop a valid stolen credential from calling the API
+      to read data (that is IAM/key-policy territory), does not protect data on the wire
+      (that is in-transit/TLS), and has nothing to do with DDoS.
+    ref: "concepts.md#encryption-at-rest-versus-in-transit"
+
+  - id: aws-security-kms-secrets-cognito-waf-002
+    difficulty: beginner
+    tags: [dynamodb, encryption-at-rest, defaults]
+    question: |
+      Which statement about DynamoDB encryption at rest is correct?
+    options:
+      - "It must be manually enabled per table before writing data"
+      - "It is on by default and cannot be disabled"
+      - "It is only available on global tables"
+      - "It requires a customer managed CMK to function"
+    answer: 1
+    explanation: |
+      DynamoDB encryption at rest is always on and cannot be turned off; you can choose
+      an AWS-owned key (default, free), an AWS managed key, or a customer managed CMK,
+      but encryption itself is mandatory. It is not limited to global tables and does
+      not require a CMK.
+    ref: "concepts.md#encryption-at-rest-versus-in-transit"
+
+  - id: aws-security-kms-secrets-cognito-waf-003
+    difficulty: intermediate
+    tags: [tls, in-transit, tradeoffs]
+    question: |
+      A team terminates TLS at the ALB and speaks plain HTTP to targets inside the VPC.
+      What is the PRIMARY trade-off of this choice versus re-encrypting to the backend?
+    options:
+      - "It is impossible; ALB always requires HTTPS to targets"
+      - "It makes at-rest encryption unnecessary"
+      - "It lowers TLS/CPU overhead and is simpler, but traffic between the ALB and the app is plaintext and readable by a compromised host or mirrored ENI"
+      - "It doubles the certificate cost because ACM charges per hop"
+    answer: 2
+    explanation: |
+      Edge termination is cheaper and simpler (one TLS handshake) and is acceptable in a
+      trusted VPC, but the segment from ALB to target is plaintext — a compromised host or
+      traffic mirroring can read it. End-to-end re-encryption gives defense in depth at
+      extra CPU. ALB can speak HTTP to targets, at-rest is unrelated, and ACM public certs
+      are free.
+    ref: "concepts.md#encryption-at-rest-versus-in-transit"
+
+  - id: aws-security-kms-secrets-cognito-waf-004
+    difficulty: advanced
+    tags: [s3, in-transit, enforcement]
+    question: |
+      An S3 bucket has SSE-KMS enabled on all objects. A security review still flags that
+      clients can read objects over plain HTTP. What is the correct fix?
+    options:
+      - "Rotate the KMS key more frequently"
+      - "Enable S3 Bucket Keys"
+      - "Switch from SSE-KMS to SSE-C"
+      - "Add a bucket policy that denies requests where aws:SecureTransport is false"
+    answer: 3
+    explanation: |
+      At-rest encryption (SSE-KMS) does nothing to force TLS in transit. You enforce
+      HTTPS by denying requests with a bucket policy condition aws:SecureTransport=false.
+      Key rotation, Bucket Keys (a cost optimization), and SSE-C all address different
+      concerns and don't force TLS.
+    ref: "concepts.md#encryption-at-rest-versus-in-transit"
+
+  # ---------------- KMS key types ----------------
+  - id: aws-security-kms-secrets-cognito-waf-005
+    difficulty: beginner
+    tags: [kms, key-types]
+    question: |
+      Which KMS key type lets you edit the key policy, share the key cross-account, and
+      instantly revoke access by disabling it?
+    options:
+      - "Customer managed key (CMK)"
+      - "AWS owned key"
+      - "AWS managed key"
+      - "Data key"
+    answer: 0
+    explanation: |
+      Only customer managed keys give you full control of the key policy, cross-account
+      sharing, and a disable kill switch. AWS managed keys are viewable but you cannot
+      edit their policy or use them cross-account; AWS owned keys are invisible; a data
+      key is not a KMS key type at all.
+    ref: "concepts.md#kms-keys-customer-managed-aws-managed-and-aws-owned"
+
+  - id: aws-security-kms-secrets-cognito-waf-006
+    difficulty: beginner
+    tags: [kms, cost]
+    question: |
+      What is the approximate monthly cost of a customer managed KMS key (excluding API
+      request charges)?
+    options:
+      - "Free"
+      - "$1 per key per month"
+      - "$40 per key per month"
+      - "$3,000 per month"
+    answer: 1
+    explanation: |
+      A customer managed CMK costs ~$1/key/month plus per-request API charges. Free
+      applies to AWS managed/owned keys' monthly storage; $0.40 is a Secrets Manager
+      secret; $3,000/month is Shield Advanced.
+    ref: "concepts.md#kms-keys-customer-managed-aws-managed-and-aws-owned"
+
+  - id: aws-security-kms-secrets-cognito-waf-007
+    difficulty: intermediate
+    tags: [kms, encrypt-limit, facts]
+    question: |
+      What is the maximum plaintext size the KMS Encrypt API accepts in a single call?
+    options:
+      - "64 KB"
+      - "1 MB"
+      - "4 KB (4096 bytes)"
+      - "10 MB"
+    answer: 2
+    explanation: |
+      KMS Encrypt takes at most 4 KB of plaintext — the reason you cannot encrypt large
+      objects directly with KMS and must use envelope encryption via GenerateDataKey.
+      64 KB is a Secrets Manager secret max; 1 MB and 10 MB are unrelated.
+    ref: "concepts.md#kms-keys-customer-managed-aws-managed-and-aws-owned"
+
+  - id: aws-security-kms-secrets-cognito-waf-008
+    difficulty: intermediate
+    tags: [kms, key-types, tradeoffs]
+    question: |
+      Low-stakes application logs need at-rest encryption with zero operational overhead
+      and no monthly key fee, and you never need cross-account access or a custom policy.
+      Which key is the most appropriate choice?
+    options:
+      - "A customer managed CMK with automatic rotation and a tightly scoped key policy"
+      - "A CloudHSM-backed custom key store"
+      - "A multi-Region key replicated to three Regions"
+      - "An AWS managed key (aws/service) — no monthly key charge and zero setup"
+    answer: 3
+    explanation: |
+      When you need no policy control, cross-account, or compliance evidence, the AWS
+      managed key gives KMS encryption with zero setup and no monthly key fee. A CMK adds
+      $1/month and ops surface for control you don't need; CloudHSM and MRKs are far more
+      expensive/complex for no benefit here.
+    ref: "concepts.md#kms-keys-customer-managed-aws-managed-and-aws-owned"
+
+  - id: aws-security-kms-secrets-cognito-waf-009
+    difficulty: advanced
+    tags: [kms, symmetric, asymmetric]
+    question: |
+      Which KMS key type supports automatic key rotation?
+    options:
+      - "Symmetric encryption keys with AWS-generated material"
+      - "Asymmetric RSA keys"
+      - "HMAC keys"
+      - "Keys stored in a CloudHSM custom key store"
+    answer: 0
+    explanation: |
+      Automatic (and on-demand) rotation is supported only on symmetric encryption keys
+      with AWS_KMS-generated material. Asymmetric, HMAC, and custom-key-store keys must be
+      rotated manually (create a new key and repoint aliases).
+    ref: "concepts.md#kms-keys-customer-managed-aws-managed-and-aws-owned"
+
+  # ---------------- Envelope encryption ----------------
+  - id: aws-security-kms-secrets-cognito-waf-010
+    difficulty: beginner
+    tags: [envelope-encryption, data-keys]
+    question: |
+      In envelope encryption, what does GenerateDataKey return?
+    options:
+      - "Only an encrypted data key"
+      - "Both a plaintext data key and an encrypted (wrapped) copy of it"
+      - "The CMK's raw key material"
+      - "A JWT signed by KMS"
+    answer: 1
+    explanation: |
+      GenerateDataKey returns the plaintext data key (use immediately, then wipe) and an
+      encrypted copy (persist alongside ciphertext). The CMK material never leaves KMS,
+      and KMS does not return raw master-key material or JWTs.
+    ref: "concepts.md#envelope-encryption-and-data-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-011
+    difficulty: intermediate
+    tags: [envelope-encryption, scale]
+    question: |
+      Why is envelope encryption preferred for encrypting a 5 GB object rather than
+      calling KMS Encrypt repeatedly?
+    options:
+      - "KMS Encrypt is deprecated"
+      - "It makes the ciphertext smaller"
+      - "It lets you encrypt bulk data locally after one KMS call, staying under the 4 KB limit and minimizing KMS round-trips"
+      - "It removes the need for any key at all"
+    answer: 2
+    explanation: |
+      One GenerateDataKey call yields a data key you use to encrypt the whole object
+      locally — a single KMS round-trip regardless of size, staying under the 4 KB Encrypt
+      limit and keeping cost/latency low. It does not shrink ciphertext, KMS Encrypt is
+      not deprecated, and a key is still required.
+    ref: "concepts.md#envelope-encryption-and-data-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-012
+    difficulty: intermediate
+    tags: [envelope-encryption, decrypt]
+    question: |
+      To decrypt data protected with envelope encryption, what do you send to KMS?
+    options:
+      - "The entire ciphertext object"
+      - "The plaintext data key"
+      - "The CMK's ARN and nothing else"
+      - "Only the encrypted (wrapped) data key"
+    answer: 3
+    explanation: |
+      You send only the encrypted data key to KMS Decrypt; KMS returns the plaintext data
+      key, and you decrypt the bulk data locally. Sending the whole object would exceed
+      limits and defeats the purpose; you don't have the plaintext data key yet (that's
+      what you're recovering).
+    ref: "concepts.md#envelope-encryption-and-data-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-013
+    difficulty: advanced
+    tags: [s3, bucket-keys, cost]
+    question: |
+      A bucket stores hundreds of millions of small objects with SSE-KMS, and KMS request
+      charges have become significant. Which change most directly reduces KMS cost?
+    options:
+      - "Enable S3 Bucket Keys so S3 uses a short-lived bucket-level key instead of calling KMS per object"
+      - "Switch to a multi-Region key"
+      - "Increase the KMS key rotation frequency"
+      - "Move objects to S3 Glacier"
+    answer: 0
+    explanation: |
+      S3 Bucket Keys generate a bucket-level data key that S3 reuses, cutting per-object
+      KMS API calls by up to ~99% — a well-known KMS cost optimization. MRKs, faster
+      rotation, and Glacier don't reduce KMS request volume for reads/writes.
+    ref: "concepts.md#envelope-encryption-and-data-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-014
+    difficulty: expert
+    tags: [dek-caching, tradeoffs]
+    question: |
+      Your team enables aggressive data-key caching in the AWS Encryption SDK (high max
+      messages, long max age) to reduce KMS costs. What is the PRIMARY security trade-off?
+    options:
+      - "It violates the 4 KB Encrypt limit"
+      - "It reuses one data key across many messages, widening the blast radius if that key leaks and reducing key-exhaustion protection"
+      - "It disables at-rest encryption entirely"
+      - "It forces you to switch to asymmetric keys"
+    answer: 1
+    explanation: |
+      Looser caching caps mean a single data key protects more data, so a leaked key
+      exposes more and you drift from the 'use a data key few times' principle. Tighter
+      caps cost more KMS calls but limit exposure. It doesn't touch the Encrypt limit,
+      disable encryption, or require asymmetric keys.
+    ref: "concepts.md#envelope-encryption-and-data-keys"
+
+  # ---------------- Key policies, grants, access control ----------------
+  - id: aws-security-kms-secrets-cognito-waf-015
+    difficulty: advanced
+    tags: [key-policy, iam, gotcha]
+    question: |
+      A role's IAM policy grants kms:Decrypt on a specific CMK, but decrypt calls return
+      AccessDenied. What is the most likely cause?
+    options:
+      - "The CMK is a multi-Region key and cannot be decrypted"
+      - "kms:Decrypt is not a valid action"
+      - "The KMS key policy does not delegate access to IAM / does not allow the principal"
+      - "The data key expired"
+    answer: 2
+    explanation: |
+      For KMS the key policy is authoritative: an IAM grant is ineffective unless the key
+      policy allows the account to use IAM (the 'Enable IAM policies' statement) or names
+      the principal. MRKs decrypt fine, kms:Decrypt is valid, and data keys don't expire
+      in this sense.
+    ref: "concepts.md#key-policies-grants-and-access-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-016
+    difficulty: intermediate
+    tags: [grants, facts]
+    question: |
+      How do integrated AWS services (like EBS attaching an encrypted volume) obtain
+      scoped, revocable permission to use your CMK on your behalf?
+    options:
+      - "By assuming your account root credentials"
+      - "By exporting the key material"
+      - "Through a Cognito identity pool"
+      - "Via KMS grants (up to 50,000 per key)"
+    answer: 3
+    explanation: |
+      KMS grants provide programmatic, temporary, fine-grained delegation; EBS creates a
+      grant per volume, for example, with up to 50,000 grants per key. Services never
+      assume root, key material is never exported, and Cognito is unrelated to KMS
+      delegation.
+    ref: "concepts.md#key-policies-grants-and-access-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-017
+    difficulty: expert
+    tags: [encryption-context, multi-tenant]
+    question: |
+      You run a multi-tenant app on one CMK and want cryptographically enforced per-tenant
+      isolation without creating one key per tenant. Which KMS feature best fits?
+    options:
+      - "Encryption context (AAD) bound to ciphertext, required per-tenant via key policy conditions"
+      - "Aliases, one per tenant"
+      - "On-demand rotation per tenant"
+      - "A separate grant token embedded in each object"
+    answer: 0
+    explanation: |
+      Encryption context is additional authenticated data tied to the ciphertext; policy
+      conditions can require a specific context (e.g., tenant ID) so a decrypt only
+      succeeds for that tenant — isolation on one key. Aliases and rotation don't enforce
+      tenant scoping, and embedding grant tokens doesn't provide this.
+    ref: "concepts.md#key-policies-grants-and-access-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-018
+    difficulty: expert
+    tags: [key-granularity, blast-radius, tradeoffs]
+    question: |
+      A SaaS with 200,000 tenants debates one CMK for all tenants versus one CMK per
+      tenant. Which statement best captures the trade-off?
+    options:
+      - "Per-tenant keys are always better with no downsides"
+      - "One key is simplest but a single over-permissioned role can read everything and disabling is all-or-nothing; per-tenant keys give tight blast radius and per-tenant kill switches but multiply $1/key/month cost and can approach the 100,000-keys-per-Region quota"
+      - "One CMK cannot encrypt data for more than one tenant"
+      - "Per-tenant keys remove the need for IAM policies"
+    answer: 1
+    explanation: |
+      The real trade-off is blast radius/kill-switch granularity vs cost and the 100,000
+      customer-managed-keys-per-Region quota (200k tenants would exceed it), plus policy
+      management overhead. Encryption context is the middle ground. Per-tenant keys aren't
+      free of downsides and don't replace IAM.
+    ref: "concepts.md#key-policies-grants-and-access-control"
+
+  # ---------------- Rotation and multi-Region keys ----------------
+  - id: aws-security-kms-secrets-cognito-waf-019
+    difficulty: intermediate
+    tags: [rotation, facts]
+    question: |
+      When KMS automatically rotates a customer managed symmetric key, what happens to the
+      key ID/ARN and to existing ciphertext?
+    options:
+      - "The key ARN changes and old ciphertext must be re-encrypted"
+      - "All data is automatically re-encrypted with the new material"
+      - "The key ID/ARN stays the same and old ciphertext still decrypts using retained prior key material"
+      - "The old data becomes permanently unreadable"
+    answer: 2
+    explanation: |
+      Rotation changes only the current backing material; the key ID/ARN is stable and KMS
+      retains all prior material, transparently choosing the right version to decrypt old
+      ciphertext. It does not re-encrypt data or rotate previously generated data keys.
+    ref: "concepts.md#key-rotation-and-multi-region-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-020
+    difficulty: intermediate
+    tags: [rotation, facts, defaults]
+    question: |
+      What is the default automatic key-rotation period for a customer managed KMS key,
+      and what range can you configure?
+    options:
+      - "90 days default, configurable 30 to 365 days"
+      - "1095 days default, not configurable"
+      - "30 days default, configurable 7 to 90 days"
+      - "365 days default, configurable 90 to 2560 days"
+    answer: 3
+    explanation: |
+      The default rotation period is 365 days and is configurable from 90 to 2560 days.
+      1095 days (3 years) was the old AWS-managed-key schedule before May 2022; the other
+      ranges are incorrect.
+    ref: "concepts.md#key-rotation-and-multi-region-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-021
+    difficulty: advanced
+    tags: [multi-region-keys, cross-region]
+    question: |
+      Data encrypted with SSE-KMS in us-east-1 must be readable in eu-west-1 after
+      cross-Region replication WITHOUT a cross-Region KMS call at read time. What do you
+      use?
+    options:
+      - "Multi-Region keys (a primary and a replica sharing the same key material)"
+      - "A single-Region CMK in us-east-1 shared via key policy"
+      - "An AWS managed key, which is automatically global"
+      - "CloudHSM replication"
+    answer: 0
+    explanation: |
+      Multi-Region keys share key material across Regions, so a replica in eu-west-1 can
+      decrypt ciphertext produced in us-east-1 locally. A single-Region key would force a
+      cross-Region call back to us-east-1 (latency + failure coupling); AWS managed keys
+      are not global; CloudHSM replication doesn't provide this KMS behavior.
+    ref: "concepts.md#key-rotation-and-multi-region-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-022
+    difficulty: expert
+    tags: [multi-region-keys, tradeoffs, isolation]
+    question: |
+      What is the PRIMARY security trade-off of adopting multi-Region keys instead of
+      independent per-Region keys?
+    options:
+      - "MRKs cannot be rotated"
+      - "The same key material now exists in multiple Regions, weakening single-Region isolation so a policy mistake has wider reach"
+      - "MRKs are billed at $3,000/month"
+      - "MRKs disable envelope encryption"
+    answer: 1
+    explanation: |
+      MRKs replicate identical key material across Regions, so the blast radius spans
+      Regions and single-Region isolation is weaker — the cost of cross-Region decrypt
+      convenience. MRKs can be rotated (a shared property on the primary), aren't priced
+      like Shield, and don't affect envelope encryption.
+    ref: "concepts.md#key-rotation-and-multi-region-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-023
+    difficulty: advanced
+    tags: [aws-managed-keys, rotation]
+    question: |
+      How often does KMS rotate AWS managed keys today, and can you change it?
+    options:
+      - "Every 3 years; you can shorten it"
+      - "Never; AWS managed keys are not rotated"
+      - "Every ~365 days; you cannot enable or disable rotation for AWS managed keys"
+      - "Every 90 days; configurable"
+    answer: 2
+    explanation: |
+      Since May 2022 AWS managed keys rotate approximately yearly, and you cannot enable,
+      disable, or reconfigure it. The 3-year schedule was the pre-2022 behavior; they are
+      rotated, and 90-day/configurable applies to customer managed keys.
+    ref: "concepts.md#key-rotation-and-multi-region-keys"
+
+  # ---------------- CloudHSM vs KMS ----------------
+  - id: aws-security-kms-secrets-cognito-waf-024
+    difficulty: intermediate
+    tags: [cloudhsm, kms, tenancy]
+    question: |
+      What is the fundamental difference between AWS CloudHSM and KMS?
+    options:
+      - "CloudHSM is cheaper and simpler than KMS"
+      - "KMS is single-tenant while CloudHSM is multi-tenant"
+      - "CloudHSM integrates natively with all AWS services while KMS does not"
+      - "CloudHSM gives you single-tenant, dedicated HSMs you fully control; KMS is multi-tenant managed crypto AWS operates"
+    answer: 3
+    explanation: |
+      CloudHSM is single-tenant dedicated hardware under your full control (AWS has no
+      access); KMS is multi-tenant managed crypto. CloudHSM is pricier and higher-ops, and
+      it lacks native AWS-service integration unless fronted by a KMS custom key store.
+    ref: "concepts.md#cloudhsm-versus-kms-and-custom-key-stores"
+
+  - id: aws-security-kms-secrets-cognito-waf-025
+    difficulty: advanced
+    tags: [custom-key-store, xks, integration]
+    question: |
+      A regulated customer requires that key material live only in an HSM they solely
+      control, yet they still want S3 and EBS to use those keys transparently. Which
+      design meets both needs?
+    options:
+      - "Use a KMS custom key store (CloudHSM key store or external key store) so KMS is the API front door while material stays in their HSM"
+      - "Store keys in Secrets Manager and reference them from S3"
+      - "Use an AWS managed key with rotation enabled"
+      - "Export the CMK material to their HSM"
+    answer: 0
+    explanation: |
+      A KMS custom key store keeps native AWS-service integration while backing keys with
+      a CloudHSM cluster or external (XKS) HSM under sole customer control. Secrets Manager
+      doesn't provide HSM custody for S3/EBS encryption, AWS managed keys are AWS-operated,
+      and KMS symmetric material cannot be exported.
+    ref: "concepts.md#cloudhsm-versus-kms-and-custom-key-stores"
+
+  - id: aws-security-kms-secrets-cognito-waf-026
+    difficulty: advanced
+    tags: [cloudhsm, tradeoffs, cost]
+    question: |
+      When is choosing CloudHSM over KMS justified despite higher cost and ops burden?
+    options:
+      - "Whenever any data must be encrypted at rest"
+      - "When a regulation or contract mandates sole/single-tenant key custody or custom crypto that KMS cannot provide"
+      - "To reduce per-request latency for S3 encryption"
+      - "To get free automatic key rotation"
+    answer: 1
+    explanation: |
+      CloudHSM is warranted for regulatory/contractual single-tenant custody, custom crypto
+      algorithms, or offloading non-AWS crypto — situations KMS can't satisfy. For routine
+      at-rest encryption KMS is strictly less work; CloudHSM adds latency and ops and its
+      rotation is manual, not free/automatic.
+    ref: "concepts.md#cloudhsm-versus-kms-and-custom-key-stores"
+
+  - id: aws-security-kms-secrets-cognito-waf-027
+    difficulty: expert
+    tags: [custom-key-store, quota]
+    question: |
+      How many custom key stores can you create per account per Region?
+    options:
+      - "1"
+      - "100"
+      - "10"
+      - "Unlimited"
+    answer: 2
+    explanation: |
+      Up to 10 custom key stores per account per Region, counting both CloudHSM key stores
+      and external key stores regardless of connection state.
+    ref: "concepts.md#cloudhsm-versus-kms-and-custom-key-stores"
+
+  # ---------------- Secrets Manager vs Parameter Store ----------------
+  - id: aws-security-kms-secrets-cognito-waf-028
+    difficulty: beginner
+    tags: [secrets-manager, cost]
+    question: |
+      What is the approximate monthly cost of a Secrets Manager secret?
+    options:
+      - "Free"
+      - "$1 per secret per month"
+      - "$4 per secret per month"
+      - "$0.40 per secret per month (plus API call charges)"
+    answer: 3
+    explanation: |
+      Secrets Manager charges ~$0.40 per secret per month plus $0.05 per 10,000 API calls.
+      Free is Parameter Store standard params; $1/month is a KMS CMK; $4 is not a listed
+      price.
+    ref: "concepts.md#secrets-manager-versus-ssm-parameter-store"
+
+  - id: aws-security-kms-secrets-cognito-waf-029
+    difficulty: intermediate
+    tags: [secrets-manager, parameter-store, tradeoffs]
+    question: |
+      A team stores static config and a rarely-changed API key they rotate manually, and
+      wants zero cost across thousands of parameters. Which is the best fit?
+    options:
+      - "SSM Parameter Store SecureString (standard) — free, KMS-encrypted, fine for manual rotation"
+      - "Secrets Manager, for its rotation Lambda"
+      - "Hardcode them in the AMI"
+      - "CloudHSM"
+    answer: 0
+    explanation: |
+      Parameter Store SecureString is free (standard params), KMS-encrypted, and ideal when
+      you don't need automatic rotation. Secrets Manager's $0.40/secret/month is only worth
+      it when managed rotation adds value; hardcoding in an AMI is an anti-pattern; CloudHSM
+      is irrelevant here.
+    ref: "concepts.md#secrets-manager-versus-ssm-parameter-store"
+
+  - id: aws-security-kms-secrets-cognito-waf-030
+    difficulty: intermediate
+    tags: [secrets-manager, feature]
+    question: |
+      Which capability does Secrets Manager provide that Parameter Store does NOT provide
+      natively?
+    options:
+      - "KMS encryption of the value"
+      - "Built-in automatic rotation (including managed rotation for RDS/Aurora/Redshift/DocumentDB)"
+      - "Versioning of stored values"
+      - "IAM-controlled access"
+    answer: 1
+    explanation: |
+      Built-in managed rotation, with turnkey integration for RDS/Aurora/Redshift/DocumentDB
+      credentials, is Secrets Manager's differentiator. Both services offer KMS encryption,
+      versioning/history, and IAM access control, so those don't distinguish them.
+    ref: "concepts.md#secrets-manager-versus-ssm-parameter-store"
+
+  - id: aws-security-kms-secrets-cognito-waf-031
+    difficulty: advanced
+    tags: [secrets-manager, limits, facts]
+    question: |
+      What is the maximum size of a single Secrets Manager secret value?
+    options:
+      - "4 KB"
+      - "8 KB"
+      - "64 KB (65,536 bytes)"
+      - "1 MB"
+    answer: 2
+    explanation: |
+      A Secrets Manager secret value can be up to 65,536 bytes (64 KB). 4 KB is a standard
+      Parameter Store param (and the KMS Encrypt limit); 8 KB is an advanced Parameter Store
+      param; 1 MB is unrelated.
+    ref: "concepts.md#secrets-manager-versus-ssm-parameter-store"
+
+  - id: aws-security-kms-secrets-cognito-waf-032
+    difficulty: advanced
+    tags: [secrets-manager, throughput, quota]
+    question: |
+      A high-traffic Lambda fleet reads a DB credential from Secrets Manager on every
+      invocation and is now being throttled. What is the best fix?
+    options:
+      - "Request a higher GetSecretValue quota; it is the only option"
+      - "Move the secret to CloudHSM"
+      - "Store the credential in a Lambda environment variable in plaintext"
+      - "Cache the fetched secret in the execution environment and refresh only around rotation, reducing GetSecretValue calls"
+    answer: 3
+    explanation: |
+      GetSecretValue has a high but finite TPS (10,000/s per Region); the right pattern is
+      to cache the value in the runtime and refresh around rotation, cutting calls and cost.
+      CloudHSM doesn't help; plaintext env vars defeat the point of a secret store.
+    ref: "concepts.md#secrets-manager-versus-ssm-parameter-store"
+
+  # ---------------- Rotation and cross-service ----------------
+  - id: aws-security-kms-secrets-cognito-waf-033
+    difficulty: advanced
+    tags: [rotation, staging-labels]
+    question: |
+      During Secrets Manager rotation, which staging label points at the value clients read
+      by default, and how is a graceful cut-over achieved?
+    options:
+      - "AWSCURRENT is default; the previous value stays live as AWSPREVIOUS during the swap so in-flight clients don't break"
+      - "AWSPENDING is default; the old value is deleted immediately"
+      - "AWSTEST is default; there is no previous version"
+      - "There are no labels; rotation overwrites in place with downtime"
+    answer: 0
+    explanation: |
+      Clients read AWSCURRENT. Rotation creates AWSPENDING, sets and tests it, then moves
+      AWSCURRENT to the new version while the old becomes AWSPREVIOUS (still valid), enabling
+      graceful cut-over. AWSPENDING is the in-progress label, not the default read target.
+    ref: "concepts.md#secrets-rotation-and-cross-service-integration"
+
+  - id: aws-security-kms-secrets-cognito-waf-034
+    difficulty: expert
+    tags: [rotation, zero-downtime, database]
+    question: |
+      A high-throughput database must have its credentials rotated with ZERO failed
+      connections. Which rotation strategy fits best?
+    options:
+      - "Single-user rotation, accepting a brief window of failures until clients re-fetch"
+      - "Alternating-users rotation with two DB users, rotating the inactive one and flipping"
+      - "Delete and recreate the secret each cycle"
+      - "Disable rotation and rotate manually once a year"
+    answer: 1
+    explanation: |
+      Alternating-users keeps two DB users and rotates the inactive one, then flips
+      AWSCURRENT — no window where the live credential is invalid. Single-user rotation has a
+      brief failure window until clients re-fetch; deleting/recreating causes outages; annual
+      manual rotation doesn't address zero-downtime.
+    ref: "concepts.md#secrets-rotation-and-cross-service-integration"
+
+  - id: aws-security-kms-secrets-cognito-waf-035
+    difficulty: expert
+    tags: [rotation, frequency, tradeoffs]
+    question: |
+      What is the trade-off of rotating credentials very frequently, and what quota guides
+      the pace?
+    options:
+      - "There is no downside; rotate every minute"
+      - "Frequent rotation is blocked by the 4 KB Encrypt limit"
+      - "Frequent rotation shrinks the exposure window but adds availability risk and cost, and calling PutSecretValue/UpdateSecret faster than ~once per 10 minutes can exhaust the 100-versions-per-secret quota"
+      - "Rotation frequency is fixed at 365 days"
+    answer: 2
+    explanation: |
+      Each rotation is a small availability risk (a bad setSecret can lock you out) and adds
+      cost, and updating faster than roughly every 10 minutes can blow the 100-versions
+      quota. The 4 KB limit and a fixed 365-day period are unrelated to this.
+    ref: "concepts.md#secrets-rotation-and-cross-service-integration"
+
+  - id: aws-security-kms-secrets-cognito-waf-036
+    difficulty: intermediate
+    tags: [rds-proxy, cross-service]
+    question: |
+      How does RDS Proxy let Lambda functions connect to a database without the functions
+      ever handling the DB password directly?
+    options:
+      - "It disables authentication on the database"
+      - "It stores the password in the Lambda environment variable"
+      - "It uses a Cognito identity pool"
+      - "It retrieves the credential from Secrets Manager itself and manages the connection pool"
+    answer: 3
+    explanation: |
+      RDS Proxy pulls DB credentials from Secrets Manager and manages pooled connections, so
+      Lambda never sees the password. It does not disable auth, use env-var plaintext, or
+      rely on Cognito.
+    ref: "concepts.md#secrets-rotation-and-cross-service-integration"
+
+  # ---------------- Cognito user pools ----------------
+  - id: aws-security-kms-secrets-cognito-waf-037
+    difficulty: beginner
+    tags: [cognito, user-pool, authentication]
+    question: |
+      What is the primary purpose of a Cognito user pool?
+    options:
+      - "To authenticate users and issue standards-based JWTs (ID, access, refresh tokens)"
+      - "To vend temporary AWS credentials for calling S3 and DynamoDB"
+      - "To provision TLS certificates"
+      - "To filter malicious HTTP requests"
+    answer: 0
+    explanation: |
+      A user pool is a managed user directory / OIDC provider that authenticates users and
+      issues JWTs. Vending AWS credentials is the identity pool's job; certs are ACM; HTTP
+      filtering is WAF.
+    ref: "concepts.md#cognito-user-pools-for-authentication"
+
+  - id: aws-security-kms-secrets-cognito-waf-038
+    difficulty: intermediate
+    tags: [cognito, tokens]
+    question: |
+      In a Cognito user pool, which token carries OAuth2 scopes used to authorize API calls?
+    options:
+      - "The ID token"
+      - "The access token"
+      - "The refresh token"
+      - "The SAML assertion"
+    answer: 1
+    explanation: |
+      The access token carries scopes and is used to authorize API access (e.g., API Gateway
+      JWT authorizer, userInfo). The ID token carries identity claims; the refresh token is
+      opaque and used to mint new tokens; SAML assertions are an external-IdP concept.
+    ref: "concepts.md#cognito-user-pools-for-authentication"
+
+  - id: aws-security-kms-secrets-cognito-waf-039
+    difficulty: intermediate
+    tags: [cognito, tokens, defaults]
+    question: |
+      What are the default expirations for Cognito user pool ID/access tokens and refresh
+      tokens?
+    options:
+      - "ID/access: 5 minutes; refresh: 1 hour"
+      - "ID/access: 24 hours fixed; refresh: 24 hours fixed"
+      - "ID/access: 1 hour (configurable 5 min–24 h); refresh: 30 days (configurable 60 min–3650 days)"
+      - "ID/access: 30 days; refresh: 10 years, both fixed"
+    answer: 2
+    explanation: |
+      ID and access tokens default to 1 hour (configurable 5 minutes to 24 hours); refresh
+      tokens default to 30 days (configurable 60 minutes to 3650 days/10 years). The other
+      combinations are incorrect.
+    ref: "concepts.md#cognito-user-pools-for-authentication"
+
+  - id: aws-security-kms-secrets-cognito-waf-040
+    difficulty: advanced
+    tags: [cognito, token-ttl, tradeoffs]
+    question: |
+      What is the trade-off of shortening the access-token TTL and lengthening the
+      refresh-token TTL?
+    options:
+      - "Shorter access tokens make the app slower to load with no security benefit"
+      - "Longer refresh tokens automatically rotate the KMS key"
+      - "Token TTLs have no security impact"
+      - "Shorter access tokens limit stolen-token damage but cause more refreshes; a long-lived refresh token is convenient but a stolen one is a long-lived liability best mitigated with token revocation"
+    answer: 3
+    explanation: |
+      Short access-token TTL limits the window a stolen access token is useful (at the cost of
+      more refresh round-trips); long refresh-token TTL is convenient but a stolen refresh
+      token is dangerous for a long time, so enable token revocation. The other options are
+      false.
+    ref: "concepts.md#cognito-user-pools-for-authentication"
+
+  - id: aws-security-kms-secrets-cognito-waf-041
+    difficulty: advanced
+    tags: [cognito, federation, hosted-ui]
+    question: |
+      A B2C app wants "Sign in with Google/Apple" plus enterprise SAML login, managed login
+      pages, and MFA, without building auth. Which Cognito capability set covers this?
+    options:
+      - "User pool with Hosted UI, external IdP federation (social + SAML/OIDC), and MFA"
+      - "Identity pool with unauthenticated (guest) access only"
+      - "A rate-based WAF rule"
+      - "ACM certificate with DNS validation"
+    answer: 0
+    explanation: |
+      User pools provide Hosted UI, federation with social and SAML/OIDC IdPs, and MFA — a
+      turnkey authentication layer. Identity pools handle AWS-credential vending, not login
+      UX; WAF and ACM are unrelated to authentication flows.
+    ref: "concepts.md#cognito-user-pools-for-authentication"
+
+  - id: aws-security-kms-secrets-cognito-waf-042
+    difficulty: advanced
+    tags: [cognito, iam, tradeoffs]
+    question: |
+      When would you choose a dedicated IdP (Auth0, Okta, Entra ID) over Cognito?
+    options:
+      - "When you want the cheapest AWS-native JWT issuance"
+      - "When you need rich enterprise SSO, deep customization, or multi-cloud identity that Cognito's features lag on"
+      - "When you need automatic KMS key rotation"
+      - "When you need to filter Layer 7 attacks"
+    answer: 1
+    explanation: |
+      Cognito is cheap and AWS-native but its enterprise SSO breadth, admin UX, and
+      customization lag dedicated IdPs; pick Auth0/Okta/Entra for those needs. Cognito wins on
+      cost/AWS integration; KMS rotation and L7 filtering are different domains.
+    ref: "concepts.md#cognito-user-pools-for-authentication"
+
+  # ---------------- Cognito identity pools ----------------
+  - id: aws-security-kms-secrets-cognito-waf-043
+    difficulty: beginner
+    tags: [cognito, identity-pool, authorization]
+    question: |
+      What does a Cognito identity pool (federated identities) do?
+    options:
+      - "Authenticates users and issues JWTs"
+      - "Provisions and renews TLS certificates"
+      - "Exchanges an identity token for temporary, limited-privilege AWS credentials via STS"
+      - "Scans S3 for PII"
+    answer: 2
+    explanation: |
+      Identity pools take a token (from a user pool or Google/SAML/OIDC/guest) and vend
+      temporary AWS credentials via STS mapped to an IAM role — authorization to AWS
+      resources. Authentication/JWTs are user pools; certs are ACM; PII scanning is Macie.
+    ref: "concepts.md#cognito-identity-pools-for-authorization-to-aws-resources"
+
+  - id: aws-security-kms-secrets-cognito-waf-044
+    difficulty: intermediate
+    tags: [cognito, user-pool-vs-identity-pool]
+    question: |
+      Which pairing correctly distinguishes Cognito user pools from identity pools?
+    options:
+      - "User pool = authorization to AWS; identity pool = authentication"
+      - "Both do the same thing; the names are interchangeable"
+      - "User pool = TLS; identity pool = DDoS protection"
+      - "User pool = authentication (issues JWTs); identity pool = authorization to AWS (vends temporary IAM-scoped credentials)"
+    answer: 3
+    explanation: |
+      User pools authenticate (who are you, issuing JWTs); identity pools authorize access to
+      AWS resources (vending temporary STS credentials tied to an IAM role). Confusing the two
+      is the classic Cognito mistake.
+    ref: "concepts.md#cognito-identity-pools-for-authorization-to-aws-resources"
+
+  - id: aws-security-kms-secrets-cognito-waf-045
+    difficulty: advanced
+    tags: [cognito, identity-pool, direct-access, tradeoffs]
+    question: |
+      A photo app wants each user's mobile client to read/write only their own S3 prefix
+      directly, with lowest latency and no proxy tier. Which approach fits, and what's the
+      trade-off?
+    options:
+      - "Use an identity pool to vend per-user credentials with an IAM policy scoped by ${cognito-identity.amazonaws.com:sub}; trade-off is that security lives in IAM policy variables and there's no server-side business logic/validation"
+      - "Put API Gateway + Lambda in front of every S3 call; it's always required"
+      - "Give every user the same static IAM access key"
+      - "Store photos in Secrets Manager"
+    answer: 0
+    explanation: |
+      Identity pools enable direct, per-user-scoped S3 access via IAM policy variables — lowest
+      latency/cost, but your data security now depends on IAM policy correctness and you lose
+      server-side validation. An API tier is needed only when you require validation/logic;
+      static keys and Secrets Manager are wrong.
+    ref: "concepts.md#cognito-identity-pools-for-authorization-to-aws-resources"
+
+  - id: aws-security-kms-secrets-cognito-waf-046
+    difficulty: advanced
+    tags: [cognito, api-gateway, authorizer]
+    question: |
+      An app needs request validation, rate limiting, and business logic before touching
+      data, with users authenticated by Cognito. Which pattern is most appropriate?
+    options:
+      - "Identity pool vending credentials so clients call DynamoDB directly"
+      - "API Gateway with a Cognito user pool JWT authorizer in front of the backend; an identity pool isn't needed"
+      - "Expose the database publicly and rely on Shield"
+      - "Use Macie to authorize requests"
+    answer: 1
+    explanation: |
+      When you need validation, throttling, and server-side logic, front the backend with API
+      Gateway using a Cognito user pool authorizer (validates the JWT) — no identity pool
+      required. Direct DynamoDB access skips your logic; exposing the DB and using Macie for
+      authZ are wrong.
+    ref: "concepts.md#cognito-identity-pools-for-authorization-to-aws-resources"
+
+  - id: aws-security-kms-secrets-cognito-waf-047
+    difficulty: expert
+    tags: [cognito, sts, credential-duration]
+    question: |
+      Temporary credentials vended by a Cognito identity pool via STS are valid for what
+      general duration range?
+    options:
+      - "Permanent until manually revoked"
+      - "30 days"
+      - "15 minutes to 12 hours"
+      - "10 years"
+    answer: 2
+    explanation: |
+      STS temporary credentials (AssumeRoleWithWebIdentity) are short-lived, typically 15
+      minutes to 12 hours — never permanent. 30 days is a Cognito refresh-token default; 10
+      years is the max refresh-token TTL, not credential duration.
+    ref: "concepts.md#cognito-identity-pools-for-authorization-to-aws-resources"
+
+  # ---------------- WAF ----------------
+  - id: aws-security-kms-secrets-cognito-waf-048
+    difficulty: beginner
+    tags: [waf, layer7]
+    question: |
+      At which layer does AWS WAF operate, and what does it inspect?
+    options:
+      - "Layer 3/4; it inspects IP packets and TCP flags only"
+      - "Layer 2; it inspects MAC addresses"
+      - "It only inspects DNS queries"
+      - "Layer 7; it inspects HTTP(S) requests (headers, body, URI, query string, method, IP, geo)"
+    answer: 3
+    explanation: |
+      WAF is a Layer 7 web-application firewall inspecting HTTP(S) request attributes. L3/L4 is
+      Shield/security-group territory; WAF is not L2 or DNS-based.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-049
+    difficulty: intermediate
+    tags: [waf, rate-based, brute-force]
+    question: |
+      Which WAF rule type is the primary defense against an HTTP flood or login brute-force
+      from a source?
+    options:
+      - "A rate-based rule that counts requests per source over a window and blocks above a threshold"
+      - "A managed SQLi rule group"
+      - "A geo-match rule"
+      - "A CAPTCHA rule applied to every request"
+    answer: 0
+    explanation: |
+      Rate-based rules count per-source requests over a window (60s default; also
+      120/300/600s) and block above a threshold — ideal for L7 floods and brute force. SQLi
+      rules target injection, geo-match filters by country, and blanket CAPTCHA harms UX
+      without targeting rate.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-050
+    difficulty: intermediate
+    tags: [waf, rate-based, facts]
+    question: |
+      What is the default evaluation window for a WAF rate-based rule?
+    options:
+      - "10 seconds"
+      - "60 seconds (also configurable to 120/300/600 seconds)"
+      - "5 minutes fixed"
+      - "1 hour"
+    answer: 1
+    explanation: |
+      The default window is 60 seconds, now also configurable to 120, 300, or 600 seconds. 10
+      seconds is not an option; 5 minutes/1 hour are not the default.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-051
+    difficulty: advanced
+    tags: [waf, managed-rules, tuning]
+    question: |
+      Before enabling AWS managed rule groups in Block mode on a production ALB, what is the
+      recommended practice?
+    options:
+      - "Enable all rules in Block immediately for maximum protection"
+      - "Disable logging to save cost"
+      - "Deploy rules in Count mode first, observe false positives, then switch to Block after tuning"
+      - "Only apply rules to GET requests"
+    answer: 2
+    explanation: |
+      Managed rules can cause false positives, so start in Count mode, analyze, then move to
+      Block after tuning. Blocking immediately risks blocking legitimate users; disabling
+      logging removes the data you need to tune; limiting to GET leaves other methods exposed.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-052
+    difficulty: advanced
+    tags: [waf, placement, edge]
+    question: |
+      Why is placing WAF on CloudFront and locking the origin to accept only CloudFront
+      traffic generally preferred over WAF on a regional ALB alone?
+    options:
+      - "CloudFront WAF is free while ALB WAF is not"
+      - "ALB cannot be associated with a WAF web ACL"
+      - "CloudFront automatically encrypts data at rest"
+      - "It filters bad traffic at the global edge before it reaches your Region and prevents attackers from bypassing the edge WAF by hitting the origin directly"
+    answer: 3
+    explanation: |
+      Edge WAF on CloudFront filters closest to attackers (cheaper, bad traffic never reaches
+      the Region), and restricting the origin to CloudFront stops direct-to-origin bypass. WAF
+      pricing isn't free on CloudFront, ALB can have a web ACL, and CloudFront doesn't do
+      at-rest encryption of your data.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-053
+    difficulty: expert
+    tags: [waf, body-inspection, limits]
+    question: |
+      A WAF web ACL on CloudFront isn't catching a malicious payload buried deep in a large
+      request body. Which limit is the likely cause?
+    options:
+      - "Body inspection defaults to 16 KB for CloudFront (raisable up to 64 KB); content past that limit isn't inspected"
+      - "WAF only inspects headers, never the body"
+      - "The 4 KB Encrypt limit"
+      - "The 5,000 WCU limit"
+    answer: 0
+    explanation: |
+      WAF body inspection defaults to 16 KB for CloudFront/API Gateway/Cognito (raisable to
+      64 KB; ALB/AppSync is 8 KB), so a payload beyond that can slip through. WAF can inspect
+      bodies; the 4 KB Encrypt and 5,000 WCU limits are unrelated to body scanning depth.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-054
+    difficulty: expert
+    tags: [waf, wcu, cost]
+    question: |
+      What is the significance of the 1,500 WCU figure for a WAF web ACL?
+    options:
+      - "It is the maximum requests per second a web ACL allows"
+      - "Using more than 1,500 Web ACL Capacity Units incurs cost beyond the base web ACL price (max 5,000 WCUs per web ACL)"
+      - "It is the number of rules allowed per account"
+      - "It is the body inspection limit in KB"
+    answer: 1
+    explanation: |
+      Rules consume WCUs; a web ACL can reach 5,000 WCUs, but exceeding 1,500 WCUs adds cost
+      over the base price — so over-broad rule sets cost more. It's not an RPS cap, a rule
+      count, or a body size.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  - id: aws-security-kms-secrets-cognito-waf-055
+    difficulty: advanced
+    tags: [waf, bot-control, atp]
+    question: |
+      Which WAF feature is designed to detect credential-stuffing and fake-account-creation
+      bots specifically?
+    options:
+      - "Rate-based rules alone"
+      - "Geo-match rules"
+      - "Bot Control / Fraud Control (Account Takeover Prevention and Account Creation Fraud Prevention) managed intelligence"
+      - "The Known Bad Inputs managed rule group"
+    answer: 2
+    explanation: |
+      WAF Fraud Control (ATP and Account Creation Fraud Prevention) and Bot Control provide
+      managed intelligence for credential stuffing and fake accounts. Rate-based rules catch
+      volume but not sophisticated distributed bots; geo-match and Known Bad Inputs address
+      different threats.
+    ref: "concepts.md#aws-waf-managed-rules-rate-based-rules-and-bot-control"
+
+  # ---------------- Shield ----------------
+  - id: aws-security-kms-secrets-cognito-waf-056
+    difficulty: beginner
+    tags: [shield-standard, ddos]
+    question: |
+      What does AWS Shield Standard provide?
+    options:
+      - "A paid $3,000/month subscription with SRT access"
+      - "Layer 7 SQL injection filtering"
+      - "TLS certificate provisioning"
+      - "Free, automatic protection for all AWS customers against common L3/L4 DDoS attacks at the edge"
+    answer: 3
+    explanation: |
+      Shield Standard is free and always-on for every AWS customer, defending common
+      network/transport (L3/L4) attacks at the edge. The $3,000/month tier is Advanced; SQLi
+      filtering is WAF; certs are ACM.
+    ref: "concepts.md#aws-shield-standard-versus-shield-advanced"
+
+  - id: aws-security-kms-secrets-cognito-waf-057
+    difficulty: intermediate
+    tags: [shield-advanced, cost, facts]
+    question: |
+      What is the pricing/commitment model for AWS Shield Advanced?
+    options:
+      - "$3,000 per month per organization with a 1-year commitment (plus data transfer)"
+      - "$1 per protected resource per month, no commitment"
+      - "Free"
+      - "$0.40 per protected resource per month"
+    answer: 0
+    explanation: |
+      Shield Advanced is $3,000/month per organization on a 1-year commitment, plus data
+      transfer fees. $1/month is a KMS key; free is Shield Standard; $0.40 is a Secrets Manager
+      secret.
+    ref: "concepts.md#aws-shield-standard-versus-shield-advanced"
+
+  - id: aws-security-kms-secrets-cognito-waf-058
+    difficulty: advanced
+    tags: [shield-advanced, features, tradeoffs]
+    question: |
+      Which combination of benefits is UNIQUE to Shield Advanced (versus Standard)?
+    options:
+      - "Free at-rest encryption and key rotation"
+      - "DDoS cost protection (scaling credits), 24x7 Shield Response Team access, enhanced detection/visibility, and WAF at no extra basic charge on protected resources"
+      - "Automatic TLS certificate renewal"
+      - "PII discovery in S3"
+    answer: 1
+    explanation: |
+      Advanced adds DDoS cost protection, SRT access, near-real-time detection/visibility, L7
+      auto-mitigation, and WAF included on protected resources. At-rest encryption/rotation is
+      KMS, cert renewal is ACM, and PII discovery is Macie.
+    ref: "concepts.md#aws-shield-standard-versus-shield-advanced"
+
+  - id: aws-security-kms-secrets-cognito-waf-059
+    difficulty: advanced
+    tags: [shield, waf, layer7]
+    question: |
+      A team subscribes to Shield Advanced and assumes it fully handles Layer 7 application
+      floods. Why is this assumption risky?
+    options:
+      - "Shield Advanced blocks all traffic by default"
+      - "Shield Advanced only works with CloudHSM"
+      - "L7 application floods still require WAF rate-based rules; Shield is not a substitute for WAF at Layer 7"
+      - "Shield Advanced disables TLS"
+    answer: 2
+    explanation: |
+      Shield focuses on L3/L4 (with L7 auto-mitigation assistance), but effective L7 flood
+      defense still needs WAF rate-based rules. Shield doesn't block all traffic, require
+      CloudHSM, or disable TLS.
+    ref: "concepts.md#aws-shield-standard-versus-shield-advanced"
+
+  - id: aws-security-kms-secrets-cognito-waf-060
+    difficulty: expert
+    tags: [shield-advanced, decision, tradeoffs]
+    question: |
+      For which workload is subscribing to Shield Advanced most clearly justified?
+    options:
+      - "A low-traffic internal admin tool behind a VPN"
+      - "A static S3 website with no dynamic backend"
+      - "A batch job that runs nightly with no public endpoint"
+      - "A high-value payments/gaming platform where a DDoS is a business-critical event and cost protection plus 24x7 SRT support are worth ~$36k/year"
+    answer: 3
+    explanation: |
+      Advanced's cost is justified for high-value, high-visibility public targets needing
+      SLA-backed protection, SRT, and financial protection against attack-driven autoscaling.
+      Internal tools, static sites, and non-public batch jobs don't warrant the org-wide
+      $3,000/month spend.
+    ref: "concepts.md#aws-shield-standard-versus-shield-advanced"
+
+  # ---------------- ACM ----------------
+  - id: aws-security-kms-secrets-cognito-waf-061
+    difficulty: beginner
+    tags: [acm, tls, cost]
+    question: |
+      What does AWS Certificate Manager provide for public TLS certificates on integrated
+      services?
+    options:
+      - "Free certificates with automatic renewal"
+      - "Certificates for a per-cert fee with manual renewal"
+      - "Only self-signed certificates"
+      - "Certificates that must be renewed by opening a support case"
+    answer: 0
+    explanation: |
+      Public ACM certificates are free and auto-renew (with DNS validation records in place),
+      preventing expiry outages. They aren't per-cert-fee, self-signed, or manually renewed via
+      support.
+    ref: "concepts.md#acm-for-tls-certificates"
+
+  - id: aws-security-kms-secrets-cognito-waf-062
+    difficulty: advanced
+    tags: [acm, cloudfront, gotcha]
+    question: |
+      You attach an ACM certificate to a CloudFront distribution but it doesn't appear as
+      selectable. Your origin is in eu-west-1. What's wrong?
+    options:
+      - "CloudFront cannot use ACM certificates"
+      - "CloudFront requires the certificate to be in us-east-1 regardless of origin Region"
+      - "You must export the private key first"
+      - "The certificate must be a private CA cert"
+    answer: 1
+    explanation: |
+      CloudFront requires the ACM cert in us-east-1 (N. Virginia) no matter where the origin
+      is — a classic gotcha. CloudFront does use ACM certs, you can't export a public ACM key,
+      and it doesn't need to be a private CA cert.
+    ref: "concepts.md#acm-for-tls-certificates"
+
+  - id: aws-security-kms-secrets-cognito-waf-063
+    difficulty: advanced
+    tags: [acm, private-key, tradeoffs]
+    question: |
+      A team needs the TLS private key installed on an EC2 instance they manage. Why can't
+      they use a standard public ACM certificate, and what should they use?
+    options:
+      - "Public ACM certs cost too much; use a cheaper public cert"
+      - "ACM certs only work in us-east-1; deploy the instance there"
+      - "The private key of a public ACM cert cannot be exported; use ACM Private CA (exportable certs) or import a third-party certificate"
+      - "They can export it via the KMS Decrypt API"
+    answer: 2
+    explanation: |
+      Public ACM cert private keys stay in AWS and can only be used by integrated services; for
+      an on-host key you need ACM Private CA (which issues exportable certs) or an imported
+      cert. Public certs are free, region requirement is CloudFront-specific, and KMS Decrypt
+      doesn't export ACM keys.
+    ref: "concepts.md#acm-for-tls-certificates"
+
+  - id: aws-security-kms-secrets-cognito-waf-064
+    difficulty: intermediate
+    tags: [acm, validation, renewal]
+    question: |
+      Which domain-validation method is recommended for ACM certificates to ensure seamless
+      automatic renewal?
+    options:
+      - "Email validation"
+      - "Manual re-validation each year"
+      - "IP-based validation"
+      - "DNS validation (a CNAME record that stays in place)"
+    answer: 3
+    explanation: |
+      DNS (CNAME) validation lets ACM auto-renew as long as the record remains, avoiding manual
+      steps. Email validation requires periodic action, manual re-validation defeats automation,
+      and IP-based validation isn't an ACM method.
+    ref: "concepts.md#acm-for-tls-certificates"
+
+  - id: aws-security-kms-secrets-cognito-waf-065
+    difficulty: expert
+    tags: [acm-private-ca, cost, mtls]
+    question: |
+      When is AWS Private CA (ACM Private CA) the right choice despite its ~$400/month per-CA
+      cost?
+    options:
+      - "For internal PKI needs like service-to-service mTLS or issuing private/exportable certs at scale"
+      - "For every public website to save money"
+      - "To provision free public certificates"
+      - "To protect against DDoS attacks"
+    answer: 0
+    explanation: |
+      Private CA suits internal PKI: private certs for internal services, mTLS, and exportable
+      certs. Public sites should use free public ACM certs; Private CA isn't for public certs or
+      DDoS protection.
+    ref: "concepts.md#acm-for-tls-certificates"
+
+  # ---------------- Macie / GuardDuty / Inspector ----------------
+  - id: aws-security-kms-secrets-cognito-waf-066
+    difficulty: beginner
+    tags: [macie, pii, s3]
+    question: |
+      Which AWS service discovers and classifies sensitive data (PII/PHI) in Amazon S3?
+    options:
+      - "Amazon GuardDuty"
+      - "Amazon Macie"
+      - "Amazon Inspector"
+      - "AWS WAF"
+    answer: 1
+    explanation: |
+      Macie uses ML/pattern matching to find and classify sensitive data in S3 and flag
+      public/unencrypted buckets. GuardDuty detects threats, Inspector finds vulnerabilities,
+      and WAF filters HTTP requests.
+    ref: "concepts.md#threat-detection-macie-guardduty-and-inspector"
+
+  - id: aws-security-kms-secrets-cognito-waf-067
+    difficulty: intermediate
+    tags: [guardduty, threat-detection]
+    question: |
+      Which service continuously analyzes CloudTrail, VPC Flow Logs, and DNS logs to detect
+      compromised instances, credential exfiltration, and anomalous API activity?
+    options:
+      - "Amazon Macie"
+      - "Amazon Inspector"
+      - "Amazon GuardDuty"
+      - "AWS Config"
+    answer: 2
+    explanation: |
+      GuardDuty is the always-on threat-detection service analyzing CloudTrail, VPC Flow Logs,
+      and DNS logs (plus add-ons). Macie targets S3 data classification, Inspector targets
+      CVEs, and Config tracks resource configuration/compliance.
+    ref: "concepts.md#threat-detection-macie-guardduty-and-inspector"
+
+  - id: aws-security-kms-secrets-cognito-waf-068
+    difficulty: intermediate
+    tags: [inspector, vulnerability]
+    question: |
+      Which service scans EC2, ECR container images, and Lambda for known CVEs and network
+      reachability?
+    options:
+      - "Amazon Macie"
+      - "Amazon GuardDuty"
+      - "AWS Shield"
+      - "Amazon Inspector"
+    answer: 3
+    explanation: |
+      Inspector is the vulnerability-management service scanning EC2/ECR/Lambda for CVEs and
+      reachability. Macie is data classification, GuardDuty is threat detection, and Shield is
+      DDoS protection.
+    ref: "concepts.md#threat-detection-macie-guardduty-and-inspector"
+
+  - id: aws-security-kms-secrets-cognito-waf-069
+    difficulty: advanced
+    tags: [detection, complementary, security-hub]
+    question: |
+      How should Macie, GuardDuty, and Inspector be positioned in a defense-in-depth strategy?
+    options:
+      - "They are complementary detective controls answering different questions (exposed data / active attack / vulnerable workload), best aggregated in Security Hub with EventBridge auto-remediation"
+      - "They are interchangeable; pick one"
+      - "They are preventive controls that block attacks inline"
+      - "They replace the need for KMS and WAF"
+    answer: 0
+    explanation: |
+      Each answers a distinct question — Macie (exposed sensitive data), GuardDuty (active
+      threat), Inspector (vulnerabilities) — and they are detective, not preventive; aggregate
+      findings in Security Hub and auto-remediate via EventBridge. They don't block inline or
+      replace KMS/WAF.
+    ref: "concepts.md#threat-detection-macie-guardduty-and-inspector"
+
+  # ---------------- PII / tokenization ----------------
+  - id: aws-security-kms-secrets-cognito-waf-070
+    difficulty: advanced
+    tags: [tokenization, pci, scope]
+    question: |
+      Why does tokenizing credit-card numbers (replacing them with tokens backed by a vault)
+      reduce PCI-DSS compliance scope more than encrypting them?
+    options:
+      - "Encryption is not allowed under PCI-DSS"
+      - "Downstream systems only ever handle non-sensitive tokens, so they fall out of PCI scope, whereas ciphertext is still the data and every keyholding system stays in scope"
+      - "Tokens are faster to compute than ciphertext"
+      - "Tokenization requires no storage at all"
+    answer: 1
+    explanation: |
+      Tokenization keeps the real value only in a tightly controlled vault; systems handling
+      just tokens are out of scope. Encryption keeps the data (ciphertext) and every keyholder
+      in scope. Encryption is allowed, speed isn't the point, and a vault does store the mapping.
+    ref: "concepts.md#pii-compliance-and-tokenization"
+
+  - id: aws-security-kms-secrets-cognito-waf-071
+    difficulty: expert
+    tags: [tokenization, encryption, tradeoffs]
+    question: |
+      What is a key downside of tokenization compared with server-side encryption?
+    options:
+      - "Tokenization exposes the plaintext to more systems"
+      - "It is reversible without the vault"
+      - "It adds a vault dependency (availability and detokenize latency) and only fits well-structured values like cards or SSNs"
+      - "It cannot reduce compliance scope"
+    answer: 2
+    explanation: |
+      Tokenization introduces a vault dependency (a new availability/latency concern) and works
+      best for structured values. It reduces exposure (fewer systems see plaintext), is not
+      reversible without the vault, and does reduce compliance scope — so the other options are
+      wrong.
+    ref: "concepts.md#pii-compliance-and-tokenization"
+
+  - id: aws-security-kms-secrets-cognito-waf-072
+    difficulty: advanced
+    tags: [client-side-encryption, field-level, tradeoffs]
+    question: |
+      A requirement states AWS itself must never be able to see certain field values in
+      plaintext, even a service operator. Which approach fits, and what do you give up?
+    options:
+      - "SSE-KMS with an AWS managed key; you give up nothing"
+      - "Enable TLS in transit only"
+      - "Tokenize every field with a public token"
+      - "Client-side / field-level encryption (e.g., AWS Encryption SDK) before data reaches the store; you give up server-side query/index on those fields"
+    answer: 3
+    explanation: |
+      Client-side/field-level encryption encrypts before data hits the store so AWS never sees
+      plaintext, at the cost of losing server-side search/indexing on encrypted fields. SSE-KMS
+      lets AWS-managed services decrypt; TLS only protects transit; blanket tokenization has its
+      own vault constraints and doesn't map to arbitrary fields.
+    ref: "concepts.md#pii-compliance-and-tokenization"
+
+  - id: aws-security-kms-secrets-cognito-waf-073
+    difficulty: intermediate
+    tags: [data-residency, compliance]
+    question: |
+      For regulated PII with data-residency requirements, which practice is most appropriate?
+    options:
+      - "Keep regulated data in-Region, use Region-scoped keys, and avoid cross-border replication unless MRKs and policy explicitly allow it"
+      - "Replicate PII across all Regions for durability"
+      - "Store PII only in Secrets Manager"
+      - "Disable encryption to simplify audits"
+    answer: 0
+    explanation: |
+      Data residency means keeping regulated data in-Region with Region-scoped keys and not
+      replicating across borders without explicit MRK/policy allowance. Blanket cross-Region
+      replication can violate residency, Secrets Manager isn't a PII datastore, and disabling
+      encryption is never appropriate.
+    ref: "concepts.md#pii-compliance-and-tokenization"
+
+  # ---------------- Trade-offs / synthesis ----------------
+  - id: aws-security-kms-secrets-cognito-waf-074
+    difficulty: expert
+    tags: [defense-in-depth, layering]
+    question: |
+      Which ordering best describes a layered defense-in-depth request path for a public,
+      data-backed web app?
+    options:
+      - "KMS at rest only, with everything else optional"
+      - "WAF/Shield at the edge → ACM TLS in transit → Cognito/IAM authN+authZ → KMS envelope encryption at rest → Secrets Manager for credentials → GuardDuty/Macie/Inspector detection → CloudTrail audit"
+      - "CloudTrail first, then nothing else is needed"
+      - "Shield alone provides full application security"
+    answer: 1
+    explanation: |
+      Defense in depth layers independent controls: edge filtering (WAF/Shield), transit
+      encryption (ACM), identity (Cognito/IAM), at-rest encryption (KMS), secret management,
+      detection (GuardDuty/Macie/Inspector), and audit (CloudTrail). No single control (KMS
+      alone, CloudTrail alone, Shield alone) is sufficient.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-kms-secrets-cognito-waf-075
+    difficulty: expert
+    tags: [service-selection, scenario]
+    question: |
+      A fintech needs: automatic DB credential rotation, per-tenant cryptographic isolation on
+      one key, cross-Region DR read access to encrypted data, and edge L7 flood protection.
+      Which stack maps correctly?
+    options:
+      - "Parameter Store for rotation, one AWS owned key, single-Region key, Shield Standard only"
+      - "Hardcoded creds, CloudHSM for everything, no cross-Region strategy, GuardDuty for flood protection"
+      - "Secrets Manager (alternating-users rotation), a CMK with per-tenant encryption context, multi-Region keys for DR decrypt, and WAF rate-based rules at the edge"
+      - "Cognito identity pools for rotation, ACM for encryption context, MRK for DDoS"
+    answer: 2
+    explanation: |
+      Secrets Manager provides managed rotation (alternating-users for zero downtime),
+      encryption context enforces per-tenant isolation on one CMK, MRKs allow the DR Region to
+      decrypt without a cross-Region call, and WAF rate-based rules handle L7 floods. The other
+      stacks misuse services (owned keys can't rotate on demand, Cognito/ACM/GuardDuty don't do
+      those jobs).
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-kms-secrets-cognito-waf-076
+    difficulty: advanced
+    tags: [service-selection, cost]
+    question: |
+      A startup with 50,000 mostly-static configuration parameters and a handful of database
+      passwords wants to minimize cost while still auto-rotating the DB passwords. Best design?
+    options:
+      - "Put all 50,000 values plus the DB passwords in Secrets Manager"
+      - "Put everything in CloudHSM"
+      - "Store everything in a single Secrets Manager secret to pay for only one secret"
+      - "Keep the 50,000 config values in Parameter Store SecureString (free) and put only the DB passwords in Secrets Manager for managed rotation"
+    answer: 3
+    explanation: |
+      Split by need: free Parameter Store SecureString for the many static values, Secrets
+      Manager only for the few credentials that benefit from managed rotation. Putting 50,000
+      values in Secrets Manager costs ~$20k/year; CloudHSM is irrelevant; cramming everything
+      into one secret breaks per-value access control and rotation.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-kms-secrets-cognito-waf-077
+    difficulty: expert
+    tags: [failure-modes, cross-region, single-region-key]
+    question: |
+      An active-active multi-Region app encrypts data in Region A with a single-Region CMK and
+      replicates it to Region B. Region A then suffers a full outage. What failure does this
+      design NOT tolerate?
+    options:
+      - "Region B cannot decrypt the replicated data because the single-Region key material lives only in Region A, which is down"
+      - "Region B can still decrypt because keys are global"
+      - "Data at rest becomes unencrypted"
+      - "The refresh tokens expire"
+    answer: 0
+    explanation: |
+      A single-Region key's material exists only in its Region; with Region A down, Region B
+      can't call KMS there to decrypt — the design fails to tolerate a Region A outage. Fix it
+      with multi-Region keys. Keys aren't global by default, data doesn't become unencrypted,
+      and token expiry is unrelated.
+    ref: "concepts.md#key-rotation-and-multi-region-keys"
+
+  - id: aws-security-kms-secrets-cognito-waf-078
+    difficulty: intermediate
+    tags: [envelope-encryption, direct-encrypt, decision]
+    question: |
+      For which case is calling KMS Encrypt directly (no envelope encryption) actually
+      appropriate?
+    options:
+      - "Encrypting a 500 MB video file"
+      - "Encrypting a small secret under 4 KB with low call volume"
+      - "Encrypting a high-throughput stream of millions of records per second"
+      - "Encrypting an entire EBS volume"
+    answer: 1
+    explanation: |
+      Direct KMS Encrypt is fine for tiny payloads under the 4 KB limit at low volume. Large
+      files (500 MB, EBS volumes) exceed the limit, and high-throughput streams would hammer KMS
+      request quotas — all call for envelope encryption / data keys.
+    ref: "concepts.md#envelope-encryption-and-data-keys"

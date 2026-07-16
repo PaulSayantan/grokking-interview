@@ -1,0 +1,1422 @@
+topic: "ML and GenAI System Design on AWS: SageMaker, Bedrock and RAG"
+domain: system-design
+topic_slug: aws-ml-genai-sagemaker-bedrock
+version: 1
+
+questions:
+  # ---------------- ML lifecycle ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-001
+    difficulty: beginner
+    tags: [ml-lifecycle, s3, data]
+    question: |
+      In a typical SageMaker ML pipeline, what is the durable source of truth for
+      raw training data and where trained model artifacts are stored?
+    options:
+      - "Amazon S3"
+      - "Amazon EFS mounted on the training instance"
+      - "The instance store of the training instance"
+      - "Amazon DynamoDB"
+    answer: 0
+    explanation: |
+      S3 is the durable (11 nines) backing store for datasets and model artifacts, with
+      strong read-after-write consistency. EFS/instance store are ephemeral working
+      volumes; DynamoDB is a KV store, not a data lake for large ML datasets.
+    ref: "concepts.md#ml-lifecycle-on-aws"
+
+  - id: aws-ml-genai-sagemaker-bedrock-002
+    difficulty: intermediate
+    tags: [ml-lifecycle, spot, cost]
+    question: |
+      A team runs long, interruption-tolerant training jobs and wants to cut cost.
+      What is the correct way to use SageMaker Managed Spot Training?
+    options:
+      - "Use Spot only for real-time inference endpoints to save on serving cost"
+      - "Disable checkpointing so the job restarts faster after interruption"
+      - "Enable Managed Spot Training with periodic checkpointing to S3 so interrupted jobs resume"
+      - "Use Spot for the online Feature Store to reduce read cost"
+    answer: 2
+    explanation: |
+      Managed Spot can save up to ~90% but instances can be reclaimed; checkpointing to S3
+      lets the job resume rather than restart from scratch. Spot is a training-capacity
+      option, not for endpoints or Feature Store; disabling checkpoints loses progress.
+    ref: "concepts.md#ml-lifecycle-on-aws"
+
+  - id: aws-ml-genai-sagemaker-bedrock-003
+    difficulty: advanced
+    tags: [ml-lifecycle, self-managed, trade-offs]
+    question: |
+      An organization already runs a mature Kubernetes platform team and needs custom
+      schedulers and non-standard GPU topologies for training. What is the strongest
+      argument for self-managing training on EKS instead of SageMaker Training?
+    options:
+      - "SageMaker cannot train deep learning models at all"
+      - "EKS always costs less than SageMaker for every workload"
+      - "SageMaker does not support GPUs for training"
+      - "Maximum control over cluster, scheduler, and hardware topology, reusing existing platform tooling"
+    answer: 3
+    explanation: |
+      Self-managing wins when you have platform expertise and specialized needs that
+      SageMaker's managed abstractions constrain. SageMaker fully supports GPU/distributed
+      training; EKS is not universally cheaper (you pay in ops burden); the real trade-off
+      is control vs undifferentiated heavy lifting.
+    ref: "concepts.md#ml-lifecycle-on-aws"
+
+  # ---------------- Inference modes ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-004
+    difficulty: beginner
+    tags: [inference-modes, real-time, limits]
+    question: |
+      What is the maximum request payload size and invocation timeout for a SageMaker
+      real-time endpoint?
+    options:
+      - "6 MB payload, 60 second timeout"
+      - "1 GB payload, 1 hour timeout"
+      - "400 KB payload, 29 second timeout"
+      - "100 MB payload, 15 minute timeout"
+    answer: 0
+    explanation: |
+      Real-time endpoints cap payloads at 6 MB with a 60 s invocation timeout — synchronous
+      and latency-oriented. 1 GB / 1 hour are the Asynchronous Inference limits; 400 KB is a
+      DynamoDB item; 29 s is API Gateway's integration timeout.
+    ref: "concepts.md#sagemaker-inference-modes"
+
+  - id: aws-ml-genai-sagemaker-bedrock-005
+    difficulty: intermediate
+    tags: [inference-modes, async, large-payload]
+    question: |
+      You must run inference on documents up to 500 MB that each take ~10 minutes to
+      process, with results available within an hour. Which SageMaker inference mode fits?
+    options:
+      - "Real-time endpoint with autoscaling"
+      - "Serverless Inference with Provisioned Concurrency"
+      - "Asynchronous Inference"
+      - "Multi-Model Endpoint"
+    answer: 2
+    explanation: |
+      Async Inference supports payloads up to 1 GB and processing up to 1 hour, queues
+      requests, writes results to S3, and scales to zero. Real-time (6 MB / 60 s) and
+      serverless (≤ 4 MB, no GPU) would fail on size and duration; MME addresses model count,
+      not payload/duration.
+    ref: "concepts.md#sagemaker-inference-modes"
+
+  - id: aws-ml-genai-sagemaker-bedrock-006
+    difficulty: intermediate
+    tags: [inference-modes, serverless, idle-cost]
+    question: |
+      A CPU-based model receives sporadic traffic with long idle gaps and can tolerate
+      occasional cold starts. Which mode minimizes cost while auto-scaling to zero?
+    options:
+      - "Real-time endpoint with a minimum of one instance"
+      - "Batch Transform on a schedule"
+      - "A dedicated GPU real-time endpoint"
+      - "Serverless Inference"
+    answer: 3
+    explanation: |
+      Serverless Inference scales to zero between bursts (pay per use) and suits CPU models
+      that tolerate cold starts. Real-time keeps ≥ 1 instance running (idle cost). Batch is
+      offline bulk, not request/response. A GPU endpoint is both unnecessary and costly here.
+    ref: "concepts.md#sagemaker-inference-modes"
+
+  - id: aws-ml-genai-sagemaker-bedrock-007
+    difficulty: advanced
+    tags: [inference-modes, serverless, limits, gpu]
+    question: |
+      Which statement about SageMaker Serverless Inference limits is correct?
+    options:
+      - "It supports GPU instances up to 8 GPUs per endpoint"
+      - "Memory ranges 1024–6144 MB, no GPU, max 200 concurrency per endpoint, 5 GB ephemeral disk"
+      - "It supports payloads up to 1 GB and processing up to 1 hour"
+      - "There is no per-endpoint concurrency cap; only account-level billing applies"
+    answer: 1
+    explanation: |
+      Serverless memory is 1024–6144 MB (no GPU), max concurrency per endpoint is 200, with
+      5 GB ephemeral disk and a 10 GB max image. GPUs and MME/VPC/data-capture are excluded.
+      1 GB / 1 hour is Async. There IS a per-endpoint concurrency cap (200) plus per-region
+      account concurrency (1000, or 500 in some regions).
+    ref: "concepts.md#sagemaker-inference-modes"
+
+  - id: aws-ml-genai-sagemaker-bedrock-008
+    difficulty: advanced
+    tags: [inference-modes, api-gateway, timeout, trade-offs]
+    question: |
+      A synchronous public API (API Gateway → Lambda → SageMaker) sometimes needs 40+
+      seconds of model compute. Requests intermittently fail. What is the root cause and
+      best fix?
+    options:
+      - "API Gateway's 29 s integration timeout is exceeded; move to an async pattern (Async Inference or a job + polling)"
+      - "S3 eventual consistency; switch to strongly consistent reads"
+      - "The real-time endpoint payload limit of 400 KB is exceeded; compress the payload"
+      - "DynamoDB throttling; raise the WCU"
+    answer: 0
+    explanation: |
+      API Gateway enforces a 29 s integration timeout, so 40 s synchronous calls fail. The
+      fix is an asynchronous pattern (SageMaker Async Inference with S3+SNS, or submit-a-job
+      then poll). S3 is strongly consistent; the real-time payload limit is 6 MB not 400 KB;
+      DynamoDB is not in this path.
+    ref: "concepts.md#sagemaker-inference-modes"
+
+  - id: aws-ml-genai-sagemaker-bedrock-009
+    difficulty: intermediate
+    tags: [inference-modes, batch, offline]
+    question: |
+      You must score an entire 500 GB dataset in S3 once per night with no need for an
+      always-on endpoint. Which is most cost-effective?
+    options:
+      - "Keep a real-time endpoint warm and loop requests through it"
+      - "Serverless Inference invoked in a tight loop"
+      - "SageMaker Batch Transform"
+      - "A Bedrock provisioned-throughput model"
+    answer: 2
+    explanation: |
+      Batch Transform spins up a transient fleet to score an S3 dataset and shuts down —
+      cheapest for offline bulk. A standing real-time endpoint or looping serverless calls
+      wastes money and hits per-request overhead; Bedrock is for foundation-model generation,
+      not scoring your custom model on a dataset.
+    ref: "concepts.md#sagemaker-inference-modes"
+
+  - id: aws-ml-genai-sagemaker-bedrock-010
+    difficulty: expert
+    tags: [inference-modes, async, autoscaling, cold-start]
+    question: |
+      On which metric does SageMaker Asynchronous Inference autoscaling (including
+      scale-to-zero) primarily key, and what is the main latency consequence?
+    options:
+      - "SageMakerVariantInvocationsPerInstance; no cold start ever occurs"
+      - "CPUUtilization; scaling is instantaneous with no penalty"
+      - "GPUMemoryUtilization; requests are dropped when scaled to zero"
+      - "ApproximateBacklogSizePerInstance; the first request after scaling from zero pays a warm-up penalty"
+    answer: 3
+    explanation: |
+      Async scales on backlog (ApproximateBacklogSizePerInstance) and can go to zero when the
+      queue drains; the trade-off is a warm-up penalty on the first request after scale-from-
+      zero. Real-time scales on InvocationsPerInstance. Requests aren't dropped at zero — they
+      queue in S3 and trigger scale-up.
+    ref: "concepts.md#sagemaker-inference-modes"
+
+  # ---------------- MME / MCE ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-011
+    difficulty: beginner
+    tags: [mme, cost, many-models]
+    question: |
+      What problem do SageMaker Multi-Model Endpoints (MME) primarily solve?
+    options:
+      - "Cost-effectively hosting many models on shared infrastructure instead of one endpoint each"
+      - "Serving a single very large model that exceeds one GPU's memory"
+      - "Guaranteeing zero cold starts for every model"
+      - "Running distributed training across regions"
+    answer: 0
+    explanation: |
+      MME packs many models onto a shared fleet/container, dynamically loading them from S3
+      on demand — far cheaper than one endpoint per rarely-used model. Very large single
+      models need tensor/pipeline parallelism, not MME; MME explicitly accepts occasional
+      cold starts; it's a serving, not training, feature.
+    ref: "concepts.md#multi-model-and-multi-container-endpoints"
+
+  - id: aws-ml-genai-sagemaker-bedrock-012
+    difficulty: advanced
+    tags: [mme, memory, cold-start, s3]
+    question: |
+      How does a Multi-Model Endpoint manage models under memory pressure?
+    options:
+      - "It rejects invocations for any model not preloaded at endpoint creation"
+      - "It replicates every model to every instance at all times"
+      - "It dynamically loads a model on first invocation and unloads least-recently-used models, keeping them on disk for fast reload"
+      - "It stores all models only in GPU memory and never on disk"
+    answer: 2
+    explanation: |
+      MME loads models from S3 on first invocation, caches them, and evicts LRU models under
+      memory pressure — evicted models remain on the instance disk (fast reload; only re-
+      downloaded from S3 if disk fills). Models aren't preloaded at creation, aren't
+      replicated everywhere, and disk caching is central to reducing cold starts.
+    ref: "concepts.md#multi-model-and-multi-container-endpoints"
+
+  - id: aws-ml-genai-sagemaker-bedrock-013
+    difficulty: advanced
+    tags: [mme, trade-offs, dedicated-endpoint]
+    question: |
+      You host 800 per-tenant models on an MME. Two tenants have very high, latency-
+      sensitive TPS while the rest are sparse. What is the best design?
+    options:
+      - "Move all 800 models to individual dedicated endpoints"
+      - "Switch the entire fleet to Serverless Inference"
+      - "Increase MME instance count until the hot tenants stop having cold starts"
+      - "Keep sparse models on the MME, but give the two high-TPS latency-sensitive models dedicated endpoints"
+    answer: 3
+    explanation: |
+      MME shines for many similar-sized, intermittently-used models; models with high TPS or
+      strict latency deserve dedicated endpoints so they don't contend for shared memory or
+      suffer eviction cold starts. 800 dedicated endpoints is wasteful; serverless has no GPU
+      and its own cold starts; just scaling out MME doesn't eliminate eviction contention.
+    ref: "concepts.md#multi-model-and-multi-container-endpoints"
+
+  - id: aws-ml-genai-sagemaker-bedrock-014
+    difficulty: intermediate
+    tags: [mce, inference-pipeline]
+    question: |
+      What is a SageMaker inference pipeline (via multi-container endpoints) best used for?
+    options:
+      - "Running preprocessing, model, and postprocessing as chained containers in one endpoint with container-to-container hops"
+      - "Serving thousands of independent models with LRU eviction"
+      - "Guaranteeing exactly-once semantics across regions"
+      - "Automatically fine-tuning a model on each request"
+    answer: 0
+    explanation: |
+      An inference pipeline chains containers (e.g., feature transform → model → post-process)
+      inside one endpoint, avoiding external network hops. MME (not MCE) is the many-models
+      case; the others are unrelated to inference pipelines.
+    ref: "concepts.md#multi-model-and-multi-container-endpoints"
+
+  # ---------------- Feature Store / Pipelines ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-015
+    difficulty: intermediate
+    tags: [feature-store, skew, online-offline]
+    question: |
+      What core problem does SageMaker Feature Store's online + offline design address?
+    options:
+      - "Encrypting model artifacts at rest"
+      - "Automatically choosing GPU instance types"
+      - "Training/serving skew, by ensuring the same feature values are available for low-latency inference and for training"
+      - "Load balancing across endpoints"
+    answer: 2
+    explanation: |
+      Feature Store's online store (low-latency reads for inference) and offline store (S3
+      for training) keep feature computation consistent, avoiding training/serving skew and
+      supporting point-in-time-correct joins. The other options are unrelated to feature
+      management.
+    ref: "concepts.md#sagemaker-feature-store-and-pipelines"
+
+  - id: aws-ml-genai-sagemaker-bedrock-016
+    difficulty: advanced
+    tags: [feature-store, point-in-time, leakage]
+    question: |
+      Why does Feature Store record event time and support point-in-time joins for building
+      training datasets?
+    options:
+      - "To reduce S3 storage cost"
+      - "To increase online read throughput"
+      - "To enable cross-region replication"
+      - "To prevent label leakage by joining only feature values that existed at or before each label's timestamp"
+    answer: 3
+    explanation: |
+      Point-in-time-correct joins ensure a training row uses only feature values available at
+      that moment, preventing leakage of future information (which inflates offline metrics
+      and fails in production). It is not primarily about storage cost, throughput, or
+      replication.
+    ref: "concepts.md#sagemaker-feature-store-and-pipelines"
+
+  - id: aws-ml-genai-sagemaker-bedrock-017
+    difficulty: intermediate
+    tags: [pipelines, model-registry, mlops]
+    question: |
+      In an MLOps setup on SageMaker, what role does the Model Registry play?
+    options:
+      - "It stores raw training data"
+      - "It versions trained models with approval status, gating which version gets deployed"
+      - "It runs the ANN vector search"
+      - "It provides the online feature store"
+    answer: 1
+    explanation: |
+      Model Registry versions model artifacts and tracks approval status so pipelines/
+      EventBridge can gate deployment. Raw data lives in S3; vector search is OpenSearch/
+      pgvector; the online store is Feature Store.
+    ref: "concepts.md#sagemaker-feature-store-and-pipelines"
+
+  # ---------------- Bedrock FMs ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-018
+    difficulty: beginner
+    tags: [bedrock, managed, foundation-models]
+    question: |
+      What is Amazon Bedrock at its core?
+    options:
+      - "A serverless API to access foundation models (Anthropic, Meta, Amazon, etc.) without managing infrastructure"
+      - "A managed Kubernetes service for hosting your own models"
+      - "A vector database for embeddings"
+      - "A distributed training cluster manager"
+    answer: 0
+    explanation: |
+      Bedrock is a fully managed, serverless API to third-party and Amazon foundation models
+      — no GPUs or weights to host. It is not Kubernetes (that's EKS), not a vector DB
+      (OpenSearch/pgvector), and not a training cluster.
+    ref: "concepts.md#amazon-bedrock-foundation-models"
+
+  - id: aws-ml-genai-sagemaker-bedrock-019
+    difficulty: intermediate
+    tags: [bedrock, converse-api, portability]
+    question: |
+      Why would a team standardize on Bedrock's Converse API rather than model-specific
+      InvokeModel bodies?
+    options:
+      - "Converse is the only API that supports streaming"
+      - "Converse bypasses all token-based billing"
+      - "Converse gives a unified multi-turn/tool-use schema across models, so swapping models needs minimal code change"
+      - "Converse guarantees zero hallucinations"
+    answer: 2
+    explanation: |
+      Converse provides a consistent request/response schema (messages, tool use) across
+      Bedrock models, easing model portability. Both APIs support streaming variants; neither
+      changes billing or eliminates hallucination.
+    ref: "concepts.md#amazon-bedrock-foundation-models"
+
+  - id: aws-ml-genai-sagemaker-bedrock-020
+    difficulty: advanced
+    tags: [bedrock, self-host, trade-offs, cost]
+    question: |
+      An interviewer asks when self-hosting an open model (e.g., Llama on SageMaker LMI/EKS)
+      beats calling Bedrock. What is the most defensible answer?
+    options:
+      - "Always — self-hosting is cheaper in every scenario"
+      - "When traffic is spiky and unpredictable"
+      - "When you want zero operational responsibility for GPUs"
+      - "When you have sustained, high, predictable token volume you can keep a GPU fleet saturated, or need full model control / private weights"
+    answer: 3
+    explanation: |
+      Self-hosting pays off at sustained high utilization (per-token markup avoided) and when
+      you need model control/private weights, accepting GPU ops and scarcity. Spiky/unknown
+      load and zero-ops goals favor Bedrock's elasticity and managed infra.
+    ref: "concepts.md#amazon-bedrock-foundation-models"
+
+  - id: aws-ml-genai-sagemaker-bedrock-021
+    difficulty: intermediate
+    tags: [bedrock, data-governance, compliance]
+    question: |
+      A regulated enterprise needs foundation-model access while keeping data in its AWS
+      account and integrating with IAM, KMS, and CloudTrail. Which is the strongest fit?
+    options:
+      - "Amazon Bedrock, optionally via PrivateLink, with IAM/KMS/CloudTrail integration"
+      - "Call a public third-party LLM API over the internet"
+      - "Host the model on a public EC2 instance with a public IP"
+      - "Email prompts to a managed service"
+    answer: 0
+    explanation: |
+      Bedrock keeps data within your account, supports PrivateLink (no internet egress), and
+      integrates with IAM/KMS/CloudTrail; it doesn't use your prompts to train base models.
+      A public external API or public EC2 undermines the governance requirements.
+    ref: "concepts.md#amazon-bedrock-foundation-models"
+
+  # ---------------- Provisioned vs on-demand ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-022
+    difficulty: beginner
+    tags: [bedrock, provisioned-throughput, model-units]
+    question: |
+      What does a Bedrock Provisioned Throughput purchase measure capacity in?
+    options:
+      - "vCPUs"
+      - "GPU-hours"
+      - "Model Units (MUs), each guaranteeing a fixed input/output tokens-per-minute for a model"
+      - "Requests per second per shard"
+    answer: 2
+    explanation: |
+      Provisioned Throughput is bought in Model Units, each delivering a fixed input and
+      output tokens-per-minute for a specific model, billed hourly. vCPUs/GPU-hours/shards
+      are the wrong abstractions for Bedrock.
+    ref: "concepts.md#bedrock-provisioned-versus-on-demand-throughput"
+
+  - id: aws-ml-genai-sagemaker-bedrock-023
+    difficulty: intermediate
+    tags: [bedrock, on-demand, throttling]
+    question: |
+      On-demand Bedrock traffic starts returning HTTP 429 errors as load grows. What is
+      happening and the appropriate first response?
+    options:
+      - "The vector store is full; delete embeddings"
+      - "The S3 bucket is throttling; enable Transfer Acceleration"
+      - "The model has run out of parameters; fine-tune it"
+      - "Per-account requests/tokens-per-minute quotas are exceeded; apply exponential backoff and consider cross-region inference or a fallback model"
+    answer: 3
+    explanation: |
+      On-demand has per-account RPM/TPM quotas; exceeding them throttles (429). Handle with
+      backoff and spread load via cross-region inference profiles or a fallback model, and/or
+      buy Provisioned Throughput for guaranteed capacity. The other options misdiagnose the
+      throttle.
+    ref: "concepts.md#bedrock-provisioned-versus-on-demand-throughput"
+
+  - id: aws-ml-genai-sagemaker-bedrock-024
+    difficulty: advanced
+    tags: [bedrock, provisioned-throughput, trade-offs, cost]
+    question: |
+      A workload has steady, high, predictable token volume with a strict latency SLA. Which
+      Bedrock capacity choice is most appropriate and what is the key downside?
+    options:
+      - "Provisioned Throughput; downside is you pay hourly regardless of usage, so over-provisioning wastes money"
+      - "On-demand; downside is nothing, it always matches provisioned latency"
+      - "Serverless Inference on SageMaker; downside is cold starts"
+      - "Batch Transform; downside is high latency"
+    answer: 0
+    explanation: |
+      Predictable high volume + SLA favors Provisioned Throughput (guaranteed TPM, consistent
+      latency), but it bills hourly until deleted — over-provisioning wastes money, under-
+      provisioning throttles. On-demand can throttle and gives no latency guarantee; the other
+      two aren't Bedrock capacity modes for this need.
+    ref: "concepts.md#bedrock-provisioned-versus-on-demand-throughput"
+
+  - id: aws-ml-genai-sagemaker-bedrock-025
+    difficulty: expert
+    tags: [bedrock, custom-model, provisioned-throughput]
+    question: |
+      You fine-tuned a model on Bedrock. How can you serve it for inference?
+    options:
+      - "Only via on-demand throughput, same as base models"
+      - "By deploying it to a SageMaker Serverless endpoint automatically"
+      - "Only via Provisioned Throughput — custom models require purchased throughput to serve"
+      - "It cannot be served; fine-tuning is evaluation-only"
+    answer: 2
+    explanation: |
+      Custom/fine-tuned Bedrock models can only be served through Provisioned Throughput —
+      there is no on-demand option for them. This mandatory throughput cost is a major factor
+      in the fine-tune-vs-RAG economics.
+    ref: "concepts.md#bedrock-provisioned-versus-on-demand-throughput"
+
+  - id: aws-ml-genai-sagemaker-bedrock-026
+    difficulty: intermediate
+    tags: [bedrock, provisioned-throughput, commitment]
+    question: |
+      Which set of commitment terms does Bedrock Provisioned Throughput offer, and how does
+      commitment affect price?
+    options:
+      - "1 day, 1 week, 1 year; shorter commitment is cheaper"
+      - "Only 6 months, at a fixed price"
+      - "Pay-per-token only; there are no commitment terms"
+      - "No commitment, 1 month, or 6 months; longer commitment lowers the hourly price"
+    answer: 3
+    explanation: |
+      Terms are no-commitment, 1 month, or 6 months; longer commitments earn a lower hourly
+      rate. No-commitment can be deleted anytime; committed terms bill until the term ends.
+      Pay-per-token is the separate on-demand model.
+    ref: "concepts.md#bedrock-provisioned-versus-on-demand-throughput"
+
+  # ---------------- RAG end to end ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-027
+    difficulty: beginner
+    tags: [rag, grounding, fundamentals]
+    question: |
+      What is the primary purpose of Retrieval-Augmented Generation (RAG)?
+    options:
+      - "To train the model faster"
+      - "To ground an LLM's answers in your (often private/fresh) data by retrieving relevant context into the prompt"
+      - "To reduce the number of GPUs needed for training"
+      - "To compress the model weights"
+    answer: 1
+    explanation: |
+      RAG retrieves relevant chunks and injects them as context so the model answers from
+      your data — fixing stale knowledge and reducing hallucination without retraining. It is
+      not a training-speed, hardware, or compression technique.
+    ref: "concepts.md#rag-on-aws-end-to-end"
+
+  - id: aws-ml-genai-sagemaker-bedrock-028
+    difficulty: intermediate
+    tags: [rag, knowledge-bases, managed]
+    question: |
+      A team wants managed document Q&A with citations over S3 documents and minimal
+      plumbing. Which AWS service fits best?
+    options:
+      - "Amazon Bedrock Knowledge Bases with RetrieveAndGenerate"
+      - "Build a custom LangChain app on Lambda wiring embeddings and a vector DB by hand"
+      - "SageMaker Batch Transform"
+      - "Amazon DynamoDB with a GSI on document text"
+    answer: 0
+    explanation: |
+      Bedrock Knowledge Bases handles chunking, embedding, vector storage, retrieval, and
+      returns grounded answers with citations — fastest managed RAG path. Custom LangChain is
+      valid but more work; Batch Transform and DynamoDB GSIs are not semantic retrieval.
+    ref: "concepts.md#rag-on-aws-end-to-end"
+
+  - id: aws-ml-genai-sagemaker-bedrock-029
+    difficulty: advanced
+    tags: [rag, custom, knowledge-bases, trade-offs]
+    question: |
+      When is a custom RAG pipeline (your own chunking, retrieval, re-ranking) justified over
+      Bedrock Knowledge Bases?
+    options:
+      - "When you want the least possible engineering effort"
+      - "When you never need citations"
+      - "When you need bespoke chunking, multi-stage retrieval, hybrid ranking, or a store/logic Knowledge Bases doesn't support"
+      - "When your corpus is very small"
+    answer: 2
+    explanation: |
+      Managed KB trades control for convenience; a custom pipeline is justified when you need
+      knobs KB doesn't expose (custom chunking, multi-stage/hybrid retrieval, unsupported
+      stores). Minimal effort and small corpora argue FOR the managed KB.
+    ref: "concepts.md#rag-on-aws-end-to-end"
+
+  - id: aws-ml-genai-sagemaker-bedrock-030
+    difficulty: intermediate
+    tags: [rag, latency, tokens, cost]
+    question: |
+      What is a real cost/latency downside of RAG compared with a plain LLM call?
+    options:
+      - "It requires GPU training on every query"
+      - "It permanently changes the model weights"
+      - "It disables streaming"
+      - "Retrieval adds latency, and injected context increases input tokens (more cost per call)"
+    answer: 3
+    explanation: |
+      RAG adds a retrieval step (latency) and stuffs retrieved chunks into the prompt,
+      increasing input tokens and thus cost. It doesn't retrain the model per query, doesn't
+      modify weights, and is compatible with streaming.
+    ref: "concepts.md#rag-on-aws-end-to-end"
+
+  # ---------------- Embeddings / chunking ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-031
+    difficulty: beginner
+    tags: [embeddings, consistency]
+    question: |
+      In a RAG system, which rule about embeddings must hold?
+    options:
+      - "Queries and documents must be embedded with the same model, and dimensions must match the index"
+      - "Queries and documents can use different embedding models as long as dimensions differ"
+      - "Embeddings must be regenerated on every query"
+      - "Higher dimensions always improve retrieval regardless of cost"
+    answer: 0
+    explanation: |
+      Query and document embeddings must come from the same model and match the index's
+      dimensionality — you can't mix models/dims in one index. Document embeddings are
+      precomputed at ingest, not per query; higher dims cost more storage/latency and aren't
+      unconditionally better.
+    ref: "concepts.md#embeddings-and-chunking"
+
+  - id: aws-ml-genai-sagemaker-bedrock-032
+    difficulty: advanced
+    tags: [embeddings, dimensions, trade-offs, cost]
+    question: |
+      Some embedding models (e.g., Titan Text Embeddings v2) support choosing a smaller output
+      dimension. What is the trade-off?
+    options:
+      - "Smaller dimensions always improve accuracy"
+      - "Smaller dimensions require re-training the LLM"
+      - "Smaller dimensions reduce storage and speed up search at a small accuracy cost"
+      - "Dimension has no effect on storage or latency"
+    answer: 2
+    explanation: |
+      Reducing embedding dimensions (e.g., 1024→512/256) cuts vector storage and speeds ANN
+      search, trading a little retrieval accuracy — a valid cost lever at scale. It doesn't
+      improve accuracy, and dimension clearly affects storage/latency.
+    ref: "concepts.md#embeddings-and-chunking"
+
+  - id: aws-ml-genai-sagemaker-bedrock-033
+    difficulty: intermediate
+    tags: [chunking, trade-offs, retrieval]
+    question: |
+      What is the core trade-off in choosing chunk size for RAG?
+    options:
+      - "Larger chunks always retrieve faster"
+      - "Chunk size only affects storage, never quality"
+      - "Chunk size must equal the model's context window"
+      - "Small chunks improve retrieval precision but fragment context; large chunks preserve context but dilute relevance and waste context-window tokens"
+    answer: 3
+    explanation: |
+      Small chunks are precise but can fragment meaning and require retrieving many; large
+      chunks preserve context but dilute relevance and consume more context tokens. It's a
+      precision-vs-completeness trade-off — not just storage, and not tied to the context
+      window size.
+    ref: "concepts.md#embeddings-and-chunking"
+
+  - id: aws-ml-genai-sagemaker-bedrock-034
+    difficulty: advanced
+    tags: [chunking, overlap, semantic]
+    question: |
+      Why use overlapping windows or semantic/recursive chunking instead of naive fixed-size
+      splitting?
+    options:
+      - "To avoid cutting related content across boundaries so a relevant answer isn't split between two chunks"
+      - "To reduce embedding model cost to zero"
+      - "To guarantee exactly one chunk per document"
+      - "To eliminate the need for a vector store"
+    answer: 0
+    explanation: |
+      Overlap and structure-aware splitting keep related text together so retrieval doesn't
+      miss context split across a hard boundary — at the cost of some storage duplication.
+      They don't zero-out embedding cost, force one chunk per doc, or remove the vector store.
+    ref: "concepts.md#embeddings-and-chunking"
+
+  # ---------------- Vector stores ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-035
+    difficulty: intermediate
+    tags: [vector-store, opensearch, pgvector, trade-offs]
+    question: |
+      You need large-scale vector search AND hybrid keyword+semantic ranking with rich
+      metadata filters. Which AWS option is the strongest fit?
+    options:
+      - "Aurora PostgreSQL with pgvector"
+      - "Amazon DynamoDB with a GSI"
+      - "Amazon OpenSearch Service with k-NN (HNSW) plus BM25 hybrid search"
+      - "Amazon S3 Select"
+    answer: 2
+    explanation: |
+      OpenSearch combines vector k-NN with BM25 keyword scoring (hybrid) and rich filtering at
+      scale — the classic large-scale RAG store. pgvector fits when vectors co-locate with
+      relational data at moderate scale; DynamoDB/S3 Select aren't ANN engines.
+    ref: "concepts.md#vector-store-options-on-aws"
+
+  - id: aws-ml-genai-sagemaker-bedrock-036
+    difficulty: advanced
+    tags: [vector-store, pgvector, trade-offs]
+    question: |
+      When is Aurora PostgreSQL with pgvector the better vector-store choice over a dedicated
+      search engine?
+    options:
+      - "When you have billions of vectors and need the absolute lowest ANN latency"
+      - "When you need no consistency guarantees at all"
+      - "When you want to avoid using any database"
+      - "When vectors must be joined with existing relational data transactionally at moderate scale, avoiding a new system"
+    answer: 3
+    explanation: |
+      pgvector wins when embeddings live alongside relational data you already query — one
+      transactional database, no new system — at moderate scale. At billions of vectors with
+      strict latency, dedicated engines pull ahead. The other options misstate its strengths.
+    ref: "concepts.md#vector-store-options-on-aws"
+
+  - id: aws-ml-genai-sagemaker-bedrock-037
+    difficulty: advanced
+    tags: [vector-store, kendra, acl, trade-offs]
+    question: |
+      An enterprise needs turnkey document search with prebuilt connectors and document-level
+      access control (users only see permitted results). Which service is the natural fit,
+      and what's the trade-off?
+    options:
+      - "OpenSearch; trade-off is no filtering support"
+      - "Amazon Kendra; trade-off is higher cost and less control over ANN internals"
+      - "DynamoDB; trade-off is lack of durability"
+      - "S3 Select; trade-off is no semantic search"
+    answer: 1
+    explanation: |
+      Kendra provides managed intelligent search with connectors and document-level ACLs —
+      ideal for permissions-aware enterprise retrieval — but costs more and hides the ANN
+      internals. OpenSearch does support filtering; DynamoDB is durable; S3 Select is the
+      wrong tool entirely.
+    ref: "concepts.md#vector-store-options-on-aws"
+
+  - id: aws-ml-genai-sagemaker-bedrock-038
+    difficulty: expert
+    tags: [vector-store, opensearch-serverless, cost, trade-offs]
+    question: |
+      A RAG workload has steady, high query volume 24/7. When comparing OpenSearch Serverless
+      to a provisioned OpenSearch cluster, which statement is most accurate?
+    options:
+      - "Serverless removes cluster sizing and suits spiky load, but OCU-hour billing can exceed a right-sized provisioned cluster at steady high load"
+      - "Serverless is always cheaper regardless of load"
+      - "Provisioned clusters cannot do vector search"
+      - "Serverless offers strong consistency while provisioned does not"
+    answer: 0
+    explanation: |
+      Serverless (OCU-billed) is great for spiky ingest/query and removes sizing, but at
+      steady high load a right-sized provisioned cluster can be cheaper. Provisioned clusters
+      absolutely support k-NN; the consistency claim is fabricated.
+    ref: "concepts.md#vector-store-options-on-aws"
+
+  # ---------------- ANN indexes ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-039
+    difficulty: intermediate
+    tags: [ann, hnsw, ivf, memory]
+    question: |
+      What is the primary trade-off between HNSW and IVF (IVFFlat/IVFPQ) ANN indexes?
+    options:
+      - "IVF is always more accurate and faster than HNSW"
+      - "HNSW requires no parameters; IVF requires GPUs"
+      - "HNSW gives high recall/low latency but uses more memory; IVF/PQ uses less memory/builds faster but recall depends on nprobe"
+      - "They are identical; the names are interchangeable"
+    answer: 2
+    explanation: |
+      HNSW (graph) offers excellent recall/latency but is memory-hungry (graph in RAM); IVF
+      partitions into clusters, using less memory and building faster, with recall governed by
+      nprobe (and PQ compressing vectors at an accuracy cost). They are not interchangeable.
+    ref: "concepts.md#ann-indexes-and-retrieval"
+
+  - id: aws-ml-genai-sagemaker-bedrock-040
+    difficulty: advanced
+    tags: [ann, recall, latency, tuning]
+    question: |
+      Raising ef_search (HNSW) or nprobe (IVF) and increasing k has what effect?
+    options:
+      - "Improves recall for free with no latency or cost impact"
+      - "Reduces recall while lowering latency"
+      - "Has no measurable effect on retrieval"
+      - "Improves recall but increases latency and, via more retrieved tokens, generation cost"
+    answer: 3
+    explanation: |
+      Higher ef_search/nprobe/k search more of the index (better recall) but cost more latency,
+      and larger k feeds more chunks into the prompt (more tokens/cost). Recall improvements
+      are never free — tune against an eval set.
+    ref: "concepts.md#ann-indexes-and-retrieval"
+
+  - id: aws-ml-genai-sagemaker-bedrock-041
+    difficulty: expert
+    tags: [ann, hnsw, ivf, corpus-scale, trade-offs]
+    question: |
+      A corpus of 2 billion vectors must run on RAM-constrained, cost-sensitive infrastructure.
+      Which ANN approach is most appropriate and why?
+    options:
+      - "IVF with product quantization (IVFPQ), because it compresses vectors and lowers memory at some recall cost"
+      - "HNSW, because it minimizes memory usage"
+      - "Exact brute-force search, because it is fastest at this scale"
+      - "No index; scan S3 objects per query"
+    answer: 0
+    explanation: |
+      At billions of vectors under RAM/cost pressure, IVFPQ compresses vectors to fit memory,
+      trading some recall — the right lever. HNSW is memory-hungry (opposite of the need);
+      brute-force is infeasible at 2B; scanning S3 per query is absurd.
+    ref: "concepts.md#ann-indexes-and-retrieval"
+
+  - id: aws-ml-genai-sagemaker-bedrock-042
+    difficulty: intermediate
+    tags: [ann, hybrid-search, retrieval]
+    question: |
+      Why add hybrid search (BM25 keyword + vector) rather than pure semantic vector search?
+    options:
+      - "To eliminate the need for embeddings"
+      - "To reduce the vector dimension automatically"
+      - "To catch exact terms, IDs, and rare tokens that embeddings alone often miss"
+      - "To disable metadata filtering"
+    answer: 2
+    explanation: |
+      Hybrid search fuses keyword matching (great for exact terms, codes, IDs, rare words)
+      with semantic similarity, improving recall for queries embeddings handle poorly. It
+      doesn't remove embeddings, change dimensions, or disable filtering.
+    ref: "concepts.md#ann-indexes-and-retrieval"
+
+  # ---------------- Re-ranking / grounding ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-043
+    difficulty: advanced
+    tags: [re-ranking, precision, cost, trade-offs]
+    question: |
+      What is the benefit of re-ranking retrieved candidates with a cross-encoder (e.g., Cohere
+      Rerank on Bedrock) versus simply passing more chunks (larger k) to the LLM?
+    options:
+      - "Re-ranking removes the need for a vector store"
+      - "Re-ranking is always free and adds no latency"
+      - "Larger k always beats re-ranking on quality"
+      - "Re-ranking yields higher precision with fewer, better chunks — reducing input tokens (cost/latency) and distraction"
+    answer: 3
+    explanation: |
+      Re-ranking re-scores top-N with a query-aware cross-encoder and selects the best few,
+      raising precision while cutting the token count sent to the LLM. It still needs the
+      vector store, and it adds an extra model call (latency/cost), so skip it when ANN
+      precision is already high.
+    ref: "concepts.md#re-ranking-and-grounding"
+
+  - id: aws-ml-genai-sagemaker-bedrock-044
+    difficulty: intermediate
+    tags: [grounding, citations, hallucination]
+    question: |
+      What does "grounding" mean in a RAG answer, and how is it commonly enforced on AWS?
+    options:
+      - "Answers must be traceable to retrieved text; enforced via citations and Bedrock Guardrails contextual grounding checks"
+      - "Running the model on-premises; enforced by network isolation"
+      - "Lowering the temperature to zero; enforced by the tokenizer"
+      - "Storing answers in S3; enforced by bucket policy"
+    answer: 0
+    explanation: |
+      Grounding means the answer is supported by retrieved context, enforced via citation of
+      source chunks and, on AWS, Guardrails contextual grounding/relevance checks that flag
+      unsupported answers. The other options confuse grounding with unrelated mechanisms.
+    ref: "concepts.md#re-ranking-and-grounding"
+
+  - id: aws-ml-genai-sagemaker-bedrock-045
+    difficulty: expert
+    tags: [grounding, retrieval, trade-offs]
+    question: |
+      After enabling strict grounding checks, your assistant now frequently replies "I don't
+      know" for questions the docs actually cover. What is the best first fix?
+    options:
+      - "Loosen grounding immediately and accept more hallucination"
+      - "Increase the model temperature"
+      - "Improve retrieval (chunking, hybrid search, re-ranking) so the correct context is actually retrieved before relaxing grounding"
+      - "Switch to a larger model with no other change"
+    answer: 2
+    explanation: |
+      Strict grounding surfaces retrieval failures: if the right chunk isn't retrieved, the
+      model correctly refuses. Fix retrieval first (chunking/hybrid/re-rank) rather than
+      loosening grounding (which invites hallucination) or blindly raising temperature/model
+      size.
+    ref: "concepts.md#re-ranking-and-grounding"
+
+  # ---------------- Serving at scale / GPUs / batching ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-046
+    difficulty: intermediate
+    tags: [serving, inferentia, trainium, cost]
+    question: |
+      For cost-optimized LLM inference on AWS custom silicon, which accelerator is designed
+      for inference?
+    options:
+      - "AWS Trainium (Trn1)"
+      - "Amazon Glacier"
+      - "AWS Graviton for GPUs"
+      - "AWS Inferentia2 (Inf2)"
+    answer: 3
+    explanation: |
+      Inferentia2 (Inf2) targets cost-effective inference; Trainium (Trn1) targets training.
+      "Inferentia for inference, Trainium for training." Glacier is cold storage; Graviton is
+      an Arm CPU, not a GPU.
+    ref: "concepts.md#inference-serving-at-scale-gpus-and-batching"
+
+  - id: aws-ml-genai-sagemaker-bedrock-047
+    difficulty: advanced
+    tags: [serving, continuous-batching, throughput, latency]
+    question: |
+      Why does continuous (in-flight) batching in servers like vLLM/TGI/SageMaker LMI improve
+      LLM serving over static batching?
+    options:
+      - "It disables the KV cache to save memory"
+      - "It merges many requests into GPU forward passes and adds/evicts sequences as they finish, greatly raising GPU utilization/throughput"
+      - "It guarantees each request runs on its own dedicated GPU"
+      - "It eliminates the latency cost of larger batches entirely"
+    answer: 1
+    explanation: |
+      Continuous batching dynamically packs in-flight sequences into forward passes, keeping
+      the GPU busy for far higher throughput than static batching. It relies on (not disables)
+      the KV cache, shares GPUs across requests, and still incurs some latency at large batch.
+    ref: "concepts.md#inference-serving-at-scale-gpus-and-batching"
+
+  - id: aws-ml-genai-sagemaker-bedrock-048
+    difficulty: advanced
+    tags: [serving, batch-size, latency, throughput, trade-offs]
+    question: |
+      What is the fundamental trade-off of increasing inference batch size on a GPU?
+    options:
+      - "Higher throughput (lower cost per token) but higher per-request latency"
+      - "Lower throughput and lower latency simultaneously"
+      - "It only affects training, not inference"
+      - "It reduces both cost and latency with no downside"
+    answer: 0
+    explanation: |
+      Bigger batches amortize GPU work across more requests (higher throughput, cheaper per
+      token) but individual requests wait longer (higher latency). Latency-critical paths use
+      small batches; offline/batch jobs maximize batch size.
+    ref: "concepts.md#inference-serving-at-scale-gpus-and-batching"
+
+  - id: aws-ml-genai-sagemaker-bedrock-049
+    difficulty: expert
+    tags: [serving, gpu-selection, quantization, sizing]
+    question: |
+      A 70B-parameter model must be served but only smaller/fewer GPUs are affordable. Which
+      technique most directly lets it fit and run faster with a small accuracy cost?
+    options:
+      - "Increase the embedding dimension"
+      - "Switch to CPU-only serverless inference"
+      - "Quantization (e.g., INT8/FP8/AWQ/GPTQ) to shrink the model, optionally with tensor parallelism"
+      - "Raise the API Gateway timeout"
+    answer: 2
+    explanation: |
+      Quantization shrinks weights to fit smaller/fewer GPUs and speeds inference at a small
+      accuracy cost, combined with tensor parallelism to shard across GPUs. Embedding dimension
+      is unrelated to LLM serving; CPU serverless can't host a 70B model; timeouts don't affect
+      fit.
+    ref: "concepts.md#inference-serving-at-scale-gpus-and-batching"
+
+  - id: aws-ml-genai-sagemaker-bedrock-050
+    difficulty: intermediate
+    tags: [serving, gpu-selection, cost]
+    question: |
+      Which is a sound GPU-selection principle for inference cost efficiency?
+    options:
+      - "Always use the largest available GPU (H100) for every model"
+      - "GPU choice never affects cost, only latency"
+      - "CPU instances are always cheaper for LLM inference"
+      - "Match model size to instance — don't waste an H100 on a 7B model, and don't force a 70B model onto a single small GPU"
+    answer: 3
+    explanation: |
+      Right-sizing the accelerator to the model avoids both waste (huge GPU, tiny model) and
+      failure (giant model on an undersized GPU). GPU choice affects both cost and feasibility;
+      CPUs are usually too slow for large LLMs.
+    ref: "concepts.md#inference-serving-at-scale-gpus-and-batching"
+
+  # ---------------- KV cache / streaming / latency ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-051
+    difficulty: advanced
+    tags: [latency, ttft, output-tokens]
+    question: |
+      For an LLM, total latency ≈ TTFT + (output_tokens × inter-token latency). Which lever
+      most reduces total generation latency?
+    options:
+      - "Reducing the number of output tokens the model must generate"
+      - "Increasing the embedding dimension"
+      - "Adding more retrieved chunks to the prompt"
+      - "Disabling the KV cache"
+    answer: 0
+    explanation: |
+      Output tokens are generated serially, so shortening the output is the biggest latency
+      lever. Larger prompts (more chunks) raise TTFT and cost; disabling the KV cache would
+      slow generation drastically; embedding dimension is unrelated to generation latency.
+    ref: "concepts.md#kv-cache-streaming-and-latency-metrics"
+
+  - id: aws-ml-genai-sagemaker-bedrock-052
+    difficulty: expert
+    tags: [kv-cache, memory, concurrency]
+    question: |
+      Why is the KV cache often the binding constraint on how many concurrent LLM requests fit
+      on a GPU?
+    options:
+      - "It stores the model weights, which are large"
+      - "It is stored on disk and limited by IOPS"
+      - "It grows with context length × batch size, consuming GPU memory that limits concurrency"
+      - "It requires a separate GPU per request"
+    answer: 2
+    explanation: |
+      The KV cache holds attention keys/values for processed tokens; its footprint scales with
+      context length and concurrent sequences, so it eats GPU memory and caps concurrency. It
+      doesn't store weights, isn't on disk, and is shared, not per-GPU-per-request.
+    ref: "concepts.md#kv-cache-streaming-and-latency-metrics"
+
+  - id: aws-ml-genai-sagemaker-bedrock-053
+    difficulty: intermediate
+    tags: [streaming, ttft, ux]
+    question: |
+      Why use Bedrock's ConverseStream (streaming) for a chat application?
+    options:
+      - "It reduces the total tokens generated"
+      - "It guarantees the answer is grounded"
+      - "It removes the need for guardrails"
+      - "It returns tokens as generated so users see output at time-to-first-token, improving perceived latency"
+    answer: 3
+    explanation: |
+      Streaming surfaces tokens as they're produced, so the user sees text at TTFT instead of
+      waiting for the full response — a big perceived-latency win. It doesn't change total
+      tokens, grounding, or the need for guardrails (which get harder to apply mid-stream).
+    ref: "concepts.md#kv-cache-streaming-and-latency-metrics"
+
+  - id: aws-ml-genai-sagemaker-bedrock-054
+    difficulty: advanced
+    tags: [streaming, api-gateway, architecture, trade-offs]
+    question: |
+      A non-streaming long generation behind API Gateway sometimes takes 35 s and fails. Which
+      is the most appropriate architectural change?
+    options:
+      - "Stream tokens (Lambda response streaming / WebSocket) so first bytes arrive well within the 29 s API Gateway integration timeout"
+      - "Raise the SageMaker payload limit to 1 GB"
+      - "Move the model to a serverless endpoint"
+      - "Increase DynamoDB read capacity"
+    answer: 0
+    explanation: |
+      API Gateway's 29 s integration timeout kills long synchronous responses; streaming (or
+      WebSocket/response streaming) delivers first bytes early and avoids the single long
+      blocking call. Payload limits, serverless mode, and DynamoDB capacity don't address the
+      timeout.
+    ref: "concepts.md#kv-cache-streaming-and-latency-metrics"
+
+  # ---------------- Caching ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-055
+    difficulty: intermediate
+    tags: [caching, semantic-cache, trade-offs]
+    question: |
+      What is the main risk of a semantic cache (embedding-similarity-based) versus an exact
+      prompt cache?
+    options:
+      - "It cannot store any responses"
+      - "It requires Provisioned Throughput"
+      - "A query that looks similar but is subtly different may return a wrong cached answer"
+      - "It always increases token cost"
+    answer: 2
+    explanation: |
+      Semantic caches match paraphrases (more hits, cheaper/faster) but a too-loose similarity
+      threshold can serve a wrong answer for a query that merely resembles a past one. It does
+      store responses, doesn't require Provisioned Throughput, and reduces (not increases) cost
+      on hits.
+    ref: "concepts.md#prompt-and-semantic-caching"
+
+  - id: aws-ml-genai-sagemaker-bedrock-056
+    difficulty: advanced
+    tags: [caching, prompt-cache, prefix, cost]
+    question: |
+      Bedrock prompt caching of a large static prefix (system prompt, few-shot examples, reused
+      context) helps most when:
+    options:
+      - "Every request has a completely unique prompt with no shared content"
+      - "You want to increase the number of output tokens"
+      - "You need stronger grounding checks"
+      - "A long prefix is reused across many calls (e.g., chat or agents), cutting TTFT and input-token cost"
+    answer: 3
+    explanation: |
+      Prefix caching avoids reprocessing a large shared prefix each call, reducing TTFT and
+      input-token cost — valuable in chat/agent loops with a stable prefix. With fully unique
+      prompts there's nothing to reuse; it doesn't affect output length or grounding.
+    ref: "concepts.md#prompt-and-semantic-caching"
+
+  - id: aws-ml-genai-sagemaker-bedrock-057
+    difficulty: expert
+    tags: [caching, semantic-cache, correctness]
+    question: |
+      Which type of response should you NOT serve from a semantic cache?
+    options:
+      - "A generic factual definition that rarely changes"
+      - "A personalized or time-sensitive answer (e.g., account balance, today's price)"
+      - "A cached FAQ answer for a common question"
+      - "A static product description"
+    answer: 1
+    explanation: |
+      Personalized or time-sensitive answers must not be semantic-cached — similarity matching
+      could return another user's or a stale answer. Generic, static, non-personalized content
+      is safe to cache.
+    ref: "concepts.md#prompt-and-semantic-caching"
+
+  # ---------------- Guardrails ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-058
+    difficulty: intermediate
+    tags: [guardrails, safety, pii]
+    question: |
+      Which capabilities do Amazon Bedrock Guardrails provide?
+    options:
+      - "Input/output policies: denied topics, content filters, PII detection/redaction, and contextual grounding checks"
+      - "Only output content filtering, applied after generation"
+      - "Automatic fine-tuning of the base model"
+      - "Vector index management"
+    answer: 0
+    explanation: |
+      Guardrails apply to both input and output: denied topics, content filters, PII
+      detection/redaction, word filters, and contextual grounding/relevance checks — and are
+      model-agnostic (ApplyGuardrail). They don't fine-tune models or manage vector indexes.
+    ref: "concepts.md#guardrails-and-hallucination-mitigation"
+
+  - id: aws-ml-genai-sagemaker-bedrock-059
+    difficulty: advanced
+    tags: [guardrails, latency, false-positives, trade-offs]
+    question: |
+      What is a realistic downside of applying strict Bedrock Guardrails to every request?
+    options:
+      - "They make the model deterministic"
+      - "They increase the context window size"
+      - "They add latency and cost per request and can produce false positives that block legitimate content"
+      - "They remove the need for a vector store"
+    answer: 2
+    explanation: |
+      Guardrails add per-request checks (latency + cost) and, if thresholds are strict, may
+      block legitimate content (false positives) — a safety-vs-UX tuning problem. They don't
+      change determinism, context window, or retrieval architecture.
+    ref: "concepts.md#guardrails-and-hallucination-mitigation"
+
+  - id: aws-ml-genai-sagemaker-bedrock-060
+    difficulty: intermediate
+    tags: [guardrails, hallucination, mitigation]
+    question: |
+      Which combination best reduces factual hallucination in a RAG assistant?
+    options:
+      - "High temperature and no citations"
+      - "Removing retrieval and relying on the base model's knowledge"
+      - "Only increasing the model size"
+      - "Strong grounding with citations, lower temperature for factual tasks, and 'say I don't know' instructions"
+    answer: 3
+    explanation: |
+      Grounding + citations, lower temperature, and explicit refusal instructions together cut
+      hallucination. High temperature/no citations and dropping retrieval increase it; a bigger
+      model alone doesn't ground answers in your data.
+    ref: "concepts.md#guardrails-and-hallucination-mitigation"
+
+  # ---------------- Fine-tune vs RAG vs prompt ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-061
+    difficulty: intermediate
+    tags: [fine-tuning, rag, prompt-engineering]
+    question: |
+      Which statement best captures what each adaptation approach teaches a model?
+    options:
+      - "Prompt engineering shapes in-context response; RAG injects facts/knowledge; fine-tuning teaches behavior/style/format"
+      - "Prompt engineering changes weights; RAG changes weights; fine-tuning injects live data"
+      - "All three do the same thing at different speeds"
+      - "RAG teaches behavior; fine-tuning provides fresh knowledge with citations"
+    answer: 0
+    explanation: |
+      Prompt engineering steers in-context behavior; RAG injects facts (updatable via the
+      index, with citations); fine-tuning teaches behavior/format/tone by changing weights.
+      RAG doesn't change weights and fine-tuning doesn't provide fresh, cited knowledge — those
+      are swapped in the wrong distractors.
+    ref: "concepts.md#fine-tuning-versus-rag-versus-prompt-engineering"
+
+  - id: aws-ml-genai-sagemaker-bedrock-062
+    difficulty: advanced
+    tags: [rag, fine-tuning, freshness, trade-offs]
+    question: |
+      Knowledge that changes daily must be reflected in answers with source citations. RAG or
+      fine-tuning, and why?
+    options:
+      - "Fine-tuning, because it bakes the latest facts into the weights instantly"
+      - "Fine-tuning, because RAG cannot produce citations"
+      - "RAG, because you update the index (not the model) for freshness and it can cite sources"
+      - "Neither; only prompt engineering can handle changing data"
+    answer: 2
+    explanation: |
+      RAG handles frequently-changing knowledge by updating the vector index and can return
+      citations — no retraining. Fine-tuning bakes facts into weights (stale until retrained)
+      and doesn't cite sources; prompt engineering alone can't scale to a large corpus.
+    ref: "concepts.md#fine-tuning-versus-rag-versus-prompt-engineering"
+
+  - id: aws-ml-genai-sagemaker-bedrock-063
+    difficulty: advanced
+    tags: [fine-tuning, behavior, latency, trade-offs]
+    question: |
+      When is fine-tuning the right choice over RAG/prompting despite its cost?
+    options:
+      - "When knowledge changes hourly and must be cited"
+      - "When you want zero training cost"
+      - "When the corpus is enormous and dynamic"
+      - "When you need consistent behavior/format/tone or to shorten prompts (bake behavior in) and quality can't be met by prompting/RAG"
+    answer: 3
+    explanation: |
+      Fine-tuning excels at consistent behavior/style/format and can shorten prompts (fewer
+      tokens → lower per-call latency/cost). Rapidly-changing, citable knowledge and dynamic
+      corpora favor RAG; fine-tuning always has training cost (and on Bedrock mandatory
+      Provisioned Throughput).
+    ref: "concepts.md#fine-tuning-versus-rag-versus-prompt-engineering"
+
+  - id: aws-ml-genai-sagemaker-bedrock-064
+    difficulty: expert
+    tags: [fine-tuning, cost, provisioned-throughput, economics]
+    question: |
+      Why does fine-tuning on Bedrock often only pay off at scale?
+    options:
+      - "Because you pay training cost plus mandatory Provisioned Throughput (hourly) to serve the custom model, so low volume can't amortize it"
+      - "Because fine-tuned models are served for free"
+      - "Because fine-tuning requires a dedicated region"
+      - "Because RAG is always more accurate than fine-tuning"
+    answer: 0
+    explanation: |
+      A custom Bedrock model must be served via Provisioned Throughput (billed hourly), on top
+      of training cost — so low-volume use can't amortize the standing spend. Fine-tuned serving
+      is not free; region dedication isn't required; RAG vs fine-tune accuracy is task-dependent.
+    ref: "concepts.md#fine-tuning-versus-rag-versus-prompt-engineering"
+
+  - id: aws-ml-genai-sagemaker-bedrock-065
+    difficulty: intermediate
+    tags: [fine-tuning, lora, peft]
+    question: |
+      What is the advantage of parameter-efficient fine-tuning (LoRA/QLoRA) on SageMaker?
+    options:
+      - "It retrains all model weights for maximum quality"
+      - "It removes the need for any training data"
+      - "It tunes a small set of adapter parameters, dramatically cutting training cost/memory vs full fine-tuning"
+      - "It converts the model to a vector index"
+    answer: 2
+    explanation: |
+      LoRA/QLoRA update small low-rank adapters instead of all weights, slashing GPU memory and
+      training cost while retaining most of the benefit. It still needs training data and does
+      not full-tune or turn a model into an index.
+    ref: "concepts.md#fine-tuning-versus-rag-versus-prompt-engineering"
+
+  # ---------------- Agents ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-066
+    difficulty: intermediate
+    tags: [agents, tool-use, action-groups]
+    question: |
+      What does a Bedrock Agent add beyond a plain LLM call?
+    options:
+      - "It only summarizes text faster"
+      - "It replaces the need for a vector store in all cases"
+      - "It guarantees deterministic outputs"
+      - "It orchestrates reasoning plus tool/API calls (action groups via Lambda/OpenAPI), Knowledge Bases, and guardrails to complete multi-step tasks"
+    answer: 3
+    explanation: |
+      Agents let the model act: reason, call action groups (Lambda/OpenAPI), query attached
+      Knowledge Bases, apply guardrails, and iterate over steps. They don't just summarize,
+      don't universally remove vector stores, and are non-deterministic.
+    ref: "concepts.md#bedrock-agents-and-tool-use"
+
+  - id: aws-ml-genai-sagemaker-bedrock-067
+    difficulty: advanced
+    tags: [agents, step-functions, trade-offs, determinism]
+    question: |
+      A workflow follows a fixed, known sequence of steps every time and must be reliable and
+      cheap. Should you use a Bedrock Agent or Step Functions, and why?
+    options:
+      - "Bedrock Agent, because agents are always cheaper"
+      - "Step Functions, because a deterministic orchestration is cheaper, faster, and more testable for a fixed path"
+      - "Bedrock Agent, because deterministic workflows need an LLM in the loop"
+      - "Neither; use a single LLM call for everything"
+    answer: 1
+    explanation: |
+      A fixed workflow is best served by deterministic Step Functions — cheaper, faster,
+      testable, no LLM round-trips. Agents fit variable, open-ended paths but add non-
+      determinism, latency, and cost, and can loop/err — overkill for a known sequence.
+    ref: "concepts.md#bedrock-agents-and-tool-use"
+
+  - id: aws-ml-genai-sagemaker-bedrock-068
+    difficulty: expert
+    tags: [agents, latency, reliability, trade-offs]
+    question: |
+      What are the primary risks of relying on a Bedrock Agent for a customer-facing,
+      latency-sensitive path?
+    options:
+      - "Non-determinism, higher latency from multiple LLM round-trips, harder testing, and possible loops/errors"
+      - "Guaranteed lower latency and fully deterministic behavior"
+      - "It cannot call any external tools"
+      - "It forces you to use Provisioned Throughput"
+    answer: 0
+    explanation: |
+      Agents make several LLM calls (higher, variable latency), behave non-deterministically,
+      are harder to test, and can loop or misfire — risky on tight latency SLAs. They can call
+      tools, don't guarantee low latency, and don't inherently force Provisioned Throughput.
+    ref: "concepts.md#bedrock-agents-and-tool-use"
+
+  # ---------------- Cost / capacity ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-069
+    difficulty: intermediate
+    tags: [cost, tokens, estimation]
+    question: |
+      For GenAI cost estimation, per-request cost is best approximated by:
+    options:
+      - "Number of GPUs × hours, regardless of tokens"
+      - "A flat fee per request independent of length"
+      - "(input_tokens × input_price) + (output_tokens × output_price)"
+      - "Vector count × embedding dimension"
+    answer: 2
+    explanation: |
+      On-demand FM cost scales with input and output tokens at their respective prices; output
+      tokens are typically pricier and serial. GPU-hours describe self-hosted capacity, not
+      per-token billing; there's no flat per-request fee; vector×dim is storage sizing.
+    ref: "concepts.md#cost-and-latency-trade-offs-and-capacity-estimation"
+
+  - id: aws-ml-genai-sagemaker-bedrock-070
+    difficulty: expert
+    tags: [cost, capacity, vector-store, sizing]
+    question: |
+      Roughly how much raw storage do 100 million 768-dimensional float32 embeddings require
+      (before index overhead)?
+    options:
+      - "About 3 GB"
+      - "About 30 TB"
+      - "About 300 KB"
+      - "About 307 GB"
+    answer: 3
+    explanation: |
+      100M × 768 × 4 bytes ≈ 307 GB raw, before HNSW/IVF index overhead (which must largely fit
+      in RAM for HNSW) — so plan sharding. The other magnitudes are off by orders of magnitude.
+    ref: "concepts.md#cost-and-latency-trade-offs-and-capacity-estimation"
+
+  - id: aws-ml-genai-sagemaker-bedrock-071
+    difficulty: advanced
+    tags: [cost, levers, optimization]
+    question: |
+      Which is generally the highest-impact, lowest-risk lever to reduce GenAI serving cost?
+    options:
+      - "Shorten output length and cache reusable prefixes/answers before touching hardware or throughput commitments"
+      - "Immediately buy the largest Provisioned Throughput commitment"
+      - "Increase k and retrieve more chunks per query"
+      - "Fine-tune the model to make it larger"
+    answer: 0
+    explanation: |
+      Since cost scales with tokens, shortening outputs and caching reusable prefixes/answers
+      cut cost with little risk. Big provisioned commitments risk over-provisioning; larger k
+      raises token cost; fine-tuning adds cost, not savings.
+    ref: "concepts.md#cost-and-latency-trade-offs-and-capacity-estimation"
+
+  - id: aws-ml-genai-sagemaker-bedrock-072
+    difficulty: advanced
+    tags: [capacity, classic-ml, sizing]
+    question: |
+      For a classic real-time model at 2,000 peak QPS where each instance sustains ~250 QPS,
+      roughly how many instances (before headroom) are needed?
+    options:
+      - "About 2"
+      - "About 40"
+      - "About 8, plus autoscaling headroom for spikes and scale-out lag"
+      - "About 200"
+    answer: 2
+    explanation: |
+      2000 ÷ 250 = 8 instances, plus headroom for burst and autoscaling lag. Real-time keeps a
+      minimum fleet (≥ 1) running 24/7; the other figures misapply the arithmetic.
+    ref: "concepts.md#cost-and-latency-trade-offs-and-capacity-estimation"
+
+  # ---------------- Cross-cutting trade-offs / failure ----------------
+  - id: aws-ml-genai-sagemaker-bedrock-073
+    difficulty: advanced
+    tags: [resilience, multi-region, failure-modes]
+    question: |
+      For regional resilience of a Bedrock-backed application, which approach is most
+      appropriate?
+    options:
+      - "Rely on a single region because Bedrock endpoints are global"
+      - "Store all prompts in one S3 bucket in one region with no replication"
+      - "Use a single provisioned MU in one region and hope it fails over automatically"
+      - "Run active-active across regions using cross-region inference profiles and replicate the vector store and S3 data"
+    answer: 3
+    explanation: |
+      Bedrock and SageMaker endpoints are regional (multi-AZ within a region). For region-level
+      resilience, run active-active with cross-region inference profiles and replicate S3 +
+      vector store. A single region/bucket/MU has no automatic cross-region failover.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-ml-genai-sagemaker-bedrock-074
+    difficulty: expert
+    tags: [scenario, chatbot, service-selection, trade-offs]
+    question: |
+      Design a support chatbot over 10M internal docs, <2 s TTFT, citations required, tight
+      budget, small team, spiky traffic. Which design is most appropriate?
+    options:
+      - "Bedrock Knowledge Bases (or custom RAG) over an OpenSearch/pgvector store, Bedrock on-demand with streaming, re-ranking to few chunks, Guardrails grounding, prompt caching"
+      - "Fine-tune a large model on all 10M docs and serve via Provisioned Throughput"
+      - "Self-host a 70B model on a 24/7 GPU fleet with no retrieval"
+      - "Batch Transform the documents nightly and email answers"
+    answer: 0
+    explanation: |
+      RAG (managed KB or custom) gives fresh, cited answers without retraining; Bedrock on-
+      demand suits spiky traffic and a small team; streaming hits <2 s TTFT; re-ranking + prompt
+      caching control cost/latency; Guardrails enforce grounding. Fine-tuning 10M docs is costly
+      and can't cite; a 24/7 70B fleet is expensive and ungrounded; batch is not interactive.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-ml-genai-sagemaker-bedrock-075
+    difficulty: expert
+    tags: [scenario, inference-modes, dual-architecture]
+    question: |
+      You must (a) score 500 GB of images nightly AND (b) serve 5 MB requests at <200 ms p99.
+      Which two-architecture answer is correct?
+    options:
+      - "Use one real-time endpoint for both workloads"
+      - "Serverless Inference for both"
+      - "Batch Transform for the nightly 500 GB scoring; a provisioned real-time (likely GPU) endpoint with autoscaling for the <200 ms p99 online path"
+      - "Async Inference for the online path and real-time for the nightly batch"
+    answer: 2
+    explanation: |
+      Offline bulk scoring is textbook Batch Transform (no standing endpoint); the strict p99
+      online path needs a warm real-time endpoint (GPU if the model demands). One endpoint can't
+      optimally serve both; serverless can't guarantee <200 ms p99 (cold starts, no GPU); async
+      is for large/long jobs, not <200 ms online.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-ml-genai-sagemaker-bedrock-076
+    difficulty: advanced
+    tags: [failure-modes, cold-start, mitigation]
+    question: |
+      A latency-critical serverless/MME/async path suffers scale-from-zero cold starts. What is
+      the standard mitigation?
+    options:
+      - "Increase the item size limit"
+      - "Switch to eventual consistency"
+      - "Reduce the embedding dimension"
+      - "Use Provisioned Concurrency (serverless) or keep-warm/dedicated capacity to eliminate scale-from-zero latency for hot paths"
+    answer: 3
+    explanation: |
+      Cold starts on scale-from-zero are mitigated by Provisioned Concurrency (serverless) or
+      keeping capacity warm/dedicated for latency-critical traffic — trading idle cost for
+      predictable latency. The other options are unrelated to cold starts.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-ml-genai-sagemaker-bedrock-077
+    difficulty: intermediate
+    tags: [failure-modes, retrieval, monitoring]
+    question: |
+      Users report the RAG assistant sometimes fabricates answers. Where should you look first
+      and what should you monitor?
+    options:
+      - "The GPU driver version; monitor CPU temperature"
+      - "The retrieval stage (chunking, hybrid search, re-ranking) and grounding scores; a retrieval miss forces the model to guess"
+      - "The S3 bucket policy; monitor request counts"
+      - "The API Gateway timeout; monitor 4xx rates only"
+    answer: 1
+    explanation: |
+      Fabrication usually traces to retrieval failing to surface the right context; inspect
+      chunking/hybrid/re-ranking and monitor grounding/relevance scores. GPU drivers, bucket
+      policy, and API Gateway timeouts don't cause hallucination.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-ml-genai-sagemaker-bedrock-078
+    difficulty: beginner
+    tags: [trade-offs, service-selection]
+    question: |
+      Which statement best summarizes the Bedrock-vs-SageMaker default choice for GenAI?
+    options:
+      - "Start on Bedrock (managed, per-token, elastic); consider self-hosting on SageMaker only for full model control, private weights, or clearly cheaper economics at sustained high volume"
+      - "Always self-host on SageMaker for any GenAI use case"
+      - "Bedrock is only for training, SageMaker only for inference"
+      - "They are interchangeable with identical cost and control"
+    answer: 0
+    explanation: |
+      Bedrock is the fast, elastic, managed default; self-hosting on SageMaker/EKS is justified
+      by control/private-weights needs or economics at sustained high utilization. Bedrock isn't
+      training-only, and the two differ sharply in control and cost profile.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"

@@ -1,0 +1,1741 @@
+topic: 'Microservices Patterns on AWS: Decomposition, Saga, Outbox and Service Communication'
+domain: system-design
+topic_slug: aws-microservices-patterns
+version: 1
+questions:
+- id: aws-microservices-patterns-001
+  difficulty: beginner
+  tags:
+  - decomposition
+  - database-per-service
+  - bounded-context
+  question: |
+    In a well-designed microservices architecture on AWS, what is the rule
+    about data ownership between services?
+  options:
+  - Each service owns its data store; other services access it only via its API or events, never its tables
+    directly
+  - All services share one Aurora cluster to guarantee referential integrity
+  - Every service must use DynamoDB so schemas are uniform
+  - Services may read each other's tables but must not write to them
+  answer: 0
+  explanation: |
+    Database-per-service means the boundary is logical: no other service touches
+    a service's store directly; access is via API or events. A shared database
+    (option 1) creates a distributed monolith. There is no requirement to use one
+    engine (option 2). Allowing cross-service reads (option 3) still couples
+    schemas and breaks independent deployability.
+  ref: concepts.md#decomposing-services-and-database-per-service-on-aws
+- id: aws-microservices-patterns-002
+  difficulty: beginner
+  tags:
+  - sync
+  - api-gateway
+  - timeout
+  question: |
+    What is the default maximum integration timeout for Amazon API Gateway,
+    after which a synchronous request will fail?
+  options:
+  - 5 seconds
+  - 15 minutes
+  - 29 seconds
+  - 60 seconds
+  answer: 2
+  explanation: |
+    API Gateway's default integration timeout is 29 seconds. Operations that can
+    exceed it must be made asynchronous (return 202 + job id, do work in the
+    background). 15 minutes (option 1) is the Lambda max duration, a different
+    limit.
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-003
+  difficulty: beginner
+  tags:
+  - saga
+  - distributed-transactions
+  - compensation
+  question: |
+    Because there is no distributed ACID transaction across a
+    database-per-service architecture, how does a saga handle a step that fails
+    after earlier steps already committed?
+  options:
+  - It issues a two-phase commit rollback across all databases
+  - It locks all databases until the transaction can be retried
+  - It discards the failure and lets the data stay inconsistent
+  - It runs compensating actions that semantically undo the earlier committed steps
+  answer: 3
+  explanation: |
+    A saga is a sequence of local transactions, each with a compensating action.
+    On failure you cannot roll back (steps already committed) so you compensate
+    (refund, release reservation). Two-phase commit (option 0) is exactly what
+    microservices avoid; global locks (option 1) defeat the point; ignoring the
+    failure (option 2) leaves broken state.
+  ref: concepts.md#saga-pattern-for-distributed-transactions-and-compensation
+- id: aws-microservices-patterns-004
+  difficulty: beginner
+  tags:
+  - messaging
+  - sqs
+  - fan-out
+  question: |
+    Which AWS service is a pub/sub topic that pushes each message to multiple
+    subscribers (fan-out), rather than a point-to-point queue?
+  options:
+  - Amazon SQS
+  - Amazon SNS
+  - AWS Step Functions
+  - Amazon RDS
+  answer: 1
+  explanation: |
+    SNS is publish/subscribe: one message is pushed to many subscribers. SQS is a
+    point-to-point queue (one message consumed by one consumer in a group). Step
+    Functions is a workflow orchestrator; RDS is a database.
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-005
+  difficulty: beginner
+  tags:
+  - outbox
+  - dual-write
+  question: |
+    What problem does the transactional outbox pattern solve?
+  options:
+  - It compresses events to reduce network cost
+  - It guarantees exactly-once delivery to all consumers
+  - It lets a service atomically commit a database change and reliably publish the corresponding event,
+    avoiding the dual-write problem
+  - It encrypts events at rest in the queue
+  answer: 2
+  explanation: |
+    The dual-write problem is that committing a DB change and publishing an event
+    are two writes with no shared transaction. The outbox writes the event in the
+    same local transaction as the state change, so the event is guaranteed to
+    eventually publish. It does not provide exactly-once delivery (option 1) —
+    delivery is at-least-once, so consumers must be idempotent.
+  ref: concepts.md#transactional-outbox-and-change-data-capture-on-aws
+- id: aws-microservices-patterns-006
+  difficulty: beginner
+  tags:
+  - strangler-fig
+  - migration
+  question: |
+    The strangler-fig pattern for migrating a monolith on AWS works by:
+  options:
+  - Putting a routing facade (API Gateway/ALB) in front and incrementally extracting capabilities into
+    new services, gradually shifting traffic
+  - Rewriting the entire monolith in one big-bang release with a full freeze
+  - Duplicating the monolith across three regions for availability
+  - Converting all synchronous calls to Kinesis streams overnight
+  answer: 0
+  explanation: |
+    Strangler-fig incrementally extracts capabilities behind a routing layer and
+    shifts traffic per capability, keeping each step small and reversible. A
+    big-bang rewrite (option 1) is the high-risk approach it avoids. Options 2 and
+    3 are unrelated.
+  ref: concepts.md#strangler-fig-migration-on-aws
+- id: aws-microservices-patterns-007
+  difficulty: beginner
+  tags:
+  - idempotency
+  - at-least-once
+  question: |
+    Why must consumers of SQS, SNS, EventBridge and Kinesis be idempotent?
+  options:
+  - Because these services guarantee exactly-once delivery
+  - Because messages are always delivered out of order
+  - Because the services drop messages under load
+  - Because these services deliver at-least-once and can redeliver duplicates
+  answer: 3
+  explanation: |
+    SQS Standard, SNS, EventBridge, and Kinesis are at-least-once and can
+    redeliver, so a handler may see the same message more than once. Idempotency
+    makes reprocessing safe. They do not guarantee exactly-once (option 0).
+  ref: concepts.md#idempotency-and-exactly-once-processing
+- id: aws-microservices-patterns-008
+  difficulty: beginner
+  tags:
+  - bff
+  - api-gateway
+  question: |
+    What is the core idea of the Backend-for-Frontend (BFF) pattern?
+  options:
+  - A single generic API that serves every client identically
+  - A separate aggregation/API layer tailored per client type (web, iOS, Android, partner), each optimizing
+    payloads for its client
+  - A background job runner for batch processing
+  - A caching layer placed only in front of the database
+  answer: 1
+  explanation: |
+    BFF provides one gateway/aggregation layer per client type so each gets an
+    API optimized for its needs (slim/batched for mobile, richer for web). A
+    single generic API (option 0) is the thing BFF improves on when client needs
+    diverge.
+  ref: concepts.md#api-gateway-and-backend-for-frontend-patterns
+- id: aws-microservices-patterns-009
+  difficulty: beginner
+  tags:
+  - service-discovery
+  - cloud-map
+  question: |
+    What is the primary purpose of AWS Cloud Map?
+  options:
+  - It is a service registry that lets services register and discover each other's locations via DNS or
+    API
+  - It is a managed relational database for microservices
+  - It encrypts service-to-service traffic with mTLS
+  - It orchestrates saga transactions
+  answer: 0
+  explanation: |
+    Cloud Map is a service registry/discovery mechanism — instances register and
+    consumers discover them via DNS or the Cloud Map API. It is not a database
+    (option 1). mTLS and traffic management (option 2) are mesh features, not
+    Cloud Map. Saga orchestration (option 3) is Step Functions.
+  ref: concepts.md#service-discovery-with-cloud-map-and-service-mesh-with-app-mesh-and-vpc-lattice
+- id: aws-microservices-patterns-010
+  difficulty: beginner
+  tags:
+  - monolith
+  - when-not-to
+  question: |
+    For an early-stage product with a small team and unstable domain boundaries,
+    which is usually the better starting architecture on AWS?
+  options:
+  - Immediately split into 20 microservices, one per entity
+  - A distributed monolith with a shared database
+  - A well-structured (modular) monolith, deferring service extraction until a specific pain justifies
+    it
+  - One Lambda per database table with cross-Lambda synchronous calls
+  answer: 2
+  explanation: |
+    When boundaries are unstable and the team is small, a modular monolith is
+    fastest and cheapest; premature splitting locks in wrong boundaries and
+    multiplies ops overhead. A distributed monolith (option 1) has all the costs
+    of distribution with none of the benefits.
+  ref: concepts.md#when-not-to-use-microservices-on-aws
+- id: aws-microservices-patterns-011
+  difficulty: beginner
+  tags:
+  - cell-based
+  - blast-radius
+  question: |
+    What is the primary benefit of cell-based architecture?
+  options:
+  - It eliminates the need for a database
+  - It guarantees strong consistency across all cells
+  - It removes the need for load balancing
+  - It contains the blast radius of a failure, bad deploy, or poison workload to a single cell instead
+    of the whole fleet
+  answer: 3
+  explanation: |
+    Cells are independent, self-contained stacks serving a subset of traffic; a
+    failure is contained to one cell (bounded blast radius). It does not remove
+    databases or provide global strong consistency; each cell is its own stack.
+  ref: concepts.md#cell-based-architecture-and-bounded-contexts
+- id: aws-microservices-patterns-012
+  difficulty: beginner
+  tags:
+  - saga
+  - orchestration
+  - step-functions
+  question: |
+    Which AWS service is the natural choice for saga orchestration with a central,
+    visible workflow and built-in retry/catch/compensation wiring?
+  options:
+  - Amazon SQS
+  - AWS Step Functions
+  - Amazon CloudFront
+  - Amazon Route 53
+  answer: 1
+  explanation: |
+    Step Functions is a managed state machine that coordinates steps explicitly,
+    with retries, Catch-based error handling, and compensation transitions. SQS is
+    a queue, CloudFront a CDN, Route 53 DNS.
+  ref: concepts.md#saga-orchestration-with-step-functions
+- id: aws-microservices-patterns-013
+  difficulty: intermediate
+  tags:
+  - messaging
+  - sqs-fifo
+  - throughput
+  - limits
+  question: |
+    A payments team wants strict per-account ordering and de-duplication on a
+    queue and expects ~5,000 messages/second. Which statement is the most important
+    design concern?
+  options:
+  - SQS FIFO has unlimited throughput, so there is no concern
+  - SQS Standard already guarantees per-account ordering, so use it
+  - SQS FIFO has a baseline of 300 messages/second per API action (3,000 with batching of 10); at 5,000/s
+    you must enable high-throughput mode or reconsider the ordering requirement
+  - SNS FIFO cannot do ordering, so ordering is impossible on AWS
+  answer: 2
+  explanation: |
+    SQS FIFO's baseline is 300 msg/s per action (3,000 with 10-message batches);
+    high-throughput mode raises this substantially. SQS Standard is best-effort
+    ordering only (option 1 wrong). SNS FIFO does preserve order (option 3 wrong).
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-014
+  difficulty: intermediate
+  tags:
+  - messaging
+  - kinesis
+  - limits
+  - throughput
+  question: |
+    What is the per-shard ingest limit of a Kinesis Data Stream (provisioned mode)?
+  options:
+  - 1 MB/s or 1,000 records/s (whichever comes first)
+  - 256 KB/s or 100 records/s
+  - 10 MB/s or 10,000 records/s
+  - Unlimited; Kinesis auto-scales per record
+  answer: 0
+  explanation: |
+    Each Kinesis shard ingests up to 1 MB/s or 1,000 records/s (whichever is hit
+    first) and reads at 2 MB/s (shared) or 2 MB/s per consumer with enhanced
+    fan-out. On-demand mode scales automatically, but provisioned shards have this
+    fixed limit and hot partition keys can throttle a single shard.
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-015
+  difficulty: intermediate
+  tags:
+  - sync
+  - api-gateway
+  - alb
+  - grpc
+  question: |
+    A team needs public gRPC (HTTP/2, protobuf) endpoints for high-throughput
+    clients. Which AWS front door is appropriate and why?
+  options:
+  - API Gateway REST API, because it natively proxies gRPC
+  - An NLB with an HTTP listener, because L4 balancers understand gRPC methods
+  - CloudFront, because it terminates gRPC and routes by method
+  - An ALB, because it supports gRPC targets and HTTP/2 end to end; API Gateway does not proxy gRPC natively
+  answer: 3
+  explanation: |
+    ALB supports gRPC and HTTP/2 end to end. API Gateway is REST/HTTP/WebSocket and
+    does not natively proxy gRPC (option 0 wrong). NLB is L4 and doesn't understand
+    gRPC methods (option 1 wrong). CloudFront is a CDN, not a gRPC router (option 2).
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-016
+  difficulty: intermediate
+  tags:
+  - saga
+  - orchestration
+  - choreography
+  - tradeoff
+  question: |
+    What is the PRIMARY trade-off of choosing saga choreography (EventBridge/SNS)
+    over orchestration (Step Functions)?
+  options:
+  - Choreography is more expensive per state transition
+  - Choreography maximizes decoupling but the workflow exists only implicitly across services, making
+    'where is this transaction and why did it fail?' hard to answer
+  - Choreography cannot handle compensation at all
+  - Choreography requires a single central coordinator
+  answer: 1
+  explanation: |
+    Choreography (each service reacts to and emits events) removes the central
+    coordinator and maximizes decoupling, but the flow is implicit and scattered,
+    so global state and failure debugging are hard. It can do compensation via
+    failure events (option 2 wrong) and has no central coordinator by definition
+    (option 3 wrong). Per-state-transition cost is a Step Functions concern.
+  ref: concepts.md#saga-choreography-with-eventbridge-and-sns
+- id: aws-microservices-patterns-017
+  difficulty: intermediate
+  tags:
+  - outbox
+  - dynamodb-streams
+  - cdc
+  question: |
+    Which serverless approach implements a transactional outbox on DynamoDB without
+    a separate outbox table?
+  options:
+  - Write the business item, enable DynamoDB Streams, and trigger a Lambda that publishes the change to
+    EventBridge/SNS
+  - Poll the DynamoDB table every second with a Lambda and diff snapshots
+  - Use a DynamoDB transaction that also calls SNS Publish atomically
+  - Enable S3 event notifications on the DynamoDB bucket
+  answer: 0
+  explanation: |
+    DynamoDB Streams captures item changes (24 h retention, ordered per partition
+    key); a triggered Lambda publishes downstream. The item write itself is the
+    outbox. You cannot atomically combine a DynamoDB write and an SNS Publish in
+    one transaction (option 2 — that IS the dual-write problem). DynamoDB has no
+    "bucket" (option 3).
+  ref: concepts.md#transactional-outbox-and-change-data-capture-on-aws
+- id: aws-microservices-patterns-018
+  difficulty: intermediate
+  tags:
+  - idempotency
+  - dynamodb
+  - conditional-write
+  question: |
+    How does a DynamoDB conditional write implement idempotent message processing?
+  options:
+  - It retries the write until it succeeds, guaranteeing exactly-once
+  - It automatically deduplicates all messages for 14 days
+  - PutItem with a ConditionExpression like attribute_not_exists(pk) on the idempotency key atomically
+    fails for a duplicate, so the second processing is skipped
+  - It encrypts the idempotency key so duplicates can't collide
+  answer: 2
+  explanation: |
+    A conditional PutItem keyed by the idempotency key succeeds only the first
+    time; a duplicate fails the condition atomically, letting the handler skip
+    reprocessing (and optionally return the stored result). It is not automatic
+    14-day dedup (option 1 — SQS FIFO dedup is only 5 minutes) and encryption
+    (option 3) is unrelated.
+  ref: concepts.md#idempotency-and-exactly-once-processing
+- id: aws-microservices-patterns-019
+  difficulty: intermediate
+  tags:
+  - step-functions
+  - standard-vs-express
+  - limits
+  question: |
+    For a long-running order-fulfillment saga that may include a human approval
+    step and can last days, which Step Functions workflow type fits best and why?
+  options:
+  - Express, because it supports executions up to 1 year
+  - Express, because it gives exactly-once semantics and full history
+  - Either; they are functionally identical
+  - Standard, because it supports executions up to 1 year, gives exactly-once execution, and retains full
+    execution history for audit
+  answer: 3
+  explanation: |
+    Standard workflows run up to 1 year, are exactly-once, and keep full execution
+    history — ideal for long, auditable sagas with human steps. Express is capped
+    at 5 minutes and is at-least-once (async), with history only via CloudWatch
+    Logs. They are not identical (option 2).
+  ref: concepts.md#saga-orchestration-with-step-functions
+- id: aws-microservices-patterns-020
+  difficulty: intermediate
+  tags:
+  - messaging
+  - sns-sqs
+  - eventbridge
+  - tradeoff
+  question: |
+    For high-throughput internal fan-out where each consuming service just needs
+    its own durable, independently-buffered copy of every event, which is the most
+    appropriate baseline?
+  options:
+  - EventBridge, because it offers the lowest latency of all options
+  - SNS + SQS fan-out, giving each consumer a durable buffered queue with its own retries, back-pressure,
+    and DLQ
+  - A single shared SQS Standard queue read by all consumers
+  - Kinesis with one shard for all consumers
+  answer: 1
+  explanation: |
+    SNS+SQS gives each subscriber its own durable queue (independent retries,
+    DLQ, back-pressure) at high throughput and low latency. EventBridge adds
+    routing but higher latency and lower raw throughput (option 0 wrong). A single
+    shared SQS queue means consumers compete for the same messages, not fan-out
+    (option 2). One Kinesis shard caps at 1 MB/s (option 3).
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-021
+  difficulty: intermediate
+  tags:
+  - service-mesh
+  - app-mesh
+  - deprecation
+  - vpc-lattice
+  question: |
+    A team asks which managed AWS service mesh to adopt for a NEW ECS-based system
+    in 2026. What is the most current guidance?
+  options:
+  - Adopt AWS App Mesh; it is the recommended managed mesh going forward
+  - There is no service mesh option on AWS; build sidecars yourself
+  - App Mesh is on a deprecation path (end of support announced for Sept 30, 2026); use ECS Service Connect
+    or Amazon VPC Lattice instead
+  - Use Amazon MQ as the service mesh
+  answer: 2
+  explanation: |
+    AWS announced App Mesh end of support (Sept 30, 2026) and steers customers to
+    ECS Service Connect (ECS-native discovery + light proxy) or VPC Lattice
+    (sidecar-less L7 service networking across accounts/compute). Building your own
+    sidecars (option 1) ignores those managed options; Amazon MQ (option 3) is a
+    message broker, not a mesh.
+  ref: concepts.md#service-discovery-with-cloud-map-and-service-mesh-with-app-mesh-and-vpc-lattice
+- id: aws-microservices-patterns-022
+  difficulty: intermediate
+  tags:
+  - sync
+  - availability
+  - chain
+  question: |
+    A user request synchronously calls service A → B → C → D, each with 99.9%
+    availability. What is the approximate availability of the whole chain, and what
+    does this imply?
+  options:
+  - About 99.6% (0.999^4), because a synchronous chain's availability is roughly the product of each hop;
+    decoupling with async breaks this coupling
+  - 99.9%, because the load balancer masks failures
+  - 100%, because retries fix everything
+  - 99.99%, because availability improves with more hops
+  answer: 0
+  explanation: |
+    Synchronous chains multiply availabilities: 0.999^4 ≈ 0.996 (99.6%), worse
+    than any single hop. This is a core reason to prefer async/decoupling where the
+    caller doesn't need the result inline. More hops make it worse, not better
+    (option 3).
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-023
+  difficulty: intermediate
+  tags:
+  - decomposition
+  - cqrs
+  - cross-service-query
+  question: |
+    In a database-per-service design, how do you satisfy a query that needs data
+    from both the Orders service and the Customer service?
+  options:
+  - Perform a SQL JOIN across the two services' databases
+  - Grant the Orders service read access to the Customer tables
+  - Merge the two services back into one
+  - Use API composition (call both services and join in code) or maintain a CQRS read model built from
+    their events
+  answer: 3
+  explanation: |
+    With no cross-service JOINs, you either compose at the API layer (call both,
+    join in application code) or build a materialized CQRS read model fed by both
+    services' events. Cross-database JOINs and shared table access (options 0, 1)
+    break the boundary; merging (option 2) is a drastic overreaction.
+  ref: concepts.md#decomposing-services-and-database-per-service-on-aws
+- id: aws-microservices-patterns-024
+  difficulty: intermediate
+  tags:
+  - api-gateway
+  - alb
+  - tradeoff
+  - cost
+  question: |
+    For a public REST API needing managed auth (Cognito/JWT/Lambda authorizers),
+    per-key usage plans, request validation, and throttling with a Lambda backend,
+    which front door minimizes undifferentiated work?
+  options:
+  - An ALB, since you can add all of that with target group rules
+  - Amazon API Gateway, which provides managed auth, usage plans, API keys, throttling, validation, and
+    caching out of the box
+  - An NLB, since L4 gives the lowest latency for auth
+  - CloudFront alone, since it can validate JWTs and manage usage plans
+  answer: 1
+  explanation: |
+    API Gateway provides these cross-cutting features natively with no servers.
+    ALB would require you to build auth/usage-plans/keys yourself (option 0). NLB is
+    L4 and has no notion of auth or API keys (option 2). CloudFront can do some
+    edge auth but not usage plans/API keys/request validation as a managed API layer
+    (option 3).
+  ref: concepts.md#api-gateway-and-backend-for-frontend-patterns
+- id: aws-microservices-patterns-025
+  difficulty: intermediate
+  tags:
+  - dynamodb-streams
+  - retention
+  - failure-mode
+  question: |
+    Your relay Lambda reading DynamoDB Streams was broken and disabled for 30 hours.
+    What is the consequence, given default stream retention?
+  options:
+  - Records older than 24 hours are lost, because DynamoDB Streams retain data for only 24 hours; you
+    should alarm on iterator age and use a DLQ
+  - Nothing; DynamoDB Streams retain records for 14 days
+  - The stream automatically replays from the beginning of time
+  - The source table is rolled back to a consistent state
+  answer: 0
+  explanation: |
+    DynamoDB Streams retention is 24 hours, so 30 hours of downtime loses records.
+    Mitigate with iterator-age alarms and a Lambda DLQ, or use the Kinesis adapter
+    for DynamoDB (up to 365-day retention) if longer durability is needed. It is
+    not 14 days (that's SQS max retention).
+  ref: concepts.md#transactional-outbox-and-change-data-capture-on-aws
+- id: aws-microservices-patterns-026
+  difficulty: intermediate
+  tags:
+  - sync
+  - async
+  - long-running
+  - 202
+  question: |
+    A report-generation endpoint sometimes takes 45 seconds behind API Gateway.
+    Requests intermittently fail. What is the correct fix?
+  options:
+  - Increase the Lambda memory to make it faster and hope it fits under 29 s
+  - Switch API Gateway to a WebSocket API and hold the connection open for 45 s
+  - 'Make the operation asynchronous: return 202 with a job id immediately, run the work in the background
+    (SQS worker / Step Functions), and let the client poll or receive a WebSocket/webhook push'
+  - Move the endpoint behind CloudFront to cache the slow response
+  answer: 2
+  explanation: |
+    45 s exceeds API Gateway's 29 s integration timeout. The standard pattern is
+    async: 202 + job id, background processing, client polls or gets pushed. Bumping
+    memory (option 0) is unreliable. Caching a per-request report (option 3) doesn't
+    help first requests. Holding a connection open still fights the timeout model.
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-027
+  difficulty: intermediate
+  tags:
+  - saga
+  - isolation
+  - anomalies
+  question: |
+    Sagas lack the isolation property of ACID transactions. Which countermeasure
+    helps prevent another actor from acting on an order that is mid-saga?
+  options:
+  - A distributed two-phase-commit lock across all services
+  - Disabling all reads on every service during the saga
+  - Increasing the SQS visibility timeout to 12 hours
+  - A semantic lock — e.g. a 'pending' status flag — plus reread/version checks and ordering hard-to-compensate
+    steps last
+  answer: 3
+  explanation: |
+    Because sagas have no isolation, you use application-level countermeasures:
+    semantic locks (a 'pending' flag), commutative updates, reread/version checks,
+    and pessimistic step ordering (compensate-hard steps last). 2PC (option 0) is
+    what microservices avoid; disabling reads (option 1) is impractical; visibility
+    timeout (option 2) is unrelated to saga isolation.
+  ref: concepts.md#saga-pattern-for-distributed-transactions-and-compensation
+- id: aws-microservices-patterns-028
+  difficulty: intermediate
+  tags:
+  - messaging
+  - sizes
+  - limits
+  question: |
+    What is the maximum message/event payload size for standard Amazon SQS and
+    Amazon EventBridge (before using extensions like the SQS Extended Client)?
+  options:
+  - 64 KB
+  - 256 KB
+  - 1 MB
+  - 10 MB
+  answer: 1
+  explanation: |
+    Both SQS messages and EventBridge events are limited to 256 KB. SQS can carry
+    up to 2 GB via the Extended Client (payload stored in S3, pointer in the
+    message). Kinesis records are limited to 1 MB; API Gateway REST payloads up to
+    10 MB.
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-029
+  difficulty: intermediate
+  tags:
+  - appsync
+  - graphql
+  - bff
+  - tradeoff
+  question: |
+    When is AWS AppSync (GraphQL) a strong BFF choice over a REST API, and what is
+    the main trade-off?
+  options:
+  - When clients need per-URL HTTP caching; GraphQL caches trivially
+  - When you need the absolute lowest per-request cost; GraphQL is always cheapest
+  - When clients have diverse, evolving field needs and want to avoid over/under-fetching; the trade-off
+    is added schema/resolver complexity and harder caching plus N+1/deep-query cost control
+  - When you must proxy gRPC to backends
+  answer: 2
+  explanation: |
+    AppSync lets clients request exactly the fields they need and aggregate many
+    sources — great when client data needs diverge, at the cost of schema/resolver
+    complexity, harder caching (no simple per-URL cache), and query-cost guardrails
+    for N+1/deep queries. REST is easier to cache per URL (option 0 favors REST).
+  ref: concepts.md#api-gateway-and-backend-for-frontend-patterns
+- id: aws-microservices-patterns-030
+  difficulty: intermediate
+  tags:
+  - distributed-monolith
+  - anti-pattern
+  question: |
+    Two "microservices" must always be deployed together and share the same
+    database table. What is the most accurate diagnosis?
+  options:
+  - This is a distributed monolith / wrong boundary — the two are likely one bounded context that was
+    split incorrectly
+  - This is an ideal loosely-coupled design
+  - This is a healthy use of the CQRS pattern
+  - This proves microservices don't work on AWS
+  answer: 0
+  explanation: |
+    Services that deploy together and share a table have distribution's costs
+    (network, partial failure) without its benefits (independent deploy/scale) — a
+    distributed monolith, usually a sign the boundary is wrong and they are one
+    bounded context. It's not CQRS (option 2) and doesn't indict microservices
+    generally (option 3).
+  ref: concepts.md#decomposing-services-and-database-per-service-on-aws
+- id: aws-microservices-patterns-031
+  difficulty: intermediate
+  tags:
+  - alb
+  - nlb
+  - privatelink
+  - tradeoff
+  question: |
+    Which load balancer type is used as the front for an AWS PrivateLink endpoint
+    service, and why?
+  options:
+  - ALB, because PrivateLink requires L7 path routing
+  - Classic Load Balancer, because it is the only one supporting PrivateLink
+  - API Gateway, because PrivateLink only works with REST APIs
+  - NLB, because PrivateLink endpoint services front an NLB at L4 with static IPs and source preservation
+  answer: 3
+  explanation: |
+    PrivateLink endpoint services are fronted by an NLB (L4), which offers static
+    IPs, ultra-low latency, and source-IP preservation. ALB is L7 and not the
+    PrivateLink service front in the classic model. (ALB can be a target behind an
+    NLB in some patterns, but the PrivateLink service itself is NLB-based.)
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-032
+  difficulty: intermediate
+  tags:
+  - strangler-fig
+  - routing
+  - canary
+  question: |
+    During a strangler-fig migration, how do you safely move traffic for a newly
+    extracted capability while retaining a fast rollback?
+  options:
+  - Cut 100% of traffic instantly and monitor afterward
+  - Use weighted/canary routing at the facade (API Gateway/ALB) to shift traffic gradually to the new
+    service, rolling back instantly if metrics degrade
+  - Delete the monolith's code path immediately to force the new service
+  - Route by random coin flip in each client
+  answer: 1
+  explanation: |
+    Weighted/canary routing at the routing facade lets you shift a small
+    percentage first, watch metrics, and roll back instantly by re-pointing the
+    route to the monolith. Instant 100% cutover (option 0) removes the safety net;
+    deleting the old path (option 2) prevents rollback.
+  ref: concepts.md#strangler-fig-migration-on-aws
+- id: aws-microservices-patterns-033
+  difficulty: intermediate
+  tags:
+  - cell-based
+  - router
+  - availability
+  question: |
+    In cell-based architecture, why must the cell router be kept extremely simple
+    and highly available?
+  options:
+  - Because the router is the shared component you cannot cellularize; if it fails, all cells are unreachable,
+    so it becomes the shared fate
+  - Because the router stores all the application data
+  - Because the router must run the business logic for every cell
+  - Because routers are the most expensive AWS component
+  answer: 0
+  explanation: |
+    The thin routing/mapping layer is the one thing shared across cells, so its
+    availability caps the whole system's — it must stay simple, stateless, and
+    highly available. It should hold no application data (option 1) or business
+    logic (option 2); those live in cells.
+  ref: concepts.md#cell-based-architecture-and-bounded-contexts
+- id: aws-microservices-patterns-034
+  difficulty: intermediate
+  tags:
+  - eventbridge
+  - routing
+  - content-based
+  question: |
+    Which capability is EventBridge's distinctive strength compared to a plain
+    SNS+SQS fan-out?
+  options:
+  - Highest raw messages-per-second throughput of any AWS messaging service
+  - Guaranteed exactly-once delivery
+  - Content-based routing via event patterns (route only orders over $1000 in EU), a schema registry,
+    20+ target types, and archive/replay
+  - Sub-millisecond delivery latency
+  answer: 2
+  explanation: |
+    EventBridge shines at content-based routing (rules matching event patterns),
+    schema registry, many native AWS targets, and archive/replay. It is not the
+    highest-throughput or lowest-latency option (SNS+SQS or Kinesis win there), and
+    it is at-least-once, not exactly-once.
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-035
+  difficulty: intermediate
+  tags:
+  - idempotency
+  - sqs-fifo
+  - dedup
+  - window
+  question: |
+    A message redriven from a DLQ several hours later is reprocessed and causes a
+    double charge, even though you use SQS FIFO. Why, and what fixes it?
+  options:
+  - FIFO ordering was lost; enable Standard queues instead
+  - FIFO dedup covers 14 days, so this cannot happen
+  - Increase the visibility timeout to 12 hours to prevent redelivery
+  - FIFO content-based dedup only covers a 5-minute window; use an explicit idempotency store (e.g. DynamoDB
+    conditional write keyed by an idempotency key) for correctness across longer windows
+  answer: 3
+  explanation: |
+    SQS FIFO deduplication only applies within a 5-minute window, so a message
+    reprocessed hours later slips through. Correctness across arbitrary windows
+    requires an explicit idempotency store with a TTL you choose. Visibility timeout
+    (option 2) delays redelivery but doesn't dedup across a DLQ redrive.
+  ref: concepts.md#idempotency-and-exactly-once-processing
+- id: aws-microservices-patterns-036
+  difficulty: intermediate
+  tags:
+  - service-discovery
+  - dns
+  - api
+  - staleness
+  question: |
+    What is the trade-off between DNS-based and API-based service discovery in
+    Cloud Map?
+  options:
+  - DNS is always fresher because it has no caching
+  - DNS is universal and SDK-free but caches (TTL), so it can send traffic to instances that scaled in
+    until TTL expires; API discovery is fresher and health-aware but couples callers to the Cloud Map
+    SDK
+  - API discovery cannot filter by health, so it is strictly worse
+  - There is no difference; both are identical
+  answer: 1
+  explanation: |
+    DNS discovery is simple and universal but suffers TTL-caching staleness; API
+    discovery is fresh and health-aware but requires the Cloud Map SDK. DNS is not
+    cache-free (option 0), and API discovery IS health-aware (option 3 wrong).
+  ref: concepts.md#service-discovery-with-cloud-map-and-service-mesh-with-app-mesh-and-vpc-lattice
+- id: aws-microservices-patterns-037
+  difficulty: intermediate
+  tags:
+  - when-not-to
+  - consistency
+  question: |
+    Which requirement most strongly argues AGAINST decomposing an operation into
+    microservices with sagas?
+  options:
+  - The operation must be independently scalable
+  - Different teams want to own different parts
+  - The operation demands strong transactional consistency across all steps and cannot tolerate eventual
+    consistency or intermediate 'pending' states
+  - The operation is called at very high volume
+  answer: 2
+  explanation: |
+    Sagas give eventual consistency and expose intermediate states; if the business
+    truly requires strong ACID consistency across the whole operation, a single
+    transactional database is far simpler. Independent scaling, team ownership, and
+    high volume (options 0, 1, 3) actually favor decomposition.
+  ref: concepts.md#when-not-to-use-microservices-on-aws
+- id: aws-microservices-patterns-038
+  difficulty: advanced
+  tags:
+  - saga
+  - orchestration
+  - cost
+  - state-transitions
+  question: |
+    A high-volume saga on Step Functions Standard has many small steps and its
+    cost is climbing sharply. Which explanation and remedy are correct?
+  options:
+  - Standard is priced per state transition, so a chatty many-step saga is expensive; reduce state transitions
+    (batch steps) or use Express workflows (duration-priced) for high-volume short inner loops, keeping
+    Standard for the long-running outer saga
+  - Standard is priced per GB stored; move data to S3
+  - Standard is free; the cost must be from Lambda only
+  - Switch to choreography, which is always cheaper regardless of volume
+  answer: 0
+  explanation: |
+    Standard workflows are billed per state transition, so many small steps at high
+    volume get pricey. Fixes: reduce transitions (batching), or use Express
+    (priced by duration × memory) for the hot inner loop while keeping Standard for
+    the durable outer saga. Choreography isn't unconditionally cheaper and changes
+    the model (option 3).
+  ref: concepts.md#saga-orchestration-with-step-functions
+- id: aws-microservices-patterns-039
+  difficulty: advanced
+  tags:
+  - outbox
+  - ordering
+  - dynamodb-streams
+  - kinesis
+  question: |
+    Your outbox uses DynamoDB Streams → Lambda → EventBridge. Downstream requires
+    strict global ordering of all events and 7-day replay. What is the accurate
+    assessment?
+  options:
+  - DynamoDB Streams already provide strict global ordering and 7-day retention
+  - EventBridge guarantees global ordering, so the streams' ordering doesn't matter
+  - Increase Lambda concurrency to enforce global ordering
+  - DynamoDB Streams order only within a partition key and retain 24 hours; global ordering isn't guaranteed
+    and 7-day replay needs a different design (e.g. Kinesis adapter with longer retention, or a single-partition/sequenced
+    log) with trade-offs
+  answer: 3
+  explanation: |
+    DynamoDB Streams preserve order only per partition key and retain 24 hours; they
+    give neither global ordering nor 7-day replay. Achieving those requires design
+    changes (Kinesis adapter for longer retention; a sequencing/single-partition
+    approach for global order, which caps throughput). EventBridge does not provide
+    global ordering (option 1). More concurrency actually harms ordering (option 2).
+  ref: concepts.md#transactional-outbox-and-change-data-capture-on-aws
+- id: aws-microservices-patterns-040
+  difficulty: advanced
+  tags:
+  - messaging
+  - kinesis
+  - hot-partition
+  - scaling
+  question: |
+    A Kinesis stream is throttling on writes even though total volume is below the
+    aggregate shard capacity. What is the most likely root cause?
+  options:
+  - Kinesis has a global 1 MB/s account cap
+  - A skewed/hot partition key routes disproportionate traffic to one shard, exceeding that shard's 1
+    MB/s or 1,000 rec/s limit while other shards are idle
+  - Enhanced fan-out reduces write capacity
+  - Records under 1 KB cannot be written
+  answer: 1
+  explanation: |
+    Per-shard limits (1 MB/s, 1,000 rec/s) are enforced per shard; a hot partition
+    key concentrates writes on one shard and throttles even when aggregate capacity
+    is fine. Fix with a higher-cardinality partition key. There is no global 1 MB/s
+    account cap (option 0), and enhanced fan-out affects reads, not writes.
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-041
+  difficulty: advanced
+  tags:
+  - saga
+  - orchestration-vs-choreography
+  - judgment
+  question: |
+    A KYC onboarding flow has 9 steps, multiple conditional branches, timeouts,
+    manual review, and strict audit requirements. Which coordination style and
+    service best fit, and why?
+  options:
+  - Orchestration with Step Functions Standard, because complex branching, timeouts, human approval, and
+    auditability need a central, visible workflow with exactly-once execution and full history
+  - Pure choreography over EventBridge, because it decouples the 9 teams
+  - A single synchronous API call chaining all 9 steps
+  - SQS Standard with one queue per step and no coordinator
+  answer: 0
+  explanation: |
+    Complex, multi-branch, human-in-the-loop, audited flows are the textbook case
+    for orchestration via Step Functions Standard (visible flow, retries/timeouts,
+    exactly-once, full history). Pure choreography (option 1) makes global state and
+    audit hard; a synchronous 9-step chain (option 2) is fragile and hits timeouts.
+  ref: concepts.md#saga-orchestration-with-step-functions
+- id: aws-microservices-patterns-042
+  difficulty: advanced
+  tags:
+  - outbox
+  - cdc
+  - dms
+  - relational
+  question: |
+    You must implement an outbox for a service backed by Aurora PostgreSQL with
+    near-zero added write latency. Which approach fits best?
+  options:
+  - Have the app call SNS Publish right after each COMMIT
+  - Poll every table every 100 ms with a Lambda
+  - Use log-based CDC (AWS DMS or a Debezium-style connector) reading the WAL to stream committed changes
+    to Kinesis/MSK, adding no write overhead to the transaction
+  - Wrap the SNS Publish inside the SQL transaction
+  answer: 2
+  explanation: |
+    Log-based CDC reads the transaction log (WAL/binlog) out of band, so it adds no
+    write-path latency and captures committed changes reliably. Calling SNS after
+    COMMIT (option 0) reintroduces the dual-write gap. High-frequency polling
+    (option 1) adds query load and latency. You cannot enlist SNS in a SQL
+    transaction (option 3).
+  ref: concepts.md#transactional-outbox-and-change-data-capture-on-aws
+- id: aws-microservices-patterns-043
+  difficulty: advanced
+  tags:
+  - service-mesh
+  - tradeoff
+  - sidecar
+  - judgment
+  question: |
+    A team of 6 services wants to adopt a full sidecar service mesh "for
+    observability." What is the best senior-level recommendation?
+  options:
+  - Adopt Istio immediately; more mesh is always better
+  - Deploy App Mesh, since it is AWS's strategic mesh going forward
+  - Use Kinesis to collect observability instead of any mesh
+  - 'Push back: at only 6 services the sidecar CPU/memory/latency tax and operational complexity rarely
+    pay off; start with Cloud Map / ECS Service Connect and add a mesh only at real scale with genuine
+    mTLS/traffic-mgmt needs'
+  answer: 3
+  explanation: |
+    A mesh's sidecar overhead and ops complexity are hard to justify for a handful
+    of services; simpler discovery (Cloud Map/Service Connect) plus app-level
+    resilience usually suffices, adding a mesh only when scale and real mTLS/
+    traffic-shifting needs appear. App Mesh (option 1) is being deprecated. Kinesis
+    (option 2) is unrelated to service networking.
+  ref: concepts.md#service-discovery-with-cloud-map-and-service-mesh-with-app-mesh-and-vpc-lattice
+- id: aws-microservices-patterns-044
+  difficulty: advanced
+  tags:
+  - vpc-lattice
+  - sidecar-less
+  - cross-account
+  question: |
+    A platform must connect services running on ECS, EKS, EC2, and Lambda across
+    multiple VPCs and accounts, with IAM-based auth and no sidecars. Which AWS
+    capability fits best?
+  options:
+  - AWS App Mesh with Envoy sidecars everywhere
+  - Amazon VPC Lattice — L7 service-to-service networking across VPCs/accounts and heterogeneous compute
+    (ECS/EKS/EC2/Lambda) with IAM auth policies and no sidecars
+  - A single shared NLB with static IPs
+  - Amazon MQ as a service bus between accounts
+  answer: 1
+  explanation: |
+    VPC Lattice provides sidecar-less L7 service networking spanning VPCs, accounts,
+    and mixed compute (including Lambda), with IAM auth policies and weighted
+    routing — exactly this scenario. App Mesh (option 0) needs sidecars and is being
+    deprecated. An NLB (option 2) doesn't give per-service IAM auth or L7 routing.
+  ref: concepts.md#service-discovery-with-cloud-map-and-service-mesh-with-app-mesh-and-vpc-lattice
+- id: aws-microservices-patterns-045
+  difficulty: advanced
+  tags:
+  - idempotency
+  - effectively-once
+  - honesty
+  question: |
+    An interviewer asks how you'll guarantee "exactly-once" processing of payment
+    events. What is the most correct senior answer?
+  options:
+  - Enable exactly-once delivery on SNS and EventBridge
+  - Use UDP so packets are never duplicated
+  - True end-to-end exactly-once delivery doesn't exist in a distributed system; engineer effectively-once
+    via at-least-once delivery plus idempotent, deduplicated handlers (idempotency key + DynamoDB conditional
+    write, optimistic locking)
+  - Set SQS visibility timeout to zero to avoid duplicates
+  answer: 2
+  explanation: |
+    There is no true end-to-end exactly-once delivery; you achieve
+    effectively-once by combining at-least-once delivery with idempotent handlers
+    (idempotency keys, conditional writes, optimistic locking). SNS/EventBridge
+    don't offer exactly-once delivery (option 0). UDP (option 1) and zero visibility
+    timeout (option 3) make duplication worse.
+  ref: concepts.md#idempotency-and-exactly-once-processing
+- id: aws-microservices-patterns-046
+  difficulty: advanced
+  tags:
+  - decomposition
+  - chatty
+  - boundary
+  question: |
+    After splitting a monolith, a single user action now triggers 12 synchronous
+    inter-service round-trips, tanking latency. What does this most likely indicate?
+  options:
+  - The service boundary is wrong — services that must make many synchronous round-trips per request probably
+    belong to the same bounded context or need async/aggregation
+  - The network is misconfigured and needs a bigger NLB
+  - You should add more replicas to each service
+  - You should switch every call from REST to gRPC and the problem disappears
+  answer: 0
+  explanation: |
+    A chatty, multi-round-trip cross-service flow signals a bad boundary: those
+    services likely belong together, or the interaction should be redesigned (async
+    events, API composition/BFF aggregation). gRPC (option 3) reduces per-call
+    overhead but doesn't fix a fundamentally wrong decomposition.
+  ref: concepts.md#decomposing-services-and-database-per-service-on-aws
+- id: aws-microservices-patterns-047
+  difficulty: advanced
+  tags:
+  - messaging
+  - kinesis-vs-sqs
+  - replay
+  - judgment
+  question: |
+    One event source must feed three independent consumers — real-time fraud,
+    analytics, and an audit archive — each reading ALL events, with the ability to
+    replay the last 30 days. Which design fits best?
+  options:
+  - A single SQS Standard queue that all three consumers poll
+  - SNS with no subscribers, polled by each consumer
+  - SQS FIFO with one message group for everything
+  - Kinesis Data Streams (retention set up to 365 days; here 30 days) with multiple consumers/enhanced
+    fan-out, so each consumer independently reads the full ordered log and can replay
+  answer: 3
+  explanation: |
+    Kinesis retains an ordered log (retention configurable up to 365 days) that
+    multiple consumers can each read in full and replay — ideal for fan-in to
+    several independent consumers plus replay. A single SQS queue deletes a message
+    after one consumer reads it (option 0) and has no replay. SNS without
+    subscribers delivers nothing (option 1).
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-048
+  difficulty: advanced
+  tags:
+  - cell-based
+  - sizing
+  - hot-cell
+  question: |
+    Which is a genuine challenge of cell-based architecture that you must design for?
+  options:
+  - Cells make strong global consistency trivial
+  - Cell sizing and partition-key placement (avoiding a hot cell), plus keeping the router simple/HA and
+    handling cross-cell operations, are nontrivial
+  - Cells remove the need for capacity planning entirely
+  - Cells cannot be deployed independently
+  answer: 1
+  explanation: |
+    Cell architecture adds real challenges: avoiding hot cells (placement/sizing),
+    a simple highly-available router, and hard cross-cell operations. It does not
+    make global consistency trivial (option 0) — cells are independent stacks — and
+    cells CAN (and should) deploy independently for canarying (option 3).
+  ref: concepts.md#cell-based-architecture-and-bounded-contexts
+- id: aws-microservices-patterns-049
+  difficulty: advanced
+  tags:
+  - saga
+  - compensation
+  - ordering
+  - design
+  question: |
+    In designing a saga, why order the step that is hardest to compensate LAST?
+  options:
+  - So that if an earlier step fails you avoid ever having to compensate the hardest-to-undo action, reducing
+    the chance of messy or impossible compensation
+  - Because the last step is always the fastest
+  - Because AWS bills the last step at a discount
+  - Because Step Functions can only compensate the final step
+  answer: 0
+  explanation: |
+    Pessimistic ordering places the least-reversible action last, so earlier
+    failures never require compensating something hard or impossible to undo (e.g.
+    shipping a physical item). This is a standard saga design countermeasure, not a
+    billing (option 2) or tooling limitation (option 3).
+  ref: concepts.md#saga-pattern-for-distributed-transactions-and-compensation
+- id: aws-microservices-patterns-050
+  difficulty: advanced
+  tags:
+  - step-functions
+  - express
+  - semantics
+  - judgment
+  question: |
+    A high-volume, short (sub-second), idempotent event-processing pipeline needs
+    100,000+ starts/second and cost efficiency, and does not need year-long
+    durability. Which Step Functions type fits, and what must you accept?
+  options:
+  - Standard, accepting per-state-transition cost at that volume
+  - Standard, because Express cannot exceed 1,000 starts/second
+  - Express, accepting at-least-once (async) semantics and history only via CloudWatch Logs, in exchange
+    for very high start rates and duration-based pricing
+  - Neither; Step Functions cannot exceed 1,000 starts/second
+  answer: 2
+  explanation: |
+    Express workflows handle 100k+ starts/s with duration-based pricing, suited to
+    short high-volume idempotent processing, but are at-least-once (async) with
+    history only in CloudWatch Logs. Standard's per-transition pricing would be
+    costly at this volume (option 0), and Express is designed exactly for these high
+    start rates (options 1, 3 wrong).
+  ref: concepts.md#saga-orchestration-with-step-functions
+- id: aws-microservices-patterns-051
+  difficulty: advanced
+  tags:
+  - api-gateway
+  - http-vs-rest
+  - cost
+  - judgment
+  question: |
+    A latency-sensitive, cost-conscious public API just needs a thin proxy to
+    Lambda with JWT auth and no per-key usage plans. Which API Gateway flavor is
+    most appropriate?
+  options:
+  - REST API, because it is always the safest default
+  - WebSocket API, because it is cheapest for request/response
+  - A custom EC2 reverse proxy, because API Gateway can't do JWT
+  - HTTP API, which offers lower latency and roughly 70% lower cost than REST APIs with JWT auth, at the
+    expense of some advanced REST-API features
+  answer: 3
+  explanation: |
+    HTTP APIs are cheaper (~70%) and lower-latency than REST APIs and support JWT
+    authorizers — ideal for a thin Lambda proxy without needing REST-only features
+    (e.g. per-key usage plans, request validation). WebSocket APIs (option 1) are
+    for bidirectional streaming, not request/response.
+  ref: concepts.md#api-gateway-and-backend-for-frontend-patterns
+- id: aws-microservices-patterns-052
+  difficulty: advanced
+  tags:
+  - strangler-fig
+  - anti-corruption-layer
+  - data
+  question: |
+    When extracting a capability during strangler-fig migration, what role does an
+    anti-corruption layer (ACL) play, and how is data typically handled?
+  options:
+  - The ACL blocks all traffic to the monolith; data is deleted immediately
+  - The ACL translates between the monolith's model and the new service's model, while data is migrated
+    per capability via dual-write / CDC / backfill, so both systems run in parallel during transition
+  - The ACL encrypts the database; data never moves
+  - The ACL merges the two databases into one shared schema
+  answer: 1
+  explanation: |
+    An ACL translates between the legacy model and the new service's model so
+    neither corrupts the other, and per-capability data is migrated via dual-write/
+    CDC/backfill while both systems run in parallel. Merging into a shared schema
+    (option 3) would reintroduce coupling.
+  ref: concepts.md#strangler-fig-migration-on-aws
+- id: aws-microservices-patterns-053
+  difficulty: advanced
+  tags:
+  - sns-vs-eventbridge
+  - latency
+  - throughput
+  - judgment
+  question: |
+    You need very high-throughput, low-latency fan-out to a fixed set of internal
+    consumers, and you do NOT need content-based routing or AWS-service targets.
+    SNS+SQS vs EventBridge — which and why?
+  options:
+  - EventBridge, because it is lower latency and higher throughput than SNS
+  - EventBridge, because SNS cannot fan out to multiple consumers
+  - SNS + SQS, because it delivers lower latency and higher raw throughput with durable per-consumer buffering;
+    EventBridge's routing/schema features aren't needed here and add latency
+  - Neither; use a synchronous API to each consumer
+  answer: 2
+  explanation: |
+    When you don't need EventBridge's routing/schema/target integrations, SNS+SQS is
+    lower-latency, higher-throughput, and gives durable per-consumer buffering.
+    EventBridge trades latency for routing power (option 0 wrong). SNS absolutely
+    fans out to multiple subscribers (option 1 wrong).
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-054
+  difficulty: advanced
+  tags:
+  - outbox
+  - at-least-once
+  - idempotency
+  - chain
+  question: |
+    Your outbox-via-Streams relay guarantees the event is eventually published, but
+    downstream sometimes double-applies it. Where is the correct place to fix this?
+  options:
+  - In the consumers, by making them idempotent (idempotency key + conditional write), because the outbox
+    provides at-least-once delivery by design
+  - In the outbox relay, by attempting exactly-once publishing
+  - In DynamoDB, by disabling Streams retries
+  - In EventBridge, by enabling exactly-once mode
+  answer: 0
+  explanation: |
+    The outbox pattern intentionally provides at-least-once delivery, so duplicates
+    are expected and the fix belongs in idempotent consumers. You cannot make the
+    relay truly exactly-once (option 1), disabling retries would lose events
+    (option 2), and EventBridge has no exactly-once mode (option 3).
+  ref: concepts.md#idempotency-and-exactly-once-processing
+- id: aws-microservices-patterns-055
+  difficulty: advanced
+  tags:
+  - decomposition
+  - isolation
+  - blast-radius
+  question: |
+    What operational benefit does true database-per-service isolation provide that
+    a shared database cannot?
+  options:
+  - Automatic distributed ACID transactions
+  - A single place to run cross-service analytics JOINs
+  - Guaranteed lower storage cost
+  - Fault isolation — one service's hot partition, runaway query, or schema migration cannot stall the
+    other services
+  answer: 3
+  explanation: |
+    Separate stores isolate faults: one service's hot partition or heavy migration
+    doesn't degrade others. It does NOT provide distributed ACID (option 0) or easy
+    cross-service JOINs (option 1 — that's actually harder), and it can increase
+    total cost/ops (option 2).
+  ref: concepts.md#decomposing-services-and-database-per-service-on-aws
+- id: aws-microservices-patterns-056
+  difficulty: advanced
+  tags:
+  - saga
+  - choreography
+  - cyclic
+  - tracing
+  question: |
+    A choreographed saga across many services occasionally enters an infinite loop
+    of events, and failures are hard to trace. Which pair of concerns does this
+    illustrate?
+  options:
+  - Cost per state transition and vendor lock-in
+  - Cyclic event chains and scattered/implicit workflow that make global state and failure tracing hard
+    — mitigated with distributed tracing (X-Ray/OpenTelemetry) and an event catalog
+  - Insufficient Lambda memory and cold starts
+  - SQS visibility timeouts being too short
+  answer: 1
+  explanation: |
+    These are the classic downsides of choreography: cyclic event chains and an
+    implicit, scattered workflow that is hard to trace. Mitigations are strong
+    distributed tracing and event cataloging/governance. State-transition cost
+    (option 0) is an orchestration concern.
+  ref: concepts.md#saga-choreography-with-eventbridge-and-sns
+- id: aws-microservices-patterns-057
+  difficulty: advanced
+  tags:
+  - bff
+  - coupling
+  - thin-gateway
+  question: |
+    Why should an API gateway / BFF layer be kept "thin" (routing and cross-cutting
+    concerns only)?
+  options:
+  - Because putting domain/business logic in the gateway turns it into a bottleneck and a single point
+    of change, recreating a monolith at the edge
+  - Because AWS charges more for gateways with business logic
+  - Because thin gateways are the only ones that support TLS
+  - Because business logic cannot run in Lambda
+  answer: 0
+  explanation: |
+    A gateway loaded with business logic becomes a coupling bottleneck and single
+    point of change — an edge monolith. Keep it to routing, auth, throttling, and
+    validation, with domain logic in the services. The other options are false.
+  ref: concepts.md#api-gateway-and-backend-for-frontend-patterns
+- id: aws-microservices-patterns-058
+  difficulty: advanced
+  tags:
+  - when-not-to
+  - ops-maturity
+  question: |
+    A team with no CI/CD, no distributed tracing, and no on-call rotation wants to
+    launch 15 microservices. What is the biggest risk?
+  options:
+  - They will save too much money
+  - AWS will not let them create more than 5 services
+  - Without CI/CD, observability, and service ownership, microservices become a distributed big ball of
+    mud that is harder to operate than a monolith
+  - Microservices require no operational maturity, so there is no risk
+  answer: 2
+  explanation: |
+    Microservices demand CI/CD, observability, IaC, and clear ownership; lacking
+    them yields a distributed big ball of mud that's harder to run than a monolith.
+    There's no 5-service AWS cap (option 1), and the claim of no ops maturity needed
+    (option 3) is false.
+  ref: concepts.md#when-not-to-use-microservices-on-aws
+- id: aws-microservices-patterns-059
+  difficulty: advanced
+  tags:
+  - messaging
+  - sqs
+  - retention
+  - visibility
+  - limits
+  question: |
+    Which set of SQS limits is correct?
+  options:
+  - Max retention 4 days (fixed), visibility timeout max 30 s, delay max 20 s
+  - Max retention 7 days, visibility timeout max 1 h, delay max 5 min
+  - Max retention 365 days, visibility timeout max 24 h, delay max 1 h
+  - Max retention 14 days, default visibility timeout 30 s (max 12 h), delay max 15 min, long-poll wait
+    max 20 s
+  answer: 3
+  explanation: |
+    SQS retention defaults to 4 days but is configurable up to 14 days; visibility
+    timeout defaults to 30 s (max 12 h); delivery delay max is 15 min; long-poll
+    ReceiveMessage wait max is 20 s. The other option sets misstate these limits.
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-060
+  difficulty: advanced
+  tags:
+  - outbox
+  - dynamodb-streams
+  - dlq
+  - failure-mode
+  question: |
+    Which operational safeguards are most important for an outbox relay built on
+    DynamoDB Streams + Lambda?
+  options:
+  - Nothing; DynamoDB Streams are infinitely durable
+  - A Lambda on-failure destination/DLQ for poison records plus a CloudWatch alarm on stream IteratorAge,
+    because the 24-hour retention means prolonged relay failure loses events
+  - Turn off retries so failures surface immediately and records drop
+  - Store all events in the Lambda's /tmp for durability
+  answer: 1
+  explanation: |
+    Because Streams retain only 24 hours, you must alarm on IteratorAge (relay lag)
+    and route poison records to a DLQ/on-failure destination so a stuck record
+    doesn't block the shard and cause data loss. Streams aren't infinitely durable
+    (option 0), and dropping records (option 3) or using ephemeral /tmp is unsafe.
+  ref: concepts.md#transactional-outbox-and-change-data-capture-on-aws
+- id: aws-microservices-patterns-061
+  difficulty: expert
+  tags:
+  - saga
+  - hybrid
+  - boundaries
+  - staff-level
+  question: |
+    At staff level, how would you combine orchestration and choreography in a large
+    order-management platform?
+  options:
+  - Use only choreography everywhere to maximize decoupling
+  - Use only orchestration everywhere for a single global workflow
+  - Choreograph across bounded contexts (loose event-based coupling between Orders, Payments, Fulfillment)
+    while orchestrating the complex multi-step workflow within a single context using Step Functions
+  - Randomly alternate per request
+  answer: 2
+  explanation: |
+    A common mature pattern is hybrid: loose event-driven choreography between
+    bounded contexts (autonomy, decoupling) with orchestration inside a context
+    where a complex, branchy, audited workflow benefits from a central visible state
+    machine. Pure-either extremes (options 0, 1) sacrifice the complementary
+    benefits.
+  ref: concepts.md#saga-choreography-with-eventbridge-and-sns
+- id: aws-microservices-patterns-062
+  difficulty: expert
+  tags:
+  - availability
+  - region-failure
+  - degradation
+  - staff-level
+  question: |
+    An order-placement flow synchronously calls a fraud-check service. If the fraud
+    service is down, the whole checkout fails. Which resilience change best
+    preserves revenue without abandoning fraud checks entirely?
+  options:
+  - 'Make fraud-check asynchronous/deferred with a bounded fallback: accept the order optimistically (or
+    apply a fast heuristic), publish an event, and run full fraud-check out of band, compensating (cancel/flag)
+    if it fails — trading strict up-front rejection for availability'
+  - Remove fraud checks permanently
+  - Add infinite synchronous retries against the fraud service
+  - Move the fraud service to a bigger EC2 instance and keep it synchronous with no fallback
+  answer: 0
+  explanation: |
+    Decoupling the fraud check (async/deferred with a bounded fallback and later
+    compensation) preserves checkout availability when the dependency is down, at
+    the cost of briefly accepting some risk. Infinite synchronous retries (option 2)
+    amplify the outage; a bigger instance with no fallback (option 3) still couples
+    availability. Note: AWS Builders' Library warns that naive fallbacks add risk,
+    so the fallback must be bounded and tested.
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-063
+  difficulty: expert
+  tags:
+  - step-functions
+  - exactly-once
+  - express-idempotency
+  - staff-level
+  question: |
+    You switched a saga from Step Functions Standard to Express to cut cost, and now
+    occasionally a step runs twice. What is the correct explanation?
+  options:
+  - Express has a bug; open an AWS support case
+  - Standard is also at-least-once, so nothing changed
+  - Express only runs steps once but retries the whole workflow
+  - Express workflows are at-least-once (async), unlike Standard's exactly-once execution, so steps can
+    run more than once; make the steps idempotent or keep Standard where exactly-once execution is required
+  answer: 3
+  explanation: |
+    Standard workflows provide exactly-once execution; Express (async) is
+    at-least-once, so steps may execute more than once — expected behavior, not a
+    bug. Either make steps idempotent or keep Standard where exactly-once execution
+    matters. Standard is not at-least-once (option 1).
+  ref: concepts.md#saga-orchestration-with-step-functions
+- id: aws-microservices-patterns-064
+  difficulty: expert
+  tags:
+  - messaging
+  - ordering
+  - partition-key
+  - tradeoff
+  - staff-level
+  question: |
+    A design requires strict ordering AND very high throughput on Kinesis. What is
+    the fundamental tension, and the standard resolution?
+  options:
+  - There is no tension; a single shard gives both
+  - Ordering is per partition key/shard, so strict global ordering forces few/one partition (capping throughput);
+    resolve by ordering only within a business key (e.g. per account) so parallel shards scale while each
+    key stays ordered
+  - Increase record size to 10 MB to raise throughput
+  - Use SQS Standard, which gives both global ordering and unlimited throughput
+  answer: 1
+  explanation: |
+    Kinesis orders per partition key/shard, so global ordering means concentrating
+    on one shard and losing parallelism. The standard resolution is to require
+    ordering only within a business partition key (per account/entity), letting many
+    shards scale in parallel while each key stays ordered. SQS Standard has no
+    ordering guarantee (option 3).
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-065
+  difficulty: expert
+  tags:
+  - cell-based
+  - shuffle-sharding
+  - blast-radius
+  - staff-level
+  question: |
+    Beyond simple cell partitioning, which technique from the AWS Builders' Library
+    further reduces the blast radius of a poison/noisy tenant across cells?
+  options:
+  - Shuffle-sharding — assigning each tenant a randomized combination of cells/workers so that overlapping
+    failure sets are minimized and few tenants share the exact same shard
+  - Placing every tenant in one giant cell for simplicity
+  - Removing the router to reduce latency
+  - Giving each tenant its own AWS Region unconditionally
+  answer: 0
+  explanation: |
+    Shuffle-sharding assigns each tenant a random subset of workers/cells so that
+    any two tenants rarely share the same full set, dramatically shrinking the
+    fraction of tenants a single poison workload can affect. One giant cell
+    (option 1) maximizes blast radius; a region per tenant (option 3) is wildly
+    uneconomical.
+  ref: concepts.md#cell-based-architecture-and-bounded-contexts
+- id: aws-microservices-patterns-066
+  difficulty: expert
+  tags:
+  - outbox
+  - cqrs
+  - read-model
+  - consistency
+  - staff-level
+  question: |
+    You build a CQRS read model fed by events from an outbox. A user updates their
+    profile then immediately reloads and sees the old value. What is happening and
+    what is the pragmatic fix?
+  options:
+  - The read model is corrupt; rebuild it from scratch on every read
+  - Switch the read model to synchronous cross-service JOINs
+  - This is expected eventual-consistency lag between the write model and the event-fed read model; mitigate
+    with read-your-writes techniques (serve the writer's own recent change from the write model or a cache,
+    version/tokens, or a brief client-side optimistic update)
+  - Disable the outbox so writes and reads are the same store
+  answer: 2
+  explanation: |
+    CQRS read models fed by events are eventually consistent; a just-written value
+    may not have propagated. Pragmatic mitigations give read-your-writes for the
+    author (read from write model/cache, consistency tokens, optimistic UI) without
+    abandoning CQRS. Disabling the outbox/CQRS (option 3) throws away the benefits;
+    cross-service JOINs (option 1) aren't possible.
+  ref: concepts.md#transactional-outbox-and-change-data-capture-on-aws
+- id: aws-microservices-patterns-067
+  difficulty: expert
+  tags:
+  - service-communication
+  - retries
+  - backoff
+  - retry-storm
+  - staff-level
+  question: |
+    During a partial outage, aggressive client retries make a struggling service
+    collapse entirely (a retry storm). Which combination best prevents this?
+  options:
+  - Unlimited immediate retries with no delay
+  - A single fixed 1-second retry interval for all clients
+  - Removing all timeouts so requests wait indefinitely
+  - Retries with exponential backoff AND jitter, a retry budget/token bucket to cap total retries, and
+    circuit breakers to stop hammering a failing dependency
+  answer: 3
+  explanation: |
+    The Builders' Library prescribes exponential backoff WITH jitter (to
+    de-synchronize retries), plus retry budgets/token buckets and circuit breakers
+    to prevent retry storms from overwhelming a recovering service. Fixed intervals
+    (option 1) resynchronize clients; removing timeouts (option 2) ties up resources.
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-068
+  difficulty: expert
+  tags:
+  - decomposition
+  - distributed-transaction
+  - judgment
+  - staff-level
+  question: |
+    A fintech operation must atomically debit account A and credit account B, both
+    owned by the same "Ledger" service, with strict ACID guarantees. How should this
+    be modeled?
+  options:
+  - Split debit and credit into two services and coordinate with a saga
+  - Keep both accounts within the single Ledger bounded context/database and use one local ACID transaction
+    (e.g. DynamoDB TransactWriteItems or an Aurora transaction) — do NOT introduce a distributed transaction
+    where a local one suffices
+  - Use EventBridge choreography with compensations for the debit/credit
+  - Use Step Functions to two-phase-commit across two databases
+  answer: 1
+  explanation: |
+    When both entities belong to one bounded context, a single local ACID
+    transaction (DynamoDB TransactWriteItems, up to 100 items/4 MB, or an Aurora
+    transaction) is correct and simplest. Splitting into a saga (options 0, 2)
+    needlessly sacrifices atomicity/isolation for a problem a local transaction
+    solves. Knowing when NOT to distribute is a senior signal.
+  ref: concepts.md#decomposing-services-and-database-per-service-on-aws
+- id: aws-microservices-patterns-069
+  difficulty: expert
+  tags:
+  - eventbridge
+  - archive-replay
+  - limits
+  - staff-level
+  question: |
+    A team wants to onboard a brand-new consumer by replaying the last 90 days of
+    domain events. They currently use SNS+SQS fan-out. What is the accurate
+    assessment?
+  options:
+  - Just replay from SNS; SNS stores all published messages for 90 days
+  - SQS retains 90 days, so drain the existing queue again
+  - SNS/SQS do not retain published history for replay; use EventBridge with an archive + replay (or a
+    durable log like Kinesis/MSK/S3) to feed a new consumer from history — this is a key reason to route
+    domain events through EventBridge or a log
+  - Rebuild the events by querying each service's database synchronously
+  answer: 2
+  explanation: |
+    SNS doesn't store history and SQS deletes consumed messages (max 14-day
+    retention anyway), so neither supports replaying 90 days to a new consumer.
+    EventBridge archive+replay or a durable log (Kinesis up to 365 days, MSK, S3)
+    is the right tool — a reason to route domain events through a replayable
+    substrate.
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-070
+  difficulty: expert
+  tags:
+  - idempotency
+  - powertools
+  - in-progress-lock
+  - staff-level
+  question: |
+    Two duplicate invocations of an idempotent Lambda arrive nearly simultaneously
+    (before the first finishes). A naive "check-then-write" idempotency table lets
+    both proceed. What robust mechanism prevents the double execution?
+  options:
+  - 'Use an idempotency store with an atomic conditional ''in-progress'' lock written on start (e.g. Lambda
+    Powertools Idempotency): the first invocation atomically claims the key as IN_PROGRESS, and the concurrent
+    duplicate sees the lock and waits/short-circuits instead of re-executing'
+  - Increase Lambda reserved concurrency to 1 globally
+  - Rely on SQS FIFO 5-minute dedup, which always covers concurrent invocations
+  - Log both executions and reconcile in a nightly batch job
+  answer: 0
+  explanation: |
+    The race exists because check-then-write isn't atomic. The fix is an atomic
+    conditional write that claims an IN_PROGRESS lock at the start of processing
+    (as Lambda Powertools Idempotency does), so a concurrent duplicate sees the lock
+    and does not re-execute. Global concurrency of 1 (option 1) destroys throughput;
+    nightly reconciliation (option 3) doesn't prevent the double effect.
+  ref: concepts.md#idempotency-and-exactly-once-processing
+- id: aws-microservices-patterns-071
+  difficulty: intermediate
+  tags:
+  - decomposition
+  - transactwriteitems
+  - dynamodb
+  - limits
+  question: |
+    What is the limit of a single DynamoDB TransactWriteItems call, relevant when
+    deciding whether a local transaction can replace a saga?
+  options:
+  - Up to 25 items across tables
+  - Up to 1,000 items with no size limit
+  - Only 1 item; DynamoDB has no multi-item transactions
+  - Up to 100 items and 4 MB total in one all-or-nothing transaction within a single account/region
+  answer: 3
+  explanation: |
+    DynamoDB transactions (TransactWriteItems) support up to 100 items and 4 MB in
+    one atomic call within one account/region — useful for keeping a local ACID
+    transaction instead of a distributed saga when entities share a bounded context.
+    The 25-item figure was the older limit; DynamoDB does support multi-item
+    transactions (option 2 wrong).
+  ref: concepts.md#decomposing-services-and-database-per-service-on-aws
+- id: aws-microservices-patterns-072
+  difficulty: intermediate
+  tags:
+  - cost
+  - messaging
+  - estimation
+  question: |
+    A system emits ~1 billion events/month. For rough cost-model reasoning, which
+    statement about pricing dimensions is most accurate?
+  options:
+  - SQS, SNS, and EventBridge are all free at any volume
+  - SQS/SNS are priced primarily per request/message and EventBridge per event published (custom events),
+    while Kinesis is priced per shard-hour (provisioned) or per GB (on-demand) — so at 1B events the choice
+    materially changes cost
+  - All AWS messaging is priced per GB of data transferred only
+  - Kinesis is always cheaper than SQS at any volume
+  answer: 1
+  explanation: |
+    SQS/SNS bill per request/message, EventBridge per custom event published, and
+    Kinesis by shard-hour (provisioned) or data volume (on-demand). At a billion
+    events these dimensions diverge sharply, so cost is a real selection factor —
+    not free (option 0), not purely data-transfer (option 2), and Kinesis isn't
+    universally cheapest (option 3).
+  ref: concepts.md#asynchronous-communication-with-sqs-sns-eventbridge-and-kinesis
+- id: aws-microservices-patterns-073
+  difficulty: intermediate
+  tags:
+  - service-connect
+  - ecs
+  - discovery
+  question: |
+    For an ECS-only system wanting logical service names, client-side load
+    balancing, retries, and per-service traffic metrics with minimal configuration,
+    which modern option is most appropriate?
+  options:
+  - Amazon ECS Service Connect, which provides built-in discovery plus a lightweight managed proxy with
+    far less configuration than App Mesh
+  - AWS App Mesh with hand-written Envoy config
+  - Route 53 private hosted zones only, with no proxy
+  - A self-managed Consul cluster on EC2
+  answer: 0
+  explanation: |
+    ECS Service Connect gives ECS-native service discovery plus a light managed
+    Envoy proxy (logical names, client-side LB, retries, metrics) with much less
+    config than App Mesh, which is also being deprecated (option 1). DNS-only
+    (option 2) lacks the proxy features; self-managed Consul (option 3) adds ops
+    burden.
+  ref: concepts.md#service-discovery-with-cloud-map-and-service-mesh-with-app-mesh-and-vpc-lattice
+- id: aws-microservices-patterns-074
+  difficulty: expert
+  tags:
+  - bff
+  - appsync
+  - n-plus-one
+  - guardrails
+  - staff-level
+  question: |
+    Your AppSync GraphQL BFF is suffering latency spikes from deeply nested queries
+    causing N+1 resolver fan-out. Which mitigations are appropriate?
+  options:
+  - Nothing can be done; GraphQL inherently cannot be optimized
+  - Convert every resolver to a synchronous cross-service JOIN
+  - Apply query-depth/complexity limits, batch resolvers (DataLoader-style batching), pipeline resolvers,
+    and caching where possible to bound N+1 and deep-query cost
+  - Remove the schema so clients cannot write nested queries
+  answer: 2
+  explanation: |
+    GraphQL N+1 and deep-query cost are managed with depth/complexity limits,
+    batching (DataLoader-style), pipeline resolvers, and caching — standard
+    guardrails. GraphQL is optimizable (option 0), cross-service JOINs aren't
+    possible in this architecture (option 1), and removing the schema (option 3)
+    would break the API.
+  ref: concepts.md#api-gateway-and-backend-for-frontend-patterns
+- id: aws-microservices-patterns-075
+  difficulty: beginner
+  tags:
+  - sync-vs-async
+  - judgment
+  question: |
+    A user clicks "show my current account balance" and must see the correct number
+    before proceeding. Which communication style is most appropriate?
+  options:
+  - Fire an async event and email the balance later
+  - Publish to Kinesis and rebuild the balance on the client from the log
+  - Return the last cached value regardless of age
+  - A synchronous request/response read against a strongly consistent store
+  answer: 3
+  explanation: |
+    When the user needs an accurate answer immediately to act, a synchronous,
+    strongly consistent read is correct. The async options defer or stale the
+    answer, unacceptable for a balance the user is about to use.
+  ref: concepts.md#synchronous-communication-with-api-gateway-alb-grpc-and-rest
+- id: aws-microservices-patterns-076
+  difficulty: advanced
+  tags:
+  - trade-offs
+  - service-selection
+  - summary
+  question: |
+    Which single statement best captures the correct default for coordinating a
+    complex, auditable, multi-branch distributed transaction versus a simple
+    loosely-coupled event flow on AWS?
+  options:
+  - Always choreograph with EventBridge; orchestration is legacy
+  - Orchestrate complex/critical multi-branch transactions needing visibility with Step Functions; choreograph
+    simple, loosely-coupled event-driven flows with EventBridge/SNS — hybrids are common
+  - Always orchestrate everything with Step Functions to centralize control
+  - Use synchronous REST chains for all distributed transactions
+  answer: 1
+  explanation: |
+    The accepted rule of thumb: orchestration (Step Functions) for complex,
+    critical, visible/audited transactions; choreography (EventBridge/SNS) for
+    simple loosely-coupled flows; many systems hybridize. Absolute "always" answers
+    (options 0, 2) ignore context, and synchronous chains (option 3) reintroduce
+    coupling and timeout/availability problems.
+  ref: concepts.md#trade-offs-and-when-to-use-what

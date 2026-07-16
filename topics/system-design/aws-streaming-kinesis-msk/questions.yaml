@@ -1,0 +1,1546 @@
+topic: "Streaming and Real-Time Data: Kinesis and MSK"
+domain: system-design
+topic_slug: aws-streaming-kinesis-msk
+version: 1
+
+questions:
+  # ---------------- Stream vs queue mental model ----------------
+  - id: aws-streaming-kinesis-msk-001
+    difficulty: beginner
+    tags: [stream-vs-queue, fundamentals]
+    question: |
+      What is the fundamental difference between a streaming log (Kinesis/Kafka)
+      and a work queue (SQS)?
+    options:
+      - "A log deletes each record after one consumer reads it; a queue retains records for replay"
+      - "A log is an append-only, retained, ordered sequence that many consumers read independently by position; a queue delivers each message to one worker and deletes it on ack"
+      - "A queue supports multiple independent readers with replay; a log does not"
+      - "There is no functional difference; the names are interchangeable"
+    answer: 1
+    explanation: |
+      A log retains records for a window and lets many independent consumer groups read
+      the same records by offset/sequence number, enabling replay and fan-out. A queue
+      hands each message to one competing worker and deletes it on ack — no replay, no
+      independent re-reading. Option 0 inverts the two; option 2 describes the log's
+      properties but attributes them to the queue.
+    ref: "concepts.md#streaming-versus-queueing-the-core-mental-model"
+
+  - id: aws-streaming-kinesis-msk-002
+    difficulty: beginner
+    tags: [stream-vs-queue, service-selection]
+    question: |
+      You need to broadcast a single "order placed" event to several decoupled
+      microservices via push delivery, with no requirement to replay historical events.
+      Which AWS service is the most natural fit?
+    options:
+      - "Kinesis Data Streams"
+      - "Amazon MSK"
+      - "Amazon SNS (or EventBridge)"
+      - "Kinesis Data Firehose"
+    answer: 2
+    explanation: |
+      Fan-out of one event to many subscribers via push, with filtering/routing and no
+      replay requirement, is exactly pub/sub — SNS or EventBridge. Kinesis/MSK are
+      ordered retained logs (overkill and more ops when you don't need replay/ordering),
+      and Firehose is buffered delivery to storage destinations, not pub/sub.
+    ref: "concepts.md#streaming-versus-queueing-the-core-mental-model"
+
+  - id: aws-streaming-kinesis-msk-003
+    difficulty: intermediate
+    tags: [stream-vs-queue, replay, service-selection]
+    question: |
+      A new analytics consumer must process ALL events from the past 30 days that other
+      consumers already processed, without producers resending anything. Which property
+      makes this possible and which service class provides it?
+    options:
+      - "Delete-on-ack semantics, provided by SQS Standard"
+      - "Message-group ordering, provided by SQS FIFO"
+      - "A retained, replayable log read by position, provided by Kinesis Data Streams or MSK"
+      - "Push fan-out with archiving, provided by SNS"
+    answer: 2
+    explanation: |
+      Reading historical records that others already consumed, from the start, requires a
+      retained log where nothing is deleted on read and consumers track their own
+      position — Kinesis Data Streams or MSK (set to TRIM_HORIZON / earliest). SQS deletes
+      on ack (no replay); FIFO ordering doesn't give history replay; SNS push has no
+      high-throughput replayable log for a brand-new subscriber to backfill from.
+    ref: "concepts.md#streaming-versus-queueing-the-core-mental-model"
+
+  # ---------------- KDS architecture and shards ----------------
+  - id: aws-streaming-kinesis-msk-004
+    difficulty: beginner
+    tags: [shards, limits]
+    question: |
+      What is the write (ingest) capacity of a single Kinesis Data Streams shard?
+    options:
+      - "1 MB/s or 1,000 records/s, whichever is reached first"
+      - "2 MB/s or 2,000 records/s"
+      - "10 MB/s or 10,000 records/s"
+      - "Unlimited; shards only affect read throughput"
+    answer: 0
+    explanation: |
+      A shard ingests up to 1 MB/s OR 1,000 records/s, whichever limit is hit first —
+      both matter. 2 MB/s is the per-shard read (egress) limit; 10 MB/10,000 records is
+      the GetRecords transaction cap. Shards absolutely bound write throughput.
+    ref: "concepts.md#kinesis-data-streams-architecture-and-shards"
+
+  - id: aws-streaming-kinesis-msk-005
+    difficulty: beginner
+    tags: [shards, egress, limits]
+    question: |
+      For a standard (shared-throughput) consumer, what is the maximum read throughput
+      per shard?
+    options:
+      - "2 MB/s, shared across all standard consumers of that shard"
+      - "1 MB/s"
+      - "2 MB/s dedicated per consumer"
+      - "10 MB/s per consumer"
+    answer: 0
+    explanation: |
+      Each shard emits up to 2 MB/s, shared across all classic consumers, with a cap of
+      5 GetRecords/s. 2 MB/s dedicated per consumer is Enhanced Fan-Out, not shared
+      consumers. 1 MB/s is the write limit, and 10 MB is the per-GetRecords transaction
+      size, not a sustained rate.
+    ref: "concepts.md#kinesis-data-streams-architecture-and-shards"
+
+  - id: aws-streaming-kinesis-msk-006
+    difficulty: beginner
+    tags: [retention, durability]
+    question: |
+      What are the default and maximum retention periods for a Kinesis Data Stream?
+    options:
+      - "Default 7 days, maximum 90 days"
+      - "Default 1 hour, maximum 24 hours"
+      - "Default 24 hours, maximum 365 days"
+      - "Default 24 hours, maximum forever"
+    answer: 2
+    explanation: |
+      KDS retains records for 24 hours by default, extendable up to 365 days (8,760
+      hours). Kafka can be effectively unbounded, but KDS is capped at 365 days. Longer
+      retention costs more and is what enables replay/reprocessing.
+    ref: "concepts.md#kinesis-data-streams-architecture-and-shards"
+
+  - id: aws-streaming-kinesis-msk-007
+    difficulty: intermediate
+    tags: [shards, durability, availability]
+    question: |
+      How does Kinesis Data Streams achieve durability, and what is its blast radius for
+      an Availability Zone failure?
+    options:
+      - "Records are stored on a single AZ; an AZ failure loses unread records"
+      - "Records are replicated across 3 Regions automatically for global durability"
+      - "Records are synchronously replicated across 3 AZs in the Region, so a single-AZ failure is transparent, but the stream is single-Region"
+      - "Durability depends entirely on the consumer checkpointing to S3"
+    answer: 2
+    explanation: |
+      KDS synchronously replicates each record across 3 AZs before acking, so a single-AZ
+      outage is transparent. It is a regional service with no automatic cross-Region
+      replication, so a Region failure takes the stream down (needs explicit DR). It does
+      not span Regions automatically, and durability is not the consumer's job.
+    ref: "concepts.md#kinesis-data-streams-architecture-and-shards"
+
+  - id: aws-streaming-kinesis-msk-008
+    difficulty: intermediate
+    tags: [kpl, records, throughput]
+    question: |
+      You are ingesting 800,000 tiny (200-byte) events per second. By bytes that is only
+      ~160 MB/s, but you keep getting throttled far more than 160 shards would suggest.
+      What is happening and the standard fix?
+    options:
+      - "The 1 MB/s byte limit binds; add more shards to increase byte capacity"
+      - "Records over 100 bytes are rejected; compress each record"
+      - "On-demand mode is required because provisioned cannot handle small records"
+      - "The 1,000 records/s-per-shard limit binds (you'd need ~800 shards); use KPL aggregation to pack many user records into fewer 1 MB KDS records"
+    answer: 3
+    explanation: |
+      With tiny records the 1,000-records/s-per-shard limit binds long before the byte
+      limit: 800k rec/s needs ~800 shards by records but only ~160 by bytes. KPL
+      aggregation batches many small user records into single ~1 MB KDS records, so the
+      byte limit binds instead and you need far fewer shards. There's no 100-byte cap,
+      and on-demand doesn't change the per-record accounting fundamentally.
+    ref: "concepts.md#kinesis-data-streams-architecture-and-shards"
+
+  - id: aws-streaming-kinesis-msk-009
+    difficulty: advanced
+    tags: [aggregate-throughput, estimation]
+    question: |
+      A provisioned stream has 12 shards. What is its maximum aggregate ingest and its
+      maximum aggregate read throughput for shared consumers?
+    options:
+      - "12 MB/s ingest, 12 MB/s read"
+      - "12 MB/s (or 12,000 rec/s) ingest, 24 MB/s read"
+      - "24 MB/s ingest, 24 MB/s read"
+      - "1 MB/s ingest, 2 MB/s read regardless of shard count"
+    answer: 1
+    explanation: |
+      Aggregate = shards × per-shard limits: ingest 12 × (1 MB/s or 1,000 rec/s) = 12 MB/s
+      or 12,000 rec/s; shared read 12 × 2 MB/s = 24 MB/s. Shards multiply capacity, so
+      option 3 is wrong; option 0 forgets read is 2 MB/s per shard; option 2 wrongly
+      doubles ingest.
+    ref: "concepts.md#kinesis-data-streams-architecture-and-shards"
+
+  # ---------------- Partition keys, hot shards, resharding ----------------
+  - id: aws-streaming-kinesis-msk-010
+    difficulty: beginner
+    tags: [partition-key, ordering]
+    question: |
+      In Kinesis Data Streams, what does the record's partition key determine?
+    options:
+      - "Which shard the record is routed to (via hashing), and therefore load distribution and ordering granularity"
+      - "The retention period of the record"
+      - "The consumer that will receive the record"
+      - "The durability level of the record"
+    answer: 0
+    explanation: |
+      KDS hashes (MD5) the partition key to a 128-bit space and routes the record to the
+      shard whose hash range contains it — so the key controls load distribution and the
+      unit of ordering (ordering is guaranteed only within a shard). It has nothing to do
+      with retention, consumer selection, or durability.
+    ref: "concepts.md#partition-keys-hot-shards-and-resharding"
+
+  - id: aws-streaming-kinesis-msk-011
+    difficulty: intermediate
+    tags: [hot-shard, partition-key]
+    question: |
+      Your producers use `country` as the partition key, and one country is 60% of
+      traffic. What symptom appears and why?
+    options:
+      - "All shards throttle equally because keys are round-robined"
+      - "Records are silently dropped with no error"
+      - "Read throughput doubles automatically to compensate"
+      - "One shard (holding that country's hash range) throttles with ProvisionedThroughputExceededException while others sit idle — a hot shard"
+    answer: 3
+    explanation: |
+      Low-cardinality/skewed keys concentrate traffic on one shard's hash range, which
+      hits the 1 MB/s or 1,000 rec/s ceiling and throws ProvisionedThroughputExceeded
+      while other shards idle — the classic hot shard. Keys aren't round-robined (routing
+      is by hash of the key), records throttle rather than silently drop, and read
+      capacity doesn't auto-scale to fix a write hot spot.
+    ref: "concepts.md#partition-keys-hot-shards-and-resharding"
+
+  - id: aws-streaming-kinesis-msk-012
+    difficulty: advanced
+    tags: [hot-shard, ordering, tradeoffs]
+    question: |
+      One high-volume entity must keep its records ordered, but it alone overwhelms a
+      single shard. What is the correct trade-off to spread its load?
+    options:
+      - "Use a composite key like entityId#bucket to spread across shards, accepting that strict ordering now holds only within each bucket, not across the whole entity"
+      - "Switch to SQS FIFO to keep global ordering at higher throughput"
+      - "Increase the record size limit so fewer records are needed"
+      - "Enable Enhanced Fan-Out, which redistributes writes across shards"
+    answer: 0
+    explanation: |
+      To relieve a hot key you spread it across shards with a composite key
+      (entityId#bucket), which trades away strict per-entity global ordering (order now
+      holds only within a bucket/shard) for scalable throughput. SQS FIFO has a lower per-
+      group throughput ceiling (~300/3,000 TPS), not higher; record size doesn't fix a
+      rate limit; EFO is a read-side feature and doesn't affect write distribution.
+    ref: "concepts.md#partition-keys-hot-shards-and-resharding"
+
+  - id: aws-streaming-kinesis-msk-013
+    difficulty: advanced
+    tags: [resharding, ordering, kcl]
+    question: |
+      When a shard is split into two child shards, how must a KCL consumer handle the
+      parent/child lineage to preserve ordering?
+    options:
+      - "Read children immediately and ignore the parent"
+      - "Read parent and children in parallel from the start"
+      - "Fully drain the parent shard (read all its records in order up to the shard end) before beginning to read its child shards"
+      - "Delete the parent shard's records to avoid duplicates"
+    answer: 2
+    explanation: |
+      To keep ordering across a split, the KCL drains the parent shard completely (in
+      order, to the shard end) before consuming the children, since children hold records
+      written after the split. Reading children first or in parallel would reorder;
+      records aren't (and can't be) manually deleted. During resharding you also pay for
+      both parent and child shards temporarily.
+    ref: "concepts.md#partition-keys-hot-shards-and-resharding"
+
+  - id: aws-streaming-kinesis-msk-014
+    difficulty: intermediate
+    tags: [resharding, provisioned]
+    question: |
+      Which statement about resharding in Kinesis Data Streams is correct?
+    options:
+      - "Resharding is automatic in provisioned mode based on load"
+      - "Merging two non-adjacent shards is the normal way to reduce cost"
+      - "Splitting increases capacity and merging reduces it; both are manual operations available only in provisioned mode"
+      - "On-demand mode requires you to reshard manually"
+    answer: 2
+    explanation: |
+      In provisioned mode you manually Split (add capacity) or Merge (reduce cost);
+      merges must be of adjacent shards. On-demand mode auto-scales shards for you (no
+      manual resharding). Provisioned resharding is not automatic, and merges are of
+      adjacent shards, not arbitrary ones.
+    ref: "concepts.md#partition-keys-hot-shards-and-resharding"
+
+  # ---------------- On-demand vs provisioned ----------------
+  - id: aws-streaming-kinesis-msk-015
+    difficulty: beginner
+    tags: [on-demand, provisioned, capacity-mode]
+    question: |
+      What is the main operational difference between KDS on-demand and provisioned
+      capacity modes?
+    options:
+      - "On-demand requires you to manage and reshard shards manually; provisioned auto-scales"
+      - "On-demand auto-scales shards for you; provisioned requires you to set and reshard shards manually"
+      - "Provisioned has no throughput limits; on-demand is fixed at 1 shard"
+      - "There is no difference in shard management, only in pricing"
+    answer: 1
+    explanation: |
+      On-demand removes shard management — AWS auto-scales — while provisioned requires
+      you to set the shard count and reshard manually. Option 0 inverts them; provisioned
+      scales by adding shards (not unlimited without action) and on-demand is not fixed at
+      one shard; and they differ in both management and pricing.
+    ref: "concepts.md#on-demand-versus-provisioned-capacity-mode"
+
+  - id: aws-streaming-kinesis-msk-016
+    difficulty: advanced
+    tags: [on-demand, scaling, failure-modes]
+    question: |
+      A stream is in on-demand mode with a low baseline. A product launch drives a sudden
+      10× traffic spike and you still see throttling. Why?
+    options:
+      - "On-demand scales relative to the trailing 30-day peak and cannot instantly absorb more than ~2× the previous peak, so a cold 10× spike exceeds what it can immediately handle"
+      - "On-demand mode has a hard 1 MB/s ceiling"
+      - "On-demand mode disables scaling during launches"
+      - "Throttling in on-demand is impossible; the issue must be the consumer"
+    answer: 0
+    explanation: |
+      On-demand auto-scales but bounded by roughly 2× the prior 30-day peak and won't
+      instantly absorb a cold 10× jump, so a launch spike from a low baseline can still
+      throttle — pre-warm or use provisioned with headroom. On-demand has no fixed 1 MB/s
+      cap (that's a single shard), it doesn't disable scaling, and write throttling is
+      real, not just a consumer issue.
+    ref: "concepts.md#on-demand-versus-provisioned-capacity-mode"
+
+  - id: aws-streaming-kinesis-msk-017
+    difficulty: intermediate
+    tags: [capacity-mode, cost, tradeoffs]
+    question: |
+      For a workload with steady, well-understood, very high sustained throughput and
+      tight cost targets, which KDS mode is usually best and why?
+    options:
+      - "On-demand, because it is always cheaper per GB"
+      - "On-demand, because it removes all ops burden regardless of scale"
+      - "Provisioned, because at steady high volume the per-shard pricing is cheaper than on-demand's per-GB premium, and you can plan resharding around known load"
+      - "Either; cost is identical between modes"
+    answer: 2
+    explanation: |
+      At steady, large, predictable volume, provisioned (shard-hour) pricing beats
+      on-demand's higher per-GB rate, and known load makes manual resharding manageable.
+      On-demand is more expensive per GB (so option 0 is wrong), its ops savings don't
+      justify the premium at large steady scale, and the modes are not identically priced.
+    ref: "concepts.md#on-demand-versus-provisioned-capacity-mode"
+
+  - id: aws-streaming-kinesis-msk-018
+    difficulty: intermediate
+    tags: [capacity-mode, limits]
+    question: |
+      How often can you switch a Kinesis data stream between on-demand and provisioned
+      capacity modes?
+    options:
+      - "As often as you like"
+      - "Once per stream, permanently"
+      - "Twice per 24 hours per stream"
+      - "Only during a maintenance window"
+    answer: 2
+    explanation: |
+      You can switch between on-demand and provisioned twice within any 24-hour window per
+      stream. It's neither unlimited, one-time-permanent, nor tied to a maintenance
+      window.
+    ref: "concepts.md#on-demand-versus-provisioned-capacity-mode"
+
+  - id: aws-streaming-kinesis-msk-019
+    difficulty: expert
+    tags: [on-demand, limits, throughput]
+    question: |
+      A newly created on-demand stream — before any scaling history — provides what
+      default throughput, and what is the upper scale ceiling in us-east-1?
+    options:
+      - "1 MB/s write / 2 MB/s read default; ceiling 200 MB/s write"
+      - "10 GB/s write from creation with no ramp"
+      - "4 MB/s write / 8 MB/s read default; hard ceiling 4 MB/s"
+      - "4 MB/s write / 8 MB/s read default; scales up to 10 GB/s write and 20 GB/s read in us-east-1/us-west-2/eu-west-1"
+    answer: 3
+    explanation: |
+      A new on-demand stream starts at 4 MB/s write / 8 MB/s read and scales up to 200
+      MB/s write / 400 MB/s read in most Regions, and up to 10 GB/s write / 20 GB/s read in
+      us-east-1, us-west-2, and eu-west-1 (with a support request). It doesn't start at
+      1 shard's limits, nor at 10 GB/s from creation, and the default is not a hard cap.
+    ref: "concepts.md#on-demand-versus-provisioned-capacity-mode"
+
+  # ---------------- Consumers, KCL, Lambda, EFO ----------------
+  - id: aws-streaming-kinesis-msk-020
+    difficulty: intermediate
+    tags: [enhanced-fan-out, consumers, latency]
+    question: |
+      What does Enhanced Fan-Out (EFO) provide compared to standard shared consumers?
+    options:
+      - "Each registered consumer gets its own dedicated 2 MB/s per shard via HTTP/2 push (SubscribeToShard), with ~70 ms latency instead of sharing 2 MB/s and polling"
+      - "It increases the write limit per shard to 2 MB/s"
+      - "It stores checkpoints in S3 instead of DynamoDB"
+      - "It removes the need for partition keys"
+    answer: 0
+    explanation: |
+      EFO gives each registered consumer a dedicated 2 MB/s per shard via the
+      SubscribeToShard HTTP/2 push API (~70 ms latency), instead of multiple consumers
+      contending for one shared 2 MB/s with ~200 ms polling. It's a read-side feature (no
+      effect on the 1 MB/s write limit), doesn't change checkpoint storage, and partition
+      keys still matter.
+    ref: "concepts.md#consumers-kcl-lambda-and-enhanced-fan-out"
+
+  - id: aws-streaming-kinesis-msk-021
+    difficulty: advanced
+    tags: [enhanced-fan-out, consumers, failure-modes]
+    question: |
+      You attach a 4th standard (shared) consumer application to a stream and every
+      consumer slows down. What is the cause and the fix?
+    options:
+      - "The write limit is exceeded; add more shards"
+      - "DynamoDB lease table is full; delete leases"
+      - "Retention is too short; increase it"
+      - "All standard consumers share the shard's 2 MB/s egress (and 5 GetRecords/s), so 4 consumers contend for the same read budget; move to Enhanced Fan-Out for dedicated per-consumer throughput"
+    answer: 3
+    explanation: |
+      Standard consumers share the per-shard 2 MB/s (and the 5 GetRecords/s), so adding
+      consumers splits the read budget and slows everyone. EFO gives each consumer its own
+      2 MB/s per shard. It's a read-contention problem, not a write-limit, lease-table, or
+      retention issue.
+    ref: "concepts.md#consumers-kcl-lambda-and-enhanced-fan-out"
+
+  - id: aws-streaming-kinesis-msk-022
+    difficulty: intermediate
+    tags: [kcl, checkpoint, dynamodb]
+    question: |
+      Where does the Kinesis Client Library (KCL) store consumer checkpoints and lease
+      ownership state?
+    options:
+      - "In the Kinesis stream itself"
+      - "In S3 objects per shard"
+      - "In a DynamoDB lease table it manages"
+      - "In local memory only, lost on restart"
+    answer: 2
+    explanation: |
+      KCL coordinates shard leases and stores checkpoints in a DynamoDB lease table, so
+      one worker owns a shard at a time and progress survives restarts. It doesn't
+      checkpoint into the stream, into S3, or purely in memory (which would lose progress).
+    ref: "concepts.md#consumers-kcl-lambda-and-enhanced-fan-out"
+
+  - id: aws-streaming-kinesis-msk-023
+    difficulty: advanced
+    tags: [lambda, parallelization-factor, ordering]
+    question: |
+      By default a Lambda event source mapping for Kinesis runs one concurrent invocation
+      per shard. What does increasing ParallelizationFactor (up to 10) do, and what
+      ordering guarantee remains?
+    options:
+      - "It runs up to 10 concurrent invocations processing the SAME shard in parallel, while still preserving order per partition key"
+      - "It processes multiple shards per invocation; ordering is lost entirely"
+      - "It increases the shard's write limit tenfold"
+      - "It disables checkpointing for higher throughput"
+    answer: 0
+    explanation: |
+      ParallelizationFactor lets up to 10 concurrent Lambda invocations process a single
+      shard in parallel, boosting throughput while still preserving ordering per partition
+      key (records for a given key go to the same concurrent processor). It doesn't change
+      shard write limits or disable checkpointing, and ordering per key is preserved, not
+      lost.
+    ref: "concepts.md#consumers-kcl-lambda-and-enhanced-fan-out"
+
+  - id: aws-streaming-kinesis-msk-024
+    difficulty: expert
+    tags: [enhanced-fan-out, limits]
+    question: |
+      How many registered Enhanced Fan-Out consumers can you have per data stream?
+    options:
+      - "Unlimited"
+      - "Exactly 5"
+      - "Up to 20 (up to 50 with On-demand Advantage mode)"
+      - "One per shard"
+    answer: 2
+    explanation: |
+      You can register up to 20 EFO consumers per stream in standard modes, and up to 50
+      with On-demand Advantage mode. It's not unlimited, not fixed at 5 (that's the
+      simultaneous-CREATING limit), and not tied to shard count.
+    ref: "concepts.md#consumers-kcl-lambda-and-enhanced-fan-out"
+
+  - id: aws-streaming-kinesis-msk-025
+    difficulty: intermediate
+    tags: [lambda, consumers, tradeoffs]
+    question: |
+      For a simple stateless transform-and-forward consumer with minimal ops, which
+      Kinesis consumption option is usually best, and what is its main limitation?
+    options:
+      - "Managed Service for Apache Flink; limited to stateless work"
+      - "Lambda event source mapping; simplest/lowest-ops but caps out on complex stateful processing"
+      - "Custom KCL fleet; lowest ops of all options"
+      - "EFO alone processes records without any consumer code"
+    answer: 1
+    explanation: |
+      Lambda event source mapping is the lowest-ops consumer — great for stateless
+      transforms/fan-in — but it's weak for complex stateful processing (windows/joins),
+      where Flink fits. Flink is for stateful work (option 0 mislabels it), a KCL fleet is
+      higher ops than Lambda, and EFO is a delivery mode, not a processor.
+    ref: "concepts.md#consumers-kcl-lambda-and-enhanced-fan-out"
+
+  # ---------------- Ordering, retention, replay ----------------
+  - id: aws-streaming-kinesis-msk-026
+    difficulty: beginner
+    tags: [ordering]
+    question: |
+      What ordering guarantee do Kinesis Data Streams and Kafka provide?
+    options:
+      - "Total ordering across the entire stream/topic"
+      - "No ordering guarantees at all"
+      - "Ordering only within a shard/partition (by sequence number/offset); no total order across shards"
+      - "Ordering only for records under 1 KB"
+    answer: 2
+    explanation: |
+      Both guarantee ordering only within a single shard/partition, tracked by sequence
+      number (KDS) or offset (Kafka); there is no total order across shards/partitions.
+      They do provide ordering (so not "none"), it's not global, and record size is
+      irrelevant to the guarantee.
+    ref: "concepts.md#ordering-retention-and-replay"
+
+  - id: aws-streaming-kinesis-msk-027
+    difficulty: intermediate
+    tags: [iterator, replay]
+    question: |
+      A brand-new consumer starts with the shard iterator type TRIM_HORIZON. What happens?
+    options:
+      - "It reads only records arriving after it starts"
+      - "It reads from a specific timestamp you must supply"
+      - "It fails because TRIM_HORIZON is invalid for new consumers"
+      - "It reads from the oldest still-retained record, reprocessing all retained history"
+    answer: 3
+    explanation: |
+      TRIM_HORIZON starts at the oldest retained record, so a new consumer replays all
+      retained history. LATEST reads only new arrivals; AT_TIMESTAMP needs a timestamp;
+      and TRIM_HORIZON is a valid, common choice — picking LATEST vs TRIM_HORIZON is the
+      "why did my consumer skip/flood" gotcha.
+    ref: "concepts.md#ordering-retention-and-replay"
+
+  - id: aws-streaming-kinesis-msk-028
+    difficulty: advanced
+    tags: [replay, event-sourcing, tradeoffs]
+    question: |
+      Why is a retained, replayable log the backbone of event-sourcing and CQRS
+      read-model rebuilds, and what is the cost of long retention?
+    options:
+      - "Because consumers can reset to an older position and reprocess to rebuild downstream stores; long retention costs more storage and enlarges the blast radius when replaying bad data"
+      - "Because logs delete records after processing, keeping storage low; long retention has no downside"
+      - "Because logs guarantee exactly-once delivery natively; long retention improves latency"
+      - "Because SQS provides replay; long retention reduces cost"
+    answer: 0
+    explanation: |
+      Replay — resetting to an older sequence number/offset — lets you rebuild read models
+      or reprocess after a fix, which is why logs underpin event-sourcing/CQRS. The
+      trade-off is storage cost and a larger blast radius if you replay bad data. Logs
+      don't delete on read, don't natively guarantee exactly-once, and SQS lacks replay.
+    ref: "concepts.md#ordering-retention-and-replay"
+
+  - id: aws-streaming-kinesis-msk-029
+    difficulty: advanced
+    tags: [ordering, sqs-fifo, tradeoffs]
+    question: |
+      You need ordered processing per entity at ~50,000 ordered events/second across many
+      entities. Why is Kinesis partition ordering usually preferable to SQS FIFO here?
+    options:
+      - "SQS FIFO has no ordering guarantee"
+      - "Kinesis FIFO mode is faster than SQS FIFO"
+      - "SQS FIFO cannot deduplicate messages"
+      - "SQS FIFO caps at ~300 TPS per message group (3,000 with batching), which won't sustain high-volume ordered throughput; Kinesis per-shard ordering scales far higher by adding shards"
+    answer: 3
+    explanation: |
+      SQS FIFO's per-group throughput ceiling (~300 TPS, 3,000 with batching) throttles
+      high-volume ordered streams, whereas Kinesis preserves order per shard and scales by
+      adding shards. SQS FIFO does guarantee ordering (and dedup), and there's no "Kinesis
+      FIFO mode" — the point is the throughput ceiling.
+    ref: "concepts.md#ordering-retention-and-replay"
+
+  - id: aws-streaming-kinesis-msk-030
+    difficulty: intermediate
+    tags: [iterator, latest, gotcha]
+    question: |
+      A team complains their new consumer "missed" a day of events that were already in
+      the stream. Which iterator setting most likely caused this?
+    options:
+      - "TRIM_HORIZON"
+      - "AT_SEQUENCE_NUMBER"
+      - "LATEST, which reads only records arriving after the consumer starts"
+      - "AT_TIMESTAMP set to the stream creation time"
+    answer: 2
+    explanation: |
+      LATEST starts at the tip and skips all already-retained history, so a new consumer
+      appears to "miss" prior events. TRIM_HORIZON or an AT_TIMESTAMP at the beginning
+      would have replayed them; AT_SEQUENCE_NUMBER starts at a chosen point. This is a
+      classic iterator-type gotcha.
+    ref: "concepts.md#ordering-retention-and-replay"
+
+  # ---------------- Firehose vs Data Streams ----------------
+  - id: aws-streaming-kinesis-msk-031
+    difficulty: beginner
+    tags: [firehose, destinations]
+    question: |
+      What is the primary purpose of Amazon Data Firehose (formerly Kinesis Data Firehose)?
+    options:
+      - "A low-latency replayable log for custom real-time consumers"
+      - "A pub/sub topic for broadcasting events"
+      - "A fully managed service that buffers records and reliably delivers them to destinations like S3, Redshift, OpenSearch, and Splunk with no consumer code"
+      - "A managed Kafka cluster"
+    answer: 2
+    explanation: |
+      Firehose is buffered, managed delivery to fixed destinations (S3/Redshift/OpenSearch/
+      Splunk/HTTP) with no consumer code and near-zero ops. It is not a replayable log
+      (that's Data Streams), not pub/sub (SNS), and not Kafka (MSK).
+    ref: "concepts.md#kinesis-data-firehose-versus-data-streams"
+
+  - id: aws-streaming-kinesis-msk-032
+    difficulty: intermediate
+    tags: [firehose, buffering, latency]
+    question: |
+      Firehose delivers to S3 when a buffer condition is met. What are the buffer interval
+      bounds, and what does this imply about latency?
+    options:
+      - "60–900 seconds (buffer size 1–128 MB), whichever is first; Firehose is near-real-time (seconds to minutes), not real-time"
+      - "1–10 seconds; Firehose is true real-time (sub-second)"
+      - "15–60 minutes; Firehose is a batch-only service"
+      - "There is no buffering; every record is delivered immediately"
+    answer: 0
+    explanation: |
+      Firehose flushes when buffer size (1–128 MB for S3) OR buffer interval (default
+      60–900 s) is reached, whichever first — so with default buffering latency to S3 is
+      ~60 s, making it near-real-time, not sub-second real-time. (Firehose also offers a
+      zero-buffering option that lowers the interval to 0 s for tighter latency.) It's
+      neither a fixed sub-second guarantee nor a 15–60 min batch service.
+    ref: "concepts.md#kinesis-data-firehose-versus-data-streams"
+
+  - id: aws-streaming-kinesis-msk-033
+    difficulty: intermediate
+    tags: [firehose, data-streams, tradeoffs]
+    question: |
+      You need to (a) run sub-second real-time consumers with replay AND (b) archive the
+      same data cheaply into S3 as Parquet. What is the standard AWS pattern?
+    options:
+      - "Use Firehose alone for both real-time consumers and S3 archival"
+      - "Use SQS for real-time and SNS for archival"
+      - "Use Data Streams (KDS) as the source of truth for real-time consumers/replay, and subscribe a Firehose to it to convert and land data in S3 as Parquet"
+      - "Use two independent Firehose streams"
+    answer: 2
+    explanation: |
+      The common pattern is KDS as the replayable real-time source, with Firehose
+      subscribed to it for buffered conversion/delivery to S3 (Parquet). Firehose alone
+      can't serve sub-second custom consumers or replay; SQS/SNS aren't a data-lake ETL
+      path; and two Firehose streams don't give you a replayable real-time source.
+    ref: "concepts.md#kinesis-data-firehose-versus-data-streams"
+
+  - id: aws-streaming-kinesis-msk-034
+    difficulty: advanced
+    tags: [firehose, replay, limitations]
+    question: |
+      Which capability does Firehose NOT provide, making it the wrong choice when required?
+    options:
+      - "Inline record transformation with Lambda"
+      - "JSON-to-Parquet/ORC conversion"
+      - "A replayable log with multiple independent consumers reading the same records by position"
+      - "Dynamic partitioning into S3 prefixes"
+    answer: 2
+    explanation: |
+      Firehose is fire-and-deliver: it keeps no readable, replayable log and supports only
+      fixed destinations — you can't attach multiple independent consumers or reprocess
+      from it. It does support Lambda transforms, Parquet/ORC conversion, and dynamic
+      partitioning. When you need replay/fan-out, use Data Streams or MSK.
+    ref: "concepts.md#kinesis-data-firehose-versus-data-streams"
+
+  - id: aws-streaming-kinesis-msk-035
+    difficulty: expert
+    tags: [firehose, cost, records]
+    question: |
+      Firehose ingestion pricing rounds each record up to the nearest 5 KB. For the same
+      total byte volume, what is the cost implication and mitigation?
+    options:
+      - "Cost depends only on total bytes; record count is irrelevant"
+      - "Many small records cost more (each rounded up to 5 KB), so batching/aggregating records before sending reduces cost"
+      - "Larger records cost more per byte; split into tiny records"
+      - "Compression is disallowed, so cost cannot be reduced"
+    answer: 1
+    explanation: |
+      Because each record is billed rounded up to 5 KB, sending the same bytes as many
+      tiny records costs far more than fewer larger records — so batch/aggregate before
+      sending. Record count is not irrelevant (option 0), splitting into tiny records
+      makes it worse (option 2), and you can reduce cost via batching (option 3 wrong).
+    ref: "concepts.md#kinesis-data-firehose-versus-data-streams"
+
+  - id: aws-streaming-kinesis-msk-036
+    difficulty: intermediate
+    tags: [firehose, data-streams, service-selection]
+    question: |
+      A requirement states: "Land clickstream data in OpenSearch for dashboards; 1–2
+      minute freshness is fine; the team wants zero consumer code and no shard
+      management." Which service best fits?
+    options:
+      - "Kinesis Data Streams with a custom KCL consumer"
+      - "Amazon MSK with Kafka Connect"
+      - "Kinesis Data Firehose with an OpenSearch destination"
+      - "SQS with a Lambda poller"
+    answer: 2
+    explanation: |
+      Zero consumer code, no shards, near-real-time (1–2 min OK), delivering to
+      OpenSearch is precisely Firehose's managed-delivery sweet spot. KDS+KCL and MSK+
+      Connect add code/ops for no benefit here, and SQS+Lambda isn't a managed OpenSearch
+      loader and lacks Firehose's buffering/conversion.
+    ref: "concepts.md#kinesis-data-firehose-versus-data-streams"
+
+  # ---------------- MSK / Kafka managed vs self-managed ----------------
+  - id: aws-streaming-kinesis-msk-037
+    difficulty: beginner
+    tags: [msk, kafka, managed]
+    question: |
+      What does Amazon MSK manage on your behalf while still giving you real Apache Kafka?
+    options:
+      - "Your topic and partition design decisions"
+      - "Your consumer application code and offsets"
+      - "Automatic cross-Region replication by default"
+      - "Broker provisioning, patching, AZ-spread, and health, while you keep Kafka's topics/partitions/consumer-groups and the full Kafka API and ecosystem"
+    answer: 3
+    explanation: |
+      MSK manages broker provisioning, patching, AZ placement, and health monitoring while
+      preserving standard Kafka (topics, partitions, consumer groups, clients, connectors).
+      You still own topic/partition design and consumer code; MSK is not multi-Region by
+      default (needs MSK Replicator/MirrorMaker2).
+    ref: "concepts.md#amazon-msk-kafka-managed-versus-self-managed"
+
+  - id: aws-streaming-kinesis-msk-038
+    difficulty: intermediate
+    tags: [msk, kinesis, tradeoffs]
+    question: |
+      Which is a genuine reason to choose Amazon MSK over Kinesis Data Streams?
+    options:
+      - "MSK requires zero capacity planning and no partition decisions"
+      - "You need Kafka's ecosystem (Kafka Connect connectors, Kafka Streams, log compaction), API portability/no lock-in, or very high sustained throughput with fine tuning"
+      - "MSK is always cheaper than Kinesis at every scale"
+      - "MSK is a serverless-only service with no brokers to think about"
+    answer: 1
+    explanation: |
+      MSK's advantages are the Kafka ecosystem (Connect, Streams, ksqlDB, compaction),
+      portability/no vendor lock-in, and higher tunable throughput. MSK provisioned
+      requires capacity/partition planning (so option 0/3 are wrong for that mode), and
+      it's not universally cheaper — it can cost more ops than the fully-managed Kinesis.
+    ref: "concepts.md#amazon-msk-kafka-managed-versus-self-managed"
+
+  - id: aws-streaming-kinesis-msk-039
+    difficulty: advanced
+    tags: [msk, compaction, features]
+    question: |
+      Which Kafka feature has no direct Kinesis Data Streams equivalent and can justify
+      choosing MSK?
+    options:
+      - "Enhanced fan-out consumers"
+      - "24-hour default retention"
+      - "Log compaction — retaining only the latest value per key"
+      - "3-AZ replication for durability"
+    answer: 2
+    explanation: |
+      Kafka log compaction (keep only the newest value per key, ideal for changelog/CDC
+      topics) has no direct KDS analog. EFO is a Kinesis feature, 24h retention exists in
+      both concepts, and 3-AZ replication is provided by both — none of those are
+      compaction.
+    ref: "concepts.md#amazon-msk-kafka-managed-versus-self-managed"
+
+  - id: aws-streaming-kinesis-msk-040
+    difficulty: advanced
+    tags: [self-managed, kafka, ops, tradeoffs]
+    question: |
+      When is self-managed Kafka on EC2 justified over MSK, and what is the cost?
+    options:
+      - "Only when you need something MSK doesn't support (e.g. a specific Kafka version or custom plugin), accepting that you now own broker failures, patching, scaling, disk, and coordination (ZooKeeper/KRaft)"
+      - "Always, because EC2 is cheaper than MSK"
+      - "When you want AWS to manage patching for you"
+      - "When you need less operational burden than MSK"
+    answer: 0
+    explanation: |
+      Self-managed Kafka is justified only for needs MSK can't meet, and it comes with a
+      heavy ops tax (broker failures, patching, scaling, disk, ZooKeeper/KRaft) — the
+      opposite of less burden. MSK exists precisely to remove ~80% of that toil while
+      keeping the API; EC2 isn't automatically cheaper once ops cost is counted.
+    ref: "concepts.md#amazon-msk-kafka-managed-versus-self-managed"
+
+  - id: aws-streaming-kinesis-msk-041
+    difficulty: intermediate
+    tags: [msk, kinesis, service-selection]
+    question: |
+      A team new to streaming, with no Kafka experience, needs an ordered replayable log
+      with multiple consumers and wants the least operational overhead. KDS or MSK?
+    options:
+      - "MSK, because Kafka is always the industry standard"
+      - "Self-managed Kafka for maximum control"
+      - "SQS FIFO, since it also orders messages"
+      - "Kinesis Data Streams, because it is more fully managed (no brokers/partitions to plan) and fits their throughput — unless a specific Kafka feature is required"
+    answer: 3
+    explanation: |
+      With no Kafka experience and a least-ops goal, KDS (no brokers, on-demand available)
+      is the pragmatic choice unless they specifically need Kafka connectors/compaction/
+      portability. MSK and self-managed Kafka add ops; SQS FIFO isn't a replayable
+      multi-consumer log and has a throughput ceiling.
+    ref: "concepts.md#amazon-msk-kafka-managed-versus-self-managed"
+
+  # ---------------- MSK provisioned vs serverless ----------------
+  - id: aws-streaming-kinesis-msk-042
+    difficulty: intermediate
+    tags: [msk-serverless, capacity]
+    question: |
+      What is the main value proposition of MSK Serverless compared to MSK Provisioned?
+    options:
+      - "It supports every provisioned feature plus more"
+      - "It is always cheaper per unit of throughput"
+      - "No brokers or capacity planning — AWS auto-scales throughput and storage; you just create topics and produce/consume, billed on throughput + storage + partition-hours"
+      - "It gives you full control over broker instance types"
+    answer: 2
+    explanation: |
+      MSK Serverless removes broker/capacity planning and auto-scales — the "on-demand of
+      Kafka" — billed on throughput/storage/partition-hours. It does NOT support all
+      provisioned features (e.g. custom broker configs, some auth modes, tiered-storage
+      tuning), isn't always cheaper per throughput, and hides broker instance choices.
+    ref: "concepts.md#msk-provisioned-versus-msk-serverless"
+
+  - id: aws-streaming-kinesis-msk-043
+    difficulty: advanced
+    tags: [msk-serverless, auth, limits]
+    question: |
+      Which constraint of MSK Serverless would push you toward MSK Provisioned?
+    options:
+      - "You need very high partition counts, log-compaction tuning, custom broker configs, or non-IAM authentication modes that Serverless doesn't support"
+      - "It supports IAM authentication"
+      - "It auto-scales throughput"
+      - "It stores data across multiple AZs"
+    answer: 0
+    explanation: |
+      Serverless imposes quotas (e.g. capped partitions per cluster) and uses IAM auth
+      only, lacking custom broker configs, tiered-storage tuning, and non-IAM auth — so
+      needs like very high partition counts or SASL/SCRAM/TLS mutual auth require
+      provisioned. IAM auth, auto-scaling, and multi-AZ storage are features, not reasons
+      to leave Serverless.
+    ref: "concepts.md#msk-provisioned-versus-msk-serverless"
+
+  - id: aws-streaming-kinesis-msk-044
+    difficulty: intermediate
+    tags: [msk, tiered-storage, cost]
+    question: |
+      What does MSK tiered storage let you do, and what is the trade-off?
+    options:
+      - "Replicate topics to another Region automatically; the trade-off is higher write latency"
+      - "Compress records at rest with no downside"
+      - "Offload older log segments to cheaper storage so you can retain data longer without over-provisioning broker disk; the trade-off is that reads of old (tiered) data are slower than local reads"
+      - "Convert Kafka topics to Parquet in S3"
+    answer: 2
+    explanation: |
+      Tiered storage moves older segments to a cheaper tier, enabling long retention
+      without huge broker disks; the trade-off is that fetching old tiered data is slower
+      than reading hot local segments. It isn't cross-Region replication (that's
+      Replicator), isn't free compression, and doesn't convert topics to Parquet.
+    ref: "concepts.md#msk-provisioned-versus-msk-serverless"
+
+  # ---------------- Choosing across services ----------------
+  - id: aws-streaming-kinesis-msk-045
+    difficulty: beginner
+    tags: [service-selection, sqs]
+    question: |
+      You need to distribute independent units of work to an elastic pool of workers,
+      where each task is processed once by one worker and then forgotten, with no replay.
+      Which service is the best fit?
+    options:
+      - "Kinesis Data Streams"
+      - "Amazon MSK"
+      - "Kinesis Data Firehose"
+      - "Amazon SQS Standard"
+    answer: 3
+    explanation: |
+      Competing consumers, once-per-task processing, delete-on-ack, and elastic workers
+      with no replay is the definition of a work queue — SQS Standard. Kinesis/MSK are
+      retained logs (overkill and wrong shape for pure work distribution), and Firehose is
+      delivery to storage.
+    ref: "concepts.md#kinesis-versus-msk-versus-sqs-versus-sns-choosing"
+
+  - id: aws-streaming-kinesis-msk-046
+    difficulty: advanced
+    tags: [service-selection, scenario, tradeoffs]
+    question: |
+      Constraints: ~200 MB/s of telemetry, three independent consumers (real-time alerting,
+      an S3 data lake, and a search index), replay needed for reprocessing, and a small
+      team wanting minimal ops. Which design is most appropriate?
+    options:
+      - "Kinesis Data Streams (on-demand) as the source of truth; alerting via Lambda/Flink, a Firehose subscriber to S3, and an EFO consumer for the search index"
+      - "SQS Standard with three separate queues fed by producers"
+      - "One Firehose stream fanning out to all three consumers"
+      - "Self-managed Kafka on EC2 with three consumer groups"
+    answer: 0
+    explanation: |
+      Multiple independent consumers + replay + minimal ops at this scale points to KDS
+      (on-demand removes shard mgmt), with Firehose for the lake and EFO to isolate the
+      search consumer. SQS can't replay or fan-out the same records; Firehose can't
+      fan-out to arbitrary custom consumers or replay; self-managed Kafka adds heavy ops
+      for a small team.
+    ref: "concepts.md#kinesis-versus-msk-versus-sqs-versus-sns-choosing"
+
+  - id: aws-streaming-kinesis-msk-047
+    difficulty: intermediate
+    tags: [service-selection, sns-sqs, fanout]
+    question: |
+      What is the key limitation of an SNS-to-SQS fan-out compared to a streaming log
+      when a NEW consumer needs to see past events?
+    options:
+      - "SNS-to-SQS cannot deliver to multiple queues"
+      - "SNS-to-SQS guarantees global ordering that streams lack"
+      - "SNS-to-SQS retains all events for 365 days by default"
+      - "SNS-to-SQS gives push pub/sub with per-consumer queues and DLQs, but has no ordered replayable history, so a new consumer cannot backfill past events"
+    answer: 3
+    explanation: |
+      SNS→SQS fan-out is great for push pub/sub with isolated queues and DLQs, but there's
+      no retained, replayable log — a new subscriber only gets events sent after it
+      subscribes and cannot backfill. Only a log (KDS/MSK) delivers historical backfill.
+      It can deliver to multiple queues, doesn't guarantee global ordering, and doesn't
+      retain 365 days.
+    ref: "concepts.md#kinesis-versus-msk-versus-sqs-versus-sns-choosing"
+
+  - id: aws-streaming-kinesis-msk-048
+    difficulty: advanced
+    tags: [service-selection, connectors, scenario]
+    question: |
+      A large enterprise already runs many Kafka apps and dozens of Kafka Connect
+      connectors on-prem, needs to lift-and-shift to AWS with minimal code change, and has
+      Kafka-savvy operators. Which service is most appropriate?
+    options:
+      - "Kinesis Data Streams, rewriting all Kafka clients to the KDS API"
+      - "Kinesis Data Firehose for all topics"
+      - "Amazon MSK, because it preserves the Kafka API/ecosystem so existing clients and connectors work with minimal change"
+      - "SQS FIFO to replace Kafka topics"
+    answer: 2
+    explanation: |
+      Existing Kafka apps + many Connect connectors + savvy operators is the textbook MSK
+      case: same Kafka API and ecosystem, minimal rewrite. Moving to KDS would require
+      rewriting every client (wasteful given the constraint); Firehose/SQS FIFO aren't
+      Kafka and can't host connectors or replace topic semantics.
+    ref: "concepts.md#kinesis-versus-msk-versus-sqs-versus-sns-choosing"
+
+  - id: aws-streaming-kinesis-msk-049
+    difficulty: expert
+    tags: [service-selection, sqs-fifo, limits, scenario]
+    question: |
+      A payments team needs strictly ordered, deduplicated processing per account at a
+      modest ~200 TPS per account across a few thousand accounts. Which is the better
+      primitive and why?
+    options:
+      - "Kinesis Data Streams, because SQS FIFO cannot order messages"
+      - "SQS FIFO, using accountId as the message group id — it provides per-group ordering plus exactly-once dedup within the window, and 200 TPS/group is within FIFO's ~300 TPS limit"
+      - "SNS, because ordering is a pub/sub feature"
+      - "Firehose, because it delivers in order to the database"
+    answer: 1
+    explanation: |
+      At ~200 TPS per group (under FIFO's ~300 TPS/group ceiling) with strict per-account
+      ordering and dedup needs, SQS FIFO with accountId as group id is a clean fit and
+      simpler than managing shard-to-key routing. FIFO does order (option 0 wrong), SNS
+      isn't for ordered dedup work distribution, and Firehose is buffered delivery, not
+      ordered exactly-once processing.
+    ref: "concepts.md#kinesis-versus-msk-versus-sqs-versus-sns-choosing"
+
+  # ---------------- Exactly-once / delivery semantics ----------------
+  - id: aws-streaming-kinesis-msk-050
+    difficulty: intermediate
+    tags: [delivery-semantics, idempotency]
+    question: |
+      What delivery semantics do Kinesis Data Streams consumers (via KCL/Lambda) provide
+      by default, and how do you achieve effectively-once processing?
+    options:
+      - "At-least-once — records can be reprocessed after a crash before checkpoint or during resharding — so you make consumers idempotent (dedupe on a business key or sequence number)"
+      - "Exactly-once by default; no extra work needed"
+      - "At-most-once; records may be silently dropped"
+      - "Exactly-once only if you enable EFO"
+    answer: 0
+    explanation: |
+      KCL/Lambda deliver at-least-once (a crash before checkpoint or resharding can
+      reprocess a record), so you achieve effectively-once via idempotent consumers
+      (dedupe on business key or KDS sequence number). It's not exactly-once by default,
+      not at-most-once (records aren't dropped), and EFO changes throughput/latency, not
+      delivery guarantees.
+    ref: "concepts.md#exactly-once-idempotency-and-delivery-semantics"
+
+  - id: aws-streaming-kinesis-msk-051
+    difficulty: advanced
+    tags: [delivery-semantics, producers, duplicates]
+    question: |
+      How can a producer create duplicate records in Kinesis Data Streams even without a
+      bug in application logic?
+    options:
+      - "Kinesis randomly duplicates records for durability"
+      - "Duplicates only occur if retention is set too long"
+      - "A PutRecord that times out but actually succeeded gets retried by the client, writing the same record twice"
+      - "Producers cannot create duplicates; only consumers can"
+    answer: 2
+    explanation: |
+      A classic duplicate source: the write succeeds server-side but the response is lost
+      or times out, so the client retries and writes the record again. Kinesis doesn't
+      duplicate for durability, retention length is unrelated, and producers absolutely can
+      introduce duplicates. This is why idempotent/dedup consumers are recommended.
+    ref: "concepts.md#exactly-once-idempotency-and-delivery-semantics"
+
+  - id: aws-streaming-kinesis-msk-052
+    difficulty: advanced
+    tags: [kafka, exactly-once, transactions]
+    question: |
+      How does Kafka/MSK support exactly-once semantics, and what caveat remains for
+      external sinks?
+    options:
+      - "A single flag makes all end-to-end delivery exactly-once, including to external databases"
+      - "Kafka cannot provide any exactly-once guarantees"
+      - "Exactly-once is only available in MSK Serverless"
+      - "Idempotent producers (enable.idempotence) plus transactions give exactly-once WITHIN Kafka (read-process-write); end-to-end exactly-once to an external sink still requires an idempotent/transactional sink"
+    answer: 3
+    explanation: |
+      Kafka's idempotent producer + transactions provide exactly-once for read-process-
+      write within Kafka, but writing to an external system exactly-once still needs the
+      sink to be idempotent/transactional. There's no single flag for end-to-end EOS to
+      arbitrary databases; Kafka does support EOS (not "none"); and it's not exclusive to
+      Serverless.
+    ref: "concepts.md#exactly-once-idempotency-and-delivery-semantics"
+
+  - id: aws-streaming-kinesis-msk-053
+    difficulty: expert
+    tags: [delivery-semantics, tradeoffs, design]
+    question: |
+      For most high-throughput streaming pipelines, what is the pragmatic, interview-
+      correct approach to delivery guarantees?
+    options:
+      - "Always implement strict end-to-end exactly-once with distributed transactions"
+      - "Rely on at-most-once to minimize cost"
+      - "Design for at-least-once delivery plus idempotent consumers / dedup keys, reserving expensive exactly-once (transactions, FIFO dedup) for domains that truly require it (e.g. ledgers)"
+      - "Disable retries so no duplicates ever occur"
+    answer: 2
+    explanation: |
+      The pragmatic default is at-least-once + idempotent consumers, because strict
+      exactly-once (transactions/coordination) is costly and throughput-limiting; reserve
+      it for domains that demand it. At-most-once risks data loss; disabling retries harms
+      reliability and doesn't guarantee no duplicates.
+    ref: "concepts.md#exactly-once-idempotency-and-delivery-semantics"
+
+  - id: aws-streaming-kinesis-msk-054
+    difficulty: intermediate
+    tags: [firehose, delivery-semantics]
+    question: |
+      What delivery semantics does Firehose provide to its destination, and what should
+      you do about it?
+    options:
+      - "At-least-once — duplicates are possible — so dedupe downstream (e.g. in the warehouse) if uniqueness matters"
+      - "Exactly-once; no dedup needed"
+      - "At-most-once; expect data loss"
+      - "It provides ordering and exactly-once together"
+    answer: 0
+    explanation: |
+      Firehose delivers at-least-once, so duplicates can appear at the destination; dedupe
+      downstream if needed. It's not exactly-once, doesn't intentionally drop data
+      (at-most-once), and doesn't guarantee ordering + exactly-once.
+    ref: "concepts.md#exactly-once-idempotency-and-delivery-semantics"
+
+  # ---------------- Managed Service for Apache Flink ----------------
+  - id: aws-streaming-kinesis-msk-055
+    difficulty: intermediate
+    tags: [flink, analytics, stateful]
+    question: |
+      What is Amazon Managed Service for Apache Flink best suited for?
+    options:
+      - "Stateless one-record-at-a-time transforms with minimal cost"
+      - "Buffered delivery of records to S3"
+      - "Storing the source-of-truth log"
+      - "Stateful stream processing — windowed aggregations, joins, enrichment, and complex event processing over KDS/MSK — with durable checkpointing for recovery"
+    answer: 3
+    explanation: |
+      Managed Service for Apache Flink runs Flink for stateful stream processing (windows,
+      joins, enrichment, CEP) with incremental checkpoints to S3 for exactly-once state
+      recovery. Simple stateless transforms are cheaper on Lambda; buffered S3 delivery is
+      Firehose; the log itself is KDS/MSK.
+    ref: "concepts.md#real-time-analytics-with-managed-service-for-apache-flink"
+
+  - id: aws-streaming-kinesis-msk-056
+    difficulty: advanced
+    tags: [flink, event-time, watermarks]
+    question: |
+      Why would you choose Flink over a plain Lambda consumer for real-time analytics with
+      out-of-order and late-arriving events?
+    options:
+      - "Lambda supports event-time windows and watermarks natively; Flink does not"
+      - "Flink is always cheaper than Lambda for any workload"
+      - "Flink provides stateful event-time processing with watermarks (handling out-of-order/late events) and large keyed state with exactly-once via checkpoints, which stateless Lambda invocations cannot"
+      - "Lambda cannot read from Kinesis at all"
+    answer: 2
+    explanation: |
+      Flink's event-time processing, watermarks, and large keyed state with checkpointed
+      exactly-once are exactly what stateless per-invocation Lambda lacks, making Flink the
+      right tool for windowed/late-event analytics. Lambda doesn't do native event-time
+      windows, Flink isn't always cheaper (it's more complex/costly), and Lambda can read
+      Kinesis fine for simpler cases.
+    ref: "concepts.md#real-time-analytics-with-managed-service-for-apache-flink"
+
+  - id: aws-streaming-kinesis-msk-057
+    difficulty: advanced
+    tags: [flink, tradeoffs, cost]
+    question: |
+      What is the trade-off of using Flink versus a simpler Lambda/Firehose approach?
+    options:
+      - "Flink is simpler and cheaper with no state to manage"
+      - "Flink is more powerful (stateful windows/joins/CEP) but more complex and costly — you reason about parallelism, checkpoint intervals, and state size — so for simple stateless transforms or fan-in, Lambda/Firehose is cheaper and simpler"
+      - "Flink cannot recover from failures, so it's only for non-critical jobs"
+      - "Lambda supports the same stateful windowing as Flink, so Flink is never needed"
+    answer: 1
+    explanation: |
+      Flink buys stateful power at the cost of complexity (parallelism, checkpoints, state
+      sizing) and expense; for simple stateless transforms or fan-in, Lambda/Firehose are
+      simpler and cheaper. Flink is not simpler/cheaper (option 0), it recovers via
+      checkpoints (option 2 wrong), and Lambda lacks Flink's stateful windowing (option 3
+      wrong).
+    ref: "concepts.md#real-time-analytics-with-managed-service-for-apache-flink"
+
+  - id: aws-streaming-kinesis-msk-058
+    difficulty: expert
+    tags: [flink, checkpoint, recovery]
+    question: |
+      How does Managed Service for Apache Flink recover a stateful job exactly where it
+      left off after a failure?
+    options:
+      - "It uses durable, incremental checkpoints/snapshots (typically to S3) so keyed state and stream position are restored to a consistent point"
+      - "It replays the entire source stream from the beginning every time"
+      - "It relies on the consumer's DynamoDB lease table like KCL"
+      - "It cannot recover state; jobs always start cold"
+    answer: 0
+    explanation: |
+      Flink recovers via durable incremental checkpoints/snapshots (to S3), restoring
+      keyed state and source position to a consistent point for exactly-once state. It
+      doesn't always replay from the beginning, doesn't use a KCL DynamoDB lease table for
+      Flink state, and does recover state (not cold-start).
+    ref: "concepts.md#real-time-analytics-with-managed-service-for-apache-flink"
+
+  # ---------------- Lambda / Kappa architectures ----------------
+  - id: aws-streaming-kinesis-msk-059
+    difficulty: advanced
+    tags: [lambda-architecture, kappa, architecture]
+    question: |
+      What primarily distinguishes Kappa architecture from Lambda architecture?
+    options:
+      - "Kappa uses AWS Lambda functions; Lambda architecture does not"
+      - "Lambda architecture has no batch layer; Kappa has two"
+      - "Kappa treats everything as a stream with one codebase (replay the log to recompute); Lambda architecture maintains separate batch and speed layers, duplicating logic"
+      - "Kappa has no source of truth"
+    answer: 2
+    explanation: |
+      Kappa = one streaming pipeline/codebase; you replay the retained log to recompute.
+      Lambda architecture keeps separate batch and speed layers doing the same logic
+      twice, requiring reconciliation. The name "Lambda architecture" is unrelated to AWS
+      Lambda; Lambda architecture does have a batch layer; Kappa's log is the source of
+      truth.
+    ref: "concepts.md#lambda-and-kappa-architectures-on-aws"
+
+  - id: aws-streaming-kinesis-msk-060
+    difficulty: expert
+    tags: [kappa, tradeoffs, retention]
+    question: |
+      What is the main trade-off/prerequisite of Kappa architecture on AWS?
+    options:
+      - "It requires two separate codebases for correctness"
+      - "It cannot serve real-time queries"
+      - "It eliminates the need for any storage"
+      - "It needs long retention (or tiered storage) and a stream engine that can replay history fast enough; large historical replays can be slow/expensive"
+    answer: 3
+    explanation: |
+      Kappa's simplicity (one codebase, replay to recompute) depends on retaining enough
+      history (long retention/tiered storage) and an engine that can reprocess it quickly;
+      big historical replays can be slow/costly. It uses one codebase (not two), does serve
+      real-time, and still needs storage for the log.
+    ref: "concepts.md#lambda-and-kappa-architectures-on-aws"
+
+  - id: aws-streaming-kinesis-msk-061
+    difficulty: advanced
+    tags: [lambda-architecture, batch, tradeoffs]
+    question: |
+      When would you keep a Lambda-architecture batch layer instead of going pure Kappa?
+    options:
+      - "When historical recompute over petabytes is far cheaper/faster in batch (EMR/Redshift) than replaying the whole stream, or when regulations require a separate authoritative batch view"
+      - "Never; Kappa is strictly superior in all cases"
+      - "When you have no real-time requirement at all"
+      - "Only when the stream cannot store any data"
+    answer: 0
+    explanation: |
+      A batch layer earns its keep when recomputing over petabytes is cheaper/faster in
+      EMR/Redshift than replaying the entire stream, or when a separate authoritative batch
+      view is mandated. Kappa isn't universally superior (the dual-code cost is real);
+      lacking real-time needs would question streaming entirely; and it's not only about
+      the stream storing nothing.
+    ref: "concepts.md#lambda-and-kappa-architectures-on-aws"
+
+  - id: aws-streaming-kinesis-msk-062
+    difficulty: intermediate
+    tags: [kappa, architecture, aws-mapping]
+    question: |
+      In a serverless-first Kappa design on AWS, which mapping is typical?
+    options:
+      - "SQS as source of truth; Athena for real-time; DynamoDB for batch"
+      - "Firehose as source of truth; Lambda for storage; SNS for replay"
+      - "RDS as the log; EC2 for streaming; S3 Glacier for real-time"
+      - "Kinesis/MSK as the retained log source of truth; Flink for real-time views (OpenSearch/DynamoDB); Firehose to S3 (Parquet) for batch/replay via Athena/Redshift/EMR"
+    answer: 3
+    explanation: |
+      The canonical AWS Kappa mapping uses Kinesis/MSK as the source-of-truth log, Flink
+      for real-time materialized views, and Firehose→S3(Parquet) for batch/replay
+      queried by Athena/Redshift/EMR. The other options misassign roles (SQS/Firehose/RDS
+      aren't the replayable source-of-truth log; Glacier isn't for real-time).
+    ref: "concepts.md#lambda-and-kappa-architectures-on-aws"
+
+  # ---------------- Backpressure, throttling, failure modes ----------------
+  - id: aws-streaming-kinesis-msk-063
+    difficulty: intermediate
+    tags: [iterator-age, consumer-lag, monitoring]
+    question: |
+      Which CloudWatch metric signals that Kinesis consumers are falling behind, and what
+      is the danger if it keeps rising?
+    options:
+      - "WriteThroughputExceeded; the danger is duplicate records"
+      - "GetRecords.Latency; the danger is higher cost only"
+      - "IteratorAgeMilliseconds; if it keeps rising, records may age out of retention before being read — silent data loss"
+      - "PutRecord.Success; the danger is producer throttling"
+    answer: 2
+    explanation: |
+      IteratorAgeMilliseconds (consumer lag) rising means consumers can't keep up, and if
+      it exceeds the retention window records age out unread — silent data loss. Mitigate
+      with more parallelism/EFO or longer retention. The other metrics don't measure
+      consumer lag and don't carry the aging-out-of-retention risk.
+    ref: "concepts.md#backpressure-throttling-and-failure-modes"
+
+  - id: aws-streaming-kinesis-msk-064
+    difficulty: advanced
+    tags: [backpressure, buffering, design]
+    question: |
+      Why is a stream (or queue) buffering a backlog during a downstream slowdown often
+      considered a feature rather than a bug?
+    options:
+      - "Because the log absorbs spikes and lets slow consumers catch up at their own pace, providing backpressure that shields downstream systems from being overwhelmed — unlike synchronous calls"
+      - "Because the backlog is automatically discarded to protect the system"
+      - "Because buffering guarantees exactly-once delivery"
+      - "Because it forces producers to stop sending data"
+    answer: 0
+    explanation: |
+      The log/queue acts as a shock absorber: it buffers bursts so downstream consumers
+      process at a sustainable rate, which is the backpressure benefit synchronous calls
+      lack. Backlogs aren't discarded (until retention expires), buffering doesn't provide
+      exactly-once, and producers aren't forced to stop (the buffer is what lets them keep
+      going).
+    ref: "concepts.md#backpressure-throttling-and-failure-modes"
+
+  - id: aws-streaming-kinesis-msk-065
+    difficulty: advanced
+    tags: [poison-record, lambda, dlq]
+    question: |
+      A single malformed record causes a Lambda consumer to retry a batch forever,
+      stalling that shard. What is the correct mitigation?
+    options:
+      - "Increase the shard's write limit"
+      - "Delete the entire shard and reshard"
+      - "Use bisect-on-error, a max retry/record age, and an on-failure destination (SQS/SNS DLQ) so one bad record doesn't block the shard"
+      - "Switch the stream to on-demand mode"
+    answer: 2
+    explanation: |
+      A poison record is handled with bisect-on-error (isolate the bad record), max
+      retries/record age, and an on-failure destination (DLQ) so the shard isn't blocked.
+      Write limits, deleting/resharding, and capacity mode changes don't address a
+      poison-record processing stall.
+    ref: "concepts.md#backpressure-throttling-and-failure-modes"
+
+  - id: aws-streaming-kinesis-msk-066
+    difficulty: expert
+    tags: [dr, multi-region, failure-modes]
+    question: |
+      Both Kinesis Data Streams and MSK replicate across 3 AZs. Which failure do they NOT
+      tolerate by default, and how do you address it?
+    options:
+      - "A single-AZ failure; use EFO"
+      - "A single broker/shard failure; add more consumers"
+      - "A consumer crash; use longer retention"
+      - "A full Region failure — both are single-Region by default; address with cross-Region replication (MSK Replicator/MirrorMaker2 for Kafka, or a re-publishing consumer for KDS), accepting added cost and RPO/RTO"
+    answer: 3
+    explanation: |
+      3-AZ replication makes single-AZ outages transparent, but neither service is
+      multi-Region by default — a Region failure takes the stream down. DR requires
+      explicit cross-Region replication (MSK Replicator/MirrorMaker2 or a KDS
+      re-publisher), with real cost and RPO/RTO trade-offs. The other options describe
+      failures already handled within a Region.
+    ref: "concepts.md#backpressure-throttling-and-failure-modes"
+
+  - id: aws-streaming-kinesis-msk-067
+    difficulty: intermediate
+    tags: [throttling, exceptions]
+    question: |
+      What exception indicates a Kinesis producer is exceeding a shard's write capacity,
+      and what are typical fixes?
+    options:
+      - "ProvisionedThroughputExceededException; fixes include a better partition key, more shards, KPL aggregation, or switching to on-demand"
+      - "ThrottlingException; only fix is to wait"
+      - "AccessDeniedException; fix IAM policy"
+      - "ResourceNotFoundException; recreate the stream"
+    answer: 0
+    explanation: |
+      Exceeding 1 MB/s or 1,000 rec/s on a shard throws ProvisionedThroughputExceeded;
+      remedies are spreading load (better key), adding shards, aggregating small records
+      (KPL), or on-demand. The others are unrelated errors (auth, missing resource,
+      generic throttling with no design fix).
+    ref: "concepts.md#backpressure-throttling-and-failure-modes"
+
+  # ---------------- Cost and capacity estimation ----------------
+  - id: aws-streaming-kinesis-msk-068
+    difficulty: advanced
+    tags: [estimation, shards, limits]
+    question: |
+      You must ingest 5,000 records/second, each 500 bytes (2.5 MB/s total), in provisioned
+      mode. How many shards do you need and why?
+    options:
+      - "3 shards, because 2.5 MB/s / 1 MB/s rounds up to 3"
+      - "5 shards, because the record-count limit (5,000 / 1,000 rec/s) binds before the byte limit; you take the max of the two calculations"
+      - "1 shard, because 2.5 MB/s is under 10 MB/s"
+      - "10 shards, one per 500 rec/s"
+    answer: 1
+    explanation: |
+      Size by the max of both limits: bytes need ceil(2.5/1)=3 shards, but records need
+      ceil(5,000/1,000)=5 shards, so 5 shards — the record-count limit binds first for
+      tiny records (KPL aggregation could relieve it). Option 0 ignores the record limit;
+      option 2 uses a wrong per-shard byte cap; option 3 uses a nonexistent 500 rec/s
+      limit.
+    ref: "concepts.md#cost-reasoning-and-capacity-estimation"
+
+  - id: aws-streaming-kinesis-msk-069
+    difficulty: expert
+    tags: [pricing, put-payload-units]
+    question: |
+      In provisioned KDS pricing, a PUT payload unit is 25 KB. How many PUT payload units
+      does a single 60 KB record consume?
+    options:
+      - "1 unit"
+      - "2 units"
+      - "3 units (60 KB rounds up across three 25 KB units)"
+      - "60 units"
+    answer: 2
+    explanation: |
+      Each PUT payload unit is 25 KB and records round up: 60 KB / 25 KB = 2.4 → 3 units.
+      This rounding is why many small records inflate cost and why aggregation helps. One
+      or two units would under-count; 60 units confuses bytes with units.
+    ref: "concepts.md#cost-reasoning-and-capacity-estimation"
+
+  - id: aws-streaming-kinesis-msk-070
+    difficulty: advanced
+    tags: [pricing, cost, tradeoffs]
+    question: |
+      Which cost heuristic is correct for streaming on AWS?
+    options:
+      - "Many tiny records are always cheapest because each is small"
+      - "Enhanced Fan-Out is free, so enable it for every consumer"
+      - "Longer retention is always free"
+      - "At steady high volume, provisioned KDS/MSK usually beats on-demand/serverless per GB; many tiny records hurt cost (record-count limits, 25 KB PUT-unit and 5 KB Firehose rounding), so aggregate/batch"
+    answer: 3
+    explanation: |
+      Provisioned modes are cheaper per GB at steady high volume; tiny records inflate cost
+      due to record-count limits and per-unit rounding (25 KB PUT units, 5 KB Firehose), so
+      batch/aggregate. Tiny records are not cheapest, EFO adds per-consumer-shard cost, and
+      extended/long-term retention is billed — none are free.
+    ref: "concepts.md#cost-reasoning-and-capacity-estimation"
+
+  - id: aws-streaming-kinesis-msk-071
+    difficulty: intermediate
+    tags: [enhanced-fan-out, cost, tradeoffs]
+    question: |
+      You have exactly two consumers reading a stream and cost is a concern. Should you
+      enable Enhanced Fan-Out?
+    options:
+      - "Yes, always enable EFO for any number of consumers"
+      - "No, EFO is impossible with fewer than five consumers"
+      - "Not necessarily — two consumers can often share the 2 MB/s per shard acceptably; EFO adds per-consumer-shard cost, so pay for it only when you have many consumers or need low-latency isolation"
+      - "Yes, because EFO is free"
+    answer: 2
+    explanation: |
+      With only two consumers, shared throughput is often fine and avoids EFO's per-
+      consumer-shard-hour + per-GB charges; reserve EFO for many consumers or low-latency
+      isolation. EFO isn't always necessary, isn't restricted to 5+ consumers, and isn't
+      free.
+    ref: "concepts.md#cost-reasoning-and-capacity-estimation"
+
+  - id: aws-streaming-kinesis-msk-072
+    difficulty: expert
+    tags: [msk, pricing, estimation]
+    question: |
+      Which dimensions drive MSK Provisioned cost, and what mainly determines broker count?
+    options:
+      - "Per broker-hour (by instance size) + storage-GB-month (+ provisioned-throughput/tiered-storage) + data transfer; broker count is driven by partition throughput targets and holding replicas across 3 AZs"
+      - "Per-request charges only; broker count is fixed at one"
+      - "Per-GB ingested only, like Firehose; broker count is irrelevant"
+      - "Per shard-hour, like Kinesis provisioned"
+    answer: 0
+    explanation: |
+      MSK Provisioned bills broker-hours (by instance size) + storage + optional
+      provisioned-throughput/tiered-storage + data transfer; you size brokers to meet
+      partition throughput and to hold replicas across 3 AZs (typically RF=3). MSK isn't
+      priced per-request-only, per-GB-only, or per-shard-hour (that's Kinesis).
+    ref: "concepts.md#cost-reasoning-and-capacity-estimation"
+
+  # ---------------- Consolidated trade-offs / judgment ----------------
+  - id: aws-streaming-kinesis-msk-073
+    difficulty: advanced
+    tags: [tradeoffs, service-selection, scenario]
+    question: |
+      A startup with a tiny ops team is launching a new product with unpredictable,
+      possibly spiky traffic and needs a replayable event log now. Which choice best
+      balances the constraints?
+    options:
+      - "MSK Provisioned, sizing brokers and partitions up front for the expected peak"
+      - "Self-managed Kafka on EC2 to keep costs lowest"
+      - "Kinesis Data Streams in on-demand mode — no shard management, auto-scales for spiky/unknown traffic, provides replay — accepting a higher per-GB cost while volume is unknown"
+      - "SQS Standard, because it scales automatically"
+    answer: 2
+    explanation: |
+      Unknown/spiky traffic + tiny ops team + need for a replayable log points to KDS
+      on-demand: zero shard management, spike-friendly auto-scaling, and replay, at the
+      cost of a higher per-GB rate that's acceptable until volume is understood. MSK
+      Provisioned/self-managed Kafka demand ops maturity/capacity planning; SQS Standard
+      isn't a replayable log.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-streaming-kinesis-msk-074
+    difficulty: expert
+    tags: [tradeoffs, ordering, scenario]
+    question: |
+      A design routes all of a very high-volume customer's events to one shard to preserve
+      strict ordering, and it throttles. Which statement best captures the fundamental
+      trade-off?
+    options:
+      - "You can have strict per-customer ordering AND unlimited per-customer throughput on one shard; just enable EFO"
+      - "Ordering has no relationship to shard assignment"
+      - "Switching to on-demand removes the per-key throughput ceiling"
+      - "Strict per-key ordering forces all that key's traffic onto one shard, which caps at 1 MB/s or 1,000 rec/s; to scale you must split the key (bucketing), sacrificing strict global ordering for that customer"
+    answer: 3
+    explanation: |
+      Per-key ordering pins a key to one shard, whose throughput is capped, so scaling a
+      hot key means bucketing (entityId#bucket) and giving up strict global per-customer
+      ordering. EFO is read-side and doesn't lift the write cap; ordering is tightly tied
+      to shard assignment; and on-demand still routes one partition key to one shard (the
+      per-key ceiling remains).
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-streaming-kinesis-msk-075
+    difficulty: advanced
+    tags: [tradeoffs, firehose, scenario]
+    question: |
+      Requirement: reliably archive 300 MB/s of logs to an S3 data lake in Parquet with
+      minimal engineering, 1–5 min freshness acceptable, no need to replay or attach
+      custom consumers. Which is most appropriate and why?
+    options:
+      - "Amazon Data Firehose (Direct PUT or from a stream) with record format conversion to Parquet — managed, no consumer code, buffering gives 1–5 min freshness"
+      - "Kinesis Data Streams with a custom KCL consumer writing Parquet to S3"
+      - "MSK with a Kafka Connect S3 sink connector managed by the team"
+      - "SQS with a Lambda writer"
+    answer: 0
+    explanation: |
+      Managed archival to S3 as Parquet with minimal engineering and minute-level freshness
+      is exactly Firehose (with Parquet conversion) — no consumer code, no shards. KCL and
+      MSK+Connect add engineering/ops for no benefit given no replay/custom-consumer need;
+      SQS+Lambda isn't a managed Parquet loader.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-streaming-kinesis-msk-076
+    difficulty: intermediate
+    tags: [tradeoffs, service-selection]
+    question: |
+      Which single question best discriminates between choosing a streaming log
+      (Kinesis/MSK) and a work queue (SQS) in an interview?
+    options:
+      - "Which service is cheaper per message?"
+      - "Which service has a higher default retention?"
+      - "Which service integrates with Lambda?"
+      - "Do you need replay, ordering, and multiple independent consumers of the same records — or do you need each task handed to exactly one worker and then forgotten?"
+    answer: 3
+    explanation: |
+      The core discriminator is replay + ordering + independent multi-consumer reads (log)
+      versus one-worker-per-task delete-on-ack work distribution (queue). Price, retention
+      defaults, and Lambda integration are secondary and don't capture the fundamental
+      shape of the problem.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-streaming-kinesis-msk-077
+    difficulty: expert
+    tags: [tradeoffs, msk-serverless, scenario]
+    question: |
+      A team wants Kafka's API and connectors but has bursty, hard-to-predict throughput,
+      is fine with IAM authentication, and doesn't need custom broker configs or huge
+      partition counts. Which MSK option fits best and why?
+    options:
+      - "MSK Provisioned, because it's always cheaper"
+      - "Self-managed Kafka on EC2 for maximum burst control"
+      - "MSK Serverless — no capacity planning, auto-scales for bursty traffic, IAM auth is acceptable, and they don't need the provisioned-only features/quotas"
+      - "Kinesis Data Streams, since Kafka connectors also work on it"
+    answer: 2
+    explanation: |
+      Bursty/unpredictable throughput + IAM auth acceptable + no need for provisioned-only
+      features is the MSK Serverless sweet spot (zero capacity planning, auto-scaling).
+      Provisioned isn't always cheaper and needs sizing; self-managed adds heavy ops; and
+      Kafka connectors do NOT run on Kinesis (different API), so KDS doesn't meet the
+      Kafka-ecosystem requirement.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-streaming-kinesis-msk-078
+    difficulty: beginner
+    tags: [firehose, sources]
+    question: |
+      Which of the following can serve as a source for Amazon Data Firehose?
+    options:
+      - "Direct PUT, a Kinesis Data Stream, or an Amazon MSK cluster"
+      - "Only Direct PUT from the SDK"
+      - "Only an S3 bucket"
+      - "Only a DynamoDB table"
+    answer: 0
+    explanation: |
+      Firehose sources are Direct PUT, a Kinesis Data Stream, or MSK. It is not limited to
+      Direct PUT, and S3/DynamoDB are not Firehose sources (S3 is a common destination;
+      DynamoDB streams feed Lambda, not Firehose directly).
+    ref: "concepts.md#kinesis-data-firehose-versus-data-streams"
+
+  - id: aws-streaming-kinesis-msk-079
+    difficulty: intermediate
+    tags: [record-size, limits]
+    question: |
+      What is the maximum size of a single record payload (before base64 encoding) that
+      Kinesis Data Streams accepts, and what caveat applies?
+    options:
+      - "1 KB, hard limit"
+      - "Up to 10 MiB using burst capacity, but a large record still counts against the shard's 1 MB/s budget, so oversized records throttle throughput"
+      - "400 KB, matching DynamoDB items"
+      - "5 MB with no throughput impact"
+    answer: 1
+    explanation: |
+      KDS accepts records up to 10 MiB (before base64) using burst capacity, but the bytes
+      still count against the 1 MB/s shard write budget, so large records eat throughput
+      and can throttle. It's not a 1 KB or 400 KB cap, and large records definitely impact
+      throughput (option 3 wrong).
+    ref: "concepts.md#kinesis-data-streams-architecture-and-shards"
+
+  - id: aws-streaming-kinesis-msk-080
+    difficulty: expert
+    tags: [getrecords, limits, throttling]
+    question: |
+      A shared-throughput consumer calls GetRecords and receives a 10 MB response. What
+      constraint applies to its immediately following calls on that shard?
+    options:
+      - "No constraint; it can call as fast as it wants"
+      - "The shard is permanently throttled for 24 hours"
+      - "Subsequent GetRecords within the next 5 seconds throw ProvisionedThroughputExceededException, because a shard's read is 2 MB/s and a 10 MB pull represents ~5 seconds of budget"
+      - "The consumer must reshard before reading again"
+    answer: 2
+    explanation: |
+      Because a shard sustains 2 MB/s reads, pulling the 10 MB max in one call consumes ~5
+      seconds of read budget, so further GetRecords in the next 5 seconds throw
+      ProvisionedThroughputExceeded (also capped at 5 GetRecords/s). It's not unconstrained,
+      not a 24-hour lockout, and doesn't require resharding.
+    ref: "concepts.md#consumers-kcl-lambda-and-enhanced-fan-out"

@@ -1,0 +1,1564 @@
+topic: "Analytics and Big Data on AWS: Data Lakes, Redshift, EMR and Athena"
+domain: system-design
+topic_slug: aws-analytics-datalake-redshift-emr
+version: 1
+
+questions:
+  # ---------------- Lake vs warehouse vs lakehouse ----------------
+- id: aws-analytics-datalake-redshift-emr-001
+  difficulty: beginner
+  tags: [data-lake, data-warehouse, schema]
+  question: |
+    What is the defining difference between a data lake (S3) and a data
+    warehouse (Redshift) in terms of when schema is applied?
+  options:
+  - "A data lake applies schema-on-read; a warehouse applies schema-on-write"
+  - "Both apply schema-on-write, differing only in storage cost"
+  - "Neither uses a schema; both are fully unstructured"
+  - "A data lake applies schema-on-write; a warehouse applies schema-on-read"
+  answer: 0
+  explanation: |
+    A lake lands raw files and interprets structure at query time (schema-on-read),
+    giving flexibility for any format. A warehouse requires a defined schema on load
+    (schema-on-write), giving fast, governed, consistent SQL. Option 3 inverts them;
+    option 1/2 are simply wrong.
+  ref: "concepts.md#data-lake-versus-data-warehouse-versus-lakehouse"
+
+- id: aws-analytics-datalake-redshift-emr-002
+  difficulty: beginner
+  tags: [lakehouse, iceberg]
+  question: |
+    What does a "lakehouse" architecture on AWS primarily aim to provide?
+  options:
+  - "A single relational engine that replaces both S3 and Redshift entirely"
+  - "One copy of data in open columnar formats on S3, with ACID table semantics, readable by multiple engines"
+  - "A way to store only unstructured binary blobs with no schema at all"
+  - "An in-memory cache that eliminates the need for S3 durability"
+  answer: 1
+  explanation: |
+    The lakehouse keeps one copy of data in open formats (Parquet + Iceberg/Hudi/Delta)
+    on S3, adds ACID transactions and schema evolution, and lets Athena, Redshift
+    Spectrum, EMR, and Glue all read it. It does not replace S3 (option 0), is not
+    schema-less (option 2), and is a storage/table pattern, not a cache (option 3).
+  ref: "concepts.md#data-lake-versus-data-warehouse-versus-lakehouse"
+
+- id: aws-analytics-datalake-redshift-emr-003
+  difficulty: intermediate
+  tags: [service-selection, data-lake, data-warehouse, trade-offs]
+  question: |
+    A retailer has 200 concurrent BI users running complex multi-table joins with a
+    sub-second dashboard SLA, on well-structured, frequently-queried data. Which
+    choice best fits and why?
+  options:
+  - "Store everything in DynamoDB and query with PartiQL, because it is fully managed"
+  - "Athena over raw JSON in S3, because it is serverless and cheapest to start"
+  - "A Redshift warehouse with data loaded and tuned, because it delivers low-latency, high-concurrency SQL with joins and governance"
+  - "EMR Spark batch jobs, because Spark scales to any size"
+  answer: 2
+  explanation: |
+    High concurrency + complex joins + sub-second SLA on structured data is the
+    canonical warehouse workload — Redshift with tuned distribution/sort keys and
+    concurrency scaling. Athena on raw JSON is per-scan, seconds-latency, and quota
+    limited (wrong for 200 concurrent sub-second users). EMR is batch, not an
+    interactive endpoint. DynamoDB is OLTP key-value, not for ad-hoc joins/aggregations.
+  ref: "concepts.md#data-lake-versus-data-warehouse-versus-lakehouse"
+
+- id: aws-analytics-datalake-redshift-emr-004
+  difficulty: advanced
+  tags: [lakehouse, gdpr, iceberg, trade-offs]
+  question: |
+    Your organization stores billions of records as immutable partitioned Parquet on
+    S3 and must now support efficient row-level "delete this user" (GDPR) and CDC
+    upserts. What is the most appropriate change?
+  options:
+  - "Rewrite every affected Parquet file manually on each deletion request"
+  - "Move all data into OpenSearch so documents can be deleted by id"
+  - "Switch to CSV so rows can be edited in place with text tools"
+  - "Adopt an open table format like Apache Iceberg over the S3 data to gain ACID row-level delete/upsert and time-travel"
+  answer: 3
+  explanation: |
+    Plain Parquet is immutable with no transactional delete/upsert. Iceberg (AWS's
+    favored open table format) adds ACID row-level delete/merge, schema evolution, and
+    time-travel while keeping data on S3 and multi-engine readable. Manual rewrites
+    (option 0) don't scale; OpenSearch is a search engine, not a cost-effective home
+    for billions of analytical records; CSV loses columnar efficiency and still lacks
+    transactions.
+  ref: "concepts.md#open-table-formats-iceberg-hudi-and-delta-lake"
+
+  # ---------------- S3 as foundation ----------------
+- id: aws-analytics-datalake-redshift-emr-005
+  difficulty: beginner
+  tags: [s3, consistency, durability]
+  question: |
+    Since December 2020, what consistency model does Amazon S3 provide for new object
+    PUTs and overwrite PUTs/DELETEs?
+  options:
+  - "Strong read-after-write consistency for all operations"
+  - "Strong consistency for new objects but eventual for overwrites"
+  - "Consistency only within a single Availability Zone"
+  - "Eventual consistency for all operations"
+  answer: 0
+  explanation: |
+    S3 provides strong read-after-write consistency for all operations (new PUTs,
+    overwrites, and DELETEs) since Dec 2020, removing the old eventual-consistency
+    caveats. Options 1, 2, and 3 describe the pre-2020 or incorrect models.
+  ref: "concepts.md#amazon-s3-as-the-data-lake-foundation"
+
+- id: aws-analytics-datalake-redshift-emr-006
+  difficulty: intermediate
+  tags: [s3, small-files, performance, trade-offs]
+  question: |
+    A streaming pipeline writes millions of tiny (~10 KB) objects to S3 per hour, and
+    Athena queries have become slow and expensive. What is the primary problem and
+    fix?
+  options:
+  - "S3 lost durability; enable versioning to restore performance"
+  - "The small-file problem inflates request/scheduling overhead; compact into larger (~128 MB–1 GB) files"
+  - "Parquet is corrupt; switch back to CSV"
+  - "Strong consistency is slowing writes; disable it per bucket"
+  answer: 1
+  explanation: |
+    Millions of tiny files cause massive per-object overhead, more GET requests, and
+    more query task scheduling — the classic small-file problem. Compact into larger
+    objects (or use Iceberg/S3 Tables auto-compaction). Durability/versioning
+    (option 0) is unrelated; CSV is worse for scan cost (option 2); consistency cannot
+    be disabled and is not the cause (option 3).
+  ref: "concepts.md#amazon-s3-as-the-data-lake-foundation"
+
+- id: aws-analytics-datalake-redshift-emr-007
+  difficulty: advanced
+  tags: [s3, throttling, prefix, failure-modes]
+  question: |
+    A high-throughput ingestion job starts receiving 503 SlowDown errors from S3
+    concentrated on one key prefix. What is the best explanation and mitigation?
+  options:
+  - "S3 throttles based on object size; compress objects to avoid it"
+  - "S3 has a global write cap of 100 req/s; move to a larger bucket"
+  - "Request rate scales per prefix (~3,500 writes / 5,500 reads per second); spread keys across more prefixes and retry with backoff"
+  - "The bucket ran out of storage; delete old objects"
+  answer: 2
+  explanation: |
+    S3 scales request rate per prefix (at least 3,500 PUT/POST/DELETE and 5,500 GET per
+    second per prefix) and horizontally with more prefixes. A single hot prefix
+    throttles (503 SlowDown); spread keys/partitions and use exponential backoff. S3
+    has no fixed global 100 req/s cap or storage limit (options 1/3), and throttling is
+    request-rate not size based (option 0).
+  ref: "concepts.md#amazon-s3-as-the-data-lake-foundation"
+
+  # ---------------- Glue ----------------
+- id: aws-analytics-datalake-redshift-emr-008
+  difficulty: beginner
+  tags: [glue, catalog]
+  question: |
+    What is the primary role of the AWS Glue Data Catalog?
+  options:
+  - "It is a real-time streaming ingestion service"
+  - "It is a BI dashboarding tool"
+  - "It stores the actual table data in a proprietary columnar format"
+  - "It is a central Hive-compatible metastore (databases, tables, columns, partitions, S3 locations) shared by Athena, Redshift Spectrum, EMR, and Glue"
+  answer: 3
+  explanation: |
+    The Glue Data Catalog is a managed, Hive-compatible metastore holding schema and
+    partition metadata, shared across query engines. It does not store the data itself
+    (that stays in S3, option 2), is not ingestion (option 0, that's Firehose/Kinesis),
+    and is not BI (option 1, that's QuickSight).
+  ref: "concepts.md#aws-glue-data-catalog-crawlers-and-etl"
+
+- id: aws-analytics-datalake-redshift-emr-009
+  difficulty: intermediate
+  tags: [glue, crawlers, trade-offs]
+  question: |
+    For a table where you only ever ADD new date partitions and the schema is stable,
+    why might you avoid re-running a Glue crawler each time?
+  options:
+  - "Crawlers cost money per run and are slow on large buckets; adding partitions (MSCK REPAIR / partition projection) is cheaper and deterministic"
+  - "Crawlers delete existing data when they run"
+  - "Crawlers only work with Redshift, not Athena"
+  - "Crawlers cannot detect partitions at all"
+  answer: 0
+  explanation: |
+    Crawlers are convenient for unknown/changing data but cost money and are slow at
+    scale, and can misinfer types. When only partitions change, use MSCK REPAIR TABLE
+    or partition projection instead. Crawlers do detect partitions (option 3), don't
+    delete data (option 1), and work across engines (option 2).
+  ref: "concepts.md#aws-glue-data-catalog-crawlers-and-etl"
+
+- id: aws-analytics-datalake-redshift-emr-010
+  difficulty: intermediate
+  tags: [glue, pricing, dpu]
+  question: |
+    How is AWS Glue Spark ETL priced?
+  options:
+  - "Per query, based on bytes scanned in S3"
+  - "Per DPU-hour (1 DPU = 4 vCPU + 16 GB), billed per second with a 1-minute minimum"
+  - "A flat monthly fee regardless of usage"
+  - "Per row processed"
+  answer: 1
+  explanation: |
+    Glue ETL is billed by DPU-hour (a DPU is 4 vCPU + 16 GB RAM), per-second with a
+    1-minute minimum — it scales to zero when idle. Bytes-scanned pricing is Athena/
+    Spectrum (option 0); there is no flat fee or per-row model (options 2/3).
+  ref: "concepts.md#aws-glue-data-catalog-crawlers-and-etl"
+
+- id: aws-analytics-datalake-redshift-emr-011
+  difficulty: advanced
+  tags: [glue, emr, service-selection, trade-offs]
+  question: |
+    A team runs one heavy Spark job every night that needs a specific Spark version and
+    custom native libraries, plus HBase for a separate always-on workload. Which is the
+    most appropriate compute platform?
+  options:
+  - "Glue ETL only, because it is serverless"
+  - "Athena for Spark, because it is interactive"
+  - "Amazon EMR, because it gives full control over Spark/Hadoop versions, custom software, and can host HBase on a persistent cluster"
+  - "Redshift stored procedures, because they run SQL"
+  answer: 2
+  explanation: |
+    Needing specific framework versions, custom native libs, and a persistent HBase
+    service points to EMR's full-control clusters (and lower cost at sustained
+    utilization). Glue pins its own Spark and doesn't run HBase (option 0); Athena for
+    Spark is interactive/serverless, not for persistent HBase (option 1); Redshift SQL
+    procedures aren't a Spark/HBase platform (option 3).
+  ref: "concepts.md#amazon-emr-managed-hadoop-and-spark"
+
+  # ---------------- Lake Formation ----------------
+- id: aws-analytics-datalake-redshift-emr-012
+  difficulty: intermediate
+  tags: [lake-formation, governance, security]
+  question: |
+    What capability does AWS Lake Formation add on top of the Glue Data Catalog that
+    raw IAM/S3 bucket policies do not easily provide?
+  options:
+  - "Automatic conversion of CSV to Parquet"
+  - "Cross-region replication of S3 objects"
+  - "Faster query execution via caching"
+  - "Fine-grained column-level, row-level, and cell-level permissions granted with database-style GRANT/REVOKE across engines"
+  answer: 3
+  explanation: |
+    Lake Formation brokers fine-grained (column/row/cell-level) access using GRANT/
+    REVOKE and temporary credentials, enforced by Athena, Spectrum, EMR, Glue, and
+    QuickSight — far beyond coarse bucket-level IAM. It's not a cache (option 2), a
+    format converter (option 0), or replication (option 1).
+  ref: "concepts.md#aws-lake-formation-governance-and-permissions"
+
+- id: aws-analytics-datalake-redshift-emr-013
+  difficulty: advanced
+  tags: [lake-formation, lf-tags, governance, trade-offs]
+  question: |
+    A regulated enterprise has thousands of tables and needs PII columns hidden from
+    analysts across all current and future tables with minimal ongoing effort. What is
+    the best Lake Formation approach?
+  options:
+  - "Use LF-Tags (tag-based access control): tag resources (e.g. classification=PII) and grant on tags so new data inherits policy automatically"
+  - "Give analysts direct S3 bucket read access and rely on trust"
+  - "Encrypt the whole bucket and share the key only with admins"
+  - "Write an individual named-resource grant for every table by hand"
+  answer: 0
+  explanation: |
+    LF-Tags let you attach tags like classification=PII and grant on tags, so policy
+    scales across thousands of tables and new data inherits it automatically. Named
+    grants per table (option 3) don't scale; direct S3 access bypasses fine-grained
+    control (option 1); bucket encryption is all-or-nothing, not column-level
+    (option 2).
+  ref: "concepts.md#aws-lake-formation-governance-and-permissions"
+
+- id: aws-analytics-datalake-redshift-emr-014
+  difficulty: expert
+  tags: [lake-formation, security, failure-modes]
+  question: |
+    With Lake Formation fine-grained permissions in place, how could a job still bypass
+    them, and how do you prevent it?
+  options:
+  - "It cannot; Lake Formation intercepts all S3 access at the network layer"
+  - "A job with direct IAM access to the underlying S3 bucket can bypass LF; lock the bucket down so only the LF-integrated role/engines can read it"
+  - "Only by disabling KMS; rotate keys to prevent it"
+  - "By using Parquet instead of CSV, which LF cannot read"
+  answer: 1
+  explanation: |
+    LF enforcement happens in the integrated engines, not at the S3 layer, so a
+    principal with direct S3 permissions can read raw objects and bypass column/row
+    rules. Mitigate by restricting the bucket policy to the Lake Formation role/engines.
+    Option 0 is false (LF is not a network interceptor); options 2/3 are unrelated to
+    the bypass.
+  ref: "concepts.md#aws-lake-formation-governance-and-permissions"
+
+  # ---------------- Athena ----------------
+- id: aws-analytics-datalake-redshift-emr-015
+  difficulty: beginner
+  tags: [athena, serverless, pricing]
+  question: |
+    What is Amazon Athena and how are standard S3 queries billed?
+  options:
+  - "A streaming service billed per shard-hour"
+  - "A provisioned MPP warehouse billed per node-hour"
+  - "A serverless SQL (Presto/Trino) engine over S3, billed at $5 per TB of data scanned"
+  - "A managed Spark service billed per DPU-hour"
+  answer: 2
+  explanation: |
+    Athena is serverless Presto/Trino SQL over S3 using the Glue Catalog, billed at
+    $5 per TB scanned (10 MB minimum per query). It is not a provisioned warehouse
+    (option 1, that's Redshift), not Spark (option 3, that's Glue/EMR), and not
+    streaming (option 0, that's Kinesis).
+  ref: "concepts.md#amazon-athena-serverless-sql-on-s3"
+
+- id: aws-analytics-datalake-redshift-emr-016
+  difficulty: intermediate
+  tags: [athena, cost, partitioning]
+  question: |
+    Since Athena bills on data scanned, which combination most directly reduces query
+    cost on a large table?
+  options:
+  - "Add more Athena workgroups"
+  - "Increase the S3 storage class to Standard-IA"
+  - "Store as row-oriented CSV and query all columns"
+  - "Store as columnar Parquet, partition on filtered columns (e.g. date), and compress; select only needed columns"
+  answer: 3
+  explanation: |
+    Columnar Parquet reads only selected columns; partitioning prunes irrelevant data;
+    compression shrinks bytes — together often cutting scan cost by 30–90%+. CSV with
+    SELECT * scans everything (option 2). Workgroups organize/limit queries but don't
+    inherently reduce scan (option 0). Storage class affects storage price, not bytes
+    scanned per query (option 1).
+  ref: "concepts.md#amazon-athena-serverless-sql-on-s3"
+
+- id: aws-analytics-datalake-redshift-emr-017
+  difficulty: advanced
+  tags: [athena, redshift, service-selection, trade-offs]
+  question: |
+    Analysts run roughly a dozen ad-hoc exploratory queries per day against a 30 TB S3
+    lake, with no strict latency SLA and a tight budget for idle infrastructure. Which
+    design minimizes total cost while meeting the need?
+  options:
+  - "Use Athena directly on partitioned Parquet in S3, paying only per scan with zero idle cost"
+  - "Spin up an always-on EMR cluster with Presto"
+  - "Copy all data into OpenSearch for querying"
+  - "Run a large 24/7 Redshift provisioned cluster loaded with all 30 TB"
+  answer: 0
+  explanation: |
+    Infrequent, ad-hoc queries with no idle budget is Athena's sweet spot — zero idle
+    cost, pay only per scan, and partitioned Parquet keeps scans cheap. A 24/7 Redshift
+    cluster (option 3) or always-on EMR (option 1) pays for idle time you don't need.
+    OpenSearch (option 2) is for search/logs and expensive to keep 30 TB hot.
+  ref: "concepts.md#athena-versus-redshift-versus-emr-choosing-the-query-engine"
+
+- id: aws-analytics-datalake-redshift-emr-018
+  difficulty: expert
+  tags: [athena, pricing, estimation]
+  question: |
+    A query scans exactly 4 MB of data in S3. How does Athena's standard pricing treat
+    this?
+  options:
+  - "It is free because it is under 1 GB"
+  - "It is rounded up to the 10 MB per-query minimum and billed accordingly"
+  - "It is billed for a full 1 TB minimum"
+  - "It is billed per row, not per byte"
+  answer: 1
+  explanation: |
+    Athena rounds each query up to the nearest 10 MB with a 10 MB per-query minimum, so
+    a 4 MB scan bills as 10 MB. There's no free-under-1-GB tier (option 0), no 1 TB
+    minimum (option 2), and pricing is per byte scanned, not per row (option 3).
+  ref: "concepts.md#amazon-athena-serverless-sql-on-s3"
+
+- id: aws-analytics-datalake-redshift-emr-019
+  difficulty: advanced
+  tags: [athena, provisioned-capacity, trade-offs]
+  question: |
+    A team has predictable, high-volume Athena usage and wants isolated, predictable
+    cost instead of variable per-scan billing. Which Athena feature fits?
+  options:
+  - "Query result reuse"
+  - "Federated queries via Lambda connectors"
+  - "Provisioned Capacity (capacity reservations), billed per DPU-hour for dedicated processing capacity"
+  - "Partition projection"
+  answer: 2
+  explanation: |
+    Athena Provisioned Capacity uses capacity reservations billed per DPU-hour (~$0.30),
+    giving isolated, predictable capacity for steady high-volume workloads instead of
+    per-scan billing. Federated queries (option 1) reach other data sources; partition
+    projection (option 3) and result reuse (option 0) reduce scan/latency but don't
+    change the billing model to reserved capacity.
+  ref: "concepts.md#amazon-athena-serverless-sql-on-s3"
+
+  # ---------------- Columnar / partitioning ----------------
+- id: aws-analytics-datalake-redshift-emr-020
+  difficulty: beginner
+  tags: [parquet, columnar]
+  question: |
+    Why do columnar formats like Parquet reduce query cost for analytics engines that
+    bill on bytes scanned?
+  options:
+  - "They encrypt data, reducing its size"
+  - "They store data in memory instead of S3"
+  - "They store data alphabetically so lookups are faster"
+  - "They let the engine read only the columns a query selects, plus skip row groups via min/max stats, and compress well"
+  answer: 3
+  explanation: |
+    Columnar layout reads only referenced columns, predicate pushdown + min/max stats
+    skip non-matching row groups, and dictionary/RLE + Snappy/Zstd compress heavily —
+    all cutting bytes read. It's not alphabetical ordering (option 2), encryption
+    doesn't shrink data (option 0), and Parquet still lives on S3 (option 1).
+  ref: "concepts.md#columnar-formats-partitioning-and-compression-for-cost-and-performance"
+
+- id: aws-analytics-datalake-redshift-emr-021
+  difficulty: intermediate
+  tags: [partitioning, trade-offs]
+  question: |
+    What is the main risk of over-partitioning a data lake table (e.g. partitioning by
+    a high-cardinality column)?
+  options:
+  - "It creates many small files and huge partition counts, causing the small-file problem and slow query planning"
+  - "It permanently deletes older partitions"
+  - "It forces the table into row-oriented storage"
+  - "Queries can no longer use WHERE clauses"
+  answer: 0
+  explanation: |
+    Too many partitions produces millions of small files (per-object overhead, more
+    requests) and enormous partition metadata that slows planning/GetPartitions calls.
+    Partitioning doesn't disable WHERE (option 3), delete data (option 1), or change
+    storage orientation (option 2).
+  ref: "concepts.md#columnar-formats-partitioning-and-compression-for-cost-and-performance"
+
+- id: aws-analytics-datalake-redshift-emr-022
+  difficulty: advanced
+  tags: [partition-projection, athena, performance]
+  question: |
+    An Athena table has hundreds of thousands of date partitions and query planning is
+    dominated by partition metadata lookups. What directly addresses this?
+  options:
+  - "Switch to CSV to reduce metadata"
+  - "Use partition projection so Athena computes partition locations from a pattern instead of listing them via GetPartitions"
+  - "Disable the Glue Data Catalog"
+  - "Add more columns to the table"
+  answer: 1
+  explanation: |
+    Partition projection lets Athena calculate partition values/locations from a
+    configured pattern, avoiding expensive GetPartitions metadata calls on
+    high-partition tables. CSV (option 0) doesn't help metadata; the catalog is still
+    needed (option 2, disabling it is not viable); adding columns is irrelevant
+    (option 3).
+  ref: "concepts.md#columnar-formats-partitioning-and-compression-for-cost-and-performance"
+
+- id: aws-analytics-datalake-redshift-emr-023
+  difficulty: expert
+  tags: [estimation, parquet, partitioning, cost]
+  question: |
+    A 10 TB CSV table is fully scanned by Athena today (~$50/query). After converting to
+    Parquet, partitioning by day, and selecting 3 of 30 columns so a query reads ~50 GB,
+    what is the approximate per-query cost, and what does this illustrate?
+  options:
+  - "$0, because Parquet queries are free"
+  - "Still ~$50; format has no effect on scan cost"
+  - "About $0.25, illustrating that columnar format + partition/column pruning can swing cost ~200x"
+  - "About $5, because there is always a 1 TB minimum"
+  answer: 2
+  explanation: |
+    At $5/TB, scanning ~50 GB ≈ $0.25 versus ~$50 for the full 10 TB — roughly a 200x
+    reduction, the canonical argument for Parquet + partitioning + column selection.
+    Format absolutely affects scan cost (option 1); there is no 1 TB minimum, only 10 MB
+    (option 3); Parquet queries are not free (option 0).
+  ref: "concepts.md#cost-models-and-back-of-envelope-estimation"
+
+  # ---------------- Redshift architecture / RA3 ----------------
+- id: aws-analytics-datalake-redshift-emr-024
+  difficulty: beginner
+  tags: [redshift, mpp, architecture]
+  question: |
+    In Amazon Redshift's MPP architecture, what is the role of the leader node?
+  options:
+  - "It only handles backups and snapshots"
+  - "It is a standby replica for failover"
+  - "It stores all the table data and runs every query itself"
+  - "It parses queries, builds execution plans, coordinates parallel execution across compute nodes, and aggregates results"
+  answer: 3
+  explanation: |
+    The leader node parses/plans queries, coordinates the compute nodes (each split into
+    slices) that run work in parallel, and aggregates intermediate results. It doesn't
+    store table data or run queries alone (option 2), isn't limited to backups
+    (option 0), and isn't a standby (option 1).
+  ref: "concepts.md#amazon-redshift-mpp-architecture-ra3-and-managed-storage"
+
+- id: aws-analytics-datalake-redshift-emr-025
+  difficulty: intermediate
+  tags: [redshift, ra3, managed-storage]
+  question: |
+    What is the key advantage of Redshift RA3 nodes with managed storage over the older
+    DC2 nodes?
+  options:
+  - "RA3 decouples compute and storage — hot data on local SSD, the rest on S3-backed managed storage — so you scale and pay for each independently"
+  - "RA3 stores data only in memory"
+  - "RA3 makes queries free"
+  - "RA3 removes the leader node entirely"
+  answer: 0
+  explanation: |
+    RA3 with Redshift Managed Storage separates compute from storage: hot data on local
+    SSD, remainder transparently on S3, letting you scale/pay independently. DC2 bundles
+    compute+local SSD. RA3 still has a leader node (option 3), doesn't keep data
+    in-memory only (option 1), and queries aren't free (option 2).
+  ref: "concepts.md#amazon-redshift-mpp-architecture-ra3-and-managed-storage"
+
+- id: aws-analytics-datalake-redshift-emr-026
+  difficulty: advanced
+  tags: [redshift, ra3, dc2, service-selection, trade-offs]
+  question: |
+    A small analytics team has a stable ~600 GB compressed dataset, compute-bound
+    dashboards, and wants the cheapest capable Redshift option. Which node type fits and
+    why?
+  options:
+  - "ra3.16xlarge, because it is the largest"
+  - "DC2 nodes, because for datasets under ~1 TB they offer the best performance at the lowest price with bundled local SSD"
+  - "RA3 with 16 PB managed storage, to leave room to grow"
+  - "Redshift Serverless with maximum RPUs at all times"
+  answer: 1
+  explanation: |
+    For datasets under ~1 TB compressed, AWS recommends DC2 for best performance at
+    lowest price (local SSD bundled). ra3.16xlarge (option 0) and 16 PB managed storage
+    (option 2) are massive overkill for 600 GB; max-RPU Serverless 24/7 (option 3)
+    defeats Serverless's cost benefit and overspends.
+  ref: "concepts.md#amazon-redshift-mpp-architecture-ra3-and-managed-storage"
+
+- id: aws-analytics-datalake-redshift-emr-027
+  difficulty: intermediate
+  tags: [redshift, zero-etl]
+  question: |
+    What does a Redshift "zero-ETL" integration (e.g. from Aurora) provide?
+  options:
+  - "A free tier for all Redshift queries"
+  - "A way to run Spark jobs inside Redshift"
+  - "Near-real-time replication of operational data into Redshift with no pipeline code to build or maintain"
+  - "Automatic conversion of Redshift tables to Parquet"
+  answer: 2
+  explanation: |
+    Zero-ETL integrations replicate operational data (Aurora/RDS/DynamoDB) into Redshift
+    near-real-time without building/maintaining an ETL pipeline. It's not embedded Spark
+    (option 1), not a format converter (option 3), and not a pricing tier (option 0).
+  ref: "concepts.md#amazon-redshift-mpp-architecture-ra3-and-managed-storage"
+
+  # ---------------- Distribution / sort keys ----------------
+- id: aws-analytics-datalake-redshift-emr-028
+  difficulty: intermediate
+  tags: [redshift, distribution-key, joins]
+  question: |
+    Two large Redshift fact/dimension tables are frequently joined on customer_id.
+    Which distribution style typically gives the best join performance and why?
+  options:
+  - "EVEN distribution, so rows spread randomly"
+  - "No distribution; Redshift never redistributes data"
+  - "ALL distribution on both tables, so every node has a full copy"
+  - "KEY distribution on customer_id for both, so matching rows co-locate on the same slice and joins avoid data redistribution"
+  answer: 3
+  explanation: |
+    KEY distribution on the join column co-locates matching rows on the same slice,
+    eliminating cross-node redistribution during the join. ALL on two large tables wastes
+    huge storage and load time (option 2); EVEN forces reshuffles on the join
+    (option 0); Redshift does redistribute when needed (option 1).
+  ref: "concepts.md#distribution-styles-sort-keys-and-redshift-performance-tuning"
+
+- id: aws-analytics-datalake-redshift-emr-029
+  difficulty: advanced
+  tags: [redshift, distribution-key, skew, failure-modes]
+  question: |
+    After setting KEY distribution on a column, one compute slice is far busier and the
+    cluster's disk is unevenly full. What is the most likely cause?
+  options:
+  - "Data skew — the chosen distribution key is lopsided, so many rows land on one slice (a hot slice)"
+  - "Concurrency scaling is disabled"
+  - "The leader node is overloaded"
+  - "The sort key is interleaved"
+  answer: 0
+  explanation: |
+    A lopsided (low-diversity/highly-skewed) distribution key sends disproportionate rows
+    to one slice, creating a hot slice and uneven disk. Choose a higher-cardinality,
+    evenly-distributed key (or EVEN/AUTO). Sort-key style (option 3), concurrency scaling
+    (option 1), and the leader node (option 2) don't cause per-slice data skew.
+  ref: "concepts.md#distribution-styles-sort-keys-and-redshift-performance-tuning"
+
+- id: aws-analytics-datalake-redshift-emr-030
+  difficulty: advanced
+  tags: [redshift, sort-key, zone-maps]
+  question: |
+    Queries almost always filter on an event_date range. Which sort-key choice best
+    accelerates them and how does it work?
+  options:
+  - "An interleaved sort key on ten unrelated columns"
+  - "A compound sort key leading with event_date, so zone maps let Redshift skip blocks outside the date range"
+  - "No sort key, relying on distribution alone"
+  - "A sort key on a random UUID column"
+  answer: 1
+  explanation: |
+    A compound sort key led by event_date orders data on disk so zone maps (min/max per
+    block) skip blocks outside the requested range — ideal for range/time filters.
+    Interleaved keys help equal-weight multi-column filtering but cost more to maintain
+    (option 0); no sort key means full scans (option 2); a random UUID sort key gives no
+    useful pruning (option 3).
+  ref: "concepts.md#distribution-styles-sort-keys-and-redshift-performance-tuning"
+
+- id: aws-analytics-datalake-redshift-emr-031
+  difficulty: expert
+  tags: [redshift, distribution, all, trade-offs]
+  question: |
+    When is ALL distribution the right choice for a Redshift table, and what is the
+    trade-off?
+  options:
+  - "Only for temporary tables that are never joined"
+  - "For the largest fact table, because replication speeds writes"
+  - "For a small, frequently-joined dimension table — it removes redistribution for joins, at the cost of extra storage on every node and slower loads"
+  - "For every table, because it always maximizes performance"
+  answer: 2
+  explanation: |
+    ALL replicates the full table to every node, eliminating redistribution when joining
+    to it — worthwhile for small dimension tables. The trade-off is N-times storage and
+    slower loads, so it's wrong for large tables (option 1) and wrong as a universal
+    default (option 3). It's specifically useful for joined dimensions, not
+    never-joined temps (option 0).
+  ref: "concepts.md#distribution-styles-sort-keys-and-redshift-performance-tuning"
+
+  # ---------------- Spectrum ----------------
+- id: aws-analytics-datalake-redshift-emr-032
+  difficulty: intermediate
+  tags: [spectrum, redshift, s3]
+  question: |
+    What does Redshift Spectrum let you do?
+  options:
+  - "Convert Redshift into a serverless service"
+  - "Stream data in real time from Kinesis"
+  - "Automatically shard DynamoDB tables"
+  - "Run Redshift queries over external tables in S3 without loading them, and join lake data to local warehouse tables"
+  answer: 3
+  explanation: |
+    Spectrum queries external S3 tables (via the Glue Catalog) without loading them and
+    joins them to local Redshift tables, billed per TB scanned like Athena. It's not a
+    serverless converter (option 0), not streaming (option 1), and unrelated to DynamoDB
+    sharding (option 2).
+  ref: "concepts.md#redshift-spectrum-and-querying-the-data-lake"
+
+- id: aws-analytics-datalake-redshift-emr-033
+  difficulty: advanced
+  tags: [spectrum, tiering, cost, trade-offs]
+  question: |
+    A warehouse holds 3 months of hot data queried constantly, plus 5 years of rarely
+    queried history. What is the most cost-effective Redshift design?
+  options:
+  - "Keep the hot 3 months loaded in Redshift and leave the cold history as partitioned Parquet in S3, queried on demand via Spectrum"
+  - "Delete the historical data since it is rarely queried"
+  - "Move everything to Athena and shut down Redshift"
+  - "Load all 5 years into the Redshift cluster for uniform performance"
+  answer: 0
+  explanation: |
+    The hot/cold tiering pattern: hot data loaded in Redshift for low latency/high
+    concurrency; cold history stays cheap in S3 as Parquet, queried occasionally via
+    Spectrum (per-scan). Loading 5 years of cold data (option 3) wastes storage/compute;
+    deleting history (option 1) may violate retention needs; moving all hot,
+    high-concurrency traffic to Athena (option 2) hurts latency/concurrency.
+  ref: "concepts.md#redshift-spectrum-and-querying-the-data-lake"
+
+- id: aws-analytics-datalake-redshift-emr-034
+  difficulty: expert
+  tags: [spectrum, athena, service-selection, trade-offs]
+  question: |
+    Both Athena and Redshift Spectrum are per-scan engines over S3. When is Spectrum
+    specifically the better choice over Athena?
+  options:
+  - "When you have no Redshift cluster and want fully serverless SQL"
+  - "When you need to join S3 lake data to tables that already live in a Redshift cluster, or serve results through the Redshift endpoint"
+  - "When you want to avoid the Glue Data Catalog entirely"
+  - "When queries must complete in under 1 millisecond"
+  answer: 1
+  explanation: |
+    Spectrum shines when joining lake data to existing Redshift tables or serving via the
+    Redshift endpoint (both use the same catalog). With no cluster and a desire for pure
+    serverless SQL, Athena is better (option 0). Both use the Glue Catalog (option 2),
+    and neither delivers sub-millisecond per-scan latency (option 3).
+  ref: "concepts.md#redshift-spectrum-and-querying-the-data-lake"
+
+  # ---------------- Concurrency scaling / WLM / Serverless ----------------
+- id: aws-analytics-datalake-redshift-emr-035
+  difficulty: intermediate
+  tags: [redshift, concurrency-scaling]
+  question: |
+    Every weekday at 9am, dashboard queries queue up on a Redshift cluster as everyone
+    logs in. Which feature addresses this without permanently oversizing the cluster?
+  options:
+  - "Switching to DC2 nodes"
+  - "Interleaved sort keys"
+  - "Concurrency scaling, which adds transient clusters during read bursts and removes them, with ~1 free hour/day of credits"
+  - "ALL distribution on every table"
+  answer: 2
+  explanation: |
+    Concurrency scaling spins up transient clusters to absorb concurrent read bursts and
+    removes them afterward (with ~1 hour/day free credits), fixing the 9am queue without
+    24/7 overprovisioning. Sort keys/distribution (options 1/3) tune layout, not burst
+    concurrency; DC2 (option 0) doesn't add burst capacity.
+  ref: "concepts.md#redshift-concurrency-scaling-workload-management-and-serverless"
+
+- id: aws-analytics-datalake-redshift-emr-036
+  difficulty: advanced
+  tags: [redshift, serverless, provisioned, trade-offs]
+  question: |
+    A data warehouse is queried heavily during business hours but is completely idle
+    nights and weekends, with unpredictable daytime spikes. Which option is most
+    cost-appropriate?
+  options:
+  - "A permanently max-sized provisioned cluster to handle spikes"
+  - "EMR with Presto running continuously"
+  - "Provisioned RA3 cluster running 24/7 with reserved nodes"
+  - "Redshift Serverless, paying per RPU-hour only while queries run and scaling to near-zero when idle"
+  answer: 3
+  explanation: |
+    Spiky, intermittent usage with long idle periods is Redshift Serverless's sweet
+    spot — pay per RPU-hour only while active, auto-scale, near-zero idle cost. Reserved
+    24/7 provisioned (option 2) and a max-sized cluster (option 0) pay for large idle
+    windows; continuous EMR (option 1) is even more idle waste and wrong tool.
+  ref: "concepts.md#redshift-concurrency-scaling-workload-management-and-serverless"
+
+- id: aws-analytics-datalake-redshift-emr-037
+  difficulty: advanced
+  tags: [redshift, provisioned, reserved, trade-offs]
+  question: |
+    A warehouse runs a steady, high, 24/7 load with predictable capacity needs. Which
+    choice usually minimizes cost while giving full control?
+  options:
+  - "Provisioned RA3 with reserved nodes, which is cheaper for steady high utilization and offers WLM/resize control"
+  - "Athena per-scan for everything"
+  - "On-demand provisioned only, never reserved"
+  - "Redshift Serverless at high base RPU all day"
+  answer: 0
+  explanation: |
+    For steady 24/7 high utilization, provisioned RA3 with reserved nodes is cheapest and
+    gives full control (WLM, resize, node choice). Serverless at high base RPU all day
+    (option 3) loses its idle-savings advantage and can cost more for constant load;
+    Athena per-scan (option 1) is expensive for constant heavy querying; on-demand only
+    (option 2) forgoes reserved discounts.
+  ref: "concepts.md#redshift-concurrency-scaling-workload-management-and-serverless"
+
+- id: aws-analytics-datalake-redshift-emr-038
+  difficulty: intermediate
+  tags: [redshift, wlm]
+  question: |
+    What is the purpose of Redshift Workload Management (WLM)?
+  options:
+  - "To convert tables to columnar format"
+  - "To define query queues with memory/concurrency allocation (manual or Auto WLM), protecting the cluster and prioritizing workloads"
+  - "To replicate the cluster across regions"
+  - "To bill queries per TB scanned"
+  answer: 1
+  explanation: |
+    WLM (manual or Auto) defines queues with memory and concurrency, plus short-query
+    acceleration and query monitoring rules, to prioritize workloads and protect against
+    runaway queries. It's not a format converter (option 0), replication (option 2), or
+    a billing mechanism (option 3).
+  ref: "concepts.md#redshift-concurrency-scaling-workload-management-and-serverless"
+
+  # ---------------- EMR ----------------
+- id: aws-analytics-datalake-redshift-emr-039
+  difficulty: beginner
+  tags: [emr, hadoop, spark]
+  question: |
+    What is Amazon EMR best described as?
+  options:
+  - "A pub/sub messaging service"
+  - "A serverless SQL engine over S3"
+  - "A managed platform for big-data frameworks (Hadoop, Spark, Hive, Presto, HBase, Flink) on clusters of EC2, EKS, or serverless"
+  - "A managed relational database"
+  answer: 2
+  explanation: |
+    EMR is managed Hadoop/Spark/Hive/Presto/HBase/Flink on EC2, EKS, or EMR Serverless.
+    Serverless SQL over S3 is Athena (option 1); managed relational DB is RDS
+    (option 3); pub/sub is SNS/EventBridge (option 0).
+  ref: "concepts.md#amazon-emr-managed-hadoop-and-spark"
+
+- id: aws-analytics-datalake-redshift-emr-040
+  difficulty: advanced
+  tags: [emr, spot, task-nodes, cost, trade-offs]
+  question: |
+    To cut EMR cost on a large Spark job while protecting data integrity, how should you
+    use Spot instances across node roles?
+  options:
+  - "Run the primary/coordinator node on Spot"
+  - "Never use Spot with EMR; it is unsupported"
+  - "Run core nodes (which hold HDFS data) on Spot to save the most money"
+  - "Run task nodes (compute only, no HDFS) on Spot and keep core nodes on-demand, so reclamation doesn't lose HDFS data"
+  answer: 3
+  explanation: |
+    Task nodes hold no HDFS data, so Spot reclamation only loses transient compute —
+    ideal for ~70% savings. Core nodes hold HDFS/shuffle data and should stay on-demand;
+    Spot on core (option 2) or the primary (option 0) risks data/cluster loss. EMR fully
+    supports Spot (option 1).
+  ref: "concepts.md#amazon-emr-managed-hadoop-and-spark"
+
+- id: aws-analytics-datalake-redshift-emr-041
+  difficulty: intermediate
+  tags: [emr, emrfs, s3, transient]
+  question: |
+    Why do modern EMR designs commonly use EMRFS to read/write S3 directly and run
+    transient clusters rather than storing data in HDFS on long-running clusters?
+  options:
+  - "It decouples storage from compute — data persists durably in S3 while clusters spin up for a job and terminate, so you pay only for the job"
+  - "EMRFS encrypts data that HDFS cannot"
+  - "S3 cannot be read by Spark without EMRFS licensing"
+  - "HDFS is faster than S3 for all workloads, so this is only for compliance"
+  answer: 0
+  explanation: |
+    EMRFS lets Spark/Hive use S3 as durable, decoupled storage, so clusters can be
+    transient (run the job, then terminate) and you avoid paying for idle HDFS clusters.
+    It's not merely compliance (option 3), not an encryption exclusive (option 1), and
+    there's no licensing gate (option 2).
+  ref: "concepts.md#amazon-emr-managed-hadoop-and-spark"
+
+  # ---------------- Serverless big data ----------------
+- id: aws-analytics-datalake-redshift-emr-042
+  difficulty: advanced
+  tags: [emr-serverless, glue, emr, service-selection, trade-offs]
+  question: |
+    A team wants full Spark/Hive semantics and control over the EMR release version, but
+    has bursty, variable job volume and does not want to manage clusters. Which option
+    best fits?
+  options:
+  - "EMR on EC2 with a long-running cluster"
+  - "EMR Serverless, which runs Spark/Hive without provisioning clusters and bills for vCPU/memory-seconds used"
+  - "Athena SQL only"
+  - "Redshift Serverless"
+  answer: 1
+  explanation: |
+    EMR Serverless is the middle ground: full Spark/Hive with chosen EMR release, but
+    serverless economics (auto-provision, scale to zero, bill for resources used) — ideal
+    for bursty jobs without cluster management. Long-running EMR on EC2 (option 0) wastes
+    idle cost; Athena (option 2) is SQL, not Spark/Hive jobs; Redshift Serverless
+    (option 3) is a warehouse, not Spark.
+  ref: "concepts.md#serverless-big-data-emr-serverless-and-glue-etl"
+
+- id: aws-analytics-datalake-redshift-emr-043
+  difficulty: expert
+  tags: [glue, emr, cost, trade-offs]
+  question: |
+    A continuous, very high-utilization Spark pipeline runs nearly 24/7 at large scale.
+    Which platform typically minimizes cost, and why?
+  options:
+  - "Athena for Spark, because it is interactive"
+  - "Glue ETL, because serverless is always cheapest"
+  - "EMR on EC2 with Spot task nodes and reserved core capacity, because at sustained high utilization EC2-based EMR is cheaper than per-DPU/per-second serverless"
+  - "EMR Serverless, because it scales to zero"
+  answer: 2
+  explanation: |
+    At sustained high utilization, EMR on EC2 with Spot task nodes + reserved core is
+    typically cheapest — serverless per-unit pricing (Glue DPU-hour, EMR Serverless
+    vCPU-seconds) is convenient but costs more when you're never idle. Scale-to-zero
+    (option 3) is irrelevant for 24/7 load; Glue "always cheapest" (option 1) is false;
+    Athena for Spark (option 0) is for interactive analysis, not continuous pipelines.
+  ref: "concepts.md#serverless-big-data-emr-serverless-and-glue-etl"
+
+- id: aws-analytics-datalake-redshift-emr-044
+  difficulty: intermediate
+  tags: [glue, emr-serverless, service-selection]
+  question: |
+    For a simple scheduled Spark ETL job that reads and writes Glue Catalog tables with
+    minimal operational overhead, which is the most natural choice?
+  options:
+  - "OpenSearch ingestion pipelines"
+  - "A Redshift stored procedure"
+  - "A manually managed EMR on EC2 cluster"
+  - "AWS Glue ETL, the serverless, catalog-integrated Spark service that scales to zero"
+  answer: 3
+  explanation: |
+    Glue ETL is serverless, tightly integrated with the Glue Catalog, and scales to zero
+    — ideal for scheduled catalog-centric Spark ETL with minimal ops. A hand-managed EMR
+    cluster (option 2) adds ops burden; OpenSearch ingestion (option 0) is for search
+    data; a Redshift procedure (option 1) is SQL in the warehouse, not lake Spark ETL.
+  ref: "concepts.md#serverless-big-data-emr-serverless-and-glue-etl"
+
+  # ---------------- Firehose / ingestion ----------------
+- id: aws-analytics-datalake-redshift-emr-045
+  difficulty: beginner
+  tags: [firehose, ingestion, s3]
+  question: |
+    What is Amazon Data Firehose (Kinesis Data Firehose) primarily used for?
+  options:
+  - "Serverless buffered delivery of streaming data into destinations like S3, Redshift, and OpenSearch, with optional format conversion"
+  - "Running SQL over S3"
+  - "Managing IAM permissions"
+  - "Providing a durable, replayable, ordered log for multiple independent consumers"
+  answer: 0
+  explanation: |
+    Firehose is a fully managed, auto-scaling service that buffers and delivers streaming
+    data to S3/Redshift/OpenSearch/Splunk/HTTP, with optional Lambda transform, Parquet/
+    ORC conversion, and dynamic partitioning. The replayable ordered log (option 3) is
+    Kinesis Data Streams; SQL over S3 is Athena (option 1); IAM (option 2) is unrelated.
+  ref: "concepts.md#batch-versus-streaming-ingestion-with-kinesis-data-firehose"
+
+- id: aws-analytics-datalake-redshift-emr-046
+  difficulty: intermediate
+  tags: [firehose, buffering, latency, trade-offs]
+  question: |
+    Why does Kinesis Data Firehose deliver data with tens-of-seconds to minutes of
+    latency rather than sub-second?
+  options:
+  - "It re-encrypts every record individually"
+  - "It buffers records by buffer size or buffer interval (whichever hits first) before delivering, trading freshness for no-ops batching"
+  - "It waits for a human approval on each batch"
+  - "It routes all data through a single global shard"
+  answer: 1
+  explanation: |
+    Firehose batches by buffer size (e.g. 1–128 MB) or interval (e.g. 60–900 s), so
+    inherent delivery latency is the price of hands-off batching. It doesn't per-record
+    re-encrypt (option 0), require human approval (option 2), or use a single global
+    shard (option 3 — it auto-scales with no shards to manage).
+  ref: "concepts.md#batch-versus-streaming-ingestion-with-kinesis-data-firehose"
+
+- id: aws-analytics-datalake-redshift-emr-047
+  difficulty: advanced
+  tags: [firehose, kinesis-data-streams, service-selection, trade-offs]
+  question: |
+    You need sub-second latency, strict ordering, replay, and fan-out to several
+    independent real-time consumers, AND you also want to archive the same stream to S3.
+    What is the best design?
+  options:
+  - "Load everything into Redshift in real time"
+  - "Firehose only, since it can also do real-time processing"
+  - "Kinesis Data Streams for the low-latency, ordered, replayable, multi-consumer log, chained to Firehose to also land data in S3"
+  - "SQS Standard for ordering and replay"
+  answer: 2
+  explanation: |
+    Sub-second latency, ordering, replay, and multi-consumer fan-out require Kinesis Data
+    Streams (a durable, replayable, ordered log). Chain it to Firehose to also archive to
+    S3 — a common pattern. Firehose alone (option 1) has batching latency and no replay/
+    fan-out; SQS Standard (option 3) offers neither ordering nor replay; real-time
+    Redshift loads (option 0) don't provide a replayable consumer log.
+  ref: "concepts.md#batch-versus-streaming-ingestion-with-kinesis-data-firehose"
+
+- id: aws-analytics-datalake-redshift-emr-048
+  difficulty: intermediate
+  tags: [firehose, redshift, delivery]
+  question: |
+    How does Firehose deliver data into Amazon Redshift?
+  options:
+  - "By replicating the Redshift cluster"
+  - "By writing directly to Redshift local SSD over the network"
+  - "By streaming individual rows via INSERT statements"
+  - "By first staging batched data in S3 and then running a Redshift COPY command"
+  answer: 3
+  explanation: |
+    Firehose delivery to Redshift stages batched data in S3 and issues a COPY — the
+    efficient bulk-load path for a columnar MPP warehouse. Per-row INSERTs (option 2)
+    are slow and not how Firehose works; it doesn't replicate the cluster (option 0) or
+    write to local SSD directly (option 1).
+  ref: "concepts.md#batch-versus-streaming-ingestion-with-kinesis-data-firehose"
+
+- id: aws-analytics-datalake-redshift-emr-049
+  difficulty: advanced
+  tags: [firehose, small-files, freshness, trade-offs]
+  question: |
+    A Firehose stream to S3 is configured with a very small buffer size and short
+    interval to maximize freshness. What downstream problem is this likely to create?
+  options:
+  - "The small-file problem — many tiny S3 objects that slow and inflate the cost of downstream Athena/Spark queries"
+  - "Loss of strong consistency in S3"
+  - "Redshift distribution skew"
+  - "Data loss, because small buffers drop records"
+  answer: 0
+  explanation: |
+    Aggressive buffering for freshness produces many small objects, causing the small-file
+    problem downstream (slow queries, high request cost). Balance freshness vs file size
+    and compact. Small buffers don't drop records (option 3), don't affect S3 consistency
+    (option 1), and don't cause Redshift distribution skew (option 2, a warehouse layout
+    issue).
+  ref: "concepts.md#batch-versus-streaming-ingestion-with-kinesis-data-firehose"
+
+  # ---------------- Open table formats ----------------
+- id: aws-analytics-datalake-redshift-emr-050
+  difficulty: intermediate
+  tags: [iceberg, acid, table-formats]
+  question: |
+    Which capabilities do open table formats like Apache Iceberg add over plain
+    partitioned Parquet on S3?
+  options:
+  - "Nothing; they are just a different compression codec"
+  - "ACID transactions, row-level upsert/delete/merge, schema evolution, snapshot isolation, and time-travel"
+  - "Automatic conversion of the lake into a relational database engine"
+  - "Real-time sub-millisecond point lookups"
+  answer: 1
+  explanation: |
+    Iceberg/Hudi/Delta add a metadata layer providing ACID, row-level upsert/delete/merge,
+    schema evolution, snapshot isolation, and time-travel over columnar files. They're not
+    a codec (option 0), don't turn S3 into an RDBMS engine (option 2), and don't provide
+    OLTP sub-ms lookups (option 3).
+  ref: "concepts.md#open-table-formats-iceberg-hudi-and-delta-lake"
+
+- id: aws-analytics-datalake-redshift-emr-051
+  difficulty: expert
+  tags: [iceberg, compaction, s3-tables, failure-modes]
+  question: |
+    A streaming-upsert Iceberg table on S3 gradually accumulates many small data and
+    metadata files, degrading read performance. What operational practice addresses this,
+    and what AWS feature automates it?
+  options:
+  - "Increase the S3 request rate quota"
+  - "Disable ACID to stop file creation; there is no automation"
+  - "Periodic compaction of small files; Amazon S3 Tables provides managed Iceberg with automatic compaction"
+  - "Switch the table back to CSV"
+  answer: 2
+  explanation: |
+    Open-format tables still need compaction to fight small-file accumulation; Amazon S3
+    Tables offers managed Iceberg with automatic compaction (or schedule Glue compaction).
+    Disabling ACID (option 1) defeats the purpose; CSV (option 3) loses columnar
+    efficiency and transactions; request-rate quotas (option 0) don't fix file layout.
+  ref: "concepts.md#open-table-formats-iceberg-hudi-and-delta-lake"
+
+- id: aws-analytics-datalake-redshift-emr-052
+  difficulty: advanced
+  tags: [iceberg, hudi, delta, service-selection, trade-offs]
+  question: |
+    On AWS, which open table format is generally the safest default given the broadest
+    native support across Athena, Redshift, EMR, and Glue?
+  options:
+  - "Apache Hudi, because it is the only one supporting upserts"
+  - "Plain Parquet, because table formats are unnecessary"
+  - "Delta Lake, because it is Databricks-native"
+  - "Apache Iceberg, the AWS-favored open standard natively supported across Athena, Redshift, EMR, and Glue"
+  answer: 3
+  explanation: |
+    Iceberg has the broadest AWS-native support and underpins S3 Tables, making it the
+    safe default. Delta is strongest in Databricks (option 2); Hudi excels at streaming
+    upserts but isn't the only upsert-capable format (option 0); plain Parquet lacks ACID/
+    upserts entirely (option 1).
+  ref: "concepts.md#open-table-formats-iceberg-hudi-and-delta-lake"
+
+  # ---------------- OpenSearch ----------------
+- id: aws-analytics-datalake-redshift-emr-053
+  difficulty: beginner
+  tags: [opensearch, search, logs]
+  question: |
+    What is Amazon OpenSearch Service primarily suited for?
+  options:
+  - "Full-text search, log/observability analytics, and near-real-time dashboards with alerting"
+  - "Durable object storage"
+  - "Serverless Spark ETL"
+  - "Complex multi-table SQL joins over a data warehouse"
+  answer: 0
+  explanation: |
+    OpenSearch (managed Elasticsearch/OpenSearch) targets full-text search, log analytics,
+    and near-real-time dashboards/alerting. Complex SQL joins are Redshift's domain
+    (option 3); object storage is S3 (option 1); Spark ETL is Glue/EMR (option 2).
+  ref: "concepts.md#amazon-opensearch-for-search-and-log-analytics"
+
+- id: aws-analytics-datalake-redshift-emr-054
+  difficulty: advanced
+  tags: [opensearch, athena, logs, tiering, trade-offs]
+  question: |
+    You must support fast full-text search and live dashboards over the last 2 weeks of
+    logs, plus cheap ad-hoc analytics over 3 years of history. What design balances cost
+    and capability?
+  options:
+  - "Keep all 3 years hot in OpenSearch for uniform search"
+  - "Hot recent logs in OpenSearch for search/dashboards; cold history as Parquet in S3 queried by Athena (bridge with UltraWarm/cold tiers)"
+  - "Store everything only in Redshift"
+  - "Store everything only in S3 Glacier Deep Archive"
+  answer: 1
+  explanation: |
+    OpenSearch is expensive to keep petabytes hot, so keep the searched recent window
+    there and push cold history to cheap S3 Parquet queried by Athena (UltraWarm/cold
+    tiers bridge them). All 3 years hot (option 0) is costly; Redshift-only (option 2)
+    isn't text-search-optimized; Glacier Deep Archive (option 3) can't serve ad-hoc
+    queries without lengthy restores.
+  ref: "concepts.md#amazon-opensearch-for-search-and-log-analytics"
+
+- id: aws-analytics-datalake-redshift-emr-055
+  difficulty: expert
+  tags: [opensearch, ultrawarm, cost]
+  question: |
+    What is the purpose of OpenSearch UltraWarm (and cold) storage tiers?
+  options:
+  - "To convert indices into Parquet for Athena"
+  - "To speed up writes by caching in memory"
+  - "To move older, less-frequently-searched indices to cheaper S3-backed storage while keeping them queryable, reducing cost"
+  - "To replicate data to another region for DR"
+  answer: 2
+  explanation: |
+    UltraWarm and cold tiers store older indices on cheaper S3-backed storage while
+    remaining queryable, lowering the cost of retaining large log histories in OpenSearch.
+    They're not a write cache (option 1), cross-region DR (option 3), or a Parquet
+    converter (option 0).
+  ref: "concepts.md#amazon-opensearch-for-search-and-log-analytics"
+
+  # ---------------- QuickSight ----------------
+- id: aws-analytics-datalake-redshift-emr-056
+  difficulty: intermediate
+  tags: [quicksight, spice, bi, trade-offs]
+  question: |
+    What is the main trade-off of using QuickSight SPICE (import) mode versus direct
+    query?
+  options:
+  - "SPICE can only read from S3"
+  - "Direct query removes all load from Redshift/Athena"
+  - "SPICE is always fresher but slower than direct query"
+  - "SPICE caches a fast, high-concurrency in-memory copy that shields the source, but the data is a periodically refreshed (potentially stale) snapshot"
+  answer: 3
+  explanation: |
+    SPICE gives fast, cheap, high-concurrency dashboards and offloads the source, at the
+    cost of staleness (refresh interval) and SPICE capacity limits; direct query is always
+    fresh but pushes every interaction to Athena/Redshift. SPICE is a snapshot so it's not
+    fresher (option 2); it reads many sources, not just S3 (option 0); direct query adds
+    load rather than removing it (option 1).
+  ref: "concepts.md#amazon-quicksight-for-business-intelligence"
+
+- id: aws-analytics-datalake-redshift-emr-057
+  difficulty: advanced
+  tags: [quicksight, direct-query, spice, service-selection, trade-offs]
+  question: |
+    Hundreds of viewers open a dashboard over data that changes only once daily. To keep
+    dashboards fast and avoid hammering Athena on every interaction, which QuickSight
+    configuration fits best?
+  options:
+  - "SPICE import refreshed once per day, serving all viewers from the in-memory cache"
+  - "Disable caching to guarantee freshness on every click"
+  - "Point QuickSight directly at raw CSV in S3 with no catalog"
+  - "Direct query to Athena for every widget interaction"
+  answer: 0
+  explanation: |
+    Many viewers + daily-changing data is ideal for SPICE: refresh once daily and serve
+    all interactions from the fast in-memory cache, shielding Athena from per-click scan
+    cost. Direct query per interaction (option 3) hammers Athena and costs per scan;
+    disabling caching (option 1) worsens load/latency for no benefit here; raw CSV
+    (option 2) is slow and unrelated to the caching decision.
+  ref: "concepts.md#amazon-quicksight-for-business-intelligence"
+
+  # ---------------- ETL vs ELT ----------------
+- id: aws-analytics-datalake-redshift-emr-058
+  difficulty: intermediate
+  tags: [etl, elt, patterns]
+  question: |
+    What distinguishes ELT from traditional ETL in an AWS analytics context?
+  options:
+  - "ELT transforms data before loading; ETL transforms after"
+  - "ELT loads raw data into the target (S3/Redshift) first and transforms in place with the engine (SQL/dbt/CTAS); ETL transforms before loading"
+  - "ELT never keeps raw data; ETL always does"
+  - "There is no difference; the terms are synonyms"
+  answer: 1
+  explanation: |
+    ELT extracts and loads raw data first, then transforms in place using the target
+    engine's power (Redshift SQL, Athena CTAS, dbt), keeping raw data for re-derivation.
+    ETL transforms before loading. Option 0 inverts the definitions; option 2 mischaracterizes
+    raw retention; option 3 is false.
+  ref: "concepts.md#etl-versus-elt-patterns-on-aws"
+
+- id: aws-analytics-datalake-redshift-emr-059
+  difficulty: advanced
+  tags: [elt, lakehouse, trade-offs]
+  question: |
+    Why do modern lakehouse designs on AWS often lean toward ELT rather than ETL?
+  options:
+  - "Because ELT removes the need for any compute at all"
+  - "Because ELT guarantees lower query latency than any warehouse"
+  - "Because landing raw data cheaply in S3 (open formats) and transforming with the engine you already pay for keeps raw data for re-derivation and reduces separate pipeline compute"
+  - "Because ETL is deprecated on AWS"
+  answer: 2
+  explanation: |
+    ELT fits the lakehouse: cheap raw S3 landing + open formats, transform with the
+    engine you already run (Redshift/Athena/dbt), retain raw for re-derivation, and lean
+    on zero-ETL to cut pipeline code. ELT doesn't guarantee lower latency universally
+    (option 1), ETL isn't deprecated (option 3), and transformation still needs compute
+    (option 0).
+  ref: "concepts.md#etl-versus-elt-patterns-on-aws"
+
+- id: aws-analytics-datalake-redshift-emr-060
+  difficulty: intermediate
+  tags: [etl, trade-offs]
+  question: |
+    In which situation is a classic ETL (transform-before-load) approach usually
+    preferable to ELT?
+  options:
+  - "When you have no compute available for transformation"
+  - "When you want to avoid using S3 entirely"
+  - "When transforms are trivial and the team wants raw data retained for re-derivation"
+  - "When transforms are heavy/complex and you want the warehouse kept clean and its compute reserved for queries"
+  answer: 3
+  explanation: |
+    ETL suits heavy/complex transforms where you want to control schema/quality up front
+    and keep the (expensive) warehouse compute focused on queries rather than transforms.
+    Trivial transforms + raw retention (option 2) favor ELT; ETL still needs compute,
+    so lack of compute (option 0) is not the reason; ETL isn't about avoiding S3
+    (option 1).
+  ref: "concepts.md#etl-versus-elt-patterns-on-aws"
+
+  # ---------------- Choosing engine ----------------
+- id: aws-analytics-datalake-redshift-emr-061
+  difficulty: advanced
+  tags: [service-selection, athena, redshift, emr, trade-offs]
+  question: |
+    A nightly job must run a petabyte-scale join with custom Scala UDFs plus an ML
+    feature-engineering step, output written to S3. Which engine is most appropriate?
+  options:
+  - "EMR/Spark (or EMR Serverless if bursty), because it supports programmatic large-scale processing, custom UDFs, and ML pipelines"
+  - "QuickSight, because it handles large datasets"
+  - "Athena, because it is serverless SQL"
+  - "Redshift, because it is an MPP warehouse"
+  answer: 0
+  explanation: |
+    Programmatic petabyte processing with custom Scala UDFs and an ML step is Spark's
+    domain — EMR (or EMR Serverless for bursty runs). Athena SQL (option 2) can't run
+    arbitrary Scala/ML pipelines; Redshift (option 3) is for interactive SQL, not custom
+    Spark UDF batch jobs; QuickSight (option 1) is BI visualization, not processing.
+  ref: "concepts.md#athena-versus-redshift-versus-emr-choosing-the-query-engine"
+
+- id: aws-analytics-datalake-redshift-emr-062
+  difficulty: intermediate
+  tags: [service-selection, athena, redshift]
+  question: |
+    Which statement best captures when to prefer Redshift over Athena?
+  options:
+  - "When queries are rare and you want zero idle cost"
+  - "When you need high-concurrency, low-latency, repeated SQL with complex joins over structured data and can accept paying for a cluster or RPUs"
+  - "When you only ever run one query per month"
+  - "When you refuse to load or model any data"
+  answer: 1
+  explanation: |
+    Redshift wins for high-concurrency, low-latency, repeated, join-heavy SQL with
+    governance — worth the cluster/RPU cost. Rare queries with zero idle budget
+    (options 0/2) favor Athena; refusing to load/model data (option 3) also favors
+    Athena's schema-on-read lake approach.
+  ref: "concepts.md#athena-versus-redshift-versus-emr-choosing-the-query-engine"
+
+- id: aws-analytics-datalake-redshift-emr-063
+  difficulty: expert
+  tags: [service-selection, lakehouse, trade-offs]
+  question: |
+    Three teams need to query the same large dataset: one wants ad-hoc SQL, one runs
+    high-concurrency dashboards, one runs Spark ML. What architecture avoids maintaining
+    three separate copies?
+  options:
+  - "Replicate the dataset nightly to three OpenSearch clusters"
+  - "Copy the data into Athena, Redshift, and EMR-local HDFS separately"
+  - "A lakehouse: store one copy as Iceberg on S3 in the Glue Catalog, queried by Athena (ad-hoc), Redshift Spectrum (dashboards/joins), and EMR/Spark (ML)"
+  - "Force all three teams to use only Athena"
+  answer: 2
+  explanation: |
+    The lakehouse keeps one governed Iceberg copy on S3 that Athena, Redshift Spectrum,
+    and EMR/Spark all read — no triple-copy sprawl. Three separate copies (option 1) or
+    three OpenSearch replicas (option 0) duplicate storage and drift; forcing everyone
+    onto Athena (option 3) ignores the dashboard-concurrency and Spark-ML needs.
+  ref: "concepts.md#athena-versus-redshift-versus-emr-choosing-the-query-engine"
+
+  # ---------------- Cost / estimation ----------------
+- id: aws-analytics-datalake-redshift-emr-064
+  difficulty: intermediate
+  tags: [cost, spectrum, athena]
+  question: |
+    What is the shared pricing dimension for Amazon Athena and Redshift Spectrum queries
+    over S3?
+  options:
+  - "Per row returned to the client"
+  - "A flat fee per query regardless of size"
+  - "Per node-hour of a running cluster"
+  - "$5 per TB of data scanned in S3 (with a 10 MB per-query minimum)"
+  answer: 3
+  explanation: |
+    Both Athena and Spectrum bill $5 per TB scanned (10 MB minimum), which is why columnar
+    formats and partition pruning dominate cost optimization. Node-hours (option 2) are
+    the Redshift-cluster model; neither bills per row returned (option 0) or a flat
+    per-query fee (option 1).
+  ref: "concepts.md#cost-models-and-back-of-envelope-estimation"
+
+- id: aws-analytics-datalake-redshift-emr-065
+  difficulty: advanced
+  tags: [cost, athena, workgroup, failure-modes]
+  question: |
+    To prevent a single unpartitioned SELECT * from scanning an entire multi-TB table and
+    generating a surprise bill, which Athena control helps most?
+  options:
+  - "Set per-query / per-workgroup data-scanned limits (and use workgroups to cap and monitor spend)"
+  - "Switch the table to CSV"
+  - "Disable the Glue Data Catalog"
+  - "Increase the concurrent-query quota"
+  answer: 0
+  explanation: |
+    Athena workgroups let you enforce per-query and per-workgroup data-scanned limits and
+    monitor spend, stopping runaway scans. Raising concurrency (option 3) does the
+    opposite; CSV (option 1) increases bytes scanned; disabling the catalog (option 2)
+    breaks querying entirely.
+  ref: "concepts.md#cost-models-and-back-of-envelope-estimation"
+
+- id: aws-analytics-datalake-redshift-emr-066
+  difficulty: expert
+  tags: [cost, estimation, storage]
+  question: |
+    You keep 1 TB/day of raw logs and analysts scan them. Which action most reduces the
+    dominant cost, and what is the dominant cost?
+  options:
+  - "Enable versioning; storage is the dominant cost"
+  - "Convert to partitioned Parquet so queries scan far less; query scan cost ($5/TB scanned) dominates over the ~$0.023/GB-mo storage"
+  - "Move to a bigger region; data transfer dominates"
+  - "Add more analysts; labor dominates"
+  answer: 1
+  explanation: |
+    Repeated full scans of raw logs at $5/TB dwarf S3 storage (~$0.023/GB-mo), so
+    converting to partitioned Parquet (with column/partition pruning) slashes scanned
+    bytes and cost. Versioning (option 0) adds cost; region change/transfer (option 2)
+    isn't the dominant factor here; labor (option 3) isn't the AWS bill.
+  ref: "concepts.md#cost-models-and-back-of-envelope-estimation"
+
+  # ---------------- Failure modes ----------------
+- id: aws-analytics-datalake-redshift-emr-067
+  difficulty: advanced
+  tags: [redshift, ha, dr, failure-modes, trade-offs]
+  question: |
+    A single-cluster Redshift deployment must improve resilience to an Availability Zone
+    failure. Which approach is appropriate?
+  options:
+  - "Convert the cluster to DynamoDB global tables"
+  - "Rely on S3 strong consistency to make the cluster multi-AZ automatically"
+  - "Use RA3 Multi-AZ for HA, and/or automated snapshots with cross-region snapshot copy for DR, since a standard cluster is single-AZ"
+  - "Nothing is needed; Redshift clusters are inherently multi-region"
+  answer: 2
+  explanation: |
+    A standard Redshift cluster is single-AZ; improve resilience with RA3 Multi-AZ and/or
+    snapshots + cross-region snapshot copy for DR. S3 consistency (option 1) doesn't make
+    the cluster multi-AZ; clusters aren't inherently multi-region (option 3); DynamoDB
+    global tables (option 0) are a different service/model, not a warehouse.
+  ref: "concepts.md#failure-modes-and-reliability"
+
+- id: aws-analytics-datalake-redshift-emr-068
+  difficulty: expert
+  tags: [dr, s3, emr, resilience, trade-offs]
+  question: |
+    In a well-designed AWS analytics platform, which component should be treated as the
+    durable source of truth so compute can be considered replaceable?
+  options:
+  - "The Redshift leader node's memory"
+  - "The Glue crawler's temporary cache"
+  - "The EMR cluster's local HDFS"
+  - "Amazon S3 (regional, 11-nines durability, with cross-region replication / MRAP for DR); EMR/Athena/Redshift compute is rebuildable from it"
+  answer: 3
+  explanation: |
+    S3 is the durable, highly available source of truth (11 nines, CRR/MRAP for DR); EMR,
+    Athena, and Redshift compute can be rebuilt or reloaded from S3, so treat them as
+    replaceable. HDFS on EMR (option 2) is transient; leader-node memory (option 0) and a
+    crawler cache (option 1) are ephemeral, not sources of truth.
+  ref: "concepts.md#failure-modes-and-reliability"
+
+- id: aws-analytics-datalake-redshift-emr-069
+  difficulty: advanced
+  tags: [redshift, storage-full, failure-modes]
+  question: |
+    A Redshift cluster reaches a "storage-full" state. On a DC2 cluster, what is the core
+    issue and a valid remedy?
+  options:
+  - "DC2 bundles fixed local SSD storage; add nodes/resize (or move to RA3 managed storage) to increase capacity"
+  - "The leader node crashed; reboot it"
+  - "Concurrency scaling filled the disk; disable it"
+  - "S3 ran out of space; buy more S3"
+  answer: 0
+  explanation: |
+    DC2 nodes have fixed local SSD; when full, you must add nodes/resize or migrate to RA3
+    (which offloads to S3-backed managed storage). It's not an S3 capacity issue
+    (option 3), not a leader-node crash (option 1), and concurrency scaling doesn't fill
+    the primary cluster's disk (option 2).
+  ref: "concepts.md#failure-modes-and-reliability"
+
+- id: aws-analytics-datalake-redshift-emr-070
+  difficulty: intermediate
+  tags: [schema-drift, glue, failure-modes]
+  question: |
+    Upstream producers occasionally change field types, breaking lake tables. Which
+    combination best guards against this schema drift?
+  options:
+  - "Rely solely on crawlers to re-infer types after each break"
+  - "Use Glue Schema Registry + Glue Data Quality (and explicit DDL or Iceberg schema evolution) to validate and manage schema changes"
+  - "Store everything as one giant string column"
+  - "Turn off validation to accept any data"
+  answer: 1
+  explanation: |
+    Glue Schema Registry enforces schema compatibility for streams, Glue Data Quality
+    validates data, and Iceberg's schema evolution (or explicit DDL) manages changes
+    safely. Crawlers alone (option 0) may silently misinfer; a single string column
+    (option 2) discards structure; turning off validation (option 3) invites bad data.
+  ref: "concepts.md#failure-modes-and-reliability"
+
+  # ---------------- Extra coverage ----------------
+- id: aws-analytics-datalake-redshift-emr-071
+  difficulty: beginner
+  tags: [zones, data-lake]
+  question: |
+    Why do data lakes commonly organize S3 into raw, curated, and aggregated zones?
+  options:
+  - "To disable schema-on-read"
+  - "To force all data into a single file per zone"
+  - "To separate immutable landed data from validated/cleansed and query-ready (partitioned Parquet) data, improving quality and cost control"
+  - "Because S3 requires exactly three buckets"
+  answer: 2
+  explanation: |
+    Zones separate immutable raw landing from cleansed/curated and aggregated
+    (Parquet, partitioned, BI-ready) data, giving reproducibility, quality, and cost
+    control. It's not a single-file rule (option 1), not a bucket-count requirement
+    (option 3), and doesn't disable schema-on-read (option 0).
+  ref: "concepts.md#amazon-s3-as-the-data-lake-foundation"
+
+- id: aws-analytics-datalake-redshift-emr-072
+  difficulty: expert
+  tags: [redshift, materialized-views, performance, trade-offs]
+  question: |
+    Dashboards repeatedly run the same expensive aggregation in Redshift. Which feature
+    most directly reduces recomputation, and what is the trade-off?
+  options:
+  - "ALL distribution, which precomputes aggregations"
+  - "Concurrency scaling, which caches query results permanently"
+  - "Interleaved sort keys, which eliminate all aggregation cost"
+  - "Materialized views (with auto-refresh), which precompute and store aggregates for fast reads, at the cost of refresh overhead and potential staleness between refreshes"
+  answer: 3
+  explanation: |
+    Materialized views precompute and persist aggregates so repeated dashboard queries
+    read them cheaply; the trade-off is refresh cost and staleness between refreshes
+    (auto-refresh mitigates it). Sort keys/distribution (options 2/0) affect scan/join
+    layout, not precomputed aggregates; concurrency scaling (option 1) adds burst capacity,
+    it doesn't permanently cache results.
+  ref: "concepts.md#redshift-concurrency-scaling-workload-management-and-serverless"
+
+- id: aws-analytics-datalake-redshift-emr-073
+  difficulty: intermediate
+  tags: [athena, federated-query, service-selection]
+  question: |
+    An analyst needs to run a single SQL query joining S3 lake data with live rows in an
+    RDS PostgreSQL database, without exporting the RDS data first. Which Athena capability
+    enables this?
+  options:
+  - "Federated queries via Lambda data source connectors"
+  - "Provisioned Capacity"
+  - "Result reuse"
+  - "Partition projection"
+  answer: 0
+  explanation: |
+    Athena federated queries use Lambda-based connectors to query external sources (RDS,
+    DynamoDB, etc.) and join them with S3 data in one query. Partition projection (option 3)
+    and result reuse (option 2) optimize S3 scans; Provisioned Capacity (option 1) changes
+    the billing model, not cross-source querying.
+  ref: "concepts.md#amazon-athena-serverless-sql-on-s3"
+
+- id: aws-analytics-datalake-redshift-emr-074
+  difficulty: advanced
+  tags: [redshift, data-sharing, trade-offs]
+  question: |
+    A producer team wants several consumer teams (separate clusters/accounts) to query its
+    live Redshift data without copying it. Which capability fits, and what is the benefit?
+  options:
+  - "Nightly UNLOAD to S3 and reload into each consumer cluster"
+  - "Redshift data sharing, giving live read access across clusters/accounts with no data movement or duplication"
+  - "Cross-region snapshot copy to each consumer"
+  - "Export to CSV and email it"
+  answer: 1
+  explanation: |
+    Redshift data sharing exposes live data to other clusters/accounts with no copying —
+    consumers read the producer's committed data directly, avoiding duplication and drift.
+    Nightly UNLOAD/reload (option 0) and snapshot copies (option 2) duplicate and stale
+    the data; CSV export (option 3) is neither live nor scalable.
+  ref: "concepts.md#amazon-redshift-mpp-architecture-ra3-and-managed-storage"
+
+- id: aws-analytics-datalake-redshift-emr-075
+  difficulty: expert
+  tags: [emr, emr-on-eks, service-selection, trade-offs]
+  question: |
+    An organization standardizes on Kubernetes and wants to run Spark jobs sharing the
+    same EKS clusters as other services for better utilization. Which EMR option fits?
+  options:
+  - "Glue ETL"
+  - "EMR on EC2 with dedicated clusters"
+  - "EMR on EKS, which runs Spark on shared Kubernetes clusters for higher resource utilization and unified ops"
+  - "Athena for Spark"
+  answer: 2
+  explanation: |
+    EMR on EKS runs Spark on shared EKS clusters, letting the org standardize on
+    Kubernetes and improve utilization across workloads. EMR on EC2 (option 1) uses
+    dedicated clusters, not shared EKS; Athena for Spark (option 3) and Glue (option 0)
+    are serverless and not Kubernetes-based.
+  ref: "concepts.md#amazon-emr-managed-hadoop-and-spark"
+
+- id: aws-analytics-datalake-redshift-emr-076
+  difficulty: intermediate
+  tags: [glue, dynamicframe, spark]
+  question: |
+    What advantage do Glue DynamicFrames offer over standard Spark DataFrames for messy,
+    evolving source data?
+  options:
+  - "They are always faster than DataFrames for every workload"
+  - "They eliminate the need for the Glue Data Catalog"
+  - "They run only on GPUs"
+  - "They tolerate schema flexibility/inconsistency (self-describing records) without requiring a fixed schema up front, easing ingestion of semi-structured data"
+  answer: 3
+  explanation: |
+    DynamicFrames are schema-flexible/self-describing, handling inconsistent semi-structured
+    data without a rigid predefined schema — useful during messy ingestion (convertible to
+    DataFrames for Spark SQL). They don't require GPUs (option 2), aren't universally
+    faster (option 0), and don't replace the catalog (option 1).
+  ref: "concepts.md#aws-glue-data-catalog-crawlers-and-etl"
+
+- id: aws-analytics-datalake-redshift-emr-077
+  difficulty: beginner
+  tags: [firehose, ingestion, service-selection]
+  question: |
+    Which service most simply lands a continuous stream of records into S3 as compressed
+    Parquet with no servers to manage?
+  options:
+  - "Kinesis Data Firehose, with built-in buffering, compression, and Parquet/ORC format conversion"
+  - "Amazon Redshift COPY on a schedule"
+  - "AWS Lake Formation"
+  - "Amazon EMR"
+  answer: 0
+  explanation: |
+    Firehose is serverless, buffers records, and can convert to Parquet/ORC and compress
+    on the way to S3 — the simplest no-ops landing path. EMR (option 3) needs cluster
+    management; scheduled Redshift COPY (option 1) is batch and warehouse-bound; Lake
+    Formation (option 2) is governance, not ingestion.
+  ref: "concepts.md#batch-versus-streaming-ingestion-with-kinesis-data-firehose"
+
+- id: aws-analytics-datalake-redshift-emr-078
+  difficulty: advanced
+  tags: [athena, iceberg, updates, trade-offs]
+  question: |
+    A team wants to run UPDATE and DELETE statements from Athena on lake data, which plain
+    Parquet tables don't support. What enables this?
+  options:
+  - "Enabling result reuse"
+  - "Using Apache Iceberg tables, which give Athena row-level INSERT/UPDATE/DELETE/MERGE with ACID semantics"
+  - "Switching the workgroup to Provisioned Capacity"
+  - "Increasing the concurrent query quota"
+  answer: 1
+  explanation: |
+    Athena can run row-level UPDATE/DELETE/MERGE only on transactional table formats like
+    Iceberg; plain Parquet is immutable. Result reuse (option 0), Provisioned Capacity
+    (option 2), and quota increases (option 3) don't add mutability.
+  ref: "concepts.md#open-table-formats-iceberg-hudi-and-delta-lake"
+
+- id: aws-analytics-datalake-redshift-emr-079
+  difficulty: intermediate
+  tags: [redshift, auto, distribution, tuning]
+  question: |
+    A new Redshift table has no obvious join or distribution key and the team is unsure
+    how it will grow. What is a sensible default distribution choice?
+  options:
+  - "Manually re-create the table daily with a different key"
+  - "KEY on a random column to force collocation"
+  - "AUTO distribution, letting Redshift choose and adjust the style as the table grows"
+  - "ALL, to be safe"
+  answer: 2
+  explanation: |
+    AUTO distribution lets Redshift pick and evolve the style (small tables often start
+    ALL, growing to EVEN/KEY), a good default when the pattern is unknown. KEY on a random
+    column (option 1) risks skew and helps no real join; ALL on a growing table
+    (option 3) wastes space; daily recreation (option 0) is needless churn.
+  ref: "concepts.md#distribution-styles-sort-keys-and-redshift-performance-tuning"
+
+- id: aws-analytics-datalake-redshift-emr-080
+  difficulty: expert
+  tags: [athena, concurrency, quotas, failure-modes, trade-offs]
+  question: |
+    A customer-facing app fires many concurrent Athena queries per user click and starts
+    seeing queries queue/throttle. What is the best interpretation and fix?
+  options:
+  - "Convert data to CSV to raise concurrency"
+  - "Add more Glue crawlers to increase throughput"
+  - "Athena has unlimited concurrency; the app has a bug"
+  - "Athena has default concurrent-query quotas and seconds-level variable latency; for high-concurrency low-latency serving, cache results (e.g. SPICE/extract) or load into Redshift instead of querying Athena per click"
+  answer: 3
+  explanation: |
+    Athena has default concurrent-DML quotas and variable seconds-level latency — it's not
+    built to back per-click, high-concurrency user requests. Serve those via a cache
+    (SPICE/materialized extract) or a low-latency store like Redshift/DynamoDB, reserving
+    Athena for analyst/ad-hoc use. Concurrency isn't unlimited (option 2); CSV (option 0)
+    and crawlers (option 1) don't address concurrency limits.
+  ref: "concepts.md#athena-versus-redshift-versus-emr-choosing-the-query-engine"

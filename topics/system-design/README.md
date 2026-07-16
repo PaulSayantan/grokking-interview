@@ -1,7 +1,7 @@
 # System Design
 
-23 topics. Study content and MCQs live in per-topic
-subfolders. See the master taxonomy in `../../TOPICS.md`.
+23 core topics + 26 AWS System Design topics (49 total). Study content and MCQs
+live in per-topic subfolders. See the master taxonomy in `../../TOPICS.md`.
 
 | Topic | Slug | Freq | Difficulty | Status |
 |---|---|---|---|---|
@@ -34,4 +34,43 @@ Status: ☐ not started · ◐ concepts done · ● concepts+MCQs · ✅ validat
 All 23 topics: deep trade-off-focused concepts.md + validated MCQs across all four
 tiers. Includes modern topics (event-driven/CQRS/saga/CDC, GenAI/RAG/vector DBs,
 real-time streaming, resilience trade-offs deep-dive).
+
+## AWS System Design (26 topics)
+
+Designing microservices and large-scale systems with AWS primitives (SQS, DynamoDB,
+ECS/EKS, EC2, Lambda, S3, and more). Same depth/trade-off bar as the core topics;
+`aws-` slug prefix. **1,979 MCQs**, all four tiers, service-limit- and trade-off-heavy.
+
+| Topic | Slug | Freq | Difficulty | Status |
+|---|---|---|---|---|
+| AWS Fundamentals and the Well-Architected Framework | `aws-fundamentals-well-architected` | very-high | beginner | ✅ (80 MCQs · 38 adv/expert) |
+| AWS Compute: EC2, Containers, Fargate and Lambda Trade-offs | `aws-compute-ec2-fargate-lambda` | very-high | intermediate | ✅ (70 MCQs · 30 adv/expert) |
+| Containers on AWS: ECS vs EKS, Fargate and Orchestration | `aws-containers-ecs-eks` | high | advanced | ✅ (75 MCQs · 35 adv/expert) |
+| Serverless Architecture: Lambda, Step Functions and Event-Driven Design | `aws-serverless-lambda-stepfunctions` | very-high | intermediate | ✅ (72 MCQs · 34 adv/expert) |
+| API Layer on AWS: API Gateway, AppSync and GraphQL | `aws-api-layer-apigateway-appsync` | high | intermediate | ✅ (70 MCQs · 37 adv/expert) |
+| Amazon S3 Deep Dive: Object Storage at Scale | `aws-storage-s3-deep-dive` | very-high | intermediate | ✅ (75 MCQs · 37 adv/expert) |
+| Block and File Storage: EBS, EFS and FSx Trade-offs | `aws-storage-ebs-efs-fsx` | high | intermediate | ✅ (75 MCQs · 37 adv/expert) |
+| Amazon DynamoDB Deep Dive: Data Modeling and Scale | `aws-dynamodb-deep-dive` | very-high | advanced | ✅ (78 MCQs · 38 adv/expert) |
+| Relational Databases on AWS: RDS and Aurora | `aws-databases-rds-aurora` | high | intermediate | ✅ (76 MCQs · 36 adv/expert) |
+| Caching on AWS: ElastiCache, DAX and CloudFront Patterns | `aws-caching-elasticache-dax` | high | intermediate | ✅ (75 MCQs · 37 adv/expert) |
+| AWS Messaging: SQS, SNS and EventBridge | `aws-messaging-sqs-sns-eventbridge` | very-high | intermediate | ✅ (70 MCQs · 35 adv/expert) |
+| Streaming and Real-Time Data: Kinesis and MSK | `aws-streaming-kinesis-msk` | high | advanced | ✅ (80 MCQs · 39 adv/expert) |
+| AWS Networking: VPC, Subnets, PrivateLink and Transit Gateway | `aws-networking-vpc-privatelink` | high | advanced | ✅ (70 MCQs · 30 adv/expert) |
+| Edge, DNS and CDN: Route 53, CloudFront and Global Accelerator | `aws-dns-cdn-route53-cloudfront` | high | intermediate | ✅ (74 MCQs · 33 adv/expert) |
+| Load Balancing and Auto Scaling: ALB, NLB, GWLB and ASG | `aws-load-balancing-elb-autoscaling` | high | intermediate | ✅ (80 MCQs · 36 adv/expert) |
+| AWS IAM Deep Dive: Identities, Policies and Access Control | `aws-security-iam-deep-dive` | high | advanced | ✅ (80 MCQs · 39 adv/expert) |
+| Data Protection and App Security: KMS, Secrets, Cognito and WAF | `aws-security-kms-secrets-cognito-waf` | high | intermediate | ✅ (78 MCQs · 43 adv/expert) |
+| Observability on AWS: CloudWatch, X-Ray and CloudTrail | `aws-observability-cloudwatch-xray` | high | intermediate | ✅ (75 MCQs · 37 adv/expert) |
+| Resilience and Disaster Recovery: Multi-AZ, Multi-Region and DR Strategies | `aws-resilience-multiregion-dr` | very-high | advanced | ✅ (80 MCQs · 42 adv/expert) |
+| Analytics and Big Data on AWS: Data Lakes, Redshift, EMR and Athena | `aws-analytics-datalake-redshift-emr` | medium | advanced | ✅ (80 MCQs · 41 adv/expert) |
+| Microservices Patterns on AWS: Decomposition, Saga, Outbox and Communication | `aws-microservices-patterns` | very-high | advanced | ✅ (76 MCQs · 35 adv/expert) |
+| ML and GenAI System Design on AWS: SageMaker, Bedrock and RAG | `aws-ml-genai-sagemaker-bedrock` | high | advanced | ✅ (78 MCQs · 41 adv/expert) |
+| IoT and Edge Computing on AWS: IoT Core, Greengrass and Edge | `aws-iot-edge-computing` | medium | advanced | ✅ (80 MCQs · 38 adv/expert) |
+| Migration and Modernization Strategies on AWS | `aws-migration-modernization` | medium | intermediate | ✅ (78 MCQs · 36 adv/expert) |
+| Cost Optimization and Scaling Trade-offs on AWS | `aws-cost-optimization-scaling` | high | advanced | ✅ (74 MCQs · 30 adv/expert) |
+| End-to-End AWS Reference Architectures: Designing Real Systems | `aws-reference-architectures` | very-high | advanced | ✅ (80 MCQs · 34 adv/expert) |
+
+All 26 AWS topics: deep trade-off + service-selection concepts.md with service limits,
+comparison tables, cost reasoning, ASCII diagrams, and end-to-end reference designs;
+validated MCQs across all four tiers (heavy scenario/judgment + AWS-fact style).
 

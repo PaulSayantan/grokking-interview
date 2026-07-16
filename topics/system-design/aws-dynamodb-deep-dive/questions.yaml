@@ -1,0 +1,1405 @@
+topic: "Amazon DynamoDB Deep Dive: Data Modeling and Scale"
+domain: system-design
+topic_slug: aws-dynamodb-deep-dive
+version: 1
+
+questions:
+  # ---------------- Partitioning ----------------
+  - id: aws-dynamodb-deep-dive-001
+    difficulty: beginner
+    tags: [partition-key, fundamentals]
+    question: |
+      In a DynamoDB table with a composite primary key, what determines which
+      physical partition an item is stored on?
+    options:
+      - "A hash of the partition key value"
+      - "The sort key value, sorted lexicographically"
+      - "The order in which items were inserted"
+      - "The size of the item in KB"
+    answer: 0
+    explanation: |
+      DynamoDB hashes the partition key to choose a physical partition. The sort
+      key only orders items WITHIN a partition; it does not select the partition.
+      Insertion order and item size do not affect placement.
+    ref: "concepts.md#partition-key-sort-key-and-how-partitioning-works"
+
+  - id: aws-dynamodb-deep-dive-002
+    difficulty: beginner
+    tags: [item-size, limits]
+    question: |
+      What is the maximum size of a single DynamoDB item (including all attribute
+      names and values)?
+    options:
+      - "64 KB"
+      - "1 MB"
+      - "400 KB"
+      - "4 MB"
+    answer: 2
+    explanation: |
+      A DynamoDB item is capped at 400 KB total. 1 MB is the Query/Scan page size,
+      4 MB is a transaction/batch response limit — not the item limit. Large blobs
+      must be offloaded to S3 with a pointer stored in the item.
+    ref: "concepts.md#partition-key-sort-key-and-how-partitioning-works"
+
+  - id: aws-dynamodb-deep-dive-003
+    difficulty: intermediate
+    tags: [partition-key, cardinality, hot-partition]
+    question: |
+      You are choosing a partition key for a high-throughput events table. Which
+      candidate is the WORST choice and why?
+    options:
+      - "eventId (a UUID) — high cardinality, spreads evenly"
+      - "customerId — many distinct values"
+      - "deviceId#date — high cardinality composite"
+      - "status (values: PENDING, DONE, FAILED) — very low cardinality concentrates traffic on few partitions"
+    answer: 3
+    explanation: |
+      A low-cardinality key like `status` has only a handful of distinct values, so
+      traffic piles onto a few partitions, creating hot partitions and throttling
+      despite spare total capacity. UUIDs, composite device#date, and customerId all
+      offer high cardinality and even distribution.
+    ref: "concepts.md#partition-key-sort-key-and-how-partitioning-works"
+
+  - id: aws-dynamodb-deep-dive-004
+    difficulty: intermediate
+    tags: [sort-key, query]
+    question: |
+      What capability does adding a sort key (composite primary key) give you that
+      a simple partition-key-only table lacks?
+    options:
+      - "Strongly consistent reads, which are impossible without a sort key"
+      - "The ability to Query all items sharing a partition key, filtered/ordered by sort key in one request"
+      - "Automatic multi-region replication"
+      - "Larger maximum item size"
+    answer: 1
+    explanation: |
+      Items with the same partition key are stored physically together, sorted by
+      sort key, enabling a single Query with begins_with/between/comparison on the
+      sort key returning sorted results. Consistency, replication, and item size are
+      unrelated to whether you have a sort key.
+    ref: "concepts.md#partition-key-sort-key-and-how-partitioning-works"
+
+  - id: aws-dynamodb-deep-dive-005
+    difficulty: advanced
+    tags: [durability, partitioning, replication]
+    question: |
+      How does DynamoDB achieve durability for a write within a single Region?
+    options:
+      - "It writes to a single SSD and relies on nightly backups"
+      - "It writes asynchronously to one replica and acks immediately"
+      - "It writes to the partition leader and synchronously replicates to a quorum across three Availability Zones before acking"
+      - "It stores all items in S3 and caches them in memory"
+    answer: 2
+    explanation: |
+      Each partition is replicated across three AZs; a write goes to the leader and
+      is committed to a quorum of replicas before the client is acked, surviving an
+      AZ failure. Single-SSD, async-single-replica, and S3-backed descriptions are
+      incorrect models of DynamoDB's storage layer.
+    ref: "concepts.md#partition-key-sort-key-and-how-partitioning-works"
+
+  - id: aws-dynamodb-deep-dive-006
+    difficulty: advanced
+    tags: [partitioning, splits, scaling]
+    question: |
+      What triggers DynamoDB to split a partition?
+    options:
+      - "When a partition exceeds ~10 GB of data OR exceeds its throughput ceiling; splits happen automatically based on the partition-key hash"
+      - "Only a manual API call by the operator"
+      - "Every time a new item is inserted"
+      - "Only when you switch capacity modes"
+    answer: 0
+    explanation: |
+      DynamoDB automatically splits partitions when they exceed ~10 GB or their
+      per-partition throughput limits, redistributing items by PK hash. It is not
+      manual, not per-insert, and not tied to capacity-mode changes. Distribution
+      quality still depends on key design.
+    ref: "concepts.md#partition-key-sort-key-and-how-partitioning-works"
+
+  # ---------------- Single-table design ----------------
+  - id: aws-dynamodb-deep-dive-007
+    difficulty: beginner
+    tags: [single-table, modeling]
+    question: |
+      What is the core idea of "single-table design" in DynamoDB?
+    options:
+      - "Storing one row per table for maximum isolation"
+      - "Replicating the same table across all Regions"
+      - "Using only a partition key and never a sort key"
+      - "Storing multiple entity types in one table using generic keys, co-locating related items so one Query fetches them together"
+    answer: 3
+    explanation: |
+      Single-table design puts many entity types in one physical table with generic
+      key attributes, co-locating related items under a shared partition key to serve
+      them in one Query without joins. The other options describe unrelated concepts.
+    ref: "concepts.md#single-table-design-and-access-pattern-first-modeling"
+
+  - id: aws-dynamodb-deep-dive-008
+    difficulty: intermediate
+    tags: [single-table, joins]
+    question: |
+      Why does single-table design "pre-join" data at write time instead of query
+      time?
+    options:
+      - "Because DynamoDB charges more for reads than writes always"
+      - "Because DynamoDB has no server-side joins, so co-locating related items under one partition key materializes the join and minimizes round trips"
+      - "Because sort keys are not supported across tables"
+      - "Because it enables strongly consistent reads on GSIs"
+    answer: 1
+    explanation: |
+      DynamoDB offers no server-side joins; single-table design co-locates related
+      items so a single Query returns them, minimizing network round trips (the
+      dominant latency/cost factor). It has nothing to do with GSI consistency or a
+      write-cheaper-than-read pricing claim.
+    ref: "concepts.md#single-table-design-and-access-pattern-first-modeling"
+
+  - id: aws-dynamodb-deep-dive-009
+    difficulty: advanced
+    tags: [single-table, tradeoffs, judgment]
+    question: |
+      A startup with rapidly evolving, still-undefined access patterns and a small
+      team is choosing a DynamoDB modeling approach. Which recommendation is most
+      appropriate and why?
+    options:
+      - "Force strict single-table design now to guarantee scale, accepting the cryptic keys"
+      - "Use one table per attribute to maximize flexibility"
+      - "Favor simpler multi-table modeling (or a small number of tables) because access patterns are still churning and single-table rigidity would force repeated re-modeling and backfills"
+      - "Use Aurora because DynamoDB cannot store evolving data"
+    answer: 2
+    explanation: |
+      Single-table design optimizes cost/latency for STABLE, known patterns; with
+      churning requirements its rigidity forces re-modeling and GSI backfills. A
+      pragmatic few-table approach preserves evolution speed. One-table-per-attribute
+      is nonsense, and DynamoDB can store the data — the issue is pattern stability.
+    ref: "concepts.md#single-table-design-and-access-pattern-first-modeling"
+
+  - id: aws-dynamodb-deep-dive-010
+    difficulty: intermediate
+    tags: [single-table, method]
+    question: |
+      In access-pattern-first modeling, what is the correct FIRST step?
+    options:
+      - "Design the keys, then discover access patterns later"
+      - "Pick the capacity mode"
+      - "Normalize all entities into third normal form"
+      - "Enumerate every access pattern the application needs, then design keys and indexes so each is a single Query/GetItem"
+    answer: 3
+    explanation: |
+      You enumerate all access patterns FIRST, then design keys/indexes to satisfy
+      each with a single operation. Normalization is a relational technique that
+      DynamoDB deliberately avoids; capacity mode is a separate operational choice.
+    ref: "concepts.md#single-table-design-and-access-pattern-first-modeling"
+
+  - id: aws-dynamodb-deep-dive-011
+    difficulty: expert
+    tags: [single-table, tradeoffs, analytics]
+    question: |
+      Which is a genuine DRAWBACK of aggressive single-table design that you should
+      raise in a design review?
+    options:
+      - "Cryptic overloaded keys hurt readability, and mixed entity types make analytics/exports and schema evolution harder"
+      - "It always costs more than multi-table because of extra requests"
+      - "It prevents you from ever using a GSI"
+      - "It forces strongly consistent reads on every query"
+    answer: 0
+    explanation: |
+      STD's real cost is human/operational: opaque keys, harder onboarding, messy
+      exports mixing entity types, and painful evolution. It typically LOWERS request
+      cost (fewer round trips), still uses GSIs, and does not dictate read consistency.
+    ref: "concepts.md#single-table-design-and-access-pattern-first-modeling"
+
+  # ---------------- GSI vs LSI ----------------
+  - id: aws-dynamodb-deep-dive-012
+    difficulty: beginner
+    tags: [gsi, consistency]
+    question: |
+      Which statement about Global Secondary Index (GSI) read consistency is true?
+    options:
+      - "GSIs support strongly consistent reads"
+      - "GSIs support eventually consistent reads only"
+      - "GSIs support only transactional reads"
+      - "GSIs cannot be read at all, only written"
+    answer: 1
+    explanation: |
+      A GSI is maintained asynchronously in a separate structure, so it can only
+      serve eventually consistent reads. Strong consistency is available on base
+      tables and LSIs, not GSIs.
+    ref: "concepts.md#secondary-indexes-gsi-versus-lsi"
+
+  - id: aws-dynamodb-deep-dive-013
+    difficulty: intermediate
+    tags: [lsi, gsi, creation]
+    question: |
+      A team wants to add a new secondary index to a two-year-old production table to
+      support a new query. Which index type can they add, and which cannot?
+    options:
+      - "They can add a GSI anytime; an LSI can only be created at table creation and cannot be added later"
+      - "They can add an LSI but not a GSI"
+      - "Neither can be added after creation"
+      - "Both can be added, with identical constraints"
+    answer: 0
+    explanation: |
+      GSIs can be created or deleted at any time. LSIs must be defined at table
+      creation and can never be added afterward. This is a key differentiator that
+      often decides the design.
+    ref: "concepts.md#secondary-indexes-gsi-versus-lsi"
+
+  - id: aws-dynamodb-deep-dive-014
+    difficulty: intermediate
+    tags: [lsi, partition-key]
+    question: |
+      How does a Local Secondary Index (LSI) differ from a GSI in its key structure?
+    options:
+      - "An LSI has a completely different partition key and sort key"
+      - "An LSI has no sort key"
+      - "An LSI shares the base table's partition key but uses an alternate sort key"
+      - "An LSI must use the same sort key as the base table"
+    answer: 2
+    explanation: |
+      An LSI keeps the SAME partition key as the base table and provides an alternate
+      SORT key, letting it live in the same partition (hence shared capacity and
+      possible strong consistency). A GSI can define an entirely different PK/SK.
+    ref: "concepts.md#secondary-indexes-gsi-versus-lsi"
+
+  - id: aws-dynamodb-deep-dive-015
+    difficulty: advanced
+    tags: [gsi, throttling, reliability]
+    question: |
+      In provisioned mode, what dangerous side effect can an UNDER-provisioned GSI
+      cause?
+    options:
+      - "It silently drops the index and continues"
+      - "It increases the base table's item size limit"
+      - "It automatically converts the base table to on-demand"
+      - "It can back-pressure and throttle writes to the BASE table, not just the index"
+    answer: 3
+    explanation: |
+      Because base writes must propagate to the GSI, a throttled/under-provisioned
+      GSI can back-pressure and throttle base-table writes — a classic production
+      trap. The other options are fabricated behaviors.
+    ref: "concepts.md#secondary-indexes-gsi-versus-lsi"
+
+  - id: aws-dynamodb-deep-dive-016
+    difficulty: advanced
+    tags: [projection, gsi, cost]
+    question: |
+      You define a GSI with KEYS_ONLY projection, but your query needs a non-key
+      attribute. What happens?
+    options:
+      - "The query fails permanently"
+      - "You must fetch the missing attribute back from the base table, adding latency and RCU cost"
+      - "DynamoDB automatically enlarges the projection"
+      - "The attribute is returned as null but the query is free"
+    answer: 1
+    explanation: |
+      A KEYS_ONLY (or INCLUDE without that attribute) projection forces a fetch back
+      to the base table for missing attributes, costing extra RCU and latency. This
+      is the trade-off vs projecting ALL (which doubles storage/write cost).
+    ref: "concepts.md#secondary-indexes-gsi-versus-lsi"
+
+  - id: aws-dynamodb-deep-dive-017
+    difficulty: expert
+    tags: [lsi, item-collection, limits]
+    question: |
+      Which hard constraint is UNIQUE to Local Secondary Indexes?
+    options:
+      - "A maximum of 20 per table"
+      - "They cannot be strongly consistent"
+      - "The total size of all items plus all LSI entries for a single partition-key value must stay under 10 GB (item collection size limit)"
+      - "They require Streams to be enabled"
+    answer: 2
+    explanation: |
+      LSIs impose the item-collection size limit: everything under one partition-key
+      value (base items + LSI projections) must stay under 10 GB. LSIs cap at 5 (GSIs
+      at 20), CAN be strongly consistent, and don't require Streams.
+    ref: "concepts.md#secondary-indexes-gsi-versus-lsi"
+
+  - id: aws-dynamodb-deep-dive-018
+    difficulty: intermediate
+    tags: [gsi, lsi, judgment]
+    question: |
+      You need strongly consistent reads on an alternate sort order, the query always
+      stays within one partition key, and you know this at table-creation time. Which
+      index best fits?
+    options:
+      - "An LSI, because it can serve strongly consistent reads within the same partition"
+      - "A GSI, because it is more flexible"
+      - "Neither; use a full-table Scan"
+      - "A DAX cluster"
+    answer: 0
+    explanation: |
+      Those three conditions (strong consistency, single-PK scope, known at creation)
+      are exactly when an LSI beats a GSI, since GSIs are eventually consistent only.
+      A Scan is wasteful; DAX is a cache, not an index.
+    ref: "concepts.md#secondary-indexes-gsi-versus-lsi"
+
+  # ---------------- Capacity modes ----------------
+  - id: aws-dynamodb-deep-dive-019
+    difficulty: beginner
+    tags: [capacity-mode, on-demand]
+    question: |
+      What is the main operational advantage of DynamoDB on-demand capacity mode?
+    options:
+      - "It is always cheaper than provisioned capacity"
+      - "It removes the 400 KB item limit"
+      - "It guarantees strongly consistent reads"
+      - "You manage no capacity and it instantly serves spiky, unpredictable traffic with no throttling to plan around"
+    answer: 3
+    explanation: |
+      On-demand removes capacity planning and absorbs spikes instantly. It is NOT
+      always cheaper (roughly 6–7x per unit vs fully-utilized provisioned) and has no
+      effect on consistency or item-size limits.
+    ref: "concepts.md#capacity-modes-provisioned-with-auto-scaling-versus-on-demand"
+
+  - id: aws-dynamodb-deep-dive-020
+    difficulty: intermediate
+    tags: [auto-scaling, spikes, tradeoffs]
+    question: |
+      Why does provisioned capacity with auto scaling struggle with sudden, sharp
+      traffic spikes?
+    options:
+      - "Auto scaling is disabled during spikes"
+      - "Auto scaling reacts on a minutes timescale via CloudWatch alarms, so requests above current capacity get throttled before it scales up"
+      - "Auto scaling only scales down, never up"
+      - "Spikes automatically switch the table to on-demand"
+    answer: 1
+    explanation: |
+      Auto scaling adjusts provisioned capacity toward a target utilization but reacts
+      over minutes, so a flash spike throttles before capacity catches up. On-demand
+      is the mode that absorbs instant spikes. The other options are false.
+    ref: "concepts.md#capacity-modes-provisioned-with-auto-scaling-versus-on-demand"
+
+  - id: aws-dynamodb-deep-dive-021
+    difficulty: advanced
+    tags: [cost, capacity-mode, judgment]
+    question: |
+      A table has steady, highly predictable traffic sustained at ~75% of a stable
+      throughput level, and cost matters. Which capacity strategy is most appropriate?
+    options:
+      - "On-demand, for zero ops"
+      - "On-demand with DAX in front"
+      - "Provisioned capacity with auto scaling, and reserved capacity for the committed floor, since high steady utilization makes it far cheaper than on-demand"
+      - "Provisioned at 5% utilization to be safe"
+    answer: 2
+    explanation: |
+      Steady, high-utilization workloads are the textbook case for provisioned + auto
+      scaling + reserved capacity, which is dramatically cheaper per unit than
+      on-demand. On-demand shines for spiky/low utilization; provisioning at 5% wastes
+      money.
+    ref: "concepts.md#capacity-modes-provisioned-with-auto-scaling-versus-on-demand"
+
+  - id: aws-dynamodb-deep-dive-022
+    difficulty: advanced
+    tags: [cost, crossover, estimation]
+    question: |
+      Roughly at what provisioned-capacity utilization does on-demand pricing become
+      comparable in cost to provisioned?
+    options:
+      - "Around 1% utilization"
+      - "They are always identical in cost"
+      - "Around 90% utilization"
+      - "Around 14–20% utilization (below that, on-demand tends to be cheaper; above it, provisioned wins)"
+    answer: 3
+    explanation: |
+      Because on-demand costs roughly 6–7x per unit, it breaks even with provisioned
+      running at about 14–20% utilization. Below that, idle provisioned capacity makes
+      on-demand cheaper; above it, provisioned wins.
+    ref: "concepts.md#capacity-modes-provisioned-with-auto-scaling-versus-on-demand"
+
+  - id: aws-dynamodb-deep-dive-023
+    difficulty: intermediate
+    tags: [capacity-mode, migration, judgment]
+    question: |
+      A brand-new feature will launch with completely unknown traffic. What is a
+      sensible capacity approach?
+    options:
+      - "Launch on-demand to eliminate throttling risk and learn the traffic shape, then consider moving to provisioned once the pattern stabilizes and cost matters"
+      - "Provision a huge fixed capacity and hope it fits"
+      - "Start on Aurora and migrate later"
+      - "Disable auto scaling to save money"
+    answer: 0
+    explanation: |
+      On-demand is ideal for unknown workloads: no throttling risk, zero planning, and
+      it reveals the real traffic shape. A common pattern is to migrate to provisioned
+      once traffic is predictable and cost optimization matters.
+    ref: "concepts.md#capacity-modes-provisioned-with-auto-scaling-versus-on-demand"
+
+  # ---------------- RCU/WCU math ----------------
+  - id: aws-dynamodb-deep-dive-024
+    difficulty: beginner
+    tags: [rcu, consistency, math]
+    question: |
+      One RCU provides how much read throughput per second?
+    options:
+      - "One read of up to 1 KB"
+      - "One strongly consistent read of up to 4 KB, or two eventually consistent reads of up to 4 KB"
+      - "Unlimited reads of any size"
+      - "One eventually consistent read of up to 8 KB"
+    answer: 1
+    explanation: |
+      1 RCU = one strongly consistent read up to 4 KB per second, or two eventually
+      consistent reads up to 4 KB. Reads round up to 4 KB. The 1 KB unit applies to
+      writes (WCU), not reads.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  - id: aws-dynamodb-deep-dive-025
+    difficulty: beginner
+    tags: [wcu, math]
+    question: |
+      One standard WCU provides how much write throughput per second?
+    options:
+      - "One write of up to 1 KB"
+      - "One write of up to 4 KB"
+      - "Two writes of up to 1 KB"
+      - "One transactional write of up to 1 KB"
+    answer: 0
+    explanation: |
+      1 WCU = one standard write of up to 1 KB per second, rounding up. Reads use 4 KB
+      units. A transactional write costs 2x (2 WCU per KB), so it is not 1 WCU.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  - id: aws-dynamodb-deep-dive-026
+    difficulty: intermediate
+    tags: [rcu, math, estimation]
+    question: |
+      You perform 500 eventually consistent reads per second of 6 KB items. How many
+      RCUs are required?
+    options:
+      - "1000 RCU"
+      - "250 RCU"
+      - "500 RCU"
+      - "3000 RCU"
+    answer: 2
+    explanation: |
+      6 KB rounds up to 8 KB. A strongly consistent read of 8 KB = 2 RCU (two 4 KB
+      units); eventually consistent halves that to 1 RCU per read. 500 reads/sec x
+      1 RCU = 500 RCU. (If these were strong reads it would be 1000 RCU.) The 250
+      answer wrongly halves twice.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  - id: aws-dynamodb-deep-dive-027
+    difficulty: intermediate
+    tags: [wcu, math, estimation]
+    question: |
+      You write 100 items per second, each 2.5 KB. How many WCUs do you need
+      (standard, non-transactional writes)?
+    options:
+      - "250 WCU"
+      - "400 WCU"
+      - "100 WCU"
+      - "300 WCU"
+    answer: 3
+    explanation: |
+      Each 2.5 KB item rounds up to 3 KB = 3 WCU. 100 writes/sec x 3 = 300 WCU.
+      Forgetting the round-up-to-1-KB rule (250) is the common mistake.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  - id: aws-dynamodb-deep-dive-028
+    difficulty: advanced
+    tags: [transactions, capacity, math]
+    question: |
+      A transactional read of an 8 KB item consumes how many RCU?
+    options:
+      - "1 RCU"
+      - "4 RCU"
+      - "2 RCU"
+      - "8 RCU"
+    answer: 1
+    explanation: |
+      8 KB = 2 read-units (4 KB each) for a strongly consistent read, and transactional
+      reads cost 2x, so 2 x 2 = 4 RCU. Forgetting the 2x transaction multiplier gives 2.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  - id: aws-dynamodb-deep-dive-029
+    difficulty: advanced
+    tags: [per-partition, limits, hot-key]
+    question: |
+      A single item must accept 2,000 writes per second. Even with a table provisioned
+      at 50,000 WCU, why will this throttle, and what is the fix?
+    options:
+      - "It won't throttle; table capacity is all that matters"
+      - "Switch to strongly consistent writes"
+      - "A single partition/key caps at ~1000 WCU per second, so one hot item throttles regardless of total capacity; fix with write sharding across key suffixes"
+      - "Increase the item size limit"
+    answer: 2
+    explanation: |
+      One partition key is served by one partition, capped at ~1000 WCU (and 3000 RCU).
+      2,000 writes/sec to one item exceeds that no matter the table total. Write
+      sharding (counter#0..N) spreads the load; strong writes and item-size changes are
+      irrelevant.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  - id: aws-dynamodb-deep-dive-030
+    difficulty: intermediate
+    tags: [query, pagination, limits]
+    question: |
+      What is the maximum amount of data a single Query or Scan will return in one
+      page before you must paginate?
+    options:
+      - "1 MB"
+      - "400 KB"
+      - "16 MB"
+      - "4 MB"
+    answer: 0
+    explanation: |
+      Query/Scan return at most 1 MB per page; you continue with LastEvaluatedKey.
+      400 KB is item size, 16 MB is a BatchGetItem/BatchWriteItem response cap, and
+      4 MB is the transaction response cap.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  - id: aws-dynamodb-deep-dive-031
+    difficulty: expert
+    tags: [batch, transactions, limits]
+    question: |
+      Which set of limits is correct?
+    options:
+      - "Both up to 1000 items"
+      - "BatchWriteItem up to 100 items; TransactWriteItems up to 25 items"
+      - "BatchWriteItem up to 50 items; TransactWriteItems up to 50 items"
+      - "BatchWriteItem up to 25 items; TransactWriteItems up to 100 items"
+    answer: 3
+    explanation: |
+      BatchWriteItem handles up to 25 put/delete requests; BatchGetItem up to 100 items;
+      TransactWriteItems/TransactGetItems up to 100 items. Mixing these up is a common
+      error.
+    ref: "concepts.md#rcu-and-wcu-math-item-size-and-per-partition-limits"
+
+  # ---------------- Adaptive capacity / hot partitions ----------------
+  - id: aws-dynamodb-deep-dive-032
+    difficulty: intermediate
+    tags: [adaptive-capacity, hot-partition]
+    question: |
+      What does DynamoDB adaptive capacity do?
+    options:
+      - "It removes the per-partition throughput ceiling entirely"
+      - "It automatically boosts hot partitions using unused capacity and can isolate very hot items by splitting partitions by throughput — but cannot exceed the per-partition ceiling"
+      - "It converts hot partitions to LSIs"
+      - "It caches hot reads in DAX automatically"
+    answer: 1
+    explanation: |
+      Adaptive capacity instantly boosts hot partitions with spare capacity and can
+      split partitions by throughput, but it cannot beat the ~3000 RCU/1000 WCU
+      per-partition ceiling. It does not create indexes or DAX clusters.
+    ref: "concepts.md#adaptive-capacity-hot-partitions-and-hot-keys"
+
+  - id: aws-dynamodb-deep-dive-033
+    difficulty: advanced
+    tags: [hot-key, write-sharding, judgment]
+    question: |
+      A global counter must handle 50,000 increments per second. What is the correct
+      DynamoDB design?
+    options:
+      - "A single item updated with UpdateItem ADD, relying on adaptive capacity"
+      - "Use a strongly consistent read before each increment"
+      - "Write-shard the counter across N suffixed keys (counter#0..N-1), increment a random shard, and sum shards on read"
+      - "Store the counter in a GSI"
+    answer: 2
+    explanation: |
+      One key caps at ~1000 WCU, so 50k/sec must be write-sharded across many keys and
+      aggregated at read time. Adaptive capacity cannot exceed the per-key ceiling; a
+      single item or GSI would throttle.
+    ref: "concepts.md#adaptive-capacity-hot-partitions-and-hot-keys"
+
+  - id: aws-dynamodb-deep-dive-034
+    difficulty: advanced
+    tags: [hot-key, write-sharding, tradeoffs]
+    question: |
+      What is the PRIMARY trade-off introduced by write sharding a hot key?
+    options:
+      - "It reduces durability"
+      - "It violates the 400 KB item limit"
+      - "It forces strongly consistent reads"
+      - "Reads must now scatter-gather and aggregate across N shards, adding read fan-out cost and latency"
+    answer: 3
+    explanation: |
+      Sharding trades write scalability for read complexity: you must query/aggregate N
+      shards, increasing read fan-out cost and latency. Durability, consistency mode,
+      and item size are unaffected.
+    ref: "concepts.md#adaptive-capacity-hot-partitions-and-hot-keys"
+
+  - id: aws-dynamodb-deep-dive-035
+    difficulty: expert
+    tags: [hot-partition, throttling, diagnosis]
+    question: |
+      A team provisioned 40,000 WCU but still sees ProvisionedThroughputExceeded
+      errors on a small fraction of writes. What is the most likely root cause?
+    options:
+      - "A hot partition: writes concentrate on one partition-key value or a low-cardinality key, exceeding the ~1000 WCU per-partition ceiling despite ample total capacity"
+      - "The table is out of storage space"
+      - "On-demand mode is silently active"
+      - "The item size exceeds 400 KB"
+    answer: 0
+    explanation: |
+      Throttling with spare total capacity is the signature of a hot partition — traffic
+      skewed onto one partition key or a low-cardinality key hitting the per-partition
+      ceiling. Storage, mode confusion, and item size don't produce this pattern.
+    ref: "concepts.md#adaptive-capacity-hot-partitions-and-hot-keys"
+
+  - id: aws-dynamodb-deep-dive-036
+    difficulty: intermediate
+    tags: [hot-read, dax, entropy]
+    question: |
+      Which techniques help relieve a HOT READ key specifically?
+    options:
+      - "Only increasing the item size limit"
+      - "Fronting reads with DAX (or a cache) and/or read-sharding, since caching absorbs repeated hot-key reads"
+      - "Enabling TTL"
+      - "Switching to LSI"
+    answer: 1
+    explanation: |
+      Hot reads are best absorbed by a cache like DAX (microsecond reads, offloads RCU)
+      or by read-sharding. TTL expires data, LSIs are indexes, and item-size limits are
+      unrelated to read hotspots.
+    ref: "concepts.md#adaptive-capacity-hot-partitions-and-hot-keys"
+
+  # ---------------- Consistency ----------------
+  - id: aws-dynamodb-deep-dive-037
+    difficulty: beginner
+    tags: [consistency, default]
+    question: |
+      By default, DynamoDB reads are:
+    options:
+      - "Eventually consistent"
+      - "Strongly consistent"
+      - "Transactional"
+      - "Cached in DAX"
+    answer: 0
+    explanation: |
+      Reads default to eventually consistent (cheaper, higher throughput). You must
+      explicitly request ConsistentRead=true for strong consistency, which costs twice
+      as much and is only available on base tables/LSIs.
+    ref: "concepts.md#strongly-consistent-versus-eventually-consistent-reads"
+
+  - id: aws-dynamodb-deep-dive-038
+    difficulty: intermediate
+    tags: [consistency, cost]
+    question: |
+      Compared to a strongly consistent read, an eventually consistent read of the
+      same item:
+    options:
+      - "Costs twice as much"
+      - "Costs the same"
+      - "Costs half as much (and may return slightly stale data)"
+      - "Is not billed at all"
+    answer: 2
+    explanation: |
+      Eventually consistent reads cost half an RCU of a strong read and may briefly lag
+      the latest write (converging in milliseconds). They are always billed, just at
+      half the rate.
+    ref: "concepts.md#strongly-consistent-versus-eventually-consistent-reads"
+
+  - id: aws-dynamodb-deep-dive-039
+    difficulty: advanced
+    tags: [consistency, gsi, global-tables]
+    question: |
+      Which read can NEVER be strongly consistent?
+    options:
+      - "A base-table GetItem in one Region"
+      - "An LSI query in one Region"
+      - "A read within a transaction"
+      - "A GSI query, or a cross-region read against a global table"
+    answer: 3
+    explanation: |
+      GSIs are async-maintained (eventual only) and cross-region reads on global tables
+      are eventually consistent. Base-table reads and LSI reads can be strong; a read in
+      the same region can be strong.
+    ref: "concepts.md#strongly-consistent-versus-eventually-consistent-reads"
+
+  - id: aws-dynamodb-deep-dive-040
+    difficulty: expert
+    tags: [consistency, concurrency, judgment]
+    question: |
+      To safely decrement an account balance only if funds are sufficient under
+      concurrency, what is the most robust approach?
+    options:
+      - "Do a strongly consistent read, then an unconditional write"
+      - "Use a conditional write (or transaction) with a ConditionExpression like balance >= :amount, so the check and write are atomic"
+      - "Use an eventually consistent read then write"
+      - "Front the operation with DAX"
+    answer: 1
+    explanation: |
+      A read-then-write still races between the read and the write. A conditional write
+      makes the check-and-set atomic, which is the correct concurrency primitive. Strong
+      reads reduce staleness but don't prevent the race; DAX is a read cache.
+    ref: "concepts.md#strongly-consistent-versus-eventually-consistent-reads"
+
+  # ---------------- Transactions / conditional writes ----------------
+  - id: aws-dynamodb-deep-dive-041
+    difficulty: intermediate
+    tags: [conditional-write, optimistic-locking]
+    question: |
+      How do you implement optimistic locking on a single DynamoDB item?
+    options:
+      - "Acquire a row-level lock via a LOCK statement"
+      - "Use strongly consistent reads only"
+      - "Store a version attribute and use a ConditionExpression (version = :expected) so the write applies only if the version matches, then increment it"
+      - "Enable TTL on the item"
+    answer: 2
+    explanation: |
+      Optimistic locking uses a version attribute checked with a ConditionExpression;
+      a mismatch throws ConditionalCheckFailedException and you retry. DynamoDB has no
+      SQL-style locks; strong reads and TTL don't provide concurrency control.
+    ref: "concepts.md#transactions-and-conditional-writes"
+
+  - id: aws-dynamodb-deep-dive-042
+    difficulty: intermediate
+    tags: [transactions, limits]
+    question: |
+      What is the item limit for a single DynamoDB TransactWriteItems call?
+    options:
+      - "100 items"
+      - "25 items"
+      - "10 items"
+      - "Unlimited"
+    answer: 0
+    explanation: |
+      TransactWriteItems and TransactGetItems support up to 100 items (and 4 MB). Batch
+      writes are capped at 25. Transactions are also single-region only.
+    ref: "concepts.md#transactions-and-conditional-writes"
+
+  - id: aws-dynamodb-deep-dive-043
+    difficulty: advanced
+    tags: [transactions, cost, tradeoffs]
+    question: |
+      What is the PRIMARY cost trade-off of using DynamoDB transactions versus a single
+      conditional write?
+    options:
+      - "Transactions are free"
+      - "Transactions enable cross-region atomicity"
+      - "Transactions remove the item size limit"
+      - "Transactions consume 2x the capacity units and can fail with TransactionConflictException under contention, so use them only when true multi-item atomicity is needed"
+    answer: 3
+    explanation: |
+      Transactional operations cost 2x normal capacity and add conflict/retry overhead.
+      A single conditional write (1x, no cross-item conflict) is preferred when one
+      item's atomicity suffices. Transactions are single-region and don't change size
+      limits.
+    ref: "concepts.md#transactions-and-conditional-writes"
+
+  - id: aws-dynamodb-deep-dive-044
+    difficulty: expert
+    tags: [transactions, uniqueness, pattern]
+    question: |
+      How do you enforce a globally unique email during user creation in DynamoDB?
+    options:
+      - "Create a GSI on email and hope for the best"
+      - "Use a TransactWriteItems that puts the user item AND puts an EMAIL#<email> lock item with a condition attribute_not_exists, so both succeed or neither does"
+      - "Do a Scan to check for duplicates first"
+      - "Use TTL to expire duplicates"
+    answer: 1
+    explanation: |
+      Uniqueness is enforced by an all-or-nothing transaction writing the entity plus a
+      companion lock item keyed on the email with attribute_not_exists. A GSI is
+      eventually consistent (races), a pre-Scan is a TOCTOU race and expensive, and TTL
+      is unrelated.
+    ref: "concepts.md#transactions-and-conditional-writes"
+
+  - id: aws-dynamodb-deep-dive-045
+    difficulty: beginner
+    tags: [conditional-write, idempotency]
+    question: |
+      Which ConditionExpression implements "insert only if this item does not already
+      exist" (idempotent insert)?
+    options:
+      - "attribute_exists(PK)"
+      - "begins_with(PK, :prefix)"
+      - "attribute_not_exists(PK)"
+      - "size(PK) > 0"
+    answer: 2
+    explanation: |
+      attribute_not_exists(PK) succeeds only when no item with that key exists, giving
+      insert-if-absent semantics. attribute_exists would update-only; the others are
+      unrelated comparisons.
+    ref: "concepts.md#transactions-and-conditional-writes"
+
+  # ---------------- Streams ----------------
+  - id: aws-dynamodb-deep-dive-046
+    difficulty: beginner
+    tags: [streams, cdc]
+    question: |
+      What does DynamoDB Streams provide?
+    options:
+      - "A full-text search index over the table"
+      - "Automatic backups for 35 days"
+      - "A relational query engine"
+      - "An ordered, time-sequenced log of item-level changes (insert/modify/remove), retained for 24 hours"
+    answer: 3
+    explanation: |
+      Streams are DynamoDB's change-data-capture: an ordered log of item-level changes
+      retained 24 hours (ordered per partition key). Search is OpenSearch, SQL is
+      relational, and 35-day retention is PITR.
+    ref: "concepts.md#dynamodb-streams-and-event-driven-patterns"
+
+  - id: aws-dynamodb-deep-dive-047
+    difficulty: intermediate
+    tags: [streams, lambda, idempotency]
+    question: |
+      When processing DynamoDB Streams with Lambda, why must your handler be
+      idempotent?
+    options:
+      - "Because delivery is at-least-once, so the same record batch can be delivered more than once"
+      - "Because records are delivered exactly once"
+      - "Because Streams are unordered globally and randomly"
+      - "Because Lambda cannot read Streams"
+    answer: 0
+    explanation: |
+      Stream-to-Lambda delivery is at-least-once, so retries can reprocess a batch;
+      handlers must be idempotent. Records ARE ordered per partition key (not globally),
+      and Lambda is the standard consumer.
+    ref: "concepts.md#dynamodb-streams-and-event-driven-patterns"
+
+  - id: aws-dynamodb-deep-dive-048
+    difficulty: advanced
+    tags: [streams, search, pattern]
+    question: |
+      What is the standard AWS pattern to keep a full-text search index synchronized
+      with a DynamoDB table?
+    options:
+      - "Periodically Scan the whole table into OpenSearch"
+      - "DynamoDB Streams -> Lambda -> OpenSearch, propagating each change event as it happens"
+      - "Enable strongly consistent reads on a GSI"
+      - "Use DAX to store the search index"
+    answer: 1
+    explanation: |
+      Streaming changes through Lambda into OpenSearch keeps search in near-real-time
+      sync without costly full scans. Periodic scans are wasteful and stale; GSIs aren't
+      full-text search; DAX is a cache.
+    ref: "concepts.md#dynamodb-streams-and-event-driven-patterns"
+
+  - id: aws-dynamodb-deep-dive-049
+    difficulty: expert
+    tags: [streams, kinesis, retention, tradeoffs]
+    question: |
+      Your CDC consumer might be down for more than 24 hours during incidents, and you
+      need replay plus multiple consumers. Which option best addresses this?
+    options:
+      - "Kinesis Data Streams for DynamoDB, which offers longer retention (up to 1 year), higher fan-out to multiple consumers, and replay"
+      - "Native DynamoDB Streams, because 24-hour retention is always enough"
+      - "Enable PITR instead of any stream"
+      - "Increase the item size limit"
+    answer: 0
+    explanation: |
+      Native Streams retain only 24 hours with essentially one primary consumer; if you
+      need long retention, replay, and many consumers, use Kinesis Data Streams for
+      DynamoDB. PITR is backup, not CDC, and item size is irrelevant.
+    ref: "concepts.md#dynamodb-streams-and-event-driven-patterns"
+
+  - id: aws-dynamodb-deep-dive-050
+    difficulty: advanced
+    tags: [streams, outbox, event-driven]
+    question: |
+      How can DynamoDB Streams implement a transactional outbox pattern?
+    options:
+      - "By scanning the table every minute for new events"
+      - "By storing events only in DAX"
+      - "Write the entity and an outbox item atomically; Streams then reliably drives publishing those changes to SNS/EventBridge/Kinesis"
+      - "By using LSIs to publish messages"
+    answer: 2
+    explanation: |
+      The outbox pattern writes state + outbox record atomically, and Streams provide
+      reliable CDC to publish downstream, avoiding dual-write inconsistency. Scanning is
+      wasteful; DAX and LSIs don't publish events.
+    ref: "concepts.md#dynamodb-streams-and-event-driven-patterns"
+
+  # ---------------- TTL ----------------
+  - id: aws-dynamodb-deep-dive-051
+    difficulty: beginner
+    tags: [ttl, format]
+    question: |
+      DynamoDB TTL expires items based on an attribute containing what value?
+    options:
+      - "An ISO-8601 date string"
+      - "A boolean flag"
+      - "A number of days since creation"
+      - "A Unix epoch timestamp in seconds"
+    answer: 3
+    explanation: |
+      TTL reads a numeric attribute holding a Unix epoch time in SECONDS; when now
+      passes that time, the item becomes eligible for background deletion. ISO strings,
+      day counts, and booleans are not valid TTL formats.
+    ref: "concepts.md#time-to-live-ttl"
+
+  - id: aws-dynamodb-deep-dive-052
+    difficulty: intermediate
+    tags: [ttl, precision, gotcha]
+    question: |
+      Which statement about TTL deletion timing is correct?
+    options:
+      - "Items are deleted exactly at the TTL timestamp"
+      - "Deletion is background and not immediate (typically within hours, up to ~48h); expired-but-unpurged items still appear in reads and count toward storage"
+      - "TTL deletes consume WCU per item"
+      - "TTL deletion is guaranteed within one second"
+    answer: 1
+    explanation: |
+      TTL deletion is asynchronous and imprecise (often within hours, up to ~48h);
+      until purged, expired items still show up in queries and count toward storage, so
+      filter on the TTL attribute if correctness depends on it. TTL deletes are free
+      (no WCU).
+    ref: "concepts.md#time-to-live-ttl"
+
+  - id: aws-dynamodb-deep-dive-053
+    difficulty: advanced
+    tags: [ttl, streams, archive]
+    question: |
+      You want to archive items to S3 the moment they expire via TTL. What makes this
+      possible?
+    options:
+      - "TTL deletions are silent and cannot be captured"
+      - "TTL writes the archive to S3 automatically"
+      - "TTL deletions flow through DynamoDB Streams as REMOVE records (marked as system/TTL deletions), so a Lambda can archive them"
+      - "You must Scan the table to find expired items"
+    answer: 2
+    explanation: |
+      TTL deletions appear in Streams as REMOVE records with a userIdentity marker
+      indicating a TTL deletion, enabling a Streams->Lambda->S3 archive. TTL itself
+      doesn't write to S3, and scanning is unnecessary.
+    ref: "concepts.md#time-to-live-ttl"
+
+  - id: aws-dynamodb-deep-dive-054
+    difficulty: expert
+    tags: [ttl, compliance, judgment]
+    question: |
+      A compliance rule requires records to be hard-deleted within a strict 1-hour SLA
+      of expiry. Is relying on DynamoDB TTL appropriate?
+    options:
+      - "No, because TTL deletion is best-effort and can take hours; you should delete explicitly to meet a tight, guaranteed SLA"
+      - "Yes, TTL guarantees deletion within one hour"
+      - "Yes, if you also enable DAX"
+      - "Yes, if you switch to on-demand"
+    answer: 0
+    explanation: |
+      TTL is best-effort and imprecise, so it cannot meet a strict deletion SLA. For
+      guaranteed, timely hard-deletes, delete explicitly (e.g., a scheduled job issuing
+      DeleteItem). DAX and capacity mode are irrelevant to deletion timing.
+    ref: "concepts.md#time-to-live-ttl"
+
+  # ---------------- Global tables ----------------
+  - id: aws-dynamodb-deep-dive-055
+    difficulty: intermediate
+    tags: [global-tables, multi-region]
+    question: |
+      What does a DynamoDB global table provide?
+    options:
+      - "A single-region table with more storage"
+      - "Strongly consistent reads across all Regions"
+      - "A read-only replica in one other Region"
+      - "A multi-region, multi-active table you can read and write in any participating Region, with cross-region replication typically within ~1 second"
+    answer: 3
+    explanation: |
+      Global tables are multi-region, multi-active (every Region is a primary you can
+      read and write), replicating in ~1 second. Cross-region reads are eventually
+      consistent — never strongly consistent.
+    ref: "concepts.md#global-tables-and-multi-region"
+
+  - id: aws-dynamodb-deep-dive-056
+    difficulty: advanced
+    tags: [global-tables, conflict, lww]
+    question: |
+      How do global tables resolve a conflict when the same item is written
+      concurrently in two Regions?
+    options:
+      - "They merge the two versions field by field"
+      - "Last-Writer-Wins based on timestamp — the latest write is kept and the other is silently discarded"
+      - "They reject both writes"
+      - "They fail over to a single Region"
+    answer: 1
+    explanation: |
+      Global tables use Last-Writer-Wins: the write with the latest timestamp wins and
+      the losing write is silently dropped. There is no application-level merge, so you
+      must design to avoid or tolerate concurrent same-item cross-region writes.
+    ref: "concepts.md#global-tables-and-multi-region"
+
+  - id: aws-dynamodb-deep-dive-057
+    difficulty: advanced
+    tags: [global-tables, dr, judgment]
+    question: |
+      A globally distributed app needs low local read/write latency and a strong DR
+      story with sub-second RPO. Which approach fits, and what must you accept?
+    options:
+      - "A single-region table with cross-region backups; accept multi-hour RPO"
+      - "Aurora Global Database only; DynamoDB cannot do multi-region"
+      - "Global tables; accept Last-Writer-Wins conflict resolution and eventual cross-region consistency"
+      - "DAX clusters in each Region"
+    answer: 2
+    explanation: |
+      Global tables give multi-region low latency and near-zero RPO/RTO DR, at the cost
+      of LWW conflicts and eventual cross-region consistency. Backups give a poor RPO;
+      DynamoDB does support multi-region; DAX is a cache, not replication.
+    ref: "concepts.md#global-tables-and-multi-region"
+
+  - id: aws-dynamodb-deep-dive-058
+    difficulty: expert
+    tags: [global-tables, transactions, limits]
+    question: |
+      Which capability does NOT work across Regions with global tables?
+    options:
+      - "Local reads and writes in each Region"
+      - "Regional failover by pointing clients at another Region"
+      - "Automatic ~1-second replication"
+      - "Cross-region transactions and strongly consistent cross-region reads"
+    answer: 3
+    explanation: |
+      Transactions are single-region only and strong reads never span regions. Local
+      reads/writes, ~1s replication, and simple failover all work. This limit shapes
+      how you design multi-region write ownership.
+    ref: "concepts.md#global-tables-and-multi-region"
+
+  # ---------------- DAX ----------------
+  - id: aws-dynamodb-deep-dive-059
+    difficulty: beginner
+    tags: [dax, caching]
+    question: |
+      What is DynamoDB Accelerator (DAX)?
+    options:
+      - "A fully managed, in-memory write-through cache that speaks the DynamoDB API and cuts read latency from milliseconds to microseconds"
+      - "A relational query layer for DynamoDB"
+      - "A backup service"
+      - "A capacity mode"
+    answer: 0
+    explanation: |
+      DAX is an in-memory, write-through cache fronting DynamoDB with the same API,
+      delivering microsecond reads and offloading RCU for read-heavy workloads. It is
+      not a query layer, backup, or capacity mode.
+    ref: "concepts.md#dax-caching"
+
+  - id: aws-dynamodb-deep-dive-060
+    difficulty: advanced
+    tags: [dax, consistency, tradeoffs]
+    question: |
+      What is a key limitation of DAX regarding read consistency?
+    options:
+      - "It only serves strongly consistent reads"
+      - "It serves eventually consistent reads from cache; strongly consistent reads pass through to DynamoDB, so DAX gives no benefit for strong-consistency workloads"
+      - "It makes all reads transactional"
+      - "It disables eventual consistency table-wide"
+    answer: 1
+    explanation: |
+      DAX caches eventually consistent results; strong reads bypass the cache to
+      DynamoDB, so DAX doesn't accelerate strong-consistency workloads and adds a
+      staleness window otherwise. It doesn't make reads transactional.
+    ref: "concepts.md#dax-caching"
+
+  - id: aws-dynamodb-deep-dive-061
+    difficulty: expert
+    tags: [dax, elasticache, tradeoffs, judgment]
+    question: |
+      You need transparent, DynamoDB-native read acceleration for a hot, read-heavy
+      catalog that tolerates slight staleness. Why might DAX beat ElastiCache (Redis)
+      here?
+    options:
+      - "DAX speaks the DynamoDB API and is write-through, so it needs little code change and stays DynamoDB-native; ElastiCache requires cache-aside code and manual consistency handling"
+      - "ElastiCache cannot cache anything"
+      - "DAX is serverless while ElastiCache requires no nodes"
+      - "DAX guarantees strong consistency and Redis does not"
+    answer: 0
+    explanation: |
+      DAX's advantage is transparency: same API, write-through, minimal code. Redis
+      needs explicit cache-aside logic and invalidation. Note DAX is NOT serverless (it
+      is a managed node cluster) and does not add strong consistency — those distractors
+      are false.
+    ref: "concepts.md#dax-caching"
+
+  - id: aws-dynamodb-deep-dive-062
+    difficulty: intermediate
+    tags: [dax, ops, tradeoffs]
+    question: |
+      Which is a real downside of adopting DAX versus using DynamoDB alone?
+    options:
+      - "DAX removes the ability to use GSIs"
+      - "DAX forces on-demand capacity"
+      - "DAX is a provisioned node cluster in your VPC (extra cost and ops), unlike the otherwise serverless DynamoDB"
+      - "DAX reduces durability of the base table"
+    answer: 2
+    explanation: |
+      DAX runs as a managed cluster of nodes you provision and pay for — it reintroduces
+      capacity/ops decisions that plain DynamoDB avoids. It doesn't affect GSIs, capacity
+      mode, or base-table durability.
+    ref: "concepts.md#dax-caching"
+
+  # ---------------- Backup / PITR ----------------
+  - id: aws-dynamodb-deep-dive-063
+    difficulty: beginner
+    tags: [pitr, backup]
+    question: |
+      Point-in-Time Recovery (PITR) lets you restore a DynamoDB table to any point
+      within the last:
+    options:
+      - "7 days"
+      - "1 year"
+      - "24 hours"
+      - "35 days"
+    answer: 3
+    explanation: |
+      PITR provides continuous backups with restore to any second in the last 35 days.
+      24 hours is Streams retention; 1 year is Kinesis retention; 7 days is neither.
+    ref: "concepts.md#backup-and-point-in-time-recovery"
+
+  - id: aws-dynamodb-deep-dive-064
+    difficulty: advanced
+    tags: [pitr, global-tables, dr, judgment]
+    question: |
+      Which combination protects against BOTH a Region-wide outage AND accidental
+      logical data corruption from a bad batch job?
+    options:
+      - "PITR alone"
+      - "Global tables (regional failover) plus PITR (restore to a point before the corruption)"
+      - "On-demand backups alone"
+      - "DAX plus TTL"
+    answer: 1
+    explanation: |
+      These are different failure classes: global tables handle regional/infrastructure
+      failure via failover; PITR undoes logical corruption by restoring to a prior
+      point. Neither alone covers both. DAX/TTL address neither.
+    ref: "concepts.md#backup-and-point-in-time-recovery"
+
+  - id: aws-dynamodb-deep-dive-065
+    difficulty: intermediate
+    tags: [backup, restore, gotcha]
+    question: |
+      A common gotcha when recovering a DynamoDB table from a backup or PITR is that:
+    options:
+      - "The restore overwrites the source table in place instantly"
+      - "Backups consume WCU during creation"
+      - "The restore creates a NEW table, so you must plan a cutover (extra cost and RTO)"
+      - "You can only restore to the same second the backup was taken"
+    answer: 2
+    explanation: |
+      Restores always produce a new table; you then cut traffic over, which adds time
+      and cost to your RTO. Backups don't consume table capacity, and PITR restores to
+      any second in the 35-day window.
+    ref: "concepts.md#backup-and-point-in-time-recovery"
+
+  # ---------------- DynamoDB vs RDS/Aurora ----------------
+  - id: aws-dynamodb-deep-dive-066
+    difficulty: intermediate
+    tags: [dynamodb-vs-aurora, service-selection]
+    question: |
+      An application needs complex ad-hoc reporting queries with multi-table joins and
+      rich ACID transactions across many rows, at moderate scale. Which store fits
+      best?
+    options:
+      - "Aurora/RDS (relational), because it supports joins, ad-hoc SQL, and multi-row ACID"
+      - "DynamoDB with many GSIs"
+      - "DynamoDB with a Scan for each report"
+      - "DynamoDB global tables"
+    answer: 0
+    explanation: |
+      Joins, ad-hoc queries, and broad multi-row ACID are relational strengths — Aurora/
+      RDS fits. DynamoDB has no joins, GSIs don't enable ad-hoc joins, Scans are costly,
+      and global tables address geography, not query flexibility.
+    ref: "concepts.md#dynamodb-versus-rds-and-aurora"
+
+  - id: aws-dynamodb-deep-dive-067
+    difficulty: advanced
+    tags: [dynamodb-vs-aurora, service-selection, judgment]
+    question: |
+      A service needs predictable single-digit-ms latency at massive, spiky scale with
+      simple, well-known key-based access patterns and minimal ops. Which is the best
+      fit and why?
+    options:
+      - "Aurora, because it always scales writes horizontally"
+      - "RDS MySQL with read replicas"
+      - "A self-managed Cassandra cluster on EC2, for control"
+      - "DynamoDB, because it offers automatic horizontal scale, predictable low latency, and near-zero ops for known key-based patterns"
+    answer: 3
+    explanation: |
+      Massive/spiky scale + known key access + low ops is DynamoDB's sweet spot. Aurora
+      scales writes through one primary (not horizontal writes); self-managed Cassandra
+      adds heavy ops; RDS replicas scale reads, not write-heavy horizontal scale.
+    ref: "concepts.md#dynamodb-versus-rds-and-aurora"
+
+  - id: aws-dynamodb-deep-dive-068
+    difficulty: expert
+    tags: [polyglot, service-selection, tradeoffs]
+    question: |
+      A high-scale system needs fast key-based OLTP, full-text search, AND heavy
+      analytical reporting. What is the most pragmatic real-world architecture?
+    options:
+      - "Force everything onto DynamoDB using Scans for search and reporting"
+      - "Polyglot persistence: DynamoDB for OLTP, stream changes to OpenSearch for search, and export to S3+Athena or Redshift for analytics"
+      - "Use only Aurora for all three"
+      - "Use DAX to serve analytics queries"
+    answer: 1
+    explanation: |
+      Different needs favor different engines: DynamoDB for OLTP, OpenSearch for search,
+      S3+Athena/Redshift for analytics, wired via Streams. Forcing Scans onto DynamoDB
+      is costly/slow; Aurora-only struggles at that OLTP scale; DAX is a cache, not an
+      analytics engine.
+    ref: "concepts.md#dynamodb-versus-rds-and-aurora"
+
+  - id: aws-dynamodb-deep-dive-069
+    difficulty: intermediate
+    tags: [scan, anti-pattern]
+    question: |
+      Why is a full-table Scan generally an anti-pattern for serving queries in
+      DynamoDB?
+    options:
+      - "Scans are not permitted by the API"
+      - "Scans always return stale data"
+      - "A Scan reads the entire table (consuming RCU proportional to table size, paged at 1 MB), making it slow and expensive versus a targeted Query"
+      - "Scans only work on GSIs"
+    answer: 2
+    explanation: |
+      Scan reads every item, costing RCU proportional to table size and paginating at
+      1 MB — expensive and slow. Design keys/indexes so access patterns are Queries or
+      GetItems. Scans are allowed but should be reserved for rare, offline needs.
+    ref: "concepts.md#dynamodb-versus-rds-and-aurora"
+
+  # ---------------- Overloading ----------------
+  - id: aws-dynamodb-deep-dive-070
+    difficulty: intermediate
+    tags: [gsi-overloading, single-table]
+    question: |
+      What is "GSI overloading" in single-table design?
+    options:
+      - "Creating one GSI per access pattern"
+      - "Replicating a GSI to multiple Regions"
+      - "Projecting ALL attributes into every GSI"
+      - "Reusing a single GSI (e.g., GSI1PK/GSI1SK) to serve multiple access patterns across different entity types, since each entity stores different values in those generic index keys"
+    answer: 3
+    explanation: |
+      GSI overloading reuses one generic GSI across many entity types and access
+      patterns, conserving the 20-GSI budget and reducing write amplification/cost. It
+      is the opposite of one-GSI-per-pattern.
+    ref: "concepts.md#attribute-overloading-and-gsi-overloading"
+
+  - id: aws-dynamodb-deep-dive-071
+    difficulty: advanced
+    tags: [overloading, cost, tradeoffs]
+    question: |
+      What do you GAIN and what do you GIVE UP with attribute/GSI overloading?
+    options:
+      - "Gain fewer indexes/tables, less write amplification and cost; give up readability, maintainability, and clean analytics/exports"
+      - "Gain readability; give up scale"
+      - "Gain strong consistency; give up durability"
+      - "Gain nothing; it is purely cosmetic"
+    answer: 0
+    explanation: |
+      Overloading is an efficiency win (fewer indexes/tables, lower write amplification
+      and cost) paid for with opaque keys that hurt readability, onboarding, and
+      exports. It doesn't change consistency or durability.
+    ref: "concepts.md#attribute-overloading-and-gsi-overloading"
+
+  - id: aws-dynamodb-deep-dive-072
+    difficulty: expert
+    tags: [gsi, budget, limits, judgment]
+    question: |
+      A single-table design is approaching the 20-GSI-per-table limit as new access
+      patterns arrive. What is the most idiomatic remedy?
+    options:
+      - "Split into hundreds of tiny tables immediately"
+      - "Overload existing GSIs by encoding multiple entity types/patterns into the same generic GSI keys, so a few GSIs serve many patterns"
+      - "Switch to LSIs, which have no limit"
+      - "Enable DAX to add index capacity"
+    answer: 1
+    explanation: |
+      GSI overloading lets a handful of GSIs serve many patterns, staying within the
+      20-GSI cap. LSIs are more limited (max 5, creation-time only), tiny-table sprawl
+      trades one problem for another, and DAX is a cache, not an index.
+    ref: "concepts.md#attribute-overloading-and-gsi-overloading"
+
+  # ---------------- Cross-cutting trade-offs ----------------
+  - id: aws-dynamodb-deep-dive-073
+    difficulty: advanced
+    tags: [large-objects, s3, design]
+    question: |
+      Users must upload 5 MB documents whose metadata is queried in DynamoDB. What is
+      the correct design?
+    options:
+      - "Store the document in S3 and keep only the S3 key/pointer plus metadata in the DynamoDB item"
+      - "Store the 5 MB document as a binary attribute in the item"
+      - "Split the document across 13 items of 400 KB each"
+      - "Use a transaction to store the document atomically"
+    answer: 0
+    explanation: |
+      A 5 MB object exceeds the 400 KB item limit, so store it in S3 and keep a pointer
+      plus queryable metadata in DynamoDB. Sharding a blob across items is fragile;
+      transactions don't raise the size limit.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-dynamodb-deep-dive-074
+    difficulty: expert
+    tags: [failure-modes, cell-based, resilience]
+    question: |
+      Which failure does a single-Region DynamoDB table with PITR NOT tolerate?
+    options:
+      - "Accidental deletion of items by a bad job (recoverable via PITR)"
+      - "An Availability Zone failure (three-AZ replication survives it)"
+      - "A full Region outage — the table is unavailable until the Region recovers or you restore elsewhere; global tables would be needed for automatic multi-region availability"
+      - "Loss of a single SSD"
+    answer: 2
+    explanation: |
+      Three-AZ replication survives an AZ or disk loss, and PITR undoes logical
+      corruption — but a whole-Region outage takes a single-region table offline. Only
+      multi-region global tables give automatic cross-region availability.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-dynamodb-deep-dive-075
+    difficulty: intermediate
+    tags: [consistency, cost, judgment]
+    question: |
+      For a read-heavy workload where slightly stale data is acceptable, which default
+      choice both lowers cost and improves resilience?
+    options:
+      - "Strongly consistent reads everywhere"
+      - "Reads through DAX with ConsistentRead=true"
+      - "Transactional reads for everything"
+      - "Eventually consistent reads — half the RCU cost and able to be served by a follower replica if the leader is briefly unavailable"
+    answer: 3
+    explanation: |
+      Eventual reads cost half and can be served by any replica, improving throughput
+      and resilience when staleness is tolerable. Strong/transactional reads cost more;
+      forcing strong reads through DAX bypasses the cache entirely.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-dynamodb-deep-dive-076
+    difficulty: beginner
+    tags: [service-model, fundamentals]
+    question: |
+      Which phrase best describes DynamoDB's core positioning?
+    options:
+      - "A relational database with SQL and joins"
+      - "A fully managed, serverless key-value and document NoSQL database with single-digit-millisecond latency at scale"
+      - "An in-memory cache like Redis"
+      - "An OLAP data warehouse"
+    answer: 1
+    explanation: |
+      DynamoDB is a managed, serverless key-value/document NoSQL store with predictable
+      low latency at scale. It is not relational (no SQL/joins), not an in-memory cache
+      (that is ElastiCache/DAX), and not a warehouse (that is Redshift).
+    ref: "concepts.md#dynamodb-versus-rds-and-aurora"
+
+  - id: aws-dynamodb-deep-dive-077
+    difficulty: advanced
+    tags: [capacity, on-demand, cold-start, gotcha]
+    question: |
+      A brand-new on-demand table is hit by an enormous launch-day spike far above any
+      prior traffic. What is the realistic risk?
+    options:
+      - "There is no risk; on-demand handles infinite instant traffic from second zero"
+      - "The table converts to provisioned automatically"
+      - "A brand-new table starts at a baseline (several thousand req/sec) and ramps to your observed peak; an extreme cold spike beyond that baseline can still throttle until it scales"
+      - "The item size limit drops to 100 KB"
+    answer: 2
+    explanation: |
+      On-demand adapts up to double the previously observed peak and starts at a
+      baseline; a huge cold spike above that baseline can briefly throttle. To be safe
+      for a known launch, pre-warm or start provisioned high. The other options are false.
+    ref: "concepts.md#capacity-modes-provisioned-with-auto-scaling-versus-on-demand"
+
+  - id: aws-dynamodb-deep-dive-078
+    difficulty: expert
+    tags: [modeling, time-series, hot-partition, judgment]
+    question: |
+      For IoT telemetry at high ingest, why is a partition key of just the current date
+      (e.g., PK="2026-07-16") a poor choice?
+    options:
+      - "All of today's writes hit one partition key (one partition, ~1000 WCU cap), creating a hot partition; combine the date with a high-cardinality dimension like deviceId"
+      - "Dates cannot be stored as strings"
+      - "It uses too much storage"
+      - "It prevents TTL from working"
+    answer: 0
+    explanation: |
+      A pure-date PK funnels all current writes to a single partition, capped at ~1000
+      WCU — a guaranteed hot partition. Compose the key with a high-cardinality attribute
+      (deviceId#date) to spread writes. Storage/TTL/string-typing are not the issue.
+    ref: "concepts.md#adaptive-capacity-hot-partitions-and-hot-keys"

@@ -48,7 +48,7 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 
 | Domain | Topics | Authored |
 |---|---|---|
-| [System Design](topics/system-design/README.md) | 23 | 23 ✅ (all tiers) |
+| [System Design](topics/system-design/README.md) | 23 core + 26 AWS | 49 ✅ (all tiers) |
 | [Docker](topics/docker/README.md) | 15 | 0 |
 | [Kubernetes](topics/kubernetes/README.md) | 16 | 0 |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 18 | 0 |
@@ -63,6 +63,18 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 
 ## Session log
 
+- **Session 8 (2026-07-16):** AWS System Design sub-domain — authored **26 new topics**
+  under `topics/system-design/` with an `aws-` slug prefix (compute EC2/ECS/EKS/Fargate/Lambda,
+  serverless + Step Functions, API Gateway/AppSync, S3 deep-dive, EBS/EFS/FSx, DynamoDB deep-dive,
+  RDS/Aurora, ElastiCache/DAX, SQS/SNS/EventBridge, Kinesis/MSK, VPC/PrivateLink/Transit GW,
+  Route 53/CloudFront/Global Accelerator, ELB/Auto Scaling, IAM deep-dive, KMS/Secrets/Cognito/WAF,
+  CloudWatch/X-Ray/CloudTrail, multi-region DR, analytics/Redshift/EMR/Athena, microservices
+  patterns/saga/outbox, ML/GenAI/SageMaker/Bedrock/RAG, IoT/Greengrass/edge, migration/7-Rs,
+  cost optimization, and end-to-end reference architectures). Built via
+  `.claude/workflows/scripts/aws-system-design-authoring.js` (author → verify pipeline, high effort,
+  52 agents, 0 errors). **1,979 MCQs** (~76/topic; 348 B / 683 I / 636 adv / 312 expert), all four
+  tiers, service-limit- and trade-off-heavy. Verify agents fact-checked AWS limits/consistency against
+  current docs and rebalanced skewed answer-index distributions. All validates (111 files, 8,635 Qs total).
 - **Session 1 (2026-07-15):** Foundation laid — repo scaffold, docs, templates,
   memory, skills, taxonomy research. See memory for details.
 - **Session 2 (2026-07-15):** Spring Boot domain fully authored — all 18 topics have

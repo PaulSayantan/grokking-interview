@@ -1,0 +1,1583 @@
+topic: 'Caching on AWS: ElastiCache, DAX and CloudFront Patterns'
+domain: system-design
+topic_slug: aws-caching-elasticache-dax
+version: 1
+questions:
+- id: aws-caching-elasticache-dax-001
+  difficulty: beginner
+  tags:
+  - fundamentals
+  - read-write-ratio
+  question: |
+    A caching layer delivers the most value for a workload that is characterized by
+    which property?
+  options:
+  - Reads far outnumber writes and some staleness is tolerable
+  - Writes far outnumber reads and every read must be strongly consistent
+  - Every request reads a unique key that is never requested again
+  - The dataset is tiny and already served in microseconds from the source
+  answer: 0
+  explanation: |
+    Caching pays off when data is read far more than written and can tolerate some
+    staleness, because misses (and writes) are the only traffic that reaches the
+    source. Write-heavy or strongly-consistent-only data, unique-per-request keys
+    (near-zero hit rate), and already-fast tiny datasets get little to no benefit.
+  ref: concepts.md#why-cache-and-what-to-cache-on-aws
+- id: aws-caching-elasticache-dax-002
+  difficulty: beginner
+  tags:
+  - latency
+  - layers
+  question: |
+    Order these AWS read paths from LOWEST to HIGHEST typical latency for a cache hit
+    or fast read.
+  options:
+  - DynamoDB SSD read < DAX item-cache hit < ElastiCache in-VPC
+  - DAX item-cache hit < ElastiCache in-VPC < DynamoDB SSD read
+  - ElastiCache in-VPC < DynamoDB SSD read < DAX item-cache hit
+  - DynamoDB SSD read < ElastiCache in-VPC < DAX item-cache hit
+  answer: 1
+  explanation: |
+    DAX item-cache hits are microseconds, ElastiCache in-VPC reads are sub-ms to low
+    single-digit ms, and a DynamoDB SSD read is ~5-10 ms. The other orderings invert
+    these well-known ballparks.
+  ref: concepts.md#why-cache-and-what-to-cache-on-aws
+- id: aws-caching-elasticache-dax-003
+  difficulty: intermediate
+  tags:
+  - hit-rate
+  - estimation
+  question: |
+    A read path has a 1 ms cache and a 10 ms origin. Raising the cache hit rate from
+    90% to 99% has what qualitative effect on effective latency and origin load?
+  options:
+  - Negligible effect because 90% was already high
+  - It increases effective latency because more keys must be cached
+  - 'Large effect: misses (which dominate the added latency and all origin load) drop by ~10x'
+  - It only helps origin cost, never latency
+  answer: 2
+  explanation: |
+    Misses drive both the added latency and 100% of origin load. Going from 10% to 1%
+    misses is a ~10x reduction in origin traffic and in the miss-driven latency
+    contribution — the last few percent of hit rate matter most. It does not increase
+    latency, and it improves both latency and origin cost.
+  ref: concepts.md#why-cache-and-what-to-cache-on-aws
+- id: aws-caching-elasticache-dax-004
+  difficulty: beginner
+  tags:
+  - when-not-to-cache
+  question: |
+    Which scenario is the WEAKEST candidate for adding a cache?
+  options:
+  - A product catalog read millions of times per day, updated hourly
+  - User profile data read on every page load, updated rarely
+  - Rendered homepage fragments shared by all anonymous users
+  - A per-request analytics query whose parameters are unique each time (near-zero reuse)
+  answer: 3
+  explanation: |
+    Unique-per-request keys yield a near-zero hit rate, so a cache adds a hop and cost
+    for almost no benefit. The others have high read reuse and staleness tolerance,
+    making them strong cache candidates.
+  ref: concepts.md#why-cache-and-what-to-cache-on-aws
+- id: aws-caching-elasticache-dax-005
+  difficulty: beginner
+  tags:
+  - redis
+  - memcached
+  - engines
+  question: |
+    Which capability is available with ElastiCache for Redis/Valkey but NOT with
+    ElastiCache for Memcached?
+  options:
+  - Replication, automatic failover, persistence, and data structures like sorted sets
+  - Storing simple string key/value pairs
+  - Scaling out to multiple nodes
+  - Setting a TTL on cached entries
+  answer: 0
+  explanation: |
+    Memcached is a simple multi-threaded blob cache: no replication, no failover, no
+    persistence, and no data structures. Redis/Valkey add all of those. Both can store
+    strings, scale across nodes, and set TTLs.
+  ref: concepts.md#elasticache-redis-versus-memcached
+- id: aws-caching-elasticache-dax-006
+  difficulty: intermediate
+  tags:
+  - memcached
+  - multi-threading
+  - trade-offs
+  question: |
+    In what narrow case is ElastiCache for Memcached a defensible choice over
+    Redis/Valkey?
+  options:
+  - You need a real-time leaderboard with ranked queries
+  - You need a simple, disposable blob cache and want to scale vertically on a multi-threaded node with
+    no HA requirement
+  - You need cross-AZ failover so cached data survives a node loss
+  - You need pub/sub fan-out to many subscribers
+  answer: 1
+  explanation: |
+    Memcached fits a pure, ephemeral, simple blob cache where multi-threaded vertical
+    scaling on one node helps and HA is not required. Leaderboards (sorted sets),
+    failover/replication, and pub/sub all require Redis/Valkey.
+  ref: concepts.md#elasticache-redis-versus-memcached
+- id: aws-caching-elasticache-dax-007
+  difficulty: advanced
+  tags:
+  - redis
+  - threading
+  - throughput
+  question: |
+    "Memcached is faster than Redis" — under what qualification is this claim
+    actually true, and why is it misleading in general?
+  options:
+  - Always true, because Memcached has lower per-command overhead in every topology
+  - True only with cluster mode enabled on both engines
+  - True only for a single-node, no-HA, no-structure comparison because Memcached is multi-threaded; misleading
+    because Redis scales via sharding across nodes and adds HA
+  - Never true; Redis is always faster because it is single-threaded
+  answer: 2
+  explanation: |
+    A single large Memcached node can serve more raw ops/sec than one single-threaded
+    Redis node. But Redis scales horizontally by sharding across many primaries and
+    provides replication/failover, so the blanket claim ignores how Redis actually
+    scales and the HA it provides.
+  ref: concepts.md#elasticache-redis-versus-memcached
+- id: aws-caching-elasticache-dax-008
+  difficulty: intermediate
+  tags:
+  - valkey
+  - engines
+  question: |
+    What is Valkey in the ElastiCache context?
+  options:
+  - A proprietary AWS in-memory engine unrelated to Redis
+  - A managed Memcached variant with persistence
+  - The DynamoDB caching engine used inside DAX
+  - A Redis-compatible open-source fork (Linux Foundation) that AWS offers as an ElastiCache engine, typically
+    at lower cost
+  answer: 3
+  explanation: |
+    Valkey is the Redis-API-compatible open-source fork that AWS steers customers
+    toward on ElastiCache, generally at lower node/serverless cost. It is not
+    unrelated to Redis, not a Memcached variant, and not the DAX engine.
+  ref: concepts.md#elasticache-redis-versus-memcached
+- id: aws-caching-elasticache-dax-009
+  difficulty: beginner
+  tags:
+  - cache-aside
+  - patterns
+  question: |
+    In the cache-aside (lazy-loading) pattern, what happens on a cache miss?
+  options:
+  - The application reads from the database, then populates the cache with a TTL, then returns
+  - The write is buffered in the cache and flushed to the DB later
+  - The request fails and the client must retry
+  - The cache synchronously writes to the DB before responding
+  answer: 0
+  explanation: |
+    Cache-aside loads lazily: on a miss the app fetches from the DB, stores the value
+    in the cache (usually with a TTL), and returns it. Buffered async writes describe
+    write-behind; synchronous DB+cache writes describe write-through.
+  ref: concepts.md#cache-patterns-cache-aside-write-through-write-behind
+- id: aws-caching-elasticache-dax-010
+  difficulty: intermediate
+  tags:
+  - write-behind
+  - durability
+  - trade-offs
+  question: |
+    What is the PRIMARY risk of the write-behind (write-back) caching pattern?
+  options:
+  - Reads are always stale
+  - A cache node failure before the async flush loses writes that never reached the durable store
+  - It cannot batch writes to the database
+  - It increases write latency compared to write-through
+  answer: 1
+  explanation: |
+    Write-behind acks the write from the cache and flushes to the DB asynchronously,
+    so a node failure before the flush loses those writes — a durability window. It
+    actually lowers write latency and can batch DB writes; reads are fresh for
+    written keys.
+  ref: concepts.md#cache-patterns-cache-aside-write-through-write-behind
+- id: aws-caching-elasticache-dax-011
+  difficulty: intermediate
+  tags:
+  - write-through
+  - patterns
+  - trade-offs
+  question: |
+    Compared to cache-aside, what does write-through primarily trade away, and what
+    does it gain?
+  options:
+  - Gains lower read latency; trades away durability
+  - Gains smaller memory footprint; trades away consistency
+  - Gains fresh reads-after-write and consistent cached data; trades away write latency and wastes memory
+    caching data that may never be read
+  - Gains cross-region replication; trades away simplicity
+  answer: 2
+  explanation: |
+    Write-through updates the cache on every write, so written keys are always fresh
+    and read-after-write is fast/consistent. The cost is added write latency (DB +
+    cache) and memory spent on data that may never be read. It does not reduce memory
+    or add cross-region replication.
+  ref: concepts.md#cache-patterns-cache-aside-write-through-write-behind
+- id: aws-caching-elasticache-dax-012
+  difficulty: advanced
+  tags:
+  - cache-aside
+  - ttl
+  - invalidation
+  - best-practice
+  question: |
+    For a read-heavy service backed by RDS where occasional brief staleness is
+    acceptable, which combination is the most robust default?
+  options:
+  - Write-behind with no TTL for lowest write latency
+  - Write-through with no TTL and no invalidation
+  - No cache; rely on RDS read replicas only
+  - Cache-aside with a short-ish TTL as a backstop plus explicit invalidation on the common write paths
+  answer: 3
+  explanation: |
+    Cache-aside + short TTL (self-healing backstop) + invalidate-on-write gives the
+    best correctness/robustness balance: TTL bounds staleness even if an invalidation
+    is missed. Write-behind risks losing writes; write-through without TTL leaves no
+    backstop; read replicas alone don't cut origin latency to sub-ms.
+  ref: concepts.md#cache-patterns-cache-aside-write-through-write-behind
+- id: aws-caching-elasticache-dax-013
+  difficulty: intermediate
+  tags:
+  - ttl
+  - safety-net
+  - patterns
+  question: |
+    Why is setting a TTL considered mandatory even when you also invalidate keys
+    explicitly on write?
+  options:
+  - 'It is a safety net: if an invalidation is ever missed, stale entries still self-heal when the TTL
+    expires'
+  - TTL makes reads faster than invalidation
+  - TTL is required by ElastiCache to store any key
+  - TTL guarantees strong consistency
+  answer: 0
+  explanation: |
+    Explicit invalidation is fragile — miss one write path and you leak stale data
+    forever. A TTL guarantees eventual self-healing. TTL is not mandatory for storage,
+    does not make reads faster, and does not provide strong consistency.
+  ref: concepts.md#cache-patterns-cache-aside-write-through-write-behind
+- id: aws-caching-elasticache-dax-014
+  difficulty: beginner
+  tags:
+  - cluster-mode
+  - replicas
+  question: |
+    In ElastiCache for Redis with cluster mode DISABLED, how do you scale read
+    throughput versus dataset capacity?
+  options:
+  - Add shards for both reads and capacity
+  - Add read replicas (up to 5) to scale reads; resize the node vertically to grow capacity
+  - You cannot scale reads at all
+  - Add hash slots to the primary
+  answer: 1
+  explanation: |
+    Cluster-mode-disabled is a single shard: read replicas (up to 5) scale reads, and
+    capacity grows only by vertically resizing the node (max ≈ one node's memory).
+    Sharding/hash slots belong to cluster mode enabled.
+  ref: concepts.md#cluster-mode-enabled-versus-disabled-sharding-and-replication
+- id: aws-caching-elasticache-dax-015
+  difficulty: intermediate
+  tags:
+  - cluster-mode
+  - hash-slots
+  - sharding
+  question: |
+    How does cluster-mode-enabled Redis decide which shard a key belongs to?
+  options:
+  - By insertion order across shards round-robin
+  - By the key's TTL value
+  - CRC16(key) mod 16384 maps the key to one of 16384 hash slots, which are distributed across shards
+  - By the size of the value in bytes
+  answer: 2
+  explanation: |
+    Redis cluster mode partitions the 16384 hash slots across shards; a key hashes via
+    CRC16(key) mod 16384 to a slot, and the slot's owning shard stores it. TTL, value
+    size, and insertion order do not determine placement.
+  ref: concepts.md#cluster-mode-enabled-versus-disabled-sharding-and-replication
+- id: aws-caching-elasticache-dax-016
+  difficulty: advanced
+  tags:
+  - cluster-mode
+  - hash-tags
+  - multi-key
+  question: |
+    In cluster-mode-enabled Redis, a transaction touching two keys fails with a
+    cross-slot error. What is the correct fix?
+  options:
+  - Disable cluster mode at runtime for that transaction
+  - Increase the number of shards until the keys land together
+  - Switch the keys to Memcached
+  - Use hash tags like {user123}:profile and {user123}:orders so both keys hash to the same slot/shard
+  answer: 3
+  explanation: |
+    Multi-key operations and transactions must be on the same shard. Hash tags force
+    the substring inside braces to determine the slot, co-locating related keys. You
+    cannot toggle cluster mode per-command, adding shards spreads keys further apart,
+    and Memcached has no transactions.
+  ref: concepts.md#cluster-mode-enabled-versus-disabled-sharding-and-replication
+- id: aws-caching-elasticache-dax-017
+  difficulty: advanced
+  tags:
+  - cluster-mode
+  - write-scaling
+  - capacity
+  question: |
+    A single-node Redis cache is CPU-bound on writes and the working set no longer
+    fits in one node's RAM. What is the appropriate change?
+  options:
+  - Enable cluster mode and add shards so writes and memory spread across multiple primaries
+  - Add more read replicas to the existing single shard
+  - Switch to a strongly consistent read setting
+  - Lower the TTL on all keys
+  answer: 0
+  explanation: |
+    Read replicas scale reads, not writes or capacity, and a single-threaded primary
+    is the write bottleneck. Cluster mode enabled shards data across multiple
+    primaries, scaling both write throughput and memory. Consistency settings and TTL
+    don't address the capacity/write ceiling.
+  ref: concepts.md#cluster-mode-enabled-versus-disabled-sharding-and-replication
+- id: aws-caching-elasticache-dax-018
+  difficulty: intermediate
+  tags:
+  - replication
+  - consistency
+  question: |
+    Replication between an ElastiCache Redis primary and its replicas is asynchronous.
+    What is the direct consequence for reads and failover?
+  options:
+  - Replica reads are always strongly consistent and failover never loses data
+  - A replica read can be stale, and a failover may lose the last few unreplicated writes
+  - Reads are blocked until replication completes
+  - Writes are rejected during replication lag
+  answer: 1
+  explanation: |
+    Async replication means replicas can lag (stale reads) and a promoted replica may
+    not yet have the primary's most recent writes (small data loss on failover). Redis
+    is AP-leaning, not a strongly-consistent store; reads and writes are not blocked
+    by replication.
+  ref: concepts.md#cluster-mode-enabled-versus-disabled-sharding-and-replication
+- id: aws-caching-elasticache-dax-019
+  difficulty: expert
+  tags:
+  - serverless
+  - cost
+  - capacity
+  question: |
+    For a brand-new service with unpredictable, spiky traffic and a team that does not
+    want to do capacity planning, which ElastiCache choice fits best — and what is the
+    cost trade-off versus reserved nodes?
+  options:
+  - A large single Memcached node; cheapest in all cases
+  - A fixed 10-shard cluster; guarantees the lowest cost
+  - 'ElastiCache Serverless: auto-scales capacity/storage billed by GB-hr + ECPUs; less cost-optimal than
+    reserved nodes for steady heavy load'
+  - MemoryDB; because it is the cheapest option for pure caching
+  answer: 2
+  explanation: |
+    Serverless removes node/shard sizing and auto-scales, ideal for spiky/unknown
+    load, billed by GB-hr stored + ECPUs. Steady, well-understood heavy workloads are
+    usually cheaper on reserved nodes. A fixed cluster requires the very planning the
+    team wants to avoid, and MemoryDB (durable primary DB) is overkill/expensive for a
+    pure cache.
+  ref: concepts.md#cluster-mode-enabled-versus-disabled-sharding-and-replication
+- id: aws-caching-elasticache-dax-020
+  difficulty: intermediate
+  tags:
+  - multi-az
+  - failover
+  - ha
+  question: |
+    What does enabling Multi-AZ with automatic failover on an ElastiCache Redis
+    cluster provide?
+  options:
+  - Strong consistency across AZs
+  - Higher single-key write throughput
+  - Elimination of all cross-AZ data transfer charges
+  - Automatic promotion of a replica in a healthy AZ if the primary fails, with endpoint DNS updated so
+    clients reconnect
+  answer: 3
+  explanation: |
+    Multi-AZ places replicas in other AZs and, on primary failure, promotes a replica
+    and updates the endpoint so clients reconnect (seconds to ~1 minute). It does not
+    give strong consistency (async replication), does not raise single-key write
+    throughput, and cross-AZ transfer still costs money.
+  ref: concepts.md#multi-az-failover-and-how-the-design-degrades
+- id: aws-caching-elasticache-dax-021
+  difficulty: advanced
+  tags:
+  - failure-mode
+  - cold-start
+  - thundering-herd
+  question: |
+    A single-node cache (no replicas) dies at peak traffic. What is the most likely
+    immediate consequence?
+  options:
+  - 'A cold-start on the whole keyspace: a flood of misses hits the origin DB at once, spiking latency
+    and DB load'
+  - Nothing; ElastiCache silently recreates all cached data
+  - The application returns cached data from a hidden backup automatically
+  - Writes continue to the cache buffer with no origin impact
+  answer: 0
+  explanation: |
+    With no replica, the cache is gone and every read misses until the cache warms —
+    effectively a whole-keyspace thundering herd against the DB. ElastiCache does not
+    recreate in-memory data on the fly, there is no hidden backup served automatically,
+    and there is no buffer to write to.
+  ref: concepts.md#multi-az-failover-and-how-the-design-degrades
+- id: aws-caching-elasticache-dax-022
+  difficulty: advanced
+  tags:
+  - global-datastore
+  - multi-region
+  - dr
+  question: |
+    A design needs low-latency cache reads in two regions plus cross-region DR for
+    Redis. Which feature applies, and what is its consistency caveat?
+  options:
+  - ElastiCache is global by default; reads are strongly consistent across regions
+  - Global Datastore replicates asynchronously to a secondary region; RPO/RTO are non-zero due to async
+    replication
+  - CloudFront replicates Redis clusters across regions synchronously
+  - DAX provides cross-region Redis replication
+  answer: 1
+  explanation: |
+    ElastiCache is regional; Global Datastore adds an async-replicated secondary
+    cluster in another region for DR and local reads, so there is a non-zero RPO/RTO.
+    ElastiCache is not global by default, CloudFront does not replicate Redis, and DAX
+    is DynamoDB-only.
+  ref: concepts.md#multi-az-failover-and-how-the-design-degrades
+- id: aws-caching-elasticache-dax-023
+  difficulty: expert
+  tags:
+  - availability
+  - resilience
+  - design
+  question: |
+    Why is a cache that the system "cannot live without" considered an availability
+    liability, and what mitigations address it?
+  options:
+  - It is not a liability; a critical cache improves availability by definition
+  - The only mitigation is to disable the cache in production
+  - If the cache fails and the origin can't absorb the load, the whole system fails; mitigate with connection-pool
+    limits, request coalescing, and circuit breakers so the origin survives a cold/dead cache
+  - Caches never fail, so the concern is theoretical
+  answer: 2
+  explanation: |
+    A hard dependency on the cache means a cache outage becomes a full outage when the
+    origin is overwhelmed. You design the origin to survive a cold/dead cache via
+    coalescing, pool limits, and circuit breakers. Caches do fail, and disabling the
+    cache is not a mitigation.
+  ref: concepts.md#multi-az-failover-and-how-the-design-degrades
+- id: aws-caching-elasticache-dax-024
+  difficulty: intermediate
+  tags:
+  - eviction
+  - maxmemory
+  - policy
+  question: |
+    When an ElastiCache Redis node reaches its maxmemory limit, what governs which
+    data is removed?
+  options:
+  - The oldest keys by insertion time, always
+  - A random 50% of the keyspace is flushed
+  - The cluster automatically adds a shard and evicts nothing
+  - The configured eviction policy (e.g., allkeys-lru, volatile-ttl); if eviction can't keep up, writes
+    may be rejected
+  answer: 3
+  explanation: |
+    Eviction follows the configured maxmemory-policy (allkeys-lru, volatile-lru,
+    volatile-ttl, noeviction, etc.); with noeviction or when eviction lags, writes can
+    be rejected. It is not strictly insertion order, not a random half-flush, and it
+    does not auto-add shards.
+  ref: concepts.md#multi-az-failover-and-how-the-design-degrades
+- id: aws-caching-elasticache-dax-025
+  difficulty: beginner
+  tags:
+  - dax
+  - fundamentals
+  question: |
+    What is DAX (DynamoDB Accelerator)?
+  options:
+  - A write-through, in-memory cache purpose-built for DynamoDB, API-compatible with the DynamoDB SDK,
+    delivering microsecond reads
+  - A general-purpose Redis cache for any data source
+  - A CloudFront edge caching feature for APIs
+  - A durable primary database with Redis semantics
+  answer: 0
+  explanation: |
+    DAX is a DynamoDB-only, write-through in-memory cache that is DynamoDB-API
+    compatible (near drop-in) and serves cache hits in microseconds. It is not a
+    general Redis cache, not an edge/CDN feature, and not a durable primary DB (that's
+    MemoryDB).
+  ref: concepts.md#dax-dynamodb-accelerator
+- id: aws-caching-elasticache-dax-026
+  difficulty: intermediate
+  tags:
+  - dax
+  - caches
+  - item-query
+  question: |
+    DAX maintains two caches. What are they and how are they keyed?
+  options:
+  - A read cache and a write cache, both keyed by TTL
+  - An item cache (GetItem/BatchGetItem, keyed by primary key) and a query cache (Query/Scan, keyed by
+    request parameters), each with its own TTL
+  - A hot cache and a cold cache split by access frequency
+  - A primary cache and a replica cache split by node
+  answer: 1
+  explanation: |
+    DAX has an item cache (keyed by primary key for GetItem/BatchGetItem) and a query
+    cache (keyed by the Query/Scan parameters), each with a configurable TTL
+    (default 5 minutes). The other splits are not how DAX organizes its caches.
+  ref: concepts.md#dax-dynamodb-accelerator
+- id: aws-caching-elasticache-dax-027
+  difficulty: advanced
+  tags:
+  - dax
+  - strong-consistency
+  - gotcha
+  question: |
+    A team adds DAX but notices some reads did not get faster. The reads request
+    strongly consistent results. Why is DAX not helping them?
+  options:
+  - DAX only caches writes, not reads
+  - DAX requires cluster mode to cache reads
+  - Strongly consistent reads are passed through directly to DynamoDB and are not served from the DAX
+    cache
+  - Strong reads are cached but with a 0-second TTL
+  answer: 2
+  explanation: |
+    DAX serves eventually consistent data from cache; a strongly consistent read
+    request bypasses the cache and goes straight to the table, so it gets no caching
+    benefit. DAX caches reads (not only writes), needs no cluster mode toggle, and does
+    not cache strong reads at all.
+  ref: concepts.md#dax-dynamodb-accelerator
+- id: aws-caching-elasticache-dax-028
+  difficulty: advanced
+  tags:
+  - dax
+  - write-through
+  - stale
+  - bypass
+  question: |
+    In a DAX deployment, some application code writes directly to the DynamoDB table
+    (bypassing DAX). What consistency problem does this create?
+  options:
+  - None; DAX detects all table writes automatically
+  - The write is rejected by DynamoDB
+  - DAX immediately flushes its entire cache on any table write
+  - The DAX item cache is not invalidated by the bypassing write and serves stale data until the entry's
+    TTL expires
+  answer: 3
+  explanation: |
+    DAX only updates its cache for writes that go THROUGH DAX. A direct-to-table write
+    leaves the DAX item cache stale until TTL expiry. DAX does not observe out-of-band
+    table writes, the write is not rejected, and it does not flush everything.
+  ref: concepts.md#dax-dynamodb-accelerator
+- id: aws-caching-elasticache-dax-029
+  difficulty: intermediate
+  tags:
+  - dax
+  - ttl
+  - defaults
+  question: |
+    What is the default TTL for DAX item and query caches?
+  options:
+  - 5 minutes (configurable)
+  - 60 seconds
+  - 1 hour
+  - 24 hours
+  answer: 0
+  explanation: |
+    DAX item and query caches default to a 5-minute TTL, which is configurable per
+    cache. The other values are not the DAX defaults.
+  ref: concepts.md#dax-dynamodb-accelerator
+- id: aws-caching-elasticache-dax-030
+  difficulty: advanced
+  tags:
+  - dax
+  - query-cache
+  - invalidation
+  - gotcha
+  question: |
+    With DAX, a write-through PutItem refreshes the affected item in the item cache.
+    Why might a related Query result still return stale data afterward?
+  options:
+  - PutItem never updates any cache
+  - The query cache is invalidated by TTL, not by writes to underlying items, so a cached query result
+    can persist until its own TTL expires
+  - Query results are strongly consistent and cannot be stale
+  - The item cache and query cache share the same entry, so both update together
+  answer: 1
+  explanation: |
+    A write-through PutItem updates the item cache entry for that key, but query-cache
+    entries expire only by TTL — they are not invalidated by underlying item writes,
+    so a stale query result can persist. The caches are separate, and query results
+    from cache are eventually consistent.
+  ref: concepts.md#dax-dynamodb-accelerator
+- id: aws-caching-elasticache-dax-031
+  difficulty: intermediate
+  tags:
+  - dax
+  - limits
+  - nodes
+  question: |
+    Which statement about DAX cluster topology and scope is correct?
+  options:
+  - DAX can cache data from RDS, DynamoDB, and S3
+  - DAX is a single-node service with no replicas
+  - A DAX cluster runs in your VPC with a primary plus up to 10 replica nodes (up to 11 nodes) across
+    AZs, and caches DynamoDB data only
+  - DAX only works with DynamoDB global tables
+  answer: 2
+  explanation: |
+    DAX is DynamoDB-only, runs in your VPC, and supports a primary plus up to 10
+    replicas (11 nodes) spread across AZs for HA. It cannot cache RDS/S3, is not
+    single-node, and does not require global tables.
+  ref: concepts.md#dax-dynamodb-accelerator
+- id: aws-caching-elasticache-dax-032
+  difficulty: intermediate
+  tags:
+  - dax
+  - elasticache
+  - selection
+  question: |
+    You need to cache raw DynamoDB items for a read-heavy service with minimal code
+    changes and eventual consistency is acceptable. Which is the better fit and why?
+  options:
+  - ElastiCache Redis, because you must write cache-aside logic anyway
+  - CloudFront, because it caches API responses
+  - MemoryDB, because it is durable
+  - DAX, because it is DynamoDB-API-compatible (near drop-in) and write-throughs items for you
+  answer: 3
+  explanation: |
+    For drop-in item caching of DynamoDB with eventual consistency, DAX is purpose-
+    built and requires little code. ElastiCache would force you to hand-write cache-
+    aside and invalidation; CloudFront is an edge/API cache; MemoryDB is a durable
+    primary DB, overkill here.
+  ref: concepts.md#dax-versus-elasticache-in-front-of-dynamodb
+- id: aws-caching-elasticache-dax-033
+  difficulty: advanced
+  tags:
+  - elasticache
+  - dax
+  - structures
+  - selection
+  question: |
+    A DynamoDB-backed app must also cache computed cross-item aggregates, maintain a
+    real-time leaderboard, and enforce a global rate limit. Which caching choice is
+    appropriate?
+  options:
+  - ElastiCache Redis, because it offers data structures (sorted sets, counters), can cache computed/aggregated
+    data, and is not limited to DynamoDB item shapes
+  - DAX, because it caches everything DynamoDB touches
+  - CloudFront, because it handles counters at the edge
+  - API Gateway caching, because it stores sorted sets
+  answer: 0
+  explanation: |
+    DAX only caches DynamoDB items/queries — it cannot hold arbitrary aggregates,
+    sorted-set leaderboards, or global counters. ElastiCache Redis provides exactly
+    those structures. CloudFront and API Gateway caching are response caches, not
+    data-structure stores.
+  ref: concepts.md#dax-versus-elasticache-in-front-of-dynamodb
+- id: aws-caching-elasticache-dax-034
+  difficulty: advanced
+  tags:
+  - anti-pattern
+  - dax
+  - elasticache
+  question: |
+    Why is putting ElastiCache in front of DynamoDB purely to cache raw items usually
+    the wrong choice?
+  options:
+  - ElastiCache cannot store DynamoDB items at all
+  - DAX does exactly that with less code and native write-through; ElastiCache adds hand-rolled cache-aside/invalidation
+    for no added capability in this case
+  - ElastiCache is slower than DynamoDB for reads
+  - DynamoDB forbids external caches
+  answer: 1
+  explanation: |
+    For plain item caching, DAX is the low-effort, DynamoDB-native answer with write-
+    through. ElastiCache would replicate that at the cost of extra code and ops without
+    adding value unless you need its extra capabilities. ElastiCache can store items
+    and is fast; DynamoDB doesn't forbid caches.
+  ref: concepts.md#dax-versus-elasticache-in-front-of-dynamodb
+- id: aws-caching-elasticache-dax-035
+  difficulty: expert
+  tags:
+  - hybrid
+  - dax
+  - elasticache
+  - architecture
+  question: |
+    A senior candidate proposes using BOTH DAX and ElastiCache for a DynamoDB-backed
+    platform. What is the strongest justification?
+  options:
+  - 'Redundancy: two caches guarantee no cache ever misses'
+  - Using two caches halves the cost of each
+  - DAX handles the DynamoDB item hot path with microsecond reads while ElastiCache holds computed/aggregated/cross-source
+    data and structures the DynamoDB item cache cannot represent
+  - It is required whenever DynamoDB global tables are enabled
+  answer: 2
+  explanation: |
+    Each cache does what it is best at: DAX for native item caching, ElastiCache for
+    aggregates, structures, pub/sub, and multi-source caching. Two caches do not
+    eliminate misses, do not halve cost, and are not tied to global tables.
+  ref: concepts.md#dax-versus-elasticache-in-front-of-dynamodb
+- id: aws-caching-elasticache-dax-036
+  difficulty: intermediate
+  tags:
+  - dax
+  - cost
+  - rcu
+  question: |
+    How can DAX reduce cost for a read-heavy DynamoDB workload?
+  options:
+  - By eliminating the need for the DynamoDB table entirely
+  - By converting the table to on-demand automatically
+  - By compressing all items to 1 KB
+  - By absorbing repeated reads of hot items, reducing consumed table RCUs and avoiding throttling on
+    hot partitions
+  answer: 3
+  explanation: |
+    DAX serves repeat reads from cache, cutting the RCUs the table must provision and
+    relieving hot-partition throttling — often cheaper than scaling table read
+    capacity. It does not replace the table (the durable source), change capacity mode,
+    or compress items.
+  ref: concepts.md#dax-versus-elasticache-in-front-of-dynamodb
+- id: aws-caching-elasticache-dax-037
+  difficulty: beginner
+  tags:
+  - cloudfront
+  - cdn
+  - fundamentals
+  question: |
+    What are the two primary benefits of putting CloudFront in front of an origin?
+  options:
+  - Lower client-perceived latency (content cached near users) and reduced origin load/egress
+  - Stronger database consistency and lower storage cost
+  - Automatic schema migration and query optimization
+  - Guaranteed exactly-once message delivery
+  answer: 0
+  explanation: |
+    CloudFront caches content at edge locations near users (cutting RTTs and TLS
+    overhead) and offloads the origin (less compute and egress). It has nothing to do
+    with DB consistency, schema migration, or messaging semantics.
+  ref: concepts.md#caching-at-the-edge-with-cloudfront
+- id: aws-caching-elasticache-dax-038
+  difficulty: advanced
+  tags:
+  - cloudfront
+  - cache-key
+  - hit-rate
+  question: |
+    A CloudFront distribution has a poor cache hit rate. The most common root cause is
+    which of the following?
+  options:
+  - The origin is an S3 bucket
+  - The cache policy includes highly variable fields (all query strings, a unique per-user cookie), which
+    shatters the cache key into near-unique entries
+  - TTLs are too long
+  - Origin Shield is enabled
+  answer: 1
+  explanation: |
+    Including variable fields (all query strings, unique cookies, volatile headers) in
+    the cache key produces near-unique keys and destroys reuse. Long TTLs raise hit
+    rate; S3 origins and Origin Shield don't reduce it. Fix the cache policy to key
+    only on what truly varies the response.
+  ref: concepts.md#caching-at-the-edge-with-cloudfront
+- id: aws-caching-elasticache-dax-039
+  difficulty: advanced
+  tags:
+  - cloudfront
+  - invalidation
+  - versioned-urls
+  question: |
+    Why are versioned/content-hashed object URLs preferred over CloudFront
+    invalidations for deploying updated static assets?
+  options:
+  - Invalidations are free and instant, but versioning is simpler
+  - Versioned URLs force a full origin re-crawl
+  - Invalidations cost money beyond a free tier and are slow to propagate; versioned URLs change the cache
+    key so new content is fetched immediately while old entries age out via TTL/LRU
+  - Invalidations permanently disable caching for the path
+  answer: 2
+  explanation: |
+    Versioned URLs (app.v2.js / content-hash names) create a new cache key so clients
+    fetch the new asset at once, with old entries expiring naturally — avoiding the
+    cost and latency of invalidations. Invalidations are not free/instant, versioned
+    URLs don't force re-crawls, and invalidations don't permanently disable caching.
+  ref: concepts.md#caching-at-the-edge-with-cloudfront
+- id: aws-caching-elasticache-dax-040
+  difficulty: advanced
+  tags:
+  - cloudfront
+  - edge-compute
+  - functions-lambda-edge
+  question: |
+    For a sub-millisecond viewer-request task like rewriting a header or checking a
+    simple auth token at massive scale, which CloudFront edge-compute option fits, and
+    what is the trade-off versus the alternative?
+  options:
+  - Lambda@Edge, because it is faster and cheaper than CloudFront Functions
+  - Neither; edge compute cannot touch headers
+  - API Gateway authorizers running at the edge
+  - 'CloudFront Functions: sub-ms, cheap, viewer request/response, but far more limited than Lambda@Edge
+    which can run heavier logic for hundreds of ms'
+  answer: 3
+  explanation: |
+    CloudFront Functions are ultra-cheap, sub-ms, and ideal for lightweight
+    header/redirect/token tasks on viewer events, but limited. Lambda@Edge handles
+    heavier transformations at higher latency/cost. API Gateway authorizers are not
+    CloudFront edge compute.
+  ref: concepts.md#caching-at-the-edge-with-cloudfront
+- id: aws-caching-elasticache-dax-041
+  difficulty: intermediate
+  tags:
+  - cloudfront
+  - origin-shield
+  - thundering-herd
+  question: |
+    What does CloudFront Origin Shield primarily accomplish?
+  options:
+  - It adds a centralized caching layer in front of the origin that collapses requests, raising offload
+    and reducing origin thundering herd
+  - It encrypts all cache entries at the edge
+  - It replaces the need for a cache policy
+  - It provides cross-region database replication
+  answer: 0
+  explanation: |
+    Origin Shield is an extra centralized cache tier that funnels edge misses through
+    one point, collapsing duplicate origin fetches (e.g., one fetch per object) and
+    protecting the origin. It is not about encryption, cache policies, or DB
+    replication.
+  ref: concepts.md#caching-at-the-edge-with-cloudfront
+- id: aws-caching-elasticache-dax-042
+  difficulty: intermediate
+  tags:
+  - cloudfront
+  - private-data
+  - security
+  question: |
+    What is the risk of edge-caching per-user private API responses at CloudFront
+    without care?
+  options:
+  - There is no risk; CloudFront isolates users automatically
+  - If the cache key does not include user identity, one user's private response can be served to another
+    user (cache-key mis-scoping / data leak)
+  - It always doubles origin cost
+  - CloudFront refuses to cache authenticated responses
+  answer: 1
+  explanation: |
+    Caching private responses without including the user identity in the cache key can
+    leak one user's data to another. CloudFront does not auto-isolate users by content;
+    it caches whatever the key permits. It doesn't double cost or universally refuse
+    authenticated responses.
+  ref: concepts.md#caching-at-the-edge-with-cloudfront
+- id: aws-caching-elasticache-dax-043
+  difficulty: beginner
+  tags:
+  - ttl
+  - staleness
+  question: |
+    What is the fundamental trade-off in choosing a TTL for cached data?
+  options:
+  - Shorter TTL always increases hit rate
+  - TTL has no effect on hit rate
+  - Shorter TTL means fresher data but lower hit rate and more origin load; longer TTL means higher hit
+    rate but staler data
+  - Longer TTL always improves consistency
+  answer: 2
+  explanation: |
+    TTL trades freshness against hit rate/origin load: short TTLs refresh often (fresh
+    but more misses), long TTLs reuse more (higher hit rate but staler). Shorter TTL
+    lowers hit rate, and longer TTL worsens, not improves, freshness/consistency.
+  ref: concepts.md#ttl-and-cache-invalidation
+- id: aws-caching-elasticache-dax-044
+  difficulty: advanced
+  tags:
+  - event-driven
+  - invalidation
+  - streams
+  question: |
+    Which modern pattern keeps caches fresh across services WITHOUT coupling every
+    writer to cache-management code?
+  options:
+  - Requiring all writers to call a shared cache-delete library synchronously
+  - Setting an infinite TTL and never invalidating
+  - Disabling caching whenever any write occurs
+  - 'Event-driven invalidation: DynamoDB Streams / CDC / EventBridge trigger a Lambda that refreshes or
+    invalidates cache entries'
+  answer: 3
+  explanation: |
+    Event-driven invalidation decouples writers from cache logic: the data-change
+    event (Streams/CDC/EventBridge) drives a Lambda that updates the cache. A shared
+    synchronous delete library still couples writers; infinite TTL never refreshes;
+    disabling caching on writes defeats the purpose.
+  ref: concepts.md#ttl-and-cache-invalidation
+- id: aws-caching-elasticache-dax-045
+  difficulty: intermediate
+  tags:
+  - eviction
+  - invalidation
+  - concepts
+  question: |
+    Eviction and invalidation are often confused. Which statement correctly
+    distinguishes them?
+  options:
+  - Eviction is about capacity (dropping data when memory is full via LRU/LFU/TTL); invalidation is about
+    correctness (removing/updating stale entries when the source changes)
+  - They are the same operation with different names
+  - Invalidation only happens when memory is full
+  - Eviction guarantees no data is ever stale
+  answer: 0
+  explanation: |
+    Eviction manages capacity — LRU/LFU/TTL drop data under memory pressure.
+    Invalidation manages correctness — removing entries that no longer match the
+    source. They are distinct; invalidation is not triggered by memory pressure, and
+    eviction does nothing to guarantee freshness.
+  ref: concepts.md#ttl-and-cache-invalidation
+- id: aws-caching-elasticache-dax-046
+  difficulty: advanced
+  tags:
+  - eviction-policy
+  - selection
+  question: |
+    You run a Redis instance mixing pure cache entries (safe to drop) and a few keys
+    that must never be evicted. Which eviction approach fits best?
+  options:
+  - allkeys-lru so every key including the protected ones can be evicted
+  - Set TTLs only on the evictable keys and use a volatile-* policy (e.g., volatile-lru/volatile-ttl)
+    so only keys with a TTL are candidates for eviction
+  - noeviction, so nothing is ever cached
+  - Random eviction across all keys
+  answer: 1
+  explanation: |
+    volatile-* policies only evict keys that have a TTL set, letting you protect the
+    TTL-less critical keys while still evicting the disposable cache entries.
+    allkeys-lru could evict the protected keys; noeviction would reject writes; random
+    eviction offers no protection.
+  ref: concepts.md#ttl-and-cache-invalidation
+- id: aws-caching-elasticache-dax-047
+  difficulty: intermediate
+  tags:
+  - versioned-keys
+  - invalidation
+  question: |
+    How does using versioned cache keys (e.g., v2:user:123) avoid the invalidation
+    problem?
+  options:
+  - It forces a strongly consistent read
+  - It disables TTL entirely
+  - Changing the key when content changes means readers fetch the new key while old entries simply age
+    out via TTL/LRU — no explicit deletion needed
+  - It replicates the key to every shard
+  answer: 2
+  explanation: |
+    Versioned keys sidestep invalidation: a new version is a new key, so consumers get
+    fresh data immediately and stale old-version entries expire naturally. It doesn't
+    change consistency guarantees, disable TTL, or replicate across shards.
+  ref: concepts.md#ttl-and-cache-invalidation
+- id: aws-caching-elasticache-dax-048
+  difficulty: intermediate
+  tags:
+  - thundering-herd
+  - stampede
+  question: |
+    What is the "thundering herd" (cache stampede) problem?
+  options:
+  - Too many keys stored in one shard
+  - A replica falling behind the primary
+  - A CloudFront invalidation taking too long
+  - A popular key expires (or the cache cold-starts) and many concurrent requests all miss at once, hammering
+    the origin simultaneously
+  answer: 3
+  explanation: |
+    Thundering herd is the simultaneous flood of misses when a hot key expires or the
+    cache is cold, all hitting the origin at once and risking a cascading failure. It
+    is not about shard key counts, replica lag, or invalidation latency.
+  ref: concepts.md#hot-keys-and-the-thundering-herd-problem
+- id: aws-caching-elasticache-dax-049
+  difficulty: advanced
+  tags:
+  - thundering-herd
+  - coalescing
+  - single-flight
+  question: |
+    Which technique directly prevents thousands of concurrent misses from all
+    recomputing the same expired hot key?
+  options:
+  - 'Request coalescing / single-flight: only one request recomputes (e.g., via a per-key SETNX lock)
+    while others wait for its result'
+  - Increasing the number of shards
+  - Switching to strongly consistent reads
+  - Lowering the TTL to force more frequent expiry
+  answer: 0
+  explanation: |
+    Coalescing/single-flight ensures one recompute per key while others await the
+    result, protecting the origin. Adding shards doesn't help a single key, strong
+    reads don't reduce recomputes, and lowering TTL increases expiry frequency (worse).
+  ref: concepts.md#hot-keys-and-the-thundering-herd-problem
+- id: aws-caching-elasticache-dax-050
+  difficulty: advanced
+  tags:
+  - hot-key
+  - cluster-mode
+  - gotcha
+  question: |
+    Why does enabling cluster mode (sharding) NOT solve a single hot-key problem?
+  options:
+  - Because cluster mode reduces the number of nodes
+  - Because a single key still hashes to exactly one slot/shard, so all its traffic lands on one node
+    regardless of how many shards exist
+  - Because cluster mode disables replicas
+  - Because hot keys are automatically split across all shards
+  answer: 1
+  explanation: |
+    Sharding distributes DIFFERENT keys across shards, but one key maps to one slot on
+    one shard — so a single hot key still concentrates on one node. Mitigate with local
+    caching, key replication/fan-out, or read replicas. Cluster mode doesn't reduce
+    nodes, disable replicas, or auto-split a single key.
+  ref: concepts.md#hot-keys-and-the-thundering-herd-problem
+- id: aws-caching-elasticache-dax-051
+  difficulty: expert
+  tags:
+  - hot-key
+  - fan-out
+  - mitigation
+  question: |
+    A global config key receives extreme read traffic that saturates one Redis shard.
+    Which mitigation spreads that single key's load across nodes?
+  options:
+  - Enable strong consistency on the key
+  - Lower the key's TTL to 1 second
+  - Replicate the value under multiple keys (hot:1..N) and have each reader read a random replica, spreading
+    load across shards; and/or use in-process local caching
+  - Move the key to Memcached
+  answer: 2
+  explanation: |
+    Key fan-out (write copies hot:1..N and read a random one) distributes a single hot
+    key's reads across slots/shards; local in-process caching absorbs the hottest
+    reads before they hit Redis. Strong consistency, a tiny TTL, or moving to Memcached
+    don't spread single-key load.
+  ref: concepts.md#hot-keys-and-the-thundering-herd-problem
+- id: aws-caching-elasticache-dax-052
+  difficulty: advanced
+  tags:
+  - ttl-jitter
+  - stale-while-revalidate
+  - mitigation
+  question: |
+    Which pair of techniques reduces synchronized cache expiry stampedes cheaply?
+  options:
+  - Setting identical TTLs on all keys and disabling background refresh
+  - Using noeviction and infinite TTL
+  - Forcing all reads to be strongly consistent
+  - Jittered/staggered TTLs (so keys don't expire simultaneously) plus serving stale while revalidating
+    in the background
+  answer: 3
+  explanation: |
+    Jitter avoids many keys expiring at the same instant (essentially free), and
+    serve-stale-while-revalidate returns the old value while refreshing async so no
+    request blocks on a cold recompute. Identical TTLs synchronize stampedes; infinite
+    TTL/noeviction and strong reads don't address stampedes.
+  ref: concepts.md#hot-keys-and-the-thundering-herd-problem
+- id: aws-caching-elasticache-dax-053
+  difficulty: advanced
+  tags:
+  - negative-caching
+  - penetration
+  question: |
+    Repeated requests for keys that do not exist keep hitting the database. Which
+    technique mitigates this "cache penetration"?
+  options:
+  - 'Negative caching: briefly cache a ''not found'' result so repeated misses for nonexistent keys stop
+    hammering the DB'
+  - Increasing the item cache TTL for existing keys
+  - Disabling TTL for all keys
+  - Switching to write-through caching
+  answer: 0
+  explanation: |
+    Negative caching stores a short-lived "not found" marker so lookups for
+    nonexistent keys are absorbed by the cache instead of repeatedly hitting the DB
+    (also mitigates a penetration attack). Longer positive TTLs, disabling TTL, or
+    write-through don't address missing-key lookups.
+  ref: concepts.md#hot-keys-and-the-thundering-herd-problem
+- id: aws-caching-elasticache-dax-054
+  difficulty: intermediate
+  tags:
+  - session-store
+  - stateless
+  - scaling
+  question: |
+    Why do stateless app servers commonly store session state in ElastiCache Redis
+    rather than in local memory?
+  options:
+  - Local memory is slower than Redis
+  - A shared cache lets any server handle any request, enabling horizontal scaling and easy deploys; with
+    Multi-AZ/replication sessions survive a node failure
+  - Redis guarantees strong consistency for sessions
+  - Local memory cannot store session objects
+  answer: 1
+  explanation: |
+    Externalizing sessions to a shared, replicated store means any stateless server
+    can serve any user, which enables scaling and rolling deploys, and Multi-AZ Redis
+    keeps sessions alive through node failures. Local memory is actually faster but not
+    shared; strong consistency isn't the reason.
+  ref: concepts.md#session-store-rate-limiting-and-leaderboard-use-cases
+- id: aws-caching-elasticache-dax-055
+  difficulty: advanced
+  tags:
+  - session-store
+  - redis
+  - memcached
+  - trade-offs
+  question: |
+    For a session store where logging users out on infrastructure failure is
+    unacceptable, which engine and why?
+  options:
+  - Memcached, because multi-threading makes it more reliable
+  - Either engine; both replicate sessions identically
+  - Redis/Valkey with Multi-AZ replication, because a promoted replica preserves sessions on node failure,
+    whereas Memcached has no replication and loses a node's sessions
+  - DAX, because it write-throughs session data
+  answer: 2
+  explanation: |
+    Redis/Valkey with replication/failover preserves sessions across a node loss;
+    Memcached has no replication, so losing a node drops those sessions and logs users
+    out. The engines are not equivalent here, and DAX is DynamoDB-only.
+  ref: concepts.md#session-store-rate-limiting-and-leaderboard-use-cases
+- id: aws-caching-elasticache-dax-056
+  difficulty: intermediate
+  tags:
+  - rate-limiting
+  - counters
+  - redis
+  question: |
+    Why is centralizing rate-limit counters in ElastiCache Redis (INCR + TTL)
+    preferable to per-server in-memory counters?
+  options:
+  - In-memory counters are impossible to implement
+  - Redis counters never expire
+  - In-memory counters are strongly consistent and Redis is not
+  - A central atomic counter enforces a GLOBAL limit across all app servers, which independent per-server
+    counters cannot
+  answer: 3
+  explanation: |
+    Redis INCR is atomic and shared, so the limit applies globally across every server;
+    per-server counters each enforce only a local slice, allowing far more total
+    traffic than intended. In-memory counters are possible but not shared; Redis
+    counters can have TTLs.
+  ref: concepts.md#session-store-rate-limiting-and-leaderboard-use-cases
+- id: aws-caching-elasticache-dax-057
+  difficulty: intermediate
+  tags:
+  - leaderboard
+  - sorted-sets
+  - redis
+  question: |
+    Which Redis data structure is the canonical choice for a real-time leaderboard,
+    and why?
+  options:
+  - Sorted sets (ZADD/ZRANGE/ZREVRANK), because they give O(log n) ranked inserts and efficient top-N
+    and per-member rank queries
+  - Lists, because they preserve insertion order
+  - Hashes, because they store fields
+  - Strings, because they are fastest
+  answer: 0
+  explanation: |
+    Sorted sets maintain members ordered by score, giving O(log n) inserts and cheap
+    ranked range/rank queries — exactly what leaderboards need. Lists, hashes, and
+    strings can't efficiently answer top-N or rank queries. Memcached/DAX/CloudFront
+    can't do this at all.
+  ref: concepts.md#session-store-rate-limiting-and-leaderboard-use-cases
+- id: aws-caching-elasticache-dax-058
+  difficulty: expert
+  tags:
+  - leaderboard
+  - hot-key
+  - sharding
+  question: |
+    A single global leaderboard sorted set becomes a hot key at extreme scale. What is
+    a reasonable scaling approach?
+  options:
+  - Convert the sorted set to a Memcached blob
+  - Shard leaderboards (per-region or per-time-bucket) and merge results, and/or serve reads from replicas,
+    to spread the load off one shard
+  - Enable strong consistency on the sorted set
+  - Move the leaderboard to DAX
+  answer: 1
+  explanation: |
+    A single sorted set lives on one shard, so at extreme scale you shard by
+    region/time bucket and merge, and use read replicas for read scaling. Memcached
+    has no sorted set, strong consistency doesn't spread load, and DAX can't store
+    sorted sets.
+  ref: concepts.md#session-store-rate-limiting-and-leaderboard-use-cases
+- id: aws-caching-elasticache-dax-059
+  difficulty: advanced
+  tags:
+  - pubsub
+  - streams
+  - messaging
+  question: |
+    What is the key difference between Redis Pub/Sub and Redis Streams for fan-out,
+    and when would you instead choose SNS/SQS/Kinesis?
+  options:
+  - Pub/Sub persists messages; Streams are fire-and-forget
+  - They are identical; choice is arbitrary
+  - Pub/Sub is fire-and-forget (offline subscribers miss messages); Streams add persistence and consumer
+    groups; for durable, at-least-once, large-scale messaging use SNS/SQS/Kinesis
+  - Streams are only for leaderboards
+  answer: 2
+  explanation: |
+    Pub/Sub delivers to currently-connected subscribers only (no persistence); Streams
+    persist messages and support consumer groups. Redis fan-out is best-effort and
+    low-latency; for durable, scalable, at-least-once delivery use SNS/SQS/Kinesis. The
+    first option reverses the semantics.
+  ref: concepts.md#session-store-rate-limiting-and-leaderboard-use-cases
+- id: aws-caching-elasticache-dax-060
+  difficulty: advanced
+  tags:
+  - memorydb
+  - durability
+  - primary-db
+  question: |
+    When is Amazon MemoryDB the right choice over ElastiCache Redis?
+  options:
+  - When you need a cheap, disposable cache
+  - When you only need edge caching
+  - When you need to cache DynamoDB items with minimal code
+  - When you want Redis-compatible microsecond reads AND durable, single-digit-ms writes as the PRIMARY
+    database, because MemoryDB commits to a Multi-AZ transactional log before ack
+  answer: 3
+  explanation: |
+    MemoryDB is a durable, Redis-compatible primary database: writes commit to a
+    Multi-AZ transactional log before acknowledgment, giving durability with in-memory
+    speed. It costs more and is overkill for a pure cache; edge caching is CloudFront;
+    minimal-code DynamoDB item caching is DAX.
+  ref: concepts.md#modern-and-serverless-first-caching-patterns
+- id: aws-caching-elasticache-dax-061
+  difficulty: intermediate
+  tags:
+  - api-gateway
+  - caching
+  - serverless
+  question: |
+    What does API Gateway's built-in response caching provide?
+  options:
+  - A per-stage response cache keyed by request parameters that offloads the backend for cacheable REST
+    responses without adding a separate caching service
+  - A shared Redis cluster for your application code
+  - Edge caching identical to CloudFront's global PoPs
+  - A durable database for API state
+  answer: 0
+  explanation: |
+    API Gateway caching is a per-stage response cache (configurable size and TTL) keyed
+    by request parameters, reducing backend calls for cacheable responses. It is not a
+    general Redis cluster, not the global edge network, and not a durable database.
+  ref: concepts.md#modern-and-serverless-first-caching-patterns
+- id: aws-caching-elasticache-dax-062
+  difficulty: expert
+  tags:
+  - multi-tier
+  - architecture
+  - ttl
+  question: |
+    In a multi-tier cache (browser -> CloudFront edge -> API Gateway cache ->
+    ElastiCache -> DB), how should TTLs generally be arranged?
+  options:
+  - Upper tiers (edge) fresher than lower tiers
+  - Lower tiers fresher (shorter TTL) and upper tiers coarser (longer TTL), so each tier absorbs a slice
+    while staleness is bounded closer to the source
+  - All tiers must use identical TTLs
+  - TTLs are irrelevant in multi-tier designs
+  answer: 1
+  explanation: |
+    Each tier absorbs some traffic; keeping lower tiers fresher and upper (edge) tiers
+    coarser balances offload with bounded staleness. Making the edge fresher than the
+    source is illogical, identical TTLs waste the layering, and TTLs are central to the
+    design.
+  ref: concepts.md#modern-and-serverless-first-caching-patterns
+- id: aws-caching-elasticache-dax-063
+  difficulty: intermediate
+  tags:
+  - serverless
+  - ecpu
+  - cost
+  question: |
+    ElastiCache Serverless is billed primarily along which dimensions?
+  options:
+  - Number of provisioned shards and replicas per hour
+  - Number of CloudFront invalidations
+  - Data stored (GB-hr) plus ElastiCache Processing Units (ECPUs) consumed
+  - Consumed DynamoDB RCUs and WCUs
+  answer: 2
+  explanation: |
+    Serverless removes node/shard sizing and bills by GB-hr of data stored plus ECPUs
+    consumed. Provisioned shard-hours describe node-based ElastiCache; invalidations
+    are CloudFront; RCUs/WCUs are DynamoDB.
+  ref: concepts.md#modern-and-serverless-first-caching-patterns
+- id: aws-caching-elasticache-dax-064
+  difficulty: advanced
+  tags:
+  - cost
+  - replicas
+  - cross-az
+  question: |
+    Which factors multiply the cost of a node-based ElastiCache Redis deployment?
+  options:
+  - Only the number of keys stored
+  - Only CloudFront egress
+  - The TTL length of each key
+  - Number of shards multiplied by (1 primary + N replicas) node-hours, plus cross-AZ data transfer for
+    Multi-AZ replication
+  answer: 3
+  explanation: |
+    Node-based cost scales with shards x (primary + replicas) node-hours, and Multi-AZ
+    adds cross-AZ transfer charges. Key count/TTL affect memory sizing indirectly but
+    aren't billing dimensions, and CloudFront egress is a different service.
+  ref: concepts.md#cost-latency-and-capacity-estimation
+- id: aws-caching-elasticache-dax-065
+  difficulty: advanced
+  tags:
+  - cost
+  - dax
+  - rcu
+  - estimation
+  question: |
+    For a hot read-heavy DynamoDB table, how do you reason about whether DAX is
+    cost-effective?
+  options:
+  - Weigh DAX node-hour cost against the DynamoDB RCUs saved (and throttling avoided) by serving repeat
+    reads from cache — for high read reuse on hot data, DAX is often cheaper than scaling table read capacity
+  - DAX is always cheaper regardless of workload
+  - DAX cost equals the WCUs consumed
+  - DAX has no cost; it is included with DynamoDB
+  answer: 0
+  explanation: |
+    DAX cost (node-hours) is traded against saved RCUs and avoided hot-partition
+    throttling; for high read reuse it often wins over provisioning more read capacity.
+    DAX is not free, not always cheaper, and its cost is not tied to WCUs.
+  ref: concepts.md#cost-latency-and-capacity-estimation
+- id: aws-caching-elasticache-dax-066
+  difficulty: intermediate
+  tags:
+  - cost
+  - cloudfront
+  question: |
+    Which CloudFront cost is typically REDUCED the most by a high cache hit rate?
+  options:
+  - The per-request charge, which disappears entirely
+  - Origin egress and origin compute, because cached responses are served from the edge without hitting
+    the origin
+  - The cost of the ElastiCache cluster
+  - DynamoDB storage cost
+  answer: 1
+  explanation: |
+    A high hit rate means fewer origin fetches, cutting origin egress and compute (the
+    biggest savings). Edge requests still incur per-request charges; CloudFront doesn't
+    reduce ElastiCache cluster or DynamoDB storage costs.
+  ref: concepts.md#cost-latency-and-capacity-estimation
+- id: aws-caching-elasticache-dax-067
+  difficulty: advanced
+  tags:
+  - sizing
+  - working-set
+  - capacity
+  question: |
+    When sizing an ElastiCache cluster, when do you move from a single node to cluster
+    mode enabled?
+  options:
+  - As soon as you have more than 100 keys
+  - Only when you enable TTLs
+  - When the working-set size (hot keys x avg value size + overhead + eviction headroom) exceeds one node's
+    RAM, or write throughput exceeds one primary
+  - Never; a single node scales infinitely
+  answer: 2
+  explanation: |
+    Sharding is needed when the working set won't fit in one node's memory or the write
+    rate exceeds a single primary's capacity. Key count alone, TTLs, and "infinite
+    single node" are not the deciding criteria.
+  ref: concepts.md#cost-latency-and-capacity-estimation
+- id: aws-caching-elasticache-dax-068
+  difficulty: expert
+  tags:
+  - selection
+  - consistency
+  - financial
+  question: |
+    A financial service must decrement inventory / read an account balance with strict
+    correctness — no staleness tolerated on that read. How should caching be applied?
+  options:
+  - Cache the balance in Redis with a 1-second TTL and serve from cache
+  - Use write-behind so writes are fastest
+  - Put the balance behind CloudFront with a short TTL
+  - Bypass the cache for that read (or use the source's strong-read path, e.g., a DynamoDB strongly consistent
+    read that bypasses DAX); cache only the staleness-tolerant reads
+  answer: 3
+  explanation: |
+    Caches here are eventually consistent; a correctness-critical read must go to the
+    source's strong path (or bypass the cache). Strong DynamoDB reads bypass DAX by
+    design. A short-TTL Redis/CloudFront copy still risks staleness, and write-behind
+    adds a durability window — both unacceptable for balances.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: aws-caching-elasticache-dax-069
+  difficulty: expert
+  tags:
+  - selection
+  - scenario
+  - edge
+  question: |
+    A global media site serves large static video/image assets to users worldwide and
+    wants to minimize latency and origin egress. Which layer is the primary answer?
+  options:
+  - CloudFront (edge/CDN), caching assets near users with versioned URLs and long max-age; optionally
+    Origin Shield to protect the origin
+  - ElastiCache Redis in one region
+  - DAX in front of the media metadata table
+  - MemoryDB as the asset store
+  answer: 0
+  explanation: |
+    Global, cacheable static media is the textbook CloudFront use case — edge caching
+    cuts latency and origin egress; versioned URLs + long TTL + Origin Shield are the
+    standard pattern. A single-region Redis doesn't help global latency, DAX caches
+    DynamoDB items (not media blobs), and MemoryDB is a durable DB, not an asset CDN.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: aws-caching-elasticache-dax-070
+  difficulty: expert
+  tags:
+  - selection
+  - scenario
+  - structures
+  question: |
+    Design constraint: real-time gaming leaderboard for 50M players, sub-ms ranked
+    queries, global rate limiting, and presence pub/sub. Which caching stack fits?
+  options:
+  - DAX cluster, because it gives microsecond reads
+  - ElastiCache Redis/Valkey (sorted sets for ranking, INCR counters for limits, pub/sub for presence),
+    sharded/replicated for scale and HA
+  - CloudFront with Lambda@Edge computing ranks at the edge
+  - API Gateway caching with a long TTL
+  answer: 1
+  explanation: |
+    The workload needs data structures (sorted sets, counters) and pub/sub — only
+    Redis/Valkey provides them, scaled via sharding + replicas. DAX has no sorted sets
+    or pub/sub, CloudFront/Lambda@Edge can't maintain a global ranked structure, and
+    API Gateway caching is a response cache.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: aws-caching-elasticache-dax-071
+  difficulty: advanced
+  tags:
+  - selection
+  - dax
+  - consistency
+  - scenario
+  question: |
+    A read-heavy DynamoDB product-detail API needs microsecond reads, minimal code
+    change, and can tolerate up to a few minutes of staleness. Which is the best fit
+    and what is the main trade-off you accept?
+  options:
+  - ElastiCache Redis; trade-off is more code and manual invalidation
+  - CloudFront; trade-off is global replication cost
+  - DAX; trade-off is eventual consistency (strong reads bypass the cache) and stale entries until TTL,
+    in exchange for near-zero code change and microsecond reads
+  - MemoryDB; trade-off is durability overhead
+  answer: 2
+  explanation: |
+    DAX matches the constraints: drop-in DynamoDB caching with microsecond reads,
+    accepting eventual consistency and TTL-bounded staleness. Redis adds code/ops for
+    no extra benefit here, CloudFront is an edge API cache (and product detail may be
+    per-request), and MemoryDB's durability is unneeded for a cache.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: aws-caching-elasticache-dax-072
+  difficulty: intermediate
+  tags:
+  - selection
+  - cheat-sheet
+  question: |
+    Which layer is the correct default for caching cacheable public GET API responses
+    close to global users?
+  options:
+  - ElastiCache Memcached
+  - DAX
+  - MemoryDB
+  - CloudFront (optionally combined with API Gateway response caching)
+  answer: 3
+  explanation: |
+    Cacheable public GET responses for global users are best served at the edge via
+    CloudFront (and API Gateway caching can add per-stage response caching). Memcached
+    and MemoryDB are in-region stores; DAX is DynamoDB item caching, not HTTP response
+    caching.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: aws-caching-elasticache-dax-073
+  difficulty: expert
+  tags:
+  - trade-offs
+  - universal
+  - interview
+  question: |
+    What is the single most important thing an interviewer wants you to articulate
+    when you add ANY cache to a design?
+  options:
+  - The staleness window you accept, the invalidation strategy, the failure behavior when the cache is
+    gone, and why the read/write ratio justifies the cache
+  - The exact instance type and price of the cache node
+  - That caching always improves both latency and consistency
+  - That the cache should be the system of record
+  answer: 0
+  explanation: |
+    Every cache trades freshness/complexity for latency/cost; the senior answer names
+    the accepted staleness window, invalidation approach, cold/dead-cache degradation,
+    and the read/write justification. Caching does not improve consistency, and a
+    volatile cache should not be the system of record (that's MemoryDB territory).
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: aws-caching-elasticache-dax-074
+  difficulty: beginner
+  tags:
+  - consistency
+  - ap
+  - fundamentals
+  question: |
+    Redis replicas, DAX caches, and CloudFront edges share which consistency
+    characteristic by default?
+  options:
+  - They are all strongly consistent
+  - They are eventually consistent / AP-leaning — reads may be stale, so correctness-critical reads should
+    bypass them
+  - They guarantee linearizable reads
+  - They block reads until fully synchronized
+  answer: 1
+  explanation: |
+    All three are eventually consistent by default (async replication / TTL-based
+    staleness), so a read may be stale; strongly consistent needs bypass the cache.
+    None provide linearizability or block reads for synchronization by default.
+  ref: concepts.md#trade-offs-and-when-to-use-what
+- id: aws-caching-elasticache-dax-075
+  difficulty: intermediate
+  tags:
+  - selection
+  - memcached
+  - cheat-sheet
+  question: |
+    Given a requirement for a pure, simple, disposable blob cache on a single large
+    multi-threaded node with no HA or data-structure needs, which choice is most
+    cost/complexity appropriate?
+  options:
+  - ElastiCache Redis cluster mode enabled with 10 shards
+  - DAX
+  - ElastiCache Memcached
+  - MemoryDB
+  answer: 2
+  explanation: |
+    Memcached fits a simple, multi-threaded, disposable blob cache with no HA/structure
+    needs — the one scenario it is defensible. A 10-shard Redis cluster is overkill,
+    DAX is DynamoDB-specific, and MemoryDB is a durable primary DB.
+  ref: concepts.md#trade-offs-and-when-to-use-what

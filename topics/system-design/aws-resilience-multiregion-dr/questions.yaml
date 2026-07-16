@@ -1,0 +1,1516 @@
+topic: "Resilience and Disaster Recovery: Multi-AZ, Multi-Region and DR Strategies"
+domain: system-design
+topic_slug: aws-resilience-multiregion-dr
+version: 1
+
+questions:
+  # ---------------- Availability building blocks ----------------
+  - id: aws-resilience-multiregion-dr-001
+    difficulty: beginner
+    tags: [regions, availability-zones, fundamentals]
+    question: |
+      Which statement best describes the relationship between AWS Regions and
+      Availability Zones (AZs)?
+    options:
+      - "A Region contains multiple AZs, each one or more physically separate data centers with independent power/cooling, linked by low-latency private fiber"
+      - "Regions and AZs are the same thing with different names"
+      - "AZs are edge/PoP locations used only for CloudFront caching"
+      - "An AZ contains multiple Regions that share power and cooling"
+    answer: 0
+    explanation: |
+      A Region is a geography containing multiple AZs; each AZ is one or more discrete
+      data centers, physically separated but connected by low-latency (usually <1–2 ms)
+      redundant fiber. Regions are the isolation boundary. Edge/PoP locations are a
+      separate CloudFront concept, not AZs.
+    ref: "concepts.md#availability-building-blocks-regions-azs-and-multi-az-ha"
+
+  - id: aws-resilience-multiregion-dr-002
+    difficulty: beginner
+    tags: [multi-az, high-availability]
+    question: |
+      What failure does a standard Multi-AZ deployment within a single Region protect
+      against?
+    options:
+      - "Accidental deletion or logical corruption of your data"
+      - "Failure of a single Availability Zone (data center)"
+      - "A bad application deploy that returns errors globally"
+      - "Loss of an entire AWS Region"
+    answer: 1
+    explanation: |
+      Multi-AZ protects against an AZ-scoped failure by keeping redundant capacity in
+      other AZs of the same Region. It does NOT protect against a Region-wide event, data
+      corruption/deletion (replication copies it), or a bad global deploy.
+    ref: "concepts.md#availability-building-blocks-regions-azs-and-multi-az-ha"
+
+  - id: aws-resilience-multiregion-dr-003
+    difficulty: intermediate
+    tags: [multi-az, synchronous-replication, latency]
+    question: |
+      Why can RDS Multi-AZ use synchronous replication to the standby, while cross-Region
+      replication is almost always asynchronous?
+    options:
+      - "Synchronous replication is a control-plane feature unavailable across Regions"
+      - "RDS only supports synchronous replication and DynamoDB only supports async"
+      - "Inter-AZ latency is very low (sub-ms to low-ms), so synchronous writes barely affect latency; inter-Region latency is tens of ms, so synchronous writes would cripple write performance"
+      - "Cross-Region links have no bandwidth, so only async is possible"
+    answer: 2
+    explanation: |
+      Distance dictates latency (speed of light). AZs are close (sub-ms/low-ms) so
+      synchronous commit is cheap and gives zero RPO within a Region. Regions are far
+      (tens of ms one-way), so synchronous cross-Region commits would add that to every
+      write — hence async replication and a non-zero cross-Region RPO.
+    ref: "concepts.md#availability-building-blocks-regions-azs-and-multi-az-ha"
+
+  - id: aws-resilience-multiregion-dr-004
+    difficulty: intermediate
+    tags: [aurora, multi-az, durability]
+    question: |
+      Aurora stores your data as how many copies across how many AZs, and what does that
+      buy you?
+    options:
+      - "3 copies in a single AZ; protects against disk failure only"
+      - "6 copies across 6 Regions; gives global write availability"
+      - "2 copies across 2 AZs; survives one instance failure only"
+      - "6 copies across 3 AZs; can lose an entire AZ (2 copies) without losing write availability and keep reads available"
+    answer: 3
+    explanation: |
+      Aurora keeps 6 copies of data across 3 AZs. It can tolerate loss of an AZ (2 copies)
+      with no loss of write availability, and losing an AZ plus one more copy while still
+      serving reads. This is intra-Region durability, not cross-Region.
+    ref: "concepts.md#availability-building-blocks-regions-azs-and-multi-az-ha"
+
+  # ---------------- RPO / RTO / availability math ----------------
+  - id: aws-resilience-multiregion-dr-005
+    difficulty: beginner
+    tags: [rpo, rto, definitions]
+    question: |
+      What is the difference between RTO and RPO?
+    options:
+      - "RTO is max acceptable downtime; RPO is max acceptable data loss (measured in time)"
+      - "RTO is max acceptable data loss; RPO is max acceptable downtime"
+      - "Both measure downtime, just for different services"
+      - "RTO applies to databases; RPO applies to compute"
+    answer: 0
+    explanation: |
+      RTO (Recovery Time Objective) is how long you can be down. RPO (Recovery Point
+      Objective) is how much data, in time, you can afford to lose (i.e. how old the last
+      usable recovery point can be). Both are business targets you design down to.
+    ref: "concepts.md#measuring-resilience-rpo-rto-and-availability-math"
+
+  - id: aws-resilience-multiregion-dr-006
+    difficulty: intermediate
+    tags: [availability-math, dependencies]
+    question: |
+      A request path depends serially on three components, each with 99.9% availability.
+      What is the approximate combined availability, and what is the design lesson?
+    options:
+      - "99.9% — serial dependencies don't reduce availability"
+      - "About 99.7% — availabilities of serial (hard) dependencies multiply, so each added dependency lowers the total"
+      - "About 100% — redundancy always increases availability"
+      - "About 33% — you divide by the number of components"
+    answer: 1
+    explanation: |
+      Serial hard dependencies multiply: 0.999^3 ≈ 0.997 (99.7%). Every hard dependency
+      you add can only lower availability, and depending on a lower-availability component
+      caps your ceiling. Redundant/parallel components instead combine as 1−(1−a)^n.
+    ref: "concepts.md#measuring-resilience-rpo-rto-and-availability-math"
+
+  - id: aws-resilience-multiregion-dr-007
+    difficulty: beginner
+    tags: [availability, nines]
+    question: |
+      Approximately how much downtime per year does "four nines" (99.99%) availability
+      allow?
+    options:
+      - "About 4 days"
+      - "About 8.8 hours"
+      - "About 52 minutes"
+      - "About 5 minutes"
+    answer: 2
+    explanation: |
+      99.99% ≈ 52.6 minutes/year. 99.9% ≈ 8.77 h, and 99.999% ≈ 5.26 min. Knowing these
+      lets you translate a "five nines" ask into what it actually costs to build.
+    ref: "concepts.md#measuring-resilience-rpo-rto-and-availability-math"
+
+  - id: aws-resilience-multiregion-dr-008
+    difficulty: advanced
+    tags: [availability-math, control-plane, ceiling]
+    question: |
+      Your workload is designed for 99.99% but the failover path has a hard dependency on
+      an API measured at 99.9%. What is the effect and the fix?
+    options:
+      - "Availability becomes 99.99% + 99.9% = higher"
+      - "The fix is to add more retries against the 99.9% API"
+      - "No effect; the 99.99% design dominates"
+      - "The dependency caps effective availability near 99.9%; remove the hard dependency (e.g. make failover statically stable / data-plane only)"
+    answer: 3
+    explanation: |
+      A hard dependency on a lower-availability component caps the whole system near that
+      component's number. Retries against a degraded control-plane API don't fix it (and
+      can worsen it). The fix is to eliminate the hard dependency at failover time — the
+      static-stability principle (data-plane-only failover).
+    ref: "concepts.md#measuring-resilience-rpo-rto-and-availability-math"
+
+  # ---------------- The four DR strategies ----------------
+  - id: aws-resilience-multiregion-dr-009
+    difficulty: beginner
+    tags: [dr-strategies, taxonomy]
+    question: |
+      Which ordering of the four AWS DR strategies goes from highest RTO/lowest cost to
+      lowest RTO/highest cost?
+    options:
+      - "Backup & restore → pilot light → warm standby → multi-site active-active"
+      - "Warm standby → pilot light → backup & restore → active-active"
+      - "Active-active → warm standby → pilot light → backup & restore"
+      - "Pilot light → backup & restore → active-active → warm standby"
+    answer: 0
+    explanation: |
+      Increasing readiness / decreasing RTO & RPO, increasing cost/complexity:
+      backup & restore → pilot light → warm standby → multi-site active-active.
+    ref: "concepts.md#the-four-dr-strategies"
+
+  - id: aws-resilience-multiregion-dr-010
+    difficulty: intermediate
+    tags: [dr-strategies, active-passive, active-active]
+    question: |
+      Which pairing correctly classifies the strategies as active/passive vs active/active?
+    options:
+      - "Pilot light and warm standby are active/active; the rest are active/passive"
+      - "Backup & restore, pilot light, and warm standby are active/passive; multi-site is active/active"
+      - "All four are active/active"
+      - "Only backup & restore is active/passive; the rest are active/active"
+    answer: 1
+    explanation: |
+      Backup & restore, pilot light, and warm standby are active/passive (DR Region does
+      not serve user traffic until failover). Multi-site active/active serves traffic from
+      all Regions. Hot standby is a full-capacity active/passive variant.
+    ref: "concepts.md#the-four-dr-strategies"
+
+  - id: aws-resilience-multiregion-dr-011
+    difficulty: advanced
+    tags: [dr-strategies, corruption, rpo]
+    question: |
+      Even a well-built multi-site active/active deployment cannot guarantee RPO of zero
+      for which failure, and why?
+    options:
+      - "A single instance failure, because ASGs are control-plane"
+      - "Loss of a single AZ, because AZs aren't replicated"
+      - "Data corruption or accidental/malicious deletion, because replication copies the bad change to every Region; you must restore from a point-in-time backup taken before the event"
+      - "Loss of a Region, because active/active can't route around Regions"
+    answer: 2
+    explanation: |
+      Replication is not backup — it faithfully propagates corruption/deletes everywhere
+      within seconds. Recovery from a logical data disaster requires rolling back to a
+      backup from before the event, so RPO for corruption is always > 0. Active/active
+      handles infra/Region events near-zero, but not logical data loss.
+    ref: "concepts.md#the-four-dr-strategies"
+
+  # ---------------- Backup and restore ----------------
+  - id: aws-resilience-multiregion-dr-012
+    difficulty: beginner
+    tags: [backup-restore, aws-backup]
+    question: |
+      Which AWS service provides a central place to configure, schedule, and copy backups
+      across Regions and accounts for services like EBS, RDS, DynamoDB, EFS, and FSx?
+    options:
+      - "AWS DataSync"
+      - "Amazon S3 Glacier"
+      - "AWS Config"
+      - "AWS Backup"
+    answer: 3
+    explanation: |
+      AWS Backup centralizes backup policy, scheduling, monitoring, and cross-Region /
+      cross-account copy across many services. Config tracks configuration state, DataSync
+      moves files, and Glacier is a storage class — none are the central backup manager.
+    ref: "concepts.md#backup-and-restore"
+
+  - id: aws-resilience-multiregion-dr-013
+    difficulty: intermediate
+    tags: [backup-restore, rto, iac]
+    question: |
+      For a backup-and-restore DR strategy, which factor most directly determines whether
+      you meet your RTO?
+    options:
+      - "The speed and reliability of redeploying infrastructure (ideally via IaC) plus restoring data, since both must happen at failover"
+      - "The S3 storage class of the backups"
+      - "Whether you use Route 53 or Global Accelerator"
+      - "The number of AZs in the DR Region"
+    answer: 0
+    explanation: |
+      In backup & restore, nothing is running in the DR Region — RTO is dominated by
+      standing up infra (much faster and less error-prone with CloudFormation/CDK + golden
+      AMIs) and restoring data. Without IaC, RTO balloons and may blow the target.
+    ref: "concepts.md#backup-and-restore"
+
+  - id: aws-resilience-multiregion-dr-014
+    difficulty: advanced
+    tags: [backup-restore, control-plane, restore]
+    question: |
+      Why is it recommended to periodically perform (not just take) restores from backup,
+      beyond simply validating backup integrity?
+    options:
+      - "Restores are free, so there is no downside"
+      - "Restore is a control-plane operation that may be degraded during a real disaster; pre-staging restores means you already have operable data stores from a recent backup"
+      - "Restores automatically improve RPO"
+      - "It converts backups into synchronous replicas"
+    answer: 1
+    explanation: |
+      Restoring from backup is a control-plane operation, which may be impaired exactly
+      during a Regional event. Regularly restoring (and keeping the restored data store)
+      reduces dependence on that control-plane path at failover time, and validates the
+      backups. It does not change RPO or make replicas.
+    ref: "concepts.md#backup-and-restore"
+
+  # ---------------- Pilot light ----------------
+  - id: aws-resilience-multiregion-dr-015
+    difficulty: beginner
+    tags: [pilot-light, definition]
+    question: |
+      In a pilot light DR strategy, what is running in the DR Region during normal
+      operation?
+    options:
+      - "Only DNS records, no data"
+      - "Nothing — only backups exist"
+      - "Data is continuously replicated and core infrastructure exists, but application/compute servers are switched off (or at zero capacity) until failover"
+      - "A full-capacity copy of production actively serving traffic"
+    answer: 2
+    explanation: |
+      Pilot light keeps data replicating and core infra provisioned but keeps compute
+      switched off/minimal, turning it on and scaling up at failover. That is more than
+      backup&restore (which has nothing running) and less than warm standby (which is
+      already serving at reduced capacity).
+    ref: "concepts.md#pilot-light"
+
+  - id: aws-resilience-multiregion-dr-016
+    difficulty: intermediate
+    tags: [pilot-light, drs]
+    question: |
+      AWS Elastic Disaster Recovery (DRS) is best described as implementing which DR
+      pattern, and for which workloads?
+    options:
+      - "Backup & restore for DynamoDB tables only"
+      - "Warm standby for managed databases like RDS and Aurora"
+      - "Multi-site active/active for serverless workloads"
+      - "A pilot-light model using continuous block-level replication into a low-cost staging area, launching full instances on failover — ideal for on-prem/other-cloud or EC2-based (not RDS) workloads"
+    answer: 3
+    explanation: |
+      DRS continuously replicates servers block-level into a cheap staging area and spins
+      up full-capacity instances on failover — a pilot-light approach. It targets server-
+      based workloads (on-prem, other cloud, or EC2), not managed services like RDS.
+    ref: "concepts.md#pilot-light"
+
+  - id: aws-resilience-multiregion-dr-017
+    difficulty: advanced
+    tags: [pilot-light, warm-standby, control-plane, risk]
+    question: |
+      What is the key reliability risk that pilot light carries but warm standby largely
+      avoids?
+    options:
+      - "Pilot light's failover depends on control-plane operations to provision/scale compute during the event; warm standby already has a running fleet and only needs to scale up"
+      - "Pilot light cannot replicate data"
+      - "Warm standby cannot serve traffic at all"
+      - "Pilot light has higher steady-state cost"
+    answer: 0
+    explanation: |
+      Pilot light must launch/turn on compute at failover — control-plane operations that
+      may be degraded during a Regional event. Warm standby keeps a live (small) fleet
+      running, so it can serve immediately and only scales up. Warm standby costs more but
+      lowers failover risk.
+    ref: "concepts.md#pilot-light"
+
+  # ---------------- Warm standby ----------------
+  - id: aws-resilience-multiregion-dr-018
+    difficulty: intermediate
+    tags: [warm-standby, pilot-light, distinction]
+    question: |
+      What is the concrete distinction between pilot light and warm standby?
+    options:
+      - "Pilot light replicates data; warm standby does not"
+      - "Pilot light cannot process requests until servers are turned on/deployed; warm standby is already running and can handle (reduced) traffic immediately, needing only scale-up"
+      - "Warm standby is single-Region; pilot light is multi-Region"
+      - "Pilot light uses Route 53; warm standby uses Global Accelerator"
+    answer: 1
+    explanation: |
+      Both replicate data and have DR-Region assets. The difference: pilot light's compute
+      is off and must be turned on/deployed first, while warm standby is a fully functional
+      but scaled-down environment already serving, so failover is just scale-up + traffic
+      shift — lower RTO, higher steady-state cost.
+    ref: "concepts.md#warm-standby"
+
+  - id: aws-resilience-multiregion-dr-019
+    difficulty: advanced
+    tags: [warm-standby, hot-standby, cost]
+    question: |
+      A team runs warm standby but wants to eliminate the scale-up step at failover for the
+      lowest possible RTO. What is the trade-off of moving to hot standby, and why do many
+      teams then go active/active?
+    options:
+      - "Hot standby only works within one AZ"
+      - "Hot standby is cheaper than warm standby, so there is no trade-off"
+      - "Hot standby provisions full production capacity in the DR Region 24/7 (higher cost, statically stable); since you're already paying for a full fleet, using it active/active often makes economic sense"
+      - "Hot standby removes the need for data replication"
+    answer: 2
+    explanation: |
+      Hot standby keeps full capacity ready (statically stable, no control-plane scale-up),
+      trading money for RTO. Because you're already paying for a full second fleet that sits
+      idle, many teams make it active/active to actually serve traffic from it — otherwise
+      warm standby is the more economical choice.
+    ref: "concepts.md#warm-standby"
+
+  - id: aws-resilience-multiregion-dr-020
+    difficulty: expert
+    tags: [warm-standby, service-quotas, scaling]
+    question: |
+      A warm standby relies on EC2 Auto Scaling to reach full production capacity at
+      failover. Which subtle failure can prevent it from meeting RTO even when Auto Scaling
+      works, and how do you pre-empt it?
+    options:
+      - "The DR Region has too many AZs; reduce them"
+      - "S3 versioning blocks scaling"
+      - "Route 53 TTLs are too low; raise them"
+      - "Service quotas (limits) in the DR Region are too low to scale to production capacity; raise them in advance and validate readiness"
+    answer: 3
+    explanation: |
+      Auto Scaling can't launch beyond your account's service quotas in that Region. If DR-
+      Region quotas are set for the scaled-down footprint, scale-up stalls at failover.
+      Pre-raise quotas and verify readiness (e.g. via ARC readiness checks). TTLs and AZ
+      count don't cap scaling capacity.
+    ref: "concepts.md#warm-standby"
+
+  # ---------------- Multi-site active/active ----------------
+  - id: aws-resilience-multiregion-dr-021
+    difficulty: intermediate
+    tags: [active-active, write-patterns]
+    question: |
+      In an active/active design, which write strategy routes ALL writes to one Region and
+      promotes another on failure, and which AWS service fits it best?
+    options:
+      - "Write global — Aurora Global Database (single writer, promote a secondary on failure)"
+      - "Write partitioned — Amazon SQS FIFO"
+      - "Write random — Amazon Kinesis"
+      - "Write local — DynamoDB global tables"
+    answer: 0
+    explanation: |
+      "Write global" sends all writes to one Region and promotes another on failure —
+      Aurora Global Database fits (single writer, sub-second replication, promote in
+      <1 min). "Write local" (writes to nearest Region) fits DynamoDB global tables.
+      "Write partitioned" routes by key to avoid conflicts.
+    ref: "concepts.md#multi-site-active-active-and-hot-standby"
+
+  - id: aws-resilience-multiregion-dr-022
+    difficulty: advanced
+    tags: [active-active, hot-standby, distinction]
+    question: |
+      What distinguishes multi-site active/active from hot standby?
+    options:
+      - "There is no difference"
+      - "Active/active serves traffic from all Regions; hot standby provisions full capacity but serves from only one Region until promotion"
+      - "Active/active is cheaper because only one Region runs"
+      - "Hot standby uses async replication; active/active uses synchronous cross-Region writes"
+    answer: 1
+    explanation: |
+      Both run full capacity in multiple Regions. Active/active has all Regions serving
+      user traffic (no failover, just traffic shift). Hot standby is active/passive — the
+      second Region is fully provisioned but idle until promoted. Cross-Region writes are
+      async in both (physics), not synchronous.
+    ref: "concepts.md#multi-site-active-active-and-hot-standby"
+
+  - id: aws-resilience-multiregion-dr-023
+    difficulty: expert
+    tags: [active-active, partition, split-brain]
+    question: |
+      In a two-Region active/active system using DynamoDB global tables (write local), a
+      network partition isolates the Regions and both keep accepting writes to the same
+      items. What happens on heal, and what's the risk?
+    options:
+      - "The primary Region rolls back all secondary writes"
+      - "Writes are rejected during the partition, so nothing to reconcile"
+      - "On heal, conflicting concurrent writes are reconciled by last-writer-wins using timestamps, so one Region's update silently overwrites the other's — lost updates for that item"
+      - "The table automatically merges both values into a list"
+    answer: 2
+    explanation: |
+      Global tables are multi-active and reconcile concurrent writes with last-writer-wins.
+      During a partition both Regions accept writes; on heal LWW picks one timestamp and
+      silently drops the other update. There's no merge or rollback — so LWW is unsafe for
+      operations like counters or ledgers where lost updates are unacceptable.
+    ref: "concepts.md#multi-site-active-active-and-hot-standby"
+
+  # ---------------- Choosing a strategy ----------------
+  - id: aws-resilience-multiregion-dr-024
+    difficulty: advanced
+    tags: [strategy-selection, scenario, rto-rpo]
+    question: |
+      A relational OLTP workload must meet RTO of ~1 minute and RPO of a few seconds
+      against a full Region outage, on a budget that rules out running a second full
+      active/active fleet's write complexity. What is the most appropriate design?
+    options:
+      - "DynamoDB global tables with last-writer-wins"
+      - "Backup & restore with hourly RDS snapshots copied cross-Region"
+      - "Pilot light with an RDS cross-Region read replica you promote manually over ~10 minutes"
+      - "Aurora Global Database (single primary, <1 s replication) in a warm/hot standby posture, promoting a secondary in <1 minute on Region loss"
+    answer: 3
+    explanation: |
+      Aurora Global Database gives ~1 s replication (RPO seconds) and can promote a
+      secondary to primary in under a minute (RTO ~1 min) while keeping SQL/ACID and a
+      single writer (no conflict logic). Backup&restore (RTO hours) and RDS replica
+      promotion (minutes) miss RTO; DynamoDB is non-relational and introduces LWW.
+    ref: "concepts.md#choosing-a-dr-strategy-from-rto-and-rpo-targets"
+
+  - id: aws-resilience-multiregion-dr-025
+    difficulty: intermediate
+    tags: [strategy-selection, cost]
+    question: |
+      A batch-analytics system has an agreed RTO of 8 hours and RPO of 6 hours, and cost is
+      the dominant concern. Which DR strategy is most appropriate?
+    options:
+      - "Backup & restore with cross-Region backup copies and IaC redeploy"
+      - "Hot standby with full capacity in a second Region"
+      - "Multi-site active/active across three Regions"
+      - "Warm standby with a scaled-down always-on fleet"
+    answer: 0
+    explanation: |
+      With RTO/RPO in hours and cost paramount, backup & restore is the right fit — you
+      avoid paying for idle standby compute and simply redeploy (IaC) and restore within
+      the generous window. Warm/hot standby and active/active spend money to buy an RTO/RPO
+      the business doesn't require.
+    ref: "concepts.md#choosing-a-dr-strategy-from-rto-and-rpo-targets"
+
+  - id: aws-resilience-multiregion-dr-026
+    difficulty: advanced
+    tags: [strategy-selection, over-engineering]
+    question: |
+      What is the classic anti-pattern the "choose to your RTO/RPO target" heuristic is
+      meant to prevent?
+    options:
+      - "Always enabling Multi-AZ"
+      - "Spending on active/active complexity when RTO is measured in hours (over-engineering), or using backup&restore when RTO is minutes (under-engineering) — mismatching the strategy to the actual target"
+      - "Using IaC for deployments"
+      - "Taking point-in-time backups"
+    answer: 1
+    explanation: |
+      DR should be sized to the RTO/RPO numbers. Over-engineering (active/active for a
+      4-hour RTO) wastes money and adds consistency bugs; under-engineering (backup&restore
+      for a 5-minute RTO) fails the drill. The other options are generally good practices,
+      not anti-patterns.
+    ref: "concepts.md#choosing-a-dr-strategy-from-rto-and-rpo-targets"
+
+  - id: aws-resilience-multiregion-dr-027
+    difficulty: expert
+    tags: [strategy-selection, rpo-zero, corruption]
+    question: |
+      A stakeholder demands "RPO of zero, including protection against accidental data
+      deletion." How should a senior engineer respond?
+    options:
+      - "Recommend backup & restore alone, which gives RPO zero"
+      - "Enable DynamoDB global tables; multi-active writes give RPO zero for everything"
+      - "Explain that RPO zero against infra failure is achievable with synchronous replication, but RPO zero against logical corruption/deletion is impossible via replication (it copies the bad change); the real defense is immutable point-in-time backups, so corruption RPO is bounded by backup granularity"
+      - "Promise RPO zero using cross-Region synchronous writes"
+    answer: 2
+    explanation: |
+      Replication can't protect against logical data disasters — it propagates them. True
+      "RPO zero for deletion" isn't achievable; you bound the loss with immutable/PITR
+      backups. Cross-Region synchronous writes aren't viable (latency) and still wouldn't
+      stop a logical delete. This is a requirements-clarification moment.
+    ref: "concepts.md#choosing-a-dr-strategy-from-rto-and-rpo-targets"
+
+  # ---------------- Aurora Global Database ----------------
+  - id: aws-resilience-multiregion-dr-028
+    difficulty: intermediate
+    tags: [aurora-global-database, replication]
+    question: |
+      How does Aurora Global Database replicate to secondary Regions, and what is the
+      typical replication latency?
+    options:
+      - "By copying nightly snapshots; ~24 h latency"
+      - "Synchronously, so all Regions commit before ack; ~0 latency"
+      - "Via SQL/binlog replay on the secondary compute; ~30 s latency"
+      - "At the storage layer using dedicated infrastructure, with typical cross-Region latency under 1 second and minimal impact on the primary's compute"
+    answer: 3
+    explanation: |
+      Aurora Global DB replicates at the storage layer using dedicated infrastructure, not
+      the DB engine, so the primary's compute stays devoted to the workload. Typical
+      cross-Region latency is under a second. It is asynchronous (not synchronous 0-latency),
+      and far faster/fresher than snapshot copies.
+    ref: "concepts.md#data-replication-aurora-global-database"
+
+  - id: aws-resilience-multiregion-dr-029
+    difficulty: advanced
+    tags: [aurora-global-database, limits]
+    question: |
+      What is the maximum number of secondary (read-only) Regions in an Aurora Global
+      Database, and how many read instances can a secondary cluster hold?
+    options:
+      - "Up to 10 secondary Regions; up to 16 read-only DB instances (vs the usual 15 for a standalone cluster)"
+      - "Exactly 1 secondary Region; up to 5 readers"
+      - "Unlimited secondary Regions; unlimited readers"
+      - "Up to 5 secondary Regions; up to 15 readers"
+    answer: 0
+    explanation: |
+      An Aurora global database has one primary and up to 10 read-only secondary Regions.
+      Because a secondary is read-only, it can hold up to 16 read instances, one more than
+      the usual 15-reader limit of a standalone Aurora cluster.
+    ref: "concepts.md#data-replication-aurora-global-database"
+
+  - id: aws-resilience-multiregion-dr-030
+    difficulty: advanced
+    tags: [aurora-global-database, switchover, failover]
+    question: |
+      In Aurora Global Database, what is the difference between a switchover and an
+      unplanned failover regarding data loss?
+    options:
+      - "Both lose data equally"
+      - "Switchover (planned) relocates the primary to a secondary with no data loss (RPO 0); unplanned failover (after a Region outage) promotes a secondary with a small non-zero RPO (typically ~1 s of unreplicated writes)"
+      - "Switchover always loses more data than failover"
+      - "Neither involves changing the primary Region"
+    answer: 1
+    explanation: |
+      Switchover (formerly managed planned failover) is for planned Region rotation and is
+      lossless (RPO 0). Unplanned failover recovers from an outage by promoting a secondary
+      and can lose the small amount of not-yet-replicated data (RPO usually ~1 s). Both
+      change which Region is primary.
+    ref: "concepts.md#data-replication-aurora-global-database"
+
+  - id: aws-resilience-multiregion-dr-031
+    difficulty: expert
+    tags: [aurora-global-database, write-forwarding]
+    question: |
+      What does Aurora Global Database "write forwarding" enable, and what does it NOT
+      change?
+    options:
+      - "It removes the need for a primary cluster"
+      - "It makes every Region an independent writer (true multi-master), eliminating cross-Region write latency"
+      - "It lets secondary clusters forward write statements to the single primary, enabling a write-global/read-local pattern without app-side routing — but writes still execute on the one primary and pay the cross-Region round trip"
+      - "It converts replication to synchronous"
+    answer: 2
+    explanation: |
+      Write forwarding lets a secondary accept a write and forward it to the primary, so
+      apps can talk to their local endpoint. It is NOT multi-master — there is still one
+      writer, and forwarded writes incur the cross-Region latency. For true local writes
+      you'd use DynamoDB global tables instead.
+    ref: "concepts.md#data-replication-aurora-global-database"
+
+  # ---------------- DynamoDB global tables ----------------
+  - id: aws-resilience-multiregion-dr-032
+    difficulty: intermediate
+    tags: [dynamodb-global-tables, multi-active]
+    question: |
+      What is the defining characteristic of DynamoDB global tables?
+    options:
+      - "Synchronous cross-Region writes with strong global consistency"
+      - "They replicate only on demand when you trigger a backup"
+      - "A single writer Region with read-only replicas elsewhere"
+      - "Multi-active, multi-Region: every replica Region accepts both reads and writes, with async replication (typically ~1 s) and last-writer-wins conflict resolution"
+    answer: 3
+    explanation: |
+      Global tables are multi-active — every Region is a read/write replica ("write local").
+      Replication is asynchronous (typically around 1 s) and concurrent conflicting writes
+      are resolved last-writer-wins. There is no synchronous global consistency and no
+      single-writer restriction.
+    ref: "concepts.md#data-replication-dynamodb-global-tables"
+
+  - id: aws-resilience-multiregion-dr-033
+    difficulty: advanced
+    tags: [dynamodb-global-tables, consistency]
+    question: |
+      Which consistency guarantee do DynamoDB global tables NOT provide?
+    options:
+      - "Strongly consistent reads ACROSS Regions"
+      - "Multi-Region write acceptance"
+      - "Eventually consistent reads within a Region"
+      - "Strongly consistent reads within a single Region"
+    answer: 0
+    explanation: |
+      Within a Region you can request strongly consistent reads; across Regions there is no
+      strong consistency — replication is async, so a read in another Region may return
+      stale data that hasn't propagated yet. Multi-Region writes are supported. Cross-Region
+      strong consistency is the guarantee that does not exist.
+    ref: "concepts.md#data-replication-dynamodb-global-tables"
+
+  - id: aws-resilience-multiregion-dr-034
+    difficulty: advanced
+    tags: [dynamodb-global-tables, use-case, lww]
+    question: |
+      For which workload are DynamoDB global tables with last-writer-wins a POOR fit
+      without additional design?
+    options:
+      - "Shopping cart or session state with per-item ownership"
+      - "A monetary ledger or a global counter where concurrent increments in two Regions must all be preserved"
+      - "Read-mostly product catalog served locally"
+      - "User profile/preferences store where the latest write should win"
+    answer: 1
+    explanation: |
+      LWW silently drops the losing concurrent write, so increment/ledger semantics
+      (two Regions each +1 → one +1 lost) are unsafe. Profiles, carts, and read-mostly
+      catalogs tolerate last-write-wins. For counters/ledgers use write-partitioning,
+      conditional writes, or a single-writer store.
+    ref: "concepts.md#data-replication-dynamodb-global-tables"
+
+  - id: aws-resilience-multiregion-dr-035
+    difficulty: intermediate
+    tags: [dynamodb-global-tables, rto, failover]
+    question: |
+      When a Region hosting one replica of a DynamoDB global table becomes unavailable,
+      what failover action is required to keep writes flowing?
+    options:
+      - "Manually re-enable replication in each surviving Region"
+      - "Promote a read replica to primary, which takes several minutes"
+      - "None for write capability — every remaining Region is already a writer; you route clients to a healthy Region and writes continue (near-zero RTO for the write path)"
+      - "Restore from a snapshot in the healthy Region"
+    answer: 2
+    explanation: |
+      Because global tables are multi-active, there is no promotion step — surviving Regions
+      already accept writes. You simply steer traffic (e.g. via Route 53/Global Accelerator)
+      to a healthy Region. This near-zero write-path RTO is a key advantage over single-writer
+      designs that require promotion.
+    ref: "concepts.md#data-replication-dynamodb-global-tables"
+
+  # ---------------- S3 CRR ----------------
+  - id: aws-resilience-multiregion-dr-036
+    difficulty: beginner
+    tags: [s3-crr, prerequisites]
+    question: |
+      What is a prerequisite for enabling S3 Cross-Region Replication (CRR)?
+    options:
+      - "Using the S3 Glacier Deep Archive storage class"
+      - "A VPC endpoint in the destination Region"
+      - "Enabling S3 Transfer Acceleration"
+      - "Versioning enabled on both the source and destination buckets"
+    answer: 3
+    explanation: |
+      S3 replication (CRR/SRR) requires versioning enabled on source and destination
+      buckets, plus a replication configuration and IAM role. Transfer Acceleration, Glacier
+      class, and VPC endpoints are unrelated prerequisites.
+    ref: "concepts.md#data-replication-s3-cross-region-replication"
+
+  - id: aws-resilience-multiregion-dr-037
+    difficulty: intermediate
+    tags: [s3-crr, rtc, sla]
+    question: |
+      What does S3 Replication Time Control (S3 RTC) add over standard CRR?
+    options:
+      - "It provides an SLA to replicate 99.99% of new objects within 15 minutes, with replication metrics/events, for a predictable RPO — at extra cost"
+      - "It replicates to all AWS Regions at once"
+      - "It encrypts objects during replication"
+      - "It makes replication synchronous with zero RPO"
+    answer: 0
+    explanation: |
+      Standard CRR is async and best-effort (usually minutes, occasionally longer). RTC adds
+      a 15-minute replication SLA (99.99% of objects) plus metrics/events, giving a bounded
+      RPO for a fee. It is not synchronous, not multi-Region fan-out, and not an encryption
+      feature.
+    ref: "concepts.md#data-replication-s3-cross-region-replication"
+
+  - id: aws-resilience-multiregion-dr-038
+    difficulty: advanced
+    tags: [s3-crr, delete-markers, protection]
+    question: |
+      By default, when you delete an object in the source bucket of an S3 replication setup,
+      what happens in the destination bucket, and why is this the default?
+    options:
+      - "The object is immediately deleted in the destination too, to save cost"
+      - "By default the delete is NOT replicated (only a delete marker is added in the source), which protects the DR copy from malicious or accidental deletes in the source Region"
+      - "The destination bucket is emptied entirely"
+      - "Replication stops permanently"
+    answer: 1
+    explanation: |
+      Default behavior adds a delete marker only in the source; the destination keeps the
+      object. This protects the DR copy against accidental/malicious deletion in the source.
+      Delete-marker replication is opt-in if you actually want deletes to propagate.
+    ref: "concepts.md#data-replication-s3-cross-region-replication"
+
+  - id: aws-resilience-multiregion-dr-039
+    difficulty: intermediate
+    tags: [s3, consistency]
+    question: |
+      Regarding S3 consistency, which statement is currently correct?
+    options:
+      - "S3 only guarantees consistency if you enable RTC"
+      - "S3 is eventually consistent for all operations, even within a Region"
+      - "S3 provides strong read-after-write consistency for new and overwrite PUTs and for DELETEs within a Region, but Cross-Region Replication remains eventually consistent"
+      - "S3 provides strong consistency across all Regions instantly"
+    answer: 2
+    explanation: |
+      Since December 2020, S3 offers strong read-after-write consistency for objects within
+      a Region (PUTs, overwrites, DELETEs). CRR across Regions is still asynchronous/eventual.
+      Cross-Region strong consistency is not offered, and RTC is about replication timing,
+      not intra-Region read consistency.
+    ref: "concepts.md#data-replication-s3-cross-region-replication"
+
+  # ---------------- Replication consistency & conflict ----------------
+  - id: aws-resilience-multiregion-dr-040
+    difficulty: advanced
+    tags: [consistency, split-brain, mitigation]
+    question: |
+      Which technique does NOT prevent split-brain data divergence in a multi-Region
+      write scenario?
+    options:
+      - "Single-writer design (e.g. Aurora Global Database)"
+      - "Write-partitioning by key so each key is only written in one Region"
+      - "Accepting CRDT/last-writer-wins semantics deliberately"
+      - "Lowering DNS TTLs on the failover record"
+    answer: 3
+    explanation: |
+      Split-brain is a data-consistency problem solved at the data layer: single-writer,
+      write-partitioning, or explicitly accepting LWW/CRDT reconciliation. Lowering DNS TTLs
+      speeds traffic redirection but does nothing to prevent conflicting concurrent writes
+      from diverging.
+    ref: "concepts.md#replication-consistency-and-conflict-trade-offs"
+
+  - id: aws-resilience-multiregion-dr-041
+    difficulty: expert
+    tags: [consistency, read-your-writes]
+    question: |
+      In a multi-Region system with async replication, a user updates their profile in
+      Region A, then a subsequent request is routed to Region B and doesn't see the change.
+      What is the cleanest mitigation?
+    options:
+      - "Pin the user's session to a single Region (session affinity), or route critical read-your-writes reads to the writer Region"
+      - "Disable replication so data stays local"
+      - "Increase the DynamoDB read capacity units in Region B"
+      - "Switch to synchronous cross-Region writes for all data"
+    answer: 0
+    explanation: |
+      Cross-Region read-your-writes isn't guaranteed under async replication. Pinning the
+      user to one Region (or reading critical data from the authoritative/writer Region)
+      preserves the guarantee. Synchronous cross-Region writes are impractical (latency),
+      disabling replication defeats DR, and more RCUs don't fix staleness.
+    ref: "concepts.md#replication-consistency-and-conflict-trade-offs"
+
+  - id: aws-resilience-multiregion-dr-042
+    difficulty: advanced
+    tags: [consistency, comparison]
+    question: |
+      Which store avoids cross-Region write CONFLICTS entirely by design, and how?
+    options:
+      - "DynamoDB global tables, because they use strong consistency"
+      - "Aurora Global Database, because it has a single writer (only one Region accepts writes at a time)"
+      - "S3 CRR, because it is synchronous"
+      - "ElastiCache Global Datastore, because every node is a writer"
+    answer: 1
+    explanation: |
+      Aurora Global DB has exactly one writer Region, so there are never concurrent
+      conflicting writes to reconcile. DynamoDB global tables are multi-active and DO have
+      conflicts (resolved by LWW). S3 CRR is async, and ElastiCache Global Datastore also
+      has a single primary writer (so it too avoids conflicts, but it isn't "every node a
+      writer").
+    ref: "concepts.md#replication-consistency-and-conflict-trade-offs"
+
+  # ---------------- Route 53 failover & health checks ----------------
+  - id: aws-resilience-multiregion-dr-043
+    difficulty: beginner
+    tags: [route53, health-checks]
+    question: |
+      What is the role of Route 53 health checks in a failover routing policy?
+    options:
+      - "They synchronously replicate databases across Regions"
+      - "They cache DNS answers at the edge"
+      - "They monitor endpoint health (and can tie to CloudWatch alarms) so Route 53 serves only healthy records, enabling automated DNS failover"
+      - "They provision new EC2 instances when an endpoint fails"
+    answer: 2
+    explanation: |
+      Route 53 health checks test endpoints (HTTP/HTTPS/TCP) or track CloudWatch alarms, and
+      the DNS failover policy serves the secondary when the primary is unhealthy. They don't
+      launch instances or replicate data — they only influence DNS answers.
+    ref: "concepts.md#route-53-failover-and-health-checks"
+
+  - id: aws-resilience-multiregion-dr-044
+    difficulty: intermediate
+    tags: [route53, ttl, dns]
+    question: |
+      Why is DNS-based failover with Route 53 not instantaneous, and what mitigates the
+      delay?
+    options:
+      - "Health checks run only once per day"
+      - "Failover requires manually editing hosted zones each time"
+      - "Route 53 is a control-plane service; move to a data-plane one"
+      - "Clients and resolvers cache DNS answers until the record's TTL expires (and some ignore TTLs), so lower the TTL on failover records (e.g. 60 s) and accept some tail"
+    answer: 3
+    explanation: |
+      DNS answers are cached for the TTL; some clients/resolvers even overstay it. So even
+      with fast health checks, some clients keep hitting the old endpoint until caches
+      expire. Low TTLs shrink the window. Route 53 DNS resolution is actually a highly
+      reliable data-plane operation.
+    ref: "concepts.md#route-53-failover-and-health-checks"
+
+  - id: aws-resilience-multiregion-dr-045
+    difficulty: advanced
+    tags: [route53, global-accelerator, comparison]
+    question: |
+      A workload needs near-immediate client failover between Regions with fixed IPs for
+      customer firewall allowlisting, and low latency. Which is the better fit and why?
+    options:
+      - "AWS Global Accelerator, because it uses anycast static IPs on the AWS backbone — failover isn't subject to DNS TTL caching, latency is lower, and the IPs are fixed for allowlisting"
+      - "CloudFront origin failover, because it fails over the whole client at once"
+      - "A weighted Route 53 policy, because weight changes are a data-plane operation"
+      - "Route 53 latency-based routing, because it avoids all caching issues"
+    answer: 0
+    explanation: |
+      Global Accelerator provides static anycast IPs (great for allowlisting), routes over
+      the AWS backbone (lower latency), and isn't subject to DNS caching, so client failover
+      is fast. Route 53 is DNS (TTL caching). CloudFront origin failover is per-request for
+      cached content, not general client failover, and Route 53 weight changes are a control-
+      plane operation.
+    ref: "concepts.md#route-53-failover-and-health-checks"
+
+  - id: aws-resilience-multiregion-dr-046
+    difficulty: advanced
+    tags: [route53, weighted, control-plane]
+    question: |
+      Some teams fail over by changing Route 53 weighted-routing weights to send all
+      traffic to the recovery Region. What is the resilience concern with this approach?
+    options:
+      - "Weighted routing doesn't support health checks"
+      - "Changing weights is a CONTROL-plane operation, which may be degraded during a large event; a data-plane switch (e.g. ARC routing controls or health-check on/off) is more resilient"
+      - "Weighted routing caches longer than failover routing"
+      - "Weighted routing only works within one Region"
+    answer: 1
+    explanation: |
+      Editing weights is a Route 53 control-plane change, and control planes are less
+      reliable during major events — precisely when you need failover. ARC routing controls
+      (or toggling health checks) are highly-available data-plane switches, the more
+      resilient pattern.
+    ref: "concepts.md#route-53-failover-and-health-checks"
+
+  - id: aws-resilience-multiregion-dr-047
+    difficulty: intermediate
+    tags: [cloudfront, origin-failover]
+    question: |
+      How does CloudFront origin failover behave differently from Route 53 or Global
+      Accelerator failover?
+    options:
+      - "It requires manual DNS changes for each failover"
+      - "It permanently redirects all future traffic to the secondary origin"
+      - "It fails over per individual request at the edge — if a request to the primary origin fails, that request retries the secondary, but subsequent requests still try the primary first"
+      - "It only works for dynamic API traffic, never cached content"
+    answer: 2
+    explanation: |
+      CloudFront origin failover operates per-request: on a failed/eligible response from
+      the primary origin, CloudFront tries the secondary for that request, but keeps trying
+      the primary first on later requests. Route 53 and Global Accelerator shift traffic at
+      the endpoint/DNS level, not per-request.
+    ref: "concepts.md#route-53-failover-and-health-checks"
+
+  # ---------------- ARC ----------------
+  - id: aws-resilience-multiregion-dr-048
+    difficulty: advanced
+    tags: [arc, routing-controls, data-plane]
+    question: |
+      What makes Amazon Application Recovery Controller (ARC) routing controls more
+      reliable than editing DNS or scaling resources at failover time?
+    options:
+      - "They automatically write application code for you"
+      - "They are cheaper than Route 53"
+      - "They run entirely in the primary Region for locality"
+      - "They are highly available data-plane on/off switches backed by a cluster of five endpoints across five Regions, so you can flip traffic even if some Regions are impaired — no single-Region control-plane dependency"
+    answer: 3
+    explanation: |
+      ARC routing controls are data-plane switches backed by a five-Region cluster, so the
+      failover action itself doesn't depend on a single Region's control plane being healthy.
+      That's the whole point — a statically stable, highly available failover trigger. They
+      aren't free, and don't generate code.
+    ref: "concepts.md#application-recovery-controller-and-routing-controls"
+
+  - id: aws-resilience-multiregion-dr-049
+    difficulty: advanced
+    tags: [arc, readiness-checks]
+    question: |
+      What problem do ARC readiness checks specifically address?
+    options:
+      - "They continuously verify the recovery Region is actually ready to take load (capacity, quotas, config parity, replication) so you don't fail over into a Region that can't serve"
+      - "They replace the need for backups"
+      - "They lower the cost of the standby fleet"
+      - "They encrypt data in transit between Regions"
+    answer: 0
+    explanation: |
+      Readiness checks audit that the recovery environment can actually handle a failover —
+      matching capacity, service quotas, configuration, and replication state — preventing a
+      failover into a Region that would immediately fall over. They aren't about encryption,
+      backups, or cost.
+    ref: "concepts.md#application-recovery-controller-and-routing-controls"
+
+  - id: aws-resilience-multiregion-dr-050
+    difficulty: expert
+    tags: [arc, safety-rules]
+    question: |
+      Why do ARC routing controls include "safety rules"?
+    options:
+      - "To automatically scale the ASG during failover"
+      - "To prevent operators from putting the system into a dangerous state — e.g. turning both Regions off, or turning both on when that's invalid — during a stressful, error-prone failover"
+      - "To enforce encryption at rest"
+      - "To reduce the cost of the ARC cluster"
+    answer: 1
+    explanation: |
+      Failover is high-stakes and error-prone. Safety rules constrain routing-control state
+      transitions (e.g. don't allow "all Regions off" or invalid simultaneous-on states),
+      protecting against fat-finger mistakes. They aren't about scaling, encryption, or cost.
+    ref: "concepts.md#application-recovery-controller-and-routing-controls"
+
+  # ---------------- Static stability ----------------
+  - id: aws-resilience-multiregion-dr-051
+    difficulty: intermediate
+    tags: [static-stability, control-plane, data-plane]
+    question: |
+      What does "static stability" mean in AWS resilience design?
+    options:
+      - "Never scaling any resource, ever"
+      - "Keeping all resources in a single AZ to reduce complexity"
+      - "The system continues to operate through a failure WITHOUT needing to make control-plane changes (e.g. no new launches, no config edits) during the event"
+      - "Using only static websites hosted on S3"
+    answer: 2
+    explanation: |
+      Static stability means surviving a failure using already-provisioned resources, with
+      no reliance on control-plane operations (which are less reliable during big events).
+      It typically requires pre-provisioning spare capacity. It's not about single-AZ or
+      static websites.
+    ref: "concepts.md#static-stability-and-avoiding-control-plane-dependency"
+
+  - id: aws-resilience-multiregion-dr-052
+    difficulty: advanced
+    tags: [static-stability, availability-zones]
+    question: |
+      To be statically stable against the loss of one of three AZs, how should you size
+      capacity, and what's the trade-off?
+    options:
+      - "Put all capacity in one AZ and snapshot it"
+      - "Use a single large instance so there's nothing to scale"
+      - "Run at exactly 100% utilization across the AZs and rely on Auto Scaling to backfill"
+      - "Keep enough spare capacity in the surviving AZs (e.g. run each AZ so the remaining two can absorb the third's load) so no new instance launches (control-plane) are needed — trading higher steady-state cost for reliability"
+    answer: 3
+    explanation: |
+      Static stability across AZs means pre-provisioning spare capacity so surviving AZs
+      handle the lost AZ's load without calling RunInstances during the event. The trade-off
+      is paying for idle headroom. Relying on Auto Scaling at failure time reintroduces a
+      control-plane dependency.
+    ref: "concepts.md#static-stability-and-avoiding-control-plane-dependency"
+
+  - id: aws-resilience-multiregion-dr-053
+    difficulty: expert
+    tags: [static-stability, tradeoff]
+    question: |
+      What is the fundamental trade-off of designing for static stability?
+    options:
+      - "You pay for idle/spare capacity that only earns its keep during a failure, in exchange for removing the fragile dependency on control-plane availability when it's least reliable"
+      - "You can no longer use multiple AZs"
+      - "It forces synchronous cross-Region replication"
+      - "You lose data durability"
+    answer: 0
+    explanation: |
+      Static stability trades cost (over-provisioned, mostly-idle capacity) for reliability
+      (no control-plane dependency at failure time). It doesn't reduce durability, prevent
+      multi-AZ, or require synchronous cross-Region writes. This is the cost-vs-reliability
+      decision to make per tier.
+    ref: "concepts.md#static-stability-and-avoiding-control-plane-dependency"
+
+  - id: aws-resilience-multiregion-dr-054
+    difficulty: advanced
+    tags: [control-plane, data-plane, definition]
+    question: |
+      Which of the following is a DATA-plane operation (and thus generally higher-availability
+      to depend on during a disaster)?
+    options:
+      - "Creating or modifying a Route 53 hosted-zone record"
+      - "Route 53 resolving a DNS query to an already-configured record / reading an existing S3 object"
+      - "Provisioning a new DynamoDB table"
+      - "Calling RunInstances to launch new EC2 capacity"
+    answer: 1
+    explanation: |
+      Data-plane = serving existing resources (DNS resolution of existing records, GET of an
+      existing S3 object). Launching instances, editing records, and creating tables are
+      control-plane (create/modify) operations, which have lower availability design goals —
+      avoid depending on them in the failover path.
+    ref: "concepts.md#static-stability-and-avoiding-control-plane-dependency"
+
+  # ---------------- Cell-based architecture ----------------
+  - id: aws-resilience-multiregion-dr-055
+    difficulty: intermediate
+    tags: [cell-based, blast-radius]
+    question: |
+      What is the primary reliability benefit of a cell-based architecture?
+    options:
+      - "It removes the need for load balancers"
+      - "It eliminates the need for backups"
+      - "It caps blast radius: a bad deploy, poison-pill request, or overload damages only one cell (a fraction of customers) instead of the whole fleet"
+      - "It provides synchronous cross-Region consistency"
+    answer: 2
+    explanation: |
+      Cells are independent full stacks each serving a partition of customers. A failure is
+      contained to one cell, converting a total outage into a partial one and enabling
+      cell-by-cell canary deploys. It doesn't replace backups, provide global consistency,
+      or remove load balancers.
+    ref: "concepts.md#cell-based-architecture-and-blast-radius-reduction"
+
+  - id: aws-resilience-multiregion-dr-056
+    difficulty: advanced
+    tags: [cell-based, cell-router, spof]
+    question: |
+      What new single point of failure does a cell-based architecture introduce, and how do
+      you mitigate it?
+    options:
+      - "The load balancer inside each cell"
+      - "The IAM role for each cell"
+      - "The database, which must be synchronous"
+      - "The cell router that maps requests to cells — keep it thin, dependency-light, and ultra-reliable (ideally near-static, e.g. a cached mapping) because if it fails, everything fails"
+    answer: 3
+    explanation: |
+      The router that assigns requests to cells is a shared component in every request path;
+      if it fails, all cells become unreachable. Mitigate by keeping it dumb, with minimal
+      dependencies and heavy caching of a simple mapping, maximizing its availability. The
+      per-cell components are isolated by design.
+    ref: "concepts.md#cell-based-architecture-and-blast-radius-reduction"
+
+  - id: aws-resilience-multiregion-dr-057
+    difficulty: expert
+    tags: [cell-based, shuffle-sharding]
+    question: |
+      How does shuffle sharding improve on simple cell/partition assignment for limiting the
+      impact of a poison-pill or noisy tenant?
+    options:
+      - "It assigns each tenant a random subset (combination) of cell resources, so the probability that any two tenants share the exact same set of resources is very low — a single bad tenant degrades far fewer others"
+      - "It removes the cell router"
+      - "It forces all tenants onto a single shared cell"
+      - "It replicates every tenant to every cell"
+    answer: 0
+    explanation: |
+      Shuffle sharding gives each customer a distinct random combination of resources; the
+      overlap between any two customers' resource sets is minimal, so a poison-pill/noisy
+      tenant impacts only the small fraction sharing its exact combination. It doesn't
+      replicate everyone everywhere or remove the router.
+    ref: "concepts.md#cell-based-architecture-and-blast-radius-reduction"
+
+  # ---------------- Chaos engineering / FIS ----------------
+  - id: aws-resilience-multiregion-dr-058
+    difficulty: beginner
+    tags: [chaos-engineering, fis]
+    question: |
+      What is AWS Fault Injection Service (FIS)?
+    options:
+      - "A monitoring dashboard for CloudWatch metrics"
+      - "A managed chaos-engineering service that runs experiment templates injecting controlled faults (e.g. stop EC2, add latency, simulate an AZ outage) to validate resilience"
+      - "A backup service for RDS"
+      - "A DNS failover routing policy"
+    answer: 1
+    explanation: |
+      FIS is AWS's managed fault-injection/chaos-engineering tool. It runs experiment
+      templates that inject controlled failures to test that systems degrade and recover as
+      designed. It's not monitoring, backup, or DNS.
+    ref: "concepts.md#chaos-engineering-with-aws-fis"
+
+  - id: aws-resilience-multiregion-dr-059
+    difficulty: advanced
+    tags: [chaos-engineering, fis, stop-conditions]
+    question: |
+      What is the purpose of "stop conditions" in an AWS FIS experiment?
+    options:
+      - "To increase the fault severity over time"
+      - "To schedule the experiment for off-peak hours"
+      - "To automatically halt and roll back the experiment when a CloudWatch alarm shows real customer impact exceeding a threshold, bounding the blast radius"
+      - "To encrypt the fault injection traffic"
+    answer: 2
+    explanation: |
+      Stop conditions tie the experiment to CloudWatch alarms; if impact crosses your
+      steady-state guardrail, FIS aborts and rolls back. This safety mechanism is what makes
+      running chaos experiments (even in prod) responsible. They don't schedule, encrypt, or
+      escalate faults.
+    ref: "concepts.md#chaos-engineering-with-aws-fis"
+
+  - id: aws-resilience-multiregion-dr-060
+    difficulty: intermediate
+    tags: [chaos-engineering, testing, game-days]
+    question: |
+      Why do resilience programs insist that an untested failover plan is "a hypothesis, not
+      a plan"?
+    options:
+      - "Because AWS forbids untested plans"
+      - "Because testing lowers the cost of the DR Region"
+      - "Because failover is always automatic and never needs testing"
+      - "Because assumptions about capacity, quotas, config parity, and runbooks routinely break in practice; only exercising failover (game days, FIS, restore drills) proves the RTO/RPO can actually be met"
+    answer: 3
+    explanation: |
+      DR plans rot: quotas drift, configs diverge, runbooks go stale, replication lags. Only
+      regularly testing (game days, FIS experiments, restore drills, ARC readiness) gives
+      confidence the plan works when it matters. It's a practical reality, not an AWS rule,
+      and testing doesn't reduce cost.
+    ref: "concepts.md#chaos-engineering-with-aws-fis"
+
+  # ---------------- Graceful degradation / throttling / load shedding ----------------
+  - id: aws-resilience-multiregion-dr-061
+    difficulty: beginner
+    tags: [graceful-degradation, fallbacks]
+    question: |
+      What is graceful degradation?
+    options:
+      - "Serving a reduced-but-useful response when a dependency fails — e.g. cached/stale data, defaults, read-only mode, or hiding a non-essential feature — instead of failing the whole request"
+      - "Automatically deleting failed resources"
+      - "Scaling the database vertically on error"
+      - "Immediately returning HTTP 500 when any dependency is slow"
+    answer: 0
+    explanation: |
+      Graceful degradation keeps the core experience working during partial failure by
+      falling back to stale caches, defaults, or read-only mode, or dropping non-essential
+      features. Returning 500s is the opposite; auto-deleting and vertical scaling aren't
+      degradation strategies.
+    ref: "concepts.md#graceful-degradation-throttling-and-load-shedding"
+
+  - id: aws-resilience-multiregion-dr-062
+    difficulty: intermediate
+    tags: [load-shedding, overload]
+    question: |
+      What is load shedding, and why does it improve overall availability under overload?
+    options:
+      - "Queuing every request indefinitely until capacity frees up"
+      - "Proactively and quickly rejecting excess/low-priority requests (e.g. 429/503) so the system serves the accepted load well instead of collapsing for everyone"
+      - "Scaling up the fleet automatically to accept all traffic"
+      - "Retrying failed requests more aggressively"
+    answer: 1
+    explanation: |
+      Under overload, accepting everything degrades all requests toward failure. Shedding
+      excess work fast keeps the accepted subset healthy, maximizing useful throughput and
+      protecting latency. Infinite queuing worsens latency, and aggressive retries amplify
+      overload (retry storms).
+    ref: "concepts.md#graceful-degradation-throttling-and-load-shedding"
+
+  - id: aws-resilience-multiregion-dr-063
+    difficulty: advanced
+    tags: [retries, backoff, jitter, thundering-herd]
+    question: |
+      Why should client retries use exponential backoff WITH jitter rather than fixed or
+      synchronized retry intervals?
+    options:
+      - "Backoff removes the need for idempotency"
+      - "Jitter makes retries faster"
+      - "Without jitter, many clients retry in lockstep after a failure, creating synchronized retry spikes (thundering herd) that re-overload the recovering service; randomized backoff spreads retries out"
+      - "Jitter guarantees the request eventually succeeds"
+    answer: 2
+    explanation: |
+      Synchronized retries produce periodic load spikes that keep knocking over a recovering
+      dependency. Adding jitter randomizes timing so retries spread out, smoothing recovery.
+      Backoff doesn't guarantee success or remove the need for idempotency (which makes
+      retries safe).
+    ref: "concepts.md#graceful-degradation-throttling-and-load-shedding"
+
+  - id: aws-resilience-multiregion-dr-064
+    difficulty: advanced
+    tags: [throttling, backpressure, queues]
+    question: |
+      A downstream service can handle 2,000 TPS but upstream traffic spikes to 10,000 TPS.
+      Which pattern best preserves the system without dropping the important work, and what's
+      the trade-off?
+    options:
+      - "Immediately fail all 10,000 requests to protect the downstream"
+      - "Vertically scale the downstream to 10,000 TPS instantly with no cost"
+      - "Remove all rate limits so the downstream absorbs the spike"
+      - "Buffer with a queue (e.g. SQS) so consumers process at their sustainable rate — converting the throughput spike into added latency rather than failure — accepting that processing is now delayed"
+    answer: 3
+    explanation: |
+      A queue decouples producers from a slower consumer and applies backpressure, absorbing
+      the spike and trading throughput-overload for latency (work is delayed, not dropped).
+      Removing limits overloads the downstream; failing everything drops important work; and
+      instant free vertical scaling isn't real.
+    ref: "concepts.md#graceful-degradation-throttling-and-load-shedding"
+
+  - id: aws-resilience-multiregion-dr-065
+    difficulty: intermediate
+    tags: [circuit-breaker, resilience]
+    question: |
+      What does a client-side circuit breaker protect against?
+    options:
+      - "Continuing to hammer a failing dependency: after a failure threshold it 'opens' to fail fast (or use a fallback), giving the dependency time to recover and avoiding resource exhaustion in the caller"
+      - "Cross-Region replication lag"
+      - "DNS TTL caching"
+      - "Data corruption in the database"
+    answer: 0
+    explanation: |
+      A circuit breaker trips open when a dependency looks unhealthy, so the caller fails
+      fast / falls back instead of piling on requests and exhausting its own threads/
+      connections — and it gives the dependency room to recover. It's unrelated to
+      corruption, replication lag, or DNS caching.
+    ref: "concepts.md#graceful-degradation-throttling-and-load-shedding"
+
+  # ---------------- Backups, immutability, WORM ----------------
+  - id: aws-resilience-multiregion-dr-066
+    difficulty: intermediate
+    tags: [worm, s3-object-lock]
+    question: |
+      What is the difference between S3 Object Lock Compliance mode and Governance mode?
+    options:
+      - "Compliance mode is cheaper; Governance mode is more durable"
+      - "In Compliance mode no one (not even the root user) can delete/overwrite an object version before retention expires; in Governance mode, users with a specific permission can override the lock"
+      - "Governance mode encrypts objects; Compliance mode does not"
+      - "Compliance mode replicates cross-Region; Governance mode does not"
+    answer: 1
+    explanation: |
+      Compliance mode is truly immutable until retention expires — even root cannot delete
+      early — ideal for regulatory/ransomware protection. Governance mode allows privileged
+      override (with a specific IAM permission), giving flexibility at lower protection. It's
+      not about cost, encryption, or replication.
+    ref: "concepts.md#backups-immutability-and-worm"
+
+  - id: aws-resilience-multiregion-dr-067
+    difficulty: advanced
+    tags: [immutability, ransomware, aws-backup]
+    question: |
+      Why is pairing replication with IMMUTABLE (WORM) backups in a separate account
+      considered the strongest defense against ransomware/insider data destruction?
+    options:
+      - "A separate account increases replication speed"
+      - "Replication alone already prevents ransomware"
+      - "Replication copies the malicious encryption/deletion everywhere within seconds; immutable backups (e.g. Vault Lock compliance mode) in a separate account can't be altered/deleted even by a compromised production account, so you can roll back"
+      - "Immutable backups make replication synchronous"
+    answer: 2
+    explanation: |
+      Replication faithfully propagates the attack, so it's no defense. Immutable backups
+      that even root/attacker can't delete, isolated in a separate account/OU, survive a
+      compromise and let you restore to a pre-attack point. Immutability doesn't affect
+      replication mode or speed.
+    ref: "concepts.md#backups-immutability-and-worm"
+
+  - id: aws-resilience-multiregion-dr-068
+    difficulty: intermediate
+    tags: [dynamodb, pitr, backup]
+    question: |
+      DynamoDB point-in-time recovery (PITR) lets you restore a table to any point within
+      what window?
+    options:
+      - "The last 365 days"
+      - "The last 24 hours"
+      - "The last 7 days"
+      - "The last 35 days"
+    answer: 3
+    explanation: |
+      DynamoDB PITR provides continuous backups allowing restore to any second within the
+      last 35 days. On-demand backups cover longer retention. Knowing this bounds your
+      corruption-recovery RPO for DynamoDB.
+    ref: "concepts.md#backups-immutability-and-worm"
+
+  - id: aws-resilience-multiregion-dr-069
+    difficulty: advanced
+    tags: [backups, cross-account, isolation]
+    question: |
+      Why keep DR backups in a separate AWS account (or OU) from production?
+    options:
+      - "So a compromise of the production account (or leaked credentials / insider threat) cannot delete the backups — account boundary provides blast-radius and security isolation"
+      - "Because AWS Backup only works cross-account"
+      - "To make restores automatic"
+      - "To reduce data transfer cost"
+    answer: 0
+    explanation: |
+      A separate account means production credentials/compromise can't reach the backups,
+      protecting against insider threat and account takeover. It's about isolation, not cost
+      savings, and AWS Backup works within an account too; account separation doesn't
+      automate restores.
+    ref: "concepts.md#backups-immutability-and-worm"
+
+  # ---------------- Cross-cutting trade-offs ----------------
+  - id: aws-resilience-multiregion-dr-070
+    difficulty: advanced
+    tags: [automatic-vs-manual-failover, tradeoff]
+    question: |
+      What is the primary trade-off between automatic and manually-initiated (one-button)
+      Region failover?
+    options:
+      - "Automatic failover is always slower"
+      - "Automatic failover minimizes RTO but risks false-positive failovers (costly, lossy) and flapping; manual/one-button (pre-scripted, e.g. via ARC) avoids false alarms at the cost of human-reaction latency"
+      - "Manual failover requires editing application code each time"
+      - "Automatic failover cannot use health checks"
+    answer: 1
+    explanation: |
+      Automated failover reacts fastest but can fire on false positives (unnecessary,
+      lossy) and flap. Manual (still automated as a scripted one-button action, ideally via
+      ARC data-plane switches) prevents spurious failovers but adds human latency. Stateless
+      tiers often use automated DNS health-based failover; stateful Region promotion is often
+      manual.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-resilience-multiregion-dr-071
+    difficulty: expert
+    tags: [strategy-selection, multi-region-justification]
+    question: |
+      A single-Region workload already meets a 99.95% availability SLA and has no
+      regulatory or global-latency requirement. A stakeholder wants multi-Region active/
+      active "for resilience." What is the best-reasoned response?
+    options:
+      - "Add a third and fourth Region for extra safety"
+      - "Agree immediately — more Regions is always better"
+      - "Push back: multi-Region active/active adds significant cost and consistency/conflict complexity; if the SLA, RPO/RTO, compliance, and latency needs are already met, the added complexity may reduce reliability. Multi-AZ + strong backups may suffice; go multi-Region only when a concrete requirement demands it"
+      - "Switch to backup & restore to save money instead"
+    answer: 2
+    explanation: |
+      Multi-Region isn't free reliability — it introduces async replication, conflict
+      handling, split-brain risk, and operational surface that can lower reliability if
+      unjustified. Absent a concrete RTO/RPO/compliance/latency driver, Multi-AZ + robust
+      backups often meets the goal. Adding Regions "for safety" is over-engineering.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-resilience-multiregion-dr-072
+    difficulty: advanced
+    tags: [aurora-vs-dynamodb, selection]
+    question: |
+      What is the PRIMARY trade-off when choosing Aurora Global Database over DynamoDB
+      global tables for a multi-Region data layer?
+    options:
+      - "DynamoDB provides synchronous global consistency, Aurora does not"
+      - "Aurora supports multi-master writes in every Region; DynamoDB does not"
+      - "Aurora is cheaper at every scale"
+      - "Aurora gives single-writer ACID/SQL correctness with fast promotion (write-global), but cross-Region writes pay a round trip; DynamoDB global tables give local low-latency writes in every Region (write-local) but only eventual cross-Region consistency with last-writer-wins"
+    answer: 3
+    explanation: |
+      The core trade-off is correctness/single-writer (Aurora) vs local-write latency/
+      multi-active (DynamoDB, LWW eventual). DynamoDB is NOT synchronously globally
+      consistent, and Aurora Global DB is single-writer (write forwarding routes to the one
+      primary), not multi-master.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-resilience-multiregion-dr-073
+    difficulty: intermediate
+    tags: [replication-vs-backup, tradeoff]
+    question: |
+      "We replicate to another Region with RPO of 1 second, so we don't need backups."
+      Why is this reasoning flawed?
+    options:
+      - "Replication protects against infrastructure/Region failure but faithfully copies logical disasters (corruption, accidental/malicious deletion) to every Region within seconds; only point-in-time (ideally immutable) backups let you recover from those"
+      - "Replication has an RPO worse than backups"
+      - "Backups are required by AWS for all accounts"
+      - "Replication is more expensive than backups"
+    answer: 0
+    explanation: |
+      Replication and backup solve different problems: replication = availability/DR for
+      infra events; backups = recovery from logical data disasters that replication would
+      otherwise propagate everywhere. You need both. Cost, RPO comparisons, and AWS mandates
+      aren't the point.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-resilience-multiregion-dr-074
+    difficulty: expert
+    tags: [scenario, cell-based, blast-radius, deploy]
+    question: |
+      A large multi-tenant SaaS suffered a global outage when one bad deploy hit all
+      customers at once, and separately when one tenant's poison-pill request exhausted a
+      shared thread pool. Which combination best addresses BOTH going forward?
+    options:
+      - "Multi-Region active/active with DynamoDB global tables"
+      - "Cell-based architecture (deploy and canary per cell to contain bad deploys) plus shuffle sharding (so a poison-pill/noisy tenant impacts only a tiny fraction of others)"
+      - "Increase the thread pool size and add more AZs"
+      - "Switch all traffic routing to Global Accelerator"
+    answer: 1
+    explanation: |
+      Cells contain a bad deploy to one partition and enable cell-by-cell canaries; shuffle
+      sharding limits the overlap of resources between tenants so a poison-pill tenant harms
+      only the few sharing its combination. Multi-Region, bigger thread pools, or Global
+      Accelerator address neither blast-radius problem directly.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-resilience-multiregion-dr-075
+    difficulty: advanced
+    tags: [scenario, static-stability, control-plane]
+    question: |
+      A failover runbook (a) edits Route 53 records, (b) scales an ASG from 2 to 40
+      instances via Auto Scaling, and (c) creates a new DynamoDB table. During a real
+      Regional event the failover stalls. What is the most likely root cause and the fix?
+    options:
+      - "The DynamoDB table needed a global secondary index"
+      - "DNS TTLs were too high; the fix is caching more aggressively"
+      - "The runbook depends on control-plane operations (record edits, scaling, table creation) that are degraded during the event; make it statically stable — pre-provision capacity/tables and use data-plane failover switches (e.g. ARC routing controls)"
+      - "The ASG needed a larger instance type"
+    answer: 2
+    explanation: |
+      Steps (b) and (c), and to a degree (a), are control-plane operations that may be
+      impaired precisely during a large Regional event. The statically stable fix is to
+      pre-provision the fleet and tables ahead of time and trigger failover via highly
+      available data-plane switches (ARC). Instance type, GSIs, and TTL caching don't
+      address the control-plane dependency.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-resilience-multiregion-dr-076
+    difficulty: intermediate
+    tags: [s3-crr, srr, selection]
+    question: |
+      When would you choose S3 Same-Region Replication (SRR) over Cross-Region Replication
+      (CRR)?
+    options:
+      - "SRR is always preferred because it's cheaper for DR"
+      - "SRR provides synchronous replication and CRR does not"
+      - "When you need to protect against a full Region outage"
+      - "When you need a second copy within the same Region for use cases like log aggregation, compliance separation across accounts, or low-latency in-Region redundancy — not cross-Region DR"
+    answer: 3
+    explanation: |
+      SRR copies objects within the same Region (e.g. aggregating logs, separating
+      prod/test or accounts, in-Region redundancy). It does NOT protect against a Region
+      outage — that's what CRR is for. Both are async; the choice is about the failure scope
+      you're protecting against.
+    ref: "concepts.md#data-replication-s3-cross-region-replication"
+
+  - id: aws-resilience-multiregion-dr-077
+    difficulty: expert
+    tags: [scenario, active-active, write-partitioned]
+    question: |
+      You need active/active across two Regions with LOCAL writes but must avoid last-
+      writer-wins lost updates on the same entity. Which pattern fits, and what does it cost
+      you?
+    options:
+      - "Write-partitioned: route each entity's writes to a home Region by its partition key (e.g. user ID) so a given item is only written in one Region — you get local writes for most users and no conflicts, at the cost of routing complexity and cross-Region latency when a user is served by a non-home Region"
+      - "Synchronous cross-Region writes for every entity"
+      - "Single global writer in one Region for everything"
+      - "Plain DynamoDB global tables everywhere; LWW is fine"
+    answer: 0
+    explanation: |
+      Write-partitioning assigns each key a home Region, so concurrent conflicting writes to
+      the same item can't happen — avoiding LWW loss while keeping local writes for most
+      traffic. The cost is routing logic and cross-Region latency for out-of-home requests.
+      Plain global tables reintroduce LWW; synchronous or single-writer sacrifice local-write
+      latency.
+    ref: "concepts.md#multi-site-active-active-and-hot-standby"
+
+  - id: aws-resilience-multiregion-dr-078
+    difficulty: beginner
+    tags: [multi-az, always-on]
+    question: |
+      Which of these regional AWS services is inherently multi-AZ (AZ-resilient) without you
+      configuring standbys?
+    options:
+      - "A single EC2 instance in one AZ"
+      - "Amazon S3, DynamoDB, and SQS (regional services that store data redundantly across multiple AZs by default)"
+      - "An EBS volume attached to one instance"
+      - "A single-AZ RDS instance"
+    answer: 1
+    explanation: |
+      S3, DynamoDB, and SQS are regional services that internally replicate across multiple
+      AZs, so you get AZ resilience for free. A single EC2 instance, a single EBS volume, and
+      a single-AZ RDS instance are AZ-scoped and not automatically AZ-resilient.
+    ref: "concepts.md#availability-building-blocks-regions-azs-and-multi-az-ha"
+
+  - id: aws-resilience-multiregion-dr-079
+    difficulty: advanced
+    tags: [rds-multi-az, failover, rto]
+    question: |
+      A classic RDS Multi-AZ deployment (single standby) versus the newer Multi-AZ DB
+      cluster (two readable standbys) differ in failover behavior how?
+    options:
+      - "Classic Multi-AZ replicates asynchronously across Regions"
+      - "Both fail over instantly with zero downtime"
+      - "Classic Multi-AZ typically fails over in ~60–120 s to a non-readable standby; the Multi-AZ DB cluster has two readable standbys and can fail over faster (around 35 s), also offering read scaling"
+      - "The Multi-AZ DB cluster cannot fail over automatically"
+    answer: 2
+    explanation: |
+      Classic RDS Multi-AZ keeps a synchronous, non-readable standby and fails over in about
+      60–120 s. The Multi-AZ DB cluster adds two readable standbys, faster failover (~35 s),
+      and read scaling. Neither is zero-downtime, and Multi-AZ is within a Region (not
+      cross-Region async).
+    ref: "concepts.md#availability-building-blocks-regions-azs-and-multi-az-ha"
+
+  - id: aws-resilience-multiregion-dr-080
+    difficulty: intermediate
+    tags: [elasticache, global-datastore, replication]
+    question: |
+      ElastiCache Global Datastore provides cross-Region replication with which write model?
+    options:
+      - "Synchronous writes to all Regions before ack"
+      - "No replication; each Region is fully independent"
+      - "Multi-active — every Region accepts writes with LWW"
+      - "A single primary Region for writes replicating asynchronously to secondary Regions (typically sub-second to seconds), with secondaries serving reads and promotable on failover"
+    answer: 3
+    explanation: |
+      ElastiCache Global Datastore uses one primary Region for writes with asynchronous
+      cross-Region replication to read-only secondaries that can be promoted on failover —
+      analogous to Aurora's single-writer model. It's not multi-active LWW, not synchronous,
+      and not independent per Region.
+    ref: "concepts.md#replication-consistency-and-conflict-trade-offs"

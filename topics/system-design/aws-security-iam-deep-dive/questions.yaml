@@ -1,0 +1,1523 @@
+topic: "AWS IAM Deep Dive: Identities, Policies and Access Control"
+domain: system-design
+topic_slug: aws-security-iam-deep-dive
+version: 1
+
+questions:
+  # ---------------- Users, groups, roles ----------------
+  - id: aws-security-iam-deep-dive-001
+    difficulty: beginner
+    tags: [users, roles, fundamentals]
+    question: |
+      What is the defining difference between an IAM user and an IAM role?
+    options:
+      - "A user has long-lived credentials; a role has no long-lived credentials and is assumed for temporary ones"
+      - "A user can be attached to groups; a role cannot have any policies"
+      - "A role is global while a user is Region-scoped"
+      - "A user can be assumed via STS; a role cannot"
+    answer: 0
+    explanation: |
+      An IAM user carries persistent credentials (password and/or up to two access
+      keys). A role has no standing credentials; a trusted principal assumes it via
+      STS and gets temporary, expiring credentials. Roles do have policies (a trust
+      policy plus permissions policies). IAM is global, not Region-scoped, for both.
+    ref: "concepts.md#iam-users-groups-and-roles"
+
+  - id: aws-security-iam-deep-dive-002
+    difficulty: beginner
+    tags: [groups]
+    question: |
+      Which statement about IAM groups is correct?
+    options:
+      - "A group is a principal you can name in a trust policy"
+      - "Groups can be nested to build hierarchies"
+      - "A group is only a container for attaching policies to multiple users; it is not itself an identity"
+      - "A role can be added to a group to inherit its policies"
+    answer: 2
+    explanation: |
+      Groups are purely a convenience for attaching policies to many users at once.
+      A group is not a principal, cannot be named in a trust policy, cannot be
+      nested, and roles cannot join groups. Those distractors are all common
+      misconceptions.
+    ref: "concepts.md#iam-users-groups-and-roles"
+
+  - id: aws-security-iam-deep-dive-003
+    difficulty: intermediate
+    tags: [roles, best-practice, keys]
+    question: |
+      An application running on EC2 needs to read from an S3 bucket. Why is
+      attaching an IAM role via an instance profile preferred over creating an IAM
+      user and putting its access keys in the app's config?
+    options:
+      - "Roles grant more permissions than users can"
+      - "Instance profiles are cheaper than IAM users"
+      - "IAM users cannot access S3 at all"
+      - "The role's credentials are short-lived and automatically rotated, so a leak has a bounded blast radius and there is no secret at rest"
+    answer: 3
+    explanation: |
+      The role delivers temporary, auto-rotated credentials through IMDS, so there
+      is no long-lived secret to leak and a stolen credential expires. Roles do not
+      grant "more" permissions, cost is identical (IAM is free), and users can
+      absolutely access S3 — the point is credential hygiene and blast radius.
+    ref: "concepts.md#iam-users-groups-and-roles"
+
+  - id: aws-security-iam-deep-dive-004
+    difficulty: intermediate
+    tags: [quotas, limits]
+    question: |
+      How many long-lived access keys can a single IAM user have active at once?
+    options:
+      - "One"
+      - "Two"
+      - "Five"
+      - "Unlimited"
+    answer: 1
+    explanation: |
+      An IAM user can have at most two access keys. The two-key allowance exists
+      specifically to enable zero-downtime rotation: create the second key, migrate,
+      then deactivate and delete the old one.
+    ref: "concepts.md#iam-users-groups-and-roles"
+
+  - id: aws-security-iam-deep-dive-005
+    difficulty: advanced
+    tags: [users, roles, judgment]
+    question: |
+      You are designing access for a legacy on-premises batch job that cannot
+      federate with any identity provider and cannot run inside AWS. It needs to
+      upload files to S3 nightly. Which approach is the most defensible?
+    options:
+      - "Bake root account credentials into the job's config file"
+      - "Give the job the EC2 instance profile role from an unrelated instance"
+      - "Make the S3 bucket public so no credentials are needed"
+      - "Create an IAM user with a narrowly scoped policy and access keys, and put a rotation process and CloudTrail monitoring around it"
+    answer: 3
+    explanation: |
+      When a caller genuinely cannot obtain temporary credentials, an IAM user with
+      a tightly scoped policy plus rotation and monitoring is the accepted escape
+      hatch. Root credentials must never be used programmatically, sharing an
+      unrelated instance profile is not possible off-instance and violates least
+      privilege, and a public bucket is a data breach waiting to happen.
+    ref: "concepts.md#iam-users-groups-and-roles"
+
+  # ---------------- STS / temporary credentials ----------------
+  - id: aws-security-iam-deep-dive-006
+    difficulty: beginner
+    tags: [sts, assume-role]
+    question: |
+      What does the STS AssumeRole operation return?
+    options:
+      - "Temporary security credentials: an access key ID, a secret access key, and a session token"
+      - "A permanent access key pair for the role"
+      - "A signed URL to the AWS console"
+      - "The role's trust policy document"
+    answer: 0
+    explanation: |
+      AssumeRole returns temporary credentials (access key ID, secret access key,
+      session token) that expire after the requested duration. It does not create
+      permanent keys, is not a console URL, and does not return policy documents.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-007
+    difficulty: intermediate
+    tags: [sts, limits, session-duration]
+    question: |
+      What are the minimum and maximum session durations for an STS AssumeRole call
+      (ignoring role chaining)?
+    options:
+      - "5 minutes minimum, 1 hour maximum"
+      - "1 hour minimum, 24 hours maximum"
+      - "15 minutes minimum, 12 hours maximum (capped by the role's MaxSessionDuration)"
+      - "There is no minimum; maximum is 36 hours"
+    answer: 2
+    explanation: |
+      DurationSeconds ranges from 900 seconds (15 min) up to 43200 seconds (12 h),
+      capped by the role's MaxSessionDuration (1-12 h). Default is 3600 s (1 hour).
+      The other ranges are fabricated.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-008
+    difficulty: advanced
+    tags: [sts, role-chaining, limits]
+    question: |
+      A pipeline assumes role A, then uses A's credentials to assume role B (role
+      chaining), requesting a 6-hour session for B whose MaxSessionDuration is 12
+      hours. What happens?
+    options:
+      - "The session is granted for 6 hours as requested"
+      - "The call fails, because role chaining caps the session at 1 hour"
+      - "The session is granted for 12 hours (the role maximum)"
+      - "The call fails, because role chaining is not allowed at all"
+    answer: 1
+    explanation: |
+      Role chaining caps any resulting session at 1 hour regardless of
+      MaxSessionDuration; requesting more than 1 hour via chaining fails. Chaining
+      is allowed, but the 1-hour ceiling is a classic gotcha.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-009
+    difficulty: intermediate
+    tags: [eks, irsa, roles]
+    question: |
+      In an EKS cluster you want each pod to receive its own least-privilege IAM
+      credentials instead of sharing the node's instance-profile role. Which
+      mechanism provides this?
+    options:
+      - "Attaching an IAM user's keys as a Kubernetes secret in each pod"
+      - "Giving every node the AdministratorAccess managed policy"
+      - "A single shared role in the pod's environment variables"
+      - "IAM Roles for Service Accounts (IRSA) via an OIDC provider, or EKS Pod Identity"
+    answer: 3
+    explanation: |
+      IRSA maps a Kubernetes service account to an IAM role through the cluster's
+      OIDC provider (EKS Pod Identity is the newer add-on doing the same), so each
+      pod assumes its own scoped role with short-lived credentials. The alternatives
+      all reintroduce shared or long-lived credentials and violate least privilege.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-010
+    difficulty: advanced
+    tags: [sts, revocation, incident-response]
+    question: |
+      A set of temporary STS credentials for a role has been leaked and has 8 hours
+      left before expiry. What is true about revoking them?
+    options:
+      - "You can call sts:RevokeToken to invalidate the specific credentials instantly"
+      - "The credentials are automatically revoked as soon as they are used from a new IP"
+      - "You cannot un-issue the token; you can only add a deny (e.g. on aws:TokenIssueTime) or delete/deny the role to cut off older sessions"
+      - "Deleting the S3 bucket revokes the credentials"
+    answer: 2
+    explanation: |
+      There is no API to revoke an individual issued STS token. Standard incident
+      response is to attach a policy that denies actions for sessions issued before
+      a cutoff time (aws:TokenIssueTime), or to modify/detach the role's policies.
+      This is exactly why short session durations are recommended.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-011
+    difficulty: expert
+    tags: [sts, session-policy, limits]
+    question: |
+      When calling AssumeRole, what is the limit on session policies passed inline
+      and via managed policy ARNs?
+    options:
+      - "Up to 10 managed policy ARNs plus one inline policy, combined plaintext limited to 2,048 characters"
+      - "Unlimited managed policies, no size limit"
+      - "One managed policy only, 10 KB limit"
+      - "Up to 50 managed policies, 6,144 character limit"
+    answer: 0
+    explanation: |
+      AssumeRole accepts up to 10 managed policy ARNs plus a single inline policy;
+      the combined plaintext cannot exceed 2,048 characters (with a separate packed
+      binary limit reported as PackedPolicySize). The other numbers are wrong.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-012
+    difficulty: intermediate
+    tags: [imds, ec2, security]
+    question: |
+      Why is IMDSv2 recommended for EC2 instances that carry an instance-profile
+      role?
+    options:
+      - "It encrypts the role's credentials at rest on disk"
+      - "It doubles the credential rotation frequency"
+      - "It removes the need for a trust policy on the role"
+      - "It requires a session token and enforces a hop limit, mitigating SSRF attacks that steal role credentials from the metadata service"
+    answer: 3
+    explanation: |
+      IMDSv2 uses a session-oriented, token-based flow with a configurable network
+      hop limit, which blocks the SSRF-based metadata credential theft pattern
+      (the Capital One-style vector). It does not change encryption, rotation, or
+      trust policies.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-013
+    difficulty: intermediate
+    tags: [sts, operations]
+    question: |
+      Which STS operation is used to exchange an OIDC/web identity token (e.g. from
+      Cognito or Google) for AWS role credentials?
+    options:
+      - "GetSessionToken"
+      - "AssumeRoleWithWebIdentity"
+      - "AssumeRoleWithSAML"
+      - "GetFederationToken"
+    answer: 1
+    explanation: |
+      AssumeRoleWithWebIdentity is the OIDC path (used by web/mobile apps, Cognito,
+      and IRSA). AssumeRoleWithSAML is for SAML enterprise IdPs, GetSessionToken is
+      for MFA-protecting an IAM user's own calls, and GetFederationToken is a
+      different federation broker mechanism.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  # ---------------- Policy types and structure ----------------
+  - id: aws-security-iam-deep-dive-014
+    difficulty: beginner
+    tags: [policy, structure]
+    question: |
+      Which element appears in a resource-based policy but not in a normal
+      identity-based policy?
+    options:
+      - "Principal"
+      - "Effect"
+      - "Action"
+      - "Resource"
+    answer: 0
+    explanation: |
+      Resource-based (and trust) policies specify a Principal — who is allowed. An
+      identity-based policy is already attached to a principal, so it omits that
+      element. Effect, Action, and Resource appear in both.
+    ref: "concepts.md#policy-types-and-structure"
+
+  - id: aws-security-iam-deep-dive-015
+    difficulty: intermediate
+    tags: [policy, trust-policy]
+    question: |
+      A role's trust policy is best described as which kind of policy?
+    options:
+      - "An identity-based policy attached to the role"
+      - "A service control policy"
+      - "A resource-based policy on the role that specifies who may assume it"
+      - "A permission boundary"
+    answer: 2
+    explanation: |
+      The trust policy is effectively a resource-based policy attached to the role,
+      naming the principals allowed to assume it. It is separate from the role's
+      permissions (identity-based) policies, which define what the role can do.
+    ref: "concepts.md#policy-types-and-structure"
+
+  - id: aws-security-iam-deep-dive-016
+    difficulty: intermediate
+    tags: [managed-policy, inline-policy]
+    question: |
+      What is a key advantage of a customer-managed policy over an inline policy?
+    options:
+      - "Inline policies are evaluated first and always win"
+      - "Inline policies support conditions but managed ones do not"
+      - "Managed policies bypass explicit deny"
+      - "Managed policies are reusable across identities and versioned, so a single edit updates every attachment"
+    answer: 3
+    explanation: |
+      Customer-managed policies are standalone, reusable, and versioned (up to 5
+      versions), so one change propagates to all attachments. Inline policies are
+      1:1 with a single identity and deleted with it. Neither bypasses deny, and
+      both support conditions; evaluation order is not by policy category.
+    ref: "concepts.md#policy-types-and-structure"
+
+  - id: aws-security-iam-deep-dive-017
+    difficulty: advanced
+    tags: [policy-types, caps, grants]
+    question: |
+      Which set of policy types can only RESTRICT permissions and never grant them
+      on their own?
+    options:
+      - "SCPs, RCPs, permission boundaries, and session policies"
+      - "Identity-based and resource-based policies"
+      - "Trust policies and inline policies"
+      - "Managed policies and KMS key policies"
+    answer: 0
+    explanation: |
+      SCPs, RCPs, permission boundaries, and session policies are all "caps" that
+      intersect with granted permissions; none grants access by itself. Identity-
+      and resource-based policies (including trust and key policies) are the ones
+      that actually grant.
+    ref: "concepts.md#policy-types-and-structure"
+
+  # ---------------- Policy evaluation logic ----------------
+  - id: aws-security-iam-deep-dive-018
+    difficulty: beginner
+    tags: [evaluation, deny]
+    question: |
+      In IAM policy evaluation, what is the effect of an explicit Deny in any
+      applicable policy?
+    options:
+      - "It is overridden if another policy has an explicit Allow"
+      - "It only applies within the same account"
+      - "It always wins and the request is denied, regardless of any Allow"
+      - "It is ignored for resource-based policies"
+    answer: 2
+    explanation: |
+      An explicit Deny can never be overridden by any Allow in any policy type; it
+      is the highest-priority outcome. This is the primary tool for hard guardrails.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  - id: aws-security-iam-deep-dive-019
+    difficulty: beginner
+    tags: [evaluation, default-deny]
+    question: |
+      If no policy explicitly allows or denies an action, what is the result?
+    options:
+      - "The action is allowed (default allow)"
+      - "AWS prompts the user for approval"
+      - "The action is allowed only for read operations"
+      - "The action is denied (default/implicit deny)"
+    answer: 3
+    explanation: |
+      IAM is deny-by-default: absent any explicit Allow, the request is implicitly
+      denied. There is no default-allow and no read-only exception.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  - id: aws-security-iam-deep-dive-020
+    difficulty: intermediate
+    tags: [evaluation, union, intersection]
+    question: |
+      Within a single account, how do an identity-based policy and a resource-based
+      policy combine to determine access?
+    options:
+      - "Both must allow the action (intersection)"
+      - "Access is granted if either one allows the action (union), unless something explicitly denies it"
+      - "The resource-based policy always overrides the identity-based policy"
+      - "Only the identity-based policy is consulted"
+    answer: 1
+    explanation: |
+      For same-account requests, grants are a union: an allow in either the identity
+      policy or the resource policy suffices. An explicit deny in either still wins.
+      Intersection is how caps (SCP/boundary/session) behave, not these two.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  - id: aws-security-iam-deep-dive-021
+    difficulty: advanced
+    tags: [evaluation, scp]
+    question: |
+      An SCP attached to an OU allows only s3:* and ec2:*. A user in a member
+      account of that OU has an identity policy granting dynamodb:GetItem. Can the
+      user read from DynamoDB?
+    options:
+      - "Yes, because the identity policy grants it"
+      - "Yes, because SCPs only apply to roles, not users"
+      - "No, because SCPs grant permissions and this one grants DynamoDB implicitly"
+      - "No, because the action must be allowed by both the SCP and the identity policy, and the SCP does not permit DynamoDB"
+    answer: 3
+    explanation: |
+      Effective permissions are the intersection of the identity policy and the SCP.
+      The SCP does not include DynamoDB, so the action is filtered out even though
+      the identity policy allows it. SCPs apply to all principals in the account and
+      never grant — they only cap.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  - id: aws-security-iam-deep-dive-022
+    difficulty: advanced
+    tags: [evaluation, cross-account]
+    question: |
+      For a cross-account request (principal in account A accessing a resource in
+      account B), what must be true for access to succeed?
+    options:
+      - "Both sides must allow: account A's identity policy must permit the action AND account B's resource policy must permit the principal"
+      - "Only account B's resource policy must allow it"
+      - "Only account A's identity policy must allow it"
+      - "Either side allowing it is sufficient, just like same-account access"
+    answer: 0
+    explanation: |
+      Across accounts each account authorizes independently, so you need an allow on
+      the caller side (identity policy in A) AND an allow on the resource side
+      (resource policy in B naming the principal). The same-account union rule does
+      not apply across account boundaries.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  - id: aws-security-iam-deep-dive-023
+    difficulty: expert
+    tags: [evaluation, order]
+    question: |
+      During evaluation, which check is applied FIRST across all policy types?
+    options:
+      - "Whether an identity-based policy allows the action"
+      - "Whether the resource-based policy allows the action"
+      - "Whether any policy contains an explicit Deny"
+      - "Whether a permission boundary allows the action"
+    answer: 2
+    explanation: |
+      AWS first checks for any explicit Deny across every applicable policy; if one
+      exists the request is denied immediately. Only after clearing explicit denies
+      does it evaluate SCPs/RCPs, resource policies, boundaries, session policies,
+      and identity policies for an allow.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  - id: aws-security-iam-deep-dive-024
+    difficulty: expert
+    tags: [evaluation, scp, service-linked]
+    question: |
+      Which statement about SCP evaluation in AWS Organizations is correct?
+    options:
+      - "An SCP allow at the account level alone is enough even if a parent OU's SCP does not allow it"
+      - "The effective SCP is the intersection down the tree; an action must be allowed at every level from root to the account"
+      - "SCPs grant permissions to principals that lack an identity policy"
+      - "SCPs apply to the management account root exactly as they apply to member accounts"
+    answer: 1
+    explanation: |
+      SCPs are evaluated as an intersection down the hierarchy — an allow must exist
+      at root, the OU, and the account. SCPs never grant, and the management account
+      is treated specially (SCPs do not restrict it the same way). Service-linked
+      roles are also exempt.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  # ---------------- Least privilege / conditions ----------------
+  - id: aws-security-iam-deep-dive-025
+    difficulty: beginner
+    tags: [least-privilege]
+    question: |
+      Least privilege in IAM means granting:
+    options:
+      - "Every permission a team might conceivably need, to avoid tickets"
+      - "AdministratorAccess to all engineers by default"
+      - "Read-only access to everything"
+      - "Only the actions, on only the resources, under only the conditions actually required"
+    answer: 3
+    explanation: |
+      Least privilege scopes down along three axes: actions, resources, and
+      conditions. Over-provisioning "just in case," blanket admin, or blanket
+      read-only all miss the intent.
+    ref: "concepts.md#least-privilege-and-policy-conditions"
+
+  - id: aws-security-iam-deep-dive-026
+    difficulty: intermediate
+    tags: [conditions, org]
+    question: |
+      Which condition key lets you allow access only to principals that belong to
+      your own AWS Organization?
+    options:
+      - "aws:SourceIp"
+      - "aws:SecureTransport"
+      - "aws:PrincipalOrgID"
+      - "aws:CurrentTime"
+    answer: 2
+    explanation: |
+      aws:PrincipalOrgID matches the calling principal's organization ID, a
+      one-line way to confine access to your org. SourceIp is network fencing,
+      SecureTransport enforces TLS, CurrentTime is time-based — none scope by org.
+    ref: "concepts.md#least-privilege-and-policy-conditions"
+
+  - id: aws-security-iam-deep-dive-027
+    difficulty: advanced
+    tags: [abac, rbac, tradeoffs]
+    question: |
+      A platform team must grant thousands of engineers access to resources such
+      that each engineer can only touch resources belonging to their own team,
+      without editing policies as teams and resources grow. Which approach fits
+      best, and what is its main risk?
+    options:
+      - "ABAC using tag-matching conditions (e.g. aws:PrincipalTag matches aws:ResourceTag); risk is that weak tag governance becomes a privilege-escalation path"
+      - "RBAC with one role per team; risk is nothing, it always scales"
+      - "Give everyone the same admin role; risk is only cost"
+      - "A separate AWS account per engineer; risk is latency"
+    answer: 0
+    explanation: |
+      ABAC scales with a single policy that compares principal tags to resource
+      tags, enabling self-service across huge fleets. Its dependence on tag
+      integrity is the catch: a mis-set or attacker-controlled tag grants access, so
+      tag governance must be enforced (often via SCPs locking tag keys). RBAC would
+      explode in policy count here.
+    ref: "concepts.md#least-privilege-and-policy-conditions"
+
+  - id: aws-security-iam-deep-dive-028
+    difficulty: intermediate
+    tags: [conditions, mfa]
+    question: |
+      Which condition key would you use to require that a sensitive action is only
+      allowed when the caller authenticated with MFA?
+    options:
+      - "aws:PrincipalOrgID"
+      - "aws:SourceVpce"
+      - "aws:RequestTag"
+      - "aws:MultiFactorAuthPresent"
+    answer: 3
+    explanation: |
+      aws:MultiFactorAuthPresent (often paired with aws:MultiFactorAuthAge) gates
+      actions on MFA. PrincipalOrgID scopes by org, SourceVpce pins to a VPC
+      endpoint, and RequestTag concerns tags in the request — none enforce MFA.
+    ref: "concepts.md#least-privilege-and-policy-conditions"
+
+  - id: aws-security-iam-deep-dive-029
+    difficulty: advanced
+    tags: [conditions, network, vpc]
+    question: |
+      You want an S3 bucket to be reachable only through a specific VPC endpoint and
+      never from the public internet, enforced in the bucket policy. Which condition
+      key is most appropriate?
+    options:
+      - "aws:SecureTransport"
+      - "aws:SourceVpce (deny when the request does not come through the named VPC endpoint)"
+      - "aws:MultiFactorAuthPresent"
+      - "aws:CurrentTime"
+    answer: 1
+    explanation: |
+      aws:SourceVpce restricts access to requests arriving through a specific VPC
+      endpoint (a Deny when it does not match is the common data-perimeter pattern).
+      SecureTransport only enforces TLS, MFA is about authentication, and CurrentTime
+      is time-based.
+    ref: "concepts.md#least-privilege-and-policy-conditions"
+
+  # ---------------- Permission boundaries ----------------
+  - id: aws-security-iam-deep-dive-030
+    difficulty: intermediate
+    tags: [permission-boundary]
+    question: |
+      What are the effective permissions of an IAM role that has an identity policy
+      granting s3:* and dynamodb:* but a permission boundary allowing only s3:*?
+    options:
+      - "Only s3:* (intersection of identity policy and boundary)"
+      - "s3:* and dynamodb:* (identity policy wins)"
+      - "Nothing, because the boundary conflicts with the identity policy"
+      - "dynamodb:* only"
+    answer: 0
+    explanation: |
+      A permission boundary caps the maximum; effective permissions are the
+      intersection of the identity policy and the boundary. Only s3:* survives. The
+      boundary never grants, so it does not add dynamodb, and an intersection is not
+      a conflict that voids everything.
+    ref: "concepts.md#permission-boundaries"
+
+  - id: aws-security-iam-deep-dive-031
+    difficulty: advanced
+    tags: [permission-boundary, delegation]
+    question: |
+      Your platform team wants to let developers create their own IAM roles for
+      their apps, but ensure no developer-created role can ever exceed a defined set
+      of permissions. What is the standard mechanism?
+    options:
+      - "Give developers AdministratorAccess and trust code review"
+      - "Attach an SCP that denies iam:CreateRole entirely"
+      - "Require (via a condition on iam:CreateRole/PutRolePolicy using iam:PermissionsBoundary) that every created role carries a specific permission boundary"
+      - "Use session policies on each developer's console login"
+    answer: 2
+    explanation: |
+      Delegated role creation is made safe by forcing every new role to carry a
+      mandated permission boundary, enforced through a condition on the IAM
+      create/put actions. Even if a developer attaches admin to their role, the
+      boundary caps it. Denying CreateRole outright removes the self-service they
+      want; session policies do not constrain role creation.
+    ref: "concepts.md#permission-boundaries"
+
+  - id: aws-security-iam-deep-dive-032
+    difficulty: advanced
+    tags: [permission-boundary, scp, comparison]
+    question: |
+      What distinguishes a permission boundary from an SCP?
+    options:
+      - "A boundary grants permissions while an SCP only caps"
+      - "SCPs work in a standalone account but boundaries require Organizations"
+      - "They are identical and interchangeable"
+      - "A boundary applies to one specific user or role, while an SCP applies to all principals in an account or OU and requires AWS Organizations"
+    answer: 3
+    explanation: |
+      Both are caps using intersection, but scope differs: a boundary targets a
+      single identity (great for delegation), while an SCP is an org-wide guardrail
+      over all principals in accounts/OUs and needs Organizations. Boundaries work in
+      a standalone account; the reverse claim is backward.
+    ref: "concepts.md#permission-boundaries"
+
+  # ---------------- SCP / RCP ----------------
+  - id: aws-security-iam-deep-dive-033
+    difficulty: intermediate
+    tags: [scp, organizations]
+    question: |
+      Which is a correct, common use of a Service Control Policy?
+    options:
+      - "Denying member accounts the ability to disable CloudTrail or operate outside approved Regions"
+      - "Granting a specific user s3:GetObject on a bucket"
+      - "Creating temporary credentials for federated users"
+      - "Encrypting data at rest in S3"
+    answer: 0
+    explanation: |
+      SCPs are org-wide guardrails that restrict what member-account principals may
+      do — e.g. deny disabling CloudTrail or acting outside approved Regions. They
+      cannot grant a specific permission, mint credentials, or encrypt data.
+    ref: "concepts.md#service-control-policies-and-resource-control-policies"
+
+  - id: aws-security-iam-deep-dive-034
+    difficulty: advanced
+    tags: [rcp, data-perimeter]
+    question: |
+      You must guarantee that every S3 bucket across a 300-account organization can
+      only be accessed by principals in your own organization, even if someone
+      writes a permissive bucket policy. Which single control accomplishes this most
+      directly?
+    options:
+      - "A permission boundary on every role"
+      - "An SCP allowing s3:* in every account"
+      - "A Resource Control Policy (RCP) enforcing aws:PrincipalOrgID on the relevant resource types org-wide"
+      - "Turning on S3 versioning everywhere"
+    answer: 2
+    explanation: |
+      RCPs cap what can be done TO resources regardless of the principal, so one RCP
+      enforcing aws:PrincipalOrgID stops any out-of-org access even if a bucket
+      policy is sloppy. Boundaries and SCPs constrain the identity side, not the
+      resource side, and versioning is unrelated to access control.
+    ref: "concepts.md#service-control-policies-and-resource-control-policies"
+
+  - id: aws-security-iam-deep-dive-035
+    difficulty: advanced
+    tags: [scp, rcp, comparison]
+    question: |
+      What is the core distinction between an SCP and an RCP?
+    options:
+      - "SCP works on resources; RCP works on identities"
+      - "SCP grants; RCP denies"
+      - "They are the same feature with different names in different Regions"
+      - "SCP is a cap on identities (the caller side); RCP is a cap on resources (the resource side, applying even to external and service principals)"
+    answer: 3
+    explanation: |
+      SCP limits what your org's principals can do; RCP limits what can be done to
+      your org's resources — and RCP applies regardless of who the principal is,
+      including external and AWS service principals. Neither grants. They are
+      distinct, complementary controls.
+    ref: "concepts.md#service-control-policies-and-resource-control-policies"
+
+  - id: aws-security-iam-deep-dive-036
+    difficulty: expert
+    tags: [scp, pitfalls]
+    question: |
+      A team replaces the default FullAWSAccess SCP on an OU with a restrictive
+      allow-list SCP that lists only s3 and dynamodb actions. What is the most likely
+      consequence?
+    options:
+      - "Nothing changes because SCPs only add permissions"
+      - "Principals in those accounts lose access to every service not enumerated (e.g. CloudWatch, KMS, EC2), potentially breaking automation and service-linked flows"
+      - "The accounts gain admin access to all services"
+      - "Only console access is affected; API access is unchanged"
+    answer: 1
+    explanation: |
+      Because SCPs only subtract, replacing FullAWSAccess with a narrow allow-list
+      removes every unlisted service from the effective permissions of principals in
+      those accounts, which commonly breaks logging, encryption, and automation. You
+      must enumerate everything needed. SCPs never add permissions.
+    ref: "concepts.md#service-control-policies-and-resource-control-policies"
+
+  - id: aws-security-iam-deep-dive-037
+    difficulty: expert
+    tags: [scp, limits]
+    question: |
+      How many SCPs can be attached to a single entity (root, OU, or account) in AWS
+      Organizations?
+    options:
+      - "One"
+      - "Twenty"
+      - "Unlimited"
+      - "Five"
+    answer: 3
+    explanation: |
+      Up to 5 SCPs can be attached per entity (and document-size limits apply), so
+      guardrails must be composed carefully rather than sprawling. The other numbers
+      are incorrect.
+    ref: "concepts.md#service-control-policies-and-resource-control-policies"
+
+  # ---------------- Resource-based policies / confused deputy ----------------
+  - id: aws-security-iam-deep-dive-038
+    difficulty: beginner
+    tags: [resource-policy, s3]
+    question: |
+      An S3 bucket policy is an example of which policy type?
+    options:
+      - "Resource-based policy"
+      - "Identity-based policy"
+      - "Service control policy"
+      - "Session policy"
+    answer: 0
+    explanation: |
+      A bucket policy is attached to the resource (the bucket) and names principals,
+      making it a resource-based policy. It is not attached to an identity, is not
+      an org SCP, and is not a per-session policy.
+    ref: "concepts.md#resource-based-policies-and-the-confused-deputy-problem"
+
+  - id: aws-security-iam-deep-dive-039
+    difficulty: advanced
+    tags: [kms, key-policy]
+    question: |
+      A user has an IAM policy granting kms:Decrypt on a specific key, but calls to
+      decrypt fail with AccessDenied. The key policy contains no statement enabling
+      IAM policies or referencing the account root. Why?
+    options:
+      - "IAM policies always override key policies, so this should work — it must be a bug"
+      - "kms:Decrypt requires MFA by default"
+      - "A KMS key policy is authoritative; unless it delegates to IAM (e.g. the 'Enable IAM policies' statement with the account root), identity policies alone cannot grant key access"
+      - "The key must be in a different Region"
+    answer: 2
+    explanation: |
+      Unlike most services, a KMS key policy is authoritative: identity-based
+      policies do not grant access unless the key policy delegates authority to IAM.
+      Omitting that statement can lock everyone out. It is not a bug, not an MFA
+      default, and not a Region issue.
+    ref: "concepts.md#resource-based-policies-and-the-confused-deputy-problem"
+
+  - id: aws-security-iam-deep-dive-040
+    difficulty: intermediate
+    tags: [confused-deputy, external-id]
+    question: |
+      A SaaS vendor asks you to create a cross-account role it can assume to read
+      your account's metrics. To prevent the confused-deputy problem, what should
+      the role's trust policy require?
+    options:
+      - "That the role has AdministratorAccess"
+      - "That the vendor's principal presents a unique external ID via the sts:ExternalId condition"
+      - "That requests come only over HTTP"
+      - "That the vendor uses your root credentials"
+    answer: 1
+    explanation: |
+      A per-customer external ID (sts:ExternalId condition) ensures the vendor can
+      only assume your role when presenting a secret an attacker would not know,
+      defeating the confused-deputy attack. Admin access, HTTP, and root credentials
+      all make things worse.
+    ref: "concepts.md#resource-based-policies-and-the-confused-deputy-problem"
+
+  - id: aws-security-iam-deep-dive-041
+    difficulty: advanced
+    tags: [confused-deputy, source-arn]
+    question: |
+      An S3 bucket policy allows the CloudTrail service principal to write logs.
+      Which condition keys prevent another customer's CloudTrail from being tricked
+      into writing to (or reading via) your bucket?
+    options:
+      - "aws:SecureTransport and aws:CurrentTime"
+      - "aws:PrincipalTag and aws:RequestTag"
+      - "aws:MultiFactorAuthPresent and aws:MultiFactorAuthAge"
+      - "aws:SourceArn and aws:SourceAccount (pin the specific trail/account)"
+    answer: 3
+    explanation: |
+      For service-to-service resource policies, aws:SourceArn and aws:SourceAccount
+      pin the exact source resource/account, so another customer's resource cannot
+      induce the service to act on yours — the confused-deputy defense for AWS
+      services. TLS/time, tags, and MFA do not address this.
+    ref: "concepts.md#resource-based-policies-and-the-confused-deputy-problem"
+
+  - id: aws-security-iam-deep-dive-042
+    difficulty: intermediate
+    tags: [s3, block-public-access]
+    question: |
+      What is the modern best-practice default for controlling S3 access?
+    options:
+      - "Rely on bucket ACLs granting public-read"
+      - "Make buckets public and restrict at the application layer"
+      - "Enable S3 Block Public Access, disable ACLs (bucket owner enforced), and control access via bucket and IAM policies"
+      - "Use only signed URLs and no policies"
+    answer: 2
+    explanation: |
+      Current guidance is Block Public Access on, ACLs disabled (bucket owner
+      enforced), with access governed by bucket and IAM policies. Public ACLs and
+      public buckets are the classic breach source; signed URLs are a complement,
+      not a substitute for policy-based control.
+    ref: "concepts.md#resource-based-policies-and-the-confused-deputy-problem"
+
+  # ---------------- Cross-account ----------------
+  - id: aws-security-iam-deep-dive-043
+    difficulty: intermediate
+    tags: [cross-account, patterns]
+    question: |
+      Which is the recommended default pattern for giving principals in account A
+      the ability to perform actions in account B?
+    options:
+      - "Create a role in B that trusts A, and have A's principals assume it via STS"
+      - "Create an IAM user in B and share its access keys with A"
+      - "Enable public access on B's resources"
+      - "Copy B's root credentials into A"
+    answer: 0
+    explanation: |
+      The recommended cross-account pattern is a role in the target account (B)
+      whose trust policy allows the source account (A), assumed via STS for
+      short-lived credentials and clean CloudTrail attribution. Sharing keys or root
+      credentials, or going public, are anti-patterns.
+    ref: "concepts.md#cross-account-access-patterns"
+
+  - id: aws-security-iam-deep-dive-044
+    difficulty: advanced
+    tags: [cross-account, resource-policy, judgment]
+    question: |
+      Account A must let account B read objects from a single S3 bucket, with the
+      least moving parts and using B's own credentials. Which is the best fit?
+    options:
+      - "A role in A that B assumes, with B refreshing STS credentials constantly"
+      - "An SCP in A allowing s3:GetObject"
+      - "A permission boundary on B's users"
+      - "A bucket policy in A naming account B as principal (scoped, plus an org condition), so B uses its own credentials directly"
+    answer: 3
+    explanation: |
+      For pure data sharing of one resource, a resource-based (bucket) policy naming
+      B is simpler than a role-assumption flow and lets B use its own credentials.
+      An SCP only caps (never grants), and a boundary is a cap on B's identities, not
+      a grant of access to A's bucket.
+    ref: "concepts.md#cross-account-access-patterns"
+
+  - id: aws-security-iam-deep-dive-045
+    difficulty: advanced
+    tags: [cross-account, guardrail, org]
+    question: |
+      When you enable cross-account access, how do you ensure "cross-account" means
+      "within my organization" and not "anyone who guesses an ARN"?
+    options:
+      - "Nothing is needed; ARNs are unguessable"
+      - "Add aws:PrincipalOrgID conditions and/or enforce RCPs so only your org's principals are accepted"
+      - "Rely on the Region being private"
+      - "Use longer bucket names"
+    answer: 1
+    explanation: |
+      Wrapping cross-account grants with aws:PrincipalOrgID conditions or org-wide
+      RCPs confines access to your organization's principals. ARNs and account IDs
+      are not secret, Regions are not private boundaries, and names are irrelevant to
+      authorization.
+    ref: "concepts.md#cross-account-access-patterns"
+
+  # ---------------- Federation ----------------
+  - id: aws-security-iam-deep-dive-046
+    difficulty: intermediate
+    tags: [federation, identity-center]
+    question: |
+      What is the modern, recommended way to give human employees access across a
+      multi-account AWS Organization?
+    options:
+      - "IAM Identity Center with permission sets, connected to your IdP, issuing short-lived credentials"
+      - "Create IAM users in each account and email them passwords"
+      - "Share a single root account login"
+      - "Long-lived access keys distributed via a spreadsheet"
+    answer: 0
+    explanation: |
+      IAM Identity Center centralizes human access: connect your IdP once, assign
+      permission sets (managed role definitions) across accounts, and users get
+      short-lived credentials via the portal. Per-account IAM users, shared root, and
+      distributed keys are exactly what it replaces.
+    ref: "concepts.md#federation-with-saml-oidc-and-iam-identity-center"
+
+  - id: aws-security-iam-deep-dive-047
+    difficulty: intermediate
+    tags: [federation, saml, oidc]
+    question: |
+      Which federation type uses AssumeRoleWithSAML, and which is typically used for
+      web/mobile apps and Kubernetes IRSA?
+    options:
+      - "OIDC for enterprise IdPs; SAML for mobile apps"
+      - "Both use GetSessionToken"
+      - "SAML for enterprise IdPs (ADFS, Okta); OIDC/web identity for apps and IRSA"
+      - "SAML for Kubernetes; OIDC for ADFS"
+    answer: 2
+    explanation: |
+      SAML 2.0 federation (AssumeRoleWithSAML) maps enterprise IdP assertions to
+      roles, while OIDC/web identity (AssumeRoleWithWebIdentity) serves web/mobile
+      apps and IRSA. GetSessionToken is unrelated to these federation flows.
+    ref: "concepts.md#federation-with-saml-oidc-and-iam-identity-center"
+
+  - id: aws-security-iam-deep-dive-048
+    difficulty: advanced
+    tags: [identity-center, permission-set]
+    question: |
+      In IAM Identity Center, what is a "permission set" essentially?
+    options:
+      - "A long-lived IAM user shared across accounts"
+      - "A network ACL applied at the VPC level"
+      - "A billing allocation tag"
+      - "A managed role definition that Identity Center provisions into member accounts and assigns to users/groups"
+    answer: 3
+    explanation: |
+      A permission set is a reusable definition (managed/inline policies + session
+      duration) that Identity Center materializes as a role in each assigned account,
+      so users assume it with short-lived credentials. It is not a user, an ACL, or a
+      billing construct.
+    ref: "concepts.md#federation-with-saml-oidc-and-iam-identity-center"
+
+  # ---------------- Access Analyzer ----------------
+  - id: aws-security-iam-deep-dive-049
+    difficulty: intermediate
+    tags: [access-analyzer]
+    question: |
+      What does IAM Access Analyzer's external-access analysis primarily detect?
+    options:
+      - "Resources whose resource-based policies allow access from principals outside your zone of trust (account or organization)"
+      - "Slow API calls that exceed a latency budget"
+      - "Unencrypted EBS volumes"
+      - "IAM users without MFA"
+    answer: 0
+    explanation: |
+      Access Analyzer continuously evaluates resource-based policies and flags any
+      resource reachable by a principal outside your defined zone of trust (account
+      or org). Latency, encryption, and MFA posture are handled by other tools.
+    ref: "concepts.md#iam-access-analyzer"
+
+  - id: aws-security-iam-deep-dive-050
+    difficulty: advanced
+    tags: [access-analyzer, provable-security]
+    question: |
+      Access Analyzer's findings are notable because they are based on:
+    options:
+      - "Heuristic pattern matching on policy strings"
+      - "Manual review by AWS support staff"
+      - "Automated reasoning / provable security (the Zelkova engine) that mathematically evaluates who can access a resource"
+      - "Machine-learning anomaly detection on CloudTrail only"
+    answer: 2
+    explanation: |
+      Access Analyzer uses automated reasoning (provable security, based on Zelkova)
+      to mathematically determine reachability, rather than heuristics, human review,
+      or purely ML-based anomaly detection.
+    ref: "concepts.md#iam-access-analyzer"
+
+  - id: aws-security-iam-deep-dive-051
+    difficulty: advanced
+    tags: [access-analyzer, least-privilege]
+    question: |
+      You want to generate a tightly scoped least-privilege policy for a role based
+      on what it actually did over the last 90 days. Which Access Analyzer capability
+      helps?
+    options:
+      - "External access findings"
+      - "Block Public Access"
+      - "GuardDuty threat detection"
+      - "Policy generation from CloudTrail activity"
+    answer: 3
+    explanation: |
+      Access Analyzer can generate a candidate least-privilege policy from
+      CloudTrail-recorded activity. External-access findings detect over-sharing but
+      do not right-size; Block Public Access is an S3 setting; GuardDuty is threat
+      detection, not policy generation.
+    ref: "concepts.md#iam-access-analyzer"
+
+  - id: aws-security-iam-deep-dive-052
+    difficulty: expert
+    tags: [access-analyzer, detection-vs-prevention]
+    question: |
+      A candidate says "we'll use Access Analyzer to block all external access."
+      What is the accurate correction?
+    options:
+      - "Access Analyzer enforces blocks automatically once enabled"
+      - "Access Analyzer detects and advises (findings, validation, custom checks in CI) but does not enforce; prevention still requires SCPs, RCPs, or boundaries"
+      - "Access Analyzer only works on EC2"
+      - "Access Analyzer replaces the need for CloudTrail"
+    answer: 1
+    explanation: |
+      Access Analyzer is a detection and right-sizing tool (findings, policy
+      validation, custom policy checks in pipelines); it does not enforce.
+      Prevention comes from SCPs/RCPs/boundaries. It is not EC2-specific and does not
+      replace CloudTrail.
+    ref: "concepts.md#iam-access-analyzer"
+
+  - id: aws-security-iam-deep-dive-053
+    difficulty: intermediate
+    tags: [access-analyzer, unused-access]
+    question: |
+      Which Access Analyzer feature helps drive least-privilege cleanup by flagging
+      permissions and credentials that have not been used recently?
+    options:
+      - "External access findings"
+      - "Custom policy checks"
+      - "Policy validation"
+      - "Unused access findings"
+    answer: 3
+    explanation: |
+      Unused access findings surface roles, users, keys, and permissions unused
+      within a configured window, guiding removal. External-access findings target
+      over-sharing; custom checks and validation operate on policy content, not usage.
+    ref: "concepts.md#iam-access-analyzer"
+
+  # ---------------- Coarse vs fine ----------------
+  - id: aws-security-iam-deep-dive-054
+    difficulty: intermediate
+    tags: [coarse-fine, tradeoffs]
+    question: |
+      What is the primary trade-off of a coarse-grained policy like s3:* on
+      Resource "*" for a production workload?
+    options:
+      - "It maximizes blast radius: a compromised or buggy workload can do far more than intended, and audits become meaningless"
+      - "It is slower to evaluate at runtime"
+      - "It costs more per API call"
+      - "It cannot be attached to roles"
+    answer: 0
+    explanation: |
+      Coarse grants are fast to write and rarely block work, but they maximize blast
+      radius and undermine auditability. Policy evaluation speed and per-call cost
+      are not the concern, and coarse policies attach to roles fine.
+    ref: "concepts.md#coarse-grained-versus-fine-grained-policies"
+
+  - id: aws-security-iam-deep-dive-055
+    difficulty: advanced
+    tags: [coarse-fine, strategy]
+    question: |
+      What is the recommended way to resolve the tension between fine-grained IAM
+      (safe but tedious) and coarse-grained IAM (fast but risky) at organizational
+      scale?
+    options:
+      - "Always use coarse-grained policies and monitor after the fact"
+      - "Put everything in one account with one admin role"
+      - "Segment blast radius with multiple accounts, use fine-grained role-based, condition-scoped policies inside each, and enforce outer bounds with SCPs/RCPs/boundaries"
+      - "Disable IAM and rely on network security groups"
+    answer: 2
+    explanation: |
+      The mature pattern isolates blast radius across accounts, applies fine-grained
+      least privilege within each, and caps the outer bounds with SCPs/RCPs/
+      boundaries so mistakes cannot escape. Blanket coarse grants, a single admin
+      account, or replacing IAM with network controls all fail the security bar.
+    ref: "concepts.md#coarse-grained-versus-fine-grained-policies"
+
+  - id: aws-security-iam-deep-dive-056
+    difficulty: intermediate
+    tags: [coarse-fine, tooling]
+    question: |
+      Rather than hand-authoring a tight policy from scratch, a good starting point
+      for least privilege is to:
+    options:
+      - "Grant AdministratorAccess and remove permissions later based on complaints"
+      - "Start from AWS-managed or Access Analyzer-generated policies and tighten based on real usage"
+      - "Copy a random policy from a blog post"
+      - "Use Resource: '*' and add conditions never"
+    answer: 1
+    explanation: |
+      Starting from AWS-managed or activity-generated policies and tightening from
+      observed usage is efficient and safer than hand-crafting or over-granting first.
+      Admin-then-subtract and blind copying invert the least-privilege principle.
+    ref: "concepts.md#coarse-grained-versus-fine-grained-policies"
+
+  # ---------------- Zero-trust ----------------
+  - id: aws-security-iam-deep-dive-057
+    difficulty: intermediate
+    tags: [zero-trust]
+    question: |
+      How does IAM support a zero-trust posture on the AWS control plane?
+    options:
+      - "By trusting any request that originates inside the VPC"
+      - "By disabling authentication for internal services"
+      - "By relying solely on security groups"
+      - "By authorizing every signed API request individually with strong identity, short-lived credentials, and contextual conditions — no network-location bypass"
+    answer: 3
+    explanation: |
+      Every AWS API call is individually signed (SigV4) and authorized; there is no
+      "inside the network so it's trusted" bypass for the control plane. Short-lived
+      credentials and conditions (MFA, VPC endpoint, org) enforce continuous,
+      context-aware verification. The other options describe implicit trust, the
+      opposite of zero-trust.
+    ref: "concepts.md#how-iam-enables-zero-trust"
+
+  - id: aws-security-iam-deep-dive-058
+    difficulty: advanced
+    tags: [zero-trust, data-perimeter]
+    question: |
+      Which combination best implements a "data perimeter" asserting trusted
+      identities, trusted resources, and trusted networks?
+    options:
+      - "Security groups + NACLs only"
+      - "Long-lived access keys + IP allowlists"
+      - "SCPs (identities confined to org) + RCPs (resources accept only org principals) + VPC endpoint policies (network path)"
+      - "One admin role shared org-wide"
+    answer: 2
+    explanation: |
+      A data perimeter layers SCPs (your principals act only within the org), RCPs
+      (your resources accept only org principals), and VPC endpoint policies (the
+      network path), covering identity, resource, and network trust. Pure network
+      controls, shared keys, or a shared admin role do not create a perimeter.
+    ref: "concepts.md#how-iam-enables-zero-trust"
+
+  - id: aws-security-iam-deep-dive-059
+    difficulty: expert
+    tags: [zero-trust, tradeoffs]
+    question: |
+      What is a realistic downside of enforcing a strict data perimeter with
+      aws:PrincipalOrgID everywhere?
+    options:
+      - "It can break legitimate third-party integrations and cross-org sharing, forcing you to carve deliberate, narrow exceptions"
+      - "It increases per-request latency by seconds"
+      - "It disables CloudTrail logging"
+      - "It prevents the use of IAM roles"
+    answer: 0
+    explanation: |
+      A blanket org-only perimeter blocks legitimate external integrations, so you
+      must add specific, narrow exceptions (particular external IDs/accounts) rather
+      than loosening the whole guardrail. It does not add seconds of latency, disable
+      logging, or forbid roles.
+    ref: "concepts.md#how-iam-enables-zero-trust"
+
+  # ---------------- Pitfalls ----------------
+  - id: aws-security-iam-deep-dive-060
+    difficulty: advanced
+    tags: [pitfalls, passrole, escalation]
+    question: |
+      Why is granting iam:PassRole on Resource "*" dangerous?
+    options:
+      - "It slows down role creation"
+      - "It prevents roles from being deleted"
+      - "It disables the role's trust policy"
+      - "A principal who can also launch a compute service could pass ANY role (including admin) to a service they control and escalate to full admin"
+    answer: 3
+    explanation: |
+      iam:PassRole lets a principal hand a role to a service. Scoped to "*", a user
+      who can launch EC2/Lambda/ECS can pass an admin role to compute they control
+      and inherit its permissions — a classic privilege-escalation path. Always scope
+      PassRole to specific ARNs with iam:PassedToService.
+    ref: "concepts.md#common-pitfalls"
+
+  - id: aws-security-iam-deep-dive-061
+    difficulty: intermediate
+    tags: [pitfalls, wildcards]
+    question: |
+      A resource-based policy has Principal: "*" and no Condition. What is the
+      practical effect?
+    options:
+      - "Only the account owner can access the resource"
+      - "The resource is effectively public — anyone can access it"
+      - "Access is denied to everyone by default"
+      - "Only AWS services can access it"
+    answer: 1
+    explanation: |
+      Principal: "*" with no condition (like aws:PrincipalOrgID) grants access to
+      any AWS principal — effectively public exposure. It does not restrict to the
+      owner, deny everyone, or limit to services.
+    ref: "concepts.md#common-pitfalls"
+
+  - id: aws-security-iam-deep-dive-062
+    difficulty: advanced
+    tags: [pitfalls, consistency]
+    question: |
+      Immediately after creating a new IAM role and policy, an automated job that
+      assumes the role gets intermittent AccessDenied errors, then succeeds on retry.
+      What is the most likely cause?
+    options:
+      - "IAM is eventually consistent; policy/role changes take time to propagate globally, so briefly retrying AccessDenied is expected"
+      - "The role was created in the wrong Region"
+      - "The role needs a KMS key"
+      - "STS is down"
+    answer: 0
+    explanation: |
+      IAM is a globally distributed, eventually consistent system; brand-new
+      entities and policy changes can take seconds to propagate, so transient
+      AccessDenied right after creation warrants a retry/backoff. IAM is global (no
+      Region), and KMS/STS outages are not implied.
+    ref: "concepts.md#common-pitfalls"
+
+  - id: aws-security-iam-deep-dive-063
+    difficulty: expert
+    tags: [pitfalls, escalation]
+    question: |
+      Which set of IAM actions, if granted too broadly, most directly enables a
+      principal to escalate its own privileges?
+    options:
+      - "iam:GetRole, iam:ListRoles, iam:GenerateCredentialReport"
+      - "s3:GetObject, s3:ListBucket"
+      - "iam:CreatePolicyVersion, iam:AttachUserPolicy, iam:PutUserPolicy, iam:UpdateAssumeRolePolicy, iam:PassRole"
+      - "cloudwatch:PutMetricData, logs:CreateLogGroup"
+    answer: 2
+    explanation: |
+      Actions that let a principal modify policies, attach policies to itself, or
+      change trust relationships (CreatePolicyVersion, AttachUserPolicy,
+      PutUserPolicy, UpdateAssumeRolePolicy) plus PassRole are the canonical
+      privilege-escalation set. Read-only IAM, S3 data reads, and metrics/logs writes
+      are not escalation paths by themselves.
+    ref: "concepts.md#common-pitfalls"
+
+  - id: aws-security-iam-deep-dive-064
+    difficulty: intermediate
+    tags: [pitfalls, trust-policy]
+    question: |
+      A developer put the role's permissions (e.g. s3:GetObject) inside the role's
+      trust policy and wonders why the app cannot read S3. What is the mistake?
+    options:
+      - "Trust policies cannot contain any actions"
+      - "Roles cannot access S3"
+      - "S3 requires a bucket ACL for role access"
+      - "The trust policy only defines WHO may assume the role (sts:AssumeRole); the actual permissions belong in the role's permissions (identity) policy"
+    answer: 3
+    explanation: |
+      The trust policy governs who may assume the role (typically sts:AssumeRole
+      with a Principal); what the role can do belongs in its separate permissions
+      policy. Conflating the two is a frequent beginner error. Roles can access S3,
+      and ACLs are not required.
+    ref: "concepts.md#common-pitfalls"
+
+  - id: aws-security-iam-deep-dive-065
+    difficulty: beginner
+    tags: [pitfalls, root]
+    question: |
+      Which is the correct guidance for the AWS account root user?
+    options:
+      - "Lock it down (MFA, no access keys) and use it only for the few tasks that require root; do everyday work with IAM roles/Identity Center"
+      - "Use it for daily administration to avoid IAM complexity"
+      - "Share root keys with the on-call team"
+      - "Embed root keys in CI for reliability"
+    answer: 0
+    explanation: |
+      Root should have MFA, no access keys, and be reserved for the handful of
+      root-only tasks; day-to-day access uses least-privilege roles/Identity Center.
+      Using, sharing, or embedding root credentials are severe anti-patterns.
+    ref: "concepts.md#common-pitfalls"
+
+  # ---------------- Trade-offs / when to use what ----------------
+  - id: aws-security-iam-deep-dive-066
+    difficulty: advanced
+    tags: [tradeoffs, service-selection]
+    question: |
+      A workload runs as a Lambda function and needs DynamoDB access. Which is the
+      most appropriate identity design?
+    options:
+      - "Create an IAM user, store its keys in Lambda environment variables"
+      - "Use the account root credentials via a layer"
+      - "Attach a least-privilege Lambda execution role scoped to the specific table and actions"
+      - "Assume a cross-account admin role on every invocation"
+    answer: 2
+    explanation: |
+      A scoped Lambda execution role is the correct, key-free pattern — the Lambda
+      service assumes it and injects short-lived credentials. IAM-user keys in env
+      vars, root credentials, or a cross-account admin role are all insecure or
+      excessive.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-067
+    difficulty: advanced
+    tags: [tradeoffs, session-duration]
+    question: |
+      An interactive data-science team complains about frequent re-authentication
+      when their 15-minute sessions expire mid-analysis. What is the correct
+      trade-off adjustment and its cost?
+    options:
+      - "Switch to long-lived IAM user keys — no expiry problems"
+      - "Disable STS and use root"
+      - "Set the duration to 30 days"
+      - "Increase the session duration (up to the role's MaxSessionDuration, max 12 h), accepting that a stolen token stays valid longer"
+    answer: 3
+    explanation: |
+      Raising the session duration (bounded by MaxSessionDuration up to 12 h) fixes
+      the churn at the cost of a longer window during which a leaked token is valid
+      (and cannot be individually revoked). Long-lived keys, root, and impossible
+      30-day sessions are wrong — STS maxes at 12 hours.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-068
+    difficulty: expert
+    tags: [tradeoffs, org-design]
+    question: |
+      You are designing access governance for a 200-account organization. Which
+      layering correctly assigns each control to its role?
+    options:
+      - "SCPs grant app permissions; boundaries handle human SSO; Identity Center caps regions"
+      - "Identity Center for human access (permission sets), SCPs/RCPs for org-wide guardrails, permission boundaries for safe delegated role creation, and fine-grained roles per workload"
+      - "One giant identity policy shared across all accounts"
+      - "Permission boundaries for org-wide region locks; SCPs for individual role caps"
+    answer: 1
+    explanation: |
+      Correct layering: Identity Center for humans, SCPs/RCPs as org-wide guardrails,
+      permission boundaries to safely delegate role creation, and least-privilege
+      per-workload roles. The other options swap the responsibilities (SCPs don't
+      grant; boundaries aren't org-wide region locks) or centralize everything into
+      one brittle policy.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-069
+    difficulty: advanced
+    tags: [tradeoffs, cross-account, kms]
+    question: |
+      A consumer account must decrypt objects encrypted with a KMS key owned by a
+      producer account. Which is required in addition to the consumer's IAM policy
+      granting kms:Decrypt?
+    options:
+      - "Nothing; the IAM policy alone suffices for cross-account KMS"
+      - "The consumer must own the key"
+      - "The object must be public"
+      - "The producer's KMS key policy must grant/delegate access to the consumer account (and typically a grant), because the key policy is authoritative"
+    answer: 3
+    explanation: |
+      KMS key policies are authoritative, so cross-account decryption requires the
+      producer's key policy to allow the consumer account (commonly plus a grant),
+      not just the consumer's IAM policy. The consumer need not own the key, and
+      making objects public is unrelated and dangerous.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-070
+    difficulty: intermediate
+    tags: [tradeoffs, region-lock]
+    question: |
+      Regulatory rules require that no workload in your organization operates outside
+      eu-west-1 and eu-central-1. What is the most robust enforcement?
+    options:
+      - "An SCP that denies actions when aws:RequestedRegion is not in the approved list, applied org-wide"
+      - "A README asking engineers to only use EU Regions"
+      - "A permission boundary on one admin user"
+      - "Deleting other Regions from the console"
+    answer: 0
+    explanation: |
+      An org-wide SCP denying actions outside approved Regions (via
+      aws:RequestedRegion) enforces data residency in a way principals cannot bypass.
+      Documentation, a single-user boundary, or "deleting Regions" (not possible) do
+      not enforce anything org-wide.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-071
+    difficulty: expert
+    tags: [tradeoffs, blast-radius]
+    question: |
+      Two designs isolate a highly sensitive payments workload: (A) a separate AWS
+      account with SCP guardrails and fine-grained roles, or (B) the same shared
+      account as other workloads but with carefully scoped IAM roles. What is the
+      strongest argument for (A)?
+    options:
+      - "Option A is cheaper because IAM is free"
+      - "Option A has lower API latency"
+      - "Option A gives a hard account boundary that limits blast radius even if an IAM misconfiguration occurs, and enables org-level guardrails (SCP/RCP) specific to that account"
+      - "Option B cannot use IAM roles"
+    answer: 2
+    explanation: |
+      A separate account is a hard isolation boundary: an IAM mistake in one account
+      cannot reach another, and you can apply account-specific SCPs/RCPs. Cost and
+      latency are not differentiators (IAM is free either way; latency is unchanged),
+      and option B can certainly use roles.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-072
+    difficulty: intermediate
+    tags: [tradeoffs, third-party]
+    question: |
+      A monitoring SaaS offers two onboarding options: (1) you create an IAM user and
+      hand over its access keys, or (2) you create a cross-account role with an
+      external ID that the vendor assumes. Which do you choose and why?
+    options:
+      - "Option 1, because access keys are simpler"
+      - "Option 2, because it uses short-lived credentials, no shared secret at rest, and the external ID defends against the confused-deputy problem"
+      - "Neither; make your resources public instead"
+      - "Option 1, because roles cannot be assumed cross-account"
+    answer: 1
+    explanation: |
+      The cross-account role with an external ID is the secure standard: temporary
+      credentials, no long-lived secret handed to a third party, and confused-deputy
+      protection. Handing over IAM-user keys creates a standing secret outside your
+      control; public resources are a breach; roles absolutely support cross-account
+      assumption.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-073
+    difficulty: beginner
+    tags: [tradeoffs, workload-identity]
+    question: |
+      For an application running on AWS that needs permissions, the default choice
+      should be:
+    options:
+      - "An IAM user with access keys"
+      - "The root user"
+      - "A shared secret in a config file"
+      - "A role appropriate to the runtime (instance profile, task role, Lambda role, or IRSA)"
+    answer: 3
+    explanation: |
+      The default for any on-AWS workload is a runtime-appropriate role, giving
+      short-lived, auto-rotated credentials with no secret at rest. IAM-user keys,
+      root, and shared secrets are the patterns roles exist to eliminate.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-074
+    difficulty: advanced
+    tags: [tradeoffs, ecs, isolation]
+    question: |
+      On ECS, why prefer a per-task IAM role over relying on the EC2 container
+      instance's instance-profile role?
+    options:
+      - "Task roles are faster to assume"
+      - "Instance roles cannot access any AWS service"
+      - "A task role scopes credentials to the individual task, so tasks do not inherit the broader host/instance permissions — better least privilege and isolation between co-located tasks"
+      - "Task roles remove the need for a task definition"
+    answer: 2
+    explanation: |
+      Per-task roles deliver task-scoped credentials via a link-local endpoint, so
+      co-located tasks are isolated and do not inherit the host's broader
+      permissions. It is about least privilege and isolation, not speed; instance
+      roles do work, and task definitions are still required.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-security-iam-deep-dive-075
+    difficulty: intermediate
+    tags: [access-analyzer, ci-cd]
+    question: |
+      You want your CI/CD pipeline to fail a build if a policy change would newly
+      grant access to principals outside your account. Which capability fits?
+    options:
+      - "Access Analyzer custom policy checks (e.g. check-no-new-access) run in the pipeline"
+      - "An SCP attached to the pipeline"
+      - "A permission boundary on the CodeBuild role only"
+      - "Turning on MFA for the pipeline"
+    answer: 0
+    explanation: |
+      Access Analyzer custom policy checks (like check-no-new-access) integrate into
+      pipelines to block changes that broaden access, shifting detection left. SCPs
+      and boundaries are runtime caps, not build-time diff checks, and MFA does not
+      analyze policy diffs.
+    ref: "concepts.md#iam-access-analyzer"
+
+  - id: aws-security-iam-deep-dive-076
+    difficulty: expert
+    tags: [evaluation, boundary, session, scp]
+    question: |
+      A role has: an identity policy allowing s3:* and sqs:*, a permission boundary
+      allowing s3:* only, a session policy (from AssumeRole) allowing s3:GetObject
+      only, and an SCP allowing s3:* and dynamodb:*. What can the resulting session
+      do on S3?
+    options:
+      - "s3:* (identity policy wins)"
+      - "s3:* and sqs:* and dynamodb:*"
+      - "Nothing"
+      - "Only s3:GetObject (the intersection of identity policy, boundary, session policy, and SCP)"
+    answer: 3
+    explanation: |
+      Effective permission is the intersection of all caps with the grant: identity
+      (s3+sqs) ∩ boundary (s3) ∩ session (s3:GetObject) ∩ SCP (s3+dynamodb) =
+      s3:GetObject. SQS is dropped by the boundary/session, DynamoDB is never granted
+      by an identity policy, and the session policy narrows S3 to just GetObject.
+    ref: "concepts.md#policy-evaluation-logic"
+
+  - id: aws-security-iam-deep-dive-077
+    difficulty: intermediate
+    tags: [sts, session-tags, abac]
+    question: |
+      How many session tags can you pass in an AssumeRole call, and what makes a
+      session tag "transitive"?
+    options:
+      - "Up to 10 tags; transitive means they are encrypted"
+      - "Up to 50 tags; transitive tags persist to subsequent sessions during role chaining"
+      - "Unlimited tags; transitive means they appear in billing"
+      - "Up to 5 tags; transitive means they are MFA-protected"
+    answer: 1
+    explanation: |
+      AssumeRole accepts up to 50 session tags; marking a tag transitive means it
+      carries forward to later sessions in a role chain (used for ABAC across
+      chained assumptions). The other counts and definitions are incorrect.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-078
+    difficulty: beginner
+    tags: [sts, whoami]
+    question: |
+      Which STS call can any principal use to discover the account, user ID, and ARN
+      it is currently operating as, even with an otherwise restrictive policy?
+    options:
+      - "sts:GetCallerIdentity"
+      - "sts:AssumeRole"
+      - "iam:GetUser"
+      - "sts:GetFederationToken"
+    answer: 0
+    explanation: |
+      sts:GetCallerIdentity is the harmless "whoami" that returns the account, user
+      ID, and ARN and is effectively always permitted. AssumeRole and
+      GetFederationToken mint credentials; iam:GetUser requires IAM read permissions
+      and does not work for role sessions.
+    ref: "concepts.md#roles-sts-and-temporary-credentials"
+
+  - id: aws-security-iam-deep-dive-079
+    difficulty: advanced
+    tags: [scp, management-account]
+    question: |
+      Why should you avoid running workloads in the AWS Organizations management
+      account and instead use member accounts?
+    options:
+      - "The management account has higher API latency"
+      - "The management account cannot use IAM roles"
+      - "SCPs do not restrict the management account the same way they restrict member accounts, so guardrails do not fully protect it — reducing blast-radius control"
+      - "Member accounts are free while the management account is billed extra"
+    answer: 2
+    explanation: |
+      SCPs do not apply to the management account the way they do to members, so
+      workloads there sit outside your strongest guardrails, increasing risk. Keep it
+      minimal (org administration only). Latency, role support, and billing are not
+      the reason.
+    ref: "concepts.md#service-control-policies-and-resource-control-policies"
+
+  - id: aws-security-iam-deep-dive-080
+    difficulty: intermediate
+    tags: [federation, tradeoffs]
+    question: |
+      When is raw SAML/OIDC federation (rather than IAM Identity Center) the more
+      appropriate choice?
+    options:
+      - "Always, because Identity Center is deprecated"
+      - "Only for billing purposes"
+      - "Never, because federation is insecure"
+      - "When you cannot adopt AWS Organizations/Identity Center or need a specific custom trust and role-mapping flow, accepting that you manage mappings per account"
+    answer: 3
+    explanation: |
+      Raw SAML/OIDC federation remains appropriate when Identity Center is not an
+      option or you need custom trust/role mappings, at the cost of managing mappings
+      per account. Identity Center is current (not deprecated), federation is not
+      inherently insecure, and this has nothing to do with billing.
+    ref: "concepts.md#federation-with-saml-oidc-and-iam-identity-center"

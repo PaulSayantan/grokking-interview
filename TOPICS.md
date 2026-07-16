@@ -8,7 +8,7 @@ Frequency = how often the topic shows up in interviews (very-high → low).
 
 ## Domains
 
-- [System Design](#system-design) — 23 topics
+- [System Design](#system-design) — 23 core + 26 AWS System Design topics (49)
 - [Docker](#docker) — 15 topics
 - [Kubernetes](#kubernetes) — 16 topics
 - [DevOps & CI/CD](#devops-cicd) — 18 topics
@@ -22,7 +22,7 @@ Frequency = how often the topic shows up in interviews (very-high → low).
 <a id="system-design"></a>
 ## System Design
 
-Folder: `topics/system-design/` · 23 topics — see `topics/system-design/README.md` for the authoritative, current topic list (4 modern topics added in Session 6: event-driven/CQRS/saga/CDC, GenAI/LLM system design, real-time streaming, resilience trade-offs).
+Folder: `topics/system-design/` · 23 core topics + 26 AWS System Design topics (`aws-` slug prefix) — see `topics/system-design/README.md` for the authoritative, current topic list (4 modern topics added in Session 6: event-driven/CQRS/saga/CDC, GenAI/LLM system design, real-time streaming, resilience trade-offs. AWS System Design sub-domain added in Session 8: compute EC2/ECS/EKS/Fargate/Lambda, serverless, API Gateway/AppSync, S3/EBS/EFS/FSx, DynamoDB, RDS/Aurora, ElastiCache/DAX, SQS/SNS/EventBridge, Kinesis/MSK, VPC/networking, Route 53/CloudFront, ELB/Auto Scaling, IAM, KMS/Cognito/WAF, CloudWatch/X-Ray, multi-region DR, analytics, microservices patterns, ML/GenAI/Bedrock, IoT/edge, migration, cost optimization, and end-to-end reference architectures).
 
 ### System Design Fundamentals & Interview Framework
 

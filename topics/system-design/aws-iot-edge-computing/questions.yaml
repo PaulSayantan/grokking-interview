@@ -1,0 +1,1493 @@
+topic: "IoT and Edge Computing on AWS: IoT Core, Greengrass and Edge"
+domain: system-design
+topic_slug: aws-iot-edge-computing
+version: 1
+
+questions:
+  # ---------------- Why edge computing ----------------
+  - id: aws-iot-edge-computing-001
+    difficulty: beginner
+    tags: [edge, rationale, latency]
+    question: |
+      What is the primary reason to run compute at the edge (near the device)
+      instead of in an AWS region?
+    options:
+      - "Edge compute is always cheaper per CPU-hour than a region"
+      - "To satisfy concrete needs like low latency, reduced bandwidth, offline operation, or data residency"
+      - "Because AWS regions cannot run machine-learning inference"
+      - "Edge hardware never needs patching or monitoring"
+    answer: 1
+    explanation: |
+      Edge is justified by specific forces: real-time latency, bandwidth/cost reduction,
+      operating during connectivity loss, and data sovereignty. It is not inherently
+      cheaper (option 0) — it adds fleet ops burden. Regions do run ML (option 2), and
+      edge hardware absolutely needs patching (option 3).
+    ref: "concepts.md#why-edge-computing-latency-bandwidth-offline-and-data-sovereignty"
+
+  - id: aws-iot-edge-computing-002
+    difficulty: beginner
+    tags: [edge, tradeoff]
+    question: |
+      Which of the following is a genuine COST of pushing computation to the edge
+      that you must weigh against its benefits?
+    options:
+      - "Increased fleet operational burden: you now patch, monitor, and secure many runtimes"
+      - "You lose the ability to use MQTT"
+      - "Devices can no longer use X.509 certificates"
+      - "IoT Core stops working entirely"
+    answer: 0
+    explanation: |
+      Edge multiplies operational surface — thousands of runtimes to patch/monitor/secure,
+      weaker central consistency, harder debugging. It does not remove MQTT, certs, or
+      IoT Core. Default to cloud and push to edge only for a named requirement.
+    ref: "concepts.md#why-edge-computing-latency-bandwidth-offline-and-data-sovereignty"
+
+  - id: aws-iot-edge-computing-003
+    difficulty: intermediate
+    tags: [edge, bandwidth, estimation]
+    question: |
+      A fleet of 10,000 vibration sensors each samples at high frequency and would
+      produce ~2 MB/s of raw data if backhauled over expensive cellular links. Which
+      approach best reduces cost while preserving the ability to detect anomalies?
+    options:
+      - "Send all raw samples to IoT Core and filter in the rules engine"
+      - "Aggregate/infer at the edge with Greengrass and transmit only summaries and detected anomalies"
+      - "Increase the MQTT payload limit above 128 KiB to batch more per message"
+      - "Store all raw data in a Device Shadow and sync it periodically"
+    answer: 1
+    explanation: |
+      Bandwidth-driven use cases are the textbook edge case: aggregate/infer locally and
+      ship only summaries/anomalies, cutting cellular cost dramatically. Filtering in the
+      cloud (option 0) still pays to transmit raw data. The MQTT limit is fixed at 128 KiB
+      (option 2). Shadows are 8 KB and not for telemetry (option 3).
+    ref: "concepts.md#why-edge-computing-latency-bandwidth-offline-and-data-sovereignty"
+
+  - id: aws-iot-edge-computing-004
+    difficulty: intermediate
+    tags: [edge, data-residency]
+    question: |
+      A hospital contract forbids raw patient video from leaving the building, but you
+      still want AWS-native services on site. Which edge force is driving the design and
+      what is the best fit?
+    options:
+      - "Latency; use Wavelength inside the carrier network"
+      - "Data sovereignty/residency; process on site (Outposts or on-prem Greengrass) and emit only compliant derived data"
+      - "Bandwidth; use Kinesis Data Firehose with a large buffer"
+      - "Offline operation; increase the QoS-1 queued-message TTL"
+    answer: 1
+    explanation: |
+      Residency/sovereignty forbids raw data egress, so process on site (Outposts for AWS
+      infra in your DC, or Greengrass on-prem) and export only anonymized/derived data.
+      Wavelength is for mobile latency, Firehose still ships raw off-site, and TTL tuning
+      is about brief disconnects, not residency.
+    ref: "concepts.md#why-edge-computing-latency-bandwidth-offline-and-data-sovereignty"
+
+  # ---------------- IoT Core device gateway / MQTT broker ----------------
+  - id: aws-iot-edge-computing-005
+    difficulty: beginner
+    tags: [iot-core, mqtt, fundamentals]
+    question: |
+      At its core, what is the AWS IoT Core device gateway?
+    options:
+      - "A managed relational database for device metadata"
+      - "A CDN for delivering firmware images"
+      - "A fully-managed, auto-scaling MQTT (and HTTPS/WebSocket) broker that maintains millions of device connections"
+      - "A managed Kafka cluster you size in partitions"
+    answer: 2
+    explanation: |
+      IoT Core's gateway is a managed, elastic MQTT broker (also HTTPS and
+      MQTT-over-WebSocket) handling millions of concurrent device connections with no
+      broker provisioning. It is not a relational DB, a CDN, or a Kafka cluster.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-006
+    difficulty: intermediate
+    tags: [iot-core, mqtt, qos]
+    question: |
+      A design requires exactly-once delivery of device messages. What is the correct
+      statement about achieving this with IoT Core?
+    options:
+      - "Use MQTT QoS 2, which IoT Core supports for exactly-once delivery"
+      - "Enable retained messages, which guarantee exactly-once"
+      - "Use HTTPS instead of MQTT to get exactly-once semantics"
+      - "IoT Core supports only QoS 0 and QoS 1; achieve effectively-once by making downstream processing idempotent (dedupe on a message id)"
+    answer: 3
+    explanation: |
+      IoT Core supports QoS 0 (at most once) and QoS 1 (at least once) only — there is no
+      QoS 2. Exactly-once must be built downstream via idempotency/dedupe. Retained
+      messages and HTTPS do not provide exactly-once.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-007
+    difficulty: intermediate
+    tags: [iot-core, basic-ingest, cost]
+    question: |
+      Devices send telemetry straight to storage and no other device needs to subscribe
+      to their topics. Which IoT Core feature reduces cost by skipping the message-broker
+      charge while still running a rule?
+    options:
+      - "Basic Ingest (publishing to $aws/rules/<ruleName>)"
+      - "Persistent sessions"
+      - "Retained messages"
+      - "Last Will and Testament"
+    answer: 0
+    explanation: |
+      Basic Ingest sends data directly into a rule via the reserved $aws/rules/ topic,
+      bypassing the pub/sub message broker charge — ideal for device→cloud storage with no
+      other subscribers. The other features are about session/state, not cost bypass.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-008
+    difficulty: intermediate
+    tags: [iot-core, mqtt, presence]
+    question: |
+      You want the broker to notify subscribers when a device disconnects UNcleanly
+      (e.g. loses power). Which MQTT feature provides this?
+    options:
+      - "Retained messages"
+      - "Last Will and Testament (LWT)"
+      - "Basic Ingest"
+      - "Device Shadow delta"
+    answer: 1
+    explanation: |
+      LWT lets a device register a message the broker publishes if the connection drops
+      uncleanly — the standard presence/"device offline" signal. Retained messages store
+      the last message for new subscribers; Basic Ingest is a cost path; the shadow delta
+      is state reconciliation.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-009
+    difficulty: advanced
+    tags: [iot-core, limits]
+    question: |
+      What is the approximate maximum MQTT message payload size accepted by AWS IoT Core?
+    options:
+      - "256 KB"
+      - "1 MB"
+      - "128 KiB"
+      - "8 KB"
+    answer: 2
+    explanation: |
+      IoT Core caps message payloads at ~128 KiB (billed per 5 KB block). 8 KB is the
+      Device Shadow document limit — a common distractor. 256 bytes is the topic-name
+      limit, and 1 MB is the Kinesis per-shard rate, not an IoT payload size.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-010
+    difficulty: advanced
+    tags: [iot-core, self-managed, tradeoff]
+    question: |
+      A team debates IoT Core vs running their own Mosquitto/EMQX broker on EC2 for a
+      2-million-device fleet. Which is the strongest argument FOR IoT Core?
+    options:
+      - "IoT Core supports MQTT QoS 2 while self-managed brokers do not"
+      - "IoT Core retains and replays the full message stream like a Kafka log"
+      - "IoT Core lets you install arbitrary broker plugins"
+      - "Managed per-device X.509 identity at scale, native shadows/rules, and zero broker capacity planning or cluster ops"
+    answer: 3
+    explanation: |
+      IoT Core's edge is device identity at scale, native shadows/rules, and no broker
+      ops/capacity planning. It does NOT offer QoS 2, is a router not a replayable log
+      (you tee to Kinesis for replay), and does not support arbitrary plugins — those are
+      reasons you might instead self-manage.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-011
+    difficulty: advanced
+    tags: [iot-core, persistent-sessions]
+    question: |
+      A device briefly loses connectivity for a few minutes. Which mechanism lets it
+      resume its subscriptions and receive QoS-1 messages that were queued while it was
+      away?
+    options:
+      - "MQTT persistent sessions (with queued-message TTL, default ~1 hour)"
+      - "Device Shadow named documents"
+      - "Kinesis Enhanced Fan-Out"
+      - "Firehose buffering"
+    answer: 0
+    explanation: |
+      Persistent sessions preserve subscriptions and queue QoS-1 messages during brief
+      drops, delivering them on reconnect (queued messages have a default ~1 h TTL and a
+      queue limit). Shadows track state, not queued messages; the Kinesis/Firehose options
+      are downstream ingestion features.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  # ---------------- Protocols ----------------
+  - id: aws-iot-edge-computing-012
+    difficulty: beginner
+    tags: [protocols, mqtt]
+    question: |
+      Why is MQTT generally preferred over HTTPS for battery-powered, chatty IoT devices?
+    options:
+      - "HTTPS cannot be encrypted, so MQTT is the only secure option"
+      - "MQTT uses a long-lived connection with a tiny 2-byte header and supports server push, avoiding repeated handshakes and polling"
+      - "MQTT payloads can be arbitrarily large while HTTPS caps at 1 KB"
+      - "HTTPS does not work with X.509 certificates"
+    answer: 1
+    explanation: |
+      MQTT's persistent connection, minimal header overhead, and native server push save
+      battery/cellular data and avoid polling — ideal for chatty, command-driven devices.
+      HTTPS is encrypted too, both have payload limits, and HTTPS can use X.509.
+    ref: "concepts.md#message-protocols-mqtt-versus-http-versus-websocket"
+
+  - id: aws-iot-edge-computing-013
+    difficulty: intermediate
+    tags: [protocols, websocket, browser]
+    question: |
+      A browser-based dashboard must receive live device data from IoT Core, but browsers
+      cannot open raw MQTT sockets. Which protocol/auth combination fits best?
+    options:
+      - "Raw MQTT with X.509 mutual TLS"
+      - "HTTPS polling every few seconds with no push"
+      - "MQTT over WebSocket with SigV4 (IAM/Cognito) authentication"
+      - "Kinesis Data Streams consumed directly by the browser"
+    answer: 2
+    explanation: |
+      Browsers use MQTT over WebSocket (tunneled over 443) with SigV4/Cognito auth, giving
+      server push in the browser. Raw MQTT isn't available in browsers, HTTPS polling loses
+      push and wastes calls, and browsers don't consume Kinesis directly.
+    ref: "concepts.md#message-protocols-mqtt-versus-http-versus-websocket"
+
+  - id: aws-iot-edge-computing-014
+    difficulty: intermediate
+    tags: [protocols, https]
+    question: |
+      For which scenario is plain HTTPS (REST) the acceptable choice to talk to IoT Core?
+    options:
+      - "A device that must receive frequent pushed commands from the cloud"
+      - "A high-frequency telemetry stream needing lowest per-message overhead"
+      - "A battery-powered device where minimizing radio-on time is critical"
+      - "A legacy HTTP-only sensor that posts an occasional one-way reading and never needs a pushed command"
+    answer: 3
+    explanation: |
+      HTTPS suits rare, one-way telemetry from HTTP-only clients that never need push. It
+      is a poor fit when server push is required, when per-message overhead must be minimal,
+      or for battery-sensitive devices — all of which favor MQTT.
+    ref: "concepts.md#message-protocols-mqtt-versus-http-versus-websocket"
+
+  - id: aws-iot-edge-computing-015
+    difficulty: advanced
+    tags: [protocols, tradeoff]
+    question: |
+      Which capability does MQTT provide that plain HTTPS request/response does NOT,
+      making MQTT essential for command-and-control fleets?
+    options:
+      - "Server-initiated push to the device (the cloud can command a device without the device polling)"
+      - "TLS encryption of the transport"
+      - "Support for JSON payloads"
+      - "Authentication with X.509 certificates"
+    answer: 0
+    explanation: |
+      MQTT's subscribe model lets the cloud push commands to a device at any time (the
+      basis of shadows and jobs). HTTPS is request/response — the device must poll. Both
+      support TLS, JSON, and X.509, so those aren't differentiators.
+    ref: "concepts.md#message-protocols-mqtt-versus-http-versus-websocket"
+
+  # ---------------- Registry / provisioning ----------------
+  - id: aws-iot-edge-computing-016
+    difficulty: beginner
+    tags: [registry, things]
+    question: |
+      In the AWS IoT registry, what is a "Thing"?
+    options:
+      - "A physical MQTT broker instance"
+      - "A logical representation of a device (name + attributes) used for shadows, jobs, and indexing"
+      - "A rules-engine SQL statement"
+      - "A Kinesis shard assigned to a device"
+    answer: 1
+    explanation: |
+      A Thing is the logical device record (name + attributes) that ties to shadows, jobs,
+      and fleet indexing. It is not a broker, a rule, or a shard.
+    ref: "concepts.md#device-registry-identity-and-fleet-organization"
+
+  - id: aws-iot-edge-computing-017
+    difficulty: intermediate
+    tags: [registry, dynamic-groups, fleet-indexing]
+    question: |
+      You want to roll out firmware only to "all devices currently running firmware < 2.0".
+      Which combination makes this targeting possible?
+    options:
+      - "A static Thing Group populated manually with each device"
+      - "A Billing Group filtered by cost"
+      - "Fleet Indexing plus a dynamic Thing Group whose membership is defined by a query"
+      - "A Device Shadow delta broadcast to all things"
+    answer: 2
+    explanation: |
+      Fleet Indexing makes registry/shadow/connectivity data searchable, and dynamic Thing
+      Groups auto-populate from such a query (firmware < 2.0), which jobs then target.
+      Static groups need manual membership, billing groups are for cost, and a shadow delta
+      is per-device state, not fleet targeting.
+    ref: "concepts.md#device-registry-identity-and-fleet-organization"
+
+  - id: aws-iot-edge-computing-018
+    difficulty: advanced
+    tags: [provisioning, fleet-provisioning, security]
+    question: |
+      A manufacturer cannot burn a unique certificate into each device on the assembly
+      line. Which AWS IoT approach lets devices obtain a unique per-device certificate at
+      first boot?
+    options:
+      - "Just-in-time provisioning using each device's pre-installed unique cert"
+      - "SigV4 authentication with a shared IAM user"
+      - "Custom authorizer Lambda issuing self-signed certs"
+      - "Fleet provisioning: ship a shared claim certificate, then exchange it at first boot for a unique per-device certificate"
+    answer: 3
+    explanation: |
+      Fleet provisioning embeds a shared claim cert that the device exchanges for a unique
+      cert at bootstrap — avoiding unique certs at manufacture. JITP assumes a unique cert
+      already exists; shared IAM users and self-signed authorizers don't give per-device
+      hardware identity.
+    ref: "concepts.md#device-registry-identity-and-fleet-organization"
+
+  - id: aws-iot-edge-computing-019
+    difficulty: expert
+    tags: [provisioning, tradeoff, security]
+    question: |
+      What is the PRIMARY security trade-off of using a single shared claim certificate
+      for fleet provisioning versus per-device certs installed at manufacture?
+    options:
+      - "The claim cert has a larger blast radius if extracted; mitigate by scoping its policy to allow only the provisioning API"
+      - "The claim cert cannot be revoked, so it must never be deactivated"
+      - "Per-device certs cannot be used with mutual TLS"
+      - "Shared claim certs disable Device Defender entirely"
+    answer: 0
+    explanation: |
+      A shared claim cert, if extracted, could provision many devices — a bigger blast
+      radius — so its policy must be tightly scoped to only the provisioning exchange.
+      Certs can be revoked, per-device certs do use mTLS, and claim certs don't disable
+      Device Defender.
+    ref: "concepts.md#device-registry-identity-and-fleet-organization"
+
+  # ---------------- Device Shadows ----------------
+  - id: aws-iot-edge-computing-020
+    difficulty: beginner
+    tags: [shadow, state]
+    question: |
+      What core problem does a Device Shadow solve?
+    options:
+      - "Storing years of high-frequency telemetry cheaply"
+      - "Letting applications read and set a device's state even when the device is offline, reconciling when it reconnects"
+      - "Load-balancing MQTT connections across brokers"
+      - "Encrypting the MQTT transport"
+    answer: 1
+    explanation: |
+      A shadow is a cloud-persisted JSON state document (desired/reported/delta) that
+      decouples apps from device connectivity — you can command an offline device and it
+      converges on reconnect. It is not telemetry storage, load balancing, or transport
+      encryption.
+    ref: "concepts.md#device-shadows-desired-versus-reported-state"
+
+  - id: aws-iot-edge-computing-021
+    difficulty: intermediate
+    tags: [shadow, desired-reported-delta]
+    question: |
+      In a Device Shadow document, what does the "delta" represent?
+    options:
+      - "The raw telemetry since the last reading"
+      - "The list of subscribers to the shadow topic"
+      - "The difference between desired and reported state that the device still needs to apply"
+      - "The certificate rotation schedule"
+    answer: 2
+    explanation: |
+      The delta is the computed difference between desired (what an app wants) and reported
+      (what the device last said), telling the device what to converge on. It is not
+      telemetry, subscriber lists, or cert schedules.
+    ref: "concepts.md#device-shadows-desired-versus-reported-state"
+
+  - id: aws-iot-edge-computing-022
+    difficulty: advanced
+    tags: [shadow, limits, anti-pattern]
+    question: |
+      Which use of a Device Shadow is an ANTI-pattern you should reject in a design review?
+    options:
+      - "Storing a device's desired configuration so it applies changes on reconnect"
+      - "Using a named shadow to separate config from network state"
+      - "Using the version field for optimistic concurrency on updates"
+      - "Streaming 100 Hz sensor telemetry through the shadow document"
+    answer: 3
+    explanation: |
+      Shadows are for state, capped at 8 KB, with rate limits — streaming high-frequency
+      telemetry through them is an anti-pattern; use MQTT topics → Kinesis instead. The
+      others are correct shadow uses (desired config, named shadows, version-based
+      concurrency).
+    ref: "concepts.md#device-shadows-desired-versus-reported-state"
+
+  - id: aws-iot-edge-computing-023
+    difficulty: advanced
+    tags: [shadow, limits]
+    question: |
+      What is the maximum size of a single AWS IoT Device Shadow document?
+    options:
+      - "8 KB"
+      - "128 KiB"
+      - "400 KB"
+      - "256 bytes"
+    answer: 0
+    explanation: |
+      A shadow document is capped at 8 KB. 128 KiB is the MQTT message limit, 400 KB is the
+      DynamoDB item limit, and 256 bytes is the IoT topic-name limit — all common
+      distractors.
+    ref: "concepts.md#device-shadows-desired-versus-reported-state"
+
+  - id: aws-iot-edge-computing-024
+    difficulty: expert
+    tags: [shadow, tradeoff, command]
+    question: |
+      A design must send a device a real-time, transient command with the lowest latency,
+      where losing the command if the device is offline is acceptable. Shadow or direct
+      MQTT topic, and why?
+    options:
+      - "Device Shadow, because it is always lower latency than a direct topic"
+      - "Direct MQTT command topic, because it is lower latency and unbounded in shape; the shadow adds an 8 KB ceiling and eventual convergence overhead"
+      - "Device Shadow, because direct topics cannot carry commands"
+      - "Neither; commands must go through the rules engine SQL"
+    answer: 1
+    explanation: |
+      For transient, real-time, fire-and-forget commands, a direct MQTT topic is
+      lower-latency and unconstrained; the shadow's value (durable desired-state, offline
+      reconciliation) isn't needed and it adds an 8 KB limit and convergence latency. Direct
+      topics do carry commands; the rules engine isn't required.
+    ref: "concepts.md#device-shadows-desired-versus-reported-state"
+
+  # ---------------- Rules engine ----------------
+  - id: aws-iot-edge-computing-025
+    difficulty: beginner
+    tags: [rules-engine, routing]
+    question: |
+      What does the AWS IoT rules engine do?
+    options:
+      - "It provisions device certificates automatically"
+      - "It stores time-series telemetry for querying"
+      - "It runs a SQL statement over matching messages and routes them to one or more AWS service actions"
+      - "It manages the local MQTT broker on Greengrass devices"
+    answer: 2
+    explanation: |
+      The rules engine is a serverless, SQL-driven router: match a topic filter, transform
+      with SELECT, and fan out to actions (Kinesis, Firehose, Lambda, DynamoDB, Timestream,
+      etc.). It doesn't provision certs, store telemetry, or run the Greengrass broker.
+    ref: "concepts.md#the-rules-engine-routing-messages-to-aws-services"
+
+  - id: aws-iot-edge-computing-026
+    difficulty: intermediate
+    tags: [rules-engine, error-action, reliability]
+    question: |
+      A rule's primary action to DynamoDB occasionally fails due to throttling. How do you
+      avoid silently dropping those messages?
+    options:
+      - "Nothing can be done; failed rule actions are always lost"
+      - "Switch the device to QoS 0"
+      - "Increase the MQTT payload size limit"
+      - "Configure the rule's error action to a fallback destination such as an SQS DLQ or S3"
+    answer: 3
+    explanation: |
+      Each rule supports a single error action for messages whose primary action fails —
+      route them to an SQS DLQ or S3 for later reprocessing. Failed actions are not
+      inevitably lost, and QoS/payload changes don't address downstream action failure.
+    ref: "concepts.md#the-rules-engine-routing-messages-to-aws-services"
+
+  - id: aws-iot-edge-computing-027
+    difficulty: intermediate
+    tags: [rules-engine, fan-out]
+    question: |
+      You need the same temperature reading to (a) land in S3, (b) power a Timestream
+      dashboard, and (c) update a "latest value" record in DynamoDB. What is the cleanest
+      IoT design?
+    options:
+      - "A single rule with multiple actions teeing the message to Firehose→S3, Timestream, and DynamoDB"
+      - "Three separate MQTT topics, one per destination, published by the device"
+      - "A Lambda that the device calls directly over HTTPS for each destination"
+      - "A Device Shadow that all three services subscribe to"
+    answer: 0
+    explanation: |
+      One rule can fan a single message to multiple actions simultaneously — the IoT
+      materialization pattern. Making the device publish three times wastes bandwidth,
+      direct Lambda-per-destination adds cost/latency, and shadows aren't a telemetry
+      fan-out mechanism.
+    ref: "concepts.md#the-rules-engine-routing-messages-to-aws-services"
+
+  - id: aws-iot-edge-computing-028
+    difficulty: advanced
+    tags: [rules-engine, lambda, tradeoff, scale]
+    question: |
+      At millions of messages per second, what is the trade-off of routing EVERY message
+      through a Lambda action versus filtering/routing in the rule SQL?
+    options:
+      - "Lambda is always cheaper and has no concurrency limit"
+      - "Per-message Lambda can hit concurrency limits and cost far more; filtering/routing in rule SQL is cheaper and lower-latency, so reserve Lambda for genuine custom logic"
+      - "Rule SQL cannot filter, so Lambda is the only option"
+      - "Lambda guarantees exactly-once, so it should always be used"
+    answer: 1
+    explanation: |
+      Invoking Lambda on every message at massive scale risks concurrency throttling and
+      high cost; do filtering/enrichment/routing in rule SQL and use Lambda only for custom
+      logic. Rule SQL can filter (WHERE), and Lambda does not give exactly-once.
+    ref: "concepts.md#the-rules-engine-routing-messages-to-aws-services"
+
+  - id: aws-iot-edge-computing-029
+    difficulty: advanced
+    tags: [rules-engine, ordering, replay]
+    question: |
+      Which statement about the IoT rules engine's delivery semantics is correct?
+    options:
+      - "It guarantees strict ordering and supports replaying past messages"
+      - "It provides exactly-once delivery to all actions"
+      - "It evaluates each message independently with no built-in ordering or replay, and action retries can cause duplicates"
+      - "It buffers messages for 24 hours like a Kinesis stream"
+    answer: 2
+    explanation: |
+      The rules engine is stateless per message — no ordering, no replay — and retries on
+      action failure can duplicate. If you need ordering/replay, route to Kinesis. It does
+      not offer exactly-once or a 24 h retention buffer (that's Kinesis default retention).
+    ref: "concepts.md#the-rules-engine-routing-messages-to-aws-services"
+
+  # ---------------- Ingestion: Kinesis vs Firehose ----------------
+  - id: aws-iot-edge-computing-030
+    difficulty: beginner
+    tags: [ingestion, firehose]
+    question: |
+      Telemetry from IoT Core simply needs to land durably in S3 as Parquet for later
+      Athena queries, with no custom stream-processing code. Which is the simplest fit?
+    options:
+      - "IoT rule → Kinesis Data Streams with a custom consumer"
+      - "IoT rule → Lambda writing individual PutObject calls per message"
+      - "IoT rule → DynamoDB, then export to S3 nightly"
+      - "IoT rule → Kinesis Data Firehose → S3 (with Parquet conversion)"
+    answer: 3
+    explanation: |
+      Firehose is the zero-admin "land it in the lake" path: buffers, converts to Parquet,
+      partitions, and delivers to S3 — no consumers to run. Data Streams adds consumer code
+      you don't need; per-message PutObject is inefficient; DynamoDB-then-export is a
+      roundabout, costly detour.
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  - id: aws-iot-edge-computing-031
+    difficulty: intermediate
+    tags: [ingestion, kinesis, firehose, tradeoff]
+    question: |
+      What is the PRIMARY reason to choose Kinesis Data Streams over Data Firehose for an
+      IoT telemetry pipeline?
+    options:
+      - "You need real-time processing, ordering per key, replay, or multiple independent consumers of the same data"
+      - "Firehose cannot deliver to S3"
+      - "Firehose has a lower payload size limit"
+      - "Data Streams requires no shard management at any scale"
+    answer: 0
+    explanation: |
+      Data Streams is a retained, ordered, replayable log with multiple independent
+      consumers — pick it for real-time/replay/multi-consumer needs. Firehose does deliver
+      to S3 (its main job), and Data Streams requires shard sizing unless you use On-Demand.
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  - id: aws-iot-edge-computing-032
+    difficulty: intermediate
+    tags: [ingestion, firehose, latency]
+    question: |
+      A stakeholder expects sub-second dashboards but the pipeline is IoT rule → Firehose →
+      S3 → Athena. What is the flaw?
+    options:
+      - "Firehose drops data older than 24 hours"
+      - "Firehose buffers (up to ~900 s or ~128 MB for S3), adding seconds-to-minutes of latency — it is not real-time"
+      - "Athena cannot read Parquet"
+      - "S3 is not durable enough for telemetry"
+    answer: 1
+    explanation: |
+      Firehose is a buffered delivery service (up to 900 s / 128 MB for S3), so it adds
+      seconds-to-minutes latency — unsuitable for sub-second dashboards. Use Kinesis Data
+      Streams + a real-time consumer (or Timestream) instead. Firehose doesn't drop by age,
+      Athena reads Parquet, and S3 is highly durable.
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  - id: aws-iot-edge-computing-033
+    difficulty: advanced
+    tags: [ingestion, kinesis, limits, estimation]
+    question: |
+      1,000,000 devices each publish a 500-byte message every second (~500 MB/s aggregate).
+      Sizing a provisioned Kinesis Data Stream, roughly how many shards are needed for
+      ingest, and which per-shard limit governs it?
+    options:
+      - "~50 shards, governed by the 2 MB/s egress limit"
+      - "~5 shards, governed by a 100 MB/s per-shard limit"
+      - "~500 shards, governed by the 1 MB/s (or 1000 records/s) per-shard ingest limit"
+      - "Exactly 1 shard because Kinesis auto-scales infinitely"
+    answer: 2
+    explanation: |
+      Each shard ingests 1 MB/s (or 1000 records/s), so ~500 MB/s needs ~500 shards (also
+      check the records/s bound). Egress is 2 MB/s per shard but ingest governs here. There
+      is no 100 MB/s per-shard limit, and provisioned streams don't auto-scale (On-Demand
+      does, to ~200 MB/s write).
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  - id: aws-iot-edge-computing-034
+    difficulty: advanced
+    tags: [ingestion, iot-analytics, deprecation]
+    question: |
+      A colleague proposes AWS IoT Analytics for a brand-new 2026 telemetry-analytics
+      pipeline. What is the correct response?
+    options:
+      - "Approve it; IoT Analytics is the recommended default for all IoT analytics"
+      - "Approve it only if the fleet exceeds 1 million devices"
+      - "Reject it because it cannot ingest MQTT data"
+      - "Reject it; AWS IoT Analytics reached end of support (Dec 2025) — use Firehose→S3+Athena/Glue, Timestream, or Managed Service for Apache Flink instead"
+    answer: 3
+    explanation: |
+      AWS IoT Analytics reached end of support (Dec 2025) and should not be used for new
+      designs; modern equivalents are Firehose→S3+Athena/Glue, Timestream, or Managed
+      Service for Apache Flink. Fleet size is irrelevant, and its retirement — not an
+      ingestion limitation — is the reason.
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  - id: aws-iot-edge-computing-035
+    difficulty: expert
+    tags: [ingestion, kinesis, efo]
+    question: |
+      Four independent consumer applications must each read a Kinesis Data Stream at full
+      throughput with low fan-out latency, without competing for the shared 2 MB/s egress.
+      Which feature addresses this and what does it cost?
+    options:
+      - "Enhanced Fan-Out (EFO): each consumer gets a dedicated 2 MB/s per shard via HTTP/2 push, at additional per-consumer cost"
+      - "Standard (shared) consumers; they never share bandwidth"
+      - "Firehose, which gives each consumer its own delivery stream for free"
+      - "Increasing the payload size to 128 KiB per record"
+    answer: 0
+    explanation: |
+      Enhanced Fan-Out gives each registered consumer a dedicated 2 MB/s-per-shard pipe
+      with push delivery, avoiding contention — at extra cost per consumer. Standard
+      consumers share the 2 MB/s egress; Firehose isn't a multi-consumer log; payload size
+      doesn't solve fan-out contention.
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  # ---------------- Greengrass ----------------
+  - id: aws-iot-edge-computing-036
+    difficulty: beginner
+    tags: [greengrass, edge-runtime]
+    question: |
+      What is AWS IoT Greengrass?
+    options:
+      - "A managed MQTT broker running only in AWS regions"
+      - "An edge runtime installed on a gateway/device that runs local compute, ML, a local MQTT broker, and buffers/syncs data with IoT Core"
+      - "A time-series database for telemetry"
+      - "A CDN for firmware distribution"
+    answer: 1
+    explanation: |
+      Greengrass is the edge runtime bringing local compute, ML inference, a local MQTT
+      broker, StreamManager buffering, and shadow sync to devices, syncing with IoT Core
+      when connected. It is not a cloud-only broker, a database, or a CDN.
+    ref: "concepts.md#aws-iot-greengrass-the-edge-runtime-local-compute-ml-and-sync"
+
+  - id: aws-iot-edge-computing-037
+    difficulty: intermediate
+    tags: [greengrass, offline, streammanager]
+    question: |
+      Devices on ships lose satellite connectivity for hours daily. Which Greengrass
+      capability prevents telemetry loss during outages by buffering locally and exporting
+      when the link returns?
+    options:
+      - "The local MQTT broker (Moquette)"
+      - "Local shadows"
+      - "StreamManager (durable local stream buffering with prioritized export to Kinesis/S3/SiteWise)"
+      - "IPC between components"
+    answer: 2
+    explanation: |
+      StreamManager durably buffers streams on the device (surviving reboots) and
+      automatically exports to Kinesis/S3/SiteWise when connectivity allows — the anti-loss
+      mechanism for flaky links. The local broker handles LAN MQTT, local shadows handle
+      state, IPC is inter-component comms.
+    ref: "concepts.md#aws-iot-greengrass-the-edge-runtime-local-compute-ml-and-sync"
+
+  - id: aws-iot-edge-computing-038
+    difficulty: intermediate
+    tags: [greengrass, v2, components]
+    question: |
+      What is the main architectural change in Greengrass v2 compared with v1?
+    options:
+      - "v2 removes all local compute capability"
+      - "v2 can only run in AWS regions, not at the edge"
+      - "v2 drops support for the local MQTT broker"
+      - "v2 is component-based: each capability is a versioned component deployed from the cloud, replacing v1's monolithic groups"
+    answer: 3
+    explanation: |
+      Greengrass v2 introduced a modular, versioned component model deployed via the cloud,
+      replacing v1's monolithic group deployments. It retains local compute, edge
+      operation, and the local MQTT broker.
+    ref: "concepts.md#aws-iot-greengrass-the-edge-runtime-local-compute-ml-and-sync"
+
+  - id: aws-iot-edge-computing-039
+    difficulty: advanced
+    tags: [greengrass, tradeoff, ops]
+    question: |
+      A team wants offline autonomy and considers rolling their own Docker/K3s edge stack
+      instead of Greengrass. What does Greengrass provide out of the box that they'd
+      otherwise have to build?
+    options:
+      - "Managed OTA component deployment, cloud-integrated device identity, StreamManager buffering, and shadow sync"
+      - "Nothing; Greengrass and a custom stack are functionally identical"
+      - "A fully managed Kubernetes control plane"
+      - "Unlimited free compute at the edge"
+    answer: 0
+    explanation: |
+      Greengrass gives managed OTA deployment, cloud identity integration, StreamManager,
+      and shadow sync without custom engineering. It is not a managed K8s control plane and
+      compute isn't free — you'd choose a custom stack only for needs Greengrass can't meet
+      (e.g. full Kubernetes).
+    ref: "concepts.md#aws-iot-greengrass-the-edge-runtime-local-compute-ml-and-sync"
+
+  - id: aws-iot-edge-computing-040
+    difficulty: advanced
+    tags: [greengrass, ml, hybrid]
+    question: |
+      You need image-based anomaly detection running with low latency at a remote site
+      that often loses connectivity. What is the standard AWS pattern?
+    options:
+      - "Send every image to SageMaker endpoints in the region for inference"
+      - "Train the model in the cloud (e.g. SageMaker), then deploy it as a Greengrass ML component to run inference locally at the edge"
+      - "Store images in a Device Shadow and infer when reconnected"
+      - "Run inference in the IoT rules engine SQL"
+    answer: 1
+    explanation: |
+      "Train in the cloud, infer at the edge": SageMaker-trained models are deployed as
+      Greengrass ML components for local, low-latency, offline-capable inference. Cloud
+      endpoints add latency and fail offline; shadows aren't for images; the rules engine
+      doesn't run ML models.
+    ref: "concepts.md#aws-iot-greengrass-the-edge-runtime-local-compute-ml-and-sync"
+
+  - id: aws-iot-edge-computing-041
+    difficulty: expert
+    tags: [greengrass, resilience, regional-failure]
+    question: |
+      During an IoT Core regional impairment, what happens to a well-designed Greengrass
+      edge deployment, and why is this a resilience argument for edge?
+    options:
+      - "All local devices immediately stop functioning until the region recovers"
+      - "Greengrass automatically fails over to another AWS region with no configuration"
+      - "Greengrass keeps operating locally (local broker, local shadows, local compute) and StreamManager buffers data until the region recovers"
+      - "The local shadows are wiped and must be re-provisioned"
+    answer: 2
+    explanation: |
+      Because compute, the MQTT broker, and shadows run locally, Greengrass continues
+      operating and buffers data during a cloud outage — a core edge resilience benefit.
+      There is no automatic cross-region IoT failover (registry/shadows don't auto-
+      replicate), and local shadows aren't wiped.
+    ref: "concepts.md#aws-iot-greengrass-the-edge-runtime-local-compute-ml-and-sync"
+
+  # ---------------- Edge infra: Local Zones / Outposts / Wavelength ----------------
+  - id: aws-iot-edge-computing-042
+    difficulty: beginner
+    tags: [edge-infra, wavelength]
+    question: |
+      Which AWS edge offering embeds compute inside telecom 5G networks for ultra-low
+      latency to mobile users?
+    options:
+      - "AWS Outposts"
+      - "AWS Local Zones"
+      - "AWS IoT Greengrass"
+      - "AWS Wavelength"
+    answer: 3
+    explanation: |
+      Wavelength places compute inside 5G carrier networks so mobile traffic reaches it
+      without going to the region — ideal for AR/VR, connected cars, mobile gaming.
+      Outposts is on-prem, Local Zones is metro-edge, Greengrass is a device runtime.
+    ref: "concepts.md#edge-infrastructure-local-zones-outposts-and-wavelength"
+
+  - id: aws-iot-edge-computing-043
+    difficulty: intermediate
+    tags: [edge-infra, outposts, residency]
+    question: |
+      A regulated workload must keep data inside your own data center but you want to use
+      AWS EC2/EBS APIs on site. Which offering fits?
+    options:
+      - "AWS Outposts (a rack of AWS hardware in your own data center)"
+      - "AWS Local Zones"
+      - "AWS Wavelength"
+      - "CloudFront edge locations"
+    answer: 0
+    explanation: |
+      Outposts puts AWS hardware/APIs physically in your data center for residency and
+      on-prem low-latency integration. Local Zones are AWS-owned metro facilities (not your
+      building), Wavelength is carrier-network mobile edge, and CloudFront is a CDN.
+    ref: "concepts.md#edge-infrastructure-local-zones-outposts-and-wavelength"
+
+  - id: aws-iot-edge-computing-044
+    difficulty: intermediate
+    tags: [edge-infra, local-zones]
+    question: |
+      A latency-sensitive media application needs single-digit-millisecond latency to users
+      in a specific metro area, but the company owns no data center there. Which is the
+      best fit?
+    options:
+      - "AWS Outposts shipped to a rented closet in that metro"
+      - "AWS Local Zones in that metro"
+      - "AWS Wavelength, regardless of whether users are on 5G"
+      - "Greengrass installed on each user's laptop"
+    answer: 1
+    explanation: |
+      Local Zones place AWS infrastructure in a specific metro for low latency without you
+      owning a DC. Outposts requires you to host hardware; Wavelength targets 5G mobile
+      users specifically; Greengrass on user laptops is not a media-serving pattern.
+    ref: "concepts.md#edge-infrastructure-local-zones-outposts-and-wavelength"
+
+  - id: aws-iot-edge-computing-045
+    difficulty: advanced
+    tags: [edge-infra, greengrass, selection]
+    question: |
+      Compute must run ON a machine on a factory floor that must keep making decisions when
+      the internet is down. Local Zones, Outposts, Wavelength, or Greengrass?
+    options:
+      - "Local Zones, because they are close to the factory's metro"
+      - "Wavelength, because factories use 5G"
+      - "Greengrass, because the compute must run on/near the device itself and operate offline"
+      - "Outposts, because it is the only option that runs at the edge"
+    answer: 2
+    explanation: |
+      Greengrass runs compute on the device/gateway itself with full offline autonomy —
+      the right tool for on-machine, disconnected operation. Local Zones/Wavelength are
+      AWS-managed infra elsewhere; Outposts is a rack (still needs power/space and a region
+      link) and is overkill for on-device control.
+    ref: "concepts.md#edge-infrastructure-local-zones-outposts-and-wavelength"
+
+  - id: aws-iot-edge-computing-046
+    difficulty: advanced
+    tags: [edge-infra, tradeoff, cost]
+    question: |
+      What is the general trade-off of choosing Local Zones/Outposts/Wavelength over a
+      standard AWS region?
+    options:
+      - "They offer more services at lower cost than a region"
+      - "They are free and require no networking to the parent region"
+      - "They eliminate the need for any security controls"
+      - "They cost more per unit, offer a subset of services, and add operational surface — justified only by a concrete latency/residency requirement"
+    answer: 3
+    explanation: |
+      Edge infrastructure is pricier per unit, offers fewer services, and adds ops overhead,
+      so use it only for a specific latency/residency need — otherwise the region +
+      CloudFront is cheaper/simpler. They aren't free, still connect to the region, and
+      don't remove security needs.
+    ref: "concepts.md#edge-infrastructure-local-zones-outposts-and-wavelength"
+
+  # ---------------- Security ----------------
+  - id: aws-iot-edge-computing-047
+    difficulty: beginner
+    tags: [security, x509, auth]
+    question: |
+      What is the default, best-practice authentication mechanism for devices connecting to
+      AWS IoT Core over MQTT?
+    options:
+      - "Unique X.509 client certificates with mutual TLS"
+      - "A shared username and password for the whole fleet"
+      - "IP allowlisting only"
+      - "No authentication; rely on topic obscurity"
+    answer: 0
+    explanation: |
+      Per-device X.509 certs with mutual TLS are the default best practice, ideally with
+      the private key in a secure element/TPM. Shared credentials, IP allowlists, or no
+      auth are insecure and don't scale to per-device revocation.
+    ref: "concepts.md#device-security-x509-certificates-policies-and-iot-device-defender"
+
+  - id: aws-iot-edge-computing-048
+    difficulty: intermediate
+    tags: [security, iot-policy, least-privilege]
+    question: |
+      How do you ensure a compromised device can only publish/subscribe to ITS OWN topics
+      and not the entire fleet's data?
+    options:
+      - "Give every device iot:* on topic/* for simplicity"
+      - "Use IoT policies with policy variables (e.g. ${iot:Connection.Thing.ThingName}) so a device is scoped to its own topics"
+      - "Rely on TLS encryption alone"
+      - "Put all devices in one Thing Group"
+    answer: 1
+    explanation: |
+      Policy variables like ${iot:Connection.Thing.ThingName} template the allowed topics to
+      the connecting thing, enforcing least privilege per device. Granting iot:* is the
+      opposite; TLS encrypts but doesn't authorize topics; group membership isn't
+      authorization scoping.
+    ref: "concepts.md#device-security-x509-certificates-policies-and-iot-device-defender"
+
+  - id: aws-iot-edge-computing-049
+    difficulty: intermediate
+    tags: [security, device-defender]
+    question: |
+      What does AWS IoT Device Defender's "Detect" feature provide?
+    options:
+      - "Automatic certificate issuance at manufacture"
+      - "A managed MQTT broker for edge devices"
+      - "Continuous behavioral anomaly detection (rule-based thresholds and ML models) that alarms on abnormal device behavior"
+      - "Time-series storage of telemetry"
+    answer: 2
+    explanation: |
+      Detect continuously monitors device behavior against rule-based thresholds and
+      ML-learned baselines (messages/min, auth failures, bytes out, ports), alarming to SNS
+      for quarantine. Audit (a sibling feature) checks config; it's not provisioning, a
+      broker, or storage.
+    ref: "concepts.md#device-security-x509-certificates-policies-and-iot-device-defender"
+
+  - id: aws-iot-edge-computing-050
+    difficulty: advanced
+    tags: [security, custom-authorizer]
+    question: |
+      You must onboard legacy devices that authenticate with bearer tokens rather than
+      X.509 certificates. Which IoT Core mechanism supports this?
+    options:
+      - "Fleet provisioning with claim certs"
+      - "Device Shadow named documents"
+      - "Enhanced Fan-Out"
+      - "A custom authorizer (Lambda) that validates the token"
+    answer: 3
+    explanation: |
+      Custom authorizers run a Lambda to validate non-cert schemes like bearer tokens,
+      bridging legacy devices. Fleet provisioning is for cert issuance, shadows are state,
+      and EFO is a Kinesis consumer feature.
+    ref: "concepts.md#device-security-x509-certificates-policies-and-iot-device-defender"
+
+  - id: aws-iot-edge-computing-051
+    difficulty: advanced
+    tags: [security, device-defender, audit]
+    question: |
+      Which of these would AWS IoT Device Defender AUDIT flag as a fleet configuration
+      problem?
+    options:
+      - "Overly permissive IoT policies, shared/duplicate certificates across devices, or certs about to expire"
+      - "A device publishing valid telemetry at a steady rate"
+      - "A rule teeing data to both Kinesis and Timestream"
+      - "A device using a persistent MQTT session"
+    answer: 0
+    explanation: |
+      Audit checks configuration against best practices — overly permissive policies,
+      shared/duplicate certs, expiring certs, disabled logging. Normal telemetry, valid
+      fan-out rules, and persistent sessions are not misconfigurations.
+    ref: "concepts.md#device-security-x509-certificates-policies-and-iot-device-defender"
+
+  - id: aws-iot-edge-computing-052
+    difficulty: expert
+    tags: [security, tradeoff, secure-element]
+    question: |
+      What is the PRIMARY trade-off of storing each device's private key in a hardware
+      secure element/TPM versus storing keys in device flash/software?
+    options:
+      - "Secure elements prevent the device from using MQTT"
+      - "Hardware-protected keys give the smallest blast radius and clean per-device revocation but add manufacturing cost/complexity; software keys are cheap but a single extraction can compromise many devices"
+      - "Software keys are more secure because they are easier to rotate"
+      - "There is no difference in blast radius between the two"
+    answer: 1
+    explanation: |
+      Hardware-rooted keys can't be easily extracted, minimizing blast radius and enabling
+      per-device revocation — at higher manufacturing cost. Software-stored keys are cheaper
+      but extraction risks many devices. Secure elements don't block MQTT, and software keys
+      aren't more secure.
+    ref: "concepts.md#device-security-x509-certificates-policies-and-iot-device-defender"
+
+  # ---------------- Timestream / time-series storage ----------------
+  - id: aws-iot-edge-computing-053
+    difficulty: beginner
+    tags: [timestream, time-series]
+    question: |
+      Which AWS service is purpose-built for storing and querying IoT time-series telemetry
+      with SQL and automatic hot/cold tiering?
+    options:
+      - "Amazon RDS for PostgreSQL"
+      - "Amazon S3 Glacier"
+      - "Amazon Timestream"
+      - "Amazon Neptune"
+    answer: 2
+    explanation: |
+      Timestream is the serverless, purpose-built time-series DB with memory→magnetic
+      tiering and time-series SQL functions. RDS is general OLTP, Glacier is cold archive,
+      Neptune is a graph database.
+    ref: "concepts.md#time-series-storage-amazon-timestream-and-alternatives"
+
+  - id: aws-iot-edge-computing-054
+    difficulty: intermediate
+    tags: [timestream, tiering]
+    question: |
+      How does Amazon Timestream keep recent-data queries fast while retaining historical
+      data cheaply?
+    options:
+      - "It stores everything in a single in-memory tier forever"
+      - "It offloads all data to S3 Glacier immediately on write"
+      - "It requires you to manually move data between tables"
+      - "It uses a fast in-memory memory store for recent data and a cheaper magnetic store for history, with automatic tiering by retention policy"
+    answer: 3
+    explanation: |
+      Timestream automatically tiers data from a hot memory store to a cheaper magnetic
+      store per your retention policy, balancing query speed and storage cost. It does not
+      keep everything in memory, dump straight to Glacier, or require manual movement.
+    ref: "concepts.md#time-series-storage-amazon-timestream-and-alternatives"
+
+  - id: aws-iot-edge-computing-055
+    difficulty: intermediate
+    tags: [storage, dynamodb, latest-value]
+    question: |
+      An application needs only the single latest reading per device, fetched with
+      low-latency key lookups. Which store is the most appropriate?
+    options:
+      - "Amazon DynamoDB, keyed by device id storing the latest value"
+      - "Amazon Timestream, scanning the full history each time"
+      - "Amazon S3 + Athena, running a query per lookup"
+      - "Amazon OpenSearch, full-text searching each request"
+    answer: 0
+    explanation: |
+      "Latest value per device" is a key-value lookup — DynamoDB (keyed on device id) gives
+      single-digit-ms reads. Timestream is for range/aggregation analytics, S3+Athena has
+      high per-query latency, and OpenSearch is overkill for a keyed lookup.
+    ref: "concepts.md#time-series-storage-amazon-timestream-and-alternatives"
+
+  - id: aws-iot-edge-computing-056
+    difficulty: advanced
+    tags: [storage, s3, athena, cost]
+    question: |
+      You must retain years of raw telemetry as cheaply as possible for occasional ad-hoc
+      SQL and ML training, accepting higher query latency. Which store fits best?
+    options:
+      - "Timestream memory store"
+      - "S3 (Parquet, partitioned) queried with Athena"
+      - "DynamoDB with TTL"
+      - "ElastiCache"
+    answer: 1
+    explanation: |
+      S3 + Athena is the cheapest long-term retention for ad-hoc SQL and ML training data,
+      trading query latency for cost. Timestream's memory tier is expensive for cold data,
+      DynamoDB isn't built for analytics scans, and ElastiCache is volatile in-memory.
+    ref: "concepts.md#time-series-storage-amazon-timestream-and-alternatives"
+
+  - id: aws-iot-edge-computing-057
+    difficulty: advanced
+    tags: [timestream, cost, query]
+    question: |
+      Which statement about Amazon Timestream's cost model should shape your query design?
+    options:
+      - "Queries are free regardless of data scanned"
+      - "Storage is free but ingestion is unbounded in cost"
+      - "Query cost scales with the amount of data scanned, so time-range and predicate scoping matter"
+      - "It bills per active MQTT connection"
+    answer: 2
+    explanation: |
+      Timestream bills ingestion, tiered storage, and query compute based on data scanned —
+      so scoping queries by time range/predicates controls cost. Queries aren't free,
+      storage isn't free, and it has nothing to do with MQTT connections.
+    ref: "concepts.md#time-series-storage-amazon-timestream-and-alternatives"
+
+  # ---------------- Edge vs cloud processing ----------------
+  - id: aws-iot-edge-computing-058
+    difficulty: intermediate
+    tags: [edge-vs-cloud, decision]
+    question: |
+      Which computation is best performed in the CLOUD rather than at the edge?
+    options:
+      - "A safety interlock that must react in single-digit milliseconds"
+      - "Filtering redundant raw data before it leaves a bandwidth-constrained site"
+      - "A control loop that must run when the site is offline"
+      - "Cross-device correlation and fleet-wide ML model training over long-term data"
+    answer: 3
+    explanation: |
+      The global view — cross-device correlation and fleet-wide training — needs all data
+      centrally and elastic scale, so it belongs in the cloud. Safety interlocks, control
+      loops, and bandwidth-driven filtering are edge cases (latency/offline/bandwidth).
+    ref: "concepts.md#edge-versus-cloud-processing-where-should-each-computation-run"
+
+  - id: aws-iot-edge-computing-059
+    difficulty: intermediate
+    tags: [edge-vs-cloud, hybrid]
+    question: |
+      What is the typical "hybrid" IoT pattern that balances edge and cloud?
+    options:
+      - "Infer/aggregate at the edge and send summaries+anomalies to the cloud; train models centrally and deploy them to the edge"
+      - "Do everything at the edge and never send data to the cloud"
+      - "Do everything in the cloud and never run edge compute"
+      - "Randomly split each computation between edge and cloud"
+    answer: 0
+    explanation: |
+      The common real-world answer: edge inference/aggregation with summaries+anomalies to
+      the cloud, and central training of models pushed back to the edge ("train in the
+      cloud, infer at the edge"). Pure-edge and pure-cloud extremes miss the balance.
+    ref: "concepts.md#edge-versus-cloud-processing-where-should-each-computation-run"
+
+  - id: aws-iot-edge-computing-060
+    difficulty: advanced
+    tags: [edge-vs-cloud, tradeoff]
+    question: |
+      Framed as a trade-off, what does moving a computation to the edge fundamentally
+      exchange?
+    options:
+      - "It trades latency for higher bandwidth cost"
+      - "It trades central consistency and low ops cost for latency, autonomy, and bandwidth savings"
+      - "It trades security for convenience with no other effect"
+      - "It trades durability for throughput"
+    answer: 1
+    explanation: |
+      Edge computation gains latency, offline autonomy, and bandwidth savings while giving
+      up central consistency and adding operational cost (code to deploy/monitor/secure on
+      hardware you don't fully control). The other framings misstate the exchange.
+    ref: "concepts.md#edge-versus-cloud-processing-where-should-each-computation-run"
+
+  # ---------------- Scaling & failure modes ----------------
+  - id: aws-iot-edge-computing-061
+    difficulty: advanced
+    tags: [scaling, thundering-herd]
+    question: |
+      After a regional blip, millions of devices try to reconnect to IoT Core
+      simultaneously. What best mitigates the resulting connection storm?
+    options:
+      - "Disable TLS to speed up reconnects"
+      - "Increase the Device Shadow size limit"
+      - "Jittered exponential backoff in device firmware plus proactively raised connection/sec quotas and staggered provisioning"
+      - "Switch all devices from MQTT to HTTPS"
+    answer: 2
+    explanation: |
+      A thundering-herd reconnect is mitigated by jittered exponential backoff in firmware,
+      raising connections/sec quotas ahead of time, and staggering fleets. Disabling TLS is
+      insecure, shadow size is irrelevant, and HTTPS doesn't solve the storm.
+    ref: "concepts.md#scaling-to-millions-of-devices-and-failure-modes"
+
+  - id: aws-iot-edge-computing-062
+    difficulty: advanced
+    tags: [scaling, hot-shard, dynamodb]
+    question: |
+      A telemetry pipeline routes to DynamoDB keyed by "region", and one region dominates
+      traffic. Which limit will this design hit first, and what's the fix?
+    options:
+      - "The 128 KiB MQTT limit; enable Basic Ingest"
+      - "The 8 KB shadow limit; use named shadows"
+      - "The Kinesis 2 MB/s egress limit; add Enhanced Fan-Out"
+      - "A hot partition capped at ~3000 RCU / 1000 WCU; spread the key (e.g. hash device id) to distribute writes"
+    answer: 3
+    explanation: |
+      A low-cardinality partition key funnels a hot region into one DynamoDB partition,
+      capped at ~3000 RCU / 1000 WCU, throttling well below fleet aggregate; fix by
+      spreading the key (hash device id). The other limits aren't what a skewed DynamoDB key
+      hits.
+    ref: "concepts.md#scaling-to-millions-of-devices-and-failure-modes"
+
+  - id: aws-iot-edge-computing-063
+    difficulty: expert
+    tags: [scaling, multiregion, dr]
+    question: |
+      A stakeholder assumes IoT Core will "just fail over to another region" automatically.
+      What is the accurate design caveat?
+    options:
+      - "IoT Core is regional; the registry and shadows do not auto-replicate, so multi-region IoT requires deliberate design (replicate config, point devices at a secondary endpoint)"
+      - "IoT Core is global, so no failover is needed"
+      - "IoT Core replicates all device state to every region automatically"
+      - "Only Greengrass devices can ever be multi-region"
+    answer: 0
+    explanation: |
+      IoT Core is regional and its registry/shadows don't auto-replicate, so cross-region
+      resilience must be explicitly engineered (config replication, secondary endpoint
+      failover in firmware). It's not global, doesn't auto-replicate, and multi-region
+      isn't exclusive to Greengrass.
+    ref: "concepts.md#scaling-to-millions-of-devices-and-failure-modes"
+
+  - id: aws-iot-edge-computing-064
+    difficulty: expert
+    tags: [scaling, connectivity, buffering]
+    question: |
+      A pure-cloud design (devices → IoT Core, no edge) is proposed for equipment that
+      loses connectivity for hours. Which failure does this architecture NOT tolerate, and
+      what fixes it?
+    options:
+      - "Broker overload; fix with more shards"
+      - "Long connectivity outages lose telemetry (QoS-1 persistent sessions only cover brief drops with a ~1 h queued TTL); fix by buffering at the edge with Greengrass StreamManager"
+      - "Certificate expiry; fix with HTTPS"
+      - "Hot partitions; fix with Timestream"
+    answer: 1
+    explanation: |
+      Without edge buffering, hours-long outages lose data — QoS-1/persistent sessions only
+      cover short drops (queued-message TTL ~1 h). Greengrass StreamManager buffers durably
+      and exports on reconnect. The other options address unrelated problems.
+    ref: "concepts.md#scaling-to-millions-of-devices-and-failure-modes"
+
+  - id: aws-iot-edge-computing-065
+    difficulty: advanced
+    tags: [scaling, throttling, backpressure]
+    question: |
+      A rule action delivers to a downstream that is throttling (e.g. a Kinesis shard at
+      capacity). Without mitigation, what happens, and what is the safe design?
+    options:
+      - "Messages queue in the shadow indefinitely; no action needed"
+      - "IoT Core automatically buys more shards for you"
+      - "Throttled deliveries risk dropped data; route overflow to the rule's error action (SQS/S3 DLQ) and scale the downstream (more shards/On-Demand)"
+      - "The devices are billed extra but no data is lost automatically"
+    answer: 2
+    explanation: |
+      Downstream throttling can drop data; capture overflow in the rule error action (DLQ)
+      and scale the sink (add shards or use On-Demand). Shadows don't queue telemetry, IoT
+      Core doesn't auto-provision downstream capacity, and data isn't preserved by default.
+    ref: "concepts.md#scaling-to-millions-of-devices-and-failure-modes"
+
+  # ---------------- Trade-offs cheat-sheet / scenario ----------------
+  - id: aws-iot-edge-computing-066
+    difficulty: intermediate
+    tags: [tradeoff, ingestion, selection]
+    question: |
+      Which pairing of requirement → AWS ingestion target is CORRECT?
+    options:
+      - "Real-time analytics with replay → Kinesis Data Firehose"
+      - "Latest value per device for an app → Timestream"
+      - "Time-range dashboards → DynamoDB"
+      - "Land telemetry durably in S3 with no consumer code → Kinesis Data Firehose"
+    answer: 3
+    explanation: |
+      Firehose is the zero-code "land in S3" path. Real-time/replay → Kinesis Data Streams
+      (not Firehose); latest-value → DynamoDB (not Timestream); time-range dashboards →
+      Timestream (not DynamoDB). The other three invert the correct mapping.
+    ref: "concepts.md#trade-offs-and-when-to-use-what-a-decision-cheat-sheet"
+
+  - id: aws-iot-edge-computing-067
+    difficulty: expert
+    tags: [scenario, end-to-end, estimation]
+    question: |
+      5 million devices each send a 300-byte reading every 10 seconds (~150,000 msg/s,
+      ~45 MB/s). Requirements: durable long-term storage for ML, near-real-time anomaly
+      dashboards, and minimal broker cost. Which end-to-end design is best?
+    options:
+      - "Devices → MQTT Basic Ingest → IoT rule teeing to Firehose→S3(Parquet) for storage AND Kinesis Data Streams→stream processor→Timestream for near-real-time dashboards"
+      - "Devices → HTTPS POST per reading → Lambda → DynamoDB only"
+      - "Devices → MQTT → Device Shadow updates → Fleet Indexing dashboards"
+      - "Devices → MQTT → single Lambda action per message → S3 PutObject per reading"
+    answer: 0
+    explanation: |
+      Basic Ingest cuts broker cost; a rule tees to Firehose→S3(Parquet) for cheap ML
+      storage and to Kinesis→processor→Timestream for near-real-time dashboards — matching
+      all three requirements. HTTPS-per-reading and Lambda/PutObject-per-message are costly
+      and don't scale; shadows aren't telemetry storage.
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  - id: aws-iot-edge-computing-068
+    difficulty: expert
+    tags: [scenario, edge, selection]
+    question: |
+      An autonomous mining vehicle must make split-second obstacle decisions, runs a camera
+      producing GBs/hour, and operates in tunnels with no connectivity for hours. Which
+      design is most appropriate?
+    options:
+      - "Stream all camera frames to a regional SageMaker endpoint for real-time inference"
+      - "Run Greengrass on the vehicle: local ML inference for decisions, StreamManager buffering of summaries/anomalies, sync to IoT Core when back in coverage"
+      - "Use AWS Wavelength since vehicles are mobile"
+      - "Store frames in Device Shadows and process them when reconnected"
+    answer: 1
+    explanation: |
+      Split-second decisions + huge bandwidth + long offline periods is the textbook
+      Greengrass edge case: local inference, StreamManager buffering, sync on reconnect.
+      Regional inference fails offline and on bandwidth; Wavelength needs 5G coverage
+      (absent in tunnels); shadows can't hold camera frames.
+    ref: "concepts.md#edge-versus-cloud-processing-where-should-each-computation-run"
+
+  - id: aws-iot-edge-computing-069
+    difficulty: expert
+    tags: [scenario, security, compromise]
+    question: |
+      A single field camera is enrolled into a botnet and starts scanning and exfiltrating
+      data. Which combination of AWS IoT capabilities best contains this?
+    options:
+      - "Rely solely on TLS encryption to block the traffic"
+      - "Increase the Kinesis shard count to absorb the extra traffic"
+      - "Policy variables scoping each device to its own topics (limiting reach) + Device Defender Detect flagging the anomalous behavior + mitigation moving it to quarantine and revoking its certificate"
+      - "Switch the fleet to HTTPS to prevent botnet participation"
+    answer: 2
+    explanation: |
+      Least-privilege policy variables cap what one device can reach; Device Defender Detect
+      spots the anomaly; mitigation quarantines the device and revokes its cert. TLS alone
+      doesn't stop an authorized-but-compromised device, and shard count/HTTPS don't address
+      compromise.
+    ref: "concepts.md#device-security-x509-certificates-policies-and-iot-device-defender"
+
+  - id: aws-iot-edge-computing-070
+    difficulty: intermediate
+    tags: [scenario, shadow, offline-config]
+    question: |
+      You must change a sleeping/offline device's configuration so it applies the change
+      the moment it reconnects. What is the correct mechanism?
+    options:
+      - "Publish a direct MQTT command and hope the device is online"
+      - "Rewrite the device's X.509 certificate"
+      - "Send the config through Kinesis Data Firehose"
+      - "Update the device's shadow desired state; the device receives the delta and converges on reconnect"
+    answer: 3
+    explanation: |
+      Setting shadow desired state persists the intent; the offline device gets the delta on
+      reconnect and converges — exactly the shadow's purpose. A direct command is lost while
+      offline, certs aren't config, and Firehose is an egress path, not device command.
+    ref: "concepts.md#device-shadows-desired-versus-reported-state"
+
+  - id: aws-iot-edge-computing-071
+    difficulty: beginner
+    tags: [tradeoff, protocol, selection]
+    question: |
+      For a battery-powered sensor that must also receive occasional pushed commands, which
+      protocol is the reflexive choice?
+    options:
+      - "MQTT"
+      - "HTTPS with periodic polling"
+      - "Plain TCP with no TLS"
+      - "SMTP"
+    answer: 0
+    explanation: |
+      MQTT's low overhead and native server push fit battery devices needing commands —
+      avoiding wasteful polling. HTTPS polling drains battery and adds latency; unencrypted
+      TCP is insecure; SMTP is email, not IoT.
+    ref: "concepts.md#message-protocols-mqtt-versus-http-versus-websocket"
+
+  - id: aws-iot-edge-computing-072
+    difficulty: advanced
+    tags: [scenario, edge-infra, selection]
+    question: |
+      A cloud gaming service must stream to mobile players over 5G with the lowest possible
+      round-trip latency. Which AWS edge option is purpose-built for this?
+    options:
+      - "AWS Outposts in a central data center"
+      - "AWS Wavelength (compute embedded in the 5G carrier network)"
+      - "AWS IoT Greengrass on each phone"
+      - "A larger EC2 instance in the parent region"
+    answer: 1
+    explanation: |
+      Wavelength embeds compute in the carrier's 5G network so traffic reaches it without
+      hitting the region — minimizing mobile latency for game streaming. Outposts is on-prem,
+      Greengrass is a device runtime (not a game server), and a bigger region instance
+      doesn't cut network distance.
+    ref: "concepts.md#edge-infrastructure-local-zones-outposts-and-wavelength"
+
+  - id: aws-iot-edge-computing-073
+    difficulty: intermediate
+    tags: [greengrass, local-broker]
+    question: |
+      Several sensors on a factory LAN must exchange MQTT messages with each other and a
+      local app even when the internet is down. What provides this?
+    options:
+      - "IoT Core's cloud broker only"
+      - "Kinesis Data Streams on the LAN"
+      - "The Greengrass local MQTT broker (Moquette) acting as the LAN gateway"
+      - "A Device Shadow shared over the LAN"
+    answer: 2
+    explanation: |
+      Greengrass runs a local MQTT broker so nearby devices communicate on the LAN with no
+      internet, syncing to IoT Core when connected. The cloud broker requires connectivity;
+      Kinesis isn't a LAN broker; shadows aren't a local pub/sub bus.
+    ref: "concepts.md#aws-iot-greengrass-the-edge-runtime-local-compute-ml-and-sync"
+
+  - id: aws-iot-edge-computing-074
+    difficulty: expert
+    tags: [scenario, cost, basic-ingest]
+    question: |
+      A pipeline sends device data only to storage (no device-to-device pub/sub) but the
+      IoT Core bill is dominated by messaging charges. Which change reduces cost with the
+      least architectural disruption?
+    options:
+      - "Switch every device to HTTPS to avoid MQTT charges"
+      - "Move all storage to a Device Shadow"
+      - "Reduce the MQTT payload below 5 KB per message"
+      - "Use Basic Ingest ($aws/rules/<rule>) so messages go straight into the rule, incurring only the rules-engine cost and skipping the pub/sub broker charge"
+    answer: 3
+    explanation: |
+      Basic Ingest bypasses the pub/sub message-broker charge for device→storage flows with
+      no other subscribers, keeping only rules-engine cost — minimal disruption. HTTPS
+      doesn't inherently cut costs, shadows aren't storage, and payload-size tweaks don't
+      remove the broker charge model the way Basic Ingest does.
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-075
+    difficulty: beginner
+    tags: [registry, thing-group]
+    question: |
+      What is a Thing Group primarily used for in AWS IoT?
+    options:
+      - "Organizing devices for bulk policy attachment, job targeting, and OTA rollouts"
+      - "Storing high-frequency telemetry"
+      - "Encrypting MQTT traffic"
+      - "Sizing Kinesis shards"
+    answer: 0
+    explanation: |
+      Thing Groups (static or dynamic) organize devices so you can attach policies in bulk,
+      target jobs, and roll out OTA updates. They aren't telemetry storage, encryption, or
+      shard sizing.
+    ref: "concepts.md#device-registry-identity-and-fleet-organization"
+
+  - id: aws-iot-edge-computing-076
+    difficulty: advanced
+    tags: [ingestion, kinesis, retention, replay]
+    question: |
+      A new analytics team needs to REPROCESS the last 7 days of telemetry with new code,
+      and other consumers must keep reading live. Which choice supports this?
+    options:
+      - "Firehose, by re-buffering the last 7 days"
+      - "Kinesis Data Streams with retention set to 7 days, letting a new consumer replay from the start while existing consumers read independently"
+      - "A Device Shadow history"
+      - "DynamoDB Streams with a 7-day TTL"
+    answer: 1
+    explanation: |
+      Kinesis Data Streams retains records (configurable up to 365 days; here 7) so a new
+      consumer can replay while others read independently by their own position. Firehose has
+      no replay, shadows keep no history, and DynamoDB Streams retains change records only
+      ~24 h.
+    ref: "concepts.md#high-volume-telemetry-ingestion-iot-core-to-kinesis-firehose-s3-and-analytics"
+
+  - id: aws-iot-edge-computing-077
+    difficulty: intermediate
+    tags: [rules-engine, enrichment]
+    question: |
+      Inside a rule's SQL, how can you enrich an incoming message with a device's current
+      shadow state before routing it?
+    options:
+      - "It is impossible; rules cannot access shadows"
+      - "Only by invoking a separate Step Functions workflow first"
+      - "Call get_thing_shadow(...) (or another supported function) within the rule SQL SELECT"
+      - "By increasing the shadow size limit to 128 KiB"
+    answer: 2
+    explanation: |
+      Rule SQL supports external functions like get_thing_shadow(), aws_lambda(), and
+      DynamoDB lookups to enrich messages inline before routing. Enrichment is possible
+      without Step Functions, and shadow size limits are unrelated.
+    ref: "concepts.md#the-rules-engine-routing-messages-to-aws-services"
+
+  - id: aws-iot-edge-computing-078
+    difficulty: expert
+    tags: [scenario, residency, outposts, tradeoff]
+    question: |
+      A bank must run IoT device management and analytics but regulation forbids ANY device
+      data leaving the country, and no AWS region exists in that country. Which approach
+      best satisfies residency while keeping AWS tooling?
+    options:
+      - "Use the nearest foreign AWS region; encryption satisfies residency"
+      - "Use Wavelength in a neighboring country"
+      - "Store everything in a global Device Shadow"
+      - "Deploy AWS Outposts (or in-country on-prem Greengrass) so AWS services/data stay in-country, exporting only permitted derived data"
+    answer: 3
+    explanation: |
+      Residency that forbids data leaving the country requires in-country infrastructure —
+      Outposts (AWS hardware on-site) or on-prem Greengrass — with only compliant derived
+      data exported. Encryption doesn't change data location, a foreign region/Wavelength
+      still leaves the country, and shadows aren't a residency mechanism.
+    ref: "concepts.md#edge-infrastructure-local-zones-outposts-and-wavelength"
+
+  - id: aws-iot-edge-computing-079
+    difficulty: beginner
+    tags: [iot-core, mental-model]
+    question: |
+      Which statement best captures the role of AWS IoT Core in a telemetry architecture?
+    options:
+      - "It is the front door (managed MQTT broker + rules engine + device shadows) that routes data to other services rather than storing it long-term"
+      - "It is the long-term data warehouse for all telemetry"
+      - "It replaces Kinesis, S3, and Timestream in one service"
+      - "It runs the machine-learning models at the edge"
+    answer: 0
+    explanation: |
+      IoT Core is the front door: broker + rules engine + shadows, deliberately routing
+      telemetry out (to Kinesis/Firehose/Timestream/S3) rather than storing it. It is not a
+      warehouse, a replacement for storage/streaming services, or an edge ML runtime
+      (that's Greengrass).
+    ref: "concepts.md#iot-core-device-gateway-and-the-mqtt-broker"
+
+  - id: aws-iot-edge-computing-080
+    difficulty: advanced
+    tags: [scenario, protocol, iot-core, tradeoff]
+    question: |
+      A mobile app (not a browser) must both send user actions to and receive live pushes
+      from IoT Core, authenticated via Amazon Cognito. Which approach fits best?
+    options:
+      - "Raw MQTT with a per-user X.509 certificate provisioned in the app store"
+      - "MQTT over WebSocket authenticated with SigV4 credentials from Cognito, giving bi-directional push over 443"
+      - "HTTPS polling with a shared API key"
+      - "Direct Kinesis consumer embedded in the mobile app"
+    answer: 1
+    explanation: |
+      Cognito-authenticated apps use SigV4 over MQTT-over-WebSocket for bi-directional push
+      over 443 without managing per-user device certs. Per-user X.509 in an app is
+      impractical, HTTPS polling loses push, and embedding a Kinesis consumer in the app is
+      an anti-pattern.
+    ref: "concepts.md#message-protocols-mqtt-versus-http-versus-websocket"

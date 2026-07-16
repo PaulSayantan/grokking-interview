@@ -1,0 +1,1597 @@
+topic: 'Amazon S3 Deep Dive: Object Storage at Scale'
+domain: system-design
+topic_slug: aws-storage-s3-deep-dive
+version: 1
+questions:
+- id: aws-storage-s3-deep-dive-001
+  difficulty: beginner
+  tags:
+  - object-model
+  - fundamentals
+  question: |
+    In Amazon S3's data model, what does a "prefix" actually refer to?
+  options:
+  - A physical folder created on disk when you upload a file
+  - A leading substring of object keys that S3 uses for listing and throughput partitioning
+  - A separate bucket nested inside another bucket
+  - A required 8-character hash that must begin every key
+  answer: 1
+  explanation: |
+    S3 is a flat key-value store with no real directories. A prefix is just a
+    leading portion of the key string (e.g. `logs/2026/`), used by
+    ListObjectsV2 filtering and — importantly — as the unit S3 partitions on for
+    request throughput. There are no physical folders (A), buckets don't nest
+    (C), and no mandatory hash prefix is required (D); randomizing prefixes is
+    old, now-obsolete advice.
+  ref: 'concepts.md#s3-object-model-buckets-keys-and-prefixes'
+- id: aws-storage-s3-deep-dive-002
+  difficulty: beginner
+  tags:
+  - object-model
+  - limits
+  question: |
+    What is the maximum size of a single S3 object, and the largest size you can
+    upload in a single (non-multipart) PUT?
+  options:
+  - Max object 5 TiB; single PUT 5 GiB
+  - Max object 5 GiB; single PUT 5 GiB
+  - Max object unlimited; single PUT 5 TiB
+  - Max object 5 TiB; single PUT 5 TiB
+  answer: 0
+  explanation: |
+    An S3 object can be up to 5 TiB, but a single PUT is capped at 5 GiB — beyond
+    that you must use multipart upload (recommended above ~100 MB). Objects are
+    not unlimited (C), and you cannot PUT 5 TiB in one request (D). This is why
+    large-file design always involves multipart upload.
+  ref: 'concepts.md#s3-object-model-buckets-keys-and-prefixes'
+- id: aws-storage-s3-deep-dive-003
+  difficulty: beginner
+  tags:
+  - buckets
+  - region
+  question: |
+    Which statement about S3 buckets is correct?
+  options:
+  - A bucket lives in exactly one Region and its name is globally unique across all AWS accounts
+  - A bucket spans all Regions automatically for durability
+  - Bucket names only need to be unique within your own account
+  - Each bucket is replicated to every AWS Region by default
+  answer: 0
+  explanation: |
+    A bucket resides in a single Region; data stays there unless you configure
+    replication. The bucket name is part of a global DNS namespace, so it must be
+    unique worldwide. S3 does not auto-span or auto-replicate Regions (B, D), and
+    uniqueness is global, not per-account (C).
+  ref: 'concepts.md#s3-object-model-buckets-keys-and-prefixes'
+- id: aws-storage-s3-deep-dive-004
+  difficulty: beginner
+  tags:
+  - consistency
+  question: |
+    Since December 2020, what consistency model does S3 provide for reads after a
+    successful write of a new object?
+  options:
+  - Eventual consistency, so a GET may return 404 for a while
+  - Consistency only within the same Availability Zone
+  - Strong consistency only if you pay for a premium tier
+  - Strong read-after-write consistency at no extra cost or performance penalty
+  answer: 3
+  explanation: |
+    As of Dec 2020, all GET/PUT/LIST/HEAD operations are strongly consistent in
+    every Region, free, with no performance penalty — a new object is immediately
+    readable. The old eventual-consistency behavior (A) is gone; it is not a paid
+    tier (C) and not AZ-scoped (B).
+  ref: 'concepts.md#strong-read-after-write-consistency'
+- id: aws-storage-s3-deep-dive-005
+  difficulty: beginner
+  tags:
+  - durability
+  question: |
+    Amazon S3 Standard is designed for how many "nines" of durability?
+  options:
+  - 99.9% (three nines)
+  - 99.99% (four nines)
+  - 99.999999999% (eleven nines)
+  - 100% guaranteed, no data loss possible
+  answer: 2
+  explanation: |
+    S3 Standard is designed for 11 nines (99.999999999%) of durability by storing
+    objects redundantly across at least three AZs. 99.9% and 99.99% (A, B)
+    describe availability SLAs of some classes, not durability. No system offers a
+    literal 100% guarantee (D).
+  ref: 'concepts.md#durability-availability-and-multi-az-design'
+- id: aws-storage-s3-deep-dive-006
+  difficulty: beginner
+  tags:
+  - storage-classes
+  question: |
+    Which S3 storage class is designed to store data in a SINGLE Availability
+    Zone, trading redundancy for lower cost?
+  options:
+  - S3 Standard
+  - S3 Standard-IA
+  - S3 Glacier Deep Archive
+  - S3 One Zone-IA
+  answer: 3
+  explanation: |
+    One Zone-IA stores data in one AZ, ~20% cheaper than Standard-IA, and is only
+    appropriate for re-creatable data because losing that AZ loses the data.
+    Standard and Standard-IA (A, B) span at least three AZs, and Deep Archive (C)
+    is also multi-AZ but for cold archival.
+  ref: 'concepts.md#storage-classes-and-cost-latency-trade-offs'
+- id: aws-storage-s3-deep-dive-007
+  difficulty: beginner
+  tags:
+  - encryption
+  - defaults
+  question: |
+    By default, what happens to a newly uploaded object's encryption at rest in
+    S3 today?
+  options:
+  - It is stored unencrypted unless you opt in
+  - It is encrypted only if the bucket is public
+  - It is automatically encrypted at rest (SSE-S3 minimum) by default
+  - Encryption requires a KMS key on every request or the upload fails
+  answer: 2
+  explanation: |
+    Since Jan 2023, S3 encrypts all new objects at rest by default with at least
+    SSE-S3 (AES-256). You no longer have to opt in (A). Encryption is unrelated to
+    public status (B), and KMS is optional, not mandatory (D).
+  ref: 'concepts.md#encryption-with-sse-s3-sse-kms-and-sse-c'
+- id: aws-storage-s3-deep-dive-008
+  difficulty: beginner
+  tags:
+  - security
+  - block-public-access
+  question: |
+    What is the primary purpose of S3 Block Public Access?
+  options:
+  - It encrypts objects with a customer-managed key
+  - It speeds up uploads from distant clients
+  - It overrides any bucket policy or ACL that would otherwise make data public
+  - It automatically moves objects to Glacier
+  answer: 2
+  explanation: |
+    Block Public Access is an account/bucket master switch that overrides
+    policies and ACLs granting public access — the key guard against accidental
+    data leaks; it is on by default. It has nothing to do with encryption (A),
+    transfer speed (C/B is Transfer Acceleration), or tiering (D).
+  ref: 'concepts.md#access-control-bucket-policies-and-block-public-access'
+- id: aws-storage-s3-deep-dive-009
+  difficulty: beginner
+  tags:
+  - presigned-urls
+  question: |
+    What is a presigned URL primarily used for?
+  options:
+  - Making a bucket permanently public
+  - Encrypting objects on the client side
+  - Granting time-limited access to a specific S3 operation without the client having AWS credentials
+  - Replicating objects to another Region
+  answer: 2
+  explanation: |
+    A presigned URL is signed with a principal's credentials to allow a specific
+    operation (e.g. GET or PUT) on a specific key for a limited time, without the
+    client holding AWS credentials or the bucket being public. It does not make
+    buckets public (A), do client-side crypto (B), or replicate (D).
+  ref: 'concepts.md#presigned-urls-and-static-website-hosting'
+- id: aws-storage-s3-deep-dive-010
+  difficulty: beginner
+  tags:
+  - events
+  - event-driven
+  question: |
+    Which set of destinations can directly receive S3 event notifications?
+  options:
+  - Only Amazon EC2 instances
+  - Only other S3 buckets
+  - Only Amazon RDS databases
+  - Lambda, SQS, SNS, and Amazon EventBridge
+  answer: 3
+  explanation: |
+    S3 event notifications can be delivered to Lambda, SQS, SNS, and EventBridge,
+    forming the front door of serverless event-driven pipelines. EC2, RDS, and
+    other buckets are not direct notification targets (A, C, B).
+  ref: 'concepts.md#s3-event-notifications-and-event-driven-patterns'
+- id: aws-storage-s3-deep-dive-011
+  difficulty: beginner
+  tags:
+  - storage-comparison
+  question: |
+    Which AWS storage service exposes a POSIX filesystem that many EC2 instances
+    across multiple AZs can mount concurrently?
+  options:
+  - Amazon S3
+  - Amazon EBS
+  - Amazon EFS
+  - Amazon Glacier
+  answer: 2
+  explanation: |
+    EFS is a managed NFS/POSIX filesystem, regional and multi-AZ, mountable by
+    many instances at once. S3 is object storage over HTTP (A), EBS is a
+    single-AZ block volume usually attached to one instance (B), and Glacier is
+    an S3 archival tier (D).
+  ref: 'concepts.md#s3-versus-ebs-versus-efs'
+- id: aws-storage-s3-deep-dive-012
+  difficulty: beginner
+  tags:
+  - versioning
+  question: |
+    When versioning is enabled on a bucket and you issue a DELETE on an object
+    (without specifying a version), what happens?
+  options:
+  - All versions are permanently and irreversibly erased
+  - The bucket is deleted
+  - A delete marker is inserted; prior versions remain and are recoverable
+  - Nothing happens; DELETE is ignored on versioned buckets
+  answer: 2
+  explanation: |
+    A simple DELETE on a versioned bucket inserts a delete marker (the object
+    appears gone) while previous versions persist and can be restored. It does
+    not erase all versions (A), delete the bucket (B), or get ignored (D).
+  ref: 'concepts.md#versioning-mfa-delete-and-object-lock-worm'
+- id: aws-storage-s3-deep-dive-013
+  difficulty: beginner
+  tags:
+  - lifecycle
+  question: |
+    What do S3 lifecycle policies let you do?
+  options:
+  - Guarantee objects are never deleted
+  - Encrypt objects with customer-supplied keys
+  - Rewrite object contents in place
+  - Automatically transition objects between storage classes and expire (delete) them on an age schedule
+  answer: 3
+  explanation: |
+    Lifecycle rules declaratively transition objects (e.g. Standard → IA →
+    Glacier) and expire them by age, implementing tiered retention. They don't
+    handle encryption (B), objects are immutable so no in-place rewrite (C), and
+    immutability is Object Lock, not lifecycle (A).
+  ref: 'concepts.md#lifecycle-policies-and-intelligent-tiering'
+- id: aws-storage-s3-deep-dive-014
+  difficulty: beginner
+  tags:
+  - s3-select
+  question: |
+    What does S3 Select do?
+  options:
+  - Runs SQL joins across thousands of objects in a bucket
+  - Selects which AZ an object is stored in
+  - Runs a SQL SELECT (filter/projection) over a single object and returns only matching data
+  - Chooses the cheapest storage class automatically
+  answer: 2
+  explanation: |
+    S3 Select runs a SQL SELECT with WHERE/projection over one object (CSV/JSON/
+    Parquet) and returns only the matching rows/columns, cutting transfer.
+    Cross-object joins over many files are Athena's job (A). It does not pick AZs
+    (B) or storage classes (D — that's Intelligent-Tiering).
+  ref: 'concepts.md#s3-select-and-data-querying'
+- id: aws-storage-s3-deep-dive-015
+  difficulty: intermediate
+  tags:
+  - consistency
+  - replication
+  - trade-offs
+  question: |
+    A team assumes S3's strong read-after-write consistency means their
+    cross-Region replica is always in sync. Why is this wrong?
+  options:
+  - Strong consistency only applies to objects smaller than 128 KB
+  - Cross-Region Replication is asynchronous and eventually consistent; the destination lags the source
+  - Strong consistency was removed in 2022
+  - Replication makes the source bucket eventually consistent too
+  answer: 1
+  explanation: |
+    Strong read-after-write consistency is a within-Region guarantee. CRR is
+    asynchronous — the destination bucket lags (seconds to minutes, unbounded
+    without RTC). Consistency has no size threshold (A), was not removed (C), and
+    the source stays strongly consistent (D).
+  ref: 'concepts.md#strong-read-after-write-consistency'
+- id: aws-storage-s3-deep-dive-016
+  difficulty: intermediate
+  tags:
+  - storage-classes
+  - cost
+  - gotcha
+  question: |
+    A tenant uploads millions of 5 KB JSON files. To "save money" an engineer
+    moves them all to S3 Standard-IA. What is the likely result?
+  options:
+  - Costs may INCREASE because IA bills a 128 KB minimum object size and a 30-day minimum duration
+  - Costs drop by ~50% with no downside
+  - The objects become unreadable
+  - Durability drops to 3 nines
+  answer: 0
+  explanation: |
+    Standard-IA charges a minimum billable size of 128 KB per object and a 30-day
+    minimum duration. For 5 KB objects you pay as if each were 128 KB, so IA can
+    cost MORE than Standard. IA is for large, infrequently accessed objects.
+    Objects stay readable (C) and durability is unchanged at 11 nines (D).
+  ref: 'concepts.md#storage-classes-and-cost-latency-trade-offs'
+- id: aws-storage-s3-deep-dive-017
+  difficulty: intermediate
+  tags:
+  - request-rate
+  - limits
+  question: |
+    What is the documented per-prefix request-rate ceiling for S3, and how do you
+    scale beyond it?
+  options:
+  - 100 requests per second per bucket; scale by requesting a quota increase
+  - 3,500 PUT and 5,500 GET per second per prefix; scale by spreading load across more prefixes
+  - 1,000 requests per second per Region; scale by adding Regions
+  - Unlimited per prefix but capped at 10 prefixes per bucket
+  answer: 1
+  explanation: |
+    S3 supports at least 3,500 PUT/COPY/POST/DELETE and 5,500 GET/HEAD per second
+    per partitioned prefix, with no limit on the number of prefixes — so you scale
+    horizontally by distributing keys across prefixes. It is not a per-bucket 100
+    RPS cap (A), not per-Region (C), and prefix count is unlimited (D).
+  ref: 'concepts.md#request-rate-scaling-and-key-prefix-design'
+- id: aws-storage-s3-deep-dive-018
+  difficulty: intermediate
+  tags:
+  - multipart
+  - limits
+  question: |
+    Which statement about S3 multipart upload is correct?
+  options:
+  - Up to 10,000 parts, each 5 MiB–5 GiB (except the last), assembled server-side; recommended for objects
+    > 100 MB
+  - Each part must be exactly 5 GiB
+  - Multipart is only for objects under 5 MB
+  - Parts must be uploaded strictly in order, one at a time
+  answer: 0
+  explanation: |
+    Multipart allows up to 10,000 parts (5 MiB–5 GiB each, last part can be
+    smaller), uploaded in parallel and assembled with CompleteMultipartUpload;
+    AWS recommends it above ~100 MB and requires it above 5 GiB. Parts aren't
+    fixed at 5 GiB (B), it's for large not tiny objects (C), and parts upload in
+    parallel, not serially (D).
+  ref: 'concepts.md#multipart-upload-byte-range-and-transfer-acceleration'
+- id: aws-storage-s3-deep-dive-019
+  difficulty: intermediate
+  tags:
+  - multipart
+  - cost
+  - gotcha
+  question: |
+    An audit finds unexplained storage growth in a bucket with heavy large-file
+    uploads. What lifecycle rule most likely was missing?
+  options:
+  - Expire current versions after 1 day
+  - Enable Requester Pays
+  - Transition all objects to Deep Archive immediately
+  - Abort incomplete multipart uploads after N days
+  answer: 3
+  explanation: |
+    Multipart parts from uploads that were never completed or aborted persist and
+    are billed as storage indefinitely. A lifecycle rule to abort incomplete
+    multipart uploads reclaims them. Expiring current versions daily would delete
+    live data (A), immediate Deep Archive risks retrieval issues (C), and
+    Requester Pays shifts cost, not fixes orphaned parts (B).
+  ref: 'concepts.md#multipart-upload-byte-range-and-transfer-acceleration'
+- id: aws-storage-s3-deep-dive-020
+  difficulty: intermediate
+  tags:
+  - encryption
+  - kms
+  - scaling
+  question: |
+    A high-QPS application reads SSE-KMS-encrypted S3 objects and starts getting
+    throttling errors even though S3 itself isn't at its request limit. What is
+    the cause and best fix?
+  options:
+  - S3 prefix limit; add a random hash to keys
+  - Insufficient bucket versioning; enable versioning
+  - KMS request-rate limits are being hit on every decrypt; enable S3 Bucket Keys to cut KMS calls
+  - The bucket needs Transfer Acceleration
+  answer: 2
+  explanation: |
+    With SSE-KMS, every GET/PUT calls KMS, which has account/region request-rate
+    quotas — a high-QPS workload gets throttled by KMS, not S3. S3 Bucket Keys
+    generate a short-lived bucket-level data key, cutting KMS calls by orders of
+    magnitude. Prefix hashing (A), versioning (B), and Transfer Acceleration (D)
+    don't address KMS throttling.
+  ref: 'concepts.md#encryption-with-sse-s3-sse-kms-and-sse-c'
+- id: aws-storage-s3-deep-dive-021
+  difficulty: intermediate
+  tags:
+  - static-hosting
+  - cloudfront
+  - security
+  question: |
+    What is the recommended production pattern for serving a public static
+    website from S3 securely and cost-effectively?
+  options:
+  - Make the bucket public and use the S3 website endpoint directly
+  - Keep the bucket private with Block Public Access on, and serve via CloudFront using Origin Access
+    Control
+  - Enable SSE-C and hand out the key to browsers
+  - Put the bucket behind an internal NLB
+  answer: 1
+  explanation: |
+    The best practice is a private bucket (BPA on) fronted by CloudFront with
+    Origin Access Control — gives HTTPS, caching, custom domains, WAF, lower
+    egress, and no accidental exposure. The raw S3 website endpoint is HTTP-only
+    and requires a public bucket (A). SSE-C keys to browsers (C) and an NLB (D)
+    are inappropriate.
+  ref: 'concepts.md#presigned-urls-and-static-website-hosting'
+- id: aws-storage-s3-deep-dive-022
+  difficulty: intermediate
+  tags:
+  - events
+  - delivery-semantics
+  question: |
+    A Lambda triggered by S3 ObjectCreated events occasionally processes the same
+    object twice. Why, and what is the correct design response?
+  options:
+  - S3 events are exactly-once but Lambda has a bug; add retries
+  - Enable versioning to guarantee exactly-once delivery
+  - The bucket must be in the same AZ as the Lambda
+  - S3 event delivery is at-least-once and unordered; make the consumer idempotent
+  answer: 3
+  explanation: |
+    S3 event notifications are at-least-once with no strict ordering, so
+    occasional duplicates are expected — consumers must be idempotent (e.g. keyed
+    on object key/version). It is not exactly-once (A), AZ placement is irrelevant
+    (C), and versioning does not change delivery semantics (B).
+  ref: 'concepts.md#s3-event-notifications-and-event-driven-patterns'
+- id: aws-storage-s3-deep-dive-023
+  difficulty: intermediate
+  tags:
+  - replication
+  - prerequisites
+  question: |
+    What is a hard prerequisite for enabling S3 replication (CRR or SRR)?
+  options:
+  - The buckets must use One Zone-IA storage
+  - Versioning must be enabled on both source and destination buckets
+  - Both buckets must be in the same account
+  - Object Lock must be enabled
+  answer: 1
+  explanation: |
+    Replication requires versioning on both source and destination buckets. It
+    works across accounts (C is not required) and any storage class (A is false),
+    and does not require Object Lock (D).
+  ref: 'concepts.md#cross-region-and-same-region-replication'
+- id: aws-storage-s3-deep-dive-024
+  difficulty: intermediate
+  tags:
+  - storage-comparison
+  - decision
+  question: |
+    An application needs a low-latency block device for a self-managed relational
+    database on a single EC2 instance. Which storage is appropriate?
+  options:
+  - S3 — store the DB files as objects
+  - EBS — attach a provisioned-IOPS block volume to the instance
+  - EFS — mount an NFS share
+  - Glacier Instant Retrieval
+  answer: 1
+  explanation: |
+    A self-managed DB needs sub-millisecond, random in-place block I/O on a single
+    instance — that's EBS (io2/gp3). S3 has HTTP latency and immutable objects,
+    wrong for a DB (A). EFS adds network-file latency and is for shared POSIX (C).
+    Glacier is archival (D).
+  ref: 'concepts.md#s3-versus-ebs-versus-efs'
+- id: aws-storage-s3-deep-dive-025
+  difficulty: intermediate
+  tags:
+  - egress
+  - cost
+  question: |
+    Which statement about S3 data-transfer cost is correct?
+  options:
+  - Uploading into S3 is free; transferring data out to the internet is charged per GB
+  - Uploading data into S3 (ingress) is charged per GB
+  - All S3 data transfer is free
+  - Same-Region S3-to-EC2 transfer is charged at the internet egress rate
+  answer: 0
+  explanation: |
+    Ingress to S3 is free; internet egress is charged per GB and often dominates
+    cost. Ingress is not charged (B), transfer isn't universally free (C), and
+    same-Region S3-to-EC2 traffic is free, not internet-rate (D).
+  ref: 'concepts.md#egress-and-data-transfer-economics'
+- id: aws-storage-s3-deep-dive-026
+  difficulty: intermediate
+  tags:
+  - intelligent-tiering
+  - trade-offs
+  question: |
+    For a dataset whose access pattern is unknown and irregular, why is S3
+    Intelligent-Tiering often the safest default?
+  options:
+  - It has the lowest per-GB storage price of any class
+  - It disables all request charges
+  - It guarantees single-digit-millisecond latency even from Deep Archive
+  - It auto-moves objects between tiers based on access and charges no retrieval fees for the frequent/infrequent
+    tiers, for a small per-object monitoring fee
+  answer: 3
+  explanation: |
+    Intelligent-Tiering monitors access and shifts objects across tiers with no
+    retrieval fees for frequent/infrequent tiers, trading a small monitoring fee
+    for not having to guess the access curve. It is not the cheapest storage (A),
+    archive tiers still have retrieval latency (C), and request charges still
+    apply (B).
+  ref: 'concepts.md#lifecycle-policies-and-intelligent-tiering'
+- id: aws-storage-s3-deep-dive-027
+  difficulty: intermediate
+  tags:
+  - glacier
+  - retrieval
+  - decision
+  question: |
+    You must archive compliance data accessed maybe twice a year, and when you do
+    need it, waiting up to 12 hours is acceptable. Which class minimizes storage
+    cost?
+  options:
+  - S3 Glacier Deep Archive
+  - S3 Glacier Instant Retrieval
+  - S3 Standard-IA
+  - S3 One Zone-IA
+  answer: 0
+  explanation: |
+    Deep Archive is the cheapest class (~$0.00099/GB-mo) with standard retrieval
+    around 12 hours — perfect when access is rare and hours-long waits are fine.
+    Standard-IA and One Zone-IA (C, D) cost far more for instant access you don't
+    need. Glacier Instant (B) costs more because it delivers ms latency you don't
+    require.
+  ref: 'concepts.md#storage-classes-and-cost-latency-trade-offs'
+- id: aws-storage-s3-deep-dive-028
+  difficulty: intermediate
+  tags:
+  - byte-range
+  - performance
+  question: |
+    What is a primary use of byte-range GET requests in S3?
+  options:
+  - To encrypt only part of an object
+  - To bypass the per-prefix request limits
+  - To rename an object without copying it
+  - To download parts of a large object in parallel and enable resumable, partial reads
+  answer: 3
+  explanation: |
+    Byte-range GET (`Range: bytes=...`) fetches only a portion of an object,
+    enabling parallel downloads, resumable transfers, and reading just a header/
+    footer (e.g. a Parquet footer). It doesn't encrypt (A), rename (C), or bypass
+    request limits (B).
+  ref: 'concepts.md#multipart-upload-byte-range-and-transfer-acceleration'
+- id: aws-storage-s3-deep-dive-029
+  difficulty: intermediate
+  tags:
+  - querying
+  - athena
+  - decision
+  question: |
+    You need to run SQL with joins and aggregations across thousands of
+    partitioned Parquet files in an S3 data lake. Which service fits best?
+  options:
+  - S3 Select
+  - Amazon Athena with the Glue Data Catalog
+  - A single Lambda reading every file into memory
+  - S3 Object Lambda
+  answer: 1
+  explanation: |
+    Athena is serverless Presto SQL across many objects/partitions with joins and
+    aggregations, billed per TB scanned (reduced by Parquet + partitioning). S3
+    Select works on a single object only (A). A Lambda can't hold the whole lake
+    (C), and Object Lambda transforms objects on the GET path, not cross-file
+    queries (D).
+  ref: 'concepts.md#s3-select-and-data-querying'
+- id: aws-storage-s3-deep-dive-030
+  difficulty: intermediate
+  tags:
+  - presigned-urls
+  - limits
+  question: |
+    A presigned URL is generated using temporary credentials from an assumed IAM
+    role. What bounds its maximum validity?
+  options:
+  - Always exactly 7 days regardless of credential type
+  - 1 hour, hard-coded
+  - It never expires
+  - It cannot outlive the temporary session token, so at most ~36 hours
+  answer: 3
+  explanation: |
+    A presigned URL signed with temporary (STS) credentials cannot be valid longer
+    than the underlying session token — at most ~36 hours. The 7-day maximum
+    applies to long-term IAM user credentials (A). URLs always expire (C), and
+    there is no fixed 1-hour cap (B).
+  ref: 'concepts.md#presigned-urls-and-static-website-hosting'
+- id: aws-storage-s3-deep-dive-031
+  difficulty: intermediate
+  tags:
+  - security
+  - acls
+  - best-practice
+  question: |
+    What is the current AWS best practice for S3 access control regarding ACLs?
+  options:
+  - Use ACLs as the primary access mechanism
+  - Disable ACLs (Object Ownership = Bucket Owner Enforced) and rely on IAM and bucket policies
+  - ACLs are required for cross-account access and cannot be disabled
+  - Grant public-read ACLs to all objects by default
+  answer: 1
+  explanation: |
+    AWS now disables ACLs by default (Bucket Owner Enforced) and recommends
+    managing access with IAM identity policies and bucket policies. ACLs are
+    legacy (A), cross-account access works via policies without ACLs (C), and
+    public-read ACLs are exactly what you avoid (D).
+  ref: 'concepts.md#access-control-bucket-policies-and-block-public-access'
+- id: aws-storage-s3-deep-dive-032
+  difficulty: intermediate
+  tags:
+  - lifecycle
+  - versioning
+  - cost
+  question: |
+    A versioned bucket holding frequently-overwritten config files keeps growing
+    in cost. What is the most targeted fix?
+  options:
+  - Disable versioning entirely to stop paying for versions
+  - Switch to One Zone-IA
+  - Add a lifecycle rule to expire noncurrent versions after N days
+  - Enable MFA delete
+  answer: 2
+  explanation: |
+    Versioning bills for every stored version; the targeted fix is a lifecycle
+    rule to expire noncurrent versions after a retention window, preserving
+    accident recovery while capping cost. Disabling versioning loses protection
+    and breaks replication (A). One Zone-IA changes durability, not version bloat
+    (B). MFA delete adds friction, not cleanup (D).
+  ref: 'concepts.md#versioning-mfa-delete-and-object-lock-worm'
+- id: aws-storage-s3-deep-dive-033
+  difficulty: intermediate
+  tags:
+  - network
+  - cost
+  - vpc
+  question: |
+    Private-subnet EC2 instances read heavily from S3 and the NAT gateway bill is
+    surprisingly high. What is the recommended remedy?
+  options:
+  - Move the instances to a public subnet with public IPs
+  - Enable Transfer Acceleration on the bucket
+  - Add a VPC gateway endpoint for S3 so traffic bypasses the NAT gateway and stays on the AWS network
+  - Switch the bucket to One Zone-IA
+  answer: 2
+  explanation: |
+    A VPC gateway endpoint for S3 is free and routes S3 traffic off the NAT
+    gateway, eliminating NAT data-processing charges while keeping traffic
+    private. Public subnets increase exposure and still may incur costs (A).
+    Transfer Acceleration is for distant internet clients (B), and One Zone-IA
+    doesn't affect networking (D).
+  ref: 'concepts.md#egress-and-data-transfer-economics'
+- id: aws-storage-s3-deep-dive-034
+  difficulty: intermediate
+  tags:
+  - object-lock
+  - compliance
+  question: |
+    Which S3 feature makes an object version immutable such that NOT EVEN the root
+    account can delete or shorten its retention until it expires?
+  options:
+  - Object Lock in Governance mode
+  - Object Lock in Compliance mode
+  - MFA delete
+  - Bucket versioning alone
+  answer: 1
+  explanation: |
+    Object Lock Compliance mode enforces true WORM — no principal, including root,
+    can delete or shorten retention until it expires (for SEC 17a-4/FINRA-type
+    requirements). Governance mode allows privileged bypass (A). MFA delete adds a
+    token requirement but isn't immutable retention (C), and versioning alone
+    doesn't prevent deletion (D).
+  ref: 'concepts.md#versioning-mfa-delete-and-object-lock-worm'
+- id: aws-storage-s3-deep-dive-035
+  difficulty: intermediate
+  tags:
+  - events
+  - buffering
+  - resilience
+  question: |
+    Uploads arrive in unpredictable bursts and you want to protect downstream
+    compute from being overwhelmed while keeping retries and a dead-letter queue.
+    What pattern fits best?
+  options:
+  - S3 → Lambda directly, relying on Lambda to absorb any spike
+  - S3 → SNS → email only
+  - S3 → SQS → consumer, using the queue to buffer bursts with retries and a DLQ
+  - Poll the bucket with ListObjects every second
+  answer: 2
+  explanation: |
+    Placing SQS between S3 and compute buffers bursts, decouples producers from
+    consumers, and gives built-in retries plus a DLQ. Direct S3 → Lambda can hit
+    concurrency limits under a flood (A). SNS-to-email doesn't process objects
+    (B), and polling ListObjects is inefficient and racy (D).
+  ref: 'concepts.md#s3-event-notifications-and-event-driven-patterns'
+- id: aws-storage-s3-deep-dive-036
+  difficulty: intermediate
+  tags:
+  - durability
+  - availability
+  question: |
+    What is the key difference between durability and availability in S3?
+  options:
+  - Durability is whether your bytes survive; availability is whether you can access them right now (SLA)
+  - They are the same thing measured in different units
+  - Availability is always higher than durability
+  - Durability applies only to Glacier classes
+  answer: 0
+  explanation: |
+    Durability = will the data survive (S3 = 11 nines nearly everywhere).
+    Availability = can you reach it at a given moment (Standard 99.99%, IA 99.9%,
+    One Zone-IA 99.5%). They're distinct (B), durability's 11 nines exceeds
+    availability SLAs (C), and durability applies to all classes (D).
+  ref: 'concepts.md#durability-availability-and-multi-az-design'
+- id: aws-storage-s3-deep-dive-037
+  difficulty: advanced
+  tags:
+  - request-rate
+  - hot-partition
+  - key-design
+  question: |
+    A pipeline writes millions of objects per hour keyed by
+    `YYYY/MM/DD/HH/<uuid>`. During each hour, writers hammer one date/hour prefix
+    and see 503 SlowDown. What is the most effective redesign?
+  options:
+  - Reduce the number of writers to stay under 3,500 PUT/s total
+  - Introduce a distributing component early in the key (e.g. a leading shard/hash bucket) so writes fan
+    across many prefixes
+  - Move to a single giant object and append
+  - Switch the bucket to Glacier Flexible Retrieval
+  answer: 1
+  explanation: |
+    Limits are per prefix. A leading time component means all concurrent writers
+    share one prefix — one hot partition. Adding a distributing prefix element
+    (shard/hash before the date) fans writes across many partitions, multiplying
+    throughput. Throttling all writers wastes capacity (A), S3 objects can't be
+    appended (C), and Glacier is archival, not a throughput fix (D).
+  ref: 'concepts.md#request-rate-scaling-and-key-prefix-design'
+- id: aws-storage-s3-deep-dive-038
+  difficulty: advanced
+  tags:
+  - request-rate
+  - backoff
+  - resilience
+  question: |
+    During a sudden traffic ramp, clients get intermittent 503 SlowDown from a
+    single prefix. Which is the correct interpretation and handling?
+  options:
+  - It's a hard cap; you must shard into a new bucket immediately or requests will fail forever
+  - S3 is repartitioning under load; retry with exponential backoff and jitter while spreading the key
+    space, and throughput recovers
+  - Enable versioning to remove the limit
+  - It indicates data corruption; restore from backup
+  answer: 1
+  explanation: |
+    503 SlowDown during a ramp means S3 is adaptively splitting the partition;
+    exponential backoff with jitter plus key-space distribution lets throughput
+    catch up. It's not a permanent per-bucket cap (A), versioning is unrelated
+    (C), and it's not corruption (D).
+  ref: 'concepts.md#request-rate-scaling-and-key-prefix-design'
+- id: aws-storage-s3-deep-dive-039
+  difficulty: advanced
+  tags:
+  - estimation
+  - request-rate
+  question: |
+    A read-heavy service must sustain ~100,000 GET/s from S3. Roughly how many
+    partitioned prefixes must the key design distribute across, at minimum?
+  options:
+  - About 2 prefixes
+  - It is impossible; S3 caps at 5,500 GET/s per bucket
+  - About 100 prefixes because the per-prefix limit is 1,000 GET/s
+  - About 19 prefixes (100,000 / 5,500)
+  answer: 3
+  explanation: |
+    At 5,500 GET/s per prefix, 100,000 / 5,500 ≈ 19 prefixes minimum, and there's
+    no cap on prefix count, so the design is feasible. The per-prefix GET limit is
+    5,500, not 1,000 (C), and the limit is per prefix not per bucket, so it's not
+    impossible (B); 2 prefixes is far too few (A).
+  ref: 'concepts.md#request-rate-scaling-and-key-prefix-design'
+- id: aws-storage-s3-deep-dive-040
+  difficulty: advanced
+  tags:
+  - replication
+  - rtc
+  - sla
+  question: |
+    A DR requirement states 99.99% of new objects must exist in the secondary
+    Region within 15 minutes, with metrics to prove it. Which S3 feature meets
+    this?
+  options:
+  - S3 Replication Time Control (RTC), which adds a 15-minute replication SLA and metrics
+  - Standard Cross-Region Replication without add-ons
+  - Same-Region Replication
+  - Lifecycle transition to another Region
+  answer: 0
+  explanation: |
+    Replication Time Control adds a contractual SLA to replicate 99.99% of objects
+    within 15 minutes, plus replication metrics/events. Plain CRR is best-effort
+    with unbounded lag and no SLA (B). SRR stays in one Region (C), and lifecycle
+    rules can't move data across Regions (D).
+  ref: 'concepts.md#cross-region-and-same-region-replication'
+- id: aws-storage-s3-deep-dive-041
+  difficulty: advanced
+  tags:
+  - replication
+  - existing-objects
+  question: |
+    You enable replication on a bucket that already contains 50 TB of objects.
+    What happens to the pre-existing objects, and how do you replicate them?
+  options:
+  - They replicate automatically within minutes
+  - You must delete and re-upload them
+  - Only new objects replicate going forward; use S3 Batch Replication to copy existing objects
+  - Existing objects can never be replicated
+  answer: 2
+  explanation: |
+    Replication configuration applies only to objects written after it's enabled;
+    existing objects require S3 Batch Replication (a Batch Operations job).
+    They don't auto-replicate (A), you needn't delete/re-upload (B), and existing
+    objects can be replicated via Batch (D is false).
+  ref: 'concepts.md#cross-region-and-same-region-replication'
+- id: aws-storage-s3-deep-dive-042
+  difficulty: advanced
+  tags:
+  - replication
+  - delete-markers
+  - semantics
+  question: |
+    In default S3 replication behavior, what happens to DELETE operations?
+  options:
+  - All deletes, including specific version deletes, are replicated to keep buckets identical
+  - Deletes are replicated only in Same-Region Replication
+  - No deletes of any kind are ever replicated
+  - Delete markers can be replicated (configurable), but deletions of specific versions are NOT replicated
+  answer: 3
+  explanation: |
+    Delete marker replication is configurable, but permanent deletes of specific
+    version IDs are not replicated — a safeguard so a destructive version delete
+    on the source can't wipe the replica. So (A) and (C) are wrong, and this
+    applies to CRR and SRR alike (B).
+  ref: 'concepts.md#cross-region-and-same-region-replication'
+- id: aws-storage-s3-deep-dive-043
+  difficulty: advanced
+  tags:
+  - encryption
+  - kms
+  - cost
+  question: |
+    Which statement about SSE-KMS with S3 Bucket Keys is correct?
+  options:
+  - Bucket Keys reduce the number of KMS API calls (and cost/throttling risk) by using a short-lived bucket-level
+    data key
+  - Bucket Keys disable encryption to save cost
+  - Bucket Keys require SSE-C
+  - Bucket Keys give per-object CloudTrail decrypt events for finer auditing
+  answer: 0
+  explanation: |
+    S3 Bucket Keys generate a bucket-level data key so S3 makes far fewer KMS
+    calls, cutting KMS cost and throttling risk at high throughput. They don't
+    disable encryption (B) or require SSE-C (C). They actually REDUCE per-object
+    KMS/CloudTrail granularity (aggregated to bucket level), so (D) is wrong.
+  ref: 'concepts.md#encryption-with-sse-s3-sse-kms-and-sse-c'
+- id: aws-storage-s3-deep-dive-044
+  difficulty: advanced
+  tags:
+  - encryption
+  - sse-c
+  - trade-offs
+  question: |
+    What is the defining trade-off of SSE-C (server-side encryption with
+    customer-provided keys)?
+  options:
+  - AWS stores your keys and rotates them automatically
+  - You supply the encryption key on every request over TLS and S3 does not store it, giving full key
+    control but no S3-managed rotation
+  - It is the cheapest option because it eliminates all request costs
+  - It provides per-request CloudTrail decrypt logs like SSE-KMS
+  answer: 1
+  explanation: |
+    With SSE-C you send the key with each request; S3 uses it to encrypt/decrypt
+    and then discards it, so you get complete key control but bear all key
+    management and lose S3/KMS-side rotation and audit. AWS does not store or
+    rotate SSE-C keys (A), it doesn't remove request costs (C), and it lacks
+    KMS-style per-request audit logs (D).
+  ref: 'concepts.md#encryption-with-sse-s3-sse-kms-and-sse-c'
+- id: aws-storage-s3-deep-dive-045
+  difficulty: advanced
+  tags:
+  - access-control
+  - evaluation
+  question: |
+    A principal has an IAM policy allowing `s3:GetObject`, but a bucket policy has
+    an explicit Deny for requests where `aws:SecureTransport` is false. Over HTTP
+    (non-TLS), what is the result?
+  options:
+  - Denied, because an explicit Deny always overrides any Allow
+  - Allowed, because the IAM Allow wins
+  - Allowed only for objects under 128 KB
+  - The request is silently upgraded to HTTPS and allowed
+  answer: 0
+  explanation: |
+    In AWS policy evaluation, an explicit Deny anywhere overrides any Allow. The
+    bucket policy Deny on non-TLS requests blocks the HTTP GET regardless of the
+    IAM Allow. Allows never beat an explicit Deny (B), size is irrelevant (C), and
+    S3 does not silently upgrade the protocol (D).
+  ref: 'concepts.md#access-control-bucket-policies-and-block-public-access'
+- id: aws-storage-s3-deep-dive-046
+  difficulty: advanced
+  tags:
+  - access-points
+  - multi-tenant
+  question: |
+    A shared data-lake bucket must expose different access policies to dozens of
+    applications without one unwieldy bucket policy. Which feature fits best?
+  options:
+  - Use S3 Access Points, each a named endpoint with its own policy (optionally VPC-restricted)
+  - Create one bucket per application
+  - Enable Requester Pays
+  - Use SSE-C per application
+  answer: 0
+  explanation: |
+    S3 Access Points provide named endpoints, each with its own tailored policy
+    (and optional VPC-only restriction), decomposing a giant bucket policy for
+    shared datasets at scale. One bucket per app hits the bucket limit and
+    multiplies ops (B). Requester Pays is about billing (C), and SSE-C is
+    encryption, not access management (D).
+  ref: 'concepts.md#access-control-bucket-policies-and-block-public-access'
+- id: aws-storage-s3-deep-dive-047
+  difficulty: advanced
+  tags:
+  - transfer-acceleration
+  - trade-offs
+  - decision
+  question: |
+    Mobile clients on other continents upload large videos to a bucket in
+    us-east-1 and complain about slow, failing uploads. Which combination is the
+    best-justified design?
+  options:
+  - Serve the bucket publicly and let clients retry
+  - Switch the bucket to One Zone-IA to speed writes
+  - Multipart upload with parallel parts plus S3 Transfer Acceleration (edge ingest onto the AWS backbone),
+    and a lifecycle rule to abort incomplete MPUs
+  - Route uploads through a single EC2 proxy in us-east-1
+  answer: 2
+  explanation: |
+    Distant large uploads benefit from multipart parallelism (resilience +
+    throughput) and Transfer Acceleration, which ingests at the nearest CloudFront
+    edge onto the AWS backbone; the abort-incomplete-MPU rule prevents orphaned
+    parts. Public buckets don't help speed (A), One Zone-IA is a durability/cost
+    change (B), and a single EC2 proxy is a bottleneck (D).
+  ref: 'concepts.md#multipart-upload-byte-range-and-transfer-acceleration'
+- id: aws-storage-s3-deep-dive-048
+  difficulty: advanced
+  tags:
+  - transfer-acceleration
+  - trade-offs
+  question: |
+    When is S3 Transfer Acceleration NOT worth enabling?
+  options:
+  - When clients are far from the bucket Region and moving large volumes over the public internet
+  - When you need resumable uploads
+  - When clients are already close to the bucket Region or on fast paths, where the extra per-GB fee buys
+    little or no speedup
+  - When durability is a concern
+  answer: 2
+  explanation: |
+    Transfer Acceleration adds a per-GB fee and helps only long-distance internet
+    transfers; for nearby clients or already-fast paths it may not help (or can be
+    slower), so it's not worth the cost. It IS worth it for distant large uploads
+    (A is a good use case). Resumability comes from multipart (B), and durability
+    is unrelated (D).
+  ref: 'concepts.md#multipart-upload-byte-range-and-transfer-acceleration'
+- id: aws-storage-s3-deep-dive-049
+  difficulty: advanced
+  tags:
+  - events
+  - eventbridge
+  - trade-offs
+  question: |
+    Why might you choose EventBridge over direct S3-to-Lambda/SQS notifications
+    for a growing event-driven platform?
+  options:
+  - EventBridge is always cheaper and lower-latency than direct notifications
+  - EventBridge guarantees exactly-once, strictly-ordered delivery
+  - Direct notifications cannot invoke Lambda at all
+  - EventBridge offers richer content-based filtering, multiple targets/fan-out, archive and replay, and
+    cross-account routing
+  answer: 3
+  explanation: |
+    EventBridge adds content-based filtering, multi-target fan-out, archive/replay,
+    and cross-account routing beyond the prefix/suffix filtering and single-target
+    model of direct S3 notifications — at slightly higher cost/latency, so it's
+    not always cheaper/faster (A). Direct notifications can invoke Lambda (C), and
+    EventBridge is not exactly-once/strictly-ordered (B).
+  ref: 'concepts.md#s3-event-notifications-and-event-driven-patterns'
+- id: aws-storage-s3-deep-dive-050
+  difficulty: advanced
+  tags:
+  - lambda
+  - limits
+  - processing
+  question: |
+    A Lambda triggered by S3 must process individual uploaded files that can be up
+    to 50 GB. Which constraint makes a naive "download the whole object into
+    memory or /tmp" approach fail, and what's the fix?
+  options:
+  - Lambda's 15-minute timeout; there is no size issue
+  - Lambda cannot read from S3 at all
+  - S3 objects can't exceed 5 GB, so 50 GB is impossible
+  - Lambda caps at 10 GB memory and 10 GB ephemeral /tmp, so a 50 GB object won't fit; stream via byte-range
+    GETs or use Fargate/EMR
+  answer: 3
+  explanation: |
+    Lambda maxes at 10 GB memory and 10 GB /tmp, so a 50 GB object can't be held
+    whole; stream it with byte-range reads or move to Fargate/EMR for large files.
+    The timeout matters too but isn't the size blocker (A). S3 objects go to 5 TiB,
+    not 5 GB (C), and Lambda can read S3 (B).
+  ref: 'concepts.md#s3-event-notifications-and-event-driven-patterns'
+- id: aws-storage-s3-deep-dive-051
+  difficulty: advanced
+  tags:
+  - api-gateway
+  - limits
+  - async
+  question: |
+    You expose a synchronous REST endpoint via API Gateway that triggers heavy S3
+    object processing sometimes taking minutes. What limitation forces an async
+    design?
+  options:
+  - API Gateway cannot invoke Lambda
+  - API Gateway has a 29-second integration timeout, so long jobs must be made async (return a job id,
+    process in background)
+  - S3 blocks synchronous reads
+  - There is no limit; keep it synchronous
+  answer: 1
+  explanation: |
+    API Gateway enforces a 29-second integration timeout, so a multi-minute job
+    can't complete synchronously — return a job id and process asynchronously
+    (queue + worker, poll or callback). API Gateway can invoke Lambda (A), S3
+    doesn't block sync reads (C), and there is indeed a limit (D).
+  ref: 'concepts.md#s3-event-notifications-and-event-driven-patterns'
+- id: aws-storage-s3-deep-dive-052
+  difficulty: advanced
+  tags:
+  - storage-comparison
+  - one-zone
+  - durability
+  question: |
+    A team stores their ONLY copy of critical, non-reproducible data in S3 One
+    Zone-IA to save money. What risk are they taking?
+  options:
+  - One Zone-IA keeps data in a single AZ, so destruction of that AZ permanently loses the data despite
+    its 11-nines-by-design rating
+  - None; One Zone-IA has the same protection as Standard
+  - One Zone-IA has only 3 nines of durability against bit rot
+  - One Zone-IA cannot be read after 30 days
+  answer: 0
+  explanation: |
+    One Zone-IA is designed for 11 nines of durability but within one AZ, so an AZ
+    loss destroys the only copy — appropriate only for re-creatable data. It's not
+    the same protection as multi-AZ Standard (B), its bit-rot durability isn't 3
+    nines (C), and data remains readable past 30 days (the 30-day floor is a
+    billing minimum) (D).
+  ref: 'concepts.md#s3-versus-ebs-versus-efs'
+- id: aws-storage-s3-deep-dive-053
+  difficulty: advanced
+  tags:
+  - egress
+  - cloudfront
+  - cost
+  question: |
+    A media site serves large files directly from S3 to internet users worldwide
+    and egress cost is high. Which change most reduces cost while improving
+    performance?
+  options:
+  - Move objects to Standard-IA
+  - Serve through CloudFront (free origin-to-CDN transfer, cached lower-cost egress, edge proximity) in
+    front of a private bucket
+  - Enable Requester Pays so users pay
+  - Replicate the bucket to five Regions
+  answer: 1
+  explanation: |
+    Fronting S3 with CloudFront makes origin-to-CDN transfer free, lowers egress
+    rates, caches at edges, and improves latency — cutting cost and improving
+    delivery. Standard-IA cuts storage, not egress, and adds retrieval fees for
+    hot data (A). Requester Pays shifts (not reduces) cost and is odd for a public
+    site (C). Five-Region replication increases cost (D).
+  ref: 'concepts.md#egress-and-data-transfer-economics'
+- id: aws-storage-s3-deep-dive-054
+  difficulty: advanced
+  tags:
+  - lifecycle
+  - cost
+  - small-objects
+  question: |
+    A bucket holds billions of tiny objects. An engineer proposes a lifecycle rule
+    to transition them all to Glacier to cut storage cost. What hidden cost should
+    you warn about?
+  options:
+  - Glacier has worse durability, so data may be lost
+  - Lifecycle rules cannot target Glacier
+  - Each transition is a per-object request charge, so transitioning billions of tiny objects can cost
+    more than the storage savings; aggregate them first
+  - Objects in Glacier can never be restored
+  answer: 2
+  explanation: |
+    Lifecycle transitions incur per-object request charges; for billions of tiny
+    objects those fees can exceed the storage savings, so you should aggregate
+    (e.g. Parquet/gz) before archiving. Glacier has the same 11-nines durability
+    (A), lifecycle can target Glacier (B), and Glacier objects can be restored (D).
+  ref: 'concepts.md#lifecycle-policies-and-intelligent-tiering'
+- id: aws-storage-s3-deep-dive-055
+  difficulty: advanced
+  tags:
+  - object-lambda
+  - transform
+  question: |
+    You need to redact PII from objects on the fly for certain callers without
+    duplicating the data into a second bucket. Which capability fits?
+  options:
+  - S3 Select
+  - Cross-Region Replication
+  - S3 Object Lambda, which runs your function on the GET path to transform data as it's returned
+  - Requester Pays
+  answer: 2
+  explanation: |
+    S3 Object Lambda invokes your Lambda on the GET path to transform (redact,
+    reformat, resize) object data as it's read, avoiding a duplicated copy. S3
+    Select only filters/projects a single object, it can't run arbitrary redaction
+    logic (A). Replication and Requester Pays are unrelated (B, D).
+  ref: 'concepts.md#s3-select-and-data-querying'
+- id: aws-storage-s3-deep-dive-056
+  difficulty: advanced
+  tags:
+  - consistency
+  - coordination
+  - anti-pattern
+  question: |
+    A team wants to implement a distributed lock by writing a `lock` object to S3
+    and checking for its existence. Why is S3 a poor fit, and what's better?
+  options:
+  - S3 has no multi-object atomic compare-and-swap/transaction semantics for coordination; use DynamoDB
+    conditional writes for locking
+  - S3 is eventually consistent, so the lock check is always stale; nothing is better
+  - S3 locks work perfectly and are the recommended approach
+  - You must use MFA delete to build a lock
+  answer: 0
+  explanation: |
+    Although S3 is now strongly consistent per key and even supports conditional
+    creates, it lacks general transactional/CAS coordination semantics and isn't a
+    lock service; DynamoDB conditional writes (or a lock table) are the right tool.
+    S3 is not eventually consistent anymore (B), it's not a recommended lock store
+    (C), and MFA delete is irrelevant to locking (D).
+  ref: 'concepts.md#strong-read-after-write-consistency'
+- id: aws-storage-s3-deep-dive-057
+  difficulty: advanced
+  tags:
+  - buckets
+  - multi-tenant
+  - limits
+  question: |
+    A SaaS with 200,000 tenants plans one S3 bucket per tenant for isolation. What
+    is the main problem and the better approach?
+  options:
+  - The default ~10,000-bucket-per-account soft limit (and ops overhead) makes per-tenant buckets impractical;
+    use prefixes plus IAM conditions or Access Points for isolation
+  - No problem; buckets are unlimited
+  - Buckets can't hold tenant data; use EBS volumes per tenant
+  - You must create a separate AWS account per tenant
+  answer: 0
+  explanation: |
+    Accounts default to ~10,000 buckets (raisable but capped around a million and
+    operationally heavy). Model tenants as prefixes with IAM policy conditions
+    (`s3:prefix`) or per-tenant Access Points inside shared buckets. Buckets aren't
+    unlimited (B), S3 does hold tenant data (C), and per-account-per-tenant is
+    extreme overkill (D).
+  ref: 'concepts.md#s3-object-model-buckets-keys-and-prefixes'
+- id: aws-storage-s3-deep-dive-058
+  difficulty: advanced
+  tags:
+  - storage-comparison
+  - efs
+  - ebs
+  - decision
+  question: |
+    A legacy application requires a shared POSIX filesystem with file locking,
+    mounted by an autoscaling fleet across three AZs. Which storage service fits,
+    and why not the others?
+  options:
+  - EFS, because it provides a concurrent multi-AZ POSIX/NFS filesystem with locking; EBS is single-AZ/single-attach
+    and S3 lacks POSIX semantics
+  - EBS, because it's the fastest block storage
+  - S3, because it's the cheapest per GB
+  - Instance store, for lowest latency
+  answer: 0
+  explanation: |
+    EFS is the shared, multi-AZ POSIX/NFS filesystem an autoscaling fleet can
+    mount concurrently with locking. EBS is generally single-AZ and single-attach
+    (B). S3 has no POSIX semantics/locking despite low cost (C), and instance
+    store is ephemeral and node-local (D).
+  ref: 'concepts.md#s3-versus-ebs-versus-efs'
+- id: aws-storage-s3-deep-dive-059
+  difficulty: advanced
+  tags:
+  - presigned-urls
+  - upload-validation
+  question: |
+    You want browsers to upload directly to S3 but must enforce a maximum file
+    size and content type at upload time. Which mechanism is more appropriate than
+    a plain presigned PUT URL?
+  options:
+  - A presigned PUT URL always enforces content-length automatically
+  - Turn on Transfer Acceleration
+  - Enable Object Lock
+  - An S3 POST policy (browser form upload) with content-length-range and content-type conditions
+  answer: 3
+  explanation: |
+    An S3 POST policy lets you embed conditions like content-length-range and
+    allowed content-type into a signed browser form upload, enforcing size/type at
+    upload. A plain presigned PUT doesn't inherently enforce size (A). Object Lock
+    is WORM retention (C), and Transfer Acceleration only speeds transfer (B).
+  ref: 'concepts.md#presigned-urls-and-static-website-hosting'
+- id: aws-storage-s3-deep-dive-060
+  difficulty: advanced
+  tags:
+  - replication
+  - multi-region-access-point
+  question: |
+    You want a single global endpoint over buckets replicated in multiple Regions,
+    with automatic failover routing to a healthy Region. Which feature provides
+    this?
+  options:
+  - S3 Transfer Acceleration
+  - CloudFront signed cookies
+  - S3 Multi-Region Access Points
+  - S3 Select
+  answer: 2
+  explanation: |
+    Multi-Region Access Points expose one global endpoint over replicated buckets
+    and route requests to the nearest healthy Region with failover. Transfer
+    Acceleration speeds single-bucket transfers (A), signed cookies are CloudFront
+    auth (B), and S3 Select is single-object query (D).
+  ref: 'concepts.md#cross-region-and-same-region-replication'
+- id: aws-storage-s3-deep-dive-061
+  difficulty: expert
+  tags:
+  - consistency
+  - cdn
+  - staleness
+  question: |
+    An app updates an object in S3 and immediately reads it through the CloudFront
+    distribution in front of the bucket, but gets the OLD content. Given S3 is
+    strongly consistent, what explains this?
+  options:
+  - S3 lost strong consistency for overwrites
+  - The CloudFront cache TTL, not S3, governs staleness; the edge is serving a cached copy until it expires
+    or is invalidated
+  - The object was replicated to another Region
+  - Strong consistency only applies to PUTs of new objects, never overwrites
+  answer: 1
+  explanation: |
+    S3 overwrite reads are strongly consistent, but a CDN in front caches copies;
+    the stale read comes from CloudFront's TTL — fix with cache invalidation or
+    versioned object keys. S3 didn't lose consistency (A), replication isn't
+    involved for a direct read (C), and strong consistency does cover overwrites
+    (D).
+  ref: 'concepts.md#strong-read-after-write-consistency'
+- id: aws-storage-s3-deep-dive-062
+  difficulty: expert
+  tags:
+  - request-rate
+  - estimation
+  - mixed-workload
+  question: |
+    A design must sustain 28,000 PUT/s and 33,000 GET/s uniformly. If keys are
+    evenly distributed across N prefixes, what minimum N satisfies BOTH limits
+    (3,500 PUT/s and 5,500 GET/s per prefix)?
+  options:
+  - N = 6, driven only by the GET budget (33,000 / 5,500)
+  - N = 8, because PUT needs 28,000 / 3,500 = 8 and GET needs 33,000 / 5,500 = 6, so the binding minimum
+    is the larger, 8
+  - N = 14, you must add the PUT and GET prefix needs together
+  - N = 1, because the limits are per bucket
+  answer: 1
+  explanation: |
+    A single prefix serves both 3,500 PUT/s and 5,500 GET/s simultaneously, so
+    compute each budget independently and take the larger: PUT needs 28,000/3,500
+    = 8 prefixes; GET needs 33,000/5,500 = 6 prefixes. The binding minimum is
+    max(8, 6) = 8. Using only the GET figure undercounts (A), you don't add the
+    two because one prefix covers both budgets (C), and limits are per prefix, not
+    per bucket (D).
+  ref: 'concepts.md#request-rate-scaling-and-key-prefix-design'
+- id: aws-storage-s3-deep-dive-063
+  difficulty: expert
+  tags:
+  - cost
+  - estimation
+  - egress
+  question: |
+    A bucket stores 100 TB in Standard (~$0.023/GB-mo) and serves 500 TB/month to
+    the internet (~$0.09/GB). Roughly, which cost dominates and by how much?
+  options:
+  - 'Storage dominates: ~$2,300 storage vs ~$450 egress'
+  - Neither; requests always dominate both
+  - They're about equal
+  - 'Egress dominates: storage ~$2,300/mo vs egress ~$45,000/mo — egress is ~20x larger'
+  answer: 3
+  explanation: |
+    Storage ≈ 100,000 GB × $0.023 ≈ $2,300/mo. Egress ≈ 500,000 GB × $0.09 ≈
+    $45,000/mo — roughly 20x storage. This is why egress (mitigated by CloudFront)
+    usually dominates high-traffic designs, not raw storage (A, C). Requests are
+    real but here egress dwarfs them (B).
+  ref: 'concepts.md#egress-and-data-transfer-economics'
+- id: aws-storage-s3-deep-dive-064
+  difficulty: expert
+  tags:
+  - replication
+  - active-active
+  - semantics
+  question: |
+    For an active-active setup where two Regions both accept writes and replicate
+    to each other, which S3 capability is required to correctly propagate
+    replica-side changes and avoid loops?
+  options:
+  - Standard one-way CRR is enough for active-active
+  - Two-way replication with replica modification sync (and appropriate delete-marker handling) to propagate
+    changes made on replicas without infinite loops
+  - Same-Region Replication only
+  - Object Lock in Compliance mode
+  answer: 1
+  explanation: |
+    Active-active needs two-way replication with replica modification sync so
+    metadata/changes made on a replica flow back correctly, plus careful
+    delete-marker settings to avoid loops. One-way CRR handles only one direction
+    (A), SRR stays in-Region (C), and Object Lock is immutability, unrelated to
+    bidirectional replication (D).
+  ref: 'concepts.md#cross-region-and-same-region-replication'
+- id: aws-storage-s3-deep-dive-065
+  difficulty: expert
+  tags:
+  - object-lock
+  - compliance
+  - risk
+  question: |
+    A compliance team enables Object Lock in Compliance mode with a 7-year
+    retention, then realizes they set 70 years by mistake on petabytes of data.
+    What is true?
+  options:
+  - In Compliance mode, no one — including root — can shorten or delete before expiry, so you are committed
+    to storing/paying until it expires
+  - The root account can immediately shorten the retention
+  - You can switch to Governance mode to fix it
+  - Deleting the bucket removes the retention obligation
+  answer: 0
+  explanation: |
+    Compliance mode is truly immutable: neither IAM users nor root can shorten
+    retention or delete before expiry, so a 70-year setting locks in storage cost
+    for 70 years — hence AWS advice to test with Governance mode first. Root can't
+    shorten it (B), you can't downgrade a locked object to Governance to escape (C),
+    and you can't delete the bucket with locked objects to void it (D).
+  ref: 'concepts.md#versioning-mfa-delete-and-object-lock-worm'
+- id: aws-storage-s3-deep-dive-066
+  difficulty: expert
+  tags:
+  - durability
+  - failure-modes
+  - region
+  question: |
+    Which failure does a single-Region S3 Standard bucket (no replication) NOT
+    tolerate?
+  options:
+  - A full-Region outage or Region-wide event
+  - Loss of one Availability Zone
+  - Loss of a single disk or storage node
+  - Bit rot / silent data corruption
+  answer: 0
+  explanation: |
+    S3 Standard spans ≥3 AZs and self-heals, so it tolerates disk/node loss (C),
+    an AZ loss (B), and bit rot via checksums (D). What a single-Region bucket
+    does NOT tolerate is a full-Region outage — that requires Cross-Region
+    Replication / Multi-Region Access Points.
+  ref: 'concepts.md#durability-availability-and-multi-az-design'
+- id: aws-storage-s3-deep-dive-067
+  difficulty: expert
+  tags:
+  - intelligent-tiering
+  - small-objects
+  - cost
+  question: |
+    When can S3 Intelligent-Tiering be a POOR choice despite its "safe default"
+    reputation?
+  options:
+  - When you have an enormous number of very small objects (per-object monitoring fee dominates) or data
+    you KNOW is always hot (just use Standard)
+  - When access patterns are unknown
+  - When objects are larger than 128 KB
+  - When you need 11 nines of durability
+  answer: 0
+  explanation: |
+    Intelligent-Tiering charges a per-object monitoring fee, so a huge count of
+    tiny objects makes monitoring dominate; and for always-hot data plain Standard
+    is cheaper with no monitoring fee. Unknown access is exactly where it shines
+    (B). It has no upper size restriction (C) and offers full 11-nines durability
+    (D).
+  ref: 'concepts.md#lifecycle-policies-and-intelligent-tiering'
+- id: aws-storage-s3-deep-dive-068
+  difficulty: expert
+  tags:
+  - concurrency
+  - conditional-writes
+  - consistency
+  question: |
+    Two clients race to create the same S3 key and you must ensure only the first
+    write wins without an external lock. Which native S3 mechanism helps most?
+  options:
+  - There is no way; S3 always lets the last writer win
+  - Enable versioning so both writes are kept and pick one later
+  - 'A conditional write using `If-None-Match: *` so the PUT fails if the object already exists (and ETag/If-Match
+    preconditions for single-object optimistic concurrency)'
+  - Use MFA delete
+  answer: 2
+  explanation: |
+    S3 supports conditional writes: `If-None-Match: *` makes a PUT succeed only if
+    the object doesn't exist (prevents overwrite races), and ETag/If-Match enables
+    single-object optimistic concurrency. So last-writer-wins isn't forced (A).
+    Versioning keeps both but doesn't arbitrate a winner atomically (B), and MFA
+    delete is unrelated (D).
+  ref: 'concepts.md#strong-read-after-write-consistency'
+- id: aws-storage-s3-deep-dive-069
+  difficulty: expert
+  tags:
+  - migration
+  - snow
+  - decision
+  - estimation
+  question: |
+    You must move 500 TB from an on-prem datacenter to S3, and your internet
+    uplink is 500 Mbps. Roughly how long would a pure online transfer take, and
+    what's the better option?
+  options:
+  - About a day; just use aws s3 cp
+  - Impossible to move data over 100 TB to S3
+  - About an hour with Transfer Acceleration
+  - Roughly 90+ days at 500 Mbps (~5.4 GB/min), so use AWS Snowball (offline device) or DataSync over
+    Direct Connect instead
+  answer: 3
+  explanation: |
+    500 Mbps ≈ 62.5 MB/s ≈ ~5.4 TB/day, so 500 TB takes ~90+ days online —
+    impractical. Snow family ships a physical device (petabyte-scale offline
+    transfer), beating the internet past a break-even; DataSync/Direct Connect
+    helps for sustained online migration. It's not a day/hour (A, C), and >100 TB
+    is very possible (B).
+  ref: 'concepts.md#multipart-upload-byte-range-and-transfer-acceleration'
+- id: aws-storage-s3-deep-dive-070
+  difficulty: expert
+  tags:
+  - requester-pays
+  - cost
+  - sharing
+  question: |
+    You publish a large public research dataset in S3 but don't want to pay for
+    others' downloads. Which feature shifts request and egress costs to the
+    caller?
+  options:
+  - Requester Pays buckets, which charge the requesting account for request and data-transfer costs
+  - Block Public Access
+  - Object Lock
+  - SSE-KMS
+  answer: 0
+  explanation: |
+    Requester Pays makes the caller's account pay request and egress costs
+    (they must acknowledge with `x-amz-request-payer`), letting you share big
+    datasets without footing the download bill. BPA controls public access (B),
+    Object Lock is WORM (C), and SSE-KMS is encryption (D).
+  ref: 'concepts.md#egress-and-data-transfer-economics'
+- id: aws-storage-s3-deep-dive-071
+  difficulty: expert
+  tags:
+  - checksums
+  - integrity
+  question: |
+    To guarantee end-to-end integrity of a large object upload so S3 rejects a
+    corrupted transfer, which mechanism do you use?
+  options:
+  - Rely on TCP checksums only
+  - Provide a checksum (e.g. Content-MD5, or CRC32/CRC32C/SHA-256/CRC64NVME) so S3 verifies the received
+    bytes and rejects a mismatch
+  - Enable versioning
+  - Use One Zone-IA for faster integrity checks
+  answer: 1
+  explanation: |
+    S3 supports upload-time checksums (Content-MD5 and additional algorithms like
+    CRC32, CRC32C, SHA-1, SHA-256, CRC64NVME); if the computed checksum doesn't
+    match, S3 rejects the upload, ensuring end-to-end integrity. TCP checksums are
+    weak and not end-to-end guarantees (A). Versioning (C) and storage class (D)
+    don't validate transfer integrity.
+  ref: 'concepts.md#durability-availability-and-multi-az-design'
+- id: aws-storage-s3-deep-dive-072
+  difficulty: expert
+  tags:
+  - events
+  - ordering
+  - versioning
+  question: |
+    A workflow needs to react to object updates in strict order, but S3 events are
+    unordered and may duplicate. What is the most robust approach?
+  options:
+  - Trust S3 to deliver events in order after enabling versioning
+  - Switch to One Zone-IA to enforce ordering
+  - Design consumers to be idempotent and reconstruct ordering from object version IDs / sequencer values
+    in the event, rather than assuming delivery order
+  - Poll ListObjects and process alphabetically
+  answer: 2
+  explanation: |
+    S3 event notifications include a `sequencer` and (with versioning) version IDs;
+    robust consumers are idempotent and derive ordering from those fields instead
+    of trusting delivery order. Versioning doesn't order events (A), storage class
+    is irrelevant (B), and alphabetical ListObjects polling doesn't reflect update
+    order and is racy (D).
+  ref: 'concepts.md#s3-event-notifications-and-event-driven-patterns'
+- id: aws-storage-s3-deep-dive-073
+  difficulty: intermediate
+  tags:
+  - storage-classes
+  - glacier-instant
+  question: |
+    Which storage class is best for archival data that is rarely accessed but,
+    when needed, must be retrieved in MILLISECONDS?
+  options:
+  - S3 Glacier Deep Archive
+  - S3 Glacier Flexible Retrieval
+  - S3 Standard
+  - S3 Glacier Instant Retrieval
+  answer: 3
+  explanation: |
+    Glacier Instant Retrieval gives millisecond access at archive pricing (with a
+    90-day minimum and retrieval fee) — ideal for rarely accessed data that still
+    needs instant reads. Deep Archive and Flexible have hours/minutes retrieval
+    (A, B), and Standard is for hot data, not archival cost savings (C).
+  ref: 'concepts.md#storage-classes-and-cost-latency-trade-offs'
+- id: aws-storage-s3-deep-dive-074
+  difficulty: intermediate
+  tags:
+  - security
+  - mfa-delete
+  question: |
+    Which statement about S3 MFA Delete is accurate?
+  options:
+  - It can be enabled by any IAM user with S3 permissions
+  - It is required for all buckets by default
+  - It encrypts objects with a hardware token
+  - It requires an MFA token to permanently delete versions or change the versioning state, and can only
+    be enabled by the root account
+  answer: 3
+  explanation: |
+    MFA Delete requires an MFA token to permanently delete object versions or
+    change versioning state, and it can only be enabled by the bucket-owning root
+    account, which also complicates automation. It's not enableable by any IAM
+    user (A), doesn't encrypt (C), and is optional, not default (B).
+  ref: 'concepts.md#versioning-mfa-delete-and-object-lock-worm'
+- id: aws-storage-s3-deep-dive-075
+  difficulty: advanced
+  tags:
+  - storage-comparison
+  - ebs
+  - multi-attach
+  question: |
+    Which statement best captures the EBS constraint that pushes architects toward
+    S3 or EFS for shared data?
+  options:
+  - EBS volumes are regional and mountable by any instance in the Region
+  - An EBS volume lives in a single AZ and is normally attached to one instance (multi-attach exists only
+    for specific io2 volumes with a cluster-aware filesystem)
+  - EBS has lower durability than S3 for the same data
+  - EBS cannot be encrypted
+  answer: 1
+  explanation: |
+    EBS is single-AZ and normally single-attach; multi-attach is limited to
+    certain io2 volumes and needs a cluster-aware filesystem — so for broadly
+    shared access you reach for EFS (POSIX) or S3 (objects). EBS isn't regional/
+    any-instance (A), you snapshot to S3 for cross-AZ durability, and EBS can be
+    encrypted (D).
+  ref: 'concepts.md#s3-versus-ebs-versus-efs'
