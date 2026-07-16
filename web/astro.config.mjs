@@ -13,8 +13,20 @@ export default defineConfig({
   output: "static",
   integrations: [
     tailwind({ applyBaseStyles: false }),
-    preact(),
+    // `compat: true` aliases react/react-dom -> preact/compat so libraries that
+    // import from "react" (e.g. `motion/react`, used only by the practice quiz
+    // island) resolve against Preact. See ENHANCE-CONTRACT.md §Motion.
+    preact({ compat: true }),
   ],
+  vite: {
+    ssr: {
+      // Bundle motion (and its underlying framer-motion) through Vite during
+      // the prerender/SSR pass so the react -> preact/compat alias applies to
+      // their bare `import "react"` calls. Without this Node resolves "react"
+      // natively during prerender and the build fails (no react package).
+      noExternal: ["motion", "framer-motion"],
+    },
+  },
   markdown: {
     // GFM (tables in comparison sections) is enabled by default in Astro; we add
     // remark-gfm explicitly so the pipeline is unambiguous and portable.

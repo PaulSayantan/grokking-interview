@@ -15,11 +15,14 @@
  *     <h1>...</h1>
  *   </BaseLayout>
  *
- * Provides: responsive semantic header (site name -> "/", Catalog link, dark-mode
- * toggle persisted in localStorage with no flash of wrong theme), a <main id="main">
- * slot with a skip link, and a minimal footer.
+ * Provides: sticky, translucent, semantic header (site name -> "/", Catalog link,
+ * dark-mode toggle persisted in localStorage with no flash of wrong theme),
+ * Astro <ClientRouter /> view transitions (auto-disabled under reduced motion),
+ * a <main id="main"> slot with a skip link, and a minimal footer. The theme
+ * toggle re-initializes after each client-side navigation (astro:after-swap).
  */
 import "../styles/global.css";
+import { ClientRouter } from "astro:transitions";
 
 interface Props {
   title: string;
@@ -41,7 +44,12 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
     <title>{fullTitle}</title>
     {description && <meta name="description" content={description} />}
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    {/* No-flash theme init: runs before paint, sets data-theme from storage/OS. */}
+    <meta name="theme-color" content="#494ee6" />
+    {/*
+      No-flash theme init: runs before paint, sets data-theme from storage/OS.
+      transition:persist so the pre-paint state isn't lost across swaps; the
+      after-swap listener below re-applies it for client-side navigations.
+    */}
     <script is:inline>
       (function () {
         try {
@@ -56,30 +64,35 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
         }
       })();
     </script>
+    <ClientRouter />
   </head>
   <body class="min-h-screen flex flex-col">
     <a href="#main" class="skip-link">Skip to content</a>
 
     <header
-      class="sticky top-0 z-40 border-b backdrop-blur"
-      style="border-color: var(--color-border); background-color: color-mix(in srgb, var(--color-bg) 88%, transparent);"
+      class="sticky top-0 z-40 border-b backdrop-blur-md"
+      style="border-color: var(--color-border); background-color: color-mix(in oklab, var(--color-bg) 78%, transparent);"
     >
       <div
         class="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3"
       >
         <a
           href="/"
-          class="text-base font-bold no-underline"
+          class="group inline-flex items-center gap-2 text-base font-extrabold tracking-tight no-underline"
           style="color: var(--color-text);"
           aria-current={activeNav === "home" ? "page" : undefined}
         >
-          {siteName}
+          <span
+            class="inline-block h-6 w-6 shrink-0 rounded-lg"
+            style="background: var(--gradient-brand); box-shadow: var(--shadow-glow);"
+            aria-hidden="true"></span>
+          <span class="text-gradient">{siteName}</span>
         </a>
 
-        <nav aria-label="Primary" class="flex items-center gap-1 sm:gap-3">
+        <nav aria-label="Primary" class="flex items-center gap-1 sm:gap-2">
           <a
             href="/catalog"
-            class="rounded px-3 py-2 text-sm font-medium no-underline"
+            class="inline-flex min-h-[44px] items-center rounded-md px-3 py-2 text-sm font-semibold no-underline transition-colors hover:bg-[color:var(--color-surface-2)]"
             style={`color: ${activeNav === "catalog" ? "var(--color-primary)" : "var(--color-text-muted)"};`}
             aria-current={activeNav === "catalog" ? "page" : undefined}
           >
@@ -88,7 +101,7 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
           <button
             id="theme-toggle"
             type="button"
-            class="rounded-md border p-2 text-sm"
+            class="inline-flex h-[44px] w-[44px] items-center justify-center rounded-md border text-sm transition-colors hover:bg-[color:var(--color-surface-2)]"
             style="border-color: var(--color-border); color: var(--color-text);"
             aria-label="Toggle dark mode"
             aria-pressed="false"
@@ -104,41 +117,67 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
     </main>
 
     <footer
-      class="border-t"
-      style="border-color: var(--color-border); color: var(--color-text-muted);"
+      class="mt-16 border-t"
+      style="border-color: var(--color-border); color: var(--color-text-muted); background-color: color-mix(in oklab, var(--color-surface) 60%, transparent);"
     >
       <div
-        class="mx-auto flex max-w-5xl flex-col gap-1 px-4 py-6 text-sm sm:flex-row sm:items-center sm:justify-between"
+        class="mx-auto flex max-w-5xl flex-col gap-1 px-4 py-8 text-sm sm:flex-row sm:items-center sm:justify-between"
       >
         <p>{siteName} — a learner's interview Q&amp;A library.</p>
         <p>Static site · progress stored locally in your browser.</p>
       </div>
     </footer>
 
+    {/*
+      Theme toggle wiring. Defined as a reusable init that runs on first load
+      AND after every client-side navigation (astro:after-swap), because
+      <ClientRouter /> swaps <body> and would otherwise drop the listener.
+      Guard against double-binding via a dataset flag on the button.
+    */}
     <script is:inline>
       (function () {
-        var btn = document.getElementById("theme-toggle");
-        var icon = document.getElementById("theme-icon");
-        function sync() {
-          var dark =
-            document.documentElement.getAttribute("data-theme") === "dark";
-          if (icon) icon.textContent = dark ? "☀️" : "🌙";
-          if (btn) btn.setAttribute("aria-pressed", String(dark));
+        function initThemeToggle() {
+          var btn = document.getElementById("theme-toggle");
+          var icon = document.getElementById("theme-icon");
+          function sync() {
+            var dark =
+              document.documentElement.getAttribute("data-theme") === "dark";
+            if (icon) icon.textContent = dark ? "☀️" : "🌙";
+            if (btn) btn.setAttribute("aria-pressed", String(dark));
+          }
+          sync();
+          if (btn && !btn.dataset.bound) {
+            btn.dataset.bound = "1";
+            btn.addEventListener("click", function () {
+              var next =
+                document.documentElement.getAttribute("data-theme") === "dark"
+                  ? "light"
+                  : "dark";
+              document.documentElement.setAttribute("data-theme", next);
+              try {
+                localStorage.setItem("theme", next);
+              } catch (e) {}
+              sync();
+            });
+          }
         }
-        sync();
-        if (btn) {
-          btn.addEventListener("click", function () {
-            var next =
-              document.documentElement.getAttribute("data-theme") === "dark"
-                ? "light"
-                : "dark";
-            document.documentElement.setAttribute("data-theme", next);
-            try {
-              localStorage.setItem("theme", next);
-            } catch (e) {}
-            sync();
-          });
+        // Re-apply persisted theme after a swap (ClientRouter replaces <html>
+        // attributes on navigation) and rebind the toggle.
+        function applyStoredTheme() {
+          try {
+            var stored = localStorage.getItem("theme");
+            var prefersDark = window.matchMedia(
+              "(prefers-color-scheme: dark)",
+            ).matches;
+            var theme = stored || (prefersDark ? "dark" : "light");
+            document.documentElement.setAttribute("data-theme", theme);
+          } catch (e) {}
         }
+        initThemeToggle();
+        document.addEventListener("astro:after-swap", function () {
+          applyStoredTheme();
+          initThemeToggle();
+        });
       })();
     </script>
   </body>

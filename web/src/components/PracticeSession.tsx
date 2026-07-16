@@ -1,5 +1,10 @@
 /** @jsxImportSource preact */
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
+// Motion is used ONLY here (the sole Preact island). `motion/react` resolves
+// against Preact via the react -> preact/compat alias (@astrojs/preact
+// { compat: true }). `MotionConfig reducedMotion="user"` makes every animation
+// below automatically collapse to a no-op when the OS requests reduced motion.
+import { motion, AnimatePresence, MotionConfig } from "motion/react";
 import type { Question } from "@lib/types";
 import { DEFAULT_SAMPLE_SIZE, pickN, seededShuffle } from "@lib/sample";
 
@@ -326,44 +331,76 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
 
   // ---- Results summary -----------------------------------------------------
   if (finished) {
+    const passed = pct >= 60;
+    const newBest = stats != null && pct >= stats.bestPct && pct > 0;
     return (
+      <MotionConfig reducedMotion="user">
       <div>
-        <div class="card p-6 text-center">
+        <motion.div
+          class="card surface-brand overflow-hidden p-6 text-center"
+          initial={{ opacity: 0, scale: 0.96, y: 8 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ type: "spring", stiffness: 260, damping: 22 }}
+        >
           <p
             class="text-sm font-semibold uppercase tracking-wide"
             style="color: var(--color-text-muted);"
           >
             {resolved.scope}
           </p>
-          <p class="mt-2 text-4xl font-bold">
-            {score} / {total}
-          </p>
+          <motion.p
+            class="mt-2 text-5xl font-bold"
+            initial={{ scale: 0.6, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ type: "spring", stiffness: 380, damping: 18, delay: 0.12 }}
+          >
+            <span class="text-gradient">
+              {score} / {total}
+            </span>
+          </motion.p>
           <p class="mt-1 text-lg" style="color: var(--color-text-muted);">
             {pct}% correct
           </p>
+          {newBest && (
+            <motion.p
+              class="mt-2 text-sm font-semibold"
+              style={{ color: "var(--color-accent)" }}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.4, duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+            >
+              {passed ? "New best score!" : "New best!"}
+            </motion.p>
+          )}
           {stats && (
             <p class="mt-3 text-sm" style="color: var(--color-text-muted);">
               Best: {stats.bestPct}% · Attempts: {stats.attempts}
             </p>
           )}
           <div class="mt-6 flex flex-wrap justify-center gap-3">
-            <button
+            <motion.button
               type="button"
-              class="rounded-md px-5 py-2.5 font-semibold no-underline"
-              style="background: var(--color-primary); color: var(--color-primary-contrast);"
+              class="min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
+              style={{
+                background: "var(--color-primary)",
+                color: "var(--color-primary-contrast)",
+              }}
               onClick={() => void loadPool()}
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.97 }}
+              transition={{ type: "spring", stiffness: 500, damping: 30 }}
             >
               Retry (new {Math.min(DEFAULT_SAMPLE_SIZE, total)})
-            </button>
+            </motion.button>
             <a
               href={backHref}
-              class="rounded-md border px-5 py-2.5 font-medium no-underline"
+              class="inline-flex min-h-[44px] items-center rounded-md border px-5 py-2.5 font-medium no-underline"
               style="border-color: var(--color-border); color: var(--color-text);"
             >
               Back to topic
             </a>
           </div>
-        </div>
+        </motion.div>
 
         <h2 class="mb-3 mt-8 text-lg font-bold">Review</h2>
         <ol class="flex flex-col gap-3">
@@ -372,7 +409,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
             const correct = chosen === pq.correctIndex;
             const href = learnMoreHref(pq.q);
             return (
-              <li class="card p-4" key={pq.q.id}>
+              <li class="card reveal p-4" key={pq.q.id}>
                 <div class="flex items-start justify-between gap-3">
                   <p class="font-medium">
                     <span style="color: var(--color-text-muted);">{i + 1}.</span>{" "}
@@ -426,6 +463,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           })}
         </ol>
       </div>
+      </MotionConfig>
     );
   }
 
@@ -433,7 +471,8 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   const href = activeQ ? learnMoreHref(activeQ.q) : null;
 
   return (
-    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+    <MotionConfig reducedMotion="user">
+    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
     <div onKeyDown={onKeyDown as unknown as (e: Event) => void}>
       {/* Progress + running score */}
       <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
@@ -453,9 +492,9 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         </p>
       </div>
 
-      {/* Progress bar */}
+      {/* Progress bar — compositor-only: animate scaleX (never width). */}
       <div
-        class="mb-6 h-1.5 w-full overflow-hidden rounded-full"
+        class="mb-6 h-2 w-full overflow-hidden rounded-full"
         style="background: var(--color-surface-2);"
         role="progressbar"
         aria-valuemin={0}
@@ -463,14 +502,25 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         aria-valuenow={current + 1}
         aria-label="Quiz progress"
       >
-        <div
-          class="h-full rounded-full transition-all"
-          style={`width: ${total ? ((current + 1) / total) * 100 : 0}%; background: var(--color-primary);`}
+        <motion.div
+          class="h-full w-full rounded-full"
+          style={{ background: "var(--gradient-brand)", transformOrigin: "left center" }}
+          initial={{ scaleX: 0 }}
+          animate={{ scaleX: total ? (current + 1) / total : 0 }}
+          transition={{ type: "spring", stiffness: 140, damping: 22 }}
         />
       </div>
 
       {activeQ && (
-        <div class="card p-5 sm:p-6">
+        <AnimatePresence mode="wait" initial={false}>
+        <motion.div
+          key={current}
+          class="card p-5 sm:p-6"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+        >
           <h2 class="text-lg font-semibold" style="white-space: pre-wrap;">
             {activeQ.q.question.trim()}
           </h2>
@@ -494,40 +544,71 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                 }
               }
               return (
-                <button
+                <motion.button
                   key={oi}
                   type="button"
-                  ref={(el) => {
+                  ref={(el: HTMLButtonElement | null) => {
                     optionRefs.current[oi] = el;
                   }}
-                  class="flex w-full items-start gap-3 rounded-md border px-4 py-3 text-left text-sm transition-colors"
-                  style={`background: ${bg}; border-color: ${border}; color: ${fg}; cursor: ${
-                    isLocked ? "default" : "pointer"
-                  };`}
+                  class="flex min-h-[44px] w-full items-center gap-3 rounded-md border px-4 py-3 text-left text-sm transition-colors"
+                  style={{
+                    background: bg,
+                    borderColor: border,
+                    color: fg,
+                    cursor: isLocked ? "default" : "pointer",
+                  }}
                   disabled={isLocked}
                   aria-pressed={chosen}
                   tabIndex={oi === focusIndex ? 0 : -1}
                   onClick={() => select(oi)}
+                  whileHover={isLocked ? undefined : { scale: 1.01 }}
+                  whileTap={isLocked ? undefined : { scale: 0.985 }}
+                  animate={
+                    isLocked && (isCorrect || chosen)
+                      ? { scale: [1, isCorrect ? 1.02 : 0.99, 1] }
+                      : { scale: 1 }
+                  }
+                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
                 >
                   <span
-                    class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-xs font-bold"
-                    style="background: var(--color-surface-2); color: var(--color-text-muted);"
+                    class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs font-bold"
+                    style={
+                      isLocked && isCorrect
+                        ? "background: var(--color-correct); color: var(--color-primary-contrast);"
+                        : isLocked && chosen
+                          ? "background: var(--color-incorrect); color: var(--color-primary-contrast);"
+                          : "background: var(--color-surface-2); color: var(--color-text-muted);"
+                    }
                     aria-hidden="true"
                   >
                     {OPTION_LETTERS[oi]}
                   </span>
-                  <span>{opt}</span>
+                  <span class="flex-1">{opt}</span>
                   {isLocked && isCorrect && (
-                    <span class="ml-auto" aria-hidden="true">
+                    <motion.span
+                      class="ml-auto text-base font-bold"
+                      style={{ color: "var(--color-correct)" }}
+                      aria-hidden="true"
+                      initial={{ scale: 0, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ type: "spring", stiffness: 600, damping: 22, delay: 0.05 }}
+                    >
                       ✓
-                    </span>
+                    </motion.span>
                   )}
                   {isLocked && chosen && !isCorrect && (
-                    <span class="ml-auto" aria-hidden="true">
+                    <motion.span
+                      class="ml-auto text-base font-bold"
+                      style={{ color: "var(--color-incorrect)" }}
+                      aria-hidden="true"
+                      initial={{ scale: 0, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ type: "spring", stiffness: 600, damping: 22, delay: 0.05 }}
+                    >
                       ✗
-                    </span>
+                    </motion.span>
                   )}
-                </button>
+                </motion.button>
               );
             })}
           </div>
@@ -535,7 +616,11 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           {/* Feedback (announced) */}
           <div aria-live="polite" class="mt-4">
             {isLocked && (
-              <div>
+              <motion.div
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+              >
                 <p
                   class="text-sm font-semibold"
                   style={`color: ${
@@ -565,21 +650,27 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                     Learn more →
                   </a>
                 )}
-              </div>
+              </motion.div>
             )}
           </div>
 
           {isLocked && (
             <div class="mt-5 flex justify-end">
-              <button
+              <motion.button
                 type="button"
                 ref={nextBtnRef}
-                class="rounded-md px-5 py-2.5 font-semibold no-underline"
-                style="background: var(--color-primary); color: var(--color-primary-contrast);"
+                class="min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
+                style={{
+                  background: "var(--color-primary)",
+                  color: "var(--color-primary-contrast)",
+                }}
                 onClick={goNext}
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
+                transition={{ type: "spring", stiffness: 500, damping: 30 }}
               >
                 {current < total - 1 ? "Next" : "See results"}
-              </button>
+              </motion.button>
             </div>
           )}
 
@@ -589,8 +680,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
               use arrow keys + Enter to answer.
             </p>
           )}
-        </div>
+        </motion.div>
+        </AnimatePresence>
       )}
     </div>
+    </MotionConfig>
   );
 }
