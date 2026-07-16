@@ -1347,8 +1347,8 @@ questions:
   - "A main-memory reference (~100 ns) is orders of magnitude faster than a disk seek (~10 ms) or SSD random read (~150 us)"
   answer: 3
   explanation: |
-    Caching pays off because RAM (~100 ns) is ~100x faster than SSD random reads and ~100,000x
-    faster than a disk seek, dramatically cutting read latency. The other comparisons are true
+    Caching pays off because RAM (~100 ns) is ~1,000x faster than SSD random reads (~150 us) and
+    ~100,000x faster than a disk seek (~10 ms), dramatically cutting read latency. The other comparisons are true
     but irrelevant to the cache-vs-disk decision.
   ref: "concepts.md#latency-numbers-every-engineer-should-know"
 
@@ -1443,3 +1443,685 @@ questions:
     consistency) fits better here. Durability is high (not low), three regions is not a SPOF,
     and chat replication is entirely feasible.
   ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+- id: fundamentals-and-framework-081
+  difficulty: advanced
+  tags: [tail-latency, fan-out, percentiles]
+  question: |
+    A request fans out to 100 independent leaf services and must wait for all of them. Each
+    leaf has a p99 of 10 ms (1-in-100 requests is slow). Approximately what fraction of the
+    top-level requests will experience at least one slow leaf?
+  options:
+  - "About 1%, the same as a single leaf"
+  - "About 10%, one tenth of the leaves"
+  - "About 63%, because 1 - (1 - 0.01)^100 dominated by the slowest of 100"
+  - "About 100%, every request is always slow"
+  answer: 2
+  explanation: |
+    P(>=1 slow) = 1 - (1 - p)^n = 1 - 0.99^100 ~ 0.63. A per-leaf p99 becomes roughly the
+    top-level p63, which is exactly why wide fan-out forces obsessive tail control. It is far
+    worse than the single-leaf 1%, not merely 10%, and not literally 100%.
+  ref: "concepts.md#tail-latency-percentiles-and-coordinated-omission"
+
+- id: fundamentals-and-framework-082
+  difficulty: expert
+  tags: [tail-latency, coordinated-omission, measurement]
+  question: |
+    A closed-loop load test (one outstanding request per worker, send the next only after the
+    previous returns) reports a healthy p99, yet production users complain of frequent multi-
+    second stalls. What measurement flaw most likely explains the gap?
+  options:
+  - "Coordinated omission: during a server stall the generator stops sending, so it never records the many requests that would have piled up, undercounting the tail"
+  - "The load test used too many concurrent connections, inflating latency"
+  - "Percentiles cannot be measured on the client side at all"
+  - "The p99 is correct; users are simply wrong about the stalls"
+  answer: 0
+  explanation: |
+    Closed-loop generators pause during stalls, so a 2 s pause is counted once instead of the
+    hundreds of requests real traffic would have queued, badly understating p99/p999. Fixes:
+    open-model load, HdrHistogram correction, edge-side measurement. It is not caused by too
+    many connections, client-side percentiles are standard, and dismissing users is wrong.
+  ref: "concepts.md#tail-latency-percentiles-and-coordinated-omission"
+
+- id: fundamentals-and-framework-083
+  difficulty: advanced
+  tags: [tail-latency, hedged-requests]
+  question: |
+    To cut p99 on reads that hit one of several replicas, a team sends a duplicate ("backup")
+    request to a second replica if the first has not responded within the p95 latency, taking
+    whichever returns first. What is the primary cost of this hedged-request technique?
+  options:
+  - "A small amount of extra load (roughly the hedge rate, ~5%) from the duplicated requests"
+  - "It makes the system strongly consistent, which is undesirable here"
+  - "It doubles total traffic because every request is always sent twice"
+  - "It increases p50 latency substantially"
+  answer: 0
+  explanation: |
+    Hedging only fires for the slow tail (requests past p95), so it adds ~5% extra load while
+    sharply cutting p99. It does not send every request twice (that would be ~100% extra),
+    does not change the consistency model, and leaves p50 essentially unchanged.
+  ref: "concepts.md#tail-latency-percentiles-and-coordinated-omission"
+
+- id: fundamentals-and-framework-084
+  difficulty: advanced
+  tags: [percentiles, composition]
+  question: |
+    A colleague computes an overall service p99 by adding the p99 of each of its three
+    sequential internal steps. Why is this method flawed?
+  options:
+  - "Percentiles are additive, so the sum is exactly correct"
+  - "You should multiply the percentiles instead of adding them"
+  - "Percentiles of different steps do not add; a request rarely hits the 99th percentile of all three steps at once, so summing overestimates, while ignoring correlation can also mislead"
+  - "p99 is always equal to the mean, so use the mean sum"
+  answer: 2
+  explanation: |
+    Percentiles are not additive across stages: the same request is unlikely to be simultaneously
+    at the p99 of every step, so summing p99s overestimates the true composite p99 (the correct
+    approach convolves the distributions or measures end-to-end). Multiplying is meaningless for
+    latencies, and p99 is not the mean.
+  ref: "concepts.md#tail-latency-percentiles-and-coordinated-omission"
+
+- id: fundamentals-and-framework-085
+  difficulty: expert
+  tags: [tail-latency, fan-out, design]
+  question: |
+    A search service fans out to 200 shards per query and its p99 is unacceptable even though
+    each shard is fast on average. Which combination most directly attacks the tail without
+    simply buying more hardware?
+  options:
+  - "Increase the per-shard timeout so slow shards always complete"
+  - "Switch every shard to synchronous strong consistency"
+  - "Serialize the shard calls so only one runs at a time"
+  - "Hedged/tied requests to shard replicas, plus returning results from the shards that answered within a deadline (partial results) rather than waiting for the slowest"
+  answer: 3
+  explanation: |
+    At fan-out 200 the slowest shard dominates, so you hedge to replicas and/or return
+    good-enough partial results at a deadline instead of waiting for stragglers. Raising
+    timeouts makes the tail worse, forcing strong consistency adds latency, and serializing
+    200 calls is catastrophically slow.
+  ref: "concepts.md#tail-latency-percentiles-and-coordinated-omission"
+
+- id: fundamentals-and-framework-086
+  difficulty: advanced
+  tags: [availability, mtbf, mttr]
+  question: |
+    Two designs have the same failure rate (MTBF ~ 720 hours). Design A recovers in ~1 hour
+    (manual paging); Design B self-heals via automated failover in ~1 minute. What is the
+    approximate availability difference?
+  options:
+  - "Both are identical because they fail equally often"
+  - "Availability does not depend on recovery time"
+  - "A ~ 99.998%, B ~ 99.86%; slower recovery is more available"
+  - "A ~ 99.86%, B ~ 99.998%; shrinking MTTR buys nines cheaply even when failures are unchanged"
+  answer: 3
+  explanation: |
+    A = MTBF/(MTBF+MTTR). A: 720/721 ~ 99.86%; B: 720/(720+1/60) ~ 99.998%. Cutting MTTR from
+    1 h to 1 min gains ~2 nines with the same failure rate, which is why fast detection and
+    automated failover are so valuable. Recovery time absolutely matters.
+  ref: "concepts.md#availability-math-mtbf-mttr-and-the-cost-of-nines"
+
+- id: fundamentals-and-framework-087
+  difficulty: expert
+  tags: [availability, correlated-failure, redundancy]
+  question: |
+    You add a fourth replica to a service, expecting the parallel formula 1 - (1 - A)^n to push
+    availability toward another nine, but real availability barely improves. What is the most
+    likely reason?
+  options:
+  - "The formula requires an even number of replicas"
+  - "Four replicas is beyond the maximum that any load balancer supports"
+  - "Failures are correlated (shared AZ, config, deploy, or a poison request), so replicas fail together and the independence assumption behind 1 - (1 - A)^n does not hold"
+  - "Adding replicas always reduces availability"
+  answer: 2
+  explanation: |
+    The parallel-redundancy formula assumes independent failures; when replicas share a failure
+    domain (AZ, config service, cert, deploy pipeline, or receive the same poison input) they go
+    down together, so extra replicas add little. The fix is fault isolation (multi-AZ/region,
+    cells), not more replicas in the same domain.
+  ref: "concepts.md#availability-math-mtbf-mttr-and-the-cost-of-nines"
+
+- id: fundamentals-and-framework-088
+  difficulty: advanced
+  tags: [availability, cost-of-nines]
+  question: |
+    Management asks to move a feature from 99.99% to 99.999% availability. Which statement best
+    captures the real engineering implication of that single extra nine?
+  options:
+  - "It is a minor config change with negligible added cost"
+  - "The downtime budget drops from ~52 min/yr to ~5.3 min/yr, which is too little for any human-in-the-loop recovery, forcing fully automated failover and redundancy of every dependency at roughly an order-of-magnitude more cost"
+  - "It reduces cost because fewer incidents are allowed"
+  - "It only requires adding one more replica in the same AZ"
+  answer: 1
+  explanation: |
+    Five nines leaves ~5.3 min/year, too little for anyone to be paged and respond, so recovery
+    must be zero-touch and every dependency redundant, roughly 10x the cost/effort of four
+    nines. It is not a config tweak, does not reduce cost, and a same-AZ replica does not address
+    correlated failure or manual-recovery latency.
+  ref: "concepts.md#availability-math-mtbf-mttr-and-the-cost-of-nines"
+
+- id: fundamentals-and-framework-089
+  difficulty: expert
+  tags: [availability, mttr, detection]
+  question: |
+    A team has driven MTBF very high but a rare failure still takes ~3 hours to detect and
+    recover because it depends on a customer complaint plus manual investigation. Given a fixed
+    failure rate, what is the highest-leverage availability investment?
+  options:
+  - "Add more redundant replicas to further raise MTBF"
+  - "Reduce MTTR: automated detection (health checks/alerts), automated failover, and tested runbooks, since availability = MTBF/(MTBF+MTTR) and MTTR now dominates"
+  - "Raise the SLO so the failures no longer count"
+  - "Nothing can be done once MTBF is high"
+  answer: 1
+  explanation: |
+    When MTBF is already high, MTTR dominates the availability ratio, so cutting detection and
+    recovery time (auto-detect, auto-failover, rehearsed runbooks) yields the most nines per
+    dollar. More replicas chase MTBF you have already maxed, raising the SLO changes nothing
+    real, and improvement is clearly possible.
+  ref: "concepts.md#availability-math-mtbf-mttr-and-the-cost-of-nines"
+
+- id: fundamentals-and-framework-090
+  difficulty: advanced
+  tags: [durability, availability, distinction]
+  question: |
+    An interviewer asks you to distinguish durability from availability with a concrete example.
+    Which pairing is correct?
+  options:
+  - "They are the same property measured in different units"
+  - "Durability is about read latency; availability is about write latency"
+  - "A more available system is automatically more durable"
+  - "A store undergoing a failover is briefly unavailable (cannot serve requests now) yet fully durable (no committed data lost); conversely a fast store that acks before persisting can be highly available yet lose recent writes on crash"
+  answer: 3
+  explanation: |
+    Availability is reachability now; durability is survival of stored data over time. A store
+    can be temporarily unreachable but lose nothing (durable, briefly unavailable), or serve
+    fast while risking loss of un-persisted writes (available, less durable). They are distinct
+    and not implied by each other.
+  ref: "concepts.md#durability-rpo-rto-and-data-loss-math"
+
+- id: fundamentals-and-framework-091
+  difficulty: expert
+  tags: [durability, rpo, replication]
+  question: |
+    A payments system must guarantee that an acknowledged transfer is never lost even if the
+    primary node is destroyed the instant after the ack. Which replication choice meets this,
+    and what is the cost?
+  options:
+  - "Asynchronous replication; cost is nothing because it is faster"
+  - "Synchronous (or quorum) replication so the write is durable on another node before ack, giving RPO ~ 0; cost is added write latency (the replica round trip) and reduced availability if the replica is unreachable"
+  - "No replication; keep a single very reliable node"
+  - "Cache the write in memory on the primary and ack immediately"
+  answer: 1
+  explanation: |
+    RPO ~ 0 for an acked write requires the write to be durable on another node before ack:
+    synchronous or quorum replication. The price is latency (replica RTT in the write path) and
+    lower availability during partitions. Async loses the un-shipped tail on failover, a single
+    node has no protection, and in-memory-only ack loses data on crash.
+  ref: "concepts.md#durability-rpo-rto-and-data-loss-math"
+
+- id: fundamentals-and-framework-092
+  difficulty: advanced
+  tags: [durability, rpo, rto]
+  question: |
+    A stakeholder says "make the database more durable." What is the most useful senior response
+    that turns this into an actionable design constraint?
+  options:
+  - "Ask what RPO (how much recent data loss is tolerable, in time) and RTO (how long to recover) the business actually requires, because those numbers determine the replication and backup design"
+  - "Silently add three more replicas and move on"
+  - "Explain that durability is impossible to guarantee"
+  - "Switch to eventual consistency to improve durability"
+  answer: 0
+  explanation: |
+    "More durable" is unquantified; pinning RPO (tolerable data-loss window) and RTO (tolerable
+    downtime) turns it into concrete replication/backup requirements. Blindly adding replicas
+    may not meet the real target, durability is achievable to very high nines, and consistency
+    model is a separate axis from durability.
+  ref: "concepts.md#durability-rpo-rto-and-data-loss-math"
+
+- id: fundamentals-and-framework-093
+  difficulty: expert
+  tags: [durability, quorum, node-loss]
+  question: |
+    A quorum-replicated store acks a write only after it is committed on W=3 replicas out of
+    N=5. How many simultaneous replica losses can this write survive without being lost, and
+    what does raising W trade against?
+  options:
+  - "It survives up to W - 1 = 2 simultaneous losses; raising W improves durability but increases write latency and lowers write availability (more replicas must be up to ack)"
+  - "It survives 5 losses because there are 5 replicas"
+  - "It survives 0 losses because quorum does not affect durability"
+  - "It survives W = 3 losses; raising W has no downside"
+  answer: 0
+  explanation: |
+    A write durable on W copies survives up to W - 1 simultaneous losses (at least one copy
+    remains). Larger W means more copies (better durability) but more nodes must be reachable to
+    ack, raising latency and lowering write availability. It is neither all 5 nor zero, and there
+    is always a trade-off.
+  ref: "concepts.md#durability-rpo-rto-and-data-loss-math"
+
+- id: fundamentals-and-framework-094
+  difficulty: advanced
+  tags: [durability, s3, nines]
+  question: |
+    S3 advertises "eleven nines" (99.999999999%) of durability but only ~99.9% availability in
+    its SLA. What does this pairing tell you?
+  options:
+  - "The numbers are contradictory and one must be a typo"
+  - "Durability (data will not be lost, via erasure coding/replication across devices and AZs) is engineered far higher than availability (ability to reach it at any given moment), because losing data is far worse than a brief inability to read it"
+  - "Availability is always higher than durability"
+  - "Eleven nines of durability guarantees eleven nines of availability"
+  ref: "concepts.md#durability-rpo-rto-and-data-loss-math"
+  answer: 1
+  explanation: |
+    Durability and availability are independent guarantees: S3 makes data loss astronomically
+    unlikely while accepting occasional brief unreachability, because permanent loss is far
+    worse than a retryable outage. The two are not contradictory, availability is not always
+    higher, and one does not imply the other.
+
+- id: fundamentals-and-framework-095
+  difficulty: advanced
+  tags: [nfr-budget, latency-budget]
+  question: |
+    You have a p99 < 200 ms budget. TLS+client RTT to the edge is ~40 ms, in-region service
+    RTT+LB ~5 ms, and compute ~20 ms. A proposed feature adds a synchronous call to a service in
+    another continent (~140 ms RTT). What is the correct budgeting conclusion?
+  options:
+  - "It fits easily; 200 ms is plenty"
+  - "The cross-continent call alone (~140 ms) plus the existing ~65 ms exceeds 200 ms with no headroom, so that call must be made in-region, async, or cached rather than synchronous cross-continent"
+  - "Only the mean matters, so ignore the p99 budget"
+  - "Add the latencies of parallel calls together to check the budget"
+  answer: 1
+  explanation: |
+    40+5+20 = 65 ms already, and a ~140 ms cross-continent RTT pushes the total past 200 ms with
+    no room for GC/retries, so the design must avoid a synchronous cross-continent hop (go
+    in-region, async, or cache). The budget is p99 not mean, and parallel calls overlap rather
+    than sum.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-096
+  difficulty: expert
+  tags: [nfr-budget, cache, db-load]
+  question: |
+    A read path serves 100K read QPS through a cache in front of the database. If the cache hit
+    rate is 95%, approximately what read QPS reaches the database, and why does the hit rate
+    matter so much?
+  options:
+  - "~95K QPS; the hit rate barely changes DB load"
+  - "~5K QPS; DB load = read QPS x (1 - hit rate), so 95% hit rate cuts DB read load ~20x, which is the entire point of the cache"
+  - "~100K QPS; the cache does not reduce DB load"
+  - "~50K QPS; the cache always halves load"
+  answer: 1
+  explanation: |
+    DB read QPS = 100K x (1 - 0.95) = 5K. Because DB load scales with the miss rate, pushing the
+    hit rate from 90% to 95% halves DB load (10K to 5K) and 95% vs no cache is a 20x reduction,
+    so small hit-rate gains have outsized effects. It is not ~95K, not unchanged, and not a fixed
+    halving.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-097
+  difficulty: expert
+  tags: [nfr-budget, littles-law, pool-sizing]
+  question: |
+    A service must sustain 50,000 QPS at an average latency of 20 ms. Using Little's Law, roughly
+    how many requests are in flight concurrently, and what does that number size?
+  options:
+  - "~1,000 concurrent; it sizes thread pools, connection pools, and DB connections so you do not self-inflict queueing"
+  - "~2,500,000 concurrent; it sizes total disk capacity"
+  - "~10 concurrent; it sizes the number of servers"
+  - "Concurrency cannot be derived from QPS and latency"
+  answer: 0
+  explanation: |
+    Little's Law: in-flight = throughput x latency = 50,000/s x 0.020 s = 1,000. That figure
+    sizes worker threads, connection pools, and downstream DB connections; undersize them and you
+    queue and blow tail latency near saturation. It is not millions, not ~10, and is directly
+    derivable.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-098
+  difficulty: advanced
+  tags: [nfr-budget, consistency, design-impact]
+  question: |
+    Midway through a design the interviewer adds: "reads must be linearizable (always see the
+    latest committed write)." Which set of earlier decisions does this most directly invalidate?
+  options:
+  - "Nothing changes; linearizability is free"
+  - "Serving reads from lagging replicas and from a cache for freshness-sensitive data must be reconsidered, since those can return stale values; you now route such reads to the primary or a quorum, paying latency (PACELC 'C')"
+  - "You must immediately shard the database"
+  - "You should switch the whole system to a message queue"
+  answer: 1
+  explanation: |
+    Linearizable reads cannot come from asynchronously-lagging replicas or a possibly-stale
+    cache, so those reads move to the primary or a read quorum at the cost of latency and
+    replica-scale freedom (PACELC's normal-operation C-vs-L trade-off). It is not free, and
+    sharding or queues do not address staleness.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-099
+  difficulty: advanced
+  tags: [nfr-budget, fleet-sizing]
+  question: |
+    A single server sustains ~2,000 QPS at safe utilization. Peak traffic is ~50,000 QPS and you
+    want N+1 redundancy plus headroom to run at ~65% utilization. Roughly how many servers should
+    you provision?
+  options:
+  - "About 25 servers, since 50,000 / 2,000 = 25 and redundancy/headroom are unnecessary"
+  - "About 2 servers, because averages are lower than peaks"
+  - "Around 40 servers: ~50,000 / 2,000 = 25 at full load, divide by ~0.65 utilization (~38), then add ~1 for N+1"
+  - "Exactly 50,000 servers, one per QPS"
+  answer: 2
+  explanation: |
+    Base need is 50,000/2,000 = 25 servers at 100% util; to stay near 65% you need ~25/0.65 ~ 38,
+    then +1 for N+1 redundancy, so ~40. Ignoring headroom (25) risks a latency blowup near
+    saturation, provisioning for average under-sizes for peak, and one-per-QPS is nonsensical.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-100
+  difficulty: expert
+  tags: [nfr-budget, cross-linking, judgment]
+  question: |
+    Which statement best expresses how the non-functional requirements interlock when you "drive
+    the design from the numbers"?
+  options:
+  - "Each NFR is independent and can be maximized separately"
+  - "Estimation numbers feed the latency budget; the availability target sets redundancy, which drives cost and (via synchronous replication) both latency and durability/RPO; and the consistency NFR decides whether you may cache or replica-scale at all"
+  - "Cost is the only NFR that matters; the rest follow automatically"
+  - "Consistency and durability are the same requirement"
+  answer: 1
+  explanation: |
+    The NFRs are coupled: sizing drives the latency budget; more nines means more redundancy
+    (cost), and synchronous replication for durability/RPO also adds write latency; and the
+    consistency requirement gates caching/replica reads. Naming these linkages is the senior
+    skill. NFRs are not independent, cost is not the sole driver, and consistency differs from
+    durability.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-101
+  difficulty: advanced
+  tags: [interview-method, defending-tradeoffs]
+  question: |
+    The interviewer challenges your eventual-consistency choice with "are you sure?" What is the
+    strongest senior response pattern?
+  options:
+  - "Immediately switch to strong consistency to satisfy them"
+  - "Insist eventual consistency is always correct and refuse to discuss it"
+  - "Restate the NFR that permits staleness, confirm whether their question introduces a new constraint, and only then adapt; if nothing changed, defend the choice with its gain (availability/latency/scale) and give-up (bounded staleness)"
+  - "Say both choices are equivalent so it does not matter"
+  answer: 2
+  explanation: |
+    A senior candidate neither flips reflexively nor digs in dogmatically: re-anchor on the NFR,
+    check whether the challenge adds a constraint, and adapt only if it genuinely does, defending
+    with gain/give-up otherwise. Instant caving signals shallow understanding, refusal signals
+    rigidity, and claiming equivalence is false.
+  ref: "concepts.md#driving-the-interview-and-defending-trade-offs-at-senior-level"
+
+- id: fundamentals-and-framework-102
+  difficulty: advanced
+  tags: [interview-method, restraint]
+  question: |
+    During a design at modest scale (well below a single primary's capacity), a candidate
+    proactively shards the database across 16 nodes "to be safe." How should this read to a
+    senior interviewer?
+  options:
+  - "As a strong signal, because more sharding is always better"
+  - "As over-engineering: premature sharding adds cost and distributed-systems complexity with no current benefit; the senior move is to stay simple and state the flip-condition (shard when write QPS or dataset exceeds one primary)"
+  - "As irrelevant, since interviewers do not evaluate scaling decisions"
+  - "As a requirement of every modern design"
+  answer: 1
+  explanation: |
+    Knowing when NOT to add complexity is a seniority signal; sharding below the single-box
+    ceiling buys nothing and costs a lot, so the strong answer stays simple and names the
+    condition that would flip the decision. More sharding is not always better, scaling judgment
+    is very much evaluated, and sharding is not universally required.
+  ref: "concepts.md#driving-the-interview-and-defending-trade-offs-at-senior-level"
+
+- id: fundamentals-and-framework-103
+  difficulty: expert
+  tags: [interview-method, quantify, defense]
+  question: |
+    An interviewer says "your design calls three services synchronously in series, each 99.9%
+    available; is that acceptable for a 99.9% SLO?" What is the strongest response?
+  options:
+  - "Yes, because each service already meets 99.9%"
+  - "No: 0.999^3 ~ 99.7%, which is below the 99.9% SLO because synchronous dependencies multiply; I would cut a hard dependency, add a fallback/cache, or make one call async to raise the ceiling"
+  - "Yes, because the slowest service sets the availability"
+  - "It cannot be computed without load-testing"
+  answer: 1
+  explanation: |
+    Series dependencies multiply: 0.999^3 ~ 0.997 = 99.7% < 99.9%, so the composed path fails the
+    SLO and you must reduce hard dependencies or add fallbacks/async. Per-service compliance does
+    not guarantee composed compliance, availability composes by multiplication not by the slowest
+    link, and the math is straightforward.
+  ref: "concepts.md#driving-the-interview-and-defending-trade-offs-at-senior-level"
+
+- id: fundamentals-and-framework-104
+  difficulty: advanced
+  tags: [interview-method, failure-modes]
+  question: |
+    Which behavior most reliably signals senior/staff level in the deep-dive portion of a system
+    design interview?
+  options:
+  - "Waiting to be asked before discussing any failure mode"
+  - "Proactively volunteering failure modes and their blast radius (primary dies -> RTO/RPO; cache node dies -> thundering herd and request coalescing; AZ dies -> correlated failure and cells) before the interviewer probes"
+  - "Naming as many database products as possible"
+  - "Producing the largest possible architecture diagram"
+  answer: 1
+  explanation: |
+    Senior candidates surface failure modes and blast radius unprompted and tie each to a
+    mitigation, showing operational maturity. Waiting to be asked, name-dropping products, and
+    drawing bigger diagrams are not depth signals.
+  ref: "concepts.md#driving-the-interview-and-defending-trade-offs-at-senior-level"
+
+- id: fundamentals-and-framework-105
+  difficulty: expert
+  tags: [interview-method, steelman]
+  question: |
+    You chose async event-driven fan-out over synchronous RPC. The interviewer asks you to
+    justify it against the alternative. Which answer demonstrates the strongest trade-off
+    reasoning?
+  options:
+  - "Async is modern and RPC is outdated, so async wins"
+  - "The synchronous option would be simpler to reason about and give an immediate answer, but at this fan-out and burst profile it couples availability multiplicatively and cannot absorb spikes; I accept eventual consistency and idempotency complexity to gain decoupling and burst tolerance, and I would revert to sync if the flow required an immediate consistent response"
+  - "RPC cannot scale, so there is no alternative to consider"
+  - "It does not matter which one is chosen"
+  answer: 1
+  explanation: |
+    The strongest form steelmans the alternative (sync is simpler, immediate), rejects it for a
+    specific reason (availability coupling, burst absorption), names the cost accepted (eventual
+    consistency, idempotency), and gives a flip-condition. Dismissing RPC as outdated or
+    unscalable, or shrugging, all fail to show reasoning.
+  ref: "concepts.md#driving-the-interview-and-defending-trade-offs-at-senior-level"
+
+- id: fundamentals-and-framework-106
+  difficulty: advanced
+  tags: [tail-latency, cache, thundering-herd]
+  question: |
+    A popular cache key expires and thousands of concurrent requests miss simultaneously, all
+    stampeding the database and spiking p99. Which technique most directly prevents this
+    thundering herd?
+  options:
+  - "Set the TTL to zero so the key never caches"
+  - "Request coalescing / single-flight (let one request recompute while others wait) plus staggered TTLs or early async refresh, so only one miss hits the DB per key"
+  - "Increase the database timeout so all requests eventually succeed"
+  - "Remove the cache entirely to avoid expiry"
+  answer: 1
+  explanation: |
+    Coalescing collapses concurrent misses for the same key into a single backend fetch while
+    the rest wait, and jittered TTLs / early refresh avoid synchronized expiry, protecting the DB
+    and the tail. Zero TTL and removing the cache destroy the cache's benefit, and a longer
+    timeout just prolongs the overload.
+  ref: "concepts.md#tail-latency-percentiles-and-coordinated-omission"
+
+- id: fundamentals-and-framework-107
+  difficulty: expert
+  tags: [availability, planned-maintenance, sla]
+  question: |
+    A vendor advertises "99.99% availability" but their contract excludes planned maintenance
+    windows from the calculation. Why does this materially matter to you as an integrator?
+  options:
+  - "It does not matter; excluded time is still counted as uptime"
+  - "Planned maintenance always happens at night, so it never affects users"
+  - "Excluding maintenance makes the SLA stricter, which benefits you"
+  - "Your experienced availability can be well below 99.99% because maintenance downtime does not count against their SLA, so you must design for those windows (redundancy, retries, or a second provider) rather than trusting the headline number"
+  answer: 3
+  explanation: |
+    If planned maintenance is excluded, the vendor can be down during those windows without
+    breaching the SLA, so your real experienced availability is lower than 99.99% and you must
+    engineer around it. Excluded time reduces (not preserves) effective uptime, maintenance is
+    not guaranteed to be off-peak for your users, and the exclusion loosens, not tightens, the
+    guarantee.
+  ref: "concepts.md#availability-math-mtbf-mttr-and-the-cost-of-nines"
+
+- id: fundamentals-and-framework-108
+  difficulty: advanced
+  tags: [durability, rpo, async-replication]
+  question: |
+    A database uses asynchronous replication to a standby with typical replication lag of ~2
+    seconds. The primary fails and you promote the standby. What is the realistic RPO, and how
+    would you reduce it?
+  options:
+  - "RPO is zero because the standby is a full copy"
+  - "RPO equals the RTO by definition"
+  - "RPO is infinite because async replication loses everything"
+  - "RPO is roughly the replication lag (~2 s of the most recent writes may be lost); reduce it with synchronous or semi-synchronous replication, accepting added write latency"
+  answer: 3
+  explanation: |
+    With async replication, writes not yet shipped when the primary dies are lost, so RPO ~ the
+    lag (~2 s here); moving to synchronous/semi-sync replication shrinks RPO toward zero at the
+    cost of write latency. RPO is not zero for async, is a data-loss window not the recovery
+    time, and only the un-replicated tail is lost, not everything.
+  ref: "concepts.md#durability-rpo-rto-and-data-loss-math"
+
+- id: fundamentals-and-framework-109
+  difficulty: expert
+  tags: [nfr-budget, latency, cross-region]
+  question: |
+    A global app has a 100 ms p99 read budget and users on three continents. Reads tolerate a few
+    seconds of staleness. Which architecture best satisfies both the latency budget and the
+    consistency NFR?
+  options:
+  - "A single primary region with strongly consistent reads for everyone, accepting cross-continent RTTs"
+  - "Regional read replicas (or edge caches) near users serving eventually-consistent reads locally, with asynchronous replication from the write region, so reads stay in-region and fit the budget"
+  - "Synchronous multi-region reads via quorum across all three continents on every read"
+  - "Serve all reads from a single global cache in one region"
+  answer: 1
+  explanation: |
+    Because staleness is tolerable, place read replicas/edge caches near users and serve reads
+    in-region (avoiding the ~100+ ms cross-continent RTT), replicating asynchronously; this fits
+    both the latency budget and the relaxed consistency NFR. A single primary or single-region
+    cache forces cross-continent RTTs for distant users, and synchronous cross-continent quorum
+    reads blow the budget.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-110
+  difficulty: advanced
+  tags: [tail-latency, percentiles, slo]
+  question: |
+    A service reports mean latency 25 ms and p999 of 3 s. Users on a page that issues ~50
+    sub-requests per load complain constantly. Which analysis is correct?
+  options:
+  - "The mean is 25 ms so the service is healthy; the complaints are unrelated"
+  - "With ~50 sub-requests per page, the chance a page hits the 1-in-1000 tail is roughly 1 - 0.999^50 ~ 5%, so about 1 in 20 page loads suffers a 3 s stall; the p999 tail, not the mean, drives the user-perceived experience"
+  - "p999 is irrelevant because it only affects 0.1% of requests"
+  - "Reducing the mean to 20 ms will fix the complaints"
+  answer: 1
+  explanation: |
+    Fan-out multiplies tail exposure: 1 - 0.999^50 ~ 5%, so ~1 in 20 page loads hits the 3 s
+    p999 stall despite a great mean, which is exactly what users feel. The mean hides this, p999
+    is very relevant under fan-out, and shaving the mean does nothing for the tail.
+  ref: "concepts.md#tail-latency-percentiles-and-coordinated-omission"
+
+- id: fundamentals-and-framework-111
+  difficulty: expert
+  tags: [availability, dependency, isolation, judgment]
+  question: |
+    Your service (target 99.99%) synchronously calls a recommendations service (99.5%) to enrich
+    responses. Recommendations are nice-to-have, not essential. What is the best design?
+  options:
+  - "Keep the synchronous hard dependency; the recommendation service will probably be fine"
+  - "Raise the recommendation service's SLO to 99.99% and keep it synchronous and required"
+  - "Replicate the recommendation service across more nodes in the same AZ"
+  - "Make the recommendation call best-effort with a tight timeout, circuit breaker, and graceful degradation (serve the response without recommendations on failure), so its 99.5% does not cap your 99.99%"
+  answer: 3
+  explanation: |
+    A synchronous hard dependency caps your availability at its own (99.5%), so for a nice-to-have
+    you make it best-effort with timeout, circuit breaker, and degradation, decoupling your
+    availability from it. Keeping it required inherits its lower ceiling, unilaterally raising
+    another team's SLO is not something you control, and same-AZ replicas do not address the
+    dependency-ceiling problem.
+  ref: "concepts.md#availability-math-mtbf-mttr-and-the-cost-of-nines"
+
+- id: fundamentals-and-framework-112
+  difficulty: advanced
+  tags: [interview-method, structure, driving]
+  question: |
+    At the very start of a design interview, which opening most strongly signals a candidate who
+    can drive the session?
+  options:
+  - "Immediately drawing a load balancer, three services, and a database"
+  - "Proposing a plan and confirming it: 'I'll scope functional and non-functional requirements, do a quick capacity estimate, sketch the high-level design, then deep-dive the fan-out and datastore. Does that ordering work, and are there areas you want me to emphasize?'"
+  - "Asking the interviewer to tell you exactly what to design step by step"
+  - "Picking a trendy database and defending it before any requirements"
+  answer: 1
+  explanation: |
+    Proposing and confirming a structured plan (and inviting the interviewer to steer emphasis)
+    shows ownership and time discipline. Jumping to a diagram or a database before requirements
+    designs the wrong thing, and asking to be told each step is the opposite of driving.
+  ref: "concepts.md#driving-the-interview-and-defending-trade-offs-at-senior-level"
+
+- id: fundamentals-and-framework-113
+  difficulty: expert
+  tags: [durability, availability, tradeoff, scenario]
+  question: |
+    A write path acknowledges the client as soon as the data is in the primary's memory (before
+    it is fsync'd to disk or replicated) to hit an aggressive write-latency SLO. For a financial
+    ledger, what is the fundamental flaw?
+  options:
+  - "It makes writes too slow"
+  - "Acking before the write is durable (persisted and/or replicated) means a crash between ack and persistence loses an acknowledged financial transaction (RPO > 0), which is unacceptable for a ledger; durability must not be sacrificed for latency here"
+  - "It improves durability at the cost of consistency"
+  - "There is no flaw; in-memory acks are always durable"
+  answer: 1
+  explanation: |
+    Acking before durability (fsync/replication) creates a window where an acknowledged write can
+    vanish on crash, giving RPO > 0, which a financial ledger cannot tolerate; the latency SLO
+    must yield to durability (or use fast synchronous replication). It does not make writes slow,
+    does not improve durability, and in-memory acks are explicitly not durable.
+  ref: "concepts.md#durability-rpo-rto-and-data-loss-math"
+
+- id: fundamentals-and-framework-114
+  difficulty: advanced
+  tags: [nfr-budget, cache-sizing, working-set]
+  question: |
+    Daily reads touch ~500 GB of distinct objects; ~20% of objects serve ~80% of reads, and each
+    cache node holds ~64 GB of usable RAM. Roughly how many cache nodes should you plan for the
+    hot set, and what assumption dominates the estimate?
+  options:
+  - "About 2-3 nodes; the hot set is ~100 GB (20% of 500 GB), and hot bytes / per-node RAM = 100/64 ~ 2 with headroom -> a small cluster, dominated by the hot-fraction assumption"
+  - "About 8 nodes because you must cache all 500 GB"
+  - "Exactly 1 node, since caches are always small"
+  - "About 500 nodes, one per GB of distinct data"
+  answer: 0
+  explanation: |
+    Hot bytes ~ 0.20 x 500 GB = 100 GB; 100/64 ~ 1.6, so ~2 nodes plus headroom/replication ->
+    a handful of nodes, and the estimate hinges on the hot-fraction (80/20) assumption. Caching
+    all 500 GB defeats the point, one node under-sizes the hot set, and one-node-per-GB ignores
+    node capacity.
+  ref: "concepts.md#numbers-and-nfr-budgets-that-drive-the-design"
+
+- id: fundamentals-and-framework-115
+  difficulty: expert
+  tags: [interview-method, cross-linking, judgment]
+  question: |
+    Late in an interview you must justify committing to a 99.9% SLO (not 99.99%) for a social
+    feature while promising low tail latency and eventual consistency. Which response best weaves
+    the numbers and trade-offs together?
+  options:
+  - "Pick 99.99% because more nines are always better for users"
+  - "99.9% (~43 min/month budget) matches a non-critical social feature; the extra nine would demand multi-region and zero-touch failover at ~10x cost we cannot justify. Eventual consistency lets me cache and use in-region read replicas to hold the tail latency down, and the error budget lets us keep shipping features until it is spent"
+  - "Consistency, latency, and availability are independent, so I can maximize all three"
+  - "Availability does not affect cost, so commit to the highest number possible"
+  answer: 1
+  explanation: |
+    The strong answer ties the SLO to the budget and business criticality, prices the extra nine
+    (~10x, multi-region), and shows how the eventual-consistency choice enables the caching/replica
+    strategy that meets the tail-latency goal, plus the error-budget velocity link. Maximizing all
+    NFRs at once ignores their coupling, and more nines are neither always better nor free.
+  ref: "concepts.md#driving-the-interview-and-defending-trade-offs-at-senior-level"

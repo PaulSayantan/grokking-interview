@@ -121,6 +121,30 @@ you accept higher write latency for global correctness" shows depth.
 - **PC/EC (Spanner, sync SQL):** correct always; you pay latency every write.
   Pick when a single wrong read is expensive.
 
+**Precise reading of the mnemonic.** The formal statement quantifies over two
+independent events. Write it as two conditionals: `IF partition THEN (A or C)`
+**AND** `ELSE (during normal operation) (L or C)`. The two "C"s mean the same
+thing (roughly linearizability), and the choices are largely *independent* — a
+system's partition behavior does not dictate its normal-operation behavior. In
+practice, though, the correlated corners dominate: **PA/EL** (Dynamo/Cassandra:
+available + fast, sacrifice consistency in both branches) and **PC/EC**
+(Spanner/sync-SQL: consistent in both, pay availability and latency). The
+off-diagonal corners are the interesting ones:
+
+- **PC/EL (rare):** consistent under partition but latency-favoring normally.
+  **PNUTS/Yahoo Sherpa** is the canonical example — its normal-case reads may
+  return a slightly stale but *consistent* per-record version to save latency,
+  yet it refuses to violate its per-record timeline during a partition.
+- **PA/EC (rare):** would give up consistency only during partitions but pay
+  for it in normal operation — an unusual posture, since if you already pay for
+  consistency normally you usually want it under partition too.
+
+**A subtlety interviewers probe:** PACELC's "C" is not truly binary — a system
+can be `EL` for some operations and `EC` for others (tunable consistency), so
+the classification describes a *default*, not an absolute. Saying "Cassandra is
+PA/EL by default, but a `QUORUM/QUORUM` path is effectively EC for that query"
+is the precise answer.
+
 ---
 
 ## Strong versus eventual consistency spectrum
@@ -251,6 +275,96 @@ causal ordering of messages.
 
 ---
 
+## Sequential consistency and the model hierarchy
+
+**Intuition.** Between linearizability (strongest single-object model) and
+causal consistency sits **sequential consistency** (Lamport, 1979). It requires
+that all operations appear in **some single total order**, and that this order
+respects **each individual process's program order** — but it does **not** have
+to respect real (wall-clock) time across processes. So everyone agrees on one
+interleaving, but that interleaving may reorder operations from different
+clients relative to when they actually happened.
+
+**The precise ladder (strongest to weakest for single-object reads/writes):**
+
+| Model | Single global order? | Respects real-time across clients? | Respects per-client program order? | Available under partition? |
+|---|---|---|---|---|
+| Linearizable | yes | **yes** | yes | no |
+| Sequential | yes | no | yes | no |
+| Causal (causal+) | no (only causal order) | no | yes | **yes** |
+| Eventual | no | no | no | yes |
+
+**The one-line distinctions (memorize these):**
+- **Linearizable = sequential + real-time.** If op A finishes (in wall-clock)
+  before op B starts, linearizability forces A before B in the order; sequential
+  does not.
+- **Sequential = causal + a single total order.** Sequential makes *concurrent*
+  operations agree on one order everywhere; causal lets different replicas order
+  concurrent (independent) operations differently.
+- **Causal = eventual + happens-before.** Causal adds the guarantee that
+  cause precedes effect everywhere; eventual guarantees only convergence.
+
+**The canonical sequential-but-not-linearizable example.** Two clients each
+post to their own timeline; a third reads. Under sequential consistency all
+readers see the *same* interleaving of the two posts — but that interleaving
+can put a post that happened *later* in wall-clock time *before* one that
+happened earlier, as long as it is consistent with each poster's own order.
+Linearizability forbids this; sequential allows it. This is exactly why
+sequential consistency is composable within a process but "feels" laggy across
+processes.
+
+**Why it is rarely a design target.** Sequential consistency is (a) still not
+available under partition — it needs a global total order, so it is a CP-class
+model — yet (b) does not give the real-time recency that makes linearizability
+useful for locks/leader-election. So it offers most of the *cost* of
+linearizability with less of the *benefit*; real systems usually pick
+linearizable (for the critical core) or causal+/eventual (for the available
+surface) and skip the middle. It shows up mainly in shared-memory/CPU cache
+coherence discussions and as an interview probe to see if you know the ladder.
+
+---
+
+## Testing and violating consistency models
+
+A senior signal is knowing **how each guarantee is empirically checked** — this
+is what tools like **Jepsen** (Kyle Kingsbury) do: generate concurrent
+histories, then ask "does a valid ordering exist that explains this history
+under model X?"
+
+- **Linearizability — checked against real time.** Record each op's
+  invocation and response wall-clock. The **Wing-Gong / Knossos linearizability
+  checker** searches for a single total order where each op takes effect at a
+  point inside its [invoke, response] interval and reads return the last write.
+  *Violation signature:* a read returns a value that was already overwritten by
+  a write that **completed before the read began** ("stale read"), or a
+  successful write is later invisible ("lost update"). This search is NP-hard in
+  general, so checkers bound history length.
+- **Sequential — checked ignoring real time.** Same as linearizable but the
+  found total order need only respect each process's program order, not the
+  wall-clock intervals. *Violation signature:* no single interleaving exists
+  that is consistent with every client's own operation order.
+- **Causal — checked against the happens-before graph.** Build the
+  happens-before (dependency) DAG from operation metadata; a history is causal
+  if each read observes a value whose writes include all causal predecessors.
+  *Violation signature:* a client sees an effect (the "answer") without the
+  cause (the "question") it depended on — a causality violation.
+- **Read-your-writes / monotonic reads — per-client checks.** RYW is violated
+  if a client's read misses its own prior write; monotonic reads is violated if
+  a client reads value v then later reads an *older* value than v.
+- **Eventual — a liveness (not safety) property.** You cannot violate it in a
+  finite prefix; you can only observe non-convergence *after quiescence* (stop
+  writing, wait, and check whether replicas still disagree). This is why
+  "eventual" is untestable in bounded time and why Jepsen focuses on the
+  stronger safety models.
+
+**Interview gotcha:** linearizability and serializability failures look
+different. A linearizability bug is a *stale/reordered single-object read*; a
+serializability bug is an *anomaly across objects* (write skew, lost update,
+phantom). Naming which class of anomaly you would look for tells the
+interviewer you understand the model, not just its name.
+
+---
+
 ## Linearizability versus serializability
 
 These two words get conflated constantly; distinguishing them cleanly is a
@@ -352,6 +466,71 @@ datacenter to avoid cross-region latency.
 
 ---
 
+## Anti-entropy: read repair, hinted handoff, Merkle trees
+
+Quorum overlap only fixes staleness for replicas you *happen to touch* on a
+read. Eventually-consistent stores need background mechanisms to converge the
+replicas you don't touch. There are three complementary repair pathways, and
+knowing when each fires is a strong Dynamo-lineage signal.
+
+**1. Read repair (foreground, opportunistic).** On a read, the coordinator
+gathers R responses, detects that some replicas returned an older version, and
+pushes the newest version back to the stale ones — *synchronously* before
+replying (blocking read repair) or *asynchronously* after replying. Cassandra
+also does **probabilistic/background read repair** (`read_repair_chance`,
+`dclocal_read_repair_chance` historically) to repair replicas not in the read
+set. *Limitation:* only repairs keys that are actually read — cold data never
+gets repaired this way.
+
+**2. Hinted handoff (write-time, availability).** When a target replica is down
+during a write, the coordinator stores a **hint** (the write plus its intended
+recipient) locally and replays it when the replica recovers. This is what makes
+**sloppy quorums** possible: the write is durable on N reachable nodes even if
+they aren't the "home" nodes. *Gotcha:* hints have a TTL
+(`max_hint_window_ms`, default 3 h in Cassandra); if a node is down longer, its
+hints are dropped and you **must** rely on anti-entropy repair to converge, or
+data stays divergent. Hinted handoff also does not by itself restore the
+overlap guarantee — a read during the outage can still miss the hinted write.
+
+**3. Anti-entropy repair (background, comprehensive) with Merkle trees.** To
+reconcile *entire datasets* between two replicas without shipping all the data,
+Dynamo/Cassandra/Riak build a **Merkle tree** (hash tree) over each replica's
+key range: leaves hash individual keys/rows (or small partitions of them), and
+each parent hashes its children. Two replicas exchange trees **top-down**: if
+root hashes match, the ranges are identical and nothing is sent; if they
+differ, they recurse only into the subtrees whose hashes differ, transferring
+**only the divergent leaves**.
+
+```
+        Merkle tree diff (log N comparison)
+        replica A root  ==  replica B root ?  -> equal: DONE, 0 data shipped
+                 |  differ
+          +------+------+
+        h(L)           h(R)      compare children
+       equal?         differ?  -> recurse only into R
+                        |
+                  ship only the mismatched leaf ranges
+```
+
+- **Cost/benefit:** comparison is **O(log N)** hash exchanges to *locate*
+  differences instead of O(N) full-dataset transfer; you ship only what
+  actually diverged. Cassandra's `nodetool repair` builds these trees; Dynamo
+  and Riak use them for replica synchronization.
+- **Gotchas:** building the tree requires reading the data (I/O heavy — repair
+  is a scheduled, expensive operation); tree granularity trades precision for
+  memory (too-coarse leaves over-transfer, too-fine leaves cost RAM); and a
+  single differing key high in the range still forces recursing that subtree.
+  Merkle repair is also how you close the gap left by dropped hints and
+  unread cold data.
+
+**Putting it together:** read repair handles hot data cheaply and immediately;
+hinted handoff preserves availability and durability during short outages;
+Merkle-tree anti-entropy is the backstop that guarantees *eventual* convergence
+for everything else. Together they are the machinery behind the word
+"eventual" in "eventual consistency."
+
+---
+
 ## Conflict resolution: LWW, vector clocks, CRDTs
 
 When multiple replicas accept writes (AP / multi-leader), concurrent updates
@@ -395,6 +574,84 @@ OR-Set), registers (LWW/MV), sequences (RGA/Logoot for text).
 | LWW | no | yes (silently) | tiny (timestamp) | none | last-intent wins; clocks trusted |
 | Vector clocks | yes | no | grows w/ writers | high (merge) | must not lose concurrent writes |
 | CRDTs | n/a (auto-merge) | no | moderate | low (once modeled) | collaborative / offline / counters |
+
+---
+
+## CRDT types in depth: counters, sets, registers
+
+The previous section named CRDTs; here is the internal machinery an interviewer
+will push on, because each type has a *specific* convergence trick and a
+*specific* failure mode.
+
+**State-based (CvRDT) vs operation-based (CmRDT).** Two families:
+- **State-based (convergent):** replicas periodically ship their **whole
+  state**; merge is a **join** on a semilattice (a function that is
+  commutative, associative, idempotent). Robust to duplicate/reordered/lost
+  messages (idempotent merge tolerates re-delivery) but heavier on bandwidth.
+- **Operation-based (commutative):** replicas ship **operations**, which must
+  be **commutative** and delivered **exactly once in causal order** (needs a
+  reliable causal-broadcast layer). Lighter payloads, stronger delivery
+  assumptions. Both converge to the same result (**strong eventual
+  consistency**): replicas that have received the same set of updates are in the
+  same state, with no consensus.
+
+**G-Counter (grow-only counter).** State = a vector of per-replica counts;
+increment bumps *your own* entry; **merge = element-wise max**; **value = sum**
+of the vector. Element-wise max is idempotent and commutative, so it converges
+and never loses an increment. *Limit:* increments only — cannot decrement.
+
+**PN-Counter (positive-negative counter).** Two G-Counters, `P` (increments)
+and `N` (decrements); **value = sum(P) − sum(N)**. Supports both directions.
+This is the correct structure for a distributed **like/view counter that must
+never lose a tick** and needs no coordination. *Gotcha:* the state grows with
+the number of replicas (one entry each), and a naive decrement below zero is
+representable — you must guard semantics (e.g., non-negative inventory can't be
+a plain PN-Counter, because concurrent decrements can drive it negative; that
+needs a **bounded/escrow counter** or coordination).
+
+**G-Set / 2P-Set.** G-Set is add-only (union merge). **2P-Set** adds a
+"tombstone" set for removals — but once removed, an element can **never be
+re-added** (the tombstone wins forever), which is usually the wrong semantics.
+
+**OR-Set (Observed-Remove Set).** The practical set CRDT. Each *add* attaches a
+unique tag (e.g., (element, unique-id)); a *remove* removes only the tags it has
+**observed**. Concurrent add-and-remove of the same element resolves
+**add-wins**: an add with a tag the remove never saw survives. This is why a
+concurrently-deleted item can "**resurrect**" — the classic CRDT gotcha (Amazon
+Dynamo's shopping-cart merge had the analogous "deleted item comes back"
+behavior). *Cost:* tombstone/tag metadata accumulates and must be garbage
+collected.
+
+**LWW-Register vs MV-Register.** For a single value:
+- **LWW-Register:** keep the value with the highest timestamp; simple but
+  **loses the concurrent write** (and is clock-skew sensitive) — same trade-off
+  as LWW conflict resolution.
+- **MV-Register (multi-value):** keeps **all concurrent values as siblings**
+  (like vector-clock siblings) and surfaces them for application merge — no
+  silent loss, but pushes resolution to the app.
+
+**Sequence/list CRDTs (RGA, Logoot, LSEQ, Treedoc).** For collaborative text
+editing: assign dense, totally-ordered position identifiers between existing
+elements so concurrent inserts interleave deterministically. Power
+Automerge/Yjs, and underlie Google-Docs / Figma-style collaboration.
+
+| CRDT | Merge rule | Guarantee | Main gotcha |
+|---|---|---|---|
+| G-Counter | element-wise max, value=sum | no lost increment | increment-only |
+| PN-Counter | two G-Counters, P−N | no lost inc/dec | can go negative; per-replica growth |
+| OR-Set | add-wins with unique tags | no lost add | deleted item can resurrect; tombstone GC |
+| 2P-Set | union + tombstones | removals stick | element can never be re-added |
+| LWW-Register | highest timestamp | converges | loses concurrent write; clock-sensitive |
+| MV-Register | keep concurrent siblings | no lost write | app must merge siblings |
+| RGA/Logoot | dense position ids | converges, ordered | id/metadata growth |
+
+**The unifying property to state in an interview:** CRDTs give **strong
+eventual consistency** — a *safety* property that any two replicas which have
+delivered the same updates hold the same state, achieved purely through
+algebraic merge (semilattice join) with **zero coordination**. What they cannot
+do is enforce a **global invariant** that requires seeing all replicas at once
+(e.g., "total inventory ≥ 0", "unique username") — those still need consensus
+or single-writer ownership.
 
 ---
 
@@ -491,6 +748,122 @@ famously runs Cassandra/ScyllaDB for trillions of messages with tuned CLs.
   requires a quorum in *every* DC (strong cross-region, high latency, low
   availability). Choosing among these is a classic multi-region trade-off
   question.
+
+---
+
+## Why CP versus AP is an oversimplification
+
+Kleppmann's "Please stop calling databases CP or AP" is a favorite senior
+talking point. The label is misleading for several concrete reasons:
+
+- **The choice only exists *during a partition*.** CAP says nothing about the
+  99.9% of the time there is no partition. A "CP" database is not perpetually
+  sacrificing availability; it only refuses service on the minority side *while
+  a partition is active*. This is why PACELC (which describes normal operation)
+  is the more honest framing.
+- **A system is not one point — it depends on configuration and even on the
+  operation.** MongoDB with `w:1` and reads from secondaries behaves AP-ish;
+  the same MongoDB with `w:majority` + `readConcern:linearizable` behaves CP.
+  Cassandra is AP by default but a `QUORUM/QUORUM` path or an LWT is CP-ish for
+  that request. The label describes a *default*, not an invariant.
+- **CAP's "C" is only linearizability and "A" is a very strict total
+  availability.** Many real systems provide useful guarantees (causal, session,
+  serializable-but-not-linearizable) that CAP's binary vocabulary cannot even
+  name. A store can be unavailable under CAP's strict definition yet perfectly
+  useful, or "available" yet returning data too stale to use.
+- **The proof's model is narrow.** Gilbert & Lynch proved the impossibility for
+  a specific formal model (asynchronous network, total availability,
+  single-object linearizability). Real partitions are messy (asymmetric,
+  partial, transient, one-way), GC pauses and slow disks *look* like partitions,
+  and "availability" is a spectrum (99.9 vs 99.999), not a bit.
+- **Latency is the omitted variable.** In practice you rarely hit a clean
+  partition; you hit *slowness*. The everyday engineering trade is consistency
+  vs latency (PACELC's else-branch), and a node that is merely slow is
+  indistinguishable from a partitioned one within a timeout — so a "CP" system
+  under load can *look* unavailable and an "AP" system can *look* consistent
+  when replication happens to keep up.
+
+**The senior framing:** don't classify the database; classify the *operation on
+a data class under a specific failure mode*. "For the balance-decrement path we
+require linearizable writes, so under a partition that path is unavailable on
+the minority side; for the catalog read path we accept staleness, so it stays
+available" — that sentence says more than any CP/AP label.
+
+---
+
+## Consistency of real systems
+
+Concrete, correct guarantees for the systems interviewers name — get these
+exact, because vague claims here are a common senior-level miss.
+
+**Amazon Dynamo (2007 paper) vs DynamoDB (the AWS service).** The *paper* is the
+archetypal AP, leaderless, sloppy-quorum, vector-clock store with
+client/merge-side conflict resolution — it deliberately chose availability and
+made the app reconcile siblings. **DynamoDB the service is different and often
+misdescribed:** it is a **single-leader-per-partition, replicated across 3 AZs**
+design. It offers **eventually consistent reads by default** and
+**strongly consistent (read-after-write) reads** on request (from the leader
+replica, same-region only). It provides **ACID transactions**
+(`TransactWriteItems`/`TransactGetItems`) and **conditional writes** for
+compare-and-set. **Global Tables** are multi-region **active-active with
+last-writer-wins** and are **eventually consistent across regions** (no strong
+cross-region reads). So DynamoDB is closer to PA/EL by default but tunable to
+EC per-request within a region.
+
+**Apache Cassandra / ScyllaDB.** Leaderless, tunable per-query consistency
+level over replication factor N. Default posture PA/EL; `R+W>N` (e.g.,
+`QUORUM/QUORUM` or `LOCAL_QUORUM/LOCAL_QUORUM`) gives strong-*ish* reads but
+**not linearizability**. For true linearizable compare-and-set it offers
+**LWT (lightweight transactions)** via **Paxos**, at ~4 round trips.
+Conflict resolution is **LWW by cell timestamp** (so clock skew and lost
+concurrent writes are real risks). `LOCAL_QUORUM` stays in-region;
+`EACH_QUORUM` requires a quorum in every DC.
+
+**Google Spanner.** Sharded, each shard a **Paxos group**; provides **strict
+serializability** globally, marketed as **external consistency**. The trick is
+**TrueTime**: GPS + atomic-clock-backed API that returns a bounded time interval
+`[earliest, latest]` with uncertainty ε (a few ms). On commit, Spanner does
+**commit-wait** — it waits out the uncertainty ε so that no later transaction
+can be assigned an earlier timestamp — which is why writes pay a few ms of extra
+latency for globally correct real-time ordering. PC/EC. Read-only transactions
+at a timestamp are lock-free.
+
+**CockroachDB.** Open-source Spanner-inspired: **per-range Raft groups**,
+**serializable isolation** by default (SSI). Without atomic clocks it uses NTP
+plus a configured **max clock offset** and a technique (uncertainty intervals +
+read restarts) to provide serializability; it does **not** guarantee full
+linearizability/strict-serializability across all keys the way TrueTime does
+(it targets serializable + "single-key linearizable"), and it will **crash a
+node whose clock drifts beyond max offset** to preserve safety. PC/EC-ish.
+
+**MongoDB.** Single primary per replica set; tunable **write concern**
+(`w:1` … `w:majority`) and **read concern** (`local`, `majority`,
+`linearizable`, `snapshot`) plus **causal-consistency sessions** (cluster time
+gives RYW + monotonic reads). With `w:majority` + `readConcern:majority` it is
+CP-leaning (PC/EC); relaxed concerns move it toward availability/latency.
+Multi-document ACID transactions exist since 4.0.
+
+**ZooKeeper / etcd / Consul.** Consensus-backed (ZAB / Raft), **linearizable
+writes**. Nuance: **ZooKeeper reads are *not* linearizable by default** — a
+follower can serve a slightly stale read; you must issue a `sync` before the
+read (or use etcd's linearizable-read option, which routes through the leader /
+uses ReadIndex) to get a linearizable read. Small, critical, CP control-plane
+state.
+
+**Riak.** Closest production heir to the Dynamo paper: leaderless, N/R/W,
+**vector clocks (dotted version vectors) surfacing siblings**, and native
+**CRDT data types** (counters, sets, maps, registers, flags) for automatic
+convergence. AP by default.
+
+| System | Default posture | Strongest available | Conflict handling | Notable mechanism |
+|---|---|---|---|---|
+| DynamoDB (service) | PA/EL | EC read + ACID txn (in-region) | LWW (global tables) / conditional writes | leader-per-partition, 3-AZ |
+| Cassandra/Scylla | PA/EL | LWT (Paxos, linearizable CAS) | LWW by cell timestamp | tunable CL, `R+W>N` |
+| Spanner | PC/EC | strict serializability | 2PC + Paxos, single-writer | TrueTime + commit-wait |
+| CockroachDB | PC/EC-ish | serializable (SSI) | Raft per range, MVCC | max-clock-offset, read restarts |
+| MongoDB | tunable (PC/EC w/ majority) | linearizable read / ACID txn | single primary | write/read concerns |
+| etcd/ZooKeeper | PC/EC | linearizable | consensus (no conflicts) | Raft / ZAB; ZK stale reads sans `sync` |
+| Riak | PA/EL | causal (CRDTs) | vector clocks / CRDTs | dotted version vectors |
 
 ---
 

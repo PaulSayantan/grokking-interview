@@ -145,6 +145,39 @@ over-decomposition had gotten out of hand.
   with others? Does it own its data? Are cross-service calls rare relative to
   in-service work? If "no," reconsider the cut.
 
+**Aggregates as the sizing tool (deeper).** The aggregate is the most practical
+boundary instrument, because an aggregate is a *transactional consistency
+boundary*: everything inside one aggregate can be changed atomically in a single
+local ACID transaction; anything *across* aggregates must be eventually
+consistent (via events/sagas). Vaughn Vernon's rules of thumb: keep aggregates
+**small** (prefer referencing other aggregates *by id*, not by embedding them),
+enforce **one aggregate per transaction**, and update other aggregates
+**asynchronously**. This gives a concrete decomposition heuristic: **a service
+should own one or a few closely-related aggregates**, and any invariant that
+must hold synchronously has to live *within* a single aggregate — if a proposed
+split would put a "must-be-atomic" invariant across two services, that split is
+wrong. Conversely, if two aggregates only ever need eventual consistency, they
+are a candidate seam. The `Order` + `OrderLine` cluster is one aggregate (change
+together); `Order` and `Customer` are separate aggregates linked by
+`customerId` (reference by id).
+
+**Context mapping patterns (name these).** When two bounded contexts interact,
+the *relationship* is a design decision: **Shared Kernel** (a small shared model
+— avoid, it couples deploys), **Customer-Supplier** (downstream can influence
+upstream's roadmap), **Conformist** (downstream just accepts upstream's model),
+**Anti-Corruption Layer (ACL)** (downstream translates the upstream model into
+its own so a messy/legacy upstream can't leak in — the safest default when
+integrating with a system you don't control), and **Open Host Service +
+Published Language** (upstream offers a stable public protocol for many
+consumers). Naming the ACL in an interview signals maturity: it's how you keep a
+legacy or third-party model from corrupting a clean new context.
+
+> **Cross-link.** This is the boundary-drawing *mechanics* in brief; the
+> dedicated topic **microservices-ddd-and-boundaries** goes deeper on strategic
+> vs tactical DDD, event storming to discover contexts, and context-map
+> patterns. Treat bounded contexts (the strategic unit) and aggregates (the
+> tactical consistency unit) as the two-level tool for sizing services.
+
 ---
 
 ## API styles REST, GraphQL and gRPC
@@ -297,6 +330,39 @@ field numbers; add new fields with new numbers.
 - Always ship a **deprecation policy**: sunset headers, timelines, metrics on who
   still uses old versions. Breaking a public API silently is a cardinal sin.
 
+**Safe deprecation lifecycle (deeper).** A disciplined sunset runs in phases:
+(1) **Announce** — mark the field/endpoint deprecated in docs and emit the
+standard `Deprecation: true` and `Sunset: <HTTP-date>` response headers (RFC
+8594) so clients can detect it programmatically; add a `Link` header pointing to
+the migration guide. (2) **Measure** — attribute every call to a specific
+consumer (per-API-key/client-id usage metrics) so you know *exactly who* still
+depends on it — you cannot safely remove what you can't measure. (3) **Nudge** —
+reach out to the top laggards; optionally add "brownouts" (brief, scheduled
+outages of the deprecated path) to surface hidden dependencies. (4) **Remove**
+only after usage hits ~zero and the sunset date passes. The cardinal rule:
+*never remove based on a calendar alone — remove based on measured usage.*
+
+**Consumer-driven contracts (CDC), deeper.** In an internal ecosystem you
+control both sides, so shift breakage detection *left* into CI. With Pact-style
+CDC each **consumer** publishes the subset of the provider's API it actually
+relies on (specific fields, shapes, status codes) to a broker; the **provider's**
+pipeline replays every consumer's contract and fails the build if a change would
+break any of them. This is strictly more precise than schema diffing: it ignores
+fields nobody uses (so you *can* safely drop a field no consumer reads) and
+catches semantic expectations a schema wouldn't. The "can-I-deploy" gate then
+answers "is it safe to release provider vX given all currently-deployed
+consumers?" Contrast with **schema-registry compatibility checks** (Avro/Protobuf
+with a registry enforcing BACKWARD/FORWARD/FULL compatibility) used on event
+streams — that governs the *message schema* rather than a specific consumer's
+usage. Use both: registry compat for events, CDC for request/response APIs.
+
+| Technique | What it verifies | Best for |
+|---|---|---|
+| Schema diff / OpenAPI lint | Structural back-compat of the whole schema | Public REST, coarse gate |
+| Consumer-driven contracts (Pact) | Each known consumer's *actual* expectations | Internal svc-to-svc, both sides owned |
+| Schema registry (Avro/Proto) | Message back/forward compatibility rules | Kafka/event streams |
+| Protobuf field-number discipline | Wire compat of binary messages | gRPC / protobuf everywhere |
+
 ---
 
 ## Pagination, filtering and idempotency keys
@@ -347,6 +413,146 @@ leave the key recorded without the effect (or vice-versa).
   creation, and any at-least-once messaging consumer.
 - Related but different: **exactly-once delivery is a myth over a network**; you
   get *at-least-once delivery + idempotent processing* = *effectively once*.
+
+**Idempotency-key design, deeper (the gotchas a senior probes).**
+- **Who generates the key and its scope.** The *client* generates a unique key
+  per logical operation (typically a UUIDv4), and reuses that *same* key across
+  retries of *that* operation. The server scopes uniqueness to
+  `(account, endpoint, key)` so one tenant's key can't collide with another's.
+- **Fingerprint the request.** Store a hash of the request body alongside the
+  key. If the same key arrives with a *different* body, that's a client bug —
+  return `422`/`409` rather than silently serving the old result or executing a
+  different operation under a reused key.
+- **The concurrency race.** Two retries can arrive simultaneously (client fired a
+  retry while the first was in flight). Insert the key row with a **unique
+  constraint** *before* doing the work: the loser of the insert either waits and
+  returns the stored result, or gets a `409 "request in progress"`. A common
+  state machine is `NEW -> (processing) -> COMPLETED`, and the second caller must
+  not re-execute while the first is `processing`.
+- **Atomicity of effect + key.** As above, commit the side effect and the
+  stored response in the *same* transaction (or use the outbox pattern) so a
+  crash can't record one without the other.
+- **TTL and its danger.** Keys are stored with a TTL (Stripe keeps them ~24h).
+  The subtle bug: if the TTL is *shorter* than the client's retry window, a late
+  retry after expiry re-executes and double-charges. TTL must exceed the maximum
+  realistic retry horizon.
+- **Idempotency ≠ idempotent semantics.** An idempotency key makes a *specific
+  duplicate request* safe; it does not make the operation itself idempotent for
+  *different* keys. `POST /charges` with two different keys is two charges by
+  design — that's correct.
+- **Downstream propagation.** If your handler calls other services, propagate a
+  derived idempotency key (or use natural keys) so a retried outer request
+  doesn't double-execute inner effects either.
+
+---
+
+## API composition versus CQRS read models
+
+**Intuition.** In microservices, data is scattered across private databases, so
+"show me an order with its customer, line items, shipment status, and reviews" —
+trivial as a SQL `JOIN` in a monolith — becomes a *cross-service query* problem.
+There is no shared database to join, and reaching into another service's tables
+is forbidden (distributed monolith). Two patterns solve this, with a classic
+latency-vs-consistency trade-off.
+
+**API composition.** A composer (the gateway, a BFF, or a dedicated query
+service) calls each owning service, collects the pieces, and joins them **in
+memory** at request time. Simple, no extra storage, always reads fresh data.
+Weaknesses: **latency is the sum/max of the calls** (and the whole query fails or
+degrades if any dependency is slow — you must set per-call timeouts and return
+partial results); **in-memory joins don't scale** for large result sets or
+queries that need to filter/sort across services (you'd fetch huge sets to join
+a few); and it puts read load directly on the transactional services.
+
+**CQRS read model (materialized view).** Command Query Responsibility
+Segregation splits the write side from the read side. The owning services emit
+**events** on state changes; a read-model builder subscribes and maintains a
+**denormalized, pre-joined projection** in a store optimized for the query
+(e.g. Elasticsearch for search, a document store for a dashboard). The
+cross-service query becomes a single fast lookup against the projection.
+Weaknesses: the projection is **eventually consistent** (replication lag between
+a write and the view updating — a "read-your-writes" gap the UI must handle);
+you now **maintain a second copy of the data** and the projection code; and you
+must handle **rebuilds** (replay events to reconstruct a corrupted/changed view)
+and out-of-order/duplicate events (idempotent, order-tolerant projectors).
+
+```
+API COMPOSITION (read-time join)        CQRS READ MODEL (write-time join)
+  query -> [composer]                     events ---> [projector] --> [read DB]
+             |  |  |  (fan-out, sync)                                     ^
+          [svcA][svcB][svcC]              query -----------------> single lookup
+  fresh, simple, slow/fragile at scale    fast, scalable, eventually consistent
+```
+
+**TRADE-OFFS / when to pick.**
+
+| Dimension | API composition | CQRS read model |
+|---|---|---|
+| Data freshness | Strong (read-time) | Eventual (lag) |
+| Read latency | Sum/max of N calls | Single fast lookup |
+| Extra storage | None | A maintained projection |
+| Scales to big/filtered joins | Poorly | Well |
+| Operational complexity | Low | Higher (events, rebuilds) |
+| Coupling to source load | Direct read load | Decoupled (async) |
+
+- Use **API composition** for low-fan-out, low-QPS, or admin queries where
+  freshness matters and the join is small — it's the cheap default; don't build
+  CQRS until composition actually hurts.
+- Use **CQRS** for hot, high-QPS read paths, search/dashboards, and queries that
+  filter/sort/aggregate across services, where you can tolerate eventual
+  consistency. Common combo: writes go through the services (commands), a
+  read-optimized projection serves the heavy query path.
+- **Gotcha:** CQRS is frequently over-applied. It is not "always split reads and
+  writes"; it's a targeted answer to a specific cross-service or read-scaling
+  problem, and it *adds* eventual-consistency and rebuild complexity you must be
+  ready to operate.
+
+---
+
+## The operational tax of microservices
+
+**Intuition.** The code-level talking points (boundaries, API styles) are the
+*easy* half. The reason experienced engineers are cautious about microservices
+is the **operational tax** — the standing cost of *running* a fleet, which is
+where most migrations actually fail. Naming this in an interview separates
+senior from mid-level answers.
+
+**The dimensions of the tax.**
+- **Distributed tracing and context propagation.** With one process a stack
+  trace tells the whole story; across services you *must* propagate a trace/
+  correlation context (W3C `traceparent`/`tracestate`, or OpenTelemetry
+  baggage) through every hop — including across async broker boundaries — or a
+  request becomes un-debuggable. Every service must be instrumented; one service
+  that drops the header creates a blind spot in every trace that passes through
+  it. This is not optional infrastructure; it's a prerequisite.
+- **Observability triad.** You need centralized **logs** (correlated by trace
+  id), **metrics** (RED — Rate/Errors/Duration — per service, plus the four
+  golden signals), and **traces**, all aggregated — because "which of the 40
+  services caused this p99 spike?" is unanswerable from any single box.
+- **Deployment and release surface.** N services = N pipelines, N sets of build/
+  test/deploy config, N rollback procedures. Cross-service changes need
+  **backward/forward-compatible, decoupled rollouts** (expand-contract / parallel
+  change): you can't deploy provider and consumer atomically, so every change
+  must tolerate a window where old and new run side by side.
+- **On-call and cognitive load.** Every service needs an owner, a runbook,
+  alerts, and someone who understands its failure modes at 3am. The org-wide
+  on-call burden and the cognitive load of "what talks to what" grow with the
+  fleet; this is often the *actual* limiting factor, not compute cost.
+- **Local development and testing.** You can no longer run "the app" on a laptop
+  trivially; you need service virtualization/mocks, contract tests, and often
+  ephemeral environments. End-to-end tests become flaky and expensive, pushing
+  teams toward contract testing instead.
+- **Platform and governance.** At scale you need a platform team, a service
+  catalog/registry, paved-road templates, dependency/patch management across the
+  fleet (a zero-day means patching N services), and secret/cert rotation
+  (mTLS everywhere).
+
+**The framing that lands:** the network hop is cheap to *write* and expensive to
+*operate*. The true cost of a service boundary is not the RPC — it's the
+pipeline, the dashboard, the trace instrumentation, the runbook, and the pager
+that now exist forever. That standing tax is why "monolith first" and "modular
+monolith" are sound: they defer the tax until an org actually needs (and can
+staff) the platform to pay it.
 
 ---
 
@@ -500,6 +706,35 @@ scaling** problems, not a default.
 that must be deployed together, shared database, synchronous call chains many
 levels deep, a change to one service constantly requiring changes to others.
 You've paid the microservices tax and kept the monolith's coupling.
+
+**How to *detect* a distributed monolith (concrete signals).** Interviewers
+probe whether you can measure the anti-pattern, not just define it:
+- **Lockstep-deploy coupling.** Track how often a change to service A requires a
+  coordinated release of B/C in the same window. A healthy system's services
+  deploy on independent cadences; if your "deploy trains" always ship N services
+  together, the boundary is fake. A dependency graph derived from the trace
+  spans that shows most requests fanning through the same 5 services in a fixed
+  chain is a red flag.
+- **Shared schema / cross-service foreign keys.** Grep for one service reading
+  another's tables, shared ORM entities, or a "common" DB library everyone
+  imports. Any FK across service boundaries is a distributed monolith in waiting.
+- **Synchronous fan-depth.** Instrument the p99 *call depth* per request. Chains
+  deeper than ~3 sync hops both multiply latency and multiply the failure
+  probability: if each hop is 99.9% available, a 5-deep sync chain is
+  0.999^5 ≈ 99.5% — you've *lowered* availability versus a monolith (one
+  process at 99.9%). Availability of a serial sync path is the **product** of
+  the links, so adding services on the critical path is a reliability tax.
+- **Change-coupling from version control.** Mine commit history: files/services
+  that repeatedly change *together* ("logical/temporal coupling") belong in the
+  same boundary. High cross-service co-change is the strongest empirical
+  detector of a bad cut.
+- **Shared release version.** If services must agree on a lockstep "platform
+  version" to be compatible (no independent contract evolution), they are one
+  unit wearing many hats.
+
+The fix is usually to *merge* over-split services back (Uber's DOMA, Segment's
+consolidation) or to break the shared data dependency (give each service its own
+store + events), not to add more infrastructure on top of the coupling.
 
 **The mature path:** monolith (or modular monolith) -> identify the module that
 *actually* needs independent scaling/deploy -> extract it via **strangler fig**

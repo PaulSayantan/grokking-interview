@@ -1,0 +1,1499 @@
+topic: "Probabilistic Data Structures for Scale"
+domain: system-design
+topic_slug: probabilistic-data-structures
+version: 1
+questions:
+  - id: probabilistic-data-structures-001
+    difficulty: beginner
+    tags: [bloom-filter, guarantees, fundamentals]
+    question: |
+      What is the defining correctness guarantee of a standard Bloom filter?
+    options:
+      - "It may return false positives but never false negatives."
+      - "It may return false negatives but never false positives."
+      - "It returns exact answers but only for membership queries."
+      - "It may return both false positives and false negatives within a bounded rate."
+    answer: 0
+    explanation: |
+      A Bloom filter sets k bits on insert and checks all k on query. If any bit is 0 the
+      element was definitely never inserted (no false negatives). If all are set the element
+      is "possibly present" — other elements may have set those bits (false positives). The
+      one-sided error direction ("definitely not present" is trustworthy) is exactly what
+      makes it safe as a pre-filter in front of an exact backstop.
+    ref: "concepts.md#bloom-filters-mechanism-and-math"
+
+  - id: probabilistic-data-structures-002
+    difficulty: beginner
+    tags: [cardinality, hyperloglog, mapping]
+    question: |
+      Which query is HyperLogLog designed to answer?
+    options:
+      - "Whether a specific element is a member of a set."
+      - "The approximate frequency of a specific key in a stream."
+      - "The approximate number of distinct elements in a stream."
+      - "The p99 latency of a request stream."
+    answer: 2
+    explanation: |
+      HyperLogLog estimates cardinality (count-distinct) in a fixed ~1.5 KB. It cannot answer
+      membership (Bloom/Cuckoo do that), frequency (Count-Min Sketch), or quantiles (t-digest/
+      DDSketch). Matching the question to the right structure is the core skill; these tools
+      answer fundamentally different questions and are not interchangeable.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-003
+    difficulty: beginner
+    tags: [count-min-sketch, error-direction]
+    question: |
+      A Count-Min Sketch estimate for a key's frequency can be wrong in which direction?
+    options:
+      - "It can only under-estimate the true count."
+      - "It can over- or under-estimate symmetrically."
+      - "It is always exact for heavy hitters and wrong only for rare keys."
+      - "It can only over-estimate the true count."
+    answer: 3
+    explanation: |
+      Every counter a key touches is only ever incremented; hash collisions add other keys'
+      counts, so each row's cell is >= the true count. Taking the minimum across rows removes
+      as much collision inflation as possible but can never go below the truth — hence
+      over-estimate only. This one-sided error is why CMS-based rate limiters fail safe toward
+      throttling. (Count-Sketch, with +/-1 hashes and a median, gives two-sided unbiased estimates.)
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-004
+    difficulty: intermediate
+    tags: [bloom-filter, math, sizing]
+    question: |
+      For a Bloom filter, the optimal number of hash functions minimizing false-positive rate
+      is approximately which expression (m = bits, n = elements)?
+    options:
+      - "k = (m/n) · ln 2"
+      - "k = (n/m) · ln 2"
+      - "k = m/n"
+      - "k = ln(m/n)"
+    answer: 0
+    explanation: |
+      Minimizing p ≈ (1 − e^(−kn/m))^k over k gives k* = (m/n)·ln 2 ≈ 0.693·(m/n). Too few
+      hashes under-uses the bits; too many saturate the array faster. At k* roughly half the
+      bits are set, which is the sweet spot. The other forms invert the ratio or drop the ln 2
+      constant and give materially wrong FP rates.
+    ref: "concepts.md#bloom-filters-mechanism-and-math"
+
+  - id: probabilistic-data-structures-005
+    difficulty: intermediate
+    tags: [bloom-filter, math, capacity]
+    question: |
+      Roughly how many bits per element does a Bloom filter need for a 1% false-positive rate,
+      and what happens to that cost as you target 0.1%?
+    options:
+      - "About 10 bits/element for 1%, and it doubles to ~20 bits/element for 0.1%."
+      - "About 2 bits/element for 1%, growing linearly with 1/p."
+      - "About 10 bits/element for 1%, and each 10x reduction in p adds a roughly fixed ~4.8 bits/element."
+      - "About 32 bits/element regardless of p, since it stores a hash per element."
+    answer: 2
+    explanation: |
+      m/n = −ln p / (ln 2)^2 ≈ −1.44·log2(p). At p=1% that's ~9.6 bits/elem (k=7); at 0.1% it's
+      ~14.4 bits/elem (k=10) — an additive ~4.8 bits per order-of-magnitude, not a doubling and
+      not linear in 1/p. Crucially the filter never stores the elements, so the cost is
+      independent of key size. This log-linear cost is why driving p toward zero gets expensive
+      slowly, not explosively.
+    ref: "concepts.md#bloom-filters-mechanism-and-math"
+
+  - id: probabilistic-data-structures-006
+    difficulty: advanced
+    tags: [bloom-filter, lsm, databases, read-amplification]
+    question: |
+      In an LSM-tree store (RocksDB/Cassandra), what specifically does a per-SSTable Bloom
+      filter buy you, and what is the cost of a false positive there?
+    options:
+      - "It guarantees a key exists before reading; a false positive returns stale data."
+      - "It replaces the need to read SSTables entirely; a false positive corrupts the memtable."
+      - "It compresses the SSTable index; a false positive increases write amplification."
+      - "It lets a point lookup skip SSTables that definitely lack the key; a false positive costs one wasted disk read/seek, not a wrong answer."
+    answer: 3
+    explanation: |
+      The filter answers "is this key possibly in this SSTable?" A "no" is definitive and skips
+      the I/O — the main lever against read amplification in LSM point lookups. A false positive
+      means you do the SSTable read and find nothing: wasted I/O, but the actual read is the exact
+      backstop, so the answer is still correct. This is the archetypal safe use of one-sided error:
+      the filter accelerates, an exact read guarantees correctness. Poor filter tuning inflates
+      wasted reads, not correctness.
+    ref: "concepts.md#bloom-filter-uses-and-failure-modes"
+
+  - id: probabilistic-data-structures-007
+    difficulty: advanced
+    tags: [bloom-filter, failure-mode, capacity, operations]
+    question: |
+      A Bloom filter you sized for n = 10M at 1% FP is now observed returning ~30% "maybe
+      present" for keys you know were never inserted. What is the most likely root cause and the
+      correct fix?
+    options:
+      - "The hash functions are too strong; weaken them and the FP rate will drop."
+      - "Actual insert volume greatly exceeded 10M, saturating the bit array; rebuild a larger filter (or switch to a scalable Bloom filter) sized for the real n."
+      - "The filter is suffering false negatives; add more hash functions to compensate."
+      - "The bit array shrank at runtime; re-allocate the same size and it will recover."
+    answer: 1
+    explanation: |
+      Bloom filters need n known up front. If real n far exceeds the planned n, too many bits get
+      set and FP rate climbs toward 1 — they do not degrade into "just slower," they degrade into
+      "always maybe." The fix is to rebuild larger from source or adopt a scalable Bloom filter
+      that chains growing filters with tightening FP rates. Weaker hashes worsen FP; you can't get
+      false negatives from over-filling; and the array doesn't shrink. Monitor fill ratio, not just
+      planned n.
+    ref: "concepts.md#bloom-filter-uses-and-failure-modes"
+
+  - id: probabilistic-data-structures-008
+    difficulty: advanced
+    tags: [cuckoo-filter, counting-bloom, deletion, trade-offs]
+    question: |
+      You need approximate membership WITH deletion and high load factor, and you care about
+      cache locality. Compared with a counting Bloom filter, why is a cuckoo filter usually the
+      better choice, and what is its distinctive failure mode?
+    options:
+      - "Cuckoo filters store short fingerprints in 2 candidate buckets (better locality and, for low FP rates, less space than a counting Bloom), but insertion can fail via eviction cascades near ~95% load, forcing a resize."
+      - "Cuckoo filters never fail to insert and use no more space; there is no downside."
+      - "Cuckoo filters support deletion by decrementing per-bit counters and never overflow."
+      - "Cuckoo filters guarantee zero false positives while allowing deletion."
+    answer: 0
+    explanation: |
+      Cuckoo filters keep a fingerprint per item with two candidate buckets (using partial-key
+      cuckoo hashing so items can be relocated knowing only the fingerprint), giving 2-probe
+      locality and, for FP below ~3%, smaller footprint than a counting Bloom filter (which needs
+      3–4x the space and can suffer counter overflow). The distinctive cuckoo failure: when the
+      table is near full, eviction chains hit the max-kick limit and insertion fails, requiring a
+      rebuild/resize; duplicates also consume bucket slots. It does not eliminate false positives.
+    ref: "concepts.md#counting-bloom-cuckoo-and-quotient-filters"
+
+  - id: probabilistic-data-structures-009
+    difficulty: expert
+    tags: [counting-bloom, deletion, false-negatives, safety]
+    question: |
+      Why can a counting Bloom filter introduce FALSE NEGATIVES — the very thing a Bloom filter
+      is supposed to never do — in a real deployment?
+    options:
+      - "Because incrementing counters on insert can overflow and wrap to zero."
+      - "Because the minimum over rows can be negative."
+      - "Because decrementing counters for an element that was never actually inserted (or was already deleted) drives shared counters below their true value, so a still-present element's counters can read zero."
+      - "Because counting Bloom filters use fingerprints that collide."
+    answer: 2
+    explanation: |
+      A CBF's safety relies on decrementing only counters for elements truly present. If you delete
+      an element that was never inserted (a false-positive "hit" you trusted) or double-delete, you
+      decrement counters that other present elements depend on; those can then read zero and yield a
+      false negative for a genuinely-present element. Overflow (saturating a 4-bit counter at 15)
+      causes under-counting on later deletes too, but the classic correctness break is deleting
+      never-inserted elements. CBFs have no rows/min and no fingerprints — that describes CMS/cuckoo.
+    ref: "concepts.md#counting-bloom-cuckoo-and-quotient-filters"
+
+  - id: probabilistic-data-structures-010
+    difficulty: expert
+    tags: [hyperloglog, mechanism, variance, harmonic-mean]
+    question: |
+      HyperLogLog improves on the basic Flajolet–Martin "track the max number of leading zeros"
+      estimator primarily by which two mechanisms?
+    options:
+      - "By storing every element's hash and de-duplicating, then counting."
+      - "By using a counting Bloom filter internally to avoid double counting."
+      - "By taking the arithmetic mean of all register values, which cancels outliers."
+      - "By stochastic averaging across m = 2^p registers (bucketed by hash prefix) and combining them with a harmonic mean plus a bias-correction constant, which dramatically reduces variance."
+    answer: 3
+    explanation: |
+      Tracking a single max ρ is unbiased but high-variance. HLL splits the stream into m = 2^p
+      buckets (via the leading p hash bits), records the max ρ per bucket, and combines them with a
+      HARMONIC mean (which damps large-register outliers) scaled by α_m. Standard error ≈ 1.04/√m.
+      The arithmetic mean would not tame the exponential outliers as well; HLL stores no elements and
+      uses no Bloom filter. HLL++ adds 64-bit hashing, small-range bias correction, and a sparse mode.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-011
+    difficulty: advanced
+    tags: [hyperloglog, error, sizing, math]
+    question: |
+      Redis HyperLogLog uses p = 14 (m = 16384 registers) and quotes ~0.81% standard error. If a
+      product owner asked you to halve the error to ~0.4%, what happens to the register count?
+    options:
+      - "It roughly quadruples, because error ≈ 1.04/√m, so halving error needs ~4x the registers."
+      - "It doubles to 32768 registers."
+      - "It stays the same; error is fixed by the hash width, not m."
+      - "It halves, because error scales linearly with 1/m."
+    answer: 0
+    explanation: |
+      Standard error ≈ 1.04/√m. To halve the error you must quadruple m (√m in the denominator):
+      0.81%/√4 ≈ 0.40%, needing ~65536 registers and ~4x the memory. This diminishing return —
+      4x space per 2x accuracy — is the key economic fact of HLL and why you stop at the product's
+      real tolerance (a uniques dashboard rarely needs sub-0.5%).
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-012
+    difficulty: expert
+    tags: [hyperloglog, mergeability, intersection, distributed]
+    question: |
+      You compute per-shard HyperLogLogs on 200 shards and want (a) the global distinct count and
+      (b) the count of users common to shard A and shard B. Which statement is correct?
+    options:
+      - "Both are computed by register-wise max of the HLLs; both are exact."
+      - "Neither is possible; HLLs cannot be combined across shards."
+      - "The global count is obtained by lossless register-wise max merge; the intersection must be estimated via inclusion–exclusion, which compounds relative errors and is unreliable for small intersections."
+      - "The intersection is a direct register-wise min; the union is not supported."
+    answer: 2
+    explanation: |
+      HLL union = register-wise max, and this is exact/lossless — the merged HLL equals the HLL of
+      the combined stream, which is precisely why sharded distinct-counts are cheap and mergeable.
+      Intersections are NOT natively supported; you approximate |A∩B| = |A|+|B|−|A∪B|, which subtracts
+      two noisy estimates and blows up the relative error when the intersection is small or the sets
+      differ greatly in size. There is no meaningful register-wise "min" for intersection.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-013
+    difficulty: advanced
+    tags: [count-min-sketch, math, sizing]
+    question: |
+      A Count-Min Sketch with width w and depth d guarantees, with probability ≥ 1 − δ, that the
+      estimate exceeds the true frequency by at most which quantity (N = total stream count)?
+    options:
+      - "ε · f(x), independent of N."
+      - "ε / N, with w = ⌈1/ε⌉ and d = ⌈1/δ⌉."
+      - "√N · ε, regardless of w and d."
+      - "ε · N, with w = ⌈e/ε⌉ and d = ⌈ln(1/δ)⌉."
+    answer: 3
+    explanation: |
+      The standard CMS bound: with w = ⌈e/ε⌉ and d = ⌈ln(1/δ)⌉, Pr[f̂(x) ≤ f(x) + εN] ≥ 1 − δ. The
+      overestimate is bounded by ε·N — the total stream MASS, not the key's own count. This is why
+      CMS is great for heavy hitters (true count >> εN) and poor for rare keys (their count can be
+      swamped by εN of collision noise). The other forms misstate the dependence on N or the sizing.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-014
+    difficulty: expert
+    tags: [count-min-sketch, rate-limiting, failure-mode, safety]
+    question: |
+      You build a per-API-key rate limiter on a Count-Min Sketch. Under a heavy-tailed workload
+      with an under-provisioned width w, what breaks first and why is it a serious problem?
+    options:
+      - "Light, low-volume keys accumulate phantom counts from collisions with heavy keys and get wrongly throttled, because CMS over-estimates and εN noise dwarfs their small true counts."
+      - "Heavy hitters get under-counted and evade limits, because min() hides their true count."
+      - "The sketch starts returning false negatives, letting all traffic through."
+      - "Counters overflow and reset every key to zero simultaneously."
+    answer: 0
+    explanation: |
+      CMS over-counts, and the overestimate is bounded by ε·N. Heavy hitters (the ones you WANT to
+      throttle) are estimated accurately, so they don't evade limits — over-counting fails safe for
+      them. The victims are innocent low-volume keys whose tiny true counts are buried under collision
+      inflation from heavy keys sharing their cells; with too-small w they cross the limit and get
+      throttled unfairly. The fix is a larger w (and/or conservative-update). CMS never under-counts,
+      so options about false negatives/under-counting are wrong.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-015
+    difficulty: expert
+    tags: [count-min-sketch, count-sketch, turnstile, deletions]
+    question: |
+      Your stream now includes decrements (a "turnstile" model with negative updates). Why does
+      plain Count-Min Sketch break, and what is the right replacement?
+    options:
+      - "It breaks because hashing negative numbers is undefined; use a Bloom filter instead."
+      - "It breaks because δ becomes negative; increase depth d and it recovers."
+      - "The min() estimator is only valid for non-negative streams; with negatives collisions can push cells below the truth, so min() is no longer an upper bound — use Count-Sketch (±1 hashes, median estimator) for unbiased two-sided estimates."
+      - "Nothing breaks; CMS handles negative counts natively via the min estimator."
+    answer: 2
+    explanation: |
+      CMS's correctness that min() is an over-estimate depends on all updates being non-negative
+      (collisions only add). With negative updates, a colliding cell can be pulled below the true
+      value, so min() no longer bounds it and the guarantee collapses. Count-Sketch multiplies
+      updates by a ±1 hash per row and takes the MEDIAN, giving an unbiased estimator valid for
+      turnstile (signed) streams. Hashing negatives is fine; δ doesn't go negative.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-016
+    difficulty: intermediate
+    tags: [skip-list, complexity, mechanism]
+    question: |
+      What gives a skip list its expected O(log n) search cost?
+    options:
+      - "Deterministic rotations rebalance the structure after every insert."
+      - "It stores elements in a contiguous array and binary-searches."
+      - "A hash function maps each key directly to its level, guaranteeing balance."
+      - "Each element is promoted to higher express-lane levels with geometrically decreasing probability, so higher lanes let a search skip large spans before dropping down."
+    answer: 3
+    explanation: |
+      A skip list stacks sparser and sparser sorted linked lists; an element appears at level L with
+      probability p^L (coin flips at insert). Search starts at the top lane, moves right until it
+      would overshoot, drops a level, and repeats — giving expected O(log n) with high-probability
+      bounds. There are no rotations (that's balanced BSTs), no contiguous array (that's sorted-array
+      binary search), and levels come from a PRNG, not the key's hash.
+    ref: "concepts.md#skip-lists-as-probabilistic-balanced-structures"
+
+  - id: probabilistic-data-structures-017
+    difficulty: advanced
+    tags: [skip-list, redis, rocksdb, real-systems]
+    question: |
+      Why do Redis sorted sets and the RocksDB/LevelDB memtable both use skip lists rather than a
+      balanced BST or B-tree?
+    options:
+      - "Skip lists use less memory per element than any alternative."
+      - "Skip lists avoid global rebalancing (no rotations/splits), making concurrent inserts and ordered iteration simple with predictable low write tail-latency — exactly what a mutable in-memory structure needs."
+      - "Skip lists guarantee worst-case O(1) operations."
+      - "Skip lists provide better on-disk locality than B-trees."
+    answer: 1
+    explanation: |
+      Inserts/deletes in a skip list are local pointer splices with no cascading rotations or node
+      splits, which makes lock-free / fine-grained-locking concurrency and ordered iteration easy and
+      keeps write tail-latency predictable — ideal for a mutable memtable and Redis ZSET (which pairs
+      the skip list with a hash map for O(1) score lookup). Skip lists actually use MORE memory
+      (extra forward pointers) and have WORSE cache/disk locality than B-trees — which is why on-disk
+      indexes use B-trees. Worst case is O(n), not O(1).
+    ref: "concepts.md#skip-lists-as-probabilistic-balanced-structures"
+
+  - id: probabilistic-data-structures-018
+    difficulty: advanced
+    tags: [skip-list, b-tree, locality, trade-offs]
+    question: |
+      For an ON-DISK ordered index, why is a B-tree generally preferred over a skip list despite the
+      skip list's simpler concurrency story?
+    options:
+      - "B-trees pack many keys per node/page (contiguous), giving far better cache and disk-block locality and higher memory density, minimizing the pointer-chasing and I/O that hurt skip lists on disk."
+      - "B-trees have lower asymptotic complexity than skip lists."
+      - "Skip lists cannot store sorted data."
+      - "B-trees never need to split nodes, so writes are always O(1)."
+    answer: 0
+    explanation: |
+      Both are O(log n). The decisive factor on disk is locality: B-tree nodes hold many keys in a
+      contiguous page, so one I/O fetches many comparisons and memory density is high. A skip list
+      chases scattered pointers across levels, incurring many cache misses / random reads — acceptable
+      in RAM, costly on disk. That locality difference is precisely why databases use B-trees on disk
+      and skip lists in memory. B-trees do split nodes (not O(1) writes), and skip lists are sorted.
+    ref: "concepts.md#skip-lists-as-probabilistic-balanced-structures"
+
+  - id: probabilistic-data-structures-019
+    difficulty: intermediate
+    tags: [minhash, jaccard, mechanism]
+    question: |
+      Why does MinHash estimate Jaccard similarity of two sets?
+    options:
+      - "Because the sum of hash values of two sets equals their intersection size."
+      - "Because it counts the number of shared shingles directly."
+      - "Because for a random hash h, P[min(h(A)) = min(h(B))] equals the Jaccard similarity J(A,B), so the fraction of matching signature positions estimates J."
+      - "Because the XOR of the two minima equals the symmetric difference."
+    answer: 2
+    explanation: |
+      The core identity: under a random permutation/hash, the probability the two sets share the same
+      minimum element equals |A∩B|/|A∪B| = J(A,B). Using k independent hashes yields a length-k
+      signature; the fraction of positions where the minima agree is an unbiased estimate of Jaccard,
+      with standard error ≈ 1/√k. It does not directly count shared shingles or use sums/XOR of hashes.
+    ref: "concepts.md#minhash-simhash-and-lsh-for-near-duplicate-detection"
+
+  - id: probabilistic-data-structures-020
+    difficulty: expert
+    tags: [lsh, banding, s-curve, tuning, trade-offs]
+    question: |
+      In MinHash LSH banding you split a length-k signature into b bands of r rows (k = b·r); a pair
+      is a candidate if it matches on all r rows of any band. You're drowning in candidate pairs to
+      compare. Which adjustment reduces candidates, and what do you risk?
+    options:
+      - "Decrease r (fewer rows per band): fewer candidates, but you risk more false positives."
+      - "Increase both b and r independently, since more of each always helps."
+      - "Switch the hash family; banding parameters have no effect on candidate volume."
+      - "Increase r (more rows per band) and/or decrease b: it raises the S-curve threshold so fewer low-similarity pairs qualify, reducing candidates — at the risk of missing true near-duplicates (false negatives)."
+    answer: 3
+    explanation: |
+      The candidate probability for Jaccard s is 1 − (1 − s^r)^b, an S-curve with threshold ≈ (1/b)^(1/r).
+      Making r larger (requiring more rows to agree per band) and/or b smaller pushes the threshold up,
+      so only higher-similarity pairs become candidates — fewer comparisons. The cost is missing genuine
+      near-dupes just below the new threshold (false negatives). Decreasing r would INCREASE candidates.
+      k = b·r constrains them; you can't raise both freely, and the family choice doesn't remove the
+      banding trade-off.
+    ref: "concepts.md#minhash-simhash-and-lsh-for-near-duplicate-detection"
+
+  - id: probabilistic-data-structures-021
+    difficulty: advanced
+    tags: [simhash, minhash, selection, trade-offs]
+    question: |
+      Google's web-crawl near-duplicate detection uses 64-bit SimHash. When is SimHash the better
+      choice over MinHash, and what property makes near-dupe search efficient?
+    options:
+      - "SimHash is better for exact set/Jaccard similarity; near-dupes have identical fingerprints."
+      - "SimHash suits cosine/angle similarity over weighted (e.g. TF-IDF) feature vectors and is far more compact (one word); near-dupes differ in only a few bits, so you solve 'fingerprints within small Hamming distance' via permuted tables."
+      - "SimHash guarantees zero false negatives, unlike MinHash."
+      - "SimHash requires training on a labeled corpus, giving higher accuracy than MinHash."
+    answer: 1
+    explanation: |
+      SimHash maps a high-dimensional weighted vector to a single b-bit fingerprint whose Hamming
+      distance tracks cosine angle — compact (one word vs a k-length MinHash signature) and ideal for
+      TF-IDF-weighted text. Manku et al. found near-dupes typically differ in ≤3 bits, solved with
+      permuted-table Hamming search. MinHash is the natural fit for set/Jaccard (so option 0 is
+      backwards). Neither guarantees zero false negatives, and SimHash needs no training.
+    ref: "concepts.md#minhash-simhash-and-lsh-for-near-duplicate-detection"
+
+  - id: probabilistic-data-structures-022
+    difficulty: advanced
+    tags: [quantiles, percentile-averaging, monitoring, failure-mode]
+    question: |
+      A dashboard reports fleet p99 latency by averaging the p99 values reported by each of 500
+      hosts. Why is this number wrong, and what is the correct approach?
+    options:
+      - "Averaging percentiles is mathematically invalid — a percentile of an aggregate is not the mean of per-host percentiles; instead export mergeable quantile sketches (t-digest/DDSketch) per host and merge the SKETCHES, then read p99."
+      - "It's correct as long as all hosts have equal traffic."
+      - "It's wrong only because of clock skew; synchronize clocks and it becomes correct."
+      - "Replace the average with the maximum of the per-host p99s to get the true fleet p99."
+    answer: 0
+    explanation: |
+      You cannot average percentiles: the p99 of the combined distribution is generally not the mean
+      (or max) of the per-host p99s — a host with light traffic contributes a p99 that shouldn't carry
+      equal weight, and quantiles simply don't compose linearly. The correct pattern is to compute a
+      mergeable quantile sketch per host and merge the sketches (bucket-wise for DDSketch, centroid
+      re-clustering for t-digest), then query the merged sketch. Equal traffic doesn't fix the math,
+      and clock skew is irrelevant to quantile composition.
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-023
+    difficulty: expert
+    tags: [ddsketch, t-digest, guarantees, selection]
+    question: |
+      Your SLO tooling needs a PROVABLE relative-error bound on every reported p99 across the whole
+      value range. Which sketch gives that guarantee and by what mechanism?
+    options:
+      - "t-digest, because its scale function guarantees a fixed absolute error at every quantile."
+      - "A fixed-bucket histogram, because equal-width buckets bound absolute error."
+      - "DDSketch, because exponentially-spaced buckets (index ⌈log_γ(v)⌉ with γ=(1+α)/(1−α)) ensure the reported value is within a fixed α relative error of the true value for every quantile."
+      - "Reservoir sampling, because a uniform sample reproduces every quantile exactly."
+    answer: 2
+    explanation: |
+      DDSketch's log-spaced buckets give a hard relative-error guarantee |v̂ − v| ≤ α·v uniformly
+      across quantiles, and it is fully mergeable. t-digest has excellent EMPIRICAL tail accuracy
+      (relative to q) but not a provable uniform bound — it's the better pick for maximal tail
+      resolution with minimal fuss, not for a formal guarantee. Fixed-bucket histograms bound error
+      only to bucket width (poor at tails unless bucketed for them), and a uniform sample gives
+      sampling error, not exact quantiles.
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-024
+    difficulty: expert
+    tags: [t-digest, scale-function, tail-accuracy, mechanism]
+    question: |
+      What design choice makes t-digest especially accurate at extreme quantiles (p999, p9999)?
+    options:
+      - "It stores every sample below p1 and above p99 exactly."
+      - "It uses fixed equal-width buckets that are narrower at the ends."
+      - "It averages the top and bottom 1% of samples separately."
+      - "Its scale function forces centroids near the tails (q→0 or q→1) to stay small (fine resolution) while allowing large centroids near the median, concentrating precision where the extremes are."
+    answer: 3
+    explanation: |
+      t-digest adaptively clusters samples into centroids with a scale function k(q) that caps centroid
+      size small near q=0 and q=1 and permits large centroids near q=0.5. So the tails get many fine
+      centroids (high accuracy) and the middle is coarse — accuracy is relative to q, best at the
+      extremes, which is exactly where latency SLOs live. It does not store raw tail samples, uses
+      adaptive (not fixed-width) centroids, and doesn't merely average the top/bottom percent.
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-025
+    difficulty: intermediate
+    tags: [reservoir-sampling, algorithm-r, uniformity]
+    question: |
+      In Vitter's Algorithm R with reservoir size s, when the i-th item (i > s) arrives you pick a
+      random j in [1, i] and replace slot j if j ≤ s. What invariant does this maintain?
+    options:
+      - "After processing i items, every item seen so far is in the reservoir with probability exactly s/i, i.e. a uniform sample at every prefix."
+      - "The most recent s items are always in the reservoir."
+      - "Items are retained in proportion to their arrival order, favoring early items."
+      - "Exactly the first s items are kept forever."
+    answer: 0
+    explanation: |
+      The classic reservoir invariant, provable by induction: after i items, each seen item is retained
+      with probability exactly s/i — a uniform sample without knowing n in advance and in one pass. It
+      is NOT a recency window, NOT biased to early items ("keep the first N" would be), and does not
+      freeze the first s. The bias-free property is why it's used for uniform log/trace sampling.
+    ref: "concepts.md#reservoir-sampling-over-streams"
+
+  - id: probabilistic-data-structures-026
+    difficulty: advanced
+    tags: [reservoir-sampling, tail-events, tracing, trade-offs]
+    question: |
+      You use uniform reservoir sampling to retain 1,000 request traces from a firehose for debugging.
+      Your on-call complains that error/outlier traces are almost never in the sample. What's the
+      correct read of this situation?
+    options:
+      - "The reservoir is buggy; a correct uniform sample would over-represent errors."
+      - "Increase s to 2,000 and errors will appear proportionally more often per trace."
+      - "This is expected: a uniform sample represents the population, so rare events (errors) are rare in it — for rare-but-important events use biased/tail-based sampling instead of uniform."
+      - "Switch to 'keep every k-th request'; that captures rare events better."
+    answer: 2
+    explanation: |
+      A uniform sample faithfully mirrors the population, so if errors are 0.01% of traffic they'll be
+      ~0.01% of the sample — by design you'll rarely capture them. The right fix for rare-but-critical
+      events is biased sampling (e.g. tail-based trace sampling that keeps slow/error traces). A correct
+      uniform sampler does NOT over-represent errors; doubling s keeps the same proportion; and
+      systematic every-k sampling can alias with periodic patterns and still under-captures rare events.
+    ref: "concepts.md#reservoir-sampling-over-streams"
+
+  - id: probabilistic-data-structures-027
+    difficulty: expert
+    tags: [when-not-to-approximate, billing, correctness, judgment]
+    question: |
+      Which of these is the LEAST appropriate place to substitute a probabilistic structure for an
+      exact one, and why?
+    options:
+      - "Skipping SSTable reads in an LSM store with a Bloom filter — a false positive only wastes I/O."
+      - "Estimating unique visitors on an analytics dashboard with HyperLogLog — ±2% is invisible to the product."
+      - "Approximate per-IP request counts for edge rate limiting with a Count-Min Sketch — over-counting fails safe toward throttling."
+      - "Counting billable ad impressions that advertisers are charged for with a Count-Min Sketch — over-counting directly inflates charges and the count is the record of truth."
+    answer: 3
+    explanation: |
+      Billable impression counts are the product of record; CMS over-counts, which would over-charge
+      advertisers — a liability, not a tolerable error, and there's no safe backstop. The other three
+      are canonical safe uses: the Bloom filter has an exact disk-read backstop, the uniques dashboard
+      genuinely tolerates ±2%, and rate-limit over-counting fails safe (worst case: throttle slightly
+      early). The line is drawn by whether error is bounded, its direction is safe, and a backstop
+      exists — billing fails all three.
+    ref: "concepts.md#choosing-the-error-budget-and-when-not-to-approximate"
+
+  - id: probabilistic-data-structures-028
+    difficulty: advanced
+    tags: [lower-bounds, space, why-approximate, theory]
+    question: |
+      Why is HyperLogLog able to beat any exact algorithm on space for count-distinct, rather than
+      this being a mere engineering optimization?
+    options:
+      - "Because HLL uses a faster hash function than exact structures."
+      - "Because exact distinct-counting provably requires Ω(n) space (you must effectively remember the distinct elements), while approximate counting to a relative error needs only sublinear space — it's an information-theoretic lower bound, not an implementation detail."
+      - "Because HLL compresses the exact set with a better algorithm."
+      - "Because modern CPUs have SIMD instructions that only HLL can use."
+    answer: 1
+    explanation: |
+      Exact count-distinct has a linear-space lower bound: distinguishing all possible distinct sets
+      forces you to retain essentially per-element information. Allowing a bounded relative error
+      collapses the required information to sublinear (HLL: fixed ~1.5 KB for any n to ~2%). That's a
+      provable information-theoretic gap, so no clever exact algorithm can match HLL's space — it's not
+      about hash speed, compression of an exact set, or SIMD.
+    ref: "concepts.md#why-approximate-and-the-space-time-accuracy-trade-off"
+
+  - id: probabilistic-data-structures-029
+    difficulty: advanced
+    tags: [memory-hierarchy, latency, why-approximate, cache]
+    question: |
+      A key argument for shrinking a data structure 100x with a sketch is latency, not just RAM cost.
+      Which statement best captures the mechanism?
+    options:
+      - "Shrinking a structure can move it up a tier of the memory hierarchy (e.g. from DRAM ~100 ns or SSD ~100 µs into L2/L3 cache ~10–40 ns), cutting per-access latency by orders of magnitude."
+      - "Smaller structures always have lower asymptotic complexity."
+      - "Sketches eliminate all cache misses by definition."
+      - "Latency depends only on network round-trips, which sketches remove."
+    answer: 0
+    explanation: |
+      Access latency is dominated by which tier of the hierarchy the data lives in: L2/L3 (~10–40 ns) vs
+      DRAM (~100 ns) vs SSD (~100 µs) vs network hop (~hundreds of µs–ms). Making a structure 100x
+      smaller can promote it from disk/DRAM into cache, delivering the big latency win — independent of
+      asymptotic complexity. Sketches don't magically remove all cache misses (a naive Bloom filter
+      does k scattered probes; blocked Bloom fixes that), and they aren't only about network hops.
+    ref: "concepts.md#why-approximate-and-the-space-time-accuracy-trade-off"
+
+  - id: probabilistic-data-structures-030
+    difficulty: advanced
+    tags: [bloom-filter, blocked-bloom, cache, optimization]
+    question: |
+      A naive Bloom filter with k=7 incurs up to 7 cache misses per query. What does a "blocked Bloom
+      filter" (used in RocksDB, Impala) change, and at what cost?
+    options:
+      - "It reduces k to 1, eliminating false positives entirely."
+      - "It stores the elements themselves in a block to allow deletion."
+      - "It confines all k bits of an element to a single cache-line-sized block, so a query touches ~1 cache line instead of k, at the cost of a slightly worse false-positive rate for the same size."
+      - "It replaces bits with counters to enable resizing at runtime."
+    answer: 2
+    explanation: |
+      Blocked Bloom filters map an element's k bits into one machine-cache-line-sized block, so a query
+      is ~1 cache miss instead of k scattered ones — a large real-world speedup. The trade-off is a
+      modestly higher FP rate (intra-block bit skew reduces the ideal randomness) for the same footprint.
+      It doesn't set k=1, doesn't store elements, doesn't enable deletion, and doesn't add counters.
+    ref: "concepts.md#bloom-filter-uses-and-failure-modes"
+
+  - id: probabilistic-data-structures-031
+    difficulty: expert
+    tags: [bloom-filter, uniqueness-constraint, correctness, judgment]
+    question: |
+      Why can a Bloom filter SPEED UP but never ENFORCE a uniqueness constraint (e.g. "this email must
+      be unique")?
+    options:
+      - "Because Bloom filters have false negatives that would let duplicates through."
+      - "Because Bloom filters cannot store strings like emails."
+      - "Because enforcing uniqueness requires deletion, which Bloom filters support poorly."
+      - "Because a Bloom filter false positive would report a brand-new, valid value as 'already present' and wrongly reject it, and you cannot enumerate or recover what it rejected — so it can only front an exact index that makes the final decision."
+    answer: 3
+    explanation: |
+      A Bloom filter has no false negatives, so a "not present" is trustworthy — good for a fast
+      accept path. But its false positives mean it will occasionally claim a genuinely new value is
+      "already present," wrongly rejecting a valid registration, and there's no way to know which
+      rejections were spurious. Thus it can only accelerate (definitely-new → fast accept; maybe →
+      consult exact index) in front of an authoritative exact index. It handles strings fine; the issue
+      is FP direction, not deletion.
+    ref: "concepts.md#choosing-the-error-budget-and-when-not-to-approximate"
+
+  - id: probabilistic-data-structures-032
+    difficulty: intermediate
+    tags: [cdn, cache-admission, bloom-filter, one-hit-wonder]
+    question: |
+      A CDN uses a Bloom filter to implement "only admit an object to cache on its second request."
+      What does the filter track and what does it prevent?
+    options:
+      - "It tracks which objects have been 'seen once' so one-hit-wonders (objects requested a single time) don't pollute the cache; admit only on a hit in the seen-once filter."
+      - "It tracks object sizes to prevent large objects from being cached."
+      - "It tracks TTLs to prevent stale objects from being served."
+      - "It tracks client IPs to prevent abusive clients from filling the cache."
+    answer: 0
+    explanation: |
+      The one-hit-wonder filter records "have I seen this object before?"; on the first request it's
+      absent (record it, don't cache), on the second request it's present (now admit). This keeps
+      single-request objects — which would otherwise evict useful content — out of the cache, improving
+      hit ratio for a tiny memory cost. It's not about sizes, TTLs, or client IPs.
+    ref: "concepts.md#bloom-filter-uses-and-failure-modes"
+
+  - id: probabilistic-data-structures-033
+    difficulty: advanced
+    tags: [count-min-sketch, heavy-hitters, top-k, mechanism]
+    question: |
+      To find top-k heavy hitters with a Count-Min Sketch you pair it with a min-heap of candidates.
+      Given CMS's error direction, what guarantee does this give?
+    options:
+      - "It may miss true heavy hitters but never reports a false one."
+      - "It reports exact top-k counts with no error."
+      - "It may admit a few false heavy hitters but never misses a true one whose count exceeds the threshold (relative to the error bound), because CMS over-estimates and thus never under-reports a heavy key."
+      - "It guarantees the reported order of the top-k is exactly correct."
+    answer: 2
+    explanation: |
+      Because CMS only over-counts, a genuinely heavy key's estimate is >= its true count, so it will
+      not be wrongly excluded from the heap — no misses of true heavy hitters (above the εN error
+      band). The cost is possibly admitting a few borderline false positives whose inflated estimate
+      crossed the threshold. Counts aren't exact and exact ordering isn't guaranteed near the threshold,
+      so options claiming exactness or "never a false one" are wrong.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-034
+    difficulty: expert
+    tags: [distributed, mergeability, design, judgment]
+    question: |
+      You must report distinct active users PER region AND a global total across 200 shards, refreshed
+      hourly, cheaply. Why is an exact distinct-count a poor fit and HLL a good one?
+    options:
+      - "Exact sets are fine because you can average the per-shard distinct counts to get the global total."
+      - "Exact distinct-count is not mergeable without shipping the raw per-shard sets (potentially gigabytes) to de-duplicate cross-shard overlap; HLL merges losslessly via register-wise max, so per-region HLLs combine into a global HLL cheaply and correctly."
+      - "Exact counts are fine because distinct counts add across shards."
+      - "HLL is a poor fit because it cannot be merged across shards."
+    answer: 1
+    explanation: |
+      You cannot add or average per-shard distinct counts because a user may appear in several shards —
+      correcting for overlap requires the raw sets. Exact global distinct-count therefore means moving
+      gigabytes of member sets to de-dup. HLL sidesteps this: register-wise max merge is exact/lossless,
+      so per-region sketches merge into a global count with no raw-data movement — the textbook reason
+      to use HLL in sharded analytics. HLL is very much mergeable, so the last option is false.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-035
+    difficulty: advanced
+    tags: [quotient-filter, ssd, mergeability, trade-offs]
+    question: |
+      Among filters that support deletion, when does a quotient filter have an edge over a cuckoo
+      filter?
+    options:
+      - "When you need zero false positives and unlimited inserts."
+      - "When you never delete anything and want the smallest possible size."
+      - "When you need to store the full elements rather than fingerprints."
+      - "When you want cache-friendly SEQUENTIAL probing, mergeability, resizability, and efficient SSD-friendly layout (RSQF/CQF), accepting more implementation complexity and degradation as load approaches full."
+    answer: 3
+    explanation: |
+      Quotient filters store fingerprints via quotienting in an open-addressed table with sequential
+      probing, which is cache- and SSD-friendly, and the RSQF/CQF variants are mergeable and resizable
+      (CQF also counts multiplicities) — advantages cuckoo filters lack. The trade-offs are higher
+      complexity and performance degradation (long shifted "runs") near full load. It doesn't give zero
+      false positives or store full elements, and its edge isn't a no-delete scenario.
+    ref: "concepts.md#counting-bloom-cuckoo-and-quotient-filters"
+
+  - id: probabilistic-data-structures-036
+    difficulty: expert
+    tags: [hyperloglog, small-cardinality, hll-plus-plus, bias]
+    question: |
+      Plain HyperLogLog is known to be biased for small cardinalities. What does Google's HLL++ do
+      about it, and what other ceiling does it remove?
+    options:
+      - "It applies empirical bias correction (and a sparse representation) for small ranges, and uses 64-bit hashing to remove the ~2^32 cardinality ceiling of 32-bit HLL."
+      - "It switches to a counting Bloom filter for small n and caps counts at 2^32."
+      - "It increases the number of registers dynamically until the estimate stabilizes."
+      - "It stores exact values for small n permanently, never switching to the dense estimator."
+    answer: 0
+    explanation: |
+      HLL++ adds bias correction for the small-cardinality regime plus a compact sparse representation
+      (tiny and near-exact when n is small, switching to dense at scale), and it uses 64-bit hashes so
+      cardinalities beyond 2^32 don't collide out. It does not fall back to a counting Bloom filter,
+      doesn't grow registers dynamically, and the sparse mode does transition to dense as n grows.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-037
+    difficulty: intermediate
+    tags: [error-budget, selection, framework]
+    question: |
+      You need to answer "how often did each key occur, and who are the top talkers?" over a stream of
+      billions of events with a fixed small memory budget. Which structure fits?
+    options:
+      - "HyperLogLog, because it counts occurrences per key."
+      - "Count-Min Sketch (optionally with a top-k heap), because it estimates per-key frequency in fixed space and supports heavy-hitter detection."
+      - "A Bloom filter, because it tracks how many times each key was inserted."
+      - "A skip list, because it keeps keys sorted by frequency automatically."
+    answer: 1
+    explanation: |
+      Frequency-per-key and heavy hitters is the Count-Min Sketch's job (pair with a min-heap for
+      top-k). HyperLogLog counts DISTINCT keys, not per-key frequency. A plain Bloom filter answers
+      membership only — it doesn't count occurrences. A skip list is an ordered map, not a frequency
+      estimator, and doesn't auto-rank by frequency.
+    ref: "concepts.md#choosing-the-error-budget-and-when-not-to-approximate"
+
+  - id: probabilistic-data-structures-038
+    difficulty: advanced
+    tags: [reservoir-sampling, algorithm-l, performance]
+    question: |
+      Vitter's Algorithm L improves on Algorithm R for very large streams primarily by doing what?
+    options:
+      - "Increasing the reservoir size automatically as the stream grows."
+      - "Storing the entire stream and sampling at the end."
+      - "Computing how many upcoming items to skip before the next replacement, reducing RNG work from O(n) to O(s·(1 + log(n/s))) while preserving uniformity."
+      - "Weighting items by recency so newer items are more likely to be kept."
+    answer: 2
+    explanation: |
+      Algorithm L draws, in one shot, the number of items to skip before the next replacement (from the
+      appropriate distribution), so it does far fewer RNG calls and updates — O(s·(1+log(n/s))) work
+      instead of O(n) — while keeping the exact same s/i uniformity. It does not grow the reservoir,
+      buffer the whole stream, or bias toward recency (that would be a different, non-uniform scheme).
+    ref: "concepts.md#reservoir-sampling-over-streams"
+
+  - id: probabilistic-data-structures-039
+    difficulty: expert
+    tags: [tail-latency, tail-at-scale, quantiles, fanout]
+    question: |
+      "The Tail at Scale" (Dean & Barroso) explains why p99/p999 dominate user-perceived latency in a
+      fan-out service. Which reasoning is correct and how does it drive your choice of quantile tooling?
+    options:
+      - "The mean latency dominates because it averages out slow leaves; store only the mean per host."
+      - "Only the fastest leaf matters because responses can be served speculatively."
+      - "Tail latency is irrelevant if the average is low, so percentile sketches are unnecessary."
+      - "A request that fans out to N leaves waits for the slowest, so even a rare per-leaf slow response becomes likely to appear in at least one leaf — making high quantiles the metric that matters, which you must measure correctly AND mergeably across the fleet with sketches like t-digest/DDSketch."
+    answer: 3
+    explanation: |
+      With fan-out to N leaves the overall latency is governed by the slowest leaf; a per-leaf 1%-slow
+      event becomes ~(1 − 0.99^N) likely to hit at least one leaf, so the tail of the leaf distribution
+      shows up as the common case for the parent. Hence p99/p999 are the numbers that matter, and you
+      need them measured correctly and MERGEABLY across millions of req/s — exactly what mergeable
+      quantile sketches provide. Means hide the tail; you can't rely on fastest-leaf; low average does
+      not excuse a bad tail.
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-040
+    difficulty: advanced
+    tags: [bloom-filter, hashing, double-hashing, independence]
+    question: |
+      Real Bloom filters rarely use k truly independent hash functions. What is the standard,
+      theoretically-justified substitute and why is it acceptable?
+    options:
+      - "Use the same hash k times with different seeds chosen at random each query, which is unbiased."
+      - "Use double hashing g_i(x) = h1(x) + i·h2(x) (or split one strong 128-bit hash into two 64-bit halves), which is proven to preserve the false-positive behavior without needing k independent hashes."
+      - "Use k copies of a fast non-cryptographic hash with the same seed, since collisions cancel out."
+      - "Use a single hash and set k adjacent bits, which is equivalent to k independent hashes."
+    answer: 1
+    explanation: |
+      Kirsch–Mitzenmacher showed that double hashing g_i(x) = h1(x) + i·h2(x) yields essentially the
+      same asymptotic FP rate as k independent hashes, so practitioners derive all k positions from two
+      hashes (often one strong 128-bit hash split in halves). Re-seeding per query is nonsense (queries
+      must be deterministic); identical-seed copies give correlated identical positions (useless); and
+      setting k adjacent bits destroys independence and worsens FP.
+    ref: "concepts.md#bloom-filters-mechanism-and-math"
+
+  - id: probabilistic-data-structures-041
+    difficulty: expert
+    tags: [count-min-sketch, conservative-update, optimization, trade-offs]
+    question: |
+      What does "conservative update" change in a Count-Min Sketch, and what does it preserve?
+    options:
+      - "On each increment it updates only the cell(s) currently holding the minimum value across the d rows, which empirically reduces over-counting while preserving the property that estimates never fall below the true count."
+      - "It decrements all cells that aren't the minimum, allowing deletions safely."
+      - "It switches from min() to median() estimation, giving two-sided error."
+      - "It doubles the width w on every collision to keep error constant."
+    answer: 0
+    explanation: |
+      Conservative update increments only the smallest cell(s) among the d rows for a key (since the
+      estimate is the min, raising larger cells can't help and only inflates other keys). This lowers
+      empirical over-count while still never under-counting — the one-sided guarantee holds. It does not
+      decrement/delete, does not change to a median estimator (that's Count-Sketch for signed streams),
+      and does not resize on collisions.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-042
+    difficulty: advanced
+    tags: [membership, exact-vs-approx, small-n, judgment]
+    question: |
+      For a membership set of only ~5,000 items that easily fits in CPU cache, why is a Bloom filter
+      often the WRONG choice?
+    options:
+      - "Because Bloom filters can't hold 5,000 items."
+      - "Because Bloom filters are slower than hash sets for any n."
+      - "Because at small n an exact hash set already fits in cache and answers with zero error; a Bloom filter would add a tunable false-positive rate for no meaningful space or latency win — sketches pay off only at scale."
+      - "Because 5,000 items exceeds the optimal fill of any Bloom filter."
+    answer: 2
+    explanation: |
+      Sketches trade accuracy for space/latency; that trade only pays when the exact structure is too
+      big to fit a good memory tier. At n=5,000 an exact hash set is tiny, cache-resident, and exact —
+      adding a Bloom filter just imports false positives for no benefit. Bloom filters can certainly
+      hold 5,000 items and aren't universally slower; the point is there's nothing to gain at that scale.
+    ref: "concepts.md#choosing-the-error-budget-and-when-not-to-approximate"
+
+  - id: probabilistic-data-structures-043
+    difficulty: expert
+    tags: [security, revocation, fail-open, judgment]
+    question: |
+      An engineer proposes using a Bloom filter of revoked auth tokens as the FINAL check: "if the
+      token isn't in the filter, accept it." What is the safety problem and the correct design?
+    options:
+      - "No problem — Bloom filters have no false negatives, so a revoked token is always flagged."
+      - "The Bloom filter should store VALID tokens instead of revoked ones."
+      - "There is no safety issue because false positives just reject a few valid tokens."
+      - "This is a legitimate use since revocation lists are small."
+    answer: 0
+    explanation: |
+      Storing REVOKED tokens is actually the safe direction: a Bloom filter has no false negatives, so
+      every revoked token in the filter is always caught ("maybe present" → do exact check / reject),
+      and its false positives merely force a valid token through an exact re-check — it fails CLOSED for
+      revocation. The design becomes unsafe only if you invert it (store valid tokens and accept on
+      "present"), because a false positive would then accept a token that was never issued. Storing
+      valid tokens (option 1) is exactly the unsafe inversion; the small-list and no-issue framings miss
+      the direction-of-error analysis.
+    ref: "concepts.md#choosing-the-error-budget-and-when-not-to-approximate"
+
+  - id: probabilistic-data-structures-044
+    difficulty: advanced
+    tags: [minhash, error, signature-length, math]
+    question: |
+      A MinHash signature of length k estimates Jaccard similarity with roughly what standard error,
+      and what does that imply for choosing k?
+    options:
+      - "About 1/k, so k=100 gives ~1% error."
+      - "About 1/k^2, so small k already gives tiny error."
+      - "Error is independent of k and fixed by the shingle size."
+      - "About 1/√k, so k=200 gives ~7% error; halving the error requires ~4x more hashes."
+    answer: 3
+    explanation: |
+      MinHash estimates Jaccard as a fraction over k independent draws, so its standard error ≈ 1/√k
+      (k=200 → ~7%). Like HLL and other sampling-based sketches, cutting error in half needs ~4x the
+      signature length — a diminishing return you weigh against storage and compare cost. It is not 1/k,
+      not 1/k^2, and definitely not independent of k.
+    ref: "concepts.md#minhash-simhash-and-lsh-for-near-duplicate-detection"
+
+  - id: probabilistic-data-structures-045
+    difficulty: expert
+    tags: [lsh, ann, embeddings, modern, trade-offs]
+    question: |
+      For modern SEMANTIC similarity search over learned embeddings, classical MinHash/SimHash LSH has
+      largely been displaced by which approach, and where do MinHash/SimHash still win?
+    options:
+      - "Displaced by ANN indexes like HNSW / IVF-PQ / ScaNN for vector search; MinHash/SimHash still win for exact-shingle and text near-dup at web scale because they need no training and are cheap to compute and store."
+      - "Displaced by exact O(n^2) comparison; MinHash never wins anymore."
+      - "Displaced by Bloom filters, which now do vector search directly."
+      - "Displaced by Count-Min Sketch, which estimates cosine similarity."
+    answer: 0
+    explanation: |
+      For dense learned embeddings, graph/quantization ANN indexes (HNSW, IVF-PQ, ScaNN) dominate
+      because they exploit vector geometry far better than random-projection LSH. But MinHash (Jaccard
+      over shingles) and SimHash (Hamming over text features) remain the workhorses for exact-shingle /
+      text near-duplicate detection at web scale: no training, cheap to compute, compact to store.
+      Exact O(n^2), Bloom filters, and CMS do not do vector similarity search.
+    ref: "concepts.md#minhash-simhash-and-lsh-for-near-duplicate-detection"
+
+  - id: probabilistic-data-structures-046
+    difficulty: intermediate
+    tags: [skip-list, memory, probability, tuning]
+    question: |
+      In a skip list with promotion probability p, decreasing p from 1/2 to 1/4 has what primary effect?
+    options:
+      - "It eliminates the probabilistic nature and makes the structure deterministic."
+      - "It guarantees O(1) search."
+      - "It increases expected search cost but reduces the average number of forward pointers per node (lower memory), trading a bit of speed for space."
+      - "It has no effect on either memory or search cost."
+    answer: 2
+    explanation: |
+      With smaller p, fewer nodes get promoted to higher levels, so the average pointer count per node
+      drops (~2 pointers at p=1/2 vs ~1.33 at p=1/4), saving memory — but each level covers fewer nodes,
+      so expected search comparisons rise somewhat. It's a classic space/time knob and stays
+      probabilistic (levels still come from coin flips); it never yields deterministic or O(1) search.
+    ref: "concepts.md#skip-lists-as-probabilistic-balanced-structures"
+
+  - id: probabilistic-data-structures-047
+    difficulty: expert
+    tags: [skip-list, adversarial, security, worst-case]
+    question: |
+      A skip list's worst case is O(n). Why is this generally NOT an exploitable weakness the way
+      hash-collision attacks are for hash tables?
+    options:
+      - "Because skip lists cap the number of levels, making O(n) impossible."
+      - "Because skip lists rehash on every insert to avoid attacks."
+      - "Because O(n) worst case only occurs for sorted input, which is easy to detect."
+      - "Because node levels are drawn from a PRNG independent of the key values, so an adversary controlling inputs cannot force the pathological structure the way they can force hash collisions with chosen keys."
+    answer: 3
+    explanation: |
+      A skip list's shape depends on random coin flips at insert time, not on the keys, so an attacker
+      choosing inputs cannot steer the structure toward its degenerate O(n) form — unlike hash tables,
+      where chosen keys can all collide into one bucket. The bad case is just astronomically unlikely
+      randomness. Level caps don't make O(n) impossible in principle; skip lists don't rehash; and the
+      degeneracy isn't tied to sorted input.
+    ref: "concepts.md#skip-lists-as-probabilistic-balanced-structures"
+
+  - id: probabilistic-data-structures-048
+    difficulty: advanced
+    tags: [ddsketch, buckets, value-range, trade-offs]
+    question: |
+      DDSketch's relative-error guarantee comes from log-spaced buckets, but what practical constraint
+      does that create and how is it handled?
+    options:
+      - "An unbounded value range implies unbounded bucket count, so implementations cap buckets (e.g. collapsing the lowest/smallest buckets or setting a max bucket count), and it assumes positive values — fine for latency."
+      - "It needs the exact value range in advance or it crashes; there is no mitigation."
+      - "It requires values to be integers, rounding all floats."
+      - "It stores one bucket per distinct value, so memory grows linearly with distinct values."
+    answer: 0
+    explanation: |
+      Log-spaced buckets give a fixed relative error, but a truly unbounded range would need unbounded
+      buckets, so DDSketch bounds memory by capping bucket count (typically collapsing the smallest/
+      lowest buckets) and assumes positive inputs — a non-issue for latency measurements. It does not
+      crash without a preset range, doesn't force integers, and does not allocate a bucket per distinct
+      value (that would defeat the point).
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-049
+    difficulty: advanced
+    tags: [histogram, fixed-buckets, tail, failure-mode]
+    question: |
+      Why do fixed-bucket histograms with boundaries tuned for typical (median) latencies silently
+      report garbage p999?
+    options:
+      - "Because they cannot be merged across hosts at all."
+      - "Because with coarse or absent buckets in the tail region, all extreme values fall into one wide (or overflow) bucket, so the p999 estimate has error on the order of that bucket's width — precisely where you need resolution most."
+      - "Because averaging bucket midpoints is always exact."
+      - "Because fixed buckets have provable relative-error guarantees like DDSketch."
+    answer: 1
+    explanation: |
+      A fixed histogram's quantile error is bounded by the width of the bucket the quantile lands in.
+      If buckets are dense near the median but coarse (or a single overflow bucket) in the tail, the
+      p999 lands in a very wide bucket and its estimate is only accurate to that width — garbage exactly
+      where SLOs live. Fixed histograms CAN be merged if buckets match (so option 0 is wrong), midpoint
+      averaging isn't exact, and they lack DDSketch's relative-error guarantee.
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-050
+    difficulty: expert
+    tags: [cuckoo-filter, partial-key, mechanism, deep]
+    question: |
+      Cuckoo filters use "partial-key cuckoo hashing." Why is this trick essential, given that a cuckoo
+      table normally needs the original key to relocate items?
+    options:
+      - "It stores the full key alongside the fingerprint so relocation is trivial."
+      - "It uses three hash functions instead of two to avoid needing the key."
+      - "The second candidate bucket is computed as i2 = i1 XOR hash(fingerprint), so an item can be moved to its alternate bucket knowing only its stored fingerprint (not the original key), enabling eviction without keeping keys."
+      - "It rebuilds the whole table on each eviction to recompute positions."
+    answer: 2
+    explanation: |
+      Classic cuckoo hashing needs the key to compute a displaced item's alternate bucket, but a filter
+      only stores fingerprints, not keys. The partial-key trick sets i2 = i1 XOR hash(fingerprint), so
+      from either bucket index and the fingerprint you can compute the other bucket — enabling
+      relocation during eviction using only what's stored. It deliberately does NOT store full keys,
+      doesn't need three hashes, and doesn't rebuild the table per eviction.
+    ref: "concepts.md#counting-bloom-cuckoo-and-quotient-filters"
+
+  - id: probabilistic-data-structures-051
+    difficulty: advanced
+    tags: [error-budget, cost-curves, design, math]
+    question: |
+      When setting an error budget, which set of scaling relationships correctly guides how expensive
+      it is to buy more accuracy?
+    options:
+      - "Bloom bits/element is linear in 1/p; HLL error is 1/m; MinHash error is 1/k."
+      - "All three scale as 1/√n, so accuracy is free at large n."
+      - "Bloom bits/element is constant; HLL and MinHash errors grow with n."
+      - "Bloom bits/element grows log-linearly in 1/p (~+4.8 bits per 10x); HLL and MinHash errors scale as 1/√m and 1/√k (4x space to halve error) — so pushing accuracy an order of magnitude is costly and you should stop at the product's real tolerance."
+    answer: 3
+    explanation: |
+      Bloom filter cost is −1.44·log2(p) bits/element — log-linear in 1/p, ~+4.8 bits per order of
+      magnitude. Sampling-style sketches (HLL, MinHash) have error ∝ 1/√(registers or hashes), so
+      halving error costs ~4x space. These curves say accuracy gets expensive fast, so you size to the
+      product's genuine tolerance rather than chasing zero. The other options misstate the exponents or
+      falsely claim accuracy is free / that HLL error grows with n (it's ~constant relative error).
+    ref: "concepts.md#choosing-the-error-budget-and-when-not-to-approximate"
+
+  - id: probabilistic-data-structures-052
+    difficulty: intermediate
+    tags: [weighted-reservoir, sampling, variants]
+    question: |
+      You want a stream sample where items are kept with probability proportional to a weight w
+      (e.g. sample high-value events more). Which technique applies?
+    options:
+      - "Standard Algorithm R, which already weights by arrival order."
+      - "Weighted reservoir sampling (A-Res / Efraimidis–Spirakis): assign each item a key u^(1/w) with u uniform in (0,1) and keep the top-s items by key."
+      - "Count-Min Sketch, which samples proportional to frequency."
+      - "HyperLogLog, which samples distinct items uniformly."
+    answer: 1
+    explanation: |
+      Weighted reservoir sampling (A-Res) assigns each item the random key u^(1/w) and retains the top-s
+      by key; this yields inclusion probabilities proportional to weight in one pass. Standard Algorithm
+      R is unweighted (uniform, not arrival-order-weighted). CMS is a frequency sketch and HLL is a
+      cardinality estimator — neither performs weighted sampling.
+    ref: "concepts.md#reservoir-sampling-over-streams"
+
+  - id: probabilistic-data-structures-053
+    difficulty: expert
+    tags: [distinguish, membership-vs-cardinality-vs-frequency, trap]
+    question: |
+      A candidate proposes "use a Bloom filter to count unique visitors." Why is this a category error,
+      and what is the precise fix?
+    options:
+      - "A Bloom filter answers membership, not cardinality — you cannot recover a distinct COUNT from it (bit density only crudely correlates with n and saturates); use HyperLogLog, which is purpose-built for count-distinct and is mergeable across shards."
+      - "It's fine; counting the set bits in the Bloom filter gives the exact unique count."
+      - "It's fine as long as you also store a counting Bloom filter."
+      - "Use a Count-Min Sketch instead, which counts distinct visitors directly."
+    answer: 0
+    explanation: |
+      Bloom filters test membership; they don't yield a distinct count. Bit density is a saturating,
+      lossy signal, not a reliable cardinality estimator, and once the filter fills you learn nothing.
+      The right tool is HyperLogLog (fixed ~1.5 KB, ~2% error, mergeable). A counting Bloom filter still
+      does membership+counts-of-inserts-per-cell, not distinct cardinality, and CMS estimates per-key
+      FREQUENCY, not the number of distinct keys.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-054
+    difficulty: advanced
+    tags: [cache-penetration, bloom-filter, negative-lookup, design]
+    question: |
+      To defend a database against a flood of lookups for keys that do not exist ("cache penetration"),
+      you put a Bloom filter of EXISTING keys in front. How does it help and what's the caveat?
+    options:
+      - "It caches the values of non-existent keys; the caveat is memory growth."
+      - "It guarantees every lookup hits the cache; the caveat is stale reads."
+      - "'Definitely not present' lets you return a miss without touching the DB (blocking the flood); the caveat is that false positives let a small fraction of non-existent-key lookups through to the DB, and the filter must be kept in sync as keys are added/removed."
+      - "It replaces the database index entirely; the caveat is false negatives dropping real keys."
+    answer: 2
+    explanation: |
+      A Bloom filter of existing keys turns "definitely not present" into an instant miss that never
+      reaches the DB, absorbing floods of bogus-key traffic. Because Bloom has no false negatives, it
+      never wrongly blocks a real key; its false positives merely let a small fraction of nonexistent
+      lookups fall through to the DB (harmless, just slightly less filtering). The real operational
+      caveat is keeping the filter in sync with key additions/removals. It doesn't cache values, doesn't
+      guarantee cache hits, and can't drop real keys.
+    ref: "concepts.md#bloom-filter-uses-and-failure-modes"
+
+  - id: probabilistic-data-structures-055
+    difficulty: expert
+    tags: [hyperloglog, register-width, memory, math]
+    question: |
+      Why do HyperLogLog registers need only ~6 bits each (rather than, say, 32), and how does that
+      bound the total memory?
+    options:
+      - "Registers store the element hash, which fits in 6 bits."
+      - "Registers store the register index, which needs log2(m) bits."
+      - "6 bits is arbitrary; registers could be 1 bit with the same accuracy."
+      - "Each register stores the max count of leading zeros ρ, which for a 64-bit hash is at most ~64, so 6 bits (values 0–63) suffice; total ≈ m × 6 bits (e.g. 16384 × 6 ≈ 12 KB raw, ~1.5 KB compressed)."
+    answer: 3
+    explanation: |
+      A register holds ρ, the largest run of leading zeros observed for that bucket; with a 64-bit hash
+      ρ tops out around 64, so 6 bits (0–63) is enough. Memory ≈ m × 6 bits — for m=16384 that's ~12 KB
+      raw and ~1.5 KB after Redis-style compression, independent of cardinality. Registers hold ρ, not
+      the hash itself or the bucket index, and 1-bit registers would lose the magnitude information that
+      the estimator depends on.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-056
+    difficulty: advanced
+    tags: [count-min-sketch, depth-width, roles, math]
+    question: |
+      In a Count-Min Sketch, what do the width w and depth d parameters independently control?
+    options:
+      - "w controls the confidence (1 − δ) and d controls the error ε."
+      - "w controls the additive error factor ε (w = ⌈e/ε⌉) and d controls the failure probability δ (d = ⌈ln(1/δ)⌉) — more columns reduce collision inflation, more rows make it unlikely all rows are unlucky."
+      - "Both w and d only affect memory, not accuracy."
+      - "w controls deletion support and d controls mergeability."
+    answer: 1
+    explanation: |
+      Width w sets how tightly collisions are spread, controlling the ε in the εN error term
+      (w = ⌈e/ε⌉); depth d is the number of independent hash rows, and taking the min over d rows makes
+      it exponentially unlikely that a key collides with a heavy key in EVERY row — controlling the
+      confidence 1 − δ (d = ⌈ln(1/δ)⌉). Their roles are distinct (option 0 swaps them); both affect
+      accuracy, and neither governs deletion or mergeability specifically.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-057
+    difficulty: expert
+    tags: [scalable-bloom, unknown-n, design, trade-offs]
+    question: |
+      When n is unknown and unbounded, a "scalable Bloom filter" chains progressively larger filters
+      with geometrically tightening per-filter FP rates. Why the tightening rates?
+    options:
+      - "Because a query must check ALL filters in the chain, the aggregate FP rate is the sum of the per-filter rates; geometrically shrinking each new filter's target keeps that sum bounded (converging) rather than growing without limit."
+      - "To make later filters faster to query than earlier ones."
+      - "Because earlier filters are deleted once full, so only the newest matters."
+      - "To guarantee zero false positives once enough filters are added."
+    answer: 0
+    explanation: |
+      In a scalable Bloom filter a "maybe present" requires checking every filter in the chain, so the
+      overall false-positive probability is roughly the sum (union) of each filter's rate. If every new
+      filter used the same target rate, the sum would grow unboundedly as filters accumulate; making
+      each new filter's target a shrinking geometric fraction keeps the total converging to a bounded
+      value. Earlier filters are retained (not deleted — they hold real elements), and no scheme reaches
+      zero FP.
+    ref: "concepts.md#bloom-filter-uses-and-failure-modes"
+
+  - id: probabilistic-data-structures-058
+    difficulty: intermediate
+    tags: [selection, near-duplicate, mapping]
+    question: |
+      Which task is the natural fit for MinHash + LSH?
+    options:
+      - "Estimating the 99th-percentile latency of an API."
+      - "Counting distinct users across shards."
+      - "Detecting near-duplicate documents at scale by grouping similar shingle-sets into candidate buckets."
+      - "Enforcing a per-user request rate limit."
+    answer: 2
+    explanation: |
+      MinHash estimates Jaccard set similarity and LSH banding buckets similar signatures together for
+      candidate near-dup pairs — the canonical near-duplicate-detection pipeline. Latency quantiles are
+      t-digest/DDSketch, distinct-user counting is HyperLogLog, and rate limiting is Count-Min Sketch —
+      different questions, different structures.
+    ref: "concepts.md#minhash-simhash-and-lsh-for-near-duplicate-detection"
+
+  - id: probabilistic-data-structures-059
+    difficulty: advanced
+    tags: [one-sided-error, safety, design-principle]
+    question: |
+      Why is one-sided error (as in Bloom and Count-Min Sketch) generally easier to build safe systems
+      on than two-sided error?
+    options:
+      - "Because one-sided error is always smaller in magnitude than two-sided error."
+      - "Because one-sided error can be eliminated entirely by adding more hashes."
+      - "Because two-sided error structures cannot be merged across shards."
+      - "Because you know the DIRECTION of the mistake, so you can design a correctness backstop or fail in the safe direction (e.g. Bloom's 'not present' is certain; CMS never under-counts, so a rate limiter fails safe toward throttling)."
+    answer: 3
+    explanation: |
+      Knowing the error direction lets you architect around it: Bloom's definite "not present" enables a
+      safe skip, its "maybe" triggers an exact backstop; CMS's guaranteed over-count means a limiter
+      errs toward throttling (safe) rather than admitting abuse (unsafe). Two-sided error gives no such
+      leverage. One-sided error is not inherently smaller in magnitude, can't be fully eliminated with
+      more hashes, and mergeability is a separate property (Count-Sketch, two-sided, is still mergeable).
+    ref: "concepts.md#why-approximate-and-the-space-time-accuracy-trade-off"
+
+  - id: probabilistic-data-structures-060
+    difficulty: expert
+    tags: [hyperloglog, membership, limitation, judgment]
+    question: |
+      Your team has an HLL with ~1M estimated uniques and now wants to answer "did user X visit?" for
+      arbitrary X. What's the correct response?
+    options:
+      - "HLL cannot answer per-element membership at all — it only estimates cardinality; for membership you need a separate structure (exact set or Bloom/Cuckoo filter), so add one rather than trying to repurpose the HLL."
+      - "Query the HLL registers for X's hash prefix; if the register is non-zero, X visited."
+      - "Rebuild the HLL with more registers and membership becomes possible."
+      - "Use PFCOUNT on a single-element HLL and compare."
+    answer: 0
+    explanation: |
+      HLL discards element identity — it only keeps per-bucket max-ρ, which reflects many elements
+      collectively. A non-zero register says nothing about whether a specific X was seen (countless
+      elements map there). Membership requires a different structure entirely (exact set or Bloom/Cuckoo
+      filter). More registers doesn't add membership, and comparing PFCOUNTs can't reconstruct
+      per-element presence.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-061
+    difficulty: advanced
+    tags: [t-digest, ddsketch, mergeability, distributed]
+    question: |
+      Across a 1,000-host fleet emitting millions of req/s, why are t-digest / DDSketch preferred over
+      shipping raw latency samples to a central quantile computation?
+    options:
+      - "Because raw samples are more accurate and the sketches are only for display."
+      - "Because sketches compute the mean, which is all that's needed."
+      - "Because centralizing raw latencies at that volume is infeasible (bandwidth/storage), whereas each host emits a small mergeable sketch and you merge the SKETCHES to get correct fleet quantiles cheaply."
+      - "Because raw samples cannot be transmitted over a network."
+    answer: 2
+    explanation: |
+      Shipping every latency sample from millions of req/s is prohibitively expensive in bandwidth and
+      storage; mergeable sketches let each host summarize locally into a few KB and be merged centrally
+      into correct fleet-wide quantiles. The sketches give quantiles (not just the mean), which is the
+      whole point, and raw samples can be transmitted — it's just infeasible at this volume, which is
+      the actual reason.
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-062
+    difficulty: expert
+    tags: [count-min-sketch, hyperloglog, comparison, trap]
+    question: |
+      A stream analytics interviewer asks you to distinguish, in one sentence each, what Bloom, HLL, and
+      CMS give you. Which set of characterizations is fully correct?
+    options:
+      - "Bloom: distinct count; HLL: membership; CMS: quantiles."
+      - "Bloom: frequency; HLL: membership; CMS: distinct count."
+      - "Bloom: quantiles; HLL: frequency; CMS: membership."
+      - "Bloom: set membership (no false negatives); HLL: number of DISTINCT elements (mergeable, ±relative); CMS: per-key FREQUENCY / heavy hitters (over-count only)."
+    answer: 3
+    explanation: |
+      The correct one-liners: Bloom answers "is X present?" with no false negatives; HyperLogLog
+      estimates the count of distinct elements (mergeable via register max, ~relative error); Count-Min
+      Sketch estimates per-key frequency and finds heavy hitters, over-counting only. The other options
+      scramble these three orthogonal questions — the classic trap that tests whether you actually know
+      which structure answers which question.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-063
+    difficulty: advanced
+    tags: [bloom-filter, distributed, sync, invalidation]
+    question: |
+      A common operational hazard with a Bloom filter used as a negative-lookup guard in front of a
+      mutable dataset is what, and how is it typically mitigated?
+    options:
+      - "The filter automatically deletes keys when the dataset shrinks, causing false negatives."
+      - "Deletions from the dataset can't be reflected in a standard Bloom filter (no delete), so a removed key still reads 'maybe present' — mitigated by periodically rebuilding the filter or using a delete-capable filter (cuckoo/quotient/counting)."
+      - "The filter's false-positive rate drops when keys are deleted, breaking the guard."
+      - "There is no hazard; Bloom filters stay perfectly in sync with any dataset."
+    answer: 1
+    explanation: |
+      A standard Bloom filter can't delete, so when a key is removed from the underlying dataset the
+      filter still says "maybe present" — a stale-but-safe outcome (you'll do an unnecessary exact
+      lookup that returns miss), but over time deletions accumulate and erode the filter's value. Mitigate
+      by periodic full rebuilds from source or a delete-capable filter. Bloom filters don't auto-delete
+      (so no false negatives), removing keys doesn't lower FP rate, and they are certainly not
+      self-synchronizing with a mutable dataset.
+    ref: "concepts.md#bloom-filter-uses-and-failure-modes"
+
+  - id: probabilistic-data-structures-064
+    difficulty: expert
+    tags: [reservoir-sampling, distributed, merge, math]
+    question: |
+      You run independent size-s reservoir samples on each of many shards and want a single uniform
+      sample of size s over the combined stream. What must the merge do?
+    options:
+      - "Combine the per-shard samples weighted by each shard's total item count (so items from a shard that saw more items are represented proportionally), yielding a uniform global sample."
+      - "Concatenate all shard reservoirs and take the first s items."
+      - "Take the union and deduplicate, then keep s at random."
+      - "Average the reservoirs element-wise."
+    answer: 0
+    explanation: |
+      A shard that processed more items should contribute proportionally more to the global sample;
+      merging must weight each shard's reservoir by its observed item count and resample to size s,
+      preserving global uniformity. Taking "the first s" reintroduces order bias, dedup+random ignores
+      shard sizes, and element-wise averaging is meaningless for sampled records. Weighted combination is
+      the standard mergeable-reservoir approach.
+    ref: "concepts.md#reservoir-sampling-over-streams"
+
+  - id: probabilistic-data-structures-065
+    difficulty: advanced
+    tags: [skip-list, concurrency, lock-free, real-systems]
+    question: |
+      Java's ConcurrentSkipListMap is a go-to lock-free ordered map. What structural property of skip
+      lists makes lock-free concurrency more tractable than for balanced trees?
+    options:
+      - "Skip lists never need any synchronization because reads and writes can't conflict."
+      - "Skip lists store all data in a single node, so there's nothing to lock."
+      - "Updates are localized pointer splices with no global rebalancing (no rotations or node splits that would touch many nodes at once), so a writer affects few nodes and CAS-based lock-free linking is feasible."
+      - "Balanced trees are impossible to make thread-safe under any scheme."
+    answer: 2
+    explanation: |
+      A skip-list insert/delete just splices a few forward pointers at each affected level with no
+      cascading rotations or splits, so the set of nodes a writer must coordinate is small and
+      bounded — amenable to CAS-based lock-free linking (as in ConcurrentSkipListMap). Balanced trees'
+      rotations/splits can touch many nodes and ancestors, making lock-free implementations far harder.
+      Skip lists still need synchronization (they're not conflict-free), don't store everything in one
+      node, and balanced trees can be made thread-safe (just harder).
+    ref: "concepts.md#skip-lists-as-probabilistic-balanced-structures"
+
+  - id: probabilistic-data-structures-066
+    difficulty: expert
+    tags: [error-budget, backstop, judgment, design-principle]
+    question: |
+      Summarize the "senior mental model" for when approximation is SAFE. Which statement is the most
+      complete and correct?
+    options:
+      - "Approximation is safe whenever the error rate is below 5%."
+      - "Approximation is safe as long as the structure is mergeable across shards."
+      - "Approximation is safe only for read-heavy workloads, never write-heavy ones."
+      - "Approximation is safe when (a) the error is bounded and tunable, (b) its direction is known and the system fails in the safe direction, and (c) there's a correctness backstop or the product genuinely tolerates the error — violating any one turns a clever sketch into an intermittent correctness bug."
+    answer: 3
+    explanation: |
+      The three-part test — bounded/tunable error, known and safe error direction, and either a backstop
+      or genuine product tolerance — is what separates a legitimate optimization from a latent bug. A
+      flat 5% threshold ignores error direction and blast radius; mergeability is useful but irrelevant
+      to safety; and the read-vs-write framing is a non sequitur. The subtlety is that violations
+      manifest only occasionally, making them hard to catch — hence the discipline of the checklist.
+    ref: "concepts.md#choosing-the-error-budget-and-when-not-to-approximate"
+
+  - id: probabilistic-data-structures-067
+    difficulty: intermediate
+    tags: [redis, apis, hyperloglog, real-systems]
+    question: |
+      Which Redis commands implement HyperLogLog operations, and what does PFMERGE enable?
+    options:
+      - "PFADD/PFCOUNT/PFMERGE; PFMERGE combines multiple HLLs into one (register-wise max), enabling distinct-count unions across keys/shards without raw data."
+      - "SADD/SCARD/SUNION; PFMERGE deduplicates exact sets."
+      - "INCR/GET/MERGE; PFMERGE sums the counters."
+      - "BF.ADD/BF.EXISTS/BF.MERGE; PFMERGE merges Bloom filters."
+    answer: 0
+    explanation: |
+      Redis exposes HLL via PFADD (add element), PFCOUNT (estimate cardinality), and PFMERGE (combine
+      HLLs by register-wise max into a union), which is precisely the mergeable-union property used for
+      distinct-count across shards/time buckets. SADD/etc. are exact sets, INCR is a plain counter, and
+      BF.* are RedisBloom Bloom-filter commands — not HLL.
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-068
+    difficulty: expert
+    tags: [minhash, lsh, false-negative, compliance, judgment]
+    question: |
+      For a LEGAL e-discovery near-duplicate system where missing a true duplicate is unacceptable, why
+      is a standard LSH banding scheme risky, and what's the mitigation?
+    options:
+      - "LSH is fine as-is; it has no false negatives."
+      - "Switch to a Bloom filter, which guarantees finding all duplicates."
+      - "LSH is approximate and can miss true near-dupes below the S-curve threshold (false negatives); mitigate by tuning b/r for a lower threshold and higher recall (accepting more candidate comparisons), and/or exhaustively verifying candidates — recognizing you're trading compute for recall, and pure LSH gives no hard recall guarantee."
+      - "Use HyperLogLog to count the duplicates exactly."
+    answer: 2
+    explanation: |
+      LSH is an approximate nearest-neighbor method: its S-curve means pairs just below the effective
+      threshold can fail to become candidates, i.e. missed duplicates — unacceptable when recall is
+      legally required. You mitigate by pushing the threshold down (more/larger bands for higher recall)
+      and accepting more candidate comparisons plus exact verification, while acknowledging LSH gives no
+      hard recall guarantee. Bloom filters don't do similarity search, and HLL counts cardinality, not
+      duplicates.
+    ref: "concepts.md#minhash-simhash-and-lsh-for-near-duplicate-detection"
+
+  - id: probabilistic-data-structures-069
+    difficulty: advanced
+    tags: [count-min-sketch, memory, sizing, math]
+    question: |
+      For ε = 0.001 and δ = 0.001, roughly how many counters does a Count-Min Sketch need, and how does
+      this compare to keeping an exact per-key counter for a stream with 100M distinct keys?
+    options:
+      - "About 100M counters — the same as exact, so CMS gives no benefit."
+      - "About w·d = ⌈e/ε⌉·⌈ln(1/δ)⌉ ≈ 2718 × 7 ≈ 19,000 counters (~76 KB at 4 bytes), independent of the number of distinct keys — versus 100M exact counters (~400 MB)."
+      - "About √(100M) ≈ 10,000 counters, scaling with the square root of distinct keys."
+      - "About 7 counters — only the depth matters."
+    answer: 1
+    explanation: |
+      CMS size is w·d = ⌈e/ε⌉·⌈ln(1/δ)⌉ ≈ 2718 × 7 ≈ 19,000 counters (~76 KB), and crucially it is
+      independent of the number of distinct keys — that's the whole point. Exact per-key counters for
+      100M keys need ~100M counters (~400 MB plus map overhead). CMS does not scale with distinct keys
+      (options 0 and 2 are wrong), and depth alone (option 3) ignores the width that controls error.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"
+
+  - id: probabilistic-data-structures-070
+    difficulty: expert
+    tags: [ddsketch, gamma, relative-error, math]
+    question: |
+      DDSketch sets bucket boundaries with γ = (1 + α)/(1 − α) and index i = ⌈log_γ(v)⌉. If you tighten
+      the relative-error target α from 2% to 1%, what happens to the number of buckets covering a fixed
+      value range?
+    options:
+      - "It stays the same; α only affects merge cost."
+      - "It halves, because tighter error needs fewer, wider buckets."
+      - "It grows with the square of 1/α."
+      - "It roughly doubles, because smaller α makes γ closer to 1, so each bucket spans a narrower multiplicative range and more buckets are needed to cover the same range."
+    answer: 3
+    explanation: |
+      With α smaller, γ = (1+α)/(1−α) approaches 1, so ln γ ≈ 2α shrinks and each bucket covers a
+      narrower multiplicative span (ratio γ). The bucket count to cover a fixed range is ∝ 1/ln γ ≈
+      1/(2α), so halving α (2%→1%) roughly doubles the buckets — a linear (not quadratic) growth in 1/α,
+      and definitely not fewer/wider buckets. α affects accuracy and memory, not merely merge cost.
+    ref: "concepts.md#streaming-quantiles-with-t-digest-and-ddsketch"
+
+  - id: probabilistic-data-structures-071
+    difficulty: advanced
+    tags: [why-approximate, mergeability, exact-limits, distributed]
+    question: |
+      Which property most directly explains why approximate structures enable cheap HORIZONTAL scaling
+      that exact structures often cannot match?
+    options:
+      - "The best sketches (HLL, Count-Min, t-digest, MinHash) are linear/mergeable, so shard-local sketches combine into a global answer WITHOUT re-scanning raw data — whereas many exact answers (e.g. distinct-count) require shipping raw per-shard state to combine."
+      - "Approximate structures use less CPU per operation in all cases."
+      - "Approximate structures are always immutable, which simplifies replication."
+      - "Exact structures cannot be sharded at all."
+    answer: 0
+    explanation: |
+      Mergeability is the horizontal-scaling superpower: you compute a small sketch per shard and merge
+      the sketches (HLL max, CMS add, DDSketch bucket add, MinHash signatures) to get a global answer
+      with no raw-data movement. Exact distinct-count, by contrast, needs the raw member sets to correct
+      for cross-shard overlap. Sketches aren't universally lower-CPU, aren't necessarily immutable, and
+      exact structures can be sharded — they just don't compose cheaply for these queries.
+    ref: "concepts.md#why-approximate-and-the-space-time-accuracy-trade-off"
+
+  - id: probabilistic-data-structures-072
+    difficulty: expert
+    tags: [cuckoo-filter, duplicates, failure-mode, deep]
+    question: |
+      A subtle cuckoo-filter failure: inserting the SAME element many times can cause an insertion
+      failure even when the table is far from full. Why?
+    options:
+      - "Because identical elements hash to different buckets each time."
+      - "Because each insertion stores another copy of the fingerprint, and a given element has only its two candidate buckets with fixed slot capacity; once both buckets' slots are full of that fingerprint, further inserts have nowhere to go and eviction can't help (the copies keep landing in the same two buckets)."
+      - "Because the filter automatically deletes duplicates, corrupting counts."
+      - "Because duplicate inserts overflow a per-cell counter as in a counting Bloom filter."
+    answer: 1
+    explanation: |
+      A cuckoo filter stores fingerprints, and an element only ever maps to its two candidate buckets.
+      Inserting the same element repeatedly deposits duplicate fingerprints; once those two buckets'
+      fixed-capacity slots are saturated with that fingerprint, there's no alternate location (eviction
+      just shuffles identical fingerprints among the same two buckets), so insertion fails despite low
+      overall load. Identical elements hash to the SAME buckets (option 0 is wrong); cuckoo filters don't
+      auto-dedup, and plain cuckoo filters have no per-cell counters (that's the counting variant).
+    ref: "concepts.md#counting-bloom-cuckoo-and-quotient-filters"
+
+  - id: probabilistic-data-structures-073
+    difficulty: intermediate
+    tags: [reservoir-sampling, use-case, observability]
+    question: |
+      Why is reservoir sampling well-suited to keeping observability costs fixed under variable traffic?
+    options:
+      - "Because it stores all requests and compresses them later."
+      - "Because it samples more heavily during traffic spikes to capture incidents."
+      - "Because it retains a fixed-size uniform sample (e.g. 1,000 traces) regardless of whether traffic is 100/s or 100,000/s, giving constant memory/cost and an unbiased sample to analyze."
+      - "Because it guarantees every error is captured."
+    answer: 2
+    explanation: |
+      Reservoir sampling maintains a fixed reservoir size independent of stream length, so retention
+      cost is constant no matter the traffic rate, and the sample is uniform/unbiased for later analysis.
+      It does not store everything, does not automatically sample harder during spikes (it keeps the
+      same fixed size — a feature for cost control), and being uniform it does NOT guarantee capturing
+      rare errors (that needs biased/tail sampling).
+    ref: "concepts.md#reservoir-sampling-over-streams"
+
+  - id: probabilistic-data-structures-074
+    difficulty: expert
+    tags: [hyperloglog, intersection, inclusion-exclusion, failure-mode]
+    question: |
+      Why does estimating |A ∩ B| via inclusion–exclusion on HLLs (|A|+|B|−|A∪B|) become especially
+      unreliable when the intersection is small relative to |A| and |B|?
+    options:
+      - "Because HLL cannot compute unions, so the formula has no valid |A∪B| term."
+      - "Because intersections require register-wise min, which HLL forbids."
+      - "Because inclusion–exclusion only works for disjoint sets."
+      - "Because you subtract two large, independently-noisy estimates (|A|+|B| and |A∪B|) whose ABSOLUTE errors (each ~ε times a large cardinality) can be comparable to or larger than the small true intersection, so the result's relative error explodes."
+    answer: 3
+    explanation: |
+      HLL estimates carry ~relative error, so |A|, |B|, |A∪B| each have absolute error on the order of
+      ε times a large number. The intersection is their difference; when the true intersection is small,
+      those absolute errors (which don't shrink just because the answer is small) dominate, and the
+      relative error of |A∩B| blows up — the classic catastrophic-cancellation problem. HLL CAN compute
+      unions (max merge), there's no valid register-min for intersection, and inclusion–exclusion is a
+      general identity (not only for disjoint sets).
+    ref: "concepts.md#hyperloglog-for-cardinality-estimation"
+
+  - id: probabilistic-data-structures-075
+    difficulty: advanced
+    tags: [selection, comprehensive, judgment, mapping]
+    question: |
+      You are designing a trending-hashtags feature: identify the most-used hashtags in the last hour
+      over a firehose, with bounded memory and tolerance for slight over-counting. Which combination is
+      the best fit?
+    options:
+      - "A Bloom filter per hashtag to track membership, plus HLL for counts."
+      - "A Count-Min Sketch for per-hashtag frequency plus a min-heap of top-k candidates, over sliding/tumbling time windows — bounded memory, over-count-only error that never drops a true trending tag."
+      - "A skip list of all hashtags sorted by exact count."
+      - "Reservoir sampling of hashtags, then count the sample exactly."
+    answer: 1
+    explanation: |
+      Trending = heavy hitters by frequency in fixed memory, which is exactly CMS + top-k heap over time
+      windows; its over-count-only error is tolerable and guarantees a genuinely trending tag isn't
+      dropped. A Bloom filter gives membership not counts (and HLL gives distinct-count, not per-tag
+      frequency). A skip list of exact counts scales with distinct hashtags (unbounded memory).
+      Reservoir sampling would under-represent and miss the very tags whose exact rank you need.
+    ref: "concepts.md#count-min-sketch-for-frequency-and-heavy-hitters"

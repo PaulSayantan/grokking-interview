@@ -1,0 +1,1490 @@
+topic: "Capacity Modeling, Queueing and Tail Latency at Scale"
+domain: system-design
+topic_slug: capacity-modeling-and-tail-latency
+version: 1
+questions:
+  - id: capacity-modeling-and-tail-latency-001
+    difficulty: beginner
+    tags: [back-of-envelope, estimation, peak-load]
+    question: |
+      When doing a back-of-the-envelope capacity estimate for a user-facing
+      online service, why is it a mistake to size the fleet for average load?
+    options:
+      - "Diurnal/burst traffic means peak is typically 2-3x average, and sizing for average leaves no headroom for peaks or failover"
+      - "Average load is impossible to compute from DAU numbers"
+      - "Average load always overestimates the true requirement"
+      - "Cloud providers bill on average, not peak, so the number is irrelevant"
+    answer: 0
+    explanation: |
+      Real traffic is spiky; peak commonly runs 2-3x the average, and you also need
+      headroom for a failed instance's traffic. Sizing exactly for average guarantees
+      the system melts at peak. It is not that average is impossible to compute, nor
+      that it overestimates, and billing does not change the physical capacity need.
+    ref: "concepts.md#back-of-the-envelope-estimation-done-rigorously"
+
+  - id: capacity-modeling-and-tail-latency-002
+    difficulty: intermediate
+    tags: [back-of-envelope, latency-numbers, bandwidth]
+    question: |
+      A design is described as "latency-bound" on a critical path made of many
+      sequential cross-datacenter round trips. A junior engineer proposes batching
+      more data per request to fix it. Why is this the wrong lever?
+    options:
+      - "Batching addresses bandwidth/throughput limits, not the serialized round-trip latency that dominates this path"
+      - "Batching increases the number of round trips"
+      - "Batching only works for writes, not reads"
+      - "Batching always violates the request size limits of TCP"
+    answer: 0
+    explanation: |
+      Batching amortizes per-request overhead and helps bandwidth-bound work, but a
+      chain of sequential round trips is bound by latency (largely speed-of-light and
+      per-hop queueing). You reduce it by cutting the number of sequential hops or
+      parallelizing, not by making each payload bigger. Batching does not add trips,
+      works for reads too, and does not inherently violate TCP limits.
+    ref: "concepts.md#back-of-the-envelope-estimation-done-rigorously"
+
+  - id: capacity-modeling-and-tail-latency-003
+    difficulty: intermediate
+    tags: [back-of-envelope, latency-numbers]
+    question: |
+      Ordering by typical latency, which sequence is correct (fastest to slowest)?
+    options:
+      - "Main memory reference < SSD random read < intra-datacenter round trip < cross-continent round trip"
+      - "SSD random read < main memory reference < cross-continent round trip < intra-datacenter round trip"
+      - "Intra-datacenter round trip < main memory reference < SSD random read < cross-continent round trip"
+      - "Main memory reference < intra-datacenter round trip < SSD random read < cross-continent round trip"
+    answer: 0
+    explanation: |
+      Ballparks: main memory ~100 ns, SSD random read ~16-100 us, intra-DC round trip
+      ~0.5 ms, cross-continent RTT ~150 ms. Memory is roughly 100-1000x faster than an
+      SSD read, which is faster than a network round trip, which is far faster than
+      crossing continents (speed-of-light bound).
+    ref: "concepts.md#back-of-the-envelope-estimation-done-rigorously"
+
+  - id: capacity-modeling-and-tail-latency-004
+    difficulty: intermediate
+    tags: [littles-law, concurrency, thread-pool]
+    question: |
+      A service handles 4,000 requests/second and each request occupies a worker
+      thread for an average of 25 ms. Using Little's Law, roughly how many worker
+      threads are busy on average?
+    options:
+      - "100"
+      - "16"
+      - "160"
+      - "1,000"
+    answer: 0
+    explanation: |
+      L = lambda x W = 4000 req/s x 0.025 s = 100 concurrently-busy workers. You need
+      at least ~100 threads (plus headroom) to sustain that rate. The other values come
+      from mis-multiplying units (e.g., forgetting to convert 25 ms to 0.025 s).
+    ref: "concepts.md#littles-law-and-concurrency-sizing"
+
+  - id: capacity-modeling-and-tail-latency-005
+    difficulty: advanced
+    tags: [littles-law, stability, overload]
+    question: |
+      Which statement about Little's Law (L = lambda x W) is the most precise and
+      defensible in a senior interview?
+    options:
+      - "It is distribution-free and holds for any stable system, but assumes a steady state where arrival rate equals departure rate; under sustained overload there is no steady state and W grows unbounded"
+      - "It only holds for Poisson arrivals and exponential service times"
+      - "It predicts the latency at a given concurrency level directly"
+      - "It requires FIFO scheduling to be valid"
+    answer: 0
+    explanation: |
+      Little's Law is remarkably general: no assumption on arrival/service distribution
+      or scheduling discipline, provided the system is stable (long-run arrivals =
+      departures). It gives the relationship among L, lambda, W but does NOT by itself
+      predict latency at a utilization level (that needs a queueing model like M/M/1).
+      It is not restricted to Poisson/exponential or FIFO.
+    ref: "concepts.md#littles-law-and-concurrency-sizing"
+
+  - id: capacity-modeling-and-tail-latency-006
+    difficulty: advanced
+    tags: [littles-law, connection-pool, downstream]
+    question: |
+      Your app needs 12,000 QPS to a database that healthily services a query in 4 ms.
+      Little's Law suggests ~48 connections. A teammate argues "let's set the pool to
+      600 to be safe." What is the strongest objection?
+    options:
+      - "A pool far larger than L=lambda*W just relocates queueing into the database, where added concurrency causes lock/latch contention (USL beta) and can reduce throughput and worsen tail latency"
+      - "600 connections would exceed the TCP port limit on the client"
+      - "Little's Law is invalid for databases, so 48 is also wrong"
+      - "Larger pools always improve throughput, so 600 is fine"
+    answer: 0
+    explanation: |
+      L = 12000 x 0.004 = 48. Oversizing the pool doesn't add DB capacity; it pushes
+      the queue into the database where excess concurrency triggers contention
+      (Universal Scalability Law coherency/contention terms), often dropping throughput
+      and inflating the tail. Port limits are not the binding issue at 600, Little's Law
+      does apply, and more connections do not monotonically help.
+    ref: "concepts.md#littles-law-and-concurrency-sizing"
+
+  - id: capacity-modeling-and-tail-latency-007
+    difficulty: advanced
+    tags: [littles-law, queue-depth]
+    question: |
+      A monitoring dashboard shows a work queue steadily holding ~600 items while the
+      consumer processes 150 items/second. What customer-facing statement does Little's
+      Law let you make?
+    options:
+      - "Each item waits about 4 seconds in the queue on average"
+      - "The consumer is 4x too slow"
+      - "The queue will overflow in 600 seconds"
+      - "Throughput is 600 items/second"
+    answer: 0
+    explanation: |
+      Applying L_q = lambda x W_q: W_q = L_q / lambda = 600 / 150 = 4 s average wait.
+      That converts a raw queue-depth number into a latency statement. The other options
+      misread the relationship (depth alone does not tell you how much "too slow," when
+      it overflows, or the throughput).
+    ref: "concepts.md#littles-law-and-concurrency-sizing"
+
+  - id: capacity-modeling-and-tail-latency-008
+    difficulty: expert
+    tags: [littles-law, pool-sizing, backpressure, tradeoffs]
+    question: |
+      You must size a thread pool that calls a fragile downstream. Little's Law says
+      you'd need 200 threads to hit target throughput at the downstream's healthy
+      latency, but the downstream degrades sharply past 60 concurrent calls. What is
+      the best design?
+    options:
+      - "Cap concurrency to the downstream to ~60 with a bounded queue and fast rejection/backpressure, accepting reduced throughput rather than driving the downstream into contention"
+      - "Set the pool to 200 threads with an unbounded work queue so no request is ever rejected"
+      - "Set the pool to 200 and rely on the downstream to protect itself"
+      - "Remove the pool entirely and call the downstream synchronously per request"
+    answer: 0
+    explanation: |
+      When Little's Law's ideal concurrency exceeds what the downstream can tolerate, you
+      must cap at the downstream's healthy point, bound the queue, and shed/backpressure
+      the excess. Sending 200 concurrent calls pushes it past its knee and collapses
+      throughput for everyone. An unbounded queue just relocates unbounded latency;
+      relying on the downstream to self-protect is unsafe; removing the pool doesn't
+      bound concurrency at all.
+    ref: "concepts.md#littles-law-and-concurrency-sizing"
+
+  - id: capacity-modeling-and-tail-latency-009
+    difficulty: intermediate
+    tags: [utilization, latency, knee, mm1]
+    question: |
+      Using M/M/1 intuition, the latency multiplier relative to service time is
+      1/(1 - rho). Approximately how much does average time-in-system inflate at 90%
+      utilization compared to a lightly loaded system?
+    options:
+      - "About 1.1x"
+      - "About 2x"
+      - "About 10x"
+      - "About 90x"
+    answer: 2
+    explanation: |
+      1/(1 - 0.90) = 1/0.10 = 10x. At 95% it is 20x and at 99% it is 100x. This
+      hyperbolic blow-up as rho approaches 1 is why online services stay well left of
+      full utilization.
+    ref: "concepts.md#utilization-versus-latency-and-the-knee-of-the-curve"
+
+  - id: capacity-modeling-and-tail-latency-010
+    difficulty: advanced
+    tags: [utilization, knee, tail, variance]
+    question: |
+      Why is running a latency-sensitive service at 90% CPU utilization risky even if
+      the *average* latency still looks acceptable?
+    options:
+      - "Past the knee (~70-80%), queueing latency variance grows even faster than the mean, so p99/p999 explode and there is no headroom for GC pauses, retries, or a failover"
+      - "Average latency is the only metric that matters, so it is not actually risky"
+      - "CPU utilization above 80% causes hardware to throttle to 0 automatically"
+      - "The scheduler switches to LIFO above 80% and reorders responses"
+    answer: 0
+    explanation: |
+      The M/M/1 mean follows 1/(1-rho), but wait-time variance grows even faster, so the
+      tail diverges violently past the knee while the mean can still look "fine." That
+      leaves no room for GC, bursts, or absorbing a failed peer. Hardware does not
+      throttle to zero at 80%, and schedulers do not auto-switch to LIFO.
+    ref: "concepts.md#utilization-versus-latency-and-the-knee-of-the-curve"
+
+  - id: capacity-modeling-and-tail-latency-011
+    difficulty: advanced
+    tags: [utilization, batch-vs-online, tradeoffs]
+    question: |
+      For which workload is it appropriate to deliberately run resources near 95-100%
+      utilization?
+    options:
+      - "A throughput-oriented batch job (e.g., a video-encoding or MapReduce farm) with no per-request latency SLO"
+      - "A synchronous payment authorization API with a strict p99.9 SLO"
+      - "A real-time bidding service that must respond within 50 ms"
+      - "An interactive search backend fanning out to hundreds of shards"
+    answer: 0
+    explanation: |
+      Batch/throughput systems have no latency SLO, so maximizing utilization (and thus
+      hardware efficiency) is correct; queueing delay is irrelevant to a job measured on
+      completion time. All the other examples are latency-sensitive and must stay left
+      of the knee to keep the tail bounded.
+    ref: "concepts.md#utilization-versus-latency-and-the-knee-of-the-curve"
+
+  - id: capacity-modeling-and-tail-latency-012
+    difficulty: expert
+    tags: [utilization, cost, tradeoffs, headroom]
+    question: |
+      A team runs a bursty, strict-SLO service at 45% average CPU and is asked to cut
+      cost by targeting 85%. What is the most defensible senior response?
+    options:
+      - "Agree immediately; 45% wastes ~2x the hardware and utilization targets don't affect latency"
+      - "Refuse any change; utilization targets are sacred and can never move"
+      - "Push back: for bursty traffic with a strict SLO, 85% sits past the knee where bursts and failover push latency over the cliff; if cost matters, improve autoscaling responsiveness or smooth the burst before raising the steady-state target"
+      - "Move to 85% but disable all retries to compensate"
+    answer: 2
+    explanation: |
+      Utilization target is a real cost/latency trade-off, but for bursty + strict-SLO
+      workloads 85% steady state leaves no headroom for the burst or a failover, so the
+      tail collapses. The right move is to attack the burstiness/autoscaling first, or
+      accept a moderately higher (not 85%) target. Blindly agreeing ignores the knee;
+      "never move" is dogma; disabling retries trades one failure mode for another.
+    ref: "concepts.md#utilization-versus-latency-and-the-knee-of-the-curve"
+
+  - id: capacity-modeling-and-tail-latency-013
+    difficulty: intermediate
+    tags: [usl, scalability, coherency]
+    question: |
+      In the Universal Scalability Law, what does the coherency (beta) term model, and
+      what is its qualitative effect on the throughput curve?
+    options:
+      - "The cost of keeping shared state consistent across nodes (crosstalk), which grows ~N^2 and can make throughput peak and then DECREASE as nodes are added"
+      - "Serial fraction only; it causes throughput to plateau"
+      - "Network bandwidth, which caps throughput at a fixed ceiling"
+      - "Memory usage per node, which has no effect on throughput"
+    answer: 0
+    explanation: |
+      The beta term captures coherency/crosstalk (cache coherence, lock coordination,
+      cross-node consistency), which scales with pairwise communication (~N^2) and
+      produces retrograde scaling: throughput peaks at N* then declines. The serial
+      contention term is alpha (which causes the plateau); beta is what bends the curve
+      back down.
+    ref: "concepts.md#the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-014
+    difficulty: advanced
+    tags: [usl, retrograde, sharding]
+    question: |
+      An engineer reports: "We doubled our stateless app tier from 20 to 40 nodes and
+      aggregate throughput went DOWN, not up." Assuming the app tier itself is healthy,
+      what is the most likely USL explanation?
+    options:
+      - "A shared coordination point (e.g., a hot database row, distributed lock, or cache-invalidation fan-out) created N^2 coherency traffic (beta), so past the optimum N* more nodes reduce throughput"
+      - "Amdahl's Law caps speedup at 1/s, so throughput naturally halves"
+      - "Adding nodes always reduces throughput because of TCP overhead"
+      - "The load balancer can only address 20 nodes"
+    answer: 0
+    explanation: |
+      Retrograde scaling (throughput dropping as you add nodes) is the signature of a
+      non-zero coherency term beta: more nodes coordinating over shared state generate
+      super-linear crosstalk that outweighs the added capacity. The fix is to reduce beta
+      by sharding/removing the shared coordination point. Amdahl only predicts a plateau
+      (never a decline), TCP overhead does not cause retrograde scaling, and LB
+      addressing limits are not it.
+    ref: "concepts.md#the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-015
+    difficulty: expert
+    tags: [usl, beta, design, tradeoffs]
+    question: |
+      Your system is dominated by the USL coherency term (beta). Which intervention
+      most directly raises the throughput ceiling and pushes the optimum N* to the
+      right?
+    options:
+      - "Add more nodes to the existing shared-state cluster"
+      - "Batch requests to reduce per-request serial work (attacks alpha)"
+      - "Partition/shard the state so nodes stop coordinating (share-nothing), use consistent routing to pin keys to a node, and replace synchronous coordination with async"
+      - "Increase the size of the consensus group so more nodes can accept writes"
+    answer: 2
+    explanation: |
+      Because beta comes from cross-node coordination, the ceiling rises only by
+      REDUCING coordination: shard to share-nothing, route consistently so a key lives on
+      one node, and make coordination async. Adding nodes to a beta-dominated system makes
+      it worse. Batching attacks alpha (the plateau) not beta. Enlarging a consensus group
+      adds a serialization/coherency point and slows writes.
+    ref: "concepts.md#the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-016
+    difficulty: advanced
+    tags: [usl, consensus, raft, sharding]
+    question: |
+      Why do production Raft/Paxos deployments keep the voting group small (typically
+      3-7 members) and scale out by sharding into many groups rather than enlarging one
+      group?
+    options:
+      - "The leader is a serialization/coordination point; adding voters increases coherency cost and quorum size, so writes get SLOWER, not faster - you scale throughput by adding independent groups (shards), not group members"
+      - "Larger groups improve write latency because more nodes share the work"
+      - "Raft mathematically forbids more than 7 members"
+      - "Odd numbers of members are required only above 7"
+    answer: 0
+    explanation: |
+      A consensus group has a single leader ordering writes and requires a quorum to
+      commit; adding members grows the quorum and the coordination/coherency cost (USL
+      beta at the group level), so writes slow down. You scale by partitioning into many
+      independent groups. There is no hard "7 member" rule; the constraint is
+      performance/coordination, not a syntactic limit.
+    ref: "concepts.md#the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-017
+    difficulty: intermediate
+    tags: [amdahl, speedup, serial-fraction]
+    question: |
+      A workload is 5% inherently serial. By Amdahl's Law, what is the maximum speedup
+      as the number of processors approaches infinity?
+    options:
+      - "20x"
+      - "5x"
+      - "95x"
+      - "Unbounded"
+    answer: 0
+    explanation: |
+      Amdahl's Law caps speedup at 1/s = 1/0.05 = 20x, regardless of how many
+      processors you add. The 5% serial portion becomes the hard ceiling. It is not
+      5x, 95x, or unbounded.
+    ref: "concepts.md#amdahls-law-versus-the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-018
+    difficulty: advanced
+    tags: [amdahl, usl, comparison]
+    question: |
+      What is the key difference between Amdahl's Law and the Universal Scalability Law?
+    options:
+      - "Amdahl models a serial-fraction plateau; USL adds a coherency term (beta) so it can predict throughput actually DECLINING with more nodes, which Amdahl never does"
+      - "They are identical; USL is just a rebranding of Amdahl's Law"
+      - "USL only applies to single-core CPUs while Amdahl applies to clusters"
+      - "Amdahl accounts for coherency cost while USL ignores it"
+    answer: 0
+    explanation: |
+      Setting USL's beta term to zero recovers Amdahl. Amdahl predicts a plateau (max
+      speedup 1/s); USL's coherency term (beta*N*(N-1)) captures crosstalk and predicts
+      a peak followed by decline. USL is the superset and the one that models real
+      distributed systems. The other options invert or confuse the two.
+    ref: "concepts.md#amdahls-law-versus-the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-019
+    difficulty: advanced
+    tags: [gustafson, amdahl, weak-scaling]
+    question: |
+      Gustafson's Law is more optimistic than Amdahl's Law about large-scale
+      parallelism. Under what assumption does that optimism hold?
+    options:
+      - "The problem grows with the machine (weak scaling), so the relative serial fraction shrinks and near-linear speedup is achievable"
+      - "The problem size is fixed and only the machine grows (strong scaling)"
+      - "There is zero communication cost between nodes"
+      - "The serial fraction is exactly zero"
+    answer: 0
+    explanation: |
+      Gustafson assumes weak scaling: as you add nodes you also scale up the problem
+      (bigger dataset in the same time), so the serial portion becomes a smaller fraction
+      of total work and speedup can be near-linear. Amdahl assumes a fixed problem
+      (strong scaling). It does not require zero communication or zero serial fraction.
+    ref: "concepts.md#amdahls-law-versus-the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-020
+    difficulty: beginner
+    tags: [percentiles, averages, tail]
+    question: |
+      Why do senior engineers say "averages lie" when reasoning about latency SLOs?
+    options:
+      - "Latency distributions are right-skewed, so a low mean can coexist with a large tail (e.g., 1% of requests at 1 second) that users actually feel"
+      - "Averages are always higher than the true latency"
+      - "The mean is impossible to compute at scale"
+      - "Averages only apply to throughput, never latency"
+    answer: 0
+    explanation: |
+      Latency is heavily right-skewed (GC, contention, retries create a long tail), so
+      the mean sits above the median and tells you nothing about worst-case experience.
+      A service can average 10 ms while 1% of requests take a second. Averages are not
+      "always higher," are computable, and do apply to latency - they just hide the tail.
+    ref: "concepts.md#why-averages-lie-percentiles-and-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-021
+    difficulty: advanced
+    tags: [percentiles, aggregation, tdigest]
+    question: |
+      A dashboard computes fleet-wide p99 latency by taking the arithmetic mean of each
+      host's individually-reported p99. Why is this metric wrong?
+    options:
+      - "It is correct as long as all hosts get equal traffic"
+      - "p99 should be summed across hosts, not averaged"
+      - "Percentiles are neither additive nor averageable; you must merge the underlying distributions (e.g., via t-digest or HdrHistogram) to get a true fleet percentile"
+      - "You should use the max of per-host p99 instead, which is exact"
+    answer: 2
+    explanation: |
+      A percentile is a property of a distribution, and you cannot average or add
+      percentiles across sources - even with equal traffic the mean-of-p99s is not the
+      true p99. You must merge the raw distributions or use mergeable sketches
+      (t-digest, HdrHistogram). Summing is nonsensical, and max-of-p99 is an
+      overestimate, not the exact fleet p99.
+    ref: "concepts.md#why-averages-lie-percentiles-and-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-022
+    difficulty: intermediate
+    tags: [percentiles, p999, slo]
+    question: |
+      A service exposes an API that a typical user session calls ~500 times. Which
+      latency percentile is the most honest target for "what users experience," and
+      why?
+    options:
+      - "p50, because it represents the typical single call"
+      - "The mean, because it summarizes all calls"
+      - "p999 (or higher), because across ~500 calls a user is very likely to hit the tail, so the tail becomes the effective per-session experience"
+      - "p100/max, because only the worst case matters"
+    answer: 2
+    explanation: |
+      With hundreds of dependent calls per session, the probability of hitting a rare
+      slow request is high, so p999 (or beyond) governs the felt experience - this is the
+      fan-out/repetition argument. p50 and the mean ignore the tail entirely; p100/max is
+      dominated by unstable outliers and is a poor SLO target.
+    ref: "concepts.md#why-averages-lie-percentiles-and-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-023
+    difficulty: expert
+    tags: [percentiles, slo, cost, tradeoffs]
+    question: |
+      Tightening an SLO from p99 to p99.9 is being debated. Which framing is the most
+      accurate senior perspective?
+    options:
+      - "It is free; the same infrastructure that meets p99 meets p99.9"
+      - "p99.9 is always the wrong target; p50 is sufficient"
+      - "It is a real cost trade-off: tail SLOs get expensive (over-provisioning, hedging, replication), and p999 protects high-fan-out/high-repetition users, but chasing p100 is usually futile because it is dominated by unbounded outliers"
+      - "p99.9 can be met simply by removing the slowest 0.1% of requests from the metric"
+    answer: 2
+    explanation: |
+      Moving from p99 to p999 meaningfully improves experience for users who make many
+      calls, but it costs real money (headroom, hedged/tied requests, replication), and
+      going all the way to p100 is usually futile since it is set by unbounded outliers.
+      It is not free, p50 is not sufficient for high-fan-out systems, and you cannot
+      legitimately "delete" the slow requests from the metric.
+    ref: "concepts.md#why-averages-lie-percentiles-and-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-024
+    difficulty: advanced
+    tags: [fan-out, tail-amplification, probability]
+    question: |
+      A request fans out to 100 independent leaf services in parallel and must wait for
+      all of them. Each leaf independently exceeds its "slow" threshold 1% of the time.
+      Approximately what fraction of requests will be slow (at least one slow leaf)?
+    options:
+      - "About 1%"
+      - "About 10%"
+      - "About 63%"
+      - "About 100%"
+    answer: 2
+    explanation: |
+      P(at least one slow) = 1 - (1 - 0.01)^100 = 1 - 0.99^100 ~ 1 - 0.366 = 0.634, about
+      63%. This is the core "tail at scale" result: a per-leaf 1% slow rate becomes a
+      per-request ~63% slow rate at fan-out 100. It is far more than 1% or 10%, and not
+      quite 100%.
+    ref: "concepts.md#fan-out-amplification-of-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-025
+    difficulty: expert
+    tags: [fan-out, percentiles, critical-path]
+    question: |
+      Dean and Barroso observe that a request touching a large number of services
+      "sees" a much worse percentile of any single service. Which statement captures
+      this most precisely?
+    options:
+      - "A request touching 100 services experiences roughly the 50th-percentile latency of a single service"
+      - "Fan-out reduces tail latency because slow leaves are averaged out"
+      - "A request touching ~100 services on the critical path experiences roughly the 99.99th-percentile behavior of an individual service, because it only takes one slow leaf to slow the whole request"
+      - "The request latency equals the average leaf latency regardless of fan-out"
+    answer: 2
+    explanation: |
+      Because the request completes only when the slowest of ~100 leaves responds, its
+      latency is governed by the extreme percentile of a single service - roughly the
+      99.99th - not the median or the average. Fan-out amplifies rather than averages out
+      the tail; you cannot average latencies of a max-of-N wait.
+    ref: "concepts.md#fan-out-amplification-of-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-026
+    difficulty: advanced
+    tags: [fan-out, sequential-vs-parallel, tail]
+    question: |
+      For tail-latency control in a deep call graph, why is "wide and shallow" generally
+      preferable to "deep and narrow"?
+    options:
+      - "Parallel fan-out lets tails MAX together (one slow leaf), while sequential/layered calls ADD their tail latencies on every hop, accumulating tail down the chain"
+      - "Deep call graphs use less network bandwidth"
+      - "Sequential calls are always faster than parallel calls"
+      - "Wide fan-out eliminates the tail entirely"
+    answer: 0
+    explanation: |
+      In parallel fan-out the request waits for the slowest leaf (tails combine as a
+      max), whereas in a sequential/layered chain each hop adds its own tail so latencies
+      accumulate additively over many tiers. Neither eliminates the tail, but deep chains
+      compound it. Bandwidth and a blanket "sequential is faster" claim are irrelevant/
+      wrong.
+    ref: "concepts.md#fan-out-amplification-of-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-027
+    difficulty: expert
+    tags: [fan-out, denormalization, tradeoffs]
+    question: |
+      A read-heavy user profile page currently issues 40 parallel backend calls and has
+      a poor p99. Which change best improves the tail, and what is the trade-off?
+    options:
+      - "Add retries to each of the 40 calls; trade-off is more network traffic only"
+      - "Increase per-call timeouts so slow calls succeed; trade-off is none"
+      - "Denormalize so one (or a few) read answers what previously took many calls, reducing fan-out width; trade-off is added write-time cost and storage/consistency complexity"
+      - "Convert the 40 parallel calls to 40 sequential calls; trade-off is simpler code"
+    answer: 2
+    explanation: |
+      Reducing fan-out width attacks the amplification directly; denormalizing/
+      precomputing so a single read serves the page trades write-time work, storage, and
+      consistency management for a much more predictable read tail - usually the right
+      call for read-heavy user paths. Retries add load (and can amplify the tail),
+      longer timeouts raise the tail, and sequential calls add tails on every hop.
+    ref: "concepts.md#fan-out-amplification-of-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-028
+    difficulty: intermediate
+    tags: [tail-at-scale, hedged-requests]
+    question: |
+      What is a "hedged request" as described in The Tail at Scale?
+    options:
+      - "Sending the request to two replicas simultaneously and always using both responses"
+      - "Retrying the same replica up to three times with backoff"
+      - "Sending to one replica, and only if it hasn't responded by a threshold (e.g., the p95) sending a second copy to another replica and taking the first to answer"
+      - "Splitting a request into shards and processing them on the same node"
+    answer: 2
+    explanation: |
+      Hedging sends a secondary copy only after a delay tied to a high percentile (e.g.,
+      p95), so the extra load is small (~5%) while cutting the tail substantially. Sending
+      to two replicas immediately is naive duplication (or tied requests), same-replica
+      retry does not escape a slow node, and splitting into shards on one node is
+      unrelated.
+    ref: "concepts.md#the-tail-at-scale-mitigations"
+
+  - id: capacity-modeling-and-tail-latency-029
+    difficulty: advanced
+    tags: [tail-at-scale, tied-requests, queueing]
+    question: |
+      How do "tied requests" differ from hedged requests, and what tail cause do they
+      target most directly?
+    options:
+      - "Tied requests wait longer before duplicating; they target CPU-bound work"
+      - "Tied requests retry the same server; they target network loss"
+      - "Tied requests are enqueued at two replicas at once, and whichever server STARTS executing first tells the other to cancel; they directly attack queueing delay with less wasted work than naive duplication"
+      - "Tied requests return partial results; they target completeness"
+    answer: 2
+    explanation: |
+      With tied requests both copies are enqueued immediately but "tied" so that the
+      instant one server begins execution it cancels the twin. This targets queueing delay
+      (the dominant tail cause) more directly than hedging while avoiding double execution.
+      They are not delayed, not same-server retries, and not partial-result responses.
+    ref: "concepts.md#the-tail-at-scale-mitigations"
+
+  - id: capacity-modeling-and-tail-latency-030
+    difficulty: expert
+    tags: [tail-at-scale, hedging, metastable, tradeoffs]
+    question: |
+      Under which condition is enabling hedged requests dangerous and potentially a
+      trigger for a metastable failure?
+    options:
+      - "On idempotent read-only calls at low baseline utilization"
+      - "Only when the p95 threshold is set too high"
+      - "On non-idempotent writes, or at high baseline utilization, where the extra hedge load piles on exactly when the system is already slow, creating a positive-feedback overload loop"
+      - "Hedging is always safe because it cancels the loser"
+    answer: 2
+    explanation: |
+      Hedging is safe only for idempotent, low-baseline-load reads. Hedging writes risks
+      duplicate side effects, and hedging when already near overload adds load precisely
+      when the system is slow, forming a self-amplifying loop that can tip into a
+      metastable collapse. A too-high threshold just reduces effectiveness; hedging is
+      not "always safe" and cancellation does not prevent the load spike from firing.
+    ref: "concepts.md#the-tail-at-scale-mitigations"
+
+  - id: capacity-modeling-and-tail-latency-031
+    difficulty: advanced
+    tags: [tail-at-scale, micro-partitioning, rebalancing]
+    question: |
+      Why does micro-partitioning (many more partitions than machines) help control tail
+      latency and speed up recovery?
+    options:
+      - "It reduces the total amount of data stored"
+      - "It eliminates the need for replication"
+      - "Fine-grained partitions let the system migrate a single slow/hot partition off a struggling node and rebalance quickly, instead of moving a whole node's worth of data"
+      - "It guarantees exactly-once processing"
+    answer: 2
+    explanation: |
+      With, say, 10-100 partitions per machine, load balancing and failure recovery are
+      fine-grained: a hot or slow partition can be shed/migrated cheaply and load
+      redistributed quickly, keeping the tail down. It does not reduce data volume,
+      remove the need for replication, or provide exactly-once semantics.
+    ref: "concepts.md#the-tail-at-scale-mitigations"
+
+  - id: capacity-modeling-and-tail-latency-032
+    difficulty: advanced
+    tags: [tail-at-scale, good-enough, partial-response, tradeoffs]
+    question: |
+      Web search returns results once ~95 of 100 shards have responded rather than
+      waiting for all 100. What is this technique and its trade-off?
+    options:
+      - "Load shedding; it drops user requests to save capacity"
+      - "Hedged requests; it duplicates all shard calls"
+      - "Good-enough / partial responses; it bounds the deadline by sacrificing a little completeness, which is acceptable for ranking/search but not for something like a bank balance"
+      - "Static stability; it pre-provisions failover capacity"
+    answer: 2
+    explanation: |
+      Returning on a sufficient fraction of leaves is the "good-enough response" pattern:
+      it caps tail latency by tolerating slight incompleteness, which works for search/
+      ranking but is unacceptable where completeness is required (financial balances).
+      It is not load shedding of user requests, not hedging, and not static stability.
+    ref: "concepts.md#the-tail-at-scale-mitigations"
+
+  - id: capacity-modeling-and-tail-latency-033
+    difficulty: intermediate
+    tags: [tail-at-scale, idempotency, retries]
+    question: |
+      Both hedged and tied requests reduce the tail by issuing extra copies of work.
+      Which property of the operation makes these techniques safe to apply?
+    options:
+      - "The operation must be idempotent or safely cancellable so duplicate execution does not corrupt state"
+      - "The operation must be strictly serializable"
+      - "The operation must run on a single-threaded server"
+      - "The operation must be a write that mutates shared state"
+    answer: 0
+    explanation: |
+      Because hedging/tied requests can result in more than one copy executing (or needing
+      cancellation), they are only safe when the work is idempotent or cancellable without
+      side-effect duplication. Serializability and single-threading are unrelated
+      requirements, and mutating writes are exactly the case where duplication is unsafe.
+    ref: "concepts.md#the-tail-at-scale-mitigations"
+
+  - id: capacity-modeling-and-tail-latency-034
+    difficulty: advanced
+    tags: [coordinated-omission, load-testing, closed-loop]
+    question: |
+      What is coordinated omission, and why does it make load tests under-report tail
+      latency?
+    options:
+      - "A network effect where packets are dropped in coordinated bursts"
+      - "A sampling technique that intentionally discards outliers to smooth graphs"
+      - "A closed-loop load generator that waits for each response before sending the next fails to issue the many requests that 'should' have been sent during a server stall, so those high-latency samples are never recorded"
+      - "A consensus protocol failure where nodes omit votes"
+    answer: 2
+    explanation: |
+      In a closed-loop generator, a server stall also stalls the generator, so the
+      requests that a fixed schedule would have sent during the stall are never issued or
+      measured. The tool records one slow request instead of the hundreds that should have
+      experienced the backlog, dramatically underestimating p99/p999. It is not a network
+      or consensus phenomenon, nor deliberate outlier trimming.
+    ref: "concepts.md#coordinated-omission"
+
+  - id: capacity-modeling-and-tail-latency-035
+    difficulty: expert
+    tags: [coordinated-omission, open-loop, wrk2, hdrhistogram]
+    question: |
+      Which combination correctly fixes coordinated omission in latency measurement?
+    options:
+      - "Use a closed-loop generator and report only the average"
+      - "Increase the number of client threads until CPU saturates"
+      - "Measure latency from actual_send to response, ignoring intended start time"
+      - "Use an open-loop / constant-throughput model (e.g., wrk2, Gatling open model) where request start times follow a fixed schedule, and/or correct samples with HdrHistogram's expected-interval back-filling"
+    answer: 3
+    explanation: |
+      The correct fixes are open-loop generation (start times set by a schedule/Poisson
+      process independent of responses) and/or HdrHistogram's
+      recordValueWithExpectedInterval to synthesize omitted samples, measuring from
+      INTENDED start to response. Closed-loop + average hides the tail, adding client
+      threads does not fix the coordination, and measuring from actual_send is exactly the
+      omission bug.
+    ref: "concepts.md#coordinated-omission"
+
+  - id: capacity-modeling-and-tail-latency-036
+    difficulty: expert
+    tags: [coordinated-omission, open-loop, production]
+    question: |
+      Why does the coordinated-omission problem also reveal something important about how
+      real production clients differ from a naive load test?
+    options:
+      - "Real clients always retry, so latency is lower in production"
+      - "Real clients use faster hardware than load generators"
+      - "Production traffic is always lower than test traffic"
+      - "Real internet clients arrive open-loop (independent of whether the server is stalled), so they experience the full queued backlog, whereas closed-loop clients naturally back-pressure and under-stress the server"
+    answer: 3
+    explanation: |
+      A closed-loop client waits for a response before sending more, which naturally
+      throttles offered load during a stall - real internet users do not; new requests keep
+      arriving and queue up, so production sees the full backlog the test hid. This is why
+      you should test with an open-loop model. The other options are unfounded
+      generalizations.
+    ref: "concepts.md#coordinated-omission"
+
+  - id: capacity-modeling-and-tail-latency-037
+    difficulty: intermediate
+    tags: [head-of-line-blocking, queueing]
+    question: |
+      What is head-of-line (HoL) blocking?
+    options:
+      - "When a queue overflows and drops new items"
+      - "When two queues deadlock waiting for each other"
+      - "When a load balancer sends all traffic to one node"
+      - "When a slow or large item at the front of a FIFO queue blocks all the items behind it, even ones that could be served quickly"
+    answer: 3
+    explanation: |
+      HoL blocking is specifically the front-of-queue item stalling everything behind it
+      in a FIFO discipline, inflating the tail for otherwise-fast work. It is distinct from
+      overflow/drop, deadlock, and load-balancer imbalance.
+    ref: "concepts.md#head-of-line-blocking"
+
+  - id: capacity-modeling-and-tail-latency-038
+    difficulty: advanced
+    tags: [head-of-line-blocking, http2, http3, quic]
+    question: |
+      HTTP/2 multiplexes many streams over a single TCP connection, yet HTTP/3 (QUIC) was
+      still motivated partly by head-of-line blocking. Where does the residual HoL
+      blocking in HTTP/2 come from, and how does QUIC address it?
+    options:
+      - "HTTP/2 blocks at the application layer; QUIC adds more application threads"
+      - "HTTP/2 has no HoL blocking; QUIC is only about encryption"
+      - "HTTP/2 uses too few connections; QUIC opens one connection per stream"
+      - "A single lost TCP segment stalls delivery of ALL HTTP/2 streams (transport-level HoL); QUIC runs over UDP with independent per-stream delivery so a loss on one stream doesn't block the others"
+    answer: 3
+    explanation: |
+      HTTP/2 removes application-layer HoL but a single lost TCP segment stalls all
+      multiplexed streams because TCP guarantees in-order delivery of the whole byte
+      stream. QUIC (HTTP/3) gives each stream independent delivery over UDP, so loss on one
+      stream doesn't block the rest. QUIC also brings integrated encryption but its HoL
+      benefit is the per-stream independence, not more threads or one connection per
+      stream.
+    ref: "concepts.md#head-of-line-blocking"
+
+  - id: capacity-modeling-and-tail-latency-039
+    difficulty: advanced
+    tags: [head-of-line-blocking, bulkheads, isolation]
+    question: |
+      In a service where a shared thread pool serves all request types, a single slow
+      downstream causes unrelated fast requests to time out. What is the best structural
+      fix and its cost?
+    options:
+      - "Add retries to the fast requests so they eventually get a thread"
+      - "Increase the global timeout so nothing times out"
+      - "Move all requests to a single unbounded queue for fairness"
+      - "Use separate queues/pools (bulkheads) per class of work or per dependency to isolate the slow work; the cost is more pools and potential under-utilization from reduced sharing"
+    answer: 3
+    explanation: |
+      The slow dependency is causing HoL blocking across a shared pool; the structural fix
+      is bulkheading (workload isolation) so slow work cannot starve fast work, at the cost
+      of less resource sharing and possible idle capacity. Retries make it worse (re-enqueue
+      behind the stuck head), a longer global timeout hides nothing and delays failure, and
+      one unbounded queue amplifies the blocking.
+    ref: "concepts.md#head-of-line-blocking"
+
+  - id: capacity-modeling-and-tail-latency-040
+    difficulty: expert
+    tags: [head-of-line-blocking, lifo, load-shedding]
+    question: |
+      During overload, why can switching a request queue from FIFO to LIFO (or a
+      deadline-aware priority) sometimes improve the fraction of requests that meet their
+      SLO?
+    options:
+      - "LIFO increases total throughput because stacks are faster than queues"
+      - "LIFO guarantees every request is served eventually"
+      - "LIFO eliminates head-of-line blocking entirely"
+      - "Under overload, FIFO serves the oldest requests first - which have often already burned their deadline and will time out anyway; serving fresher requests (LIFO/priority) means the work done is more likely to still be useful"
+    answer: 3
+    explanation: |
+      When the queue is backed up, the oldest (front) items may already be past their
+      deadline; completing them wastes work on responses no one will use. Serving the
+      freshest requests (LIFO or deadline-aware) maximizes the share of work that still
+      meets its SLO. LIFO is not faster per se, does not guarantee eventual service
+      (old items can starve), and does not by itself remove HoL blocking.
+    ref: "concepts.md#head-of-line-blocking"
+
+  - id: capacity-modeling-and-tail-latency-041
+    difficulty: intermediate
+    tags: [thread-pool, cpu-bound, sizing]
+    question: |
+      For purely CPU-bound work, what is the appropriate rule of thumb for thread-pool
+      size, and why?
+    options:
+      - "Hundreds of threads, to keep a deep backlog ready"
+      - "One thread, because CPU work must be serialized"
+      - "Ten times the number of cores, to overlap CPU and IO"
+      - "Roughly the number of CPU cores (perhaps cores + 1), because extra runnable threads just add context-switch and cache-thrash overhead without more throughput"
+    answer: 3
+    explanation: |
+      CPU-bound throughput is capped by cores, so ~N_cores (or N_cores + 1 to cover
+      occasional stalls) is right; more runnable threads than cores only add
+      context-switch overhead and cache thrash. Hundreds of threads help IO-bound, not
+      CPU-bound work; one thread underutilizes multicore; 10x cores is an IO-bound
+      heuristic.
+    ref: "concepts.md#thread-pool-and-connection-pool-sizing-math"
+
+  - id: capacity-modeling-and-tail-latency-042
+    difficulty: advanced
+    tags: [thread-pool, io-bound, formula]
+    question: |
+      Using the IO-bound sizing formula threads = N_cores x utilization x (1 + W/C), how
+      many threads keep 8 cores busy at 100% target when each request spends 90 ms
+      waiting on IO and 10 ms on CPU?
+    options:
+      - "8"
+      - "16"
+      - "80"
+      - "800"
+    answer: 2
+    explanation: |
+      W/C = 90/10 = 9, so threads = 8 x 1 x (1 + 9) = 80. This is Little's Law in disguise:
+      you need enough threads so cores stay busy while most threads are parked on IO. 8
+      would leave cores idle; 800 wildly overshoots.
+    ref: "concepts.md#thread-pool-and-connection-pool-sizing-math"
+
+  - id: capacity-modeling-and-tail-latency-043
+    difficulty: advanced
+    tags: [connection-pool, database, hikaricp, usl]
+    question: |
+      Tools like HikariCP and PgBouncer recommend surprisingly SMALL database connection
+      pools. What is the core reason a smaller pool can beat a larger one?
+    options:
+      - "Smaller pools use less client memory, which is the only benefit"
+      - "Small pools force requests to fail fast, which users prefer"
+      - "Connection setup is so slow that fewer connections is always faster"
+      - "A database has limited cores; past ~2-4x cores, more concurrent connections cause lock/latch contention and context switching (USL contention/coherency), so throughput drops and tail latency rises"
+    answer: 3
+    explanation: |
+      A DB with N cores cannot truly run more than ~N queries at once; beyond a small
+      multiple of cores, added connections contend on locks/latches and thrash the
+      scheduler (USL effects), reducing throughput and inflating the tail. Memory is a
+      minor factor; fail-fast is a separate concern; and while connection setup has cost,
+      the dominant reason is contention, not setup time.
+    ref: "concepts.md#thread-pool-and-connection-pool-sizing-math"
+
+  - id: capacity-modeling-and-tail-latency-044
+    difficulty: expert
+    tags: [connection-pool, backpressure, where-to-queue, tradeoffs]
+    question: |
+      Counterintuitively, senior engineers often prefer a *smaller* connection pool that
+      briefly queues requests in the application over a large pool that keeps the database
+      busy. Why?
+    options:
+      - "The application always processes requests faster than the database"
+      - "Application queues never overflow"
+      - "Databases cannot queue requests at all"
+      - "Queueing in the app keeps the bottleneck somewhere you control - where you can apply priority, per-request timeouts, and load shedding - instead of pushing a queue into the DB where a stuck query blocks everyone and you have no shedding controls"
+    answer: 3
+    explanation: |
+      Where the queue forms matters: in the app you retain control (priorities, timeouts,
+      shedding, backpressure), whereas a queue inside the DB is opaque and a stuck query
+      there blocks all clients. It is not that the app is inherently faster or that its
+      queues never overflow, and databases do queue - that is precisely the problem you
+      want to avoid.
+    ref: "concepts.md#thread-pool-and-connection-pool-sizing-math"
+
+  - id: capacity-modeling-and-tail-latency-045
+    difficulty: advanced
+    tags: [thread-pool, bounded-queue, fail-fast]
+    question: |
+      Why should a right-sized thread pool almost always have a BOUNDED work queue in
+      front of it?
+    options:
+      - "Bounded queues are required by the JVM"
+      - "Bounded queues make the pool process requests faster"
+      - "Unbounded queues cannot preserve FIFO order"
+      - "An unbounded queue merely relocates unbounded latency and memory growth in front of the pool; bounding it lets you reject/shed fast when full (fail fast beats fail slow)"
+    answer: 3
+    explanation: |
+      Right-sizing the pool caps concurrency, but an unbounded feeder queue just moves the
+      unbounded latency and memory blow-up upstream; a bounded queue converts overload into
+      fast, explicit rejection/backpressure. It is not a JVM requirement, does not change
+      per-request speed, and ordering is unrelated.
+    ref: "concepts.md#thread-pool-and-connection-pool-sizing-math"
+
+  - id: capacity-modeling-and-tail-latency-046
+    difficulty: intermediate
+    tags: [capacity-planning, headroom, failover]
+    question: |
+      You run identical capacity across 3 availability zones and must survive losing any
+      one AZ. What is the maximum steady-state utilization per AZ so the survivors can
+      absorb the failover?
+    options:
+      - "About 90%"
+      - "About 75%"
+      - "About 67%"
+      - "About 50%"
+    answer: 2
+    explanation: |
+      With M=3 zones, losing one leaves M-1=2 to carry 100%, so each may run at most
+      (M-1)/M = 2/3 ~ 67% in steady state. Conveniently this also sits near the safe side
+      of the latency knee. 50% is the 2-AZ answer; 75% is the 4-cell answer; 90% leaves no
+      failover room.
+    ref: "concepts.md#capacity-planning-with-headroom-and-cells"
+
+  - id: capacity-modeling-and-tail-latency-047
+    difficulty: advanced
+    tags: [capacity-planning, two-az, cost, tradeoffs]
+    question: |
+      Why is a 2-AZ active/active design that must survive one AZ loss relatively
+      expensive on a cost-per-served-request basis?
+    options:
+      - "Two AZs require twice the network bandwidth of three"
+      - "AWS charges more for 2-AZ deployments"
+      - "Two AZs cannot use autoscaling"
+      - "Each AZ can run at most (M-1)/M = 1/2 = 50% utilization to absorb the other's traffic on failover, so you permanently pay for ~half your capacity sitting idle"
+    answer: 3
+    explanation: |
+      With only 2 zones, surviving one loss requires each to be able to take 100%, capping
+      steady-state at 50% - so half your provisioned capacity is idle headroom, which is
+      costly. Adding a third zone raises the cap to 67% and improves efficiency. Bandwidth,
+      pricing, and autoscaling claims are not the reason.
+    ref: "concepts.md#capacity-planning-with-headroom-and-cells"
+
+  - id: capacity-modeling-and-tail-latency-048
+    difficulty: advanced
+    tags: [cell-based, blast-radius, capacity]
+    question: |
+      What is the primary capacity-and-reliability benefit of a cell-based architecture
+      (many independent full-stack cells each serving a slice of customers)?
+    options:
+      - "It removes the need for load balancing"
+      - "Cells eliminate the need for replication within a cell"
+      - "Cells guarantee strong consistency across all customers"
+      - "Each cell has a known, tested capacity ceiling and contains blast radius, so failures/poison workloads/bad deploys affect one cell, and you scale by adding cells rather than growing one pool (avoiding USL coherency costs)"
+    answer: 3
+    explanation: |
+      Cells give a known per-cell capacity ceiling, blast-radius containment, and linear
+      scale-by-adding-cells (dodging the USL beta of one giant pool). They do not remove
+      load balancing/replication, and they do not provide cross-cell strong consistency -
+      in fact cells are deliberately independent.
+    ref: "concepts.md#capacity-planning-with-headroom-and-cells"
+
+  - id: capacity-modeling-and-tail-latency-049
+    difficulty: expert
+    tags: [static-stability, failover, control-plane]
+    question: |
+      The AWS "static stability" principle says to pre-provision failover capacity so no
+      scaling action is needed during a failure. What failure mode does this specifically
+      avoid?
+    options:
+      - "It avoids paying for idle capacity"
+      - "It avoids the need for health checks"
+      - "It avoids all forms of data loss"
+      - "It avoids depending on the control plane (autoscaling, new resource launches) exactly when it is most likely to be stressed or unavailable during the outage, so the data plane keeps serving from already-running headroom"
+    answer: 3
+    explanation: |
+      Static stability means the system keeps working WITHOUT reacting: failover capacity
+      is already running, so you don't need control-plane operations (scaling, launching)
+      during an outage - operations that often fail precisely when everything else is
+      failing. It explicitly TRADES cost (idle capacity) for this robustness; it is not
+      about health checks or data loss.
+    ref: "concepts.md#capacity-planning-with-headroom-and-cells"
+
+  - id: capacity-modeling-and-tail-latency-050
+    difficulty: expert
+    tags: [static-stability, reactive-scaling, tradeoffs]
+    question: |
+      A team wants to save money by NOT pre-provisioning failover capacity and instead
+      autoscaling up when an AZ fails. What is the strongest argument against this on a
+      critical path?
+    options:
+      - "Autoscaling is always slower than 1 second, which is unacceptable"
+      - "Autoscaling violates the CAP theorem"
+      - "Reactive scaling is cheaper only for stateless services"
+      - "Scaling up during an outage depends on the control plane and dependencies (AMIs, capacity availability, quotas) at the worst possible moment; correlated failures and capacity contention can prevent the scale-up, so the reactive design fails exactly when you need it"
+    answer: 3
+    explanation: |
+      Reactive scaling during a failure introduces a control-plane/capacity dependency at
+      the worst time; during a large event, capacity may be contended, quotas hit, and
+      dependencies degraded, so the scale-up may not complete - the opposite of static
+      stability. It is not strictly a fixed latency claim, has nothing to do with CAP, and
+      the statelessness point does not address the correlated-failure risk.
+    ref: "concepts.md#capacity-planning-with-headroom-and-cells"
+
+  - id: capacity-modeling-and-tail-latency-051
+    difficulty: intermediate
+    tags: [cost-estimation, egress, capacity]
+    question: |
+      When translating a capacity model into cloud cost, which category is most
+      frequently underestimated or forgotten?
+    options:
+      - "vCPU-hours for the app tier"
+      - "The number of IAM roles"
+      - "The cost of DNS lookups"
+      - "Network egress and cross-AZ/cross-region data transfer, which for chatty microservices or heavy replication can exceed compute cost"
+    answer: 3
+    explanation: |
+      Data transfer - especially cross-AZ/cross-region and internet egress - is a large,
+      commonly-overlooked line item that can dominate for chatty service meshes or
+      replication-heavy designs. Compute is usually accounted for; IAM roles and DNS
+      lookups are negligible.
+    ref: "concepts.md#estimating-cost-from-capacity"
+
+  - id: capacity-modeling-and-tail-latency-052
+    difficulty: advanced
+    tags: [cost-estimation, utilization, provisioning]
+    question: |
+      If a workload's raw compute need is X but you target 60% utilization for headroom,
+      how much compute must you actually provision (ignoring failover)?
+    options:
+      - "0.6X"
+      - "X"
+      - "About 1.67X"
+      - "3X"
+    answer: 2
+    explanation: |
+      Provisioned = need / utilization_target = X / 0.6 ~ 1.67X. Targeting 60% means you
+      buy ~1.67x the raw requirement; adding N+1 failover headroom multiplies this again.
+      0.6X and X ignore the headroom; 3X overshoots.
+    ref: "concepts.md#estimating-cost-from-capacity"
+
+  - id: capacity-modeling-and-tail-latency-053
+    difficulty: expert
+    tags: [cost-estimation, cost-latency-reliability, tradeoffs]
+    question: |
+      Which statement best captures the cost/latency/reliability trade-off when
+      presenting a capacity-and-cost estimate to a design review?
+    options:
+      - "You can minimize cost, tail latency, and blast radius simultaneously with good engineering"
+      - "Cost is the only metric that matters; latency and reliability follow automatically"
+      - "The cheapest architecture is always the correct one"
+      - "You must pick a point on the trade-off surface: tail and reliability techniques (knee headroom, hedging, replication, multi-AZ idle, static stability) all cost money; the right target is the cheapest option that meets the SLO with acceptable blast radius, and you should quote the number WITH its assumptions"
+    answer: 3
+    explanation: |
+      Cost, tail latency, and blast radius trade off against each other; every
+      tail/reliability lever has a bill, so the goal is the cheapest design that still
+      meets the SLO at an acceptable blast radius, presented with explicit assumptions
+      (peak-to-avg, utilization, replication, egress) so reviewers can challenge the lever.
+      You cannot minimize all three at once, and cheapest-wins ignores the SLO.
+    ref: "concepts.md#estimating-cost-from-capacity"
+
+  - id: capacity-modeling-and-tail-latency-054
+    difficulty: intermediate
+    tags: [backpressure, buffering, overload]
+    question: |
+      A producer persistently outruns a consumer. Why is adding an ever-larger
+      (unbounded) buffer the wrong fix?
+    options:
+      - "Buffers are slower than direct calls"
+      - "Buffers always violate ordering guarantees"
+      - "Unbounded buffers are illegal in most languages"
+      - "A buffer only helps when the average consume rate >= average produce rate; if the consumer is persistently slower, the queue grows without bound - OOM and, by Little's Law, ever-increasing latency with stale data"
+    answer: 3
+    explanation: |
+      Buffering smooths transient bursts but cannot fix a sustained rate mismatch: the
+      queue grows unbounded, exhausting memory and (via W = L/lambda) driving latency and
+      staleness up. It converts an outage-now into a worse outage-later. It is not about
+      per-op speed, ordering, or legality.
+    ref: "concepts.md#back-pressure-versus-buffering"
+
+  - id: capacity-modeling-and-tail-latency-055
+    difficulty: advanced
+    tags: [backpressure, stability, overload]
+    question: |
+      Among unbounded buffering, back-pressure, and load shedding, which is the only
+      mechanism that keeps a system STABLE (bounded latency and memory) under SUSTAINED
+      overload while a controllable producer exists?
+    options:
+      - "Unbounded buffering, because no request is ever rejected"
+      - "Retrying failed requests more aggressively"
+      - "Increasing the buffer size proportionally to load"
+      - "Back-pressure, because it propagates the constraint upstream and slows the producer, bounding latency and memory at the cost of reduced throughput"
+    answer: 3
+    explanation: |
+      Back-pressure signals the (controllable) producer to slow down, keeping the queue and
+      latency bounded - the only stable outcome under sustained overload, though throughput
+      drops. Unbounded buffering collapses (OOM/latency), aggressive retries amplify load
+      (metastable risk), and growing the buffer just delays the collapse.
+    ref: "concepts.md#back-pressure-versus-buffering"
+
+  - id: capacity-modeling-and-tail-latency-056
+    difficulty: advanced
+    tags: [load-shedding, open-loop, public-api]
+    question: |
+      For a public API facing uncontrollable, open-loop internet clients that ignore your
+      back-pressure, what is the correct overload strategy?
+    options:
+      - "Buffer everything so no client sees an error"
+      - "Load shedding: reject excess requests fast (e.g., 429/503, admission control, token bucket) so accepted requests keep meeting their SLO - serving some requests well beats serving all badly"
+      - "Rely purely on TCP back-pressure to the clients"
+      - "Scale the buffer until the burst passes"
+    answer: 1
+    explanation: |
+      Internet clients won't obey application back-pressure, so you shed load at the edge:
+      reject the excess quickly to protect the accepted requests' SLO. Buffering all of it
+      makes everyone slow and eventually crashes, TCP-level flow control does not slow an
+      open-loop request rate, and buffering the burst just defers collapse.
+    ref: "concepts.md#back-pressure-versus-buffering"
+
+  - id: capacity-modeling-and-tail-latency-057
+    difficulty: expert
+    tags: [metastable, retries, backpressure, tradeoffs]
+    question: |
+      A system that had a brief latency spike stays fully collapsed long after the
+      original trigger disappears. Investigation shows deep unbounded queues and clients
+      that time out and retry. What is happening and what breaks the cycle?
+    options:
+      - "A deadlock; restarting one node fixes it"
+      - "A metastable failure: retries add load faster than it drains, so retry-amplified load becomes self-sustaining; break it with bounded queues, capped retries with jitter, circuit breakers, and load shedding to kill the positive-feedback loop"
+      - "A memory leak; adding RAM fixes it permanently"
+      - "Normal behavior; the system will recover on its own once caches warm"
+    answer: 1
+    explanation: |
+      This is the classic metastable failure (Bronson et al.): a trigger backs up queues,
+      timeouts cause retries, and the amplified load sustains the collapse even after the
+      trigger is gone. Recovery requires breaking the feedback loop - bounded queues,
+      capped/jittered retries, circuit breakers, load shedding. It is not a deadlock or a
+      leak, and it will NOT self-recover while retries keep re-injecting load.
+    ref: "concepts.md#back-pressure-versus-buffering"
+
+  - id: capacity-modeling-and-tail-latency-058
+    difficulty: advanced
+    tags: [backpressure, buffering, when-to-use, tradeoffs]
+    question: |
+      When is buffering (rather than back-pressure or shedding) the RIGHT choice?
+    options:
+      - "When the producer is uncontrollable and the overload is permanent"
+      - "For transient, bounded bursts where a little added latency is acceptable and the consumer will catch up (e.g., message queues, log ingestion) - using a BOUNDED buffer"
+      - "Never; back-pressure is always superior"
+      - "Whenever memory is cheap, regardless of the rate mismatch"
+    answer: 1
+    explanation: |
+      A bounded buffer is ideal for smoothing transient bursts when the consumer's average
+      rate keeps up and some extra latency is fine (queues, log pipelines). It is wrong for
+      permanent overload (queue grows unbounded), back-pressure is not universally superior
+      (it reduces throughput and needs a controllable producer), and cheap memory does not
+      fix a sustained rate mismatch.
+    ref: "concepts.md#back-pressure-versus-buffering"
+
+  - id: capacity-modeling-and-tail-latency-059
+    difficulty: expert
+    tags: [littles-law, capacity, end-to-end, scenario]
+    question: |
+      A gateway must sustain 20,000 RPS. Each request holds a gateway worker for 30 ms,
+      of which 25 ms is spent awaiting a downstream that safely handles at most 400
+      concurrent calls. What is the most defensible sizing conclusion?
+    options:
+      - "600 gateway workers suffice and the downstream will be fine because 600 > 400"
+      - "Gateway needs ~600 workers (20000 x 0.03), but downstream concurrency demand is ~20000 x 0.025 = 500, which exceeds its safe 400 - so you must throttle to <=400 concurrent downstream calls and shed/queue the rest, meaning the gateway cannot actually pass all 20k RPS to the downstream at 25 ms"
+      - "Set 500 workers to exactly match downstream demand and remove all limits"
+      - "The downstream limit is irrelevant because Little's Law only applies to the gateway"
+    answer: 1
+    explanation: |
+      Gateway L = 20000 x 0.03 = 600 workers. But the downstream's required concurrency is
+      20000 x 0.025 = 500, above its safe 400, so you must cap concurrency to 400 and
+      shed/queue - which means at 25 ms service time the downstream can only sustain
+      400/0.025 = 16,000 RPS, not 20,000. Ignoring the downstream limit (options A, C, D)
+      drives it past its knee and collapses throughput for everyone.
+    ref: "concepts.md#littles-law-and-concurrency-sizing"
+
+  - id: capacity-modeling-and-tail-latency-060
+    difficulty: advanced
+    tags: [tail, root-cause, variance, scenario]
+    question: |
+      A service reports mean latency 12 ms but p999 = 850 ms. Which set of root causes and
+      first-line mitigations is most on-target?
+    options:
+      - "Slow disk only; fix by adding more disks"
+      - "Tail variance from GC/JIT pauses, queueing near the knee, head-of-line blocking, and lock contention; mitigate with tail-tolerant techniques (hedged/tied requests for idempotent reads), workload isolation, and attacking the per-request variance sources"
+      - "The mean is wrong; recompute it and the p999 will drop"
+      - "Network encryption overhead; disable TLS to fix the tail"
+    answer: 1
+    explanation: |
+      A huge gap between mean and p999 is the signature of tail variance: GC/JIT
+      stop-the-world pauses, queueing past the knee, HoL blocking, and lock contention.
+      First-line responses are tail-tolerance (hedging/tied for idempotent reads),
+      isolation/bulkheads, and reducing the variance sources. It is not a single-cause
+      disk issue, the mean is not "wrong," and disabling TLS is both unsafe and not the
+      cause.
+    ref: "concepts.md#why-averages-lie-percentiles-and-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-061
+    difficulty: intermediate
+    tags: [use-method, saturation, observability]
+    question: |
+      In Brendan Gregg's USE method for finding resource bottlenecks, what do the three
+      letters stand for?
+    options:
+      - "Uptime, Speed, Efficiency"
+      - "Utilization, Saturation, Errors - checked for every resource to find the bottleneck"
+      - "Usage, Scaling, Elasticity"
+      - "User, Session, Endpoint"
+    answer: 1
+    explanation: |
+      USE = Utilization, Saturation, Errors, applied per resource (CPU, memory, disk,
+      network). Saturation - the degree of queued/waiting work - is often the earliest
+      signal of the knee, before utilization pins at 100%. The other expansions are
+      fabricated.
+    ref: "concepts.md#utilization-versus-latency-and-the-knee-of-the-curve"
+
+  - id: capacity-modeling-and-tail-latency-062
+    difficulty: advanced
+    tags: [retries, amplification, capacity]
+    question: |
+      A service allows up to 3 total attempts per request (1 original + 2 retries). During
+      a partial brownout where ~50% of calls fail and get retried, what is the danger for
+      capacity, and what is the standard control?
+    options:
+      - "No danger; retries only replace failed work"
+      - "Retries multiply offered load exactly when the system is weakest (retry amplification), so a token-bucket retry budget (cap retries as a fraction of total traffic, e.g., 10%) plus jittered backoff and circuit breakers is needed to prevent a retry storm"
+      - "Retries reduce load because failed requests are cheaper"
+      - "The only fix is to disable retries entirely in all cases"
+    answer: 1
+    explanation: |
+      Naive per-request retry caps can still multiply total load several-fold during a
+      brownout, deepening the outage (retry amplification / storm). The standard control is
+      a retry budget (token bucket limiting retries to a small fraction of traffic) with
+      jittered exponential backoff and circuit breakers. Retries do add load (not replace
+      or reduce it), and disabling retries everywhere sacrifices legitimate resilience.
+    ref: "concepts.md#back-pressure-versus-buffering"
+
+  - id: capacity-modeling-and-tail-latency-063
+    difficulty: expert
+    tags: [fan-out, root-cause, variance, tradeoffs]
+    question: |
+      At fan-out N=200, reducing each leaf's individual p99 from 20 ms to 10 ms produces a
+      larger request-level tail improvement than you'd naively expect. Why does attacking
+      per-leaf variance pay off super-linearly at high fan-out?
+    options:
+      - "Because latencies are averaged across the 200 leaves"
+      - "Because the request waits on the slowest of N leaves, so P(request slow) = 1 - (1 - p)^N; shrinking each leaf's slow probability p compounds through the exponent N, disproportionately shrinking the request-level slow rate"
+      - "Because reducing leaf latency reduces the number of leaves"
+      - "Because fan-out latency is independent of leaf latency"
+    answer: 1
+    explanation: |
+      With P(request slow) = 1 - (1 - p)^N, lowering each leaf's slow probability p is
+      amplified through the exponent N, so per-leaf variance reduction yields
+      super-linear request-level gains at high fan-out - exactly Dean and Barroso's
+      argument for investing in reducing per-server variability. Latencies aren't averaged
+      in a max-of-N wait, leaf latency doesn't change N, and request latency clearly
+      depends on leaf latency.
+    ref: "concepts.md#fan-out-amplification-of-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-064
+    difficulty: advanced
+    tags: [shuffle-sharding, cell-based, isolation]
+    question: |
+      Shuffle sharding assigns each customer a random small subset of workers rather than
+      one fixed shard. How does this improve isolation compared to simple sharding?
+    options:
+      - "It gives every customer a dedicated worker, eliminating all contention"
+      - "By overlapping subsets combinatorially, the chance that any two customers share the exact same set of workers is tiny, so a single poison customer degrades only the few others who overlap - dramatically shrinking blast radius versus one shared shard"
+      - "It removes the need for any capacity headroom"
+      - "It guarantees each customer gets the fastest worker"
+    answer: 1
+    explanation: |
+      Shuffle sharding uses combinatorics: with random subsets, the probability that two
+      customers share their entire worker set is very small, so a noisy/poison customer
+      only affects those who overlap - a fraction of the fleet - rather than a whole shared
+      shard. It does not give dedicated workers, remove headroom, or optimize for speed.
+    ref: "concepts.md#capacity-planning-with-headroom-and-cells"
+
+  - id: capacity-modeling-and-tail-latency-065
+    difficulty: intermediate
+    tags: [utilization, saturation, knee, monitoring]
+    question: |
+      Why can "queue depth / saturation" be a better early-warning signal of the latency
+      knee than CPU utilization percentage alone?
+    options:
+      - "CPU utilization is impossible to measure accurately"
+      - "Utilization can read a smooth 80-100% while the growing run-queue/wait time (saturation) reveals that requests are already queueing and latency is climbing - saturation exposes the knee that a pinned utilization number hides"
+      - "Queue depth is always exactly proportional to CPU%"
+      - "Saturation only matters for memory, not CPU"
+    answer: 1
+    explanation: |
+      Once you're near the knee, utilization saturates and stops distinguishing "busy" from
+      "overloaded," but saturation (run-queue length, wait time) keeps rising and directly
+      signals queueing/latency growth - which is why the USE method tracks it. Utilization
+      is measurable, queue depth is not a fixed multiple of CPU%, and saturation applies to
+      CPU too.
+    ref: "concepts.md#utilization-versus-latency-and-the-knee-of-the-curve"
+
+  - id: capacity-modeling-and-tail-latency-066
+    difficulty: expert
+    tags: [usl, alpha-beta, measurement]
+    question: |
+      You fit the USL to scaling data and get alpha = 0.03 and beta = 0.0001. Roughly
+      where is the throughput-maximizing number of nodes N* = sqrt((1 - alpha)/beta)?
+    options:
+      - "About 30 nodes"
+      - "About 99 nodes"
+      - "About 300 nodes"
+      - "There is no maximum; throughput grows forever"
+    answer: 1
+    explanation: |
+      N* = sqrt((1 - alpha)/beta) = sqrt(0.97/0.0001) = sqrt(9700) ~ 98.5, about 99 nodes.
+      Beyond that the coherency term dominates and adding nodes reduces throughput. Because
+      beta > 0 there IS a finite maximum (ruling out "grows forever").
+    ref: "concepts.md#the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-067
+    difficulty: advanced
+    tags: [deadlines, timeouts, propagation, fan-out]
+    question: |
+      In a multi-tier request that fans out through several services, why is propagating a
+      per-request DEADLINE (absolute time budget) preferable to configuring a fixed
+      per-hop TIMEOUT at each service?
+    options:
+      - "Fixed per-hop timeouts are illegal in gRPC"
+      - "A propagated deadline shares one shrinking budget across all hops, so downstream work is abandoned once the caller has already given up - avoiding wasted work and preventing accumulated per-hop timeouts from exceeding the client's total budget"
+      - "Deadlines make each hop faster"
+      - "Per-hop timeouts guarantee the total latency equals the sum of the timeouts, which is desirable"
+    answer: 1
+    explanation: |
+      A deadline is an absolute budget carried through the call graph; each hop only does
+      work if time remains, so no service keeps computing a result the client no longer
+      wants, and you can't accidentally sum per-hop timeouts into a total larger than the
+      client's patience. gRPC in fact promotes deadlines; deadlines don't speed up a hop;
+      and summing per-hop timeouts is the problem, not a virtue.
+    ref: "concepts.md#head-of-line-blocking"
+
+  - id: capacity-modeling-and-tail-latency-068
+    difficulty: expert
+    tags: [avoid-fallback, static-stability, tradeoffs]
+    question: |
+      The AWS Builders' Library advises AGAINST fallback logic (e.g., "if the primary data
+      source fails, compute from a secondary path") on critical paths. What is the core
+      reasoning?
+    options:
+      - "Fallbacks are slower on the happy path"
+      - "Fallback code runs rarely, so it is poorly tested and its capacity is unproven; it tends to fire during broad failures when it is most likely to also fail or to add unmodeled load - it is more robust to keep the primary path statically stable and simple than to depend on a fragile fallback"
+      - "Fallbacks always cause data loss"
+      - "Fallbacks violate the CAP theorem"
+    answer: 1
+    explanation: |
+      Fallback paths are exercised rarely, so they are under-tested and their capacity is
+      unvalidated; they activate precisely during correlated failures, when they are most
+      likely to fail or overload a secondary that wasn't sized for full load. The guidance
+      is to make the primary path statically stable rather than rely on a fragile fallback.
+      It is not primarily about happy-path speed, guaranteed data loss, or CAP.
+    ref: "concepts.md#capacity-planning-with-headroom-and-cells"
+
+  - id: capacity-modeling-and-tail-latency-069
+    difficulty: intermediate
+    tags: [back-of-envelope, storage, growth]
+    question: |
+      A service writes 5,000 records/second, each ~2 KB, replicated 3x, retained for 1
+      year. Roughly what raw stored volume should the capacity estimate produce?
+    options:
+      - "About 30 TB"
+      - "About 300 TB"
+      - "About 900 TB"
+      - "About 3 PB"
+    answer: 2
+    explanation: |
+      Per second: 5000 x 2 KB = 10 MB/s. Per year: 10 MB/s x ~31.5e6 s ~ 315 TB before
+      replication; times 3x replication ~ 945 TB, about 900 TB. Forgetting replication
+      gives ~300 TB (a common miss); 30 TB and 3 PB are off by an order of magnitude.
+    ref: "concepts.md#back-of-the-envelope-estimation-done-rigorously"
+
+  - id: capacity-modeling-and-tail-latency-070
+    difficulty: expert
+    tags: [tail, jvm, gc, mitigation, tradeoffs]
+    question: |
+      A JVM service's p999 spikes correlate exactly with stop-the-world GC pauses. Which
+      approach best reduces the GC-induced tail, and what is the trade-off?
+    options:
+      - "Increase the heap as large as possible; there is no downside"
+      - "Use a low-pause collector (e.g., ZGC/Shenandoah) and/or reduce allocation rate, and use hedged/tied requests so a paused replica's request completes on another - trading some CPU/throughput and extra work for a bounded tail"
+      - "Disable GC entirely to remove the pauses"
+      - "Switch to a single-threaded event loop, which has no GC"
+    answer: 1
+    explanation: |
+      GC pauses are a classic tail source; low-pause collectors (ZGC, Shenandoah) and
+      lower allocation shrink the pauses, and tail-tolerance (hedged/tied requests) lets a
+      request escape a paused replica - at the cost of some throughput/CPU and duplicated
+      work. Huge heaps can lengthen pauses (not "no downside"), you cannot disable GC in a
+      managed runtime, and an event loop still runs on a GC'd runtime.
+    ref: "concepts.md#the-tail-at-scale-mitigations"
+
+  - id: capacity-modeling-and-tail-latency-071
+    difficulty: advanced
+    tags: [backpressure, reactive-streams, mechanism]
+    question: |
+      Reactive Streams (and HTTP/2 flow control) implement back-pressure via a
+      credit/demand mechanism. How does request(n) enforce back-pressure?
+    options:
+      - "The producer pushes as fast as it can and the consumer drops extras"
+      - "The consumer signals demand for n items, and the producer may emit at most n more until further demand is signaled - so a slow consumer naturally throttles the producer without an unbounded buffer"
+      - "The producer polls the consumer's CPU before each emission"
+      - "It opens a new TCP connection per item to spread load"
+    answer: 1
+    explanation: |
+      In a demand-based (pull/credit) model the consumer requests n elements and the
+      producer is bounded to emit at most that many until more demand arrives, so a slow
+      consumer directly limits production and no unbounded buffer accumulates. It is not
+      push-and-drop, CPU polling, or per-item connections.
+    ref: "concepts.md#back-pressure-versus-buffering"
+
+  - id: capacity-modeling-and-tail-latency-072
+    difficulty: expert
+    tags: [littles-law, virtual-threads, tradeoffs]
+    question: |
+      A team migrates a blocking IO service from a bounded platform-thread pool to
+      unbounded virtual threads (Project Loom) so "we can have millions of threads." By
+      Little's Law and USL, what risk have they NOT eliminated?
+    options:
+      - "None; virtual threads remove all capacity limits"
+      - "Virtual threads cheaply raise the CONCURRENCY the app can hold, but the downstream (DB/service) still has a finite healthy concurrency; without an explicit concurrency limiter/semaphore, millions of virtual threads can flood the downstream past its knee (USL beta) - the bottleneck moved, it didn't disappear"
+      - "Virtual threads eliminate the need for connection pools"
+      - "Virtual threads make the downstream infinitely scalable"
+    answer: 1
+    explanation: |
+      Virtual threads make holding high concurrency cheap on the app side, but Little's Law
+      and USL still apply to the downstream: if you let unbounded virtual threads issue
+      calls, you overwhelm the downstream past its contention knee. You still need an
+      explicit concurrency limit (semaphore/pool) - the bottleneck relocated, not vanished.
+      Virtual threads don't remove capacity limits, connection pools, or downstream limits.
+    ref: "concepts.md#littles-law-and-concurrency-sizing"
+
+  - id: capacity-modeling-and-tail-latency-073
+    difficulty: advanced
+    tags: [tail, canary, large-fan-out, protection]
+    question: |
+      Why do large-fan-out systems sometimes send a request to just 1-2 leaves first
+      before fanning it out to thousands?
+    options:
+      - "To warm the network connection"
+      - "As a canary: if the request would trigger a slow path, expensive computation, or a crash bug, discovering it on 1-2 leaves avoids simultaneously degrading or crashing thousands of servers (a correlated, fleet-wide slowdown)"
+      - "To reduce total latency by starting early"
+      - "Because leaves can only accept requests in pairs"
+    answer: 1
+    explanation: |
+      The canary probe detects a pathological/expensive/crashing request on a tiny sample
+      before it is amplified across thousands of leaves, preventing a correlated fleet-wide
+      slowdown or crash - one of Dean and Barroso's large-fan-out safeguards. It is not
+      about connection warming, isn't a latency optimization, and leaves don't require
+      pair-wise requests.
+    ref: "concepts.md#fan-out-amplification-of-tail-latency"
+
+  - id: capacity-modeling-and-tail-latency-074
+    difficulty: intermediate
+    tags: [amdahl, parallel, diminishing-returns]
+    question: |
+      A batch job is 80% parallelizable and 20% serial. Using Amdahl's Law, what is the
+      speedup with 8 processors?
+    options:
+      - "About 2.5x"
+      - "About 3.3x"
+      - "About 6.4x"
+      - "About 8x"
+    answer: 1
+    explanation: |
+      Speedup = 1 / (s + (1-s)/N) = 1 / (0.2 + 0.8/8) = 1 / (0.2 + 0.1) = 1/0.3 ~ 3.33x.
+      The 20% serial portion sharply limits the gain (max ever is 1/0.2 = 5x). 8x would
+      require zero serial fraction.
+    ref: "concepts.md#amdahls-law-versus-the-universal-scalability-law"
+
+  - id: capacity-modeling-and-tail-latency-075
+    difficulty: expert
+    tags: [tail, correlated, independence-assumption, scenario]
+    question: |
+      The 1 - (1 - p)^N fan-out formula assumes leaf slowness is INDEPENDENT. In practice,
+      a single shared cause (a hot shared cache, a common dependency, network congestion)
+      makes leaves slow TOGETHER. How does this correlation change the picture and the
+      mitigation?
+    options:
+      - "Correlation makes the tail better because slow events cluster"
+      - "Positive correlation means hedging/tied requests to sibling replicas may ALL be slow at once (the shared cause hits them too), so structural fixes - remove the shared bottleneck, isolate/partition, add diversity across failure domains - matter more than per-request hedging"
+      - "Correlation has no effect on the tail-at-scale math"
+      - "Correlation guarantees exactly p fraction of requests are slow regardless of N"
+    answer: 1
+    explanation: |
+      The independence assumption is optimistic; when a shared cause slows many leaves at
+      once, sending a hedge to a sibling that shares that cause doesn't help. So correlated
+      slowdowns demand structural remedies - eliminate the shared bottleneck, partition,
+      and spread across independent failure domains - rather than relying on per-request
+      hedging. Correlation worsens (not improves) the tail and definitely affects the math.
+    ref: "concepts.md#fan-out-amplification-of-tail-latency"

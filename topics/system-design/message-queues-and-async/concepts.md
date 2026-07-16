@@ -650,6 +650,224 @@ partitions/shards → storage**.
 consumer parallelism and forces a painful repartition. Estimate for **peak
 consumer parallelism**, not just throughput.
 
+**Little's Law for queue sizing.** `L = λ × W`: the average number of items in a
+system equals arrival rate × average time each spends inside. It is the fastest
+back-of-envelope for async pipelines. If you receive λ = 2,000 msg/s and each
+message spends W = 0.25 s in flight (processing + waiting), the steady-state
+in-flight/queue depth is L = 500. Corollaries interviewers probe:
+- To hold latency W constant while λ rises, you must raise service capacity so
+  utilization ρ = λ / (c·μ) stays well below 1 (c = consumers, μ = per-consumer
+  rate). As ρ → 1, queueing delay explodes non-linearly (M/M/1 waiting time ∝
+  1/(1−ρ)) — a queue running at 95% utilization has ~20× the wait of one at 50%.
+- A *steadily growing* queue (dL/dt > 0) means λ > c·μ: no buffer size saves you;
+  you must add consumers/capacity or shed load. Buffering only absorbs *bursts*
+  (temporary λ spikes), never a sustained deficit.
+- Sizing "how many in-flight messages / how big a visibility timeout" is just
+  L = λ × W with W = your p99 processing time.
+
+---
+
+## Retry amplification, retry budgets and metastable failures
+
+Retries are the most common way a healthy async system tips into a self-sustaining
+outage. Senior interviewers probe whether you understand *retry amplification* and
+*metastability*, not just "add exponential backoff."
+
+**Retry amplification.** Retries multiply *multiplicatively* through a call graph.
+If a request traverses 3 hops and each hop retries up to 3×, a single logical
+request can generate up to 3³ = **27** downstream attempts. During a partial
+brownout (downstream at 50% success), every layer retries, so offered load can
+spike 3–10× exactly when the system is least able to serve it. The queue makes
+this worse, not better: the broker keeps accepting, so there is no fast-fail
+signal, and consumers keep re-attempting poison-ish or timing-out work.
+
+**Metastable failures.** A system has a *stable* state (serving normally) and a
+*metastable* bad state where a work-amplifying feedback loop (usually retries or
+cache-miss storms) sustains overload **even after the original trigger is gone**.
+A brief latency blip triggers timeouts → retries → higher load → more timeouts.
+Removing the trigger does not recover the system; you must *break the loop* (drain
+the queue, drop retries, shed load, restart). This is why "it recovered on its own"
+often does not happen with async retry pipelines. (See Bronson et al., "Metastable
+Failures in Distributed Systems," HotOS 2021.)
+
+**Retry budgets (the key mitigation).** Instead of per-request fixed retries, cap
+retries as a *fraction of total traffic* — e.g., allow retries to add at most 10%
+extra load (a token-bucket / adaptive budget, as in gRPC and Finagle). Under normal
+conditions the budget is never exhausted; during an outage it clamps amplification
+to a bounded multiplier. This converts an unbounded 27× blowup into a bounded ~1.1×.
+
+**Discipline that keeps retries safe**
+- **Retry only at one layer**, ideally the edge — not at every hop (avoid nested
+  multiplication). Lower layers should fail fast and let the top retry.
+- **Only retry idempotent operations**, and only *retryable* errors (timeouts, 503,
+  429) — never a deterministic 400/validation error (that is a poison message).
+- **Backoff + full jitter** to de-synchronize the herd; **cap total attempts**; add
+  a **circuit breaker** to stop calling a downstream that is clearly down.
+- **Load shedding / admission control** at the consumer so an overloaded system
+  rejects work quickly rather than queueing it into a metastable spiral.
+
+**Trade-off.** Aggressive retries raise success rate for transient blips but are
+the primary cause of correlated, self-amplifying outages. Retry budgets + circuit
+breakers trade a slightly lower transient success rate for a hard ceiling on
+amplification — almost always the right bet at scale.
+
+---
+
+## Rebalance protocols, storms and mitigation
+
+A **rebalance** reassigns partitions among consumer-group members when membership
+or topic metadata changes. Done naively it is a *stop-the-world* event: the whole
+group pauses consumption while partitions are redistributed. A **rebalancing storm**
+is repeated rebalances that keep the group mostly paused — a top cause of runaway
+lag that looks like "the consumers are up but nothing is progressing."
+
+**The three timeouts (know them cold).**
+
+| Setting | Meaning | Typical | Failure it detects |
+|---|---|---|---|
+| `heartbeat.interval.ms` | how often the consumer pings the coordinator | 3s | — (liveness signal) |
+| `session.timeout.ms` | no heartbeat for this long ⇒ member declared dead | 45s | crashed/partitioned consumer |
+| `max.poll.interval.ms` | max gap between `poll()` calls ⇒ member evicted | 5m | *slow processing* (livelock) |
+
+The classic storm: a batch takes longer than `max.poll.interval.ms`, the
+coordinator evicts the "dead" consumer, triggers a rebalance, the consumer rejoins,
+takes too long again — forever. Heartbeats run on a *background thread* (since
+KIP-62) so a slow poll does not miss heartbeats, which is exactly why the separate
+`max.poll.interval.ms` exists to catch stuck processing.
+
+**Rebalance protocols, oldest to newest**
+- **Eager (stop-the-world)** — every member revokes *all* partitions, then the
+  leader recomputes assignment; nobody consumes during the round. Simple, brutal.
+- **Cooperative / incremental** (KIP-429, `CooperativeStickyAssignor`) — only the
+  partitions that actually need to move are revoked; everything else keeps
+  consuming. Turns one big pause into small, targeted moves.
+- **Static membership** (KIP-345, set `group.instance.id`) — a member keeps a
+  stable identity across brief restarts; if it rejoins within `session.timeout.ms`
+  it reclaims its partitions with *no* rebalance at all. Ideal for rolling
+  deploys of stateful stream apps.
+- **Next-gen protocol** (KIP-848, Kafka 3.7+/4.0) — moves assignment logic to the
+  broker and makes rebalances fully incremental and less client-heavy, further
+  shrinking disruption.
+
+**Mitigation checklist**: raise `max.poll.interval.ms` or lower `max.poll.records`
+so batches finish in time; use cooperative rebalancing + static membership; avoid
+autoscaling that flaps membership; keep processing off the poll thread if it can
+stall.
+
+**Trade-off.** Larger `max.poll.interval.ms` tolerates slow batches but delays
+detecting a genuinely stuck consumer. Static membership speeds restarts but a
+truly dead static member holds its partitions idle until `session.timeout.ms`
+expires — pick the timeout to balance restart smoothness against failover speed.
+
+---
+
+## The log versus queue distinction at depth
+
+Beyond "queue deletes, log retains," the deeper distinction is the **ack model**,
+which drives everything else. Getting this precise separates senior answers.
+
+**Per-message ack (queue) vs monotonic offset (log).**
+- A **queue** (SQS, RabbitMQ) tracks each message individually. A consumer can ack
+  message 7 while message 4 is still in flight, nack a single message for
+  redelivery, or set a per-message visibility timeout. Messages are independent
+  units of work.
+- A **log** (Kafka) tracks a single **committed offset** per partition — a cursor.
+  "I have processed up to offset N." You cannot durably mark offset 7 done while
+  leaving offset 4 outstanding; committing 7 implies 0–7 are handled. Redelivery
+  means *rewinding the cursor*, which reprocesses everything after it.
+
+This single difference explains the behavioral contrasts:
+
+| Property | Queue (per-message ack) | Log (offset cursor) |
+|---|---|---|
+| Redelivery granularity | just the one failed message | rewind offset ⇒ reprocess the tail |
+| Selective / out-of-order ack | yes | no (one monotonic offset) |
+| Head-of-line blocking | none for unordered work — other workers grab other messages | yes *within a partition* (order is the point) |
+| Per-message TTL / priority / delay | native (Rabbit/SQS) | not native (offset log) |
+| Redelivery of a poison message | isolated; DLQ that one message | must skip/park or it blocks the partition |
+| Fan-out to N consumers | duplicate the queue | free: add consumer groups |
+| Replay old data | no (deleted on ack) | yes (rewind to earlier offset) |
+| Throughput ceiling | high | very high (sequential append) |
+
+**Consequences to state in an interview**
+- Queues excel at **independent, parallelizable tasks** where each unit can fail,
+  retry, and be dead-lettered on its own, and *ordering does not matter*. A poison
+  message inconveniences one worker, not the whole flow.
+- Logs excel at **ordered event streams, replay, and multi-consumer fan-out**, but
+  you inherit head-of-line blocking within a partition and coarse offset-based
+  redelivery — which is precisely why retry-topic/DLQ patterns exist for Kafka.
+- "Use a log as a task queue" is a common anti-pattern: you lose per-message ack,
+  priorities, and cheap isolated redelivery, and one bad record can stall a
+  partition. "Use a queue for event history/replay" fails because acked messages
+  are gone.
+
+---
+
+## Schema evolution and message contracts
+
+An underrated senior topic: the producer and consumer are decoupled in *time*, so
+they are almost never running the same code version. The message **schema is the
+API contract**, and evolving it wrongly is a leading cause of poison messages and
+silent data corruption.
+
+**Compatibility modes (Confluent Schema Registry terminology).**
+- **Backward compatible** — new *consumer* can read data written by the old
+  producer (you may add fields with defaults, remove fields). Lets you upgrade
+  *consumers first*. The most common default.
+- **Forward compatible** — old consumer can read data from the new producer. Lets
+  you upgrade *producers first*.
+- **Full** — both directions. **None** — no checks (dangerous).
+
+**Practical rules.** Prefer a schema format with defaults and explicit field IDs
+(Avro, Protobuf) over ad-hoc JSON. Never reuse a field tag/number for a new meaning;
+never remove a required field; add new fields as optional with defaults. Register
+schemas so an incompatible producer is *rejected at publish time* rather than
+poisoning every consumer at read time.
+
+**Why it matters for async specifically.** Because a log retains data for days, a
+consumer replaying old offsets must decode *old* schema versions too — so you cannot
+just "redeploy everyone at once." Retention turns schema compatibility from a
+deploy-time nicety into a hard, long-lived requirement.
+
+**Trade-off.** Strict compatibility (Full) maximizes safety but constrains how you
+can change messages; looser modes move faster but risk breaking one side. A
+registry with enforced compatibility is the standard way to get the safety without
+manual coordination.
+
+---
+
+## When async messaging hurts, deeper failure modes
+
+The counterweight to the benefits. A staff-level answer names *specifically why*
+async can be the wrong choice.
+
+- **Debugging and observability collapse.** A synchronous stack trace becomes a
+  causal chain scattered across producers, brokers, and consumers over time. Without
+  a propagated **correlation/trace ID** and distributed tracing, "where is my
+  message and why didn't it process?" is nearly unanswerable. This tooling is
+  *mandatory*, not optional, and is real cost.
+- **Latency and tail latency.** You added at least one hop plus (often) poll
+  intervals and batching delays. For user-facing latency-critical paths, async is
+  *slower*, and end-to-end p99 is now the sum of several queue-wait distributions.
+- **No natural backpressure to the client.** A synchronous 503/429 tells the caller
+  to slow down immediately. A queue silently absorbs overload; you can ingest far
+  more than you can process and only discover it via lag alarms — and by then the
+  backlog may exceed retention (data loss) or take hours to drain.
+- **Eventual consistency leaks to users.** Read-your-writes, monotonic reads, and
+  causal ordering across topics all become your problem. "I placed the order but
+  don't see it" is the canonical bug.
+- **Ordering and exactly-once complexity** (covered above) are pure tax you would
+  not pay with a single synchronous transaction.
+- **Async hides failure rather than removing it.** A failed synchronous call fails
+  loudly and now; a failed async message fails later, elsewhere, possibly silently
+  in a DLQ nobody watches. You have traded immediate, local failure for deferred,
+  distributed failure — sometimes a bad trade.
+
+**Rule of thumb.** Reach for async when work is genuinely deferrable, load is
+spiky, or you need fan-out/decoupling. If the operation is a simple, low-latency,
+strongly-consistent request/response, a synchronous call plus a database is simpler,
+faster, and easier to debug — don't pay the async tax for nothing.
+
 ---
 
 ## Trade-offs and when to use what

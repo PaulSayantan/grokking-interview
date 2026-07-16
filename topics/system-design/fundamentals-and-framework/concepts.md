@@ -125,15 +125,16 @@ figures.
 | Round trip CA ↔ Netherlands | 150,000,000 ns (150 ms) | ~5 years |
 
 **The takeaways every senior repeats:**
-- **RAM is ~100x faster than SSD, SSD is ~10-20x faster than HDD** for random access.
+- **RAM is ~1,000x faster than SSD (100 ns vs ~150 µs random), SSD is ~50-100x faster than
+  HDD** for random access.
 - **Memory is fast, disk is slow, network is slower, cross-region is glacial.** A cross-
-  continent round trip (150 ms) is ~300,000x a memory reference.
+  continent round trip (150 ms) is ~1,500,000x a memory reference (100 ns).
 - **Sequential >> random.** Sequential SSD read of 1 MB (1 ms) vs random 4 KB reads — batch
   and sequential-ize I/O (why LSM-trees, log-structured storage, and Kafka are fast).
 - **A single cross-region RTT (~70-150 ms) can blow a 200 ms p99 budget by itself** → keep
   chatty request/response inside one region/AZ, or go edge/CDN.
 
-**Usage / trade-offs.** These numbers justify caching (RAM vs disk = 100x), CDNs and edge
+**Usage / trade-offs.** These numbers justify caching (RAM vs SSD ≈ 1,000x, RAM vs HDD seek ≈ 100,000x), CDNs and edge
 (avoid the 150 ms cross-continent hop), read replicas placed near users, and batching. They
 also warn against N+1 patterns: 100 sequential intra-DC RTTs = 50 ms — parallelize or batch.
 Modern note: NVMe SSDs (~20-100 µs) and datacenter networks have improved, but ratios hold.
@@ -508,6 +509,222 @@ where correlated failure/blast radius is the top concern.
 **decoupling, scalability, and fault isolation** at the price of **eventual consistency and
 operational complexity**. Reach for them when scale, team autonomy, or blast-radius control
 justify the complexity — not by default.
+
+---
+
+## Tail latency, percentiles, and coordinated omission
+
+**Intuition.** At scale, the *average* is a lie and the *tail* is the product. If your p50 is
+20 ms but your p99 is 2 s, one request in a hundred is a 2-second stall — and a user who
+issues dozens of requests per page load hits that tail almost every session. Senior
+candidates reason in percentiles (p50, p90, p99, p999) and know exactly why.
+
+**Why the average hides pain.** Latency distributions are right-skewed (long tail from GC
+pauses, lock contention, cache misses, retries, queueing). The mean is dragged by the tail
+but *understates how many users hit it*. p99 = "1% of requests are at least this slow." At
+1M requests/day that is 10,000 slow experiences. p999 matters for high-fan-out or high-QPS
+services. Rule of thumb: **optimize the percentile that matches how often a user touches the
+system**, and remember percentiles do not average or add — you cannot compute a system p99
+by summing component p99s.
+
+**The fan-out tail amplification (Dean and Barroso, "The Tail at Scale").** If one request
+fans out to `n` independent services and waits for *all* of them, the probability that at
+least one lands in its slow tail is `1 − (1 − p)^n`:
+
+```
+P(request hits >=1 slow node) = 1 - (1 - p)^n
+n=1,   p=0.01  ->  1%   of requests are slow
+n=100, p=0.01  ->  63%  of requests are slow   <-- p99 of a node becomes ~p63 of the request
+n=100, p=0.001 ->  9.5% of requests are slow   (even p999 nodes bite at fan-out 100)
+```
+
+So a service where **each backend is 99th-percentile-good (1-in-100 slow) becomes slow on
+~63% of fan-out-100 requests.** This is *the* reason large systems obsess over tail latency:
+you cannot fan out widely and also let any node have a fat tail.
+
+**Techniques to cut the tail:**
+- **Hedged / backup requests:** after waiting the p95 of a call, send a duplicate to another
+  replica and take the first response; cancel the loser. Cuts p99 dramatically for ~5% extra
+  load. "Tied requests" cancel the twin the instant one starts executing.
+- **Request quantization / breaking up head-of-line blocking:** split large requests so one
+  giant item cannot stall a queue behind it.
+- **Reduce fan-out or make it hierarchical;** cache to skip slow paths; keep utilization low
+  (queueing headroom, see latency-vs-throughput).
+- **Micro-partition + selective replication** of hot items to smooth per-node variance.
+
+**Coordinated omission — the measurement gotcha (Gil Tene).** Most naive load tests and
+metrics *undercount* the tail. If a load generator sends one request at a time and the server
+stalls for 1 s, the generator simply waits — it never records the requests it *would* have
+sent during the stall, so the stall is counted once instead of hundreds of times. Result:
+reported p99 looks great while real users see far worse. Fixes: use open-model load
+generation (fixed send rate regardless of response), correct for coordinated omission (HdrHistogram),
+and measure latency at the client/edge, not just server-side. **When an interviewer asks "how
+do you know your p99?", naming coordinated omission is a strong senior signal.**
+
+---
+
+## Availability math, MTBF, MTTR, and the cost of nines
+
+**Intuition.** The nines table (above) tells you the *budget*; this section tells you what
+actually *moves* availability. Steady-state availability is:
+
+```
+A = MTBF / (MTBF + MTTR)     (MTBF = mean time between failures, MTTR = mean time to recover)
+```
+
+**The lever most candidates miss: shrink MTTR, not just MTBF.** Availability depends on the
+*ratio*. If failures are inevitable, cutting recovery time buys nines cheaply: a system that
+fails monthly but self-heals in 30 s (fast health checks + automated failover) can beat one
+that fails rarely but takes 4 hours of manual paging to recover. This is why fast detection,
+automated failover, good runbooks, and rollback speed matter as much as preventing failures.
+`43,200 min/month; MTBF=720 h, MTTR=1 h -> 99.86%. Same MTBF, MTTR=1 min -> 99.998%.`
+
+**Composition, revisited (the correlated-failure caveat).** The series formula (multiply) and
+parallel formula `1 − (1 − A)^n` assume **independent** failures. Real redundancy is rarely
+independent: replicas in one AZ share power/network; instances share a config service, a
+certificate, a deploy pipeline, a DNS zone; a poison request or a bad deploy hits all replicas
+at once. Correlated failure collapses the parallel benefit — `1 − (1 − A)^n` overstates real
+availability. This is the mathematical argument for **fault isolation** (cell-based
+architecture, multi-AZ/region, staggered deploys) rather than just piling on replicas.
+
+**The cost-of-nines curve (why 99.999% is rarely worth it):**
+
+| From → to | Downtime cut | Typical cost step |
+|---|---|---|
+| 99% → 99.9% | 3.65 d → 8.8 h/yr | health checks, one replica, monitoring |
+| 99.9% → 99.99% | 8.8 h → 52 min/yr | multi-AZ, automated failover, on-call |
+| 99.99% → 99.999% | 52 min → 5.3 min/yr | multi-region, chaos testing, zero-touch ops, no manual step in recovery |
+
+Each nine roughly **10x's the cost and effort** while shrinking the budget 10x. At five nines
+the human-in-the-loop is already too slow (5.3 min/yr leaves no time to page anyone) — you are
+paying for full automation and redundancy of *everything*, including your dependencies. Pick
+the lowest nines the business needs; over-committing burns money and velocity (ties to error
+budgets). Also decide **whether planned maintenance counts** against the SLA — reputable SLAs
+state this explicitly.
+
+---
+
+## Durability, RPO, RTO, and data-loss math
+
+**Intuition.** **Durability ≠ availability.** Availability is "can I reach it now"; durability
+is "will my data still be there (and correct) later." A store can be temporarily unavailable
+yet perfectly durable (data safe, just not reachable), or highly available yet low-durability
+(serves fast but can silently lose a recent write). Interviewers separate these deliberately.
+
+- **Durability** = probability data is *not lost* over a time window. S3's "eleven nines"
+  (99.999999999%) means for 10M objects you'd expect to lose one object roughly every 10,000
+  years — achieved by erasure-coding/replicating across many devices and AZs. Durability nines
+  are about *survival of stored data*, not uptime.
+- **RPO (Recovery Point Objective):** the maximum acceptable *data loss*, measured in time —
+  "how many seconds/minutes of recent writes can we lose?" Set by replication/backup strategy.
+- **RTO (Recovery Time Objective):** the maximum acceptable *downtime* to recover — "how long
+  until we're back?" Set by failover automation and restore speed.
+
+**Replication mode fixes RPO:**
+
+| Replication | RPO | Cost |
+|---|---|---|
+| Synchronous (ack after replica commits) | ~0 (no committed-write loss) | added write latency = replica RTT; availability drops if replica unreachable |
+| Asynchronous (ack before replica commits) | > 0 (lose the un-shipped tail on failover) | low latency; risk losing last N ms–s of writes |
+
+This is the durability face of CAP/PACELC: **synchronous replication buys RPO≈0 by paying
+latency and partition-time availability**; async buys latency/availability by accepting a
+data-loss window. For a payments ledger you choose sync (or a quorum with `W` durable copies);
+for a like-counter, async is fine. Quorum durability: a write acked by `W` replicas survives
+up to `W − 1` simultaneous node losses. When someone says "make it durable," pin them to a
+number: **what RPO and RTO does the business actually tolerate?** — that single answer reshapes
+the storage and replication design.
+
+---
+
+## Numbers and NFR budgets that drive the design
+
+**Intuition.** The estimation and latency sections give raw numbers; this section is the
+senior skill of turning an NFR into a *budget you allocate* across the design. Every NFR
+(latency, consistency, durability, availability, cost) is a constraint you spend.
+
+**Latency budgeting — decompose the p99 across the request path.** A p99 < 200 ms budget is
+not a single number; it is split across hops, and each hop must fit:
+
+```
+Client<->edge TLS+RTT   ~40 ms
+Edge -> service (in-region RTT + LB)   ~5 ms
+Service compute + serialization   ~20 ms
+Cache hit path   ~2 ms   |  Cache MISS -> DB   ~15 ms
+Downstream fan-out (must overlap, not sum; watch the tail)   ~30 ms
+Headroom for GC/retries/queueing   the rest
+```
+
+Because tail latency compounds on fan-out (see tail-latency section), you budget the *p99* of
+each hop, not the mean, and you keep serial dependencies few. **A single cross-region RTT
+(~70–150 ms) usually does not fit an interactive budget at all** — which is why the latency NFR
+forces in-region reads, edge/CDN, and async for anything cross-continent.
+
+**How each NFR reshapes the design (the mapping to memorize):**
+
+| NFR tightened | Design consequence |
+|---|---|
+| Consistency (read-your-writes, linearizable) | route reads to primary or quorum; lose caching/replica-scale freedom; higher latency (PACELC "C") |
+| Latency (tight p99) | cache, in-region, precompute/denormalize, hedge tail, cap fan-out, avoid cross-region sync |
+| Durability (low RPO) | synchronous/quorum replication, WAL + backups; pay write latency |
+| Availability (more nines) | multi-AZ/region redundancy, automated failover, fault isolation; pay cost + eventual consistency |
+| Cost | fewer replicas/regions, cheaper storage tiers, smaller cache; accept worse latency/availability |
+
+**Sizing formulas you should reach for live:**
+- **Cache/working set:** `hot bytes ≈ hot-fraction × distinct bytes touched`; nodes = hot
+  bytes / per-node RAM. Hit rate drives DB load: `DB QPS = read QPS × (1 − hit rate)`, so a
+  95% hit rate cuts DB read load 20x — the whole point of the cache.
+- **Concurrency/connection pools (Little's Law):** `in-flight = QPS × latency`. 50K QPS ×
+  20 ms = 1,000 concurrent — size threads/connections/DB pool accordingly, or you self-inflict
+  queueing and a latency blowup near saturation.
+- **Fleet sizing:** `servers ≈ peak QPS / per-server QPS`, then `× (1 + redundancy headroom)`
+  and round up for N+1 and the 60–70% utilization ceiling.
+
+These cross-link tightly: the **estimation** numbers feed the **latency budget**, the
+**availability math** sets redundancy (and thus cost and, via sync replication, latency and
+**durability/RPO**), and the **consistency** NFR decides whether you may cache/replica-scale
+at all. Naming these linkages out loud is what "driving the design from the numbers" means.
+
+---
+
+## Driving the interview and defending trade-offs at senior level
+
+**Intuition.** Beyond mid-level, the interview is not "can you produce a correct design" but
+"can you *own the room*": lead the structure, surface trade-offs before you're asked, quantify
+with numbers, and defend decisions under challenge without either caving instantly or digging
+in dogmatically.
+
+**Behaviors that read as senior/staff:**
+- **Drive, don't wait to be driven.** Propose the structure ("I'll scope requirements, size
+  it, sketch the high level, then deep-dive the fan-out and the datastore — does that work for
+  you?"), state assumptions and move, and manage your own time budget.
+- **Lead with the NFR, then the choice, then the give-up, then the flip-condition.** The
+  canonical sentence: *"Given eventual-consistency-OK and p99<150 ms at 40K read QPS, I'll go
+  cache + read-replicas (AP). I trade read freshness — bounded staleness of a few seconds — and
+  if you add strong read-your-writes for balances, I'd route those to the primary or use a
+  quorum."* Gain / give-up / flip-condition, every time.
+- **Steelman the alternative, then reject it for a reason.** "The strongly-consistent option
+  would be simpler to reason about, but it costs a cross-region RTT per write we can't afford
+  at this latency budget" beats never mentioning it.
+- **Quantify.** Turn assertions into numbers: "that's ~63% of fan-out requests hitting the
+  tail," "0.999^3 ≈ 99.7%, below our 99.9% target," "95% hit rate cuts DB load 20x." Numbers
+  are the difference between an opinion and an argument.
+- **Volunteer failure modes and blast radius.** Before asked: "what happens when the primary
+  dies (RTO/RPO), when a cache node dies (thundering herd → request coalescing), when the AZ
+  dies (correlated failure → cells/multi-AZ)."
+- **Handle the challenge gracefully.** When pushed, don't flip reflexively — restate the NFR,
+  check whether the new constraint changes it, and *then* adapt. Changing your answer the
+  instant you're questioned signals you never understood the trade-off; refusing to adapt when
+  the constraint genuinely changed signals rigidity.
+- **Know when to stop gold-plating.** "We're below a single-box ceiling; I'd *not* shard yet —
+  premature sharding adds cost and complexity with no current benefit. Flip-condition: when
+  write QPS or dataset exceeds one primary." Restraint is a senior signal.
+
+**Anti-patterns that cap you at mid-level:** boxes-and-arrows before NFRs; name-dropping
+databases without justifying them; ignoring the tail and quoting averages; treating redundancy
+as free and independent; and answering "what if X fails?" with silence. The through-line of
+this whole topic: **state the number, name the trade-off, defend it, and give the condition
+under which you'd change your mind.**
 
 ---
 

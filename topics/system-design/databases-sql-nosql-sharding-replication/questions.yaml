@@ -1442,3 +1442,698 @@ questions:
     relational node can't hold trillions of rows, graph traversal doesn't fit
     message reads, and an in-memory-only store loses durability.
   ref: "concepts.md#nosql-data-models-document-key-value-wide-column-graph"
+
+  # ================= ADVANCED + EXPERT BLOCK (senior/staff) =================
+  # ---------------- RUM conjecture / amplification ----------------
+- id: databases-sql-nosql-sharding-replication-077
+  difficulty: advanced
+  tags: [rum-conjecture, amplification, storage-engine]
+  question: |
+    An engineer claims "we should always use LSM because it minimizes read, write,
+    AND space overhead at once." Why is this fundamentally wrong?
+  options:
+  - "The RUM conjecture holds that read, update, and memory (space) overhead cannot all be minimized simultaneously — optimizing two worsens the third; there is no free lunch"
+  - "LSM only minimizes read overhead, never write overhead"
+  - "LSM cannot be used for durable storage"
+  - "Space overhead is irrelevant on modern SSDs, so the claim is moot"
+  answer: 0
+  explanation: |
+    The RUM conjecture states you cannot minimize read, update, and memory overhead
+    all at once — every access method picks a point in that trade-off space. LSM is
+    durable and lowers random-write cost but does not escape RUM; space matters
+    (compaction, versions), so the sweeping claim is unsound.
+  ref: "concepts.md#the-rum-conjecture-and-amplification-in-depth"
+
+- id: databases-sql-nosql-sharding-replication-078
+  difficulty: expert
+  tags: [lsm, compaction, leveled, size-tiered]
+  question: |
+    A write-heavy ingest workload is suffering read-latency spikes and disk-usage
+    doubling during major compactions under size-tiered compaction (STCS). The team
+    is disk-constrained and reads have grown to matter. Which change best rebalances
+    the amplification trade-offs, and what is the cost?
+  options:
+  - "Disable compaction entirely to eliminate all amplification"
+  - "Switch to a B-tree engine, which has zero write amplification"
+  - "Switch to leveled compaction (LCS): lower read and space amplification (≤1 SSTable per level, ~10% space overhead), at the cost of substantially higher write amplification"
+  - "Increase the memtable size so no SSTables are ever flushed"
+  answer: 2
+  explanation: |
+    Leveled compaction keeps at most one SSTable per level per key range, cutting
+    read and space amplification, but rewrites data across levels so write
+    amplification rises — the right dial when reads/space matter more than write
+    cost. Disabling compaction breaks reads/space; B-trees still amplify writes
+    (page rewrites); an ever-growing memtable risks data loss and huge recovery.
+  ref: "concepts.md#the-rum-conjecture-and-amplification-in-depth"
+
+- id: databases-sql-nosql-sharding-replication-079
+  difficulty: advanced
+  tags: [write-amplification, btree, small-updates]
+  question: |
+    Why can a B-tree exhibit severe write amplification for a workload of many tiny
+    (~100-byte) scattered row updates?
+  options:
+  - "B-trees never touch disk for small updates"
+  - "Small updates are batched into a single sequential append like an LSM"
+  - "Each small update dirties and must eventually rewrite an entire page (e.g., 8-16 KB) plus WAL, so a 100-byte change can amplify to kilobytes of writes; random small updates also cause page splits"
+  - "The optimizer converts small updates into full-table rewrites"
+  answer: 2
+  explanation: |
+    B-trees modify pages in place at page granularity, so a tiny row change forces
+    rewriting the whole page (plus WAL), and scattered updates trigger random I/O
+    and splits — large write amplification. B-trees do hit disk, do not append
+    sequentially like LSM, and do not rewrite whole tables per update.
+  ref: "concepts.md#the-rum-conjecture-and-amplification-in-depth"
+
+  # ---------------- MVCC / isolation ----------------
+- id: databases-sql-nosql-sharding-replication-080
+  difficulty: expert
+  tags: [isolation, write-skew, ssi, serializable]
+  question: |
+    Two doctors are on call. Each runs a transaction: "if at least one OTHER doctor
+    is on call, I may go off call," reads that the other is on call, and updates only
+    their OWN row to off-call. Under Postgres REPEATABLE READ (snapshot isolation),
+    both commit and coverage drops to zero. Why does SI fail here and what fixes it?
+  options:
+  - "It is a lost update; SI's first-committer-wins should have caught it, so this indicates a bug"
+  - "It is a dirty read; enabling READ COMMITTED fixes it"
+  - "It is write skew: each transaction updates a different row so first-committer-wins never triggers, yet the combination violates the invariant; SERIALIZABLE (SSI) detects the read/write anti-dependency and aborts one"
+  - "It is a phantom; adding a unique index fixes it"
+  answer: 2
+  explanation: |
+    Write skew: the two transactions read an overlapping set but write disjoint rows,
+    so first-committer-wins (which only fires on same-row conflicts) does not help,
+    yet the invariant breaks. Only serializable isolation prevents it; Postgres SSI
+    tracks rw-antidependencies and aborts one transaction, forcing a retry.
+  ref: "concepts.md#mvcc-internals-and-serializable-snapshot-isolation"
+
+- id: databases-sql-nosql-sharding-replication-081
+  difficulty: expert
+  tags: [mvcc, vacuum, postgres, bloat]
+  question: |
+    A Postgres table with heavy UPDATE traffic shows table and index bloat and
+    degrading scans, despite steady row counts. What MVCC-rooted cause is most
+    likely?
+  options:
+  - "Postgres compresses old rows, which inflates size"
+  - "Indexes are being rebuilt on every write, doubling size"
+  - "The WAL is being stored inside the table pages"
+  - "Each UPDATE writes a new row version (with xmin/xmax) and leaves dead tuples in the heap; if autovacuum can't keep up (often held back by a long-running transaction), dead versions accumulate as bloat"
+  answer: 3
+  explanation: |
+    Postgres MVCC creates a new tuple version per UPDATE and marks the old one dead;
+    VACUUM reclaims dead tuples. A long-running transaction holds back the vacuum
+    horizon (dead tuples can't be removed while still potentially visible), so bloat
+    grows. It is not compression, per-write index rebuilds, or WAL-in-heap.
+  ref: "concepts.md#mvcc-internals-and-serializable-snapshot-isolation"
+
+- id: databases-sql-nosql-sharding-replication-082
+  difficulty: advanced
+  tags: [isolation, ssi, 2pl, retries]
+  question: |
+    Compared to two-phase locking (2PL), what is the key operational implication of
+    running under Postgres SERIALIZABLE (SSI) for a contended workload?
+  options:
+  - "SSI is optimistic and takes no read locks, giving higher concurrency, but can abort transactions with serialization failures under contention — the application MUST implement retry loops"
+  - "SSI takes read locks, so readers block writers heavily"
+  - "SSI guarantees no transaction is ever aborted"
+  - "SSI downgrades to READ COMMITTED automatically under load"
+  answer: 0
+  explanation: |
+    SSI runs optimistically at snapshot isolation while tracking dangerous
+    read/write anti-dependencies, aborting a pivot transaction when a
+    non-serializable structure is detected. That means false-positive aborts under
+    contention, so apps must retry. It does not take read locks, does not guarantee
+    no aborts, and does not silently downgrade.
+  ref: "concepts.md#mvcc-internals-and-serializable-snapshot-isolation"
+
+- id: databases-sql-nosql-sharding-replication-083
+  difficulty: advanced
+  tags: [isolation, repeatable-read, mysql, postgres]
+  question: |
+    An engineer tested a write-conflict scenario on MySQL/InnoDB at REPEATABLE READ,
+    saw the "last writer wins" under locking, and assumes Postgres REPEATABLE READ
+    behaves identically. Why is this dangerous?
+  options:
+  - "Postgres has no REPEATABLE READ level"
+  - "Both engines abort on any write conflict identically"
+  - "InnoDB REPEATABLE READ uses gap/next-key locks and lets a locked writer win, whereas Postgres REPEATABLE READ is snapshot isolation and ABORTS the losing writer with a serialization failure — same keyword, different behavior"
+  - "Postgres REPEATABLE READ is actually weaker than READ UNCOMMITTED"
+  answer: 2
+  explanation: |
+    The SQL standard levels are implemented differently: InnoDB RR relies on
+    next-key locking (blocking, last-locked-writer wins) while Postgres RR is
+    snapshot isolation that raises a serialization failure and aborts the second
+    writer. Assuming identical behavior across engines leads to correctness bugs;
+    always name the engine.
+  ref: "concepts.md#mvcc-internals-and-serializable-snapshot-isolation"
+
+- id: databases-sql-nosql-sharding-replication-084
+  difficulty: advanced
+  tags: [isolation, phantom, snapshot]
+  question: |
+    A report transaction runs SELECT COUNT(*) twice with the same predicate and gets
+    different results within the same transaction because another transaction
+    inserted matching rows in between. Under which isolation level is this "phantom"
+    definitely prevented?
+  options:
+  - "Read Uncommitted"
+  - "Read Committed"
+  - "Serializable (and, for the reader's own snapshot, snapshot isolation)"
+  - "Phantoms cannot be prevented at any level"
+  answer: 2
+  explanation: |
+    Phantom reads (new rows appearing between identical range queries) are prevented
+    at Serializable; snapshot isolation also gives the reader a stable snapshot so
+    its own repeated counts match. Read Uncommitted and Read Committed permit
+    phantoms, and the claim they can't be prevented is false.
+  ref: "concepts.md#mvcc-internals-and-serializable-snapshot-isolation"
+
+  # ---------------- Online resharding ----------------
+- id: databases-sql-nosql-sharding-replication-085
+  difficulty: expert
+  tags: [resharding, migration, zero-downtime]
+  question: |
+    You must move a live, write-serving dataset from sharding by user_id to sharding
+    by org_id with zero downtime. Which sequence correctly minimizes the risk of
+    lost or divergent writes?
+  options:
+  - "Take the system offline, copy all data, flip config, bring it back up"
+  - "Flip reads to the new topology first, then start copying data"
+  - "Delete the old shards, then rebuild from application logs"
+  - "Dual-write (or CDC) old→new + backfill history; continuously verify with shadow reads/checksums; canary-cutover reads; then cut over writes and decommission old"
+  answer: 3
+  explanation: |
+    The safe playbook writes to both layouts (or streams via CDC) while backfilling,
+    verifies convergence with shadow reads/checksums, canaries the read cutover, then
+    cuts writes and retires the old layout. Offline copy means downtime; flipping
+    reads before data is present serves misses; deleting first risks unrecoverable
+    loss.
+  ref: "concepts.md#online-resharding-and-live-data-migration"
+
+- id: databases-sql-nosql-sharding-replication-086
+  difficulty: advanced
+  tags: [resharding, logical-shards, pre-splitting]
+  question: |
+    Why do systems like Vitess and MongoDB pre-split into many logical shards (e.g.,
+    1024) and pack several onto each physical node, rather than one shard per node?
+  options:
+  - "Growing capacity becomes reassigning whole logical shards to new nodes — moving only those shards' data — instead of rehashing and moving nearly every key"
+  - "It reduces the number of indexes needed"
+  - "It guarantees strong consistency across shards"
+  - "It eliminates the need for replication"
+  answer: 0
+  explanation: |
+    Many logical shards decouple the logical partitioning from physical placement:
+    scaling out just relocates some logical shards to new nodes, avoiding a global
+    rehash/key-movement. It is unrelated to index counts, does not grant cross-shard
+    consistency, and does not replace replication.
+  ref: "concepts.md#online-resharding-and-live-data-migration"
+
+- id: databases-sql-nosql-sharding-replication-087
+  difficulty: expert
+  tags: [resharding, cutover, write-safety]
+  question: |
+    During the final write-cutover of an online migration, the hardest correctness
+    risk is in-flight writes being lost or double-applied. Which combination best
+    controls this?
+  options:
+  - "Rely on eventual consistency to sort it out later with no special handling"
+  - "Turn off the WAL during cutover to speed it up"
+  - "Tail the change log until replication lag on the new layout reaches ~0, use a brief write-freeze on the affected key range during final catch-up, and make writes idempotent/monotonically-versioned so any double-apply is safe"
+  - "Cut over all shards simultaneously with no verification"
+  answer: 2
+  explanation: |
+    You drain lag to near zero, optionally freeze the small affected key range for
+    the final catch-up, and rely on idempotent/versioned writes so replays or
+    double-applies are harmless. Hoping eventual consistency fixes lost writes,
+    disabling the WAL, or big-bang cutover without verification all invite data loss.
+  ref: "concepts.md#online-resharding-and-live-data-migration"
+
+  # ---------------- Hot shards / hot keys ----------------
+- id: databases-sql-nosql-sharding-replication-088
+  difficulty: advanced
+  tags: [hot-shard, detection, heavy-hitter]
+  question: |
+    Your overall p99 looks healthy but one partition is throttling and pegged while
+    others idle. You need to identify the offending keys cheaply from a high-volume
+    key stream. Which technique fits best?
+  options:
+  - "Use heavy-hitter / top-K streaming detection (e.g., a count-min sketch) to approximate the hottest keys with bounded memory in real time"
+  - "Store every key access in a relational table and GROUP BY at the end of the day"
+  - "Increase the isolation level to surface the hot key"
+  - "Add more shards, which automatically reveals the hot key"
+  answer: 0
+  explanation: |
+    A count-min sketch / top-K streaming algorithm approximates the hottest keys in
+    sublinear memory and real time — ideal for hot-key detection on a firehose.
+    Logging every access is expensive and after-the-fact, isolation level is
+    irrelevant, and adding shards does not identify which value is hot.
+  ref: "concepts.md#hot-shards-and-hot-keys-detection-and-mitigation"
+
+- id: databases-sql-nosql-sharding-replication-089
+  difficulty: expert
+  tags: [hot-key, feed, fan-out, celebrity]
+  question: |
+    A feed system uses fan-out-on-write. A celebrity with 100M followers posts, and
+    the single post triggers 100M feed writes, stalling the write path. What is the
+    standard mitigation?
+  options:
+  - "Switch the entire system to fan-out-on-read for all users"
+  - "Shard the celebrity's followers table by follower_id and hope it balances"
+  - "Hybrid fan-out: push (fan-out-on-write) for normal users, but pull (fan-out-on-read / merge at read time) for celebrity accounts so their posts don't stampede the write path"
+  - "Increase the write timeout so all 100M writes eventually complete"
+  answer: 2
+  explanation: |
+    The hybrid model pushes to normal followers' feeds but pulls celebrity posts at
+    read time (merging into the feed on load), avoiding the write stampede while
+    keeping normal-case reads cheap. Pull-for-everyone makes every feed read
+    expensive, resharding followers doesn't remove the fan-out, and longer timeouts
+    just prolong the incident.
+  ref: "concepts.md#hot-shards-and-hot-keys-detection-and-mitigation"
+
+- id: databases-sql-nosql-sharding-replication-090
+  difficulty: advanced
+  tags: [hot-key, cache, thundering-herd]
+  question: |
+    A single hot key is cached, but every time its TTL expires, thousands of
+    concurrent requests miss the cache and stampede the database. What is the most
+    targeted fix?
+  options:
+  - "Remove the cache so there are no expiries"
+  - "Set the TTL to zero so the value is always fetched fresh"
+  - "Shard the database by TTL value"
+  - "Request coalescing / singleflight so only one request repopulates the cache while others wait, plus jittered/staggered TTLs to avoid synchronized expiry"
+  answer: 3
+  explanation: |
+    The thundering-herd on expiry is solved by coalescing concurrent misses into a
+    single backfill (singleflight) and jittering TTLs so keys don't all expire at
+    once. Removing the cache or TTL=0 sends all load to the DB, and sharding by TTL
+    is nonsensical.
+  ref: "concepts.md#hot-shards-and-hot-keys-detection-and-mitigation"
+
+- id: databases-sql-nosql-sharding-replication-091
+  difficulty: advanced
+  tags: [hot-key, write-sharding, tradeoffs]
+  question: |
+    Write-sharding a hot key by appending a bounded suffix (key#0..key#N) spreads
+    writes across partitions. What cost does this deliberately accept?
+  options:
+  - "Reads for that logical key must now gather and merge across all N suffixes (read fan-out), trading a write hotspot for read-side scatter"
+  - "It permanently corrupts the key's ordering guarantees for all keys"
+  - "It requires switching to a graph database"
+  - "It makes every unrelated key slower to read"
+  answer: 0
+  explanation: |
+    Suffixing spreads the hot key's writes across N partitions but a read for the
+    logical key must query all N suffixes and merge — you convert a write hotspot
+    into read fan-out. It doesn't corrupt other keys, require a new data model, or
+    slow unrelated keys.
+  ref: "concepts.md#hot-shards-and-hot-keys-detection-and-mitigation"
+
+  # ---------------- Replication log formats ----------------
+- id: databases-sql-nosql-sharding-replication-092
+  difficulty: advanced
+  tags: [replication, statement-based, non-determinism]
+  question: |
+    Why can statement-based replication (SBR) silently corrupt a replica, leading
+    engines like MySQL to default to row-based or mixed logging?
+  options:
+  - "SQL text is too large to ship over the network"
+  - "SBR cannot replicate DELETE statements"
+  - "Non-deterministic statements (NOW(), RAND(), UUID(), AUTO_INCREMENT races, some triggers/UDFs) can produce different results on the replica than on the primary, diverging the data"
+  - "Row-based replication is always smaller than statement-based"
+  answer: 2
+  explanation: |
+    SBR re-executes the SQL on the replica, so anything non-deterministic (time,
+    random, UUIDs, some triggers/UDFs, ordering of auto-increment) yields divergent
+    results — hence ROW/MIXED defaults. SBR is actually compact (not too large), can
+    replicate DELETEs, and row-based is often larger for wide updates.
+  ref: "concepts.md#replication-log-formats-statement-row-and-wal-shipping"
+
+- id: databases-sql-nosql-sharding-replication-093
+  difficulty: expert
+  tags: [replication, logical-vs-physical, cdc]
+  question: |
+    You need to (a) feed a search index and a data warehouse from Postgres,
+    selectively for a few tables, and (b) survive a cross-major-version upgrade.
+    Which replication mechanism is the right substrate, and why not the other?
+  options:
+  - "Physical WAL streaming — it can filter individual tables and works across major versions"
+  - "Statement-based replication, because it is the only one that supports CDC"
+  - "Logical decoding / logical replication — it emits filterable, row-level changes usable by CDC (Debezium) and works across major versions; physical WAL shipping is byte-identical, same-major-version-only, and all-or-nothing"
+  - "A nightly pg_dump, because streaming cannot feed external systems"
+  answer: 2
+  explanation: |
+    Logical decoding produces decoded, per-table, row-level change events — the
+    substrate CDC tools consume — and supports cross-version replication (used for
+    near-zero-downtime upgrades). Physical WAL shipping is exact bytes, same major
+    version, and can't filter tables. SBR isn't a CDC substrate, and pg_dump is a
+    batch snapshot, not near-real-time.
+  ref: "concepts.md#replication-log-formats-statement-row-and-wal-shipping"
+
+- id: databases-sql-nosql-sharding-replication-094
+  difficulty: advanced
+  tags: [replication, row-based, volume]
+  question: |
+    A single UPDATE ... WHERE status='pending' modifies 5 million rows. Under
+    row-based replication, what is the effect on the replication stream compared to
+    statement-based?
+  options:
+  - "Row-based ships the one SQL statement, so it is smaller"
+  - "Row-based ships before/after images for all 5M rows, generating a large stream, whereas statement-based would ship just the one statement — the safety of RBR costs volume here"
+  - "Both ship exactly the same number of bytes"
+  - "Row-based refuses to replicate multi-row updates"
+  answer: 1
+  explanation: |
+    RBR logs each changed row's image, so a bulk update becomes millions of row
+    events — deterministic and safe but voluminous — while SBR would ship the single
+    statement. This is the classic RBR volume trade-off; it does not refuse bulk
+    updates.
+  ref: "concepts.md#replication-log-formats-statement-row-and-wal-shipping"
+
+  # ---------------- Multi-leader / leaderless conflict resolution ----------------
+- id: databases-sql-nosql-sharding-replication-095
+  difficulty: expert
+  tags: [conflict-resolution, lww, clock-skew]
+  question: |
+    Cassandra resolves concurrent writes to the same cell with last-write-wins by
+    timestamp. Under clock skew across nodes, what is the concrete danger?
+  options:
+  - "A write that actually happened LATER can be silently discarded if its node's clock is behind, so LWW can lose the newer update with no error"
+  - "It deadlocks the cluster"
+  - "It forces all writes to become synchronous"
+  - "It converts the data into a CRDT automatically"
+  answer: 0
+  explanation: |
+    LWW keeps the highest timestamp; if the node issuing the truly-later write has a
+    lagging clock, its (newer) write loses to an older one — silent data loss driven
+    by clock skew. It doesn't deadlock, change write mode, or auto-create CRDTs.
+  ref: "concepts.md#multi-leader-and-leaderless-conflict-resolution-in-depth"
+
+- id: databases-sql-nosql-sharding-replication-096
+  difficulty: expert
+  tags: [conflict-resolution, crdt, convergence]
+  question: |
+    A multi-region collaborative editor needs concurrent edits from different regions
+    to merge automatically and always converge to the same state without
+    coordination. Which mechanism provides this and what property makes it work?
+  options:
+  - "Two-phase commit across regions on every keystroke"
+  - "Last-write-wins by wall-clock timestamp, which never loses edits"
+  - "A single global leader that serializes every keystroke"
+  - "CRDTs — data types whose merge operation is commutative, associative, and idempotent, guaranteeing strong eventual consistency (all replicas converge) without coordination"
+  answer: 3
+  explanation: |
+    CRDTs define merges that are commutative, associative, and idempotent, so
+    replicas applying updates in any order/duplication converge to the same
+    state — ideal for offline/multi-region collaboration without coordination. 2PC
+    per keystroke is impossibly slow, LWW loses concurrent edits, and a global
+    leader kills offline/local editing.
+  ref: "concepts.md#multi-leader-and-leaderless-conflict-resolution-in-depth"
+
+- id: databases-sql-nosql-sharding-replication-097
+  difficulty: advanced
+  tags: [conflict-resolution, version-vectors, siblings]
+  question: |
+    What advantage do version vectors (vector clocks) offer over a single
+    last-write-wins timestamp in a leaderless store like Riak?
+  options:
+  - "They make every write synchronous"
+  - "They can distinguish causally-ordered writes from truly-concurrent ones, surfacing genuine conflicts as siblings for the application (or user) to merge rather than silently discarding one"
+  - "They guarantee zero storage overhead"
+  - "They remove the need for replication"
+  answer: 1
+  explanation: |
+    Version vectors capture per-replica causality, so the system knows when two
+    writes are concurrent (conflict → siblings to merge) versus one superseding the
+    other — avoiding LWW's silent loss. They don't make writes synchronous, are not
+    free in storage, and don't replace replication.
+  ref: "concepts.md#multi-leader-and-leaderless-conflict-resolution-in-depth"
+
+- id: databases-sql-nosql-sharding-replication-098
+  difficulty: advanced
+  tags: [multi-leader, conflict-avoidance, routing]
+  question: |
+    An architect argues the cleanest multi-leader design "avoids conflicts rather
+    than resolving them." What concrete technique implements conflict avoidance?
+  options:
+  - "Randomly routing each write to a different leader to spread load"
+  - "Routing all writes for a given record to the same 'home' leader (sticky routing by key), so concurrent conflicting writes to that record never arise; fall back to merge only during failover"
+  - "Using last-write-wins so conflicts are resolved instantly"
+  - "Disabling replication between leaders"
+  answer: 1
+  explanation: |
+    Pinning each record's writes to a home leader (sticky/key-based routing) means
+    the same object is never written on two leaders simultaneously, so conflicts are
+    avoided by construction; merge is only needed if that leader fails over. Random
+    routing maximizes conflicts, LWW is resolution not avoidance, and disabling
+    replication breaks the system.
+  ref: "concepts.md#multi-leader-and-leaderless-conflict-resolution-in-depth"
+
+  # ---------------- Local vs global secondary indexes ----------------
+- id: databases-sql-nosql-sharding-replication-099
+  difficulty: expert
+  tags: [secondary-index, local, global, dynamodb]
+  question: |
+    Why are DynamoDB Global Secondary Indexes (GSIs) eventually consistent, while a
+    local per-shard secondary index can be strongly consistent?
+  options:
+  - "GSIs are stored on slower disks"
+  - "GSIs use LWW while local indexes use 2PC"
+  - "A GSI is partitioned by the indexed term, so a base-table write must update an index partition on a DIFFERENT node — done asynchronously; a local index lives on the same partition as the row, so it updates transactionally with the write"
+  - "Local indexes are cached in memory and GSIs are not"
+  answer: 2
+  explanation: |
+    Global (term-partitioned) indexes place the index entry on a partition chosen by
+    the indexed value, which is usually a different node than the base row, so the
+    update is applied asynchronously → eventual consistency. Local
+    (document-partitioned) indexes co-locate with the row and update atomically with
+    the write. It's about partitioning topology, not disk speed, LWW, or caching.
+  ref: "concepts.md#secondary-indexes-on-partitioned-data-local-versus-global"
+
+- id: databases-sql-nosql-sharding-replication-100
+  difficulty: advanced
+  tags: [secondary-index, local, scatter-gather]
+  question: |
+    With document-partitioned (local) secondary indexes, a query filters on the
+    indexed attribute but does NOT include the shard key. What is the read-cost
+    consequence?
+  options:
+  - "The query hits exactly one shard"
+  - "The query cannot run at all"
+  - "The query must scatter-gather across all shards and merge results, since each shard only indexes its own rows — read cost scales with shard count"
+  - "The query is served entirely from a single global index partition"
+  answer: 2
+  explanation: |
+    Local indexes only cover each shard's own rows, so a query lacking the shard key
+    must fan out to every shard, query each local index, and merge — read cost grows
+    with the number of shards. Hitting one shard or one global partition describes a
+    global/term-partitioned index instead.
+  ref: "concepts.md#secondary-indexes-on-partitioned-data-local-versus-global"
+
+- id: databases-sql-nosql-sharding-replication-101
+  difficulty: advanced
+  tags: [secondary-index, decision, tradeoffs]
+  question: |
+    You must frequently query a large sharded table by an attribute that is
+    independent of the shard key, at high read volume with strict latency. Which
+    approach is most appropriate and what trade-off do you accept?
+  options:
+  - "A local (document-partitioned) index, accepting fast single-shard writes"
+  - "A global (term-partitioned) secondary index or a separate CDC-fed lookup table, hitting one index partition per read at the cost of cross-partition (often async/eventual) index writes"
+  - "No index; scatter-gather on every read for freshness"
+  - "Re-shard the base table by that attribute so all other queries scatter-gather"
+  answer: 1
+  explanation: |
+    When reads must query by a non-shard-key attribute at scale/latency, a global
+    (term-partitioned) index — or a CDC-maintained lookup table — routes each read
+    to one index partition, accepting cross-partition, typically eventually
+    consistent index writes. A local index forces scatter-gather reads; no index is
+    slower; re-sharding just moves the scatter-gather to other queries.
+  ref: "concepts.md#secondary-indexes-on-partitioned-data-local-versus-global"
+
+  # ---------------- NewSQL decision ----------------
+- id: databases-sql-nosql-sharding-replication-102
+  difficulty: expert
+  tags: [newsql, latency, consensus, physics]
+  question: |
+    A team moves a single-region, moderately-loaded transactional workload that fits
+    one Postgres primary onto a strongly-consistent multi-region distributed SQL
+    cluster "to be future-proof," and write latency gets much worse. What is the root
+    cause?
+  options:
+  - "Distributed SQL databases have slower disks"
+  - "Postgres compatibility layers always halve throughput"
+  - "Every write now requires a consensus round trip to a majority of replicas (and cross-region commits pay ~80-150ms US-EU RTT), so a workload that never needed multi-region ACID pays a latency tax rooted in the speed of light"
+  - "The optimizer disables all indexes in distributed mode"
+  answer: 2
+  explanation: |
+    Distributed SQL commits via consensus (a round trip to a majority), and spanning
+    regions adds the physical WAN latency per commit — a real cost you only should
+    pay when you need scalable, region-surviving ACID. A workload that fit one
+    primary gains nothing and eats the tax. It's not disk speed, a fixed
+    compatibility penalty, or disabled indexes.
+  ref: "concepts.md#when-newsql-is-the-right-call-and-when-it-is-not"
+
+- id: databases-sql-nosql-sharding-replication-103
+  difficulty: advanced
+  tags: [newsql, geo-partitioning, follower-reads]
+  question: |
+    On a distributed SQL database, most transactions are single-region reads/writes,
+    but latency is high because operations round-trip to a leaseholder in another
+    region. Which built-in features most directly reduce this?
+  options:
+  - "Disabling consensus and using async single-leader replication"
+  - "Switching to READ UNCOMMITTED globally"
+  - "Geo-partitioning / table localities to pin a row's replicas to the region that uses it, plus follower/bounded-staleness reads to serve local reads without a cross-region consensus round trip"
+  - "Adding more secondary indexes"
+  answer: 2
+  explanation: |
+    Geo-partitioning places a row's replicas (and leaseholder) in the region that
+    reads/writes it, and follower/bounded-staleness reads serve slightly stale data
+    locally without the leaseholder round trip — the intended latency mitigations.
+    Disabling consensus loses the guarantees, isolation-level changes don't fix
+    geography, and more indexes don't reduce cross-region hops.
+  ref: "concepts.md#when-newsql-is-the-right-call-and-when-it-is-not"
+
+- id: databases-sql-nosql-sharding-replication-104
+  difficulty: expert
+  tags: [newsql, benchmarking, contention]
+  question: |
+    Before adopting distributed SQL, a staff engineer insists on benchmarking the
+    "contended path" (many transactions updating a few hot rows), not just the happy
+    path. Why is this the crucial test?
+  options:
+  - "Contended benchmarks are easier to run"
+  - "A hot, contended single-row write can be SLOWER on distributed SQL than on one Postgres node because every commit is a consensus quorum; the happy path can look fine while the contended path regresses badly"
+  - "The happy path always predicts contended performance accurately"
+  - "Contention only matters for read-only workloads"
+  answer: 1
+  explanation: |
+    Under contention, each commit's consensus round trip and cross-range coordination
+    dominate, so a hot-row workload can regress versus a single node whose commit is
+    local — a failure mode invisible in uncontended happy-path benchmarks. Ease of
+    running isn't the point, and contention especially hurts writes, not just reads.
+  ref: "concepts.md#when-newsql-is-the-right-call-and-when-it-is-not"
+
+- id: databases-sql-nosql-sharding-replication-105
+  difficulty: advanced
+  tags: [newsql, olap, htap, wrong-fit]
+  question: |
+    A team wants to run heavy analytical (OLAP) scans and aggregations and is
+    considering a distributed OLTP SQL database for it. What is the best guidance?
+  options:
+  - "Distributed OLTP SQL is optimal for large analytical scans; use it"
+  - "Large analytical workloads belong on a columnar warehouse (Snowflake/BigQuery/ClickHouse); distributed OLTP SQL is row-oriented for transactions — though some (e.g., TiDB with TiFlash) add a columnar replica for HTAP"
+  - "Only a graph database can do analytics"
+  - "Analytics must always run on the OLTP primary to stay consistent"
+  answer: 1
+  explanation: |
+    OLAP scans favor columnar warehouses; distributed OLTP SQL is optimized for
+    transactional, row-based access, so using it for heavy analytics is a poor fit
+    (unless the engine offers a columnar HTAP replica like TiDB's TiFlash). Graphs
+    aren't the analytics answer, and running heavy analytics on the OLTP primary
+    harms transactional latency.
+  ref: "concepts.md#when-newsql-is-the-right-call-and-when-it-is-not"
+
+- id: databases-sql-nosql-sharding-replication-106
+  difficulty: expert
+  tags: [newsql, decision, over-engineering]
+  question: |
+    Which of these scenarios is the STRONGEST justification for adopting distributed
+    SQL (Spanner/CockroachDB) rather than a cheaper alternative?
+  options:
+  - "A single-region app whose data fits one Postgres primary with read replicas"
+  - "A pure high-throughput key-value workload with no cross-key transactions"
+  - "A multi-region financial platform needing relational joins, ACID transactions across shards, and continued operation through a full region outage, that has outgrown a single primary"
+  - "An analytics workload doing large columnar aggregations"
+  answer: 2
+  explanation: |
+    Distributed SQL earns its latency/cost tax exactly when you need relational + ACID
+    + joins at horizontal scale AND survival of a region loss beyond a single primary
+    — the financial multi-region case. A single Postgres suffices for case 1; NoSQL
+    is cheaper for pure KV (case 2); a warehouse fits case 4.
+  ref: "concepts.md#when-newsql-is-the-right-call-and-when-it-is-not"
+
+  # ---------------- Cross-cutting advanced scenarios ----------------
+- id: databases-sql-nosql-sharding-replication-107
+  difficulty: advanced
+  tags: [read-your-writes, lsn, routing]
+  question: |
+    You must guarantee read-your-writes for users while still serving most reads from
+    async replicas (to protect the primary). Which mechanism achieves this most
+    precisely without forcing all reads to the primary?
+  options:
+  - "Pin every user permanently to the primary for all reads"
+  - "Make all replicas synchronous"
+  - "Capture the write's LSN/log position on commit, pass it with the user's subsequent reads, and route to (or wait for) a replica that has applied at least that LSN — otherwise read the primary"
+  - "Disable caching so reads are always fresh"
+  answer: 2
+  explanation: |
+    LSN/version-aware routing lets a read require a replica caught up to at least the
+    user's last write position (or briefly fall back to the primary), giving
+    read-your-writes while keeping most reads on replicas. Pinning all reads to the
+    primary defeats read scaling, all-synchronous replicas hurt write latency/HA,
+    and disabling caching is unrelated.
+  ref: "concepts.md#synchronous-versus-asynchronous-replication-and-replication-lag"
+
+- id: databases-sql-nosql-sharding-replication-108
+  difficulty: expert
+  tags: [quorum, sloppy-quorum, hinted-handoff]
+  question: |
+    A leaderless store uses a "sloppy quorum" with hinted handoff during a network
+    partition. What guarantee does this deliberately weaken, and what is the benefit?
+  options:
+  - "It strengthens consistency at the cost of availability"
+  - "It guarantees linearizable reads during the partition"
+  - "It accepts W writes on ANY reachable healthy nodes (not necessarily the key's home replicas), preserving write availability during a partition, but W+R>N no longer guarantees overlap with the home replicas, so reads can miss recent writes until hints are handed back"
+  - "It disables replication until the partition heals"
+  answer: 2
+  explanation: |
+    A sloppy quorum lets writes land on any reachable nodes (with hints to forward
+    later), keeping the system writable during a partition, but because those aren't
+    the designated home replicas, the strict W+R>N overlap no longer holds and reads
+    may not see the latest write until hinted handoff completes. It trades
+    consistency for availability, not the reverse.
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"
+
+- id: databases-sql-nosql-sharding-replication-109
+  difficulty: advanced
+  tags: [consistent-prefix, causality, partitioning]
+  question: |
+    Across a partitioned/sharded datastore, an observer sees an answer to a question
+    before the question itself, because the two writes went to different partitions
+    replicating at different speeds. Which guarantee is violated?
+  options:
+  - "Durability"
+  - "Consistent prefix reads — causally-ordered writes are observed out of order; it is a known hazard when related writes span independently-replicated partitions"
+  - "Atomicity"
+  - "Monotonic writes"
+  answer: 1
+  explanation: |
+    Seeing effects before their causes is a consistent-prefix violation, common when
+    causally related writes live on different partitions that replicate at different
+    rates. Fixes route causally related writes to the same partition or track
+    causal dependencies. It is not durability, atomicity, or monotonic-writes.
+  ref: "concepts.md#synchronous-versus-asynchronous-replication-and-replication-lag"
+
+- id: databases-sql-nosql-sharding-replication-110
+  difficulty: expert
+  tags: [quorum, tunable-consistency, estimation]
+  question: |
+    A Cassandra cluster with RF=3 across 3 racks must survive one rack failing while
+    still serving both reads and writes at QUORUM. With QUORUM = majority of RF (=2
+    here), what happens when one rack (one replica per key) is down?
+  options:
+  - "Both reads and writes fail because QUORUM needs all 3 replicas"
+  - "Only reads succeed; writes require all replicas"
+  - "Reads and writes at QUORUM still succeed because 2 of 3 replicas remain reachable (2 >= majority of 3), and QUORUM read + QUORUM write satisfy W+R>N (2+2>3), preserving strong consistency"
+  - "The cluster automatically drops to consistency level ONE and loses strong consistency"
+  answer: 2
+  explanation: |
+    QUORUM for RF=3 is 2 replicas. Losing one rack leaves 2 replicas reachable per
+    key, so QUORUM reads and writes both still meet their required 2, and W+R = 4 > 3
+    = N preserves read-your-writes overlap and strong consistency. It does not need
+    all 3, writes aren't stricter than reads here, and it doesn't silently downgrade.
+  ref: "concepts.md#replication-leader-follower-multi-leader-leaderless"

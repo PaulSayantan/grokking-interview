@@ -692,16 +692,17 @@ questions:
       condition holds?
     options:
       - "acks is set to 0"
-      - "The idempotent producer is enabled, so the broker reorders/dedupes by sequence number to maintain order"
+      - "The idempotent producer is enabled, so per-partition sequence numbers let the broker reject any out-of-order or duplicate batch (forcing an in-order retry), preserving order despite multiple in-flight requests"
       - "The topic has exactly one partition"
       - "Consumers use auto-commit"
     answer: 1
     explanation: |
       With the idempotent producer enabled, Kafka can keep up to 5 in-flight
-      requests and still guarantee ordering because sequence numbers let the broker
-      detect and reorder/dedupe. Without idempotence you would need
-      max.in.flight=1. acks=0, single partition, and auto-commit are irrelevant to
-      this guarantee.
+      requests and still guarantee ordering: per-partition sequence numbers let the
+      broker detect and reject a duplicate or out-of-order batch, so the producer
+      retries it in the correct position rather than writing it out of order.
+      Without idempotence you would need max.in.flight=1. acks=0, single partition,
+      and auto-commit are irrelevant to this guarantee.
     ref: "concepts.md#ordering-and-partitioning"
   - id: message-queues-and-async-041
     difficulty: advanced
@@ -1369,3 +1370,657 @@ questions:
       not universally superior, queues add failure modes rather than removing them,
       and exactly-once is never free.
     ref: "concepts.md#trade-offs-and-when-to-use-what"
+  - id: message-queues-and-async-077
+    difficulty: advanced
+    tags: [retry-amplification, resilience, call-graph]
+    question: |
+      A logical request traverses 3 async hops, and each hop independently retries
+      up to 3 times on failure. During a partial downstream brownout, roughly how
+      much can offered load amplify at the deepest layer, and what is the core
+      lesson?
+    options:
+      - "About 3x; retries add linearly across hops"
+      - "Up to 27x (3^3); retries multiply through the call graph, so you should retry at only one layer and use a retry budget"
+      - "No amplification; queues absorb all retries harmlessly"
+      - "About 6x; retries double per hop"
+    answer: 1
+    explanation: |
+      Retries multiply multiplicatively through a call graph: 3 hops x 3 attempts =
+      up to 3^3 = 27 downstream attempts per logical request. The lesson is to retry
+      at a single layer and bound total retry load with a budget, not to retry at
+      every hop. Amplification is multiplicative, not linear or doubling, and the
+      queue does not neutralize it.
+    ref: "concepts.md#retry-amplification-retry-budgets-and-metastable-failures"
+  - id: message-queues-and-async-078
+    difficulty: expert
+    tags: [metastable-failure, retries, outage]
+    question: |
+      After a brief latency blip, your async pipeline stays saturated and unhealthy
+      even though the original trigger is long gone; load never subsides on its own.
+      What is happening and what actually recovers it?
+    options:
+      - "A metastable failure: a retry/work-amplification feedback loop sustains overload after the trigger clears; recovery requires breaking the loop (shed load, drop retries, drain, or restart), not waiting"
+      - "Normal eventual consistency; it will self-heal if you wait longer"
+      - "A hardware fault; replace the broker disks"
+      - "A schema mismatch; roll back the producer"
+    answer: 0
+    explanation: |
+      This is the classic metastable failure: a self-sustaining feedback loop
+      (usually retries) keeps the system in a bad stable state after the trigger is
+      gone. It does not self-heal by waiting; you must break the loop by shedding
+      load, dropping retries, draining, or restarting. It is not a disk or schema
+      issue, and waiting does not help.
+    ref: "concepts.md#retry-amplification-retry-budgets-and-metastable-failures"
+  - id: message-queues-and-async-079
+    difficulty: advanced
+    tags: [retry-budget, load-shedding]
+    question: |
+      Why is a "retry budget" (cap retries at, say, 10% of total traffic) often
+      preferred over a fixed per-request retry count in a large async system?
+    options:
+      - "It guarantees exactly-once delivery"
+      - "It removes the need for idempotency"
+      - "It bounds total extra load from retries to a small multiplier during an outage, whereas fixed per-request retries can amplify load unboundedly exactly when the system is weakest"
+      - "It makes individual requests faster"
+    answer: 2
+    explanation: |
+      A retry budget clamps aggregate retry load to a bounded fraction of traffic, so
+      an outage cannot trigger a 10x-27x amplification the way fixed per-request
+      retries can. It does not provide exactly-once, remove the need for idempotency,
+      or speed up a single request; it protects the system as a whole.
+    ref: "concepts.md#retry-amplification-retry-budgets-and-metastable-failures"
+  - id: message-queues-and-async-080
+    difficulty: advanced
+    tags: [retries, idempotency, error-classification]
+    question: |
+      Which errors are safe and sensible to retry automatically in an async
+      consumer, and which should NOT be retried?
+    options:
+      - "Retry everything, including validation errors, so nothing is ever lost"
+      - "Retry only deterministic 400/validation errors; skip timeouts"
+      - "Never retry anything; always dead-letter immediately"
+      - "Retry transient, retryable errors (timeouts, 503, 429) on idempotent operations; do NOT retry deterministic errors like a 400/validation failure, which will fail identically forever (a poison message)"
+    answer: 3
+    explanation: |
+      Retries help only for transient/retryable failures on idempotent work; a
+      deterministic validation error (400) will fail every time and should go to a
+      DLQ, not a retry loop. Retrying everything wastes resources and can double
+      side effects; never-retry throws away recoverable blips; and it is the transient
+      errors, not the deterministic ones, that are worth retrying.
+    ref: "concepts.md#retry-amplification-retry-budgets-and-metastable-failures"
+  - id: message-queues-and-async-081
+    difficulty: expert
+    tags: [rebalance, timeouts, kafka]
+    question: |
+      A Kafka consumer heartbeats fine (background thread) but occasionally takes 6
+      minutes to process a batch, and the group keeps rebalancing. Which timeout is
+      being violated and what is the targeted fix?
+    options:
+      - "session.timeout.ms; lower heartbeat.interval.ms"
+      - "max.poll.interval.ms is exceeded, so the coordinator evicts the consumer as stuck; fix by lowering max.poll.records or raising max.poll.interval.ms so batches finish in time"
+      - "request.timeout.ms; increase replication factor"
+      - "connections.max.idle.ms; add more brokers"
+    answer: 1
+    explanation: |
+      Since KIP-62 heartbeats run on a background thread, so a slow batch does not
+      miss heartbeats or trip session.timeout.ms; instead it exceeds
+      max.poll.interval.ms (the max gap between poll calls), so the coordinator evicts
+      the consumer as stuck. Fix by shrinking batches (max.poll.records) or raising
+      the poll interval. The other timeouts and remedies are unrelated.
+    ref: "concepts.md#rebalance-protocols-storms-and-mitigation"
+  - id: message-queues-and-async-082
+    difficulty: advanced
+    tags: [rebalance, cooperative, static-membership]
+    question: |
+      During rolling deploys, your consumer group suffers long stop-the-world pauses
+      as each pod restarts. Which combination most directly minimizes disruption?
+    options:
+      - "Eager rebalancing plus a higher replication factor"
+      - "Cooperative (incremental) rebalancing plus static membership (group.instance.id), so only moved partitions are revoked and brief restarts reclaim partitions without a full rebalance"
+      - "acks=all plus a larger batch.size"
+      - "read_committed isolation plus transactions"
+    answer: 1
+    explanation: |
+      Cooperative/incremental rebalancing revokes only the partitions that must move
+      (not all of them), and static membership lets a pod that rejoins within
+      session.timeout.ms reclaim its partitions with no rebalance at all -- exactly
+      what smooths rolling deploys. Eager rebalancing is the stop-the-world default
+      you want to avoid; producer/isolation settings do not affect rebalance
+      disruption.
+    ref: "concepts.md#rebalance-protocols-storms-and-mitigation"
+  - id: message-queues-and-async-083
+    difficulty: expert
+    tags: [static-membership, failover, tradeoff]
+    question: |
+      Static group membership smooths restarts, but what is its important downside if
+      a static member truly crashes and does not come back?
+    options:
+      - "It permanently corrupts the consumer offsets"
+      - "Its partitions stay unassigned and idle (unconsumed) until session.timeout.ms expires, delaying failover"
+      - "It forces the topic to lose all data"
+      - "It disables cooperative rebalancing globally"
+    answer: 1
+    explanation: |
+      Static membership deliberately avoids rebalancing on brief absences, so a
+      genuinely dead member's partitions are not reassigned until session.timeout.ms
+      elapses -- delaying failover. That is the trade-off against smoother restarts:
+      it does not corrupt offsets, lose data, or disable cooperative rebalancing.
+    ref: "concepts.md#rebalance-protocols-storms-and-mitigation"
+  - id: message-queues-and-async-084
+    difficulty: advanced
+    tags: [log-vs-queue, ack-model]
+    question: |
+      What is the deepest structural difference between a log (Kafka) and a queue
+      (SQS/RabbitMQ) that explains most of their behavioral contrasts?
+    options:
+      - "The log uses more disk than the queue"
+      - "The queue is always faster than the log"
+      - "The log tracks a single monotonic committed offset (cursor) per partition, while the queue tracks per-message acknowledgment, so redelivery, selective ack, TTL, and priority behave differently"
+      - "The log cannot have more than one consumer"
+    answer: 2
+    explanation: |
+      The per-message-ack (queue) versus monotonic-offset-cursor (log) distinction is
+      the root cause: it dictates redelivery granularity, whether you can ack out of
+      order, native per-message TTL/priority, and head-of-line behavior. Disk usage,
+      raw speed, and consumer count are downstream or incorrect framings.
+    ref: "concepts.md#the-log-versus-queue-distinction-at-depth"
+  - id: message-queues-and-async-085
+    difficulty: advanced
+    tags: [log-vs-queue, redelivery]
+    question: |
+      In a Kafka partition, you process offset 4 successfully but offset 3 (earlier)
+      failed. Why can't you simply "ack 4 and leave 3 for later" like a queue would?
+    options:
+      - "Because a committed offset is monotonic: committing offset 4 implies 0-4 are done, so you cannot durably mark 4 complete while 3 is outstanding"
+      - "Because Kafka deletes offset 3 automatically"
+      - "Because offset 3 moves to another partition"
+      - "You can; Kafka supports per-message selective ack natively"
+    answer: 0
+    explanation: |
+      A log tracks one monotonic committed offset per partition, so committing 4
+      asserts everything through 4 is handled -- there is no per-message selective
+      ack. Redelivery means rewinding the cursor and reprocessing the tail. Kafka
+      does not auto-delete or relocate a single offset, and it has no native
+      per-message selective ack.
+    ref: "concepts.md#the-log-versus-queue-distinction-at-depth"
+  - id: message-queues-and-async-086
+    difficulty: advanced
+    tags: [log-vs-queue, anti-pattern]
+    question: |
+      A team uses a single Kafka topic as a general task queue for independent,
+      unordered jobs, and complains that one slow/poison job stalls everything and
+      they can't prioritize urgent tasks. What is the correct diagnosis?
+    options:
+      - "Kafka is simply broken; file a bug"
+      - "They need more replication"
+      - "Using a log as a task queue is an anti-pattern here: they lose per-message ack, priorities, and isolated redelivery, and a poison record causes head-of-line blocking in its partition; a queue (SQS/RabbitMQ) fits unordered independent tasks better"
+      - "They should reduce the number of partitions to one"
+    answer: 2
+    explanation: |
+      For independent, unordered, individually-retryable/prioritizable tasks, a queue
+      with per-message ack is the right tool; a log gives coarse offset redelivery,
+      no native priority, and per-partition head-of-line blocking. It is a tool-fit
+      problem, not a Kafka bug, replication issue, or a reason to collapse to one
+      partition (which worsens it).
+    ref: "concepts.md#the-log-versus-queue-distinction-at-depth"
+  - id: message-queues-and-async-087
+    difficulty: advanced
+    tags: [littles-law, sizing, estimation]
+    question: |
+      Messages arrive at 2,000/sec and each spends on average 0.25 sec in the system
+      (processing plus wait). By Little's Law, what is the expected steady-state
+      number of in-flight messages, and what does it inform?
+    options:
+      - "8,000; it sets the replication factor"
+      - "500 (L = lambda x W = 2000 x 0.25); it informs in-flight/visibility limits and buffer sizing"
+      - "2,000; it equals the arrival rate exactly"
+      - "0.25; it equals the processing time"
+    answer: 1
+    explanation: |
+      Little's Law gives L = lambda x W = 2000 x 0.25 = 500 in-flight messages, which
+      informs how many concurrent in-flight messages, visibility-timeout sizing, and
+      buffer depth to provision. It is not the arrival rate, the service time, or a
+      replication setting.
+    ref: "concepts.md#capacity-estimation-and-back-of-envelope"
+  - id: message-queues-and-async-088
+    difficulty: expert
+    tags: [utilization, queueing-theory, latency]
+    question: |
+      A consumer pool runs at 95% utilization (rho = 0.95) and latency is terrible;
+      management asks why a small traffic increase caused a huge latency jump. What
+      is the precise explanation?
+    options:
+      - "Latency is independent of utilization; the jump must be a bug"
+      - "Queueing delay grows roughly as 1/(1-rho), so near rho=1 latency explodes non-linearly; running at 95% leaves almost no headroom, so a small lambda increase causes a large wait increase"
+      - "The broker ran out of partitions"
+      - "Higher utilization always lowers latency by keeping caches warm"
+    answer: 1
+    explanation: |
+      In queueing theory, waiting time scales like 1/(1-rho), so as utilization
+      approaches 1 the queueing delay blows up non-linearly -- at 95% there is almost
+      no slack, so a small arrival-rate bump produces a large latency jump. Latency is
+      very much utilization-dependent; it is not a partition count issue, and high
+      utilization increases, not decreases, queueing delay.
+    ref: "concepts.md#capacity-estimation-and-back-of-envelope"
+  - id: message-queues-and-async-089
+    difficulty: expert
+    tags: [littles-law, backlog, capacity]
+    question: |
+      Your queue depth is growing steadily over hours (dL/dt > 0), not just during
+      bursts. What does this indicate and which "fix" is futile?
+    options:
+      - "It indicates sustained arrival rate exceeds total consumer service rate (lambda > c*mu); increasing the buffer/queue size is futile -- you must add capacity or shed load"
+      - "It indicates a duplicate-detection bug; disable idempotency"
+      - "It indicates too much retention; shorten retention to drain faster"
+      - "It indicates ordering is broken; switch to one partition"
+    answer: 0
+    explanation: |
+      A steadily growing backlog means arrivals persistently outstrip service
+      capacity; no buffer size can absorb a sustained deficit -- only more consumers/
+      capacity or load shedding will. Buffers absorb bursts, not sustained overload.
+      Disabling idempotency, shortening retention, or single-partitioning do not add
+      throughput and can cause loss.
+    ref: "concepts.md#capacity-estimation-and-back-of-envelope"
+  - id: message-queues-and-async-090
+    difficulty: advanced
+    tags: [schema-evolution, compatibility]
+    question: |
+      You want to deploy new consumer code before updating producers, and the new
+      consumers must read messages still being written in the old format. Which
+      schema compatibility mode enables this?
+    options:
+      - "Forward compatibility"
+      - "No compatibility checking"
+      - "Backward compatibility (new consumer can read data written by the old producer), so you can upgrade consumers first"
+      - "Byte-for-byte identical schemas only"
+    answer: 2
+    explanation: |
+      Backward compatibility means a new consumer can read data produced under the old
+      schema, which is precisely what lets you roll out consumers before producers.
+      Forward compatibility is the opposite direction (upgrade producers first); no
+      checks is unsafe; requiring identical schemas prevents evolution entirely.
+    ref: "concepts.md#schema-evolution-and-message-contracts"
+  - id: message-queues-and-async-091
+    difficulty: expert
+    tags: [schema-evolution, replay, retention]
+    question: |
+      Why does long log retention (Kafka) make schema compatibility a harder,
+      longer-lived requirement than in a transient queue?
+    options:
+      - "Because retention encrypts old messages"
+      - "Because a consumer replaying old offsets must still decode messages written under older schema versions, so you cannot rely on upgrading producers and consumers simultaneously"
+      - "Because retention automatically upgrades old messages to the new schema"
+      - "Because Kafka rejects any message with an old schema"
+    answer: 1
+    explanation: |
+      Retained data means a replay reads historical messages in their original schema
+      versions, so consumers must handle old schemas for as long as data is retained
+      -- you can't just do a simultaneous flip. Retention does not encrypt, auto-
+      upgrade, or reject old-schema messages; it obliges long-lived compatibility.
+    ref: "concepts.md#schema-evolution-and-message-contracts"
+  - id: message-queues-and-async-092
+    difficulty: advanced
+    tags: [schema-registry, poison-message]
+    question: |
+      How does enforcing schema compatibility via a schema registry help prevent
+      poison messages, compared to publishing ad-hoc JSON?
+    options:
+      - "It compresses messages so they never fail"
+      - "It rejects an incompatible schema at publish time (fail fast at the producer) instead of letting malformed data poison every consumer at read time"
+      - "It guarantees exactly-once delivery"
+      - "It removes the need for consumers to deserialize anything"
+    answer: 1
+    explanation: |
+      A registry validates the producer's schema against the compatibility policy and
+      rejects incompatible writes up front, so the failure surfaces at the producer
+      rather than as a read-time poison message across all consumers. It is not about
+      compression, exactly-once, or skipping deserialization.
+    ref: "concepts.md#schema-evolution-and-message-contracts"
+  - id: message-queues-and-async-093
+    difficulty: advanced
+    tags: [async-hurts, observability, tracing]
+    question: |
+      A stakeholder asks why the team invested heavily in distributed tracing and
+      correlation IDs after moving to async messaging. What is the strongest
+      justification?
+    options:
+      - "Tracing makes messages deliver faster"
+      - "Async replaces a synchronous stack trace with a causal chain spread across producers, brokers, and consumers over time; without propagated correlation/trace IDs, 'where is my message and why didn't it process?' is nearly unanswerable"
+      - "Tracing guarantees exactly-once processing"
+      - "Correlation IDs eliminate the need for a DLQ"
+    answer: 1
+    explanation: |
+      Async destroys the single synchronous stack trace, scattering causality across
+      components and time; correlation/trace IDs and distributed tracing are what make
+      debugging feasible -- a real, mandatory cost of async. Tracing does not speed
+      delivery, provide exactly-once, or replace a DLQ.
+    ref: "concepts.md#when-async-messaging-hurts-deeper-failure-modes"
+  - id: message-queues-and-async-094
+    difficulty: advanced
+    tags: [async-hurts, backpressure, overload]
+    question: |
+      Compared with a synchronous API returning 503/429 under overload, what is the
+      subtle danger of a queue silently absorbing the same overload?
+    options:
+      - "The queue makes the producer faster, which is always good"
+      - "There is no natural backpressure signal to the client: you can ingest far more than you can process, discovering it only via lag alarms -- and the backlog may exceed retention (data loss) or take hours to drain"
+      - "The queue automatically rejects excess load like a 429"
+      - "Nothing; queues eliminate overload entirely"
+    answer: 1
+    explanation: |
+      A synchronous 503/429 immediately tells the client to slow down; a queue quietly
+      buffers, so overload is hidden until lag alarms fire, by which point the backlog
+      can exceed retention (losing data) or take a long time to drain. Queues do not
+      auto-shed load by default and do not eliminate overload.
+    ref: "concepts.md#when-async-messaging-hurts-deeper-failure-modes"
+  - id: message-queues-and-async-095
+    difficulty: expert
+    tags: [async-hurts, sync-vs-async, judgment]
+    question: |
+      A CRUD endpoint does one small, strongly-consistent, low-latency
+      request/response and a team proposes routing it through a message broker "for
+      scalability." What is the most defensible senior critique?
+    options:
+      - "Agree; async is always more scalable"
+      - "For a simple, low-latency, strongly-consistent request/response, async adds a hop, eventual consistency, ordering/dedup work, and debugging cost for no benefit; a synchronous call plus a database is simpler, faster, and easier to operate -- don't pay the async tax without a reason"
+      - "Route it through async and also keep the synchronous path for safety"
+      - "Only async can provide durability here"
+    answer: 1
+    explanation: |
+      Async is justified by deferrable work, spiky load, or fan-out/decoupling -- none
+      of which apply to a simple consistent request/response. Adding a broker there
+      buys latency, eventual consistency, and operational/debugging burden for nothing.
+      Blanket 'async is more scalable' is wrong, dual paths add complexity, and a DB
+      provides durability without a broker.
+    ref: "concepts.md#when-async-messaging-hurts-deeper-failure-modes"
+  - id: message-queues-and-async-096
+    difficulty: advanced
+    tags: [visibility-timeout, sqs, redelivery]
+    question: |
+      An SQS consumer sometimes takes longer to process a message than the queue's
+      visibility timeout. What failure results, and what are the two standard fixes?
+    options:
+      - "The message is lost forever; only fix is to shorten the timeout"
+      - "Nothing happens; SQS waits indefinitely"
+      - "The message becomes visible again and is redelivered/processed concurrently (a duplicate); fix by extending the visibility timeout to exceed p99 processing time, or heartbeat via ChangeMessageVisibility while working"
+      - "The queue automatically converts to FIFO"
+    answer: 2
+    explanation: |
+      If processing outlasts the visibility timeout, SQS makes the message visible
+      again and another consumer picks it up, causing duplicate processing. The fixes
+      are to set the timeout above p99 processing time or to extend it dynamically with
+      ChangeMessageVisibility (a heartbeat). The message is not lost, SQS does not wait
+      forever, and it does not switch to FIFO.
+    ref: "concepts.md#delivery-semantics-at-most-once-at-least-once-exactly-once"
+  - id: message-queues-and-async-097
+    difficulty: expert
+    tags: [ordering, key-design, causal]
+    question: |
+      Two related events -- OrderCreated (aggregate: order) and PaymentAuthorized
+      (aggregate: payment) -- must be applied in causal order downstream, but they are
+      partitioned by their own aggregate IDs, so they can interleave. What is the
+      cleanest design fix?
+    options:
+      - "Increase the number of partitions so ordering is guaranteed"
+      - "Partition both event types by a shared correlation key (e.g., order_id) so causally related events land in the same partition and preserve order, or attach a sequence/version the consumer enforces"
+      - "Use a single global partition for the entire system"
+      - "Disable retries so events never reorder"
+    answer: 1
+    explanation: |
+      Ordering holds only within a partition, so causally related events must share a
+      partition key (e.g., both keyed by order_id) -- or carry a sequence/version the
+      consumer enforces. More partitions worsens interleaving; one global partition
+      kills throughput; disabling retries does not create cross-aggregate ordering.
+    ref: "concepts.md#ordering-and-partitioning"
+  - id: message-queues-and-async-098
+    difficulty: advanced
+    tags: [consumer-lag, diagnosis, scenario]
+    question: |
+      Consumer lag suddenly spikes. Producer rate is unchanged, consumers are not
+      crashing, and CPU is low, but you observe frequent partition reassignments in
+      the logs. What is the most likely root cause to investigate first?
+    options:
+      - "A rebalancing storm pausing consumption (e.g., slow polls exceeding max.poll.interval.ms or flapping membership), so the group spends time paused rather than processing"
+      - "The topic's replication factor dropped"
+      - "The producer secretly doubled its rate"
+      - "Disk is full on the consumer host"
+    answer: 0
+    explanation: |
+      Frequent reassignments plus stalled progress despite healthy CPU and steady
+      producer rate points to a rebalancing storm: the group keeps pausing to
+      rebalance instead of consuming. Investigate poll-interval violations or flapping
+      membership. The clues explicitly rule out a producer spike, and RF/disk would
+      present differently.
+    ref: "concepts.md#rebalance-protocols-storms-and-mitigation"
+  - id: message-queues-and-async-099
+    difficulty: expert
+    tags: [exactly-once, dedup-window, tradeoff]
+    question: |
+      A dedup store uses a time-bounded window (e.g., SQS FIFO's 5-minute dedup, or a
+      Redis TTL). A duplicate can arrive after the window if a redelivery is delayed
+      by a long outage. What is the correct way to reason about this?
+    options:
+      - "The window guarantees exactly-once regardless of delay"
+      - "Time-windowed dedup is best-effort: any duplicate delayed beyond the window slips through, so for strict correctness use a durable business-key uniqueness constraint (unbounded) rather than a TTL/window"
+      - "Duplicates after the window are impossible in practice"
+      - "Extending the window to 1 second fixes it"
+    answer: 1
+    explanation: |
+      Window/TTL-based dedup only catches duplicates that recur within the window; a
+      redelivery delayed past it (e.g., after a long outage or DLQ redrive) is not
+      recognized. For strict correctness, use a durable unique constraint on the
+      business key with no time bound. The window does not guarantee exactly-once, late
+      duplicates are real, and shrinking the window makes it worse.
+    ref: "concepts.md#idempotency-and-deduplication"
+  - id: message-queues-and-async-100
+    difficulty: advanced
+    tags: [dlq, redrive, ordering, operations]
+    question: |
+      After fixing a bug, you redrive 10,000 messages from a DLQ back into the main
+      topic. What second-order effect must you plan for?
+    options:
+      - "Redrive is instantaneous and free of side effects"
+      - "The redriven messages re-enter out of their original order and mixed with live traffic, so consumers must be idempotent and tolerate reordering; a redrive surge can also spike lag/load, so throttle it"
+      - "Redrive guarantees the messages process in original order"
+      - "Redrive deletes the main topic's live messages"
+    answer: 1
+    explanation: |
+      Redriven messages rejoin later and interleaved with current traffic, so ordering
+      relative to their original position is lost and consumers must be idempotent; the
+      sudden volume can also spike lag, so throttle the redrive. It is neither
+      instantaneous/side-effect-free, order-preserving, nor destructive to live
+      messages.
+    ref: "concepts.md#dead-letter-queues-retries-and-poison-messages"
+  - id: message-queues-and-async-101
+    difficulty: expert
+    tags: [transactions, throughput, tradeoff, kafka]
+    question: |
+      A Kafka pipeline switches from at-least-once to transactional exactly_once_v2
+      and throughput drops noticeably. Which explanation and mitigation are most
+      accurate?
+    options:
+      - "Transactions add coordinator round-trips and commit-marker overhead, and read_committed consumers wait for commit markers; mitigate by batching more work per transaction (fewer, larger commits) to amortize the cost"
+      - "EOS should increase throughput; the drop must be a network bug"
+      - "Reduce throughput loss by committing after every single record"
+      - "Disable the idempotent producer to speed transactions up"
+    answer: 0
+    explanation: |
+      Transactions incur coordinator interactions and commit markers, and
+      read_committed consumers await those markers, all of which cost throughput; you
+      amortize it by doing more records per transaction (fewer, larger commits). EOS
+      does not increase throughput, per-record commits maximize overhead, and
+      disabling idempotence breaks EOS entirely.
+    ref: "concepts.md#how-exactly-once-is-really-achieved"
+  - id: message-queues-and-async-102
+    difficulty: advanced
+    tags: [poison-message, validation, dlq]
+    question: |
+      A consumer keeps retrying a message that fails a deterministic schema/validation
+      check, wasting resources and never succeeding. What is the correct handling?
+    options:
+      - "Retry forever; it may eventually pass"
+      - "Recognize it as a non-retryable poison message and route it straight to the DLQ (skip retries) with an alert, since retrying a deterministic failure cannot help"
+      - "Increase the retry backoff to hours"
+      - "Silently drop it to keep throughput high"
+    answer: 1
+    explanation: |
+      A deterministic validation failure will never succeed on retry, so it should be
+      dead-lettered immediately (no retry loop) and alerted for inspection. Retrying
+      forever or with huge backoff just wastes resources; silently dropping loses data
+      and hides the defect.
+    ref: "concepts.md#retry-amplification-retry-budgets-and-metastable-failures"
+  - id: message-queues-and-async-103
+    difficulty: expert
+    tags: [scenario, log-vs-queue, poison]
+    question: |
+      Why do Kafka deployments need explicit retry-topic/DLQ patterns to handle a
+      poison message, whereas an SQS queue can often dead-letter one bad message with
+      almost no ceremony?
+    options:
+      - "Because Kafka has no durability"
+      - "Because SQS is always ordered and Kafka never is"
+      - "Because Kafka's offset cursor advances monotonically and a bad record in an ordered partition blocks the tail (head-of-line blocking), so you must actively move it aside; SQS tracks per-message state and a maxReceiveCount naturally dead-letters just that message"
+      - "Because Kafka cannot have more than one consumer group"
+    answer: 2
+    explanation: |
+      Kafka's single monotonic offset means a stuck record in an ordered partition
+      blocks everything behind it unless you explicitly park it (retry topic / DLT),
+      while SQS's per-message ack and maxReceiveCount isolate and dead-letter a single
+      message automatically. It is about the ack model, not durability, universal
+      ordering, or consumer-group limits.
+    ref: "concepts.md#the-log-versus-queue-distinction-at-depth"
+  - id: message-queues-and-async-104
+    difficulty: advanced
+    tags: [circuit-breaker, retries, resilience]
+    question: |
+      How does a circuit breaker complement retry backoff to prevent a metastable
+      outage when a downstream is hard-down?
+    options:
+      - "It retries faster to push through the outage"
+      - "It trips open after a failure threshold and fails fast (stops sending), giving the downstream time to recover and halting the retry feedback loop, then half-opens to test recovery"
+      - "It guarantees the downstream never fails"
+      - "It converts the queue to at-most-once"
+    answer: 1
+    explanation: |
+      A circuit breaker opens on sustained failures and fails fast, cutting the load
+      the retry loop would otherwise pile onto a down service and breaking the
+      amplification/metastable loop, then probes for recovery via half-open. It does
+      not speed retries, prevent failures, or change delivery semantics.
+    ref: "concepts.md#retry-amplification-retry-budgets-and-metastable-failures"
+  - id: message-queues-and-async-105
+    difficulty: expert
+    tags: [scenario, sizing, littles-law, capacity]
+    question: |
+      You must process 4,000 msg/s and each message takes 50 ms of consumer work
+      (single-threaded per consumer). Roughly how many consumer threads/instances do
+      you need at minimum, and what safety factor should you add?
+    options:
+      - "About 200 concurrent workers (4000 x 0.05); add headroom (e.g., 30-50%) so utilization stays below 1 and queueing delay does not blow up"
+      - "About 4,000 workers, one per message per second"
+      - "About 20 workers; latency does not depend on concurrency"
+      - "Exactly 1 worker; batching makes concurrency irrelevant"
+    answer: 0
+    explanation: |
+      By Little's Law the required concurrency is lambda x W = 4000 x 0.05 = 200 busy
+      workers just to keep up; you provision above that (headroom) so utilization stays
+      under 1, because queueing delay explodes as rho approaches 1. 4,000 and 20 are
+      arithmetic errors, and a single worker cannot sustain 4,000 msg/s at 50 ms each.
+    ref: "concepts.md#capacity-estimation-and-back-of-envelope"
+  - id: message-queues-and-async-106
+    difficulty: advanced
+    tags: [schema-evolution, field-rules]
+    question: |
+      Which schema change is safe under typical backward-compatibility rules for an
+      evolving event, and which is dangerous?
+    options:
+      - "Safe: reusing an old field's tag number for a new unrelated field"
+      - "Safe: adding a new optional field with a default value; Dangerous: removing a required field or reusing a field tag/number for a new meaning"
+      - "Safe: removing a required field with no default"
+      - "Dangerous: adding any new field at all"
+    answer: 1
+    explanation: |
+      Adding a new optional field with a default is the canonical safe evolution;
+      removing a required field or repurposing an existing tag/number corrupts decoding
+      for readers on the other version. Reusing tags is dangerous (not safe), removing
+      required fields breaks readers, and adding optional fields is precisely what is
+      allowed.
+    ref: "concepts.md#schema-evolution-and-message-contracts"
+  - id: message-queues-and-async-107
+    difficulty: expert
+    tags: [scenario, exactly-once, external-effect, email]
+    question: |
+      An at-least-once consumer sends order-confirmation emails; occasional duplicate
+      emails annoy users, but sending has no natural transactional idempotency key
+      from the provider. What is the most pragmatic design?
+    options:
+      - "Switch to at-most-once so emails are never duplicated, accepting that some confirmations are never sent"
+      - "Use Kafka transactions to make the SMTP send exactly-once"
+      - "Maintain a dedup marker keyed by a stable business tuple (e.g., order_id + template) written atomically before/with the send attempt, so a redelivery skips the send; accept that a crash in the tiny window between send and marker may rarely duplicate"
+      - "Retry the email aggressively to ensure delivery, ignoring duplicates"
+    answer: 2
+    explanation: |
+      Since email is a non-transactional external side effect, you approximate
+      effectively-once with a durable dedup marker on a stable business key,
+      acknowledging a small unavoidable window where a crash between send and marker
+      can duplicate. At-most-once risks never sending; Kafka transactions cannot cover
+      SMTP; aggressive retries maximize duplicates.
+    ref: "concepts.md#idempotency-and-deduplication"
+  - id: message-queues-and-async-108
+    difficulty: advanced
+    tags: [async-hurts, deferred-failure, dlq]
+    question: |
+      "Async hides failure rather than removing it." Which scenario best illustrates
+      this senior-level point?
+    options:
+      - "A synchronous call returns a 500 immediately to the user"
+      - "A message fails, exhausts retries, and lands in a DLQ that no one monitors, so the business impact surfaces days later as missing data instead of a loud, immediate error at request time"
+      - "A consumer processes a message successfully on the first try"
+      - "A producer validates input before publishing"
+    answer: 1
+    explanation: |
+      Async trades an immediate, local, loud failure for a deferred, distributed,
+      easily-ignored one -- the unmonitored DLQ that turns into silent data loss is the
+      textbook illustration. A synchronous 500, a successful process, and pre-publish
+      validation are not examples of hidden/deferred failure.
+    ref: "concepts.md#when-async-messaging-hurts-deeper-failure-modes"
+  - id: message-queues-and-async-109
+    difficulty: expert
+    tags: [scenario, rebalance, autoscaling]
+    question: |
+      An autoscaler adds and removes Kafka consumers aggressively based on CPU, and
+      overall throughput gets WORSE under load. What is the likely mechanism and the
+      fix?
+    options:
+      - "More consumers always help; the autoscaler is fine, add even more"
+      - "Each scale event triggers a rebalance that pauses the group, so flapping membership spends more time rebalancing than consuming; fix with cooperative rebalancing, static membership, stabilization windows/cooldowns, and scaling on lag rather than twitchy CPU"
+      - "The brokers are undersized; add partitions per second"
+      - "Throughput is capped by replication factor; lower it"
+    answer: 1
+    explanation: |
+      Frequent membership changes cause repeated rebalances that pause consumption, so
+      aggressive autoscaling can reduce net throughput. Stabilize it with cooperative
+      rebalancing, static membership, scaling cooldowns/stabilization windows, and a
+      lag-based (not jumpy CPU) metric. Adding consumers beyond partitions or changing
+      RF does not address rebalance thrash.
+    ref: "concepts.md#rebalance-protocols-storms-and-mitigation"
+  - id: message-queues-and-async-110
+    difficulty: advanced
+    tags: [log-vs-queue, fan-out, replay]
+    question: |
+      A requirement changes mid-project: besides the existing consumer, you must add
+      two brand-new consumers that each need the full history of past events. If you
+      originally built on a point-to-point queue, why is this painful, and what would
+      a log have given you?
+    options:
+      - "A queue handles this natively; nothing changes"
+      - "In a queue, messages are deleted on ack so past events are gone and each new independent consumer needs its own duplicated queue fed going forward; a log retains history and lets each new consumer group read from the earliest offset, getting the full backlog for free"
+      - "A log cannot support more than one consumer, so it would be worse"
+      - "You must switch to synchronous calls to add consumers"
+    answer: 1
+    explanation: |
+      A queue deletes acked messages, so historical events are unrecoverable and each
+      new independent consumer needs a separately-fed queue with no backfill; a
+      retained log lets any new consumer group start at the earliest offset and replay
+      the entire history. Logs support many consumer groups, and synchronous calls are
+      irrelevant to the need.
+    ref: "concepts.md#the-log-versus-queue-distinction-at-depth"

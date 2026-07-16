@@ -48,7 +48,7 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 
 | Domain | Topics | Authored |
 |---|---|---|
-| [System Design](topics/system-design/README.md) | 23 core + 26 AWS | 49 ✅ (all tiers) |
+| [System Design](topics/system-design/README.md) | 23 core + 8 adv deep-dive + 26 AWS | 57 ✅ (all tiers) |
 | [Docker](topics/docker/README.md) | 15 | 0 |
 | [Kubernetes](topics/kubernetes/README.md) | 16 | 0 |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 18 | 0 |
@@ -63,6 +63,23 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 
 ## Session log
 
+- **Session 9 (2026-07-16):** System Design advanced/expert expansion — authored **8 new
+  senior/staff deep-dive topics** (interview-method-scenario-playbooks — the scenario-based
+  thinking style + per-problem playbooks; consensus-clocks-and-time — Raft/Paxos, logical/vector/
+  hybrid clocks, TrueTime, linearizability spectrum; distributed-transactions-advanced — 2PC/3PC,
+  Percolator/Calvin, isolation anomalies; capacity-modeling-and-tail-latency — Little's Law, USL,
+  tail-at-scale, hedged requests, coordinated omission; failure-theory-advanced — metastable
+  failures, retry amplification + jitter, load shedding, backpressure, static stability;
+  data-internals-storage-engines — LSM vs B-tree amplification + RUM, MVCC/isolation, schema
+  evolution; probabilistic-data-structures — Bloom/HLL/Count-Min/LSH; microservices-ddd-and-boundaries
+  — DDD bounded contexts/aggregates, distributed-monolith anti-pattern, contract testing). **588 MCQs**,
+  skewed hard (~76% adv/expert). ALSO **deepened 6 high-frequency core topics** (fundamentals, CAP,
+  databases, microservices, message-queues, resilience) with senior concept sections + ~34 appended
+  advanced/expert MCQs each (~205 added; those topics now ~110-116 MCQs each). Built via
+  `.claude/workflows/scripts/system-design-advanced-expand.js` (author/deepen → verify, high effort,
+  28 agents, 0 errors). Verify agents fact-checked subtle distributed-systems guarantees (linearizability,
+  quorum math, Raft/2PC, TrueTime, USL, retry/tail math) and rebalanced answer indices. All validates
+  (119 files, 9,432 questions total).
 - **Session 8 (2026-07-16):** AWS System Design sub-domain — authored **26 new topics**
   under `topics/system-design/` with an `aws-` slug prefix (compute EC2/ECS/EKS/Fargate/Lambda,
   serverless + Step Functions, API Gateway/AppSync, S3 deep-dive, EBS/EFS/FSx, DynamoDB deep-dive,

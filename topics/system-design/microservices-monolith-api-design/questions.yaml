@@ -1432,3 +1432,699 @@ questions:
       retries faster or guarantee success, and fixed intervals aren't "illegal" —
       just harmful under correlated failures.
     ref: "concepts.md#the-fallacies-of-distributed-computing"
+
+  - id: microservices-monolith-api-design-076
+    difficulty: advanced
+    tags: [ddd, aggregate, boundaries]
+    question: |
+      Applying DDD aggregate design to sizing a service, which invariant placement
+      forces a boundary decision?
+    options:
+      - "Any invariant that must hold synchronously must live within a single aggregate; if a proposed service split would place such a must-be-atomic invariant across two services, the split is wrong"
+      - "Every entity should be its own aggregate so services stay small"
+      - "Invariants can always be enforced across services with a distributed lock at no cost"
+      - "Aggregates should embed all referenced aggregates so joins are local"
+    answer: 0
+    explanation: |
+      A synchronously-enforced invariant defines a transactional consistency
+      boundary, which must sit inside one aggregate (and thus one service).
+      Splitting it across services forces eventual consistency and breaks the
+      invariant. Per-entity aggregates create chatty coupling, distributed locks
+      are not free, and embedding referenced aggregates bloats them — the rule is
+      to reference other aggregates by id.
+    ref: "concepts.md#service-boundaries-and-domain-driven-design"
+
+  - id: microservices-monolith-api-design-077
+    difficulty: advanced
+    tags: [ddd, anti-corruption-layer, context-map]
+    question: |
+      A clean new "Billing" context must integrate with a messy legacy ERP whose
+      data model you cannot change. Which context-mapping pattern best protects
+      Billing's model?
+    options:
+      - "Shared Kernel: share a common model module between Billing and the ERP"
+      - "Conformist: adopt the ERP's model wholesale inside Billing"
+      - "Anti-Corruption Layer: translate the ERP model into Billing's own model at the boundary so the legacy model can't leak in"
+      - "Big Ball of Mud: let both contexts read each other's tables freely"
+    answer: 2
+    explanation: |
+      An Anti-Corruption Layer translates the upstream (legacy) model into the
+      downstream's clean model at the seam, insulating the new context. A Shared
+      Kernel couples deploys and spreads the mess; Conformist surrenders your model
+      to the legacy one; shared table access is a distributed monolith.
+    ref: "concepts.md#service-boundaries-and-domain-driven-design"
+
+  - id: microservices-monolith-api-design-078
+    difficulty: advanced
+    tags: [distributed-monolith, availability, estimation]
+    question: |
+      A user request traverses a synchronous chain of 5 services, each independently
+      99.9% available. Ignoring retries, what is the approximate end-to-end
+      availability of that serial path, and what does it imply?
+    options:
+      - "About 99.5% (0.999^5), because serial availability is the product of the links, so each added sync hop on the critical path lowers availability"
+      - "About 99.9%, because the max of the links dominates"
+      - "About 100%, because independent services can't all fail"
+      - "Exactly 99.99%, guaranteed by redundancy"
+    answer: 0
+    explanation: |
+      Serial dependencies multiply: 0.999^5 ≈ 0.995, i.e. ~99.5%, worse than any
+      single link. Adding services to a synchronous critical path is a reliability
+      tax — a monolith at 99.9% would beat this. Availability is the product, not
+      the max; independence does not prevent compounding.
+    ref: "concepts.md#when-not-to-use-microservices"
+
+  - id: microservices-monolith-api-design-079
+    difficulty: advanced
+    tags: [distributed-monolith, detection, change-coupling]
+    question: |
+      Which empirical signal, mined from version-control history, most strongly
+      indicates that two services were cut at the wrong boundary?
+    options:
+      - "The two services are written in the same language"
+      - "The two services each have their own CI pipeline"
+      - "The two services have similar lines-of-code counts"
+      - "The two services' files repeatedly change together in the same commits/PRs (high logical/temporal coupling)"
+    answer: 3
+    explanation: |
+      Frequent co-change (logical coupling) across two services means a single
+      logical change keeps rippling across the boundary — the hallmark of a bad
+      cut / distributed monolith. Shared language, independent pipelines, and
+      similar size say nothing about coupling.
+    ref: "concepts.md#when-not-to-use-microservices"
+
+  - id: microservices-monolith-api-design-080
+    difficulty: advanced
+    tags: [api-composition, cqrs, decision]
+    question: |
+      A dashboard query must join data owned by six services and is called at high
+      QPS with cross-service filtering and sorting. API composition (fan-out +
+      in-memory join) is timing out. What is the better pattern and its main cost?
+    options:
+      - "A CQRS read model: a denormalized projection fed by the services' events, queried in one place; cost is eventual consistency and maintaining/rebuilding the projection"
+      - "Give the dashboard direct read access to all six databases; cost is nothing"
+      - "Cache the composed result in the browser indefinitely; cost is memory"
+      - "Merge the six services into one; cost is a longer build"
+    answer: 0
+    explanation: |
+      When a cross-service query is hot and needs filtering/sorting/aggregation,
+      a CQRS materialized view turns it into a single fast lookup. The trade-off is
+      eventual consistency and the operational cost of building/rebuilding the
+      projection. Direct DB reads create a distributed monolith; forever-caching
+      serves stale data; merging services throws away independence.
+    ref: "concepts.md#api-composition-versus-cqrs-read-models"
+
+  - id: microservices-monolith-api-design-081
+    difficulty: advanced
+    tags: [api-composition, freshness, decision]
+    question: |
+      For a low-QPS admin screen that joins a small amount of data from three
+      services and must always show the very latest values, which approach is the
+      most appropriate default?
+    options:
+      - "Build a full CQRS read model with an event pipeline immediately"
+      - "API composition: fan out to the three services and join in memory at read time, since the fan-out is small and freshness matters"
+      - "Introduce a shared database across the three services"
+      - "Replicate all three services' tables into the admin service nightly"
+    answer: 1
+    explanation: |
+      For small, low-traffic, freshness-sensitive joins, API composition is the
+      cheap correct default — no extra storage, always fresh. Standing up CQRS adds
+      eventual-consistency and projection-maintenance cost that isn't justified
+      here; a shared DB is a distributed monolith; nightly replication is stale.
+    ref: "concepts.md#api-composition-versus-cqrs-read-models"
+
+  - id: microservices-monolith-api-design-082
+    difficulty: advanced
+    tags: [cqrs, eventual-consistency, read-your-writes]
+    question: |
+      After adopting a CQRS read model fed asynchronously by events, users
+      occasionally submit a change and then don't see it reflected when the UI
+      immediately re-queries the read side. What is happening and a reasonable fix?
+    options:
+      - "The database is corrupted; restore from backup"
+      - "The event broker guarantees exactly-once, so this cannot happen"
+      - "Replication lag between the write and the projection update creates a read-your-writes gap; mitigate by reading the just-written value from the write side, optimistic UI update, or waiting for the projection to catch up"
+      - "The read model must be switched to strong consistency by using a distributed lock on every read"
+    answer: 2
+    explanation: |
+      CQRS projections are eventually consistent, so a read immediately after a
+      write may miss it (read-your-writes gap). Fixes include serving the writer
+      their own fresh value, optimistic client updates, or version/wait-for-catch-up
+      tokens — not corruption recovery, and not pretending brokers are exactly-once.
+    ref: "concepts.md#api-composition-versus-cqrs-read-models"
+
+  - id: microservices-monolith-api-design-083
+    difficulty: advanced
+    tags: [operational-tax, tracing, context-propagation]
+    question: |
+      In a 40-service system, one team forgets to propagate the incoming
+      trace/correlation context on its outbound calls. What is the consequence?
+    options:
+      - "That service becomes a blind spot: every distributed trace passing through it is broken downstream, making end-to-end debugging of those requests very hard"
+      - "Nothing; traces are reconstructed automatically from IP addresses"
+      - "Only that service's own logs are affected; cross-service traces are fine"
+      - "The service will fail to start until tracing is fixed"
+    answer: 0
+    explanation: |
+      Distributed tracing depends on every hop propagating the trace context
+      (e.g. W3C traceparent). A single service that drops it severs the trace for
+      all requests flowing through it, creating a blind spot across the whole path.
+      Traces can't be rebuilt from IPs, and the effect is not limited to that one
+      service's logs.
+    ref: "concepts.md#the-operational-tax-of-microservices"
+
+  - id: microservices-monolith-api-design-084
+    difficulty: advanced
+    tags: [operational-tax, deployment, expand-contract]
+    question: |
+      Because you cannot deploy a provider service and its consumers atomically,
+      how must a breaking API change be rolled out across microservices?
+    options:
+      - "Take a maintenance window and deploy everything at once"
+      - "Deploy the provider first and let consumers break until they catch up"
+      - "Never change provider APIs after launch"
+      - "Using expand-contract (parallel change): add the new field/endpoint while keeping the old, migrate consumers, then remove the old — each step is backward/forward compatible"
+    answer: 3
+    explanation: |
+      Independent deploys mean old and new versions run side by side during a
+      rollout, so changes must be done as expand-contract/parallel change: introduce
+      the new alongside the old, migrate all consumers, then retire the old. Big-bang
+      windows defeat independent deploy; breaking consumers causes outages; freezing
+      APIs is impractical.
+    ref: "concepts.md#the-operational-tax-of-microservices"
+
+  - id: microservices-monolith-api-design-085
+    difficulty: advanced
+    tags: [operational-tax, cost, judgment]
+    question: |
+      A staff engineer argues the true cost of adding a new service boundary is not
+      the network RPC. What is the strongest version of that argument?
+    options:
+      - "RPCs are actually free once you use gRPC"
+      - "The standing operational tax — a new pipeline, dashboards, trace instrumentation, runbook, alerts, and pager rotation that exist forever — is the real, underestimated cost of a boundary"
+      - "Boundaries only cost extra memory, which is cheap"
+      - "The cost is purely the added serialization CPU"
+    answer: 1
+    explanation: |
+      The RPC is cheap to write; the enduring cost is operating the boundary:
+      pipeline, observability, on-call, runbooks, patching — a standing tax that
+      persists for the life of the service. This is why deferring decomposition
+      (monolith/modular-monolith first) is sound. Serialization CPU and memory are
+      minor by comparison, and RPCs are not free.
+    ref: "concepts.md#the-operational-tax-of-microservices"
+
+  - id: microservices-monolith-api-design-086
+    difficulty: advanced
+    tags: [versioning, deprecation, sunset]
+    question: |
+      What is the safest gate for actually removing a deprecated public API
+      endpoint?
+    options:
+      - "Remove it only after per-consumer usage metrics show usage has fallen to ~zero (and the sunset date has passed), because you cannot safely remove what clients still call"
+      - "Remove it on the announced sunset date regardless of usage, to force clients to move"
+      - "Remove it as soon as a newer version ships"
+      - "Never remove it; keep all versions forever"
+    answer: 0
+    explanation: |
+      Removal must be driven by measured, per-consumer usage falling to near zero,
+      not by a calendar alone — otherwise you break live integrations you didn't
+      know about. Announcing a date is necessary but insufficient; removing on ship
+      of a new version breaks laggards; keeping everything forever is unsustainable.
+    ref: "concepts.md#api-versioning-and-evolution"
+
+  - id: microservices-monolith-api-design-087
+    difficulty: advanced
+    tags: [versioning, http-headers, deprecation]
+    question: |
+      Which mechanism lets API clients detect deprecation and the removal timeline
+      programmatically rather than only via documentation?
+    options:
+      - "Returning HTTP 410 Gone on every request to the endpoint"
+      - "Renaming the endpoint without notice"
+      - "The standardized Deprecation and Sunset response headers (with a Link to the migration guide)"
+      - "Lowering the endpoint's rate limit to zero"
+    answer: 2
+    explanation: |
+      The `Deprecation` and `Sunset` (RFC 8594) response headers, plus a `Link`
+      header to migration docs, let clients programmatically detect deprecation and
+      the cutoff date. Returning 410 breaks the still-working endpoint; renaming
+      silently and zeroing rate limits are hostile, not detection mechanisms.
+    ref: "concepts.md#api-versioning-and-evolution"
+
+  - id: microservices-monolith-api-design-088
+    difficulty: advanced
+    tags: [consumer-driven-contracts, deprecation, field-removal]
+    question: |
+      Your internal service wants to drop a response field. A pure schema-diff check
+      flags it as breaking, but consumer-driven contract (Pact) verification passes.
+      What does this tell you?
+    options:
+      - "Nothing useful; you should always trust the schema diff"
+      - "The Pact broker is broken and should be ignored"
+      - "No currently-known consumer actually reads that field, so removing it is safe for existing consumers — CDC is more precise than schema diffing because it reflects real usage"
+      - "You must bump a new URI version regardless"
+    answer: 2
+    explanation: |
+      CDC verifies each consumer's actual expectations; if every consumer's contract
+      passes without the field, no one relies on it and removal is safe for known
+      consumers. That precision (ignoring unused fields, catching real semantic
+      expectations) is exactly why CDC beats blunt schema diffing in an ecosystem
+      you fully control.
+    ref: "concepts.md#api-versioning-and-evolution"
+
+  - id: microservices-monolith-api-design-089
+    difficulty: advanced
+    tags: [idempotency, ttl, gotcha]
+    question: |
+      An idempotency-key implementation stores keys with a 1-hour TTL, but a mobile
+      client's offline retry queue can replay a request up to 12 hours later. What
+      bug results and what is the fix?
+    options:
+      - "No bug; expired keys are always safe"
+      - "The client crashes because the key expired"
+      - "The server must reject all retries older than the TTL, dropping legitimate work"
+      - "A late retry after key expiry re-executes the operation (e.g. a double charge); the fix is to set the key TTL longer than the maximum realistic retry horizon"
+    answer: 3
+    explanation: |
+      If the key's TTL is shorter than the client's retry window, the record is gone
+      when a late retry arrives, so the server treats it as new and re-executes —
+      duplicating the effect. The TTL must exceed the longest realistic retry
+      horizon. Rejecting all late retries silently drops legitimate operations.
+    ref: "concepts.md#pagination-filtering-and-idempotency-keys"
+
+  - id: microservices-monolith-api-design-090
+    difficulty: advanced
+    tags: [idempotency, request-fingerprint, validation]
+    question: |
+      A well-designed idempotency layer stores a hash of the request body with each
+      key. Why?
+    options:
+      - "To detect when the SAME key is reused with a DIFFERENT body (a client bug) and reject it, rather than silently returning the old result or executing a different operation under the reused key"
+      - "To compress the request for storage savings"
+      - "To encrypt the payment amount"
+      - "To speed up the database index on the key"
+    answer: 0
+    explanation: |
+      Fingerprinting the body lets the server catch a client that reuses an
+      idempotency key for a different request — a bug that should return 409/422
+      instead of silently serving the wrong stored response or, worse, performing a
+      new operation under a "seen" key. It is not for compression, encryption, or
+      indexing.
+    ref: "concepts.md#pagination-filtering-and-idempotency-keys"
+
+  - id: microservices-monolith-api-design-091
+    difficulty: advanced
+    tags: [api-gateway, cross-cutting, judgment]
+    question: |
+      Which responsibility is appropriate to centralize in a thin API gateway
+      WITHOUT turning it into a monolith?
+    options:
+      - "Computing order pricing and tax rules"
+      - "Deciding inventory reservation logic"
+      - "Authentication/JWT validation, TLS termination, rate limiting, and routing"
+      - "Owning the customer database schema"
+    answer: 2
+    explanation: |
+      Generic cross-cutting concerns — authn, TLS termination, rate limiting,
+      routing — are exactly what a thin gateway should centralize. Pricing, tax, and
+      inventory logic are domain/business rules that belong in the owning services;
+      putting them in the gateway couples a shared SPoF to a domain and re-creates a
+      monolith. Gateways don't own databases.
+    ref: "concepts.md#api-gateway-and-backend-for-frontend"
+
+  - id: microservices-monolith-api-design-092
+    difficulty: advanced
+    tags: [modular-monolith, decision, judgment]
+    question: |
+      A 15-engineer company on one codebase has clean module boundaries but is
+      considering microservices "to scale the team." Only the payments module has a
+      distinct compliance/deploy-isolation need. What is the best-reasoned move?
+    options:
+      - "Split the entire codebase into ~15 microservices immediately"
+      - "Adopt a service mesh first, then decide"
+      - "Stay a modular monolith and extract only the payments module as a service where the isolation need is real, deferring further splits until a concrete pain appears"
+      - "Merge all modules into a single un-modularized codebase to simplify"
+    answer: 2
+    explanation: |
+      Extract a service only where a concrete driver exists (payments' compliance/
+      isolation), keeping the well-factored modular monolith for everything else and
+      deferring the operational tax. A blanket split pays the tax with no
+      justification; a mesh adds ops burden without addressing the question; de-
+      modularizing destroys the clean seams.
+    ref: "concepts.md#monolith-vs-microservices-vs-modular-monolith"
+
+  - id: microservices-monolith-api-design-093
+    difficulty: advanced
+    tags: [rest, grpc, latency, estimation]
+    question: |
+      A request makes 6 sequential internal RPCs, each ~2 ms serialization + 3 ms
+      network. Half the calls are independent of each other. What gives the largest
+      latency reduction?
+    options:
+      - "Switching serialization from JSON to protobuf, since that removes all latency"
+      - "Parallelizing the independent calls and/or collapsing round trips, because with ~5 ms per sequential hop the round-trip count dominates over serialization cost"
+      - "Adding more CPU cores to each service"
+      - "Increasing log verbosity to find the slow call"
+    answer: 1
+    explanation: |
+      At ~5 ms per hop, 6 sequential calls are ~30 ms dominated by round-trip count;
+      parallelizing the independent ones and reducing hops attacks the dominant term.
+      Protobuf trims only the ~2 ms serialization slice per call (helpful but
+      secondary), extra CPU doesn't cut network RTT, and logging doesn't reduce
+      latency.
+    ref: "concepts.md#the-fallacies-of-distributed-computing"
+
+  - id: microservices-monolith-api-design-094
+    difficulty: expert
+    tags: [async, outbox, dual-write]
+    question: |
+      A service writes an order to its DB and then publishes an "OrderCreated" event
+      from application code. Occasionally the DB commit succeeds but the publish
+      fails (or vice versa). What is the robust fix?
+    options:
+      - "Wrap the DB write and broker publish in a two-phase commit"
+      - "Retry the publish a few times and accept occasional loss"
+      - "Transactional outbox: write the event to an outbox table in the same DB transaction as the order, then relay it to the broker (via a poller or log-based CDC)"
+      - "Publish the event first, then write to the DB"
+    answer: 2
+    explanation: |
+      The dual-write problem (two systems, no shared transaction) is solved by the
+      transactional outbox: the event is committed atomically with the state change
+      in one DB transaction, and a separate relay/CDC process publishes it — so they
+      can never diverge. XA/2PC over a broker is fragile/poorly supported; retries
+      and reordering don't guarantee atomicity.
+    ref: "concepts.md#synchronous-vs-asynchronous-inter-service-communication"
+
+  - id: microservices-monolith-api-design-095
+    difficulty: expert
+    tags: [cqrs, projection-rebuild, ordering]
+    question: |
+      A CQRS read-model projection was found to have a bug and produced a corrupted
+      view. Which combination of properties makes recovery and correctness robust?
+    options:
+      - "Deleting the read model and telling users to re-enter data"
+      - "Projectors that are idempotent and order-tolerant, plus the ability to replay the event log from the beginning to rebuild the view after fixing the bug"
+      - "Making the projector non-idempotent so each event applies exactly once by luck"
+      - "Reading directly from the source services' tables to bypass the projection"
+    answer: 1
+    explanation: |
+      Robust projections are idempotent and tolerant of out-of-order/duplicate
+      events, and the event log can be replayed to rebuild a view after a fix — a
+      key operational advantage of event-driven CQRS. Manual re-entry is absurd,
+      non-idempotent projectors corrupt under retries, and reading source tables
+      breaks encapsulation.
+    ref: "concepts.md#api-composition-versus-cqrs-read-models"
+
+  - id: microservices-monolith-api-design-096
+    difficulty: expert
+    tags: [cqrs, over-application, judgment]
+    question: |
+      A team applies full CQRS (separate write and read models with an event
+      pipeline) to every entity in a modest CRUD app "because microservices need
+      CQRS." What is the most accurate critique?
+    options:
+      - "CQRS is being over-applied: it is a targeted answer to specific cross-service or read-scaling problems and it adds eventual-consistency, projection, and rebuild complexity that a simple CRUD app doesn't need"
+      - "Correct; CQRS should always be applied everywhere reads and writes exist"
+      - "CQRS is only valid if you also adopt a service mesh"
+      - "The problem is they didn't also add two-phase commit"
+    answer: 0
+    explanation: |
+      CQRS is not "always split reads and writes." It solves specific problems
+      (cross-service queries, heavy read scaling) and introduces eventual
+      consistency plus projection/rebuild operations. Applying it blanket to simple
+      CRUD adds complexity for no benefit. It has nothing to do with meshes or 2PC.
+    ref: "concepts.md#api-composition-versus-cqrs-read-models"
+
+  - id: microservices-monolith-api-design-097
+    difficulty: expert
+    tags: [saga, isolation, countermeasures]
+    question: |
+      Sagas lack the isolation of ACID transactions, so another transaction can read
+      an intermediate saga state (e.g. an order that may still be rolled back). Which
+      is a recognized saga countermeasure for this lack of isolation?
+    options:
+      - "Two-phase commit layered on top of the saga"
+      - "Disabling all concurrent access to every service"
+      - "Ignoring it, since sagas are fully isolated"
+      - "Semantic locks / a pending status flag on affected records so other operations know the value is provisional until the saga completes or compensates"
+    answer: 3
+    explanation: |
+      Because sagas expose intermediate states (no isolation), countermeasures like
+      semantic locks (marking a record PENDING/provisional), commutative updates, and
+      re-reads are used so readers treat in-flight data appropriately. 2PC defeats the
+      purpose; globally serializing access kills throughput; and sagas are explicitly
+      NOT isolated.
+    ref: "concepts.md#synchronous-vs-asynchronous-inter-service-communication"
+
+  - id: microservices-monolith-api-design-098
+    difficulty: expert
+    tags: [saga, compensation, non-compensatable]
+    question: |
+      In a saga, the step "send confirmation email to customer" cannot be undone once
+      executed. How should saga design handle such non-compensatable actions?
+    options:
+      - "Place them in a compensatable step and undo them anyway"
+      - "Order the saga so all compensatable and retriable steps come first, and put non-compensatable ('pivot'/post-pivot) steps last — after the point where success is assured — so nothing that can't be undone runs before commitment"
+      - "Refuse to include such steps in any saga"
+      - "Wrap the email send in a two-phase commit"
+    answer: 1
+    explanation: |
+      Saga design distinguishes compensatable, pivot, and retriable steps: you
+      sequence so that non-compensatable actions only occur after the pivot (once the
+      outcome is committed and won't be rolled back). Trying to "undo" an email is
+      impossible, banning such steps is impractical, and 2PC can't span an email
+      provider.
+    ref: "concepts.md#synchronous-vs-asynchronous-inter-service-communication"
+
+  - id: microservices-monolith-api-design-099
+    difficulty: expert
+    tags: [operational-tax, testing, contract]
+    question: |
+      As a system grows to dozens of services, broad end-to-end integration tests
+      become slow and flaky. What testing strategy shift best preserves confidence
+      while restoring speed?
+    options:
+      - "Delete integration tests and rely on manual QA"
+      - "Run the entire fleet for every unit test"
+      - "Only test in production with no pre-release checks"
+      - "Shift toward consumer-driven contract tests plus per-service tests, reserving a thin layer of end-to-end tests for critical paths, so most compatibility is verified without spinning up the whole fleet"
+    answer: 3
+    explanation: |
+      The scalable pattern is a test pyramid weighted toward fast per-service tests
+      and consumer-driven contract tests (which verify integration compatibility
+      without a full environment), keeping only a thin critical-path E2E layer.
+      Deleting tests or relying solely on manual QA / prod testing sacrifices
+      confidence; running the fleet per unit test is infeasible.
+    ref: "concepts.md#the-operational-tax-of-microservices"
+
+  - id: microservices-monolith-api-design-100
+    difficulty: expert
+    tags: [operational-tax, observability, metrics]
+    question: |
+      During an incident, on-call asks "which of 40 services is causing the
+      user-facing p99 latency spike?" Which observability capability answers this
+      most directly?
+    options:
+      - "Distributed traces (correlated by trace id) that break down end-to-end latency per span/service, backed by per-service RED metrics"
+      - "Per-host CPU graphs for one server"
+      - "Application logs from a single service grepped by hand"
+      - "The number of open TCP connections on the load balancer"
+    answer: 0
+    explanation: |
+      Distributed tracing attributes end-to-end latency to specific spans/services,
+      pinpointing the culprit hop; per-service RED (Rate/Errors/Duration) metrics
+      corroborate it. Single-host CPU, one service's logs, or LB connection counts
+      can't localize a latency spike across a 40-service call graph.
+    ref: "concepts.md#the-operational-tax-of-microservices"
+
+  - id: microservices-monolith-api-design-101
+    difficulty: expert
+    tags: [grpc, load-balancing, http2, gotcha]
+    question: |
+      A team puts gRPC services behind a standard L4 (connection-level) load balancer
+      and finds traffic piles onto a few backend pods. Why, and what is the fix?
+    options:
+      - "gRPC is single-threaded; add more threads"
+      - "gRPC multiplexes many requests over long-lived HTTP/2 connections, so connection-level (L4) balancing pins all of a client's requests to one backend; use L7/request-level balancing (e.g. via a proxy/mesh) or client-side load balancing"
+      - "Protobuf payloads are too large; switch to JSON"
+      - "HTTP/2 is disabled; enable HTTP/1.1"
+    answer: 1
+    explanation: |
+      gRPC keeps persistent HTTP/2 connections and multiplexes streams over them, so
+      an L4 balancer that distributes connections (not requests) sends all of a
+      client's calls to whichever pod it connected to — causing imbalance. The fix is
+      L7/request-aware balancing (proxy or service mesh) or client-side LB. It's not
+      about threads, payload size, or disabling HTTP/2 (which gRPC requires).
+    ref: "concepts.md#api-styles-rest-graphql-and-grpc"
+
+  - id: microservices-monolith-api-design-102
+    difficulty: expert
+    tags: [bff, coupling, judgment]
+    question: |
+      A company runs a Web BFF, an iOS BFF, and an Android BFF. Over time each BFF
+      re-implements the same auth, common aggregation, and error handling, and fixes
+      must be applied three times. What is the best-reasoned remediation?
+    options:
+      - "Delete two BFFs and force all clients through one generic API, re-creating the coordination bottleneck"
+      - "Keep per-client BFFs for client-specific shaping but extract the shared cross-cutting concerns (auth, common aggregation) into a shared library or a layer behind the BFFs, so duplication is removed without losing client tailoring"
+      - "Move all business logic into the BFFs to make them self-contained"
+      - "Merge the three mobile/web teams into one team"
+    answer: 1
+    explanation: |
+      The BFF pattern's known cost is duplicated cross-cutting logic across N
+      gateways. The remedy is to factor the shared concerns into a common library or
+      a layer behind the BFFs while keeping each BFF's client-specific shaping.
+      Collapsing to one generic API brings back the bottleneck BFF solved; piling
+      business logic into BFFs worsens duplication; reorging teams doesn't fix the code.
+    ref: "concepts.md#api-gateway-and-backend-for-frontend"
+
+  - id: microservices-monolith-api-design-103
+    difficulty: expert
+    tags: [pagination, cursor, consistency, gotcha]
+    question: |
+      A keyset-paginated feed sorts by "score DESC" where score can change between
+      page requests. Users report seeing the same item twice or missing items across
+      pages. What is the root cause and the fix?
+    options:
+      - "Offset pagination would have no such problem; switch to offset"
+      - "The page size is too large; reduce it to 1"
+      - "The sort key is mutable and non-unique, so the cursor position becomes ambiguous when scores change; use a stable, unique, immutable tiebreaker (e.g. (score, id) with a snapshot or immutable sort key) so the cursor is well-defined"
+      - "Cursors cannot be used with DESC ordering"
+    answer: 2
+    explanation: |
+      Keyset pagination requires a stable, unique ordering; a mutable/non-unique sort
+      key (score) lets rows move across the cursor boundary between requests, causing
+      duplicates/skips. The fix is a unique immutable tiebreaker and/or snapshotting
+      the sort value. Offset pagination is actually worse under writes; page size and
+      DESC are not the cause.
+    ref: "concepts.md#pagination-filtering-and-idempotency-keys"
+
+  - id: microservices-monolith-api-design-104
+    difficulty: expert
+    tags: [idempotency, distributed, downstream-propagation]
+    question: |
+      A payment orchestrator receives a retried request (same idempotency key) and
+      correctly returns the stored result — but during the FIRST attempt it had
+      called a downstream "ledger" service that is now called again by an internal
+      retry. How do you prevent the ledger from double-posting?
+    options:
+      - "Rely on the orchestrator's key alone; downstream services never need idempotency"
+      - "Make the ledger call fire-and-forget so duplicates don't matter"
+      - "Add a global distributed lock around the entire request for its lifetime"
+      - "Propagate a derived/deterministic idempotency key (or use a natural key) to the ledger call so the ledger also recognizes and dedupes the retried operation"
+    answer: 3
+    explanation: |
+      Idempotency must propagate: the orchestrator should pass a deterministic
+      idempotency (or natural) key to the ledger so the ledger dedupes retried inner
+      calls too. The outer key alone doesn't protect inner effects on retry.
+      Fire-and-forget loses correctness for money; a global lock for the whole request
+      lifetime is a scalability and availability hazard.
+    ref: "concepts.md#pagination-filtering-and-idempotency-keys"
+
+  - id: microservices-monolith-api-design-105
+    difficulty: expert
+    tags: [service-mesh, retries, amplification, gotcha]
+    question: |
+      A service mesh is configured with automatic retries (3 attempts) at every hop
+      of a 4-deep call chain. Under partial overload, the system collapses far faster
+      than expected. Why?
+    options:
+      - "Retries at each layer are free and cannot cause harm"
+      - "The mesh disabled TLS, causing the collapse"
+      - "Retries multiply across layers (retry amplification / storm): 3 attempts per hop over 4 hops can fan out to ~3^4 requests, hammering an already-struggling dependency; use retry budgets, retry only at one layer, and add jitter/circuit breaking"
+      - "The problem is protobuf serialization overhead"
+    answer: 2
+    explanation: |
+      Naive retries at every layer compound multiplicatively down the chain (retry
+      amplification), turning a small failure into a self-inflicted DDoS on the
+      recovering service. Mitigations: retry budgets, retrying at a single layer,
+      backoff+jitter, and circuit breakers. Retries are not free; TLS and protobuf
+      are irrelevant to this failure.
+    ref: "concepts.md#service-mesh-and-the-sidecar-pattern"
+
+  - id: microservices-monolith-api-design-106
+    difficulty: expert
+    tags: [comprehensive, decision, extraction]
+    question: |
+      A healthy modular monolith has one module ("search indexing") that needs 10x
+      the CPU/memory of the rest, scales on a different curve, and is owned by a
+      separate team. Cross-module calls to it are already asynchronous via an
+      internal queue. What is the most surgical extraction, and why is it low-risk here?
+    options:
+      - "Do not extract; vertical scaling of the whole monolith is always sufficient"
+      - "Split the entire monolith into per-table services to be consistent"
+      - "Move search indexing logic into the API gateway"
+      - "Extract the search-indexing module into its own service; risk is low because the boundary is already clean and the interaction is already asynchronous (event/queue), so it's mostly a deployment/data-ownership change, not a coupling redesign"
+    answer: 3
+    explanation: |
+      The ideal extraction target has a distinct scaling profile, separate ownership,
+      and an already-clean, already-async boundary — so promoting it to a service is
+      largely an operational/data-ownership move rather than untangling coupling,
+      making it low-risk. Scaling the whole monolith wastes resources; per-table
+      splitting is a distributed monolith; the gateway is no place for domain logic.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: microservices-monolith-api-design-107
+    difficulty: expert
+    tags: [comprehensive, distributed-monolith, diagnosis]
+    question: |
+      An "microservices" platform shows: services can only be released together in a
+      weekly train, they all import a shared "core-entities" DB library that maps the
+      same tables, and adding a field means changing five services. Which single
+      remediation attacks the ROOT cause rather than a symptom?
+    options:
+      - "Add a service mesh to speed up inter-service calls"
+      - "Break the shared-database dependency: give each service its own store and integrate via events/APIs, which is what actually enables independent deploys"
+      - "Add more replicas of each service"
+      - "Introduce distributed tracing so the coupling is easier to observe"
+    answer: 1
+    explanation: |
+      The shared database (via a common entity library) is the root of the lockstep
+      coupling — it's a distributed monolith. Only decoupling the data (private
+      stores + event/API integration) enables independent deploys. A mesh, more
+      replicas, and tracing may help operability but leave the fundamental coupling
+      intact.
+    ref: "concepts.md#when-not-to-use-microservices"
+
+  - id: microservices-monolith-api-design-108
+    difficulty: expert
+    tags: [versioning, schema-registry, events]
+    question: |
+      For an event stream on Kafka consumed by many independent services, which
+      compatibility mechanism most directly prevents a producer from emitting an
+      event shape that breaks existing consumers?
+    options:
+      - "URI path versioning on the producer's REST API"
+      - "Consumer-driven Pact contracts on the producer's synchronous endpoints"
+      - "A schema registry enforcing compatibility rules (e.g. BACKWARD) on the event schema, rejecting producer schema changes that would break current consumers"
+      - "Increasing the Kafka partition count"
+    answer: 2
+    explanation: |
+      Event streams are governed by a schema registry (Avro/Protobuf/JSON-Schema)
+      that enforces compatibility (BACKWARD/FORWARD/FULL) and rejects incompatible
+      producer schemas, protecting consumers. URI versioning and Pact target
+      request/response APIs, not the message schema on the stream; partition count is
+      unrelated to compatibility.
+    ref: "concepts.md#api-versioning-and-evolution"
+
+  - id: microservices-monolith-api-design-109
+    difficulty: expert
+    tags: [comprehensive, sync-async, degradation, decision]
+    question: |
+      A checkout call synchronously invokes a "loyalty points" service to add points.
+      Loyalty has an outage, and checkouts start failing even though points are
+      non-essential to completing a purchase. What is the best redesign?
+    options:
+      - "Keep the synchronous call but add infinite retries so it eventually succeeds"
+      - "Move the loyalty logic into the checkout service's database transaction"
+      - "Fail checkout whenever loyalty is down to keep points consistent"
+      - "Make loyalty a non-blocking, asynchronous side effect (fire an event / enqueue) or wrap the sync call in a circuit breaker with a graceful fallback, so a loyalty outage never blocks checkout"
+    answer: 3
+    explanation: |
+      A non-essential dependency should not be on the critical synchronous path:
+      publish an event / enqueue the points award asynchronously, or protect the sync
+      call with a circuit breaker and a fallback so its outage degrades gracefully.
+      Infinite retries block checkout; folding loyalty into checkout's transaction
+      couples them harder; failing checkout for optional points harms the core flow.
+    ref: "concepts.md#synchronous-vs-asynchronous-inter-service-communication"

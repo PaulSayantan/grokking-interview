@@ -1,0 +1,1305 @@
+topic: 'Failure Theory: Metastable Failures, Retry Storms and Load Shedding'
+domain: system-design
+topic_slug: failure-theory-advanced
+version: 1
+questions:
+  - id: failure-theory-advanced-001
+    difficulty: beginner
+    tags: [taxonomy, crash, byzantine]
+    question: |
+      Order the classic failure models from easiest to hardest to tolerate.
+    options:
+      - Crash ⊂ omission ⊂ timing ⊂ Byzantine
+      - Byzantine ⊂ timing ⊂ omission ⊂ crash
+      - Omission ⊂ crash ⊂ Byzantine ⊂ timing
+      - Timing ⊂ crash ⊂ omission ⊂ Byzantine
+    answer: 0
+    explanation: |
+      The models nest crash ⊂ omission ⊂ timing ⊂ Byzantine: a protocol that tolerates a harder
+      (more arbitrary) model tolerates all weaker ones. Byzantine (arbitrary/lying) is the hardest and
+      most expensive to mask; crash (fail-stop) is the easiest.
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-002
+    difficulty: intermediate
+    tags: [taxonomy, gray-failure, health-check]
+    question: |
+      Why do heartbeat / self-reported health checks routinely miss gray failures?
+    options:
+      - Gray failures only occur in the network, never on hosts, so host checks are irrelevant
+      - 'Because of differential observability: the failing node can still answer its own health probe while its clients see high latency/errors, so it reports ''healthy'''
+      - Because heartbeats are encrypted and cannot carry latency data
+      - Because gray failures are always caught by CPU alarms before a heartbeat fires
+    answer: 1
+    explanation: |
+      Gray failure (Huang et al.) is defined by differential observability: the component's own
+      view disagrees with its clients' view. A node at 200 ms I/O or 99% CPU still answers a ping, so
+      fail-stop detection sees "healthy" while callers see a brownout. The fix is client-side/outlier
+      detection based on observed latency and error rate.
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-003
+    difficulty: advanced
+    tags: [taxonomy, gray-failure, retry-storm]
+    question: |
+      In a load-balanced pool, why is a single gray (slow-but-alive) node often more dangerous than
+      a fully crashed node?
+    options:
+      - A crashed node keeps holding client connections open, while a gray node releases them
+      - A gray node consumes more disk than a crashed node
+      - A gray node stays in rotation, absorbs requests, times them out, and triggers retries — turning one slow host into fleet-wide retry amplification, whereas a crashed node is ejected
+      - There is no difference; both are removed identically by TCP health checks
+    answer: 2
+    explanation: |
+      A crashed node fails its port/heartbeat check and is removed, so traffic reroutes cleanly. A gray
+      node passes the check, keeps receiving requests, makes them slow/fail, and their retries multiply
+      load across the fleet. This is why latency/error-based outlier ejection matters more than liveness
+      checks.
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-004
+    difficulty: advanced
+    tags: [taxonomy, byzantine, consensus, quorum]
+    question: |
+      A trusted-datacenter service needs to tolerate f simultaneous node failures using crash-fault-
+      tolerant consensus (Raft/Paxos). How many replicas are needed, and how does that compare to
+      Byzantine fault tolerance?
+    options:
+      - f+1 for crash; 2f+1 for Byzantine
+      - 3f+1 for both
+      - 2f for crash; 2f+1 for Byzantine
+      - 2f+1 for crash; 3f+1 for Byzantine
+    answer: 3
+    explanation: |
+      Crash-tolerant consensus needs a majority quorum: 2f+1 replicas to tolerate f crash failures.
+      BFT (arbitrary/lying nodes) needs 3f+1 and extra message rounds because it must out-vote nodes that
+      actively lie differently to different peers. Most datacenter systems assume crash+omission+timing
+      and use checksums/TLS to reduce (not fully handle) Byzantine risk.
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-005
+    difficulty: advanced
+    tags: [taxonomy, partial-failure, idempotency]
+    question: |
+      A client's RPC times out. What can it safely conclude about whether the server processed the
+      request, and what does that imply?
+    options:
+      - The request definitely did not arrive, so it is always safe to retry blindly
+      - The request definitely was processed, so retrying would duplicate it and must be avoided
+      - Nothing definitive — the request may not have arrived, may have been processed but the reply lost, or may still be running; this ambiguity is why retries require idempotency/idempotency keys
+      - The server crashed, so the client should fail over to a Byzantine-tolerant protocol
+    answer: 2
+    explanation: |
+      A timeout is fundamentally ambiguous (partial failure, Waldo et al.): request lost, processed-but-
+      reply-lost, or still in flight. Because you cannot distinguish these, at-least-once delivery plus
+      idempotency is the only safe basis for retries; this is also why true exactly-once delivery is
+      impossible (you get effectively-once via idempotency).
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-006
+    difficulty: intermediate
+    tags: [taxonomy, byzantine, cost]
+    question: |
+      Why do most internal datacenter services deliberately NOT implement full Byzantine fault
+      tolerance?
+    options:
+      - Inside a trusted environment the cost (3f+1 replicas, extra rounds, complexity) rarely justifies the benefit; checksums/TLS reduce arbitrary-corruption risk cheaply, so crash+omission models suffice
+      - BFT is illegal outside of financial institutions
+      - BFT cannot tolerate crash failures, only arbitrary ones
+      - BFT requires special hardware that datacenters do not have
+    answer: 0
+    explanation: |
+      BFT tolerates arbitrary/malicious behavior but demands 3f+1 replicas and more message rounds. In a
+      trusted datacenter with no adversary, that overhead is usually not worth it; engineers assume
+      crash+omission+timing and use checksums/TLS to catch the rare corruption. Full BFT is reserved for
+      blockchains and a few critical control planes.
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-007
+    difficulty: expert
+    tags: [taxonomy, gray-failure, detection]
+    question: |
+      You must detect gray failures that self-health-checks miss. Which detection strategy is most
+      aligned with the nature of gray failure?
+    options:
+      - Increase the frequency of the node's own liveness heartbeat
+      - Add a second self-health endpoint on the failing node
+      - Rely on CPU utilization alarms alone, which always precede gray failure
+      - Use client-observed signals — per-upstream latency and error-rate outlier detection — and eject the node from the caller's perspective, since gray failure is defined by the caller/component view gap
+    answer: 3
+    explanation: |
+      Gray failure is differential observability: the node's own view says healthy. Only the clients'
+      view exposes it, so detection must be client-side/outlier-based (e.g., Envoy outlier ejection on
+      observed latency/errors). Faster self-heartbeats or a second self-endpoint still reflect the node's
+      own (wrong) view; CPU alarms don't fire for slow-disk or packet-loss gray failures.
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-008
+    difficulty: expert
+    tags: [metastable, definition, feedback-loop]
+    question: |
+      What most precisely distinguishes a metastable failure from an ordinary overload?
+    options:
+      - Metastable failures only happen on under-provisioned systems
+      - The bad state persists via a self-reinforcing feedback loop even after the triggering event is gone, so removing the trigger does not recover the system
+      - Metastable failures always resolve themselves within seconds
+      - Metastable failures are caused exclusively by hardware faults
+    answer: 1
+    explanation: |
+      Bronson et al.'s defining property: a trigger pushes the system past a barrier into a bad
+      (metastable) state, and a *sustaining effect* (positive feedback, e.g. retries) holds it there
+      even after the trigger disappears. Ordinary overload recovers when load drops; a metastable
+      failure needs external intervention (shed load, drain, restart) to escape.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-009
+    difficulty: expert
+    tags: [metastable, capacity, headroom]
+    question: |
+      Why can a MORE generously provisioned system be MORE susceptible to metastable failure?
+    options:
+      - Because amplification (e.g. retries) is multiplicative on baseline load, so more normal traffic means a larger absolute surge on the trigger; and headroom hides how close the system runs to an invisible cliff
+      - Extra capacity always eliminates feedback loops
+      - Larger fleets never experience correlated failures
+      - More servers reduce the sustaining threshold below the trigger threshold automatically
+    answer: 0
+    explanation: |
+      Bronson's insight: metastability arises when sustaining load < trigger load. Headroom lets the
+      system sit happily near an unseen cliff, and because retry/queue amplification multiplies baseline
+      traffic, higher normal load produces a bigger absolute amplified surge when the trigger hits.
+      Capacity is prevention, not immunity.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-010
+    difficulty: advanced
+    tags: [metastable, retry-storm, remediation]
+    question: |
+      A service is pinned at 100% CPU with near-zero goodput. Restarting clients and adding hosts have
+      not helped. What is the MOST likely dynamic and the correct first move?
+    options:
+      - A CPU bug; roll back the last deploy and wait
+      - A metastable retry storm; adding capacity feeds the amplifier, so shed load below the sustaining threshold and curtail retries (open breakers / drain retry budget) to break the feedback loop
+      - A DNS failure; flush DNS caches fleet-wide
+      - A disk-full condition; expand volumes and retry
+    answer: 1
+    explanation: |
+      Pinned CPU + near-zero goodput + no help from capacity is the signature of a metastable failure
+      sustained by amplification (usually retries). The loop is self-sustaining, so you must reduce work:
+      shed load below the *sustaining* threshold (not just the trigger) and stop the amplification. Adding
+      hosts or telling clients to retry pours fuel on the fire.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-011
+    difficulty: advanced
+    tags: [metastable, cache, thundering-herd]
+    question: |
+      After a cache cluster restart, latency stays catastrophic long after the restart completes. Which
+      description best captures the sustaining effect?
+    options:
+      - The cache hardware is permanently damaged by the restart
+      - The restart deleted the database schema
+      - All requests miss and stampede the database; the DB is now too slow to serve cache fills, so the cache stays empty and misses continue — an empty-cache feedback loop, not the restart itself
+      - TLS handshakes are the bottleneck and never complete
+    answer: 2
+    explanation: |
+      This is cache-empty thundering-herd metastability: the trigger (restart) is gone, but the empty
+      cache is sustained because the overwhelmed DB can't complete the fills, so misses persist. Breaking
+      it requires reducing DB pressure (request coalescing/single-flight fills, shedding, serving stale)
+      — not waiting or re-restarting.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-012
+    difficulty: expert
+    tags: [metastable, remediation, threshold]
+    question: |
+      When breaking a metastable failure by shedding load, why is it critical to get BELOW the sustaining
+      threshold rather than just below the original trigger level?
+    options:
+      - Because the trigger threshold is always higher than the sustaining threshold
+      - Because shedding below the trigger is illegal per SLA
+      - It is not critical; any reduction in load recovers the system immediately
+      - Because the feedback loop keeps the system in the bad state at any load above the sustaining threshold; only dropping beneath it lets the queue drain and goodput recover
+    answer: 3
+    explanation: |
+      The defining property is sustaining load < trigger load. Bringing load back to just under the
+      trigger still leaves it above the sustaining threshold, so the loop persists. You must push under
+      the sustaining threshold so work-in < capacity and the backlog drains — then you can ramp traffic
+      back gradually.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-013
+    difficulty: intermediate
+    tags: [metastable, gc, feedback-loop]
+    question: |
+      Which sequence describes a GC death-spiral metastable failure?
+    options:
+      - Low load → GC runs rarely → latency drops → load falls further
+      - GC is disabled → memory leaks → OOM → restart → normal
+      - Load bump → more allocation → more frequent GC → GC steals CPU → requests slow → queue grows → more live objects retained → even more GC
+      - Cache fills → GC pauses stop → throughput doubles
+    answer: 2
+    explanation: |
+      A GC spiral is a positive feedback loop: rising load increases allocation and GC frequency, GC
+      steals CPU from request processing, latency rises, queues deepen, more objects stay live longer,
+      which increases heap pressure and GC further. Heap pressure sustains itself even after load
+      normalizes.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-014
+    difficulty: advanced
+    tags: [retry-amplification, math, layers]
+    question: |
+      An edge service, a middle service, and a data service each retry up to 3 attempts on failure.
+      During a partial datastore failure, what is the worst-case load multiplication at the datastore?
+    options:
+      - 27× (3 × 3 × 3)
+      - 3× (3 attempts)
+      - 9× (3 + 3 + 3)
+      - 6× (3 + 3)
+    answer: 0
+    explanation: |
+      Independent retries at each of L layers multiply: r^L = 3^3 = 27×. Each layer re-issues the failing
+      call up to 3 times, and those multiply down the stack. This is why the rule is to retry at ONE
+      layer only and propagate a deadline / do-not-retry signal downstream.
+    ref: "concepts.md#retry-amplification-math-and-retry-budgets"
+  - id: failure-theory-advanced-015
+    difficulty: advanced
+    tags: [retry-amplification, retry-budget, token-bucket]
+    question: |
+      Why does a token-bucket retry budget bound amplification during a broad outage where a fixed
+      "retry N times per request" policy does not?
+    options:
+      - The token bucket retries faster, clearing the outage sooner
+      - The token bucket disables timeouts, so no retries are needed
+      - Fixed-N policies never retry, so there is nothing to bound
+      - The budget caps retries as a fraction of total requests (e.g. 10%); under broad failure the bucket empties and retries stop, so amplification is bounded at ~1 + budget instead of N×
+    answer: 3
+    explanation: |
+      A per-request "N attempts" policy still yields up to N× load when *all* requests fail. A
+      token-bucket budget limits retries to a fraction of successful traffic; when failures are broad the
+      bucket drains and retries self-disable, capping amplification at roughly 1 + budget (e.g. 1.1×)
+      regardless of failure breadth. This is the gRPC/Finagle/Envoy approach.
+    ref: "concepts.md#retry-amplification-math-and-retry-budgets"
+  - id: failure-theory-advanced-016
+    difficulty: intermediate
+    tags: [retry-amplification, single-layer]
+    question: |
+      To minimize retry amplification in a multi-layer call chain, at which layer should retries
+      generally be performed?
+    options:
+      - At every layer, so each can independently recover
+      - At exactly one layer — typically the one nearest the client that can still meet the deadline — with lower layers passing failures through and not independently retrying
+      - Only at the deepest data layer, never higher
+      - Retries should be disabled entirely at all layers
+    answer: 1
+    explanation: |
+      Retrying at multiple layers multiplies load (r^L). The standard rule is to retry at one layer only
+      (usually the one closest to the client that still has deadline budget) and have lower layers fail
+      fast, avoiding the multiplicative blowup while still recovering from transient faults.
+    ref: "concepts.md#retry-amplification-math-and-retry-budgets"
+  - id: failure-theory-advanced-017
+    difficulty: advanced
+    tags: [retry-amplification, when-to-retry, correlation]
+    question: |
+      Retries are appropriate for which class of failure, and harmful for which?
+    options:
+      - Appropriate for transient, independent, uncorrelated failures; harmful for correlated/overload failures where retrying deepens the overload
+      - Appropriate for correlated overload failures; harmful for transient packet loss
+      - Appropriate for all failures equally as long as backoff is used
+      - Appropriate only for non-idempotent operations
+    answer: 0
+    explanation: |
+      Retries help when the failure is transient and independent (a dropped packet, one bad host) — a
+      second try is likely to hit a healthy path. They hurt when the failure is correlated/overload,
+      because the dependency is failing *because* it's overloaded, and retrying adds load. Also retries
+      require idempotency and must skip non-retryable errors.
+    ref: "concepts.md#retry-amplification-math-and-retry-budgets"
+  - id: failure-theory-advanced-018
+    difficulty: intermediate
+    tags: [retry-amplification, non-retryable]
+    question: |
+      Why should a client NOT retry a 400/404/auth-failure response?
+    options:
+      - Because those responses are always encrypted
+      - Because such errors are deterministic and will never succeed on retry — retrying only burns retry budget and adds useless load
+      - Because retrying a 404 causes a Byzantine fault
+      - Because 4xx responses are always transient
+    answer: 1
+    explanation: |
+      Client errors (bad request, not found, unauthorized) are deterministic: the same request will fail
+      identically. Retrying cannot succeed; it just consumes the retry budget and adds load that should be
+      reserved for genuinely transient failures. Only retry retryable (typically transient 5xx/timeout)
+      errors.
+    ref: "concepts.md#retry-amplification-math-and-retry-budgets"
+  - id: failure-theory-advanced-019
+    difficulty: expert
+    tags: [retry-amplification, budget, backoff]
+    question: |
+      A team already uses jittered exponential backoff on retries. Why is that alone insufficient to
+      prevent a retry storm during a broad dependency outage?
+    options:
+      - Backoff removes the need for timeouts, so calls hang
+      - Jitter increases the number of retries per request
+      - Backoff spreads retries in TIME but does not cap their total VOLUME; if nearly all requests fail, the aggregate retry load still overwhelms the dependency — you also need a budget or breaker
+      - Backoff only works for idempotent operations, and most are not idempotent
+    answer: 2
+    explanation: |
+      Backoff+jitter de-synchronize retries across time so they don't arrive as one spike, but they do
+      not limit how many retries occur. Under a broad outage where most requests fail, the summed retry
+      volume still amplifies load. Capping volume requires a token-bucket retry budget or a circuit
+      breaker; backoff and budget are complementary, not substitutes.
+    ref: "concepts.md#retry-amplification-math-and-retry-budgets"
+  - id: failure-theory-advanced-020
+    difficulty: intermediate
+    tags: [backoff, jitter, thundering-herd]
+    question: |
+      Why is jitter added to exponential backoff?
+    options:
+      - To make retry timing deterministic for easier debugging
+      - To increase the maximum number of retries
+      - To encrypt the retry payload
+      - To de-correlate clients in time so they don't all retry at the same instants and re-form synchronized load spikes (thundering herd)
+    answer: 3
+    explanation: |
+      Pure exponential backoff still has all failed clients waiting the same base, 2×base, 4×base — they
+      retry in synchronized waves. Jitter randomizes each client's delay so retries spread out and don't
+      re-cluster into spikes. It is not about determinism, retry count, or encryption.
+    ref: "concepts.md#exponential-backoff-and-jitter"
+  - id: failure-theory-advanced-021
+    difficulty: advanced
+    tags: [backoff, jitter, full-jitter]
+    question: |
+      In Marc Brooker's AWS analysis, how is "full jitter" computed, and what was its notable result?
+    options:
+      - sleep = base × 2^attempt (no randomness); it minimized latency variance
+      - sleep = min(cap, base × 2^attempt) + fixed 100 ms; it eliminated all retries
+      - sleep = random(0, min(cap, base × 2^attempt)); it produced the fewest total competing calls in the simulations
+      - sleep = random(cap, 2×cap); it guaranteed a minimum spacing
+    answer: 2
+    explanation: |
+      Full jitter picks a uniformly random wait between 0 and the current exponential ceiling
+      min(cap, base·2^attempt). In Brooker's simulations it minimized the total number of competing calls
+      and completion time by fully de-synchronizing clients — showing that adding randomness reduces total
+      work rather than increasing it.
+    ref: "concepts.md#exponential-backoff-and-jitter"
+  - id: failure-theory-advanced-022
+    difficulty: expert
+    tags: [backoff, jitter, decorrelated]
+    question: |
+      When would you prefer DECORRELATED jitter (sleep = min(cap, random(base, prev_sleep × 3))) over
+      full jitter?
+    options:
+      - When you want backoff to climb quickly and stay well-spread without maintaining a per-attempt counter, deriving each delay from the previous sleep instead of an attempt number
+      - When you want retries to be perfectly synchronized
+      - When you must guarantee zero randomness
+      - When the dependency requires exactly-once delivery
+    answer: 0
+    explanation: |
+      Decorrelated jitter grows each delay from the previous sleep (random between base and 3× last),
+      giving strong spread and fast climb without tracking an attempt count. It's handy when you don't
+      want to thread an attempt counter through the code and still want increasing, well-spread backoff.
+      Both full and decorrelated jitter perform well; the choice is about state/behavior, not correctness.
+    ref: "concepts.md#exponential-backoff-and-jitter"
+  - id: failure-theory-advanced-023
+    difficulty: advanced
+    tags: [backoff, deadline, tail-latency]
+    question: |
+      What is a key downside of exponential backoff for a synchronous, user-facing request, and how is
+      it bounded?
+    options:
+      - It reduces success probability; bound it by disabling retries
+      - It corrupts the payload; bound it with checksums
+      - It causes Byzantine faults; bound it with 3f+1 replicas
+      - It increases the retried request's tail latency because you deliberately wait; it must be bounded by the request deadline so you never back off past the point where a response can still be delivered
+    answer: 3
+    explanation: |
+      Backoff intentionally waits, adding latency to the retried request — fine for background/async work
+      but harmful when a user is blocked and a deadline is ticking. The fix is to clamp backoff to the
+      remaining deadline: never sleep past the point where success could still arrive in time.
+    ref: "concepts.md#exponential-backoff-and-jitter"
+  - id: failure-theory-advanced-024
+    difficulty: beginner
+    tags: [backoff, no-jitter]
+    question: |
+      What happens if 10,000 clients use pure exponential backoff with NO jitter after failing
+      simultaneously?
+    options:
+      - They spread out perfectly and never collide
+      - They all wait the same intervals and retry in synchronized waves, preserving the load spikes backoff was meant to smooth
+      - They stop retrying entirely
+      - Each client picks a random delay automatically
+    answer: 1
+    explanation: |
+      Without jitter every client waits identical base, 2×base, 4×base intervals, so they retry in lockstep
+      — the average rate drops but the synchronized spikes remain. Jitter is what actually de-synchronizes
+      them.
+    ref: "concepts.md#exponential-backoff-and-jitter"
+  - id: failure-theory-advanced-025
+    difficulty: intermediate
+    tags: [circuit-breaker, states]
+    question: |
+      In a circuit breaker, what happens in the HALF-OPEN state?
+    options:
+      - A limited number of trial requests are allowed through; success closes the breaker, any failure re-opens it (often extending the cool-down)
+      - All traffic flows normally with failures uncounted
+      - The breaker rejects every request permanently
+      - The breaker duplicates each request to two dependencies
+    answer: 0
+    explanation: |
+      HALF-OPEN is the probe state entered after the OPEN cool-down: a limited number of trial requests
+      test whether the dependency recovered. If they succeed the breaker closes; if any fail it re-opens.
+      Letting the full herd through in half-open would recreate the storm, so probes must be limited.
+    ref: "concepts.md#circuit-breakers"
+  - id: failure-theory-advanced-026
+    difficulty: advanced
+    tags: [circuit-breaker, granularity]
+    question: |
+      Why is a single GLOBAL circuit breaker for an entire service usually a poor design?
+    options:
+      - Global breakers cannot enter the half-open state
+      - One bad shard/endpoint/instance can trip the global breaker and cut off traffic to the healthy ones; per-dependency or per-instance breakers isolate the failure
+      - Global breakers require Byzantine consensus to update
+      - Global breakers always fail closed and never open
+    answer: 1
+    explanation: |
+      A global breaker couples unrelated failures: a single failing dependency, shard, or gray node trips
+      it and blocks the healthy paths too. Per-dependency (Hystrix commands) or per-upstream/per-instance
+      (Envoy outlier ejection) breakers eject only the failing part while the rest keeps serving.
+    ref: "concepts.md#circuit-breakers"
+  - id: failure-theory-advanced-027
+    difficulty: advanced
+    tags: [circuit-breaker, threshold, rate]
+    question: |
+      Why should a circuit breaker trip on a failure RATE with a minimum request volume rather than a
+      raw failure COUNT?
+    options:
+      - Raw counts are easier to compute, so rates are only for cosmetics
+      - Rates cannot be computed without Byzantine consensus
+      - A raw count like '5 failures' behaves very differently at 10 rps vs 10,000 rps; a rate with a min-volume guard is load-independent and won't flap on a single error at low traffic
+      - Counts trip too slowly under high load
+    answer: 2
+    explanation: |
+      A fixed count is load-sensitive: 5 failures is catastrophic at 10 rps but negligible at 10,000 rps.
+      Tripping on a failure percentage over a window makes the threshold load-independent, and a
+      minimum-request-volume guard prevents a low-traffic breaker from flapping on one stray error.
+    ref: "concepts.md#circuit-breakers"
+  - id: failure-theory-advanced-028
+    difficulty: expert
+    tags: [circuit-breaker, concurrency-limiter, tradeoff]
+    question: |
+      A dependency degrades GRACEFULLY under load (rising latency, partial success) rather than being
+      cleanly up/down. Why might an adaptive concurrency limiter be a better fit than a circuit breaker?
+    options:
+      - Circuit breakers cannot be configured per endpoint
+      - Concurrency limiters require no configuration and never fail
+      - Circuit breakers add Byzantine tolerance that is unnecessary here
+      - A breaker is binary (fully on/off) and will either over- or under-shoot on a gracefully degrading dependency, whereas an adaptive limiter continuously finds the safe concurrency and keeps serving what the dependency can handle
+    answer: 3
+    explanation: |
+      A breaker is a coarse binary tool ideal for binary up/down dependencies. For a dependency that
+      degrades continuously, a breaker either trips too early (throwing away serviceable capacity) or too
+      late; an adaptive concurrency limiter (Netflix concurrency-limits, gradient/TCP-Vegas style)
+      continuously converges on the safe in-flight limit and keeps serving at that rate.
+    ref: "concepts.md#circuit-breakers"
+  - id: failure-theory-advanced-029
+    difficulty: advanced
+    tags: [circuit-breaker, false-trip, half-open]
+    question: |
+      Which is a genuine failure mode of circuit breakers that must be tuned against?
+    options:
+      - They guarantee zero false positives by design
+      - They can only be applied to idempotent operations
+      - False trips on a brief blip can cut off a dependency that was actually recovering, and an unrestricted half-open probe can re-send the full herd and recreate the storm
+      - They permanently disable a dependency after the first success
+    answer: 2
+    explanation: |
+      Breakers trade availability for recovery, so they can misfire: too-sensitive thresholds trip on
+      transient blips and cut off a healthy/recovering dependency (a self-inflicted outage), and a
+      half-open that admits the full herd to "test" recreates the surge. Thresholds must be tuned from
+      real p99/error data and half-open must be single-flight/limited.
+    ref: "concepts.md#circuit-breakers"
+  - id: failure-theory-advanced-030
+    difficulty: beginner
+    tags: [timeout, purpose]
+    question: |
+      What is the primary purpose of putting a timeout on every remote call?
+    options:
+      - To convert an unbounded wait on a hung dependency into a bounded, handleable failure so hung calls can't exhaust your thread/connection pool
+      - To speed up healthy requests on the happy path
+      - To guarantee exactly-once processing
+      - To encrypt the request in transit
+    answer: 0
+    explanation: |
+      A timeout bounds how long you wait; without it, a hung dependency holds threads/connections forever
+      and enough hung calls take your own service down. It doesn't speed up healthy calls, provide
+      exactly-once semantics (that's idempotency), or encrypt anything.
+    ref: "concepts.md#timeouts-and-deadline-propagation"
+  - id: failure-theory-advanced-031
+    difficulty: advanced
+    tags: [timeout, percentile, false-positive]
+    question: |
+      Why is setting a client timeout exactly at the dependency's p99 usually too aggressive?
+    options:
+      - p99 is impossible to measure
+      - p99 timeouts are always too long, not too short
+      - Timeouts should never be based on measured latency
+      - A p99 timeout fails ~1% of otherwise-healthy requests as false positives, and those trigger retries that add self-inflicted load; p99.9/p99.99 plus margin is more typical
+    answer: 3
+    explanation: |
+      By definition ~1% of healthy requests exceed p99, so a p99 timeout aborts them unnecessarily,
+      then those get retried — adding load precisely when you don't want it. Setting the timeout at
+      p99.9/p99.99 plus margin avoids killing healthy-but-slow requests while still catching true hangs.
+    ref: "concepts.md#timeouts-and-deadline-propagation"
+  - id: failure-theory-advanced-032
+    difficulty: expert
+    tags: [timeout, deadline-propagation, wasted-work]
+    question: |
+      Edge gives a user a 1 s budget and calls A→B→C, each with its own independent 1 s per-hop timeout.
+      What problem does this create and how does deadline propagation fix it?
+    options:
+      - No problem; independent per-hop timeouts are optimal
+      - C may still be working after the edge already gave up (wasted work on a doomed request, which amplifies load); a propagated absolute deadline lets each hop use the REMAINING time and skip work that can't finish in time
+      - The per-hop timeouts cause Byzantine faults that deadlines prevent
+      - Deadlines make each hop wait longer, improving success rate
+    answer: 1
+    explanation: |
+      Per-hop timeouts reset the clock at every hop, so downstream hops keep working long after the edge's
+      1 s budget expired — wasted, amplifying work. A deadline (absolute now+budget) propagated downstream
+      lets each hop compute remaining = deadline−now, cap its timeout to that, and abandon immediately if
+      the deadline already passed. gRPC deadlines work this way.
+    ref: "concepts.md#timeouts-and-deadline-propagation"
+  - id: failure-theory-advanced-033
+    difficulty: advanced
+    tags: [timeout, too-short, self-inflicted]
+    question: |
+      What is the self-inflicted failure mode of setting timeouts TOO short?
+    options:
+      - You abort requests that would have succeeded, then retry them — generating extra load and potentially driving the very overload the short timeout was meant to avoid
+      - Threads pile up indefinitely on hung dependencies
+      - The dependency is never given a chance to fail, so it never recovers
+      - Encryption handshakes never complete
+    answer: 0
+    explanation: |
+      Too-short timeouts produce false positives: healthy-but-slightly-slow requests are killed and
+      retried, adding load. Under stress this becomes a self-inflicted amplification loop. (Too-long
+      timeouts have the opposite failure: threads pile up on hangs and detection is slow.) Both extremes
+      are bad; set from data with margin.
+    ref: "concepts.md#timeouts-and-deadline-propagation"
+  - id: failure-theory-advanced-034
+    difficulty: expert
+    tags: [timeout, deadline, clock-skew]
+    question: |
+      Why do frameworks like gRPC propagate a REMAINING DURATION rather than an absolute wall-clock
+      timestamp for deadlines?
+    options:
+      - Durations are smaller to serialize than timestamps
+      - Propagating a relative remaining duration avoids clock-skew bugs between hosts; an absolute wall-clock deadline would be misinterpreted if the sender and receiver clocks disagree
+      - Absolute timestamps cannot be represented in gRPC
+      - Durations enable exactly-once semantics
+    answer: 1
+    explanation: |
+      Hosts don't share a perfectly synchronized clock, so an absolute wall-clock deadline would be
+      read differently across skewed clocks. Sending the remaining duration lets each hop apply it against
+      its own local clock (deadline = local_now + remaining), sidestepping cross-host clock skew.
+    ref: "concepts.md#timeouts-and-deadline-propagation"
+  - id: failure-theory-advanced-035
+    difficulty: intermediate
+    tags: [load-shedding, goodput]
+    question: |
+      Without load shedding, what typically happens to GOODPUT (useful completed work) as offered load
+      passes capacity?
+    options:
+      - Goodput plateaus flat at the capacity level
+      - Goodput increases linearly with load forever
+      - Goodput collapses toward zero, because resources are spent on requests that will time out anyway (dead work), rather than plateauing
+      - Goodput is unaffected by load
+    answer: 2
+    explanation: |
+      Past capacity, queues grow and latency explodes; requests time out before completing, so the system
+      burns resources on work that produces no value and goodput collapses off a cliff rather than
+      plateauing. Shedding keeps the system on the plateau by rejecting excess work cheaply and early.
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-036
+    difficulty: advanced
+    tags: [load-shedding, where, cost]
+    question: |
+      Where should load be shed, and why?
+    options:
+      - As deep in the stack as possible, after the expensive work, to be sure the work was needed
+      - Only inside the database, since that is where overload originates
+      - It doesn't matter where, as long as some percentage is dropped
+      - As early and cheaply as possible — at the load balancer / front door before CPU/DB is spent — and the shed action must cost far less than serving, or the shedder itself becomes the bottleneck
+    answer: 3
+    explanation: |
+      Shedding after you've already spent CPU/DB on a request wastes exactly the resources you're trying
+      to protect. Shed at the earliest, cheapest point (front door / LB) and ensure rejection is far
+      cheaper than serving; otherwise the shedding path becomes the new bottleneck.
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-037
+    difficulty: expert
+    tags: [load-shedding, lifo, overload]
+    question: |
+      Why can switching a request queue from FIFO to LIFO IMPROVE goodput specifically under overload?
+    options:
+      - LIFO is always fairer than FIFO
+      - LIFO reduces memory usage to zero
+      - Under overload the front of a deep FIFO queue is stale and likely past its deadline, so serving it is wasted work; LIFO serves the freshest requests (most likely still within deadline) and lets stale ones drop, maximizing useful completions
+      - LIFO guarantees exactly-once processing
+    answer: 2
+    explanation: |
+      In a deep FIFO queue under overload, the oldest item has waited so long it's probably past deadline;
+      completing it yields a response nobody wants. LIFO serves the newest (freshest, likeliest-in-deadline)
+      requests and lets the stale bottom drop, raising goodput. The trade-off is unfairness/reordering, so
+      it's an adaptive overload-only mode, not the default (FIFO is fair under normal load).
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-038
+    difficulty: advanced
+    tags: [load-shedding, brownout, priority]
+    question: |
+      What is "brownout" as an overload-control technique?
+    options:
+      - Intentionally disabling optional/low-priority features (personalization, recommendations, non-critical writes) to cut load while keeping core functionality alive
+      - Randomly dropping a fixed percentage of all requests
+      - Shutting down the entire service to protect the database
+      - Doubling capacity automatically when load rises
+    answer: 0
+    explanation: |
+      Brownout is priority-based degradation: shed the non-critical work first (recommendations before
+      checkout) so the core path keeps serving. It's the product-level expression of prioritized load
+      shedding, used by Netflix, Google, and Facebook.
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-039
+    difficulty: expert
+    tags: [load-shedding, little-law, concurrency]
+    question: |
+      A service can safely hold L = 200 requests in flight, and each takes W = 100 ms on average. Using
+      Little's Law, what admission rate keeps in-flight concurrency at the safe limit?
+    options:
+      - λ = L × W = 20 requests/sec
+      - λ = W / L = 0.0005 requests/sec
+      - λ = L + W ≈ 200 requests/sec
+      - λ = L / W = 200 / 0.1 s = 2,000 requests/sec
+    answer: 3
+    explanation: |
+      Little's Law: L = λ × W, so λ = L / W = 200 / 0.100 s = 2,000 req/s. Admitting above that pushes
+      concurrency past the safe limit and grows queues. Concurrency-limit shedding uses exactly this
+      relationship (often with an adaptive limiter that probes L).
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-040
+    difficulty: expert
+    tags: [load-shedding, deadline-aware]
+    question: |
+      What is the cheapest and often most effective form of admission control for a queued request whose
+      deadline has already passed?
+    options:
+      - Process it anyway to keep the queue moving
+      - Drop it WITHOUT processing, because it is dead work — the response can no longer be delivered in time, so serving it only wastes capacity
+      - Retry it three times before dropping
+      - Promote it to the front of the queue
+    answer: 1
+    explanation: |
+      A request already past its deadline cannot produce a useful response, so processing it is pure waste.
+      Deadline-aware shedding drops such items unprocessed — cheap and highly effective, and it composes
+      naturally with deadline propagation.
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-041
+    difficulty: advanced
+    tags: [load-shedding, retry-budget, package]
+    question: |
+      A team adds aggressive load shedding but clients immediately retry every 503 with no budget or
+      backoff. What is the likely outcome?
+    options:
+      - The shed requests come right back as retries, so shedding alone doesn't reduce net load — you also need client retry budgets and backoff for shedding to actually relieve the system
+      - The system fully recovers because shedding always works alone
+      - Retries are impossible after a 503
+      - The database automatically scales to absorb the retries
+    answer: 0
+    explanation: |
+      Shedding only helps if the shed work doesn't immediately return. Clients that retry every 503 with
+      no budget/backoff just re-offer the same load, defeating the shedder. Shedding, client-side retry
+      budgets, and jittered backoff (plus fast 503 + Retry-After) are a package, not independent options.
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-042
+    difficulty: intermediate
+    tags: [backpressure, bounded-queue]
+    question: |
+      Why must every queue in a system be BOUNDED?
+    options:
+      - Bounded queues are faster to allocate
+      - An unbounded queue under sustained overload grows without limit, so by Little's Law latency grows without limit until OOM; bounding forces a decision (block, drop, or reject) at the boundary
+      - Unbounded queues cannot store more than 1,000 items anyway
+      - Bounded queues guarantee exactly-once delivery
+    answer: 1
+    explanation: |
+      An unbounded queue is a hidden metastable failure: under sustained overload it grows forever,
+      driving latency (W = L/λ) up until memory exhausts and the process crashes. A bound forces an
+      explicit choice at the edge — backpressure (block), shed (drop), or reject — all safer than
+      pretending capacity is infinite.
+    ref: "concepts.md#backpressure-and-flow-control"
+  - id: failure-theory-advanced-043
+    difficulty: advanced
+    tags: [backpressure, credit-based, reactive-streams]
+    question: |
+      In credit-based flow control (HTTP/2, gRPC, Reactive Streams request(n)), how is producer rate
+      governed?
+    options:
+      - The producer sends as fast as it can and the consumer drops overflow
+      - A central coordinator uses Byzantine consensus to set the rate
+      - The consumer grants the producer credits/permits equal to its free buffer space (or requests n items), and the producer may only send up to that amount — demand-driven, non-blocking backpressure
+      - The producer randomly throttles itself with jitter
+    answer: 2
+    explanation: |
+      Credit-based flow control moves the decision to the consumer, which knows its own free capacity: it
+      issues credits (HTTP/2 window, RSocket credits) or requests n items (Reactive Streams), and the
+      producer never sends more than granted. This is precise, non-blocking backpressure — like TCP's
+      receive window.
+    ref: "concepts.md#backpressure-and-flow-control"
+  - id: failure-theory-advanced-044
+    difficulty: expert
+    tags: [backpressure, shedding, edge]
+    question: |
+      "Backpressure internally, shed at the edge." Why can't you simply backpressure the open internet?
+    options:
+      - Because the internet uses UDP exclusively
+      - Because backpressure is illegal across administrative domains
+      - Because shedding is always cheaper than backpressure everywhere
+      - Because you can't slow down a producer you don't control (millions of independent internet clients); backpressure requires a controllable producer, so at the uncontrollable edge you must shed instead
+    answer: 3
+    explanation: |
+      Backpressure works by propagating "slow down" to a producer that can comply — an internal pipeline
+      stage or a user typing. The open internet is an uncontrollable fan-in of millions of independent
+      clients you can't throttle at the source, so the only lever at that boundary is to shed (reject
+      fast). Internally, where producers are controllable, backpressure preserves all work.
+    ref: "concepts.md#backpressure-and-flow-control"
+  - id: failure-theory-advanced-045
+    difficulty: advanced
+    tags: [backpressure, tradeoff, head-of-line]
+    question: |
+      What does backpressure preserve, and what does it cost, compared to load shedding?
+    options:
+      - It drops work to preserve latency; it costs nothing
+      - It preserves exactly-once semantics at the cost of throughput only
+      - It preserves all work (nothing dropped) at the cost of added latency and coupling — a slow consumer can stall the pipeline (head-of-line blocking) and cyclic producer/consumer graphs can deadlock — whereas shedding preserves latency/goodput by dropping work
+      - It has identical trade-offs to shedding
+    answer: 2
+    explanation: |
+      Backpressure keeps every unit of work but propagates the slowdown upstream, so a slow consumer can
+      stall the whole pipeline (head-of-line blocking) and cycles can deadlock. Shedding instead drops
+      work to protect latency/goodput. Choose based on whether dropping is acceptable and whether the
+      producer can actually be slowed.
+    ref: "concepts.md#backpressure-and-flow-control"
+  - id: failure-theory-advanced-046
+    difficulty: advanced
+    tags: [cascading-failure, thread-pool]
+    question: |
+      Describe the classic cascading-failure path when downstream dependency B slows down.
+    options:
+      - All of service A's threads block calling B → A's thread pool exhausts → A can't serve ANY request (even those not using B) → A's callers see A as down → the failure climbs the stack via the shared thread pool
+      - B's slowness is isolated automatically and never affects callers
+      - A immediately returns cached data and no threads are affected
+      - B's slowness reduces A's CPU usage, improving A's throughput
+    answer: 0
+    explanation: |
+      The shared thread pool couples the healthy and unhealthy paths: threads pile up waiting on slow B,
+      the pool exhausts, and A can no longer serve anything — including requests that never touch B. A's
+      callers then see A fail, and the failure cascades upward. Bulkheads (per-dependency pools) break this
+      coupling.
+    ref: "concepts.md#cascading-failures-bulkheads-and-isolation"
+  - id: failure-theory-advanced-047
+    difficulty: advanced
+    tags: [bulkhead, thread-pool, semaphore]
+    question: |
+      What is the trade-off between thread-pool isolation and semaphore isolation for a bulkhead?
+    options:
+      - They are identical in every respect
+      - Semaphore isolation requires Byzantine consensus, thread pools do not
+      - Thread-pool isolation uses no memory; semaphores use unbounded memory
+      - Thread-pool isolation can interrupt/time out a truly stuck call on a separate thread but adds context-switch overhead; semaphore isolation is cheaper (just a concurrency cap, no extra threads) but can't abort a blocked call by switching threads
+    answer: 3
+    explanation: |
+      A separate thread pool per dependency lets you run the call on an isolated thread you can time out
+      /interrupt, at the cost of extra threads and context switches. A semaphore just caps concurrent
+      calls on the caller's own thread — cheaper, no extra switches — but if the call blocks, the caller's
+      thread blocks with it. Hystrix offered both for this reason.
+    ref: "concepts.md#cascading-failures-bulkheads-and-isolation"
+  - id: failure-theory-advanced-048
+    difficulty: expert
+    tags: [shuffle-sharding, isolation, blast-radius]
+    question: |
+      How does shuffle sharding reduce blast radius compared to plain sharding?
+    options:
+      - It gives every client the entire fleet, so load is perfectly balanced
+      - It assigns each client a RANDOM SUBSET of nodes so any two clients rarely share their full set; a poison request or bad client degrades only its few nodes, and the combinatorics make full overlap between two customers very unlikely
+      - It replicates every request to all shards using BFT
+      - It eliminates the need for any isolation because all nodes are identical
+    answer: 1
+    explanation: |
+      Shuffle sharding assigns each customer a random subset (e.g., 2 of N nodes). The number of distinct
+      subsets is large, so two customers rarely share their entire set — a poison pill or abusive client
+      harms only the few nodes in its shard, and others overlap on at most part of it. AWS Route 53 uses
+      this to shrink blast radius dramatically.
+    ref: "concepts.md#cascading-failures-bulkheads-and-isolation"
+  - id: failure-theory-advanced-049
+    difficulty: expert
+    tags: [bulkhead, tradeoff, utilization]
+    question: |
+      What does resource isolation (bulkheads/cells) fundamentally cost, and how can OVER-isolating
+      backfire?
+    options:
+      - It trades utilization for blast-radius containment (reserved idle capacity per partition); too fine-grained, each tiny pool is easier to exhaust and you waste resources, which can REDUCE resilience
+      - It costs nothing and always increases resilience
+      - It only costs latency, never utilization
+      - It requires exactly-once semantics to function
+    answer: 0
+    explanation: |
+      Isolation reserves capacity per partition (idle threads per pool, unshared cell capacity), lowering
+      utilization — you buy containment with efficiency. But over-partitioning creates many tiny pools
+      that individually exhaust easily and waste resources, so the resilience gain reverses. The judgment
+      call is choosing the partition dimension that matches how failures actually correlate.
+    ref: "concepts.md#cascading-failures-bulkheads-and-isolation"
+  - id: failure-theory-advanced-050
+    difficulty: intermediate
+    tags: [static-stability, control-plane]
+    question: |
+      What does it mean for a system to be "statically stable"?
+    options:
+      - It never changes its configuration under any circumstances
+      - It keeps working in its CURRENT configuration when dependencies fail — the data plane does not need the control plane to keep serving, as long as no changes are required
+      - It uses static IP addresses only
+      - It scales up automatically the instant a dependency fails
+    answer: 1
+    explanation: |
+      Static stability (AWS Builders' Library) means the data plane survives the control plane being fully
+      down, provided no *changes* are needed. It keeps serving from pre-provisioned/last-known-good state
+      rather than depending on the more failure-prone control plane in the hot path.
+    ref: "concepts.md#static-stability"
+  - id: failure-theory-advanced-051
+    difficulty: expert
+    tags: [static-stability, az-failure, provisioning]
+    question: |
+      To survive a single AZ failure across 3 AZs using static stability, what is the recommended
+      approach and why is it preferred over reactive auto-scaling?
+    options:
+      - Run each AZ at 100% and rely on auto-scaling to add capacity during the failure
+      - Run only one AZ to simplify capacity planning
+      - Pre-provision each AZ so the surviving two can absorb the load (~66% each), because auto-scaling is a control-plane action that may itself be impaired during the failure — exactly when everyone else is also scaling
+      - Route all traffic to a fallback region using BFT consensus
+    answer: 2
+    explanation: |
+      Static stability pre-provisions for failure: with 3 AZs, keep enough headroom (~66% utilization) so
+      the surviving 2 handle the load without needing new capacity. Relying on auto-scaling puts a
+      control-plane dependency in the recovery path — and control planes are often impaired during the
+      very event you need them, while everyone scales at once. You pay for idle capacity to remove that
+      fragile dependency.
+    ref: "concepts.md#static-stability"
+  - id: failure-theory-advanced-052
+    difficulty: advanced
+    tags: [static-stability, tradeoff, staleness]
+    question: |
+      What does static stability trade away, and why is the trade usually worth it?
+    options:
+      - It trades security for availability; rarely worth it
+      - It trades nothing; it is strictly better
+      - It trades latency for consistency only
+      - It trades cost/efficiency (paying for idle capacity) and freshness (may serve last-known-good, possibly stale, config) for availability — worth it because control planes tend to fail during big correlated events, exactly when you'd otherwise need them
+    answer: 3
+    explanation: |
+      Pre-provisioning means paying for idle capacity, and serving cached/last-known-good config means you
+      may serve stale config during a control-plane outage (e.g., a node that should be ejected lingers).
+      The bet — validated repeatedly in practice — is that over-provisioning costs far less than a
+      correlated outage where the control plane fails right when you need it most.
+    ref: "concepts.md#static-stability"
+  - id: failure-theory-advanced-053
+    difficulty: expert
+    tags: [static-stability, principle, critical-path]
+    question: |
+      Which statement best captures the deepest principle behind static stability?
+    options:
+      - Always add more capacity when a dependency fails
+      - Control planes are more reliable than data planes
+      - Don't put a fragile dependency in the critical path of recovering from that dependency's failure
+      - Freshness of config always outweighs availability
+    answer: 2
+    explanation: |
+      The core idea is to avoid a recovery path that depends on the very thing that failed. If recovering
+      from a control-plane outage requires the control plane (to scale, re-route, re-issue config), you
+      have a circular fragility. Static stability removes that dependency by pre-provisioning and serving
+      from local/last-known-good state.
+    ref: "concepts.md#static-stability"
+  - id: failure-theory-advanced-054
+    difficulty: advanced
+    tags: [fallback, danger, correlated-demand]
+    question: |
+      Per the AWS Builders' Library, why are fallbacks to a secondary live dependency among the most
+      dangerous patterns?
+    options:
+      - The fallback path is rarely exercised (so under-tested/often broken), and when the primary fails ALL traffic shifts to the fallback at once (correlated demand) onto an unsized alternate, producing bimodal behavior and often a second, worse outage
+      - They are too slow to be useful
+      - They require Byzantine consensus
+      - They always duplicate every write
+    answer: 0
+    explanation: |
+      A fallback runs only on failure, so it's under-tested and often itself broken — and it's invoked for
+      the first time at scale during your worst incident. When the primary fails, all traffic shifts to
+      the fallback simultaneously (correlated demand) onto capacity that was never sized for it, and the
+      system now behaves bimodally. This frequently causes a second, larger outage.
+    ref: "concepts.md#graceful-degradation-and-the-danger-of-fallbacks"
+  - id: failure-theory-advanced-055
+    difficulty: expert
+    tags: [fallback, safe-vs-dangerous]
+    question: |
+      Which distinguishes a SAFE fallback from a DANGEROUS one?
+    options:
+      - Safe fallbacks are always faster than dangerous ones
+      - Safe fallbacks use TCP; dangerous ones use UDP
+      - There is no meaningful difference; all fallbacks are equally risky
+      - A safe fallback removes dependencies and has roughly constant cost (serve stale local cache or a static default); a dangerous one ADDS a new, untested, unsized live remote dependency at the worst moment, creating correlated demand
+    answer: 3
+    explanation: |
+      Serving a stale local cache or a static default is safe because it introduces no new dependency and
+      has roughly constant cost — no correlated demand on a fragile system. Falling back to another live
+      remote dependency is dangerous: it's untested, unsized, and gets slammed by all traffic at once. The
+      safe/dangerous line is whether the fallback removes or adds dependencies.
+    ref: "concepts.md#graceful-degradation-and-the-danger-of-fallbacks"
+  - id: failure-theory-advanced-056
+    difficulty: advanced
+    tags: [fallback, recommendation, exercise]
+    question: |
+      If you cannot avoid a fallback path, what does the AWS guidance recommend to make it survivable?
+    options:
+      - Only use it during real incidents to keep it fresh
+      - Exercise it continuously (run some fraction of production traffic through it always so it's never cold) and size it for 100% of load
+      - Keep it completely idle and untested to minimize cost
+      - Trigger it randomly with jitter
+    answer: 1
+    explanation: |
+      The failure modes of fallbacks stem from being cold (untested) and undersized. So if you must have
+      one, continuously route some real traffic through it (so it's always warm and tested) and provision
+      it for the full load it would receive when the primary fails. A fallback used only in emergencies is
+      a landmine; the preferred design avoids needing one at all (fail/shed instead).
+    ref: "concepts.md#graceful-degradation-and-the-danger-of-fallbacks"
+  - id: failure-theory-advanced-057
+    difficulty: intermediate
+    tags: [graceful-degradation, brownout, planning]
+    question: |
+      What makes graceful degradation "good" rather than accidental?
+    options:
+      - It is planned, prioritized, and tested in advance — you decide what to drop first (e.g. recommendations before checkout) and practice it via chaos/game days
+      - It is triggered only by random chance
+      - It disables the entire product uniformly
+      - It always falls back to a secondary database
+    answer: 0
+    explanation: |
+      Good degradation is a deliberate design: a pre-decided priority order for what functionality to shed
+      first, exercised regularly (chaos/game days) so it actually works under stress. It's the
+      product-level expression of prioritized load shedding/brownout, not an emergency improvisation.
+    ref: "concepts.md#graceful-degradation-and-the-danger-of-fallbacks"
+  - id: failure-theory-advanced-058
+    difficulty: beginner
+    tags: [fallacies, distributed-computing]
+    question: |
+      The "fallacies of distributed computing" are best described as:
+    options:
+      - Performance-tuning tips for high-frequency trading
+      - False assumptions (network is reliable, latency is zero, bandwidth is infinite, etc.) that, baked into code, cause many distributed-system outages
+      - A fixed list of the only three ways a database can fail
+      - Legal requirements for cloud providers
+    answer: 1
+    explanation: |
+      Catalogued at Sun (Deutsch, Gosling, et al.), the fallacies are wrong assumptions engineers
+      implicitly make about distributed systems. Each maps to a resilience mechanism (unreliable network →
+      retries/timeouts, non-zero latency → deadlines/batching). They are neither tuning tips, a failure
+      taxonomy, nor legal rules.
+    ref: "concepts.md#the-fallacies-of-distributed-computing"
+  - id: failure-theory-advanced-059
+    difficulty: intermediate
+    tags: [fallacies, mechanism-mapping]
+    question: |
+      The fallacy "the network is reliable" most directly forces which resilience mechanisms?
+    options:
+      - Sharding and replication
+      - Byzantine consensus and 3f+1 voting
+      - Idempotent retries and timeouts
+      - LIFO queueing and brownout
+    answer: 2
+    explanation: |
+      Because the network drops packets and links flap, a call may not arrive or its reply may be lost —
+      so you need timeouts (bound the wait) and idempotent retries (recover transient loss safely). Each
+      fallacy maps to a mechanism; this one maps to timeouts + retries.
+    ref: "concepts.md#the-fallacies-of-distributed-computing"
+  - id: failure-theory-advanced-060
+    difficulty: intermediate
+    tags: [fallacies, latency, bandwidth]
+    question: |
+      Which pairing of fallacy to repairing mechanism is CORRECT?
+    options:
+      - '''Latency is zero'' → TLS and zero-trust auth'
+      - '''The network is secure'' → deadlines and batching'
+      - '''Topology never changes'' → checksums and payload limits'
+      - '''Bandwidth is infinite'' → backpressure, flow control, and payload limits'
+    answer: 3
+    explanation: |
+      Assuming infinite bandwidth ignores link saturation, so the repair is flow control/backpressure and
+      payload limits. ('Latency is zero' → deadlines/batching/async; 'network is secure' → TLS/authz;
+      'topology doesn't change' → service discovery/health-based routing.) Only the bandwidth pairing is
+      matched correctly here.
+    ref: "concepts.md#the-fallacies-of-distributed-computing"
+  - id: failure-theory-advanced-061
+    difficulty: advanced
+    tags: [tail-latency, fan-out, math]
+    question: |
+      A request fans out to 100 independent backends and must wait for all of them. Each backend has a
+      p99 of 100 ms (1% chance of being "slow"). Roughly what fraction of these fan-out requests will
+      touch at least one slow backend?
+    options:
+      - About 1%
+      - About 10%
+      - About 63% (1 − 0.99^100)
+      - About 100%
+    answer: 2
+    explanation: |
+      P(at least one slow) = 1 − P(none slow) = 1 − 0.99^100 ≈ 1 − 0.366 = 0.634 ≈ 63%. This is the core
+      lesson of The Tail at Scale: at high fan-out, the tail becomes the common case, so p99 of individual
+      backends dominates the p50 of the aggregate request. Mitigations include hedged/tied requests.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-062
+    difficulty: expert
+    tags: [tail-latency, hedged-requests, tradeoff]
+    question: |
+      "Hedged requests" (send a second copy of a request to another replica if the first is slow) reduce
+      tail latency. What is the key trade-off and how is it usually controlled?
+    options:
+      - They add extra load (duplicate work) to cut the tail; you control it by only hedging after the request exceeds a high percentile (e.g. p95) and/or capping hedges as a small fraction of traffic, so the added load stays bounded
+      - They eliminate all latency at no cost
+      - They require Byzantine consensus among replicas
+      - They only work if the operation is non-idempotent
+    answer: 0
+    explanation: |
+      Hedging trades a small amount of extra load for a big tail-latency reduction. To keep the extra work
+      bounded you defer the hedge until the first attempt passes a high percentile (so only genuinely slow
+      requests get hedged) and/or cap hedges to a few percent of traffic. Tied requests go further by
+      cancelling the loser. It requires idempotency since two copies may both execute.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-063
+    difficulty: advanced
+    tags: [scenario, judgment, overload]
+    question: |
+      During an incident, offered load is 1.4× capacity, latency is climbing, and the queue is deepening.
+      Which SINGLE action most directly protects goodput without feeding a feedback loop?
+    options:
+      - Increase all client-side retry counts so more requests eventually succeed
+      - Raise every timeout so slow requests have more time to complete
+      - Add a fallback to a secondary database for the overflow
+      - Shed the excess ~30% of low-priority load at the front door with a fast 503+Retry-After, keeping in-flight work below capacity so the queue drains
+    answer: 3
+    explanation: |
+      At 1.4× capacity the only way to keep goodput up is to reduce work below capacity — shed the excess
+      cheaply and early with fast rejection so the queue drains. Raising retries or timeouts adds load and
+      dead work (feeding amplification), and a fallback to another live DB creates correlated demand on an
+      unsized dependency.
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-064
+    difficulty: expert
+    tags: [scenario, retry, deadline, judgment]
+    question: |
+      You inherit a 4-layer call chain where every layer retries 2× with 30 s timeouts and no deadline
+      propagation. Which change set most reduces amplification and wasted work while preserving transient-
+      fault recovery?
+    options:
+      - Increase retries to 3× at every layer and add jitter
+      - Retry at one layer only, add a token-bucket retry budget, propagate an absolute deadline so each hop uses remaining time and skips doomed work, and set per-hop timeouts from p99.9 + margin
+      - Remove all timeouts so no request is prematurely aborted
+      - Add a circuit breaker but keep 2× retries at all four layers
+    answer: 1
+    explanation: |
+      The amplification is 2^4 = 16× from per-layer retries; the 30 s uniform timeouts with no deadline
+      cause massive wasted work. The correct fixes: retry at one layer, cap volume with a token-bucket
+      budget, propagate a deadline so hops fail fast on expired requests, and set data-driven timeouts.
+      Increasing retries or keeping per-layer retries preserves the blowup; removing timeouts reintroduces
+      unbounded hangs.
+    ref: "concepts.md#timeouts-and-deadline-propagation"
+  - id: failure-theory-advanced-065
+    difficulty: advanced
+    tags: [scenario, cache, thundering-herd, coalescing]
+    question: |
+      To prevent a cache-miss stampede (thundering herd) from crushing the database when a hot key
+      expires, which technique directly addresses the sustaining loop?
+    options:
+      - 'Request coalescing / single-flight: let only one request recompute the missing key while others wait for that result (optionally serving stale during recomputation)'
+      - Increase the database connection pool to unbounded
+      - Have every client retry the database with exponential backoff
+      - Disable the cache entirely so there are no misses
+    answer: 0
+    explanation: |
+      A stampede happens because N concurrent misses all hit the DB for the same key. Single-flight
+      /request coalescing collapses them into one recompute while the rest await the result (often serving
+      the last stale value meanwhile), directly cutting DB load. Unbounded pools and mass retries feed the
+      loop; disabling the cache removes the protection entirely.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-066
+    difficulty: advanced
+    tags: [scenario, circuit-breaker, gray-failure]
+    question: |
+      One instance in a 50-node pool develops a gray failure (200 ms I/O). A per-instance latency-based
+      outlier ejector is available. Why is this preferable to a single service-wide circuit breaker here?
+    options:
+      - Per-instance ejection guarantees exactly-once delivery
+      - The service-wide breaker would eject all 50 nodes and cause a full outage, whereas per-instance ejection removes just the one bad node and keeps the other 49 serving
+      - A service-wide breaker cannot detect latency, only errors
+      - Per-instance ejection requires Byzantine consensus, which is more reliable
+    answer: 1
+    explanation: |
+      A gray failure is localized to one node. A service-wide breaker sees elevated aggregate latency and
+      may trip, cutting off the whole healthy pool. Per-instance outlier ejection removes only the
+      offending node (from the client's latency view — the right lens for gray failure) while the other
+      49 keep serving. Granularity is the whole point.
+    ref: "concepts.md#circuit-breakers"
+  - id: failure-theory-advanced-067
+    difficulty: expert
+    tags: [scenario, static-stability, fallback, judgment]
+    question: |
+      A config service is down. Design A keeps serving from each host's last-known-good cached config;
+      Design B fails over reads to a rarely-used secondary config service. Which is more resilient and
+      why?
+    options:
+      - Design B, because a live secondary is always fresher than a cache
+      - They are equivalent because both avoid the primary
+      - 'Design A, because it is statically stable (no new dependency, roughly constant cost, survives the control-plane outage), while Design B is a dangerous fallback: an untested, unsized secondary hit by all traffic at once'
+      - Design B, because caches are never trustworthy
+    answer: 2
+    explanation: |
+      Serving last-known-good cached config is a safe, statically stable choice: it adds no dependency and
+      keeps working while the control plane is down (accepting only staleness). Failing over to a
+      rarely-used secondary is the classic dangerous fallback — cold, untested, unsized, and suddenly
+      receiving 100% of traffic. Prefer static stability / safe fallback over a live-secondary fallback.
+    ref: "concepts.md#static-stability"
+  - id: failure-theory-advanced-068
+    difficulty: expert
+    tags: [scenario, backpressure, kafka, judgment]
+    question: |
+      A stream processor consumes from a message log (e.g., Kafka) and falls behind because a downstream
+      DB slowed. Which response best applies flow-control principles without data loss?
+    options:
+      - Buffer unbounded in memory until the DB recovers
+      - Drop messages at random to catch up
+      - Spin up a fallback DB and dual-write to both
+      - Let the log act as the buffer and apply consumer-side backpressure (slow the poll / reduce in-flight) so the processor pulls only what it can handle — the durable log preserves all work while the DB recovers
+    answer: 3
+    explanation: |
+      A durable log is a bounded-by-retention buffer that lets you apply pull-based/consumer-side
+      backpressure: the processor requests only what it can process, and the log holds the backlog safely
+      until the DB recovers — no data loss. Unbounded in-memory buffering risks OOM, random dropping loses
+      data unnecessarily, and a fallback DB with dual-writes adds a dangerous untested dependency and
+      consistency problems.
+    ref: "concepts.md#backpressure-and-flow-control"
+  - id: failure-theory-advanced-069
+    difficulty: expert
+    tags: [scenario, capacity, headroom, metastable]
+    question: |
+      A team runs a service at 90% CPU utilization "for efficiency" and has good auto-scaling. From a
+      metastable-failure standpoint, what is the main risk and the counter?
+    options:
+      - No risk; 90% is optimal and auto-scaling handles everything
+      - The risk is only cost, which is acceptable
+      - At 90% there is almost no headroom to absorb a trigger before amplification (retries/queues) tips the system past the cliff, and reactive auto-scaling may lag or be impaired during the event; keep meaningful headroom and pre-provision for failure rather than relying on just-in-time scaling
+      - The service will become Byzantine at high utilization
+    answer: 2
+    explanation: |
+      Running at 90% leaves little room to absorb a spike before the amplification loop pushes past the
+      capacity cliff into a metastable state, and reactive scaling takes minutes and can be impaired
+      exactly during a correlated event. Headroom is the cheap insurance that keeps the barrier far from
+      normal operation; static stability says pre-provision rather than depend on just-in-time scaling.
+    ref: "concepts.md#metastable-failures-and-feedback-loops"
+  - id: failure-theory-advanced-070
+    difficulty: advanced
+    tags: [scenario, idempotency, retry, exactly-once]
+    question: |
+      Why does safely enabling client retries on a payment/write endpoint require idempotency keys, and
+      what guarantee does that combination provide?
+    options:
+      - Because a timeout is ambiguous (the write may have already succeeded), an idempotency key lets the server dedupe duplicate attempts, turning at-least-once delivery + idempotency into effectively-once processing
+      - It provides true exactly-once network delivery
+      - Idempotency keys encrypt the request, preventing duplicates
+      - Retries are always safe on writes regardless of idempotency
+    answer: 0
+    explanation: |
+      Partial failure makes a timeout ambiguous, so a blind retry could double-charge. An idempotency key
+      lets the server recognize and dedupe the retried write, so at-least-once delivery + server-side
+      idempotency yields effectively-once processing. True exactly-once *delivery* is impossible; this is
+      the practical equivalent. Retrying non-idempotent writes without keys risks duplicates.
+    ref: "concepts.md#retry-amplification-math-and-retry-budgets"
+  - id: failure-theory-advanced-071
+    difficulty: expert
+    tags: [scenario, admission-control, prioritized-queue, judgment]
+    question: |
+      A multi-tenant API must protect availability of paying (critical) traffic during overload driven by
+      a burst of free-tier (non-critical) requests. Which combination best applies overload-control theory?
+    options:
+      - One global FIFO queue and uniform random shedding across all tenants
+      - Increase timeouts and retry counts for free-tier traffic to smooth the burst
+      - Fail over all traffic to a secondary region
+      - Prioritized admission (critical requests admitted first), shed non-critical first (brownout), per-tenant fairness/quotas or shuffle sharding to isolate the noisy tenant, and switch to LIFO/ adaptive queueing under overload — shedding cheaply at the edge
+    answer: 3
+    explanation: |
+      Protecting critical traffic under overload needs prioritized admission control (serve critical
+      first), brownout of non-critical work, per-tenant isolation (quotas/shuffle sharding) so one noisy
+      tenant can't starve others, and overload-aware queueing (LIFO/adaptive) with cheap edge shedding.
+      A global FIFO with uniform shedding ignores priority and lets the burst harm paying users; raising
+      retries/timeouts adds load; regional failover is unrelated and risky.
+    ref: "concepts.md#load-shedding-and-brownout"
+  - id: failure-theory-advanced-072
+    difficulty: intermediate
+    tags: [circuit-breaker, purpose, fail-fast]
+    question: |
+      What are the two main benefits a circuit breaker provides when a dependency is clearly failing?
+    options:
+      - It encrypts calls and load-balances them
+      - It lets you fail fast (instead of piling threads on timeouts) AND gives the failing dependency room to recover by stopping the calls hammering it
+      - It guarantees exactly-once delivery and strong consistency
+      - It increases retry counts and disables timeouts
+    answer: 1
+    explanation: |
+      An open breaker rejects immediately, so callers fail fast rather than exhausting thread/connection
+      pools waiting on timeouts, and it stops sending load to the struggling dependency so it can recover.
+      It converts slow failures into fast ones — it is not about encryption, consistency, or retries.
+    ref: "concepts.md#circuit-breakers"
+  - id: failure-theory-advanced-073
+    difficulty: advanced
+    tags: [backpressure, unbounded-queue, little-law, math]
+    question: |
+      A bounded work queue holds up to L = 500 items and the service processes λ = 1,000 items/sec at
+      steady state. By Little's Law, what is the maximum queueing delay a request can experience, and why
+      does removing the bound break this guarantee?
+    options:
+      - 0.5 s max wait (W = L/λ = 500/1000); removing the bound lets L grow without limit, so W grows without limit until OOM
+      - 2 s max wait; removing the bound has no effect on latency
+      - 500 s max wait; the bound is irrelevant to latency
+      - 0 s wait; queues never add latency
+    answer: 0
+    explanation: |
+      With a bounded queue, worst-case queueing delay is W = L/λ = 500/1000 = 0.5 s — the bound puts a hard
+      ceiling on wait time. Remove the bound and, under sustained overload, L grows unboundedly, so W = L/λ
+      grows unboundedly (latency explodes) until memory is exhausted. The bound is what makes latency
+      predictable and forces the block/drop/reject decision.
+    ref: "concepts.md#backpressure-and-flow-control"
+  - id: failure-theory-advanced-074
+    difficulty: advanced
+    tags: [taxonomy, timing-failure, detection]
+    question: |
+      A node returns correct results but consistently 500 ms late due to a slow disk. Which failure class
+      is this, and why is it especially insidious in a synchronous request path?
+    options:
+      - Crash failure; it is trivially detected by heartbeats
+      - Timing (performance) failure; the output is correct so value-based checks pass, yet it blows deadlines and — because it stays 'up' — keeps absorbing traffic and triggering timeouts/retries
+      - Byzantine failure; the node is lying about its results
+      - Omission failure; it is silently dropping all messages
+    answer: 1
+    explanation: |
+      Correct-but-late is the timing/performance failure class. It's insidious because value checks pass
+      and liveness checks pass (it's up), so it stays in rotation while blowing deadlines and provoking
+      client timeouts and retries — essentially a gray failure. Latency-based outlier ejection, not
+      value or liveness checks, is what catches it.
+    ref: "concepts.md#failure-taxonomy-crash-omission-timing-byzantine-gray-and-partial"
+  - id: failure-theory-advanced-075
+    difficulty: intermediate
+    tags: [graceful-degradation, load-shedding, relationship]
+    question: |
+      How do graceful degradation/brownout relate to load shedding?
+    options:
+      - They are unrelated; degradation is only about UI theming
+      - Load shedding is a subtype of Byzantine fault tolerance
+      - Graceful degradation/brownout is the product-level expression of prioritized load shedding — shedding low-value functionality first to keep core functions serving under overload
+      - Graceful degradation replaces the need for any load shedding
+    answer: 2
+    explanation: |
+      Brownout/graceful degradation applies load-shedding priorities at the feature level: drop optional,
+      low-value work (recommendations, personalization) first so the critical path keeps serving. It's the
+      same overload-control principle expressed as product behavior, not a separate or unrelated concept.
+    ref: "concepts.md#graceful-degradation-and-the-danger-of-fallbacks"

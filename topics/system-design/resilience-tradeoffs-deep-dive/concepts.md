@@ -148,6 +148,93 @@ breaker and a budget are an outage waiting to happen.
 
 ---
 
+## Metastable failures and the feedback loop
+
+**Intuition.** A **metastable failure** (Bronson et al., *HotOS 2021*) is the
+outage class that most surprises engineers: the system was healthy, a *trigger*
+pushed it over the edge, and then it *stayed* broken even after the trigger was
+completely removed. The system has two operating regions — a **stable
+(vulnerable) state** where it serves fine, and a **metastable state** where a
+self-sustaining feedback loop keeps load above capacity. You cannot wait it out;
+you must apply a strong external intervention to force load back below capacity.
+
+**The anatomy: trigger + sustaining effect.**
+
+- A **trigger** is a transient perturbation: a traffic spike, a deploy, a brief
+  dependency blip, a cache flush, a GC pause, a failover.
+- A **sustaining effect** is a *work-amplifying feedback loop* that keeps the
+  system saturated once perturbed. The canonical amplifier is **retries**, but
+  also: cold-cache thundering herds after a cache node dies, connection
+  re-establishment storms, queue backlogs that inflate latency and cause more
+  timeouts, and lock/GC pressure that grows with concurrency.
+- Removing the trigger does **not** remove the sustaining effect. That's the
+  defining property and why "it should have recovered on its own" is wrong.
+
+**The goodput collapse curve (why it's non-linear).**
+
+```
+goodput
+  ▲            .-''''-.  ← peak useful throughput
+  │          /         \
+  │        /            \      congestion collapse: past the knee, MORE
+  │      /               \     offered load yields LESS useful work
+  │    /                  \_______
+  └──────────────────────────────────► offered load
+        capacity↑        knee↑   overload region
+```
+
+Below the knee, goodput tracks load. Past the knee, work amplification means
+each admitted request triggers extra work (retries, re-queues), so *offered load
+rises while goodput falls* — classic congestion collapse. The metastable state
+lives on the right side; there is **hysteresis** — to get back you must drop load
+well *below* the original capacity, not just back to the knee, because the
+in-flight amplified work must drain first.
+
+**Breaking the loop — the only things that actually work.** Cut the sustaining
+effect until load falls under capacity with margin:
+
+1. **Shed load hard** at the edge (drop, don't queue) — the most direct lever.
+2. **Disable or budget retries** — retries are the most common amplifier; a
+   retry budget (retries ≤ X% of traffic) caps amplification.
+3. **Open circuit breakers** to stop feeding the saturated component.
+4. **Kill standing queues / flush backlogs** so latency stops inflating timeouts.
+5. **Tame cache stampedes** (request coalescing / single-flight, staggered TTLs)
+   so a cache miss storm doesn't hammer the origin.
+6. Only *then* does adding capacity help — added capacity alone, with the loop
+   intact, is often just consumed by the amplified work.
+
+**Retry amplification math and jitter variants (deeper).** In a chain
+A→B→C→D where each hop retries `r` times, worst-case fan-out at D is `r^hops`
+(3 hops × r=3 ⇒ 27×). A **retry budget** bounds *aggregate* amplification to
+`1 + budget` (e.g. 1.1× at a 10% budget) regardless of chain depth — which is why
+budgets, not per-request caps, are the real storm defense. Jitter has several
+variants, and the choice matters under contention:
+
+| Variant | Formula (attempt n, base b, cap) | Property |
+|---|---|---|
+| No jitter | `min(cap, b·2^n)` | Synchronized herds — worst |
+| Full jitter | `random(0, min(cap, b·2^n))` | Best contention reduction in AWS tests; can retry very soon |
+| Equal jitter | `t/2 + random(0, t/2)`, `t=min(cap,b·2^n)` | Keeps a floor delay + some spread |
+| Decorrelated jitter | `min(cap, random(base, prev·3))` | Self-adapting spread; slightly fewer calls than full in some workloads |
+
+AWS's "Timeouts, retries, and backoff with jitter" recommends **full jitter** as
+the default; decorrelated jitter is a strong alternative that keys off the
+previous sleep rather than the attempt number.
+
+**Trade-offs.**
+
+| Choice | Gain | Give up |
+|---|---|---|
+| Aggressive load shedding to exit metastability | Fast recovery; system drains | Reject many requests during the intervention |
+| Retry budgets everywhere | Storm-proof; bounded amplification | Some retries dropped under stress (by design) |
+| Just add capacity | Feels intuitive | Often useless while the feedback loop is intact |
+
+Interview signal: "This is a metastable failure — the trigger is gone but retries
+are the sustaining effect. I'd shed load and cap retries with a budget to force
+offered load below capacity, because adding capacity alone won't break the loop."
+
+---
+
 ## Idempotency for safe retries
 
 **Intuition.** Retries are only safe if doing the operation twice equals doing it
@@ -328,6 +415,222 @@ approximate local limit is cheap but leaky. Pick accuracy vs latency per use cas
 
 ---
 
+## Backpressure and flow control
+
+**Intuition.** **Backpressure** is the mechanism by which a slow consumer tells a
+fast producer to *slow down* rather than silently drowning. Without it, an
+overwhelmed component's only options are to buffer without bound (leading to
+memory exhaustion and OOM kills) or drop data silently. Backpressure makes the
+overload *visible and propagated* to where it can be handled — ideally all the
+way back to the client, who can then shed, retry with backoff, or degrade.
+
+**The core failure it prevents: unbounded queues.** The most common
+anti-pattern is an *unbounded* in-memory queue between stages. Under overload it
+grows until the process OOMs — and worse, a deep queue **inflates latency**
+(Little's Law: `latency = queue_depth / throughput`), which causes upstream
+timeouts, which cause retries, which is exactly the metastable feedback loop.
+**Bounded queues are a resilience feature, not a limitation.** When a bounded
+queue fills, you get an explicit, early signal to apply backpressure or shed.
+
+**Mechanisms, from lowest to highest level.**
+
+- **TCP flow control** (receive window) — the transport layer's built-in
+  backpressure; a slow reader shrinks the window and the sender blocks.
+- **Blocking / bounded queues** — a full bounded queue blocks or rejects the
+  producer (e.g. `ArrayBlockingQueue`, a semaphore-guarded pool). Choose the
+  rejection policy deliberately: block, drop-newest, drop-oldest, or error.
+- **Credit-based flow control** — the consumer grants the producer a number of
+  **credits** (permits to send N messages / bytes); the producer may only send
+  while it holds credits, and the consumer replenishes them as it drains. Used by
+  HTTP/2 and gRPC (per-stream flow-control windows), Reactive Streams
+  (`request(n)` demand signaling), and Flink's network stack. Credit-based is
+  precise and avoids head-of-line buffer bloat because the sender never puts more
+  on the wire than the receiver has room for.
+- **Reactive Streams / async pull** — the subscriber signals demand (`request(n)`)
+  so the publisher produces only what's requested (RxJava, Project Reactor,
+  Akka Streams).
+
+```
+Push (no backpressure):  producer ──flood──► [ unbounded buffer ] ──► slow consumer  → OOM
+Credit-based:            producer ◄─grant N credits─ consumer; sends ≤ credits held  → bounded
+```
+
+**Backpressure vs load shedding.** They are complements. Backpressure *propagates*
+slowness upstream so the source slows down (lossless, preserves work). Load
+shedding *drops* work when propagation isn't possible or fast enough (lossy,
+protects the server). A robust system uses backpressure between cooperating
+internal stages and load shedding at the untrusted edge (you can't make the open
+internet slow down — you can only drop).
+
+**Trade-offs.**
+
+| Choice | Gain | Give up |
+|---|---|---|
+| Bounded queue + backpressure | Bounded memory/latency; overload made visible | Producers blocked/rejected; must handle "slow down" everywhere |
+| Unbounded queue | Never rejects a producer directly | OOM risk; latency blows up; hidden overload → metastable |
+| Credit-based flow control | Precise, no buffer bloat, per-stream fairness | Protocol complexity; both ends must implement it |
+| Drop/shed at the edge | Protects the whole pipeline | Lost requests (by design) |
+
+Interview signal: "I'd bound every queue and propagate backpressure with
+credit-based flow control between stages, and shed at the edge — an unbounded
+queue just converts overload into an OOM and a latency spike that feeds a retry
+storm."
+
+---
+
+## Admission control and brownout
+
+**Intuition.** **Admission control** decides, at the front door, whether to *let a
+request in at all* — before it consumes scarce downstream resources. It is load
+shedding made deliberate and prioritized. **Brownout** is the graceful analogue
+of a blackout: rather than the whole service going dark under overload, it dims
+by shedding *optional* work (skipping personalization, lowering fidelity,
+disabling recommendations) so the essential service stays lit for everyone.
+
+**How it works.**
+
+- **Prioritized admission:** classify requests by value/criticality (e.g.
+  checkout > browse > analytics; paying > free tier; interactive > batch) and,
+  under pressure, admit high-priority and reject low-priority. Requires the
+  request to *carry* its priority (a header, a token, a criticality tier — Google
+  calls these **criticality levels**: `CRITICAL_PLUS`, `CRITICAL`, `SHEDDABLE_PLUS`,
+  `SHEDDABLE`).
+- **Cost-aware admission:** reject based on *expected cost*, not just count — one
+  fan-out query can equal thousands of point reads.
+- **Adaptive concurrency limits (the modern default):** don't pick a magic rps.
+  Measure latency/queue depth and use a control loop (AIMD, gradient, or
+  Netflix's `concurrency-limits`, conceptually TCP-Vegas-like) to converge on the
+  concurrency that maximizes goodput. When latency climbs, the limit shrinks and
+  excess is shed automatically.
+- **Brownout as a control loop:** treat the fraction of optional work served as a
+  knob a controller adjusts to hold a latency/utilization setpoint — dim
+  optional features first, restore them as headroom returns.
+- **LIFO under overload:** serving the *newest* request first can raise goodput
+  because old requests have often already breached their deadline (the client
+  gave up); FIFO would spend capacity finishing already-doomed work.
+
+**Trade-offs.**
+
+| Choice | Gain | Give up |
+|---|---|---|
+| Prioritized admission control | Protect critical/revenue paths under overload | Must classify + tag every request; low-priority users see errors |
+| Adaptive concurrency limits | Self-tuning; no brittle magic numbers | Needs clean latency signals; harder to reason about |
+| Brownout (dim optional work) | Whole service stays up, degraded | Reduced quality; must isolate optional from essential |
+| Admit everything (no control) | Simple; "fair" | Congestion collapse; *everyone* fails |
+
+Central idea: admission control **spends the requests it rejects to guarantee the
+ones it admits actually succeed** — maximizing *goodput* (useful completed work),
+not raw throughput. Under overload, admitting less is serving more.
+
+---
+
+## Static stability
+
+**Intuition.** **Static stability** (AWS Builders' Library, "Static stability
+using Availability Zones") is the property that a system keeps operating during a
+failure using **only resources it already has**, *without depending on the
+control plane* to make changes. The insight that motivates it: **control planes
+are far more likely to be degraded exactly when you need them** — during a large
+correlated failure, the very APIs that launch instances, change DNS, or update
+routing are under maximum stress and are themselves often the thing that's broken.
+
+**Data plane vs control plane.**
+
+- The **data plane** is the high-volume path that serves requests (an EC2
+  instance running, a load balancer forwarding packets, a DNS server answering
+  queries). It is designed to be simple and stay up.
+- The **control plane** is the management path that *makes changes* (launch an
+  instance, register a target, create a record). It is complex and, statistically,
+  the less reliable of the two.
+- **Rule: keep control-plane dependencies OFF the data path, especially the
+  failure-recovery path.** A recovery mechanism that must call the control plane
+  to work will fail precisely when it's needed most.
+
+**The canonical example.** Compare two multi-AZ designs for surviving one AZ of
+three failing:
+
+| Design | Behavior on AZ loss | Statically stable? |
+|---|---|---|
+| Pre-provision 150% capacity (each AZ can absorb the load of one lost AZ) | Survivors already have headroom; **no scaling action needed** | Yes |
+| Run at 100% and rely on autoscaling to launch replacements | Recovery depends on the control plane (launch API) working during the event | No — fragile |
+
+The statically stable design "wastes" ~33% capacity in steady state in exchange
+for not depending on a launch/scale operation during the outage. The trade is
+**cost/utilization for control-plane independence**.
+
+**Other applications:** cache the last-good config/routing table and *keep
+serving it* if the config service is down (don't fail because you can't refresh);
+DNS/health systems that fail static (keep the last state) rather than fail closed;
+pre-scaled fleets ahead of known events.
+
+**Trade-offs.**
+
+| Choice | Gain | Give up |
+|---|---|---|
+| Statically stable (pre-provisioned, no control-plane dep) | Survives large failures when control planes are down | Higher steady-state cost; idle headroom |
+| Dynamically reactive (autoscale/failover via control plane) | Cheaper steady state; elastic | Recovery can fail when control plane is degraded — worst possible time |
+
+Interview signal: "I'd make failover statically stable — pre-provision the
+survivors' capacity and cache config so recovery needs no control-plane call,
+since the control plane is often down during the very event we're recovering
+from."
+
+---
+
+## Gray failures and partial failure detection
+
+**Intuition.** A **gray failure** (Microsoft Research, *HotOS 2017*) is a failure
+that is *partial, subtle, or intermittent* — the component is neither cleanly up
+nor cleanly down. It's the "slow, not dead" and "erroring for some, fine for
+others" case. Gray failures are more dangerous than clean crashes precisely
+because your automation can't see them: a crash is unambiguous and gets routed
+around in seconds; a gray failure fools health checks, so failover never fires and
+humans hesitate — the system stays degraded far longer.
+
+**Differential observability — the core concept.** A gray failure exists when the
+system's *own view* of its health disagrees with the *clients'* experienced view.
+The health check says "200 OK, I'm healthy"; the user sees timeouts, elevated
+errors, or corrupt results. The failure detector and the actual failure are
+measuring different things. Bridging that gap is the whole game.
+
+Examples: a NIC dropping 5% of packets; a disk with rising latency but not dead;
+a node with a corrupt cache serving wrong answers fast; a dependency that's slow
+only for large payloads; a JVM in GC-thrash that still answers `/healthz`
+instantly because that endpoint does no real work.
+
+**Detecting gray failure.**
+
+- **Health checks must exercise the real path** ("deep" health checks that touch
+  dependencies/disk), not a trivial `return 200` — but beware: deep checks that
+  fail on a *dependency* blip can cause mass-failover storms, so scope them
+  carefully and separate liveness from readiness.
+- **Use client-side / end-to-end signals**, not just server self-reports:
+  per-client success rate, latency, and error rate as seen by callers. Outlier
+  detection (Envoy/Istio) ejects a host that *callers* find slow/erroring even if
+  it claims health.
+- **Compare peers:** a node whose latency/error rate is a statistical outlier vs
+  its identical peers is probably gray-failing, even if absolute numbers look OK.
+- **Phi-accrual failure detectors** output a *suspicion level* (continuous)
+  rather than a binary up/down, tolerating the ambiguity gray failures create.
+- **Fail fast on the caller side:** outlier detection + circuit breakers let a
+  caller route around a gray-failing host that the host's own health check misses.
+
+**Trade-offs.**
+
+| Choice | Gain | Give up |
+|---|---|---|
+| Deep/dependency-touching health checks | Catch gray failures the shallow check misses | Risk of correlated mass-failover on a shared-dependency blip |
+| Shallow liveness checks | Cheap, stable, no cascade | Miss gray failures entirely |
+| Client-side outlier detection | Sees the failure the server denies | More telemetry/coordination; can misjudge with sparse traffic |
+| Binary up/down detectors | Simple | Brittle at the gray boundary — flap or miss |
+
+Interview signal: "I'd watch client-observed success/latency, not just server
+health checks — gray failures show up as differential observability, where the box
+says healthy but callers see errors, so I'd add outlier detection to route around
+it."
+
+---
+
 ## Graceful degradation and fallbacks
 
 **Intuition.** When a dependency fails, don't return an error if you can return
@@ -368,6 +671,67 @@ work is deciding *which* correctness you can relax and communicating it (stale
 badge, "results may be delayed"). Danger: silent fallbacks can mask real
 problems — always emit metrics/alerts when a fallback fires, or you'll degrade
 permanently without noticing.
+
+---
+
+## Why naive fallbacks are dangerous
+
+**Intuition.** This is one of the most counter-intuitive lessons in the field, and
+Marc Brooker's AWS Builders' Library article "Avoiding fallback in distributed
+systems" argues it bluntly: **static fallbacks often make systems *less* reliable,
+not more, and AWS removed fallback from critical paths (notably Route 53 / the
+DNS control path) because of it.** A fallback is a rarely-exercised alternate code
+path invoked exactly during a failure — the worst possible time to run untested
+code.
+
+**The five reasons naive fallbacks bite you.**
+
+1. **The fallback path is cold and untested.** It runs ~0.001% of the time, so it
+   rots: it may have a bug, a stale schema, a missing IAM permission, an expired
+   cert, or wrong capacity — and you discover this *during* the incident, turning
+   a partial failure into a total one.
+2. **Correlated activation / bimodal behavior.** When the primary fails, *many*
+   callers hit the fallback *simultaneously*. If the fallback (a backup service,
+   a cache, a static store) wasn't sized for full production load, it instantly
+   collapses under the herd. The system now behaves completely differently under
+   failure than in testing — **bimodal behavior**, which is hard to reason about
+   and test.
+3. **It can mask the real problem.** A silent fallback hides that the primary is
+   failing; you degrade permanently without anyone noticing until much later.
+4. **Fallback loops and shared fate.** Fallbacks can depend on the same
+   substrate that's failing (a "backup" that shares the same network, DB, or AZ),
+   so it fails in the same event — no independence, no benefit.
+5. **It adds a whole second code path** to build, test, and reason about — more
+   surface area for bugs, in the part of the system that only ever runs under
+   stress.
+
+**What to do instead (the AWS guidance).**
+
+- **Prefer making the primary path more reliable** over adding a fallback (e.g.
+  retries with backoff+jitter on the *same* path, higher redundancy, static
+  stability) — fewer distinct code paths, no bimodal behavior.
+- **Exercise the fallback continuously** so it's never cold: run it for a small
+  percentage of traffic *all the time*, or make the "fallback" the normal path so
+  there's no mode switch. If normal and failure behavior are the same, there's
+  nothing untested to break.
+- **Size the fallback for full load** if you must have one, and test it under that
+  load.
+- **Always alarm when a fallback fires** — a fallback should never be silent.
+- **Push the decision to where information is best** — the client/edge often has
+  more context than a deep internal service.
+
+**Trade-offs.**
+
+| Approach | Gain | Give up |
+|---|---|---|
+| Make primary more reliable (no fallback) | One tested path; no bimodal surprise | Can't paper over a fundamentally fragile dependency |
+| Fallback exercised continuously | Not cold; behaves the same always | Extra ongoing cost to run it for real traffic |
+| Naive static fallback (cold) | Feels safe; simple to add | Untested, undersized, correlated — often fails when needed |
+
+Interview signal (a genuine senior differentiator): "I'd be careful adding a
+fallback — an untested, cold fallback path often fails exactly when it's invoked
+and creates bimodal behavior. I'd rather make the primary path robust, and if I
+keep a fallback I'd exercise it continuously and size it for full load."
 
 ---
 
@@ -525,6 +889,22 @@ Related concepts to name: **shuffle sharding** (assign each customer a random
 pair of customers — AWS Route 53 / ELB technique, gives combinatorially many
 "virtual cells" cheaply) and **canary/wave deployments** (limit blast radius in
 the *time* dimension).
+
+**Blast-radius and shuffle-sharding math (the numbers interviewers probe).**
+Plain cells give a linear reduction: `N` cells ⇒ each failure hits `1/N` of
+customers, and you need `1/N` extra headroom per cell to absorb a neighbor's
+failover. Shuffle sharding gives a *combinatorial* one, which is the magic. With
+`W` workers and each customer assigned a random shard of `k` workers, the number
+of distinct shards is `C(W, k) = W! / (k!(W−k)!)`. The chance a *second* customer
+shares your *entire* shard (and thus is hit by the same poison-pill that took out
+all `k` of your workers) is roughly `1 / C(W,k)`. Concrete: `W=8, k=2` gives
+`C(8,2)=28` shards; `W=100, k=5` gives `C(100,5) ≈ 75,000,000` virtual shards — so
+a bad request that kills a specific 5-worker combination affects only the tiny
+fraction of customers unlucky enough to share all five. Combined with *fault
+isolation at the request level* (each customer's requests only touch its shard),
+one customer's poison-pill can't take down customers who don't fully overlap. The
+trade: shuffle sharding needs `k ≥ 2` capacity per customer and only helps when a
+single customer's load is a small fraction of a worker's capacity.
 
 ---
 

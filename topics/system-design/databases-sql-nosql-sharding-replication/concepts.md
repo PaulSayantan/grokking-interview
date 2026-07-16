@@ -627,6 +627,306 @@ exactly what interviewers reward.
 
 ---
 
+## The RUM conjecture and amplification in depth
+
+**Intuition.** Every access-method design is a three-way tug of war. The **RUM
+conjecture** (Athanassoulis et al., 2016) states that you cannot simultaneously
+minimize all three of **R**ead overhead, **U**pdate overhead, and **M**emory
+(space) overhead — optimize two and the third gets worse. This is the theory that
+sits *underneath* the LSM-vs-B-tree table above and explains why there is no
+universally best storage engine.
+
+**The three amplifications, defined precisely.**
+- **Read amplification** = bytes actually read from storage ÷ bytes the query
+  logically needs. LSM reads may probe the memtable + several SSTables (mitigated
+  by bloom filters); B-tree reads one root-to-leaf path.
+- **Write amplification** = bytes written to storage ÷ bytes the application
+  logically wrote. B-tree: rewriting a whole 8–16 KB page for a small row change,
+  plus the WAL, plus page splits. LSM: compaction re-writes the same data across
+  levels.
+- **Space amplification** = bytes on disk ÷ live logical bytes. LSM holds
+  superseded versions and tombstones until compaction reclaims them; B-trees leave
+  page fragmentation and ~⅓ empty pages after splits (fill factor).
+
+**LSM compaction strategy is itself a RUM dial:**
+
+| Strategy | Write amp | Read amp | Space amp | Fits |
+|---|---|---|---|---|
+| **Leveled (LCS)** | High (rewrite across levels, often 10–30×) | Low (≤1 SSTable per level) | Low (~10%) | Read-heavy, space-constrained |
+| **Size-tiered (STCS)** | Low | High (many overlapping SSTables) | High (up to ~2× during major compaction) | Write-heavy ingest |
+| **Time-window (TWCS)** | Low | Low for time-range | Low | Time-series with TTL |
+
+**B-tree write amplification** is roughly `page_size / row_size` for a scattered
+small-row update workload — a 200-byte update touching a 16 KB page can be ~80×
+before the WAL. This is why write-heavy workloads gravitate to LSM even though its
+compaction *also* amplifies: LSM converts the writes to **sequential** I/O and
+lets you *choose* the amplification profile via the compaction strategy.
+
+**Gotcha.** "LSM has lower write amplification" is a common oversimplification.
+LSM has lower **random-write** cost and turns writes sequential, but *leveled* LSM
+can have higher total write amplification than a B-tree. The real win is sequential
+I/O, compression on immutable sorted files, and tunability — not a blanket lower
+write-amp number.
+
+---
+
+## MVCC internals and serializable snapshot isolation
+
+**Intuition.** ACID's Isolation is not one thing — it is a ladder of guarantees,
+and the most senior mistake is assuming "snapshot isolation" or "REPEATABLE READ"
+means serializable. It does not.
+
+**How MVCC stores versions.** Postgres tags each row version with `xmin`
+(creating tx) and `xmax` (deleting/superseding tx); a snapshot is the set of
+transaction IDs visible at statement/transaction start. Old versions stay **in the
+heap** and must be reclaimed by **VACUUM** (hence table/index bloat and the
+autovacuum tuning that dominates Postgres ops). InnoDB instead keeps prior
+versions in the **undo log** (rollback segments) and builds a read view from them;
+long-running read transactions bloat the undo log (`History list length`).
+
+**The anomaly ladder (what each level actually prevents):**
+
+| Level | Dirty read | Non-repeatable read | Phantom | Lost update | Write skew |
+|---|---|---|---|---|---|
+| Read Uncommitted | allowed | allowed | allowed | allowed | allowed |
+| Read Committed | prevented | allowed | allowed | allowed | allowed |
+| Snapshot / RR | prevented | prevented | prevented* | prevented† | **allowed** |
+| Serializable | prevented | prevented | prevented | prevented | prevented |
+
+\* Snapshot isolation prevents phantoms *for the reader's snapshot* but the write
+still races. † SI prevents lost updates via first-committer-wins (Postgres aborts
+the second writer of the same row).
+
+**Write skew — the anomaly SI cannot stop.** Two transactions read an overlapping
+set, each then updates a *different* row, and their combination breaks an invariant
+neither could see. Classic example: two on-call doctors each check "at least one
+other is on call," both see the other is on, and both go off-call — leaving zero
+coverage. Neither wrote the same row, so first-committer-wins does not fire. Only
+**serializable** isolation prevents it.
+
+**Serializable Snapshot Isolation (SSI).** Postgres `SERIALIZABLE` (since 9.1,
+based on Cahill's work) runs *optimistically* at snapshot isolation but tracks
+read/write **anti-dependencies** (a transaction reads data another concurrently
+overwrites). When it detects the "dangerous structure" — a pivot transaction with
+both an incoming and outgoing rw-antidependency — it **aborts** one transaction,
+forcing a retry. Trade-off vs **two-phase locking** (2PL, pessimistic
+serializability): SSI has higher concurrency and no read locks, but produces
+**false-positive aborts** under contention, so the application *must* implement
+retry loops.
+
+**Gotcha — REPEATABLE READ means different things.** MySQL/InnoDB's default
+`REPEATABLE READ` uses a consistent snapshot plus **gap/next-key locks** to block
+many phantoms and does *not* abort on write-write conflict (last writer under a
+lock wins). Postgres `REPEATABLE READ` *is* snapshot isolation and *aborts* the
+losing writer with a serialization failure. Same SQL keyword, materially different
+behavior — name the engine when you answer.
+
+---
+
+## Online resharding and live data migration
+
+**Intuition.** Choosing a shard key is reversible only through a painful,
+online, zero-downtime migration. Interviewers probe whether you can move a live,
+write-serving dataset to a new topology without losing writes or taking downtime.
+
+**The canonical zero-downtime playbook:**
+1. **Dual-write / backfill.** Begin writing to both old and new topology (or start
+   a CDC stream from old→new), then **backfill** historical data into the new
+   layout in the background.
+2. **Verify.** Run continuous consistency checks (row counts, checksums,
+   shadow/dark reads comparing old vs new) until divergence is ~zero.
+3. **Cutover reads.** Flip reads to the new topology behind a flag, canarying by
+   percentage.
+4. **Cutover writes and decommission.** Stop dual-writing, retire the old layout.
+
+**Techniques that make this cheaper:**
+- **Logical shards (pre-splitting).** Create *many* logical shards up front (e.g.,
+  1024) and pack several onto each physical node. Growing = **reassign** logical
+  shards to new nodes — no rehash, no key movement beyond the moved shards. This is
+  Vitess (VReplication), MongoDB chunks, Citus shard rebalancing, and Kafka's
+  partition model.
+- **Consistent hashing.** Adding/removing a node moves only ~1/N (or K/N with
+  replication) of keys instead of nearly all keys under `hash % N`.
+- **Directory remap.** With lookup-based sharding, migrate by editing the map after
+  copying a range.
+
+**The hard part is the write cutover.** In-flight writes during cutover can be lost
+or double-applied. Options: a brief **write freeze** on the affected key range
+during final catch-up; or CDC-based catch-up where you tail the change log until
+lag → 0, then flip. Idempotent writes and monotonic versioning make double-apply
+safe. This operational risk is exactly why "pick a scalable shard key early" is
+repeated so often — the alternative is this migration.
+
+---
+
+## Hot shards and hot keys: detection and mitigation
+
+**Intuition.** Even a high-cardinality shard key can develop a **hot spot** when
+one *value* gets disproportionate traffic (a celebrity user, a viral event key, a
+Black-Friday SKU). A single hot partition caps you at one node's throughput no
+matter how many shards you have — the classic "my p99 is fine but one partition is
+on fire" incident.
+
+**Detection.**
+- Per-partition/per-node throughput and latency metrics (look for one partition
+  pegged while others idle).
+- **Heavy-hitter sampling** — count-min sketch or top-K streaming on the key
+  stream to find the offending keys cheaply.
+- Throttling/`ProvisionedThroughputExceeded` events concentrated on one partition;
+  DynamoDB CloudWatch per-partition metrics and "split for heat."
+
+**Mitigation — writes:**
+- **Write sharding**: append a bounded suffix (`key#0..key#N`) to spread a hot key
+  across partitions; gather all suffixes on read (trade write hotspot for
+  read fan-out).
+- **Isolate** the hot key onto a dedicated partition/node.
+- Buffer/aggregate upstream (e.g., pre-aggregate counter increments, then flush).
+
+**Mitigation — reads:**
+- Cache the hot key in front of the store — but beware the **thundering herd** on
+  expiry: use request **coalescing / singleflight** (one fetch fills the cache,
+  others wait) and staggered/jittered TTLs.
+- Add read replicas dedicated to the hot key.
+
+**The celebrity problem (feeds).** Fan-out-on-write breaks when a user has 100 M
+followers (one post → 100 M feed writes). The standard fix is **hybrid fan-out**:
+push (fan-out-on-write) for normal users, and **pull** (fan-out-on-read / merge at
+read time) for celebrity accounts, so a celebrity post doesn't stampede the write
+path.
+
+---
+
+## Replication log formats: statement, row, and WAL shipping
+
+**Intuition.** *What* flows over the replication stream shapes correctness,
+volume, coupling, and whether you can build CDC on top. Three families:
+
+| Format | What ships | Pros | Cons / gotchas |
+|---|---|---|---|
+| **Statement-based (SBR)** | The SQL text | Compact, log-readable | **Non-deterministic** statements replicate wrong: `NOW()`, `RAND()`, `UUID()`, triggers, `AUTO_INCREMENT` races, non-deterministic UDFs |
+| **Row-based (RBR)** | Before/after row images | Deterministic, safe | Larger volume; a single `UPDATE ... WHERE` touching millions of rows ships millions of row events |
+| **Logical decoding** | Decoded row changes from WAL | Cross-version, selective tables, **feeds CDC/Debezium** | Slightly more overhead than physical; some DDL/large-object caveats |
+| **Physical / WAL shipping** | Byte-level WAL blocks | Exact replica, low overhead, cheap | **Same major version only**, all-or-nothing (can't filter tables), replica is block-identical |
+
+**How to reason about it.** MySQL defaults to `ROW` (or `MIXED`, which uses
+statement where safe and falls back to row) precisely because SBR silently
+corrupts under non-determinism. Postgres offers **physical streaming replication**
+(fast, exact, for HA replicas of the same version) *and* **logical replication**
+(row-level, filterable, cross-version, upgrade-friendly, and the substrate for
+CDC). Physical is the tightly-coupled HA path; logical/row is the flexible,
+integration-and-CDC path. When an interviewer asks "how do you feed a search index
+from Postgres," the correct substrate is **logical** decoding, not physical WAL
+shipping.
+
+---
+
+## Multi-leader and leaderless conflict resolution in depth
+
+**Intuition.** Once more than one node can accept a write to the same key,
+concurrent writes *will* conflict, and "how do you resolve it" separates a hand-wave
+from a real design. There is a spectrum from "avoid conflicts" to "detect and merge."
+
+**Resolution strategies, weakest to strongest guarantee:**
+- **Last-write-wins (LWW).** Keep the write with the highest timestamp; discard the
+  rest. Simple and used by Cassandra, but **silently loses data** and is at the
+  mercy of **clock skew** — a lagging clock can make a newer write lose. Acceptable
+  only when losing a concurrent update is tolerable.
+- **Version vectors / vector clocks.** Tag each version with a per-replica counter
+  so the system can distinguish *causally ordered* from *truly concurrent* writes.
+  Concurrent writes are surfaced as **siblings** for the application (or user) to
+  merge — Dynamo/Riak. Correct, but pushes merge logic to the app.
+- **CRDTs (Conflict-free Replicated Data Types).** Data types whose merge is
+  commutative, associative, and idempotent, so replicas **always converge** without
+  coordination (strong eventual consistency): G-Counter/PN-Counter (counters),
+  OR-Set (sets), LWW-Register, and sequence CRDTs (RGA/Logoot) for collaborative
+  text. The basis of Automerge/Yjs and Redis CRDT (Active-Active).
+- **Application / user merge.** Present both versions (git-style) and let business
+  logic or the user decide.
+
+**Conflict *avoidance* beats resolution.** The cleanest multi-leader designs route
+all writes for a given record to the **same** leader ("home region" / sticky
+routing by key), so conflicts never arise — you only fall back to merge when a
+region fails over. Prefer avoidance; use CRDTs/vectors where genuine concurrent,
+multi-region writes to the same object are inherent (collaborative editing,
+offline-first apps).
+
+---
+
+## Secondary indexes on partitioned data: local versus global
+
+**Intuition.** A secondary index over a sharded table has to live *somewhere*, and
+the two choices — index-per-shard or one globally-partitioned index — have opposite
+read/write cost profiles. This is a favorite staff-level question because most
+engineers only know single-node indexes.
+
+**Local secondary index (document-partitioned).** Each shard indexes only *its
+own* rows. A write updates one index (cheap, single-partition, transactional). But
+a query on the indexed attribute that does **not** include the shard key must
+**scatter-gather** every shard and merge — read cost scales with shard count.
+Examples: Cassandra secondary indexes, DynamoDB **LSI** (shares the partition key),
+Elasticsearch (per-shard inverted index → query-then-fetch across shards).
+
+**Global secondary index (term-partitioned).** The index itself is partitioned by
+the **indexed term**, spread across shards independently of the base table. A read
+by that term hits **one** index partition (fast). But a single base-table write may
+need to update an index partition on a **different** node, so writes become
+cross-partition — typically done **asynchronously**, which is why **DynamoDB GSIs
+are eventually consistent**.
+
+| | Local (document-partitioned) | Global (term-partitioned) |
+|---|---|---|
+| Write cost | Cheap, single partition | Cross-partition, often async |
+| Read by indexed term | Scatter-gather all shards | Hits one index partition |
+| Consistency | Can be strongly consistent | Often eventually consistent |
+| Examples | Cassandra 2i, DynamoDB LSI | DynamoDB GSI |
+
+**Rule of thumb.** If the index query usually includes the shard key → local is
+fine and cheap. If you must query by an attribute independent of the shard key at
+scale → global (accept async/eventual writes) or maintain a separate
+CDC-fed lookup table.
+
+---
+
+## When NewSQL is the right call, and when it is not
+
+**Intuition.** NewSQL/distributed SQL is powerful and *seductive* — "SQL that
+scales" — but it carries a latency tax rooted in physics, and choosing it when you
+don't need it is a common staff-interview trap. This complements the mechanics in
+the NewSQL section above with the *decision*.
+
+**The tax you are signing up for.** Every write is a **consensus round trip**
+(Raft/Paxos = one RTT to a majority of replicas), and a transaction spanning
+multiple ranges layers **2PC over** those consensus groups. Across regions this
+collides with the speed of light: a US↔EU round trip is ~80–150 ms, so a
+strongly-consistent multi-region commit that must reach a majority spanning regions
+pays that per commit. Mitigations built into these systems: **geo-partitioning /
+table localities** (pin a row's replicas to the region that reads/writes it),
+**follower reads / bounded-staleness reads** (serve slightly stale reads locally to
+dodge the consensus round trip), and keeping transactions single-range.
+
+**Right call when:**
+- You need **relational semantics + ACID transactions + joins** *and* horizontal
+  scale beyond one primary, with **survival of a full region/zone**.
+- Multi-region financial, inventory, or multi-tenant SaaS that has genuinely
+  outgrown a single Postgres primary but cannot give up transactions.
+
+**Wrong call (over-engineering) when:**
+- A single Postgres + read replicas + caching still fits — then NewSQL is pure
+  cost and latency for no benefit.
+- The workload is **pure high-throughput key-value** with no cross-key
+  transactions — Cassandra/DynamoDB are cheaper and faster.
+- The workload is **analytical/OLAP** — use a columnar warehouse (Snowflake,
+  BigQuery, ClickHouse); distributed OLTP SQL is the wrong engine (though TiDB adds
+  HTAP via its **TiFlash** columnar replica).
+
+**Gotcha.** "It's just Postgres-compatible" undersells the differences: some SQL
+features, foreign-key/serial semantics, and single-node transaction latencies
+differ, and a hot single-row contended workload can be *slower* than one Postgres
+node because every commit is a quorum. Benchmark the *contended* path, not the
+happy path.
+
+---
+
 ## Common interview follow-up questions
 
 - **"You chose Postgres; how do you scale it to 10× writes?"** — Cache, read
