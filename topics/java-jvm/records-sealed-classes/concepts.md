@@ -135,7 +135,9 @@ public record Range(int lo, int hi) {
 
 Key rule: inside a compact constructor you assign to the **parameter names** (`hi = ...`) to influence
 what gets stored; you must **not** assign to `this.hi` yourself (the implicit assignment does it).
-Reading `this.hi` inside the compact body sees the default (0), not the incoming value.
+You also **cannot read `this.hi`** inside the compact body — the component field is a blank `final`
+that is not definitely assigned until the compiler-appended assignment at the end, so referencing it
+is a **compile error** ("variable might not have been initialized"). Use the parameter `hi` instead.
 
 **3. Custom (non-canonical) constructors.** Additional overloads are allowed, but every non-canonical
 constructor **must delegate to another constructor via `this(...)`** on its first line, ultimately

@@ -268,9 +268,9 @@ cf.whenComplete((val, ex) -> { if (ex != null) log.error("failed", ex); });
   logging/cleanup, not recovery.
 - **`handle`** runs on both paths and can *introduce* an exception path even after
   success. It is the most general.
-- Java 9 added `exceptionallyAsync`, `exceptionallyCompose`, and
+- Java 12 added `exceptionallyAsync`, `exceptionallyCompose`, and
   `exceptionallyComposeAsync` for async recovery and recovering with another
-  future.
+  future. (The base `exceptionally` was Java 8.)
 - Exceptions **short-circuit** the chain: once a stage fails, downstream
   `thenApply`/`thenCompose`/`thenAccept` stages are **skipped** (they complete
   exceptionally with the same cause) until an exception handler intervenes.
@@ -481,8 +481,9 @@ try (var exec = Executors.newVirtualThreadPerTaskExecutor()) {
 - **JSR 166 / `java.util.concurrent`** — `Future` (Java 5), `CompletableFuture`
   (Java 8) Javadoc: `CompletableFuture` and `CompletionStage`.
 - **JEP 266: More Concurrency Updates** (Java 9) — added `orTimeout`,
-  `completeOnTimeout`, `completeAsync`, `delayedExecutor`, `exceptionallyAsync`,
-  `exceptionallyCompose`, and the `Flow` (Reactive Streams) API.
+  `completeOnTimeout`, `completeAsync`, `delayedExecutor`, and the `Flow`
+  (Reactive Streams) API. The `exceptionallyAsync`/`exceptionallyCompose`/
+  `exceptionallyComposeAsync` methods came later, in **Java 12**.
 - **JEP 425: Virtual Threads (Preview)** — JDK 19.
 - **JEP 436: Virtual Threads (Second Preview)** — JDK 20.
 - **JEP 444: Virtual Threads** — final in **JDK 21** (2023).

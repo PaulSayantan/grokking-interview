@@ -278,9 +278,11 @@ ordinary classes.
   serialization.
 - For records, the custom hooks `writeObject`, `readObject`, and
   `readObjectNoData` are ignored for controlling field state, because state
-  must flow through the canonical constructor. `serialVersionUID` still applies
-  (defaults to `0L` for records if not declared, and any mismatch is ignored
-  for the component-based form except the UID check itself).
+  must flow through the canonical constructor. `serialVersionUID` defaults to
+  `0L` for records if not declared, and the requirement for *matching* UID
+  values is **waived** for record classes (per the serialization spec), so a
+  UID mismatch does not block deserialization the way it does for ordinary
+  classes.
 - Records cannot use a serialization proxy in the traditional
   `readObject`-based way, but the canonical-constructor path already provides
   the validation that proxies were invented to give.

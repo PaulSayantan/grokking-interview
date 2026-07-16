@@ -209,7 +209,10 @@ Class.forName("com.example.Missing"); // throws ClassNotFoundException if not on
 **The subtle case — a failed static initializer:**
 ```java
 class Bad {
-    static final int X = 1 / 0; // throws ArithmeticException during <clinit>
+    static int zero = 0;
+    static int X = 1 / zero; // throws ArithmeticException during <clinit>
+    // NOTE: `static final int X = 1 / 0;` would be a COMPILE error ("/ by zero"),
+    // because a constant-expression divide-by-zero is caught by javac, not at runtime.
 }
 // First access:
 Bad b = new Bad();   // -> ExceptionInInitializerError (wraps ArithmeticException)
