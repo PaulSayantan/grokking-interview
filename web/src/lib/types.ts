@@ -16,18 +16,28 @@ export type Difficulty =
   | "expert"
   | (string & {});
 
-/** One multiple-choice question as served in the per-topic/-domain JSON pools. */
+/**
+ * One multiple-choice question as served in the per-topic/-domain JSON pools.
+ *
+ * Every pool has a `.slim.json` twin (fetched by the practice island) that omits
+ * `explanation`, `tags`, and `difficulty` — hence those fields are optional.
+ * Explanations for slim pools are served from the per-domain `_explanations.json`
+ * map (`{ [questionId]: explanation }`).
+ */
 export interface Question {
   /** Stable unique id, e.g. "design-url-shortener-001". */
   id: string;
-  difficulty: Difficulty;
-  tags: string[];
+  /** Absent in `.slim.json` pools. */
+  difficulty?: Difficulty;
+  /** Absent in `.slim.json` pools. */
+  tags?: string[];
   question: string;
   /** 3-5 answer choices. */
   options: string[];
   /** 0-based index into `options`. */
   answer: number;
-  explanation: string;
+  /** Absent in `.slim.json` pools — look up in `_explanations.json` instead. */
+  explanation?: string;
   /**
    * Optional "concepts.md#anchor" reference into the study page.
    * The practice island turns this into /study/<domain>/<topic_slug>#<anchor>.

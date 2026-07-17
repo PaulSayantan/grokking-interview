@@ -1,10 +1,5 @@
 /** @jsxImportSource preact */
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
-// Motion is used ONLY here (the sole Preact island). `motion/react` resolves
-// against Preact via the react -> preact/compat alias (@astrojs/preact
-// { compat: true }). `MotionConfig reducedMotion="user"` makes every animation
-// below automatically collapse to a no-op when the OS requests reduced motion.
-import { motion, AnimatePresence, MotionConfig } from "motion/react";
 import type { Question } from "@lib/types";
 import { DEFAULT_SAMPLE_SIZE, pickN, seededShuffle } from "@lib/sample";
 
@@ -17,9 +12,21 @@ import { DEFAULT_SAMPLE_SIZE, pickN, seededShuffle } from "@lib/sample";
  * per-question-feedback flow. Score + best are persisted to localStorage keyed by
  * the resolved pool URL.
  *
+ * Load optimization: the island actually fetches the `.slim.json` twin of `poolUrl`
+ * (same questions minus explanation/tags/difficulty) so the initial payload is small,
+ * then lazily fetches the domain's `_explanations.json` map in the background. The
+ * explanation shown after answering is looked up from that map (with a brief
+ * "Loading explanation…" placeholder if the map hasn't arrived yet).
+ *
  * For system-design domain practice, an optional `groups` list lets the component
  * pick a `_group-<key>.json` pool client-side from a `?group=` query param and adapt
  * the scope heading accordingly (per CONTRACT.md §10).
+ *
+ * Animation is pure CSS (see ANIM_CSS): enter animations replay via keyed
+ * remounts, hover/tap scaling uses :hover/:active transforms, and everything
+ * motion-related is gated behind `@media (prefers-reduced-motion: no-preference)`
+ * — the same accessibility behavior `MotionConfig reducedMotion="user"` provided
+ * before the motion/react dependency was dropped.
  */
 
 interface GroupOption {
@@ -93,6 +100,16 @@ function writeStats(poolUrl: string, correct: number, total: number): StoredStat
   return next;
 }
 
+/** `/questions/d/_all.json` -> `/questions/d/_all.slim.json` (the light payload). */
+function slimUrl(poolUrl: string): string {
+  return poolUrl.replace(/\.json$/, ".slim.json");
+}
+
+/** `/questions/d/<anything>.json` -> `/questions/d/_explanations.json`. */
+function explanationsUrl(poolUrl: string): string {
+  return poolUrl.replace(/[^/]+$/, "_explanations.json");
+}
+
 /** Build the /study Learn-more link from a question's optional ref. */
 function learnMoreHref(q: Question): string | null {
   if (!q.ref) return null;
@@ -113,6 +130,91 @@ function prepare(pool: Question[]): PreparedQuestion[] {
 
 const OPTION_LETTERS = ["A", "B", "C", "D", "E"];
 
+/**
+ * Pure-CSS replacements for the previous motion/react animations.
+ * - Enter animations are keyframes with `animation-fill-mode: both` so delayed
+ *   elements stay hidden until their delay elapses.
+ * - The question card is keyed by question index, so its enter animation
+ *   replays on every question change (exit animation intentionally omitted).
+ * - Hover/tap scaling uses :hover/:active; springs are approximated with the
+ *   design-system ease-out curve.
+ * - Everything except color transitions is gated behind
+ *   `prefers-reduced-motion: no-preference`.
+ */
+const ANIM_CSS = `
+.ps-press-opt {
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ps-card-in {
+    animation: ps-fade-up-12 var(--dur-med, 240ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both;
+  }
+  .ps-results-in {
+    animation: ps-results-in 320ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both;
+  }
+  .ps-score-in {
+    animation: ps-score-in 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 120ms both;
+  }
+  .ps-best-in {
+    animation: ps-fade-up-6 var(--dur-med, 240ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 400ms both;
+  }
+  .ps-feedback-in {
+    animation: ps-fade-up-6 var(--dur-med, 240ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) both;
+  }
+  .ps-mark-in {
+    display: inline-block;
+    animation: ps-mark-in 200ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 50ms both;
+  }
+  .ps-press-btn {
+    transition: transform var(--dur-fast, 140ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+  }
+  .ps-press-btn:hover:not(:disabled) { transform: scale(1.03); }
+  .ps-press-btn:active:not(:disabled) { transform: scale(0.97); }
+  .ps-press-opt {
+    transition:
+      transform var(--dur-fast, 140ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+      background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+  }
+  .ps-press-opt:hover:not(:disabled) { transform: scale(1.01); }
+  .ps-press-opt:active:not(:disabled) { transform: scale(0.985); }
+  .ps-answer-pulse { animation: ps-answer-pulse 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)); }
+  .ps-answer-dip { animation: ps-answer-dip 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)); }
+  .ps-progress-fill {
+    transition: transform 400ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+  }
+  @keyframes ps-fade-up-12 {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes ps-fade-up-6 {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes ps-results-in {
+    from { opacity: 0; transform: scale(0.96) translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes ps-score-in {
+    from { opacity: 0; transform: scale(0.6); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes ps-mark-in {
+    from { opacity: 0; transform: scale(0); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes ps-answer-pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.02); }
+    100% { transform: scale(1); }
+  }
+  @keyframes ps-answer-dip {
+    0% { transform: scale(1); }
+    50% { transform: scale(0.99); }
+    100% { transform: scale(1); }
+  }
+}
+`;
+
 export default function PracticeSession({ poolUrl, backHref, title, groups }: Props) {
   // Resolve the active pool + scope from an optional ?group= query param.
   const resolved = useMemo(() => {
@@ -128,6 +230,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     "loading",
   );
   const [prepared, setPrepared] = useState<PreparedQuestion[]>([]);
+  // Lazily-loaded { questionId -> explanation } map (null until the fetch lands).
+  const [explanations, setExplanations] = useState<Record<string, string> | null>(
+    null,
+  );
   const [current, setCurrent] = useState(0);
   // selections[i] = chosen option index for question i (undefined = unanswered)
   const [selections, setSelections] = useState<(number | undefined)[]>([]);
@@ -139,11 +245,29 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const savedRef = useRef(false); // guards double-persist of a finished session
   const nextBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Which _explanations.json URL is loaded/in-flight (skips refetch on retry).
+  const explanationsUrlRef = useRef<string | null>(null);
+
+  /** Background-fetch the domain's explanations map; never blocks quiz start. */
+  const loadExplanations = useCallback((url: string) => {
+    if (explanationsUrlRef.current === url) return;
+    explanationsUrlRef.current = url;
+    void (async () => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        setExplanations((await res.json()) as Record<string, string>);
+      } catch {
+        // Allow a later loadPool() (e.g. Retry) to attempt the fetch again.
+        explanationsUrlRef.current = null;
+      }
+    })();
+  }, []);
 
   const loadPool = useCallback(async () => {
     setStatus("loading");
     try {
-      const res = await fetch(resolved.url);
+      const res = await fetch(slimUrl(resolved.url));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const pool = (await res.json()) as Question[];
       if (!Array.isArray(pool) || pool.length === 0) {
@@ -158,10 +282,12 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       setFocusIndex(0);
       savedRef.current = false;
       setStatus("ready");
+      // Deferred: fetch explanations in the background (quiz starts without them).
+      loadExplanations(explanationsUrl(resolved.url));
     } catch {
       setStatus("error");
     }
-  }, [resolved.url]);
+  }, [resolved.url, loadExplanations]);
 
   useEffect(() => {
     void loadPool();
@@ -203,6 +329,14 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       setFinished(true);
     }
   }, [current, total]);
+
+  // If the background explanations fetch failed, retry whenever an explanation
+  // is actually needed (a question was just answered). No-op while in flight.
+  useEffect(() => {
+    if (isLocked && explanations === null) {
+      loadExplanations(explanationsUrl(resolved.url));
+    }
+  }, [isLocked, explanations, resolved.url, loadExplanations]);
 
   // Persist once when a session finishes.
   useEffect(() => {
@@ -334,43 +468,30 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     const passed = pct >= 60;
     const newBest = stats != null && pct >= stats.bestPct && pct > 0;
     return (
-      <MotionConfig reducedMotion="user">
       <div>
-        <motion.div
-          class="card surface-brand overflow-hidden p-6 text-center"
-          initial={{ opacity: 0, scale: 0.96, y: 8 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ type: "spring", stiffness: 260, damping: 22 }}
-        >
+        <style>{ANIM_CSS}</style>
+        <div class="card surface-brand ps-results-in overflow-hidden p-6 text-center">
           <p
             class="text-sm font-semibold uppercase tracking-wide"
             style="color: var(--color-text-muted);"
           >
             {resolved.scope}
           </p>
-          <motion.p
-            class="mt-2 text-5xl font-bold"
-            initial={{ scale: 0.6, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={{ type: "spring", stiffness: 380, damping: 18, delay: 0.12 }}
-          >
+          <p class="ps-score-in mt-2 text-5xl font-bold">
             <span class="text-gradient">
               {score} / {total}
             </span>
-          </motion.p>
+          </p>
           <p class="mt-1 text-lg" style="color: var(--color-text-muted);">
             {pct}% correct
           </p>
           {newBest && (
-            <motion.p
-              class="mt-2 text-sm font-semibold"
-              style={{ color: "var(--color-accent)" }}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.4, duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
+            <p
+              class="ps-best-in mt-2 text-sm font-semibold"
+              style="color: var(--color-accent);"
             >
               {passed ? "New best score!" : "New best!"}
-            </motion.p>
+            </p>
           )}
           {stats && (
             <p class="mt-3 text-sm" style="color: var(--color-text-muted);">
@@ -378,20 +499,14 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
             </p>
           )}
           <div class="mt-6 flex flex-wrap justify-center gap-3">
-            <motion.button
+            <button
               type="button"
-              class="min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
-              style={{
-                background: "var(--color-primary)",
-                color: "var(--color-primary-contrast)",
-              }}
+              class="ps-press-btn min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
+              style="background: var(--color-primary); color: var(--color-primary-contrast);"
               onClick={() => void loadPool()}
-              whileHover={{ scale: 1.03 }}
-              whileTap={{ scale: 0.97 }}
-              transition={{ type: "spring", stiffness: 500, damping: 30 }}
             >
               Retry (new {Math.min(DEFAULT_SAMPLE_SIZE, total)})
-            </motion.button>
+            </button>
             <a
               href={backHref}
               class="inline-flex min-h-[44px] items-center rounded-md border px-5 py-2.5 font-medium no-underline"
@@ -400,7 +515,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
               Back to topic
             </a>
           </div>
-        </motion.div>
+        </div>
 
         <h2 class="mb-3 mt-8 text-lg font-bold">Review</h2>
         <ol class="flex flex-col gap-3">
@@ -463,7 +578,6 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           })}
         </ol>
       </div>
-      </MotionConfig>
     );
   }
 
@@ -471,9 +585,9 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   const href = activeQ ? learnMoreHref(activeQ.q) : null;
 
   return (
-    <MotionConfig reducedMotion="user">
-    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+    /* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */
     <div onKeyDown={onKeyDown as unknown as (e: Event) => void}>
+      <style>{ANIM_CSS}</style>
       {/* Progress + running score */}
       <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div>
@@ -502,25 +616,19 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         aria-valuenow={current + 1}
         aria-label="Quiz progress"
       >
-        <motion.div
-          class="h-full w-full rounded-full"
-          style={{ background: "var(--gradient-brand)", transformOrigin: "left center" }}
-          initial={{ scaleX: 0 }}
-          animate={{ scaleX: total ? (current + 1) / total : 0 }}
-          transition={{ type: "spring", stiffness: 140, damping: 22 }}
+        <div
+          class="ps-progress-fill h-full w-full rounded-full"
+          style={{
+            background: "var(--gradient-brand)",
+            transformOrigin: "left center",
+            transform: `scaleX(${total ? (current + 1) / total : 0})`,
+          }}
         />
       </div>
 
       {activeQ && (
-        <AnimatePresence mode="wait" initial={false}>
-        <motion.div
-          key={current}
-          class="card p-5 sm:p-6"
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
-        >
+        /* Keyed by question index so the CSS enter animation replays on change. */
+        <div key={current} class="card ps-card-in p-5 sm:p-6">
           <h2 class="text-lg font-semibold" style="white-space: pre-wrap;">
             {activeQ.q.question.trim()}
           </h2>
@@ -543,14 +651,22 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   fg = "var(--color-incorrect)";
                 }
               }
+              // One-shot settle animation when the answer locks in: the correct
+              // option pulses up, an incorrect chosen option dips.
+              const settleClass =
+                isLocked && isCorrect
+                  ? " ps-answer-pulse"
+                  : isLocked && chosen
+                    ? " ps-answer-dip"
+                    : "";
               return (
-                <motion.button
+                <button
                   key={oi}
                   type="button"
                   ref={(el: HTMLButtonElement | null) => {
                     optionRefs.current[oi] = el;
                   }}
-                  class="flex min-h-[44px] w-full items-center gap-3 rounded-md border px-4 py-3 text-left text-sm transition-colors"
+                  class={`ps-press-opt${settleClass} flex min-h-[44px] w-full items-center gap-3 rounded-md border px-4 py-3 text-left text-sm`}
                   style={{
                     background: bg,
                     borderColor: border,
@@ -561,14 +677,6 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   aria-pressed={chosen}
                   tabIndex={oi === focusIndex ? 0 : -1}
                   onClick={() => select(oi)}
-                  whileHover={isLocked ? undefined : { scale: 1.01 }}
-                  whileTap={isLocked ? undefined : { scale: 0.985 }}
-                  animate={
-                    isLocked && (isCorrect || chosen)
-                      ? { scale: [1, isCorrect ? 1.02 : 0.99, 1] }
-                      : { scale: 1 }
-                  }
-                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
                 >
                   <span
                     class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs font-bold"
@@ -585,30 +693,24 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   </span>
                   <span class="flex-1">{opt}</span>
                   {isLocked && isCorrect && (
-                    <motion.span
-                      class="ml-auto text-base font-bold"
-                      style={{ color: "var(--color-correct)" }}
+                    <span
+                      class="ps-mark-in ml-auto text-base font-bold"
+                      style="color: var(--color-correct);"
                       aria-hidden="true"
-                      initial={{ scale: 0, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      transition={{ type: "spring", stiffness: 600, damping: 22, delay: 0.05 }}
                     >
                       ✓
-                    </motion.span>
+                    </span>
                   )}
                   {isLocked && chosen && !isCorrect && (
-                    <motion.span
-                      class="ml-auto text-base font-bold"
-                      style={{ color: "var(--color-incorrect)" }}
+                    <span
+                      class="ps-mark-in ml-auto text-base font-bold"
+                      style="color: var(--color-incorrect);"
                       aria-hidden="true"
-                      initial={{ scale: 0, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      transition={{ type: "spring", stiffness: 600, damping: 22, delay: 0.05 }}
                     >
                       ✗
-                    </motion.span>
+                    </span>
                   )}
-                </motion.button>
+                </button>
               );
             })}
           </div>
@@ -616,11 +718,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           {/* Feedback (announced) */}
           <div aria-live="polite" class="mt-4">
             {isLocked && (
-              <motion.div
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
-              >
+              <div class="ps-feedback-in">
                 <p
                   class="text-sm font-semibold"
                   style={`color: ${
@@ -633,14 +731,33 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                     ? "Correct"
                     : `Incorrect — the correct answer is ${OPTION_LETTERS[activeQ.correctIndex]}.`}
                 </p>
-                {activeQ.q.explanation && (
-                  <p
-                    class="mt-2 text-sm"
-                    style="color: var(--color-text-muted); white-space: pre-wrap;"
-                  >
-                    {activeQ.q.explanation.trim()}
-                  </p>
-                )}
+                {(() => {
+                  // Slim pools carry no explanation; look it up in the lazily
+                  // loaded map (fall back to an inline field if present).
+                  const explanation =
+                    explanations?.[activeQ.q.id] ?? activeQ.q.explanation;
+                  if (explanation) {
+                    return (
+                      <p
+                        class="mt-2 text-sm"
+                        style="color: var(--color-text-muted); white-space: pre-wrap;"
+                      >
+                        {explanation.trim()}
+                      </p>
+                    );
+                  }
+                  if (explanations === null) {
+                    return (
+                      <p
+                        class="mt-2 text-sm italic"
+                        style="color: var(--color-text-muted);"
+                      >
+                        Loading explanation…
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
                 {href && (
                   <a
                     href={href}
@@ -650,27 +767,21 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                     Learn more →
                   </a>
                 )}
-              </motion.div>
+              </div>
             )}
           </div>
 
           {isLocked && (
             <div class="mt-5 flex justify-end">
-              <motion.button
+              <button
                 type="button"
                 ref={nextBtnRef}
-                class="min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
-                style={{
-                  background: "var(--color-primary)",
-                  color: "var(--color-primary-contrast)",
-                }}
+                class="ps-press-btn min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
+                style="background: var(--color-primary); color: var(--color-primary-contrast);"
                 onClick={goNext}
-                whileHover={{ scale: 1.03 }}
-                whileTap={{ scale: 0.97 }}
-                transition={{ type: "spring", stiffness: 500, damping: 30 }}
               >
                 {current < total - 1 ? "Next" : "See results"}
-              </motion.button>
+              </button>
             </div>
           )}
 
@@ -680,10 +791,8 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
               use arrow keys + Enter to answer.
             </p>
           )}
-        </motion.div>
-        </AnimatePresence>
+        </div>
       )}
     </div>
-    </MotionConfig>
   );
 }

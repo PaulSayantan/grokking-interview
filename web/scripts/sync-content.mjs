@@ -9,6 +9,9 @@
  *   public/questions/<domain>/<slug>.json           per-subtopic question array
  *   public/questions/<domain>/_all.json             all questions in a domain
  *   public/questions/system-design/_group-<key>.json  per-group pools (core/advanced/aws)
+ *   public/questions/<domain>/*.slim.json            slim twin of every pool above
+ *                                                    (no explanation/tags/difficulty)
+ *   public/questions/<domain>/_explanations.json     { question_id -> explanation }
  *   src/data/catalog.json                            catalog manifest for the pages
  *
  * DESIGN NOTE (frontmatter body): we KEEP the original leading "# H1" line in the
@@ -92,6 +95,29 @@ function stripLeadingH1(body) {
   return body.replace(/^﻿?#\s+.+?\r?\n/, "");
 }
 
+/** Slim question payload for the practice island's initial fetch. */
+function slimQuestion(q) {
+  const { explanation, tags, difficulty, ...rest } = q;
+  return rest;
+}
+
+/**
+ * Write a question pool as both `<baseName>.json` (full) and `<baseName>.slim.json`
+ * (no explanation/tags/difficulty — explanations ship separately per domain).
+ */
+async function writePoolFiles(dir, baseName, questions) {
+  await writeFile(
+    path.join(dir, `${baseName}.json`),
+    JSON.stringify(questions),
+    "utf8",
+  );
+  await writeFile(
+    path.join(dir, `${baseName}.slim.json`),
+    JSON.stringify(questions.map(slimQuestion)),
+    "utf8",
+  );
+}
+
 /** Group key for a system-design subtopic slug. */
 function sdGroupKey(slug) {
   if (slug.startsWith("aws-")) return "aws";
@@ -162,14 +188,10 @@ async function processAuthoredDomain(domainSlug) {
       topic_slug: slug,
     }));
 
-    // --- Write per-subtopic questions JSON ---
+    // --- Write per-subtopic questions JSON (full + slim) ---
     const domQDir = path.join(QUESTIONS_OUT, domainSlug);
     await mkdir(domQDir, { recursive: true });
-    await writeFile(
-      path.join(domQDir, `${slug}.json`),
-      JSON.stringify(outQuestions),
-      "utf8",
-    );
+    await writePoolFiles(domQDir, slug, outQuestions);
 
     // --- Accumulate for domain + group pools ---
     domainQuestions.push(...outQuestions);
@@ -208,26 +230,27 @@ async function processAuthoredDomain(domainSlug) {
     });
   }
 
-  // --- Write domain _all.json ---
+  // --- Write domain _all.json (full + slim) ---
   const domQDir = path.join(QUESTIONS_OUT, domainSlug);
   await mkdir(domQDir, { recursive: true });
-  await writeFile(
-    path.join(domQDir, "_all.json"),
-    JSON.stringify(domainQuestions),
-    "utf8",
-  );
+  await writePoolFiles(domQDir, "_all", domainQuestions);
 
-  // --- Write per-group pools for system-design ---
+  // --- Write per-group pools for system-design (full + slim) ---
   if (isSystemDesign) {
     for (const key of SD_GROUP_ORDER) {
       const pool = groupQuestions.get(key) || [];
-      await writeFile(
-        path.join(domQDir, `_group-${key}.json`),
-        JSON.stringify(pool),
-        "utf8",
-      );
+      await writePoolFiles(domQDir, `_group-${key}`, pool);
     }
   }
+
+  // --- Write per-domain explanations map (id -> explanation) ---
+  const explanations = {};
+  for (const q of domainQuestions) explanations[q.id] = q.explanation;
+  await writeFile(
+    path.join(domQDir, "_explanations.json"),
+    JSON.stringify(explanations),
+    "utf8",
+  );
 
   // --- Build ordered groups for the catalog ---
   let groups;
