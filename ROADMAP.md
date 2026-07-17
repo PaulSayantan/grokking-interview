@@ -36,10 +36,24 @@ See the per-domain checklist in **"Content progress"** below (generated from TOP
 - [ ] Tests / smoke checks for the sync pipeline + practice logic.
 
 ### Phase 3 — Polish (later)
-- [ ] Spaced-repetition / weak-topic focus mode.
-- [ ] Import/export progress, stats dashboard.
+
+A researched, prioritized engagement backlog was produced in Session 12 (patterns from
+Khan Academy, Duolingo, Anki, Exercism, GitBook et al.; all localStorage-only). Full
+plan lives in Claude memory (`web-design-enhancement-plan.md`). Highlights:
+
+- [ ] **P0** Mastery grid + `/progress` page (per-subtopic cells from quiz accuracy);
+      progress bars on catalog cards.
+- [ ] **P0** Streak counter with 1–2 grace days; milestone-only celebrations.
+- [ ] **P0** "Review missed questions" pool per topic/domain.
+- [ ] **P1** Session presets (Quick 10 / Focused 25 / All missed) + end-of-session summary.
+- [ ] **P1** Client-side search (Pagefind, Cmd+K).
+- [ ] **P1** Callout blocks (TIP/WARNING/INTERVIEW/KEY-TAKEAWAY) + reading time.
+- [ ] **P2** Left sidebar domain navigation + prev/next topic links; per-domain SVG icons;
+      welcome-back warm-up; difficulty filter (needs `difficulty` re-added to slim pools).
+- [ ] **P3** Achievement badges; SRS-light scheduling; light-theme toggle (needs user
+      sign-off — dark-only is a standing decision); self-test `<details>` blocks.
 - [ ] Multi-answer & code-snippet question types.
-- [ ] Search across all topics.
+- [ ] Import/export progress.
 
 ## Content progress
 
@@ -66,6 +80,14 @@ Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
+
+- **Session 12 (2026-07-17):** Performance audit & optimization — implemented 5 changes
+  to reduce initial page-load weight: (1) slim question pools strip explanation/tags/
+  difficulty from initial fetch (system-design 1213KB gz → 710KB gz), with explanations
+  loaded lazily; (2) replaced motion/framer-motion (46KB gz) with CSS animations (4KB gz);
+  (3) switched practice island to `client:idle` to unblock paint; (4) added `<link
+  rel="preload">` for question JSON on practice pages; (5) immutable cache headers on
+  hashed `/_astro/` assets. All 119 study pages and 9,432 questions verified intact.
 
 - **Session 9 (2026-07-16):** System Design advanced/expert expansion — authored **8 new
   senior/staff deep-dive topics** (interview-method-scenario-playbooks — the scenario-based
