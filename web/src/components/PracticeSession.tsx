@@ -146,8 +146,6 @@ function prepare(pool: Question[], size: number): PreparedQuestion[] {
   });
 }
 
-const OPTION_LETTERS = ["A", "B", "C", "D", "E"];
-
 /** The four concrete difficulty tiers offered as filter pills (green→amber). */
 const DIFFICULTY_TIERS: { key: Difficulty; label: string; accent: string }[] = [
   { key: "beginner", label: "Beginner", accent: "var(--accent-green)" },
@@ -1060,17 +1058,17 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   onClick={() => select(oi)}
                 >
                   <span
-                    class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-xs font-bold"
+                    class="flex h-6 w-6 shrink-0 items-center justify-center rounded border text-xs font-bold tabular-nums"
                     style={
                       isLocked && isCorrect
-                        ? "background: var(--color-correct); color: var(--color-primary-contrast);"
+                        ? "background: var(--color-correct); color: var(--color-primary-contrast); border-color: var(--color-correct);"
                         : isLocked && chosen
-                          ? "background: var(--color-incorrect); color: var(--color-primary-contrast);"
-                          : "background: var(--color-surface-2); color: var(--color-text-muted);"
+                          ? "background: var(--color-incorrect); color: var(--color-primary-contrast); border-color: var(--color-incorrect);"
+                          : "background: var(--color-surface-2); color: var(--color-text-muted); border-color: var(--color-border); box-shadow: 0 1px 0 color-mix(in srgb, var(--color-border) 70%, transparent);"
                     }
                     aria-hidden="true"
                   >
-                    {OPTION_LETTERS[oi]}
+                    {oi + 1}
                   </span>
                   <span class="flex-1">{opt}</span>
                   {isLocked && isCorrect && (
@@ -1110,7 +1108,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                 >
                   {activeSelection === activeQ.correctIndex
                     ? "Correct"
-                    : `Incorrect — the correct answer is ${OPTION_LETTERS[activeQ.correctIndex]}.`}
+                    : `Incorrect — the correct answer is ${activeQ.correctIndex + 1}.`}
                 </p>
                 {(() => {
                   // Slim pools carry no explanation; look it up in the lazily
@@ -1162,14 +1160,22 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                 onClick={goNext}
               >
                 {current < total - 1 ? "Next" : "See results"}
+                <span
+                  aria-hidden="true"
+                  class="ml-2 inline-flex items-center rounded border px-1.5 text-xs font-normal"
+                  style="border-color: color-mix(in srgb, var(--color-primary-contrast) 45%, transparent); color: var(--color-primary-contrast); opacity: 0.85;"
+                >
+                  ↵
+                </span>
               </button>
             </div>
           )}
 
           {!isLocked && (
             <p class="mt-4 text-xs" style="color: var(--color-text-muted);">
-              Tip: press <kbd>1</kbd>–<kbd>{String(activeQ.options.length)}</kbd> or
-              use arrow keys + Enter to answer.
+              Tip: press{" "}
+              <kbd style="border: 1px solid var(--color-border); color: var(--color-text-muted); border-radius: var(--radius-sm); padding: 0 0.25rem;">1</kbd>–<kbd style="border: 1px solid var(--color-border); color: var(--color-text-muted); border-radius: var(--radius-sm); padding: 0 0.25rem;">{String(activeQ.options.length)}</kbd>{" "}
+              or use arrow keys + Enter to answer.
             </p>
           )}
         </div>
