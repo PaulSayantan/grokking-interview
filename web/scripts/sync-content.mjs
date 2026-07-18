@@ -38,7 +38,7 @@ const CATALOG_OUT = path.join(WEB_ROOT, "src/data/catalog.json");
 // --- Domain configuration -------------------------------------------------
 
 /** Authored domains render as browsable cards; order here drives display order. */
-const AUTHORED_DOMAINS = ["system-design", "spring-boot", "spring-core", "java-jvm"];
+const AUTHORED_DOMAINS = ["system-design", "spring-boot", "spring-core", "java-jvm", "rest-api-design"];
 
 /** Not-yet-authored domains -> "Coming soon" cards. Titles from topics/<d>/README.md. */
 const COMING_SOON_DOMAINS = [
@@ -49,7 +49,6 @@ const COMING_SOON_DOMAINS = [
   "apache-tomcat",
   "messaging-databases",
   "security",
-  "rest-api-design",
   "networking",
   "observability",
   "testing",
