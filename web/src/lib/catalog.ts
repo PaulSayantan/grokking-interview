@@ -5,7 +5,12 @@
  * Import from "@lib/catalog".
  */
 import catalogJson from "../data/catalog.json";
-import type { Catalog, CatalogDomain, CatalogGroup } from "./types";
+import type {
+  Catalog,
+  CatalogDomain,
+  CatalogGroup,
+  CatalogSubtopic,
+} from "./types";
 
 export const catalog = catalogJson as Catalog;
 
@@ -41,4 +46,40 @@ export function getAllSubtopicRefs(): { domain: string; slug: string }[] {
     }
   }
   return out;
+}
+
+/** One entry in a domain's ordered learning sequence. */
+export interface DomainSequenceEntry {
+  group: CatalogGroup;
+  subtopic: CatalogSubtopic;
+}
+
+/**
+ * A domain's subtopics in learning/display order: groups in catalog order,
+ * subtopics by 1-based `position` within each group. (catalog.json already
+ * stores them in README order; the sort is defensive.)
+ */
+export function getDomainSequence(domainSlug: string): DomainSequenceEntry[] {
+  const d = getDomain(domainSlug);
+  if (!d) return [];
+  const out: DomainSequenceEntry[] = [];
+  for (const g of d.groups) {
+    const subs = [...g.subtopics].sort((a, b) => a.position - b.position);
+    for (const s of subs) out.push({ group: g, subtopic: s });
+  }
+  return out;
+}
+
+/**
+ * Previous/next subtopic in the domain's learning order, CROSSING group
+ * boundaries (e.g. system-design core → advanced → aws). undefined at the ends.
+ */
+export function getAdjacentSubtopics(
+  domainSlug: string,
+  slug: string,
+): { prev?: DomainSequenceEntry; next?: DomainSequenceEntry } {
+  const seq = getDomainSequence(domainSlug);
+  const i = seq.findIndex((e) => e.subtopic.slug === slug);
+  if (i < 0) return {};
+  return { prev: seq[i - 1], next: seq[i + 1] };
 }
