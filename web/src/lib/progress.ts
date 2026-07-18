@@ -23,6 +23,8 @@
 
 export const ANSWERS_KEY = "ip:answers:v1";
 export const STREAK_KEY = "ip:streak:v1";
+/** Prefix for per-pool session stats written by PracticeSession. */
+export const PRACTICE_KEY_PREFIX = "ip:practice:v1:";
 
 /** How many missed days a streak tolerates before it resets (grace/"freeze"). */
 export const STREAK_GRACE_DAYS = 1;
@@ -243,4 +245,49 @@ export function claimStreakMilestone(current: number): number | null {
   if (seen.includes(current)) return null;
   writeJSON(MILESTONES_KEY, [...seen, current]);
   return current;
+}
+
+// --- Resets ----------------------------------------------------------------
+
+/** Remove all localStorage keys starting with `prefix` (SSR-safe). */
+function removeByPrefix(prefix: string): void {
+  if (!canStore()) return;
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(prefix)) keys.push(k);
+    }
+    keys.forEach((k) => localStorage.removeItem(k));
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Clear mastery + accuracy data: per-question answer history and every
+ * per-pool practice stat. Leaves streak, milestones, and theme intact.
+ */
+export function resetProgress(): void {
+  if (!canStore()) return;
+  try {
+    localStorage.removeItem(ANSWERS_KEY);
+  } catch {
+    /* ignore */
+  }
+  removeByPrefix(PRACTICE_KEY_PREFIX);
+}
+
+/**
+ * Clear the daily-habit data: streak and claimed streak milestones.
+ * Leaves mastery/answers and theme intact.
+ */
+export function resetActivity(): void {
+  if (!canStore()) return;
+  try {
+    localStorage.removeItem(STREAK_KEY);
+    localStorage.removeItem(MILESTONES_KEY);
+  } catch {
+    /* ignore */
+  }
 }
