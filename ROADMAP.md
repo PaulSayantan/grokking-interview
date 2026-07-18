@@ -41,17 +41,22 @@ A researched, prioritized engagement backlog was produced in Session 12 (pattern
 Khan Academy, Duolingo, Anki, Exercism, GitBook et al.; all localStorage-only). Full
 plan lives in Claude memory (`web-design-enhancement-plan.md`). Highlights:
 
-- [ ] **P0** Mastery grid + `/progress` page (per-subtopic cells from quiz accuracy);
-      progress bars on catalog cards.
-- [ ] **P0** Streak counter with 1–2 grace days; milestone-only celebrations.
-- [ ] **P0** "Review missed questions" pool per topic/domain.
-- [ ] **P1** Session presets (Quick 10 / Focused 25 / All missed) + end-of-session summary.
-- [ ] **P1** Client-side search (Pagefind, Cmd+K).
-- [ ] **P1** Callout blocks (TIP/WARNING/INTERVIEW/KEY-TAKEAWAY) + reading time.
+- [x] **P0** Mastery grid + `/progress` page (per-subtopic cells from quiz accuracy),
+      headline stats, per-domain progress bars. *(Session 14; commit 0ad4aa2)*
+- [x] **P0** Streak counter with 1-day grace + header flame pill; milestone
+      celebrations (7/14/30/50/100). *(Sessions 14–15)*
+- [x] **P0** "Review missed questions" — per-subtopic (`?review=1`), domain-level CTA,
+      and per-card "N to review" badges. *(Sessions 14–15)*
+- [x] **P1** Session presets (Quick 10 / Focused 25 / All missed) + end-of-session
+      summary (per-subtopic breakdown, trend vs last, smart next CTA). *(Session 15)*
+- [x] **P1** Client-side search (Pagefind, Cmd+K / "/"), scoped to study content. *(Session 15)*
+- [x] **P1** Callout blocks (TIP/WARNING/INTERVIEW/KEY-TAKEAWAY) + reading time +
+      page-top scroll-progress bar. *(Session 15)*
+- [x] Catalog mastery bars + header "% mastered" pill. *(Session 15)*
 - [ ] **P2** Left sidebar domain navigation + prev/next topic links; per-domain SVG icons;
       welcome-back warm-up; difficulty filter (needs `difficulty` re-added to slim pools).
-- [ ] **P3** Achievement badges; SRS-light scheduling; light-theme toggle (needs user
-      sign-off — dark-only is a standing decision); self-test `<details>` blocks.
+- [ ] **P3** Achievement badges; SRS-light scheduling; self-test `<details>` blocks.
+      *(Light-theme toggle shipped in Session 13.)*
 - [ ] Multi-answer & code-snippet question types.
 - [ ] Import/export progress.
 
