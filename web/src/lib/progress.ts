@@ -25,6 +25,8 @@ export const ANSWERS_KEY = "ip:answers:v1";
 export const STREAK_KEY = "ip:streak:v1";
 /** Prefix for per-pool session stats written by PracticeSession. */
 export const PRACTICE_KEY_PREFIX = "ip:practice:v1:";
+/** Local YYYY-MM-DD of the learner's previous visit (welcome-back warm-up). */
+export const LASTVISIT_KEY = "ip:lastvisit:v1";
 
 /** How many missed days a streak tolerates before it resets (grace/"freeze"). */
 export const STREAK_GRACE_DAYS = 1;
@@ -290,4 +292,36 @@ export function resetActivity(): void {
   } catch {
     /* ignore */
   }
+}
+
+// --- Last-visit (welcome-back warm-up) -------------------------------------
+
+/** Local YYYY-MM-DD of the learner's previous visit, or "" if none recorded. */
+export function readLastVisit(): string {
+  return readJSON<string>(LASTVISIT_KEY, "");
+}
+
+/** Persist today's date as the last-visit day. */
+export function writeLastVisit(today: string = localDay()): void {
+  writeJSON(LASTVISIT_KEY, today);
+}
+
+/** Domain slug with the most currently-missed questions, or "" if none. */
+export function topMissedDomain(): string {
+  const map = readAnswers();
+  const counts: Record<string, number> = {};
+  for (const id in map) {
+    const r = map[id];
+    if (r.correct) continue;
+    counts[r.domain] = (counts[r.domain] || 0) + 1;
+  }
+  let best = "";
+  let max = 0;
+  for (const d in counts) {
+    if (counts[d] > max) {
+      max = counts[d];
+      best = d;
+    }
+  }
+  return best;
 }
