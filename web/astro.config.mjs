@@ -4,6 +4,7 @@ import preact from "@astrojs/preact";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import remarkGfm from "remark-gfm";
+import rehypeCallouts from "./plugins/rehype-callouts.mjs";
 
 // Static site (output: "static" is the Astro default — no SSR adapter).
 // `site` is used for canonical URLs / sitemaps; override via env for prod.
@@ -33,6 +34,8 @@ export default defineConfig({
           properties: { className: ["heading-anchor"] },
         },
       ],
+      // Turns "> [!TIP]" GitHub-alert blockquotes into styled callout boxes.
+      rehypeCallouts,
     ],
     // Shiki is Astro's built-in syntax highlighter.
     shikiConfig: {

@@ -27,6 +27,28 @@ topics/<domain-slug>/<topic-slug>/
 - Write real, interview-grade answers: definitions, why it matters, trade-offs,
   common follow-ups, and gotchas. Prefer clarity over length.
 
+### Callout blocks
+
+Use GitHub-alert-style blockquotes for emphasis. EXACTLY four case-sensitive
+types are recognized; the marker must be the blockquote's first line:
+
+| Marker | Rendered as |
+|---|---|
+| `> [!TIP]` | Tip (teal) |
+| `> [!WARNING]` | Warning (amber) |
+| `> [!INTERVIEW]` | Interview (violet) |
+| `> [!KEY-TAKEAWAY]` | Key takeaway (blue) |
+
+Example:
+
+```md
+> [!WARNING]
+> `synchronized` pins virtual threads on JDK 21.
+```
+
+Any other/absent marker renders as a plain blockquote. Body supports normal
+markdown.
+
 ## `questions.yaml` — MCQs
 
 Top-level keys:

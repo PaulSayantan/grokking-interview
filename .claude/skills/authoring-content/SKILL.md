@@ -22,6 +22,11 @@ authoritative contract is `docs/content-schema.md` — read it first if unsure.
    - Interview-grade answers: definition, why it matters, trade-offs, gotchas,
      common follow-ups. Accuracy matters — verify claims; use WebSearch for anything
      uncertain, especially version-specific behavior.
+   - Optionally emphasize with callout blocks using GitHub-alert syntax — exactly
+     4 types: `> [!TIP]`, `> [!WARNING]`, `> [!INTERVIEW]`, `> [!KEY-TAKEAWAY]`
+     (marker on its own first line, body on following `>` lines). Rendered as
+     colored boxes on the study page. Don't overuse — 1–3 per topic. See
+     `content-templates/concepts.template.md` and `docs/content-schema.md`.
 3. **Write `questions.yaml`:** start from `content-templates/questions.template.yaml`.
    - 8–15 MCQs, `id` = `<topic-slug>-NNN`, `answer` is a **0-based** index.
    - Vary the correct option's position; write plausible distractors.
