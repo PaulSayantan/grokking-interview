@@ -1,8 +1,19 @@
 /** @jsxImportSource preact */
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Question } from "@lib/types";
-import { DEFAULT_SAMPLE_SIZE, pickN, seededShuffle } from "@lib/sample";
-import { recordAnswers, registerPractice, missedIds } from "@lib/progress";
+import {
+  DEFAULT_SAMPLE_SIZE,
+  SESSION_PRESETS,
+  pickN,
+  seededShuffle,
+  type SessionPreset,
+} from "@lib/sample";
+import {
+  recordAnswers,
+  registerPractice,
+  missedIds,
+  missedCount,
+} from "@lib/progress";
 
 /**
  * PracticeSession — the interactive MCQ quiz. The ONLY Preact island on the site.
@@ -118,9 +129,14 @@ function learnMoreHref(q: Question): string | null {
   return `/study/${q.domain}/${q.topic_slug}#${hash}`;
 }
 
+/** Humanize a topic_slug for display when no title is available (slim pools). */
+function humanizeSlug(slug: string): string {
+  return slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 /** Sample + shuffle a pool into prepared questions (options shuffled, answer remapped). */
-function prepare(pool: Question[]): PreparedQuestion[] {
-  const sampled = pickN(pool, DEFAULT_SAMPLE_SIZE);
+function prepare(pool: Question[], size: number): PreparedQuestion[] {
+  const sampled = pickN(pool, size);
   return sampled.map((q) => {
     const order = seededShuffle(q.options.map((_, i) => i));
     const options = order.map((i) => q.options[i]);
@@ -233,9 +249,22 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     return { url: poolUrl, scope: title, review };
   }, [poolUrl, title, groups]);
 
-  const [status, setStatus] = useState<"loading" | "error" | "empty" | "ready">(
-    "loading",
-  );
+  // Scope the missed-question count to what this pool actually reviews: a
+  // subtopic pool (/questions/<d>/<slug>.json) scopes to that subtopic; a
+  // domain/group pool (_all / _group-*) scopes to the whole domain.
+  const missedFilter = useMemo(() => {
+    const m = resolved.url.match(/\/questions\/([^/]+)\/([^/]+)\.json$/);
+    if (!m) return {};
+    const [, domain, file] = m;
+    if (file.startsWith("_")) return { domain };
+    return { domain, topic_slug: file };
+  }, [resolved.url]);
+
+  // Which preset the learner picked; null => show the pre-quiz chooser first.
+  const [preset, setPreset] = useState<SessionPreset | null>(null);
+  const [status, setStatus] = useState<
+    "choosing" | "loading" | "error" | "empty" | "ready"
+  >("choosing");
   const [prepared, setPrepared] = useState<PreparedQuestion[]>([]);
   // Lazily-loaded { questionId -> explanation } map (null until the fetch lands).
   const [explanations, setExplanations] = useState<Record<string, string> | null>(
@@ -252,6 +281,8 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const savedRef = useRef(false); // guards double-persist of a finished session
   const nextBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Previous attempt's pct, captured on finish before writeStats overwrites it.
+  const prevPctRef = useRef<number | null>(null);
   // Which _explanations.json URL is loaded/in-flight (skips refetch on retry).
   const explanationsUrlRef = useRef<string | null>(null);
 
@@ -272,6 +303,12 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   }, []);
 
   const loadPool = useCallback(async () => {
+    // Wait for a preset choice before loading anything.
+    if (!preset) {
+      setStatus("choosing");
+      return;
+    }
+    const review = preset.review;
     setStatus("loading");
     try {
       const res = await fetch(slimUrl(resolved.url));
@@ -282,15 +319,15 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         return;
       }
       // Review-missed mode: keep only questions the learner last got wrong.
-      if (resolved.review) {
-        const missed = new Set(missedIds());
+      if (review) {
+        const missed = new Set(missedIds(missedFilter));
         pool = pool.filter((q) => missed.has(q.id));
         if (pool.length === 0) {
           setStatus("empty");
           return;
         }
       }
-      const q = prepare(pool);
+      const q = prepare(pool, preset.size ?? pool.length);
       setPrepared(q);
       setSelections(new Array(q.length).fill(undefined));
       setCurrent(0);
@@ -303,7 +340,15 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     } catch {
       setStatus("error");
     }
-  }, [resolved.url, resolved.review, loadExplanations]);
+  }, [resolved.url, preset, missedFilter, loadExplanations]);
+
+  // Deep-link ?review=1 auto-selects the "missed" preset so it skips the chooser.
+  useEffect(() => {
+    if (preset) return;
+    if (resolved.review) {
+      setPreset(SESSION_PRESETS.find((p) => p.key === "missed") ?? null);
+    }
+  }, [resolved.review, preset]);
 
   useEffect(() => {
     void loadPool();
@@ -359,6 +404,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   useEffect(() => {
     if (finished && !savedRef.current && total > 0) {
       savedRef.current = true;
+      // Capture the previous attempt's pct BEFORE writeStats overwrites lastPct.
+      prevPctRef.current = readStats(resolved.url).attempts > 0
+        ? readStats(resolved.url).lastPct
+        : null;
       setStats(writeStats(resolved.url, score, total));
       recordAnswers(
         prepared.map((pq, i) => ({
@@ -433,6 +482,55 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
 
   // ---- Render states -------------------------------------------------------
 
+  // Pre-quiz preset chooser (microlearning: match session length to time on hand).
+  if (status === "choosing") {
+    const missed = missedCount(missedFilter);
+    return (
+      <div class="card p-6">
+        <style>{ANIM_CSS}</style>
+        <p class="text-sm font-semibold uppercase tracking-wide" style="color: var(--color-text-muted);">
+          {resolved.scope}
+        </p>
+        <h2 class="mt-1 text-lg font-bold">Choose a session</h2>
+        <div class="mt-4 flex flex-col gap-3">
+          {SESSION_PRESETS.map((p) => {
+            const isMissed = p.key === "missed";
+            const disabled = isMissed && missed === 0;
+            return (
+              <button
+                type="button"
+                key={p.key}
+                disabled={disabled}
+                class="ps-press-btn card p-4 text-left"
+                style={`border-color: var(--color-border); opacity: ${disabled ? 0.5 : 1}; cursor: ${disabled ? "default" : "pointer"};`}
+                onClick={() => {
+                  if (!disabled) setPreset(p);
+                }}
+              >
+                <span class="font-semibold">
+                  {p.label}
+                  {isMissed && missed > 0 ? ` (${missed})` : ""}
+                </span>
+                <span class="mt-1 block text-sm" style="color: var(--color-text-muted);">
+                  {disabled ? "Nothing missed yet — practice a round first." : p.hint}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div class="mt-4">
+          <a
+            href={backHref}
+            class="rounded-md border px-4 py-2 text-sm font-medium no-underline"
+            style="border-color: var(--color-border); color: var(--color-text);"
+          >
+            Back to topic
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   if (status === "loading") {
     return (
       <div class="card p-6" aria-busy="true">
@@ -495,6 +593,28 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   if (finished) {
     const passed = pct >= 60;
     const newBest = stats != null && pct >= stats.bestPct && pct > 0;
+
+    // Trend vs the previous attempt (hidden on the first-ever attempt).
+    const prevPct = prevPctRef.current;
+    const delta = prevPct == null ? null : pct - prevPct;
+
+    // Per-subtopic breakdown — only meaningful when the pool spans >1 subtopic.
+    const bySlug = new Map<string, { title: string; right: number; wrong: number }>();
+    prepared.forEach((pq, i) => {
+      const key = pq.q.topic_slug;
+      const row = bySlug.get(key) ?? { title: humanizeSlug(key), right: 0, wrong: 0 };
+      if (selections[i] === pq.correctIndex) row.right++;
+      else row.wrong++;
+      bySlug.set(key, row);
+    });
+    const breakdown = [...bySlug.values()].sort(
+      (a, b) => b.wrong - a.wrong || a.title.localeCompare(b.title),
+    );
+    const multiTopic = bySlug.size > 1;
+
+    // Next CTA: review is only offered when misses exist in this pool's scope.
+    const missedNow = missedCount(missedFilter);
+
     return (
       <div>
         <style>{ANIM_CSS}</style>
@@ -513,6 +633,24 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           <p class="mt-1 text-lg" style="color: var(--color-text-muted);">
             {pct}% correct
           </p>
+          {delta != null && (
+            <p
+              class="mt-1 text-sm font-semibold"
+              style={`color: ${
+                delta > 0
+                  ? "var(--color-correct)"
+                  : delta < 0
+                    ? "var(--color-incorrect)"
+                    : "var(--color-text-muted)"
+              };`}
+            >
+              {delta > 0
+                ? `▲ +${delta}% vs last`
+                : delta < 0
+                  ? `▼ ${delta}% vs last`
+                  : "Same as last attempt"}
+            </p>
+          )}
           {newBest && (
             <p
               class="ps-best-in mt-2 text-sm font-semibold"
@@ -527,14 +665,30 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
             </p>
           )}
           <div class="mt-6 flex flex-wrap justify-center gap-3">
-            <button
-              type="button"
-              class="ps-press-btn min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
-              style="background: var(--color-primary); color: var(--color-primary-contrast);"
-              onClick={() => void loadPool()}
-            >
-              Retry (new {Math.min(DEFAULT_SAMPLE_SIZE, total)})
-            </button>
+            {missedNow > 0 && !preset?.review ? (
+              <button
+                type="button"
+                class="ps-press-btn min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
+                style="background: var(--color-primary); color: var(--color-primary-contrast);"
+                onClick={() => {
+                  // Switching the preset re-triggers loadPool via its effect —
+                  // don't also call loadPool here (avoids a double load).
+                  setPreset(SESSION_PRESETS.find((p) => p.key === "missed") ?? null);
+                  setFinished(false);
+                }}
+              >
+                Review {missedNow} missed
+              </button>
+            ) : (
+              <button
+                type="button"
+                class="ps-press-btn min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
+                style="background: var(--color-primary); color: var(--color-primary-contrast);"
+                onClick={() => void loadPool()}
+              >
+                Retry
+              </button>
+            )}
             <a
               href={backHref}
               class="inline-flex min-h-[44px] items-center rounded-md border px-5 py-2.5 font-medium no-underline"
@@ -543,6 +697,25 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
               Back to topic
             </a>
           </div>
+
+          {multiTopic && (
+            <div class="mt-6 text-left">
+              <h3 class="mb-2 text-sm font-bold uppercase tracking-wide" style="color: var(--color-text-muted);">
+                By subtopic
+              </h3>
+              <ul class="flex flex-col gap-1.5 text-sm">
+                {breakdown.map((row) => (
+                  <li key={row.title} class="flex items-center justify-between gap-3">
+                    <span style="color: var(--color-text);">{row.title}</span>
+                    <span class="shrink-0 tabular-nums">
+                      <span style="color: var(--color-correct);">{row.right}</span>
+                      <span style="color: var(--color-text-muted);"> / {row.right + row.wrong}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
 
         <h2 class="mb-3 mt-8 text-lg font-bold">Review</h2>

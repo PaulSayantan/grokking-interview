@@ -47,6 +47,24 @@ export function seededShuffle<T>(items: readonly T[], seed?: number): T[] {
 /** Default number of questions in a practice session. */
 export const DEFAULT_SAMPLE_SIZE = 25;
 
+/** Session presets shown before a quiz starts. */
+export interface SessionPreset {
+  key: "quick" | "focused" | "missed";
+  label: string;
+  /** null => no cap (use the whole matching pool). */
+  size: number | null;
+  /** true => review-missed mode (filter pool to missed questions). */
+  review: boolean;
+  /** short helper line under the label. */
+  hint: string;
+}
+
+export const SESSION_PRESETS: SessionPreset[] = [
+  { key: "quick", label: "Quick 10", size: 10, review: false, hint: "A fast 10-question warm-up." },
+  { key: "focused", label: "Focused 25", size: DEFAULT_SAMPLE_SIZE, review: false, hint: "A full 25-question block." },
+  { key: "missed", label: "All missed", size: null, review: true, hint: "Drill only what you got wrong." },
+];
+
 /**
  * Pick N items without replacement. Shuffles (optionally seeded) then takes the
  * first `n`. If the pool has fewer than `n`, returns the whole pool shuffled.
