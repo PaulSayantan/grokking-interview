@@ -936,7 +936,7 @@ questions:
       - "Require a minimum number of query parameters"
     answer: 2
     explanation: |
-      411 Length Required (RFC 9110 §15.5.11) lets a server refuse a request that
+      411 Length Required (RFC 9110 §15.5.12) lets a server refuse a request that
       lacks a Content-Length when it needs to know the size up front, though many
       servers instead accept chunked encoding and enforce a streaming byte cap.
     ref: "concepts.md#content-length-and-content-type-limits"
@@ -975,3 +975,674 @@ questions:
       clients validate locally and depend on a consistent error contract, while the
       server still enforces them.
     ref: "concepts.md#why-validate-requests"
+
+  - id: request-validation-and-data-integrity-056
+    difficulty: expert
+    tags: [json-schema, composition, additional-properties, unevaluated-properties]
+    question: |
+      Your "update profile" schema used `additionalProperties: false` and worked.
+      After you refactored it to `allOf: [ {$ref: Base}, {properties:{displayName},
+      additionalProperties:false} ]`, valid requests containing Base's fields (id,
+      createdAt) started getting rejected. Why, and what fixes it?
+    options:
+      - "`allOf` is not supported in Draft 2020-12; switch to `anyOf`"
+      - "`additionalProperties` only sees properties in its own subschema, so it can't see Base's fields; replace it with `unevaluatedProperties: false` on the outer schema"
+      - "`$ref` disables all property validation; inline the Base schema instead"
+      - "The Base schema must also set `additionalProperties: true` to override the inner one"
+    answer: 1
+    explanation: |
+      `additionalProperties` only considers `properties`/`patternProperties` in the
+      same schema object; under `allOf`/`$ref` it can't see sibling-contributed
+      fields, so it rejects them. `unevaluatedProperties: false` on the outermost
+      schema is evaluated after all subschemas and treats any property matched by
+      any branch as evaluated — the correct closed-composition guard.
+    ref: "concepts.md#closed-schemas-under-composition"
+
+  - id: request-validation-and-data-integrity-057
+    difficulty: advanced
+    tags: [json-schema, unevaluated-properties, mass-assignment]
+    question: |
+      A developer puts `additionalProperties: false` on the *outer* schema of an
+      `allOf` composition (where no `properties` are declared directly). What is the
+      most likely effect?
+    options:
+      - "It correctly closes the composed object to only the allOf-defined fields"
+      - "It rejects every request because the outer schema declares no properties, so all fields are 'additional'"
+      - "It is ignored because outer schemas can't have keywords alongside allOf"
+      - "It only validates the first subschema in the allOf array"
+    answer: 1
+    explanation: |
+      At the outer level there are no local `properties`, so `additionalProperties`
+      sees every field as unknown and rejects all of them. `additionalProperties`
+      does not look into `allOf` branches. `unevaluatedProperties: false` is the
+      keyword that does, which is why it is the right tool for composed schemas.
+    ref: "concepts.md#closed-schemas-under-composition"
+
+  - id: request-validation-and-data-integrity-058
+    difficulty: expert
+    tags: [json-schema, arrays, prefix-items, versioning]
+    question: |
+      You port a Draft-07 tuple schema `{ "items": [ {"type":"string"},
+      {"type":"number"} ], "additionalItems": false }` verbatim into an OpenAPI 3.1
+      (JSON Schema 2020-12) document. What happens?
+    options:
+      - "It works identically; the keywords are unchanged across drafts"
+      - "It mis-validates: in 2020-12 tuples use `prefixItems`, `items` is now a single schema constraining the rest, and `additionalItems` was removed"
+      - "It rejects all arrays because 2020-12 forbids tuples"
+      - "It silently allows any array of any length with any element types"
+    answer: 1
+    explanation: |
+      2020-12 renamed positional/tuple validation to `prefixItems`; `items` given a
+      single schema now constrains elements beyond the prefix, and `additionalItems`
+      is gone. An `items`-as-array from Draft-07 no longer means "tuple," so the
+      ported schema mis-validates. Use `prefixItems` + `items:false` (or
+      `unevaluatedItems:false`) to close a tuple.
+    ref: "concepts.md#array-and-tuple-validation"
+
+  - id: request-validation-and-data-integrity-059
+    difficulty: advanced
+    tags: [json-schema, arrays, tuple-close]
+    question: |
+      In JSON Schema 2020-12, how do you say "this array must be EXACTLY a
+      [string, number] tuple — no extra trailing elements"?
+    options:
+      - "`prefixItems: [string, number], items: false`"
+      - "`items: [string, number], additionalItems: false`"
+      - "`prefixItems: [string, number], additionalItems: false`"
+      - "`type: tuple, length: 2`"
+    answer: 0
+    explanation: |
+      `prefixItems` fixes the positional schemas; `items: false` forbids any element
+      beyond the prefix, closing the tuple to exactly two entries. `additionalItems`
+      was removed in 2020-12, and `type: tuple` is not a JSON Schema type.
+    ref: "concepts.md#array-and-tuple-validation"
+
+  - id: request-validation-and-data-integrity-060
+    difficulty: expert
+    tags: [content-digest, rfc9530, integrity]
+    question: |
+      A client sends `Content-Digest: sha-256=:...:` with a POST body. What should
+      the server do, and does honoring it make the request tamper-proof?
+    options:
+      - "Recompute the digest over the received body and reject a mismatch (e.g. 400); no — an attacker who rewrites the body can rewrite the header too, so a digest is not a signature"
+      - "Trust the digest as proof of authenticity and skip body validation"
+      - "Ignore it; Content-Digest is only meaningful on responses"
+      - "Store the digest as the resource's ETag automatically"
+    answer: 0
+    explanation: |
+      Per RFC 9530 the server recomputes and rejects on mismatch, detecting
+      accidental corruption or intermediary alteration. But a digest is not a
+      signature: an active attacker rewrites body and digest together. For
+      authenticity, pair it with HTTP Message Signatures (RFC 9421) or TLS+auth.
+    ref: "concepts.md#content-integrity-in-transit"
+
+  - id: request-validation-and-data-integrity-061
+    difficulty: advanced
+    tags: [content-digest, rfc9530, structured-fields]
+    question: |
+      Which statement about RFC 9530 digest fields is correct?
+    options:
+      - "RFC 9530 mandates MD5 as the only interoperable algorithm"
+      - "`Content-Digest` and `Repr-Digest` obsolete RFC 3230's `Digest`/`Want-Digest`; values are RFC 8941 structured fields, and sha-256/sha-512 are active while md5/sha-1 are deprecated for adversarial use"
+      - "The digest value is sent as a plain hex string with no encoding"
+      - "`Repr-Digest` covers the transferred bytes and `Content-Digest` covers the abstract representation"
+    answer: 1
+    explanation: |
+      RFC 9530 obsoletes RFC 3230, uses RFC 8941 structured-field syntax
+      (`alg=:base64:`), marks sha-256/sha-512 active and md5/sha-1 deprecated. It is
+      `Content-Digest` that covers the encoded/transferred body and `Repr-Digest`
+      the selected representation — the reverse of option D.
+    ref: "concepts.md#content-integrity-in-transit"
+
+  - id: request-validation-and-data-integrity-062
+    difficulty: expert
+    tags: [idempotency, retries, fingerprint]
+    question: |
+      A client retries `POST /payments` after a timeout using the same
+      `Idempotency-Key` but a slightly different body. What is the correct behavior?
+    options:
+      - "Process it as a brand-new payment since the body differs"
+      - "Return the stored original response, ignoring the new body"
+      - "Reject it (e.g. 422/409) as 'idempotency key reused with a different payload' — a request fingerprint mismatch"
+      - "Return 200 OK and merge the two bodies"
+    answer: 2
+    explanation: |
+      The key must be stored with a fingerprint of the original request. A replay
+      with the same key but a different fingerprint is a client bug or attack, so
+      reject with 422/409. Returning the stored response is correct only when the
+      fingerprint matches; processing it as new would defeat idempotency.
+    ref: "concepts.md#idempotency-keys-and-safe-retries"
+
+  - id: request-validation-and-data-integrity-063
+    difficulty: advanced
+    tags: [idempotency, concurrency, status-codes]
+    question: |
+      A second request arrives with the same `Idempotency-Key` while the first is
+      still being processed (in flight). What is the most appropriate response?
+    options:
+      - "412 Precondition Failed"
+      - "409 Conflict (indicating the original request is still in progress)"
+      - "204 No Content"
+      - "301 Moved Permanently"
+    answer: 1
+    explanation: |
+      With the first request unfinished, executing the second concurrently risks a
+      double effect. Returning 409 Conflict (some APIs use 425 Too Early) tells the
+      client the original is in flight and to retry later. 412 is for conditional
+      (If-Match) preconditions, not idempotency-key contention.
+    ref: "concepts.md#idempotency-keys-and-safe-retries"
+
+  - id: request-validation-and-data-integrity-064
+    difficulty: intermediate
+    tags: [idempotency, retries, why]
+    question: |
+      Why does the idempotency-key pattern also require storing a fingerprint (hash)
+      of the request, not just the key itself?
+    options:
+      - "To compress the request for cheaper storage"
+      - "So a replay of the same key with a DIFFERENT body can be detected and rejected instead of silently mishandled"
+      - "Because keys are not unique enough on their own"
+      - "To encrypt the request body at rest"
+    answer: 1
+    explanation: |
+      The fingerprint lets the server distinguish a genuine retry (same key, same
+      body → return stored response) from key misuse (same key, different body →
+      reject). Without it, the guarantee that a retry is truly the same operation
+      cannot be enforced.
+    ref: "concepts.md#idempotency-keys-and-safe-retries"
+
+  - id: request-validation-and-data-integrity-065
+    difficulty: expert
+    tags: [optimistic-concurrency, etag, lost-update]
+    question: |
+      Two clients GET the same resource, edit it, and PUT it back. The second write
+      silently overwrites the first (lost update). Which contract-level mechanism
+      prevents this, and what status signals the stale write?
+    options:
+      - "Rate limiting; 429 Too Many Requests"
+      - "An ETag validator with `If-Match` on writes; a stale write returns 412 Precondition Failed"
+      - "A longer request timeout; 408 Request Timeout"
+      - "Content-Length enforcement; 413 Content Too Large"
+    answer: 1
+    explanation: |
+      Optimistic concurrency: the server issues an ETag, the client sends
+      `If-Match: "<etag>"` on the write, and if the resource changed meanwhile the
+      server returns 412 Precondition Failed. The client re-fetches and retries. This
+      is the standard lost-update guard (RFC 9110 §13).
+    ref: "concepts.md#optimistic-concurrency-and-conditional-requests"
+
+  - id: request-validation-and-data-integrity-066
+    difficulty: expert
+    tags: [optimistic-concurrency, 428, precondition-required]
+    question: |
+      You want to guarantee no client can perform a blind unconditional overwrite —
+      every mutating request MUST carry a precondition. Which status code lets the
+      server enforce this?
+    options:
+      - "417 Expectation Failed"
+      - "428 Precondition Required"
+      - "412 Precondition Failed"
+      - "409 Conflict"
+    answer: 1
+    explanation: |
+      428 Precondition Required (RFC 6585) lets the server reject any request that
+      lacks a precondition (e.g. If-Match), forcing clients to send one and closing
+      the lost-update race. 412 is returned when a supplied precondition fails, not
+      when it is absent.
+    ref: "concepts.md#optimistic-concurrency-and-conditional-requests"
+
+  - id: request-validation-and-data-integrity-067
+    difficulty: expert
+    tags: [optimistic-concurrency, etag, weak-strong]
+    question: |
+      For an `If-Match` lost-update check, why must the ETag be a STRONG validator
+      rather than a weak one (`W/"..."`)?
+    options:
+      - "Weak validators are longer and waste bandwidth"
+      - "Weak ETags denote only semantic (not byte-for-byte) equivalence and MUST NOT be used with If-Match; only strong validators reliably detect a concurrent change"
+      - "Weak validators cannot be sent in request headers at all"
+      - "Strong validators are required only for GET caching, not writes"
+    answer: 1
+    explanation: |
+      A weak ETag signals that two representations are semantically equivalent but
+      may differ byte-for-byte, so it can't reliably distinguish a real concurrent
+      modification. RFC 9110 restricts If-Match (and Range) to strong validators for
+      exactly this reason.
+    ref: "concepts.md#optimistic-concurrency-and-conditional-requests"
+
+  - id: request-validation-and-data-integrity-068
+    difficulty: expert
+    tags: [patch, json-patch, merge-patch, media-type]
+    question: |
+      A client needs to remove exactly one element from a resource's array field.
+      Which PATCH format can express this, and which cannot?
+    options:
+      - "JSON Merge Patch can (via null); JSON Patch cannot"
+      - "JSON Patch (RFC 6902) can via `{op:remove, path:/tags/2}`; JSON Merge Patch (RFC 7396) cannot — it replaces arrays wholesale"
+      - "Both express it identically"
+      - "Neither; arrays cannot be patched by any standard format"
+    answer: 1
+    explanation: |
+      JSON Merge Patch treats arrays as opaque values and replaces them entirely, so
+      it can't touch a single element. JSON Patch is an ordered op list where
+      `{op:remove, path:/tags/2}` removes one element. This is a core reason to
+      choose 6902 over 7396 for list edits.
+    ref: "concepts.md#patch-body-validation"
+
+  - id: request-validation-and-data-integrity-069
+    difficulty: expert
+    tags: [patch, json-patch, test-op, concurrency]
+    question: |
+      In a JSON Patch (RFC 6902) document, what does an operation
+      `{"op":"test","path":"/version","value":42}` accomplish?
+    options:
+      - "It writes 42 into /version"
+      - "It documents the expected version for humans but has no runtime effect"
+      - "It is a precondition: if /version is not currently 42 the whole patch fails atomically and nothing is applied"
+      - "It creates /version if missing"
+    answer: 2
+    explanation: |
+      `test` asserts the current value at a pointer. If it doesn't match, the entire
+      patch fails and, because RFC 6902 patches apply atomically, no operations take
+      effect. It is effectively an in-body optimistic-concurrency / integrity guard.
+    ref: "concepts.md#patch-body-validation"
+
+  - id: request-validation-and-data-integrity-070
+    difficulty: advanced
+    tags: [patch, read-only-fields, allow-list]
+    question: |
+      How do you validate a JSON Patch request so it can never modify read-only
+      fields like /id or /role?
+    options:
+      - "Trust that clients won't target those paths"
+      - "Reject any operation whose `path` (or `from`) targets a protected pointer — an allow-list/denylist discipline applied to JSON Pointers"
+      - "Only allow the `test` operation"
+      - "Convert the patch to Merge Patch first"
+    answer: 1
+    explanation: |
+      Because JSON Patch addresses locations by JSON Pointer, protecting read-only
+      fields means inspecting each op's target pointer and rejecting ops that touch
+      protected paths — the same allow-list discipline used against mass assignment,
+      applied to pointers rather than object keys.
+    ref: "concepts.md#patch-body-validation"
+
+  - id: request-validation-and-data-integrity-071
+    difficulty: advanced
+    tags: [patch, media-type, 415]
+    question: |
+      A server supports both `application/json-patch+json` and
+      `application/merge-patch+json`. A client PATCHes with `Content-Type:
+      application/json`. What is the correct response?
+    options:
+      - "Guess which patch format was intended based on the body"
+      - "415 Unsupported Media Type — the generic type doesn't tell the server which patch semantics to apply"
+      - "200 OK, defaulting to Merge Patch"
+      - "422 Unprocessable Content, since the body may still be valid"
+    answer: 1
+    explanation: |
+      JSON Patch and JSON Merge Patch have incompatible semantics, and the media type
+      is what selects them. `application/json` is ambiguous, so a strict server
+      returns 415 rather than guessing and silently applying the wrong semantics.
+    ref: "concepts.md#patch-body-validation"
+
+  - id: request-validation-and-data-integrity-072
+    difficulty: expert
+    tags: [canonicalization, unicode, security]
+    question: |
+      Why is validating a username BEFORE Unicode NFKC normalization dangerous?
+    options:
+      - "NFKC makes strings longer, breaking maxLength"
+      - "NFKC is lossy/collapsing (e.g. ﬃ→ffi, full-width→ASCII), so a value that passes the pre-normalization check can become a different, possibly colliding or reserved value afterward"
+      - "NFKC is only defined for East Asian scripts"
+      - "Normalization must always happen on the client"
+    answer: 1
+    explanation: |
+      NFKC folds ligatures, full-width forms, superscripts, etc. Validating first and
+      normalizing later means the stored/compared value differs from what you
+      checked, enabling spoofing or collisions (e.g. impersonating a reserved name).
+      Canonicalize once, then validate the stored form.
+    ref: "concepts.md#canonicalization-as-a-security-control"
+
+  - id: request-validation-and-data-integrity-073
+    difficulty: expert
+    tags: [canonicalization, double-decode, path-traversal]
+    question: |
+      An input arrives as `%252e%252e%2f`. A component percent-decodes it, passes it
+      on, and a downstream component percent-decodes again. What is the risk, and the
+      rule?
+    options:
+      - "No risk; double-decoding is idempotent"
+      - "It becomes `../` after two decodes, enabling path traversal — the rule is decode exactly once and validate that form, never re-decode already-decoded input"
+      - "The second decode fails, so it is safe"
+      - "It only affects XML parsers"
+    answer: 1
+    explanation: |
+      `%252e` → `%2e` → `.`; two decodes yield `../`, a traversal sequence a
+      single-decode validator would have caught. Inconsistent decoding across layers
+      is a parser differential. Decode once, validate, and never re-decode.
+    ref: "concepts.md#canonicalization-as-a-security-control"
+
+  - id: request-validation-and-data-integrity-074
+    difficulty: expert
+    tags: [parser-differential, duplicate-keys, authz-bypass]
+    question: |
+      A gateway validates JSON against a schema and sees `role` = "user"; the backend
+      later reads `role` = "admin" from the SAME body and grants admin. How is this
+      possible?
+    options:
+      - "The gateway modified the body in transit"
+      - "The body had a duplicate key `role` and the two parsers disagreed (first-wins vs last-wins) — a parser differential; the fix is to reject duplicate keys"
+      - "The backend cached an old response"
+      - "JSON Schema cannot validate string fields"
+    answer: 1
+    explanation: |
+      Duplicate keys are permitted by the JSON grammar but resolved inconsistently:
+      the gateway parser took first-wins ("user") while the backend took last-wins
+      ("admin"), bypassing authorization. Defensive parsers reject duplicate keys to
+      eliminate this differential.
+    ref: "concepts.md#parser-differentials-and-json-pitfalls"
+
+  - id: request-validation-and-data-integrity-075
+    difficulty: expert
+    tags: [numbers, ieee-754, precision, integrity]
+    question: |
+      A 64-bit account ID `9007199254740993` is sent as a JSON number and, after
+      round-tripping through a JavaScript-based service, comes back as
+      `9007199254740992`. What happened and what is the fix?
+    options:
+      - "A transmission error; add a checksum"
+      - "The value exceeds IEEE-754's safe integer range (2^53−1) so it lost precision when parsed as a double; transmit large integers/IDs as strings and validate the string"
+      - "JSON rounds all numbers to even; use uppercase digits"
+      - "The number was interpreted as octal due to a leading digit"
+    answer: 1
+    explanation: |
+      JSON numbers are typically parsed as IEEE-754 doubles, which represent integers
+      exactly only up to ±(2^53−1). 9007199254740993 rounds to ...992. The convention
+      is to carry large integers and money as strings and validate them as strings to
+      preserve precision.
+    ref: "concepts.md#parser-differentials-and-json-pitfalls"
+
+  - id: request-validation-and-data-integrity-076
+    difficulty: advanced
+    tags: [numbers, nan-infinity, json]
+    question: |
+      Regarding `NaN`, `Infinity`, and `1e400` in a JSON request body, which is true?
+    options:
+      - "All three are valid JSON per RFC 8259 and should be accepted"
+      - "`NaN`/`Infinity` are not valid JSON (though some parsers accept them) and `1e400` overflows to Infinity; all should be explicitly rejected"
+      - "They are valid only inside arrays"
+      - "They are automatically coerced to 0 by conforming parsers"
+    answer: 1
+    explanation: |
+      RFC 8259 does not permit NaN or Infinity literals, yet many lenient parsers
+      accept them, and `1e400` overflows a double to Infinity. Defensive validation
+      rejects these rather than letting non-finite values into computations.
+    ref: "concepts.md#parser-differentials-and-json-pitfalls"
+
+  - id: request-validation-and-data-integrity-077
+    difficulty: expert
+    tags: [polymorphic, oneof, discriminator, openapi]
+    question: |
+      You model a payment that is EITHER a card OR a bank transfer using a schema
+      with an OpenAPI `discriminator` on a `type` field. A colleague says the
+      `discriminator` alone validates the body. Why is that wrong?
+    options:
+      - "`discriminator` is only valid in OpenAPI 3.0, not 3.1"
+      - "The `discriminator` is a documentation/short-circuit hint that selects a branch; it is not itself a validation constraint — you still need `oneOf` (or `anyOf`) to actually validate the chosen variant"
+      - "`discriminator` requires the field to be named exactly `kind`"
+      - "Discriminators only work with `allOf`, which can't express alternatives"
+    answer: 1
+    explanation: |
+      The `discriminator` object merely tells tooling which subschema to try based on
+      a property value; it does not assert validity on its own. Without a `oneOf`
+      (exactly-one) the body isn't actually validated against a variant, and ambiguous
+      bodies could slip through.
+    ref: "concepts.md#polymorphic-and-discriminated-union-bodies"
+
+  - id: request-validation-and-data-integrity-078
+    difficulty: advanced
+    tags: [polymorphic, oneof, anyof]
+    question: |
+      For validating a discriminated union where a body must match EXACTLY one
+      variant, why prefer `oneOf` over `anyOf`?
+    options:
+      - "`anyOf` is deprecated in JSON Schema 2020-12"
+      - "`oneOf` requires exactly one subschema to match, so it catches ambiguous bodies that satisfy two variants; `anyOf` (at-least-one) would let such a body pass"
+      - "`oneOf` is faster to evaluate than `anyOf`"
+      - "`anyOf` cannot be combined with a discriminator"
+    answer: 1
+    explanation: |
+      `oneOf` = exactly one match; `anyOf` = at least one. For a true union you want
+      exactly-one semantics so a body that ambiguously matches both the card and bank
+      variants is rejected. `anyOf` would accept it, hiding the ambiguity.
+    ref: "concepts.md#polymorphic-and-discriminated-union-bodies"
+
+  - id: request-validation-and-data-integrity-079
+    difficulty: advanced
+    tags: [parameters, pagination, resource-consumption]
+    question: |
+      A list endpoint accepts `?limit=`. A client sends `limit=1000000`. What is the
+      correct validation posture?
+    options:
+      - "Honor it; the client knows what it needs"
+      - "Enforce a documented maximum (clamp or reject) because an unbounded limit is a resource-exhaustion vector (OWASP API4)"
+      - "Return 404 because the page doesn't exist"
+      - "Silently return zero results"
+    answer: 1
+    explanation: |
+      Unbounded pagination lets one request pull enormous result sets, exhausting
+      memory/DB — OWASP API4 Unrestricted Resource Consumption. Enforce a documented
+      max (clamp to it or reject with a validation error) and a sensible default.
+    ref: "concepts.md#validating-parameters-not-just-bodies"
+
+  - id: request-validation-and-data-integrity-080
+    difficulty: expert
+    tags: [parameters, http-parameter-pollution]
+    question: |
+      A request has `?role=user&role=admin`. Different frameworks resolve repeated
+      query params as first-value, last-value, or an array. What class of problem is
+      this and how should an API respond?
+    options:
+      - "It is HTTP Parameter Pollution — a parser differential; define explicit semantics for repeated params and reject or normalize unexpected repetition"
+      - "It is a caching problem; add Vary: Cookie"
+      - "It is harmless because query strings are always arrays"
+      - "It is a TLS renegotiation issue"
+    answer: 0
+    explanation: |
+      HTTP Parameter Pollution mirrors the duplicate-key problem: components disagree
+      on which repeated value wins, enabling bypasses. The API must define explicit
+      semantics for singleton params and reject or normalize unexpected repeats.
+    ref: "concepts.md#validating-parameters-not-just-bodies"
+
+  - id: request-validation-and-data-integrity-081
+    difficulty: expert
+    tags: [complexity-limits, hashdos, resource-consumption]
+    question: |
+      Your API caps request bodies at 64 KB and rejects deep nesting, yet a 40 KB
+      JSON object with tens of thousands of carefully chosen keys pegs a CPU core.
+      What attack is this and what is the specific defense?
+    options:
+      - "Billion laughs; disable DTDs"
+      - "Hash-collision DoS (algorithmic complexity attack) — keys crafted to collide turn hashmap inserts into O(n²); defend with randomized hash seeds plus a key-count cap"
+      - "Slowloris; lower the read timeout"
+      - "ReDoS; simplify a regex"
+    answer: 1
+    explanation: |
+      When many keys hash to the same bucket, inserting them degrades to O(n²) — the
+      classic hashDoS. Neither size nor depth caps stop it. The defenses are
+      per-process randomized hash seeds (so an attacker can't precompute collisions)
+      and a cap on the number of keys/nodes.
+    ref: "concepts.md#structural-complexity-limits"
+
+  - id: request-validation-and-data-integrity-082
+    difficulty: advanced
+    tags: [complexity-limits, nesting-depth, dos]
+    question: |
+      Why is a maximum-nesting-depth limit necessary even after you already cap total
+      body size and array/string lengths?
+    options:
+      - "Deeply nested JSON is invalid per RFC 8259"
+      - "A small but deeply nested structure like [[[[…]]]] can overflow a recursive parser's stack, a failure mode size/length caps don't cover"
+      - "Nesting depth affects gzip ratios"
+      - "Depth limits are only relevant to XML"
+    answer: 1
+    explanation: |
+      A few kilobytes of deeply nested arrays/objects can exhaust the call stack of a
+      recursive-descent parser, crashing the process — orthogonal to byte size or
+      element counts. An explicit depth cap is the specific control.
+    ref: "concepts.md#structural-complexity-limits"
+
+  - id: request-validation-and-data-integrity-083
+    difficulty: advanced
+    tags: [error-contract, ecosystem, google-aip]
+    question: |
+      An interviewer notes that Google's API guidelines and much of RFC-9457
+      practice differ on status for generic validation failures. Which is accurate?
+    options:
+      - "Google AIP-193 maps INVALID_ARGUMENT to HTTP 400 with field violations, while RFC 9110 itself does not endorse 422 (it came from WebDAV); both 400 and 422 practices coexist"
+      - "Google mandates 422 and RFC 9110 mandates 400"
+      - "RFC 9457 forbids using 400 for validation"
+      - "There is a single blessed shape and code that all major APIs follow"
+    answer: 0
+    explanation: |
+      Google AIP-193 uses INVALID_ARGUMENT→400 with BadRequest.field_violations; RFC
+      9110 does not endorse 422 for generic validation (it originated in WebDAV).
+      Hence the ecosystem splits between 400 and 422 — the senior point is
+      consistency and a rich error body, not one universal code.
+    ref: "concepts.md#the-validation-error-contract-ecosystem"
+
+  - id: request-validation-and-data-integrity-084
+    difficulty: advanced
+    tags: [error-contract, jsonapi, pointer-parameter]
+    question: |
+      In a JSON:API error object, how is the location of a validation error in the
+      request BODY versus a QUERY PARAMETER conveyed?
+    options:
+      - "`source.pointer` (a JSON Pointer) for a body field; `source.parameter` for a query parameter"
+      - "Both use `source.pointer`"
+      - "`target` for body and `field` for query"
+      - "JSON:API does not support locating errors"
+    answer: 0
+    explanation: |
+      JSON:API error objects use `source.pointer` (RFC 6901 JSON Pointer) for body
+      locations and `source.parameter` (the parameter name) for query parameters —
+      mirroring the RFC 9457 guidance to use a pointer for bodies and a parameter name
+      for non-body inputs.
+    ref: "concepts.md#the-validation-error-contract-ecosystem"
+
+  - id: request-validation-and-data-integrity-085
+    difficulty: expert
+    tags: [nosql-injection, type-validation, security]
+    question: |
+      An endpoint expects `"username": "<string>"` but receives
+      `"username": {"$gt": ""}`. Passed to a document database this becomes a
+      query-operator injection. What is the primary validation failure and fix?
+    options:
+      - "An encoding problem; base64 the field"
+      - "A type-validation failure: the value is an object where a string was required — strict type validation (reject non-strings) closes the NoSQL/operator-injection vector"
+      - "A length problem; add maxLength"
+      - "An authentication problem; require a token"
+    answer: 1
+    explanation: |
+      The core defect is accepting an object where a string is required. `{"$gt":""}`
+      becomes a query operator downstream. Strict type validation — rejecting any
+      non-string for that field — prevents the operator-injection entirely; it is a
+      type check, not sanitization.
+    ref: "concepts.md#format-assertion-and-injection-relevant-validation"
+
+  - id: request-validation-and-data-integrity-086
+    difficulty: expert
+    tags: [ssrf, url-validation, owasp-api7]
+    question: |
+      A webhook endpoint stores a client-supplied callback URL that the server will
+      later POST to. Which validation approach best mitigates SSRF (OWASP API7:2023)?
+    options:
+      - "Regex-check that the URL starts with https:// and store it"
+      - "Allow-list permitted hosts/schemes, block internal/link-local ranges and the metadata endpoint 169.254.169.254, and re-validate after each redirect/DNS resolution"
+      - "Reject only URLs containing the word 'localhost'"
+      - "Fetch the URL immediately to test it, then trust it forever"
+    answer: 1
+    explanation: |
+      SSRF defenses must allow-list destinations, block internal/link-local and cloud
+      metadata addresses, and re-validate on each hop because DNS rebinding and
+      redirects defeat a one-time check. A scheme regex or a localhost denylist is
+      trivially bypassed.
+    ref: "concepts.md#format-assertion-and-injection-relevant-validation"
+
+  - id: request-validation-and-data-integrity-087
+    difficulty: advanced
+    tags: [format, email, accept-then-verify]
+    question: |
+      Regarding validating an `email` field, which statement reflects senior
+      judgment?
+    options:
+      - "A sufficiently strict regex guarantees the address is real and deliverable"
+      - "Even with JSON Schema's format-assertion vocabulary enabled, validators may under-validate email/uri, and a regex ≠ RFC 5321 deliverability — so accept-then-verify (confirmation link) beats an ever-stricter regex"
+      - "`format: email` always rejects invalid emails in every validator by default"
+      - "Email validation should reject any address with a plus sign"
+    answer: 1
+    explanation: |
+      2020-12 splits format into annotation (default, advisory) and assertion
+      vocabularies, and even asserting validators may under-validate email/uri.
+      Syntactic checks can't prove deliverability, so the robust design confirms via a
+      verification link rather than tightening a regex (which also breaks valid
+      addresses like plus-tags).
+    ref: "concepts.md#format-assertion-and-injection-relevant-validation"
+
+  - id: request-validation-and-data-integrity-088
+    difficulty: intermediate
+    tags: [trust-boundary, client-validation, security]
+    question: |
+      A team argues server-side validation is redundant because the web client
+      validates the form and the published OpenAPI schema documents all constraints.
+      What is the correct rebuttal?
+    options:
+      - "They are right; documented constraints are self-enforcing"
+      - "Client-side and edge validation and a published schema are conveniences an attacker bypasses by calling the API directly; the server is the trust boundary and must re-validate everything"
+      - "OpenAPI schemas are cryptographically enforced by the browser"
+      - "Server validation is only needed for GET requests"
+    answer: 1
+    explanation: |
+      Browser JS is bypassed by hitting the API directly, and a published schema is
+      merely a hint an attacker reads to craft valid-looking payloads. The server is
+      the trust boundary; 'the client already validated it' is never a security
+      guarantee.
+    ref: "concepts.md#server-side-validation-is-authoritative"
+
+  - id: request-validation-and-data-integrity-089
+    difficulty: advanced
+    tags: [enum, const, forward-compat]
+    question: |
+      Your schema uses `enum: ["active","suspended"]` for a `status` field. What is
+      the correct handling and the versioning tension involved?
+    options:
+      - "Coerce any unknown value to a default like 'active' to be forgiving"
+      - "Reject unknown enum values (allow-list discipline), but be aware strict rejection can break forward-compatibility when the server later adds a new value clients don't yet know"
+      - "Accept any string; enums are advisory"
+      - "Store unknown values but hide them from responses"
+    answer: 1
+    explanation: |
+      Enums are an allow-list: reject unknown values rather than silently defaulting
+      (which corrupts intent). The trade-off is forward-compatibility — adding a new
+      enum value can break strict older clients/servers, which is why enum evolution
+      needs a versioning strategy.
+    ref: "concepts.md#format-assertion-and-injection-relevant-validation"
+
+  - id: request-validation-and-data-integrity-090
+    difficulty: expert
+    tags: [error-contract, design, public-api]
+    question: |
+      You must design the validation-error contract for a public API consumed by web
+      and mobile SDKs in many locales. Which set of properties is most important?
+    options:
+      - "Return only the first error, in English, with the SQL that failed, using 200 OK"
+      - "Stable machine-readable codes, all errors reported at once, a field locator (JSON Pointer / parameter), localizable human messages, and no internal leakage — under one API-wide shape"
+      - "A unique error shape per endpoint so each team owns its format"
+      - "A single opaque 400 with no body so attackers learn nothing"
+    answer: 1
+    explanation: |
+      A durable public contract needs stable codes (clients branch on codes, not
+      localized text), all errors at once (one fix cycle), a locator per error, and no
+      leaked internals — all under one consistent shape. Per-endpoint shapes and
+      English-only single errors make SDKs brittle; a bodyless 400 wrecks DX.
+    ref: "concepts.md#the-validation-error-contract-ecosystem"

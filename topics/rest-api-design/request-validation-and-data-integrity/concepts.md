@@ -528,7 +528,7 @@ Accept-Post: application/json
 
 - **`411 Length Required`.** A server *may* refuse a request that omits
   `Content-Length` when it needs to know the size in advance (RFC 9110
-  §15.5.11), though most servers instead accept chunked encoding and enforce a
+  §15.5.12), though most servers instead accept chunked encoding and enforce a
   streaming byte cap.
 - **Per-element caps.** Beyond total body size, bound `maxItems` on arrays,
   `maxLength` on strings, and object nesting depth. A 1 MB body containing a
@@ -545,6 +545,411 @@ Accept-Post: application/json
 > explicitly at both the gateway and the application, return `413`/`415`/`414`
 > as appropriate, and remember `Content-Length` is a claim, not a guarantee —
 > always enforce a hard read cap.
+
+---
+
+## Closed schemas under composition
+
+`additionalProperties: false` is the mass-assignment guard from earlier — but it
+has a **notorious failure mode** that separates seniors from juniors: it does
+*not* compose. `additionalProperties` only "sees" the `properties` (and
+`patternProperties`) declared in the **same schema object**. The moment you
+build a schema with `allOf`, `$ref`, `anyOf`, or `oneOf`, properties defined in
+a *sibling* subschema are invisible to `additionalProperties`, so a closed
+schema wrongly rejects valid input.
+
+```json
+{
+  "allOf": [
+    { "$ref": "#/$defs/Base" },              // defines: id, createdAt
+    {
+      "type": "object",
+      "properties": { "displayName": { "type": "string" } },
+      "additionalProperties": false           // BUG: rejects id, createdAt
+    }
+  ]
+}
+```
+
+Here `additionalProperties: false` lives in the second subschema, which only
+knows about `displayName`. It has no idea `Base` legitimately contributed `id`
+and `createdAt`, so a body containing them is rejected even though it's valid.
+
+**The fix (JSON Schema 2019-09 / 2020-12): `unevaluatedProperties: false`.**
+Unlike `additionalProperties`, `unevaluatedProperties` is evaluated *after* all
+adjacent and referenced subschemas (including `allOf`/`$ref`/`if-then-else`),
+and it considers a property "evaluated" if **any** subschema in the whole
+composition successfully validated it. Put it on the outermost schema:
+
+```json
+{
+  "allOf": [
+    { "$ref": "#/$defs/Base" },
+    { "type": "object", "properties": { "displayName": { "type": "string" } } }
+  ],
+  "unevaluatedProperties": false             // correct closed-composition guard
+}
+```
+
+> [!KEY-TAKEAWAY]
+> For a *flat* object, `additionalProperties: false` is fine. For a schema
+> assembled by composition (`allOf`/`$ref`), you must use
+> `unevaluatedProperties: false` — otherwise your closed schema either rejects
+> valid input (if `additionalProperties` is on an inner schema) or silently
+> allows unknown fields (if it's on the outer schema, where it sees no inner
+> properties). `unevaluatedItems` is the array-tuple analog.
+
+There is a subtlety: `unevaluatedProperties` interacts with `oneOf`/`anyOf` too
+— a property is "evaluated" only by the branch(es) that actually matched, which
+is usually what you want but can surprise you with dynamic composition.
+
+---
+
+## Array and tuple validation
+
+Array validation changed meaning between JSON Schema Draft 2019-09 and Draft
+2020-12, and OpenAPI 3.1 uses 2020-12 — so this is a real versioning trap.
+
+| Concern | Draft-07 / OpenAPI 3.0 | Draft 2020-12 / OpenAPI 3.1 |
+|---|---|---|
+| Positional/tuple items | `items: [ …array of schemas… ]` | `prefixItems: [ … ]` |
+| Constrain the *rest* | `additionalItems: { … }` | `items: { … }` (single schema) |
+| Constrain a homogeneous list | `items: { … }` | `items: { … }` (unchanged) |
+
+In 2020-12, `items` when given a **single schema** constrains every element *not
+covered by* `prefixItems`; `additionalItems` was **removed**. If you mechanically
+port a Draft-07 tuple schema (`"items": [A, B]`) to 2020-12, it becomes invalid
+or silently mis-validates because `items` no longer accepts an array. To close a
+tuple to *exactly* its prefix length, set `"items": false` (or use
+`unevaluatedItems: false` under composition), plus `minItems`/`maxItems`.
+
+Other array checks that matter for integrity: `uniqueItems: true` (reject
+duplicate array elements), `minItems`/`maxItems` (both a correctness and a
+resource-exhaustion control — see complexity limits), and `contains` /
+`minContains` / `maxContains` for "at least N elements match this subschema".
+
+---
+
+## Content integrity in transit
+
+The topic is *Data Integrity*, and there is a wire-level mechanism for it beyond
+schema validity: **integrity digests**. TLS protects a payload on a single hop;
+once the request passes through a proxy, gateway, or is reconstructed from
+buffers, TLS says nothing about whether the bytes the *application* sees equal
+the bytes the *client* signed off on. A digest lets the server independently
+verify body integrity.
+
+**RFC 9530 (Digest Fields, 2024)** defines `Content-Digest` and `Repr-Digest`
+and **obsoletes RFC 3230**'s `Digest`/`Want-Digest`. The value is an **RFC 8941
+Structured Field** — a dictionary of `algorithm=:base64-bytes:` where the byte
+sequence is wrapped in colons:
+
+```http
+POST /payments HTTP/1.1
+Content-Type: application/json
+Content-Digest: sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:
+
+{ "amount": 500, "currency": "USD" }
+```
+
+The server recomputes the digest over the received body and rejects a mismatch
+(commonly `400`). `Content-Digest` covers the *encoded* body actually
+transferred; `Repr-Digest` covers the selected *representation* (independent of
+transfer/content coding). In RFC 9530, `sha-256`/`sha-512` are the active
+algorithms; `md5` and `sha-1` are registered but deprecated for adversarial use.
+
+> [!WARNING]
+> A digest is **not** a signature. An attacker who can rewrite the body can
+> equally rewrite the `Content-Digest` header — they match perfectly. A digest
+> only detects *accidental* corruption or a mismatch introduced by an
+> intermediary; it is not tamper-proof. For authenticity/integrity against an
+> active attacker, pair the digest with **HTTP Message Signatures (RFC 9421)**,
+> which can sign the `Content-Digest` header itself, or rely on TLS + auth. The
+> useful pattern: sign a short digest header rather than the whole body.
+
+---
+
+## Idempotency keys and safe retries
+
+A client that times out on `POST /payments` cannot know whether the charge
+happened. If it blindly retries, it may double-charge. The **idempotency key**
+pattern (`Idempotency-Key` header; IETF draft
+`draft-ietf-httpapi-idempotency-key-header`; the Stripe/PayPal/Adyen convention)
+makes an otherwise non-idempotent `POST` safe to retry.
+
+How validation participates:
+
+- **Validate the key's presence and format** (typically an opaque, high-entropy
+  string, e.g. a UUID). Reject a missing key on endpoints that require one.
+- **Fingerprint the request** (hash the method + path + body) and store it with
+  the key and the first response. On a replay with the **same** key and the
+  **same** fingerprint, return the *stored* original response without
+  re-executing. This is what makes the retry safe.
+- **Reject key reuse with a different body.** If a caller reuses a key with a
+  *different* payload, that is a client bug or an attack — return **`422`** (or
+  `409`) with a clear "idempotency key reused with a different request" error.
+  Never silently process it as new.
+- **`409 Conflict` while the original is still in flight.** If a second request
+  with the same key arrives before the first completes, return `409` (or `425`)
+  rather than executing concurrently.
+- **Bound the key with a TTL** (e.g. 24h). Keys are a stored resource; they must
+  expire or you leak storage and confuse legitimate later reuse.
+
+> [!KEY-TAKEAWAY]
+> Idempotency is the *integrity guarantee for retries*. The key alone is not
+> enough — you must fingerprint the payload so that "same key, different body"
+> is caught. This is validation applied to *request identity*, not just request
+> shape.
+
+---
+
+## Optimistic concurrency and conditional requests
+
+The classic **lost update**: two clients `GET` a resource, both `PATCH` it, and
+the second write silently clobbers the first. Preventing this is core data
+integrity, and REST solves it with **conditional requests** (RFC 9110 §13) — a
+form of validating that the client is updating the *version it thinks it is*.
+
+- The server returns a validator with each representation: an **`ETag`**
+  (RFC 9110 §8.8.3, an opaque version tag) and/or **`Last-Modified`**.
+- On a mutating request, the client echoes it back with **`If-Match: "<etag>"`**
+  (or `If-Unmodified-Since`). The server compares against the current version.
+- If they **don't match** — someone else changed the resource — the server
+  returns **`412 Precondition Failed`** (RFC 9110 §15.5.13) and the write is
+  rejected. The client re-fetches, re-applies, and retries.
+- **`428 Precondition Required`** (RFC 6585) lets the server *force* the pattern:
+  reject any unconditional write that lacks an `If-Match`, so clients can't
+  accidentally do a blind overwrite.
+- `If-None-Match: *` on `POST`/`PUT` prevents creating a duplicate ("create only
+  if it doesn't exist"); `If-None-Match: "<etag>"` on `GET` powers caching.
+
+Strong vs weak validators matter: a **weak** ETag (`W/"..."`) indicates
+semantic-but-not-byte equivalence and MUST NOT be used with `If-Match` for
+these lost-update checks — only **strong** validators are valid for
+`If-Match`/`Range`.
+
+> [!INTERVIEW]
+> "Two users edit the same record; the second silently overwrites the first —
+> fix it at the contract level." The senior answer is optimistic concurrency:
+> serve an `ETag`, require `If-Match` on writes, return `412` on a stale write,
+> and use `428` to *mandate* the precondition so no client can skip it.
+
+---
+
+## PATCH body validation
+
+`PATCH` (RFC 5789) applies a *set of changes*; the body's media type dictates
+how you validate it, and there are two very different formats.
+
+**JSON Merge Patch (RFC 7396, `application/merge-patch+json`).** The body looks
+like a partial resource. Semantics: a member present replaces, `null` **deletes**
+the member, and an omitted member is left unchanged. Its limits are the trap:
+you **cannot set a field to `null`** (null always means delete), and you
+**cannot patch an array element-wise** — arrays are replaced wholesale. So
+"remove item 2 from a list" is impossible with Merge Patch.
+
+**JSON Patch (RFC 6902, `application/json-patch+json`).** The body is an
+**ordered array of operations**, each with `op` and `path` (an RFC 6901 JSON
+Pointer). Validating it means checking:
+
+- `op` is one of `add`, `remove`, `replace`, `move`, `copy`, `test`; and the
+  required members are present (`value` for add/replace/test; `from` for
+  move/copy).
+- The `path` (and `from`) is a syntactically valid JSON Pointer **and targets an
+  existing location** for ops that require it (`remove`/`replace` on a missing
+  path must fail; `add` to a missing parent must fail).
+- The **`test` op** is a built-in precondition/integrity guard: `{"op":"test",
+  "path":"/version","value":42}` fails the *whole* patch if the current value
+  differs — an in-body optimistic-concurrency check.
+- **Read-only / server-owned fields.** "Validate a PATCH that must not touch
+  read-only fields" means rejecting any operation whose `path` targets a
+  protected pointer (`/id`, `/role`, `/balance`) — the allow-list discipline
+  applied to *pointers*, not object keys.
+
+Wrong media type → **`415`**; a patch that is well-formed but whose operations
+can't apply (failed `test`, missing target) is typically **`409`** or `422`.
+RFC 6902 patches must be applied **atomically**: if any op fails, none apply.
+
+---
+
+## Canonicalization as a security control
+
+Earlier we treated normalization as UX hygiene (trim, NFC before a uniqueness
+check). At senior level it is also an **attack surface**. The golden rule:
+**canonicalize once, validate the exact form you store/compare, and reject
+rather than repeatedly decode.**
+
+- **Unicode normalization spoofing.** NFKC is *lossy*: `ﬃ` (ligature) →
+  `ffi`, full-width `Ａ` → `A`, superscripts collapse. If you validate before
+  normalizing, an attacker slips a value past the check that becomes something
+  else after normalization. Decide which form you store and validate *that* form.
+- **Confusables / homographs (Unicode UTS #39).** Cyrillic `а` (U+0430) vs Latin
+  `a` (U+0061) render identically. For identifiers (usernames, domains) use a
+  confusables skeleton / mixed-script detection, not a naive equality check.
+- **Overlong / invalid UTF-8.** Reject invalid byte sequences outright rather
+  than substituting `U+FFFD`, which can merge distinct inputs.
+- **Double-decoding.** `%252e` decodes to `%2e` decodes to `.`. A validator that
+  decodes twice (or a validator that decodes once but a downstream that decodes
+  again) enables path traversal (`..`) and filter bypass. Decode exactly once,
+  then validate; never re-decode already-decoded input.
+
+> [!WARNING]
+> Repeated or inconsistent decoding across components is the root cause. Two
+> layers that each "helpfully" percent-decode or Unicode-normalize produce a
+> *parser differential*: the validator approves one string, the backend acts on
+> a different one.
+
+---
+
+## Parser differentials and JSON pitfalls
+
+A **parser differential** is a request-smuggling-analog for data: two components
+parse the *same* bytes differently, and the gap between them is the vulnerability.
+
+- **Duplicate keys.** `{"role":"user","role":"admin"}` — JSON grammar permits
+  it, but parsers disagree: some take last-wins, some first-wins, some error. If
+  a gateway validator sees `"user"` (first-wins) and the backend sees `"admin"`
+  (last-wins), authorization is bypassed. Defensively **reject** duplicate keys.
+- **Type coercion differentials.** One layer coerces `"1"` → `1` or `"true"` →
+  `true`; another doesn't. A field the validator saw as one type reaches the
+  backend as another. Enforce strict types on both sides.
+- **Number pitfalls.** JSON has one numeric type on the wire. `1e400` overflows
+  to `Infinity`; leading zeros and `-0` behave inconsistently; and integers
+  beyond the **IEEE-754 safe range (±2^53−1)** silently lose precision — a
+  64-bit ID like `9007199254740993` round-trips to `...992`. Convention:
+  transmit large integers / money as **strings** and validate the string.
+- **`NaN`/`Infinity`** are not valid JSON per RFC 8259 but many parsers accept
+  them; reject them explicitly.
+
+---
+
+## Polymorphic and discriminated-union bodies
+
+A body that is "a card payment **or** a bank payment" is a polymorphic
+(discriminated-union) body. Validate it with `oneOf` and, in OpenAPI, a
+`discriminator`.
+
+- **`oneOf` vs `anyOf`.** `oneOf` = **exactly one** subschema matches; `anyOf` =
+  *at least one*. For discriminated unions use `oneOf`, because it *catches
+  ambiguous bodies* that would satisfy two variants at once. `anyOf` would let
+  an ambiguous body through.
+- **The `discriminator` is not a validation constraint.** OpenAPI's
+  `discriminator` (a `propertyName` + `mapping`) is a *short-circuit / documentation
+  hint* that tells tooling which branch to try first based on a field like
+  `"type"`. It does **not** by itself assert the body is valid — you still need
+  the `oneOf`. Treating `discriminator` alone as validation is a classic mistake.
+- Reject a body whose discriminator value isn't in the mapping, and ensure the
+  chosen variant is closed (`unevaluatedProperties: false`) so one variant's
+  fields can't smuggle into another.
+
+---
+
+## Validating parameters, not just bodies
+
+Validation is body-centric in most people's heads, but query, path, and header
+inputs are equally attacker-controlled.
+
+- **Pagination bounds.** `limit`/`offset`/`page` must have a max (`limit=1000000`
+  is a resource-exhaustion vector, OWASP API4). Clamp or reject; document the
+  cap and default.
+- **HTTP Parameter Pollution (HPP).** `?role=user&role=admin` — frameworks
+  disagree (first value / last value / array / comma-joined). Decide your
+  semantics explicitly and reject or normalize repeated singleton params; a
+  differential here mirrors the duplicate-key problem.
+- **Path-param type/format.** `/users/{id}` should assert the type (UUID/int) and
+  reject traversal (`..`, encoded slashes). A path segment is not automatically
+  safe because it's in the URL.
+- **Header injection / CRLF.** Values echoed into responses or logs must reject
+  CR/LF to prevent response splitting and log forging.
+- **Locating parameter errors.** For non-body inputs, RFC 9457 field errors
+  should use a `parameter` (name) member rather than a JSON `pointer`.
+
+---
+
+## Structural complexity limits
+
+Body-size caps (covered above) don't bound *shape*. Several attacks fit inside a
+small byte budget — this is the deep end of **OWASP API4:2023 Unrestricted
+Resource Consumption**.
+
+- **XML entity expansion ("billion laughs" / quadratic blowup).** A few
+  kilobytes of nested entity definitions expand to gigabytes. Defense: disable
+  DTD processing and external entities entirely (also kills **XXE**), or cap
+  expansion. This is an OWASP XXE-cheat-sheet control.
+- **Deep nesting.** `[[[[[[…]]]]]]` a few thousand levels deep can overflow a
+  recursive parser's stack. Cap **maximum nesting depth**.
+- **Node/key explosion.** A modestly sized body can carry millions of tiny
+  objects/keys. Cap **total node count** and **object key count**, not just bytes.
+- **Hash-collision DoS (algorithmic complexity attack).** Many thousands of keys
+  crafted to collide in a hashmap-backed JSON object turn O(1) inserts into
+  O(n²) — the CVE-2011 "hashDoS" class, recurring since. Defense: randomized
+  hash seeds and a key-count cap.
+- **Duplicate-key amplification** compounds the above.
+
+> [!KEY-TAKEAWAY]
+> "Bound complexity, not just size" means depth caps, node/key caps, entity-
+> expansion limits, and hash-seed randomization — a 10 KB payload can still be
+> a DoS. Size limits are necessary but never sufficient.
+
+---
+
+## The validation-error contract ecosystem
+
+RFC 9457 is the standards baseline, but interviewers testing seniority ask "what
+does the error body look like" expecting awareness that **multiple competing
+shapes** exist. Know the landscape:
+
+- **RFC 9457 Problem Details** — `type/title/status/detail/instance` plus an
+  `errors[]` extension with JSON Pointers. The standards default.
+- **JSON:API** — an `errors` array of objects with `source.pointer` (for body)
+  or `source.parameter` (for query), plus `status`, `code`, `title`, `detail`.
+- **Google AIP-193 / google.rpc** — maps validation to `INVALID_ARGUMENT` →
+  **HTTP 400** with a `BadRequest` detail carrying `field_violations[]` (field +
+  description). Google's guidance is `400`, not `422`.
+- **Microsoft REST API Guidelines** — an `error` object with `code`, `message`,
+  and `details[]` where each detail carries a `target` (the field).
+- **Zalando RESTful Guidelines** — Problem+JSON, and they lean toward **`422`**
+  with pointers for semantic validation.
+
+The senior point: pick one shape, keep it API-wide, and always include **stable
+machine-readable codes**, **all errors at once**, **a field locator**, and **no
+internal leakage**. RFC 9110 itself does **not** endorse `422` for generic
+validation (it arrived via WebDAV), which is why the ecosystem is split.
+
+---
+
+## Format assertion and injection-relevant validation
+
+Two thin areas worth deepening:
+
+- **`format` annotation vs assertion vocabulary (2020-12).** JSON Schema
+  2020-12 split `format` into a *format-annotation* vocabulary (advisory,
+  default) and a *format-assertion* vocabulary (validates/rejects). Even with
+  assertion enabled, validators are *permitted to under-validate* `email`/`uri`
+  — a regex is not RFC 5321 deliverability. For email the robust design is
+  **accept-then-verify** (send a confirmation link), not a stricter regex.
+- **Type validation *is* injection defense.** A field typed as `string` that
+  arrives as an **object** — `{"$gt":""}` where you expected a username — becomes
+  **NoSQL / query-operator injection** if passed to a document store. Strict
+  type validation (reject non-strings) closes it.
+- **SSRF via URL fields (OWASP API7:2023).** Any field holding a URL the server
+  will fetch (webhooks, image imports, callbacks) must be validated against an
+  **allow-list** and must block internal/link-local ranges and the cloud
+  metadata endpoint `169.254.169.254`. Validate *after* resolving redirects, and
+  re-validate on each hop, because DNS-rebinding and redirects defeat a one-time
+  check.
+
+---
+
+## Server-side validation is authoritative
+
+A framing every senior candidate should make explicit: **client-side validation,
+edge validation, and even a published JSON Schema are conveniences, not security
+controls.** An attacker bypasses browser JS and hits the API directly; the
+published OpenAPI schema is a *hint* they read to craft a valid-looking-but-
+malicious body. The **server is the trust boundary** — it must re-validate
+everything regardless of what any prior layer claims to have checked. "The
+client already validated it" is never a defense.
 
 ---
 
@@ -593,8 +998,8 @@ semantic rules (existence, business logic) no — those live in the domain.
 
 ## References
 
-- **RFC 9110 — HTTP Semantics** (status codes: §15.5.1 `400`, §15.5.11 `411`,
-  §15.5.14 `413`, §15.5.15 `414`, §15.5.16 `415`, §15.5.21 `422`).
+- **RFC 9110 — HTTP Semantics** (status codes: §15.5.1 `400`, §15.5.12 `411`,
+  §15.5.13 `412`, §15.5.14 `413`, §15.5.15 `414`, §15.5.16 `415`, §15.5.21 `422`).
   <https://www.rfc-editor.org/rfc/rfc9110.html>
 - **RFC 9457 — Problem Details for HTTP APIs** (obsoletes RFC 7807;
   `application/problem+json`; `errors` extension example).

@@ -1019,3 +1019,652 @@ questions:
       A simple rename can sit in the gateway; heavier per-client reshaping is a
       BFF job. Either way the service need not change.
     ref: "concepts.md#request-and-response-transformation"
+
+  - id: api-gateways-and-bff-059
+    difficulty: expert
+    tags: [rate-limiting, headers, ietf-draft, standards]
+    question: |
+      A 2025 gateway emits `RateLimit-Policy: "burst";q=100;w=60` and
+      `RateLimit: "burst";r=0;t=30`. Which reading is correct?
+    options:
+      - "The policy 'burst' allows a quota of 100 per 60-second window; 0 requests remain and the window resets in 30 seconds"
+      - "100 requests remain, the window is 30 seconds, and the reset happened 60 seconds ago"
+      - "The client may burst 60 requests then must wait 100 seconds"
+      - "q and w are quota and weight; r and t are retry count and total"
+    answer: 0
+    explanation: |
+      Under draft-ietf-httpapi-ratelimit-headers (RFC 9651 Structured Fields),
+      RateLimit-Policy carries q=quota and w=window(seconds); RateLimit carries
+      r=remaining and t=reset-window(seconds). So quota 100/60s, 0 remaining,
+      resets in 30s. This replaced the legacy RateLimit-Limit/Remaining/Reset triplet.
+    ref: "concepts.md#rate-limiting-and-throttling"
+
+  - id: api-gateways-and-bff-060
+    difficulty: advanced
+    tags: [rate-limiting, headers, legacy, standards]
+    question: |
+      A candidate insists the "modern standard" rate-limit headers are
+      `X-RateLimit-Limit` / `X-RateLimit-Remaining`. What is the accurate correction?
+    options:
+      - "Those are correct and current; nothing to fix"
+      - "X-RateLimit-* is the oldest, never-standardized convention; the RateLimit-Limit/Remaining/Reset triplet is a legacy IETF form; the current draft uses structured RateLimit and RateLimit-Policy headers"
+      - "X-RateLimit-* was standardized in RFC 9110 and is authoritative"
+      - "The only valid rate-limit header in any era is Content-Range"
+    answer: 1
+    explanation: |
+      There are three generations: the widely-deployed but never-standardized
+      X-RateLimit-*; the legacy tripartite RateLimit-Limit/Remaining/Reset; and
+      the current IETF draft's Structured-Fields RateLimit + RateLimit-Policy.
+      Only Retry-After (RFC 9110) is a stable normative header.
+    ref: "concepts.md#rate-limiting-and-throttling"
+
+  - id: api-gateways-and-bff-061
+    difficulty: expert
+    tags: [resilience, retries, idempotency, failure-mode]
+    question: |
+      A gateway is configured to retry any 5xx or timeout up to 3 times. A client
+      sends `POST /payments`. The first attempt actually succeeds at the backend
+      but the response is lost to a network blip. What is the danger?
+    options:
+      - "None — retries are always safe because the client asked for them"
+      - "The retry duplicates the payment because POST is non-idempotent; retries should be limited to idempotent methods or guarded by an Idempotency-Key"
+      - "The gateway will downgrade the request to GET on retry"
+      - "The 429 header will be omitted"
+    answer: 1
+    explanation: |
+      Retrying a non-idempotent POST after a lost response can perform the write
+      twice (double-charge). Retries should be confined to idempotent/safe methods
+      (GET/PUT/DELETE per RFC 9110) or made safe with an Idempotency-Key.
+    ref: "concepts.md#resilience-patterns-at-the-edge"
+
+  - id: api-gateways-and-bff-062
+    difficulty: expert
+    tags: [resilience, retry-storm, budget]
+    question: |
+      During a partial backend outage, every gateway node retries failed requests
+      3x with no coordination, and the backend gets worse. What is the root cause
+      and the correct fix?
+    options:
+      - "The TLS handshake is too slow; disable TLS on retries"
+      - "Fixed per-request retry counts create a retry storm that multiplies load 3-4x exactly when the backend is weakest; use a retry budget (cap retries as a % of traffic) plus backoff and jitter"
+      - "The gateway needs more routes; add a catch-all"
+      - "Retries never affect load; the outage is a coincidence"
+    answer: 1
+    explanation: |
+      Naïve fixed retry counts amplify load precisely during a brownout, turning a
+      partial failure into a full one. A retry budget caps retries as a fraction of
+      total traffic; exponential backoff with jitter spreads them out. A circuit
+      breaker sheds the failing dependency entirely.
+    ref: "concepts.md#resilience-patterns-at-the-edge"
+
+  - id: api-gateways-and-bff-063
+    difficulty: advanced
+    tags: [resilience, bulkhead, circuit-breaker]
+    question: |
+      One slow upstream is consuming all of the gateway's connections, starving
+      unrelated routes. Which pattern most directly prevents this?
+    options:
+      - "Bulkhead isolation — give each upstream its own connection pool/concurrency limit so one dependency can't exhaust shared resources"
+      - "TLS re-encryption to the slow upstream"
+      - "Returning 301 redirects for the slow route"
+      - "Increasing the global timeout to infinity"
+    answer: 0
+    explanation: |
+      The bulkhead pattern (ship-compartment metaphor) isolates each upstream's
+      resources so a single slow dependency can't drain the whole pool and take
+      down unrelated routes. A circuit breaker complements it by failing fast.
+    ref: "concepts.md#resilience-patterns-at-the-edge"
+
+  - id: api-gateways-and-bff-064
+    difficulty: expert
+    tags: [caching, security, shared-cache, data-leak]
+    question: |
+      A shared edge cache keys responses on method + URL only and caches a
+      `GET /me/balance` response that required `Authorization`. What is the
+      consequence?
+    options:
+      - "Better performance with no downside"
+      - "User A's cached balance is served to user B — a cross-tenant data leak; personalized responses need Cache-Control: private (or no-store) or a user-scoped cache key plus correct Vary"
+      - "The cache will refuse to store any authenticated response automatically"
+      - "The Authorization header is echoed to all clients"
+    answer: 1
+    explanation: |
+      A shared cache that ignores identity in its key serves one user's
+      personalized response to another. Personalized/authenticated responses must
+      use Cache-Control: private or no-store, or include the user in the cache key,
+      with correct Vary. This is the classic edge-cache data-leak failure mode.
+    ref: "concepts.md#edge-caching-rfc-9111"
+
+  - id: api-gateways-and-bff-065
+    difficulty: advanced
+    tags: [caching, s-maxage, rfc-9111]
+    question: |
+      What does `Cache-Control: max-age=60, s-maxage=600` instruct?
+    options:
+      - "Browsers cache for 600s and shared caches for 60s"
+      - "All caches must revalidate every 60s"
+      - "Private (browser) caches use 60s freshness; shared caches (gateway/CDN) use 600s because s-maxage overrides max-age for shared caches only"
+      - "The response cannot be cached at all"
+    answer: 2
+    explanation: |
+      s-maxage (RFC 9111) applies only to shared caches and overrides max-age for
+      them. Here a browser treats the response as fresh for 60s while a shared
+      gateway/CDN cache treats it as fresh for 600s.
+    ref: "concepts.md#edge-caching-rfc-9111"
+
+  - id: api-gateways-and-bff-066
+    difficulty: expert
+    tags: [caching, stale-while-revalidate, rfc-5861]
+    question: |
+      A response carries `Cache-Control: max-age=30, stale-while-revalidate=120`.
+      A request arrives 40 seconds after the response was cached. What does a
+      conforming shared cache do?
+    options:
+      - "Block the client while it fetches a fresh copy from the origin"
+      - "Return a 504 because the entry is stale"
+      - "Serve the stale cached copy immediately and revalidate asynchronously in the background, since 40s is within max-age(30)+swr(120)"
+      - "Delete the entry and return 404"
+    answer: 2
+    explanation: |
+      stale-while-revalidate (RFC 5861) lets the cache serve stale content
+      instantly for up to 120s past freshness while it refreshes in the
+      background, avoiding a latency spike. stale-if-error similarly serves stale
+      content on an origin error.
+    ref: "concepts.md#edge-caching-rfc-9111"
+
+  - id: api-gateways-and-bff-067
+    difficulty: expert
+    tags: [caching, request-collapsing, thundering-herd]
+    question: |
+      A hot cache key expires and 10,000 concurrent requests hit the edge as a
+      cache miss simultaneously. Which technique prevents them all from hammering
+      the origin?
+    options:
+      - "Request collapsing/coalescing — merge the concurrent identical misses into a single upstream fetch that fills the cache and fans back out"
+      - "Aggregation — fan the one request out to more services"
+      - "Round-robin load balancing across origins"
+      - "Returning 429 to 9,999 of them"
+    answer: 0
+    explanation: |
+      Request collapsing (coalescing/dedup) folds concurrent identical misses into
+      one origin fetch, preventing a cache stampede/thundering herd. It is the
+      mirror image of aggregation (which fans out). Pairing it with
+      stale-while-revalidate further shields the origin.
+    ref: "concepts.md#request-collapsing--coalescing"
+
+  - id: api-gateways-and-bff-068
+    difficulty: advanced
+    tags: [caching, vary, cache-key]
+    question: |
+      An API serves gzip and identity encodings from the same URL but omits
+      `Vary: Accept-Encoding`. What breaks at a shared cache?
+    options:
+      - "Nothing; Vary is optional and inferred"
+      - "The cache may serve a gzip-encoded body to a client that didn't request compression (or vice versa), because encoding isn't part of the cache key"
+      - "The cache will double-compress every response"
+      - "TLS termination fails"
+    answer: 1
+    explanation: |
+      The cache key must incorporate whatever the response varies on. Without
+      Vary: Accept-Encoding, the cache can return the wrong variant (e.g. a gzip
+      body to a client that can't decode it). Correct Vary construction is
+      essential; over-broad Vary instead destroys hit rate.
+    ref: "concepts.md#edge-caching-rfc-9111"
+
+  - id: api-gateways-and-bff-069
+    difficulty: expert
+    tags: [graphql, federation, n-plus-one]
+    question: |
+      In a federated GraphQL setup, a query returns a list of 100 orders and each
+      order resolves its `customer` field with a separate call to the users
+      subgraph. What problem is this and how is it addressed?
+    options:
+      - "Tail-latency amplification; fix with TLS passthrough"
+      - "The resolver N+1 problem; batch the lookups (dataloader) so the 100 customer fetches collapse into one or few calls"
+      - "A CORS preflight storm; raise Access-Control-Max-Age"
+      - "A retry storm; add a circuit breaker"
+    answer: 1
+    explanation: |
+      Firing one downstream call per list item is the classic GraphQL resolver
+      N+1. Batching/dataloader coalesces the per-item lookups into a single (or
+      few) batched call to the subgraph, a key operational concern of federation.
+    ref: "concepts.md#graphql-federation-as-an-aggregationbff-alternative"
+
+  - id: api-gateways-and-bff-070
+    difficulty: expert
+    tags: [graphql, federation, rest-bff, design]
+    question: |
+      Choosing GraphQL federation over a set of REST BFFs for a multi-client
+      product primarily buys you which trade-off?
+    options:
+      - "You avoid hand-maintaining N bespoke aggregators and let teams own subgraphs, at the cost of an extra router hop, harder HTTP caching, and needing query-cost/depth limits and persisted queries"
+      - "It eliminates all authentication concerns"
+      - "It removes the need for any backend services"
+      - "It guarantees strong cross-service transactional consistency"
+    answer: 0
+    explanation: |
+      Federation replaces N hand-rolled aggregators with subgraph-owned schemas
+      composed by a router, but adds a router hop, complicates HTTP caching
+      (queries POSTed to one endpoint; persisted queries restore cacheability),
+      and requires query-cost/depth limiting to prevent abuse.
+    ref: "concepts.md#graphql-federation-as-an-aggregationbff-alternative"
+
+  - id: api-gateways-and-bff-071
+    difficulty: advanced
+    tags: [waf, gateway, security, layering, owasp]
+    question: |
+      A design has a WAF, an API gateway, and a service mesh in the request path.
+      What does each do and in what order?
+    options:
+      - "Mesh → gateway → WAF; the mesh authenticates external users"
+      - "WAF → API gateway → service mesh: the WAF blocks attack payloads (SQLi/XSS/OWASP-web, bots/DDoS), the gateway does API management (authN/Z, quotas, routing), the mesh secures east-west service-to-service traffic (mTLS, retries)"
+      - "They are interchangeable; any order works identically"
+      - "WAF → mesh → gateway; the WAF terminates TLS for internal services"
+    answer: 1
+    explanation: |
+      Order is WAF (is this malicious?) → API gateway (is this caller allowed and
+      within limits?) → service mesh (how do internal services talk securely?).
+      Conflating WAF and gateway maps to OWASP API8 Security Misconfiguration.
+    ref: "concepts.md#waf-vs-api-gateway-security-layering"
+
+  - id: api-gateways-and-bff-072
+    difficulty: expert
+    tags: [bff, security, oauth, spa, xss]
+    question: |
+      A SPA stores its OAuth access and refresh tokens in `localStorage`. A
+      security review flags it. What is the recommended pattern and why?
+    options:
+      - "Move the tokens to a JavaScript cookie without flags — same protection, simpler"
+      - "Encrypt the tokens in localStorage with a key also in localStorage"
+      - "Use a token-handling BFF that holds the tokens server-side and issues the browser only an HttpOnly, Secure, SameSite session cookie, so tokens never reach JS and can't be exfiltrated by XSS"
+      - "Store tokens in the URL fragment so they aren't sent to servers"
+    answer: 2
+    explanation: |
+      Tokens readable by JS are exfiltratable by any XSS. A token-handling BFF
+      keeps access/refresh tokens server-side and gives the browser an HttpOnly
+      (script-unreadable) session cookie, removing the highest-value XSS target.
+      The trade-off is defending CSRF via SameSite/CSRF tokens.
+    ref: "concepts.md#bff-as-a-security-pattern-token-handling-bff-for-spas"
+
+  - id: api-gateways-and-bff-073
+    difficulty: expert
+    tags: [token-exchange, phantom-token, security]
+    question: |
+      A gateway issues clients an opaque reference token but forwards a signed JWT
+      to backends after introspection. What pattern is this and what does it buy?
+    options:
+      - "Split token; it doubles the token size"
+      - "Phantom token; the client never sees JWT internals (no claims/signature to attack or leak) and revocation is easy via the opaque reference, while backends still get a verifiable JWT"
+      - "mTLS bridging; it removes the need for any token"
+      - "Token passthrough; the backend and client share the same token"
+    answer: 1
+    explanation: |
+      The phantom-token pattern hands clients an opaque reference and swaps in a
+      JWT at the gateway for backends. JWT internals stay off the public wire,
+      revocation is simple (revoke the reference), and backends still verify a
+      standard JWT. RFC 8693 token exchange additionally enables downscoping.
+    ref: "concepts.md#bff-as-a-security-pattern-token-handling-bff-for-spas"
+
+  - id: api-gateways-and-bff-074
+    difficulty: expert
+    tags: [jwt, security, alg-none, algorithm-confusion, owasp]
+    question: |
+      "A gateway validates JWTs — describe two ways an attacker still gets in."
+      Which pair of attacks is correct?
+    options:
+      - "Expired-token replay and CORS preflight bypass"
+      - "The alg=none attack (forged token drops the signature and sets alg to none) and RS256→HS256 algorithm confusion (signing with the public key as an HMAC secret) — both defeated by pinning the expected algorithm rather than trusting the token's alg"
+      - "Rate-limit exhaustion and TLS downgrade"
+      - "SNI spoofing and cache poisoning"
+    answer: 1
+    explanation: |
+      alg=none accepts an unsigned token if the verifier honors the token's own
+      alg; algorithm confusion tricks an RS256 verifier into treating the public
+      key as an HMAC secret for HS256. Both map to OWASP API2; the defense is to
+      pin allowed algorithms and bind each key to one algorithm.
+    ref: "concepts.md#jwt-validation-edge-cases-and-attacks"
+
+  - id: api-gateways-and-bff-075
+    difficulty: advanced
+    tags: [jwt, jwks, kid, key-rotation]
+    question: |
+      An issuer rotates its signing keys. A gateway that caches the JWKS starts
+      seeing tokens with an unknown `kid`. What is the correct behavior?
+    options:
+      - "Reject all tokens permanently until a human updates the config"
+      - "Ignore the kid and try every cached key blindly"
+      - "Treat a cache miss on kid as a signal to refetch the JWKS (respecting a refresh cooldown), then validate — cache JWKS for performance but refresh on rotation"
+      - "Downgrade to alg=none to avoid the key lookup"
+    answer: 2
+    explanation: |
+      JWKS should be cached to avoid a fetch per request, but an unknown kid means
+      the key set likely rotated, so the gateway should refetch (with a cooldown to
+      avoid a fetch storm) and then validate. Rejecting outright would cause an
+      outage on every legitimate rotation.
+    ref: "concepts.md#jwt-validation-edge-cases-and-attacks"
+
+  - id: api-gateways-and-bff-076
+    difficulty: expert
+    tags: [owasp, api4, resource-consumption, security]
+    question: |
+      Which OWASP API Security Top 10 (2023) category is most directly the API
+      gateway's core mandate, addressed by rate limits, quotas, body-size caps,
+      and timeouts?
+    options:
+      - "API1 Broken Object Level Authorization"
+      - "API4 Unrestricted Resource Consumption"
+      - "API3 Broken Object Property Level Authorization"
+      - "API6 Unrestricted Access to Sensitive Business Flows"
+    answer: 1
+    explanation: |
+      API4 Unrestricted Resource Consumption is squarely a gateway responsibility:
+      rate/quota limits, request/body size caps, and timeouts prevent a caller from
+      exhausting resources. (API1/BOLA is mostly service-side.)
+    ref: "concepts.md#owasp-api-security-top-10-2023--gateway-relevant-items"
+
+  - id: api-gateways-and-bff-077
+    difficulty: expert
+    tags: [owasp, api9, inventory, ssrf, api7]
+    question: |
+      A forgotten `v0` API and an undocumented internal endpoint are both
+      reachable through the gateway; separately, a backend fetches a URL supplied
+      in a request body. Which two OWASP API risks are in play?
+    options:
+      - "API9 Improper Inventory Management (zombie/shadow APIs) and API7 SSRF (unvalidated user-supplied URI fetched server-side)"
+      - "API2 Broken Authentication and API5 BFLA"
+      - "API1 BOLA and API10 Unsafe Consumption"
+      - "API8 Security Misconfiguration and API3 Property-Level authZ"
+    answer: 0
+    explanation: |
+      Old/undocumented routes are API9 Improper Inventory Management (zombie/shadow
+      APIs) — the gateway is the inventory & deprecation enforcement point. Fetching
+      an attacker-supplied URL server-side is API7 SSRF; validate/allowlist such URIs.
+    ref: "concepts.md#owasp-api-security-top-10-2023--gateway-relevant-items"
+
+  - id: api-gateways-and-bff-078
+    difficulty: advanced
+    tags: [lifecycle, sunset, rfc-8594, deprecation]
+    question: |
+      A team is retiring `/v1` in favor of `/v2`. How should the gateway signal
+      the impending retirement to clients using standards?
+    options:
+      - "Return 410 Gone immediately on all v1 requests"
+      - "Emit the Sunset header (RFC 8594) with the retirement date, typically alongside a Deprecation header and a Link to migration docs, while still serving v1 during the window"
+      - "Silently start returning 500s on v1"
+      - "Add a custom X-Please-Upgrade header only"
+    answer: 1
+    explanation: |
+      RFC 8594's Sunset header advertises when a resource will stop working; the
+      Deprecation header (IETF draft) marks it deprecated, often with a Link to
+      docs. This gives clients a detectable retirement window and addresses API9
+      inventory management, versus abruptly breaking v1.
+    ref: "concepts.md#api-lifecycle-versioning-deprecation-and-sunset"
+
+  - id: api-gateways-and-bff-079
+    difficulty: expert
+    tags: [cors, credentials, security]
+    question: |
+      A browser app sends credentialed requests (cookies) cross-origin. The
+      gateway responds with `Access-Control-Allow-Origin: *` and
+      `Access-Control-Allow-Credentials: true`. Why does the browser still block it?
+    options:
+      - "Because CORS requires HTTP/3"
+      - "Because the wildcard origin cannot be combined with Allow-Credentials: true — with credentials the server must echo a specific allowed origin (and typically Vary: Origin)"
+      - "Because credentials require TLS passthrough"
+      - "Because Access-Control-Max-Age must be 0 for credentials"
+    answer: 1
+    explanation: |
+      The Fetch/CORS spec forbids Access-Control-Allow-Credentials: true together
+      with Allow-Origin: *. Credentialed cross-origin requests need a specific
+      echoed origin plus Vary: Origin. CORS also only constrains browsers — it is
+      not server-side authorization.
+    ref: "concepts.md#cors-handling-at-the-edge"
+
+  - id: api-gateways-and-bff-080
+    difficulty: advanced
+    tags: [control-plane, data-plane, architecture]
+    question: |
+      Why should a gateway's data plane be kept simple and (ideally) stateless
+      while richer configuration lives in the control plane?
+    options:
+      - "Because stateless data planes cannot terminate TLS"
+      - "So the request-forwarding path stays fast and its blast radius is contained, while route/policy/key changes are versioned and rolled out via the control plane"
+      - "Because the control plane handles all live traffic"
+      - "Because stateful data planes are required for rate limiting"
+    answer: 1
+    explanation: |
+      Separating planes keeps the hot request path (data plane) fast and
+      low-blast-radius, while management concerns (routes, policies, keys) live in
+      a control plane that's versioned and rolled out gradually. State like
+      rate-limit counters is externalized rather than baked into the data plane.
+    ref: "concepts.md#control-plane-vs-data-plane"
+
+  - id: api-gateways-and-bff-081
+    difficulty: expert
+    tags: [kubernetes, ingress, gateway-api]
+    question: |
+      In Kubernetes, where does each stop: Ingress, Gateway API, and a full API
+      gateway?
+    options:
+      - "They are identical resources with different names"
+      - "Ingress does basic host/path L7 routing + TLS; Gateway API is the role-oriented successor (GatewayClass/Gateway/HTTPRoute) with richer, portable routing and traffic splitting; a full API gateway adds the API-management layer (authN/Z, quotas, transformation, aggregation, portal)"
+      - "Ingress does authN/Z and quotas; Gateway API only does TLS; API gateways only route"
+      - "Gateway API replaces both Ingress and API gateways for all use cases"
+    answer: 1
+    explanation: |
+      Ingress = basic L7 routing/TLS (vendors extended it non-portably via
+      annotations). Gateway API = role-oriented successor (GatewayClass/Gateway/
+      HTTPRoute), richer and portable, but still routing. A full API gateway layers
+      API management on top; it can build on Gateway API as its data plane.
+    ref: "concepts.md#kubernetes-ingress-vs-gateway-api-vs-api-gateway"
+
+  - id: api-gateways-and-bff-082
+    difficulty: advanced
+    tags: [service-discovery, health-check, outlier-ejection]
+    question: |
+      What is the difference between active health checks and passive health
+      checks (outlier ejection) at a gateway?
+    options:
+      - "Active checks read the response body; passive checks read the request body"
+      - "Active checks periodically probe an upstream endpoint (e.g. /health); passive checks watch live traffic and eject an instance returning too many errors/timeouts, re-admitting it after a cooldown"
+      - "Passive checks require mTLS; active checks require API keys"
+      - "They are two names for the same probe"
+    answer: 1
+    explanation: |
+      Active health checks send synthetic probes on an interval. Passive checks
+      (outlier ejection) infer health from real traffic — ejecting an instance that
+      errors/times out too much and re-admitting after a cooldown — which is cheaper
+      and reacts to actual failures.
+    ref: "concepts.md#service-discovery-and-health-checking"
+
+  - id: api-gateways-and-bff-083
+    difficulty: advanced
+    tags: [streaming, websocket, sse, connections]
+    question: |
+      Why do WebSocket and Server-Sent Events change how you size and tune a
+      gateway compared to plain request/response REST?
+    options:
+      - "They require the gateway to disable TLS"
+      - "They are long-lived connections, so the scaling constraint becomes concurrent connection count (and idle-timeout/buffering tuning) rather than requests-per-second"
+      - "They cannot pass through any gateway"
+      - "They force every response to be cached"
+    answer: 1
+    explanation: |
+      Long-lived connections (WebSocket upgrade, SSE text/event-stream) mean the
+      binding constraint shifts from RPS to concurrent open connections, and idle
+      timeouts/response-flush buffering must be tuned differently or streams stall
+      or get killed prematurely.
+    ref: "concepts.md#streaming-and-protocol-support-at-the-edge"
+
+  - id: api-gateways-and-bff-084
+    difficulty: expert
+    tags: [idempotency, retries, edge]
+    question: |
+      How does an `Idempotency-Key` request header interact with gateway retries
+      of a `POST`?
+    options:
+      - "It disables retries entirely"
+      - "It lets the server return the original result for a duplicate key instead of performing the action twice, which is precisely what makes a gateway retry of a non-idempotent POST safe"
+      - "It converts the POST into a GET"
+      - "It is only meaningful for cache keys, not writes"
+    answer: 1
+    explanation: |
+      An Idempotency-Key lets the server dedupe: a retried POST bearing the same
+      key returns the original outcome rather than re-executing the write. This is
+      what makes gateway-level (or client) retries of an otherwise non-idempotent
+      request safe.
+    ref: "concepts.md#idempotency-support-at-the-edge"
+
+  - id: api-gateways-and-bff-085
+    difficulty: advanced
+    tags: [validation, openapi, api4, api8]
+    question: |
+      A gateway validates request bodies against an OpenAPI 3.1 schema and rejects
+      oversized bodies. Which concerns does this address, and what's the boundary?
+    options:
+      - "It enforces business rules; it should also check refund eligibility"
+      - "It offloads structural validation and defends resource-consumption (API4) and misconfiguration (API8), but should stay structural (does the message conform to the contract?) — semantic 'is this a valid business operation?' is service logic"
+      - "It replaces authentication entirely"
+      - "It only helps with CORS preflight"
+    answer: 1
+    explanation: |
+      Schema validation + size limits at the edge reject malformed/oversized
+      requests early (defending API4/API8) and offload work from services. The
+      boundary is structural vs semantic: contract conformance at the edge, business
+      validity in the service.
+    ref: "concepts.md#request-and-schema-validation-at-the-edge"
+
+  - id: api-gateways-and-bff-086
+    difficulty: expert
+    tags: [tail-latency, aggregation, fan-out]
+    question: |
+      A BFF fans out to 5 services in parallel and waits for all. Every service
+      reports a healthy p99 of 100ms, yet the client-observed p99 is far worse.
+      Why, and what mitigates it?
+    options:
+      - "The BFF is misconfigured; each service's p99 should equal the client p99"
+      - "Tail-latency amplification: waiting for the slowest-of-N makes it likely at least one call is slow, so the aggregate p99 exceeds any single backend's; mitigate with per-call timeouts in a latency budget, hedged requests, and degrading non-critical fields"
+      - "TLS termination adds exactly the difference"
+      - "The client network is always the cause; nothing server-side helps"
+    answer: 1
+    explanation: |
+      With parallel fan-out and wait-for-all, client latency is the max of N. The
+      chance that at least one of N calls lands in its slow tail grows with N, so
+      aggregate p99 is worse than any single backend's. Mitigations: per-call
+      timeouts within a budget, hedged requests, and dropping non-critical fields.
+    ref: "concepts.md#tail-latency-amplification-and-composition-consistency"
+
+  - id: api-gateways-and-bff-087
+    difficulty: expert
+    tags: [composition, consistency, eventual-consistency]
+    question: |
+      An aggregated account screen shows an order-count of 12 but lists only 11
+      orders. No single service is buggy. What is the most likely explanation?
+    options:
+      - "A rate-limit header was dropped"
+      - "Composition consistency: the count and the list are independent read-time snapshots taken at different moments across services with no cross-service transaction, so they can disagree (read skew / eventual consistency)"
+      - "The JWT audience claim was wrong"
+      - "TLS re-encryption corrupted one field"
+    answer: 1
+    explanation: |
+      Aggregation merges data captured at different instants from different
+      services with no cross-service transaction, so a count from one call can
+      disagree with a list from another (read skew / eventual consistency). If it
+      matters, derive dependent values from a single consistent source.
+    ref: "concepts.md#tail-latency-amplification-and-composition-consistency"
+
+  - id: api-gateways-and-bff-088
+    difficulty: advanced
+    tags: [patterns, gateway-offloading, azure]
+    question: |
+      Microsoft/Azure formalize three gateway patterns. Which statement about
+      Gateway Offloading is correct?
+    options:
+      - "Offload as much as possible, including domain/business logic, to centralize everything"
+      - "Move shared cross-cutting functionality (TLS, authN, rate limiting, logging) into the gateway — only offload what the whole app uses, and never offload business logic"
+      - "Offloading means fanning one request out to several services"
+      - "Offloading means routing requests to multiple services behind one endpoint"
+    answer: 1
+    explanation: |
+      Gateway Offloading moves shared cross-cutting concerns (TLS, authN, rate
+      limiting, logging) to the edge; the rule is to offload only what the whole
+      app uses and never business logic. Fan-out/merge is Gateway Aggregation;
+      multi-service routing behind one endpoint is Gateway Routing.
+    ref: "concepts.md#the-three-named-gateway-patterns"
+
+  - id: api-gateways-and-bff-089
+    difficulty: advanced
+    tags: [mtls, sni, tls, routing]
+    question: |
+      How can a gateway route traffic based on the target hostname even in TLS
+      passthrough mode where it doesn't decrypt the request?
+    options:
+      - "By reading the HTTP Host header inside the encrypted body"
+      - "By using SNI (Server Name Indication) from the TLS ClientHello, which carries the target hostname in cleartext before the handshake completes"
+      - "By decrypting the first packet only"
+      - "By inspecting the X-Forwarded-Host header"
+    answer: 1
+    explanation: |
+      SNI in the TLS ClientHello exposes the requested hostname in cleartext, so a
+      gateway can select the right certificate and even route (SNI-based routing)
+      without terminating — the only routing signal available in passthrough mode,
+      since the HTTP Host header is inside the encrypted stream.
+    ref: "concepts.md#mtls-and-sni-detail"
+
+  - id: api-gateways-and-bff-090
+    difficulty: expert
+    tags: [aws, managed, token-bucket, usage-plans]
+    question: |
+      In Amazon API Gateway, a usage plan sets a rate of 100 req/s with a burst of
+      200. How does the underlying token-bucket model interpret these two numbers?
+    options:
+      - "Rate is the maximum ever allowed; burst is ignored"
+      - "The steady-state rate (100/s) is the bucket's refill rate and the burst (200) is the bucket capacity — brief spikes up to 200 are allowed as long as the long-run average stays at the refill rate"
+      - "Burst is the per-day quota and rate is the per-second quota"
+      - "Both numbers must be equal or requests are rejected"
+    answer: 1
+    explanation: |
+      Token bucket maps steady-state rate to the refill rate and burst to bucket
+      capacity: the client may momentarily exceed the steady rate up to the burst
+      size (draining the bucket), but the sustained average is capped at the refill
+      rate. Usage plans + API keys add per-key quotas on top.
+    ref: "concepts.md#managed-vs-self-hosted-trade-offs-with-aws-specifics"
+
+  - id: api-gateways-and-bff-091
+    difficulty: intermediate
+    tags: [ai-gateway, trends, rate-limiting]
+    question: |
+      How does an AI/LLM gateway's rate limiting typically differ from a classic
+      API gateway's?
+    options:
+      - "It doesn't rate limit at all"
+      - "It limits by tokens or dollar cost rather than request count, because a single request's cost varies widely; it may also do semantic caching by embedding similarity and prompt-injection/PII inspection"
+      - "It limits only by IP address and nothing else"
+      - "It caches by exact URL match just like a CDN"
+    answer: 1
+    explanation: |
+      LLM traffic cost varies per request, so AI gateways meter by tokens/cost
+      rather than request count, and add LLM-specific features: semantic caching
+      (embedding similarity), prompt-injection guards, and PII redaction. The
+      underlying edge discipline is the same, just measured differently.
+    ref: "concepts.md#aillm-gateways-forward-looking"
+
+  - id: api-gateways-and-bff-092
+    difficulty: expert
+    tags: [resilience, load-shedding, 503, retry-after]
+    question: |
+      Under global overload a gateway proactively rejects the lowest-priority
+      requests to protect core traffic. What is this called and what response is
+      appropriate?
+    options:
+      - "Rate limiting; return 429 to the affected clients individually"
+      - "Load shedding / backpressure; return 503 Service Unavailable (with Retry-After when known) since the condition is server-wide overload, not a single noisy client"
+      - "Circuit breaking; return 401 Unauthorized"
+      - "Bulkheading; return 404 Not Found"
+    answer: 1
+    explanation: |
+      Load shedding drops low-priority work under server-wide overload to protect
+      the core — the server-wide analogue of per-client rate limiting. It warrants
+      503 (+ Retry-After), whereas 429 is reserved for a specific client exceeding
+      its quota.
+    ref: "concepts.md#resilience-patterns-at-the-edge"

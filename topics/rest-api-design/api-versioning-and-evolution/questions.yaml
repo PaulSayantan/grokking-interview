@@ -855,3 +855,560 @@ questions:
       Publishing tolerant-reader expectations (ignore unknown fields, no order dependence,
       handle unknown enums) makes later additive changes safe by contract.
     ref: "concepts.md#tolerant-reader-and-postels-law"
+
+  - id: api-versioning-and-evolution-051
+    difficulty: expert
+    tags: [compatibility-axes, aip-180, semantic]
+    question: |
+      A team changes a Protobuf-backed API so a field that returned an `int32` now returns an
+      `int64` with a new tag number, while keeping the field name and JSON output shape
+      identical for values that still fit in 32 bits. Applying the source/wire/semantic framing,
+      which characterization is most accurate?
+    options:
+      - "It is fully compatible on all three axes because small values serialize identically"
+      - "It can be wire-compatible for in-range values yet source-incompatible for generated SDKs (the field's type widened) and semantically breaking for clients whose storage is sized to int32"
+      - "It is only a semantic change; source and wire compatibility are irrelevant to typed clients"
+      - "It is breaking only on the wire axis, since JSON output is unchanged"
+    answer: 1
+    explanation: |
+      The three axes are independent. Generated SDK code compiled against an int32 field breaks
+      when the type widens (source), and clients that provisioned int32 storage overflow once a
+      real value exceeds the old bound (semantic) — even if small values happen to look identical
+      on the wire. This is why widening needs a parallel field, not an in-place change.
+    ref: "concepts.md#three-axes-of-compatibility-source-wire-semantic"
+
+  - id: api-versioning-and-evolution-052
+    difficulty: expert
+    tags: [compatibility-axes, semantic, enforcement]
+    question: |
+      Which class of breaking change is a schema/OpenAPI diff linter fundamentally unable to
+      catch on its own?
+    options:
+      - "Removing a required response field"
+      - "Narrowing a field's type from string to enum"
+      - "A semantic change such as flipping a default value or changing units while the shape stays byte-identical"
+      - "Adding a new required request parameter"
+    answer: 2
+    explanation: |
+      Diff linters compare structure/types, so they catch source- and wire-axis breakages
+      (removals, narrowings, new required params). A default flip or a units change leaves the
+      schema identical, so only domain review and per-field telemetry catch the semantic axis.
+    ref: "concepts.md#three-axes-of-compatibility-source-wire-semantic"
+
+  - id: api-versioning-and-evolution-053
+    difficulty: advanced
+    tags: [semantic, pagination, scenario]
+    question: |
+      An endpoint historically returned the full collection in one response. A release adds a
+      `page_size` parameter defaulting to 50 and returns only the first page when it is omitted.
+      Why is this a breaking change despite being purely additive to the request schema?
+    options:
+      - "Because adding any query parameter is always breaking"
+      - "Because existing clients that never paginated now silently receive a truncated result set — a semantic behavior change with an identical response shape"
+      - "Because the `page_size` parameter must be required to be valid"
+      - "It is not breaking; adding an optional parameter with a default is always safe"
+    answer: 1
+    explanation: |
+      The request field is optional, but its default (50) is smaller than the old "return
+      everything" behavior, so clients that iterated the full set now silently miss data. That
+      is a semantic breaking change; the fix is to default to the old behavior or expose it
+      under a new version.
+    ref: "concepts.md#semantic-behavioral-breaking-changes"
+
+  - id: api-versioning-and-evolution-054
+    difficulty: expert
+    tags: [semantic, defaults, aip-180]
+    question: |
+      Per AIP-180, changing the default value of an existing response field (e.g. a `genre`
+      that defaulted to FICTION now defaults to NONFICTION) is classified as breaking primarily
+      because:
+    options:
+      - "The JSON serialization of the field changes length"
+      - "Clients that relied on the previous default now silently receive different meaning for the same request, corrupting downstream logic"
+      - "Default values are prohibited in REST responses"
+      - "It forces a new required field on the request side"
+    answer: 1
+    explanation: |
+      A default flip is the archetypal semantic breaking change: the shape is unchanged but the
+      value's meaning shifts for clients that depended on the old default, producing silent
+      downstream corruption that no schema diff flags.
+    ref: "concepts.md#semantic-behavioral-breaking-changes"
+
+  - id: api-versioning-and-evolution-055
+    difficulty: expert
+    tags: [bounds, int32, expand-contract, scenario]
+    question: |
+      Your public API returns numeric `id` values documented to fit in a signed 32-bit integer,
+      and you are about to exhaust that range. Which migration avoids breaking existing clients?
+    options:
+      - "Silently start returning values above 2^31-1 in the same `id` field, since JSON numbers are unbounded"
+      - "Add a new parallel int64 field (e.g. `id_long`) alongside `id`, migrate clients to it, then contract the old field only after usage telemetry hits zero"
+      - "Change the `id` field's documented type to int64 in the changelog and ship immediately"
+      - "Return `id` as a string only for values that overflow int32"
+    answer: 1
+    explanation: |
+      Widening a documented numeric bound in place is breaking — clients sized int32 storage to
+      the old limit and will overflow. Expand/contract with a new parallel int64 field lets
+      clients migrate before the old field is retired.
+    ref: "concepts.md#string-and-numeric-bound-changes"
+
+  - id: api-versioning-and-evolution-056
+    difficulty: advanced
+    tags: [bounds, aip-180, breaking-changes]
+    question: |
+      Why does AIP-180 treat *increasing* a string field's documented maximum length as a
+      breaking change?
+    options:
+      - "Longer strings cannot be serialized as JSON"
+      - "Clients provisioned fixed-length storage (e.g. VARCHAR(64)) to the old documented bound and will truncate or reject values that now exceed it"
+      - "It always changes the field's character encoding"
+      - "String length limits are immutable per RFC 9110"
+    answer: 1
+    explanation: |
+      Consumers size database columns and buffers to the documented maximum. Raising the limit
+      means previously-impossible longer values can now appear, overflowing storage that was
+      correct under the old contract — a semantic/bound breaking change.
+    ref: "concepts.md#string-and-numeric-bound-changes"
+
+  - id: api-versioning-and-evolution-057
+    difficulty: expert
+    tags: [media-type, header-grammar, quality-values]
+    question: |
+      A client sends:
+      `Accept: application/vnd.example.user+json; version=2; q=1.0, application/vnd.example.user+json; version=1; q=0.5`
+      What is it expressing, and what should a server that supports only version 1 do?
+    options:
+      - "It demands version 2 only; the server must return 406 Not Acceptable"
+      - "It prefers version 2 but will accept version 1 as a fallback; the server should return the version-1 representation with `Vary: Accept`"
+      - "The `q` values are invalid in `Accept`, so the request is a 400 Bad Request"
+      - "It requests both versions simultaneously in one response"
+    answer: 1
+    explanation: |
+      RFC 9110 `q` quality values express a preference order. Here v2 is preferred (q=1.0) but v1
+      is acceptable (q=0.5), so a server that supports only v1 returns v1 and emits `Vary: Accept`
+      because the chosen representation depends on the `Accept` header.
+    ref: "concepts.md#media-type-versioning-the-header-grammar"
+
+  - id: api-versioning-and-evolution-058
+    difficulty: advanced
+    tags: [media-type, rfc6839, suffix]
+    question: |
+      In the media type `application/vnd.example.user.v2+json`, what is the role of the `+json`
+      suffix per RFC 6839?
+    options:
+      - "It signals the API version is 2 in JSON form"
+      - "It is a structured syntax suffix declaring the type is serialized as JSON, so generic JSON tooling still applies"
+      - "It requests gzip compression of the JSON body"
+      - "It is a mandatory part of every vendor-tree media type name"
+    answer: 1
+    explanation: |
+      The `+json` structured syntax suffix (RFC 6839) says the media type is *serialized as*
+      JSON, letting generic JSON parsers and tooling process it even though the base type is a
+      vendor-specific one. It is independent of the version marker.
+    ref: "concepts.md#media-type-versioning-the-header-grammar"
+
+  - id: api-versioning-and-evolution-059
+    difficulty: expert
+    tags: [enum, protobuf, unspecified, forward-compatibility]
+    question: |
+      Protobuf requires the first value of every enum to be `0` and conventionally names it
+      `*_UNSPECIFIED`. How does this convention aid forward compatibility?
+    options:
+      - "It makes the enum serialize in fewer bytes"
+      - "It provides a well-defined default for unset fields and a safe landing bucket for values a client's generated code does not yet recognize, avoiding crashes"
+      - "It prevents anyone from ever adding new enum values"
+      - "It forces all clients to upgrade whenever a value is added"
+    answer: 1
+    explanation: |
+      The zero/`UNSPECIFIED` sentinel is the default for unset fields and gives open-enum
+      handling a place to map unknown values, so a client encountering a value added after it was
+      generated degrades gracefully instead of throwing.
+    ref: "concepts.md#enum-evolution-and-the-unspecified-sentinel"
+
+  - id: api-versioning-and-evolution-060
+    difficulty: advanced
+    tags: [enum, asymmetry, breaking-changes]
+    question: |
+      Why is adding an enum value non-breaking on the request side but potentially breaking on
+      the response side?
+    options:
+      - "Requests are cached but responses are not"
+      - "On the request side the server merely accepts more input; on the response side a client with closed-enum handling throws on the unrecognized value it now receives"
+      - "Enums are only allowed in requests, never in responses"
+      - "The response side is safe and the request side is breaking — the premise is reversed"
+    answer: 1
+    explanation: |
+      Accepting an additional input value never invalidates existing valid requests (non-breaking
+      request-side). But a client that exhaustively switches over a closed set of response enum
+      values breaks when a new value appears — the same change is safe one direction and dangerous
+      the other.
+    ref: "concepts.md#enum-evolution-and-the-unspecified-sentinel"
+
+  - id: api-versioning-and-evolution-061
+    difficulty: advanced
+    tags: [hateoas, why-failed, rest]
+    question: |
+      Which best explains why HATEOAS did not eliminate API versioning in practice?
+    options:
+      - "Hypermedia links cannot be expressed in JSON"
+      - "Clients hardcode URLs, codegen/tooling assumes fixed paths, and — critically — link-following does nothing for semantic changes to a field's meaning"
+      - "HATEOAS makes all changes breaking by design"
+      - "Browsers refuse to follow `Link` relations"
+    answer: 1
+    explanation: |
+      HATEOAS can relocate endpoints if clients follow links, but in reality clients hardcode
+      URLs and typed tooling bakes in paths; more importantly, moving an endpoint does not help a
+      client interpret a field whose semantics changed. It survives for navigation/discovery, not
+      as a versioning replacement.
+    ref: "concepts.md#hateoas-as-versioning-avoidance-and-why-it-mostly-failed"
+
+  - id: api-versioning-and-evolution-062
+    difficulty: expert
+    tags: [multi-version, transformation-pipeline, stripe, architecture]
+    question: |
+      Stripe serves roughly a hundred API versions from one codebase using a transformation
+      pipeline. What is the core mechanism?
+    options:
+      - "Each version is a separate deployed service behind a router, duplicated per endpoint"
+      - "Business logic always computes the latest representation; each breaking change is an ordered, reversible transform module, and the server 'walks back' through the transforms newer than the client's pinned version to downgrade the response"
+      - "The gateway stores a full snapshot of every version's response and replays it"
+      - "Old versions are emulated by rewriting the database schema per request"
+    answer: 1
+    explanation: |
+      In the transformation-pipeline model the core is single-versioned (latest); every breaking
+      change is encapsulated as a reversible version-change module. To serve a pinned client the
+      server composes the transforms between the latest and the client's version. Complexity
+      scales with number of changes, not versions × endpoints.
+    ref: "concepts.md#serving-multiple-versions-from-one-codebase"
+
+  - id: api-versioning-and-evolution-063
+    difficulty: advanced
+    tags: [multi-version, transformation-pipeline, benefits]
+    question: |
+      Beyond avoiding duplicated per-version code, what additional benefit does encapsulating
+      each breaking change as a declarative transform module provide?
+    options:
+      - "It removes the need for HTTPS"
+      - "The declarative change modules can auto-generate the changelog and per-version documentation"
+      - "It makes every change automatically non-breaking"
+      - "It eliminates the need to test old versions"
+    answer: 1
+    explanation: |
+      Because each change is expressed declaratively, the same modules that transform responses
+      can generate the human-facing changelog and version docs — a documented side benefit of the
+      Stripe-style pipeline.
+    ref: "concepts.md#serving-multiple-versions-from-one-codebase"
+
+  - id: api-versioning-and-evolution-064
+    difficulty: advanced
+    tags: [pinning, defaults, stripe]
+    question: |
+      Stripe pins each account to the newest version at the time of its *first request* rather
+      than defaulting every un-versioned call to "latest." What problem does pin-on-first-use
+      solve?
+    options:
+      - "It reduces the number of TLS handshakes"
+      - "It ensures no client is ever silently upgraded into a breaking change when a new major version ships"
+      - "It lets the server drop support for old versions immediately"
+      - "It forces all accounts onto the same version for consistency"
+    answer: 1
+    explanation: |
+      Defaulting to "latest" means shipping a new major silently changes behavior for every
+      un-versioned client. Pinning on first use freezes each account to a known version so a new
+      release never breaks existing callers; a per-request header still overrides the pin.
+    ref: "concepts.md#version-pinning-and-per-field-usage-telemetry"
+
+  - id: api-versioning-and-evolution-065
+    difficulty: expert
+    tags: [telemetry, field-usage, contraction, graphql]
+    question: |
+      "Remove the field only after usage telemetry hits zero" is sound policy, but how do you
+      actually obtain reliable per-field usage data — and why is it easier in GraphQL than REST?
+    options:
+      - "You cannot measure field usage; you must guess based on ticket volume"
+      - "GraphQL exposes exactly which fields each operation selects, making field-usage tracking first-class; REST must approximate via serializer instrumentation, request-shape logging, or sparse-fieldset parameters"
+      - "REST provides per-field usage automatically via status codes; GraphQL does not"
+      - "Both require clients to self-report which fields they read"
+    answer: 1
+    explanation: |
+      GraphQL servers see the exact field selection of every operation, so field-usage tracking
+      tells you precisely when a `@deprecated` field is unused. REST returns whole
+      representations, so you approximate usage with serializer instrumentation, request-shape
+      logs, or `fields=` sparse-fieldset parameters.
+    ref: "concepts.md#version-pinning-and-per-field-usage-telemetry"
+
+  - id: api-versioning-and-evolution-066
+    difficulty: expert
+    tags: [enforcement, contract-diff, ci, oasdiff]
+    question: |
+      Your team's rule is "additive changes only." What is the most robust way to *enforce* that
+      a junior cannot merge a breaking change, without relying on human review?
+    options:
+      - "Add a comment in the OpenAPI file asking reviewers to check for breakages"
+      - "Run an automated contract-diff linter (e.g. oasdiff/openapi-diff/Optic) in CI that diffs the new spec against the published one and fails the build on a breaking delta"
+      - "Increment `info.version` on every commit"
+      - "Require every PR to bump the URL path to a new /vN"
+    answer: 1
+    explanation: |
+      Mechanical enforcement is a breaking-change linter in CI: it diffs the new OpenAPI spec
+      against the published contract and fails on removed fields, narrowed types, or new required
+      params. The diff — not the version number — is the gate.
+    ref: "concepts.md#enforcing-compatibility-contract-diffing-cdc-tests-schema-registries"
+
+  - id: api-versioning-and-evolution-067
+    difficulty: expert
+    tags: [enforcement, cdc, pact, microservices]
+    question: |
+      How do consumer-driven contract (CDC) tests with a tool like Pact detect breaking changes
+      differently from an OpenAPI schema diff?
+    options:
+      - "They diff two schema documents just like oasdiff, but faster"
+      - "Each consumer publishes the exact request/response shape it actually depends on to a broker, and the provider's CI verifies it still satisfies every registered real consumer before deploying"
+      - "They test only the provider in isolation against a hypothetical schema"
+      - "They require every consumer to run in production during the provider's build"
+    answer: 1
+    explanation: |
+      A schema diff checks change against a hypothetical full contract; CDC verifies the provider
+      against the *actual* expectations of each real consumer. That catches breakage that matters
+      to live consumers and is especially valuable for internal microservices.
+    ref: "concepts.md#enforcing-compatibility-contract-diffing-cdc-tests-schema-registries"
+
+  - id: api-versioning-and-evolution-068
+    difficulty: expert
+    tags: [events, schema-registry, compatibility-modes, kafka]
+    question: |
+      A Kafka topic's schema is registered with `BACKWARD` compatibility. Which deployment
+      ordering does this mode enable, and what does it guarantee?
+    options:
+      - "Producers must be upgraded first; it guarantees old consumers read new data"
+      - "Consumers can be upgraded first; a consumer on the new schema can read data written with the previous schema"
+      - "It guarantees nothing about read order; it only versions the topic name"
+      - "Both producers and consumers must upgrade simultaneously"
+    answer: 1
+    explanation: |
+      BACKWARD means a reader using the new schema can read data written with the previous
+      schema, so you upgrade consumers first. FORWARD is the mirror (upgrade producers first);
+      FULL is both directions between adjacent versions.
+    ref: "concepts.md#event-and-async-api-versioning-schema-registry-compatibility-modes"
+
+  - id: api-versioning-and-evolution-069
+    difficulty: expert
+    tags: [events, transitive, replay, schema-registry]
+    question: |
+      Consumers of an event stream can replay the topic from the very beginning, so they may
+      encounter every schema that ever existed. Which schema-registry compatibility setting is
+      most appropriate, and why?
+    options:
+      - "BACKWARD, because it only needs to check the immediately preceding schema"
+      - "A TRANSITIVE mode (e.g. BACKWARD_TRANSITIVE), because it checks compatibility against ALL prior versions, not just the previous one"
+      - "NONE, because replay disables compatibility checking"
+      - "FORWARD, because producers are always newest"
+    answer: 1
+    explanation: |
+      Non-transitive modes only compare against the immediately preceding schema, which is
+      insufficient when a consumer replays the full history. TRANSITIVE variants check every
+      prior version, guaranteeing the replaying consumer can read every event ever written.
+    ref: "concepts.md#event-and-async-api-versioning-schema-registry-compatibility-modes"
+
+  - id: api-versioning-and-evolution-070
+    difficulty: advanced
+    tags: [events, vs-rest, negotiation]
+    question: |
+      Why is versioning an event/message contract generally harder than versioning a REST
+      endpoint?
+    options:
+      - "Events use more bandwidth than HTTP"
+      - "You cannot negotiate a version per request, and old events live forever in the log, so a replaying consumer must handle every schema that ever existed"
+      - "Events cannot be serialized with Avro or Protobuf"
+      - "REST has no compatibility concerns at all"
+    answer: 1
+    explanation: |
+      REST can negotiate a version per request via header/path/media type. Events are written
+      once and persist in the log indefinitely, with no per-request negotiation, so compatibility
+      must be enforced at publish time across the topic's whole history.
+    ref: "concepts.md#event-and-async-api-versioning-schema-registry-compatibility-modes"
+
+  - id: api-versioning-and-evolution-071
+    difficulty: expert
+    tags: [protobuf, field-numbers, reserved, security]
+    question: |
+      In Protobuf, why must you never reuse the tag number (or name) of a deleted field, and
+      what is the recommended safeguard?
+    options:
+      - "Reuse is fine as long as the field name differs; no safeguard is needed"
+      - "Reusing a tag causes old clients to decode new bytes into the old field — risking data corruption and even PII leakage — so you use `reserved` to fence off the retired numbers and names"
+      - "Reuse only affects JSON output, so mark the field `deprecated` and move on"
+      - "Reused tags increase message size, so you compress with gzip"
+    answer: 1
+    explanation: |
+      Tag numbers are the wire identity of a field. Reusing a deleted number makes old binaries
+      decode new data into the old field, causing corruption and potential PII leakage. The
+      `reserved 2, 9 to 11; reserved "foo";` keyword fences off both numbers and names so they
+      cannot be accidentally reused.
+    ref: "concepts.md#versioning-contrast-rest-vs-grpcprotobuf-vs-graphql"
+
+  - id: api-versioning-and-evolution-072
+    difficulty: expert
+    tags: [protobuf, unknown-fields, both-directions]
+    question: |
+      Protobuf achieves both backward and forward compatibility without any version number.
+      Which mechanism is most responsible for this?
+    options:
+      - "Every message carries an explicit version header"
+      - "Old binaries ignore unknown fields AND preserve them on re-serialization, so adding fields never breaks either direction"
+      - "The compiler rejects any schema that adds fields"
+      - "All fields are required, guaranteeing a fixed shape"
+    answer: 1
+    explanation: |
+      Because a binary that does not know a field skips it *and* re-emits those unknown bytes
+      when it re-serializes, a new field neither breaks old readers (backward) nor is lost when
+      old code round-trips new data (forward) — compatibility is a per-field property, not a
+      version stamp.
+    ref: "concepts.md#versioning-contrast-rest-vs-grpcprotobuf-vs-graphql"
+
+  - id: api-versioning-and-evolution-073
+    difficulty: advanced
+    tags: [graphql, nullability, breaking-changes]
+    question: |
+      In a "versionless" GraphQL schema, which of these changes is BREAKING?
+    options:
+      - "Adding a new nullable field to an object type"
+      - "Adding a new optional (nullable) argument to a field"
+      - "Making an existing nullable field non-null, or adding a non-null argument"
+      - "Adding a new object type used only by new fields"
+    answer: 2
+    explanation: |
+      Additive nullable changes are safe because clients opt into fields. But making a nullable
+      field non-null (clients that sent/handled null now break) or adding a required non-null
+      argument breaks existing operations. Nullability is a first-class compatibility tool in
+      GraphQL.
+    ref: "concepts.md#versioning-contrast-rest-vs-grpcprotobuf-vs-graphql"
+
+  - id: api-versioning-and-evolution-074
+    difficulty: advanced
+    tags: [contrast, philosophy, rest-grpc-graphql]
+    question: |
+      Which statement best contrasts the versioning philosophies of REST vs Protobuf/gRPC vs
+      GraphQL?
+    options:
+      - "All three version the whole contract with an explicit version selector"
+      - "REST versions the whole contract explicitly, while Protobuf and GraphQL are engineered to avoid versioning by making compatibility a property of individual fields"
+      - "Only GraphQL uses version numbers; REST and gRPC never do"
+      - "gRPC uses URI path versions; REST uses field numbers"
+    answer: 1
+    explanation: |
+      REST attaches a version to the whole contract (path/header/media type). Protobuf (immutable
+      tag numbers + unknown-field preservation) and GraphQL (client-selected fields +
+      `@deprecated`) deliberately avoid a version stamp by making compatibility a per-field
+      property — the opposite pole from REST.
+    ref: "concepts.md#versioning-contrast-rest-vs-grpcprotobuf-vs-graphql"
+
+  - id: api-versioning-and-evolution-075
+    difficulty: expert
+    tags: [security, owasp, zombie-apis]
+    question: |
+      OWASP API Security Top 10 2023 API9 (Improper Inventory Management) flags a specific
+      versioning failure mode as a leading risk. Which scenario does it describe?
+    options:
+      - "Using date-based versions instead of SemVer"
+      - "Leaving a deprecated `/v1` running unpatched after `/v2` ships, so it becomes a 'zombie' endpoint attackers probe while the newest version is hardened"
+      - "Returning 410 Gone after the sunset date"
+      - "Exposing the version in the URL path"
+    answer: 1
+    explanation: |
+      API9:2023 targets shadow/zombie APIs: old versions left live but unmaintained still expose
+      full data with rotting dependencies and no security patches. Attackers probe `/v1` precisely
+      because the current version is hardened and the old one is not.
+    ref: "concepts.md#deprecated-and-zombie-versions-as-a-security-risk-owasp-api92023"
+
+  - id: api-versioning-and-evolution-076
+    difficulty: advanced
+    tags: [security, owasp, mitigation, deprecation]
+    question: |
+      Which mitigation most directly addresses the OWASP API9 "zombie version" risk?
+    options:
+      - "Encrypt the old version's traffic with a stronger cipher"
+      - "Maintain an authoritative inventory of every deployed version, apply the same patch/authz baseline to all live versions, and actually retire versions after sunset (410 Gone)"
+      - "Hide the old version behind a custom header"
+      - "Return 200 with a deprecation header indefinitely instead of removing the version"
+    answer: 1
+    explanation: |
+      The risk is un-inventoried, unpatched live versions. The mitigation is inventory + uniform
+      patching/authz across all live versions + genuine retirement after sunset — not leaving
+      "deprecated but still serving unpatched traffic" running forever.
+    ref: "concepts.md#deprecated-and-zombie-versions-as-a-security-risk-owasp-api92023"
+
+  - id: api-versioning-and-evolution-077
+    difficulty: expert
+    tags: [status-codes, sunset, 410, redirect]
+    question: |
+      An old version has passed its sunset date and the successor's contract is *not* a 1:1
+      compatible relocation. Which post-sunset response is most appropriate, and why not a
+      redirect?
+    options:
+      - "308 Permanent Redirect to the successor, because it preserves method and body"
+      - "410 Gone, because the removal is permanent and it tells clients (and caches) to stop retrying; a redirect would silently send clients into a different, incompatible representation"
+      - "302 Found to the new version so clients auto-follow"
+      - "200 OK with an empty body to avoid errors"
+    answer: 1
+    explanation: |
+      410 Gone signals intentional permanent removal and is cacheable, telling callers to stop
+      retrying and migrate. A redirect is only appropriate when the successor is a true
+      compatible relocation of the same resource; redirecting into a different contract is the
+      silent-version-substitution anti-pattern.
+    ref: "concepts.md#post-sunset-status-codes-410-vs-404-vs-redirect"
+
+  - id: api-versioning-and-evolution-078
+    difficulty: advanced
+    tags: [status-codes, 410-vs-404]
+    question: |
+      Why is `410 Gone` generally preferable to `404 Not Found` for an endpoint that was
+      intentionally retired after its sunset date?
+    options:
+      - "410 is faster to serve than 404"
+      - "410 states the removal is permanent and intentional (and is cacheable), whereas 404 is ambiguous between 'removed on purpose' and 'wrong URL/temporary glitch,' so clients may keep retrying"
+      - "404 is not a valid response for retired endpoints"
+      - "410 automatically redirects clients to the new version"
+    answer: 1
+    explanation: |
+      404 cannot distinguish deliberate removal from a typo or transient error, so clients often
+      retry. 410 explicitly communicates permanent, intentional removal (and is cacheable by
+      default), prompting clients to stop and migrate.
+    ref: "concepts.md#post-sunset-status-codes-410-vs-404-vs-redirect"
+
+  - id: api-versioning-and-evolution-079
+    difficulty: intermediate
+    tags: [stability-channels, alpha-beta-ga, aip-181]
+    question: |
+      What is the defining property of a pre-GA stability channel such as Google's `v1beta1`
+      or Azure's `-preview` versions?
+    options:
+      - "They are faster than GA versions"
+      - "They carry weaker compatibility guarantees by contract and may break without the normal deprecation runway, in exchange for early access"
+      - "They are identical to GA but cost more"
+      - "They can never be promoted to GA"
+    answer: 1
+    explanation: |
+      Alpha/beta/preview channels explicitly decouple "released" from "stable": consumers accept
+      that these versions may change or break without the standard deprecation window in exchange
+      for early access. Promotion to GA is a stability promotion, not necessarily a breaking API
+      change.
+    ref: "concepts.md#stability-channels-alpha-beta-ga"
+
+  - id: api-versioning-and-evolution-080
+    difficulty: advanced
+    tags: [stability-channels, vs-major-version, aip]
+    question: |
+      How does promoting an API from `v1beta1` to `v1` differ from bumping `/v1` to `/v2`?
+    options:
+      - "They are identical operations with different names"
+      - "The beta-to-GA promotion is a stability-level promotion (the guarantees strengthen) and need not be a breaking API change, whereas a major-version bump signals an incompatible contract change"
+      - "A major-version bump never changes the contract; a stability promotion always does"
+      - "Only GA versions can have breaking changes"
+    answer: 1
+    explanation: |
+      Beta-to-GA changes the *promise* about stability, not necessarily the contract shape — the
+      resource can stay the same while its guarantees strengthen. A v1-to-v2 major bump
+      specifically communicates a breaking, incompatible contract change. They are orthogonal
+      dimensions.
+    ref: "concepts.md#stability-channels-alpha-beta-ga"

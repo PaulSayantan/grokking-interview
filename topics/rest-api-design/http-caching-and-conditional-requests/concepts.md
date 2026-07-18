@@ -400,6 +400,277 @@ progressive enhancement.
 > Accept, Accept-Encoding` — giving fresh-serving, cheap revalidation, safe negotiation,
 > and (with `If-Match`) optimistic concurrency, all statelessly.
 
+## Cache-Control request directives
+
+Everything above is response-side; clients also steer caches with **request** directives
+(RFC 9111 §5.2.1). Interviewers ask "how does a client force a fresh copy?" — the answer is
+here, not in `Cache-Control` on the response.
+
+| Request directive | Meaning |
+|---|---|
+| `no-cache` | Do not reuse a stored response without successful revalidation with the origin (forces a conditional request). This is what a browser hard-reload sends. |
+| `no-store` | Do not store the request or its response in any cache. |
+| `max-age=N` | Client will not accept a stored response older than N seconds. `max-age=0` effectively forces revalidation. |
+| `max-stale[=N]` | Client *will* accept a stale response (up to N seconds beyond expiry, or any amount if bare). Loosens freshness. |
+| `min-fresh=N` | Client wants a response that stays fresh for at least N more seconds. |
+| `only-if-cached` | Return a stored response or `504 Gateway Timeout`; never contact the origin. Used for offline / cache-only modes. |
+| `no-transform` | Intermediaries must not transform the payload. |
+
+> [!TIP]
+> A true "give me the absolute latest" client sends `Cache-Control: no-cache` (revalidate)
+> — not `no-store`. Note the asymmetry: `no-cache` on a *request* forces revalidation of
+> stored copies; `no-cache` on a *response* forbids reuse without revalidation on every
+> subsequent request. A misbehaving client that sends `no-store` on every request just
+> destroys its own cache benefit without any correctness gain over `no-cache`.
+
+## Qualified no-cache and private
+
+A senior "gotcha": `no-cache` and `private` can take an **argument** naming specific header
+fields (RFC 9111 §5.2.2.4 and §5.2.2.7). The qualified form is *narrower* than the bare
+form — the rest of the response is still cacheable/reusable.
+
+- `Cache-Control: private="Set-Cookie"` — a shared cache MAY store and reuse the response,
+  but MUST strip the named field(s) (`Set-Cookie`) before serving to a different user. The
+  body and other headers are shared normally.
+- `Cache-Control: no-cache="Set-Cookie"` — the response MAY be reused *without*
+  revalidation, but the named field(s) MUST be removed before a stored response is served.
+
+This lets you make a mostly-public response cacheable while protecting a single per-user
+field, instead of marking the whole thing `private`/`no-cache` and losing all sharing.
+Support is uneven across intermediaries, so treat the unqualified form as the safe default
+and the qualified form as an optimization when a specific CDN honors it.
+
+## immutable and must-understand
+
+- **`immutable`** (RFC 8246, a `Cache-Control` extension) tells caches the representation
+  will **not change** during its freshness lifetime, so a client SHOULD NOT send a
+  conditional revalidation even on an explicit user reload (a normal reload otherwise adds
+  `Cache-Control: max-age=0`, triggering needless `304`s for hashed assets). It only matters
+  *while the response is still fresh*; once stale it is revalidated normally. It is advisory
+  and support is limited, so pair it with a long `max-age` and content-hashed URLs.
+- **`must-understand`** (RFC 9111 §5.2.2.3) says a cache should store the response only if it
+  understands the caching requirements of the response's **status code**; it is meant to be
+  sent together with `no-store` so caches that do *not* understand the status code fall back
+  to not storing. This future-proofs caching of new status codes.
+
+## Range requests and If-Range
+
+Range requests (RFC 9110 §14) let a client fetch **part** of a representation — the
+mechanism behind resumable downloads and video seeking, and a classic caching-adjacent
+thread. The existing note that "strong ETags are required for ranges" is *because* of this
+machinery:
+
+- A server that supports ranges advertises `Accept-Ranges: bytes`.
+- The client sends `Range: bytes=0-1023` (or multiple ranges). The server replies
+  **`206 Partial Content`** with a `Content-Range` header and just those bytes, or
+  **`416 Range Not Satisfiable`** if the range is invalid (e.g. beyond the current length).
+- **`If-Range`** solves the "resource changed mid-download" race. The client sends
+  `If-Range: "etag"` (a **strong** validator, or an HTTP-date) alongside `Range`. If the
+  validator still matches, the server returns the requested `206`; if it changed, the server
+  ignores `Range` and returns the **full `200`** with the new body — so the client never
+  stitches together bytes from two different versions.
+
+```http
+GET /video.mp4 HTTP/1.1
+Range: bytes=500000-999999
+If-Range: "a1b2c3-strong"
+```
+```http
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 500000-999999/4200000
+ETag: "a1b2c3-strong"
+Accept-Ranges: bytes
+```
+
+A **weak** ETag MUST NOT be used with `Range`/`If-Range`, because a weak validator permits
+byte-level differences and range reassembly requires byte-exact identity.
+
+## Request collapsing (coalescing)
+
+When many clients miss on the **same** key at once, a naive shared cache forwards every
+miss to the origin — a **thundering herd** / cache stampede that can melt the origin the
+instant a hot key expires. **Request collapsing** (a.k.a. request coalescing) folds
+concurrent identical misses into a **single** origin request; the one response fans out to
+all waiters.
+
+- It is the primary stampede defense and is orthogonal to freshness: it helps even with
+  `max-age=0` or `no-cache`, because it deduplicates the *in-flight* revalidations.
+- It pairs with `stale-while-revalidate` (serve stale to everyone while one revalidation
+  runs) and `stale-if-error` for a complete "hot key expiry" answer that does **not** require
+  lengthening staleness.
+- Opt out with `Cache-Control: private` or per-request differences (e.g. varying headers),
+  since collapsing only makes sense when the responses are interchangeable.
+
+> [!INTERVIEW]
+> "Your origin melts every time a hot key expires at the CDN — fix it without lengthening
+> staleness." Strong answer: enable **request collapsing** so only one request revalidates,
+> add **`stale-while-revalidate`** so waiters get the stale copy instantly, and
+> **`stale-if-error`** so a revalidation failure doesn't cascade. TTL stays the same.
+
+## Web cache poisoning
+
+Caching is also an **attack surface**. Web cache poisoning (see PortSwigger's research) is
+when an attacker gets a shared cache to **store a harmful response** that is then served to
+other users. The root cause is a mismatch between the **cache key** (the inputs the cache
+uses to identify a stored entry — typically method + URI + `Vary` headers) and the response's
+actual **footprint** (all inputs that influence the response).
+
+- **Unkeyed inputs.** If the origin reflects an attacker-controllable header that is *not*
+  part of the cache key — classically `X-Forwarded-Host`, `X-Forwarded-Scheme`,
+  `X-Forwarded-For`, or a custom header — into the response (e.g. building an absolute URL,
+  a script `src`, or a redirect), the poisoned response is cached under a clean key and
+  served to everyone.
+- **"Fat GET" / cache key injection / parameter cloaking.** Discrepancies in how the cache
+  vs the origin parse the URL (duplicate params, delimiters, a request body on a GET) let an
+  attacker smuggle a payload that the cache normalizes away from the key but the origin still
+  processes.
+
+Defenses: do **not** reflect unkeyed, attacker-controllable inputs into cached responses;
+minimize the number of headers the app trusts; and where a header genuinely affects the
+response, **rewrite/normalize** it into the cache key rather than leaving it unkeyed
+(excluding it from the key is not enough if the origin still uses it). Cache only what you
+can key correctly.
+
+## Web cache deception
+
+Web cache deception (WCD) is the mirror image of poisoning: instead of *delivering* a
+payload, the attacker *exposes* a victim's **private** response by getting a shared cache to
+store it under a **cacheable-looking** URL. The classic trick is a crafted path like
+`/account/profile.css` or `/api/me/photo.jpg`: the origin ignores the bogus suffix and
+returns the victim's authenticated profile, while the cache — keying off the static-looking
+extension — stores it publicly. The attacker then requests the same URL and reads the
+victim's data.
+
+- **Poisoning vs deception:** poisoning is *payload injection* into others' responses;
+  deception is *exposure* of one victim's private response. Both stem from cache-key /
+  content mismatches.
+- **Defenses:** cache by actual `Content-Type` rather than URL extension; never cache
+  responses marked `Cache-Control: private`/`no-store`; disable path confusion so
+  `/x/y.css` doesn't resolve to a dynamic handler; and align cache and origin on URL
+  normalization.
+
+## CDN-Cache-Control and targeted cache directives (RFC 9213)
+
+The doc's existing note calls `Surrogate-Control`/`Surrogate-Key` "a CDN convention, not
+RFC." The modern, **standardized** answer is **RFC 9213 — Targeted HTTP Cache Control**. It
+defines a family of "targeted" cache-control fields addressed to specific classes of caches,
+most importantly **`CDN-Cache-Control`** (directives only CDN/shared caches obey) alongside
+the browser-facing `Cache-Control`.
+
+- **Precedence at a CDN:** a targeted field like `CDN-Cache-Control` takes priority over
+  `s-maxage`, which takes priority over `max-age`/`Expires`. So you can send a short
+  `Cache-Control: max-age=60` for browsers, an `s-maxage` for generic proxies, and a
+  distinct `CDN-Cache-Control: max-age=86400` that only the CDN tier honors.
+- Targeted fields are **not** forwarded to downstream/browser caches, so edge-only directives
+  don't leak into user agents. This cleanly separates the browser contract from the edge
+  contract, which `s-maxage` alone cannot fully express.
+
+```
+Cache-Control: max-age=60
+CDN-Cache-Control: max-age=86400, stale-while-revalidate=600
+```
+
+## Cache-Status observability (RFC 9211)
+
+"How do you *prove* a response came from cache and diagnose a low hit rate in prod?" The
+modern, standardized answer is the **`Cache-Status`** response header (**RFC 9211**), which
+replaces ad-hoc, per-vendor `X-Cache` guessing. It is a **structured field**: each cache on
+the path prepends an entry naming itself plus parameters.
+
+```
+Cache-Status: ExampleCDN; hit; ttl=299, OriginShield; fwd=miss; stored
+```
+
+- `hit` / `fwd=miss` / `fwd=stale` — whether this cache served from store or forwarded, and
+  why (`miss`, `uri-miss`, `stale`, `request-header`, etc.).
+- `stored` — the forwarded response was stored for future use.
+- `ttl` — remaining freshness; `collapsed` — the request was satisfied by request collapsing.
+
+Combined with the `Age` header, `Cache-Status` is *the* debugging answer. A low hit rate
+usually traces to an over-broad `Vary`, unnormalized cache keys (varying query-param order,
+header casing), or per-user directives (`private`, `Set-Cookie`) suppressing storage.
+
+## ETag generation strategies and pitfalls
+
+Deepening the earlier ETag material — generation strategy is where real systems break:
+
+- **Strategies.** (a) *Content hash* of the serialized body (strong, exact, but you must
+  serialize to hash); (b) *version/revision counter* bumped on every write (cheap, monotonic,
+  survives byte-level noise — often exposed as a weak ETag); (c) *derived from `Last-Modified`
+  + size* (cheap but inherits 1-second resolution).
+- **The compression pitfall.** If you compute a **strong** ETag over the raw body and then a
+  proxy/load balancer gzips or brotli-compresses it, the bytes on the wire differ per
+  encoding while the ETag is unchanged — or, if the ETag is computed *after* compression, the
+  same resource yields different ETags per encoding, breaking `If-None-Match`. Fix: use a
+  **weak** ETag for content that varies only by encoding, *or* compute the ETag before
+  compression and always send `Vary: Accept-Encoding` so each encoding is a distinct cache
+  variant with its own validator.
+- **Stability across replicas.** If ETags are per-node (server timestamp, process-local
+  counter) or hash a non-deterministically serialized body (unordered map/JSON key order),
+  two replicas return **different** ETags for the *same* logical resource. Behind a load
+  balancer this causes spurious `200`s where a `304` was expected — cache misses and lost
+  bandwidth savings. Make ETag generation deterministic and shared across replicas
+  (canonical serialization, a stored version column, or a content hash of canonical bytes).
+- **Middleware rewriting.** Some frameworks/proxies auto-generate or rewrite ETags (e.g.
+  hashing the final compressed body); know what's in your path so you don't ship two
+  conflicting ETag schemes.
+
+## Heuristic freshness specifics
+
+Sharpening the earlier heuristic warning with the testable details (RFC 9110/9111):
+
+- **Heuristically cacheable status codes** are an explicit list: `200`, `203`, `204`, `206`,
+  `300`, `301`, `308`, `404`, `405`, `410`, `414`, and `501`. Note `404`/`410` are on the
+  list — a missing resource can be cached heuristically, which surprises people.
+- **The LM-factor formula.** A common heuristic sets the freshness lifetime to roughly
+  **10% of (`Date` − `Last-Modified`)** — an old resource is assumed to stay stable
+  proportionally longer.
+- **`Cache-Control` presence disables heuristics.** Any explicit expiration (`max-age`,
+  `s-maxage`, `Expires`) turns heuristic freshness off. This is exactly why you always send
+  an explicit directive on API responses.
+
+## Vary internals: secondary cache keys and normalization
+
+Beyond the "explosion" warning, the mechanism itself is a senior topic:
+
+- **Secondary cache key.** A cache stores *multiple variants* under one URI. The primary key
+  is method + URI; the **secondary key** is the tuple of the request-header values named in
+  the stored response's `Vary`. On a later request, the cache selects the variant whose
+  secondary key matches (RFC 9111 §4.1).
+- **Normalization is a hit-rate lever.** Because matching is on raw header *values*,
+  differences in case, ordering, or `Accept` q-values create distinct variants. Edge configs
+  often **normalize** these headers (canonical casing, collapse to a small set of encodings)
+  *before* keying, dramatically raising hit rates without changing correctness.
+- **`Vary: Accept-Encoding` is almost always safe and necessary** (few values: gzip, br,
+  identity), whereas `Vary: User-Agent` (thousands of values) or `Vary: Cookie` is toxic —
+  near-unique keys, near-zero hits, and possible per-user leakage. For per-user data prefer
+  `private`, not a `Vary` on a per-user header.
+
+## Negative caching and invalidation precision
+
+- **Negative caching.** Deliberately caching `404`/`410` with a **short** TTL shields the
+  origin from floods of requests for missing keys (e.g. a scanner hitting nonexistent IDs).
+  Do **not** cache `5xx` by default — a transient origin error would be pinned and amplified;
+  `stale-if-error` is the right tool for serving *old good* content during an outage instead.
+- **Invalidation vs eviction vs purge.** RFC 9111 §4.4: a **non-error response to an unsafe
+  method** *invalidates* the target URI plus the `Location`/`Content-Location` URIs — but
+  invalidation only marks entries stale (forcing revalidation), it does not delete them, and
+  it only happens at caches **on that request's path**. *Eviction* is a cache reclaiming space
+  under pressure. *Explicit purge* is an out-of-band API call (often **by surrogate/tag**,
+  fanning out to many URIs). Because a purge of a popular key drops it from all edges at once,
+  it can trigger a stampede — combine purge with request collapsing + `stale-while-revalidate`.
+
+## bfcache and history navigation
+
+A subtle browser caveat interviewers use to separate levels: the **back/forward cache**
+(bfcache) stores a full in-memory *snapshot* of a page (DOM + JS state) for instant
+back/forward navigation. It is **not** the HTTP cache, and `Cache-Control: no-cache` does
+**not** force revalidation on a history navigation — the browser restores the snapshot,
+which is why users sometimes see stale data after clicking Back. To keep a sensitive page out
+of bfcache you use `Cache-Control: no-store` (and historically `unload`/`beforeunload`
+listeners disqualified a page). This is the correct answer to "why did the back button show
+data that should have been revalidated?"
+
 ## Common follow-up questions
 
 - **What's the difference between `no-cache` and `no-store`?** `no-store` forbids storing
@@ -432,5 +703,11 @@ progressive enhancement.
 - [RFC 5861 — HTTP Cache-Control Extensions for Stale Content](https://www.rfc-editor.org/rfc/rfc5861) (`stale-while-revalidate`, `stale-if-error`)
 - [RFC 6585 — Additional HTTP Status Codes](https://www.rfc-editor.org/rfc/rfc6585) (`428 Precondition Required`)
 - [RFC 8246 — HTTP Immutable Responses](https://www.rfc-editor.org/rfc/rfc8246) (`Cache-Control: immutable`)
+- [RFC 9211 — The Cache-Status HTTP Response Header Field](https://www.rfc-editor.org/rfc/rfc9211) (structured cache hit/miss/fwd/ttl reporting)
+- [RFC 9213 — Targeted HTTP Cache Control](https://www.rfc-editor.org/rfc/rfc9213) (`CDN-Cache-Control` and targeted directives, precedence)
 - [MDN — HTTP caching](https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching)
 - [MDN — Cache-Control](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control)
+- [MDN — bfcache (back/forward cache)](https://developer.mozilla.org/en-US/docs/Glossary/bfcache)
+- [PortSwigger — Web cache poisoning](https://portswigger.net/web-security/web-cache-poisoning)
+- [PortSwigger — Web cache deception](https://portswigger.net/web-security/web-cache-deception)
+- [OWASP API Security Top 10 (2023)](https://owasp.org/API-Security/editions/2023/en/0x00-header/)

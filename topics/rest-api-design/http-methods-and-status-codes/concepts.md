@@ -578,6 +578,454 @@ app code.
 
 ---
 
+## Conditional requests and optimistic concurrency: 304, 412, 428
+
+Three status codes form the **conditional-request family**, and together they are
+the mechanism behind optimistic concurrency ("preventing lost updates" / the
+"mid-air collision" problem). RFC 9110 §13 defines conditional headers
+(`If-Match`, `If-None-Match`, `If-Modified-Since`, `If-Unmodified-Since`).
+
+- **`304 Not Modified`** — a *read* validation succeeded. Sent for a conditional
+  `GET`/`HEAD` with `If-None-Match`/`If-Modified-Since` when the cached copy is
+  still fresh. No body; the client reuses its cache. (Caching topic covers this.)
+- **`412 Precondition Failed` (§15.5.13)** — a *write* precondition failed. The
+  client sent `If-Match: "etag"` (or `If-Unmodified-Since`) and the current state
+  no longer matches, so the server refuses the write to avoid clobbering someone
+  else's change. This is the canonical optimistic-concurrency rejection.
+- **`428 Precondition Required` (RFC 6585 §3)** — the server *forces* the client
+  to make its request conditional. It rejects an unconditional `PUT`/`PATCH`/
+  `DELETE` that has **no `If-Match`**, telling the client to GET the current
+  representation (and its `ETag`), then retry with `If-Match`. This closes the
+  "lost update" hole where a client that never sent a precondition overwrites
+  blindly.
+
+End-to-end lost-update prevention:
+
+1. Client `GET`s the resource → receives `ETag: "v7"`.
+2. Client `PUT`/`PATCH`es with `If-Match: "v7"`.
+3. If the resource is still at `"v7"` → the write applies, new `ETag: "v8"`.
+4. If another writer already moved it to `"v8"` → **`412 Precondition Failed`**;
+   the client must refetch, reconcile, and retry.
+5. To *require* step 2, an unconditional write returns **`428`**.
+
+```http
+PUT /v1/orders/123 HTTP/1.1
+If-Match: "v7"
+
+HTTP/1.1 412 Precondition Failed
+```
+
+> [!INTERVIEW]
+> **409 vs 412 is a favorite trap.** `412` = a *precondition header* you sent
+> (`If-Match`) evaluated false against current state. `409` = a state conflict
+> when **no precondition was used** (duplicate key, illegal state transition).
+> If your concurrency control is ETag-based, the mismatch is `412`; if it's a
+> business-rule clash detected server-side, it's `409`. `428` is how the server
+> mandates that clients use `If-Match` at all.
+
+---
+
+## 404 vs 410 Gone
+
+Both say "there's nothing here," but they carry different **permanence and
+lifecycle** semantics (RFC 9110 §15.5.5 and §15.5.11).
+
+- **`404 Not Found`** — the server has no current representation and says
+  **nothing about permanence or the past**. The resource may never have existed,
+  may exist but be hidden (see the BOLA note under 401/403), or may return later.
+  Not cacheable as "gone forever."
+- **`410 Gone`** — the resource **existed and was intentionally, permanently
+  removed**, and the server has no forwarding address. It is a stronger,
+  deliberate signal: clients, search-engine crawlers, and integrators should
+  **stop requesting it**. `410` is cacheable and is the correct code for
+  sunsetting/deprecating an endpoint or a hard-deleted resource whose ID you want
+  to actively discourage retrying.
+
+Use `410` when you *know* the thing is gone for good and want to tell the
+ecosystem to give up; use `404` when you either don't know or don't want to
+disclose the history. On a **repeat `DELETE`**, either `404` (default) or `410`
+(if you track tombstones) is defensible — both preserve idempotency because the
+end state is "gone."
+
+---
+
+## TRACE, CONNECT, and HTTP method override
+
+**`TRACE`** performs a loop-back diagnostic: the server echoes the received
+request back to the client. It is safe and idempotent, but it is **disabled in
+production almost everywhere** because it enables the **Cross-Site Tracing (XST)**
+attack — an attacker can use `TRACE` to read otherwise-protected headers (cookies,
+`Authorization`) reflected back, bypassing `HttpOnly`. OWASP guidance is to
+disable it; servers typically return `405 Method Not Allowed` or `501 Not
+Implemented`. Do not expose `TRACE` on an API.
+
+**`CONNECT`** establishes a **TCP tunnel** through a forward proxy, used to carry
+HTTPS (TLS) through the proxy. It is a proxy/transport primitive, **not an
+application API method** — you never design a resource around `CONNECT`.
+
+**HTTP method override** is an interop hack for clients, proxies, or firewalls
+that only permit `GET`/`POST`: the real method is tunneled in a header
+(`X-HTTP-Method-Override: DELETE`, `X-HTTP-Method`) or a form field (`_method`),
+and the server rewrites the `POST` into the intended verb.
+
+```http
+POST /v1/orders/123 HTTP/1.1
+X-HTTP-Method-Override: DELETE
+```
+
+> [!WARNING]
+> Method override is a real **security risk** (OWASP **API8:2023 Security
+> Misconfiguration**). WAF rules, gateway routing, and authorization checks that
+> key off the *outer* HTTP method see a `POST` and may let a `DELETE`/`PUT` slip
+> past controls that would have blocked it. If you must support override, apply
+> authorization to the *effective* method and constrain which overrides are
+> honored.
+
+---
+
+## Content negotiation errors: 406 and 415
+
+Two distinct codes cover the two directions of content negotiation, and both are
+frequently confused with `400` and `422`.
+
+- **`415 Unsupported Media Type` (§15.5.16)** — the server refuses the request
+  because the **request body's `Content-Type`** is one it can't process (e.g. the
+  client sent `text/xml` but the endpoint only accepts `application/json`, or an
+  unsupported `Content-Encoding`). It's about **what the client is sending**.
+- **`406 Not Acceptable` (§15.5.7)** — the server **cannot produce a response**
+  matching the client's `Accept`/`Accept-Language`/`Accept-Encoding` constraints
+  (e.g. client demands `Accept: application/xml` but the API only emits JSON).
+  It's about **what the client is willing to receive**. (Servers may instead just
+  return their default representation; `406` is the strict-negotiation choice.)
+
+Advertisement headers tell clients what a resource accepts:
+
+- **`Accept-Patch` (RFC 5789 §3.1)** — lists the PATCH document formats a
+  resource supports (e.g. `application/merge-patch+json, application/json-patch+json`).
+- **`Accept-Post` (W3C LDP)** — lists the media types a resource accepts for
+  `POST`.
+
+> [!INTERVIEW]
+> The **400 vs 415 vs 422 three-way split**: body **unparseable/syntactically
+> broken** → `400`; body in a **media type the server doesn't handle** → `415`;
+> body **parsed fine but the values fail validation** → `422`. And the negotiation
+> mirror: server **can't emit what you asked for** → `406`.
+
+---
+
+## RFC 9457 Problem Details error bodies
+
+**RFC 9457 (Problem Details for HTTP APIs, 2023; obsoletes RFC 7807)** defines the
+standard, machine-readable error body so every API doesn't invent its own error
+shape. Media type: **`application/problem+json`** (or `application/problem+xml`).
+
+Standard members (all optional, but conventionally present):
+
+- **`type`** — a URI identifying the problem *kind* (dereferenceable docs, ideally).
+  Defaults to `"about:blank"` when absent, which means "use the status code."
+- **`title`** — a short, human-readable, **type-stable** summary (should not vary
+  per occurrence).
+- **`status`** — the HTTP status code, duplicated in the body for convenience.
+- **`detail`** — human-readable explanation **specific to this occurrence**.
+- **`instance`** — a URI identifying this specific occurrence (e.g. the request/
+  error id).
+- **Extension members** — any additional fields (e.g. `errors: [...]` for
+  per-field validation failures, `balance`, `retryAfter`). Consumers must ignore
+  unknown members.
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/problem+json
+
+{
+  "type": "https://example.com/probs/out-of-credit",
+  "title": "You do not have enough credit.",
+  "status": 403,
+  "detail": "Your balance is 30 but the cost is 50.",
+  "instance": "/account/12345/msgs/abc",
+  "balance": 30
+}
+```
+
+The `status` in the body must match the real HTTP status line; the body is a
+supplement to the status code, never a replacement for it.
+
+---
+
+## WWW-Authenticate challenges and Bearer token errors
+
+A `401` must carry a **`WWW-Authenticate`** challenge (§15.5.2) — omitting it is a
+spec violation. For OAuth 2.0 Bearer tokens, **RFC 6750 §3** defines standardized
+`error` codes in the challenge that let a client tell *why* auth failed:
+
+- **`invalid_request`** — the request is malformed (missing/duplicated
+  parameters). Usually `400`, or `401` with the challenge.
+- **`invalid_token`** — the token is expired, revoked, malformed, or otherwise
+  invalid → **`401`** + `WWW-Authenticate: Bearer error="invalid_token"`. The
+  client should refresh/re-authenticate and retry.
+- **`insufficient_scope`** — the token is *valid* but lacks the scope/permission
+  for this operation → **`403`** + `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`.
+  Re-authenticating with the same grant won't help; the client needs a token with
+  broader scope.
+
+```http
+GET /v1/admin/users HTTP/1.1
+Authorization: Bearer <expired>
+
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="api", error="invalid_token",
+  error_description="The access token expired"
+```
+
+> [!INTERVIEW]
+> "Expired token vs valid-but-no-scope vs no token?" → expired: `401` +
+> `error="invalid_token"`; valid but missing scope: `403` +
+> `error="insufficient_scope"`; no token at all: `401` + a bare
+> `WWW-Authenticate: Bearer` challenge. The `insufficient_scope`/`403` pairing is
+> the tell that separates authn from authz at the token layer.
+
+---
+
+## Expect: 100-continue and 417 Expectation Failed
+
+The **`Expect: 100-continue`** handshake (§15.2.1) lets a client ask permission
+before streaming a large body. The client sends the request **headers only** with
+`Expect: 100-continue` and waits:
+
+- Server willing → **`100 Continue`** (interim `1xx`); client then sends the body.
+- Server can reject **early**, *before* the body is uploaded — e.g. `401`/`403`
+  (unauthorized), `413 Content Too Large` (body would exceed limits), `405`, etc.
+  This saves the client from uploading megabytes only to be rejected.
+- **`417 Expectation Failed` (§15.5.18)** — the server (or an intermediary) cannot
+  meet the `Expect` requirement. A client that gets `417` should retry without the
+  `Expect` header.
+
+This is a request-lifecycle optimization for big uploads; recognizing it signals
+understanding beyond the happy path.
+
+---
+
+## Rate-limit signaling: RateLimit headers and 429 vs 403
+
+`429` alone tells a client it's throttled *after the fact*; good APIs also expose
+the **budget before it's exhausted**. Header conventions:
+
+- **Legacy `X-RateLimit-*`** — the widespread de-facto convention:
+  `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`. Non-standard,
+  and reset is expressed inconsistently (epoch seconds vs delta).
+- **IETF standard `RateLimit` / `RateLimit-Policy`** (draft-ietf-httpapi-ratelimit-
+  headers, Standards Track) — structured fields: `RateLimit-Policy` advertises the
+  quota policy (`q`=quota, `w`=window seconds, `pk`=partition key), and `RateLimit`
+  reports current state (`r`=remaining, `t`=time-to-reset seconds). These are the
+  forward-looking standard.
+- **`Retry-After`** — on a `429` (or `503`), tells the client when to retry;
+  accepts **either delta-seconds or an HTTP-date** (§10.2.3).
+
+Status-code disambiguation:
+
+- **`429`** = **per-client quota** exceeded (a `4xx` client concern).
+- **`503`** = **server-wide** overload/maintenance (a `5xx` server condition).
+- Some APIs (e.g. GitHub **secondary** rate limits, and various WAFs) return
+  **`403`** for over-quota/abuse — non-ideal but seen in the wild.
+
+Correct **consumer** behavior on `429`/`503`: honor `Retry-After` if present,
+otherwise **exponential backoff with jitter** to avoid synchronized retry storms
+(thundering herd).
+
+---
+
+## The QUERY method: a safe method with a body
+
+The tension the doc raises — "`GET` bodies are undefined, but I need a large or
+sensitive search payload" — has three answers, each with trade-offs:
+
+1. **`POST /search` with a JSON body** — pragmatic and universal, but sacrifices
+   **safety, idempotency, and cacheability**; intermediaries treat it as a
+   mutation, so it can't be cached or auto-retried, and `POST` semantics don't
+   advertise "this is a read."
+2. **Body on `GET`** — RFC 9110 leaves it undefined; many servers/proxies drop or
+   reject the body. **Don't.**
+3. **The `QUERY` method** (draft-ietf-httpbis-safe-method-w-body) — a proposed
+   Standards-Track method that is **safe and idempotent *and* carries a request
+   body**. It's the standards answer: a read that can send a complex/large/
+   sensitive filter, whose responses can be cached (keyed on method + URI + body).
+
+`QUERY` is the "correct future" answer to complex search; mentioning it signals
+you're current (2024/2025). Until it ships broadly, `POST /search` remains the
+practical default, and you should know exactly what properties you're giving up by
+choosing it.
+
+---
+
+## Long-running operations: 202, operation resources, and polling
+
+For work that takes seconds-to-minutes, the mature pattern goes beyond "202 +
+Location":
+
+- **`202 Accepted`** — the request is queued; return a link to an **operation
+  resource** (a first-class resource representing the async job) that the client
+  can `GET` to poll.
+- Polling the operation returns its state (`pending`/`running`/`succeeded`/
+  `failed`), and can include **`Retry-After`** to pace the client's polling.
+- On completion, the operation resource can **`303 See Other`** (or embed a link)
+  to the finished result resource, which the client fetches with `GET`.
+
+Cloud conventions:
+
+- **Google AIP-151** — the LRO (Long-Running Operation) pattern: a standard
+  `Operation` resource with `done`, `metadata`, `response`/`error`.
+- **Microsoft REST Guidelines / Azure** — `202` + an **`Operation-Location`**
+  header pointing at the status endpoint.
+
+> [!INTERVIEW]
+> "Design the response contract for a 5-minute job." → `202 Accepted` with a
+> `Location`/`Operation-Location` to an operation resource → client polls it,
+> honoring `Retry-After` → on success the operation points (e.g. `303`) at the
+> result resource. Never block the connection for 5 minutes.
+
+---
+
+## The long tail of 4xx: 411, 413, 414, 421, 426, 431, 451
+
+Knowing the catalog separates rote memorizers from people who reach for the exact
+code:
+
+- **`411 Length Required` (§15.5.12)** — the request needs a `Content-Length` and
+  didn't send one (server won't accept chunked here).
+- **`413 Content Too Large` (§15.5.14)** — the request body exceeds what the
+  server will process (the answer to "a 20 MB payload"). Formerly "Payload Too
+  Large." Maps to OWASP **API4:2023 Unrestricted Resource Consumption**.
+- **`414 URI Too Long` (§15.5.15)** — the request-target/URI is longer than the
+  server will interpret (the answer to "a 10 KB URL" — often the symptom of
+  cramming a huge filter into a query string, i.e. use `POST`/`QUERY` instead).
+- **`421 Misdirected Request` (§15.5.20)** — the request reached a server that
+  can't produce a response for the target authority; arises with **HTTP/2
+  connection coalescing** (a reused connection sent to the wrong virtual host).
+- **`426 Upgrade Required` (§15.5.22)** — the server refuses over the current
+  protocol and names a required upgrade in the `Upgrade` header (e.g. force TLS).
+- **`431 Request Header Fields Too Large` (RFC 6585)** — headers (individually or
+  in total) are too big (the answer to "a header bomb"; e.g. an oversized cookie).
+- **`451 Unavailable For Legal Reasons` (RFC 7725)** — access denied for legal
+  reasons (court order, censorship, GDPR/geo-blocking). The number nods to
+  *Fahrenheit 451*.
+
+> [!INTERVIEW]
+> Rapid-fire: 20 MB body → **413**; 10 KB URL → **414**; header bomb → **431**;
+> unsupported request `Content-Type` → **415**; can't produce the requested
+> `Accept` → **406**; missing `Content-Length` → **411**.
+
+---
+
+## Range requests: 206 Partial Content and 416
+
+For large files / media APIs, **range requests** (§14) let a client fetch a byte
+range instead of the whole thing — the basis of resumable downloads and video
+seeking.
+
+- Server advertises support with **`Accept-Ranges: bytes`**.
+- Client requests a range: `Range: bytes=0-1023`.
+- **`206 Partial Content` (§15.3.7)** — success returning just that range, with a
+  `Content-Range: bytes 0-1023/5242880` header.
+- **`416 Range Not Satisfiable` (§15.5.17)** — the requested range is invalid
+  (e.g. start beyond the resource size); the response may include
+  `Content-Range: bytes */5242880` to state the actual length.
+
+Ranges combine with conditional headers (`If-Range` with an `ETag`) so a resumed
+download aborts cleanly if the resource changed mid-transfer.
+
+---
+
+## Batch operations and partial success: 207 Multi-Status
+
+When a **bulk/batch** request half-succeeds (3 of 10 items fail), a single overall
+status can't tell the truth. Two accepted approaches:
+
+- **`207 Multi-Status` (WebDAV, RFC 4918)** — the response body carries a
+  **per-item status** for each sub-operation, so the client sees exactly which
+  succeeded and which failed. Zalando's guidelines, for instance, mandate
+  `207` + `problem+json` semantics for batch endpoints.
+- A **`200`/`202` envelope** with an application-defined array of per-item
+  outcomes (each with its own status and error) — common when you don't want to
+  adopt the WebDAV media semantics.
+
+The key principle: **don't collapse mixed outcomes into a single misleading
+2xx/4xx.** A `200` implies everything worked; a `400` implies nothing did. Partial
+success needs a per-item report. (Whether the batch is atomic — all-or-nothing —
+or best-effort is a separate design decision you must document.)
+
+---
+
+## PATCH atomicity and format advertisement
+
+`PATCH` (RFC 5789) has operational rules that go beyond "send the changed fields":
+
+- **Atomic / all-or-nothing (§2).** A server MUST apply the *entire* patch
+  document or **none of it** — partial application is forbidden. If op 3 of 5
+  fails, the server rolls back and the resource is unchanged.
+- **Advertise supported formats** with **`Accept-Patch`** (RFC 5789 §3.1), so
+  clients know whether to send `application/merge-patch+json`,
+  `application/json-patch+json`, etc. A PATCH in an unsupported format → `415`.
+- **JSON Patch `test` op → `409` on mismatch.** RFC 6902's `test` operation is a
+  built-in precondition/concurrency guard: `{ "op": "test", "path": "/version",
+  "value": 7 }`; if it fails, the whole patch fails (atomicity) and the server
+  returns `409 Conflict` (or `412` if you framed it via `If-Match`).
+- **JSON Merge Patch limitations (RFC 7386).** It can't set a member to a literal
+  `null` (because `null` *means delete*), and it can't target individual array
+  elements (arrays are replaced wholesale). For those, use JSON Patch.
+
+> [!WARNING]
+> A failed PATCH must leave the resource **exactly as it was**. "Applied 3 of 5
+> ops then errored" is a bug — that's what atomicity forbids. Contrast this with a
+> deliberately partial-success **batch** endpoint, which reports per-item outcomes
+> via `207`.
+
+---
+
+## Non-idempotent retries and the Idempotency-Key header
+
+The deep problem with retrying `POST`: a **network timeout is ambiguous** — the
+client can't tell whether the server committed the operation and the *response*
+was lost, or the request never landed. Blind at-least-once retries then risk
+**duplicate side effects** (two charges, two orders).
+
+The standardizing fix is an **`Idempotency-Key`** header
+(draft-ietf-httpapi-idempotency-key-header): the client generates a unique key
+(e.g. a UUID) per logical operation and sends it on the `POST`. The server:
+
+1. First time it sees the key → process, and **store the response keyed by the
+   Idempotency-Key**.
+2. A **retry with the same key** → **replay the stored response** instead of
+   re-executing (so the client gets the original `201` and no second order is
+   created).
+3. A **concurrent in-flight** request with the same key → typically **`409
+   Conflict`** (the original is still processing).
+
+This makes an inherently non-idempotent `POST` **retry-safe** without changing its
+HTTP semantics. It's the concrete answer to "how do you safely retry a payment?"
+
+---
+
+## Custom methods and the colon-verb convention
+
+Some operations aren't a clean CRUD verb (cancel, publish, archive, batchGet).
+Rather than invent a new HTTP method or bury a verb in a path segment, **Google
+AIP-136** sanctions **custom methods via colon syntax** on a `POST`:
+
+```http
+POST /v1/orders/123:cancel HTTP/1.1
+POST /v1/documents/9:publish HTTP/1.1
+```
+
+The `:verb` is appended to the resource name, keeping the resource-oriented URL
+while expressing an action that doesn't fit standard methods. This is the
+sanctioned alternative to RPC-style `/orders/123/cancel` sub-resources or
+`?action=cancel` query flags. Standard methods (List/Get/Create/Update/Delete →
+`GET`/`GET`/`POST`/`PATCH`/`DELETE`) should always be preferred where they fit;
+custom methods are the escape hatch, still tunneled over `POST` (occasionally
+`GET` for safe custom methods).
+
+---
+
 ## Common follow-up questions
 
 - **"Which HTTP methods are idempotent, and why does it matter for retries?"**
@@ -622,4 +1070,15 @@ app code.
 - [MDN — HTTP request methods](https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods)
   and [HTTP response status codes](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status).
 - [OWASP API Security Top 10 (2023)](https://owasp.org/API-Security/editions/2023/en/0x00-header/)
-  — context for 401/403/404 disclosure trade-offs (BOLA/BFLA).
+  — context for 401/403/404 disclosure trade-offs (BOLA/BFLA), method-override
+  (API8), and resource-consumption limits (API4 → 413/429).
+- [RFC 6750 — OAuth 2.0 Bearer Token Usage](https://www.rfc-editor.org/rfc/rfc6750.html)
+  §3 — `WWW-Authenticate: Bearer` error codes (`invalid_token`,
+  `insufficient_scope`).
+- [RFC 7725 — 451 Unavailable For Legal Reasons](https://www.rfc-editor.org/rfc/rfc7725.html).
+- [QUERY method](https://datatracker.ietf.org/doc/draft-ietf-httpbis-safe-method-w-body/)
+  (draft-ietf-httpbis-safe-method-w-body) — a safe, idempotent method with a body.
+- [IETF RateLimit header fields](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/)
+  and [Idempotency-Key header](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/).
+- [Google AIP](https://google.aip.dev/) — AIP-136 (custom methods / colon verbs),
+  AIP-151 (long-running operations).

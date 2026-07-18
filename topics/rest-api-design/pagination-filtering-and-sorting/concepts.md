@@ -445,6 +445,254 @@ Content-Type: application/problem+json
 }
 ```
 
+## Keyset internals: mixed sort directions & row-value comparison
+
+The clean `WHERE (created_at, id) > (?, ?)` **row-value comparison** only works
+when **every key in the tuple sorts in the same direction**. `(a, b) > (?, ?)` is
+exactly `a > ?a OR (a = ?a AND b > ?b)` — a *lexicographic* comparison that assumes
+both `a` and `b` are ascending.
+
+The moment you need **mixed directions** (`price DESC, id ASC`), the tuple form is
+wrong: `(price, id) < (?, ?)` would apply `<` to *both* columns. You must
+**decompose the predicate by hand**, flipping the operator per column:
+
+```sql
+-- Seek page for  ORDER BY price DESC, id ASC  after (last_price, last_id)
+SELECT * FROM products
+WHERE price < :last_price
+   OR (price = :last_price AND id > :last_id)
+ORDER BY price DESC, id ASC
+LIMIT 20;
+```
+
+The rule: **descending key → `<` / `>` flips; ascending key → keep**. For N keys
+you get a nested OR chain (`k1 cmp OR (k1= AND (k2 cmp OR (k2= AND ...)))`). This
+hand-written OR-decomposition is the single most-probed keyset internal in senior
+interviews.
+
+**Row-value portability & index direction.** `(a, b) > (?, ?)` is standard SQL
+(SQL:1999 row-value constructors) and PostgreSQL optimizes it into a true index
+range scan. Older MySQL versions materialized/failed to optimize row-value
+comparisons (improved in MySQL 8.0), so many portable implementations write the
+OR-decomposed form even for same-direction sorts. For a **pure seek with no sort
+step**, the composite index's **column order *and* per-column direction must match
+the `ORDER BY`**. A `(price ASC, id ASC)` index cannot serve `price DESC, id ASC`
+as a range scan — the engine must add a sort (or you need a matching
+`(price DESC, id ASC)` index, supported by Postgres and MySQL 8.0+). This is the
+concrete precondition behind the claim "keyset is O(limit)."
+
+## Bidirectional cursors (prev/next and load-newer)
+
+Cursors are often called "forward-only," but real APIs (Slack, Relay, Zalando #248
+`prev`/`next`) support **backward** navigation too. To fetch the **previous** page
+you *reverse both the comparison operator and the `ORDER BY`*, fetch `limit` rows,
+then **re-reverse the returned rows** for display:
+
+```sql
+-- Forward (next) after (last_created, last_id), newest-first:
+WHERE (created_at, id) < (:c, :id) ORDER BY created_at DESC, id DESC LIMIT 20;
+
+-- Backward (prev) before (first_created, first_id):
+WHERE (created_at, id) > (:c, :id) ORDER BY created_at ASC,  id ASC  LIMIT 20;
+--   then reverse the 20 rows in application code so they read newest-first again.
+```
+
+A "load newer" feed (Twitter-style pull-to-refresh) is just backward paging from
+the newest cursor the client holds. GraphQL Relay formalizes the two directions as
+`first`/`after` (forward) and `last`/`before` (backward). The important subtlety:
+the *display order stays the same* in both directions — only the internal seek is
+reversed.
+
+## What goes inside a cursor (and cursor security)
+
+An opaque cursor is not just a base64 id. To make page N+1 reproduce the exact
+query of page N, the cursor should encode:
+
+- the **last-seen sort-key tuple** (the seek anchor),
+- the **sort spec** (so a mismatch with the request's `sort` is detectable),
+- the **filter predicate** (so the walk stays on the same result set),
+- the **direction** (forward/backward), and
+- a **schema/version tag** (so old cursors are rejected after a format change).
+
+**Base64 is encoding, not security.** Google **AIP-158** explicitly warns that
+base64 alone is *not* obfuscation — anyone can decode it. If the cursor must not be
+inspected or forged, **HMAC-sign it (integrity) or encrypt it (confidentiality)**.
+
+**Cursors must never carry authorization.** AIP-158 is emphatic: a page token is
+not a capability. Authorization is re-evaluated on **every** request from the
+caller's identity; a leaked or shared token must not grant access to data the new
+caller can't otherwise see. Treat the cursor as *where I was*, never *what I'm
+allowed to see*.
+
+## Cursor validation & error semantics
+
+What happens when a client edits the cursor, or changes `sort`/`filter` mid-walk?
+
+- **Malformed / undecodable / bad-signature / schema-version mismatch** → `400 Bad
+  Request` with an RFC 9457 `application/problem+json` body and a distinct `type`
+  URI (e.g. `.../problems/invalid-cursor`). **Never `404` or `500`** — the resource
+  exists; the *token* is bad.
+- **Cursor's embedded sort/filter ≠ the request's `sort`/`filter` params** → `400`.
+  AIP-158 generalizes this: changing **any** request argument other than
+  `page_size` while paging → `INVALID_ARGUMENT`. Encoding sort+filter in the token
+  is what makes this detectable.
+- **Expired cursor** is legitimate, not a bug — DB-backed tokens (snapshots,
+  server-side scroll state) expire; AIP-158 suggests roughly a **3-day** lifetime.
+  Return `400` with a distinct "cursor expired" `type` so the client knows to
+  restart from page 1 rather than retry.
+- An **empty/absent `next_cursor`** (AIP-158: empty `next_page_token`) is the
+  canonical "you've reached the end" signal — not an error.
+
+## Estimating total counts
+
+When you want *a* number but not the `COUNT(*)` bill, use an estimate:
+
+- **PostgreSQL planner statistics**: `SELECT reltuples::bigint FROM pg_class WHERE
+  relname = 'orders'` gives the last-`ANALYZE` row estimate in O(1). For filtered
+  sets, read the **estimated row count from `EXPLAIN` (no ANALYZE)** — the planner's
+  estimate for the `WHERE` clause — without executing the query.
+- **Elasticsearch** caps counting by default: `track_total_hits` is `10000`, so
+  `hits.total` reports `{"value":10000,"relation":"gte"}` (i.e. "at least 10,000")
+  rather than an exact count, unless you set `track_total_hits: true` and pay for
+  the full count. This is a *count* cap, distinct from the `max_result_window`
+  offset cap below.
+- Present estimates honestly ("about 1,200 results") and reserve exact counts for
+  small sets or explicit opt-in (`?with_count=true`).
+
+## Field expansion, sparse fieldsets & the N+1 problem
+
+APIs let clients pull related resources inline — JSON:API `include=`, Zalando
+`embed=`, OData `$expand`, GraphQL nested selections — and trim fields with
+**sparse fieldsets** (`fields=`, `select`, JSON:API `fields[type]`).
+
+The classic failure: expanding a related resource **per row** issues one extra
+query per item — the **N+1 problem**. A 100-row page with `include=customer` can
+fire 1 + 100 queries and run 10× slower. Mitigations at the contract level:
+
+- **Batch/join loading** (a single `IN (...)` or JOIN, or a DataLoader-style
+  per-request batcher) instead of per-row fetches.
+- **Cap expansion depth and breadth** — bound how many relations and how deep a
+  client may expand, and count expansion against complexity limits.
+- **Sparse fieldsets as the cost lever** — returning only requested fields shrinks
+  payload and can avoid touching expensive columns/joins entirely.
+
+Diagnosing "the list endpoint got 10× slower after we added `include=`" as N+1 (and
+proposing batch loading + depth caps) is a common senior scenario.
+
+## GraphQL Relay Cursor Connections
+
+GraphQL's **Relay Cursor Connections** spec standardizes what REST leaves to
+convention. The shape:
+
+```graphql
+type Connection { edges: [Edge!]!  pageInfo: PageInfo! }
+type Edge       { node: Node!  cursor: String! }   # cursor per edge, not per page
+type PageInfo   { hasNextPage: Boolean!  hasPreviousPage: Boolean!
+                  startCursor: String  endCursor: String }
+```
+
+Arguments are `first`/`after` (forward) and `last`/`before` (backward). The
+**slicing algorithm** is ordered: apply `before`/`after` to the ordered set
+*first*, then `first` (drop from the **end** to keep the first N), then `last`
+(drop from the **start**). Using `first` **and** `last` together is discouraged.
+Crucially, **ordering must be identical for forward and backward** queries — you do
+*not* reverse the result set the way a hand-rolled REST prev-page does; you reverse
+only which end you slice from.
+
+Contrast with REST: Relay standardizes **edge-level cursors** (every node carries
+its own cursor, so any node is a valid anchor), the **`PageInfo`** booleans, and
+**bidirectional args** — all of which REST cursor APIs reinvent per-API. `has_more`
+in REST maps to Relay's `hasNextPage`, and both are typically implemented by the
+same `limit + 1` fetch trick.
+
+## HTTP caching of paginated responses (RFC 9111)
+
+Under **RFC 9111**, each distinct URL (method + full URI including query string) is
+a **separate cache key**. Consequences for collections:
+
+- Every `page`/`cursor`/`filter`/`sort` combination is its own cache entry, so a
+  wide filter space **fragments** the cache and lowers hit rate — opaque cursors
+  fragment CDN caches especially, since each token is unique.
+- **Query-param order matters** to naive caches (`?a=1&b=2` ≠ `?b=2&a=1` as keys),
+  so canonicalize param order to improve hit rate.
+- Use **`Cache-Control`** and **`ETag`** (validators) on collection responses, and
+  **`Vary`** on request headers that change the body (e.g. `Accept`,
+  `Authorization`). Note collection responses are typically **short-lived / private**
+  because their contents change with every write.
+- `POST`-based search bodies (below) are **not cacheable by default** under HTTP
+  semantics, one of the trade-offs of moving a query into the body.
+
+## POST-based search for oversized queries
+
+When a filter DSL exceeds practical URL limits, move it to a **request body**:
+`POST /orders/search` or Elasticsearch-style `POST /orders/_search`. RFC 9110
+defines no hard URL-length limit, but servers cap it and return **`414 URI Too
+Long`** (typical practical ceilings are ~2–8 KB). A 12 KB JSON filter simply can't
+go in a query string.
+
+The trade-off is REST purity vs pragmatism:
+
+- **GET** is safe, idempotent, **cacheable**, and bookmarkable — but limited by URL
+  length and leaks the filter into logs/history.
+- **POST /search** carries an arbitrarily large, structured body — but is
+  **not cacheable by default**, not bookmarkable, and blurs the "POST = create"
+  expectation (you're querying, not creating). Some APIs offer both: GET for simple
+  filters, POST /search for complex ones.
+
+## Standardized query vocabularies (OData, JSON:API, Zalando)
+
+Interviewers recognize the industry-standard reserved param sets:
+
+- **Zalando (#137)** reserved query params: `q`, `fields`, `embed`, `offset`,
+  `cursor`, `limit`. Its page object (#248) has `self`/`next`/`prev`/`items`; #159
+  MUST paginate, #160 SHOULD prefer cursor over offset, #254 SHOULD avoid a total
+  count, #236/#237 cover simple vs JSON query languages.
+- **JSON:API**: `sort` (with `-field` for DESC), the `page[...]` family
+  (`page[number]`/`page[size]`/`page[offset]`/`page[cursor]`), `filter`, `include`,
+  and `fields[type]` for sparse fieldsets.
+- **OData 4.01**: `$filter` with operators `eq ne gt ge lt le and or not`, grouping
+  `()`, functions `contains`/`startswith`/`endswith`; `$orderby`, `$top`, `$skip`,
+  `$count`, `$select`, `$expand`; server-driven paging via `$skiptoken` in the
+  `@odata.nextLink`, and the `Prefer: odata.maxpagesize=N` request header.
+  **Microsoft's Azure REST guidelines** drop the `$` prefix (`filter`, `orderby`,
+  `top`, `skip`) and note that supporting `orderby` is "unusual" because arbitrary
+  server-side sort is expensive.
+- **RSQL/FIQL** full operator set (the Zalando/Apache CXF de-facto standard for
+  complex queries): `==`, `!=`, `=gt=`, `=ge=`, `=lt=`, `=le=`, `=in=`, `=out=`,
+  with `;` = AND and `,` = OR.
+
+## Server-driven vs client-driven pagination
+
+- **Client-driven**: the client dictates boundaries — sends `offset`/`limit` or
+  `page`/`size` and computes the next request itself. Maximum control, but the
+  client owns correctness (deep-offset cost, page arithmetic).
+- **Server-driven**: the server decides page boundaries and hands back an opaque
+  continuation — Google's `next_page_token` (AIP-158), Azure's `nextLink`,
+  OData `$skiptoken`, GitHub's `Link: rel="next"`. The server may return **fewer
+  items than requested — even mid-collection** (AIP-158) — and the client must keep
+  following the link until it's absent/empty. This unifies the Google/Azure/GitHub
+  style: the client treats the continuation as opaque and never constructs it.
+
+Azure's `nextLink` has extra rules: it's **never `null`** (absent on the last
+page), and it **must carry `api-version`** so following it doesn't drop the version.
+
+## NULL ordering semantics
+
+Sorting is under-specified until you decide where NULLs go. Engines differ:
+
+- **PostgreSQL/Oracle** default: NULLs sort as the **largest** value (NULLS LAST for
+  ASC, NULLS FIRST for DESC); `ORDER BY col ASC NULLS FIRST/LAST` overrides.
+- **MySQL/SQLite** default: NULLs sort as the **smallest** value (NULLS FIRST for
+  ASC). MySQL lacks `NULLS FIRST/LAST` syntax; you emulate with an
+  `ORDER BY col IS NULL, col` expression.
+- **Azure guidance**: sort NULL as **less than** any non-NULL value, for a
+  consistent contract across backends.
+
+This matters for keyset: a **NULL in the seek column breaks the `>`/`<` predicate**
+(comparisons with NULL yield `UNKNOWN`, not true/false), so rows with NULL sort keys
+can be silently skipped. Either forbid NULLs in cursor columns, or add explicit
+`col IS NULL` handling to the seek predicate.
+
 ## Common follow-up questions
 
 - **"Offset vs cursor — when would you pick each?"** Offset for small/static sets
@@ -494,3 +742,18 @@ Content-Type: application/problem+json
 - [JSON:API — Fetching: Sorting & Pagination](https://jsonapi.org/format/#fetching-sorting)
   (the `sort=-field` and `page[...]` conventions)
 - [Use the Index, Luke — "No Offset" (keyset pagination)](https://use-the-index-luke.com/no-offset)
+- [Google AIP-158 — Pagination](https://google.aip.dev/158) (`page_size`/`page_token`/
+  `next_page_token`/`total_size`; opaque URL-safe tokens; base64 ≠ obfuscation; tokens
+  carry no authz; empty token = end; changing args → `INVALID_ARGUMENT`)
+- [GraphQL Relay Cursor Connections spec](https://relay.dev/graphql/connections.htm)
+  (`Connection`/`Edge`/`PageInfo`, `first/after`/`last/before`, slicing algorithm)
+- [OData 4.01 — Querying](https://docs.oasis-open.org/odata/odata/v4.01/) (`$filter`,
+  `$orderby`, `$top`/`$skip`/`$count`, `$skiptoken`, `contains`/`startswith`)
+- [Microsoft Azure REST API Guidelines](https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md)
+  (`nextLink` never null + carries `api-version`; de-`$`'d `filter/orderby/top/skip`; NULL ordering)
+- [Zalando RESTful API Guidelines](https://opensource.zalando.com/restful-api-guidelines/)
+  (#137 reserved params, #159/#160/#161/#248/#254 pagination, #236/#237 query languages)
+- [Elasticsearch — Paginate search results](https://www.elastic.co/guide/en/elasticsearch/reference/current/paginate-search-results.html)
+  (`search_after`, Point-in-Time, `index.max_result_window` 10,000, `track_total_hits`)
+- [RFC 9111 — HTTP Caching](https://www.rfc-editor.org/rfc/rfc9111) (cache keys, `Vary`)
+- [RFC 9110 §10.1.2 / §15.5.15 — 414 URI Too Long](https://www.rfc-editor.org/rfc/rfc9110)

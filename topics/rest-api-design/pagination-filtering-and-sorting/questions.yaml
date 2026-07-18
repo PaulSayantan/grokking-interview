@@ -737,3 +737,620 @@ questions:
     explanation: |
       There is no RFC dictating offset vs cursor. RFC 8288 standardizes the Link header and its relation types; RFC 9457 (which obsoletes RFC 7807) standardizes the Problem Details error body. OpenAPI 3.1 lets you describe pagination params but mandates no envelope. The paging mechanics are convention.
     ref: "concepts.md#link-header-for-pagination-rfc-8288"
+
+  - id: pagination-filtering-and-sorting-047
+    difficulty: expert
+    tags: [keyset, mixed-directions, seek-predicate]
+    question: |
+      A keyset query must page `ORDER BY price DESC, id ASC` after the last-seen row
+      (`:last_price`, `:last_id`). Which WHERE clause is correct?
+    options:
+      - "WHERE (price, id) < (:last_price, :last_id)"
+      - "WHERE price < :last_price OR (price = :last_price AND id > :last_id)"
+      - "WHERE (price, id) > (:last_price, :last_id)"
+      - "WHERE price < :last_price AND id > :last_id"
+    answer: 1
+    explanation: |
+      A row-value tuple comparison `(price, id) < (?, ?)` only works when all keys share one direction; here price is DESC but id is ASC, so it is wrong. You must decompose per-column, flipping the operator on the descending key: `price < :last_price OR (price = :last_price AND id > :last_id)`. The plain AND form drops valid rows where price is strictly less but id is smaller.
+    ref: "concepts.md#keyset-internals-mixed-sort-directions--row-value-comparison"
+
+  - id: pagination-filtering-and-sorting-048
+    difficulty: expert
+    tags: [keyset, row-value, index-direction]
+    question: |
+      You rely on `WHERE (created_at, id) > (?, ?) ORDER BY created_at, id LIMIT 20`
+      being an O(limit) index seek with no sort step. Which condition is REQUIRED for
+      that to hold?
+    options:
+      - "A composite index whose column order AND per-column direction match the ORDER BY"
+      - "A separate single-column index on created_at and another on id"
+      - "The table must be smaller than the buffer pool"
+      - "A COUNT(*) must be run first to prime the planner"
+    answer: 0
+    explanation: |
+      Row-value comparison is standard SQL:1999 and Postgres turns it into a true range scan, but only if a composite index matches both the column ORDER and each column's DIRECTION of the ORDER BY. Two independent single-column indexes cannot serve the composite seek without a sort; a mismatched-direction index forces an added sort step, breaking the O(limit) guarantee.
+    ref: "concepts.md#keyset-internals-mixed-sort-directions--row-value-comparison"
+
+  - id: pagination-filtering-and-sorting-049
+    difficulty: advanced
+    tags: [keyset, row-value, portability]
+    question: |
+      Why do many portable keyset implementations write the OR-decomposed predicate
+      `a > ?a OR (a = ?a AND b > ?b)` even when both keys are ascending, instead of
+      the tuple form `(a, b) > (?a, ?b)`?
+    options:
+      - "The tuple form is invalid SQL on every engine"
+      - "The OR form is always faster than a range scan"
+      - "Older MySQL versions did not optimize row-value comparisons into an index range scan (improved in MySQL 8.0), so the OR form is more reliably indexable across engines"
+      - "The tuple form silently ORs the columns instead of comparing lexicographically"
+    answer: 2
+    explanation: |
+      `(a, b) > (?, ?)` is standard and Postgres optimizes it well, but older MySQL materialized rather than index-optimized row-value comparisons, so the hand-written OR-decomposition is a portability hedge that engines reliably turn into an index range scan. The tuple form is valid SQL and does compare lexicographically, not column-wise OR.
+    ref: "concepts.md#keyset-internals-mixed-sort-directions--row-value-comparison"
+
+  - id: pagination-filtering-and-sorting-050
+    difficulty: expert
+    tags: [cursor, bidirectional, prev-page]
+    question: |
+      A newest-first feed uses `ORDER BY created_at DESC, id DESC` with
+      `WHERE (created_at,id) < (:c,:id)` for the next page. To build the PREVIOUS
+      page, what does the server do?
+    options:
+      - "Reuse the same query but with a negative limit"
+      - "Reverse the comparison to `>` and the ORDER BY to ASC, fetch limit rows, then reverse the returned rows before returning them so they still read newest-first"
+      - "Recompute an offset and switch to offset pagination"
+      - "Return the next-page query result in reverse byte order"
+    answer: 1
+    explanation: |
+      Backward paging reverses BOTH the seek operator (`<` becomes `>`) and the ORDER BY direction, fetches `limit` rows just before the anchor, then re-reverses the result set in application code so the display order stays newest-first. Relay formalizes this as `last`/`before`. Offsets and negative limits are not involved.
+    ref: "concepts.md#bidirectional-cursors-prevnext-and-load-newer"
+
+  - id: pagination-filtering-and-sorting-051
+    difficulty: advanced
+    tags: [cursor, load-newer, feeds]
+    question: |
+      A social app supports pull-to-refresh ("load newer") on a newest-first feed
+      that normally pages older via a forward cursor. How is "load newer" best
+      implemented with keyset pagination?
+    options:
+      - "By running COUNT(*) to detect new rows"
+      - "By clearing the client cache and refetching page 1 with offset=0 each time"
+      - "By paging backward (prev direction) from the newest cursor the client already holds"
+      - "By switching the whole feed to offset pagination"
+    answer: 2
+    explanation: |
+      "Load newer" is just backward/prev paging anchored on the newest item the client already has: reverse the seek operator and ORDER BY to fetch rows with keys greater than that anchor, then re-reverse for display. No COUNT or offset reset is needed, which is the whole point of keyset feeds.
+    ref: "concepts.md#bidirectional-cursors-prevnext-and-load-newer"
+
+  - id: pagination-filtering-and-sorting-052
+    difficulty: expert
+    tags: [cursor, contents, reproducibility]
+    question: |
+      To guarantee that page N+1 of a cursor walk reproduces exactly the same query
+      as page N, which set of information most completely belongs inside the opaque
+      cursor token?
+    options:
+      - "Only the last-seen primary key"
+      - "The caller's access token and roles"
+      - "The last-seen sort-key tuple, the sort spec, the filter predicate, the direction, and a schema/version tag"
+      - "The total row count and the current page number"
+    answer: 2
+    explanation: |
+      The cursor must carry the seek anchor (last-seen sort-key tuple), the sort spec and filter predicate (so the walk stays on the same ordered result set), the direction, and a version tag (so stale formats are rejected). A lone primary key can't reproduce a multi-key sort or the filter, and authorization must never live in a cursor.
+    ref: "concepts.md#what-goes-inside-a-cursor-and-cursor-security"
+
+  - id: pagination-filtering-and-sorting-053
+    difficulty: expert
+    tags: [cursor, security, aip-158]
+    question: |
+      Per Google AIP-158, which statement about opaque page tokens is correct?
+    options:
+      - "Base64 encoding is sufficient obfuscation to hide the token contents"
+      - "A page token may embed authorization so a leaked token safely grants access"
+      - "Base64 alone is not obfuscation; sign or encrypt if the contents must be protected, and tokens must never carry authorization — auth is re-checked every request"
+      - "Tokens must be exactly 32 bytes and rotate hourly"
+    answer: 2
+    explanation: |
+      AIP-158 explicitly warns that base64 is encoding, not obfuscation — anyone can decode it — so use HMAC (integrity) or encryption (confidentiality) if contents must be protected. It also mandates that a token is not a capability: authorization is re-evaluated from the caller's identity on every request, so a leaked token must not grant extra access.
+    ref: "concepts.md#what-goes-inside-a-cursor-and-cursor-security"
+
+  - id: pagination-filtering-and-sorting-054
+    difficulty: expert
+    tags: [cursor, validation, status-codes]
+    question: |
+      A client hand-edits an opaque cursor and the HMAC signature no longer verifies.
+      What is the correct response?
+    options:
+      - "404 Not Found, since the page no longer exists"
+      - "500 Internal Server Error, since decoding failed"
+      - "200 OK starting from page 1, silently"
+      - "400 Bad Request with an RFC 9457 problem+json body and a distinct type URI for the invalid cursor"
+    answer: 3
+    explanation: |
+      A tampered/undecodable/bad-signature cursor is a client input error: return 400 with an `application/problem+json` body (RFC 9457) and a distinct `type` so clients can distinguish it. It is not 404 (the collection exists), not 500 (not a server fault), and silently restarting at page 1 hides the bug and can duplicate data.
+    ref: "concepts.md#cursor-validation--error-semantics"
+
+  - id: pagination-filtering-and-sorting-055
+    difficulty: expert
+    tags: [cursor, sort-change, aip-158]
+    question: |
+      Midway through a cursor walk the client changes the `sort` param but reuses the
+      old cursor (which encodes the previous sort). Per AIP-158's general rule, what
+      should happen?
+    options:
+      - "Reject with 400 / INVALID_ARGUMENT — changing any request arg other than page_size across pages is invalid; the encoded sort mismatch is detectable"
+      - "Silently re-sort all previously returned pages"
+      - "Honor the new sort and continue from the old cursor position"
+      - "Return 304 Not Modified"
+    answer: 0
+    explanation: |
+      AIP-158 says changing any argument other than page_size while paging is an INVALID_ARGUMENT error. Because the cursor encodes the original sort spec, the server detects the mismatch with the new `sort` param and returns 400. Continuing with the old anchor under a new order would skip and duplicate rows.
+    ref: "concepts.md#cursor-validation--error-semantics"
+
+  - id: pagination-filtering-and-sorting-056
+    difficulty: advanced
+    tags: [cursor, expiry, aip-158]
+    question: |
+      A DB-backed cursor (tied to a server-side snapshot) is presented three days
+      later and has expired. How should this be treated?
+    options:
+      - "As a server crash — return 500"
+      - "As a legitimate, expected condition — return 400 with a distinct 'cursor expired' problem type so the client restarts from the first page"
+      - "As success — silently rebuild the snapshot and continue"
+      - "As 401 Unauthorized"
+    answer: 1
+    explanation: |
+      AIP-158 notes DB-backed tokens legitimately expire (it suggests roughly a 3-day lifetime). Expiry is not a fault: return 400 with a distinct problem `type` signaling expiry, so the client knows to restart from page 1 rather than blindly retry. It is not a 500 or a 401, and silently rebuilding state can produce inconsistent results.
+    ref: "concepts.md#cursor-validation--error-semantics"
+
+  - id: pagination-filtering-and-sorting-057
+    difficulty: intermediate
+    tags: [cursor, end-of-results, aip-158]
+    question: |
+      In an AIP-158-style API, how does the server signal that the client has reached
+      the last page?
+    options:
+      - "By returning HTTP 204 No Content on the final page"
+      - "By returning an empty or absent next_page_token in the final response"
+      - "By setting total_size to zero"
+      - "By returning a 404 on the next request"
+    answer: 1
+    explanation: |
+      The canonical end-of-collection signal is an empty (or absent) `next_page_token` in the response — the last page still returns its items with no continuation token. A 204 would drop the final items, and total_size/404 are not the termination contract.
+    ref: "concepts.md#cursor-validation--error-semantics"
+
+  - id: pagination-filtering-and-sorting-058
+    difficulty: advanced
+    tags: [total-count, estimation, postgres]
+    question: |
+      You want a fast approximate row count for a Postgres table without a full
+      COUNT(*). Which technique fits?
+    options:
+      - "SELECT reltuples::bigint FROM pg_class WHERE relname = 'orders' (last-ANALYZE planner estimate, O(1))"
+      - "SELECT COUNT(*) FROM orders WITH (NOLOCK)"
+      - "Fetch every row and count client-side"
+      - "Add a trigger that locks the table on each insert"
+    answer: 0
+    explanation: |
+      `reltuples` in `pg_class` holds the planner's row estimate from the last ANALYZE/VACUUM and is read in O(1). For filtered sets, the estimated row count from `EXPLAIN` (without ANALYZE) gives the planner's estimate for the WHERE clause without executing. NOLOCK is a SQL Server hint, not Postgres, and still scans.
+    ref: "concepts.md#estimating-total-counts"
+
+  - id: pagination-filtering-and-sorting-059
+    difficulty: expert
+    tags: [total-count, elasticsearch, track-total-hits]
+    question: |
+      An Elasticsearch response shows `"total": {"value": 10000, "relation": "gte"}`
+      for a query matching far more documents. Why?
+    options:
+      - "The index has a hard 10,000-document limit"
+      - "track_total_hits defaults to 10000, so counting stops there and reports 'at least 10,000' rather than an exact total unless you set track_total_hits: true"
+      - "The relation field is a bug and value is always exact"
+      - "The query timed out at exactly 10,000 ms"
+    answer: 1
+    explanation: |
+      By default `track_total_hits` is 10000: ES stops the exact count once it reaches that many matches and reports `relation: gte` (at least 10,000). Setting `track_total_hits: true` forces the full, more expensive count. This count cap is distinct from the `max_result_window` offset cap.
+    ref: "concepts.md#estimating-total-counts"
+
+  - id: pagination-filtering-and-sorting-060
+    difficulty: expert
+    tags: [expansion, n-plus-one, performance]
+    question: |
+      After adding `?include=customer` to a 100-item list endpoint, latency jumped
+      roughly 10×. What is the most likely cause and the right fix?
+    options:
+      - "The JSON serializer is slow; switch serialization libraries"
+      - "N+1 queries — one extra per-row lookup for the related resource; fix with batch/join loading (a single IN/JOIN or a per-request batcher) and cap expansion depth"
+      - "The Link header grew too large; remove it"
+      - "HTTP compression was disabled; enable gzip"
+    answer: 1
+    explanation: |
+      Expanding a relation per row fires 1 + N queries — the classic N+1 problem — so a 100-row page runs ~101 queries. The contract-level fix is batch/join loading (single IN(...) or JOIN, or DataLoader-style batching) plus caps on expansion depth/breadth and sparse fieldsets to limit cost. Serialization, headers, and gzip don't explain per-row query fan-out.
+    ref: "concepts.md#field-expansion-sparse-fieldsets--the-n1-problem"
+
+  - id: pagination-filtering-and-sorting-061
+    difficulty: advanced
+    tags: [sparse-fieldsets, cost-control]
+    question: |
+      What is the primary purpose of sparse fieldsets (`?fields=`, JSON:API
+      `fields[type]`, OData `$select`) on a collection endpoint?
+    options:
+      - "To reorder the JSON keys alphabetically"
+      - "To let the client request only the fields it needs, shrinking payload and potentially avoiding expensive columns/joins"
+      - "To enforce authentication on each field"
+      - "To guarantee the response is cached forever"
+    answer: 1
+    explanation: |
+      Sparse fieldsets let clients trim the returned attributes, reducing payload size and letting the server skip touching expensive columns or joins entirely — the main cost-control lever alongside bounded expansion. They are not about key ordering, auth, or caching lifetime.
+    ref: "concepts.md#field-expansion-sparse-fieldsets--the-n1-problem"
+
+  - id: pagination-filtering-and-sorting-062
+    difficulty: expert
+    tags: [graphql, relay, connections]
+    question: |
+      In the Relay Cursor Connections spec, where does the cursor live and what does
+      PageInfo provide?
+    options:
+      - "A single cursor on the Connection; PageInfo holds the total count"
+      - "A cursor per Edge (edge.cursor); PageInfo holds hasNextPage, hasPreviousPage, startCursor, and endCursor"
+      - "No cursors at all; PageInfo holds only the page number"
+      - "A cursor on the node; PageInfo holds the SQL query"
+    answer: 1
+    explanation: |
+      Relay puts a cursor on every Edge (`edge.cursor`), so any node is a valid anchor, and exposes navigation state via PageInfo: hasNextPage, hasPreviousPage, startCursor, endCursor. There is no mandated total count, and the cursor is not on the node or the Connection root.
+    ref: "concepts.md#graphql-relay-cursor-connections"
+
+  - id: pagination-filtering-and-sorting-063
+    difficulty: expert
+    tags: [graphql, relay, slicing-algorithm]
+    question: |
+      In the Relay connection slicing algorithm, in what order are the arguments
+      applied to the ordered set?
+    options:
+      - "first, then last, then before/after"
+      - "before/after first, then first (drop from the end), then last (drop from the start)"
+      - "last first, then after, then first"
+      - "All simultaneously, taking the intersection"
+    answer: 1
+    explanation: |
+      Relay applies `before`/`after` to the ordered set first to bound the range, then `first` keeps the leading N (dropping from the end), then `last` keeps the trailing N (dropping from the start). Using `first` and `last` together is discouraged precisely because of this two-sided trimming.
+    ref: "concepts.md#graphql-relay-cursor-connections"
+
+  - id: pagination-filtering-and-sorting-064
+    difficulty: expert
+    tags: [graphql, relay, backward-ordering]
+    question: |
+      A REST prev-page implementation reverses the ORDER BY and then re-reverses the
+      returned rows. How does Relay differ in how it treats ordering for backward
+      (last/before) queries?
+    options:
+      - "Relay reverses the result set exactly like the REST prev-page trick"
+      - "Relay requires ordering to be IDENTICAL for forward and backward; it reverses only which end of the ordered set it slices from, not the displayed order"
+      - "Relay forbids backward pagination entirely"
+      - "Relay sorts backward queries randomly"
+    answer: 1
+    explanation: |
+      The Relay spec mandates that the connection's ordering be the same for forward and backward queries — you do not flip the result order the way a hand-rolled REST prev-page does. `last`/`before` change which end the slice is taken from, but the edges are still emitted in the connection's canonical order.
+    ref: "concepts.md#graphql-relay-cursor-connections"
+
+  - id: pagination-filtering-and-sorting-065
+    difficulty: advanced
+    tags: [caching, rfc9111, cache-key]
+    question: |
+      Why do opaque cursors and a large filter space tend to lower CDN/HTTP cache hit
+      rates for collection endpoints?
+    options:
+      - "RFC 9111 forbids caching any response with a query string"
+      - "Each distinct URL (including its query string) is a separate cache key, so every unique cursor/filter/sort combination becomes its own entry, fragmenting the cache"
+      - "Cursors set Cache-Control: no-store automatically"
+      - "CDNs cannot store responses larger than one page"
+    answer: 1
+    explanation: |
+      Under RFC 9111 the cache key is the method plus full URI including query string, so every distinct cursor/filter/sort combination is a separate cache entry. Unique opaque cursors and a wide filter space therefore fragment the cache and lower hit rates. Caching query-string URLs is allowed, and cursors don't auto-set no-store.
+    ref: "concepts.md#http-caching-of-paginated-responses-rfc-9111"
+
+  - id: pagination-filtering-and-sorting-066
+    difficulty: advanced
+    tags: [caching, query-param-order, vary]
+    question: |
+      Which two practices most directly improve cache behavior for paginated
+      collection responses?
+    options:
+      - "Canonicalize query-param order and set appropriate Cache-Control/ETag plus Vary on headers that change the body"
+      - "Randomize the param order and disable ETag"
+      - "Always use POST so responses are uncacheable"
+      - "Return total_count in every response and omit Vary"
+    answer: 0
+    explanation: |
+      Naive caches treat `?a=1&b=2` and `?b=2&a=1` as different keys, so canonicalizing param order raises hit rate; and correct `Cache-Control`/`ETag` validators plus `Vary` on body-affecting headers (Accept, Authorization) keep responses both cacheable and correct. Randomizing order or dropping validators hurts caching.
+    ref: "concepts.md#http-caching-of-paginated-responses-rfc-9111"
+
+  - id: pagination-filtering-and-sorting-067
+    difficulty: expert
+    tags: [post-search, url-length, 414]
+    question: |
+      A client needs to send a 12 KB JSON filter to a list endpoint and gets
+      `414 URI Too Long` when putting it in the query string. What is the standard
+      remedy, and what is the main cost?
+    options:
+      - "Split it into many GETs; there is no downside"
+      - "Move the query into a request body via POST /resource/search (or _search); the main cost is losing default HTTP cacheability and bookmarkability"
+      - "Base64 the filter into a single header; caching is unaffected"
+      - "Return the whole collection and filter client-side"
+    answer: 1
+    explanation: |
+      RFC 9110 defines no hard URL length limit but servers cap it and return 414; oversized filter DSLs move into a request body via POST /search or _search. The trade-off is that POST responses are not cacheable by default and the URL is no longer bookmarkable, plus it blurs the "POST = create" expectation.
+    ref: "concepts.md#post-based-search-for-oversized-queries"
+
+  - id: pagination-filtering-and-sorting-068
+    difficulty: advanced
+    tags: [post-search, get-vs-post, trade-offs]
+    question: |
+      Some APIs expose BOTH `GET /orders?...` and `POST /orders/search`. What is the
+      principled reason to offer both?
+    options:
+      - "POST is always faster than GET"
+      - "GET is cacheable/bookmarkable/idempotent for simple filters, while POST /search carries arbitrarily large structured queries that would exceed URL limits — at the cost of cacheability"
+      - "GET cannot express filters at all"
+      - "REST forbids querying with GET"
+    answer: 1
+    explanation: |
+      GET keeps the safe, idempotent, cacheable, bookmarkable path for simple filters; POST /search handles complex/oversized query bodies that won't fit or aren't expressible in a URL, accepting the loss of default caching. Offering both matches each request shape to the right method rather than forcing one compromise.
+    ref: "concepts.md#post-based-search-for-oversized-queries"
+
+  - id: pagination-filtering-and-sorting-069
+    difficulty: expert
+    tags: [odata, filter, operators]
+    question: |
+      Which query correctly expresses "status equals 'open' AND amount greater than
+      100" in OData 4.01 syntax?
+    options:
+      - "?$filter=status eq 'open' and amount gt 100"
+      - "?$filter=status==open;amount=gt=100"
+      - "?filter=status:open AND amount>100"
+      - "?status[eq]=open&amount[gt]=100"
+    answer: 0
+    explanation: |
+      OData 4.01 uses named operators: `eq ne gt ge lt le` with `and`/`or`/`not`, so `$filter=status eq 'open' and amount gt 100`. The second option is RSQL/FIQL syntax, and the others are ad-hoc/bracketed conventions from other schemes — not OData.
+    ref: "concepts.md#standardized-query-vocabularies-odata-jsonapi-zalando"
+
+  - id: pagination-filtering-and-sorting-070
+    difficulty: advanced
+    tags: [rsql, fiql, operators]
+    question: |
+      In RSQL/FIQL, which operators express "in a set" and "greater than or equal",
+      and which characters mean AND / OR?
+    options:
+      - "=in= and =ge=, with ';' meaning AND and ',' meaning OR"
+      - "IN() and >=, with '&&' meaning AND and '||' meaning OR"
+      - "=has= and =gte=, with ',' meaning AND and ';' meaning OR"
+      - "$in and $gte, with 'and'/'or' keywords"
+    answer: 0
+    explanation: |
+      RSQL/FIQL's operator set includes `=in=`/`=out=` for set membership and `=gt=`/`=ge=`/`=lt=`/`=le=` for comparisons, with `;` = logical AND and `,` = logical OR. The Mongo-style `$in`/`$gte` and SQL-ish `IN()`/`>=` belong to other DSLs.
+    ref: "concepts.md#standardized-query-vocabularies-odata-jsonapi-zalando"
+
+  - id: pagination-filtering-and-sorting-071
+    difficulty: advanced
+    tags: [zalando, reserved-params, json-api]
+    question: |
+      Which set matches the Zalando guidelines' reserved query parameter vocabulary
+      (#137)?
+    options:
+      - "q, fields, embed, offset, cursor, limit"
+      - "search, columns, join, start, token, count"
+      - "query, select, expand, from, page, max"
+      - "$filter, $orderby, $top, $skip, $count"
+    answer: 0
+    explanation: |
+      Zalando #137 reserves `q, fields, embed, offset, cursor, limit` as standard control params. The last option is OData's `$`-prefixed set; the others are plausible-sounding but not the recognized Zalando vocabulary interviewers expect.
+    ref: "concepts.md#standardized-query-vocabularies-odata-jsonapi-zalando"
+
+  - id: pagination-filtering-and-sorting-072
+    difficulty: advanced
+    tags: [server-driven, next-link, azure]
+    question: |
+      In server-driven pagination (Google next_page_token, Azure nextLink, OData
+      $skiptoken), which behavior must clients be prepared for?
+    options:
+      - "The server always returns exactly the requested page_size until the very last page"
+      - "The server may return fewer items than requested — even mid-collection — and the client must keep following the continuation until it is absent/empty"
+      - "The client must construct the next URL by incrementing an offset"
+      - "The continuation token is guaranteed to be a monotonically increasing integer"
+    answer: 1
+    explanation: |
+      With server-driven paging the server decides boundaries and may hand back fewer items than requested at any point (AIP-158), so the client must treat the continuation (next_page_token/nextLink/$skiptoken) as opaque and keep following it until it's absent/empty — never build it or assume a full page each time.
+    ref: "concepts.md#server-driven-vs-client-driven-pagination"
+
+  - id: pagination-filtering-and-sorting-073
+    difficulty: expert
+    tags: [azure, next-link, api-version]
+    question: |
+      Per Microsoft's Azure REST guidelines, which pair of rules governs the
+      `nextLink` used for server-driven paging?
+    options:
+      - "nextLink is null on every page except the last; it omits api-version"
+      - "nextLink is never null (it is simply absent on the last page) and it must carry the api-version query parameter"
+      - "nextLink must be a relative path without a query string"
+      - "nextLink must include the caller's bearer token"
+    answer: 1
+    explanation: |
+      Azure requires that when present, `nextLink` is never the JSON literal null — it is simply absent on the final page — and that it carries `api-version` so following it doesn't drop the API version. Embedding auth tokens in the link would be a security anti-pattern (cursors/links carry position, not authz).
+    ref: "concepts.md#server-driven-vs-client-driven-pagination"
+
+  - id: pagination-filtering-and-sorting-074
+    difficulty: expert
+    tags: [null-ordering, keyset, correctness]
+    question: |
+      A keyset seek uses a sortable column that is nullable, and some rows have NULL
+      in it. Why can this silently drop rows, and what fixes it?
+    options:
+      - "NULLs are stored as empty strings and sort last; no fix needed"
+      - "Comparisons against NULL yield UNKNOWN (not true), so those rows fail the >/< seek predicate; forbid NULLs in cursor columns or add explicit IS NULL handling"
+      - "NULLs always sort first, so they are always returned twice"
+      - "The database converts NULL to 0 automatically, so ordering is fine"
+    answer: 1
+    explanation: |
+      In SQL, `col > :x` where col is NULL evaluates to UNKNOWN, not true, so rows with NULL sort keys are excluded by the seek predicate and get skipped. The fix is to forbid NULLs in cursor/sort columns or to add explicit `col IS NULL` branches to the seek. NULLs are not silently coerced to 0 or empty string.
+    ref: "concepts.md#null-ordering-semantics"
+
+  - id: pagination-filtering-and-sorting-075
+    difficulty: advanced
+    tags: [null-ordering, engine-differences]
+    question: |
+      A query `ORDER BY score ASC` returns rows with NULL score in different
+      positions on PostgreSQL versus MySQL. Why?
+    options:
+      - "PostgreSQL is buggy; MySQL is the standard"
+      - "Default NULL ordering differs by engine — Postgres sorts NULLs as the largest value (last on ASC) while MySQL sorts them as smallest (first on ASC); make it explicit with NULLS FIRST/LAST or an equivalent expression"
+      - "MySQL drops NULL rows entirely from ORDER BY"
+      - "The SQL standard fixes NULL ordering, so any difference is a driver bug"
+    answer: 1
+    explanation: |
+      The SQL standard leaves default NULL ordering to the implementation: Postgres/Oracle treat NULL as largest (NULLS LAST on ASC) while MySQL/SQLite treat it as smallest (NULLS FIRST on ASC). To get a consistent contract, specify `NULLS FIRST/LAST` (Postgres) or emulate with `ORDER BY col IS NULL, col` (MySQL). Neither engine is buggy.
+    ref: "concepts.md#null-ordering-semantics"
+
+  - id: pagination-filtering-and-sorting-076
+    difficulty: expert
+    tags: [sharded, distributed, scatter-gather]
+    question: |
+      You must paginate a result set spread across many shards. Why is offset
+      catastrophic here, and what does a correct design use?
+    options:
+      - "Offset is fine across shards; just divide the offset by shard count"
+      - "Each shard must skip the FULL offset locally before the coordinator merges, so cost multiplies with depth AND fanout; use a merge-sorted keyset (e.g. search_after over a point-in-time) with the cursor encoding per-shard positions"
+      - "Sharded stores cannot be paginated at all"
+      - "Use a single global COUNT(*) to compute a shard-local offset"
+    answer: 1
+    explanation: |
+      To honor a global OFFSET N, every shard must locally produce and discard up to N rows before the coordinator scatter-gather merges them, so deep-offset cost scales with both depth and shard count and coordinator memory. The scalable approach is a merge-sorted keyset seek (Elasticsearch search_after over a Point-in-Time) with a cursor that records each shard's last-seen position.
+    ref: "concepts.md#keyset-internals-mixed-sort-directions--row-value-comparison"
+
+  - id: pagination-filtering-and-sorting-077
+    difficulty: expert
+    tags: [consistency, snapshot, exactly-once]
+    question: |
+      A bounded ETL job must read a large, actively-written table exactly once within
+      a single run, without a stable immutable key to keyset on. What is the most
+      appropriate mechanism?
+    options:
+      - "Offset pagination with a very large page size"
+      - "A point-in-time / snapshot read (e.g. Elasticsearch search_after + PIT, or a Postgres REPEATABLE READ transaction) so the whole job sees one consistent snapshot"
+      - "Repeatedly recompute COUNT(*) and diff pages"
+      - "Increase the HTTP timeout and fetch everything in one request"
+    answer: 1
+    explanation: |
+      A snapshot/point-in-time read pins a consistent view for the duration of the job: Elasticsearch's search_after over a PIT, or a Postgres REPEATABLE READ transaction, so concurrent writes don't cause skips/duplicates. This works for a single bounded job but, unlike immutable-key keyset, doesn't span many independent HTTP requests.
+    ref: "concepts.md#consistency-under-concurrent-insertsdeletes"
+
+  - id: pagination-filtering-and-sorting-078
+    difficulty: expert
+    tags: [deep-paging, elasticsearch, max-result-window]
+    question: |
+      Elasticsearch rejects a request for `from=10000&size=20` with a
+      `max_result_window` error. Why is this cap enforced and what replaces it?
+    options:
+      - "Because JSON cannot encode offsets above 10,000; use base64"
+      - "Because from+size deep paging forces every shard to build and rank a from+size result list that the coordinator merges — memory/coordination cost grows with depth; use search_after (keyset) instead"
+      - "Because the license tier limits results; upgrade to remove it"
+      - "Because the index is corrupt; reindex to fix"
+    answer: 1
+    explanation: |
+      With from+size, each shard must produce from+size top hits that the coordinating node merges and re-ranks, so memory and coordination cost climb with depth — hence the default `index.max_result_window` of 10,000. The scalable replacement is `search_after` (keyset), ideally over a Point-in-Time for consistency. It is not an encoding, license, or corruption issue.
+    ref: "concepts.md#deep-paging-cost-of-offset"
+
+  - id: pagination-filtering-and-sorting-079
+    difficulty: expert
+    tags: [consistency, limit-plus-one, duplicates]
+    question: |
+      Two consecutive `limit+1` cursor pages of a feed sorted on a mutable column
+      still show the same row twice. What is the root cause?
+    options:
+      - "limit+1 is inherently buggy and should be limit-1"
+      - "The extra +1 row is always duplicated by design"
+      - "The row's mutable sort key changed between the two page fetches, moving it from behind the cursor to ahead of it so it reappears — the immutable-key requirement was violated"
+      - "The cursor was not base64-encoded"
+    answer: 2
+    explanation: |
+      `limit+1` is only a has_more probe and doesn't cause duplicates. The duplicate arises because the sort/cursor key is mutable: a row whose key changed between fetches can move across the cursor boundary and be seen twice (or skipped). Keyset requires an immutable, unique anchor key for exactly-once traversal.
+    ref: "concepts.md#consistency-under-concurrent-insertsdeletes"
+
+  - id: pagination-filtering-and-sorting-080
+    difficulty: advanced
+    tags: [jump-to-page, keyset, hybrid]
+    question: |
+      A product manager wants users to jump to an arbitrary page number AND wants
+      O(1)-ish per-page cost on a huge table. What is the honest engineering answer?
+    options:
+      - "Pure keyset gives both for free"
+      - "Pure offset gives both for free"
+      - "You cannot have both cleanly; use a hybrid — keyset for next/prev plus approximate page estimation, or precompute/cache anchor keys at page boundaries — and accept the trade-off"
+      - "Switch databases to remove the constraint entirely"
+    answer: 2
+    explanation: |
+      Arbitrary jump-to-page needs offset-style addressing (O(depth) cost), while O(1) per-page needs keyset (which is next/prev only) — the two goals conflict. The pragmatic middle ground is a hybrid: keyset for sequential navigation plus approximate page estimation, or precomputing/caching the anchor key at each page boundary. No single scheme delivers both cleanly.
+    ref: "concepts.md#offset-vs-cursor--trade-offs"
+
+  - id: pagination-filtering-and-sorting-081
+    difficulty: expert
+    tags: [filtering, security, nosql-injection]
+    question: |
+      An API accepts a JSON filter like `{"role": {"$ne": null}}` and passes operator
+      keys straight into a MongoDB-style query. What is the primary risk?
+    options:
+      - "Slower JSON parsing"
+      - "NoSQL/operator injection — a client can inject operators like $ne, $gt, or $where to bypass intended predicates or run expensive/arbitrary evaluation; allowlist operators and fields and reject $where"
+      - "The response will not be cacheable"
+      - "The Link header will be malformed"
+    answer: 1
+    explanation: |
+      Blindly trusting client-supplied operator keys enables NoSQL/operator injection: attackers inject `$ne`, `$gt`, or `$where` (arbitrary JS evaluation) to subvert the intended query or exhaust resources. The defense is an allowlist of permitted operators and fields, rejecting dangerous ones like `$where` — the query-DSL analog of SQL injection (related to OWASP API4/API8).
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-082
+    difficulty: advanced
+    tags: [filtering, redos, resource-exhaustion]
+    question: |
+      A `contains`/regex filter lets clients pass an arbitrary pattern that the
+      server compiles into a regular expression. Which OWASP-relevant risk does this
+      most directly introduce?
+    options:
+      - "Broken object level authorization (API1)"
+      - "Unrestricted resource consumption (API4) via ReDoS — a crafted pattern causes catastrophic backtracking that pins CPU"
+      - "Improper inventory management (API9)"
+      - "Server-side request forgery (API7)"
+    answer: 1
+    explanation: |
+      Accepting arbitrary regex/`contains` patterns exposes ReDoS: a maliciously crafted pattern triggers catastrophic backtracking that consumes CPU and stalls the service — a form of unrestricted resource consumption (OWASP API4:2023). Mitigate by disallowing raw regex, bounding pattern complexity, or using linear-time matchers/timeouts.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-083
+    difficulty: expert
+    tags: [filtering, sorting, owasp-api3, hidden-columns]
+    question: |
+      Allowing clients to sort or filter on fields that exist in the table but are
+      not returned in the response (e.g. an internal `risk_score` column) is unsafe
+      primarily because:
+    options:
+      - "It slows down the ORDER BY clause"
+      - "It can leak the values of hidden properties through ordering/matching behavior — an OWASP API3:2023 Broken Object Property Level Authorization exposure — even though the field is never shown"
+      - "It violates RFC 8288"
+      - "It makes the cursor token longer"
+    answer: 1
+    explanation: |
+      Even if a hidden column is never serialized, letting clients sort or filter on it leaks information: by observing result order or which rows match, an attacker can infer the hidden values (a binary-search-style oracle). That's OWASP API3:2023 Broken Object Property Level Authorization — sortable/filterable fields must be an allowlist restricted to properties the caller may access.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-084
+    difficulty: advanced
+    tags: [link-header, iana, relations]
+    question: |
+      Which statement about the pagination link relation types is correct?
+    options:
+      - "next/prev/first/last are arbitrary strings each API invents"
+      - "next/prev/first/last are IANA-registered link relation types (per RFC 8288's registry), and cursor APIs commonly omit first/last while keeping next/prev"
+      - "Only next is standardized; prev/first/last are proprietary"
+      - "Link relations may only appear in the response body, never in the Link header"
+    answer: 1
+    explanation: |
+      `next`, `prev`, `first`, and `last` are registered in the IANA Link Relations registry that RFC 8288 governs, so they're interoperable rather than ad-hoc. Cursor APIs frequently drop `first`/`last` (which need a total) while still returning `next`/`prev`. Link relations can appear in the Link header or in-body links.
+    ref: "concepts.md#link-header-for-pagination-rfc-8288"

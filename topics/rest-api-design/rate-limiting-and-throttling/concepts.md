@@ -410,6 +410,361 @@ type) even though it hides the implementation.
 
 ---
 
+## Concurrency limiting as a fourth dimension
+
+**What it is.** Beyond rate (requests per unit *time*), quota (total *volume*),
+and spike arrest (arrival *smoothness*), there is a fourth, orthogonal limiter:
+**concurrency** — the number of requests a caller may have *in flight at any
+single instant*, regardless of how fast it started them. "At most 100 concurrent
+requests" says nothing about requests/second; a client could open 100 long-lived
+streaming or long-poll connections and hit the concurrency wall while its request
+*rate* is near zero.
+
+**Why it matters.** Rate limits protect against *arrival velocity*; concurrency
+limits protect against *resource occupancy* — connections, worker threads, memory,
+DB pool slots held for the duration of slow requests. A single expensive report
+that takes 30 s ties up a slot the whole time; ten of them can exhaust a pool even
+at a trivial request rate. This is why real APIs run both: **Stripe** exposes
+`global-concurrency` and `endpoint-concurrency` limits; **GitHub** caps concurrent
+requests (100, shared with GraphQL) independently of its points-per-minute rate.
+
+**Contract expression.** The IETF draft's quota-unit registry standardizes
+`qu=concurrent-requests`, so a `RateLimit-Policy` can advertise a concurrency
+budget the same way it advertises a request-rate budget — e.g.
+`RateLimit-Policy: "conc";q=100;qu=concurrent-requests`. The `RateLimit` `r` then
+means "concurrent slots still available," and a concurrency 429 clears the instant
+an in-flight request completes, not when a time window elapses — so a fixed
+`Retry-After` seconds value is a poor fit (retry when a slot frees, not at a wall
+clock).
+
+> [!KEY-TAKEAWAY]
+> Rate ≠ concurrency. Rate caps requests per unit time; concurrency caps
+> simultaneously in-flight requests. Long/slow requests can exhaust a concurrency
+> budget at near-zero request rate. Standardize it with `qu=concurrent-requests`.
+
+---
+
+## Machine-readable throttle bodies and problem types
+
+**What it is.** Headers tell a client *when* and *how much*; the **response body**
+can tell it *why*, *which policy*, and *whether it is safe to auto-retry* — the
+machine-readable half of the contract. Two ecosystems formalize this.
+
+**The IETF draft's problem types (§5).** Building on RFC 9457
+(`application/problem+json`), the draft registers throttle-specific `type` URIs,
+each carrying a **`violated-policies`** member (an array of the policy names that
+were breached):
+
+| Problem type | Status | Meaning |
+|---|---|---|
+| `quota-exceeded` | **429** | The caller's own quota/rate was exceeded |
+| `abnormal-usage-detected` | **429** | Usage flagged as abusive/anomalous |
+| `temporary-reduced-capacity` | **503** | Server-side capacity is temporarily reduced |
+
+An SDK can branch on the `type`: `quota-exceeded` → honor `Retry-After` and back
+off; `temporary-reduced-capacity` → treat as server-side (503) overload;
+`abnormal-usage-detected` → surface to a human rather than blindly retrying.
+
+**Google's cross-ecosystem model.** Google's API design guide maps the gRPC
+`RESOURCE_EXHAUSTED` code to **HTTP 429** and puts structured detail in the body:
+a required **`ErrorInfo`** (`reason`, `domain`, `metadata`), a **`QuotaFailure`**
+describing which quota was hit, and **`RetryInfo{retry_delay}`** carrying the retry
+timing *in the body* — a complement or alternative to the `Retry-After` header.
+
+**Why it matters.** A well-designed 429 body lets a generic SDK do the right thing
+without bespoke per-endpoint code: read the retry hint, identify the violated
+policy for logging/metrics, and decide retry-vs-surface. Header + typed body
+together are the full contract.
+
+---
+
+## Cost-based and weighted limiting
+
+**What it is.** Counting *requests* assumes every request costs roughly the same.
+It doesn't. One `GET /users/{id}` is cheap; one deep GraphQL query or a bulk export
+can be thousands of times more expensive. **Cost/weight/points-based limiting**
+assigns each request a cost and debits a *budget of points* rather than a count of
+calls.
+
+- **GitHub REST** enforces a **900-points-per-minute** *secondary* rate limit
+  across REST endpoints (layered on top of the primary requests/hour limit) so
+  expensive calls debit more of the budget than cheap ones.
+- **GitHub GraphQL** rate-limits by **query complexity/cost** computed from the
+  requested fields — essential because a single GraphQL endpoint hides queries of
+  wildly varying cost, making a flat "N requests/min" meaningless.
+
+**Contract expression.** The draft's `qu` quota-unit can be `content-bytes`
+(bandwidth-based) as well as `requests`, and a policy's `q` is a *quota* in those
+units — so a `RateLimit-Policy` can advertise a byte or points budget, and the
+`RateLimit` `r` reports remaining points/bytes, not remaining calls. Document how
+each operation maps to cost so clients can predict debits.
+
+**The senior angle.** "How do you rate-limit one GraphQL endpoint or one
+expensive bulk endpoint?" The answer is *not* a per-endpoint request count — it is
+a cost model (query complexity / points / bytes) surfaced through the same
+RateLimit contract, so the client sees remaining *budget* and can pace by cost.
+
+> [!KEY-TAKEAWAY]
+> Request-count limits are naive when calls differ in cost. Weighted/points/
+> bytes-based limiting debits a budget by cost; the RateLimit contract carries it
+> via `qu` (`requests` | `content-bytes` | `concurrent-requests`) and a `q` quota
+> in those units.
+
+---
+
+## 403 vs 429 and reason disambiguation
+
+**What it is.** In the wild, rate limits are not always signalled with 429.
+**GitHub historically returned 403 Forbidden** for rate-limit rejection and still
+returns **either 403 or 429** depending on the limit type. A 403 is *semantically
+wrong* for throttling (403 means "authenticated but not allowed," implying
+retrying won't help), but it is common enough that a robust client must handle it.
+
+**How a client disambiguates.** A bare 403 is *not* retryable; a 403 that is
+*actually* a rate limit is. The client distinguishes them by inspecting signals
+the body/headers carry: a rate-limit 403 will include `Retry-After` and/or
+`x-ratelimit-*` headers (GitHub sends `x-ratelimit-remaining: 0`), or a
+rate-limit-flavored problem `type`/message. Absent those, treat 403 as a hard
+authorization failure and do **not** retry.
+
+**Different 429s are not interchangeable either.** A rate-limit 429, a concurrency
+429, and a lock-timeout 429 share a status code but demand different client
+behavior. Stripe disambiguates via **`Stripe-Rate-Limited-Reason`** (values like
+`global-rate`, `endpoint-rate`, `global-concurrency`, `endpoint-concurrency`,
+`resource-specific`) and a distinct `lock_timeout` error (a 429 that carries *no*
+rate-limit header). Notably, Stripe's SDKs **auto-retry `lock_timeout` 429s but do
+NOT auto-retry rate-limit 429s** — because a lock timeout is a transient
+contention blip, whereas hammering a rate-limit 429 just deepens the throttle.
+
+> [!WARNING]
+> Do not treat every 403 as fatal or every 429 as auto-retryable. Branch on the
+> body/headers: 403-that-is-a-rate-limit (has `Retry-After`/rate headers) is
+> retryable; a plain 403 is not. A lock-timeout 429 is safely retryable; a
+> rate-limit 429 must be backed off, not hammered.
+
+---
+
+## Retry amplification and retry budgets
+
+**What it is.** In a multi-tier system (SDK → API gateway → service mesh sidecar →
+service), if *every* layer retries independently, the retry counts **multiply**.
+Three retries at each of three layers is up to **3 × 3 × 3 = 27×** the original
+load hitting the innermost service. A downstream 429 or timeout thus triggers a
+**retry storm** that can push an already-struggling system into a **metastable
+failure** — a state that persists (retries keep the load high) even after the
+original trigger is gone.
+
+**Mitigations (the senior framing).**
+- **Retry at exactly one layer.** Typically the outermost client/SDK owns retries;
+  intermediate hops fail fast and propagate the error (and `Retry-After`) rather
+  than retrying themselves.
+- **Retry budgets (Google SRE).** Cap retries to a small fraction of request
+  volume — e.g. **retries ≤ 10% of requests** — enforced with a token bucket per
+  client. When the budget is exhausted, requests fail immediately instead of
+  retrying, breaking the amplification loop.
+- **Propagate `Retry-After`** end-to-end so upper layers wait rather than
+  re-issuing, and use **circuit breakers** to stop calling a failing dependency
+  entirely for a cool-down period.
+
+**Why it matters.** The existing backoff/jitter guidance is about a *single*
+client; retry amplification is the *systemic* failure that emerges when many
+retrying layers compose. "Walk me through a downstream 429 that triggers retries
+at the gateway, mesh, and SDK" is a classic staff-level probe — the answer is
+single-layer retry + retry budgets + Retry-After propagation.
+
+---
+
+## Fail-open vs fail-closed limiters
+
+**What it is.** A distributed limiter keeps its counters in a shared datastore
+(commonly Redis). When that store is slow or **unavailable**, the limiter must
+decide, per request, what to do without an authoritative count:
+
+- **Fail-closed** — reject (429/503) when the counter can't be read. *Safe for the
+  backend* (never over-admits) but the limiter becomes a **single point of
+  failure**: a Redis outage turns into a full API outage — effectively self-DoS.
+- **Fail-open** — allow the request when the counter can't be read. *Preserves
+  availability* but removes protection exactly when the system may be stressed,
+  risking overload.
+
+**The trade-off.** Neither is universally right. Many designs fail-open for
+best-effort rate limits (availability first) but fail-closed for hard
+security/billing quotas (correctness first), and add a **local in-process
+fallback** (approximate per-node counting) so a datastore blip degrades gracefully
+instead of flipping fully open or fully closed.
+
+**Client-visible consequence.** During a limiter datastore incident, a client may
+observe `RateLimit: remaining` values that are stale, missing, or wildly
+inconsistent, and either unexpected 503s (fail-closed) or a temporary absence of
+throttling (fail-open). This is why the contract calls these headers *best-effort*.
+
+---
+
+## Client-side rate limiting and adaptive throttling
+
+**What it is.** The contract is **bilateral**: a good client doesn't just react to
+429s, it *proactively* limits itself so it rarely triggers one.
+
+- **Client-side token bucket.** The client runs its own limiter sized to the
+  advertised policy, smoothing its own outbound rate. **Stripe explicitly
+  recommends** clients implement a token bucket rather than firing bursts and
+  absorbing 429s.
+- **Adaptive concurrency / adaptive throttling.** The client dynamically adjusts
+  its in-flight concurrency based on observed latency and rejection rate (AIMD-style
+  — additive increase, multiplicative decrease), backing off as it sees pressure.
+- **Client-side "accept probability" throttling** (Google SRE): the client
+  computes a local reject probability from its recent accept/reject ratio and
+  drops requests *before* sending them once the server is clearly rejecting — this
+  sheds load at the source and is distinct from a **server-side circuit breaker**
+  (which trips a client's *calls to a dependency* off entirely).
+
+**Why it matters.** A server can only defend itself; a well-behaved ecosystem
+needs clients that pace, self-throttle, and shed proactively. "The client's
+obligations extend beyond honoring `Retry-After`" is the point — RateLimit headers
+exist precisely so clients can self-govern.
+
+---
+
+## Distributed limits and best-effort semantics
+
+**What it is.** A limiter running on many nodes behind a shared (but lagging)
+counter cannot give an *exact* real-time remaining count. This deepens the earlier
+"informational hint" caveat with the precise reasons and the spec's explicit
+disclaimers.
+
+**Why `remaining` is approximate.**
+- **Per-node local buckets** that only periodically reconcile can *sum above* the
+  global limit (each node thinks it has budget), so a client may briefly succeed
+  beyond the advertised ceiling — or, after reconciliation, see `remaining` **jump
+  down or briefly go negative**.
+- **Sticky vs non-sticky routing.** With sticky routing a client always hits the
+  same node's counter (more consistent); with non-sticky routing consecutive
+  requests hit different nodes with different local views, so `remaining` can
+  appear to move non-monotonically.
+- **Replication/sync lag** between nodes and the central store makes any single
+  response's `remaining` a *snapshot that may already be stale*.
+
+**What the draft actually says (advisory, not a guarantee).**
+- Clients **MUST NOT assume** the full service limit will be restored after `t`.
+- Clients **MUST NOT assume** future responses contain the same RateLimit fields
+  (a server may change or drop them at any time).
+- `t` **"does not necessarily end at a fixed point in time"** — with a sliding
+  window the reset is continuous, not a hard wall.
+
+The correct mental model: **RateLimit is advisory telemetry for pacing, not a
+reservation or a promise.** Treat `remaining` as "roughly this much, right now,
+best-effort."
+
+---
+
+## Retry-After and RateLimit precedence and edge cases
+
+**What it is.** The exact precedence and parsing rules when the throttle signals
+interact or are malformed — details the earlier "should be consistent" note leaves
+implicit.
+
+**Precedence (draft §6/§7).**
+- If **both `Retry-After` and `RateLimit` are present, `Retry-After` MUST take
+  precedence** for the rejected request's retry timing; the effective RateLimit
+  window **MAY be ignored** for that decision.
+- A server **SHOULD NOT** set `Retry-After` to a point *earlier* than the end of
+  the effective RateLimit window (don't invite a retry that will just be rejected
+  again).
+- Clients **MUST ignore malformed fields** rather than guessing, and a **cached
+  response with a positive `current_age` SHOULD be ignored** for rate-limit
+  purposes (a stale RateLimit snapshot is worse than none).
+
+**`Retry-After` edge cases.**
+- `Retry-After: 0` means *retry immediately* (valid; a non-negative integer).
+- An **HTTP-date in the past** implies no wait; treat as "retry now."
+- **Non-integer / garbage** delay values (`Retry-After: soon`, `12.5`) are
+  malformed → treat as **absent** and fall back to backoff.
+- Clients should **clamp absurd values** — a `Retry-After: 999999999` shouldn't
+  hang a request for years; cap it to a sane maximum and/or surface an error.
+
+---
+
+## Info-leak and abuse hardening
+
+**What it is.** Advertising precise limit state is a usability win but also an
+**information disclosure** vector, and the draft (§6) addresses it directly.
+
+- Servers **"MUST NOT convey values exposing an unwanted volume of requests"** and
+  **SHOULD cap the ratio** of quota to window, especially for large windows —
+  otherwise `RateLimit: r=…` on every response tells a scraper *exactly* how much
+  headroom it has to enumerate/scrape without tripping the limit.
+- The partition key `pk` **SHOULD be documented** but **SHOULD avoid sensitive
+  information** (it is a Byte Sequence, base64-encoded, not a place to leak user
+  identifiers or internal keys).
+- Precise `X-RateLimit-Remaining` on every 200 can *aid* an attacker pacing an
+  enumeration attack right up to the limit — a real trade-off between
+  developer-friendliness and abuse resistance. Coarsening or omitting the exact
+  remaining count on sensitive/unauthenticated endpoints is a legitimate hardening
+  choice.
+
+**Resource-consumption defense is broader than request count (OWASP API4:2023).**
+Rate limiting is one control; **Unrestricted Resource Consumption** covers many
+other dimensions an attacker can abuse even within the request-count limit:
+- max **response items / page size** (an unbounded `?limit=` is a DoS lever),
+- request **body / payload size** and **file-upload size**,
+- execution **timeouts** and **memory/CPU** caps per request,
+- **third-party operational cost** — per-request spend on SMS, email, or cloud
+  APIs, where a "cheap" request count masks real money burned.
+
+A complete answer pairs rate/quota limits with these per-request resource caps.
+
+---
+
+## Structured Fields wire mechanics and quota units
+
+**What it is.** The RateLimit fields are **Structured Fields** (RFC 8941, updated
+by RFC 9651), and parsing them correctly means following that syntax — a common
+implementer trip-up.
+
+- **Names are sf-strings** (double-quoted): `"burst"`, `"daily"`. The parameters
+  (`r`, `t`, `q`, `w`, `qu`, `pk`) are sf key/value pairs.
+- **`pk` (partition key) is a Byte Sequence** — base64 wrapped in colons, e.g.
+  `pk=:aGVsbG8=:` — not a bare string.
+- **`w` (window) is a non-zero integer number of seconds**; `q` is a
+  request/quota count in the policy's `qu` units.
+- **`qu` (quota units)** comes from the registry (§10.3): **`requests`** (default),
+  **`content-bytes`**, **`concurrent-requests`**.
+- **Lists may be split across multiple header instances** with the same field name
+  and must be **recombined** in order before parsing (a single logical List can
+  arrive as several header lines).
+- These fields **MUST NOT appear in trailers** — only in the header section.
+- **Vendor-specific parameters SHOULD be prefixed** to avoid collisions with future
+  registered params (e.g. `acme-policy`, not a bare `policy`).
+
+**The draft's own identity.** The current revision is
+**`draft-ietf-httpapi-ratelimit-headers-11`** (updated 2026-05-23). It is
+**deliberately not tied to RFC 6585 or any specific status code** — the spec says
+**"429 is only an example"**; RateLimit fields MAY accompany *any* status,
+including 2xx and (with caution) 3xx. So the coupling "RateLimit ⇒ 429" is an
+implementation convention, not a spec requirement.
+
+---
+
+## Conserving quota with conditional requests
+
+**What it is.** Conditional requests (the caching topic's `ETag`/`If-None-Match`
+and `Last-Modified`/`If-Modified-Since`) intersect with rate limiting: a `304 Not
+Modified` returns no body and costs the server far less, so **some APIs charge
+`304`/cached responses lightly or not at all** against the rate limit.
+
+**Why it matters for the contract.**
+- A client that sends `If-None-Match` and gets `304` conserves both bandwidth and
+  (on APIs that discount them) its rate/points budget — a concrete pacing
+  technique beyond "just slow down."
+- Whether `304`s count against the limit is **API-specific and must be
+  documented**; a client can't assume it. (GitHub, for instance, historically did
+  not count some conditional `304`s against the limit.)
+- This ties rate limiting to caching (RFC 9110 conditional requests, RFC 9111
+  caching): the cheapest request is the one you don't fully make, and a
+  well-designed contract rewards conditional-request discipline.
+
+---
+
 ## Common follow-up questions
 
 - **"Why is 429 a 4xx if it's retryable?"** Because the fault is on the client
@@ -457,3 +812,24 @@ type) even though it hides the implementation.
   https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/
 - **OpenAPI 3.1 Specification**: documenting response headers.
   https://spec.openapis.org/oas/v3.1.0
+- **draft-ietf-httpapi-ratelimit-headers-11** (updated 2026-05-23): current
+  revision defining `RateLimit`/`RateLimit-Policy` params (`r`,`t`,`pk` /
+  `q`,`w`,`qu`,`pk`), the quota-unit registry (`requests`, `content-bytes`,
+  `concurrent-requests`), problem types (`quota-exceeded`,
+  `temporary-reduced-capacity`, `abnormal-usage-detected` with `violated-policies`),
+  precedence rules, and info-leak guidance. "429 is only an example" — the fields
+  are not tied to any status code.
+- **Google API Improvement Proposals / API Design Guide — errors**:
+  `RESOURCE_EXHAUSTED`→429, `ErrorInfo`, `QuotaFailure`, `RetryInfo{retry_delay}`.
+  https://cloud.google.com/apis/design/errors
+- **Google SRE — Handling Overload / Addressing Cascading Failures**: client-side
+  adaptive throttling ("accept probability"), retry budgets, metastable failure.
+  https://sre.google/sre-book/handling-overload/
+- **Stripe API rate limits**: `Stripe-Rate-Limited-Reason`, `lock_timeout`,
+  global/endpoint concurrency limits, client-side token-bucket recommendation.
+  https://stripe.com/docs/rate-limits
+- **GitHub REST API — rate limits**: points/minute, primary vs secondary limits,
+  100 concurrent (shared with GraphQL), 403-or-429 behavior.
+  https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+- **Zalando RESTful API Guidelines — Rule #153**: MUST use 429 with rate-limit
+  headers. https://opensource.zalando.com/restful-api-guidelines/

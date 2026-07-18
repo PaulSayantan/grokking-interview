@@ -486,6 +486,415 @@ Alternatives and when they apply:
 > A 64-bit integer ID serialized as a JSON number is silently corrupted by any JavaScript
 > client once it exceeds 2^53−1. Serialize large integer IDs as strings.
 
+## The Prefer request header and return=minimal
+
+**`Prefer` (RFC 7240)** lets a client state a *preference* for how the server processes
+a request — a hint the server MAY honor or ignore. The most important preference for
+response design is **`return`**, which controls whether a write echoes the resource:
+
+```http
+POST /orders HTTP/1.1
+Content-Type: application/json
+Prefer: return=minimal          <-- "don't send the resource body back"
+
+{ "items": [...] }
+```
+```http
+HTTP/1.1 201 Created
+Location: /orders/98f3
+Preference-Applied: return=minimal   <-- server confirms it honored the preference
+```
+
+- **`return=minimal`** → the server SHOULD return an empty/`204 No Content` (or `201`
+  with just headers) instead of the full representation. This is *the* standards answer
+  to "how does a client tell the server **not** to echo the resource after a POST/PUT/
+  PATCH?" It saves bandwidth on high-throughput writers.
+- **`return=representation`** → explicitly ask for the full resource body back (useful
+  when the server's default is minimal).
+- **`handling=strict` / `handling=lenient`** → whether the server should hard-fail on
+  problems it could otherwise tolerate (e.g. unknown fields).
+- **`respond-async`** → asking for asynchronous handling, typically answered with
+  **`202 Accepted`** and a status/polling location.
+- **`wait=<seconds>`** → bound how long the server should block (pairs with
+  `respond-async`).
+
+Rules that matter:
+
+- Because `Prefer` is optional, the server **MUST send `Preference-Applied`** listing the
+  preferences it actually honored whenever the client cannot otherwise tell — e.g. after
+  `return=minimal` there is no body to reveal what happened.
+- A response that varies by `Prefer` and is cacheable needs **`Vary: Prefer`**, otherwise
+  a cache could serve a bodyless response to a client that wanted the representation.
+- `Prefer` is a *preference*, not a directive — a server is free to ignore it. Contrast
+  with `Expect: 100-continue`, which is a mandatory protocol interaction.
+
+> [!INTERVIEW]
+> "A batch job POSTs 10k rows and doesn't need the created bodies back — how does it say
+> so on the wire?" Answer: `Prefer: return=minimal`, server replies `201/204` with
+> `Preference-Applied: return=minimal` and no body (add `Vary: Prefer` if cached).
+
+## Problem Details error bodies (RFC 9457)
+
+**RFC 9457** (which obsoletes RFC 7807) standardizes a machine-readable error body so you
+don't invent a bespoke error shape per API. Media type **`application/problem+json`**
+(or `application/problem+xml`). The five standard members:
+
+```http
+HTTP/1.1 422 Unprocessable Content
+Content-Type: application/problem+json
+
+{
+  "type": "https://api.example.com/problems/validation-error",
+  "title": "Your request body was invalid",
+  "status": 422,
+  "detail": "The 'quantity' field must be a positive integer.",
+  "instance": "/orders/98f3/attempts/7",
+  "errors": [
+    { "detail": "must be > 0", "pointer": "/items/0/qty" },
+    { "detail": "unknown SKU",  "pointer": "/items/1/sku" }
+  ]
+}
+```
+
+- **`type`** — a URI identifying the *problem type* (the primary key of the error).
+  Default is `about:blank`, which means "no specific type; use the status code's meaning."
+  The URI need not be dereferenceable, but SHOULD point at human-readable docs if it is
+  (RFC 9457 §3.1.1). Clients should key logic off `type`, not off `title`/`detail` text.
+- **`title`** — a short, human-readable, *type-stable* summary (same for all instances of
+  a type; don't put per-request data here).
+- **`status`** — the HTTP status code, **advisory/duplicated** for out-of-band contexts;
+  it MUST match the actual response status line. It does not replace it.
+- **`detail`** — human-readable explanation *specific to this occurrence*.
+- **`instance`** — a URI identifying this specific occurrence of the problem.
+
+Key points:
+
+- **Extension members** are allowed and encouraged — e.g. an `errors[]` array for
+  per-field validation failures (using a JSON Pointer or field name). This is how you
+  answer "design the error body for a 3-field validation failure": one Problem Detail
+  with an `errors` extension listing each field.
+- RFC 9457 added a **"HTTP Problem Types" IANA registry** (§4.2) — the headline change
+  from 7807 — so common problems can share well-known `type` URIs.
+- Don't leak internals (stack traces, SQL) into `detail`. The `type`/`title` are the
+  stable contract; `detail`/`instance` vary per occurrence.
+- Zalando's guidelines *mandate* Problem JSON; Google AIP-193 and Microsoft's guidelines
+  define close analogues. Knowing RFC 9457 by name is table stakes at senior level.
+
+## GET with a body and the HTTP QUERY method
+
+**A body on `GET` has undefined semantics (RFC 9110 §9.3.1).** A GET request MAY include
+a body, but there are *no defined semantics* for it; a server MAY reject such a request or
+ignore the body, and intermediaries/caches will not include it in the cache key. The same
+caveat applies to `DELETE`. So "GET with a body" is never a safe design.
+
+This creates the classic **search trilemma** for a large filter payload:
+
+| Approach | Problem |
+|---|---|
+| `GET /search?filter=...` | URI length limits (proxies/servers cap ~8 KB); leaks filters into logs |
+| `GET` with a JSON body | Undefined semantics; not cacheable; often stripped |
+| `POST /search` | Works, but POST is neither safe nor idempotent, so **not cacheable** |
+
+**The HTTP `QUERY` method** (RFC 10008, 2026) resolves this. QUERY is **safe and
+idempotent** like GET, but carries a **request body** describing the query:
+
+```http
+QUERY /orders HTTP/1.1
+Content-Type: application/json
+Accept: application/json
+
+{ "filter": { "status": "PENDING", "createdAfter": "2026-01-01" }, "sort": ["-createdAt"] }
+```
+
+- **Cacheable** — and crucially the **request body is part of the cache key**, so two
+  QUERYs with different bodies cache separately (unlike POST).
+- The server MAY advertise which query media types it accepts via **`Accept-Query`**.
+- A QUERY that produces a new resource/result location uses `Content-Location`/`Location`
+  conventions to point at the concrete result representation.
+
+> [!INTERVIEW]
+> "A client sends a 20 KB search filter — GET-with-body, POST, or something else, and how
+> do you keep it cacheable?" Strong answer: not GET (undefined body, URI limits) and not
+> plain POST (uncacheable); use the **QUERY** method — safe, idempotent, body-in-cache-key
+> — or fall back to POST with an explicit cache strategy if QUERY isn't available.
+
+## I-JSON, binary data, and multipart payloads
+
+**I-JSON (RFC 7493, "Internet JSON")** is a restricted *profile* of JSON (RFC 8259)
+designed for maximum interoperability. Naming it lets you consolidate the "safe JSON"
+rules under one authority:
+
+- **No duplicate object keys.** RFC 8259 only *SHOULD* forbid them; I-JSON *MUST*. This is
+  a real security issue — parsers disagree (first-wins vs last-wins), so a duplicate key
+  can drive request-smuggling / authorization-bypass when a validator and an executor see
+  different values (e.g. `{"role":"user","role":"admin"}`).
+- **Object member order carries no meaning** — never depend on it.
+- **UTF-8 is mandatory**; no unpaired surrogates.
+- **Numbers**: keep integers within ±(2^53−1) and avoid relying on more than
+  IEEE-754-double precision (the large-ID / money rule again).
+- **Binary data as base64url strings** (see below).
+
+**Carrying binary bytes in JSON:**
+
+- **base64 in a JSON string** — simple, but inflates size ~33% and costs encode/decode CPU.
+  Note **base64** (`+`,`/`,`=`) vs **base64url** (`-`,`_`, no padding) — I-JSON recommends
+  base64url so the value is URL/filename-safe. Fine for small blobs (thumbnails, keys).
+- **A separate binary media type** — return the bytes with their real `Content-Type`
+  (`image/png`) at a sub-resource URI, and link to it from the JSON. Best for large blobs.
+- **`multipart/form-data`** — combine a JSON metadata part with a raw binary file part in
+  one request; each part has its own `Content-Type`. This avoids base64-bloating a large
+  file into a JSON string:
+
+```http
+POST /documents HTTP/1.1
+Content-Type: multipart/form-data; boundary=X
+
+--X
+Content-Disposition: form-data; name="metadata"
+Content-Type: application/json
+
+{ "title": "Q3 report", "tags": ["finance"] }
+--X
+Content-Disposition: form-data; name="file"; filename="q3.pdf"
+Content-Type: application/pdf
+
+%PDF-1.7 ...binary...
+--X--
+```
+
+`multipart/mixed` is the sibling for a sequence of parts without form semantics. Rule of
+thumb: **don't base64 a multi-MB file into JSON** — use multipart or a separate upload URL.
+
+## Streaming response shapes: NDJSON, JSON sequences, and SSE
+
+Returning "10 million rows" as one JSON array (`[ {...}, {...}, ... ]`) forces both server
+and client to **buffer the entire array** before the first/last element is usable — a
+memory bomb with no backpressure. Streaming formats emit one record at a time:
+
+| Format | Media type | Delimiter | Notes |
+|---|---|---|---|
+| **NDJSON / JSON Lines** | `application/x-ndjson` (JSONL) | `\n` newline | One JSON value per line; incrementally parseable line-by-line |
+| **JSON Text Sequences** | `application/json-seq` (RFC 7464) | `0x1E` (RS) prefix + `\n` | Self-synchronizing; a truncated record is detectable |
+| **Server-Sent Events** | `text/event-stream` | `data:` lines, `\n\n` | Push channel over one HTTP response; auto-reconnect, `id:`/`event:` fields |
+
+- These pair with the streaming transport: **`Transfer-Encoding: chunked`** (HTTP/1.1)
+  or HTTP/2/3 framing, because the total length isn't known up front (so no
+  `Content-Length`).
+- NDJSON's win over a JSON array: a consumer can process and discard each record, applying
+  **backpressure** and bounding memory. A `[...]` array is not incrementally valid until
+  the closing `]`.
+- SSE is for server→client *push* (notifications, progress); NDJSON/json-seq are for
+  streaming a large *result set*. Don't confuse them with WebSockets (full-duplex, not HTTP
+  request/response semantics).
+
+## Payload integrity: Content-Digest and Repr-Digest
+
+**RFC 9530** (obsoletes the RFC 3230 `Digest` header) defines integrity fields so a
+recipient can verify a body wasn't corrupted in transit — useful across proxies where TLS
+only protects each hop, not end-to-end:
+
+- **`Content-Digest`** — a digest of the **actual message content** (the specific bytes on
+  this hop, *after* content coding / range selection). Changes if the body is gzipped or a
+  range is returned.
+- **`Repr-Digest`** — a digest of the **full representation** (the resource's bytes
+  independent of encoding/range). Stable across `Content-Encoding` and range requests.
+- This **Content-vs-Repr split exactly parallels `Content-Encoding` vs the underlying
+  representation**: `Content-Digest` is the on-the-wire bytes, `Repr-Digest` is the
+  logical resource.
+- **`Want-Content-Digest` / `Want-Repr-Digest`** let a client ask the server to include a
+  digest (with algorithm preferences via q-values, e.g. `sha-256`, `sha-512`).
+- Limitation: these protect **only the body, not headers**. For end-to-end integrity over
+  selected headers you pair them with **HTTP Message Signatures (RFC 9421)**.
+
+> [!INTERVIEW]
+> "Two proxies disagree about where a body got corrupted — how do you localize it?" TLS
+> gives per-hop integrity only; add `Repr-Digest`/`Content-Digest` so any hop (or the
+> client) can verify the body against the origin's digest.
+
+## Content-Location versus Location
+
+Two headers that name a URI, frequently confused:
+
+- **`Location`** — points at a *different* resource: the newly created resource (`201`),
+  or the target of a redirect (`3xx`), or the status monitor for an async op (`202`). "Go
+  here next."
+- **`Content-Location`** — names the **canonical URI of the representation in *this*
+  response body**. Under content negotiation it identifies the *specific negotiated
+  variant*, so a client can cache or bookmark the concrete representation directly:
+
+```http
+GET /articles/42 HTTP/1.1
+Accept: application/json
+Accept-Language: fr
+```
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Language: fr
+Content-Location: /articles/42.fr.json    <-- the concrete variant this body IS
+Vary: Accept, Accept-Language
+```
+
+So `Content-Location` is directly a **content-negotiation** tool: the negotiated URL of
+the variant you just received. `Location` is about *where else to go*.
+
+## Message framing: Content-Length versus chunked transfer
+
+A recipient must know where a message body ends. Two framing mechanisms:
+
+- **`Content-Length`** — an exact byte count, used when the length is known up front.
+- **`Transfer-Encoding: chunked`** — used when the length is *unknown* (streaming a
+  generated response). The body arrives as size-prefixed chunks terminated by a zero-length
+  chunk. This is **hop-by-hop** and distinct from `Content-Encoding` (end-to-end payload
+  transform).
+
+**Security — request smuggling:** if a message carries *both* `Content-Length` and
+`Transfer-Encoding: chunked`, RFC 9112 says `Transfer-Encoding` wins and the
+`Content-Length` MUST be treated as an error. When a front-end proxy and a back-end server
+disagree about which to honor, an attacker can smuggle a second request past the front-end
+(**CL.TE / TE.CL** attacks). Robust servers reject messages that contain both.
+
+## Range requests and partial transfer
+
+**Range requests (RFC 9110 §14)** transfer only *part of a representation's bytes* —
+distinct from sparse fieldsets, which project *part of a resource's fields*. Interviewers
+probe whether you conflate the two:
+
+- Server advertises support with **`Accept-Ranges: bytes`**.
+- Client asks with **`Range: bytes=0-1023`**.
+- Server answers **`206 Partial Content`** with **`Content-Range: bytes 0-1023/2048`**,
+  or **`416 Range Not Satisfiable`** if the range is invalid.
+- Conditional ranges use `If-Range` (with an ETag/date) so a resume only proceeds if the
+  resource hasn't changed. Used for download resumption, video seeking, parallel fetch.
+
+**Range/206 = partial *transfer* (which bytes). Sparse fieldsets = partial *projection*
+(which fields).** They operate on different axes and can coexist.
+
+## Vary and cache-key mechanics
+
+`Vary` (RFC 9111) is deeper than "just send it." A shared cache keys a stored response by
+the request URL **plus** the request-header values named in `Vary`:
+
+- Each distinct combination of the listed request-header values is a **separate cache
+  entry**. `Vary: Accept-Encoding` correctly splits gzip vs identity variants.
+- **`Vary: *`** means the response is effectively **uncacheable by shared caches** — the
+  variance depends on something outside the request headers.
+- **High-cardinality headers destroy hit rate.** `Vary: User-Agent` explodes into
+  thousands of entries (one per UA string) — almost always a mistake. Normalize/collapse
+  such dimensions server-side instead.
+- **`Vary: Cookie` / `Vary: Authorization`** are dangerous: they can either poison the
+  cache (serving one user's private response to another if `Vary` is *missing*) or make
+  the response effectively per-user (useless in a shared cache). Private responses should
+  use `Cache-Control: private`, not just `Vary`.
+- CDNs often **normalize `Accept-Encoding`** to a few canonical values before keying so
+  minor UA header ordering doesn't fragment the cache.
+- You must `Vary` on *every* request header the representation was negotiated on — miss
+  one (e.g. `Accept-Language`) and a cache serves the wrong variant.
+
+## JSON Patch versus JSON Merge Patch
+
+PATCH (RFC 5789) is the method; the *body format* is a separate contract. Two standard
+formats, with different media types and trade-offs:
+
+**JSON Merge Patch (RFC 7396)** — media type `application/merge-patch+json`. The patch
+looks like the target document; the server recursively merges it:
+
+```json
+{ "name": "New name", "nickname": null }
+```
+
+- Simple and readable; `null` **deletes** a member, absence leaves it unchanged.
+- **Cannot set a value *to* `null`** (null is overloaded as delete) and **cannot patch
+  array elements** — arrays are replaced wholesale, which is painful for large lists.
+
+**JSON Patch (RFC 6902)** — media type `application/json-patch+json`. An *ordered array of
+operations* addressed by **JSON Pointer**:
+
+```json
+[
+  { "op": "test",    "path": "/version", "value": 7 },
+  { "op": "replace", "path": "/name",    "value": "New name" },
+  { "op": "remove",  "path": "/nickname" },
+  { "op": "add",     "path": "/tags/-",  "value": "urgent" }
+]
+```
+
+- Operation set: **`add`, `remove`, `replace`, `move`, `copy`, `test`**.
+- Can target individual array positions (`/tags/0`, `/tags/-` to append).
+- **`test`** enables **optimistic concurrency**: the whole patch fails atomically if a
+  value isn't what the client expected (a body-level analogue of `If-Match`/ETag).
+- More expressive but more verbose and harder to author than Merge Patch.
+
+Rule of thumb: Merge Patch for simple field updates on object-shaped resources; JSON Patch
+when you need array-element edits, moves, or `test`-based concurrency.
+
+## Structured syntax suffixes beyond +json
+
+The structured-syntax-suffix mechanism (RFC 6839) is not limited to `+json`. A suffix tells
+a *generic* parser the underlying syntax so it can dispatch even on an unknown type:
+
+- **`+json`** (RFC 8259), **`+xml`**, **`+cbor`** (binary JSON-like), **`+zip`**,
+  **`+json-seq`**, **`+ber`/`+der`**, etc.
+- Well-known types that lean on `+json`: `application/problem+json` (RFC 9457),
+  `application/hal+json` (HAL), `application/vnd.api+json` (JSON:API),
+  `application/ld+json` (JSON-LD).
+- A proxy/library can strip the suffix to decide "parse as JSON/XML" even if it has never
+  heard of the vendor subtype — which is exactly why vendor media types append a suffix.
+
+## Enum evolution and forward compatibility
+
+"Send enums as strings" is only half the story; the harder question is **what happens when
+you add a new enum value**:
+
+- Adding a value is a **breaking change for strict clients** that reject unknown values
+  (e.g. a generated client whose deserializer throws on an unrecognized string). It is
+  *non*-breaking for clients built to the **"must ignore unknown values"** contract.
+- Best practice (Google AIP-126): **document a must-ignore rule**, and reserve a sentinel
+  member such as `UNSPECIFIED`/`UNKNOWN` (proto3 makes `0 = *_UNSPECIFIED`) so a client can
+  map values it doesn't recognize to a safe default instead of crashing.
+- Because of this, whether "add an enum value" is safe **depends on the client contract you
+  published** — state the extensibility rule up front, the same way you document
+  null-vs-omission and unknown-field handling (`handling=strict|lenient`).
+
+## Compression trade-offs and attacks
+
+Beyond BREACH (already noted), the senior-level compression picture:
+
+- **BREACH** (HTTP-response-body level) and **CRIME** (TLS/SPDY-header level, historical,
+  largely mitigated by disabling TLS-level compression) both exploit the fact that
+  compression **leaks the length** of a secret when it sits next to attacker-controlled
+  reflected input. Mitigations: don't compress responses mixing a secret (CSRF token) with
+  reflected input, or mask/randomize the token per request.
+- **Decompression bombs (zip bombs)** are a *request-side* DoS: a client sends a tiny
+  `Content-Encoding: gzip` body that expands to gigabytes. Servers that accept compressed
+  request bodies MUST **bound the decompressed size** and abort past a limit.
+- Named codings and their specs: **gzip** (RFC 1952), **Brotli `br`** (RFC 7932),
+  **zstd** (RFC 8878), **deflate**, **`identity`** (no coding). Brotli/zstd generally beat
+  gzip on ratio; negotiate via `Accept-Encoding` q-values.
+
+## 406, 415, and advertising acceptable types
+
+Refinements to the 406/415 story:
+
+- **In practice most APIs/frameworks don't return `406`** — RFC 9110 explicitly permits
+  serving a default representation the client didn't ask for rather than failing, and that
+  is what most stacks do. `406` is the strict-correct answer but is rarely emitted.
+- On a `415 Unsupported Media Type` (bad request `Content-Type`) the server SHOULD tell the
+  client what it *would* accept via the companion headers **`Accept-Post`** (for POST) and
+  **`Accept-Patch`** (for PATCH). These are the request-body analogue of `Accept`.
+- **q-value edge cases:** specificity ordering is `text/plain;format=flowed` >
+  `text/plain` > `text/*` > `*/*` (more parameters / more specific range wins ties).
+  **`q=0` means "not acceptable"** — an explicit *rejection* of that type, not merely low
+  priority. When two ranges tie on q and specificity, servers may break the tie by their
+  own preference.
+
+## Bodyless responses: 204 and 304
+
+Some status codes forbid a response body: **`204 No Content`** and **`304 Not Modified`**
+MUST NOT include one (a `304` may carry validators like `ETag` but no body). This ties back
+to `Prefer: return=minimal`, which is precisely how a client asks a write to answer with a
+bodyless `204`/`201` rather than echoing the resource.
+
 ## Common follow-up questions
 
 - **Why not just return the database entity as JSON?** Over-exposure of sensitive fields
@@ -512,6 +921,23 @@ Alternatives and when they apply:
   decimal string + currency code; large 64-bit IDs as strings to dodge the 2^53 float limit.
 - **Why must you send `Vary`?** So shared caches don't serve a representation negotiated
   for one client (e.g. French, gzip) to a client that asked for something else.
+- **How does a client say "don't send the body back" after a write?** `Prefer:
+  return=minimal`; the server answers `204`/`201` with `Preference-Applied: return=minimal`
+  (and `Vary: Prefer` if cached).
+- **How do you send a large search filter and keep it cacheable?** Not GET-with-body
+  (undefined semantics, RFC 9110 §9.3.1) and not plain POST (uncacheable) — use the HTTP
+  **QUERY** method (safe, idempotent, request body in the cache key).
+- **What's the standard error body?** RFC 9457 Problem Details (`application/problem+json`):
+  `type`, `title`, `status`, `detail`, `instance`, plus extension members like `errors[]`.
+- **`Location` vs `Content-Location`?** `Location` = another resource (created/redirect/
+  async monitor); `Content-Location` = canonical URI of the representation in *this* body
+  (the specific negotiated variant).
+- **Partial response vs partial representation?** Range/`206` transfers part of the *bytes*;
+  sparse fieldsets project part of the *fields*. Different axes.
+- **How do you stream a huge result set?** NDJSON (`application/x-ndjson`) or JSON sequences
+  (`application/json-seq`) over chunked transfer — not one buffered JSON array; SSE for push.
+- **Is adding an enum value breaking?** Depends on the client's unknown-value handling;
+  publish a must-ignore rule and reserve `UNSPECIFIED` (AIP-126).
 
 ## References
 
@@ -525,7 +951,18 @@ Alternatives and when they apply:
 - [RFC 6838 — Media Type Specifications and Registration Procedures](https://www.rfc-editor.org/rfc/rfc6838.html) (vnd./prs./x. trees)
 - [RFC 6839 — Additional Media Type Structured Syntax Suffixes](https://www.rfc-editor.org/rfc/rfc6839.html) (`+json`)
 - [RFC 8288 — Web Linking](https://www.rfc-editor.org/rfc/rfc8288.html) (`Link` header)
-- [RFC 9457 — Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc9457.html) (`application/problem+json`)
+- [RFC 9457 — Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc9457.html) (`application/problem+json`, obsoletes 7807, §4.2 registry)
+- [RFC 7240 — Prefer Header for HTTP](https://www.rfc-editor.org/rfc/rfc7240.html) (`return=minimal`, `Preference-Applied`)
+- [RFC 7493 — The I-JSON Message Format](https://www.rfc-editor.org/rfc/rfc7493.html) (interoperable JSON profile)
+- [RFC 9530 — Digest Fields](https://www.rfc-editor.org/rfc/rfc9530.html) (`Content-Digest`/`Repr-Digest`, obsoletes 3230)
+- [RFC 7464 — JavaScript Object Notation (JSON) Text Sequences](https://www.rfc-editor.org/rfc/rfc7464.html) (`application/json-seq`)
+- [RFC 9111 — HTTP Caching](https://www.rfc-editor.org/rfc/rfc9111.html) (`Vary`, cache keys)
+- [RFC 9112 — HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112.html) (message framing, `Content-Length` vs chunked, smuggling)
+- [RFC 5789 — PATCH Method for HTTP](https://www.rfc-editor.org/rfc/rfc5789.html)
+- [RFC 7932 — Brotli](https://www.rfc-editor.org/rfc/rfc7932.html) / [RFC 8878 — Zstandard](https://www.rfc-editor.org/rfc/rfc8878.html)
+- [RFC 10008 — The HTTP QUERY Method](https://www.rfc-editor.org/rfc/rfc10008.html) (safe/idempotent method with a request body, cacheable on body)
+- [Google AIP-126 (enums), AIP-157 (partial responses), AIP-193 (errors)](https://google.aip.dev/)
+- [Microsoft REST API Guidelines](https://github.com/microsoft/api-guidelines) / [Zalando RESTful API Guidelines](https://opensource.zalando.com/restful-api-guidelines/)
 - [RFC 5646 / BCP 47 — Tags for Identifying Languages](https://www.rfc-editor.org/rfc/rfc5646.html)
 - [OWASP API Security Top 10 (2023) — API3:2023 Broken Object Property Level Authorization](https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/)
 - [JSON:API specification](https://jsonapi.org/format/) (sparse fieldsets, `data` envelope, `include`)

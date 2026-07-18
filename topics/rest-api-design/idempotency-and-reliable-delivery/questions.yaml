@@ -906,3 +906,600 @@ questions:
       standard reliability recipe — an Idempotency-Key header is one way, not the
       only way.
     ref: "concepts.md#at-least-once-delivery-and-duplicate-handling"
+
+  - id: idempotency-and-reliable-delivery-051
+    difficulty: expert
+    tags: [structured-fields, rfc8941, wire-syntax]
+    question: |
+      Per `draft-ietf-httpapi-idempotency-key-header-07`, what is the precise
+      Structured Fields type of the `Idempotency-Key` value, and how does that
+      affect the wire syntax?
+    options:
+      - "An RFC 8941 Item of type String, which must be double-quoted on the wire (e.g. Idempotency-Key: \"8e0397...\")"
+      - "An RFC 8941 Token, which must be unquoted and lowercase"
+      - "An RFC 8941 List of Integers separated by commas"
+      - "A raw opaque octet sequence with no type constraints"
+    answer: 0
+    explanation: |
+      The draft defines the field as an RFC 8941 Structured Field Item of type
+      String. A String Item is serialized double-quoted, so the spec-correct
+      form is a quoted value. RFC 8941 also restricts Strings to printable ASCII
+      (no control or non-ASCII characters). Many servers still accept the bare
+      Stripe-style token for compatibility, but that is not the spec-strict form.
+    ref: "concepts.md#idempotency-key-wire-syntax-and-structured-fields"
+
+  - id: idempotency-and-reliable-delivery-052
+    difficulty: advanced
+    tags: [structured-fields, compatibility]
+    question: |
+      A team migrates to a strict RFC 8941 parser for the `Idempotency-Key`
+      header. Existing clients send `Idempotency-Key: 5f8d0e3a-2b1c-...`
+      (unquoted). What is the most likely outcome?
+    options:
+      - "Nothing changes; RFC 8941 treats unquoted and quoted values identically"
+      - "The strict parser rejects the unquoted value because a String Item must be double-quoted, breaking those clients unless a compatibility shim is kept"
+      - "The parser silently converts the value to a Token and dedup still works"
+      - "The values are accepted but stored twice, doubling storage"
+    answer: 1
+    explanation: |
+      An RFC 8941 String Item must be double-quoted. A strict parser sees a bare
+      UUID as an invalid String (it would parse as a Token, a different type), so
+      it rejects it. Migrations therefore need a compatibility layer that accepts
+      the legacy unquoted form, or a coordinated client update.
+    ref: "concepts.md#idempotency-key-wire-syntax-and-structured-fields"
+
+  - id: idempotency-and-reliable-delivery-053
+    difficulty: expert
+    tags: [error-taxonomy, status-codes, draft]
+    question: |
+      Under the IETF draft's error taxonomy, a request arrives reusing a key that
+      was already completed, but with a DIFFERENT request payload/fingerprint.
+      Which status code does the draft specify?
+    options:
+      - "409 Conflict"
+      - "400 Bad Request"
+      - "422 Unprocessable Content"
+      - "412 Precondition Failed"
+    answer: 2
+    explanation: |
+      The draft standardizes on 422 Unprocessable Content (RFC 9110 §15.5.21) for
+      a same-key/different-fingerprint request — the syntax is valid but it is
+      semantically inconsistent with the recorded request. (Stripe historically
+      returns 400 here; both are defensible, but the draft chooses 422.) 409 is
+      reserved for the still-in-flight case.
+    ref: "concepts.md#error-taxonomy-in-the-ietf-draft"
+
+  - id: idempotency-and-reliable-delivery-054
+    difficulty: advanced
+    tags: [error-taxonomy, in-flight, status-codes]
+    question: |
+      Per the draft, which status code (and suggested title) applies when a
+      required `Idempotency-Key` is present but a request with that key is still
+      being processed?
+    options:
+      - "425 Too Early — \"Request replayed from early data\""
+      - "409 Conflict — \"A request is outstanding for this Idempotency-Key\""
+      - "429 Too Many Requests — \"Rate limit exceeded\""
+      - "202 Accepted — \"Still processing\""
+    answer: 1
+    explanation: |
+      The draft designates 409 Conflict with the title "A request is outstanding
+      for this Idempotency-Key" for a concurrent in-flight duplicate. It does not
+      use 425 (which is TLS early-data specific). 429 is about rate limiting, and
+      202 would wrongly imply a fresh acceptance.
+    ref: "concepts.md#error-taxonomy-in-the-ietf-draft"
+
+  - id: idempotency-and-reliable-delivery-055
+    difficulty: expert
+    tags: [error-taxonomy, expiry, semantics]
+    question: |
+      Why does the IETF draft deliberately define NO dedicated error code for a
+      key that is reused after its retention window has expired?
+    options:
+      - "Because reuse-after-expiry is forbidden and always returns 403"
+      - "Because a purged key is indistinguishable from a never-seen key, so the safe behavior is to treat it as a brand-new request and re-execute"
+      - "Because the draft mandates keys live forever, so expiry cannot happen"
+      - "Because clients are required to send a fresh key after any expiry"
+    answer: 1
+    explanation: |
+      Once a key is purged, the server has no record to distinguish it from a
+      first-time key, so the draft leaves it undefined and the sane behavior is to
+      process it as new. This is precisely the "double-execute after TTL" danger
+      window: a late retry arriving post-purge can produce a second side effect.
+    ref: "concepts.md#error-taxonomy-in-the-ietf-draft"
+
+  - id: idempotency-and-reliable-delivery-056
+    difficulty: expert
+    tags: [425, rfc8470, trap]
+    question: |
+      Is `425 Too Early` an appropriate status code for "a duplicate request with
+      this idempotency key is still in flight"?
+    options:
+      - "Yes — 425 is the canonical 'still processing, try later' code"
+      - "No — RFC 8470 defines 425 specifically for refusing TLS 1.3 early-data (0-RTT) requests; the correct code here is 409 Conflict"
+      - "Yes, but only over HTTP/2"
+      - "No — the correct code is 412 Precondition Failed"
+    answer: 1
+    explanation: |
+      425 Too Early (RFC 8470) means the server is unwilling to risk processing a
+      request that arrived in replayable TLS 1.3 early data (0-RTT). It has
+      nothing to do with an in-flight duplicate. The draft uses 409 Conflict for
+      that; 429/503 + Retry-After are the back-off signals.
+    ref: "concepts.md#the-425-too-early-trap"
+
+  - id: idempotency-and-reliable-delivery-057
+    difficulty: expert
+    tags: [425, 0-rtt, idempotency-adjacent]
+    question: |
+      Why does TLS 1.3 0-RTT early data relate to idempotency at all, motivating
+      the existence of `425 Too Early`?
+    options:
+      - "Early data is encrypted twice, so it must be deduplicated"
+      - "0-RTT data can be replayed by an attacker, so servers should only process it for safe/idempotent operations and can reject the rest with 425"
+      - "425 forces the client to re-send without TLS"
+      - "Early data bypasses idempotency keys entirely, so it is always safe"
+    answer: 1
+    explanation: |
+      TLS 1.3 0-RTT trades a round trip for replayability: an attacker can capture
+      and resend early data. A server should therefore restrict early-data
+      processing to safe/idempotent handling and can return 425 to defer anything
+      that would cause a non-idempotent side effect — the same replay concern that
+      motivates idempotency keys.
+    ref: "concepts.md#the-425-too-early-trap"
+
+  - id: idempotency-and-reliable-delivery-058
+    difficulty: expert
+    tags: [fingerprint, strategies, tradeoff]
+    question: |
+      A payment API fingerprints requests by hashing the ENTIRE raw request body
+      (SHA-256). Legitimate retries from an updated client SDK suddenly start
+      getting 422 "Idempotency-Key is already used." What is the most likely
+      cause?
+    options:
+      - "The SDK changed the idempotency key on retry"
+      - "The SDK re-serializes the JSON differently (key ordering, whitespace, float formatting), changing the whole-body hash even though the intent is identical"
+      - "SHA-256 collisions are occurring"
+      - "The server's clock drifted past the TTL"
+    answer: 1
+    explanation: |
+      A whole-body checksum is the strictest fingerprint but the most fragile:
+      any cosmetic re-serialization flips the hash, so the server sees a
+      "different payload" and returns 422. Hashing canonicalized or selected
+      semantic fields (or field-value matching) avoids these false mismatches.
+    ref: "concepts.md#request-fingerprint-strategies"
+
+  - id: idempotency-and-reliable-delivery-059
+    difficulty: advanced
+    tags: [fingerprint, strategies]
+    question: |
+      Which fingerprint strategy best tolerates cosmetic JSON re-serialization
+      while still catching a genuinely different request?
+    options:
+      - "Checksum of the raw request bytes"
+      - "No fingerprint at all — just trust the key"
+      - "Field-value matching (or a checksum of selected/canonicalized semantic fields) rather than a raw byte hash"
+      - "Hashing only the HTTP request line"
+    answer: 2
+    explanation: |
+      Comparing parsed field values (or hashing canonicalized/selected fields)
+      makes {\"a\":1,\"b\":2} and {\"b\":2,\"a\":1} match while still detecting a
+      real change (e.g. a different amount). A raw-byte checksum is brittle;
+      hashing only the request line ignores the body entirely.
+    ref: "concepts.md#request-fingerprint-strategies"
+
+  - id: idempotency-and-reliable-delivery-060
+    difficulty: expert
+    tags: [security, bola, scoping]
+    question: |
+      An API stores idempotency responses keyed ONLY on the client-supplied
+      string, in a global namespace. An attacker submits guessed low-entropy keys
+      and receives other tenants' stored responses. Which vulnerability is this,
+      and what is the fix?
+    options:
+      - "A rate-limiting bug; fix by adding 429 throttling"
+      - "Broken Object Level Authorization (OWASP API1:2023); fix with a composite lookup key of client key + authenticated principal so replay is scoped to the caller"
+      - "A caching bug; fix by disabling all caching"
+      - "A TLS misconfiguration; fix by enabling HSTS"
+    answer: 1
+    explanation: |
+      Keying on the raw client string alone lets a guessed key fetch another
+      tenant's stored response — a BOLA/IDOR data leak (OWASP API1:2023). The fix
+      is a composite lookup key combining the client-supplied key with
+      server-known authenticated attributes (account/tenant + endpoint), which
+      both prevents cross-tenant collisions and scopes replay to the caller.
+    ref: "concepts.md#security-considerations-for-idempotency-keys"
+
+  - id: idempotency-and-reliable-delivery-061
+    difficulty: advanced
+    tags: [security, injection, validation]
+    question: |
+      The draft's Security Considerations warn against using an unvalidated
+      idempotency key directly as a store/cache lookup key. What class of attack
+      does this open, and what is the primary mitigation?
+    options:
+      - "SQL injection; mitigate by switching to NoSQL"
+      - "Injection / store (cache) poisoning; mitigate by fixing and publishing a key format and always validating the key before using it as a lookup key"
+      - "Cross-site scripting; mitigate with a Content-Security-Policy header"
+      - "Clickjacking; mitigate with X-Frame-Options"
+    answer: 1
+    explanation: |
+      A crafted, unvalidated key used directly as a lookup can collide with or
+      overwrite entries (store/cache poisoning — an injection attack). The
+      mitigation is to define and publish a strict key format and validate the
+      key before it is ever used as a lookup key.
+    ref: "concepts.md#security-considerations-for-idempotency-keys"
+
+  - id: idempotency-and-reliable-delivery-062
+    difficulty: advanced
+    tags: [security, scoping, granularity]
+    question: |
+      What is the correct default scope granularity for an idempotency key, and
+      what breaks at each extreme?
+    options:
+      - "Global for all clients; over-scoping is impossible"
+      - "(Authenticated principal + endpoint); scoping too broadly (global) enables cross-tenant replay/leak, while over-scoping (e.g. including a timestamp) breaks legitimate retries that reuse the key"
+      - "Per TCP connection; anything else breaks HTTP/2"
+      - "Per calendar day; this guarantees exactly-once forever"
+    answer: 1
+    explanation: |
+      The right default is (auth principal + endpoint). Too broad (a global
+      namespace) lets one tenant's key hit another's record — a leak. Too narrow
+      (folding in a timestamp or attempt counter) means each retry looks unique,
+      so dedup never fires and the mechanism is defeated.
+    ref: "concepts.md#security-considerations-for-idempotency-keys"
+
+  - id: idempotency-and-reliable-delivery-063
+    difficulty: expert
+    tags: [standards, azure, oasis, repeatability]
+    question: |
+      In the OASIS Repeatable Requests v1.0 model (used by Azure), which headers
+      express a repeatable request and what does the spec require?
+    options:
+      - "Idempotency-Key alone, with a mandatory 24-hour window"
+      - "Repeatability-Request-ID plus Repeatability-First-Sent on the request, Repeatability-Result on the response; window MUST be at least 5 minutes; unsupported endpoints return 501"
+      - "If-Match plus If-Unmodified-Since, with ETag validation"
+      - "X-Request-Id plus X-Retry-Count, with no window requirement"
+    answer: 1
+    explanation: |
+      OASIS Repeatable Requests uses Repeatability-Request-ID (a unique id) and
+      Repeatability-First-Sent (an HTTP-date of the first attempt) on the request,
+      and Repeatability-Result: accepted|rejected on the response. The window must
+      be at least 5 minutes, and an endpoint that does not support repeatability
+      returns 501 Not Implemented.
+    ref: "concepts.md#competing-and-adjacent-idempotency-standards"
+
+  - id: idempotency-and-reliable-delivery-064
+    difficulty: expert
+    tags: [standards, google, aip-155, stale-replay]
+    question: |
+      Google's AIP-155 defines a `request_id` for idempotent requests. Which
+      nuance distinguishes it from a strict byte-frozen replay?
+    options:
+      - "It requires the key in a header named Idempotency-Key"
+      - "It is placed on the request message (not a header), is a UUID4, and permits returning the CURRENT resource state if the original response can no longer be reproduced"
+      - "It forbids any replay and always re-executes"
+      - "It mandates exactly-once network delivery"
+    answer: 1
+    explanation: |
+      AIP-155 puts request_id (a UUID4) on the request message, requires it to
+      guarantee idempotency, and — importantly — allows a replay to return the
+      current resource state when the historical response is no longer
+      reproducible. So a replay may reflect newer state rather than a frozen
+      snapshot.
+    ref: "concepts.md#competing-and-adjacent-idempotency-standards"
+
+  - id: idempotency-and-reliable-delivery-065
+    difficulty: advanced
+    tags: [standards, zalando, business-key]
+    question: |
+      The Zalando REST guidelines address idempotent creation. What do they
+      prefer over a generic `Idempotency-Key` header?
+    options:
+      - "A server-generated sequence number"
+      - "A secondary / natural business key (a domain-unique value such as an order number) enforced by a unique constraint"
+      - "A client IP address as the dedup key"
+      - "Disabling retries entirely"
+    answer: 1
+    explanation: |
+      Zalando's guidelines say an endpoint MAY support Idempotency-Key but SHOULD
+      prefer deduplicating on a natural/business key — a domain-unique value like
+      an order number backed by a unique constraint — which needs no separate key
+      header and doubles as data-layer protection.
+    ref: "concepts.md#competing-and-adjacent-idempotency-standards"
+
+  - id: idempotency-and-reliable-delivery-066
+    difficulty: expert
+    tags: [put, client-id, no-store]
+    question: |
+      Which design makes resource CREATION idempotent WITHOUT any server-side
+      dedup store, and what is its main trade-off?
+    options:
+      - "POST /resources with a server-generated id; no trade-off"
+      - "PUT /resources/{client-generated-id} (client supplies a UUID); trade-off is the client owns id generation and the server loses control of its id space"
+      - "GET /resources?create=true; trade-off is caching"
+      - "PATCH /resources with an increment op; trade-off is latency"
+    answer: 1
+    explanation: |
+      Because PUT is idempotent, PUT /resources/{client-chosen-id} makes a retry a
+      no-op create-or-replace with no dedup store needed. The cost is that the
+      client generates the id, so the server cedes control of its id space and
+      must guard against collisions or id-squatting across tenants.
+    ref: "concepts.md#idempotent-creation-without-a-dedup-store"
+
+  - id: idempotency-and-reliable-delivery-067
+    difficulty: advanced
+    tags: [reconciliation, read-back, timeout]
+    question: |
+      A client's keyless `POST /orders` times out with no response. Instead of
+      blindly retrying, what reconciliation pattern lets it safely determine
+      whether the order was created?
+    options:
+      - "Resend the POST immediately with a higher timeout"
+      - "GET the resource by a natural key (or a Location/status endpoint) to discover whether the first attempt succeeded before deciding to retry"
+      - "Switch the method to DELETE"
+      - "Assume it failed and always recreate"
+    answer: 1
+    explanation: |
+      A read-back (GET by natural key or via a Location/status resource) lets the
+      client discover the actual outcome of an ambiguous POST rather than risking
+      a duplicate. This distinguishes "may have succeeded" (retry unsafe without a
+      key) from a known failure.
+    ref: "concepts.md#idempotent-creation-without-a-dedup-store"
+
+  - id: idempotency-and-reliable-delivery-068
+    difficulty: advanced
+    tags: [retry-safety, ambiguity, error-types]
+    question: |
+      Why is a keyless `POST` that fails with "connection refused / DNS
+      resolution failure" safe to retry, while a keyless `POST` that fails with a
+      gateway TIMEOUT is not?
+    options:
+      - "Timeouts always mean the request failed, so both are safe"
+      - "Connection-refused/DNS failures mean the request never reached the server (nothing happened), whereas a timeout is ambiguous — the request may have been processed, risking a duplicate"
+      - "DNS failures corrupt the payload, so retrying fixes it"
+      - "There is no difference; both should never be retried"
+    answer: 1
+    explanation: |
+      With connection-refused or DNS failure you know the request never got to
+      the server, so a retry cannot duplicate anything. A timeout is genuinely
+      ambiguous — the server may have processed it and only the response was lost —
+      which is exactly the case an idempotency key exists to make safe.
+    ref: "concepts.md#idempotent-creation-without-a-dedup-store"
+
+  - id: idempotency-and-reliable-delivery-069
+    difficulty: expert
+    tags: [async, 202, long-running]
+    question: |
+      For an asynchronous, long-running operation, how do an idempotency key and
+      the operation (status-monitor) resource divide responsibility?
+    options:
+      - "The idempotency key protects the submission (a retried submit returns the same operation handle); the operation resource protects execution (the worker keys its side effect on the operation id so redelivery is a no-op)"
+      - "The idempotency key protects execution; the operation resource protects submission"
+      - "Both protect the same thing, so one is redundant"
+      - "Neither is needed because 202 Accepted guarantees exactly-once"
+    answer: 0
+    explanation: |
+      Submission returns 202 + a status monitor; the idempotency key dedups the
+      submission so the work is enqueued once, while the operation resource lets
+      the worker dedup its side effect on the operation id to survive
+      at-least-once queue redelivery. Two layers, two jobs.
+    ref: "concepts.md#idempotency-for-async-and-long-running-operations"
+
+  - id: idempotency-and-reliable-delivery-070
+    difficulty: advanced
+    tags: [async, replay, state]
+    question: |
+      A client submits an async job with an idempotency key, gets `202 Accepted`
+      + an `Operation-Location`, then retries the submission with the same key a
+      minute later. Which response is most consistent with the async idempotency
+      model?
+    options:
+      - "A fresh 202 that enqueues a second copy of the job"
+      - "The same operation handle, whose status may now legitimately reflect a newer state (e.g. pending → succeeded) rather than a byte-frozen 202"
+      - "A 409 Conflict, since async jobs can never be retried"
+      - "A 200 OK with an empty body"
+    answer: 1
+    explanation: |
+      The key dedups the submission, so the retry returns the same operation
+      handle — but a replay of an async operation may show the operation in a
+      newer state (pending → succeeded), not a frozen snapshot. It must not enqueue
+      a second job.
+    ref: "concepts.md#idempotency-for-async-and-long-running-operations"
+
+  - id: idempotency-and-reliable-delivery-071
+    difficulty: expert
+    tags: [gateway, service, dedup-placement]
+    question: |
+      For a payment endpoint that writes to a relational database, where should
+      the AUTHORITATIVE idempotency dedup live, and why?
+    options:
+      - "At the API gateway/CDN, because it is centralized and language-agnostic"
+      - "In the service, inside the same DB transaction as the side effect — because only there can the key record and the charge commit atomically; a gateway cannot join that transaction"
+      - "In the client, because it generates the key"
+      - "In DNS, because it is globally distributed"
+    answer: 1
+    explanation: |
+      A gateway can shed obvious duplicate load but cannot join the service's DB
+      transaction, so a crash between "edge recorded the key" and "service
+      committed the charge" can still duplicate or lose work. The correctness
+      boundary is in-service dedup bound into the same transaction as the side
+      effect.
+    ref: "concepts.md#where-to-put-deduplication-gateway-versus-service"
+
+  - id: idempotency-and-reliable-delivery-072
+    difficulty: advanced
+    tags: [gateway, tradeoff]
+    question: |
+      What is the primary LIMITATION of doing idempotency dedup purely at an API
+      gateway (e.g. a native gateway idempotency feature) for a transactional
+      write?
+    options:
+      - "It is slower than in-service dedup"
+      - "It cannot see business-transaction boundaries or join the service's database transaction, so it only dedups at the HTTP layer and cannot guarantee atomicity with the side effect"
+      - "It requires the client to send the key in the body"
+      - "It only works over HTTP/1.1"
+    answer: 1
+    explanation: |
+      Gateway dedup is centralized and language-agnostic and usefully sheds
+      duplicate load, but it operates at the HTTP layer with no visibility into
+      the DB transaction. It cannot atomically bind the key to the side effect, so
+      it is an optimization, not the correctness boundary.
+    ref: "concepts.md#where-to-put-deduplication-gateway-versus-service"
+
+  - id: idempotency-and-reliable-delivery-073
+    difficulty: expert
+    tags: [cross-store, atomicity, failure-modes]
+    question: |
+      A design stores the idempotency key in Redis (24h TTL) and performs the
+      charge in Postgres. Walk through the interleavings: which failure modes are
+      possible?
+    options:
+      - "None — Redis and Postgres commit atomically together"
+      - "Both a double-charge (charge commits, Redis key write fails/crashes → retry re-charges) AND a lost charge (Redis key committed, Postgres charge rolled back → retry replays a 'success' for work that never happened)"
+      - "Only a double-charge is possible, never a lost charge"
+      - "Only a lost charge is possible, never a double-charge"
+    answer: 1
+    explanation: |
+      Two independent stores cannot commit atomically, so some interleaving always
+      breaks: if the charge commits but the key write fails, a retry double-charges;
+      if the key commits but the charge rolls back, a retry replays a bogus success
+      (lost work). The fix is co-locating key + effect in one transaction, or a
+      transactional outbox.
+    ref: "concepts.md#binding-dedup-to-the-business-transaction"
+
+  - id: idempotency-and-reliable-delivery-074
+    difficulty: expert
+    tags: [transactional-outbox, atomicity, messaging]
+    question: |
+      When the side effect of an idempotent operation is publishing a MESSAGE to
+      another system, which pattern preserves atomicity between the state change
+      and the message?
+    options:
+      - "Publish the message first, then update the database"
+      - "Transactional outbox: write the state change AND an outbox row in one local DB transaction, then a relay publishes the message at-least-once to an idempotent consumer"
+      - "Use two-phase commit across the DB and the message broker for every request"
+      - "Cache the message in Redis and hope it is delivered"
+    answer: 1
+    explanation: |
+      The outbox pattern writes the business state and an outbox record in a single
+      local transaction, so they commit together; a relay then publishes the
+      outbox rows at-least-once. Because the downstream consumer is idempotent, the
+      end-to-end effect is exactly-once without a distributed transaction.
+    ref: "concepts.md#binding-dedup-to-the-business-transaction"
+
+  - id: idempotency-and-reliable-delivery-075
+    difficulty: expert
+    tags: [store, redis, durability]
+    question: |
+      A team uses Redis `SET key val NX PX 86400000` as the atomic reserve for
+      money-movement idempotency keys. Which caveat most threatens correctness?
+    options:
+      - "SET NX is not atomic, so it cannot reserve keys"
+      - "Default Redis persistence can lose recent writes on failover, and eviction under memory pressure can drop keys early — so a reserved key may vanish and allow a re-execution"
+      - "Redis cannot store TTLs"
+      - "Redis keys are case-insensitive, causing collisions"
+    answer: 1
+    explanation: |
+      SET NX is a fine atomic reserve, but Redis's default persistence can lose the
+      most recent writes on failover and memory-pressure eviction can drop keys
+      before their TTL. For money, that means a reserved/completed key could
+      disappear and permit a duplicate — hence durable persistence, or a
+      transactional relational store co-located with the side effect.
+    ref: "concepts.md#distributed-dedup-store-trade-offs"
+
+  - id: idempotency-and-reliable-delivery-076
+    difficulty: advanced
+    tags: [store, dynamodb, conditional-write]
+    question: |
+      Which DynamoDB feature provides the atomic "reserve the key only if unseen"
+      primitive for idempotency dedup?
+    options:
+      - "A GSI scan for the key before writing"
+      - "A conditional write with attribute_not_exists(pk) (plus a TTL attribute for expiry and optional strongly-consistent reads)"
+      - "Eventually-consistent reads after a plain PutItem"
+      - "DynamoDB Streams triggering a Lambda"
+    answer: 1
+    explanation: |
+      DynamoDB's conditional write PutItem with a condition of
+      attribute_not_exists(pk) fails if the key already exists, giving an atomic
+      insert-if-absent. A TTL attribute auto-expires keys, and strongly-consistent
+      reads are available when needed. Scans and eventually-consistent reads cannot
+      serialize the race.
+    ref: "concepts.md#distributed-dedup-store-trade-offs"
+
+  - id: idempotency-and-reliable-delivery-077
+    difficulty: expert
+    tags: [store, relational, transaction]
+    question: |
+      Why do financial systems often favor a RELATIONAL store (unique constraint +
+      INSERT ... ON CONFLICT) for idempotency keys over Redis or DynamoDB?
+    options:
+      - "Relational databases are always faster than Redis"
+      - "Because the idempotency-key row and the side-effect row can commit in ONE transaction, giving the strongest atomicity between the dedup record and the effect"
+      - "Because relational stores never need a TTL"
+      - "Because SQL prevents all network partitions"
+    answer: 1
+    explanation: |
+      The decisive advantage is transactional co-location: the key insert and the
+      side-effect insert can be in the same transaction, so they commit or roll
+      back together. That eliminates the cross-store atomicity failure modes that
+      plague a separate Redis/DynamoDB dedup store beside a relational side effect.
+    ref: "concepts.md#distributed-dedup-store-trade-offs"
+
+  - id: idempotency-and-reliable-delivery-078
+    difficulty: expert
+    tags: [retry-amplification, resilience]
+    question: |
+      A request traverses 3 nested service layers, each configured to retry up to
+      3 times on failure. During an outage of the deepest tier, roughly how much
+      load can retries impose on it, and what is the fix?
+    options:
+      - "3× total; fix by increasing timeouts"
+      - "Up to 3^3 = 27× the base load (retry amplification); fix by retrying at only one layer (e.g. the edge) and letting inner layers fail fast"
+      - "9× total; fix by adding more replicas"
+      - "No amplification occurs because retries are independent"
+    answer: 1
+    explanation: |
+      Nested retries multiply: N layers each retrying 3× impose up to 3^N (here 27×)
+      requests on the deepest tier — retry amplification that can turn a brownout
+      into a full outage. The mitigation is to retry at a single layer and have
+      inner layers fail fast rather than each retrying.
+    ref: "concepts.md#retry-amplification-budgets-and-jitter-algorithms"
+
+  - id: idempotency-and-reliable-delivery-079
+    difficulty: expert
+    tags: [jitter, algorithms, backoff]
+    question: |
+      In the AWS Builders' Library jitter taxonomy, which formula describes
+      "full jitter"?
+    options:
+      - "sleep = base · 2^n (no randomness)"
+      - "sleep = random(0, base · 2^n)"
+      - "sleep = base · 2^n / 2 + random(0, base · 2^n / 2)"
+      - "sleep = min(cap, random(base, prev · 3))"
+    answer: 1
+    explanation: |
+      Full jitter picks a delay uniformly in [0, base·2^n], giving the best
+      de-synchronization and is the recommended default. The third option is equal
+      jitter (keeps a floor), and the fourth is decorrelated jitter (grows from the
+      previous delay). The first is plain exponential backoff with no jitter.
+    ref: "concepts.md#retry-amplification-budgets-and-jitter-algorithms"
+
+  - id: idempotency-and-reliable-delivery-080
+    difficulty: advanced
+    tags: [retry-budget, circuit-breaker, resilience]
+    question: |
+      Beyond exponential backoff with jitter, which pair of techniques best
+      prevents client retries from turning a partial outage into a full one?
+    options:
+      - "Longer per-request timeouts and more retries"
+      - "A retry budget (token bucket capping retries as a fraction of live traffic) plus a client-side circuit breaker that stops sending when failure rates spike"
+      - "Switching all requests to GET"
+      - "Disabling jitter to make retries predictable"
+    answer: 1
+    explanation: |
+      A retry budget caps retries as a proportion of real traffic so a broad
+      failure cannot let retries dominate load, and a circuit breaker halts calls
+      to a failing dependency until it recovers. Together they prevent retry-driven
+      congestive collapse — the opposite of adding more retries or longer timeouts.
+    ref: "concepts.md#retry-amplification-budgets-and-jitter-algorithms"

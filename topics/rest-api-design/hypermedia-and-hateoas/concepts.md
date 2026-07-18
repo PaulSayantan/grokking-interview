@@ -417,6 +417,338 @@ a checkbox: apply it where independent-client evolvability is the dominant force
 > honestly in an interview, say "it's a pragmatic Level-2 HTTP API" and justify *why* Level 3
 > wasn't worth it. Interviewers reward the nuance far more than the buzzword.
 
+## HAL-FORMS: describing writes in HAL
+
+HAL's biggest practical gap — "it can't describe a `POST`" — was answered by the community with
+**HAL-FORMS**, media type **`application/prs.hal-forms+json`**. The `prs.` tree marks it a
+*personal* (vendor-adjacent) media type from a Mike Amundsen working draft, **not** part of the
+HAL spec: a HAL-FORMS document MUST NOT be treated as plain `application/hal+json`, though it is
+designed to be backward-compatible with it.
+
+HAL-FORMS adds a top-level **`_templates`** object alongside HAL's `_links`/`_embedded`. The
+conventional key is **`default`**; each template describes one write:
+
+```json
+{
+  "_links": { "self": { "href": "/orders/42" } },
+  "properties": { "status": "AWAITING_PAYMENT" },
+  "_templates": {
+    "default": {
+      "method": "POST",
+      "contentType": "application/json",
+      "target": "/orders/42/payment",
+      "title": "Pay for order",
+      "properties": [
+        { "name": "cardToken", "prompt": "Card", "required": true, "readOnly": false },
+        { "name": "amount", "type": "number", "required": true, "min": 0, "value": "30.00" },
+        { "name": "currency", "options": { "inline": ["USD","EUR","GBP"] } }
+      ]
+    }
+  }
+}
+```
+
+Key fields: `method`, `contentType` (defaults to `application/json`), `target` (defaults to the
+resource's own `self`), `title`, and **`properties[]`** — each a form field with `name`,
+`prompt`, `readOnly`, `required`, `regex`, `value`, `templated`, plus HTML5-style constraints
+(`type`, `min`, `max`, `minLength`, `maxLength`) and **`options`** for enumerations. `options`
+values can be listed **`inline`** or fetched **by reference** via a `link` (`href` +
+`templated`), with `minItems`/`maxItems`/`promptField`/`valueField` controlling selection. This
+is HAL's route to Siren-grade affordances without abandoning the HAL ecosystem; the alternatives
+are describing writes out-of-band in OpenAPI, or switching to Siren/Collection+JSON/Hydra.
+
+## Registering link relations: the IANA process
+
+RFC 8288 gives two ways to name a relation, but only one requires ceremony. **Extension
+relations** — an absolute URI you control (e.g. `https://api.example.com/rels/cancel-order`) —
+need **no registration**: minting a URI under a domain you own is globally unambiguous by
+construction, which is why it is the pragmatic default for private/domain rels. **Registered
+relations** — bare tokens like `self`, `next`, `payment` — must go through the IANA **Link
+Relation Types** registry. Per RFC 8288 §2.1.1 / §7.1 the registration policy is
+**"Specification Required"** (RFC 8126): you supply a stable, public specification defining the
+relation's semantics, and a **Designated Expert** reviews it before the token is added.
+
+Practical consequence for interviews: "how do I add a custom rel the *right* way?" has two
+correct answers depending on scope. For an internal/domain-specific transition, **mint an
+extension URI** — do not squat on a bare token that might later be registered with different
+semantics. Only pursue IANA registration when the relation is genuinely reusable across the web
+and you can write and publish its spec. Bare tokens you invent (`cancel-order`) are technically
+illegal as relation names and risk colliding with a future registered token.
+
+## Form and affordance link relations
+
+Link-only formats gesture at writes using **registered relations** whose targets are forms or
+services, rather than inline actions:
+
+- **`create-form`** and **`edit-form`** (RFC 6861) — link to a resource that describes how to
+  *create* a new item, or *edit* the current one. A HAL response can carry a `create-form` link
+  to a HAL-FORMS document, bridging the links-only gap.
+- **`edit`** — the resource you may `PUT`/`PATCH`/`DELETE` to modify this one (contrast with
+  `edit-form`, which points at the *form describing* the edit).
+- **`search`** — a resource (often an OpenSearch description or a templated query endpoint) for
+  searching.
+- **`service-desc`** / **`service-doc`** — machine-readable service description (e.g. an OpenAPI
+  document) vs. human documentation. This is how a root document can point at its own OpenAPI.
+- **`describedby`** — a description/schema of *this* resource (JSON Schema, profile).
+- **`status`**, **`deprecation`** (a link/date announcing a resource or link is deprecated),
+  **`preload`**, **`profile`**, **`alternate`**.
+
+Knowing rels beyond `self`/`next` is a common senior discriminator: it shows you can drive writes
+and discovery through registered semantics instead of inventing bespoke tokens for everything.
+
+## The profile link relation and media-type parameter
+
+A generic media type like `application/hal+json` tells a client the *syntax* but not the
+*application semantics* (what the fields mean, which rels exist). **RFC 6906** defines the
+**`profile`** link relation and the matching **`profile` media-type parameter** to layer that
+semantic contract on top without minting a new media type.
+
+Two wire forms:
+
+- As a link: `Link: <https://schemas.example.com/order>; rel="profile"`, or HAL's per-link
+  `profile` property.
+- As a **content-negotiation parameter**: `Content-Type: application/hal+json;profile="https://schemas.example.com/order"`,
+  and clients can request it via `Accept: application/hal+json;profile="…"`.
+
+A profile MUST NOT change how the base media type is parsed — it only adds meaning. This is the
+standards-grounded answer to "how does a client know what the fields mean?": it dereferences (or
+recognizes) the profile URI. JSON:API's `describedby` document link and its `profile`
+media-type parameter play the same role.
+
+## Hypermedia and security: affordances are not authorization
+
+A powerful pattern: the server **omits an affordance the caller isn't allowed to use** — no
+`cancel` link appears if this user can't cancel — so the *presence of a link is the capability
+signal* that drives the UI. This keeps authorization logic on the server and out of every client.
+
+The senior trap is treating link presence **as** the authorization mechanism. It is not. A
+client can forge any URL+method it observed in another response, another user's session, or the
+docs. You MUST still enforce authorization **server-side on every request**. In OWASP API
+Security Top 10 (2023) terms, relying on hidden affordances invites **API1: Broken Object Level
+Authorization (BOLA)** — the client swaps in an object id it isn't entitled to — and **API5:
+Broken Function Level Authorization (BFLA)** — the client invokes an operation/verb that was
+merely hidden, not blocked. A second, subtler risk: **leaking affordances leaks business state**
+(e.g. exposing a `escalate-to-fraud-team` link tells the caller they're flagged). Affordance
+presence is a UX/discoverability optimization layered *on top of* real server-side checks, never
+a substitute.
+
+## Hypermedia and caching: embedding vs linking
+
+The embedding-vs-linking choice is also a **caching** decision (RFC 9111). When you **link** to
+a sub-resource, each resource keeps its own URL and therefore its own `Cache-Control`, `ETag`,
+and `Last-Modified` — caches (shared or private) can store, revalidate, and invalidate it
+independently, and a conditional `GET` with `If-None-Match` can yield a cheap `304`. When you
+**embed** (`_embedded`, `included`, Siren sub-`entities`), the sub-resource's representation is
+folded into the parent's response body: it now shares the parent's freshness lifetime and
+validator. You lose independent expiry (a rarely-changing customer embedded in a frequently
+changing order is re-sent constantly) and you complicate invalidation (mutating the customer
+doesn't invalidate the composite order URL that carries a stale copy). So embedding trades
+**round trips** for **cache granularity**: fewer requests, but coarser, harder-to-invalidate
+caching. High-read APIs often prefer linking + HTTP caching over aggressive embedding for exactly
+this reason.
+
+## Versioning and hypermedia
+
+A common claim is "HATEOAS eliminates API versioning." It does not — it **moves** the problem.
+Because clients follow links instead of building URLs, the server can relocate, rename, or
+reshape endpoints without a `/v2/` path, so **URL churn becomes non-breaking**. But the parts
+clients actually couple to still evolve and still need versioning: the **media type**
+(`application/vnd.example.order.v2+json`), the **link-relation semantics** (what `pay` expects),
+and the **field/profile contract**. You version *those* — typically via media-type parameters or
+new profiles negotiated with `Accept` — rather than the path. The honest framing: hypermedia
+kills *URL* versioning pressure but relocates versioning to rels/media-types; and since most
+Level-2 APIs don't invest in that, they version in the path anyway.
+
+Hypermedia also gives you a graceful **deprecation** channel that complements versioning. HAL
+link objects carry a **`deprecation`** property — a URL that, when present, marks the link as
+deprecated and points at an explanation, so a client following an old rel gets a machine-readable
+"this is going away" signal in-band. At the HTTP layer, **RFC 8594** defines the **`Sunset`
+response header** (an HTTP-date after which the resource is expected to become unresponsive) and
+the companion **`sunset`** link relation pointing at deprecation documentation. Together these let
+a server phase out a rel or resource without a hard version break: advertise the replacement link,
+flag the old one via `deprecation`/`Sunset`, then remove it after the announced date. This is the
+hypermedia-native alternative to "freeze v1 forever." "Does HATEOAS solve
+versioning?" → "No; it changes *what* you version, from URLs to relation/media-type semantics."
+
+## OpenAPI links are not runtime HATEOAS
+
+OpenAPI 3.x has a **Link Object**, and candidates routinely conflate it with hypermedia. It is
+**design-time, not runtime**. An OpenAPI Link lives in the *API description* (the spec file), not
+in any response payload. It says "after operation X, you *could* call operation Y," identifying Y
+by **`operationId`** or **`operationRef`**, and wiring inputs with **runtime expressions** like
+`$response.body#/id` or `$response.header.Location`. Contrast this with true HATEOAS, where the
+server puts the concrete next links **in the response body at runtime**, based on the resource's
+actual state and the caller's permissions.
+
+Two consequences worth stating: (1) OpenAPI Links describe *possible* transitions statically for
+documentation/tooling, whereas hypermedia advertises *currently-valid* transitions dynamically;
+(2) OpenAPI/JSON-Schema tooling and code generators assume **fixed, described URLs** and cannot
+consume server-provided runtime links — which is itself part of *why* Level-3 adoption stays low
+(the dominant tooling ecosystem doesn't support it).
+
+## Errors as hypermedia: RFC 9457 Problem Details
+
+**RFC 9457** (Problem Details for HTTP APIs, obsoletes RFC 7807) is quietly hypermedia-flavored.
+Its **`type`** member is a **URI** that identifies the problem kind and SHOULD dereference to
+human-readable documentation about it, and **`instance`** is a URI identifying the *specific
+occurrence* — both are effectively links. Beyond the standard members (`type`, `title`, `status`,
+`detail`, `instance`), Problem Details allows **extension members**, so an error can carry real
+affordances: e.g. an `_links` block or a `retry`/`authenticate`/`help` link telling the client
+how to recover. A 402/403 can point at how to authenticate; a 429 can carry a link to rate-limit
+docs. This ties the error-handling standard back into hypermedia: even failures can drive the
+next transition rather than being dead ends.
+
+## HTML as hypermedia and the HDA revival
+
+A live 2023–2025 debate reframes the whole topic. The argument (htmx essays; *Hypermedia
+Systems*, Gross/Stepinski/Amundsen, 2023) is that **HTML is the only mainstream format that ships
+affordances natively** — `<a href>` for links and `<form method="post" action="…">` for actions
+are hypermedia controls built into the format and understood by a universal client (the browser).
+JSON hypermedia (HAL/Siren/etc.) is, on this view, a *workaround* re-inventing what HTML already
+has, and the industry's pivot to JSON "REST" APIs was really a pivot to **RPC-style JSON** that
+*discarded* hypermedia. **htmx** operationalizes this: the server returns HTML fragments carrying
+the next affordances, and the client swaps them into the DOM — "**Hypermedia-Driven
+Applications (HDA)**." The interview value is showing you know the debate is current, not
+historical, and that the cleanest HATEOAS in production is often plain HTML, not a JSON envelope.
+
+## Where hypermedia fits in a microservices topology
+
+At system altitude, hypermedia earns its place selectively:
+
+- **Internal service-to-service** calls are almost always **Level 2** (or gRPC/protobuf with
+  typed, generated clients). Both ends deploy together, latency matters, and typed contracts beat
+  runtime discovery — hypermedia is overhead here.
+- **Public APIs and Backends-for-Frontend (BFF)** are where server-driven affordances can pay
+  off: a BFF that returns *state-dependent action links* lets the UI render valid next-steps
+  without re-encoding the workflow, and a public API with uncontrolled clients benefits from
+  non-breaking URL evolution.
+- Hypermedia can also serve as a lightweight **service-composition / discovery** mechanism — the
+  root document links to sub-services — though a dedicated service registry/discovery layer is
+  usually the better tool at scale.
+
+The staff-level answer to "where would you actually use HATEOAS?" is: at the **edge** (public
+API / BFF driving a UI), not on internal typed RPC paths.
+
+A frequent 2025 interview pivot is **"how does GraphQL relate to HATEOAS?"** They attack
+client/server coupling from opposite directions. HATEOAS keeps coupling low by letting the
+*server* drive which resources and transitions are reachable at runtime (the client follows
+links). GraphQL keeps coupling low by letting the *client* declare exactly the fields and graph
+it wants in one query — a client-driven, single-endpoint model that deliberately discards
+per-resource URLs, HTTP caching, and server-advertised affordances. GraphQL solves
+over-/under-fetching and chattiness (the problems embedding tries to solve in HAL/JSON:API) but
+does **not** advertise *state-dependent next actions* — "what can I do to this order now?" is not
+something a GraphQL schema expresses the way a Siren `actions` block or a state-dependent
+`_links` set does. So they are not substitutes: GraphQL optimizes data shaping; HATEOAS
+optimizes workflow/URL evolvability.
+
+## URI Templates in depth (RFC 6570)
+
+RFC 6570 defines four **levels** of expressiveness for the templated hrefs that appear with
+`templated: true`:
+
+- **Level 1** — simple string expansion: `/users/{id}` → `/users/42`.
+- **Level 2** — reserved (`{+var}`, keeps `/`, `?`, `&` unencoded) and fragment (`{#var}`)
+  expansion: `{+path}/here` → `/foo/bar/here`.
+- **Level 3** — multiple variables and **operators**: path segments `{/seg}`, path-style params
+  `{;matrix}`, **query** `{?q,r}` (emits `?q=…&r=…`), **query continuation** `{&cont}` (emits
+  `&cont=…`, for appending to an existing query), and label `{.fmt}`.
+- **Level 4** — **modifiers**: prefix `{var:3}` (first 3 chars) and **explode** `{list*}`
+  (a list `[a,b]` becomes `list=a&list=b`; an object explodes to `k1=v1&k2=v2`).
+
+The ubiquitous form-query case is **`{?page,size}`**. The `?` vs `&` distinction is a real
+detail-check: **`{?q}`** *starts* the query string with a `?`, while **`{&q}`** *continues* an
+existing one with `&` — so you use `{&filter}` when the base URL already has query params. Note
+the trade-off: a templated link pushes **URL construction back onto the client**, which is a
+partial retreat from pure HATEOAS (the client is now assembling the URL, not just following it),
+justified when enumerating every combination as concrete links would be impractical.
+
+## JSON:API v1.1, CURIEs, and client-driven includes
+
+Two refinements deepen the earlier JSON:API and HAL treatments.
+
+**CURIE mechanics (HAL).** A CURIE is a W3C **Compact URI Expression**. In HAL, `curies` is
+itself a **reserved link relation** whose value is an array of link objects, each with a `name`
+(the prefix), a **`templated: true`** `href` containing a `{rel}` placeholder, and typically
+`"templated": true`. A rel like `ea:items` is expanded by substituting `items` into the `ea`
+prefix's template (e.g. `https://docs.example.com/rels/{rel}` → `https://docs.example.com/rels/items`),
+yielding a dereferenceable documentation URI. So CURIEs don't just shorten — they make custom
+rels self-documenting.
+
+**JSON:API v1.1 additions.** v1.1 upgraded a bare-string `links` value to a **link object with
+`href` + `meta`**; added a document-level **`describedby`** link; and introduced a **profiles**
+mechanism plus **extensions**, both negotiated via media-type parameters:
+`application/vnd.api+json; ext="…"; profile="…"` (v1.1 relaxed the once-strict "no parameters"
+rule to allow exactly these). Also note the **client-driven** nature of JSON:API's optimizations:
+**`include=author,comments`** lets the *client* request which related resources are compounded
+into `included`, and **`fields[articles]=title,body`** (sparse fieldsets) lets the client trim
+attributes. That contrasts with HAL's **server-driven** `_embedded` (the server decides what to
+inline) — a good discriminator when comparing the two.
+
+## Collection+JSON and other formats to know
+
+**Collection+JSON** (`application/vnd.collection+json`, Mike Amundsen) is the "CRUD-over-
+collections" format. Beyond `items[]` (each with `data` name/value pairs and its own `links`), it
+uniquely carries a **`template`** object (the write model — the fields to fill when creating/
+updating an item) and **`queries`** (templated search affordances with `data` describing query
+params). So it is action-capable: `template` tells the client how to `POST`/`PUT`, and `queries`
+how to search.
+
+Other formats worth name-dropping for breadth:
+
+- **Mason** (`application/vnd.mason+json`) — HAL-like `@controls` that *do* carry method/schema,
+  plus `@error` (a Problem-Details-like error block).
+- **UBER** — a minimal, transport/format-agnostic hypermedia design (JSON and XML variants).
+- **JSON Hyper-Schema** — the JSON-Schema-native way to attach affordances: a **`links`** keyword
+  whose Link Description Objects have `rel`, `href` (a URI Template), `targetSchema`, and
+  **`submissionSchema`** (the body to submit). This is the "schema-driven affordance" alternative
+  to Siren/HAL-FORMS.
+- **Ion** (`application/ion+json`) — a self-describing hypermedia type used by some AWS APIs.
+
+## Follow-your-nose and Cool URIs
+
+The design principle behind `self`: a client should **bookmark one entry point and the `self`
+rel**, and thereafter **never construct URLs** — it follows the links the server returns
+("follow your nose"). Tim Berners-Lee's "**Cool URIs don't change**" is the server-side
+complement: keep URIs stable, but even so, clients depend on rels, not URL shapes. The
+anti-pattern is a client that **rebuilds URLs from IDs and templates** (`"/orders/" + id +
+"/items"`) — that is precisely the URL-structure coupling HATEOAS exists to kill, and it breaks
+the moment the server reshapes its paths. Templated links are a deliberate, bounded exception,
+not license to reconstruct arbitrary URLs.
+
+## Testing a hypermedia API
+
+Testing shifts from "assert this fixed endpoint returns X" to **driving the API as a state
+machine**. You start at the **root**, follow **rels** to reach a resource, and assert on the
+**presence/absence of affordances per state** — e.g. "an `AWAITING_PAYMENT` order MUST expose a
+`pay` affordance and MUST NOT expose `refund`; after paying, the reverse." Crucially you assert on
+**relations, not URLs**, so the tests survive the URL changes hypermedia is meant to enable.
+
+This is genuinely **harder than contract-testing fixed endpoints**: the test must traverse
+multiple hops (more setup, more state), the space of reachable states is larger, and generic
+assertions ("this affordance is renderable") are fuzzier than "this URL returns this JSON." The
+payoff mirrors the API's: tests that don't break when the server relocates resources. It also
+naturally exercises the authorization model (does the `cancel` affordance correctly disappear for
+an unauthorized caller?), which fixed-URL tests often miss.
+
+## Industry guidelines: Zalando and Google AIP
+
+Two widely-cited public guideline sets sharpen the pragmatic picture:
+
+- **Zalando RESTful API Guidelines** — **#162 MUST use REST maturity level 2** (proper
+  resources + verbs) as the baseline, **#163 MAY use REST maturity level 3 — HATEOAS** (optional,
+  not required), **#164** standardizes common hypertext controls (a HAL-ish `_links` shape when
+  you do use them), and notably **#166 MUST NOT use `Link` headers with JSON entities** — when
+  the body is JSON, put links *in the body*, not in the HTTP `Link` header (for consistency and
+  CORS-exposure reasons). This is the balanced counterpoint to the `Link`-header praise elsewhere:
+  **GitHub uses `Link`-header pagination and it's widely loved, yet Zalando explicitly bans it
+  alongside JSON bodies** — presenting both sides is the senior take.
+- **Google AIP-158 (pagination)** mandates **opaque, non-parseable `page_token`s** — the client
+  treats the token as a blob and echoes it back, and MUST NOT decode or construct it. That is a
+  *deliberately anti-hypermedia* stance at the field level (no self-describing next-URL to follow;
+  just an opaque continuation token), and a useful counterpoint to link-based pagination: opacity
+  gives the server total freedom to change its paging internals, achieving the *same decoupling
+  goal* as a `next` link but by hiding structure rather than by advertising a link.
+
 ## Common follow-up questions
 
 - **"What does HATEOAS stand for and who coined it?"** Hypermedia As The Engine Of Application

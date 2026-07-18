@@ -264,9 +264,24 @@ Content-Type: application/problem+json
   "detail": "Quota of 100 req/min exceeded" }
 ```
 
-- `Retry-After` (RFC 9110) — seconds (or an HTTP-date) to wait.
-- `RateLimit-*` headers — the emerging IETF draft convention for exposing quota
-  state; widely used even though still a draft.
+- `Retry-After` (RFC 9110 §10.2.3) — seconds (or an HTTP-date) to wait.
+- `RateLimit-*` headers — a convention for exposing quota state.
+
+> [!WARNING]
+> **The `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset` triplet
+> shown above is the *legacy* form.** The current IETF draft
+> (`draft-ietf-httpapi-ratelimit-headers`, at -11) **replaced** it with two
+> **RFC 9651 Structured Fields** headers carrying named parameters:
+>
+> ```
+> RateLimit-Policy: "burst";q=100;w=60          ; q=quota, w=window(s), qu=quota-unit, pk=partition-key
+> RateLimit:        "burst";r=0;t=30            ; r=remaining, t=reset-window(s), pk=partition-key
+> ```
+>
+> The single-header tripartite legacy form and the even-older, never-standardized
+> `X-RateLimit-*` are widely deployed but not the current standard. Only
+> `Retry-After` (RFC 9110) is a stable normative header here. Know all three
+> generations and which is current — a common senior "gotcha."
 
 **Algorithms (named at contract altitude; the math lives in system-design):**
 fixed window, sliding window, **token bucket** (allows bursts up to bucket
@@ -516,6 +531,438 @@ bottleneck ("smart pipes, dumb endpoints"). Modern guidance is the opposite —
 
 ---
 
+## Resilience patterns at the edge
+
+Rejecting excess load (rate limiting) is only half the reliability story. The
+other half is protecting the *system* from its own failing dependencies. A
+gateway (and especially a BFF that fans out) needs the standard resilience
+toolkit:
+
+- **Per-upstream timeouts.** Every proxied call gets a bounded deadline. Without
+  one, a hung backend exhausts the gateway's connection/thread pool and the
+  failure spreads. Timeouts should sum to a **latency budget** for the whole
+  request, not be set independently.
+- **Retries — only on idempotent/safe methods.** Retrying a failed `GET`, `PUT`,
+  or `DELETE` is safe (RFC 9110 idempotency). **Retrying a non-idempotent `POST`
+  can duplicate a write** (double-charge, double-order). Retry only when the
+  method is idempotent *or* an `Idempotency-Key` makes it safe (see below).
+- **Retry budgets, not fixed counts.** Naïve "retry 3×" turns a partial outage
+  into a **retry storm** that amplifies load 3–4× exactly when the backend is
+  weakest. Cap retries as a *percentage of total traffic* (a budget) and add
+  jittered exponential backoff.
+- **Circuit breaker.** After a threshold of failures, "open" the breaker and
+  fail fast (shed the dependency) instead of piling requests onto a sick
+  backend; periodically "half-open" to probe recovery. This bounds blast radius.
+- **Bulkhead isolation.** Give each upstream its own connection pool/concurrency
+  limit so one slow dependency can't consume all the gateway's resources and
+  starve unrelated routes (the ship-compartment metaphor).
+- **Load shedding / backpressure.** Under global overload, proactively drop or
+  reject the lowest-priority work with **`503 Service Unavailable` + `Retry-After`**
+  to protect the core. This is the server-wide analogue of per-client `429`.
+
+> [!INTERVIEW]
+> "You add retries at the gateway — what can go wrong?" Strong answer names all
+> three traps: (1) non-idempotent duplication, (2) retry storms amplifying an
+> outage, (3) stacked timeouts blowing the latency budget. The fixes: idempotency
+> keys, retry budgets with backoff+jitter, and a circuit breaker.
+
+---
+
+## Edge caching (RFC 9111)
+
+A gateway/CDN can cache cacheable responses to cut latency and offload backends,
+but HTTP caching (RFC 9111, plus RFC 5861 extensions) has sharp edges.
+
+- **Shared vs private cache.** A gateway/CDN is a **shared cache** serving many
+  users. `Cache-Control: private` forbids a shared cache from storing a response
+  (only the end-user's browser may); `public` explicitly allows it.
+- **`s-maxage`.** Overrides `max-age` **for shared caches only** — lets you cache
+  longer at the edge than in browsers.
+- **`stale-while-revalidate` / `stale-if-error` (RFC 5861).** Serve slightly
+  stale content instantly while asynchronously revalidating, or serve stale on a
+  backend error — both improve resilience and tail latency.
+- **`Vary` and cache-key construction.** The cache key is method+URL **plus**
+  whatever `Vary` lists (e.g. `Vary: Accept-Encoding, Accept-Language`). Getting
+  `Vary` wrong either serves the wrong variant or destroys hit rate.
+- **`ETag` + conditional revalidation.** `If-None-Match` lets the edge revalidate
+  cheaply and return `304 Not Modified` without re-sending the body.
+- **Invalidation / purge.** Time-based expiry is passive; explicit purge/ban APIs
+  actively evict a key when data changes. Invalidation is the hard part of edge
+  caching.
+
+> [!WARNING]
+> **Never let a shared edge cache store an authenticated/personalized response
+> under a non-user-specific key** — user A's balance gets served to user B (a
+> cross-tenant data leak). Personalized responses need `Cache-Control: private`
+> (or `no-store`), or a cache key that includes the user identity, plus correct
+> `Vary`. A cache that ignores `Authorization`/`Cookie` in its key is the classic
+> failure mode.
+
+### Request collapsing / coalescing
+
+When many clients request the **same cacheable key** and it's a cache **miss**,
+a naïve edge forwards *all* of them to the origin — a **cache stampede / thundering
+herd** that can topple a cold backend. **Request collapsing** (a.k.a. coalescing
+or request dedup) merges concurrent identical misses into **one** upstream fetch;
+the single response fills the cache and fans back out to all waiters.
+
+This is the mirror image of aggregation: aggregation **fans out** one request to
+many services; collapsing **folds in** many requests to one upstream call.
+Combined with `stale-while-revalidate`, it keeps a hot key from ever hammering
+the origin.
+
+---
+
+## GraphQL federation as an aggregation/BFF alternative
+
+Beyond a single GraphQL server, **federation** (e.g. Apollo Federation) is a way
+to build one graph from many independently-owned services:
+
+- **Subgraph** — a service that owns part of the schema (its types/fields).
+- **Supergraph** — the composed schema stitched from all subgraphs.
+- **Router (the gateway)** — receives one client query, plans it, and orchestrates
+  calls across subgraphs, merging the result. Teams own their subgraph schemas
+  independently.
+
+**Trade-offs vs a REST BFF:**
+
+- **Pro:** clients fetch exactly what they need in one query; you avoid
+  hand-writing and maintaining N bespoke aggregators; teams evolve subgraphs
+  independently.
+- **Con:** an extra **router hop**; the classic **resolver N+1** problem (a field
+  resolver firing one backend call per list item — mitigated with dataloader/
+  batching); need for **query-cost / depth limiting** to stop abusive deep queries;
+  **HTTP caching is harder** (queries are usually `POST`ed to one endpoint);
+  **persisted queries** (client sends a hash of a pre-registered query) are used
+  to restore GET-cacheability and block arbitrary queries.
+
+The common 2025 design question — "**REST BFF vs GraphQL federation** for a
+multi-client product" — turns on ownership model, caching strategy, N+1/query-cost
+control, and whether the extra router operational hop is worth avoiding N
+aggregators.
+
+---
+
+## WAF vs API gateway (security layering)
+
+A **Web Application Firewall (WAF)** and an API gateway are different security
+layers that **stack**, they are not substitutes:
+
+- **WAF** inspects traffic for **attack payloads** — SQL injection, XSS, path
+  traversal, OWASP-web signatures — plus bot/DDoS mitigation and IP reputation.
+  It answers "is this request *malicious*?"
+- **API gateway** does **API management** — authN/Z, quotas, routing, transform.
+  It answers "is this caller *allowed* and *within limits*?"
+
+Typical order in the path: **client → WAF → API gateway → (service mesh) →
+service**. Conflating them maps to **OWASP API8 Security Misconfiguration**.
+Managed stacks often integrate a WAF in front of the gateway (e.g. AWS WAF +
+Amazon API Gateway).
+
+---
+
+## BFF as a security pattern (token-handling BFF for SPAs)
+
+Modern guidance (IETF `oauth-browser-based-apps` draft, OWASP) reframes the BFF
+as a **security** boundary, not just a payload-shaper, for browser apps (SPAs):
+
+- The **BFF holds the OAuth tokens server-side** (access + refresh).
+- The browser receives only an **`HttpOnly; Secure; SameSite`** session cookie —
+  a reference to the server-side session. Access/refresh tokens **never touch
+  JavaScript** or `localStorage`.
+- The BFF attaches the real token when proxying to APIs.
+
+**Why:** tokens in `localStorage`/JS are exfiltratable by any XSS. `HttpOnly`
+cookies are unreadable by script, so a token-handling BFF removes the highest-value
+XSS target. The trade-off is that cookie-based sessions must defend **CSRF**
+(via `SameSite` and/or CSRF tokens). "Where do you store SPA OAuth tokens?" → a
+token-handling BFF with `HttpOnly` cookies, **not** `localStorage`.
+
+### Token exchange: phantom-token and split-token patterns
+
+The gateway can decouple the token the **client** holds from the token the
+**backend** receives:
+
+- **Phantom token.** The client holds an **opaque reference token**; the gateway
+  introspects it and swaps in a **JWT** forwarded to backends. JWT internals
+  never appear on the public wire (no signature/claims to attack or leak), and
+  revocation is easy (revoke the opaque reference).
+- **Split token.** The signature and payload of a JWT are split; the client holds
+  one part, the gateway reassembles — a variant optimizing introspection.
+- **RFC 8693 OAuth Token Exchange.** A standard for the gateway to **downscope**
+  or **delegate** — exchange the caller's token for a narrower one scoped to a
+  specific downstream service (least privilege between hops).
+
+---
+
+## JWT validation edge cases and attacks
+
+Verifying a JWT is more than "check the signature." Senior-level pitfalls (all
+map to **OWASP API2 Broken Authentication**):
+
+- **JWKS + `kid`.** The gateway fetches the issuer's **JWKS** (JSON Web Key Set)
+  and selects the key by the token header's **`kid`**. It must **cache** JWKS
+  (network fetch per request is a latency/availability risk) yet **refresh on
+  key rotation** — a cache miss on `kid` should trigger a refetch, not a reject.
+- **`alg=none` attack.** A forged token sets the header `alg` to `none` and
+  drops the signature; a naïve verifier that honors the token's own `alg`
+  accepts it. **Defense:** the verifier must pin the expected algorithm(s), never
+  trust the token's `alg` for `none`.
+- **Algorithm-confusion (RS256 → HS256).** An attacker changes `alg` from RS256
+  (asymmetric) to HS256 (symmetric) and signs with the **public** key as the HMAC
+  secret. If the verifier uses the same "key" for both, it validates. **Defense:**
+  bind each key to one algorithm; don't let the token choose.
+- **Always validate `exp`, `nbf`, `iss`, `aud`.** A structurally-valid signature
+  on a token minted for a different audience/issuer must still be rejected.
+
+---
+
+## OWASP API Security Top 10 (2023) — gateway-relevant items
+
+The content already cites **API1 (BOLA)** and **API5 (BFLA)** as mostly
+service-side. The gateway is the enforcement point for several others:
+
+| Item | What it is | Gateway's role |
+|---|---|---|
+| **API2 Broken Authentication** | Weak/foolable token validation | Robust JWT/JWKS validation; reject `alg=none`/confusion |
+| **API4 Unrestricted Resource Consumption** | No rate/size/quota limits | The gateway's **core** mandate: rate limits, quotas, body-size caps, timeouts |
+| **API7 SSRF** | Server fetches an attacker-supplied URL | Validate/allowlist any user-supplied URIs the gateway/backend fetches |
+| **API8 Security Misconfiguration** | Missing hardening, verbose errors | Strip internal headers, normalize errors, correct CORS, WAF layering |
+| **API9 Improper Inventory Management** | Shadow/zombie/deprecated APIs | Gateway is the **API inventory & deprecation** enforcement point |
+| **API10 Unsafe Consumption of APIs** | Blindly trusting third-party APIs | Validate/transform responses from upstreams the gateway consumes |
+
+---
+
+## API lifecycle: versioning, deprecation, and Sunset
+
+The gateway is where API **inventory and lifecycle** are enforced — directly
+addressing **API9 (Improper Inventory Management)**: undocumented "shadow" APIs
+and forgotten "zombie" old versions are a top breach vector.
+
+- **Version routing.** The gateway routes `v1` vs `v2` (path, header, or media
+  type) to the right backend, letting versions coexist during migration.
+- **`Sunset` header (RFC 8594).** Advertises the date/time a resource will stop
+  working: `Sunset: Sat, 31 Jan 2026 23:59:59 GMT`. Clients (and tooling) can
+  detect the retirement window.
+- **`Deprecation` header (IETF draft).** Signals a resource is deprecated (a
+  boolean or a date), typically paired with a `Link; rel="deprecation"` or
+  `rel="sunset"` pointing to docs and `Sunset`.
+
+Centralizing this at the gateway means a single, auditable place that knows every
+live route and its lifecycle state — the antidote to zombie APIs.
+
+---
+
+## CORS handling at the edge
+
+Cross-Origin Resource Sharing governs whether a browser lets page JS on origin A
+call API origin B. Centralizing it at the gateway avoids per-service drift:
+
+- **Preflight.** For non-simple requests the browser sends an `OPTIONS` preflight
+  carrying `Access-Control-Request-Method`/`-Headers`; the gateway answers with
+  `Access-Control-Allow-Origin/-Methods/-Headers` and caches the decision via
+  **`Access-Control-Max-Age`**.
+- **Credentials pitfall.** `Access-Control-Allow-Credentials: true` **cannot** be
+  combined with `Access-Control-Allow-Origin: *` — the browser rejects it. With
+  credentials you must echo a **specific** allowed origin (and `Vary: Origin`).
+- **CORS is not authorization.** It only constrains *browsers*; it is not a
+  server-side access control. Non-browser clients ignore it entirely.
+
+---
+
+## Control plane vs data plane
+
+A gateway has two conceptually separate planes:
+
+- **Data plane** — the request path that forwards/transforms live traffic. It
+  must be **simple, fast, and (ideally) stateless** so it stays fast and its
+  blast radius is contained.
+- **Control plane** — config/management: defining routes, policies, keys, plans,
+  publishing changes. Config changes should be versioned, reviewed, and rolled
+  out gradually (the SPOF warning applies).
+
+Deployment models: **managed** (Amazon API Gateway, Apigee) offload the ops;
+**self-hosted** (Kong, Envoy, NGINX, Traefik) give control; **microgateway /
+decentralized** deploys a small gateway per service or per team (closer to the
+mesh model) to avoid one central choke point.
+
+---
+
+## Kubernetes: Ingress vs Gateway API vs API gateway
+
+Three overlapping things, each stopping at a different point:
+
+- **`Ingress`** — the original Kubernetes L7 resource: basic host/path HTTP
+  routing to Services, TLS. Limited expressiveness; vendors bolted features on via
+  annotations (non-portable).
+- **Gateway API** — the **role-oriented successor** to Ingress:
+  **`GatewayClass`** (infra provider), **`Gateway`** (a listener, owned by cluster
+  ops), and **`HTTPRoute`** (routing rules, owned by app teams). Richer,
+  portable, header/traffic-split aware — but still fundamentally *routing*.
+- **Full API gateway** — adds the **API-management layer** on top: authN/Z,
+  quotas/plans, transformation, aggregation, developer portal.
+
+Rule of thumb: Ingress/Gateway API get traffic *to* the right service; a full API
+gateway governs *how APIs are consumed*. Gateway API can be the data plane an API
+gateway product builds on.
+
+---
+
+## Service discovery and health checking
+
+The gateway must resolve an upstream **service name** to concrete healthy
+instances:
+
+- **Discovery mechanisms:** static config; **DNS**; a **service registry**
+  (Consul, Eureka); or **EDS** (Envoy's Endpoint Discovery Service) for dynamic
+  membership.
+- **Active health checks** — the gateway probes an upstream `/health` endpoint on
+  an interval and stops routing to failing instances.
+- **Passive health checks / outlier ejection** — the gateway watches live traffic
+  and **ejects** an instance that returns too many errors/timeouts, re-admitting
+  it after a cooldown. Cheaper than active probes and reacts to real failures.
+
+---
+
+## Streaming and protocol support at the edge
+
+Beyond request/response REST, a gateway increasingly must handle:
+
+- **WebSocket** — upgrade `Connection: Upgrade`; long-lived bidirectional
+  connections need connection limits and idle timeouts tuned very differently
+  from short HTTP requests.
+- **Server-Sent Events (SSE)** — one-way streaming over a long-lived HTTP
+  response (`text/event-stream`); buffering/response-flush behavior at the gateway
+  matters or events stall.
+- **HTTP/2 and HTTP/3 (QUIC).** Multiplexing (H2) and UDP-based QUIC (H3) at the
+  edge; the gateway often terminates a modern client protocol and speaks a simpler
+  one to backends.
+- **gRPC and gRPC-JSON transcoding.** The gateway can expose a REST/JSON facade
+  and transcode to gRPC upstream (protocol translation, extended to streaming).
+
+Long-lived connections change the resource model: connection count, not
+requests/second, becomes the scaling constraint.
+
+---
+
+## Idempotency support at the edge
+
+An **`Idempotency-Key`** request header lets a client safely retry an otherwise
+non-idempotent request (e.g. `POST /payments`). The server (or gateway)
+remembers the key and returns the **original result** for a duplicate instead of
+performing the action twice.
+
+This interacts with gateway retries: if the gateway retries a `POST` on the
+client's behalf, an idempotency key is what makes that retry *safe*. Without it,
+gateway-level retries of non-idempotent requests are dangerous (duplicate writes).
+
+---
+
+## Request and schema validation at the edge
+
+The gateway can reject malformed requests **before** they reach a backend,
+offloading validation and shrinking attack surface (defends **API4** and
+**API8**):
+
+- **Schema validation** — validate request bodies/params against an **OpenAPI
+  3.1** schema at the edge; reject non-conforming requests with `400`.
+- **Size limits** — cap body and header sizes to blunt resource-exhaustion
+  attacks (an **API4** control).
+- **Content-type / method allowlists** — reject unexpected verbs and media types
+  early.
+
+Keep this **structural** (does the message conform to the contract?), not
+**semantic** (is this a valid business operation?) — the latter is service logic.
+
+---
+
+## Tail-latency amplification and composition consistency
+
+Two subtle consequences of fan-out aggregation that senior interviews probe:
+
+- **Tail-latency amplification.** When one request fans out to **N** services in
+  parallel and waits for all, the client's latency is the **slowest of N**. Even
+  if each service has a good p99, the probability that *at least one* of N is slow
+  rises fast, so the aggregate p99 is much worse than any single backend's. "Every
+  backend p99 is fine but client p99 is bad" is explained by this. Mitigations:
+  **per-call timeouts within a latency budget**, **hedged requests** (fire a
+  duplicate to a second replica after a delay, take the first to answer), and
+  degrading non-critical fields.
+- **Composition consistency.** Aggregating across services merges data captured at
+  **different points in time** — there is **no cross-service transaction**. A
+  merged payload can show a total that doesn't match its line items, or a count
+  that disagrees with the list, because each sub-response is an independent
+  read-time snapshot. This is an **eventual-consistency / read skew** artifact, not
+  a bug in one service; call it out and, if it matters, fetch the dependent values
+  from a single consistent source.
+
+---
+
+## The three named gateway patterns
+
+Microsoft/Azure formalize three distinct gateway patterns worth naming precisely:
+
+- **Gateway Routing** — route requests to multiple services behind one endpoint
+  (the routing/dispatch job).
+- **Gateway Aggregation** — fan out one request to several services and merge
+  (the composition job).
+- **Gateway Offloading** — move **shared, cross-cutting** functionality (TLS,
+  authN, rate limiting, logging) into the gateway. The rule: **only offload what
+  the whole app uses**, and **never offload business logic**.
+
+---
+
+## mTLS and SNI detail
+
+Extending the one-line mTLS mention:
+
+- **Mutual TLS (mTLS)** — both sides present certificates. **Client-certificate
+  validation becomes an authentication mechanism** (the cert identifies the
+  caller) — common for partner and service-to-service traffic.
+- **SNI (Server Name Indication)** — the client sends the target hostname in the
+  TLS `ClientHello`, so the gateway can select the right cert **and even route**
+  (SNI-based routing) before/without terminating, useful in passthrough mode.
+- **Certificate rotation** — client and server certs expire; the edge must rotate
+  without downtime (overlapping validity, automated issuance). Expired-cert
+  outages are a classic edge incident.
+
+---
+
+## Managed vs self-hosted trade-offs (with AWS specifics)
+
+Concrete grounding many interviewers use:
+
+- **Managed (Amazon API Gateway, Apigee):** less ops, built-in integrations, but
+  less control and provider-specific limits. AWS specifics worth naming: **usage
+  plans + API keys** (quota + throttle per key), **burst vs steady-state throttle**
+  implemented as a **token bucket** (steady rate = bucket refill, burst = bucket
+  size), **stage-level caching**, **Lambda/custom authorizers** (offload auth to
+  your own function returning an IAM/allow policy), and **WAF integration** in
+  front.
+- **Self-hosted (Kong, Envoy, NGINX, Traefik):** full control and portability, but
+  you own scaling, HA, and upgrades.
+
+---
+
+## AI/LLM gateways (forward-looking)
+
+An emerging category: a gateway specialized for LLM/model traffic. It differs
+from a classic API gateway in what it meters and inspects:
+
+- **Token/cost-based rate limiting** — limit by **tokens or dollar cost**, not
+  request count, since one request's cost varies wildly.
+- **Semantic caching** — cache by **embedding similarity** of prompts, not exact
+  key match, to reuse answers to near-duplicate questions.
+- **Prompt-injection guards and PII redaction** — inspect/scrub prompts and
+  completions.
+- **Model routing / fallback** and **MCP routing** — route to the cheapest/best
+  model or tool, with failover.
+
+Mention it as a trend; the underlying discipline (metering, caching, security at
+the edge) is the same, just measured in tokens.
+
+---
+
 ## Common follow-up questions
 
 - **"Where do you put authentication vs authorization?"** AuthN and coarse authZ
@@ -563,3 +1010,20 @@ bottleneck ("smart pipes, dumb endpoints"). Modern guidance is the opposite —
 - **microservices.io — API Gateway / BFF pattern (Chris Richardson)**:
   https://microservices.io/patterns/apigateway.html
 - **OpenAPI 3.1 specification**: https://spec.openapis.org/oas/v3.1.0
+- **RFC 9111 — HTTP Caching** (shared/private, `s-maxage`, `Vary`, revalidation):
+  https://www.rfc-editor.org/rfc/rfc9111
+- **RFC 5861 — HTTP Cache-Control Extensions** (`stale-while-revalidate`,
+  `stale-if-error`): https://www.rfc-editor.org/rfc/rfc5861
+- **RFC 9651 — Structured Field Values for HTTP** (used by new RateLimit headers):
+  https://www.rfc-editor.org/rfc/rfc9651
+- **RFC 8594 — The Sunset HTTP Header Field**:
+  https://www.rfc-editor.org/rfc/rfc8594
+- **RFC 8693 — OAuth 2.0 Token Exchange**: https://www.rfc-editor.org/rfc/rfc8693
+- **IETF draft — OAuth 2.0 for Browser-Based Applications** (token-handling BFF):
+  https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/
+- **OWASP API Security Top 10 (2023) — full list** (API2/4/7/8/9/10):
+  https://owasp.org/API-Security/editions/2023/en/0x11-t10/
+- **Kubernetes Gateway API**: https://gateway-api.sigs.k8s.io/
+- **Apollo GraphQL Federation**: https://www.apollographql.com/docs/federation/
+- **Curity — Phantom Token / Split Token patterns**:
+  https://curity.io/resources/learn/phantom-token-pattern/

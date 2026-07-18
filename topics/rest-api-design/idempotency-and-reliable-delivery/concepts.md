@@ -405,6 +405,339 @@ What systems that advertise "exactly-once" actually provide is **exactly-once
 
 ---
 
+## Idempotency-Key wire syntax and Structured Fields
+
+The early Stripe convention treats the key as an opaque token. The IETF draft
+(now `draft-ietf-httpapi-idempotency-key-header-07`, revised 2025-10-15) is more
+precise: it defines `Idempotency-Key` as an **RFC 8941 Structured Field Value**,
+specifically an **Item of type String**. That has a concrete wire consequence —
+a String Item is **double-quoted**:
+
+```http
+Idempotency-Key: "8e03978e-40d5-43e8-bc93-6894a57f9324"
+```
+
+The quotes are part of the syntax, not decoration. A bare unquoted token (what
+most Stripe examples show, and what appears earlier in this document) is *not* a
+valid Structured Fields String; a spec-strict parser rejects it. Practically,
+many production servers still accept the unquoted form for backward
+compatibility, but a candidate should know the draft mandates the quoted String
+Item and that RFC 8941 also caps the printable-ASCII character set (no raw
+control characters, no non-ASCII).
+
+> [!INTERVIEW]
+> "What is the exact type of the `Idempotency-Key` field per the draft?" — an
+> **RFC 8941 Structured Fields Item, String type** (double-quoted). Naming
+> RFC 8941 and the quoting rule is the precise-recall signal interviewers want.
+
+---
+
+## Error taxonomy in the IETF draft
+
+Earlier this document hedged on status codes ("400 or 422 are both reasonable").
+The `-07` draft is now explicit, and a senior candidate is expected to reproduce
+the map — including the human-readable **title** strings the draft suggests:
+
+| Condition | Status | Suggested title |
+|---|---|---|
+| Key required but **missing** | **400 Bad Request** | "Idempotency-Key is missing" |
+| Key seen and request **still in flight** | **409 Conflict** | "A request is outstanding for this Idempotency-Key" |
+| Same key, **different payload/fingerprint** | **422 Unprocessable Content** | "Idempotency-Key is already used" |
+| Key **reused after expiry/purge** | *(no code defined)* | treated as a brand-new request |
+
+Notes that separate a strong answer:
+
+- **422 (RFC 9110 §15.5.21) Unprocessable Content** is the draft's choice for
+  the same-key-different-body case — the syntax is fine but the request is
+  semantically inconsistent with the recorded one. Stripe historically returns
+  `400` here; both are defensible, but the draft standardizes on `422`.
+- **409 Conflict** is the draft's code for a concurrent in-flight duplicate —
+  *not* `425 Too Early` (see the 425 trap section).
+- **Reuse after expiry has no defined error on purpose.** A purged key is
+  indistinguishable from a never-seen key, so the safe behavior is to treat it
+  as new and re-execute. That is exactly the "double-execute after TTL" danger
+  window discussed under the idempotency window.
+
+Error bodies should use **`application/problem+json` (RFC 9457)** so the
+`type`/`title`/`detail` are machine-readable.
+
+---
+
+## Request fingerprint strategies
+
+The dedup store should bind a key to a **fingerprint** of the request so that a
+key replayed with a *different* body is caught (returned `422`) rather than
+silently mis-replayed. The draft calls this an *idempotency fingerprint*
+(a concept the resource derives from the request, **not** a wire header) and
+enumerates several sanctioned generation strategies, each with a trade-off:
+
+1. **Checksum of the entire payload** (e.g. SHA-256 of the raw body). Strictest,
+   but brittle: a cosmetic re-serialization (key reordering, whitespace,
+   different float formatting) changes the hash and triggers a false `422` even
+   though the *intent* is identical.
+2. **Checksum of selected elements** — hash only the semantically meaningful
+   fields. Tolerates reserialization but requires the server to know which
+   fields matter.
+3. **Field-value matching** (full or selected) — compare parsed field values
+   rather than a raw byte hash, so `{"a":1,"b":2}` and `{"b":2,"a":1}` match.
+4. **Request digest / signature** — a signed digest that also authenticates the
+   request.
+
+> [!WARNING]
+> A whole-body checksum is the safest *correctness* choice but the most
+> **operationally fragile**: any client library that re-serializes JSON (very
+> common) will flip the hash and start returning `422` on legitimate retries.
+> Fingerprinting canonical/selected fields is the usual production compromise.
+
+---
+
+## Security considerations for idempotency keys
+
+The draft's Security Considerations section (and OWASP API Security Top 10 2023)
+turn key handling into an **authorization** problem, not just a collision one.
+Two named attack classes:
+
+- **Injection / cache-poisoning.** An unvalidated key used *directly* as a
+  cache/store lookup key can be crafted to collide with or overwrite another
+  entry (store injection). Mitigation: **fix and publish a key format** (e.g.
+  "must be a UUID / a quoted String ≤ N chars") and **always validate the key
+  before using it as a lookup key**.
+- **Key-guessing / data leak (BOLA/IDOR).** If keys are low-entropy or
+  guessable, an attacker can submit someone else's key and receive their stored
+  response — a broken-object-level-authorization leak (**OWASP API1:2023
+  BOLA**, related to API3:2023 broken object property authorization). The stored
+  response can contain another tenant's PII.
+
+The unifying fix is a **composite lookup key**: never key the store on the
+client-supplied string alone. Combine it with **server-known, authenticated
+client attributes** — the auth principal (account/API-key/tenant id) plus the
+endpoint. This both prevents cross-tenant collisions *and* scopes replay to the
+authenticated caller, so guessing another tenant's key cannot fetch their data.
+
+> [!INTERVIEW]
+> "Should the idempotency-key namespace be global or per-principal?" —
+> **per-authenticated-principal (+ endpoint)**. A global namespace lets one
+> tenant's key hit another tenant's stored response — a BOLA leak. Scoping to
+> the auth principal makes the key a *within-tenant* dedup token, which is the
+> correct authorization boundary.
+
+---
+
+## Competing and adjacent idempotency standards
+
+`Idempotency-Key` is the most common pattern but far from the only one; breadth
+here signals seniority:
+
+- **OASIS Repeatable Requests v1.0 / Microsoft Azure.** Uses a *different*
+  header pair: `Repeatability-Request-ID` (a unique id) plus
+  `Repeatability-First-Sent` (an HTTP-date timestamp of the first attempt) on
+  the request, and `Repeatability-Result: accepted | rejected` on the response.
+  The repeatability window **MUST be at least 5 minutes**, and an endpoint that
+  receives a repeatability header it does not support returns
+  **501 Not Implemented**.
+- **Google AIP-155 `request_id`.** A `request_id` field on the *request message*
+  (not a header, not the resource), a UUID4, that **MUST** guarantee
+  idempotency and replay a prior success. Notably, AIP-155 permits returning the
+  **current resource state** if the original response can no longer be
+  reproduced — a "stale replay" nuance: a replay may reflect newer state, not a
+  byte-frozen snapshot.
+- **Zalando REST guidelines (#229/#230/#231).** An endpoint MAY support the
+  `Idempotency-Key` header, but Zalando SHOULD prefer a **secondary / natural
+  business key** for idempotent creation (dedup on a domain-unique value like an
+  order number) rather than a generic key.
+- **Vendor header zoo.** `PayPal-Request-Id`, Square's `idempotency_key` (sent
+  in the request *body*), Google's `requestId`, plus Twilio, Adyen, and Dwolla
+  variants. The naming is not standardized because the header field itself is
+  still an Internet-Draft.
+
+> [!KEY-TAKEAWAY]
+> There is no single ratified standard yet. Know the three families —
+> **Stripe/IETF `Idempotency-Key`**, **OASIS/Azure `Repeatability-*` (+timestamp,
+> ≥5 min, 501)**, and **Google AIP-155 `request_id` (stale-replay allowed)** —
+> plus the natural-business-key approach.
+
+---
+
+## Idempotent creation without a dedup store
+
+An idempotency key is not the only way to make creation retry-safe. Two
+alternatives require **no dedup store at all**:
+
+- **Client-chosen id + `PUT`.** Instead of `POST /resources` (server mints the
+  id), use `PUT /resources/{client-generated-id}` where the client supplies a
+  UUID. `PUT` is idempotent by definition, so a retry to the same URL is a no-op
+  create-or-replace. Trade-off: the **client owns id generation** and the server
+  loses control of its id space (and must guard against id collisions / squatting
+  across tenants).
+- **Natural / business key + unique constraint.** Dedup on a domain-unique value
+  (order number, transfer reference). A duplicate insert violates the unique
+  constraint and is rejected, giving an at-most-once effect without any header.
+  This doubles as **defense-in-depth** behind an idempotency key whose TTL may
+  expire.
+
+A related *reconciliation* pattern: after a timeout on a keyless `POST`, the
+client can **`GET` the resource** (by natural key, or via a `Location`/status
+endpoint) to *discover* whether the first attempt actually succeeded, instead of
+blindly retrying. This distinguishes a genuinely ambiguous outcome (the request
+may have been processed — the exact case an idempotency key exists for) from a
+known-nothing-happened outcome (connection refused / DNS failure), where a
+retry is safe even without a key.
+
+---
+
+## Idempotency for async and long-running operations
+
+Real payment/order APIs are frequently **asynchronous**: the write is queued and
+processed later. The reliability contract then splits into two layers:
+
+- **Submission** returns **`202 Accepted`** with an `Operation-Location` (or
+  `Location`) header pointing at a **status-monitor resource**. The client polls
+  it, honoring `Retry-After`, until the operation resource reports
+  `succeeded`/`failed`.
+- **The idempotency key protects the *submission*** — a retried submission with
+  the same key returns the same operation handle rather than enqueuing the work
+  twice. **The operation resource protects the *execution*** — the worker keys
+  its side effect on the operation id so re-processing the queued message is a
+  no-op.
+
+So "how does idempotency work when the work is queued?" has a two-part answer:
+key-dedup at the API edge to avoid duplicate *submissions*, plus idempotent
+*consumers* (natural key / operation-id dedup) to survive at-least-once queue
+redelivery. The `202`+polling shape also means a replay may legitimately return
+the operation *in a newer state* (pending → succeeded), echoing the AIP-155
+stale-replay point.
+
+---
+
+## Where to put deduplication (gateway versus service)
+
+"Where does the dedup layer live?" is a design-altitude question.
+
+- **Gateway / edge / CDN dedup** (e.g. AWS API Gateway has native idempotency
+  support; some proxies and service meshes do too). Centralized,
+  language-agnostic, keeps duplicate load off the service. **But** it cannot see
+  business-transaction boundaries and **cannot join the service's database
+  transaction** — it can only dedup at the HTTP layer, so a crash between "edge
+  recorded the key" and "service committed the effect" can still lose or
+  duplicate work.
+- **In-service dedup.** More code in every service, but it is the **only place
+  that can bind the key record into the same DB transaction as the side
+  effect** — which is the only truly correct location for money-movement.
+
+The usual senior answer for a payment that writes to a database: **do the
+authoritative dedup in the service, inside the transaction**; a gateway layer is
+at best an optimization to shed obvious duplicate load, never the correctness
+boundary.
+
+---
+
+## Binding dedup to the business transaction
+
+The subtle correctness requirement: the **key record and the side effect must
+commit atomically**. If they don't, two failure modes appear:
+
+1. **Effect happened, key not stored** (side effect committed, key write failed
+   or crashed before it) → a retry sees no key and **double-executes**.
+2. **Key stored, effect rolled back** (key committed, side-effect transaction
+   later failed) → a retry replays a "success" for work that **never durably
+   happened** (lost work).
+
+Two correct patterns:
+
+- **Single-database transaction.** Put the `INSERT idempotency_key` and the
+  `INSERT order` (the side effect) in **one transaction**, so they commit or
+  roll back together. This is why co-locating the dedup store with the
+  side-effect datastore (relational unique constraint) is the strongest design.
+- **Transactional outbox.** When the side effect is a *message* to another
+  system, write the key/state change **and** an outbox row in one local
+  transaction, then a relay publishes the message at-least-once. The consumer is
+  idempotent, so the end-to-end effect is exactly-once.
+
+> [!WARNING]
+> "Store the key in Redis, charge in Postgres" is the classic broken design:
+> the two stores cannot commit atomically, so *some* interleaving always yields
+> either a double-charge or a lost charge. Either co-locate them in one
+> transactional store or use an outbox.
+
+---
+
+## Distributed dedup store trade-offs
+
+The store must provide an **atomic reserve primitive**, **durability**, and
+ideally **co-location with the side-effect transaction**:
+
+- **Redis** — fast; `SET key val NX [PX ttl]` is an atomic reserve, and native
+  TTL handles expiry. **Caveats:** default persistence can lose recent writes on
+  failover, and eviction under memory pressure can drop keys early. For money,
+  it needs durable persistence and cannot be in the same transaction as a
+  relational side effect (the cross-store atomicity trap above).
+- **DynamoDB** — conditional writes (`attribute_not_exists(pk)`) give an atomic
+  reserve, a TTL attribute auto-expires keys, and strongly-consistent reads are
+  available. Good serverless fit; still separate from a non-Dynamo side effect.
+- **Relational (Postgres/MySQL)** — a **unique constraint + `INSERT ... ON
+  CONFLICT` / row lock** is the atomic reserve, and crucially the key row and the
+  side-effect row can commit in **one transaction**. Strongest correctness,
+  which is why financial systems favor it.
+
+The decision axis: raw speed (Redis) vs. transactional co-location with the side
+effect (relational) vs. managed serverless scale (DynamoDB).
+
+---
+
+## Retry amplification, budgets, and jitter algorithms
+
+The client-retry section covers backoff + jitter; senior depth adds three
+points from the AWS Builders' Library:
+
+- **Retry amplification.** If every layer in a call chain retries, load
+  multiplies geometrically: N nested layers each retrying 3× impose up to **3^N**
+  requests on the deepest tier. The mitigation is to **retry at only one layer**
+  (usually the edge/client) and let inner layers fail fast, or to propagate a
+  "do not retry" signal.
+- **Retry budgets / token buckets.** Cap retries as a *fraction* of live traffic
+  (a token bucket) rather than a fixed per-request count, so a broad outage
+  cannot let retries dominate load. Pair with **client-side circuit breakers**
+  that stop sending once failure rates spike — retries can otherwise turn a
+  brownout into a full outage.
+- **Named jitter algorithms** (not just "add some randomness"):
+  - **Full jitter:** `sleep = random(0, base·2^n)` — best spread, recommended
+    default.
+  - **Equal jitter:** `sleep = base·2^n/2 + random(0, base·2^n/2)` — keeps a
+    floor while still de-synchronizing.
+  - **Decorrelated jitter:** `sleep = min(cap, random(base, prev·3))` — grows
+    from the previous delay, good for long-tail backoff.
+
+> [!KEY-TAKEAWAY]
+> "Add jitter" is table stakes; naming **full / equal / decorrelated** jitter
+> and explaining **retry budgets + circuit breakers + avoiding retry
+> amplification** is what distinguishes a senior answer. Retries can make an
+> outage *worse*, not better.
+
+---
+
+## The 425 Too Early trap
+
+Earlier this document offered `425 Too Early` as an alternative to `409` for a
+concurrent in-flight duplicate. **That is spec-incorrect and a known interview
+trap.** `425 Too Early` is defined by **RFC 8470 (Using Early Data in HTTP)** for
+exactly one purpose: a server refusing to process a request that arrived in
+**TLS 1.3 early data (0-RTT)**, because 0-RTT data is replayable and must not
+trigger non-idempotent processing. It has nothing to do with "still processing"
+or "duplicate in flight."
+
+The correct codes:
+
+- **409 Conflict** — a concurrent request with the same key is still in flight
+  (the draft's choice).
+- **429 Too Many Requests** or **503 Service Unavailable**, both with
+  **`Retry-After`** — if you want to explicitly tell the client to back off.
+
+Reserve **425** for its real meaning (0-RTT early-data replay protection), which
+is itself an *idempotency-adjacent* concept: 0-RTT is unsafe precisely because
+early data can be replayed, so servers restrict it to safe/idempotent handling.
+
+---
+
 ## Common follow-up questions
 
 - **Is `PUT` idempotent but `POST` not — why?** `PUT` replaces the resource with
@@ -455,5 +788,21 @@ What systems that advertise "exactly-once" actually provide is **exactly-once
 - **Stripe API — Idempotent Requests.**
   <https://docs.stripe.com/api/idempotent_requests>
 - **AWS Builders' Library — Timeouts, retries, and backoff with jitter**
-  (exponential backoff + jitter rationale).
+  (exponential backoff + jitter rationale; full/equal/decorrelated jitter,
+  retry budgets, retry amplification).
   <https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/>
+- **RFC 8941 — Structured Field Values for HTTP** (the Item/String type that
+  `Idempotency-Key` uses per the draft). <https://www.rfc-editor.org/rfc/rfc8941>
+- **RFC 8470 — Using Early Data in HTTP** (the real meaning of `425 Too Early` —
+  TLS 1.3 0-RTT replay protection, *not* "still processing").
+  <https://www.rfc-editor.org/rfc/rfc8470>
+- **OASIS Repeatable Requests Version 1.0** + Microsoft Azure REST API
+  Guidelines — `Repeatability-Request-ID`, `Repeatability-First-Sent`,
+  `Repeatability-Result`, ≥5-minute window, `501` if unsupported.
+- **Google AIP-155 — Request Identification** (`request_id` on the request
+  message; replay may return current resource state). <https://google.aip.dev/155>
+- **Zalando RESTful API Guidelines** — rules #229/#230/#231 on idempotency and
+  the secondary/business-key approach.
+- **OWASP API Security Top 10 2023** — API1:2023 BOLA and API3:2023 broken
+  object property authorization (idempotency-key scoping / leak).
+  <https://owasp.org/API-Security/editions/2023/en/0x11-t10/>

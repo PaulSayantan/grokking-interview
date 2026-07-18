@@ -612,6 +612,411 @@ wrong; log auth failures for detection.
 
 ---
 
+## OAuth 2.1 changes and the Security BCP (RFC 9700)
+
+The three headline OAuth 2.1 changes above (PKCE mandatory; implicit removed;
+ROPC removed) are only half the story. Senior candidates are expected to name
+the **full set of six** and cite the standard that motivated them.
+
+**The OAuth 2.0 Security Best Current Practice** was published in January 2025 as
+**RFC 9700 (BCP 240)**. It updates RFC 6749/6750/6819 and is the "why" behind
+almost every OAuth 2.1 change — cite the BCP, not just "best practice."
+
+The remaining OAuth 2.1 changes:
+
+4. **Redirect URIs are compared by exact string match** — no wildcard,
+   suffix, or substring matching. The *only* relaxation is the loopback-port
+   wildcard for native apps (`http://127.0.0.1:{any-port}/...`, RFC 8252).
+   Loose matching is the root of most open-redirect / code-leak attacks.
+5. **Bearer tokens are forbidden in the query string** — reinforcing RFC 6750
+   §2.3 (the URL-logging leak) as a hard requirement, not a recommendation.
+6. **Public-client refresh tokens must be sender-constrained *or* one-time-use
+   (rotated)** — a static long-lived refresh token in a browser/native app is no
+   longer acceptable; you either bind it (DPoP/mTLS) or rotate with reuse
+   detection.
+
+> [!INTERVIEW]
+> "Name every OAuth 2.1 change." The strong answer is six, grouped: **remove**
+> (implicit, ROPC), **require** (PKCE for all code clients, exact redirect
+> matching), **forbid** (bearer in query string), **constrain** (public-client
+> refresh tokens sender-bound or rotated) — all traceable to RFC 9700 / BCP 240.
+
+---
+
+## Redirect and authorization-code attacks
+
+PKCE + `state` is necessary but **not sufficient**. The classic senior follow-up
+is "your code flow already uses PKCE and `state` — what attacks remain?"
+
+- **Mix-up attack (multi-AS clients).** A client that talks to more than one
+  authorization server can be tricked into sending a code/token issued by AS-A
+  to AS-B (or to the attacker's AS). Defenses: the **`iss` authorization-response
+  parameter (RFC 9207)** so the client verifies *which* AS responded, or
+  per-AS distinct redirect URIs.
+- **Authorization Code Injection.** An attacker injects a code they obtained
+  into a victim's session. Defended by **PKCE** (the injected code won't match
+  the victim's `code_verifier`) or the OIDC **`nonce`** bound into the ID token.
+- **PKCE downgrade attack.** An attacker strips the `code_challenge` from the
+  authorization request, then later supplies any `code_verifier`. Countermeasure:
+  the AS **MUST reject a token request carrying a `code_verifier` if the original
+  authorization request had no `code_challenge`** (and vice-versa).
+- **307 vs 303 on the authorization response.** If the AS redirects the browser
+  back to the client with **HTTP 307 Temporary Redirect**, the browser re-sends
+  the original POST body (which may contain the user's credentials) to the
+  redirect target. The spec mandates **303 See Other**, which forces a GET.
+- **Open redirect / `Referer` & history leakage.** Loose redirect-URI matching
+  (see exact-match rule above) plus codes landing in browser history or the
+  `Referer` header sent to third-party resources on the callback page.
+
+> [!KEY-TAKEAWAY]
+> PKCE stops code interception/injection; `state` stops CSRF; **`iss` (RFC 9207)
+> stops mix-up**; **303 (not 307)** stops credential re-POST; exact redirect
+> matching stops open-redirect code theft. Naming all five separates senior from
+> mid-level.
+
+---
+
+## Device Authorization Grant
+
+**RFC 8628** defines the flow for **input-constrained devices** — smart TVs,
+media consoles, CLIs, IoT — that can't show a usable browser or keyboard.
+
+1. The device POSTs to the AS's **device authorization endpoint** and gets back a
+   `device_code`, a short human-typable `user_code`, a `verification_uri` (and
+   often a `verification_uri_complete` with the code embedded, for a QR code),
+   plus `expires_in` and a polling `interval`.
+2. The device shows "go to example.com/activate and enter WDJB-MJHT."
+3. The user completes login/consent **on a secondary device** (phone/laptop).
+4. Meanwhile the device **polls the token endpoint** with
+   `grant_type=urn:ietf:params:oauth:grant-type:device_code` + the `device_code`,
+   receiving `authorization_pending` (keep waiting), `slow_down` (increase the
+   poll interval by 5s), `access_denied`, or `expired_token` until it finally
+   gets tokens.
+
+This completes the grant-selection matrix: it's the answer to "how does a TV app
+or a headless CLI log a user in?"
+
+---
+
+## Token Exchange and delegation
+
+**RFC 8693 (OAuth 2.0 Token Exchange)** is the real answer to "propagate the end
+user's identity across a chain of microservices without re-sending the original
+token everywhere." A service presents an existing token and receives a new one
+scoped/audience-narrowed for the *next* hop.
+
+- `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`.
+- **`subject_token`** = the token representing the party on whose behalf the
+  request is made; **`actor_token`** = the token of the acting party (the
+  service). `requested_token_type`, `audience`, and `scope` narrow the output.
+- **Delegation vs impersonation.** *Impersonation:* the new token looks exactly
+  like the subject — downstream can't tell a service is acting. *Delegation:* the
+  new token records **both** identities via the **`act` (actor) claim** (a nested
+  chain: "B acting for A"), preserving an audit trail. The **`may_act`** claim in
+  a token declares *which* actor is permitted to act on the subject's behalf.
+- Each hop should **narrow** audience and scope (downscoping), so a token leaked
+  deep in the chain has minimal blast radius.
+
+> [!INTERVIEW]
+> "Five microservices, one user — how do you carry identity?" Token exchange
+> (RFC 8693): each hop exchanges its inbound token for a downscoped one with the
+> next `audience`, using **delegation** (`act`/`may_act`) over impersonation so
+> the call chain stays auditable.
+
+---
+
+## JWT access-token profile and validation checklist
+
+**RFC 9068 (JWT Profile for OAuth 2.0 Access Tokens)** standardizes what a JWT
+*access* token looks like, and crucially defines the header **`typ: at+jwt`** so
+a resource server can tell an access token apart from an **ID token**. A frequent
+trap: an API accepting an **ID token** (meant for the *client* to learn who the
+user is) as if it were an access token. Reject it — an ID token's `aud` is the
+client, not your API, and it lacks `scope`. Check `typ`, `aud`, and `scope`.
+
+**The ordered validation routine** (recite this as a checklist, not prose):
+
+1. Parse the header; **allow-list the `alg`** against expected values — never
+   trust the token's own `alg`. (Watch case-bypass tricks like `nOnE`.)
+2. Resolve the verification key by `kid` from a **pinned JWKS** (see below);
+   never follow a `jku`/`kid` that points off-issuer.
+3. **Verify the signature** before reading any claim as trusted.
+4. Check **`iss`** by exact string match against the expected issuer.
+5. Check **`aud`** contains this API's identifier.
+6. Check **`exp`**, **`nbf`**, and **`iat`** with a small clock skew (≤ ~30–60s).
+7. Check **`typ`/token-type** (`at+jwt`; reject ID tokens at the API).
+8. Enforce **scope** and then **object-level authorization**.
+
+Prefer **asymmetric** signing (EdDSA/`Ed25519`, ES256, RS256) over HS256 for
+multi-party setups, so the resource server holds only a public key and can't mint
+tokens — and the RS256→HS256 confusion attack is structurally avoided.
+
+**RFC 8725 (JSON Web Token Best Current Practices)** is the BCP that consolidates
+these rules (`alg` allow-listing, key/kid discipline, audience checks); cite it
+by name.
+
+---
+
+## JWKS and signing-key rotation
+
+The *legitimate* counterpart to the `jku`/`kid` attack is the **JWKS
+(JSON Web Key Set)** mechanism for public-key distribution and zero-downtime
+key rotation.
+
+- The AS publishes its public signing keys at a **`jwks_uri`**, discovered from
+  its **authorization-server metadata (RFC 8414)** document
+  (`/.well-known/oauth-authorization-server`, or the OIDC
+  `/.well-known/openid-configuration`).
+- Each key has a **`kid`**; the resource server **caches** the JWKS (honoring
+  `Cache-Control`) and selects the key whose `kid` matches the token header.
+- **Rotation with overlapping keys:** publish the *new* public key to the JWKS
+  **before** you start signing with it, and keep the *old* key in the set until
+  every token signed with it has expired. Because clients pick by `kid`, both
+  generations validate simultaneously — **zero rejected tokens, zero downtime.**
+- **Pinning:** hard-pin `iss` and the `jwks_uri` to the trusted issuer. An
+  attacker-supplied `jku`/`kid` pointing at their own key set is exactly the
+  header-injection attack; never resolve keys from token-controlled URLs.
+
+> [!INTERVIEW]
+> "Rotate your JWT signing key with zero downtime and no rejected tokens." →
+> JWKS with overlapping `kid`s: **publish-before-sign**, retire-after-expiry,
+> clients select by `kid`, cache honors TTL.
+
+---
+
+## Token introspection, phantom and split tokens
+
+**RFC 7662 (Token Introspection)** is how a resource server validates an
+**opaque** token: it POSTs `token=<opaque>` to the AS's `/introspect` endpoint
+(itself authenticated) and gets back JSON whose key field is **`active`** (a
+boolean), plus `scope`, `sub`, `client_id`, `exp`, `aud`, etc. The RS should
+**cache** the result briefly to avoid an introspection round-trip per request.
+
+This resolves the opaque-vs-JWT dilemma (revocable but chatty vs stateless but
+hard to revoke) with two gateway patterns:
+
+- **Phantom Token pattern.** Clients hold an **opaque** token externally (so it's
+  revocable and leaks nothing). At the edge, the **gateway introspects it once**
+  and swaps in a **short-lived JWT** for internal service-to-service calls, which
+  then validate statelessly. External revocability + internal stateless speed.
+- **Split Token pattern.** The token is split: the client carries an opaque
+  reference (or one half), while the signature/claims half is reconstructed at
+  the gateway — combining revocation control outside with stateless validation
+  inside, without a full introspection call per request.
+
+> [!KEY-TAKEAWAY]
+> "Opaque gives revocation, JWT gives stateless validation — can I have both?"
+> Yes: **phantom/split tokens at the gateway** — introspect the opaque token
+> once at the edge, forward a short-lived internal JWT.
+
+---
+
+## DPoP: sender-constrained tokens
+
+mTLS cert-binding (RFC 8705) proves possession for backend/PKI clients, but is
+impractical for SPAs and native apps. **DPoP — Demonstrating Proof-of-Possession
+(RFC 9449)** is the **application-layer** answer: it makes a token
+**sender-constrained** so a stolen/leaked token is useless without the client's
+private key. This is the canonical 2025 answer to "how do you stop token replay
+without mTLS?"
+
+**How it works.** The client holds a key pair and sends a per-request **DPoP
+proof JWT** in a `DPoP` header:
+
+- Proof header: `typ: dpop+jwt`, `alg`, and the public key as **`jwk`**.
+- Proof payload: **`htm`** (HTTP method), **`htu`** (the request URI),
+  **`iat`**, **`jti`** (unique, replay-tracked), and — when calling a resource
+  server — **`ath`** = base64url(SHA-256(access token)) binding the proof to that
+  exact token.
+
+**Token binding.** The AS binds the issued access token to the client key by
+putting the JWK thumbprint in the token's confirmation claim:
+**`cnf.jkt`** (JWK SHA-256 thumbprint). The RS recomputes the thumbprint of the
+proof's `jwk` and checks it equals `cnf.jkt`. The `dpop_jkt` authorization-request
+parameter can bind the *authorization code* to the key too.
+
+**Nonce.** To stop pre-generated proofs, the server can demand a server-chosen
+nonce via the **`DPoP-Nonce`** response header and the **`use_dpop_nonce`** error
+(HTTP **400** at the AS, **401** at the RS); the client retries with the nonce in
+the proof.
+
+**Hard rule:** a resource server **MUST reject a DPoP-bound access token that is
+presented as a plain `Bearer`** — otherwise binding is trivially bypassed.
+
+- **DPoP vs mTLS:** both are proof-of-possession. Choose **DPoP** for public
+  clients (SPA/native) where you control the app but not a PKI; choose **mTLS**
+  (`cnf.x5t#S256`) for backend services already inside a PKI/mesh.
+
+---
+
+## mTLS specifics (RFC 8705 deep-dive)
+
+Two client-authentication methods are defined:
+
+- **`tls_client_auth`** — the client cert is issued by a **CA the AS trusts**;
+  the AS binds the token to a configured subject/DN (or SAN) from the
+  PKI-validated certificate.
+- **`self_signed_tls_client_auth`** — the client registers a **self-signed**
+  certificate (or its JWKS) out of band; the AS pins that exact cert. No CA
+  needed, useful for closed ecosystems.
+
+**Certificate-bound tokens** put the confirmation claim **`cnf.x5t#S256`** =
+base64url SHA-256 of the DER client certificate into the access token. On each
+call the RS compares the thumbprint of the **presented TLS client cert** to the
+token's `cnf.x5t#S256`; a token without the matching cert is rejected. This is
+the mTLS analogue of DPoP's `cnf.jkt`.
+
+---
+
+## Cookie hardening and CSRF defenses
+
+"Add `SameSite`/`HttpOnly`" is only a start. `SameSite` is **not** a complete
+CSRF defense (top-level `GET` navigations still send `Lax` cookies; some clients
+default differently). Layer these:
+
+- **`__Host-` cookie prefix.** A cookie named `__Host-session` is only accepted
+  if it's `Secure`, has `Path=/`, and has **no `Domain`** attribute — pinning it
+  to the exact host and blocking subdomain injection/overwrite.
+- **`SameSite` values.** `Strict` (never sent cross-site — safest, but breaks
+  inbound links to authenticated pages), `Lax` (sent on top-level `GET`
+  navigations only — the common default), `None; Secure` (sent cross-site;
+  required for third-party/embedded contexts).
+- **CSRF token strategies:** the **synchronizer token** (server stores a
+  per-session token, form echoes it — stateful, strongest); the **double-submit
+  cookie** (token in both a cookie and a header/body; server checks they match —
+  stateless but weaker if subdomains can set cookies); and **origin checks** via
+  the `Origin`/`Referer` or **`Sec-Fetch-Site`** fetch-metadata headers.
+
+---
+
+## Authorization models: RBAC, ABAC, ReBAC
+
+Scopes bound *token capability*; they are **not** a full application
+authorization model. Senior candidates separate the **delegated-scope** layer
+(OAuth) from the **application authorization** layer and can name the taxonomy:
+
+- **Scopes** — what class of operation a *token* may invoke (`write:orders`).
+  Coarse, delegation-oriented; never encodes per-object ownership.
+- **RBAC (Role-Based Access Control)** — permissions attach to **roles**, users
+  hold roles. Simple, auditable; explodes into "role sprawl" when rules get
+  contextual.
+- **ABAC (Attribute-Based Access Control)** — decisions from **attributes** of
+  subject/resource/environment, evaluated by a **policy engine** (e.g. OPA/Rego,
+  AWS Cedar). Flexible, context-aware; harder to reason about exhaustively.
+- **ReBAC (Relationship-Based Access Control)** — permission derives from
+  **relationships in a graph** ("user is editor of doc which is in folder shared
+  with team"). The **Google Zanzibar** model (OpenFGA / SpiceDB) popularized it
+  for fine-grained, hierarchical sharing at scale.
+- **Claims / groups / entitlements** — attributes carried *in* the token
+  (group membership, tenant) that feed whichever model above you run.
+
+The BOLA object-level check lives in **this** layer, not in the scope: "scope
+says `write:orders`, but the user is editing *someone else's* order" is resolved
+by RBAC/ABAC/ReBAC evaluating ownership — the token alone can't.
+
+---
+
+## HTTP Basic authentication
+
+**RFC 7617** defines the oldest scheme: `Authorization: Basic ` followed by
+**base64(`username:password`)**. Base64 is *encoding, not encryption* — so Basic
+auth is only safe **over TLS**. It has **no logout** (the browser/client re-sends
+credentials every request) and no built-in expiry or rotation. Despite this it
+survives for **machine-to-machine and internal/legacy tooling** and — notably —
+as the transport for the OAuth **client credentials** at the token endpoint
+(`Authorization: Basic base64(client_id:client_secret)`). Interviewers open with
+it as a baseline before moving to tokens.
+
+---
+
+## OAuth for native and mobile apps
+
+**RFC 8252 (BCP 212)** is the profile for OAuth in native/mobile apps:
+
+- **Use the system browser** (in-app browser tab / `SFAuthenticationSession` /
+  Custom Tabs), **never an embedded WebView** — a WebView lets the app read the
+  user's credentials and defeats SSO/consent isolation.
+- **PKCE is mandatory** (native apps are public clients and can't keep a secret).
+- **Redirect delivery** back to the app uses one of: a **claimed `https` app
+  link** (App Links / Universal Links — most secure, verified domain ownership),
+  a **custom URI scheme** (`com.example.app:/cb` — weaker: another app can
+  register the same scheme, hence PKCE), or a **loopback interface**
+  (`http://127.0.0.1:{port}/` — for desktop apps, the only allowed redirect-URI
+  port wildcard).
+
+---
+
+## BFF (Backend-for-Frontend) for browser apps
+
+The current SPA guidance stops at "auth code + PKCE (public client)." The 2023+
+recommendation (the **OAuth 2.0 for Browser-Based Apps** draft) is the
+**Backend-for-Frontend** pattern, because **any token in the browser is
+XSS-exfiltratable** (localStorage especially).
+
+- A **server-side confidential component** (the BFF) runs the authorization-code
+  flow, and **holds the tokens** — they never reach JavaScript.
+- The BFF issues the SPA a **`HttpOnly`, `Secure`, `SameSite`, `__Host-`
+  session cookie** and **proxies** the SPA's API calls, attaching the real access
+  token server-side.
+- Result: **no tokens in the browser at all**; XSS can still ride the session via
+  the proxy but can't *exfiltrate* a token for offline use.
+
+> [!KEY-TAKEAWAY]
+> "Where should a React SPA keep its access token?" → **Not localStorage**
+> (XSS-exfiltratable). Prefer a **BFF** with an `HttpOnly`+`__Host-` cookie and
+> server-side token custody. If a token must live in the browser, keep it
+> **in-memory only, short-TTL, and DPoP-bound.**
+
+---
+
+## Advanced hardening extensions (FAPI-grade)
+
+For high-assurance (financial-grade / FAPI) APIs, several extensions come up:
+
+- **PAR — Pushed Authorization Requests (RFC 9126).** The client POSTs the
+  authorization parameters to the AS *first* over a back channel and receives a
+  `request_uri` reference; the front-channel `/authorize` then carries only that
+  reference. Parameters can't be tampered with or leaked in the browser URL.
+- **RAR — Rich Authorization Requests (RFC 9396).** Replaces coarse `scope`
+  strings with a structured **`authorization_details`** JSON array for
+  fine-grained, per-transaction authorization ("transfer ≤ €500 from account X").
+- **Step-up authentication (RFC 9470).** A resource server can demand stronger
+  auth for a sensitive operation by returning an `insufficient_user_authentication`
+  error with required **`acr`** (authentication context class) / **`max_age`**;
+  the token's **`acr`/`amr`** claims report how/when the user authenticated.
+
+---
+
+## SigV4 signing internals (deep-dive)
+
+The HMAC section sketched SigV4; here is the algorithm interviewers probe.
+
+**1. Canonical request** — hash of four normalized elements:
+HTTP method, **canonical URI** (percent-encoded path), **canonical query string**
+(sorted), **canonical headers** + a **`SignedHeaders`** list naming exactly which
+headers are signed, and the body hash **`x-amz-content-sha256`** (which may be the
+literal `UNSIGNED-PAYLOAD` for streaming).
+
+**2. String to sign** — the algorithm id (`AWS4-HMAC-SHA256`), timestamp, the
+**credential scope** (`date/region/service/aws4_request`), and the hash of the
+canonical request.
+
+**3. Derived signing key** — an **HMAC chain**, not the raw secret:
+`kDate = HMAC("AWS4"+secret, date)` → `kRegion = HMAC(kDate, region)` →
+`kService = HMAC(kRegion, service)` → `kSigning = HMAC(kService, "aws4_request")`.
+Scoping the key to date/region/service **limits blast radius**: a leaked derived
+key works only for that day/region/service, not the whole account.
+
+**4. Signature** = `HMAC(kSigning, stringToSign)`, placed in the `Authorization`
+header (or as `X-Amz-Signature` query params for **presigned URLs**, which embed
+`X-Amz-Expires` for time-boxed access). **SigV4A** extends this to multi-region
+signing with an asymmetric (ECDSA) key valid across regions.
+
+**Key rotation** mirrors API keys: run **two active secret keys** during
+migration (sign with the new, accept both), then retire the old.
+
+---
+
 ## Common follow-up questions
 
 - **"401 vs 403 — which is which?"** `401` = not authenticated (unknown/invalid
@@ -657,6 +1062,34 @@ wrong; log auth failures for detection.
   https://www.rfc-editor.org/rfc/rfc7662
 - **RFC 8705** — OAuth 2.0 Mutual-TLS Client Auth & Certificate-Bound Tokens:
   https://www.rfc-editor.org/rfc/rfc8705
+- **RFC 9449** — OAuth 2.0 Demonstrating Proof-of-Possession (DPoP):
+  https://www.rfc-editor.org/rfc/rfc9449
+- **RFC 9700 / BCP 240** — OAuth 2.0 Security Best Current Practice (Jan 2025):
+  https://www.rfc-editor.org/rfc/rfc9700
+- **RFC 8693** — OAuth 2.0 Token Exchange (`act`/`may_act`, delegation):
+  https://www.rfc-editor.org/rfc/rfc8693
+- **RFC 9068** — JWT Profile for OAuth 2.0 Access Tokens (`at+jwt`):
+  https://www.rfc-editor.org/rfc/rfc9068
+- **RFC 8725** — JSON Web Token Best Current Practices:
+  https://www.rfc-editor.org/rfc/rfc8725
+- **RFC 8414** — OAuth 2.0 Authorization Server Metadata (`jwks_uri`):
+  https://www.rfc-editor.org/rfc/rfc8414
+- **RFC 8628** — OAuth 2.0 Device Authorization Grant:
+  https://www.rfc-editor.org/rfc/rfc8628
+- **RFC 8252 / BCP 212** — OAuth 2.0 for Native Apps:
+  https://www.rfc-editor.org/rfc/rfc8252
+- **RFC 9207** — OAuth 2.0 Authorization Server Issuer Identification (`iss`):
+  https://www.rfc-editor.org/rfc/rfc9207
+- **RFC 7617** — The 'Basic' HTTP Authentication Scheme:
+  https://www.rfc-editor.org/rfc/rfc7617
+- **RFC 9126** — OAuth 2.0 Pushed Authorization Requests (PAR):
+  https://www.rfc-editor.org/rfc/rfc9126
+- **RFC 9396** — OAuth 2.0 Rich Authorization Requests (RAR):
+  https://www.rfc-editor.org/rfc/rfc9396
+- **RFC 9470** — OAuth 2.0 Step-up Authentication Challenge Protocol:
+  https://www.rfc-editor.org/rfc/rfc9470
+- **OAuth 2.0 for Browser-Based Apps** (BFF pattern), IETF draft:
+  https://datatracker.ietf.org/doc/html/draft-ietf-oauth-browser-based-apps
 - **OpenID Connect Core** — identity layer on OAuth 2.0 (ID tokens):
   https://openid.net/specs/openid-connect-core-1_0.html
 - **OWASP API Security Top 10 (2023)**:

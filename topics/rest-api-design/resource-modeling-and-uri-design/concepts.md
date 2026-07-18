@@ -493,6 +493,485 @@ stability is a big part of why versioning, redirects, and careful naming exist.
 
 ---
 
+## Percent-Encoding & Reserved Characters
+
+**Beginner.** URIs are restricted to a small ASCII alphabet. To put any other byte in a URI
+you **percent-encode** it: `%` followed by two hex digits of the UTF-8 byte(s). A space
+becomes `%20`, `é` becomes `%C3%A9`.
+
+**Intermediate — the RFC 3986 §2 character classes (memorize these):**
+
+- **`unreserved`** — `A–Z a–z 0–9 - . _ ~`. Always safe literally; **never needs encoding**
+  and should *not* be encoded gratuitously.
+- **`gen-delims`** — `: / ? # [ ] @`. Separate the major URI components.
+- **`sub-delims`** — `! $ & ' ( ) * + , ; =`. Reserved *within* a component for
+  application-defined sub-syntax (e.g. query pairs, matrix params).
+- **`pct-encoded`** — anything else must arrive as `%XX`.
+
+"Reserved" means "has structural meaning where it appears." A reserved char that you want to
+carry as *data* (not as a delimiter) must be percent-encoded so it isn't mistaken for the
+delimiter.
+
+**Advanced gotchas.**
+- **A literal `/` inside one path segment must be `%2F`.** But per RFC 3986 §3.3, `%2F` is
+  *not equivalent* to a real `/` — and many gateways/proxies either reject encoded slashes
+  (Apache `AllowEncodedSlashes`, some CDNs return 404/400) or **decode them before routing**,
+  which silently reintroduces a segment boundary. This is a real source of routing and
+  security bugs (path traversal via double-decoding `%252F` → `%2F` → `/`). If an id legitimately
+  contains `/` (a Git ref, a file path), the robust options are: encode and pray the gateway
+  passes it through, encode the *whole* id as an opaque token (e.g. base64url), or restructure
+  the id into sub-resource segments.
+- **`+` means space only in `application/x-www-form-urlencoded`** (query strings and form
+  bodies) — a form convention, *not* RFC 3986. In a **path** segment, `+` is a literal plus and
+  a space must be `%20`. Candidates routinely assume `+`→space everywhere; decoding a path `+`
+  as a space is a bug.
+- Encode the *bytes*, not the characters: encode using UTF-8 (`ferret+café` → `caf%C3%A9`),
+  and encode reserved chars that are data, but leave `unreserved` chars alone.
+
+> [!WARNING]
+> `%2F` ≠ `/` per RFC 3986, yet infrastructure frequently conflates them. Do not rely on an
+> encoded slash surviving intact through gateways; design ids that don't need one.
+
+---
+
+## URI Normalization & Equivalence
+
+**Beginner.** "Are these two URIs the same resource?" is answered by **normalization** — the
+process (RFC 3986 §6) of reducing URIs to a canonical form so equivalent URIs compare equal.
+It matters for cache keys, deduplication, `self`-link comparison, and deciding when to `301`.
+
+**Intermediate — the equivalence ladder (cheapest → most assumptions):**
+
+1. **Simple string comparison** — byte-for-byte; the safest, weakest test.
+2. **Syntax-based normalization** (RFC 3986 §6.2.2), always safe:
+   - **Case normalization** — scheme and host to lowercase; and in `pct-encoded` triplets the
+     **hex digits are uppercased** (`%2f` → `%2F`). The percent sign stays, only `A–F` case is
+     normalized.
+   - **Percent-encoding normalization** — decode any `unreserved` char that was needlessly
+     encoded (`%7E` → `~`).
+   - **Path segment normalization** — run `remove_dot_segments`: resolve `.` and `..`
+     (`/a/b/../c` → `/a/c`).
+3. **Scheme-based normalization** (§6.2.3) — apply scheme defaults: drop the default port
+   (`https://h:443/` → `https://h/`), an empty path becomes `/` for http(s).
+4. **Protocol-based normalization** (§6.2.4) — requires knowing server behavior (e.g. a
+   trailing slash redirecting); the most assumptions, least safe to apply blindly.
+
+**Advanced gotchas.**
+- The **path is still case-sensitive** — normalization does *not* lowercase it. `/Orders` and
+  `/orders` are distinct even after full syntax normalization.
+- Two URIs returning identical bytes are **not necessarily the same resource** — they may be
+  independent representations that happen to match. Equivalence is about *identity*, not
+  current content. If they *are* the same resource, advertise one canonical form (`301`,
+  `Content-Location`, or `rel="canonical"`); if they're genuinely distinct, keep them separate.
+- Caches key on the normalized request-target; inconsistent normalization between client and
+  origin causes cache misses or, worse, cache poisoning.
+
+---
+
+## Internationalization: IRIs and Non-ASCII URIs
+
+**Beginner.** RFC 3986 URIs are **ASCII only**. To support non-ASCII text you either
+percent-encode the UTF-8 bytes, or you use an **IRI** (Internationalized Resource Identifier,
+**RFC 3987**) which permits Unicode directly and defines a deterministic mapping back to a URI.
+
+```
+IRI:  https://api.example.com/cities/Cádiz
+URI:  https://api.example.com/cities/C%C3%A1diz     # Cádiz → UTF-8 → percent-encoded
+```
+
+**Intermediate.**
+- **Host names** can't be percent-encoded; internationalized domains use **IDNA/Punycode**
+  (`münchen.example` → `xn--mnchen-3ya.example`).
+- **Where does *locale* belong?** A localized *representation* (language of the response) is a
+  **content-negotiation** concern, not resource identity. Prefer the **`Accept-Language`**
+  request header and vary the cache with **`Vary: Accept-Language`**. Putting locale in the
+  path (`/en-US/products`) or a query (`?lang=en`) makes the *same* product a *different*
+  resource per language, multiplying URIs and fragmenting caches — acceptable for
+  human-facing/SEO pages, questionable for a data API. A locale *subdomain* (`en.api.com`)
+  similarly forks identity.
+
+**Advanced gotchas.**
+- If a non-ASCII identifier is unavoidable, normalize Unicode to **NFC** before encoding so two
+  visually identical strings don't produce different byte sequences (and different URIs).
+- Prevalent guidance (Google AIP-122, Azure) is to keep ids **DNS/ASCII-compatible and
+  human-readable** — avoid gratuitous percent-encoding and UUIDs in user-facing URLs where a
+  readable ASCII slug works.
+- Locale-in-path breaks the "one canonical URI per resource" rule and complicates `self` links:
+  which language's URI is canonical?
+
+---
+
+## URI Templates in Depth (RFC 6570)
+
+**Beginner.** RFC 6570 defines **URI Templates** — strings with `{expressions}` that expand to
+URIs given variable values. It's what OpenAPI path items, `Link` headers, and hypermedia
+clients use to describe a *class* of URIs, not just the `{id}` shorthand.
+
+**Intermediate — the operator levels.** The first character of an expression may be an
+*operator* that controls how the value is joined:
+
+| Op | Name | `{op var}` with `var=x, list=[a,b]` | Typical use |
+|---|---|---|---|
+| *(none)* | simple | `{var}` → `x` | plain substitution |
+| `+` | reserved | `{+path}` → keeps `/`, `:` unencoded | inject a whole path |
+| `#` | fragment | `{#var}` → `#x` | fragment |
+| `.` | label | `{.var}` → `.x` | file extensions |
+| `/` | path segment | `{/var}` → `/x` | append path segments |
+| `;` | path-style / matrix | `{;var}` → `;var=x` | matrix params |
+| `?` | form query | `{?var}` → `?var=x` | start a query string |
+| `&` | query continuation | `{&var}` → `&var=x` | add to a query string |
+
+**Modifiers:**
+- **explode `*`** — expand a list/map into multiple pairs. `{?ids*}` with `ids=[1,2]`
+  → `?ids=1&ids=2`; `{?filter*}` with a map → `?a=1&b=2`.
+- **prefix `:n`** — take the first *n* characters. `{var:3}` with `var=value` → `val`.
+
+```
+Template:  /users/{id}/orders{?status,page}
+Values:    id=42, status=open, page=2
+Expands:   /users/42/orders?status=open&page=2
+```
+
+**Advanced.**
+- A **templated** `Link` header (RFC 8288) sets `; templated` (via a link-template mechanism)
+  so a hypermedia client knows to *fill* it rather than dereference it as-is. HAL and other
+  hypermedia formats mark templated links explicitly.
+- OpenAPI 3.1 `paths` keys are Level-1 templates (`/users/{id}`); query/matrix operators are
+  *not* used there because query params are described separately under `parameters`.
+- Templates are one-way for description; matching an incoming URI back to a template
+  (reverse-templating) is a separate, harder problem your router solves.
+
+---
+
+## Matrix Parameters
+
+**Beginner.** A **matrix parameter** attaches `;key=value` pairs to a *specific path segment*:
+`/maps/color;lat=50;lng=20/tiles`. Tim Berners-Lee's original "matrix URIs" note introduced
+them; RFC 3986 treats `;` and `=` as `sub-delims` inside a segment but assigns **no semantics**
+— they are application-defined. RFC 6570's `{;var}` operator expands to this form.
+
+**Intermediate — matrix vs query.** The key difference is **scope**: a query string applies to
+the *whole* URI (one query per request), while a matrix param binds to *one segment*, so it
+survives nesting and can differ per segment:
+
+```
+/books;lang=en/reviews;sort=recent     # each segment carries its own params
+/books/reviews?lang=en&sort=recent      # ambiguous which segment lang applies to
+```
+
+**Advanced gotchas.**
+- JAX-RS popularized `@MatrixParam`, but **most APIs avoid matrix params**: caching/proxy
+  support is inconsistent, few clients build them, and the semantics aren't standardized. They
+  shine only for genuinely *per-segment* parameters (map tiles, coordinate-scoped filters).
+- They are not a substitute for the query string on collection filtering — use query for
+  whole-request refinement.
+
+---
+
+## Composite and Compound Keys
+
+**Beginner.** Some resources have a **multi-part natural key** — e.g. a shopping cart keyed by
+`(country, sessionId)` or a book keyed by `(publisherId, bookId)`. You must decide how that
+tuple appears in the URI.
+
+**Intermediate — the options:**
+
+```
+# A) Hierarchical name (each component a segment) — Google AIP style
+/publishers/{publisherId}/books/{bookId}
+/shopping-carts/{country}/{sessionId}        # Zalando #241
+
+# B) One opaque composite token (encode the tuple into a single id)
+/books/{opaqueCompositeId}
+
+# C) Independent components as query on search/create
+/books?publisher=123&isbn=...
+```
+
+**Advanced gotchas.**
+- **Multi-segment keys erode id opacity.** Once the "id" is spread across path segments, the
+  id is no longer a single opaque token — clients start parsing and assembling it, and adding a
+  *fourth* key component next year (a new segment) is a breaking URI change. That evolvability
+  cost is the classic interview trap: "your PK is a 3-tuple; the team adds a 4th component —
+  what did design A cost you?" Answer: every client that constructs the URI must change, and
+  cached/bookmarked URIs break.
+- **Encoding the tuple as one opaque token** (option B) preserves opacity and evolvability —
+  you can change the key's internal structure without changing the URI *shape* — at the cost of
+  human readability and the ability to browse the hierarchy.
+- Google AIP hierarchical names (`publishers/123/books/456`) deliberately choose readability +
+  hierarchy and accept that the name encodes structure; they mitigate churn by treating the
+  full name as the contract and never reusing it.
+
+---
+
+## URL Length Limits, Search Resources, and the QUERY Method
+
+**Beginner.** URIs aren't unbounded. Practical caps: legacy IE ~2 KB, Azure ~2083 chars, many
+servers default to ~8 KB request-line/header limits; exceeding them yields **414 URI Too Long**
+(RFC 9110). A big or sensitive filter can't always live in the query string.
+
+**Intermediate — three ways to send a large/complex/sensitive query:**
+
+| Approach | Safe? | Idempotent? | Cacheable? | Notes |
+|---|---|---|---|---|
+| `GET /orders?...` | yes | yes | **yes** | breaks at length limit; filter visible in logs |
+| `POST /searches` (search resource) | no | no | not by default | body carries filter; may return a created search resource / results; loses GET caching |
+| **`QUERY`** method (draft) | **yes** | **yes** | **yes** (keyed on method+URI+**body**) | GET-with-a-body done right |
+
+**Advanced.**
+- **`GET` with a body is a trap.** RFC 9110 doesn't forbid a GET body but says it has no defined
+  semantics and many intermediaries drop or ignore it — do not rely on it.
+- **`POST /searches`** is the long-standing pragmatic workaround: the criteria go in the body.
+  Downside: `POST` is neither safe nor cacheable, so you forfeit HTTP caching and must document
+  that this "creates" a search only nominally.
+- The **HTTP `QUERY` method** (IETF httpbis `draft-ietf-httpbis-safe-method-w-body`, active
+  through 2024–2025 — flag it as a *draft*, not yet an RFC) is designed to fix exactly this: a
+  method that is **safe and idempotent** like GET but carries a request body, and whose response
+  is **cacheable keyed on the request content** (method + URI + body). If asked "GET vs
+  POST /search vs QUERY," the senior answer weighs caching and idempotency: GET when it fits,
+  QUERY when standardized support arrives, POST /searches as today's fallback.
+
+---
+
+## Full vs Relative Resource Names
+
+**Beginner.** When one service needs to reference another service's resource, a bare relative
+path (`/books/456`) is ambiguous — relative to *which* API? Google AIP-122 distinguishes three
+forms of a resource name.
+
+**Intermediate.**
+
+```
+Relative name:  publishers/123/books/456
+Full name:      //library.googleapis.com/publishers/123/books/456   # schemeless, adds authority
+Resource URI:   https://library.googleapis.com/v1/publishers/123/books/456  # adds scheme + version
+```
+
+- **Relative name** — canonical *within* the service; used inside its own payloads.
+- **Full resource name** — schemeless (`//host/...`); globally unambiguous across services.
+- **Resource URI** — a full name plus scheme (and often API version) that you can dereference.
+
+**Advanced gotchas.**
+- **Version is excluded from resource *names*** because names must "persist version to version"
+  — the identity of the book doesn't change when the API rolls from v1 to v2. Version is a
+  transport/URI concern, not part of identity.
+- Real-world analogue: **AWS ARNs** (`arn:aws:s3:::bucket/key`) are exactly this — a
+  globally-unique, scheme-agnostic, cross-service resource name.
+- Ties to hypermedia: a `self` link should carry the canonical dereferenceable form so a client
+  never has to assemble it.
+
+---
+
+## Server-Assigned vs Client-Provided Identifiers
+
+**Beginner.** Who picks the id — the server or the client? By default (AIP-133) the **server
+assigns** ids on `POST` to a collection. But some designs let the **client provide** the id.
+
+**Intermediate — the two models and their method mapping:**
+
+```
+# Server-assigned (default): POST, server returns the id
+POST /books           -> 201 Created, Location: /books/AbC123
+
+# Client-provided id via create-with-id (AIP-133) or PUT upsert (AIP-134)
+PUT  /books/my-chosen-id   -> 201 (created) or 200 (replaced)  # idempotent upsert
+POST /books  {"id":"my-chosen-id"}   # create-with-id semantics
+```
+
+**Advanced gotchas.**
+- **Idempotency:** `PUT` to a client-chosen URI is idempotent — retrying a create-or-replace
+  yields one resource. `POST` create is *not* idempotent (each call may create a duplicate),
+  which is why the **`Idempotency-Key`** request header exists: the client sends a unique key,
+  the server dedups retries. Client-chosen ids and `Idempotency-Key` are two answers to the
+  same "safe retry of create" problem.
+- **Collision handling:** with client-provided ids the server must define what happens on
+  conflict — `PUT` replaces (upsert), while a strict `POST` create should return **409
+  Conflict** if the id already exists.
+- **Constraints:** user-provided ids must be documented and constrained — a common rule
+  (AIP-122) is RFC-1034/1123 label syntax `^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`. Google **dropped
+  its blanket anti-UUID stance in 2025**, so UUIDs are acceptable as ids again where readability
+  isn't required.
+
+---
+
+## Aliases and self Pseudo-Identifiers
+
+**Beginner.** An **alias** is a stable URI that resolves to a resource whose real id you don't
+have to know: `/users/me`, `/orders/latest`, `/config/current`.
+
+**Intermediate.**
+- `users/me` (or a bare `/me`, `/self`) resolves to *the caller* — the server derives the
+  identity from the **authentication token**, not from a path id.
+- The rule: an alias *resolves*, but the response should carry the **canonical name** (its real
+  `self` URI), so clients can cache and re-reference by identity.
+
+**Advanced gotchas.**
+- **Security angle (Zalando #228, BOLA):** using `me` instead of `/users/{myId}` means the
+  caller's own id never appears in the URL, removing an IDOR surface — there's no id to tamper
+  with, and the server can't be tricked into serving someone else's object by id-guessing.
+- Don't let an alias *become* the canonical identity in stored links; persist the resolved
+  canonical URI so a shared/bookmarked link doesn't silently point at "whoever is logged in."
+
+---
+
+## Nesting as an Authorization Boundary
+
+**Beginner.** Nested URIs *look* scoped — `/users/42/orders/1001` reads like "order 1001 that
+belongs to user 42." But the URI shape is only a hint; **the server must actually authorize the
+whole chain.**
+
+**Intermediate — the path-confusion IDOR.** Consider `GET /users/42/orders/1001` where order
+1001 actually belongs to user 7. If the handler looks up order 1001 by id and ignores the `42`
+in the path, it will happily return another user's order. Correct behavior: verify the
+parent-child linkage *and* the caller's right to user 42, returning **404** (don't confirm
+existence) or **403**.
+
+**Advanced gotchas.**
+- This maps to the top OWASP API risks: **API1:2023 Broken Object Level Authorization (BOLA)**
+  (object access) and **API3:2023 Broken Object Property Level Authorization (BOPLA)** (over-
+  exposing or accepting properties the caller shouldn't see/set). Nesting neither creates nor
+  removes these — every segment that names an object needs an access check.
+- Nesting *helps* the authorization story by making the scope explicit and enabling
+  parent-scoped policies; it *hurts* if developers treat the path as trusted and skip the
+  per-object check. Deep nests multiply the checks (each ancestor must be authorized), which is
+  another reason to keep nesting shallow.
+
+---
+
+## Paginating Relationships
+
+**Beginner.** A relationship endpoint (`/users/42/orders`) is a **collection** and must obey the
+*same* pagination contract as a top-level collection. A sub-collection that returns an unbounded
+array is a latency and memory time-bomb.
+
+**Intermediate.**
+- Apply cursor-based (opaque token) or offset/limit pagination, page metadata, and **`Link`
+  header** relations `rel="next" | "prev" | "first" | "last"` (RFC 8288) — identically to
+  top-level lists.
+- Nested collections are often *more* prone to unboundedness (a user with 10 years of orders),
+  so pagination and filtering are mandatory, not optional.
+
+**Advanced.**
+- The modeling rule: **relationship endpoints are collections**, so make them paginable,
+  filterable, and sortable from day one — retrofitting pagination onto a shipped endpoint that
+  returned a bare array is a breaking change (the response type changes from array to an
+  envelope, or you must sneak in `Link` headers clients weren't reading).
+- Cross-reference the *Pagination & Filtering* topic for the full cursor-vs-offset trade-off;
+  the point here is that nesting doesn't exempt you from it.
+
+---
+
+## Custom Methods: Batch and Long-Running Operations
+
+**Beginner.** Beyond the single-resource action (`POST /orders/42/cancel`), two more custom-
+method shapes show up constantly and are worth modeling deliberately (Google AIP-136/231/233).
+
+**Intermediate — the three action scopes + batch + async:**
+
+```
+# Resource-scoped custom method
+POST /books/1:archive
+
+# Collection-scoped custom method (operates on the collection)
+POST /books:batchGet          # AIP-231: read many by id in one call
+POST /books:batchCreate       # AIP-233: create many atomically
+
+# Stateless / service-scoped method (no specific resource)
+POST /v1:translateText
+```
+
+- **`GET` is allowed for a side-effect-free custom method** (a pure retrieval/computation);
+  **`POST` for anything with side effects**. This mirrors safe-vs-unsafe method semantics.
+- The colon `:` must be **disallowed inside resource ids** so `/books/1:archive` can't collide
+  with a legitimately-colon-containing id. Naming is `verb` or `verbNoun`, no prepositions.
+
+**Advanced — long-running operations (LRO).** When an action can't complete synchronously,
+model the *operation itself* as a resource: return **`202 Accepted`** with a `Location`/body
+pointing at an operation resource (`/operations/abc123`) the client polls (or subscribes to via
+webhook). This turns "the work" into a first-class, addressable, cache-nothing resource with its
+own status — far cleaner than holding a connection open or returning a fake `200`.
+
+> [!INTERVIEW]
+> "`POST /orders/42/cancel` vs `POST /orders/42:cancel` vs `PATCH` status?" Strong answer: all
+> three are defensible; choose `PATCH {"status":"cancelled"}` if cancel is a pure idempotent
+> state edit, a custom method (`:cancel` per AIP-136 or `/cancel` sub-segment) if it triggers
+> side effects/workflow, and return `202` + an operation resource if it's long-running.
+
+---
+
+## Canonical URI Enforcement
+
+**Beginner.** "Pick one canonical URI per resource" (from *Hierarchy vs Flat*) needs *mechanics*
+to actually advertise which URI is canonical.
+
+**Intermediate — the tools:**
+- **`Content-Location` response header** — states the specific URI of the representation just
+  returned. Useful after content negotiation (which variant you got) and when a `POST` returns
+  the created/updated body.
+- **`Link: <...>; rel="canonical"`** (RFC 6596) — declares the canonical URI for a resource
+  reachable at several URIs (query-param variants, tracking params), so caches and crawlers
+  coalesce them.
+- **`self` link** in a hypermedia body — carries the canonical, dereferenceable form the client
+  should store and reuse, reinforcing id opacity.
+
+**Advanced.** These matter for **cache-key correctness**: if a resource is reachable at several
+URIs but only one is canonical, advertising it lets shared caches and clients converge instead
+of storing divergent entries. Contrast with a genuine *move* (use `301`/`308`), which is a
+different action from *aliasing* (use `rel="canonical"`/`Content-Location`, keep both live).
+
+---
+
+## Location vs Content-Location
+
+**Beginner.** Two similarly-named headers, different jobs (RFC 9110 §10.2.2, §8.7):
+
+- **`Location`** — points at a *different* URI: where the newly created resource lives
+  (`201 Created`) or where to go next (`3xx` redirect). It answers "where is the thing now?"
+- **`Content-Location`** — the URI of the representation *in this very response body*. It
+  answers "what is the canonical address of the bytes I just gave you?"
+
+**Intermediate — the classic exchange:**
+
+```
+POST /orders                     -> 201 Created
+                                    Location: /orders/42          # the new resource's URI
+
+GET /orders?format=summary       -> 200 OK
+                                    Content-Location: /orders/summary   # which representation this is
+```
+
+**Advanced gotchas.**
+- When a `POST` action returns the *created/updated body*, set **both**: `Location` (where it
+  lives) and optionally `Content-Location` (the URI of the enclosed representation) if they
+  differ. Confusing the two — e.g. putting the new resource URI in `Content-Location` on a
+  create — is a common interview trap.
+- With content negotiation, `Content-Location` lets a client bookmark the *specific* negotiated
+  variant (`/orders/42.en` vs `/orders/42`) even though it requested the generic URI.
+
+---
+
+## Well-Known URIs
+
+**Beginner.** Some metadata isn't a normal resource in your model but must live at a *predictable*
+address so clients can find it without being told. **RFC 8615** reserves the **`/.well-known/`**
+path prefix for exactly this site-wide metadata.
+
+**Intermediate — common well-known URIs:**
+
+```
+/.well-known/openid-configuration          # OpenID Connect discovery
+/.well-known/oauth-authorization-server     # OAuth 2.0 AS metadata (RFC 8414)
+/.well-known/security.txt                   # security contact (RFC 9116)
+/.well-known/api-catalog                    # list of the org's APIs (RFC 9727)
+```
+
+**Advanced.** `/.well-known/api-catalog` (RFC 9727, 2025) is a modeling decision in its own
+right: API *discovery* lives at a fixed, non-resource address rather than being shoehorned into
+your resource hierarchy — the interview point is recognizing that discovery/metadata endpoints
+are deliberately *outside* the normal noun space and standardized so clients don't guess.
+
+---
+
 ## Common follow-up questions
 
 - **"Walk me through modeling an e-commerce API's URIs."** Expect collections (`/orders`,
@@ -526,8 +1005,22 @@ stability is a big part of why versioning, redirects, and careful naming exist.
   <https://www.rfc-editor.org/rfc/rfc8288>
 - **RFC 9457** — *Problem Details for HTTP APIs* (2023; obsoletes 7807). Error representation.
   <https://www.rfc-editor.org/rfc/rfc9457>
-- **W3C / Tim Berners-Lee** — *Cool URIs don't change* (1998). URI stability.
+- **RFC 3987** — *Internationalized Resource Identifiers (IRIs)* (2005). Unicode in
+  identifiers; mapping IRI↔URI. <https://www.rfc-editor.org/rfc/rfc3987>
+- **RFC 6596** — *The Canonical Link Relation* (`rel="canonical"`, 2012).
+  <https://www.rfc-editor.org/rfc/rfc6596>
+- **RFC 8615** — *Well-Known URIs* (`/.well-known/`, 2019). **RFC 9727** — *api-catalog*
+  well-known URI (2025). <https://www.rfc-editor.org/rfc/rfc8615>
+- **HTTP `QUERY` Method** — IETF httpbis `draft-ietf-httpbis-safe-method-w-body` (Internet-Draft,
+  not yet an RFC): a safe, idempotent method carrying a request body, cacheable on content.
+- **W3C / Tim Berners-Lee** — *Cool URIs don't change* (1998), and *Matrix URIs* note.
   <https://www.w3.org/Provider/Style/URI>
+- **OWASP API Security Top 10 (2023)** — API3:2023 Broken Object Property Level Authorization
+  (BOPLA). <https://owasp.org/API-Security/editions/2023/en/0x11-t10/>
+- **Google AIP** — AIP-133/134 (create / create-with-id / upsert), AIP-231/233 (batch methods).
+- **Zalando RESTful API Guidelines** — #129 kebab-case, #134 pluralize / singleton-as-collection,
+  #143 identify via path, #145/147 nesting depth, #228 opaque ids & `self`, #241 compound keys.
+  <https://opensource.zalando.com/restful-api-guidelines/>
 - **OWASP API Security Top 10 (2023)** — API1:2023 Broken Object Level Authorization (BOLA).
   <https://owasp.org/API-Security/editions/2023/en/0x11-t10/>
 - **Google API Improvement Proposals (AIP)** — AIP-122 (Resource names), AIP-136 (Custom

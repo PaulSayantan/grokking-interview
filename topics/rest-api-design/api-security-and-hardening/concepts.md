@@ -574,6 +574,300 @@ eavesdroppers and man-in-the-middle tampering.
 
 ---
 
+## OAuth 2.0 and 2.1 flows
+
+**Why this matters.** "Walk me through OAuth for an SPA / mobile app" is one of
+the most common senior API-auth probes. Name-dropping OAuth isn't enough; you
+must know the *grants* and which are now forbidden.
+
+**The grants (RFC 6749) and their fate under OAuth 2.1 (the consolidation draft
+at oauth.net/2.1).**
+
+- **Authorization Code + PKCE (RFC 7636)** — the default for *all* interactive
+  clients (web, SPA, mobile). The client redirects the user to the authorization
+  server, gets a short-lived `code`, and exchanges it for tokens at the token
+  endpoint. PKCE (`code_challenge`/`code_verifier`) binds the code to the client
+  that started the flow, defeating authorization-code interception. **OAuth 2.1
+  mandates PKCE for every authorization-code client**, not just public/native
+  ones.
+- **Client Credentials** — machine-to-machine (no user present). The client
+  authenticates with its own credentials and gets a token representing *itself*.
+- **Implicit grant (`response_type=token`)** — **removed in OAuth 2.1.** It
+  returned tokens in the URL fragment (leaks via history/referrer, no
+  confidentiality). SPAs now use Authorization Code + PKCE instead.
+- **Resource Owner Password Credentials (ROPC / password grant)** — **removed in
+  OAuth 2.1.** Having the app collect the user's password defeats the entire
+  point of delegated authorization.
+
+**Other OAuth 2.1 hardening you should cite:**
+- **Exact-string redirect-URI matching** — no wildcards, no prefix/substring
+  matching. Loose matching enables token/code redirection to attacker URLs.
+- **Bearer tokens must not travel in query strings** (same leak surface as
+  credentials in URLs; see API2).
+- **Refresh-token rotation** for public clients — each use issues a new refresh
+  token and invalidates the old one, so a stolen refresh token is detectable
+  (reuse of a rotated token signals compromise → revoke the chain).
+
+> [!INTERVIEW]
+> Canonical answer to "cookies or bearer tokens for an SPA?": there's no free
+> lunch. Bearer tokens in JS-readable storage are exposed to XSS but immune to
+> CSRF; `HttpOnly` cookies are immune to XSS token theft but need CSRF defenses
+> (`SameSite`, anti-CSRF token). The modern SPA pattern is Authorization Code +
+> PKCE with tokens held in memory (or a `Secure; HttpOnly; SameSite` cookie via
+> a backend-for-frontend), never `response_type=token`.
+
+---
+
+## Scopes vs. permissions
+
+**The distinction interviewers probe.** An OAuth **scope** (e.g., `orders:write`)
+expresses what the *client application* was authorized by the user to *attempt*
+on the user's behalf. It is **coarse-grained delegation**, not per-object or
+per-user access control. Holding scope `orders:write` does **not** mean the
+subject may edit *order 42* — that still requires a BOLA check
+(`WHERE order.owner_id = :subject`) and, for privileged operations, a BFLA
+role/permission check.
+
+**Failure mode.** Teams gate an endpoint solely on `require_scope("orders:write")`
+and ship a BOLA bug: any token with that scope can write *any* order. Scope
+checks and object/function-level authorization are **orthogonal layers** — you
+need both.
+
+> [!KEY-TAKEAWAY]
+> Scope = "what this app may try, per the user's consent." Authorization = "may
+> *this subject* perform *this action* on *this object*." Never let a scope
+> check stand in for a BOLA/BFLA check.
+
+---
+
+## API keys vs user authentication
+
+**What an API key is.** OWASP is explicit: an API key **identifies the calling
+application / project**, not an authenticated end user. It is a shared secret
+(often long-lived, sometimes embedded in clients) that provides *identification
+and coarse rate-limit/quota attribution* — not proof of a user's identity.
+
+**Why it matters.**
+- An API key alone must **not** gate access to a high-value or user-specific
+  resource; you still need user authentication + per-object authorization.
+- Keys leak easily (checked into repos, shipped in mobile binaries, logged).
+  Treat a leaked key as a compromised app credential: rotate it, scope it, and
+  rate-limit per key.
+- Distinguish **app identity** (API key / client credentials) from **user
+  identity** (an authenticated principal via OAuth/OIDC). Conflating them is a
+  frequent API2 finding.
+
+---
+
+## Sender-constrained tokens (DPoP and mTLS-bound)
+
+**The problem with bearer tokens.** A bearer token is like cash — *whoever holds
+it can spend it*. Steal it (XSS, log leak, MITM on a misconfigured hop) and you
+are the user until it expires. Short TTLs shrink the window but don't close it.
+**Sender-constrained / proof-of-possession** tokens bind the token to a key the
+legitimate client holds, so a stolen token is useless without the private key.
+
+**DPoP — Demonstrating Proof-of-Possession (RFC 9449, application layer).**
+- On each request the client sends a `DPoP` header containing a signed proof JWT
+  (`typ: dpop+jwt`) with claims `htm` (HTTP method), `htu` (HTTP URI), `jti`
+  (unique id, replay defense), `iat`, and — when presenting an access token —
+  `ath` (hash of the access token).
+- The access token is bound to the client's public key via a `cnf.jkt`
+  confirmation claim (JWK SHA-256 thumbprint). The resource server checks that
+  the DPoP proof was signed by the key whose thumbprint matches `cnf.jkt`.
+- The server can issue a `DPoP-Nonce` (returned in a header) to force freshness
+  and defeat pre-computed proofs.
+- **Limitation:** DPoP does **not** stop an attacker who runs code *inside* the
+  client (e.g., XSS can just mint fresh proofs with the in-memory key). It
+  defeats *exfiltration* of the token, not code execution in the client.
+
+**mTLS-bound tokens (RFC 8705, transport layer).** The token is bound to the
+client's TLS client certificate via a `cnf.x5t#S256` claim (certificate
+thumbprint). The resource server checks the presented client cert matches. This
+is transport-layer proof-of-possession — strong for service-to-service, heavier
+to deploy than DPoP for browser clients.
+
+> [!INTERVIEW]
+> "How do you make a stolen access token useless?" Layer the answer: short TTL +
+> refresh-token rotation + **sender-constraining** (DPoP or mTLS-bound) + a
+> revocation/`jti` denylist for the residual window. Bearer-only + "we'll rotate
+> keys" is a junior answer.
+
+---
+
+## JWT hardening and advanced attacks
+
+**The anchor spec.** RFC 7519 defines JWT, but **RFC 8725 (JSON Web Token Best
+Current Practices)** is the authoritative "how to use JWT safely" document —
+cite it, not just 7519. Its headline rules: use an **algorithm allowlist**
+(never a denylist), validate all critical claims, and don't trust the token to
+tell you how to verify it.
+
+**Attacks beyond `alg:none` and RS256↔HS256 confusion:**
+
+- **`kid` header injection.** The `kid` (key id) header tells the verifier which
+  key to load. If the server uses it to build a filesystem path or SQL query,
+  an attacker can do **path traversal** (`kid: "../../dev/null"` → empty/known
+  key) or **SQL injection** to return an attacker-controlled key, then sign the
+  token with it. Defense: treat `kid` as an opaque lookup key against a trusted
+  keystore; never interpolate it into paths/queries.
+- **`jku` / `x5u` header injection.** These headers point the verifier at a URL
+  to fetch the signing JWKS/cert. An attacker sets them to an attacker-hosted
+  JWKS. Defense: **allowlist the JWKS URI** to the trusted issuer; ignore
+  token-supplied `jku`/`x5u`.
+- **`alg:none` case-variant bypass.** Denylisting `"none"` misses `"nOnE"`,
+  `"NONE"`, etc. Use an **allowlist** of exact expected algorithms — this is
+  *why* 8725 says allowlist.
+- **Weak HMAC secret brute-force.** HS256 with a guessable/short secret can be
+  cracked offline from a single captured token. Use high-entropy secrets (or
+  asymmetric keys).
+- **JWT type confusion.** Accepting an **OIDC ID token as an access token**, or
+  a token minted for another audience. Defenses: verify `aud` and `iss`, require
+  a `typ` of `at+jwt` on access tokens (RFC 9068), and use separate keys/issuers
+  for different token types.
+
+> [!WARNING]
+> The chained senior question is: "your verifier reads the algorithm from the
+> token header — exploit it." The full answer chains `alg:none` (+ case variants),
+> RS256→HS256 confusion, and `kid`/`jku` injection, and the fix is: pin the
+> algorithm and key source server-side; never let the token choose either.
+
+---
+
+## Rate-limiting algorithms and headers
+
+**Algorithms (know the trade-offs).**
+- **Fixed window** — count per calendar window (e.g., per minute). Simple but
+  allows a 2× burst at the window boundary (end of one window + start of next).
+- **Sliding window** — smooths the boundary burst by weighting the previous
+  window; more accurate, slightly more state.
+- **Token bucket** — tokens refill at a steady rate up to a cap; a request
+  spends a token. Allows controlled bursts up to the bucket size — the usual
+  choice for APIs.
+- **Leaky bucket** — requests queue and drain at a fixed rate; smooths bursts
+  into a constant outflow.
+
+**Dimensions — limit on the right key.** Per-IP alone is weak (attackers rotate
+IPs, and NAT/CDN collapse many users to one IP). Limit per **user / token /
+API key / tenant / endpoint**, and combine dimensions for sensitive flows (ties
+into API4 and API6).
+
+**Headers (note the spec status).** The `RateLimit-Limit` / `RateLimit-Remaining`
+/ `RateLimit-Reset` family and the `X-RateLimit-*` prefix are **de-facto
+conventions, not a finalized standard**. The IETF work
+(`draft-ietf-httpapi-ratelimit-headers`) has moved to **structured fields**, e.g.
+`RateLimit-Policy: "burst";q=100;w=60` and `RateLimit: "default";r=50;t=30`. All
+three forms appear in the wild; the only always-standard signal for throttling is
+**`429 Too Many Requests`** (RFC 6585) **+ `Retry-After`** (RFC 9110).
+
+---
+
+## GraphQL resource-consumption amplification
+
+**Why GraphQL is a special API4 case.** A single GraphQL HTTP request can encode
+arbitrarily expensive work, bypassing per-request throttles:
+
+- **Query batching** — many operations in one HTTP request. A per-*request* rate
+  limit sees "1 request" but executes N operations (also enables credential-
+  stuffing amplification against a `login` mutation).
+- **Deeply nested / recursive queries** — related types that reference each
+  other (`author → posts → author → posts …`) let one query fan out to a
+  combinatorial number of resolvers.
+
+**Defenses:** query **depth limits**, **complexity/cost analysis** (assign a cost
+to fields and cap the total), **pagination caps** on list fields, timeouts, and
+**disabling batching** (or rate-limiting per operation, not per request). Persisted
+queries (allowlisting known query documents) are the strongest control.
+
+---
+
+## HTTP method restriction and content-type enforcement
+
+**Verb tampering (an API8 / BFLA overlap).** Enforce authorization per
+*(method, resource)* pair, not per path. A route that checks auth on `GET
+/orders/9` but not on `PUT`/`DELETE /orders/9` is a BFLA hole. Allowlist the
+methods each route supports and return **`405 Method Not Allowed`** (with an
+`Allow` header listing permitted methods, per RFC 9110) for the rest. Disable
+`TRACE` and other unneeded verbs.
+
+**Content-Type enforcement (RFC 9110 status codes).**
+- Reject an unexpected or missing request `Content-Type` with **`415 Unsupported
+  Media Type`** — don't guess/sniff the body format.
+- When you can't produce a representation the client's `Accept` allows, return
+  **`406 Not Acceptable`**.
+- **Never reflect the request's `Accept` value into the response `Content-Type`**;
+  set the response type to what you actually serialize, and make the body match.
+- Combine with a body-size cap (**`413 Content Too Large`**) — content-type +
+  size + schema validation are the edge gate before any parsing work.
+
+---
+
+## Logging, monitoring, and detection
+
+**Why it's here.** "Insufficient Logging & Monitoring" was a 2019 OWASP API item
+that didn't survive as a standalone 2023 entry, but detection is still half of a
+real defense story — you cannot respond to BOLA enumeration you never observe.
+
+**Do:**
+- Log authentication and **authorization failures** with a correlation/trace id,
+  the subject, the resource, and the decision — enough to reconstruct an attack.
+- Alert on **velocity / enumeration patterns**: a token walking sequential ids,
+  spikes of 403/404, credential-stuffing bursts on login (bridges API1/API4/API6).
+- Centralize logs and retain long enough for incident forensics.
+
+**Don't:**
+- **Never log secrets** — tokens, passwords, API keys, full PANs, session
+  cookies. A token in a log is a credential leak (this is the concrete reason
+  tokens don't belong in URLs).
+- **Prevent log injection** — untrusted input with newlines/control chars can
+  forge or split log lines; encode/neutralize before writing.
+
+---
+
+## Authorization architecture (RBAC, ABAC, ReBAC)
+
+**The scaling question:** "You have 300 endpoints and keep shipping BOLA/BFLA
+bugs — how do you fix this *structurally*?" The answer is architectural, not
+per-endpoint whack-a-mole.
+
+**Models.**
+- **RBAC (role-based)** — permissions attached to roles, roles to users. Simple;
+  handles BFLA well (function-level), but roles alone can't express *object
+  ownership*, so it doesn't solve BOLA.
+- **ABAC (attribute-based)** — decisions from attributes of subject, resource,
+  action, and environment (e.g., `subject.tenant == resource.tenant`). Expressive
+  enough for object-level and contextual rules.
+- **ReBAC (relationship-based)** — authorization from a graph of relationships
+  (`user is owner of doc`, `doc is in folder shared with team`), popularized by
+  **Google Zanzibar**. Fits object/hierarchy ownership — the BOLA-native model.
+
+**Centralize the decision.** Extract authorization into a **policy engine / shared
+authorization service** (e.g., OPA, or a Zanzibar-style service) so every endpoint
+is **deny-by-default** and a new route is unprotected only if someone explicitly
+opens it. Back it with **automated authorization tests** (each endpoint tested as
+owner, non-owner, and unprivileged role). Scattered per-handler `if` checks are
+why teams keep shipping the same class of bug.
+
+---
+
+## API gateway and WAF: what they can and can't enforce
+
+"Just put it behind a gateway/WAF" is a common **wrong** answer — know the line.
+
+**A gateway / WAF *can* enforce:** TLS termination, authentication (token
+validation, signature/`iss`/`aud`/`exp` checks), coarse **rate limiting**,
+schema/method/content-type validation at the edge, IP/geo filtering, and generic
+injection signatures.
+
+**A gateway / WAF *cannot* enforce:** **BOLA and BOPLA.** Object-level and
+field-level authorization require knowing *who owns this object* and *which
+fields this subject may see/set* — application-domain knowledge the edge does
+not have. The gateway sees a well-formed, authenticated request to
+`GET /invoices/1002` and has no way to know 1002 isn't the caller's. These checks
+**must** live in the code path that loads the object.
+
+---
+
 ## Common follow-up questions
 
 - **"What's the difference between BOLA and BFLA?"** BOLA (API1) = wrong
@@ -614,3 +908,11 @@ eavesdroppers and man-in-the-middle tampering.
 - Fetch Standard (CORS): https://fetch.spec.whatwg.org/
 - MDN — CORS, HTTP security headers, SameSite cookies: https://developer.mozilla.org/en-US/docs/Web/HTTP
 - OWASP — Server-Side Request Forgery Prevention Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
+- OWASP — JWT for Java / REST Security / Injection Prevention Cheat Sheets: https://cheatsheetseries.owasp.org/
+- RFC 8725 — JSON Web Token Best Current Practices: https://www.rfc-editor.org/rfc/rfc8725
+- RFC 9449 — OAuth 2.0 Demonstrating Proof of Possession (DPoP): https://www.rfc-editor.org/rfc/rfc9449
+- RFC 8705 — OAuth 2.0 Mutual-TLS Client Authentication and Certificate-Bound Access Tokens: https://www.rfc-editor.org/rfc/rfc8705
+- RFC 7636 — Proof Key for Code Exchange (PKCE): https://www.rfc-editor.org/rfc/rfc7636
+- RFC 9068 — JWT Profile for OAuth 2.0 Access Tokens (`at+jwt`): https://www.rfc-editor.org/rfc/rfc9068
+- draft-ietf-httpapi-ratelimit-headers — RateLimit header fields for HTTP: https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/
+- Google Zanzibar (ReBAC) — https://research.google/pubs/pub48190/

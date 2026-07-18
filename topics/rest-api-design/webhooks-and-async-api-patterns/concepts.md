@@ -536,6 +536,391 @@ mismatch), and monitor how long processing lags behind delivery.
 
 ---
 
+## The CloudEvents standard
+
+The ad-hoc `{ id, type, created, data }` envelope shown earlier is exactly the
+shape **CloudEvents** standardizes. **CloudEvents 1.0** is a CNCF (Cloud Native
+Computing Foundation) specification for describing event data in a common,
+vendor-neutral way, so an event emitted by one system can be consumed by another
+without bespoke parsing. Interviewers increasingly name-drop it as *the* answer
+to "how would you standardize your event envelope?"
+
+REQUIRED context attributes on every CloudEvent:
+
+- **`id`** — unique per (source, id) pair; the consumer's de-dup key. Producers
+  MUST ensure `source` + `id` is unique.
+- **`source`** — a URI-reference identifying the context the event happened in
+  (e.g. `/orders/service` or `https://github.com/cloudevents`).
+- **`specversion`** — the CloudEvents spec version, `"1.0"`.
+- **`type`** — the event kind, conventionally reverse-DNS
+  (`com.github.pull_request.opened`), used for routing and versioning.
+
+OPTIONAL attributes: **`subject`** (the specific subject within the source, e.g.
+the object key), **`time`** (RFC 3339 timestamp), **`datacontenttype`** (media
+type of `data`, defaults to `application/json` behavior when absent),
+**`dataschema`** (URI of the schema for `data`), and the payload itself in
+**`data`**.
+
+```json
+{
+  "specversion": "1.0",
+  "id": "A234-1234-1234",
+  "source": "/orders/service",
+  "type": "com.example.order.shipped",
+  "subject": "orders/o_123",
+  "time": "2026-07-19T12:00:00Z",
+  "datacontenttype": "application/json",
+  "data": { "orderId": "o_123", "carrier": "UPS" }
+}
+```
+
+### HTTP protocol binding: content modes
+
+CloudEvents defines three ways to map an event onto an HTTP message:
+
+- **Binary mode** — the `data` is the raw HTTP body (with its own
+  `Content-Type`), and every context attribute becomes a header prefixed `ce-`:
+  `ce-id`, `ce-source`, `ce-specversion`, `ce-type`, `ce-subject`, `ce-time`.
+  This keeps the payload untouched (efficient for large/binary data and lets
+  infrastructure route on headers without parsing the body).
+- **Structured mode** — the entire event (attributes *and* data) is a single
+  JSON document in the body with `Content-Type: application/cloudevents+json`.
+  Self-contained and easy to forward across transports without losing metadata.
+- **Batch mode** — an array of structured events with
+  `Content-Type: application/cloudevents-batch+json`.
+
+> [!INTERVIEW]
+> "Binary vs structured for a Kafka-backed webhook gateway?" Binary mode maps
+> attributes to `ce-*` headers so the gateway can route/filter without
+> deserializing the payload, and the raw `data` passes through untouched —
+> efficient at high volume. Structured mode is better when an event must cross
+> several hops/transports and must stay self-describing end to end. Many gateways
+> ingest binary at the edge and re-emit structured downstream.
+
+---
+
+## The Standard Webhooks specification
+
+The `Webhook-Id` / `Webhook-Timestamp` / `Webhook-Signature` headers used
+earlier come from **Standard Webhooks**, an open, cross-vendor spec (adopted by
+the likes of OpenAI, Twilio, and others) that pins down the signing conventions
+different providers had reinvented. Knowing it by name turns "some HMAC header"
+into a citable standard.
+
+Core rules:
+
+- **Signed content is `msg_id.timestamp.payload`** — the message id, the unix
+  timestamp, and the raw body, joined by dots (`.`). This binds the id and
+  timestamp into the signature, giving replay protection for free.
+- **Symmetric signature format is `v1,<base64>`** — scheme version, comma, then
+  the base64 HMAC-SHA256 digest. The signing secret is prefixed **`whsec_`** and
+  should be **24–64 bytes** of entropy.
+- **Multiple signatures are space-delimited** in one header
+  (`v1,<sigA> v1,<sigB>`), which is what enables **zero-downtime secret
+  rotation**: sign with both old and new secrets during the overlap window.
+- **Asymmetric variant `v1a` = Ed25519.** The producer signs with an Ed25519
+  private key (`whsk_` prefix) and consumers verify with the public key
+  (`whpk_` prefix). The spec advises **preferring asymmetric** signing where
+  practical.
+- **Keys must be unique per endpoint.** Reusing one secret across multiple
+  customers is called out as a vulnerability: a leak by one consumer would let
+  them forge events destined for another.
+
+> [!INTERVIEW]
+> "HMAC vs Ed25519 — when force asymmetric?" When there are **many, mutually
+> untrusted consumers**, or the consumer cannot be trusted with signing power. A
+> shared HMAC secret lets *any* holder forge valid events (including forging
+> events "from the producer" to a third party if secrets are shared). Ed25519
+> (`v1a`) gives each consumer only a public key — they can verify but never
+> forge — at the cost of slower verification and public-key distribution.
+
+---
+
+## Subscription verification handshakes
+
+Registration alone does not prove the registrant controls the URL. Before
+enabling an endpoint (or a subscription), producers run a **verification
+handshake**. Two families dominate:
+
+**1. Challenge–response echo.** The producer sends a token and requires the
+endpoint to echo it back verbatim, proving the endpoint is live and controlled:
+
+- *Meta / Facebook* — `GET` the callback with
+  `?hub.mode=subscribe&hub.challenge=<token>&hub.verify_token=<shared>`; the
+  endpoint must return the exact `hub.challenge` value as the body.
+- *Slack Events API* — sends a JSON `{"type":"url_verification","challenge":"…"}`
+  and expects the `challenge` string echoed back.
+- *Twitch EventSub* — sends a `webhook_callback_verification` request whose
+  `challenge` must be returned in the response body.
+
+**2. WebSub (W3C Recommendation, formerly PubSubHubbub).** The standardized
+pub/sub-over-webhooks protocol. A subscriber `POST`s to the hub with
+`hub.mode=subscribe`, `hub.topic`, and `hub.callback`; the hub then verifies
+intent by hitting the callback with `hub.mode`, `hub.topic`, a `hub.challenge`
+to echo, and **`hub.lease_seconds`** (subscriptions are *leased* and must be
+renewed before they expire).
+
+```
+GET /hooks/orders?hub.mode=subscribe&hub.challenge=Ab3Xy&hub.lease_seconds=864000 HTTP/1.1
+
+HTTP/1.1 200 OK
+Ab3Xy                     # echo the exact challenge to confirm the subscription
+```
+
+> [!KEY-TAKEAWAY]
+> A verification handshake ties a subscription to *proven control of the
+> callback URL*. Without it, anyone could register a victim's URL and weaponize
+> your delivery fleet to flood them (a reflected-DoS / SSRF amplifier).
+
+---
+
+## Fan-out, ordering, and consumer scaling
+
+**Thundering herd on fan-out.** One popular event (say a status-page incident,
+or a price change) may have thousands or millions of subscribers. Naively
+dispatching all deliveries at once creates a burst that overwhelms your own
+egress fleet *and* stampedes any shared downstream. Mitigations:
+
+- **Jittered dispatch scheduling** — spread the fan-out over a short window
+  instead of firing simultaneously.
+- **Per-endpoint rate limiting / token buckets** — never send a single consumer
+  more than it can absorb; smooth bursts per destination.
+- **Sharded / partitioned delivery queues** — partition work (e.g. by endpoint
+  or tenant) so one slow consumer's backlog does not block others (head-of-line
+  blocking) and you can scale workers horizontally.
+- **Backpressure** — when queues grow, slow producers or shed/deprioritize
+  rather than melting down.
+
+**The reverse herd.** When a widely-used consumer recovers from an outage, every
+producer's accumulated retries fire at once — a *retry storm* against the
+just-recovered endpoint. Jitter, capped concurrency per endpoint, and staggered
+redelivery from the DLQ tame it.
+
+**Ordering guarantees.** The base contract is "no ordering." If a customer needs
+order, mechanisms (in increasing strength) are:
+
+- **Monotonic sequence numbers** in the envelope so the consumer can detect gaps
+  and reorder, discarding anything older than what it has applied.
+- **Per-aggregate / partition-key ordering** — guarantee order only *within* a
+  key (Kafka-style keyed partitions: all events for `order o_123` go to one
+  partition and are delivered in order), never globally.
+- **Consumer-side reordering buffers** — briefly hold events to resequence.
+- **Thin payload + fetch-current-state** — the robust escape hatch: the event is
+  a hint, the consumer `GET`s authoritative current state, so out-of-order
+  arrival cannot corrupt it.
+
+> [!INTERVIEW]
+> "Customer says events arrive out of order and it breaks their ledger — fix it
+> at the contract level." Options, cheapest first: (1) document *no ordering* and
+> have them fetch current state (thin payload); (2) add a monotonic `sequence`
+> per resource so they can discard stale updates; (3) offer per-key ordered
+> delivery via partitioning if they truly need it. Global total ordering across
+> all events is almost never worth the throughput cost.
+
+---
+
+## Producer-side reliability: the transactional outbox
+
+Consumer idempotency handles duplicates, but there is a symmetric *producer*
+problem: **the dual-write problem.** The producer must commit a state change to
+its database *and* emit the webhook/event. If these are two separate operations
+and the process crashes between them, you either lose the event (committed the
+order, never sent `order.created`) or emit a phantom event (sent it, then the
+DB transaction rolled back).
+
+The **transactional outbox** pattern solves this: within the *same database
+transaction* that makes the state change, insert a row into an `outbox` table.
+The commit is atomic — either both the business change and the outbox row
+persist, or neither does. A separate **relay** process (or Change Data Capture /
+CDC tailing the DB log) then reads the outbox and delivers the webhook,
+marking rows sent. Because the relay is at-least-once, this pairs naturally with
+consumer idempotency on the event id.
+
+```
+BEGIN;
+  UPDATE orders SET status='shipped' WHERE id='o_123';
+  INSERT INTO outbox(event_id, type, payload) VALUES ('evt_88ah2','order.shipped', …);
+COMMIT;                       -- both or neither
+-- relay: SELECT unsent FROM outbox → deliver webhook → mark sent (retry on failure)
+```
+
+> [!KEY-TAKEAWAY]
+> The outbox turns "commit state" and "emit event" into one atomic write, then
+> delivers asynchronously. It is the producer-side mirror of consumer
+> idempotency: the outbox guarantees the event is *never lost*, and the event id
+> lets the consumer guarantee it is *never double-applied*.
+
+---
+
+## Structured long-running operations
+
+The ad-hoc status resource can be given a canonical shape. Two named industry
+patterns show up in interviews:
+
+**Google AIP-151 — Long-Running Operations (LRO).** A method that cannot finish
+quickly (rule of thumb: **>10 seconds**) returns an **`Operation`** resource:
+
+- **`name`** — the operation's resource id (pollable).
+- **`done`** — boolean; false while running.
+- **`metadata`** — progress/percent, ETA, and other type-specific info.
+- a result **oneof**: **`response`** (the success payload) **or** **`error`** (a
+  `google.rpc.Status` with `code`, `message`, `details`) — never both.
+
+Standard verbs operate on it: `GetOperation`, `ListOperations`,
+`CancelOperation`, `DeleteOperation`. Operations **expire** (commonly ~30 days),
+after which they are garbage-collected.
+
+**Azure-style async monitor.** The service returns **`202 Accepted`** with a
+**`Location`** header pointing to a *status-monitor* URL. Polling that URL
+returns **`200 OK`** while the operation is still running (with `Retry-After`),
+then a **`302`/`303`** redirect to the final result resource once complete. This
+is header-driven, versus Google's operation-resource-driven model.
+
+**Cancellation of in-flight work.** Neither the base status pattern nor webhooks
+covered aborting a running job. Real systems must let clients stop long
+operations:
+
+- A **`DELETE`** on the operation, or a dedicated `:cancel` verb
+  (`CancelOperation` in AIP-151), requests best-effort abort; the operation then
+  transitions to a terminal `cancelled` state.
+- **`409 Conflict`** (with `ABORTED` semantics) is the right answer when a
+  concurrent/parallel operation is rejected because it conflicts with one
+  already in progress.
+
+> [!INTERVIEW]
+> "Consumer needs to cancel a 2-hour transcode — design it." Model the job as a
+> resource with a state machine (`queued → running → succeeded | failed |
+> cancelled`). Expose `DELETE /jobs/{id}` or `POST /jobs/{id}:cancel` that
+> requests cancellation (best-effort, may race with completion). Return the
+> current state; if the job already finished, say so rather than pretending it
+> cancelled. Represent a failed job's error with RFC 9457 Problem Details (or
+> `google.rpc.Status` in an LRO), not an opaque `"failed"`.
+
+---
+
+## Documenting async in the API contract: OpenAPI webhooks vs callbacks
+
+How you *specify* asynchronous flows in the machine-readable contract is squarely
+on-topic for API design. **OpenAPI 3.1** offers two distinct objects:
+
+- **Root-level `webhooks`** (new in OpenAPI 3.1) — describes **provider-initiated,
+  out-of-band** requests the API sends that are *not* tied to any specific
+  operation the client called (e.g. "we will POST `newPet` events to your
+  registered URL"). It is a map of named webhooks at the document root.
+- **Operation-level `callbacks`** — describes requests the API will send **as a
+  consequence of a specific operation**, keyed by a **runtime expression** that
+  resolves against that request, e.g. `$request.body#/callbackUrl`. This ties the
+  callback to the exact operation and the URL the client supplied in it.
+
+```yaml
+paths:
+  /subscribe:
+    post:
+      requestBody:
+        content: { application/json: { schema: { properties: { callbackUrl: { type: string, format: uri } } } } }
+      callbacks:
+        onEvent:
+          '{$request.body#/callbackUrl}':          # runtime expression → the client's URL
+            post:
+              requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+              responses: { '200': { description: consumer acknowledged } }
+webhooks:                                            # provider-initiated, not tied to a call
+  orderShipped:
+    post:
+      requestBody: { content: { application/json: { schema: { $ref: '#/components/schemas/Event' } } } }
+```
+
+> [!KEY-TAKEAWAY]
+> `callbacks` = "in response to *this* operation, we will call the URL you passed
+> in it" (keyed by a runtime expression). `webhooks` = "independently of any
+> call, we may push these events to your subscribed endpoint." Use callbacks for
+> per-request async replies, webhooks for standing subscriptions.
+
+---
+
+## Hardening: SSRF defense-in-depth
+
+The SSRF warning earlier said *what* to block; senior interviews probe *how*.
+Layer these defenses because any single one fails:
+
+- **Validate at registration AND re-resolve at delivery time.** Checking the URL
+  only when it is registered is defeated by **DNS rebinding**: the attacker's
+  domain resolves to a public IP at registration and to `169.254.169.254` (or an
+  internal IP) at delivery. Re-resolve DNS and validate the *actual connect-time
+  IP*, and pin the connection to that validated IP.
+- **Block internal/link-local ranges** — the cloud metadata endpoint
+  `169.254.169.254`, `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`, `::1`, and `*.internal` names — after resolution, not just
+  on the literal hostname.
+- **Egress proxy / filter.** Route all outbound webhook traffic through a
+  dedicated egress proxy that enforces the denylist. Stripe open-sourced
+  **Smokescreen** for exactly this. The delivery fleet is not allowed to make
+  arbitrary outbound connections directly.
+- **Network isolation.** Run webhook-sender workers in a **private subnet with no
+  route to internal services** (and no IMDS access), so even a bypassed filter
+  cannot reach anything sensitive.
+
+> [!INTERVIEW]
+> "Walk the exact SSRF exploit and your layered defenses." Attacker registers a
+> callback URL on a domain they control that, at *delivery* time, resolves to
+> `169.254.169.254`; your sender fetches cloud instance credentials and reflects
+> them into the response body or a follow-up. Defenses: re-resolve + validate the
+> connect-time IP (kills DNS rebinding), run senders behind an egress filter
+> (Smokescreen) in an isolated subnet with IMDS blocked, and require signed,
+> verified callbacks so a reflected internal response is never trusted.
+
+---
+
+## Payload minimization and data-residency
+
+Thin vs fat was framed earlier around staleness; there is also a
+**security/compliance** driver. Fat payloads push full resource data — often
+including PII — through many hands: the consumer's logs, any intermediary
+proxies/CDNs, and error-tracking systems that capture request bodies. That
+widens the **blast radius** of a leak and can violate **GDPR data-minimization**
+or **data-residency** rules (data crossing regions in a webhook body).
+
+A **thin payload plus an authenticated callback** to fetch details keeps
+sensitive data on the authenticated API path, under access control and audit,
+rather than sprayed across delivery infrastructure. For regulated data this is
+frequently the deciding factor, independent of staleness.
+
+> [!KEY-TAKEAWAY]
+> Prefer thin payloads not only to avoid stale data but to minimize PII exposure:
+> a signed notification with ids leaks far less than a fat body if it lands in a
+> log, a proxy cache, or the wrong region.
+
+---
+
+## At-least-once corner cases: dedupe TTL vs replay window
+
+A subtle but real inconsistency trips people up: the **replay-protection window**
+and the **de-duplication retention window are different durations** and must not
+be conflated.
+
+- The **replay tolerance** (±5 min) and the **nonce store** that backs it exist
+  to reject *maliciously replayed* old requests. Keeping seen ids for ~5–10
+  minutes is enough there.
+- **Retry-based duplicates**, however, can arrive **hours or days** later — a
+  legitimate retry of a real event after a long backoff or a DLQ redelivery. To
+  de-dup *those*, the idempotency store must retain event ids **at least as long
+  as the maximum retry/redelivery window**, which is measured in days, not
+  minutes.
+
+If your dedupe store TTL is 5 minutes but a retry arrives 6 hours later, the
+consumer no longer recognizes the id and **double-processes** the event. The fix
+is to size the idempotency store to exceed the entire retry horizon (accepting
+the storage cost), separate from the short replay-nonce window. This is also why
+the crash-between-effect-and-record failure mode matters — use a transactional
+outbox / dedupe write so the record and effect commit together.
+
+> [!WARNING]
+> Do not reuse the 5-minute replay window as your idempotency TTL. Replay defense
+> guards against *malicious* re-sends within minutes; duplicate suppression must
+> survive the *entire* retry/redelivery horizon (days). Two different clocks.
+
+---
+
 ## Common follow-up questions
 
 - **"Webhooks are at-least-once — how do you prevent double-processing?"**
@@ -592,3 +977,19 @@ mismatch), and monitor how long processing lags behind delivery.
 - [MDN — Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
   and [WebSockets API](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
   — comparison baselines.
+- [CloudEvents 1.0 specification](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/spec.md)
+  (CNCF) — vendor-neutral event envelope; REQUIRED `id`/`source`/`specversion`/`type`.
+- [CloudEvents HTTP Protocol Binding](https://github.com/cloudevents/spec/blob/v1.0.2/cloudevents/bindings/http-protocol-binding.md)
+  — binary (`ce-*` headers), structured (`application/cloudevents+json`), and batch modes.
+- [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)
+  — `msg_id.timestamp.payload` signing, `v1`/`v1a` (Ed25519), `whsec_`/`whsk_`/`whpk_` keys, rotation.
+- [OpenAPI Specification 3.1.0](https://spec.openapis.org/oas/v3.1.0) — root-level
+  `webhooks` object and Operation-level `callbacks` object with runtime expressions.
+- [Google AIP-151 — Long-Running Operations](https://google.aip.dev/151) —
+  `Operation` resource (`name`/`done`/`metadata`/`response`|`error`), cancel/list/delete.
+- [Microsoft Azure — Asynchronous Request-Reply](https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design)
+  — `202` + `Location` status-monitor → `302`/`303` to result.
+- [W3C WebSub](https://www.w3.org/TR/websub/) — standardized subscribe/verify
+  (`hub.mode`, `hub.challenge`, `hub.lease_seconds`).
+- [Stripe Smokescreen](https://github.com/stripe/smokescreen) — open-source SSRF
+  egress proxy for filtering outbound (webhook) traffic.

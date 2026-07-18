@@ -1008,3 +1008,626 @@ questions:
       iss/aud so a token issued for a different issuer/audience isn't accepted.
       nbf should be honored when present.
     ref: "concepts.md#api2-broken-authentication"
+
+  - id: api-security-and-hardening-057
+    difficulty: advanced
+    tags: [oauth, spa, grants]
+    question: |
+      A mobile app and a browser SPA both need to authenticate users against
+      your OAuth 2.1 authorization server. Which grant should they use, and why
+      is the older SPA-era choice now forbidden?
+    options:
+      - "Implicit grant (response_type=token); it avoids a token-endpoint round trip"
+      - "Resource Owner Password Credentials; the app collects the password directly"
+      - "Authorization Code with PKCE; OAuth 2.1 removes the Implicit grant because returning tokens in the URL fragment leaks them via history/referrer"
+      - "Client Credentials; it is the simplest for any client type"
+    answer: 2
+    explanation: |
+      OAuth 2.1 makes Authorization Code + PKCE the default for all interactive
+      clients and removes Implicit (tokens in the fragment leak) and ROPC (app
+      handling passwords defeats delegation). Client Credentials is for
+      machine-to-machine, not user auth.
+    ref: "concepts.md#oauth-20-and-21-flows"
+
+  - id: api-security-and-hardening-058
+    difficulty: expert
+    tags: [oauth, pkce, code-interception]
+    question: |
+      What specific attack does PKCE (RFC 7636) mitigate that a plain
+      Authorization Code flow for a public client does not?
+    options:
+      - "Interception of the authorization code (e.g., via a malicious app registering the redirect scheme), because the code can't be exchanged without the matching code_verifier"
+      - "Brute-forcing the access token's signature"
+      - "Reading the token from the URL fragment"
+      - "Replaying an expired refresh token"
+    answer: 0
+    explanation: |
+      PKCE binds the code to the client that started the flow: the client sends a
+      code_challenge up front and must present the code_verifier at the token
+      endpoint. An intercepted code is useless without the verifier, defeating
+      authorization-code interception on public/native clients.
+    ref: "concepts.md#oauth-20-and-21-flows"
+
+  - id: api-security-and-hardening-059
+    difficulty: advanced
+    tags: [oauth, redirect-uri, misconfiguration]
+    question: |
+      Why does OAuth 2.1 require exact-string matching of the redirect URI rather
+      than allowing wildcard or prefix matching?
+    options:
+      - "Exact matching is faster to compute"
+      - "Loose matching lets an attacker register or exploit a matching URL to have the code/token redirected to a host they control"
+      - "Wildcards break the PKCE code_challenge"
+      - "Prefix matching is incompatible with HTTPS"
+    answer: 1
+    explanation: |
+      Wildcard/prefix redirect matching lets an attacker craft a URI that still
+      matches but points somewhere they control, redirecting the authorization
+      code or token. Exact-string matching closes that open-redirect-style
+      hijack.
+    ref: "concepts.md#oauth-20-and-21-flows"
+
+  - id: api-security-and-hardening-060
+    difficulty: advanced
+    tags: [oauth, refresh-token, rotation]
+    question: |
+      A public client uses refresh-token rotation. An attacker steals a refresh
+      token and uses it; later the legitimate client uses its (now-stale) copy.
+      What should the authorization server do, and why is rotation valuable here?
+    options:
+      - "Accept both; refresh tokens are meant to be reused"
+      - "Detect reuse of an already-rotated token as a compromise signal and revoke the whole token chain"
+      - "Extend the lifetime of both tokens"
+      - "Silently issue a third refresh token to each"
+    answer: 1
+    explanation: |
+      With rotation, each refresh issues a new token and invalidates the prior
+      one. If a rotated (already-consumed) token is presented again, that reuse
+      indicates the chain was stolen; the server revokes the entire chain,
+      turning theft into a detectable event.
+    ref: "concepts.md#oauth-20-and-21-flows"
+
+  - id: api-security-and-hardening-061
+    difficulty: expert
+    tags: [scopes, bola, authorization]
+    question: |
+      An endpoint is gated only by `require_scope("orders:write")`. A token
+      legitimately carrying that scope is used to `PUT /orders/42`, an order
+      belonging to a different customer, and it succeeds. What went wrong?
+    options:
+      - "The scope string was too broad and should have been orders:write:self"
+      - "Scope authorizes what the client app may attempt, not per-object access; a BOLA ownership check on order 42 is still required and was missing"
+      - "The token should have been an ID token, not an access token"
+      - "PUT should never be gated by scopes"
+    answer: 1
+    explanation: |
+      A scope is coarse delegation ("this app may attempt order writes"), not
+      per-object authorization. Editing order 42 still needs an object-level check
+      that 42 belongs to the subject. Scope checks and BOLA checks are orthogonal
+      layers; both are required.
+    ref: "concepts.md#scopes-vs-permissions"
+
+  - id: api-security-and-hardening-062
+    difficulty: intermediate
+    tags: [api-keys, authentication, api2]
+    question: |
+      Per OWASP, what does an API key primarily establish, and what must it NOT
+      be relied on for?
+    options:
+      - "It authenticates a specific end user; it must not be used for rate limiting"
+      - "It identifies the calling application/project and attributes quota; it must not be treated as proof of a user's identity to gate high-value user resources alone"
+      - "It encrypts the request body; it must not be sent over TLS"
+      - "It replaces TLS; it must not be combined with OAuth"
+    answer: 1
+    explanation: |
+      API keys identify the calling app/project and support quota/rate attribution
+      but are shared secrets, not user authentication. High-value or user-specific
+      access still needs authenticated user identity plus per-object
+      authorization.
+    ref: "concepts.md#api-keys-vs-user-authentication"
+
+  - id: api-security-and-hardening-063
+    difficulty: expert
+    tags: [dpop, proof-of-possession, token-theft]
+    question: |
+      With DPoP (RFC 9449), an access token carries a `cnf.jkt` claim and each
+      request includes a signed `DPoP` proof JWT. An attacker exfiltrates the
+      access token (but not the private key). What happens when they replay it,
+      and what residual risk remains?
+    options:
+      - "The token works normally; DPoP only affects the authorization server"
+      - "The resource server rejects it because the attacker can't produce a DPoP proof signed by the key whose thumbprint matches cnf.jkt; but DPoP does not stop an attacker running code inside the client (e.g., XSS)"
+      - "The token works for GET but not for state-changing methods"
+      - "The attacker must also steal the DPoP-Nonce, after which the token works forever"
+    answer: 1
+    explanation: |
+      DPoP binds the token to the client's key via cnf.jkt; a stolen token can't
+      be used without a matching proof, so exfiltration is defeated. It does not
+      protect against code executing in the client, which can mint fresh proofs
+      with the in-memory key.
+    ref: "concepts.md#sender-constrained-tokens-dpop-and-mtls-bound"
+
+  - id: api-security-and-hardening-064
+    difficulty: expert
+    tags: [dpop, mtls, binding]
+    question: |
+      Which pair correctly maps the token-binding mechanism to its confirmation
+      claim and layer?
+    options:
+      - "DPoP → cnf.x5t#S256 at the transport layer; mTLS-bound → cnf.jkt at the application layer"
+      - "DPoP → cnf.jkt (JWK thumbprint) at the application layer; mTLS-bound → cnf.x5t#S256 (cert thumbprint) at the transport layer"
+      - "Both use cnf.jkt; they differ only in token lifetime"
+      - "Both use cnf.x5t#S256; DPoP just adds a nonce"
+    answer: 1
+    explanation: |
+      DPoP (RFC 9449) is application-layer and binds via cnf.jkt, a JWK SHA-256
+      thumbprint. mTLS-bound tokens (RFC 8705) are transport-layer and bind via
+      cnf.x5t#S256, the client certificate thumbprint.
+    ref: "concepts.md#sender-constrained-tokens-dpop-and-mtls-bound"
+
+  - id: api-security-and-hardening-065
+    difficulty: advanced
+    tags: [token-theft, defense-in-depth, revocation]
+    question: |
+      An interviewer asks how to make a stolen access token as useless as
+      possible. Which layered answer is strongest?
+    options:
+      - "Encrypt the token payload with AES and store it in localStorage"
+      - "Use a very long-lived token so clients rarely need to refresh"
+      - "Short TTL + refresh-token rotation + sender-constraining (DPoP or mTLS-bound) + a revocation/jti denylist for the residual window"
+      - "Put the token in a query string protected by TLS"
+    answer: 2
+    explanation: |
+      No single control suffices. Short lifetimes shrink the window, rotation
+      detects refresh theft, sender-constraining makes exfiltration useless, and
+      a jti/revocation denylist handles the residual live window. That layered
+      story is the senior answer.
+    ref: "concepts.md#sender-constrained-tokens-dpop-and-mtls-bound"
+
+  - id: api-security-and-hardening-066
+    difficulty: expert
+    tags: [jwt, kid-injection, bcp]
+    question: |
+      A JWT verifier loads the signing key by reading the header's `kid` and
+      using it to build a file path: `keys/<kid>.pem`. How is this exploited?
+    options:
+      - "The attacker sets alg to none and skips the signature"
+      - "The attacker sets kid to a path-traversal or otherwise attacker-influenced value so the verifier loads a key the attacker controls/predicts, then signs the token with it"
+      - "The attacker enlarges the token beyond the size limit"
+      - "The attacker replays a refresh token"
+    answer: 1
+    explanation: |
+      Using kid to build a path or query lets an attacker point at a predictable
+      or attacker-controlled key (path traversal, or SQLi returning a chosen key),
+      then sign a forged token with it. Treat kid as an opaque lookup against a
+      trusted keystore; never interpolate it into paths/queries (RFC 8725).
+    ref: "concepts.md#jwt-hardening-and-advanced-attacks"
+
+  - id: api-security-and-hardening-067
+    difficulty: expert
+    tags: [jwt, jku, header-injection]
+    question: |
+      A JWT library honors the token's `jku` header to fetch the JWKS used for
+      verification. What is the attack and the correct defense?
+    options:
+      - "The token is too large; cap the header size"
+      - "The attacker points jku at a JWKS they host so their key verifies a forged token; defend by allowlisting the JWKS URI to the trusted issuer and ignoring token-supplied jku/x5u"
+      - "The attacker sets jku to none; reject none algorithms"
+      - "jku forces an HS256 downgrade; pin RS256"
+    answer: 1
+    explanation: |
+      jku/x5u headers tell the verifier where to fetch keys. If honored blindly,
+      an attacker hosts a JWKS with their own key and forges valid-looking tokens.
+      Ignore token-supplied jku/x5u and fetch keys only from an allowlisted,
+      trusted issuer endpoint.
+    ref: "concepts.md#jwt-hardening-and-advanced-attacks"
+
+  - id: api-security-and-hardening-068
+    difficulty: advanced
+    tags: [jwt, alg-none, allowlist]
+    question: |
+      A verifier blocks the algorithm `"none"` with a case-sensitive string
+      comparison. Why is this insufficient, and what is the RFC 8725-endorsed
+      fix?
+    options:
+      - "It is sufficient; case never varies in JWT headers"
+      - "Variants like nOnE/NONE bypass a denylist; use an allowlist of exact expected algorithms instead"
+      - "none is only a problem for HS256; switch to RS256"
+      - "The fix is to base64-decode the header twice"
+    answer: 1
+    explanation: |
+      Denylisting a spelling of none misses case variants and is fragile. RFC 8725
+      prescribes an algorithm allowlist: accept only the exact algorithm(s) you
+      expect and reject everything else, which inherently blocks none in any
+      casing.
+    ref: "concepts.md#jwt-hardening-and-advanced-attacks"
+
+  - id: api-security-and-hardening-069
+    difficulty: expert
+    tags: [jwt, type-confusion, audience]
+    question: |
+      An API accepts any validly-signed JWT from your identity provider as an
+      access token, so a client presents its OIDC ID token instead. Which
+      defenses prevent this token type confusion?
+    options:
+      - "Increase the token TTL and add more claims"
+      - "Verify aud (and iss), require typ: at+jwt on access tokens (RFC 9068), and use separate keys/issuers for token types"
+      - "Store tokens in HttpOnly cookies"
+      - "Reject any token containing an email claim"
+    answer: 1
+    explanation: |
+      ID tokens and access tokens have different audiences and purposes. Checking
+      aud/iss, requiring the at+jwt type for access tokens, and separating signing
+      keys/issuers stops an ID token (or a token minted for another audience) from
+      being accepted as an access token.
+    ref: "concepts.md#jwt-hardening-and-advanced-attacks"
+
+  - id: api-security-and-hardening-070
+    difficulty: advanced
+    tags: [jwt, hmac, brute-force]
+    question: |
+      Why is an HS256 JWT with the secret `"password123"` dangerous even if every
+      claim is validated correctly?
+    options:
+      - "HS256 tokens can't carry an exp claim"
+      - "A weak, low-entropy HMAC secret can be cracked offline from a single captured token, letting the attacker forge arbitrary valid tokens"
+      - "HS256 leaks the payload in plaintext"
+      - "HS256 is disallowed by RFC 7519"
+    answer: 1
+    explanation: |
+      HS256 security rests entirely on the secret. A guessable/short secret can be
+      brute-forced offline against one captured token; once recovered, the attacker
+      signs any token they like. Use high-entropy secrets or asymmetric keys.
+    ref: "concepts.md#jwt-hardening-and-advanced-attacks"
+
+  - id: api-security-and-hardening-071
+    difficulty: expert
+    tags: [rate-limiting, algorithms, token-bucket]
+    question: |
+      A fixed-window rate limiter of 100 req/min is criticized for allowing short
+      bursts far above the intended rate. What causes this, and which algorithm
+      is the usual API choice that allows controlled bursts without the boundary
+      problem?
+    options:
+      - "TLS renegotiation causes it; use leaky bucket to force a constant rate with no bursts"
+      - "Clients can send 100 at the end of one window and 100 at the start of the next (a 2x burst across the boundary); token bucket allows bounded bursts up to the bucket size while capping the sustained rate"
+      - "The Retry-After header causes it; remove it"
+      - "It is caused by NAT; switch to per-IP fixed windows"
+    answer: 1
+    explanation: |
+      Fixed windows permit a near-2x burst across the window boundary. Token
+      bucket refills at the target rate and lets requests spend accumulated tokens
+      up to the bucket cap, permitting controlled bursts while bounding the
+      sustained rate. Sliding window also smooths the boundary.
+    ref: "concepts.md#rate-limiting-algorithms-and-headers"
+
+  - id: api-security-and-hardening-072
+    difficulty: intermediate
+    tags: [rate-limiting, headers, spec-status]
+    question: |
+      Which statement about rate-limit response headers is accurate?
+    options:
+      - "RateLimit-Limit/-Remaining/-Reset and X-RateLimit-* are finalized RFC standards"
+      - "The only always-standard throttling signal is 429 with Retry-After; the RateLimit-*/X-RateLimit-* families are conventions/drafts, and the IETF draft has moved to structured fields like RateLimit-Policy and RateLimit"
+      - "429 must always be accompanied by RateLimit-Reset per RFC 9110"
+      - "X-RateLimit-* is mandated by RFC 9110"
+    answer: 1
+    explanation: |
+      429 Too Many Requests (RFC 6585) + Retry-After (RFC 9110) is the
+      standardized signal.
+      The RateLimit-*/X-RateLimit-* headers are de-facto/draft conventions; the
+      IETF work moved to structured fields (RateLimit-Policy / RateLimit). All
+      forms appear in the wild.
+    ref: "concepts.md#rate-limiting-algorithms-and-headers"
+
+  - id: api-security-and-hardening-073
+    difficulty: advanced
+    tags: [rate-limiting, dimensions, api6]
+    question: |
+      Per-IP throttling isn't stopping abuse of a signup flow. What is the most
+      likely reason and the better dimension to limit on?
+    options:
+      - "IPs are encrypted under TLS; limit on the TLS session id"
+      - "Attackers rotate IPs (and NAT/CDN collapse many users to one IP); limit per user/token/API key/tenant and per sensitive flow, combining dimensions"
+      - "Per-IP limits require HTTP/3; upgrade the protocol"
+      - "The limit is too high; there is no dimension problem"
+    answer: 1
+    explanation: |
+      Per-IP alone is weak: attackers rotate IPs and shared NAT/CDN egress
+      collapses many users behind one IP. Limit on identity/tenant dimensions and
+      per sensitive flow, which also addresses API6 business-flow abuse.
+    ref: "concepts.md#rate-limiting-algorithms-and-headers"
+
+  - id: api-security-and-hardening-074
+    difficulty: expert
+    tags: [graphql, batching, api4]
+    question: |
+      Your GraphQL endpoint has a 10-requests-per-minute rate limit, yet an
+      attacker performs thousands of `login` attempts per minute through it.
+      How, and which defense addresses it most directly?
+    options:
+      - "They exploit CORS; add an allowlist"
+      - "They use query batching to pack many operations into one HTTP request, so the per-request limit counts it as one; disable batching or rate-limit per operation, not per request"
+      - "They compress the request; disable gzip"
+      - "They use HTTP/2 multiplexing; downgrade to HTTP/1.1"
+    answer: 1
+    explanation: |
+      Query batching lets one HTTP request carry many operations, so a
+      per-request limiter undercounts and login attempts are amplified. Disable
+      batching (or count/limit per operation), and add complexity/depth limits and
+      persisted queries.
+    ref: "concepts.md#graphql-resource-consumption-amplification"
+
+  - id: api-security-and-hardening-075
+    difficulty: advanced
+    tags: [graphql, complexity, depth]
+    question: |
+      A GraphQL schema lets `author` return `posts`, and each `post` return its
+      `author` again. A single query nests this dozens of levels deep and stalls
+      the server. Which controls best mitigate this class of abuse?
+    options:
+      - "TLS 1.3 and HSTS"
+      - "Query depth limits plus complexity/cost analysis (and pagination caps, timeouts, persisted queries)"
+      - "Returning 404 instead of 403"
+      - "A stricter CORS allowlist"
+    answer: 1
+    explanation: |
+      Recursive/deeply-nested queries fan out combinatorially. Depth limits cap
+      nesting; cost/complexity analysis assigns a budget per query; pagination
+      caps, timeouts, and persisted (allowlisted) queries round out the API4
+      defense for GraphQL.
+    ref: "concepts.md#graphql-resource-consumption-amplification"
+
+  - id: api-security-and-hardening-076
+    difficulty: advanced
+    tags: [verb-tampering, bfla, methods]
+    question: |
+      A route enforces an authorization check on `GET /orders/9` but the same
+      handler path leaves `PUT` and `DELETE /orders/9` unprotected. What class
+      of flaw is this, and what is the correct principle?
+    options:
+      - "It is a CORS bug; add Access-Control-Allow-Methods"
+      - "It is verb tampering / BFLA; enforce authorization per (method, resource) pair, allowlist supported methods, and return 405 for the rest"
+      - "It is a caching bug; add Cache-Control: no-store"
+      - "It is fine because GET is the sensitive method"
+    answer: 1
+    explanation: |
+      Protecting one verb but not others is verb tampering, a BFLA hole.
+      Authorization must be enforced per (method, resource); allowlist the methods
+      a route supports and return 405 Method Not Allowed (with an Allow header) for
+      the others.
+    ref: "concepts.md#http-method-restriction-and-content-type-enforcement"
+
+  - id: api-security-and-hardening-077
+    difficulty: expert
+    tags: [content-type, status-codes, rfc9110]
+    question: |
+      A client POSTs a body with `Content-Type: text/xml` to a JSON-only
+      endpoint, and separately sends `Accept: application/xml` when only JSON can
+      be produced. Which status codes are correct for each, per RFC 9110?
+    options:
+      - "400 for both"
+      - "415 Unsupported Media Type for the unexpected request Content-Type; 406 Not Acceptable when no representation matches the client's Accept"
+      - "406 for the request body; 415 for the Accept mismatch"
+      - "422 for both, since the content is semantically invalid"
+    answer: 1
+    explanation: |
+      A request media type the server won't accept is 415 Unsupported Media Type;
+      inability to produce any representation the client's Accept allows is 406
+      Not Acceptable. Also never reflect the request Accept into the response
+      Content-Type.
+    ref: "concepts.md#http-method-restriction-and-content-type-enforcement"
+
+  - id: api-security-and-hardening-078
+    difficulty: advanced
+    tags: [logging, secrets, detection]
+    question: |
+      Which logging practice is correct for a hardened API?
+    options:
+      - "Log full bearer tokens and passwords so support can reproduce issues"
+      - "Log authn/authz failures with a correlation id, subject, resource, and decision — while never logging tokens/passwords/keys and neutralizing untrusted input to prevent log injection"
+      - "Disable logging of authorization decisions to save space"
+      - "Return the raw log line to the client for transparency"
+    answer: 1
+    explanation: |
+      Detection needs rich, correlated authz/authn failure logs, but secrets must
+      never be logged (a logged token is a leaked credential), and untrusted input
+      must be neutralized to prevent log injection/line-splitting.
+    ref: "concepts.md#logging-monitoring-and-detection"
+
+  - id: api-security-and-hardening-079
+    difficulty: expert
+    tags: [detection, bola, enumeration]
+    question: |
+      An attacker with one valid token walks sequential object ids
+      (`/invoices/1001`, `/1002`, `/1003`, ...). Even with an object-level check
+      returning 404s, what monitoring signal should fire, and why does detection
+      matter here?
+    options:
+      - "No signal is needed once the check returns 404"
+      - "A velocity/enumeration alert on a single subject generating many 403/404s across sequential ids — because a passing authorization check still shouldn't hide an active enumeration/attack in progress"
+      - "An alert only when a 200 is returned"
+      - "A TLS handshake failure alert"
+    answer: 1
+    explanation: |
+      Correct authorization stops data loss but the enumeration attempt itself is
+      an attack signal. Alerting on a subject producing many sequential-id 403/404s
+      surfaces reconnaissance and probing that a pure allow/deny check would
+      silently absorb.
+    ref: "concepts.md#logging-monitoring-and-detection"
+
+  - id: api-security-and-hardening-080
+    difficulty: expert
+    tags: [authorization-architecture, rebac, bola]
+    question: |
+      A team keeps shipping BOLA bugs across 300 endpoints, each doing its own
+      ad-hoc ownership check. Which structural approach best addresses the root
+      cause?
+    options:
+      - "Switch every id to a UUID"
+      - "Centralize authorization in a policy engine / shared authz service (ABAC or ReBAC/Zanzibar-style) that is deny-by-default, so a new endpoint is unprotected only if explicitly opened, backed by automated per-endpoint authz tests"
+      - "Put every endpoint behind a WAF"
+      - "Add rate limiting to all endpoints"
+    answer: 1
+    explanation: |
+      Scattered per-handler checks are why the same bug recurs. Centralizing on a
+      policy engine (ABAC/ReBAC) with deny-by-default and automated authz tests
+      (owner/non-owner/unprivileged) makes correct authorization the default rather
+      than something each endpoint must re-implement.
+    ref: "concepts.md#authorization-architecture-rbac-abac-rebac"
+
+  - id: api-security-and-hardening-081
+    difficulty: advanced
+    tags: [authorization-architecture, rbac, abac, rebac]
+    question: |
+      Which statement most accurately contrasts RBAC, ABAC, and ReBAC for solving
+      object-level (BOLA) authorization?
+    options:
+      - "RBAC alone naturally expresses per-object ownership"
+      - "RBAC handles function/role (BFLA) well but roles alone can't express object ownership; ABAC (subject/resource attributes) and ReBAC (relationship graph, e.g., Zanzibar) are better fits for object-level decisions"
+      - "ABAC and ReBAC are the same model with different names"
+      - "ReBAC can only express function-level authorization"
+    answer: 1
+    explanation: |
+      RBAC maps roles to permissions — good for function-level authorization but
+      it can't express "this subject owns this object." ABAC decides from
+      attributes (e.g., tenant match) and ReBAC from a relationship graph (owner
+      of doc), both suited to object-level/BOLA decisions.
+    ref: "concepts.md#authorization-architecture-rbac-abac-rebac"
+
+  - id: api-security-and-hardening-082
+    difficulty: advanced
+    tags: [gateway, waf, bola, bopla]
+    question: |
+      Why can a well-configured API gateway or WAF enforce authentication and
+      rate limiting but NOT stop BOLA and BOPLA?
+    options:
+      - "Gateways can't parse JSON"
+      - "Object-level and field-level authorization require application-domain knowledge (who owns this object, which fields this subject may see/set) that the edge doesn't have; it sees only a well-formed, authenticated request"
+      - "WAFs only inspect responses"
+      - "BOLA and BOPLA only occur over HTTP/1.1"
+    answer: 1
+    explanation: |
+      A gateway sees an authenticated, well-formed request to /invoices/1002 and
+      has no way to know 1002 isn't the caller's, or which fields the caller may
+      set. Ownership/field policy is app-domain knowledge, so BOLA/BOPLA must be
+      enforced in the code path that loads the object.
+    ref: "concepts.md#api-gateway-and-waf-what-they-can-and-cant-enforce"
+
+  - id: api-security-and-hardening-083
+    difficulty: expert
+    tags: [ssrf, redirect, imds, api7]
+    question: |
+      An SSRF-protected endpoint validates the submitted host against an
+      allowlist and rejects private IPs, but an attacker still reaches the cloud
+      metadata service. Which combination explains the bypass and the AWS-specific
+      hardening?
+    options:
+      - "The allowlist was too strict; loosen it"
+      - "An allowlisted host 302-redirects to 169.254.169.254 and the fetcher follows it (and/or DNS rebinds at connection time); block/limit redirects and re-validate the resolved IP at connect time, and require IMDSv2 (session token via PUT + hop limit) instead of IMDSv1"
+      - "TLS was disabled; enable it"
+      - "The metadata endpoint uses IPv6; the allowlist only covered IPv4"
+    answer: 1
+    explanation: |
+      Allowed hosts can 302-redirect to link-local metadata, and DNS can rebind
+      between check and connect. Defenses: don't blindly follow redirects,
+      re-validate the resolved IP at connection time, and use IMDSv2 (PUT session
+      token + hop limit) which blocks simple SSRF that IMDSv1 permits.
+    ref: "concepts.md#api7-server-side-request-forgery"
+
+  - id: api-security-and-hardening-084
+    difficulty: expert
+    tags: [csrf, double-submit, samesite]
+    question: |
+      A team relies on the double-submit-cookie CSRF pattern and assumes
+      `SameSite=Lax` (the browser default) covers the rest. Which weakness should
+      concern them?
+    options:
+      - "Double-submit is unbreakable; there is no weakness"
+      - "A subdomain or same-site attacker (e.g., XSS on a sibling subdomain) can inject/overwrite the CSRF cookie so both copies match, and SameSite=Lax still permits top-level GET navigations, so GET state changes and same-site attackers aren't fully covered"
+      - "SameSite=Lax blocks all cookies including first-party ones"
+      - "Double-submit requires disabling TLS"
+    answer: 1
+    explanation: |
+      Double-submit trusts that the attacker can't set the cookie, but a
+      subdomain/same-site attacker can inject or overwrite it so both values match.
+      SameSite=Lax also allows top-level GET navigations, so GET-based state changes
+      and same-site attackers remain risks; prefer a signed synchronizer token and
+      never mutate state on GET.
+    ref: "concepts.md#csrf-for-cookie-authenticated-apis"
+
+  - id: api-security-and-hardening-085
+    difficulty: expert
+    tags: [cors, reflection, preflight]
+    question: |
+      Which statement about CORS is correct at a senior level?
+    options:
+      - "A CORS preflight is an authentication boundary an attacker's client must pass"
+      - "Access-Control-Allow-Headers and -Methods can be safely reflected from the request since the browser enforces them"
+      - "Reflecting Access-Control-Allow-Headers/-Methods blindly is as dangerous as reflecting Origin, and preflight is not an auth boundary — a non-browser attacker client skips it entirely"
+      - "CORS applies equally to browser and non-browser clients"
+    answer: 2
+    explanation: |
+      CORS is browser-enforced only; a non-browser client ignores preflight, so it
+      is never an authorization/authentication boundary. Reflecting requested
+      headers/methods back blindly is as unsafe as reflecting Origin — maintain
+      strict allowlists.
+    ref: "concepts.md#cors-misconfiguration"
+
+  - id: api-security-and-hardening-086
+    difficulty: advanced
+    tags: [bola, nested-objects, claims]
+    question: |
+      A developer fixed BOLA on the path id (`/invoices/{id}`) but the endpoint
+      also accepts a `customerId` in the JSON body and a tenant id inside the JWT.
+      Why is the job not necessarily done?
+    options:
+      - "Only path ids can be attacked; body and token values are trusted"
+      - "BOLA applies to any object reference the caller can influence — ids in the body, query, or headers, and to nested/related objects — so each must be authorized against the subject, not just the path id"
+      - "JWT claims can never be attacker-influenced"
+      - "The fix is complete once the path id is checked"
+    answer: 1
+    explanation: |
+      BOLA isn't limited to the path. Object references in the body, query string,
+      or even chosen among token claims, and references to nested/related objects,
+      all need ownership checks. Authorize every object the request names against
+      the authenticated subject.
+    ref: "concepts.md#api1-broken-object-level-authorization"
+
+  - id: api-security-and-hardening-087
+    difficulty: advanced
+    tags: [openapi, inventory, api9]
+    question: |
+      How does treating an OpenAPI spec as a security control help, and which
+      risks does it most directly support?
+    options:
+      - "It replaces authentication entirely"
+      - "It enables schema/contract validation at the edge, negative/contract testing, and detection of shadow/zombie endpoints that don't match the spec — supporting input validation and Improper Inventory Management (API9)"
+      - "It encrypts requests in transit"
+      - "It guarantees BOLA cannot occur"
+    answer: 1
+    explanation: |
+      An authoritative OpenAPI contract lets you validate requests/responses at
+      the edge, run negative/contract tests, and flag endpoints not in the spec
+      (shadow/zombie APIs), directly supporting input validation and API9 inventory
+      management. It does not by itself provide authn or stop BOLA.
+    ref: "concepts.md#api9-improper-inventory-management"
+
+  - id: api-security-and-hardening-088
+    difficulty: intermediate
+    tags: [jwt, bcp, rfc8725]
+    question: |
+      Which RFC is the authoritative "how to use JWT safely" document that
+      prescribes defenses like algorithm allowlisting and full claim validation,
+      as opposed to merely defining the JWT format?
+    options:
+      - "RFC 7519, which defines JWT"
+      - "RFC 8725, JSON Web Token Best Current Practices"
+      - "RFC 6749, OAuth 2.0"
+      - "RFC 9110, HTTP Semantics"
+    answer: 1
+    explanation: |
+      RFC 7519 defines the JWT format; RFC 8725 (JWT BCP) is the authoritative
+      guidance on safe use — algorithm allowlists (not denylists), validating
+      critical claims, and not trusting the token to select its own verification.
+    ref: "concepts.md#jwt-hardening-and-advanced-attacks"

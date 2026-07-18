@@ -547,6 +547,413 @@ naming the *enforcement mechanism*, not merely the aspiration.
 
 ---
 
+## Parameter serialization: style, explode, and content
+
+**The problem.** A `query`/`path`/`header`/`cookie` parameter whose value is an
+array or object has to be *flattened into text* in the URL or header. OpenAPI
+describes that flattening with two keywords — **`style`** and **`explode`** —
+which map onto **RFC 6570 URI Templates**. Getting `?filter[status]=OPEN` or
+`?ids=1,2,3` documented correctly is a heavily tested detail.
+
+**`style` values and where they are legal:**
+
+| `style` | Applies to | Example (array `[3,4,5]`, name `id`) |
+|---|---|---|
+| `form` | query, cookie (default for query) | `id=3&id=4&id=5` (explode) or `id=3,4,5` (no explode) |
+| `simple` | path, header (default there) | `3,4,5` |
+| `spaceDelimited` | query | `id=3%204%205` |
+| `pipeDelimited` | query | `id=3\|4\|5` |
+| `deepObject` | query (objects only) | `id[role]=admin&id[firstName]=Alex` |
+| `label` | path | `.3.4.5` (RFC 6570 label expansion) |
+| `matrix` | path | `;id=3,4,5` (RFC 6570 path-style) |
+
+**`explode`.** `explode: true` gives each array item / object property its **own**
+`name=value` pair; `explode: false` packs them into one value using the style's
+delimiter. **`explode` defaults to `true` for `form`** and `false` for every other
+style. So a plain query array (`style: form`, default explode) serializes as
+`id=3&id=4&id=5`; set `explode: false` to get `id=3,4,5`.
+
+**`deepObject`** is the idiom for `?filter[status]=OPEN&filter[region]=us`: it is
+the only style that expresses nested-bracket object syntax, and it only works for
+objects in `query`. Note it is under-specified for deeply nested / array-valued
+properties — interviewers may probe that many tools disagree on `deepObject` edge
+cases.
+
+**`content` instead of `style`.** For a genuinely complex parameter (e.g. a JSON
+object passed in a query string), you drop `style`/`explode` and use **`content`**
+with a media type instead — the value is then serialized per that media type
+(usually `application/json`, URL-encoded):
+
+```yaml
+- name: filter
+  in: query
+  content:
+    application/json:
+      schema: { $ref: '#/components/schemas/OrderFilter' }
+# client sends ?filter=%7B%22status%22%3A%22OPEN%22%7D  ({"status":"OPEN"})
+```
+
+A parameter must use **either** `schema` (+`style`/`explode`) **or** `content` —
+never both. `content` must contain exactly one media type entry.
+
+> [!TIP]
+> There is no explicit `Accept` parameter in OpenAPI. Content negotiation on the
+> request side is modelled by `requestBody.content` keys (the `Content-Type`s the
+> operation accepts); on the response side by the `content` keys of each response
+> (the `Content-Type`s it can produce). The client's `Accept` header is implied by
+> which response media types exist — you never declare `Accept` as a `header`
+> parameter.
+
+---
+
+## allOf, discriminator, and modeling gotchas
+
+**`allOf` is intersection (AND), not object merge.** A value must validate against
+*every* subschema simultaneously. This is the trap in "extends" modeling: people
+treat `allOf: [Base, {extra props}]` like inheritance, but JSON Schema evaluates
+each branch independently.
+
+- **Closed-schema trap.** If `Base` sets `additionalProperties: false`, then an
+  `allOf` that adds new properties in a second branch makes the object **invalid** —
+  because when the `Base` branch is validated *in isolation*, the extra properties
+  are "additional" and rejected. `additionalProperties` only sees the *sibling*
+  keywords in the same schema object, not properties introduced by other `allOf`
+  branches. In 3.1 the fix is `unevaluatedProperties: false` (a 2020-12 keyword that
+  *is* aware of properties evaluated by `allOf`/`$ref` branches) instead of
+  `additionalProperties: false`.
+- **Conflicting constraints.** `allOf: [{type: string}, {type: integer}]` can never
+  be satisfied — nothing is both. `allOf` narrows; it cannot loosen.
+
+**`discriminator` correctness rules.**
+
+- `propertyName` must name a property that is **`required`** on each variant (and
+  actually present) — otherwise dispatch is undefined.
+- `mapping` maps discriminator **values** (e.g. `"cat"`) to schema references. With
+  no `mapping`, the implicit value is the **schema name** (the key under
+  `components/schemas`).
+- The discriminator is only a **tool hint for faster/unambiguous dispatch** — it is
+  *not* itself a validation constraint. JSON Schema still validates the payload
+  through the `oneOf`/`anyOf`; a wrong `petType` doesn't fail validation *because of*
+  the discriminator, it fails because the payload matches the wrong branch.
+- Discriminator works with `oneOf`/`anyOf` **and** with the `allOf`-inheritance
+  pattern (each child does `allOf: [ {$ref: Base} ]`, and `Base` carries the
+  discriminator). Mixing the two styles inconsistently is a common source of broken
+  codegen.
+
+---
+
+## links, callbacks, webhooks, and AsyncAPI
+
+These four describe *relationships and out-of-band traffic*, and are constantly
+confused. Precise distinctions:
+
+**`links` (design-time HATEOAS).** A Response Object may declare `links`: a map
+describing how a value in *this* response can be fed into *another* operation's
+parameters. It uses **runtime expressions** (`$response.body#/id`,
+`$request.path.id`) to wire an `operationId` (or `operationRef`) to its inputs:
+
+```yaml
+responses:
+  '201':
+    description: Created
+    content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+    links:
+      GetOrderById:
+        operationId: getOrder
+        parameters:
+          orderId: '$response.body#/id'   # feed the new id into getOrder
+```
+
+This is **design-time** linkage (it documents *which* call comes next and how), in
+contrast to a runtime **RFC 8288 `Link` header** (`Link: <...>; rel="next"`), which
+carries an actual URL in the response at runtime. OpenAPI `links` describe the
+relationship in the contract; the `Link` header transmits a concrete hyperlink on
+the wire. They solve related problems at different times.
+
+**`callbacks` — operation-bound out-of-band requests.** Defined on a *specific
+operation*, a `callback` describes requests the API will later send to a URL the
+client **supplied in that operation's request** (e.g. you POST a subscription with
+`callbackUrl`, and the API later POSTs events there). The callback's key is a
+runtime expression against the originating request (`{$request.body#/callbackUrl}`).
+
+**`webhooks` (3.1 root) — unbound out-of-band requests.** A top-level `webhooks`
+map describes requests the API sends that are **not tied to any prior operation
+call** — the receiver URL is configured out of band (dashboard, static config), not
+registered through an API call. Structurally each entry is a Path Item, just like
+`paths`, but describing requests the API *sends* rather than *receives*.
+
+**AsyncAPI — full event-driven / pub-sub.** When the interaction is streaming or
+message-based (Kafka, MQTT, AMQP, WebSocket), OpenAPI's request/response model does
+not fit. **AsyncAPI 3.0** is the sibling spec: it models `channels` (addresses like
+`user/signedup`), `messages` (payload schemas, reusing JSON Schema), `operations`
+(with `action: send`/`receive`), `servers`, and protocol `bindings` (per-broker
+config). Spectral lints AsyncAPI too (`spectral:asyncapi`).
+
+> [!KEY-TAKEAWAY]
+> `links` = design-time "what call comes next"; `callbacks` = out-of-band requests
+> tied to a URL registered *in a specific operation*; `webhooks` (3.1) = out-of-band
+> requests the API sends, *not* tied to any operation; AsyncAPI = full pub/sub &
+> streaming that OpenAPI can't express at all.
+
+---
+
+## Spec linting and API governance
+
+**Spectral rulesets — the enforcement primitive.** A `.spectral.yaml` ruleset is
+how you machine-enforce an API style guide. Its building blocks:
+
+- **`extends`** — inherit a base ruleset (`spectral:oas` for OpenAPI 2/3,
+  `spectral:asyncapi`) then override.
+- **`rules`** — each rule has a **`given`** (a JSONPath selecting nodes to check), a
+  **`then`** (a **function** run on those nodes), a **`severity`**
+  (`error`/`warn`/`info`/`hint`), and an optional `message`.
+- **Core functions:** `truthy`, `falsy`, `defined`, `undefined`, `pattern`
+  (regex match/notMatch), `casing` (camel/pascal/kebab/snake/…), `length`,
+  `enumeration`, `alphabetical`, `xor`, `schema`. Custom JS functions are supported.
+- **`overrides`** — apply/relax rules for specific files or JSONPath scopes.
+
+```yaml
+extends: [[spectral:oas, all]]
+rules:
+  operation-needs-description:
+    given: $.paths[*][get,post,put,patch,delete]
+    severity: error
+    then: { field: description, function: truthy }
+  path-kebab-case:
+    given: $.paths[*]~          # the ~ selects the property *key* (the path)
+    severity: error
+    then: { function: pattern, functionOptions: { match: "^(/[a-z0-9-]+|/\\{[a-zA-Z]+\\})+$" } }
+```
+
+**API governance / style guides — the pillar Spectral enforces.** At scale ("200
+APIs across 40 teams, keep them consistent") the answer is: a written **style
+guide** of MUST/SHOULD/MAY rules + a machine linter in CI + a review board + shared
+`components`. The well-known published guides:
+
+- **Zalando RESTful API Guidelines** — MUST/SHOULD/MAY rules; kebab-case paths,
+  snake_case JSON fields, a required `X-Flow-Id` correlation header, and **RFC 9457
+  `Problem`** as the universal error type. Enforced by the **Zally** linter.
+- **Google AIP (API Improvement Proposals)** — resource-oriented design, the five
+  standard methods (List/Get/Create/Update/Delete), long-running operations (LRO),
+  field masks (`update_mask`), pagination via `page_token`/`page_size`
+  (AIP-158), and a standard error model (AIP-193).
+- **Microsoft REST API Guidelines** — camelCase JSON, an `api-version` **query
+  parameter**, a standard error object, and tracking/correlation headers.
+
+The senior signal is separating **authoring one spec well** from **governing many
+specs consistently** — the latter needs codified rules + automated linting + human
+review, not heroics.
+
+---
+
+## Breaking-change detection and contract versioning
+
+**What counts as breaking (backward-incompatible) for consumers:**
+
+- Removing an endpoint, an operation, a response field, or an enum value clients
+  might receive.
+- Adding a **`required`** request property or a new required parameter.
+- **Tightening** a type/format, narrowing a `maxLength`, removing an accepted enum
+  value, or making an optional param required.
+- Changing an `operationId` (breaks *generated SDK* method names even though the
+  wire contract is unchanged).
+- Changing success status codes or the media type of a response.
+
+**What is non-breaking (backward-compatible):**
+
+- Adding a new **optional** request field or a new optional parameter.
+- Adding a whole new endpoint/operation.
+- Adding a new response field (additive) — *if* clients tolerate unknown fields.
+- Widening an accepted input enum, loosening a constraint.
+
+**Asymmetry gotcha.** Breaking-ness is **directional**: adding an *accepted input*
+value is safe, but adding a *returned output* enum value can break strict clients
+that switch on it. Adding a `required` field to a **request** breaks callers; adding
+one to a **response** does not (the server always supplies it).
+
+**Tooling & gating.** `oasdiff` (breaking-changes mode), **Optic**, and Redocly can
+diff two specs and classify each change; wire the breaking-change job into CI to
+**fail the PR** (or force a version bump) when an incompatible change appears. Tie
+`info.version` to **SemVer of the contract**: a breaking change ⇒ major bump; new
+optional capability ⇒ minor; wording/example fixes ⇒ patch. This is distinct from
+the `openapi` field (the spec-format version).
+
+---
+
+## Multi-file specs: bundling vs dereferencing
+
+**Why split.** A large API is authored across many files (best practice mirrors the
+URL hierarchy: one file per resource, shared `components` in their own files),
+linked with **external `$ref`s** (`./schemas/order.yaml#/Order`). This keeps diffs
+reviewable and enables reuse across specs.
+
+**The operational problem.** Many consumers of a spec — some codegen targets,
+Swagger UI configured for a single document, validators — **cannot resolve remote /
+relative `$ref`s**. You must transform the multi-file source into a single document
+in CI. Two distinct transforms:
+
+- **Bundling** — pull all external `$ref` targets **into one file's `components`**,
+  rewriting the references to *local* pointers (`#/components/...`). References are
+  **preserved** (still `$ref`, just now internal), so reuse/`$ref` identity and file
+  size stay reasonable. This is what you ship to tools that can't fetch remote refs.
+- **Dereferencing / flattening** — **inline** every `$ref`, replacing each with the
+  actual content. Produces a self-contained but larger doc with **no** `$ref`s;
+  breaks on circular references and duplicates repeated schemas. Use only when a
+  tool truly cannot follow even local pointers.
+
+Tools: **Redocly CLI** (`bundle`), **swagger-cli**, `@apidevtools/swagger-parser`
+(`bundle()` vs `dereference()`).
+
+> [!TIP]
+> Author split, **bundle in CI**, publish the single bundled document as the
+> artifact your UI/SDK pipeline consumes. Bundling (local refs preserved) is almost
+> always what you want over full dereferencing (refs destroyed).
+
+---
+
+## JSON Schema 2020-12 internals in 3.1
+
+Because 3.1's Schema Object *is* JSON Schema 2020-12, several 2020-12 mechanisms
+that 3.0 lacked become available — and interviewers who know 3.1 push on exactly
+what that buys you:
+
+- **Dialects.** 3.1's default dialect is
+  `https://spec.openapis.org/oas/3.1/dialect/base`. The root `jsonSchemaDialect`
+  field sets the default dialect for all Schema Objects in the document; an
+  individual schema can override it with **`$schema`**. This is what "full JSON
+  Schema alignment" concretely enables — mixing schema dialects deliberately.
+- **`$id` and `$ref` resolution.** `$id` establishes a **base URI** for a schema
+  resource, so `$ref`s resolve relative to it and independent schema resources can be
+  bundled together without pointer collisions. `$defs` (JSON Schema's local
+  definitions) coexists with OpenAPI's `components.schemas`.
+- **`$dynamicRef` / `$dynamicAnchor`** — late-bound references resolved at *runtime
+  against the dynamic scope*, enabling generic/recursive schema extension (e.g. a
+  reusable "list of T" where T is filled in by the referrer). Not expressible in 3.0.
+- **New structural keywords now usable:** `prefixItems` (tuple validation, per-index
+  item schemas), `unevaluatedProperties`/`unevaluatedItems` (the `allOf`-aware
+  successor to `additionalProperties`), `if`/`then`/`else` (conditional subschemas),
+  `patternProperties` (keys matching a regex), `dependentSchemas`/`dependentRequired`,
+  and `contentEncoding`/`contentMediaType` (which replace 3.0's
+  `format: binary`/`byte` for embedded/binary payloads).
+
+---
+
+## The OpenAPI ecosystem: Overlays, Arazzo, AsyncAPI
+
+The OpenAPI Initiative now publishes **more than one spec**. Senior interviews probe
+whether you know the sibling specifications and when each applies.
+
+**Overlay Specification 1.0 (Oct 2024) — tailor a spec without editing it.** An
+Overlay is a small YAML/JSON document of ordered **`actions`**, each with a
+**JSONPath `target`** and either an **`update`** (merge/patch the matched nodes) or
+**`remove: true`**. Applied to a base OpenAPI document it produces *another* OpenAPI
+document; overlays are chainable. This is the DRY, modern answer to "one spec, many
+audiences":
+
+- Inject rich `description`s / `examples` into a **generated** (code-first) spec that
+  you can't improve at the source.
+- **Filter out** internal or deprecated endpoints to publish a clean public variant.
+- Localize titles/descriptions; add gateway/SDK vendor metadata — all **without
+  editing the source** (so it never re-diverges).
+
+```yaml
+overlay: 1.0.0
+info: { title: Public docs overlay, version: 1.0.0 }
+actions:
+  - target: $.paths['/internal/debug']
+    remove: true
+  - target: $.info
+    update: { description: "Public Orders API. All errors are RFC 9457 problem+json." }
+```
+
+**Arazzo Specification 1.0 — document workflows, not just operations.** A single
+OpenAPI operation can't express "checkout = create cart → add item → authorize
+payment → confirm." Arazzo defines ordered **`workflows`** of **`steps`**, each
+calling an `operationId`/`operationPath`, with:
+
+- **`successCriteria`** — Criterion Objects (`simple` expression, `regex`, or
+  `jsonpath`) deciding whether a step succeeded.
+- **`onSuccess`/`onFailure`** actions — `end`, `goto` (another step/workflow), or
+  `retry`.
+- **runtime expressions** — `$response.body`, `$statusCode`,
+  `$steps.<id>.outputs.<name>`, threading outputs of one step into the inputs of the
+  next.
+
+Arazzo drives end-to-end tests and SDK "recipes"; OpenAPI describes the operations,
+Arazzo describes their **orchestration**.
+
+**AsyncAPI 3.0 — the event-driven sibling** (see the `links`/`webhooks` section):
+`channels`, `messages`, `operations` (`send`/`receive`), `servers`, protocol
+`bindings`. Use it for Kafka/MQTT/AMQP/WebSocket streams that OpenAPI's HTTP
+request/response model cannot describe.
+
+**Version facts to cite:** OpenAPI 3.1.1 (latest 3.1 patch) and 3.0.4 — with
+OpenAPI 3.2.0 released Sept 2025 as the newest line; Arazzo 1.0.0 (later 1.1.0);
+Overlay 1.0.0; AsyncAPI 3.0.
+
+---
+
+## Vendor extensions and documentation renderers
+
+**Vendor extensions (`x-`).** Any field whose name begins with **`x-`** is allowed
+almost anywhere in an OpenAPI document and is **ignored by validators** — the escape
+hatch for tool-specific metadata that must not break the standard. Uses:
+
+- **Gateway config** — AWS API Gateway reads `x-amazon-apigateway-integration` to map
+  an operation to a backend/Lambda directly from the spec.
+- **Codegen steering** — `x-enum-varnames` (name generated enum constants),
+  `x-go-type`, `x-nullable`, etc.
+- **Renderer/SDK directives** — Redoc (`x-tagGroups`, `x-logo`), Speakeasy, ReadMe.
+
+This is how you attach routing/generation metadata to a spec **without** breaking
+conformance — the answer to "put gateway config in the spec but keep it valid."
+
+**Documentation renderers — pick by audience.**
+
+| Renderer | Character |
+|---|---|
+| **Swagger UI** | Interactive, editable, **"Try it out"** live calls; great for internal/dev exploration |
+| **Redoc** | Read-only, three-panel, polished — the go-to for **public** reference docs |
+| **Stoplight Elements** | Embeddable web component, three-panel |
+| **Scalar** | Modern, fast, interactive; built-in API client |
+| **ReadMe** | Hosted docs platform with guides + reference |
+
+> [!WARNING]
+> Swagger UI's "Try it out" issues **real requests from the browser**, which surfaces
+> **CORS** and **credential-exposure** concerns (users pasting prod tokens into a doc
+> page). Public reference docs often prefer read-only Redoc precisely to avoid live
+> calls against production from the docs host.
+
+---
+
+## Content negotiation and media types
+
+**Responses and requests are keyed by media type.** A response's (or requestBody's)
+`content` is a map from **media type** to a Media Type Object (schema + examples), so
+one operation can declare multiple representations:
+
+```yaml
+responses:
+  '200':
+    content:
+      application/json: { schema: { $ref: '#/components/schemas/Order' } }
+      application/xml:  { schema: { $ref: '#/components/schemas/Order' } }
+  '404':
+    content:
+      application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } }
+```
+
+- **Errors use `application/problem+json`** (RFC 9457, which obsoletes 7807) — the
+  standard machine-readable error type; declare it on `4xx`/`5xx` responses.
+- **Media ranges / wildcards** are allowed (`text/*`, `*/*`), matched most-specific
+  first; use them sparingly since they weaken generated types.
+- As noted above, there is **no explicit `Accept` parameter** — the response
+  `content` keys *are* the set of `Content-Type`s the operation can produce, and the
+  request `content` keys are what it consumes (RFC 9110 §8 content negotiation is
+  modelled structurally, not via declared headers).
+
+---
+
 ## Common follow-up questions
 
 - **"Is OpenAPI the same as Swagger?"** No. OpenAPI is the specification; Swagger is
@@ -571,6 +978,32 @@ naming the *enforcement mechanism*, not merely the aspiration.
   inside an entry = AND (all its schemes required). `security: []` = public.
 - **"Does declaring a security scheme secure the endpoint?"** No — the spec
   documents auth; the runtime must enforce it.
+- **"Can OpenAPI document your authorization rules?"** No. It documents
+  *authentication scheme shapes* and OAuth **scopes** (which are documentation only —
+  the server enforces them). Object- and function-level authorization (BOLA/BFLA,
+  **OWASP API Security Top 10 2023** API1/API5) are runtime concerns not expressible
+  in the spec. Note OAuth 2.1 removes the `implicit` and `password` flows.
+- **"Generated (code-first) spec has bad descriptions and leaks internal endpoints,
+  and you can't touch the generator — how do you ship clean public docs?"** Apply an
+  **Overlay** in CI: `remove` internal paths and `update` in better descriptions,
+  producing a public variant without editing (and re-diverging from) the source.
+- **"How do you document a 5-call checkout flow with auth in between?"** OpenAPI
+  describes operations; use **Arazzo** to describe the ordered workflow (steps,
+  `successCriteria`, `onSuccess`/`onFailure`, runtime expressions threading outputs).
+- **"You need to document Kafka events too — extend OpenAPI?"** No; use **AsyncAPI**
+  (channels/messages/operations/bindings) for pub-sub and streaming.
+- **"Difference between `webhooks`, `callbacks`, and AsyncAPI?"** `callbacks` =
+  out-of-band requests tied to a URL registered *in a specific operation*; `webhooks`
+  (3.1 root) = out-of-band requests the API sends, not tied to any operation call;
+  AsyncAPI = full async/streaming messaging.
+- **"How do you document `?filter[status]=OPEN&filter[region]=us`?"** A `query`
+  object parameter with `style: deepObject`, `explode: true` (RFC 6570 lineage).
+- **"How do you enforce one API style across 50 teams?"** Written style guide
+  (Zalando/AIP/Microsoft-style MUST/SHOULD) + **Spectral/Zally** ruleset in CI + a
+  review board + shared `components`.
+- **"Your spec is 8000 lines across 30 files but the target tool can't resolve remote
+  `$ref`s — what do you do?"** Author split, **bundle** in CI (Redocly CLI) into one
+  document with local refs preserved; publish that as the artifact.
 
 ## References
 
@@ -585,3 +1018,13 @@ naming the *enforcement mechanism*, not merely the aspiration.
 - Prism (mock/validation server) — <https://github.com/stoplightio/prism>
 - RFC 9110 — HTTP Semantics — <https://www.rfc-editor.org/rfc/rfc9110>
 - RFC 9457 — Problem Details for HTTP APIs — <https://www.rfc-editor.org/rfc/rfc9457>
+- RFC 8288 — Web Linking (`Link` header) — <https://www.rfc-editor.org/rfc/rfc8288>
+- RFC 6570 — URI Template — <https://www.rfc-editor.org/rfc/rfc6570>
+- Overlay Specification 1.0 — <https://spec.openapis.org/overlay/v1.0.0.html>
+- Arazzo Specification 1.0 — <https://spec.openapis.org/arazzo/latest.html>
+- AsyncAPI 3.0 — <https://www.asyncapi.com/docs/reference/specification/v3.0.0>
+- oasdiff (breaking-change detection) — <https://www.oasdiff.com/>
+- Redocly CLI (bundle/lint) — <https://redocly.com/docs/cli/>
+- Zalando RESTful API Guidelines — <https://opensource.zalando.com/restful-api-guidelines/>
+- Google AIP — <https://google.aip.dev/>
+- OWASP API Security Top 10 (2023) — <https://owasp.org/API-Security/editions/2023/en/0x00-header/>
