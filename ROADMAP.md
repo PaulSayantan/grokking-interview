@@ -53,8 +53,12 @@ plan lives in Claude memory (`web-design-enhancement-plan.md`). Highlights:
 - [x] **P1** Callout blocks (TIP/WARNING/INTERVIEW/KEY-TAKEAWAY) + reading time +
       page-top scroll-progress bar. *(Session 15)*
 - [x] Catalog mastery bars + header "% mastered" pill. *(Session 15)*
-- [ ] **P2** Left sidebar domain navigation + prev/next topic links; per-domain SVG icons;
-      welcome-back warm-up; difficulty filter (needs `difficulty` re-added to slim pools).
+- [x] **P2** Domain sidebar nav (disclosure) + prev/next topic pager; per-domain
+      Nerd Font icons (subset woff2); welcome-back warm-up banner; difficulty filter
+      (difficulty re-added to slim pools); keyboard-shortcut hints; split
+      progress/activity reset. *(Session 16)*
+      _Sidebar is disclosure-only (not a persistent rail) and omitted on the domain
+      page (cards already list subtopics) — deliberate scope calls._
 - [ ] **P3** Achievement badges; SRS-light scheduling; self-test `<details>` blocks.
       *(Light-theme toggle shipped in Session 13.)*
 - [ ] Multi-answer & code-snippet question types.
