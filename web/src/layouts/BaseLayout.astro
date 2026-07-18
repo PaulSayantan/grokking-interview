@@ -92,6 +92,21 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
         </a>
 
         <nav aria-label="Primary" class="flex items-center gap-1 sm:gap-2">
+          {/* Search trigger — opens the Pagefind modal (also Cmd+K or "/"). */}
+          <button
+            type="button"
+            id="site-search-open"
+            class="inline-flex min-h-[44px] items-center gap-2 rounded-md px-3 py-2 text-sm font-medium no-underline transition-colors hover:bg-[color:var(--color-surface-2)]"
+            style="color: var(--color-text-muted); border: 1px solid var(--color-border);"
+            aria-label="Search study content"
+            aria-haspopup="dialog"
+            title="Search (press / or Cmd+K)"
+          >
+            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="9" cy="9" r="6"></circle><path d="M14 14l4 4" stroke-linecap="round"></path></svg>
+            <span class="hidden sm:inline">Search</span>
+            <kbd class="hidden rounded px-1.5 py-0.5 text-xs sm:inline" style="border: 1px solid var(--color-border); color: var(--color-text-muted);">⌘K</kbd>
+          </button>
+
           {/* Streak pill — hydrated client-side from localStorage (hidden until
               there's an active streak so no-streak users never see a "0"). */}
           <a
@@ -163,6 +178,14 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
       </div>
     </header>
 
+    {/* Search modal — native <dialog> (focus trap + Esc). transition:persist
+        keeps the mounted Pagefind UI alive across ClientRouter navigations. */}
+    <dialog id="site-search-dialog" transition:persist class="site-search-dialog" aria-label="Search">
+      <div class="site-search-panel">
+        <div id="site-search-ui"></div>
+      </div>
+    </dialog>
+
     <main id="main" class="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
       <slot />
     </main>
@@ -187,6 +210,29 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
       .theme-toggle .icon-sun { display: inline-block; }
       [data-theme="light"] .theme-toggle .icon-sun { display: none; }
       [data-theme="light"] .theme-toggle .icon-moon { display: inline-block; }
+
+      /* Search modal chrome + Pagefind UI theming (all via tokens => both
+         themes flip cleanly; never hardcode hex). */
+      .site-search-dialog { border: none; padding: 0; background: transparent; max-width: 640px; width: 92vw; margin-top: 12vh; }
+      .site-search-dialog::backdrop { background: color-mix(in oklab, var(--color-bg) 70%, transparent); backdrop-filter: blur(2px); }
+      .site-search-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-3); padding: var(--space-4); }
+      #site-search-ui {
+        --pagefind-ui-primary: var(--color-primary);
+        --pagefind-ui-text: var(--color-text);
+        --pagefind-ui-background: var(--color-surface);
+        --pagefind-ui-border: var(--color-border);
+        --pagefind-ui-tag: var(--color-surface-2);
+        --pagefind-ui-border-width: 1px;
+        --pagefind-ui-border-radius: var(--radius-md);
+        --pagefind-ui-font: inherit;
+      }
+      #site-search-ui .pagefind-ui__result-link { color: var(--color-primary); }
+      #site-search-ui .pagefind-ui__result-excerpt,
+      #site-search-ui .pagefind-ui__message { color: var(--color-text-muted); }
+      .site-search-panel { opacity: 1; }
+      @media (prefers-reduced-motion: no-preference) {
+        .site-search-dialog[open] .site-search-panel { animation: scale-in var(--dur-med) var(--ease-out) both; }
+      }
     </style>
 
     {/* Toggle behavior. Re-binds on every ClientRouter navigation. Persists
@@ -211,6 +257,88 @@ const fullTitle = title === siteName ? title : `${title} · ${siteName}`;
         document.addEventListener("astro:page-load", bind);
         bind();
       })();
+    </script>
+
+    {/* Site search (Pagefind). Lazy-loads the UI bundle that the postbuild
+        `pagefind --site dist` step emits into /pagefind/. In `astro dev` that
+        bundle doesn't exist, so the import is guarded and the button degrades
+        to a no-op. The <dialog> uses transition:persist so the mounted UI
+        survives ClientRouter nav; only the trigger listener re-binds. */}
+    <script>
+      let uiInited = false;
+      async function ensureUI() {
+        if (uiInited) return true;
+        const host = document.getElementById("site-search-ui");
+        if (!host) return false;
+        try {
+          // Build the specifier at runtime so Rollup can't statically resolve
+          // it (the bundle only exists after the postbuild `pagefind` step).
+          const uiPath = "/pagefind/" + "pagefind-ui.js";
+          const mod = await import(/* @vite-ignore */ uiPath);
+          const PagefindUI = (mod as any).PagefindUI || (window as any).PagefindUI;
+          new PagefindUI({
+            element: "#site-search-ui",
+            showSubResults: true,
+            showImages: false,
+            resetStyles: false,
+          });
+          uiInited = true;
+          return true;
+        } catch {
+          return false; // dev mode or index missing
+        }
+      }
+      function openSearch() {
+        const dlg = document.getElementById("site-search-dialog") as HTMLDialogElement | null;
+        if (!dlg) return;
+        void ensureUI().then(() => {
+          if (!dlg.open) dlg.showModal();
+          const input = dlg.querySelector<HTMLInputElement>(".pagefind-ui__search-input");
+          input?.focus();
+        });
+      }
+      function closeSearch() {
+        const dlg = document.getElementById("site-search-dialog") as HTMLDialogElement | null;
+        if (dlg?.open) dlg.close();
+      }
+      function inEditable(el: EventTarget | null): boolean {
+        const node = el as HTMLElement | null;
+        if (!node) return false;
+        const tag = node.tagName;
+        return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || node.isContentEditable;
+      }
+      function onKey(e: KeyboardEvent) {
+        if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          openSearch();
+          return;
+        }
+        if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey && !inEditable(e.target)) {
+          e.preventDefault();
+          openSearch();
+        }
+      }
+      function bind() {
+        const btn = document.getElementById("site-search-open") as HTMLElement | null;
+        if (btn && !btn.dataset.bound) {
+          btn.dataset.bound = "1";
+          btn.addEventListener("click", openSearch);
+        }
+        const dlg = document.getElementById("site-search-dialog") as HTMLElement | null;
+        if (dlg && !dlg.dataset.bound) {
+          dlg.dataset.bound = "1";
+          dlg.addEventListener("click", (e) => {
+            if (e.target === dlg) closeSearch();
+          });
+        }
+      }
+      // Global key listener attached once (document survives view transitions).
+      if (!(window as any).__ipSearchKeys) {
+        (window as any).__ipSearchKeys = true;
+        document.addEventListener("keydown", onKey);
+      }
+      document.addEventListener("astro:page-load", bind);
+      bind();
     </script>
 
     {/* Header pill hydration. Bundled (not is:inline) so it can import the
