@@ -224,3 +224,23 @@ export function displayStreak(today: string = localDay()): number {
   if (gap <= 1 + STREAK_GRACE_DAYS) return s.current;
   return 0;
 }
+
+// --- Streak milestones -----------------------------------------------------
+
+export const MILESTONES_KEY = "ip:milestones:v1";
+
+/** Streak lengths (days) that trigger a one-time celebration. */
+export const STREAK_MILESTONES = [7, 14, 30, 50, 100] as const;
+
+/**
+ * If `current` streak length equals a milestone that has NOT yet been
+ * celebrated, mark it claimed (persisted) and return it — otherwise null.
+ * Idempotent: a milestone fires exactly once across sessions/reloads.
+ */
+export function claimStreakMilestone(current: number): number | null {
+  if (!(STREAK_MILESTONES as readonly number[]).includes(current)) return null;
+  const seen = readJSON<number[]>(MILESTONES_KEY, []);
+  if (seen.includes(current)) return null;
+  writeJSON(MILESTONES_KEY, [...seen, current]);
+  return current;
+}

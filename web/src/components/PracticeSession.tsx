@@ -13,6 +13,7 @@ import {
   registerPractice,
   missedIds,
   missedCount,
+  claimStreakMilestone,
 } from "@lib/progress";
 
 /**
@@ -230,6 +231,40 @@ const ANIM_CSS = `
     100% { transform: scale(1); }
   }
 }
+/* Streak-milestone celebration. Confetti pieces default to opacity:0 so
+   reduced-motion / unsupported browsers see NO frozen dots — the static badge
+   carries the message. Motion is added only inside the gate below. */
+.ps-confetti {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.ps-confetti span {
+  position: absolute;
+  top: -12px;
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  opacity: 0;
+}
+.ps-milestone-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ps-confetti span {
+    animation: ps-confetti-fall 1500ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) forwards;
+  }
+  .ps-milestone-badge {
+    animation: ps-fade-up-6 var(--dur-med, 240ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 200ms both;
+  }
+}
+@keyframes ps-confetti-fall {
+  0% { opacity: 1; transform: translateY(0) rotate(0deg); }
+  100% { opacity: 0; transform: translateY(340px) rotate(360deg); }
+}
 `;
 
 export default function PracticeSession({ poolUrl, backHref, title, groups }: Props) {
@@ -275,6 +310,8 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   const [selections, setSelections] = useState<(number | undefined)[]>([]);
   const [finished, setFinished] = useState(false);
   const [stats, setStats] = useState<StoredStats | null>(null);
+  // Streak milestone just reached this session (null = none), for celebration.
+  const [milestone, setMilestone] = useState<number | null>(null);
   // roving focus target within the current option list
   const [focusIndex, setFocusIndex] = useState(0);
 
@@ -333,6 +370,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       setCurrent(0);
       setFinished(false);
       setFocusIndex(0);
+      setMilestone(null);
       savedRef.current = false;
       setStatus("ready");
       // Deferred: fetch explanations in the background (quiz starts without them).
@@ -417,7 +455,9 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           topic_slug: pq.q.topic_slug,
         })),
       );
-      registerPractice();
+      const streak = registerPractice();
+      const reached = claimStreakMilestone(streak.current);
+      if (reached) setMilestone(reached);
     }
   }, [finished, total, score, resolved.url, prepared, selections]);
 
@@ -618,7 +658,40 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     return (
       <div>
         <style>{ANIM_CSS}</style>
-        <div class="card surface-brand ps-results-in overflow-hidden p-6 text-center">
+        <div class="card surface-brand ps-results-in relative overflow-hidden p-6 text-center">
+          {milestone != null && (
+            <>
+              <div class="ps-confetti" aria-hidden="true">
+                {Array.from({ length: 24 }).map((_, i) => {
+                  const colors = [
+                    "var(--accent-blue)",
+                    "var(--accent-violet)",
+                    "var(--accent-amber)",
+                    "var(--accent-teal)",
+                    "var(--accent-green)",
+                    "var(--accent-rose)",
+                  ];
+                  return (
+                    <span
+                      key={i}
+                      style={{
+                        left: `${(i * 100) / 24}%`,
+                        background: colors[i % colors.length],
+                        animationDelay: `${(i % 8) * 90}ms`,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+              <p
+                class="ps-milestone-badge relative z-10 mx-auto mb-2 rounded-full px-3 py-1 text-sm font-bold"
+                style="background: color-mix(in srgb, var(--accent-amber) 16%, transparent); color: var(--accent-amber);"
+                role="status"
+              >
+                🔥 {milestone}-day streak! Keep it going.
+              </p>
+            </>
+          )}
           <p
             class="text-sm font-semibold uppercase tracking-wide"
             style="color: var(--color-text-muted);"
