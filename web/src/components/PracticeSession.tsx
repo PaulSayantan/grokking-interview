@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Question } from "@lib/types";
 import { DEFAULT_SAMPLE_SIZE, pickN, seededShuffle } from "@lib/sample";
+import { recordAnswers, registerPractice, missedIds } from "@lib/progress";
 
 /**
  * PracticeSession — the interactive MCQ quiz. The ONLY Preact island on the site.
@@ -216,14 +217,20 @@ const ANIM_CSS = `
 `;
 
 export default function PracticeSession({ poolUrl, backHref, title, groups }: Props) {
-  // Resolve the active pool + scope from an optional ?group= query param.
+  // Resolve the active pool + scope from an optional ?group= query param, and
+  // detect ?review=1 (review-missed mode: filter the pool to missed questions).
   const resolved = useMemo(() => {
-    if (groups && groups.length && typeof window !== "undefined") {
-      const key = new URLSearchParams(window.location.search).get("group");
+    const params =
+      typeof window !== "undefined"
+        ? new URLSearchParams(window.location.search)
+        : null;
+    const review = params?.get("review") === "1";
+    if (groups && groups.length && params) {
+      const key = params.get("group");
       const match = key ? groups.find((g) => g.key === key) : undefined;
-      if (match) return { url: match.url, scope: match.label };
+      if (match) return { url: match.url, scope: match.label, review };
     }
-    return { url: poolUrl, scope: title };
+    return { url: poolUrl, scope: title, review };
   }, [poolUrl, title, groups]);
 
   const [status, setStatus] = useState<"loading" | "error" | "empty" | "ready">(
@@ -269,10 +276,19 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     try {
       const res = await fetch(slimUrl(resolved.url));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const pool = (await res.json()) as Question[];
+      let pool = (await res.json()) as Question[];
       if (!Array.isArray(pool) || pool.length === 0) {
         setStatus("empty");
         return;
+      }
+      // Review-missed mode: keep only questions the learner last got wrong.
+      if (resolved.review) {
+        const missed = new Set(missedIds());
+        pool = pool.filter((q) => missed.has(q.id));
+        if (pool.length === 0) {
+          setStatus("empty");
+          return;
+        }
       }
       const q = prepare(pool);
       setPrepared(q);
@@ -287,7 +303,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     } catch {
       setStatus("error");
     }
-  }, [resolved.url, loadExplanations]);
+  }, [resolved.url, resolved.review, loadExplanations]);
 
   useEffect(() => {
     void loadPool();
@@ -338,13 +354,23 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     }
   }, [isLocked, explanations, resolved.url, loadExplanations]);
 
-  // Persist once when a session finishes.
+  // Persist once when a session finishes: pool stats + per-question answer
+  // history (feeds mastery grid + review-missed) + daily streak.
   useEffect(() => {
     if (finished && !savedRef.current && total > 0) {
       savedRef.current = true;
       setStats(writeStats(resolved.url, score, total));
+      recordAnswers(
+        prepared.map((pq, i) => ({
+          id: pq.q.id,
+          correct: selections[i] === pq.correctIndex,
+          domain: pq.q.domain,
+          topic_slug: pq.q.topic_slug,
+        })),
+      );
+      registerPractice();
     }
-  }, [finished, total, score, resolved.url]);
+  }, [finished, total, score, resolved.url, prepared, selections]);
 
   // Move focus to the option list / next button as the question changes.
   useEffect(() => {
@@ -446,7 +472,9 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     return (
       <div class="card p-6">
         <p style="color: var(--color-text-muted);">
-          There are no practice questions available for this selection yet.
+          {resolved.review
+            ? "Nothing to review here — you haven't missed any questions in this scope. Practice a round first, then come back to drill what you got wrong."
+            : "There are no practice questions available for this selection yet."}
         </p>
         <div class="mt-4">
           <a
