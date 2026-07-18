@@ -27,6 +27,8 @@ const concepts = defineCollection({
     slug: z.string(),
     /** group key: "all" | "core" | "advanced" | "aws". */
     group: z.string(),
+    /** Approximate reading time (minutes), computed at sync from the body. */
+    readingMinutes: z.number().int().positive(),
   }),
 });
 

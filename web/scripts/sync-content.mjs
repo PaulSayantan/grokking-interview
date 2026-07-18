@@ -121,6 +121,16 @@ function stripLeadingH1(body) {
   return body.replace(/^﻿?#\s+.+?\r?\n/, "");
 }
 
+/** Reading-time baseline (technical prose). */
+const WORDS_PER_MINUTE = 200;
+
+/** Approximate reading minutes for a concepts body (>=1). Count the SAME text
+ *  that renders (post H1-strip) so the number matches the visible article. */
+function readingMinutes(body) {
+  const words = body.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.round(words / WORDS_PER_MINUTE));
+}
+
 /** Slim question payload for the practice island's initial fetch. */
 function slimQuestion(q) {
   const { explanation, tags, difficulty, ...rest } = q;
@@ -229,12 +239,15 @@ async function processAuthoredDomain(domainSlug) {
     // --- Write concept collection entry (frontmatter + body sans leading H1) ---
     if (existsSync(conceptsPath)) {
       const body = await readFile(conceptsPath, "utf8");
+      const strippedBody = stripLeadingH1(body);
+      const mins = readingMinutes(strippedBody);
       const fm = [
         "---",
         `title: ${yamlStr(subtopicTitle)}`,
         `domain: ${yamlStr(domainSlug)}`,
         `slug: ${yamlStr(slug)}`,
         `group: ${yamlStr(groupKey)}`,
+        `readingMinutes: ${mins}`,
         "---",
         "",
       ].join("\n");
@@ -242,7 +255,7 @@ async function processAuthoredDomain(domainSlug) {
       await mkdir(outConceptsDir, { recursive: true });
       await writeFile(
         path.join(outConceptsDir, `${slug}.md`),
-        fm + stripLeadingH1(body),
+        fm + strippedBody,
         "utf8",
       );
     }
