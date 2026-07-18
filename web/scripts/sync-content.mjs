@@ -48,6 +48,11 @@ const COMING_SOON_DOMAINS = [
   "hibernate-jpa",
   "apache-tomcat",
   "messaging-databases",
+  "security",
+  "rest-api-design",
+  "networking",
+  "observability",
+  "testing",
 ];
 
 /** The 8 advanced/expert system-design deep-dive slugs. */
