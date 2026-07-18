@@ -73,18 +73,26 @@ Update the marker as you author each topic.
 
 Per-topic status lives in each `topics/<domain>/README.md`. Domain rollup:
 
+Note: taxonomies for the 6 originally-unauthored domains were revised (Session 17)
+and 5 new domains added; counts below reflect the current READMEs.
+
 | Domain | Topics | Authored |
 |---|---|---|
 | [System Design](topics/system-design/README.md) | 23 core + 8 adv deep-dive + 26 AWS | 57 ✅ (all tiers) |
-| [Docker](topics/docker/README.md) | 15 | 0 |
-| [Kubernetes](topics/kubernetes/README.md) | 16 | 0 |
-| [DevOps & CI/CD](topics/devops-cicd/README.md) | 18 | 0 |
 | [Spring Boot](topics/spring-boot/README.md) | 18 | 18 ✅ |
 | [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ✅ (all tiers) |
-| [Hibernate & JPA](topics/hibernate-jpa/README.md) | 15 | 0 |
-| [Apache Tomcat](topics/apache-tomcat/README.md) | 16 | 0 |
 | [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 25 | 25 ✅ (all tiers) |
-| [Messaging & Databases](topics/messaging-databases/README.md) | 12 | 0 |
+| [REST APIs & API Design](topics/rest-api-design/README.md) | 18 | 18 ✅ (Pass 1, 951 MCQs) |
+| [Docker](topics/docker/README.md) | 16 | 0 |
+| [Kubernetes](topics/kubernetes/README.md) | 19 | 0 |
+| [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 0 |
+| [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
+| [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
+| [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 0 |
+| [Security (App & Web)](topics/security/README.md) | 16 | 0 |
+| [Networking & Protocols](topics/networking/README.md) | 16 | 0 |
+| [Observability](topics/observability/README.md) | 17 | 0 |
+| [Software Testing](topics/testing/README.md) | 16 | 0 |
 
 <!-- CONTENT-PROGRESS-END -->
 
