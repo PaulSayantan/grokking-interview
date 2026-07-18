@@ -1,0 +1,1002 @@
+topic: "Webhooks & Async API Patterns"
+domain: rest-api-design
+topic_slug: webhooks-and-async-api-patterns
+version: 1
+questions:
+  - id: webhooks-and-async-api-patterns-001
+    difficulty: beginner
+    tags: [webhooks, definition]
+    question: |
+      At the HTTP level, what *is* an outbound webhook?
+    options:
+      - "An HTTP request (usually POST) the producer sends to a URL the consumer registered"
+      - "A long-lived TCP connection the client keeps open to receive events"
+      - "A special HTTP method reserved for event notifications"
+      - "A polling loop the server runs against the client"
+    answer: 0
+    explanation: |
+      A webhook is simply an HTTP request (conventionally a POST) that the
+      producer makes to a callback URL the consumer supplied. The roles are
+      reversed: the consumer runs a small server, the producer acts as client.
+    ref: "concepts.md#webhooks-versus-polling"
+
+  - id: webhooks-and-async-api-patterns-002
+    difficulty: beginner
+    tags: [polling, webhooks, comparison]
+    question: |
+      Which statement best contrasts polling with webhooks?
+    options:
+      - "Polling is push; webhooks are pull"
+      - "Both require the client to run a public server"
+      - "Webhooks eliminate the need for retries entirely"
+      - "Polling is pull (client repeatedly asks); webhooks are push (server sends on event)"
+    answer: 3
+    explanation: |
+      Polling is a pull model — the client repeatedly GETs to ask "anything
+      new?". Webhooks are push — the producer POSTs to the consumer when an
+      event occurs.
+    ref: "concepts.md#webhooks-versus-polling"
+
+  - id: webhooks-and-async-api-patterns-003
+    difficulty: intermediate
+    tags: [polling, firewall, trade-offs]
+    question: |
+      A consumer sits behind a corporate firewall and cannot expose any public
+      HTTPS endpoint. Which approach can it still use to learn about events?
+    options:
+      - "Outbound webhooks, because the producer initiates the connection"
+      - "Neither; events cannot reach it at all"
+      - "Polling, because the consumer initiates outbound requests to the producer"
+      - "Webhooks, but only over plain HTTP"
+    answer: 2
+    explanation: |
+      Webhooks require the consumer to be reachable at a public URL. Behind a
+      firewall/NAT that is impossible, so the consumer must poll — it initiates
+      the outbound connection, which firewalls allow.
+    ref: "concepts.md#webhooks-versus-polling"
+
+  - id: webhooks-and-async-api-patterns-004
+    difficulty: beginner
+    tags: [polling, efficiency]
+    question: |
+      What is the main efficiency drawback of polling compared to webhooks?
+    options:
+      - "It cannot use HTTPS"
+      - "Most poll requests return 'nothing new', wasting requests and adding latency up to the poll interval"
+      - "It requires a shared HMAC secret"
+      - "It only works server-to-server"
+    answer: 1
+    explanation: |
+      Polling repeatedly asks and usually gets "nothing changed", wasting
+      requests; and a client learns of an event only at the next poll, so
+      latency is bounded by the poll interval.
+    ref: "concepts.md#webhooks-versus-polling"
+
+  - id: webhooks-and-async-api-patterns-005
+    difficulty: intermediate
+    tags: [envelope, payload-design]
+    question: |
+      Why do well-designed webhooks wrap the domain data in an envelope with a
+      stable `id`, `type`, and `created` timestamp?
+    options:
+      - "The `id` drives consumer idempotency, `type` enables routing, and `created` supports ordering/staleness checks"
+      - "To make the payload larger so it survives compression"
+      - "Because RFC 9110 mandates this exact structure"
+      - "To avoid needing a signature header"
+    answer: 0
+    explanation: |
+      The envelope's `id` is the de-dup key for idempotent consumers, `type`
+      lets one endpoint route many event kinds, and `created` supports ordering
+      and staleness decisions. It is a convention, not an RFC mandate.
+    ref: "concepts.md#anatomy-of-an-outbound-webhook-delivery"
+
+  - id: webhooks-and-async-api-patterns-006
+    difficulty: intermediate
+    tags: [thin-vs-fat, payload-design]
+    question: |
+      A "thin" (notification-style) webhook payload sends only identifiers and
+      expects the consumer to call back the API for details. What is a genuine
+      advantage of thin payloads over "fat" ones?
+    options:
+      - "They guarantee events arrive in order"
+      - "They remove the need for the consumer to be idempotent"
+      - "They eliminate retries"
+      - "They avoid stale/oversized bodies and leak less data if a signature is bypassed"
+    answer: 3
+    explanation: |
+      Thin payloads carry just ids, so the consumer fetches current state
+      (never stale) and less sensitive data travels in the webhook. The cost is
+      an extra round trip. They do not affect ordering or idempotency needs.
+    ref: "concepts.md#anatomy-of-an-outbound-webhook-delivery"
+
+  - id: webhooks-and-async-api-patterns-007
+    difficulty: intermediate
+    tags: [payload-design, body-size]
+    question: |
+      Why should a webhook avoid sending a very large body (e.g. a 50 MB export)
+      directly?
+    options:
+      - "HTTP forbids bodies larger than 1 MB"
+      - "Large bodies cannot be signed with HMAC"
+      - "Consumers commonly time out and disconnect on large bodies; send a reference/URL instead"
+      - "The producer cannot retry large bodies"
+    answer: 2
+    explanation: |
+      Webhook consumers should ack quickly; a huge body risks timeouts and
+      disconnects. Send a small notification with a reference/URL the consumer
+      fetches on its own schedule.
+    ref: "concepts.md#anatomy-of-an-outbound-webhook-delivery"
+
+  - id: webhooks-and-async-api-patterns-008
+    difficulty: beginner
+    tags: [subscriptions, registration]
+    question: |
+      When a consumer registers a webhook endpoint, what is typically returned
+      exactly once and must be stored to verify future deliveries?
+    options:
+      - "A JWT access token"
+      - "The endpoint's per-endpoint signing secret"
+      - "A TLS client certificate"
+      - "The consumer's public IP allowlist"
+    answer: 1
+    explanation: |
+      Registration returns a high-entropy per-endpoint signing secret, shown
+      once. The consumer stores it and uses it to verify the HMAC signature on
+      every future delivery.
+    ref: "concepts.md#subscriptions-and-callback-url-registration"
+
+  - id: webhooks-and-async-api-patterns-009
+    difficulty: intermediate
+    tags: [subscriptions, ssrf, security]
+    question: |
+      Accepting an arbitrary user-supplied callback URL introduces which OWASP
+      API Security (2023) risk, and how do you mitigate it?
+    options:
+      - "Server Side Request Forgery (API7:2023); validate the URL is public HTTPS and block internal ranges at delivery time"
+      - "Broken Object Level Authorization; mitigate with per-object checks"
+      - "Mass Assignment; mitigate by allowlisting fields"
+      - "Security Misconfiguration; mitigate by disabling verbose errors"
+    answer: 0
+    explanation: |
+      A registered URL your server calls can be pointed at internal services or
+      cloud metadata — SSRF (API7:2023). Validate it is public HTTPS and block
+      internal/link-local ranges, re-resolving DNS at delivery time.
+    ref: "concepts.md#subscriptions-and-callback-url-registration"
+
+  - id: webhooks-and-async-api-patterns-010
+    difficulty: intermediate
+    tags: [subscriptions, verification-handshake]
+    question: |
+      Why do many producers require a confirmation/challenge handshake before
+      enabling a newly registered endpoint?
+    options:
+      - "To compress the payload"
+      - "To negotiate the HMAC algorithm"
+      - "Because 202 Accepted requires it"
+      - "To prove the URL is controlled by whoever registered it, preventing abuse of your sender to flood a victim URL"
+    answer: 3
+    explanation: |
+      A challenge/echo handshake proves the registrant controls the URL,
+      stopping an attacker from registering someone else's URL and using your
+      infrastructure to flood it with traffic.
+    ref: "concepts.md#subscriptions-and-callback-url-registration"
+
+  - id: webhooks-and-async-api-patterns-011
+    difficulty: beginner
+    tags: [delivery-guarantees, at-least-once]
+    question: |
+      What delivery guarantee do webhook systems realistically provide over
+      HTTP?
+    options:
+      - "Exactly-once delivery"
+      - "At-most-once delivery"
+      - "At-least-once delivery — the consumer may receive an event more than once"
+      - "Ordered exactly-once delivery"
+    answer: 2
+    explanation: |
+      HTTP offers no exactly-once. Producers retry until they see success, so a
+      consumer may get the same event more than once. De-duplication is the
+      consumer's responsibility.
+    ref: "concepts.md#delivery-guarantees-and-at-least-once-semantics"
+
+  - id: webhooks-and-async-api-patterns-012
+    difficulty: intermediate
+    tags: [status-codes, delivery]
+    question: |
+      A webhook consumer returns `400 Bad Request`. How should a well-behaved
+      producer treat this?
+    options:
+      - "As transient — retry immediately with no delay"
+      - "As a permanent failure — most systems do not retry 4xx (except 429)"
+      - "As success — 4xx means the event was accepted"
+      - "By escalating to WebSockets"
+    answer: 1
+    explanation: |
+      4xx generally indicates a client-side problem that retrying will not fix,
+      so producers treat them as permanent and stop retrying. The notable
+      exception is 429 (Too Many Requests), which means "slow down and retry".
+    ref: "concepts.md#delivery-guarantees-and-at-least-once-semantics"
+
+  - id: webhooks-and-async-api-patterns-013
+    difficulty: intermediate
+    tags: [status-codes, retries]
+    question: |
+      Which consumer response should a producer treat as *transient* and worth
+      retrying with backoff?
+    options:
+      - "503 Service Unavailable or a connection timeout"
+      - "401 Unauthorized"
+      - "404 Not Found"
+      - "410 Gone"
+    answer: 0
+    explanation: |
+      5xx responses, timeouts, and connection errors are transient — the
+      consumer may recover — so they warrant retry with backoff. 401/404/410 are
+      permanent errors that retrying will not fix.
+    ref: "concepts.md#delivery-guarantees-and-at-least-once-semantics"
+
+  - id: webhooks-and-async-api-patterns-014
+    difficulty: intermediate
+    tags: [ordering, delivery]
+    question: |
+      Which statement about webhook event ordering is correct?
+    options:
+      - "Events are always delivered in the exact order they occurred"
+      - "Ordering is guaranteed only for 5xx retries"
+      - "HTTP guarantees ordering because TCP is ordered"
+      - "Ordering is not guaranteed; retries and parallel delivery can reorder events"
+    answer: 3
+    explanation: |
+      Retries and concurrent delivery mean events can arrive out of order (e.g.
+      order.shipped before order.created). If order matters, include a sequence
+      number/timestamp or fetch current state rather than trusting order.
+    ref: "concepts.md#delivery-guarantees-and-at-least-once-semantics"
+
+  - id: webhooks-and-async-api-patterns-015
+    difficulty: intermediate
+    tags: [consumer-design, ack-fast]
+    question: |
+      A consumer does 20 seconds of heavy processing *before* returning its 2xx.
+      What is the likely failure mode?
+    options:
+      - "The signature expires mid-processing"
+      - "The event is silently dropped by TCP"
+      - "The producer times out and retries, causing duplicate deliveries and processing"
+      - "The consumer's secret rotates automatically"
+    answer: 2
+    explanation: |
+      Slow acknowledgment causes the producer to time out and retry, so the same
+      event gets delivered and processed again. The fix: durably enqueue the
+      event, return 2xx immediately, then process asynchronously.
+    ref: "concepts.md#delivery-guarantees-and-at-least-once-semantics"
+
+  - id: webhooks-and-async-api-patterns-016
+    difficulty: beginner
+    tags: [retries, backoff]
+    question: |
+      What is "exponential backoff" in webhook retry scheduling?
+    options:
+      - "Retrying at a fixed 1-second interval forever"
+      - "Increasing the wait between retries exponentially (e.g. base * 2^attempt), capped at a maximum"
+      - "Retrying only once, then giving up"
+      - "Doubling the payload size on each retry"
+    answer: 1
+    explanation: |
+      Exponential backoff grows the delay between attempts (base * 2^attempt),
+      usually capped, so a struggling consumer is not hammered and load spreads
+      over time.
+    ref: "concepts.md#retries-and-exponential-backoff"
+
+  - id: webhooks-and-async-api-patterns-017
+    difficulty: intermediate
+    tags: [retries, jitter]
+    question: |
+      Why add *jitter* (randomness) to exponential-backoff retry delays?
+    options:
+      - "To spread out retries so many failed deliveries do not all retry at the same instant (thundering herd)"
+      - "To make the delays longer on average"
+      - "To make signatures harder to forge"
+      - "Because RFC 9110 requires jitter"
+    answer: 0
+    explanation: |
+      Without jitter, many deliveries that failed together retry in lockstep,
+      creating a thundering herd. Adding randomness (e.g. full jitter:
+      random(0, backoff)) spreads the load.
+    ref: "concepts.md#retries-and-exponential-backoff"
+
+  - id: webhooks-and-async-api-patterns-018
+    difficulty: intermediate
+    tags: [retry-after, status-codes]
+    question: |
+      A consumer returns `429 Too Many Requests` with `Retry-After: 120`. What
+      should the producer do?
+    options:
+      - "Ignore the header and retry immediately"
+      - "Stop retrying permanently"
+      - "Switch to polling the consumer"
+      - "Wait about 120 seconds before the next attempt, honoring the header"
+    answer: 3
+    explanation: |
+      Retry-After (RFC 9110 §10.2.3) tells the client how long to wait. On a 429
+      the producer should honor it and delay the next retry accordingly instead
+      of using its own schedule.
+    ref: "concepts.md#retries-and-exponential-backoff"
+
+  - id: webhooks-and-async-api-patterns-019
+    difficulty: advanced
+    tags: [retries, idempotency, duplicates]
+    question: |
+      Which statement about the relationship between retries and duplicates is
+      correct?
+    options:
+      - "Automatic retries can coexist with a guarantee of single delivery"
+      - "Duplicates only occur when signing is disabled"
+      - "Retries are the mechanism that turns at-least-once into duplicate deliveries, so retries require consumer de-duplication"
+      - "Retries prevent duplicates by design"
+    answer: 2
+    explanation: |
+      You cannot have automatic retries and also guarantee single delivery — a
+      retry after a lost success response duplicates the event. Retries and
+      consumer idempotency are two halves of one design.
+    ref: "concepts.md#retries-and-exponential-backoff"
+
+  - id: webhooks-and-async-api-patterns-020
+    difficulty: beginner
+    tags: [signing, hmac]
+    question: |
+      What is the primary purpose of an HMAC signature on a webhook payload?
+    options:
+      - "To compress the body"
+      - "To prove the request genuinely came from the producer and was not tampered with"
+      - "To guarantee exactly-once delivery"
+      - "To encrypt the payload end-to-end"
+    answer: 1
+    explanation: |
+      A keyed HMAC (RFC 2104), typically HMAC-SHA256 over the body, authenticates
+      the sender and verifies integrity — it proves the producer (holder of the
+      secret) sent this exact payload. It is not encryption.
+    ref: "concepts.md#signing-and-verifying-payloads-hmac"
+
+  - id: webhooks-and-async-api-patterns-021
+    difficulty: advanced
+    tags: [signing, raw-body, gotcha]
+    question: |
+      A consumer intermittently fails signature verification even for legitimate
+      events. The most likely cause is that it computes the HMAC over...
+    options:
+      - "a re-serialized version of the JSON, which changes whitespace/key order and breaks the digest"
+      - "the raw request body bytes as received"
+      - "the timestamp only"
+      - "the response body instead of the request"
+    answer: 0
+    explanation: |
+      Signatures must be computed over the exact raw bytes. Re-serializing JSON
+      reorders keys or changes whitespace, producing a different digest —
+      causing intermittent verification failures.
+    ref: "concepts.md#signing-and-verifying-payloads-hmac"
+
+  - id: webhooks-and-async-api-patterns-022
+    difficulty: advanced
+    tags: [signing, timing-attack]
+    question: |
+      Why should signature comparison use a constant-time comparison rather than
+      a normal string equality (`==`)?
+    options:
+      - "Constant-time comparison is faster"
+      - "It is required to support Unicode"
+      - "It reduces payload size"
+      - "Normal equality can leak the correct signature through timing differences"
+    answer: 3
+    explanation: |
+      Early-exit string equality returns faster on the first mismatched byte,
+      leaking information about how many leading bytes matched. A constant-time
+      compare avoids this timing side channel.
+    ref: "concepts.md#signing-and-verifying-payloads-hmac"
+
+  - id: webhooks-and-async-api-patterns-023
+    difficulty: intermediate
+    tags: [signing, tls, security]
+    question: |
+      A colleague argues "we use HTTPS, so we don't need to sign webhooks." Why
+      are they wrong?
+    options:
+      - "HTTPS is too slow for webhooks"
+      - "HTTPS cannot carry JSON bodies"
+      - "TLS protects the transport but does not authenticate the sender — anyone who knows the URL can open a TLS connection and POST forged events"
+      - "They are correct; signing is redundant with HTTPS"
+    answer: 2
+    explanation: |
+      TLS encrypts and integrity-protects data in transit and authenticates the
+      *server* to the client — but it does not tell the consumer that the caller
+      is the legitimate producer. Anyone can POST to a public HTTPS URL, so you
+      still need a signature.
+    ref: "concepts.md#signing-and-verifying-payloads-hmac"
+
+  - id: webhooks-and-async-api-patterns-024
+    difficulty: advanced
+    tags: [signing, asymmetric, trade-offs]
+    question: |
+      Compared with shared-secret HMAC, what is the key advantage of asymmetric
+      webhook signatures (e.g. Ed25519/RSA or JWS)?
+    options:
+      - "They are always faster to compute"
+      - "The producer signs with a private key and consumers verify with a public key, so no shared secret must be distributed to many parties"
+      - "They eliminate the need for replay protection"
+      - "They remove the need for HTTPS"
+    answer: 1
+    explanation: |
+      Asymmetric signing means consumers only hold a public key; there is no
+      shared secret to leak, and consumers cannot forge events. The cost is more
+      computational overhead and complexity.
+    ref: "concepts.md#signing-and-verifying-payloads-hmac"
+
+  - id: webhooks-and-async-api-patterns-025
+    difficulty: beginner
+    tags: [replay, security]
+    question: |
+      What attack does replay protection specifically defend against?
+    options:
+      - "An attacker re-sending a previously captured, validly signed request"
+      - "An attacker guessing the signing secret"
+      - "A consumer processing an event too slowly"
+      - "A producer sending events out of order"
+    answer: 0
+    explanation: |
+      A signature verifies authenticity but a captured signed request still
+      verifies if re-sent. Replay protection stops an attacker (or a proxy) from
+      replaying that valid request later.
+    ref: "concepts.md#replay-protection-timestamps-and-nonces"
+
+  - id: webhooks-and-async-api-patterns-026
+    difficulty: intermediate
+    tags: [replay, timestamp]
+    question: |
+      Why must the timestamp used for replay protection be *inside* the signed
+      material rather than an unsigned header?
+    options:
+      - "To make the header shorter"
+      - "Because RFC 8288 requires it"
+      - "To allow the consumer to skip signature checks"
+      - "So an attacker cannot rewrite the timestamp to a fresh value without knowing the secret"
+    answer: 3
+    explanation: |
+      If the timestamp were unsigned, a replay attacker could just update it to
+      "now" and pass the tolerance check. Signing the timestamp binds it to the
+      HMAC so it cannot be forged.
+    ref: "concepts.md#replay-protection-timestamps-and-nonces"
+
+  - id: webhooks-and-async-api-patterns-027
+    difficulty: intermediate
+    tags: [replay, tolerance-window]
+    question: |
+      A webhook includes a signed timestamp. A common replay defense is to
+      reject deliveries whose timestamp is outside a tolerance window (e.g. ±5
+      minutes). What is the trade-off in choosing that window?
+    options:
+      - "Wider windows are always better because they never reject valid events"
+      - "The window has no effect on security"
+      - "It must be wide enough for legitimate retries and clock skew, but narrow enough to limit replay exposure"
+      - "Narrower windows increase replay risk"
+    answer: 2
+    explanation: |
+      Too narrow and legitimate delayed retries or clock-skewed deliveries get
+      rejected; too wide and the replay window grows. The tolerance balances
+      these, and nonces should be retained at least as long as the window.
+    ref: "concepts.md#replay-protection-timestamps-and-nonces"
+
+  - id: webhooks-and-async-api-patterns-028
+    difficulty: intermediate
+    tags: [replay, nonce, dedup]
+    question: |
+      Within the tolerance window, what additional mechanism closes the replay
+      gap and doubles as idempotency support?
+    options:
+      - "Rotating the TLS certificate"
+      - "Recording each delivery's unique event id (nonce) and rejecting ids already seen"
+      - "Switching to WebSockets"
+      - "Increasing the backoff interval"
+    answer: 1
+    explanation: |
+      A timestamp window alone still allows replays within the window. Tracking
+      the unique event id (nonce) and refusing duplicates closes that gap and is
+      exactly the de-dup key used for consumer idempotency.
+    ref: "concepts.md#replay-protection-timestamps-and-nonces"
+
+  - id: webhooks-and-async-api-patterns-029
+    difficulty: beginner
+    tags: [idempotency, consumer]
+    question: |
+      What does it mean for a webhook consumer to be idempotent?
+    options:
+      - "Processing the same event twice has the same effect as processing it once"
+      - "It never returns errors"
+      - "It always responds within 1 second"
+      - "It rejects all duplicate HTTP connections at the TCP layer"
+    answer: 0
+    explanation: |
+      Because delivery is at-least-once, the consumer must ensure re-processing
+      an event produces no additional side effects — the same end state as
+      processing it once.
+    ref: "concepts.md#idempotent-webhook-consumers"
+
+  - id: webhooks-and-async-api-patterns-030
+    difficulty: intermediate
+    tags: [idempotency, dedup-store]
+    question: |
+      What is the standard way to implement an idempotent webhook consumer?
+    options:
+      - "Reject any request without a JWT"
+      - "Process every event and hope duplicates are rare"
+      - "Return 500 on duplicates so the producer retries"
+      - "Record the stable event id with a uniqueness constraint; if the id is new, process, otherwise return 2xx and do nothing"
+    answer: 3
+    explanation: |
+      De-dup on the event id using a uniqueness constraint. New id → process and
+      commit; existing id → acknowledge with 2xx as a no-op. The id-insert should
+      guard or share a transaction with the side effect.
+    ref: "concepts.md#idempotent-webhook-consumers"
+
+  - id: webhooks-and-async-api-patterns-031
+    difficulty: advanced
+    tags: [idempotency, status-codes, gotcha]
+    question: |
+      Why should an idempotent consumer return `2xx` (not an error) when it
+      receives a duplicate event it has already processed?
+    options:
+      - "Because 2xx compresses better"
+      - "Because duplicates are always malicious"
+      - "Returning 409/500 on a duplicate makes the producer retry forever, amplifying the problem"
+      - "Because RFC 9457 forbids 4xx on duplicates"
+    answer: 2
+    explanation: |
+      From the producer's view, an error means "not delivered — retry". If a
+      duplicate returns an error, the producer keeps retrying indefinitely.
+      Acknowledging with 2xx (a no-op) stops the retries.
+    ref: "concepts.md#idempotent-webhook-consumers"
+
+  - id: webhooks-and-async-api-patterns-032
+    difficulty: advanced
+    tags: [idempotency, out-of-order]
+    question: |
+      To handle duplicates *and* out-of-order delivery robustly, which style of
+      operation is preferable in a consumer?
+    options:
+      - "Delta operations like 'increment balance by 1'"
+      - "Order-independent operations like 'set state to the value carried in the event, keyed by resource id and version'"
+      - "Operations that assume events arrive exactly once"
+      - "Operations that ignore the event id"
+    answer: 1
+    explanation: |
+      Deltas (increment) break under duplicates and reordering. Setting absolute
+      state from the event, keyed by resource id and a version/timestamp, is
+      order-independent and duplicate-safe.
+    ref: "concepts.md#idempotent-webhook-consumers"
+
+  - id: webhooks-and-async-api-patterns-033
+    difficulty: advanced
+    tags: [idempotency, transaction, gotcha]
+    question: |
+      A consumer records the event id first, then performs the DB side effect in
+      a separate step, and crashes in between. What is the failure?
+    options:
+      - "The id is marked processed but the side effect never happened, so a retry is de-duped away and the event is effectively lost"
+      - "Nothing — recording the id is enough"
+      - "The producer will never retry"
+      - "The signature becomes invalid"
+    answer: 0
+    explanation: |
+      If de-dup is not atomic with the effect, you can 'remember' an event that
+      was never actually processed; the retry then gets de-duped and the work is
+      lost. Wrap the effect and id-insert in one transaction (or use the effect's
+      natural idempotency).
+    ref: "concepts.md#idempotent-webhook-consumers"
+
+  - id: webhooks-and-async-api-patterns-034
+    difficulty: beginner
+    tags: [202-accepted, status-codes]
+    question: |
+      A POST kicks off a long-running job that cannot finish within the request.
+      Which status code best signals "accepted for processing, not yet
+      complete"?
+    options:
+      - "200 OK"
+      - "201 Created"
+      - "204 No Content"
+      - "202 Accepted"
+    answer: 3
+    explanation: |
+      202 Accepted (RFC 9110 §15.3.3) means the request was accepted but
+      processing is not complete. 200 implies a completed synchronous op and 201
+      implies a resource was created synchronously.
+    ref: "concepts.md#202-accepted-and-the-polling--status-resource-pattern"
+
+  - id: webhooks-and-async-api-patterns-035
+    difficulty: intermediate
+    tags: [202-accepted, status-resource, location]
+    question: |
+      After returning `202 Accepted`, what does a well-designed API typically
+      include so the client can track progress?
+    options:
+      - "A WebSocket upgrade header"
+      - "The final result inline in the 202 body"
+      - "A `Location` header pointing to a pollable status resource, often with `Retry-After`"
+      - "An HMAC signature of the job"
+    answer: 2
+    explanation: |
+      The 202 hands back a status resource URL (via Location) that the client
+      polls; the status resource reports pending/running/succeeded/failed and can
+      include Retry-After to pace polling.
+    ref: "concepts.md#202-accepted-and-the-polling--status-resource-pattern"
+
+  - id: webhooks-and-async-api-patterns-036
+    difficulty: intermediate
+    tags: [202-accepted, retry-after, polling]
+    question: |
+      A status resource returns `200 OK` with `Retry-After: 5` and
+      `{"status":"running"}`. What is `Retry-After` communicating here?
+    options:
+      - "The job failed and will retry in 5 seconds"
+      - "A hint that the client should poll again in about 5 seconds"
+      - "The signature expires in 5 seconds"
+      - "The client is rate-limited for 5 seconds"
+    answer: 1
+    explanation: |
+      On a status resource, Retry-After hints how long to wait before polling
+      again, pacing clients and avoiding stampedes. It is not an error or
+      rate-limit signal here.
+    ref: "concepts.md#202-accepted-and-the-polling--status-resource-pattern"
+
+  - id: webhooks-and-async-api-patterns-037
+    difficulty: intermediate
+    tags: [202-accepted, problem-details, rfc9457]
+    question: |
+      When an async job fails, how should the status resource describe the
+      failure per modern standards?
+    options:
+      - "An RFC 9457 Problem Details object (type, title, status, detail)"
+      - "An opaque `\"failed\"` string with no detail"
+      - "An RFC 7807 object, which is the current standard"
+      - "A plain 500 with no body"
+    answer: 0
+    explanation: |
+      RFC 9457 (2023) Problem Details is the current standard and obsoletes RFC
+      7807. Returning a structured type/title/status/detail is far more useful
+      than an opaque status string.
+    ref: "concepts.md#202-accepted-and-the-polling--status-resource-pattern"
+
+  - id: webhooks-and-async-api-patterns-038
+    difficulty: intermediate
+    tags: [async-reply, callback-url]
+    question: |
+      In the callback-URL variant of async request-reply, how does the client
+      receive the result?
+    options:
+      - "By polling a status resource repeatedly"
+      - "Over a WebSocket the server opens to the client"
+      - "The result is embedded in the 202 response"
+      - "The client includes a URL in the request, and the server POSTs the result there when done"
+    answer: 3
+    explanation: |
+      With a callback URL, the client supplies a URL in the request and the
+      server pushes the result to it on completion — effectively a one-shot,
+      per-request webhook.
+    ref: "concepts.md#async-request-reply-and-callback-urls"
+
+  - id: webhooks-and-async-api-patterns-039
+    difficulty: intermediate
+    tags: [async-reply, comparison]
+    question: |
+      For an async operation, when is polling a status resource preferable to a
+      callback URL?
+    options:
+      - "When you want the lowest possible latency to the result"
+      - "When you want to avoid any HTTP requests"
+      - "When the client cannot run a reachable server (e.g. a browser or CLI behind NAT)"
+      - "When the operation completes instantly"
+    answer: 2
+    explanation: |
+      Polling needs no server on the client side and works behind firewalls/NAT,
+      making it ideal for browsers, CLIs, and constrained clients. Callbacks give
+      lower latency but require the client to be reachable.
+    ref: "concepts.md#async-request-reply-and-callback-urls"
+
+  - id: webhooks-and-async-api-patterns-040
+    difficulty: advanced
+    tags: [async-reply, callback-url, security]
+    question: |
+      Which statement about callback URLs is correct?
+    options:
+      - "They carry no security burden because the client chose the URL"
+      - "They carry the same security burden as any webhook: validate the URL (SSRF), sign the callback, and treat delivery as at-least-once"
+      - "They guarantee exactly-once delivery"
+      - "They must always use plain HTTP"
+    answer: 1
+    explanation: |
+      A callback URL is a webhook: it is an SSRF vector, needs signing so the
+      client can trust it, and is subject to the same at-least-once retry
+      semantics as any other outbound delivery.
+    ref: "concepts.md#async-request-reply-and-callback-urls"
+
+  - id: webhooks-and-async-api-patterns-041
+    difficulty: beginner
+    tags: [sse, comparison]
+    question: |
+      Server-Sent Events (SSE) are best described as...
+    options:
+      - "A one-way server-to-client stream over a long-lived HTTP response (text/event-stream) with automatic reconnect"
+      - "A full-duplex protocol over a TCP upgrade"
+      - "A polling loop with a fixed interval"
+      - "An outbound POST to a consumer-registered URL"
+    answer: 0
+    explanation: |
+      SSE keeps one HTTP response open and streams events server→client
+      (text/event-stream). It is unidirectional, browser-friendly, and
+      auto-reconnects, carrying Last-Event-ID to resume.
+    ref: "concepts.md#webhooks-vs-polling-vs-sse-vs-websockets"
+
+  - id: webhooks-and-async-api-patterns-042
+    difficulty: intermediate
+    tags: [websockets, comparison]
+    question: |
+      Which scenario most justifies WebSockets over webhooks, SSE, or polling?
+    options:
+      - "A backend integration that receives occasional order events"
+      - "A CLI checking on a long-running report every few seconds"
+      - "A server notifying another server's public endpoint"
+      - "Low-latency bidirectional communication such as chat or collaborative editing"
+    answer: 3
+    explanation: |
+      WebSockets provide a persistent full-duplex connection, ideal for
+      low-latency two-way traffic (chat, collaboration, games). The other cases
+      are better served by webhooks, polling, or SSE.
+    ref: "concepts.md#webhooks-vs-polling-vs-sse-vs-websockets"
+
+  - id: webhooks-and-async-api-patterns-043
+    difficulty: intermediate
+    tags: [sse, websockets, direction]
+    question: |
+      What fundamentally distinguishes webhooks from SSE and WebSockets in terms
+      of who initiates the connection?
+    options:
+      - "All three require the client to open the connection"
+      - "Webhooks and SSE are identical; only WebSockets differ"
+      - "Webhooks push to a consumer-run server; SSE/WebSockets push over a persistent connection the client opened"
+      - "SSE requires the consumer to expose a public URL"
+    answer: 2
+    explanation: |
+      Webhooks require the recipient to expose a reachable server. SSE and
+      WebSockets flow over a connection the client initiates, so they work even
+      when the client cannot host a public URL.
+    ref: "concepts.md#webhooks-vs-polling-vs-sse-vs-websockets"
+
+  - id: webhooks-and-async-api-patterns-044
+    difficulty: intermediate
+    tags: [sse, reconnect, last-event-id]
+    question: |
+      Which built-in SSE feature helps a client resume a stream after a dropped
+      connection?
+    options:
+      - "The `Idempotency-Key` header"
+      - "The `Last-Event-ID` mechanism, which the client sends to resume from where it left off"
+      - "A 202 Accepted response"
+      - "An HMAC signature header"
+    answer: 1
+    explanation: |
+      SSE clients automatically reconnect and send Last-Event-ID so the server
+      can replay events since the last one received — a built-in resume feature
+      of the protocol.
+    ref: "concepts.md#webhooks-vs-polling-vs-sse-vs-websockets"
+
+  - id: webhooks-and-async-api-patterns-045
+    difficulty: intermediate
+    tags: [comparison, decision]
+    question: |
+      An integrator's server needs to receive event notifications from your SaaS
+      as they happen, and it can expose a public HTTPS endpoint. Which mechanism
+      is the natural fit?
+    options:
+      - "Outbound webhooks"
+      - "Polling every second"
+      - "WebSockets"
+      - "SSE from the integrator to your SaaS"
+    answer: 0
+    explanation: |
+      Server-to-server, event-driven, recipient can host a URL → webhooks. They
+      give near-real-time push without wasted polling and without a persistent
+      connection.
+    ref: "concepts.md#webhooks-vs-polling-vs-sse-vs-websockets"
+
+  - id: webhooks-and-async-api-patterns-046
+    difficulty: beginner
+    tags: [dead-letter, dlq]
+    question: |
+      What happens to a webhook event that fails delivery past its maximum retry
+      attempts in a mature system?
+    options:
+      - "It is silently discarded"
+      - "It is retried forever with no limit"
+      - "It is converted to an SSE stream"
+      - "It is moved to a dead-letter queue (DLQ) for inspection, alerting, and possible redelivery"
+    answer: 3
+    explanation: |
+      Once retries are exhausted, the event goes to a DLQ — durable storage of
+      undeliverable events with payload, headers, and failure reason — so events
+      are not lost and can be inspected or replayed.
+    ref: "concepts.md#dead-letter-handling-and-delivery-observability"
+
+  - id: webhooks-and-async-api-patterns-047
+    difficulty: advanced
+    tags: [dead-letter, silent-loss]
+    question: |
+      Why is pairing retries with a dead-letter path essential?
+    options:
+      - "It makes retries faster"
+      - "It removes the need for signing"
+      - "Without a DLQ, exhausting retries during a consumer outage means silent, permanent event loss"
+      - "It guarantees exactly-once delivery"
+    answer: 2
+    explanation: |
+      Retries alone give up eventually; without a DLQ those events vanish. The
+      DLQ plus redelivery is what makes 'at-least-once' actually mean
+      'eventually delivered'.
+    ref: "concepts.md#dead-letter-handling-and-delivery-observability"
+
+  - id: webhooks-and-async-api-patterns-048
+    difficulty: intermediate
+    tags: [observability, redelivery]
+    question: |
+      When a producer redelivers an event from the DLQ after the consumer fixed
+      its endpoint, why does it reuse the original event id?
+    options:
+      - "To make the payload smaller"
+      - "So idempotent consumers can de-dup correctly if the event was partially processed before"
+      - "To bypass signature verification"
+      - "Because a new id is not allowed by HTTP"
+    answer: 1
+    explanation: |
+      Reusing the original id lets an idempotent consumer recognize the event and
+      avoid double-processing, keeping redelivery safe.
+    ref: "concepts.md#dead-letter-handling-and-delivery-observability"
+
+  - id: webhooks-and-async-api-patterns-049
+    difficulty: intermediate
+    tags: [observability, endpoint-disabling]
+    question: |
+      A consumer endpoint has returned errors continuously for several days.
+      What is a reasonable producer behavior?
+    options:
+      - "Auto-disable the endpoint and notify its owner rather than retrying a dead URL indefinitely"
+      - "Keep retrying that URL forever at full rate"
+      - "Delete all past events for that subscriber"
+      - "Switch the subscriber to WebSockets automatically"
+    answer: 0
+    explanation: |
+      Continuous long-term failure signals a dead endpoint. Mature systems
+      auto-disable it and notify the owner, avoiding wasted retries, then let the
+      owner re-enable and redeliver.
+    ref: "concepts.md#dead-letter-handling-and-delivery-observability"
+
+  - id: webhooks-and-async-api-patterns-050
+    difficulty: intermediate
+    tags: [observability, metrics]
+    question: |
+      Which set of signals best indicates a webhook delivery system is degrading?
+    options:
+      - "Lower CPU usage on the producer"
+      - "A decrease in the number of registered endpoints"
+      - "Smaller average payload sizes"
+      - "Rising DLQ depth, falling delivery success rate, and increasing retry rate"
+    answer: 3
+    explanation: |
+      Delivery success rate, retry rate, DLQ depth, and delivery latency are the
+      core health metrics. A growing DLQ and falling success rate are direct
+      signs something is broken.
+    ref: "concepts.md#dead-letter-handling-and-delivery-observability"
+
+  - id: webhooks-and-async-api-patterns-051
+    difficulty: advanced
+    tags: [signing, secret-rotation]
+    question: |
+      How can a producer rotate a webhook signing secret without breaking
+      verification for consumers mid-rollover?
+    options:
+      - "Delete the old secret immediately and hope consumers update in time"
+      - "Disable signing during the rotation"
+      - "Emit (or accept) multiple signatures during an overlap window so a consumer can verify with either the old or new secret"
+      - "Switch to plain HTTP temporarily"
+    answer: 2
+    explanation: |
+      Dual-secret rotation sends multiple signatures (e.g. v1,<sigA> v1,<sigB>)
+      during an overlap window, so consumers accept either secret until the old
+      one is retired — no downtime.
+    ref: "concepts.md#signing-and-verifying-payloads-hmac"
+
+  - id: webhooks-and-async-api-patterns-052
+    difficulty: intermediate
+    tags: [subscriptions, https, security]
+    question: |
+      Why should a webhook management API reject callback URLs that use
+      `http://`?
+    options:
+      - "Plain HTTP is slower"
+      - "Unencrypted webhooks leak payloads in transit and are trivially spoofable"
+      - "HTTP cannot carry JSON"
+      - "RFC 8288 forbids http URLs"
+    answer: 1
+    explanation: |
+      An http:// callback exposes potentially sensitive payloads on the wire and
+      offers no transport authentication of the server, so producers require
+      HTTPS-only endpoints.
+    ref: "concepts.md#subscriptions-and-callback-url-registration"
+
+  - id: webhooks-and-async-api-patterns-053
+    difficulty: advanced
+    tags: [rfc, standards]
+    question: |
+      Which RFC defines the `202 Accepted` status and the `Retry-After` header
+      semantics used throughout async HTTP patterns?
+    options:
+      - "RFC 9110 (HTTP Semantics)"
+      - "RFC 7807"
+      - "RFC 8288 (Web Linking)"
+      - "RFC 2104 (HMAC)"
+    answer: 0
+    explanation: |
+      RFC 9110 (HTTP Semantics, 2022) consolidates HTTP status codes including
+      202 Accepted (§15.3.3) and header semantics like Retry-After (§10.2.3). RFC
+      9457 handles Problem Details; RFC 8288 handles Link; RFC 2104 defines HMAC.
+    ref: "concepts.md#202-accepted-and-the-polling--status-resource-pattern"
+
+  - id: webhooks-and-async-api-patterns-054
+    difficulty: intermediate
+    tags: [idempotency-key, retries]
+    question: |
+      Why do many producers send the *same* idempotency key / event id on every
+      retry of a given event?
+    options:
+      - "To force the consumer to reprocess it"
+      - "To rotate the signing secret"
+      - "To increase delivery latency"
+      - "So the consumer can recognize a retry as the same event rather than a new one, enabling de-duplication"
+    answer: 3
+    explanation: |
+      Keeping the id stable across retries lets an idempotent consumer identify
+      'this is the same event I already saw' and de-dup, instead of treating each
+      retry as a distinct event.
+    ref: "concepts.md#retries-and-exponential-backoff"
+
+  - id: webhooks-and-async-api-patterns-055
+    difficulty: advanced
+    tags: [rfc, web-linking]
+    question: |
+      A completed async job's status resource points to its result via a `Link`
+      header. Which RFC standardizes the `Link` header and its relation types?
+    options:
+      - "RFC 9457 (Problem Details)"
+      - "RFC 7519 (JWT)"
+      - "RFC 8288 (Web Linking)"
+      - "RFC 6234 (SHA)"
+    answer: 2
+    explanation: |
+      RFC 8288 (Web Linking) defines the Link header and registered relation
+      types, letting a status resource reference its result (or use 303 See
+      Other). RFC 9457 is Problem Details; 7519 is JWT; 6234 is SHA.
+    ref: "concepts.md#202-accepted-and-the-polling--status-resource-pattern"
+
+  - id: webhooks-and-async-api-patterns-056
+    difficulty: beginner
+    tags: [async-reply, both-patterns]
+    question: |
+      A robust API for a long-running upload is described as returning `202` with
+      a status URL *and* accepting an optional `callbackUrl`. Why support both?
+    options:
+      - "To confuse attackers"
+      - "So simple clients (browsers/CLIs) can poll while advanced server-to-server clients get pushed results"
+      - "Because HTTP requires two response paths"
+      - "To avoid needing idempotency"
+    answer: 1
+    explanation: |
+      Offering both lets constrained clients that cannot host a server poll the
+      status resource, while integrations that can receive a callback get
+      low-latency push — covering the full range of consumers.
+    ref: "concepts.md#async-request-reply-and-callback-urls"

@@ -1,0 +1,739 @@
+topic: "Pagination, Filtering & Sorting"
+domain: rest-api-design
+topic_slug: pagination-filtering-and-sorting
+version: 1
+questions:
+  - id: pagination-filtering-and-sorting-001
+    difficulty: beginner
+    tags: [why-paginate, collections]
+    question: |
+      Why should a collection endpoint like `GET /orders` paginate its results
+      instead of always returning every matching row?
+    options:
+      - "Because HTTP forbids response bodies larger than 1 MB"
+      - "To bound response size, memory, and database load as the dataset grows, avoiding a correctness and denial-of-service problem"
+      - "Because REST requires every GET to return exactly 10 items"
+      - "Because JSON cannot represent arrays with more than 100 elements"
+    answer: 1
+    explanation: |
+      Returning an unbounded list is both a correctness bug and a DoS risk: response size, memory, and DB cost grow without limit as the table grows. Pagination bounds each response. There is no HTTP body-size cap or REST rule forcing a fixed count, and JSON arrays have no such element limit.
+    ref: "concepts.md#why-paginate-filter-and-sort"
+
+  - id: pagination-filtering-and-sorting-002
+    difficulty: beginner
+    tags: [definitions, filtering, sorting]
+    question: |
+      In REST collection design, what is the difference between filtering and sorting?
+    options:
+      - "Filtering changes the order of results; sorting removes non-matching results"
+      - "Filtering selects which resources are returned (a predicate); sorting defines the order in which they are returned"
+      - "They are two names for the same operation"
+      - "Filtering only works on numbers; sorting only works on strings"
+    answer: 1
+    explanation: |
+      Filtering applies a predicate to narrow the result set to matching resources. Sorting defines the order of whatever set remains. They are distinct and often combined; neither is restricted to a data type.
+    ref: "concepts.md#why-paginate-filter-and-sort"
+
+  - id: pagination-filtering-and-sorting-003
+    difficulty: beginner
+    tags: [offset, page-size]
+    question: |
+      A client sends `GET /orders?page=3&size=20`. Assuming 1-based pages, which
+      SQL clause does this most directly correspond to?
+    options:
+      - "LIMIT 20 OFFSET 40"
+      - "LIMIT 20 OFFSET 60"
+      - "LIMIT 3 OFFSET 20"
+      - "LIMIT 60 OFFSET 20"
+    answer: 0
+    explanation: |
+      With 1-based pages, offset = (page - 1) * size = (3 - 1) * 20 = 40, returning 20 rows. page/size and offset/limit are two spellings of the same mechanism.
+    ref: "concepts.md#offset--limit-pagesize-pagination"
+
+  - id: pagination-filtering-and-sorting-004
+    difficulty: beginner
+    tags: [offset, jump-to-page]
+    question: |
+      What is the main capability that offset/limit pagination gives clients that
+      cursor pagination does not?
+    options:
+      - "Constant-cost access no matter how deep you page"
+      - "Guaranteed stability under concurrent inserts and deletes"
+      - "The ability to jump directly to an arbitrary page N and render a numbered pager"
+      - "Automatic protection against SQL injection"
+    answer: 2
+    explanation: |
+      Because offset = (page-1)*size is computable, offset pagination supports jumping to any page and rendering a numbered pager (1, 2, 3 ... 65). Cursor pagination is position-relative and only moves next/prev. Constant depth cost and write-stability are cursor's advantages, not offset's.
+    ref: "concepts.md#offset--limit-pagesize-pagination"
+
+  - id: pagination-filtering-and-sorting-005
+    difficulty: intermediate
+    tags: [offset, off-by-one, conventions]
+    question: |
+      Why is it important to document whether `page` is 0-based or 1-based in an
+      offset-style API?
+    options:
+      - "Because the HTTP spec mandates 0-based paging"
+      - "Because 1-based paging is invalid JSON"
+      - "Because both conventions exist in the wild and the ambiguity is a common off-by-one source that shifts every result by one page"
+      - "Because search engines require 1-based paging for indexing"
+    answer: 2
+    explanation: |
+      Both 0-based and 1-based page numbering are used by real APIs. If the convention isn't documented, clients compute the wrong offset and every page is shifted — a classic off-by-one bug. No RFC mandates a base.
+    ref: "concepts.md#offset--limit-pagesize-pagination"
+
+  - id: pagination-filtering-and-sorting-006
+    difficulty: intermediate
+    tags: [deep-paging, offset, performance]
+    question: |
+      With `... ORDER BY created_at LIMIT 20 OFFSET 100000`, why is this query
+      much slower than the same query with `OFFSET 0`?
+    options:
+      - "The database must generate, sort, and discard the first 100,000 matching rows before returning the 20 you want"
+      - "OFFSET forces a table lock that OFFSET 0 avoids"
+      - "Large OFFSET values disable the query cache"
+      - "The database re-parses the SQL once per skipped row"
+    answer: 0
+    explanation: |
+      OFFSET does not let the engine seek ahead. It must produce the first N matching rows in sorted order and then throw them away, so cost grows linearly with the offset (O(N)). That's the fundamental deep-paging problem of offset pagination.
+    ref: "concepts.md#deep-paging-cost-of-offset"
+
+  - id: pagination-filtering-and-sorting-007
+    difficulty: intermediate
+    tags: [deep-paging, public-apis]
+    question: |
+      Many large search APIs cap how deep you can offset (e.g. refusing offsets
+      beyond ~10,000 results). What is the primary reason?
+    options:
+      - "Because deep OFFSET is an O(N) scan that becomes a performance and DoS liability; they push clients to narrow the query or use a cursor"
+      - "To force clients to pay for a premium tier"
+      - "Because JSON responses cannot encode indices above 10,000"
+      - "Because RFC 9110 forbids offsets above 10,000"
+    answer: 0
+    explanation: |
+      Deep offset cost grows linearly with depth, so allowing arbitrarily deep offsets is a latency and DoS risk. Capping it (and steering clients to cursor pagination or narrower filters) bounds server work. It is a performance decision, not an RFC rule or an encoding limit.
+    ref: "concepts.md#deep-paging-cost-of-offset"
+
+  - id: pagination-filtering-and-sorting-008
+    difficulty: intermediate
+    tags: [cursor, keyset, seek]
+    question: |
+      What is the core mechanism of keyset (cursor) pagination?
+    options:
+      - "It seeks via an indexed WHERE predicate on the sort key of the last row seen, instead of counting and discarding preceding rows"
+      - "It caches every page in Redis and replays them"
+      - "It loads the entire table into memory and slices it"
+      - "It re-runs COUNT(*) before each page to compute the offset"
+    answer: 0
+    explanation: |
+      Keyset pagination replaces OFFSET with `WHERE (sort_key) > last_seen_key ORDER BY sort_key LIMIT n`. Because the sort key is indexed, the engine seeks directly to the position and reads only the page, giving O(page-size) cost regardless of depth.
+    ref: "concepts.md#cursor--keyset-pagination"
+
+  - id: pagination-filtering-and-sorting-009
+    difficulty: advanced
+    tags: [cursor, tiebreaker, correctness]
+    question: |
+      A team implements keyset pagination as `WHERE created_at > :last_created
+      ORDER BY created_at LIMIT 20`, sorting only on a non-unique `created_at`.
+      What bug can appear at page boundaries?
+    options:
+      - "Nothing — a single sort column is always sufficient"
+      - "The query will always return zero rows"
+      - "created_at will be silently converted to a string, breaking ordering"
+      - "Rows that share the same created_at value as the boundary can be skipped or duplicated because the key is not unique"
+    answer: 3
+    explanation: |
+      Keyset requires a total (unique) order. When several rows share `created_at`, a strict `>` on that non-unique key can skip the tied rows not yet seen or re-include ones already returned. The fix is a unique tiebreaker, e.g. `WHERE (created_at, id) > (:last_created, :last_id)`.
+    ref: "concepts.md#cursor--keyset-pagination"
+
+  - id: pagination-filtering-and-sorting-010
+    difficulty: intermediate
+    tags: [cursor, opaque-token]
+    question: |
+      Why do many APIs make the pagination cursor an opaque, base64-encoded
+      (often signed) token rather than exposing the raw last-seen key?
+    options:
+      - "Because RFC 8288 requires cursors to be base64"
+      - "Because opaque tokens are always smaller than raw keys"
+      - "So the client cannot forge or tamper with it, and so the server can change the internal paging scheme without breaking clients"
+      - "Because JSON cannot transmit integers"
+    answer: 2
+    explanation: |
+      An opaque, signed token keeps the internal sort key/scheme hidden and prevents clients from hand-crafting or tampering with cursors. It also lets the server evolve the encoding freely. There is no RFC mandating base64, and opacity is not about size or JSON limits.
+    ref: "concepts.md#cursor--keyset-pagination"
+
+  - id: pagination-filtering-and-sorting-011
+    difficulty: intermediate
+    tags: [cursor, stripe, real-world]
+    question: |
+      Stripe's API pages with `?limit=20&starting_after=or_1401` and
+      `ending_before=...`. What style of pagination is this?
+    options:
+      - "Offset/limit pagination using page numbers"
+      - "Cursor pagination anchored on a resource ID"
+      - "HATEOAS-only pagination with no parameters"
+      - "Random-sampling pagination"
+    answer: 1
+    explanation: |
+      `starting_after`/`ending_before` anchor the next/prev page on a specific resource ID rather than a numeric offset — a cursor (keyset) variant using the object id as the cursor. Stripe, Slack, Twitter/X, and GitHub GraphQL all use cursor pagination.
+    ref: "concepts.md#cursor--keyset-pagination"
+
+  - id: pagination-filtering-and-sorting-012
+    difficulty: intermediate
+    tags: [offset-vs-cursor, trade-offs]
+    question: |
+      For an infinite-scroll activity feed backed by a large, high-write table
+      where users only ever scroll forward, which pagination style is generally
+      the better fit and why?
+    options:
+      - "Offset/limit, because it supports jumping to arbitrary pages"
+      - "Offset/limit, because it can return an exact total cheaply"
+      - "Cursor/keyset, because it has constant per-page cost and is stable under concurrent inserts/deletes"
+      - "Neither — feeds should return the whole table at once"
+    answer: 2
+    explanation: |
+      A large, high-write, forward-only feed is exactly where cursor/keyset wins: constant depth cost and stability under concurrent writes. Jump-to-page-N and cheap totals (offset's strengths) don't matter for infinite scroll.
+    ref: "concepts.md#offset-vs-cursor--trade-offs"
+
+  - id: pagination-filtering-and-sorting-013
+    difficulty: intermediate
+    tags: [offset-vs-cursor, trade-offs]
+    question: |
+      Which statement correctly pairs each pagination style with a weakness it
+      has?
+    options:
+      - "Offset degrades at deep pages and is unstable under writes; cursor cannot jump to an arbitrary page N or cheaply produce a numbered pager"
+      - "Cursor degrades at deep pages; offset cannot jump to page N"
+      - "Both styles have identical performance and stability characteristics"
+      - "Offset is stable under writes; cursor is unstable under writes"
+    answer: 0
+    explanation: |
+      Offset's weaknesses are deep-paging cost (O(offset)) and instability under concurrent writes. Cursor's weaknesses are the loss of jump-to-arbitrary-page and cheap numbered pagers. This trade-off is the crux of the topic.
+    ref: "concepts.md#offset-vs-cursor--trade-offs"
+
+  - id: pagination-filtering-and-sorting-014
+    difficulty: beginner
+    tags: [offset-vs-cursor, when-to-use]
+    question: |
+      Which scenario most favors plain offset/limit pagination?
+    options:
+      - "Paging through billions of append-only log events forward only"
+      - "A high-write social timeline"
+      - "A small, relatively static admin list where users expect to click to page 50 directly"
+      - "A batch ETL job that must read every row exactly once"
+    answer: 2
+    explanation: |
+      Offset shines for small, bounded, relatively static datasets and admin UIs where jumping to an arbitrary numbered page matters. Large/high-write/exactly-once workloads favor cursor/keyset.
+    ref: "concepts.md#offset-vs-cursor--trade-offs"
+
+  - id: pagination-filtering-and-sorting-015
+    difficulty: intermediate
+    tags: [total-count, performance]
+    question: |
+      Why is returning an exact `total_elements` count often expensive on a large
+      filtered collection?
+    options:
+      - "It requires a separate COUNT(*) over the same filter that may scan the entire matching set, sometimes costing as much as the page fetch itself"
+      - "COUNT(*) is prohibited by RFC 9457"
+      - "Counting requires downloading all rows to the client first"
+      - "Databases cannot count more than 10,000 rows"
+    answer: 0
+    explanation: |
+      An exact total generally needs a separate `SELECT COUNT(*) ... WHERE <same filters>`, which can scan the whole matching set — as costly as, or costlier than, fetching one page. That's why many APIs make totals opt-in or approximate.
+    ref: "concepts.md#page-metadata-and-total-counts"
+
+  - id: pagination-filtering-and-sorting-016
+    difficulty: intermediate
+    tags: [has-more, limit-plus-one]
+    question: |
+      How can a server cheaply tell the client whether more results exist, without
+      running a COUNT(*)?
+    options:
+      - "By always returning total_pages"
+      - "By hashing the result set"
+      - "By issuing an HTTP 206 Partial Content"
+      - "By requesting limit + 1 rows and checking whether the extra row came back (has_more)"
+    answer: 3
+    explanation: |
+      Fetching `limit + 1` rows and checking whether the extra one exists yields a cheap `has_more`/`has_next` boolean with no separate count query. This is why many cursor APIs return `has_more` but omit exact totals.
+    ref: "concepts.md#page-metadata-and-total-counts"
+
+  - id: pagination-filtering-and-sorting-017
+    difficulty: advanced
+    tags: [total-count, consistency]
+    question: |
+      A UI shows "65 pages" from a `total_pages` field. Under concurrent writes,
+      what is the correct way to think about that number?
+    options:
+      - "It is a snapshot that is stale the moment it is computed; rows can appear or disappear between the count and subsequent fetches"
+      - "It is a hard invariant the client can rely on for the session"
+      - "It is guaranteed accurate because COUNT(*) locks the table"
+      - "It is always an overestimate by design"
+    answer: 0
+    explanation: |
+      total_elements/total_pages reflect the set at count time only. With ongoing inserts/deletes the number is immediately stale, so clients must not treat "65 pages" as a durable invariant.
+    ref: "concepts.md#page-metadata-and-total-counts"
+
+  - id: pagination-filtering-and-sorting-018
+    difficulty: beginner
+    tags: [total-count, approximate]
+    question: |
+      For a search UI over a huge corpus, why do many APIs return "about 4,300
+      results" rather than an exact count?
+    options:
+      - "Because approximate counts are required by OpenAPI"
+      - "Because exact counts violate user privacy"
+      - "Because computing the exact count is expensive and rarely worth it; an estimate (e.g. from table statistics) is good enough for the UI"
+      - "Because the client cannot parse exact integers"
+    answer: 2
+    explanation: |
+      Exact counts over a large corpus are costly and users rarely need precision, so search UIs commonly show an approximate/estimated count. It is a cost-vs-value trade-off, not a spec or privacy requirement.
+    ref: "concepts.md#page-metadata-and-total-counts"
+
+  - id: pagination-filtering-and-sorting-019
+    difficulty: intermediate
+    tags: [link-header, rfc8288]
+    question: |
+      Which RFC standardizes the `Link` header and the relation types `next`,
+      `prev`, `first`, and `last` commonly used for pagination?
+    options:
+      - "RFC 7807"
+      - "RFC 7519"
+      - "RFC 8288 (Web Linking)"
+      - "RFC 6585"
+    answer: 2
+    explanation: |
+      RFC 8288 (Web Linking) defines the `Link` header and IANA-registered relation types including next/prev/first/last. RFC 7807/9457 is Problem Details, 7519 is JWT, and 6585 defines additional status codes like 429.
+    ref: "concepts.md#link-header-for-pagination-rfc-8288"
+
+  - id: pagination-filtering-and-sorting-020
+    difficulty: intermediate
+    tags: [link-header, github, hateoas]
+    question: |
+      GitHub's REST API returns pagination in a `Link` header rather than making
+      clients build page URLs. What is the main advantage of this approach?
+    options:
+      - "It makes pagination discoverable/HATEOAS-friendly — the client follows a server-provided URL instead of hard-coding the paging scheme"
+      - "It removes the need for any query parameters entirely"
+      - "It lets the client mutate resources via the Link header"
+      - "It guarantees the response is cacheable forever"
+    answer: 0
+    explanation: |
+      Returning next/prev/first/last as `Link` relations lets clients follow server-provided URLs rather than knowing and constructing the pagination scheme themselves — the hypermedia/HATEOAS approach. It doesn't eliminate query params (the links contain them), enable mutation, or dictate caching.
+    ref: "concepts.md#link-header-for-pagination-rfc-8288"
+
+  - id: pagination-filtering-and-sorting-021
+    difficulty: intermediate
+    tags: [link-header, github, last-page]
+    question: |
+      Why does GitHub sometimes omit the `rel="last"` link (and why do cursor APIs
+      generally omit it)?
+    options:
+      - "Because rel=last is deprecated in RFC 8288"
+      - "Because computing the last page would require a full count of the result set, which is expensive or impossible for cursor-based results"
+      - "Because clients are not allowed to jump to the last page"
+      - "Because the last page is always empty"
+    answer: 1
+    explanation: |
+      Knowing the last page requires knowing the total, i.e. a full count — costly for large sets and undefined for pure cursor pagination. So `rel="last"` is dropped in those cases while next/prev remain.
+    ref: "concepts.md#link-header-for-pagination-rfc-8288"
+
+  - id: pagination-filtering-and-sorting-022
+    difficulty: intermediate
+    tags: [link-header, custom-headers]
+    question: |
+      An API returns `X-Total-Count: 1284`. What is the correct characterization
+      of this header?
+    options:
+      - "It is defined by RFC 8288 alongside the Link header"
+      - "It is a de-facto convention using a custom X- header, not defined by any RFC"
+      - "It is a standard HTTP header from RFC 9110"
+      - "It is mandatory for all paginated responses"
+    answer: 1
+    explanation: |
+      X-Total-Count / X-Total-Pages are common custom (X-) conventions, not standardized by any RFC. They work fine but shouldn't be described as standard. RFC 8288 standardizes the Link header, not total-count headers.
+    ref: "concepts.md#link-header-for-pagination-rfc-8288"
+
+  - id: pagination-filtering-and-sorting-023
+    difficulty: beginner
+    tags: [filtering, query-params]
+    question: |
+      A client sends `GET /orders?status=shipped&customer_id=42`. What is the
+      conventional interpretation of multiple filter query parameters?
+    options:
+      - "They are ORed together (status=shipped OR customer_id=42)"
+      - "Only the last parameter is applied"
+      - "They are ANDed together (status=shipped AND customer_id=42)"
+      - "They are ignored unless a filter= param is also present"
+    answer: 2
+    explanation: |
+      By convention, distinct field-equality filter params are combined with AND: return orders that are shipped AND belong to customer 42. OR is usually expressed with repeated values or a comma list on a single field.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-024
+    difficulty: intermediate
+    tags: [filtering, in-operator]
+    question: |
+      Which of these is a common convention for expressing "status IN (shipped,
+      delivered)" in a query string?
+    options:
+      - "GET /orders?status!=pending"
+      - "GET /orders?status=shipped+delivered only"
+      - "GET /orders?status=(shipped delivered)"
+      - "GET /orders?status=shipped,delivered  (or the repeated-key form status=shipped&status=delivered)"
+    answer: 3
+    explanation: |
+      A comma-separated value (`status=shipped,delivered`) or a repeated key (`status=shipped&status=delivered`) are the two common conventions for an IN-style multi-value filter. Both should be documented so clients know which is supported.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-025
+    difficulty: intermediate
+    tags: [filtering, operators, ranges]
+    question: |
+      A team needs range filters like "created on or after Jan 1 and before Jul 1."
+      Which is a recognized convention for expressing comparison operators in query
+      params?
+    options:
+      - "created_at[gte]=2026-01-01&created_at[lt]=2026-07-01 (bracketed operators)"
+      - "created_at==between==2026 (only RSQL can do ranges)"
+      - "You cannot express ranges in query strings; you must POST"
+      - "created_at=2026-01-01:2026-07-01 is the only valid form"
+    answer: 0
+    explanation: |
+      Bracketed operators (`field[gte]=`, `field[lt]=`) are one widely-used convention for range/comparison filters; prefix forms (`field=gt:100`) and range sugar also exist. The key is to pick and document one. Ranges are certainly expressible in query strings.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-026
+    difficulty: advanced
+    tags: [filtering, rsql, fiql]
+    question: |
+      What does the RSQL/FIQL filter `?filter=status==shipped;amount=gt=100`
+      express?
+    options:
+      - "status equals shipped AND amount greater than 100 (';' is AND in RSQL)"
+      - "status equals shipped OR amount greater than 100"
+      - "A syntax error — RSQL has no comparison operators"
+      - "status not equal to shipped"
+    answer: 0
+    explanation: |
+      In RSQL/FIQL, `;` is logical AND and `,` is logical OR, `==` is equals and `=gt=` is greater-than. So this means status == shipped AND amount > 100. RSQL packs complex boolean filters into a single URL-friendly param.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-027
+    difficulty: advanced
+    tags: [filtering, security, owasp]
+    question: |
+      Why must a server allowlist which fields are filterable rather than mapping
+      arbitrary client-supplied field names straight to database columns?
+    options:
+      - "To reduce JSON payload size"
+      - "Because query strings cannot contain field names"
+      - "Because RFC 8288 forbids dynamic filtering"
+      - "Because unrestricted field-to-column mapping is an injection and information-disclosure vector, related to OWASP API3:2023 Broken Object Property Level Authorization"
+    answer: 3
+    explanation: |
+      Translating arbitrary client field names to columns can expose or filter on properties the client shouldn't access (OWASP API3:2023) and opens injection risk. Allowlisting filterable/sortable fields is the defense. It's a security control, not a payload or spec matter.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-028
+    difficulty: intermediate
+    tags: [filtering, reserved-names]
+    question: |
+      Why should an API reserve names like `page`, `size`, `sort`, `cursor`, and
+      `q` and not treat them as filterable fields?
+    options:
+      - "Because they are HTTP reserved words"
+      - "Because they must always appear in the request body"
+      - "So pagination/sort/search control params don't collide with resource field names used for filtering"
+      - "Because RFC 9110 defines them as headers, not params"
+    answer: 2
+    explanation: |
+      These are control parameters for pagination, sorting, and search. If a resource also had a field literally named `sort` or `page`, treating every param as a filter would create ambiguity. Reserving the control names avoids the collision.
+    ref: "concepts.md#filtering-conventions"
+
+  - id: pagination-filtering-and-sorting-029
+    difficulty: beginner
+    tags: [sorting, sort-syntax]
+    question: |
+      An API documents `sort=-created_at,id`. What ordering does this request?
+    options:
+      - "created_at descending, then id ascending (as a tiebreaker)"
+      - "created_at ascending, then id descending"
+      - "id descending only; created_at is ignored"
+      - "A random order seeded by created_at"
+    answer: 0
+    explanation: |
+      A leading `-` means descending; no prefix (or `+`) means ascending. So `-created_at,id` sorts by created_at DESC and breaks ties with id ASC. This comma/minus form (used by JSON:API) scales to multi-field sorts.
+    ref: "concepts.md#sorting"
+
+  - id: pagination-filtering-and-sorting-030
+    difficulty: intermediate
+    tags: [sorting, determinism, tiebreaker]
+    question: |
+      Why is `ORDER BY created_at` alone (no tiebreaker) dangerous for paginated
+      results when timestamps can tie?
+    options:
+      - "It always returns rows in reverse order"
+      - "It disables the database index entirely"
+      - "Ties can be returned in a different order on different requests, so rows can be duplicated or skipped at page boundaries"
+      - "It forces a 500 error when duplicates exist"
+    answer: 2
+    explanation: |
+      Sorting on a non-unique column is not a total order; tied rows may come back in different relative orders across requests. Across page boundaries that non-determinism causes duplicates or skips. Appending a unique tiebreaker (e.g. `, id`) makes the order total and stable.
+    ref: "concepts.md#sorting"
+
+  - id: pagination-filtering-and-sorting-031
+    difficulty: intermediate
+    tags: [sorting, security, allowlist]
+    question: |
+      Besides authorization concerns, what performance risk comes from letting
+      clients sort on arbitrary columns?
+    options:
+      - "Sorting on a non-indexed column forces a full sort of the result set, which combined with deep offset is a latency cliff"
+      - "Sorting always doubles the response size"
+      - "Arbitrary sorting bypasses HTTP caching headers"
+      - "It causes the JSON to be returned unordered"
+    answer: 0
+    explanation: |
+      A sort on an unindexed column requires the database to sort the entire matching set in memory/disk, and paired with deep offset this is a well-known latency cliff. Allowlisting sortable (ideally indexed) fields mitigates both the perf and authorization risks.
+    ref: "concepts.md#sorting"
+
+  - id: pagination-filtering-and-sorting-032
+    difficulty: advanced
+    tags: [sorting, cursor, coupling]
+    question: |
+      In a cursor/keyset API, what must happen if the client changes the `sort`
+      parameter partway through paging?
+    options:
+      - "The previously issued cursor becomes meaningless because it encodes a position in the old sort order; the server should encode the sort into the cursor and reject a mismatch"
+      - "Nothing — cursors are independent of the sort order"
+      - "The server must silently re-sort all prior pages"
+      - "The client must switch to offset pagination automatically"
+    answer: 0
+    explanation: |
+      A cursor encodes a position within a specific sort order. Changing sort mid-walk invalidates it. Robust designs embed the sort spec in the cursor and reject cursors whose sort doesn't match the request, avoiding silent skips/duplicates.
+    ref: "concepts.md#sorting"
+
+  - id: pagination-filtering-and-sorting-033
+    difficulty: intermediate
+    tags: [sorting, default-order]
+    question: |
+      Why should a collection endpoint define a default sort order (typically on a
+      unique key) even when the client doesn't send `sort`?
+    options:
+      - "Because RFC 9110 requires a default sort"
+      - "Because clients cannot parse unsorted arrays"
+      - "To make the response compressible"
+      - "So results are deterministic across requests; without a defined order, pagination over the collection is undefined"
+    answer: 3
+    explanation: |
+      Without an explicit ORDER BY, databases may return rows in an arbitrary, unstable order, making pagination meaningless. A stable default sort (usually on a unique key) guarantees deterministic paging even when the client omits `sort`.
+    ref: "concepts.md#sorting"
+
+  - id: pagination-filtering-and-sorting-034
+    difficulty: beginner
+    tags: [search, q-param]
+    question: |
+      How does free-text search typically differ from structured filtering in a
+      REST API?
+    options:
+      - "Search returns fewer fields than filtering"
+      - "Search is only available over HTTPS"
+      - "Search finds resources relevant to terms (often with relevance ranking), while filtering applies exact field predicates; search commonly uses a `q` param"
+      - "Filtering requires POST but search requires GET"
+    answer: 2
+    explanation: |
+      Filtering matches exact field predicates (field == value); search finds resources relevant to query terms, usually ranked by relevance, and conventionally uses `?q=...`. They are complementary and frequently combined.
+    ref: "concepts.md#search"
+
+  - id: pagination-filtering-and-sorting-035
+    difficulty: advanced
+    tags: [search, relevance, pagination-interaction]
+    question: |
+      Why do relevance-ranked search results interact badly with offset
+      pagination and long-lived cursors?
+    options:
+      - "Because relevance scores are stored as strings"
+      - "Because search always returns exactly 10 results"
+      - "Because offset pagination is forbidden for search endpoints"
+      - "Because relevance is generally not a stable total order over time — scores shift as the index changes, so a fixed offset or old cursor no longer points at a consistent position"
+    answer: 3
+    explanation: |
+      Relevance ordering isn't a stable total order: as documents are added/updated, scores and ranks shift. A previously computed offset or cursor position becomes inconsistent, causing skips/duplicates. That's why relevance search often pairs with has_more and short-lived state.
+    ref: "concepts.md#search"
+
+  - id: pagination-filtering-and-sorting-036
+    difficulty: intermediate
+    tags: [search, combining-filters]
+    question: |
+      Is it acceptable to combine free-text search with structured filters, e.g.
+      `GET /products?q=shoes&brand=acme&price[lt]=100`?
+    options:
+      - "No — search and filters are mutually exclusive"
+      - "Yes — search narrows by relevance while filters narrow by facets; combining them is common and expected"
+      - "Only if the client sends them in separate requests"
+      - "Only for POST requests"
+    answer: 1
+    explanation: |
+      Combining a `q` search with facet filters (brand, price range) is a standard, expected pattern: search provides relevance, filters constrain by structured attributes. There's no rule against combining them in a single GET.
+    ref: "concepts.md#search"
+
+  - id: pagination-filtering-and-sorting-037
+    difficulty: advanced
+    tags: [consistency, offset, duplicates]
+    question: |
+      Newest-first offset pagination: a client reads page 1 (rows 1–20), then a
+      new row is inserted at the top before it requests page 2 (`offset=20`). What
+      happens?
+    options:
+      - "The new row is skipped and page 2 is correct"
+      - "The database automatically dedupes across pages"
+      - "Every row shifts down by one, so offset=20 now points at a row already shown on page 1 — the client sees a duplicate"
+      - "Page 2 returns an HTTP 409 Conflict"
+    answer: 2
+    explanation: |
+      Inserting a row ahead of the read position shifts all rows down by one. `OFFSET 20` then lands on the previous row 20, which the client already saw on page 1 — a duplicate. Offset pagination is not stable under concurrent inserts.
+    ref: "concepts.md#consistency-under-concurrent-insertsdeletes"
+
+  - id: pagination-filtering-and-sorting-038
+    difficulty: advanced
+    tags: [consistency, offset, skips]
+    question: |
+      With offset pagination, how can a concurrent DELETE ahead of the client's
+      current position cause a row to be missed?
+    options:
+      - "It cannot; deletes never affect pagination"
+      - "The delete forces all pages to reload"
+      - "The server returns the deleted row anyway"
+      - "Deleting a row before the offset shifts later rows up by one, so the row that was at position 21 moves to 20 and is skipped when the client requests offset=20"
+    answer: 3
+    explanation: |
+      A delete ahead of the read position shifts subsequent rows up. The row previously at position 21 becomes position 20, so requesting `offset=20` skips over it entirely. Thus offset pagination can both duplicate (on inserts) and drop (on deletes) rows.
+    ref: "concepts.md#consistency-under-concurrent-insertsdeletes"
+
+  - id: pagination-filtering-and-sorting-039
+    difficulty: advanced
+    tags: [consistency, keyset, exactly-once]
+    question: |
+      An interviewer asks how to page through a continuously-written table seeing
+      each row exactly once across many independent HTTP requests. What is the
+      best answer?
+    options:
+      - "Keyset pagination anchored on an immutable, unique key (e.g. WHERE id > :last_id ORDER BY id)"
+      - "Offset pagination with a large page size"
+      - "Return the whole table and dedupe on the client"
+      - "Add a total_count field and re-read pages that change"
+    answer: 0
+    explanation: |
+      Keyset pagination on an immutable unique key is anchored to a position, so inserts/deletes behind the cursor don't shift what "after last_id" means — giving exactly-once forward traversal. Offset cannot guarantee it; a bounded snapshot transaction is the alternative but doesn't span independent requests.
+    ref: "concepts.md#consistency-under-concurrent-insertsdeletes"
+
+  - id: pagination-filtering-and-sorting-040
+    difficulty: advanced
+    tags: [consistency, keyset, mutable-keys]
+    question: |
+      Why is choosing a mutable column (like `updated_at` or a changeable status)
+      as the keyset sort/cursor key risky for exactly-once paging?
+    options:
+      - "Mutable columns cannot be indexed"
+      - "Mutable columns always sort as NULL"
+      - "A row whose key changes can move from behind the cursor to ahead of it (or vice versa) and be seen twice or skipped"
+      - "The cursor token would exceed the URL length limit"
+    answer: 2
+    explanation: |
+      Keyset assumes the anchor key is stable. If a row's sort key mutates, the row can jump relative to the cursor — reappearing (duplicate) or moving past it unseen (skip). For exactly-once semantics, cursor on immutable keys such as creation time + id.
+    ref: "concepts.md#consistency-under-concurrent-insertsdeletes"
+
+  - id: pagination-filtering-and-sorting-041
+    difficulty: intermediate
+    tags: [consistency, keyset, stability]
+    question: |
+      Which statement about cursor/keyset pagination stability is correct?
+    options:
+      - "It is unstable under any concurrent write, worse than offset"
+      - "It requires locking the whole table to remain stable"
+      - "It only works on tables that are never written to"
+      - "Because the next page is 'WHERE key > last_seen', inserts or deletes behind the cursor don't change what comes after it, so forward traversal over older records is stable"
+    answer: 3
+    explanation: |
+      The keyset predicate anchors on the last-seen key, so writes behind the cursor don't shift the meaning of "after last_seen." Forward traversal through already-passed key ranges is stable — no duplicates/skips relative to the anchor — unlike offset.
+    ref: "concepts.md#consistency-under-concurrent-insertsdeletes"
+
+  - id: pagination-filtering-and-sorting-042
+    difficulty: beginner
+    tags: [limits, defaults]
+    question: |
+      What should a collection endpoint do when the client omits `limit`
+      entirely?
+    options:
+      - "Return every row in the table"
+      - "Return an empty array"
+      - "Respond with 400 Bad Request"
+      - "Apply a sane default page size (e.g. 20) rather than returning everything"
+    answer: 3
+    explanation: |
+      Omitting `limit` should fall back to a documented default page size (e.g. 20), never to "return everything." Defaulting to the whole table reintroduces the unbounded-response problem pagination exists to prevent.
+    ref: "concepts.md#limits-defaults--guardrails"
+
+  - id: pagination-filtering-and-sorting-043
+    difficulty: intermediate
+    tags: [limits, max-page-size]
+    question: |
+      A client requests `GET /orders?limit=100000` on an API whose max page size
+      is 100. Which are the two acceptable, documented behaviors?
+    options:
+      - "Silently return 100000 rows, or crash"
+      - "Always return an empty page"
+      - "Clamp the limit to the max (ideally signaling it), or reject with 400 Bad Request — and document whichever is chosen"
+      - "Redirect the client to page 1 with a 301"
+    answer: 2
+    explanation: |
+      The two sane options are clamping `limit` down to the hard cap (commonly with a signal to the client) or rejecting with 400. Either is fine as long as it's documented. Returning the whole 100000 defeats the guardrail.
+    ref: "concepts.md#limits-defaults--guardrails"
+
+  - id: pagination-filtering-and-sorting-044
+    difficulty: intermediate
+    tags: [limits, validation, problem-details]
+    question: |
+      A client sends `limit=-5` and `sort=totally_unknown_field`. What is the most
+      appropriate response?
+    options:
+      - "400 Bad Request with a machine-readable error body (RFC 9457 Problem Details) explaining the invalid params"
+      - "Silently ignore both and return defaults"
+      - "200 OK with an empty array"
+      - "500 Internal Server Error"
+    answer: 0
+    explanation: |
+      Invalid pagination/sort params (negative limit, unknown sort field) should be rejected with 400 and an RFC 9457 `application/problem+json` body describing the problem — clearer than silently ignoring them (which hides client bugs) and correct versus a 500.
+    ref: "concepts.md#limits-defaults--guardrails"
+
+  - id: pagination-filtering-and-sorting-045
+    difficulty: advanced
+    tags: [limits, owasp, dos]
+    question: |
+      Which OWASP API Security Top 10 (2023) risk is most directly addressed by
+      enforcing maximum page sizes and capping offset depth?
+    options:
+      - "API1:2023 Broken Object Level Authorization"
+      - "API4:2023 Unrestricted Resource Consumption"
+      - "API7:2023 Server Side Request Forgery"
+      - "API9:2023 Improper Inventory Management"
+    answer: 1
+    explanation: |
+      Unbounded page sizes and deep offsets let a client force the server to fetch/scan enormous result sets — a resource-consumption DoS vector, i.e. OWASP API4:2023 Unrestricted Resource Consumption. Enforcing caps and default limits is the mitigation.
+    ref: "concepts.md#limits-defaults--guardrails"
+
+  - id: pagination-filtering-and-sorting-046
+    difficulty: intermediate
+    tags: [standards, rfcs, misconception]
+    question: |
+      Which statement about standards and pagination is correct?
+    options:
+      - "RFC 9110 mandates cursor pagination for all collection endpoints"
+      - "RFC 7807 was the final Problem Details spec and is still current"
+      - "OpenAPI 3.1 defines a mandatory pagination envelope schema"
+      - "No RFC mandates a pagination *style*; RFC 8288 standardizes the Link header + next/prev/first/last relations, and RFC 9457 standardizes the error body — the page/cursor mechanics themselves are convention"
+    answer: 3
+    explanation: |
+      There is no RFC dictating offset vs cursor. RFC 8288 standardizes the Link header and its relation types; RFC 9457 (which obsoletes RFC 7807) standardizes the Problem Details error body. OpenAPI 3.1 lets you describe pagination params but mandates no envelope. The paging mechanics are convention.
+    ref: "concepts.md#link-header-for-pagination-rfc-8288"

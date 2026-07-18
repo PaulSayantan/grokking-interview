@@ -8,7 +8,7 @@ subfolders. See the master taxonomy in `../../TOPICS.md`.
 | REST Fundamentals & Architectural Constraints | `rest-fundamentals-and-constraints` | very-high | beginner | ☐ |
 | HTTP for APIs: Methods & Status Codes | `http-methods-and-status-codes` | very-high | beginner | ☐ |
 | Resource Modeling & URI Design | `resource-modeling-and-uri-design` | very-high | beginner | ☐ |
-| Request/Response Design & Content Negotiation | `request-response-design-and-content-negotiation` | high | intermediate | ☐ |
+| Request/Response Design & Content Negotiation | `request-response-design-and-content-negotiation` | high | intermediate | ● |
 | Request Validation & Data Integrity | `request-validation-and-data-integrity` | high | intermediate | ☐ |
 | Error Handling & Problem Details | `error-handling-and-problem-details` | very-high | intermediate | ☐ |
 | API Versioning & Evolution | `api-versioning-and-evolution` | very-high | intermediate | ☐ |
