@@ -82,7 +82,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Spring Boot](topics/spring-boot/README.md) | 18 | 18 ✅ |
 | [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ✅ (all tiers) |
 | [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 25 | 25 ✅ (all tiers) |
-| [REST APIs & API Design](topics/rest-api-design/README.md) | 18 | 18 ✅ (Pass 1, 951 MCQs) |
+| [REST APIs & API Design](topics/rest-api-design/README.md) | 18 | 18 ✅ (all tiers, 1,529 MCQs) |
 | [Docker](topics/docker/README.md) | 16 | 0 |
 | [Kubernetes](topics/kubernetes/README.md) | 19 | 0 |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 0 |
