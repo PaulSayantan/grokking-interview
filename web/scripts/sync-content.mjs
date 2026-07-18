@@ -76,6 +76,32 @@ async function readReadmeTitle(domainDir, fallback) {
   return title || fallback;
 }
 
+/**
+ * Parse the intended learning order from a domain README's topic tables.
+ *
+ * Each domain README lists its topics in a deliberate pedagogical sequence
+ * (Fundamentals → Scalability → … ) with the slug in a backticked cell, e.g.
+ * `| ... | `fundamentals-and-framework` | ... |`. We scan every table row for
+ * the FIRST backticked token that looks like a slug and record its order of
+ * first appearance. Slugs not found in the README fall back to the end (sorted
+ * by title), so the site never drops a subtopic just because the README is
+ * incomplete. Returns a Map<slug, orderIndex> (0-based).
+ */
+async function readReadmeOrder(domainDir) {
+  const readmePath = path.join(domainDir, "README.md");
+  const order = new Map();
+  if (!existsSync(readmePath)) return order;
+  const text = await readFile(readmePath, "utf8");
+  let next = 0;
+  for (const line of text.split(/\r?\n/)) {
+    // Only consider table rows (start with "|") to avoid prose backticks.
+    if (!line.trimStart().startsWith("|")) continue;
+    const m = line.match(/`([a-z0-9][a-z0-9-]*)`/);
+    if (m && !order.has(m[1])) order.set(m[1], next++);
+  }
+  return order;
+}
+
 /** List immediate subdirectories of a dir. */
 async function listSubdirs(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -144,6 +170,8 @@ async function clean() {
 async function processAuthoredDomain(domainSlug) {
   const domainDir = path.join(TOPICS_DIR, domainSlug);
   const title = await readReadmeTitle(domainDir, domainSlug);
+  // Intended learning sequence from the README topic tables (see readReadmeOrder).
+  const readmeOrder = await readReadmeOrder(domainDir);
   const subdirs = (await listSubdirs(domainDir)).filter(
     (name) => name !== "README.md",
   );
@@ -253,17 +281,31 @@ async function processAuthoredDomain(domainSlug) {
   );
 
   // --- Build ordered groups for the catalog ---
+  // Order subtopics by their README learning sequence; slugs absent from the
+  // README sink to the end, tie-broken by title. Then stamp a 1-based `position`
+  // per group so the UI can number cards and signal "start here".
+  const byReadmeOrder = (a, b) => {
+    const ai = readmeOrder.has(a.slug) ? readmeOrder.get(a.slug) : Infinity;
+    const bi = readmeOrder.has(b.slug) ? readmeOrder.get(b.slug) : Infinity;
+    if (ai !== bi) return ai - bi;
+    return a.title.localeCompare(b.title);
+  };
+  const numberGroup = (g) => {
+    g.subtopics.sort(byReadmeOrder);
+    g.subtopics.forEach((s, i) => {
+      s.position = i + 1;
+    });
+    return g;
+  };
+
   let groups;
   if (isSystemDesign) {
-    groups = SD_GROUP_ORDER.filter((k) => groupMap.has(k)).map((k) => {
-      const g = groupMap.get(k);
-      g.subtopics.sort((a, b) => a.title.localeCompare(b.title));
-      return g;
-    });
+    groups = SD_GROUP_ORDER.filter((k) => groupMap.has(k)).map((k) =>
+      numberGroup(groupMap.get(k)),
+    );
   } else {
     const g = groupMap.get("all") || { key: "all", label: "", subtopics: [] };
-    g.subtopics.sort((a, b) => a.title.localeCompare(b.title));
-    groups = [g];
+    groups = [numberGroup(g)];
   }
 
   const subtopicCount = groups.reduce((n, g) => n + g.subtopics.length, 0);

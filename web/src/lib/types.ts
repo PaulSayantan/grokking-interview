@@ -54,6 +54,12 @@ export interface CatalogSubtopic {
   slug: string;
   title: string;
   questionCount: number;
+  /**
+   * 1-based position in the group's intended learning sequence (derived from
+   * the domain README topic-table order by sync-content.mjs). Used to number
+   * cards so learners know where to start and in what order to progress.
+   */
+  position: number;
 }
 
 /** A group of subtopics within a domain (system-design has 3; others have 1). */
