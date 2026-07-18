@@ -20,14 +20,15 @@ export type Difficulty =
  * One multiple-choice question as served in the per-topic/-domain JSON pools.
  *
  * Every pool has a `.slim.json` twin (fetched by the practice island) that omits
- * `explanation`, `tags`, and `difficulty` — hence those fields are optional.
- * Explanations for slim pools are served from the per-domain `_explanations.json`
- * map (`{ [questionId]: explanation }`).
+ * `explanation` and `tags` — hence those fields are optional. `difficulty` is
+ * kept in slim pools (drives the practice difficulty filter). Explanations for
+ * slim pools are served from the per-domain `_explanations.json` map
+ * (`{ [questionId]: explanation }`).
  */
 export interface Question {
   /** Stable unique id, e.g. "design-url-shortener-001". */
   id: string;
-  /** Absent in `.slim.json` pools. */
+  /** Present in both full and slim pools (drives the practice difficulty filter). */
   difficulty?: Difficulty;
   /** Absent in `.slim.json` pools. */
   tags?: string[];

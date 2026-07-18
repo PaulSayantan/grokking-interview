@@ -1,6 +1,6 @@
 /** @jsxImportSource preact */
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
-import type { Question } from "@lib/types";
+import type { Difficulty, Question } from "@lib/types";
 import {
   DEFAULT_SAMPLE_SIZE,
   SESSION_PRESETS,
@@ -147,6 +147,14 @@ function prepare(pool: Question[], size: number): PreparedQuestion[] {
 }
 
 const OPTION_LETTERS = ["A", "B", "C", "D", "E"];
+
+/** The four concrete difficulty tiers offered as filter pills (green→amber). */
+const DIFFICULTY_TIERS: { key: Difficulty; label: string; accent: string }[] = [
+  { key: "beginner", label: "Beginner", accent: "var(--accent-green)" },
+  { key: "intermediate", label: "Intermediate", accent: "var(--accent-blue)" },
+  { key: "advanced", label: "Advanced", accent: "var(--accent-violet)" },
+  { key: "expert", label: "Expert", accent: "var(--accent-amber)" },
+];
 
 /**
  * Pure-CSS replacements for the previous motion/react animations.
@@ -297,6 +305,12 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
 
   // Which preset the learner picked; null => show the pre-quiz chooser first.
   const [preset, setPreset] = useState<SessionPreset | null>(null);
+  // Selected difficulty tiers; empty Set => all tiers (the default).
+  const [tiers, setTiers] = useState<Set<Difficulty>>(new Set());
+  // Per-tier counts for the chooser pills (null until the pool is sampled once).
+  const [tierCounts, setTierCounts] = useState<Record<string, number> | null>(null);
+  // Why the pool ended up empty, so the empty state can explain it.
+  const [emptyReason, setEmptyReason] = useState<"pool" | "review" | "tiers">("pool");
   const [status, setStatus] = useState<
     "choosing" | "loading" | "error" | "empty" | "ready"
   >("choosing");
@@ -352,14 +366,27 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       let pool = (await res.json()) as Question[];
       if (!Array.isArray(pool) || pool.length === 0) {
+        setEmptyReason("pool");
         setStatus("empty");
         return;
+      }
+      // Difficulty filter (empty Set => all tiers). Before review + sampling.
+      if (tiers.size > 0) {
+        pool = pool.filter(
+          (q) => q.difficulty != null && tiers.has(q.difficulty as Difficulty),
+        );
+        if (pool.length === 0) {
+          setEmptyReason("tiers");
+          setStatus("empty");
+          return;
+        }
       }
       // Review-missed mode: keep only questions the learner last got wrong.
       if (review) {
         const missed = new Set(missedIds(missedFilter));
         pool = pool.filter((q) => missed.has(q.id));
         if (pool.length === 0) {
+          setEmptyReason("review");
           setStatus("empty");
           return;
         }
@@ -378,7 +405,16 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     } catch {
       setStatus("error");
     }
-  }, [resolved.url, preset, missedFilter, loadExplanations]);
+  }, [resolved.url, preset, missedFilter, tiers, loadExplanations]);
+
+  const toggleTier = useCallback((t: Difficulty) => {
+    setTiers((prev) => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t);
+      else next.add(t);
+      return next;
+    });
+  }, []);
 
   // Deep-link ?review=1 auto-selects the "missed" preset so it skips the chooser.
   useEffect(() => {
@@ -387,6 +423,29 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       setPreset(SESSION_PRESETS.find((p) => p.key === "missed") ?? null);
     }
   }, [resolved.review, preset]);
+
+  // Tally per-tier counts once for the chooser pills (best-effort; ignores errors).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(slimUrl(resolved.url));
+        if (!res.ok) return;
+        const pool = (await res.json()) as Question[];
+        if (cancelled || !Array.isArray(pool)) return;
+        const counts: Record<string, number> = {};
+        for (const q of pool) {
+          if (q.difficulty) counts[q.difficulty] = (counts[q.difficulty] ?? 0) + 1;
+        }
+        setTierCounts(counts);
+      } catch {
+        /* counts are optional */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [resolved.url]);
 
   useEffect(() => {
     void loadPool();
@@ -532,6 +591,39 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           {resolved.scope}
         </p>
         <h2 class="mt-1 text-lg font-bold">Choose a session</h2>
+
+        <div class="mt-4">
+          <p class="text-xs font-semibold uppercase tracking-wide" style="color: var(--color-text-muted);">
+            Difficulty
+          </p>
+          <div class="mt-2 flex flex-wrap gap-2" role="group" aria-label="Filter by difficulty">
+            {DIFFICULTY_TIERS.map((t) => {
+              const on = tiers.has(t.key);
+              const count = tierCounts?.[t.key];
+              return (
+                <button
+                  type="button"
+                  key={t.key}
+                  aria-pressed={on}
+                  class="ps-press-btn rounded-full border px-3 py-1 text-sm font-medium"
+                  style={
+                    on
+                      ? `background: color-mix(in srgb, ${t.accent} 18%, transparent); border-color: ${t.accent}; color: ${t.accent};`
+                      : "background: var(--color-surface); border-color: var(--color-border); color: var(--color-text);"
+                  }
+                  onClick={() => toggleTier(t.key)}
+                >
+                  {t.label}
+                  {typeof count === "number" ? ` (${count})` : ""}
+                </button>
+              );
+            })}
+          </div>
+          <p class="mt-1 text-xs" style="color: var(--color-text-muted);">
+            {tiers.size === 0 ? "All difficulties" : `${tiers.size} selected`}
+          </p>
+        </div>
+
         <div class="mt-4 flex flex-col gap-3">
           {SESSION_PRESETS.map((p) => {
             const isMissed = p.key === "missed";
@@ -610,11 +702,26 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     return (
       <div class="card p-6">
         <p style="color: var(--color-text-muted);">
-          {resolved.review
-            ? "Nothing to review here — you haven't missed any questions in this scope. Practice a round first, then come back to drill what you got wrong."
-            : "There are no practice questions available for this selection yet."}
+          {emptyReason === "tiers"
+            ? "No questions match the difficulty levels you picked. Clear or widen the difficulty filter and try again."
+            : resolved.review
+              ? "Nothing to review here — you haven't missed any questions in this scope. Practice a round first, then come back to drill what you got wrong."
+              : "There are no practice questions available for this selection yet."}
         </p>
-        <div class="mt-4">
+        <div class="mt-4 flex flex-wrap gap-3">
+          {emptyReason === "tiers" && (
+            <button
+              type="button"
+              class="rounded-md px-4 py-2 text-sm font-semibold no-underline"
+              style="background: var(--color-primary); color: var(--color-primary-contrast);"
+              onClick={() => {
+                setPreset(null);
+                setStatus("choosing");
+              }}
+            >
+              Adjust difficulty
+            </button>
+          )}
           <a
             href={backHref}
             class="rounded-md border px-4 py-2 text-sm font-medium no-underline"

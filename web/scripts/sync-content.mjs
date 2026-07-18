@@ -131,9 +131,11 @@ function readingMinutes(body) {
   return Math.max(1, Math.round(words / WORDS_PER_MINUTE));
 }
 
-/** Slim question payload for the practice island's initial fetch. */
+/** Slim question payload for the practice island's initial fetch.
+ *  Drops explanation + tags (heavy / unused during the quiz); KEEPS difficulty
+ *  so the client-side difficulty filter can work without the full pool. */
 function slimQuestion(q) {
-  const { explanation, tags, difficulty, ...rest } = q;
+  const { explanation, tags, ...rest } = q;
   return rest;
 }
 
