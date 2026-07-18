@@ -34,6 +34,10 @@ const TOPICS_DIR = path.join(REPO_ROOT, "topics");
 const CONCEPTS_OUT = path.join(WEB_ROOT, "src/content/concepts");
 const QUESTIONS_OUT = path.join(WEB_ROOT, "public/questions");
 const CATALOG_OUT = path.join(WEB_ROOT, "src/data/catalog.json");
+// Astro's content-layer cache. We fully regenerate CONCEPTS_OUT every run, so a
+// stale data store makes the glob loader re-add ids it already cached and emit
+// "[glob-loader] Duplicate id" warnings. Invalidate it whenever we re-sync.
+const ASTRO_DATA_STORE = path.join(WEB_ROOT, ".astro/data-store.json");
 
 // --- Domain configuration -------------------------------------------------
 
@@ -181,6 +185,9 @@ async function clean() {
   await rm(CONCEPTS_OUT, { recursive: true, force: true });
   await rm(QUESTIONS_OUT, { recursive: true, force: true });
   await rm(CATALOG_OUT, { force: true });
+  // Drop the stale content-layer cache so regenerated entries aren't seen as
+  // duplicates of previously-cached ids. Astro rebuilds it on the next load.
+  await rm(ASTRO_DATA_STORE, { force: true });
 }
 
 async function processAuthoredDomain(domainSlug) {
