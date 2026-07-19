@@ -286,6 +286,262 @@ feature by itself (though it incidentally hides internal addressing). The real l
 is **IPv6**, whose vast space removes the need for NAT — hosts can have globally unique
 addresses again, restoring end-to-end reachability (subject to firewall policy).
 
+## Fast subnet math under time pressure
+
+Interviewers time this. The drilled algorithm beats binary conversion every time. For any
+`IP/prefix`:
+
+1. **Find the interesting octet** — the octet the prefix "ends in": `/8,/16,/24,/32` end on
+   octet 1,2,3,4; anything else lands in the octet where the prefix crosses a byte boundary
+   (`/25–/32` → octet 4, `/17–/24` → octet 3, etc.).
+2. **Magic number = block size = 256 − mask value of the interesting octet.** Equivalently
+   `2^(8 − bits-in-that-octet)`. For `/26`, mask octet = 192, block = `256 − 192 = 64`.
+3. **Network address** = round the interesting octet *down* to the nearest multiple of the
+   block size. **Next network** = network + block; **broadcast** = next network − 1.
+4. **First usable** = network + 1; **last usable** = broadcast − 1 (IPv4, non-/31/32).
+
+Worked at speed — `172.16.5.66/26`: block 64 → multiples 0,64,128,192 → `.66` rounds down to
+`.64` → network `172.16.5.64`, broadcast `172.16.5.127`, usable `.65–.126`.
+
+Two-way lookups to hold **by heart** (they eliminate arithmetic mid-interview):
+
+| /nn | mask octet | block | hosts | | /nn | mask octet | block | hosts |
+|-----|-----------|-------|-------|-|-----|-----------|-------|-------|
+| /25 | 128 | 128 | 126 | | /29 | 248 | 8 | 6 |
+| /26 | 192 | 64  | 62  | | /30 | 252 | 4 | 2 |
+| /27 | 224 | 32  | 30  | | /31 | 254 | 2 | 2* |
+| /28 | 240 | 16  | 14  | | /32 | 255 | 1 | 1  |
+
+> [!TIP]
+> The magic-number method works on *any* octet. `10.20.132.0/22` → /22 is in octet 3, mask
+> octet = 252, block = 4 → third-octet networks step 0,4,8,…132,136 → `132` is a network
+> boundary → `10.20.132.0/22` covers `10.20.132.0`–`10.20.135.255`.
+
+## IPv6 interface identifiers and EUI-64
+
+The lower 64 bits of a SLAAC address are the **interface identifier (IID)**. Historically it
+was derived from the 48-bit MAC via **Modified EUI-64** (RFC 4291, Appendix A):
+
+1. Split the MAC in half: `AABB CC | DD EEFF`.
+2. Insert **`FFFE`** in the middle → `AABBCC FFFE DDEEFF`.
+3. **Flip the 7th bit of the first octet** (the Universal/Local bit, second-least-significant
+   bit of octet 1). Universal(0)→Local becomes 1 in the *sense that the bit is inverted*.
+
+Worked example — MAC `00:1A:2B:3C:4D:5E`, prefix `2001:db8:1:1::/64`:
+`00` = `0000 0000`; flip the U/L bit → `0000 0010` = `02`. Insert `FFFE` →
+IID `021A:2BFF:FE3C:4D5E`, full address `2001:db8:1:1:021a:2bff:fe3c:4d5e`. The tell-tale
+`FF:FE` in the middle of an IID is the fingerprint of an EUI-64 address.
+
+> [!WARNING]
+> **EUI-64 is largely deprecated on the host side.** Because it embeds the MAC, it enables
+> cross-network device tracking. Modern OSes default to **RFC 8981 temporary/privacy
+> addresses** (obsoletes RFC 4941) for outbound traffic and **RFC 7217 stable-privacy /
+> opaque IIDs** (a per-prefix hash, stable within a network but not tied to the MAC) for the
+> stable address. Knowing EUI-64 is still expected, but "modern hosts don't use it by
+> default" is the senior-level point.
+
+## SLAAC Router Advertisements and DHCPv6
+
+Whether a host uses SLAAC, DHCPv6, or both is decided by flags in the **Router Advertisement
+(RA)** (RFC 4861/4862), not by the host guessing:
+
+- **A (Autonomous) flag** on a Prefix Information Option: if set, the host may build a SLAAC
+  address from that /64 prefix + an IID. SLAAC needs a /64 (64 host bits) — this is *why* the
+  /64 boundary is rigid, not merely conventional.
+- **M (Managed) flag**: set → use **stateful DHCPv6** for addresses *and* other config.
+- **O (Other) flag**: set (with M clear) → SLAAC for the address, **stateless DHCPv6** for
+  *other* config only (e.g. DNS servers).
+
+Key differences from DHCPv4:
+
+- **DHCPv6 cannot hand out a default gateway.** The gateway *always* comes from the RA
+  (router lifetime + link-local next-hop). A host with DHCPv6 but no RA has an address but no
+  route off-link.
+- **DHCPv6-PD (Prefix Delegation, RFC 8415)** is how an ISP delegates a whole `/48`–`/56` to
+  a customer CPE, which then sub-delegates /64s to internal links. This is the dual-stack
+  home/enterprise norm.
+
+> [!INTERVIEW]
+> "Every host must get a *specific* address AND a DNS server — which flags/mechanism?" →
+> stateful DHCPv6 (**M** flag), because SLAAC can't assign a chosen address; the gateway
+> still comes from the RA. "SLAAC hosts also need DNS" → set the **O** flag (stateless
+> DHCPv6) or use the RDNSS RA option.
+
+## Duplicate Address Detection and Neighbor Discovery
+
+IPv6 has **no ARP and no broadcast**; the **Neighbor Discovery Protocol (NDP, RFC 4861)**
+over ICMPv6 replaces both. Before a host uses any address it runs **Duplicate Address
+Detection (DAD)**: the address is **tentative**, the host sends a **Neighbor Solicitation
+(NS)** to the address's **solicited-node multicast** group (source `::`); if no Neighbor
+Advertisement (NA) comes back, the address becomes **preferred**. This is why every IPv6
+interface briefly holds a "tentative" address and why an interface stuck with only an
+`fe80::` link-local (no global) points to *no RA received* / router down / DHCPv6 failure.
+
+Address resolution (the ARP replacement): to find a neighbor's link-layer address, a host
+sends an NS to that neighbor's **solicited-node multicast** address rather than a broadcast —
+so only the target (and the few sharing its low-24-bit suffix) is interrupted, not the whole
+segment.
+
+## IPv6 multicast address structure
+
+A multicast address is `ff` + **4-bit flags** + **4-bit scope** + 112-bit group ID:
+`ff` `flgs` `scop` `::group`. Scope values that matter: `1` interface-local, `2` link-local,
+`5` site-local, `e` global. Well-known groups:
+
+| Group | Meaning |
+|-------|---------|
+| `ff02::1` | all-nodes (link-local) — the closest thing to "broadcast" |
+| `ff02::2` | all-routers (link-local) |
+| `ff02::1:2` | all DHCPv6 relay agents and servers |
+| `ff02::1:ffXX:XXXX` | **solicited-node multicast** |
+
+The **solicited-node** address is `ff02::1:ff00:0/104` with the **low 24 bits** of the target
+unicast/anycast address appended. So `2001:db8::1a:2b3c` maps to `ff02::1:ff1a:2b3c`. Because
+a host only joins the solicited-node groups for its own addresses, NDP resolution and DAD hit
+almost no other hosts — the efficiency win that lets IPv6 drop broadcast entirely.
+
+## IPv6 point-to-point links and the /127 convention
+
+For inter-router point-to-point links, **RFC 6164** says routers **MUST support /127** and
+**MUST disable Subnet-Router anycast** on that prefix. Using a full /64 on a P2P link invites
+two documented problems:
+
+- **Neighbor-cache-exhaustion DoS**: an attacker floods packets to unused addresses in the
+  huge /64; the router creates NDP cache entries and fires fruitless NSes for each, which can
+  exhaust the cache and even disrupt control-plane sessions like BGP.
+- **Ping-pong loop**: on point-to-point / NBMA media, a packet to an unused address in the
+  /64 can bounce between the two routers until its Hop Limit expires.
+
+A /127 gives exactly two addresses, one per end, with no network/broadcast concept — the
+direct IPv6 analogue of the IPv4 **/31** (RFC 3021) design pattern. (On a /31 there is *no*
+network or broadcast address; both addresses host the two ends of the link. Some very old
+IPv4 stacks mishandled /31, the historical objection to it.)
+
+## Anycast unicast multicast and broadcast
+
+Four delivery models, one comparison:
+
+| Model | Targets | How the network chooses |
+|-------|---------|-------------------------|
+| **Unicast** | exactly one interface | normal longest-prefix routing |
+| **Broadcast** | all hosts on a subnet (IPv4 only) | all-ones host bits; not in IPv6 |
+| **Multicast** | a subscribed group | group membership (IGMP/MLD) |
+| **Anycast** | *one of* many identical nodes | routes to the **topologically nearest** advertiser |
+
+**Anycast** works by advertising the **same prefix from multiple locations via BGP**;
+each client reaches whichever node is nearest in routing terms. It is **not IPv6-specific** —
+IPv4 anycast is ubiquitous: DNS root servers (`k.root-servers.net`), public resolvers
+(`8.8.8.8`, `1.1.1.1`), and CDN edge fronts all use it. In IPv6 anycast is not a distinct
+prefix — any unicast address configured on multiple nodes acts as anycast (the all-zero IID
+in a /64 is the reserved **Subnet-Router anycast** address).
+
+## IPv6 subnetting a /48 and /56 into /64s
+
+Because the LAN prefix is fixed at /64, IPv6 "subnetting" is just counting the **subnet bits**
+between the delegated prefix and /64:
+
+- **/48 → /64**: `64 − 48 = 16` subnet bits → **65,536** /64 LANs. The subnet ID occupies the
+  **4th hextet**.
+- **/56 → /64**: `64 − 56 = 8` subnet bits → **256** /64 LANs.
+- **/60 → /64**: 4 subnet bits → 16 /64s.
+
+Worked: ISP delegates `2001:db8:abcd::/48`. Subnet ID lives in the 4th hextet. Zero-indexed,
+subnet 0 = `2001:db8:abcd:0::/64`, subnet 5 = `2001:db8:abcd:5::/64`, subnet `0xffff` =
+`2001:db8:abcd:ffff::/64`.
+
+> [!TIP]
+> Allocate on **nibble boundaries** (/48→/52→/56→/60→/64) so each level aligns to a hex digit.
+> Nibble alignment keeps `ip6.arpa` reverse-DNS delegation and route aggregation clean; an
+> off-nibble prefix (e.g. /61) fragments the reverse zone into multiple delegations.
+
+## IPv4 and IPv6 transition mechanisms
+
+Dual-stack (run both protocols in parallel) is the primary model, but IPv6-only clients still
+need to reach IPv4-only servers:
+
+- **NAT64/DNS64** (RFC 6146/6147): DNS64 synthesizes an AAAA from an A record by prefixing the
+  IPv4 address under the **well-known `64:ff9b::/96`** (RFC 6052); a NAT64 gateway translates
+  the resulting IPv6 flow to IPv4. **464XLAT** adds a client-side CLAT so even IPv4-only apps
+  work over an IPv6-only access network.
+- **6to4 / Teredo**: legacy IPv6-over-IPv4 tunneling, **largely deprecated**.
+- **Address forms to distinguish**: **IPv4-mapped `::ffff:0:0/96`** (used inside dual-stack
+  sockets to present v4 peers as v6) vs the **deprecated IPv4-compatible `::/96`** (`::a.b.c.d`,
+  no longer used).
+- **Happy Eyeballs v2 (RFC 8305)**: a dual-stack client resolves A and AAAA, starts connecting
+  over IPv6 but races IPv4 shortly after, and uses whichever completes first — hiding a broken
+  or slow path from the user.
+
+## Default address selection and address lifetimes
+
+When a host has several source and destination addresses, **RFC 6724** governs the choice:
+prefer same-scope pairs, prefer a source that shares the longest prefix with the destination,
+prefer appropriate scope, avoid deprecated addresses, and (with adjustable policy) generally
+prefer IPv6 over IPv4. This is *why* a multi-address host picks a particular source address.
+
+SLAAC prefixes carry two timers in the RA Prefix Information Option: the **preferred lifetime**
+(address is used for new connections) and the **valid lifetime** (address still works for
+existing connections). When preferred expires the address becomes **deprecated** — usable but
+not chosen for new flows — enabling graceful renumbering as an ISP rotates a delegated prefix.
+
+## Reverse DNS and delegation boundaries
+
+Reverse lookups (IP → name, PTR records) live in special zones:
+
+- **IPv4**: `in-addr.arpa` with **octets reversed** — `203.0.113.5` → `5.113.0.203.in-addr.arpa`.
+- **IPv6**: `ip6.arpa` with **nibbles reversed**, one label per hex digit — 32 nibbles deep.
+
+Delegation is easy on octet/nibble boundaries. A `/24` maps cleanly to one `in-addr.arpa`
+zone; a `/nn` finer than /24 (e.g. a `/26` from your ISP) needs **classless reverse delegation
+(RFC 2317)** — the ISP CNAMEs each address into a sub-zone you control. Likewise IPv6 rDNS
+delegates cleanly only on **nibble-aligned** prefixes (/48, /52, /56, /60, /64).
+
+## NAT taxonomy and CGNAT internals
+
+Beyond basic NAT/PAT, the **RFC 3489/4787** behavioral taxonomy predicts NAT-traversal success:
+
+| NAT type | Mapping/filtering behavior | Hole-punching |
+|----------|----------------------------|---------------|
+| **Full-cone** | one external port per internal endpoint; any external host may use it | easiest |
+| **Restricted-cone** | reply allowed only from IPs the host has sent to | works |
+| **Port-restricted-cone** | reply allowed only from IP+port already contacted | works |
+| **Symmetric** | a *new* external port per destination | often fails → needs TURN relay |
+
+This drives **STUN/TURN/ICE** (RFC 5389 etc.) in WebRTC/VoIP: STUN discovers the external
+mapping for cone NATs; symmetric NATs usually force a TURN relay.
+
+**CGNAT (`100.64.0.0/10`, RFC 6598)** is a *separate* shared block precisely so it does not
+collide with subscriber RFC 1918 space behind their own routers (double-NAT). Operational
+realities: the ISP allocates **port blocks** per subscriber (limiting concurrent flows), must
+keep **huge CGN translation logs** for attribution, and breaks things — geolocation (many
+users behind one IP), reputation/denylist collateral damage, and inbound reachability
+(port-forwarding is impossible), which is a common merger/e2e pain point.
+
+## Route aggregation BGP and RPKI
+
+Aggregation (supernetting) directly limits the size of the **global BGP RIB**: one covering
+prefix instead of many more-specifics. But operationally:
+
+- **More-specific leaks / de-aggregation** bloat the table and can hijack traffic (a longer
+  prefix always wins longest-prefix match, so a leaked /24 beats an aggregate /16).
+- **Discontiguous subnets** and over-aggregation can **black-hole** traffic for space you
+  advertise but can't deliver.
+- **RPKI ROAs** (Route Origin Authorizations) are the modern guardrail: a ROA binds a prefix
+  to an origin ASN **with a `maxLength`**, so an over-long more-specific is **RPKI-invalid** —
+  mitigating both accidental de-aggregation and prefix-hijack hijacks.
+
+## Additional special-purpose address blocks
+
+Senior "is this routable?" trivia from the IANA special-purpose registries:
+
+| Block | Purpose | Routable on Internet? |
+|-------|---------|-----------------------|
+| `192.0.0.0/24` | IETF protocol assignments (RFC 6890) | No |
+| `198.18.0.0/15` | benchmarking / performance testing (RFC 2544) | No |
+| `240.0.0.0/4` | former **Class E**, reserved/experimental (reclaim debated) | No |
+| `255.255.255.255/32` | limited broadcast | No (link-only) |
+| `100.64.0.0/10` | CGNAT shared space (RFC 6598) | No |
+| `0.0.0.0/8` | "this host on this network" (source-only) | No |
+
 ## Common follow-up questions
 
 - **How many usable hosts in a /26? A /29? A /30?** 62, 6, and 2 (2^host_bits − 2).
@@ -303,6 +559,21 @@ addresses again, restoring end-to-end reachability (subject to firewall policy).
   zero groups each represents ambiguous.
 - **Is NAT a security control?** No — it's an address-conservation mechanism; obscurity is a
   side effect, not a policy.
+- **Derive the SLAAC IID for MAC 00:1A:2B:3C:4D:5E.** Flip the U/L bit of `00`→`02`, insert
+  `FFFE`: IID `021A:2BFF:FE3C:4D5E`. (But modern hosts default to RFC 7217/8981, not EUI-64.)
+- **SLAAC vs DHCPv6 — where does that decision live?** In the RA flags: A enables SLAAC, M =
+  stateful DHCPv6, O = stateless DHCPv6; the default gateway always comes from the RA.
+- **Why /127 (not /64) on a router-to-router link?** RFC 6164 — avoids neighbor-cache
+  exhaustion DoS and ping-pong loops; the IPv6 analogue of the IPv4 /31.
+- **How many /64s in a delegated /48?** 65,536 (16 subnet bits); a /56 yields 256.
+- **How does an IPv6-only client reach an IPv4-only server?** NAT64/DNS64 via `64:ff9b::/96`,
+  or 464XLAT; dual-stack clients use Happy Eyeballs (RFC 8305).
+- **Is 100.64.5.1 routable on the Internet?** No — CGNAT shared space (RFC 6598); not RFC 1918
+  but not public either.
+- **A host has only an fe80:: address, no global — what failed?** No RA received / router down
+  / DHCPv6 not answering — SLAAC/DHCPv6 never provided a global prefix.
+- **Two merged companies both use 10.0.0.0/8 — how do you interconnect?** Overlapping/twice-NAT,
+  renumber one side, or migrate to non-overlapping IPv6/ULA space.
 
 ## References
 
@@ -318,4 +589,15 @@ addresses again, restoring end-to-end reachability (subject to firewall policy).
 - RFC 4193 — Unique Local IPv6 Unicast Addresses (fc00::/7)
 - RFC 4862 — IPv6 Stateless Address Autoconfiguration (SLAAC)
 - RFC 3849 — IPv6 Address Prefix Reserved for Documentation (2001:db8::/32)
+- RFC 4861 — Neighbor Discovery for IPv6 (NDP, RA flags, DAD)
+- RFC 6164 — Using 127-Bit IPv6 Prefixes on Inter-Router Links
+- RFC 8415 — Dynamic Host Configuration Protocol for IPv6 (DHCPv6) and Prefix Delegation
+- RFC 8981 — Temporary Address Extensions for SLAAC (obsoletes RFC 4941)
+- RFC 7217 — A Method for Generating Stable, Semantically Opaque Interface Identifiers
+- RFC 6724 — Default Address Selection for IPv6
+- RFC 6052 / 6146 / 6147 — IPv6 Addressing of IPv4/IPv6 Translators, NAT64, DNS64 (64:ff9b::/96)
+- RFC 8305 — Happy Eyeballs Version 2
+- RFC 4787 / 3489 / 5389 — NAT behavioral requirements and STUN
+- RFC 2317 — Classless IN-ADDR.ARPA delegation
+- RFC 6890 — Special-Purpose IP Address Registries
 - IANA IPv4/IPv6 Special-Purpose Address Registries

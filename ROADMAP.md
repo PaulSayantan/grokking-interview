@@ -90,7 +90,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 0 |
 | [Security (App & Web)](topics/security/README.md) | 16 | 0 |
-| [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (Pass 1, 844 MCQs) |
+| [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
 | [Observability](topics/observability/README.md) | 17 | 0 |
 | [Software Testing](topics/testing/README.md) | 16 | 0 |
 
@@ -98,6 +98,17 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 20 (2026-07-19):** Networking & Protocols **Pass 2 (deepen)** — took all 16
+  topics from 844 → **1,372 MCQs** (220 B / 435 I / 414 adv / 303 expert; every topic
+  76-96, strong adv+expert block 33-53/topic). Built via `.claude/workflows/scripts/
+  networking-deepen.js` (research → deepen → verify, high effort, 48 agents, 0 errors).
+  Research stage did exhaustive per-topic RFC/wire gap-analysis and handed a gap brief to
+  the deepener; verify stage fact-checked RFC precision (QUIC 9000/9001/9002, TLS 1.3 8446,
+  CUBIC 9438, AccECN 9768, protobuf wire types, CIDR/MSS/MTU math, ICMP types, WebSocket
+  handshake) and rebalanced several clustered answer distributions. Content-only commit
+  (left concurrent web-design work untouched). Validator clean (16 files, 1,372 Qs); no
+  answer-index clustering (top share <40% every topic). Networking now complete across all
+  four tiers.
 - **Session 12 (2026-07-17):** Performance audit & optimization — implemented 5 changes
   to reduce initial page-load weight: (1) slim question pools strip explanation/tags/
   difficulty from initial fetch (system-design 1213KB gz → 710KB gz), with explanations

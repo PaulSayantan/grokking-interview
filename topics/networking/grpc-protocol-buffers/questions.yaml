@@ -922,3 +922,623 @@ questions:
       gRPC has unary plus server-, client-, and bidirectional streaming as first-class
       modes over HTTP/2. REST relies on add-ons (SSE, WebSocket) for streaming.
     ref: "concepts.md#grpc-vs-rest-vs-graphql-trade-offs"
+
+  - id: grpc-protocol-buffers-057
+    difficulty: expert
+    tags: [http2, trailers-only, errors]
+    question: |
+      A gRPC server rejects a request before producing any response message, sending a
+      single HEADERS frame with :status 200, content-type, grpc-status 3, grpc-message, and
+      END_STREAM — no DATA and no separate leading-headers frame. What is this called, and
+      why does it matter for automatic retries?
+    options:
+      - "A Trailers-Only response; because no leading headers were sent, the RPC hasn't committed and can still be retried"
+      - "A malformed response; the client must treat it as a transport error and reconnect"
+      - "A server-push response; it commits the RPC immediately and blocks retries"
+      - "A GOAWAY response; it drains the connection and all streams must migrate"
+    answer: 0
+    explanation: |
+      Combining leading and trailing metadata into one HEADERS frame is the Trailers-Only
+      form, used for errors known before any message is produced. Because the client never
+      received leading response headers, the attempt is not committed and remains retryable.
+    ref: "concepts.md#http2-mapping-internals-flow-control-goaway-and-trailers-only"
+
+  - id: grpc-protocol-buffers-058
+    difficulty: expert
+    tags: [http2, flow-control, backpressure]
+    question: |
+      A server-streaming RPC pushes results far faster than a slow client consumes them.
+      At the protocol level, what stops the server from buffering unbounded data?
+    options:
+      - "The grpc-timeout header forces the server to drop messages after the deadline"
+      - "TCP Nagle's algorithm coalesces and discards excess frames"
+      - "HTTP/2 flow control: once the stream/connection receive window is exhausted, the server must stop sending until WINDOW_UPDATE frames replenish it"
+      - "HPACK compression shrinks the backlog until it fits in one frame"
+    answer: 2
+    explanation: |
+      gRPC streaming backpressure is HTTP/2 flow control. Per-stream and per-connection
+      windows bound in-flight bytes; a producer blocks when the window is empty and resumes
+      when the receiver issues WINDOW_UPDATE, so a slow reader throttles a fast writer.
+    ref: "concepts.md#http2-mapping-internals-flow-control-goaway-and-trailers-only"
+
+  - id: grpc-protocol-buffers-059
+    difficulty: advanced
+    tags: [http2, goaway, drain]
+    question: |
+      During a graceful server shutdown, the server sends a GOAWAY frame carrying a
+      last-stream-ID. What does a client learn about streams with IDs greater than that
+      value?
+    options:
+      - "They were accepted and must be allowed to finish on this connection"
+      - "They must be downgraded to HTTP/1.1"
+      - "They will be migrated automatically to a new connection by the transport"
+      - "They were not processed by this server and are safe to retry on another connection"
+    answer: 3
+    explanation: |
+      GOAWAY's last-stream-ID is the highest stream the sender will process. Streams above
+      it were never accepted, so the client can safely re-issue them elsewhere — the basis
+      for transparent retries on drain.
+    ref: "concepts.md#http2-mapping-internals-flow-control-goaway-and-trailers-only"
+
+  - id: grpc-protocol-buffers-060
+    difficulty: expert
+    tags: [retries, retry-policy, service-config]
+    question: |
+      A team sets retryPolicy.maxAttempts to 12 in their service config to be extra
+      resilient. What actually happens?
+    options:
+      - "All 12 attempts run; there is no cap"
+      - "The config is rejected and retries are disabled entirely"
+      - "The client caps maxAttempts at 5, so at most 5 total attempts occur"
+      - "maxAttempts above 10 silently switches the method to hedging"
+    answer: 2
+    explanation: |
+      Per gRFC A6, retryPolicy.maxAttempts must be greater than 1 and is capped at 5 by the
+      client. Larger values are clamped to 5, so the extra attempts never happen.
+    ref: "concepts.md#retries-hedging-and-retry-throttling"
+
+  - id: grpc-protocol-buffers-061
+    difficulty: expert
+    tags: [retries, hedging, tail-latency]
+    question: |
+      How does a hedgingPolicy differ from a retryPolicy in when it issues additional
+      attempts?
+    options:
+      - "Hedging retries only after the first attempt returns a fatal error, exactly like retryPolicy but faster"
+      - "Hedging opens a second TCP connection but sends the request only once"
+      - "Hedging sends a parallel attempt to another backend after hedgingDelay without waiting for the first to fail, reducing tail latency"
+      - "Hedging and retryPolicy can both be active on the same method for layered protection"
+    answer: 2
+    explanation: |
+      Hedging proactively fires another attempt after hedgingDelay without waiting for a
+      failure, taking the first non-fatal response and cancelling the rest — trading
+      duplicate work for lower tail latency. A method uses retry OR hedging, not both.
+    ref: "concepts.md#retries-hedging-and-retry-throttling"
+
+  - id: grpc-protocol-buffers-062
+    difficulty: expert
+    tags: [retries, throttling, metastable]
+    question: |
+      With retryThrottling { maxTokens: 100, tokenRatio: 0.1 }, a backend starts failing
+      broadly. What behavior prevents a retry storm?
+    options:
+      - "Each success decrements a token and each failure adds tokenRatio, blocking retries when tokens exceed maxTokens/2"
+      - "Every RPC (success or failure) costs one token, and retries stop when the bucket empties"
+      - "Each failure decrements the token count by 1 and each success adds tokenRatio (0.1); retries are disabled while tokens are below maxTokens/2 (50)"
+      - "Tokens are per-RPC, so a single failing call can never affect other calls' retries"
+    answer: 2
+    explanation: |
+      The retry token bucket starts at maxTokens; failures cost 1 token, successes add
+      tokenRatio. Retries are suppressed once the count drops below maxTokens/2, so a broad
+      failure rapidly exhausts the budget and halts amplification — the metastable defense.
+    ref: "concepts.md#retries-hedging-and-retry-throttling"
+
+  - id: grpc-protocol-buffers-063
+    difficulty: expert
+    tags: [retries, commit-point, trailers-only]
+    question: |
+      To keep early server errors retryable under gRPC's automatic retry rules, how should a
+      server behave, and why?
+    options:
+      - "Always send leading headers immediately, because commit happens only on the response DATA frame"
+      - "Defer leading headers until the first response message and use Trailers-Only for early errors, because receiving response headers commits the RPC and makes it non-retryable"
+      - "Send an RST_STREAM with REFUSED_STREAM for every error so the client retries"
+      - "Set grpc-retry-pushback-ms to 0 on all responses to force a retry"
+    answer: 1
+    explanation: |
+      An attempt commits (becomes non-retryable) once the client receives response headers
+      or an outgoing message overflows the send buffer. Deferring leading headers and using
+      Trailers-Only for pre-message errors keeps the call within the retry-eligible window.
+    ref: "concepts.md#retries-hedging-and-retry-throttling"
+
+  - id: grpc-protocol-buffers-064
+    difficulty: advanced
+    tags: [retries, pushback, metadata]
+    question: |
+      A server includes grpc-retry-pushback-ms with a negative value in its response
+      trailers. How must a compliant client interpret it?
+    options:
+      - "Retry immediately, since negative means zero delay"
+      - "Wait the absolute value of the number of milliseconds, then retry"
+      - "Do not retry this RPC at all"
+      - "Ignore it and fall back to the exponential backoff schedule"
+    answer: 2
+    explanation: |
+      grpc-retry-pushback-ms lets the server dictate retry timing. A non-negative value is a
+      delay before the next retry; a negative or unparseable value instructs the client to
+      stop retrying entirely.
+    ref: "concepts.md#retries-hedging-and-retry-throttling"
+
+  - id: grpc-protocol-buffers-065
+    difficulty: expert
+    tags: [retries, transparent, refused-stream]
+    question: |
+      A client's RPC hits a RST_STREAM with error code REFUSED_STREAM (the server never ran
+      any application logic). Under gRFC A6, how is this handled relative to the retry budget?
+    options:
+      - "It is a transparent retry that does NOT count against maxAttempts or the retry budget"
+      - "It is a normal retry and decrements both maxAttempts and the retry token budget"
+      - "It is fatal and surfaces UNAVAILABLE to the caller without retry"
+      - "It is retried only if the method appears in retryableStatusCodes"
+    answer: 0
+    explanation: |
+      REFUSED_STREAM proves the request never reached application logic, so the client
+      retries transparently. Transparent retries are free — they don't consume maxAttempts
+      or retry-throttling tokens, since no work was done and no state was affected.
+    ref: "concepts.md#retries-hedging-and-retry-throttling"
+
+  - id: grpc-protocol-buffers-066
+    difficulty: advanced
+    tags: [service-config, wait-for-ready, unavailable]
+    question: |
+      During a rolling deploy, a channel briefly has no ready subchannel. With default
+      settings, what does an RPC issued in that instant do, and how does wait_for_ready=true
+      change it?
+    options:
+      - "Default queues the RPC forever; wait_for_ready makes it fail fast"
+      - "Default returns DEADLINE_EXCEEDED instantly; wait_for_ready retries three times"
+      - "Both behave identically because HTTP/2 auto-reconnects transparently"
+      - "Default fails fast with UNAVAILABLE; wait_for_ready=true queues the RPC until a connection is ready or the deadline elapses"
+    answer: 3
+    explanation: |
+      By default an RPC with no ready connection fails fast with UNAVAILABLE.
+      wait_for_ready=true instead holds the RPC until the channel connects (or the deadline
+      passes), trading fail-fast shedding for resilience across transient reconnects.
+    ref: "concepts.md#service-config-and-wait_for_ready"
+
+  - id: grpc-protocol-buffers-067
+    difficulty: advanced
+    tags: [service-config, control-plane, dns]
+    question: |
+      Which statement best describes gRPC service config?
+    options:
+      - "A compile-time annotation in the .proto that fixes timeouts per method"
+      - "A channel-level JSON control plane (methodConfig timeouts, retry/hedging, waitForReady, LB policy, retryThrottling) delivered via DNS TXT or xDS"
+      - "A per-message header that overrides the grpc-timeout value"
+      - "The TLS configuration that selects cipher suites for the channel"
+    answer: 1
+    explanation: |
+      Service config is a JSON document (per-service/per-method timeouts, retry/hedging,
+      waitForReady, message size limits, load-balancing policy, and top-level
+      retryThrottling) delivered through DNS TXT records or xDS — the runtime control plane.
+    ref: "concepts.md#service-config-and-wait_for_ready"
+
+  - id: grpc-protocol-buffers-068
+    difficulty: expert
+    tags: [load-balancing, xds, orca]
+    question: |
+      In "look-aside" (lookaside) load balancing, an external service tells a gRPC client
+      which backends to use and reports their load. Which control plane has largely
+      superseded the original gRPCLB protocol for this, and how is per-backend load reported?
+    options:
+      - "xDS (the Envoy control-plane API, gRFC A27/A52); backend load is reported in-band via ORCA metrics or out-of-band"
+      - "DNS SRV records refreshed on every RPC; load is inferred from measured TCP round-trip time"
+      - "HTTP/2 server push; load is advertised by the server in SETTINGS frames"
+      - "The HPACK dynamic table; load is encoded in the table-size update"
+    answer: 0
+    explanation: |
+      The original gRPCLB lookaside protocol is now largely superseded by xDS (the Envoy
+      control-plane API, gRFC A27/A52). Backends report load to the client either in-band via
+      ORCA (Open Request Cost Aggregation) metrics or out-of-band, informing LB decisions.
+    ref: "concepts.md#client-side-load-balancing-and-the-l4-pinning-pitfall"
+
+  - id: grpc-protocol-buffers-069
+    difficulty: expert
+    tags: [load-balancing, max-connection-age, rebalance]
+    question: |
+      You must keep an L4 balancer but want gRPC traffic to spread onto newly added backends
+      without adopting a client-side LB library. Which server-side setting most directly
+      forces periodic rebalancing?
+    options:
+      - "KEEPALIVE_TIMEOUT, so dead connections are pruned faster"
+      - "MAX_CONNECTION_AGE, so connections are recycled via GOAWAY, forcing clients to re-resolve and reconnect (and be rebalanced)"
+      - "MAX_CONCURRENT_STREAMS, so each connection carries fewer RPCs"
+      - "PERMIT_KEEPALIVE_TIME, so clients ping less often"
+    answer: 1
+    explanation: |
+      MAX_CONNECTION_AGE bounds connection lifetime; when it expires the server sends GOAWAY
+      and the client re-resolves and opens a fresh connection, which the L4 balancer can
+      route to a different (possibly new) backend — spreading load over time.
+    ref: "concepts.md#client-side-load-balancing-and-the-l4-pinning-pitfall"
+
+  - id: grpc-protocol-buffers-070
+    difficulty: advanced
+    tags: [load-balancing, channel, picker]
+    question: |
+      In gRPC's client channel architecture, which component selects a specific subchannel
+      for each individual RPC and therefore must be extremely fast?
+    options:
+      - "The name resolver"
+      - "The HPACK encoder"
+      - "The picker produced by the LB policy"
+      - "The interceptor chain"
+    answer: 2
+    explanation: |
+      The pipeline is resolver -> LB policy -> subchannels -> picker. The picker runs on the
+      hot path, choosing a subchannel per RPC (e.g. round-robin), so it must be O(1) and
+      allocation-light.
+    ref: "concepts.md#client-side-load-balancing-and-the-l4-pinning-pitfall"
+
+  - id: grpc-protocol-buffers-071
+    difficulty: expert
+    tags: [keepalive, goaway, enhance-your-calm]
+    question: |
+      A fleet of clients is configured with KEEPALIVE_TIME far below the server's
+      PERMIT_KEEPALIVE_TIME and KEEPALIVE_WITHOUT_CALLS enabled. Clients report connections
+      being dropped shortly after connecting. What is happening?
+    options:
+      - "The clients exceed the server's permitted ping rate, so the server sends GOAWAY with debug data too_many_pings (ENHANCE_YOUR_CALM, 0x0b) and closes the connection"
+      - "The TLS session tickets expired and force renegotiation"
+      - "The server's MAX_CONCURRENT_STREAMS is exhausted by the pings"
+      - "The clients' deadlines are elapsing and returning DEADLINE_EXCEEDED"
+    answer: 0
+    explanation: |
+      Pinging more frequently than PERMIT_KEEPALIVE_TIME (default 5 min) triggers the
+      server's abuse defense: it returns GOAWAY with too_many_pings, the HTTP/2
+      ENHANCE_YOUR_CALM (0x0b) code, and drops the connection.
+    ref: "concepts.md#keepalive-and-connection-lifecycle"
+
+  - id: grpc-protocol-buffers-072
+    difficulty: advanced
+    tags: [keepalive, connection-lifecycle, drain]
+    question: |
+      What is the purpose of MAX_CONNECTION_AGE_GRACE on a gRPC server?
+    options:
+      - "It sets how long a connection may sit idle before being closed"
+      - "It caps the total number of connections a server accepts"
+      - "It provides a grace window after MAX_CONNECTION_AGE for in-flight RPCs to drain (via GOAWAY) before the connection is forcibly closed"
+      - "It delays keepalive pings until the connection is that old"
+    answer: 2
+    explanation: |
+      After MAX_CONNECTION_AGE fires, the server sends GOAWAY and allows
+      MAX_CONNECTION_AGE_GRACE for existing RPCs to complete gracefully before forcing the
+      connection shut. MAX_CONNECTION_IDLE is the separate idle timeout.
+    ref: "concepts.md#keepalive-and-connection-lifecycle"
+
+  - id: grpc-protocol-buffers-073
+    difficulty: expert
+    tags: [health-checking, service-string, semantics]
+    question: |
+      Using the standard grpc.health.v1.Health service, what does a Check request with an
+      empty service string ("") mean, and what happens if you Check a service name the
+      server doesn't know?
+    options:
+      - "Empty string is invalid; unknown services return SERVING by default"
+      - "Empty string queries overall server health; an unknown service on Check returns the gRPC status NOT_FOUND"
+      - "Empty string queries every registered service; unknown services return UNAVAILABLE"
+      - "Empty string means the reflection service; unknown services return UNIMPLEMENTED"
+    answer: 1
+    explanation: |
+      An empty service string queries the server's overall health. Checking a service the
+      server hasn't registered returns the gRPC status NOT_FOUND (5). SERVICE_UNKNOWN status
+      is used by Watch, not returned as a Check error.
+    ref: "concepts.md#health-checking-protocol"
+
+  - id: grpc-protocol-buffers-074
+    difficulty: advanced
+    tags: [health-checking, watch, streaming]
+    question: |
+      How do the Check and Watch methods of the gRPC health protocol differ?
+    options:
+      - "Check is a one-shot unary query; Watch is server-streaming and pushes status changes over time"
+      - "Check is server-streaming; Watch is unary"
+      - "Both are unary, but Watch requires mTLS"
+      - "Check returns a boolean; Watch returns the full descriptor set"
+    answer: 0
+    explanation: |
+      Check is unary (a single status snapshot). Watch is server-streaming: the server pushes
+      an initial status and then a new HealthCheckResponse each time the service's serving
+      status changes, letting a load balancer react without polling.
+    ref: "concepts.md#health-checking-protocol"
+
+  - id: grpc-protocol-buffers-075
+    difficulty: expert
+    tags: [compression, security, crime-breach]
+    question: |
+      A security review flags that per-message gRPC compression is enabled on an RPC whose
+      responses embed a secret token alongside attacker-influenced fields. What is the
+      concern?
+    options:
+      - "Compression corrupts the 5-byte length prefix, causing framing errors"
+      - "Compressing secret-bearing data mixed with attacker-controlled input before encryption enables CRIME/BREACH-class attacks that recover secrets via compressed-length side channels"
+      - "gzip is not supported by gRPC, so the peer will return UNIMPLEMENTED"
+      - "Compression forces all messages to identity encoding, leaking the plaintext"
+    answer: 1
+    explanation: |
+      When compression runs before encryption and a payload mixes a secret with
+      attacker-controlled content, compressed size leaks information about the secret —
+      CRIME/BREACH. Being able to disable compression on secret-bearing messages mitigates it.
+    ref: "concepts.md#message-compression"
+
+  - id: grpc-protocol-buffers-076
+    difficulty: advanced
+    tags: [compression, headers, unimplemented]
+    question: |
+      A client sends a message with grpc-encoding: snappy, but the server can't decompress
+      snappy. What should the server do?
+    options:
+      - "Silently drop the message and return OK"
+      - "Return UNIMPLEMENTED (12) and advertise the codecs it supports via grpc-accept-encoding"
+      - "Return INVALID_ARGUMENT (3) because the payload is malformed"
+      - "Transcode the message to identity and process it anyway"
+    answer: 1
+    explanation: |
+      A peer that receives a message compressed with an algorithm it can't handle returns
+      UNIMPLEMENTED (12), and uses grpc-accept-encoding to advertise which algorithms it does
+      support so the sender can retry appropriately.
+    ref: "concepts.md#message-compression"
+
+  - id: grpc-protocol-buffers-077
+    difficulty: expert
+    tags: [compression, framing, per-message]
+    question: |
+      Within a single server-streaming response, message 1 is sent gzip-compressed and
+      message 2 uncompressed. How is this expressed on the wire, and is it legal?
+    options:
+      - "It is illegal; all messages in a stream must use the same compression"
+      - "It is legal; the 1-byte compressed-flag in each message's 5-byte length prefix is set per message (1 for gzip, 0 for identity)"
+      - "It is legal, but only if grpc-encoding is re-sent as a DATA frame between messages"
+      - "It is legal only over HTTP/3, where each message is its own QUIC stream"
+    answer: 1
+    explanation: |
+      The compressed-flag byte in each message's 5-byte prefix indicates whether that
+      specific message is compressed, so compression can vary message-to-message (and by
+      direction) within one stream. Message 1 sets the flag to 1, message 2 to 0.
+    ref: "concepts.md#message-compression"
+
+  - id: grpc-protocol-buffers-078
+    difficulty: expert
+    tags: [wire-format, determinism, hashing]
+    question: |
+      A team hashes serialized protobuf bytes to dedupe logically identical messages and
+      finds duplicates slipping through (false negatives). What is the fundamental problem?
+    options:
+      - "Protobuf adds a random nonce to every message"
+      - "Protobuf serialization is non-deterministic by default (map order, encoder choices), so equal messages can produce different bytes; there is no canonical form stable across languages/versions"
+      - "The hash function collides on protobuf's varint encoding"
+      - "Unknown fields are always stripped, changing the bytes each time"
+    answer: 1
+    explanation: |
+      Protobuf has no canonical serialization. Map ordering and encoder choices vary, and
+      even deterministic mode is only stable within one binary. Two encoders can emit
+      different bytes for the same logical message, so hashing serialized bytes is unreliable.
+    ref: "concepts.md#wire-format-edge-cases-maps-merge-and-determinism"
+
+  - id: grpc-protocol-buffers-079
+    difficulty: expert
+    tags: [wire-format, merge, concatenation]
+    question: |
+      Two serialized protobuf messages a and b of the same type are concatenated and parsed
+      as parse(a + b). For a singular sub-message field present in both, a repeated field,
+      and a singular scalar, what is the result?
+    options:
+      - "Parsing fails because a field number appears twice"
+      - "Only the fields from a survive; b is ignored after the first message ends"
+      - "Sub-messages merge recursively, repeated fields concatenate, and the singular scalar takes the last (b's) value — i.e. parse(a).MergeFrom(parse(b))"
+      - "All duplicate fields are dropped and set to their defaults"
+    answer: 2
+    explanation: |
+      Concatenation equals merge: parse(a+b) == parse(a).MergeFrom(parse(b)). Repeated fields
+      concatenate, singular scalars are last-one-wins (b), and embedded messages merge
+      recursively. This is a defining property of the wire format.
+    ref: "concepts.md#wire-format-edge-cases-maps-merge-and-determinism"
+
+  - id: grpc-protocol-buffers-080
+    difficulty: advanced
+    tags: [wire-format, map, encoding]
+    question: |
+      How is a protobuf map<string, int32> represented on the wire?
+    options:
+      - "As a single JSON object inside a bytes field"
+      - "As a repeated entry message with key = field 1 and value = field 2 (LEN records); entry order is not guaranteed"
+      - "As two parallel packed arrays, one of keys and one of values"
+      - "As a special MAP wire type (6) with inline key/value pairs"
+    answer: 1
+    explanation: |
+      A map is syntactic sugar for repeated message { key = 1; value = 2; } encoded as LEN
+      records. There is no dedicated map wire type, and entry ordering on the wire is
+      unspecified — a common reason not to rely on serialized-byte equality.
+    ref: "concepts.md#wire-format-edge-cases-maps-merge-and-determinism"
+
+  - id: grpc-protocol-buffers-081
+    difficulty: advanced
+    tags: [wire-format, packed, interop]
+    question: |
+      A field defined as repeated int32 was originally serialized in unpacked form by an old
+      writer; a new schema marks it [packed=true]. Can a new (packed-expecting) parser read
+      the old unpacked bytes?
+    options:
+      - "No; unpacked and packed encodings are wire-incompatible and parsing fails"
+      - "Only if the field number is below 16"
+      - "Only if the values are non-negative"
+      - "Yes; compliant parsers must accept both packed and unpacked repeated encodings, so toggling [packed] is wire-compatible"
+    answer: 3
+    explanation: |
+      For interoperability the spec requires parsers to accept a repeated numeric field in
+      either packed or unpacked form regardless of the current schema setting, so switching
+      the [packed] option is a safe, wire-compatible change.
+    ref: "concepts.md#wire-format-edge-cases-maps-merge-and-determinism"
+
+  - id: grpc-protocol-buffers-082
+    difficulty: expert
+    tags: [presence, fieldmask, patch]
+    question: |
+      An API offers PATCH semantics where a client wants to set count to 0 (explicitly) or
+      leave it unchanged. Why does an implicit-presence proto3 int32 fail here, and what
+      fixes it?
+    options:
+      - "It fails because int32 can't hold 0; switch to int64"
+      - "It fails because PATCH requires the required keyword, which proto3 removed"
+      - "It fails because implicit-presence defaults aren't serialized, so 0 is indistinguishable from unset; use optional (explicit presence) or a FieldMask of paths to update"
+      - "It works fine; proto3 always tracks presence for scalars"
+    answer: 2
+    explanation: |
+      With implicit presence, a field equal to its default isn't serialized and reads as the
+      default whether set or absent, so 0 and unset collapse. Marking it optional (explicit
+      presence) or using a FieldMask to name updated paths restores clear PATCH semantics.
+    ref: "concepts.md#field-presence-deeper"
+
+  - id: grpc-protocol-buffers-083
+    difficulty: expert
+    tags: [presence, oneof, serialization]
+    question: |
+      Which of these fields will serialize its value even when that value equals the type
+      default (e.g. 0 or "")?
+    options:
+      - "A proto3 scalar declared without optional (implicit presence)"
+      - "A repeated field with a single zero element removed"
+      - "An explicit-presence field: an optional scalar, a message field, or a oneof member that was explicitly set"
+      - "A map entry whose value is the default"
+    answer: 2
+    explanation: |
+      Explicit presence (optional scalar, message-typed field, or a set oneof member) tracks
+      a hasbit, so an explicitly-set default value is still serialized. Implicit-presence
+      scalars at their default are omitted, and repeated/maps never track presence.
+    ref: "concepts.md#field-presence-deeper"
+
+  - id: grpc-protocol-buffers-084
+    difficulty: expert
+    tags: [editions, features, proto2-proto3]
+    question: |
+      Protobuf Editions (edition = "2023") replace the proto2/proto3 syntax split. How is a
+      field's presence behavior or an enum's openness now controlled?
+    options:
+      - "By choosing syntax = proto2 vs proto3 at the top of the file, as before"
+      - "Via features such as field_presence (IMPLICIT/EXPLICIT/LEGACY_REQUIRED) and enum_type (OPEN/CLOSED) applied at file/message/field scope"
+      - "By setting a runtime flag in the generated code"
+      - "Editions removed enums and implicit presence entirely"
+    answer: 1
+    explanation: |
+      Editions unify proto2 and proto3 into one language whose behaviors are tuned by
+      features (field_presence, enum_type, repeated_field_encoding, utf8_validation) scoped
+      per file/message/field, rather than a single syntax keyword.
+    ref: "concepts.md#protobuf-editions-2023-and-2024"
+
+  - id: grpc-protocol-buffers-085
+    difficulty: advanced
+    tags: [interceptors, middleware, cross-cutting]
+    question: |
+      Where in a gRPC application do concerns like auth validation, tracing propagation, and
+      metrics typically live, without polluting business logic?
+    options:
+      - "Inside each generated message's serialize method"
+      - "In the .proto file as service-level annotations executed by protoc"
+      - "In the HPACK dynamic table configuration"
+      - "In interceptors (client/server, unary/streaming) that chain around the handler/stub"
+    answer: 3
+    explanation: |
+      Interceptors are gRPC's middleware: unary/streaming and client/server variants that
+      chain around each call. Auth, deadline injection, retries, logging, metrics, and
+      tracing live there, mirroring HTTP middleware and keeping handlers focused.
+    ref: "concepts.md#interceptors-and-middleware"
+
+  - id: grpc-protocol-buffers-086
+    difficulty: expert
+    tags: [security, tls, alpn]
+    question: |
+      A gRPC client fails to establish HTTP/2 to a TLS endpoint and silently negotiates
+      HTTP/1.1, breaking gRPC. Which TLS-handshake mechanism is responsible for selecting
+      HTTP/2, and what token must be negotiated?
+    options:
+      - "SNI, which must carry the value grpc"
+      - "The TLS session ticket, which must contain http2"
+      - "ALPN, which must negotiate the token h2 to select HTTP/2"
+      - "OCSP stapling, which advertises h2 support"
+    answer: 2
+    explanation: |
+      HTTP/2 over TLS is selected by ALPN negotiating the token h2 during the handshake. If
+      ALPN doesn't agree on h2 (misconfigured endpoint/proxy), the peer may fall back to
+      HTTP/1.1, which native gRPC cannot use.
+    ref: "concepts.md#transport-security-tls-mtls-and-credentials"
+
+  - id: grpc-protocol-buffers-087
+    difficulty: advanced
+    tags: [security, credentials, composition]
+    question: |
+      In gRPC, what is the distinction between channel credentials and call credentials, and
+      how do they relate?
+    options:
+      - "Channel credentials are the per-RPC token; call credentials are the TLS certificate"
+      - "Channel credentials secure the transport (TLS/mTLS identity); call credentials attach per-RPC caller identity (e.g. a bearer token in authorization metadata) and compose on top of a secured channel"
+      - "They are two names for the same TLS certificate"
+      - "Call credentials replace channel credentials once the first RPC succeeds"
+    answer: 1
+    explanation: |
+      Channel credentials establish transport security/identity (TLS or mTLS) for the
+      connection; call credentials carry per-RPC identity such as an OAuth bearer token in
+      authorization metadata. They compose, and call credentials are only sent over a secured
+      channel so tokens aren't exposed in plaintext.
+    ref: "concepts.md#transport-security-tls-mtls-and-credentials"
+
+  - id: grpc-protocol-buffers-088
+    difficulty: expert
+    tags: [http2, status-details-bin, errors]
+    question: |
+      A client needs structured error details — an error code plus a QuotaFailure describing
+      which quota was exceeded. Where does gRPC carry this, and in what form?
+    options:
+      - "In the grpc-message trailer as a human-readable string only"
+      - "As a second DATA frame after the response message"
+      - "In the :status pseudo-header extended with a sub-code"
+      - "In the grpc-status-details-bin trailer, a base64-encoded google.rpc.Status whose details field holds Any-packed messages like QuotaFailure"
+    answer: 3
+    explanation: |
+      Rich errors travel in grpc-status-details-bin: a base64-encoded google.rpc.Status
+      (numeric code, message, and a details list of Any-packed payloads such as QuotaFailure,
+      BadRequest, RetryInfo) — far richer than the flat grpc-status/grpc-message trailers.
+    ref: "concepts.md#http2-mapping-internals-flow-control-goaway-and-trailers-only"
+
+  - id: grpc-protocol-buffers-089
+    difficulty: advanced
+    tags: [wire-format, groups, limits]
+    question: |
+      Which statement about protobuf groups and message size limits is correct?
+    options:
+      - "Groups use wire types 3/4 (SGROUP/EGROUP) as a deprecated delimited framing, and a single message is limited to 2 GiB"
+      - "Groups are the modern replacement for embedded messages and have no size limit"
+      - "Groups use wire type 2 (LEN) exactly like sub-messages and are recommended"
+      - "There is no size limit on a protobuf message; only the transport imposes one"
+    answer: 0
+    explanation: |
+      Groups bracket a submessage with start/end tags (wire types 3 and 4) instead of a
+      length prefix; they're deprecated but still legal on the wire. A single protobuf
+      message is capped at 2 GiB, and string/bytes lengths are int32 varints (~2 GB).
+    ref: "concepts.md#wire-format-edge-cases-maps-merge-and-determinism"
+
+  - id: grpc-protocol-buffers-090
+    difficulty: intermediate
+    tags: [retries, previous-attempts, metadata]
+    question: |
+      When gRPC's automatic retry mechanism re-issues an RPC, how can the server tell it is a
+      retry and which attempt number it is?
+    options:
+      - "The :path pseudo-header gains a ?retry=N query parameter"
+      - "The client adds grpc-previous-rpc-attempts metadata with the count of prior attempts"
+      - "The grpc-status trailer of the prior attempt is echoed in the new request body"
+      - "There is no way; retries are invisible to the server"
+    answer: 1
+    explanation: |
+      On each retry the client sets grpc-previous-rpc-attempts to the integer number of
+      already-completed attempts, so a server (or observability tooling) can distinguish
+      retries and correlate them.
+    ref: "concepts.md#retries-hedging-and-retry-throttling"

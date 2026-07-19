@@ -988,3 +988,737 @@ questions:
       serve traffic.
     ref: "concepts.md#health-checks"
 
+  - id: proxies-gateways-load-balancing-057
+    difficulty: advanced
+    tags: [consistent-hashing, modulo, cache]
+    question: |
+      A distributed cache uses `server = hash(key) % N` to shard keys. You add one node,
+      growing the pool from 4 to 5, and the origin database is instantly overwhelmed. What
+      happened?
+    options:
+      - "Changing the divisor N remaps roughly (N-1)/N of all keys, so ~80% of keys now resolve to a different (empty) shard, causing a mass cache miss and origin stampede"
+      - "The new node advertised a duplicate VIP and blackholed traffic"
+      - "TLS session tickets became invalid across the pool"
+      - "Round robin overloaded the newest node because of slow start"
+    answer: 0
+    explanation: |
+      With modulo hashing, every key's mapping depends on N. Going 4→5 changes the result for
+      about (N-1)/N ≈ 80% of keys, so most lookups miss their old shard and fall through to the
+      origin at once. Consistent/Maglev hashing bounds the remap to ~K/N keys precisely to
+      avoid this.
+    ref: "concepts.md#consistent-hashing-done-right-ring-and-virtual-nodes"
+
+  - id: proxies-gateways-load-balancing-058
+    difficulty: advanced
+    tags: [consistent-hashing, virtual-nodes]
+    question: |
+      Why do consistent-hashing rings place each physical backend at MANY points (virtual
+      nodes) rather than a single point?
+    options:
+      - "To encrypt the ring positions against tampering"
+      - "Because a single point per backend gives uneven arc sizes (load skew) and cannot express weights; many small arcs smooth load and let weight be tuned by vnode count"
+      - "To guarantee zero keys move when the pool changes"
+      - "Because the ring must contain exactly 2^32 backends"
+    answer: 1
+    explanation: |
+      One point per node yields arcs of wildly different sizes, so load is skewed and you can't
+      express heterogeneous capacity. Hashing each node to many points averages many small arcs
+      toward even load, and assigning a bigger box more virtual nodes expresses its weight. The
+      cost is more ring memory and lookup work.
+    ref: "concepts.md#consistent-hashing-done-right-ring-and-virtual-nodes"
+
+  - id: proxies-gateways-load-balancing-059
+    difficulty: expert
+    tags: [maglev, hashing, l4]
+    question: |
+      Maglev hashing is preferred over a literal hash ring for per-packet L4 load balancing at
+      line rate primarily because it:
+    options:
+      - "Sends each packet to every backend for redundancy"
+      - "Requires no hashing of the 4-tuple at all"
+      - "Precomputes a fixed-size lookup table giving O(1) per-packet lookup with near-perfect even balance and minimal disruption on membership change"
+      - "Decrypts the TLS SNI faster than a ring can"
+    answer: 2
+    explanation: |
+      Maglev builds a prime-size lookup table from per-backend permutations, so each packet is a
+      single O(1) table index rather than a ring walk. It achieves near-perfect balance and only
+      minimal reshuffling when membership changes — exactly the properties a per-packet L4
+      forwarder needs.
+    ref: "concepts.md#maglev-and-rendezvous-hashing"
+
+  - id: proxies-gateways-load-balancing-060
+    difficulty: expert
+    tags: [rendezvous, hrw, hashing]
+    question: |
+      In rendezvous (Highest-Random-Weight) hashing, how is a key assigned to a node, and what
+      is the main cost?
+    options:
+      - "The key is hashed modulo N; cost is total remapping on resize"
+      - "The key walks clockwise to the next node on a ring; cost is virtual-node bookkeeping"
+      - "The key is broadcast to all nodes; cost is duplicated storage"
+      - "For the key, compute hash(key, node) for every node and pick the maximum; cost is O(N) work per lookup"
+    answer: 3
+    explanation: |
+      HRW scores every node for the key with hash(key, node) and selects the highest. Removing a
+      node only reshuffles the keys that scored highest on it, so disruption is minimal and there
+      is no ring/vnode state — but you must score all N nodes per lookup, making it O(N).
+    ref: "concepts.md#maglev-and-rendezvous-hashing"
+
+  - id: proxies-gateways-load-balancing-061
+    difficulty: advanced
+    tags: [draining, deregistration, deploy]
+    question: |
+      During a zero-downtime backend removal, what does a 'deregistration delay' / drain timeout
+      accomplish?
+    options:
+      - "It lets in-flight connections finish while no new connections are sent, before the backend is force-closed"
+      - "It delays health checks so the backend looks healthy longer"
+      - "It rewrites the client source IP during shutdown"
+      - "It forces all clients onto HTTP/1.1"
+    answer: 0
+    explanation: |
+      Draining stops routing new work to the backend but allows existing in-flight requests to
+      complete up to the drain timeout, after which remaining connections are closed. This is how
+      you deploy/scale-in without resetting live requests.
+    ref: "concepts.md#connection-draining-and-graceful-backend-removal"
+
+  - id: proxies-gateways-load-balancing-062
+    difficulty: expert
+    tags: [http2, goaway, draining]
+    question: |
+      An L7 proxy needs to gracefully move clients off a backend that holds long-lived HTTP/2
+      connections. The cleanest wire mechanism is to:
+    options:
+      - "Send a TCP RST on each connection immediately"
+      - "Send an HTTP/2 GOAWAY frame (RFC 9113 §6.8) so peers finish streams below the last-stream-ID and open a new connection for the rest"
+      - "Return HTTP 429 to every stream"
+      - "Lower the TCP window to zero"
+    answer: 1
+    explanation: |
+      GOAWAY tells the peer the highest stream ID that will be processed; streams above it are not
+      served and the client establishes a fresh connection (landing on a live backend). An RST
+      would abort in-flight streams; GOAWAY drains them gracefully.
+    ref: "concepts.md#connection-draining-and-graceful-backend-removal"
+
+  - id: proxies-gateways-load-balancing-063
+    difficulty: advanced
+    tags: [lame-duck, draining, health-checks]
+    question: |
+      What is 'lame-duck' mode when retiring a backend?
+    options:
+      - "The backend refuses new TLS handshakes but keeps serving over plaintext"
+      - "The backend deliberately starts failing its health check (or reports not-ready) so the LB bleeds traffic off it before the process actually stops"
+      - "The LB mirrors the backend's traffic to a standby"
+      - "The backend switches from L7 to L4 to shed load"
+    answer: 1
+    explanation: |
+      In lame-duck mode the shutting-down backend intentionally fails readiness/health checks so
+      the LB stops routing to it and existing work drains, converting an abrupt kill into a
+      graceful removal. It ties into readiness gates.
+    ref: "concepts.md#connection-draining-and-graceful-backend-removal"
+
+  - id: proxies-gateways-load-balancing-064
+    difficulty: expert
+    tags: [grpc, http2, connection-pinning, scenario]
+    question: |
+      You scale a gRPC service from 3 to 13 pods, but the original 3 pods stay pinned at 100%
+      CPU while the 10 new pods sit idle. What is the root cause?
+    options:
+      - "The new pods failed their health checks and were ejected"
+      - "gRPC uses UDP and cannot be balanced"
+      - "Clients hold long-lived multiplexed HTTP/2 connections pinned to the original backends, so per-connection balancing never routes new requests to the new pods"
+      - "The LB switched to IP-hash affinity automatically"
+    answer: 2
+    explanation: |
+      HTTP/2 multiplexes all of a client's requests onto one persistent connection. A connection-
+      level (L4 or connect-time L7) LB pins that connection to a backend, so existing clients
+      never reach the new pods. Fixes: L7 per-request balancing, client-side/lookaside (xDS) LB,
+      or max-connection-age + GOAWAY to force rebalancing.
+    ref: "concepts.md#load-balancing-http2-and-grpc-long-lived-connections"
+
+  - id: proxies-gateways-load-balancing-065
+    difficulty: expert
+    tags: [grpc, lookaside, xds]
+    question: |
+      In lookaside (one-arm) gRPC load balancing (e.g. gRPC-LB / xDS), how does the request path
+      work?
+    options:
+      - "Every request is proxied through the control plane, which forwards it to a backend"
+      - "The client queries a control plane for the current endpoint set, then connects directly to backends, keeping the control plane off the data path"
+      - "The control plane rewrites the client's source IP per request"
+      - "Backends poll the control plane and pull requests from a queue"
+    answer: 1
+    explanation: |
+      Lookaside balancing separates the control plane (which hands clients the endpoint list and
+      policy) from the data plane (client connects straight to the chosen backend). This keeps
+      per-request latency low while centralizing membership decisions — unlike a proxy that sits
+      inline on every request.
+    ref: "concepts.md#load-balancing-http2-and-grpc-long-lived-connections"
+
+  - id: proxies-gateways-load-balancing-066
+    difficulty: advanced
+    tags: [max-connection-age, http2, rebalancing]
+    question: |
+      Even behind a dumb L4 LB, setting a server-side 'max-connection-age' on an HTTP/2 service
+      helps rebalancing because:
+    options:
+      - "It shrinks the TLS record size"
+      - "It periodically sends GOAWAY and closes aged connections, forcing clients to reconnect and land on (possibly newer) backends"
+      - "It disables multiplexing so each request is a new connection"
+      - "It switches the connection to HTTP/1.1 after the age limit"
+    answer: 1
+    explanation: |
+      Long-lived HTTP/2 connections stay pinned indefinitely under an L4 LB. Bounding connection
+      age makes the server emit GOAWAY and recycle the connection, so clients reconnect and the
+      L4 LB gets a fresh chance to spread them across the current (including newly added) pool.
+    ref: "concepts.md#load-balancing-http2-and-grpc-long-lived-connections"
+
+  - id: proxies-gateways-load-balancing-067
+    difficulty: advanced
+    tags: [transparent-proxy, tproxy, client-ip]
+    question: |
+      A transparent (intercepting) proxy differs from an ordinary reverse proxy chiefly in that:
+    options:
+      - "It requires the client to configure it explicitly in proxy settings"
+      - "It can only forward UDP"
+      - "The network redirects traffic into it with no client configuration, and with TPROXY/IP_TRANSPARENT it can originate backend connections spoofing the client's real source IP"
+      - "It always terminates TLS with the client's own certificate"
+    answer: 2
+    explanation: |
+      A transparent proxy is spliced in by routing/WCCP/iptables/eBPF with no client config. Using
+      TPROXY / IP_TRANSPARENT it can preserve the client's source IP toward the backend by
+      spoofing it — something a normal terminating proxy cannot do (it would use its own IP).
+    ref: "concepts.md#transparent-intercepting-proxies"
+
+  - id: proxies-gateways-load-balancing-068
+    difficulty: intermediate
+    tags: [transparent-proxy, service-mesh, sidecar]
+    question: |
+      How does a service-mesh sidecar typically capture a pod's outbound traffic without the
+      application being reconfigured?
+    options:
+      - "The application must be recompiled against the mesh SDK"
+      - "The mesh installs iptables/eBPF rules that transparently redirect the pod's traffic into the local sidecar proxy"
+      - "DNS is disabled so all traffic goes to the sidecar"
+      - "The kernel routes all traffic to a central gateway"
+    answer: 1
+    explanation: |
+      Meshes use transparent interception: iptables or eBPF rules on the pod redirect outbound
+      (and inbound) connections into the co-located sidecar, so the unmodified app's traffic is
+      proxied without any client-side configuration.
+    ref: "concepts.md#transparent-intercepting-proxies"
+
+  - id: proxies-gateways-load-balancing-069
+    difficulty: expert
+    tags: [proxy-protocol, client-ip, l4]
+    question: |
+      Why is the PROXY protocol needed to convey the client IP through an L4 proxy, when
+      X-Forwarded-For already exists?
+    options:
+      - "X-Forwarded-For is encrypted and unreadable"
+      - "At L4 there is no HTTP layer to carry XFF, so PROXY protocol prepends the real client/dest addresses as a header before the application bytes"
+      - "PROXY protocol compresses the client IP"
+      - "X-Forwarded-For only works for IPv6"
+    answer: 1
+    explanation: |
+      XFF is an HTTP header and requires the proxy to parse/inject HTTP — an L7 activity. An L4
+      proxy forwards opaque bytes and can't add HTTP headers, so PROXY protocol prepends a small
+      out-of-band header (before the app stream) carrying the true source/destination addresses.
+    ref: "concepts.md#proxy-protocol-v1-and-v2"
+
+  - id: proxies-gateways-load-balancing-070
+    difficulty: expert
+    tags: [proxy-protocol, security]
+    question: |
+      What is the critical security requirement when a backend is configured to expect the PROXY
+      protocol?
+    options:
+      - "It must accept the PROXY header from any sender to be interoperable"
+      - "It must accept the header only from a trusted set of upstream proxies and reject connections that lack it; otherwise any client can forge its source IP"
+      - "It must strip the header and ignore it"
+      - "It must re-encrypt the header with TLS"
+    answer: 1
+    explanation: |
+      If a backend trusts a PROXY header from arbitrary senders, a client can prepend a forged
+      line and spoof its source IP — the same trust problem as XFF. The receiver must allowlist
+      trusted senders and, when expecting the header, reject connections that omit it.
+    ref: "concepts.md#proxy-protocol-v1-and-v2"
+
+  - id: proxies-gateways-load-balancing-071
+    difficulty: intermediate
+    tags: [proxy-protocol, v1-v2, wire-format]
+    question: |
+      Which correctly describes the PROXY protocol v1 vs v2 wire formats?
+    options:
+      - "v1 is a human-readable ASCII line (e.g. `PROXY TCP4 <src> <dst> <sport> <dport>`); v2 is binary starting with a fixed 12-byte signature and supports TLV extensions"
+      - "v1 is binary and v2 is ASCII"
+      - "Both are JSON documents"
+      - "v2 removes address information to save bandwidth"
+    answer: 0
+    explanation: |
+      v1 is a textual line ending in CRLF listing family, source/dest IPs and ports; v2 is a
+      compact binary header beginning with a 12-byte signature, followed by version/command and
+      family bytes, addresses, and optional TLVs (ALPN, SNI, TLS info, cloud VPCE IDs).
+    ref: "concepts.md#proxy-protocol-v1-and-v2"
+
+  - id: proxies-gateways-load-balancing-072
+    difficulty: expert
+    tags: [outlier-detection, panic-threshold, scenario]
+    question: |
+      During an incident, ~60% of your backends start failing health checks and, surprisingly,
+      overall latency gets WORSE, not better. The LB defaults to a 50% panic threshold. What is
+      it doing?
+    options:
+      - "It ejected 60% of hosts and is queueing requests for the healthy 40%"
+      - "The healthy fraction fell below the panic threshold, so the LB ignores health status and load-balances across ALL hosts, including ones marked unhealthy"
+      - "It switched to DSR to shed load"
+      - "It disabled retries, so failures surface immediately"
+    answer: 1
+    explanation: |
+      When the healthy fraction drops below the panic threshold (Envoy default 50%), the LB
+      assumes its health view is unreliable (likely correlated failure) and stops honoring health
+      status, spreading traffic across every host. That's usually safer than hammering a tiny
+      'healthy' subset, but it means unhealthy hosts receive traffic — which can look like worse
+      latency.
+    ref: "concepts.md#outlier-detection-and-the-panic-threshold"
+
+  - id: proxies-gateways-load-balancing-073
+    difficulty: advanced
+    tags: [outlier-detection, max-ejection-percent]
+    question: |
+      What does the 'max-ejection-percent' parameter in outlier detection protect against?
+    options:
+      - "Ejecting so many backends that the pool is decimated, leaving too few hosts to serve traffic"
+      - "Clients spoofing the X-Forwarded-For header"
+      - "TLS renegotiation attacks"
+      - "Round robin overloading a single node"
+    answer: 0
+    explanation: |
+      max-ejection-percent caps the fraction of the pool that outlier detection may eject at once.
+      Without it, a correlated failure signal (or a bad dependency) could eject nearly every
+      host, removing capacity exactly when it's needed. It bounds the blast radius of ejection.
+    ref: "concepts.md#outlier-detection-and-the-panic-threshold"
+
+  - id: proxies-gateways-load-balancing-074
+    difficulty: expert
+    tags: [outlier-detection, success-rate]
+    question: |
+      Which ejection mode distinguishes 'statistical/success-rate' outlier detection from
+      simple consecutive-5xx ejection?
+    options:
+      - "It ejects a host only after a fixed number of back-to-back 5xx responses"
+      - "It ejects a host whose success rate is a set number of standard deviations below the pool mean, catching a host that is merely worse than its peers rather than fully broken"
+      - "It ejects on any single timeout"
+      - "It only ejects hosts that fail active probes"
+    answer: 1
+    explanation: |
+      Success-rate ejection compares each host against the population: a host statistically worse
+      than the fleet mean (below a standard-deviation threshold) is ejected even without a run of
+      consecutive hard failures. Consecutive-5xx only reacts to back-to-back errors on one host.
+    ref: "concepts.md#outlier-detection-and-the-panic-threshold"
+
+  - id: proxies-gateways-load-balancing-075
+    difficulty: advanced
+    tags: [slow-start, scenario]
+    question: |
+      A just-restarted backend with least-connections balancing immediately gets flooded because
+      it shows zero active connections, then times out and flaps. Which feature addresses this?
+    options:
+      - "Sticky sessions by cookie"
+      - "TLS passthrough"
+      - "Slow start — ramping the new backend's traffic share up gradually over a warm-up window instead of giving it full share instantly"
+      - "Direct Server Return"
+    answer: 2
+    explanation: |
+      A cold backend has empty caches/pools and un-JITed code; with least-connections its zero
+      connection count makes it look most attractive, so it gets slammed and flaps. Slow start
+      ramps its weight up over a window so it warms under partial load before taking full share.
+    ref: "concepts.md#slow-start-for-new-backends"
+
+  - id: proxies-gateways-load-balancing-076
+    difficulty: expert
+    tags: [quic, http3, connection-migration, scenario]
+    question: |
+      A client downloading over HTTP/3 roams from Wi-Fi to LTE mid-transfer (its IP and port
+      change) but the download continues uninterrupted. For an L4 LB fronting the QUIC servers,
+      what must it route on?
+    options:
+      - "The 4-tuple, which stays constant across the roam"
+      - "The TLS SNI in every packet"
+      - "The QUIC Destination Connection ID (not the 4-tuple), since connection migration changes the client's IP/port but keeps the same Connection ID"
+      - "The source MAC address"
+    answer: 2
+    explanation: |
+      QUIC connection migration (RFC 9000 §9) lets the client change IP/port while keeping the
+      connection alive, so the 4-tuple is not a stable key. QUIC identifies connections by
+      Connection IDs; the LB must route on the Destination Connection ID (per QUIC-LB, with a
+      routing prefix encoded into the CID) to keep a migrating client on the same backend.
+    ref: "concepts.md#load-balancing-quic-and-http3"
+
+  - id: proxies-gateways-load-balancing-077
+    difficulty: expert
+    tags: [quic-lb, connection-id, ecmp]
+    question: |
+      The QUIC-LB draft has the server encode a routing prefix into the Connection ID it issues.
+      Why is that useful for a stateless L4 LB fleet?
+    options:
+      - "It lets any LB node derive the correct backend from the CID without shared connection-tracking state, so an ECMP re-pin to a different LB node still resolves the same backend"
+      - "It encrypts the payload so the LB can read it"
+      - "It removes the need for UDP"
+      - "It forces all packets of a connection onto one physical link"
+    answer: 0
+    explanation: |
+      Encoding a backend-routing prefix into the CID means every LB node can independently map a
+      packet to its backend just by reading the CID — no synchronized flow table. So even if ECMP
+      shifts a flow to a different LB node, that node still routes it to the same backend, which
+      is the stateless analog of connection tracking.
+    ref: "concepts.md#load-balancing-quic-and-http3"
+
+  - id: proxies-gateways-load-balancing-078
+    difficulty: expert
+    tags: [ech, sni, tls, scenario]
+    question: |
+      You do TLS passthrough and route by SNI. After a browser update, a fraction of clients can
+      no longer be routed to the correct backend pool. What most likely changed?
+    options:
+      - "Those clients switched to HTTP/1.0"
+      - "The clients enabled Encrypted Client Hello (ECH), which encrypts the inner ClientHello including server_name, so the LB now sees only the outer/public name and can't route on the real SNI"
+      - "The LB's certificate expired"
+      - "The clients started using IPv6"
+    answer: 1
+    explanation: |
+      ECH (a TLS 1.3 extension) encrypts the inner ClientHello, hiding server_name from anyone who
+      can't decrypt it. A passthrough LB then sees only the outer public name and loses the SNI it
+      relied on for routing — so ECH-enabled clients can't be steered to the right pool without
+      terminating TLS at a node that holds the ECH keys.
+    ref: "concepts.md#encrypted-client-hello-ech-and-sni-routing"
+
+  - id: proxies-gateways-load-balancing-079
+    difficulty: expert
+    tags: [request-smuggling, cl-te, security]
+    question: |
+      In a CL.TE request-smuggling attack, the desync arises because:
+    options:
+      - "The client sends two TCP connections that the LB merges"
+      - "The request includes both Content-Length and Transfer-Encoding, and the front-end uses one to delimit the body while the back-end uses the other, so their request boundaries disagree"
+      - "The TLS record is fragmented across packets"
+      - "The HTTP/2 stream ID overflows"
+    answer: 1
+    explanation: |
+      CL.TE means the front-end honors Content-Length while the back-end honors Transfer-Encoding
+      (chunked). Because they parse the body length differently, part of the attacker's payload is
+      treated as the start of the next request on the back-end — smuggling. RFC 9112 §6.3 says
+      Transfer-Encoding overrides Content-Length and such messages ought to be handled as an error.
+    ref: "concepts.md#http-request-smuggling"
+
+  - id: proxies-gateways-load-balancing-080
+    difficulty: expert
+    tags: [request-smuggling, cache-poisoning, scenario]
+    question: |
+      After putting a caching reverse proxy in front of your app, users occasionally receive
+      other users' authenticated pages. Which class of bug most directly explains this?
+    options:
+      - "TLS session resumption landing on the wrong backend"
+      - "Request smuggling / cache poisoning — a desync (e.g. CL.TE or an HTTP/2→1.1 downgrade) lets a smuggled request's response be cached and served to other users, compounded by a bad cache key"
+      - "Round robin sending requests to the wrong pool"
+      - "Slow start ramping a cold backend"
+    answer: 1
+    explanation: |
+      When a smuggled request's response gets stored in the shared cache under a normal key, later
+      users are served that poisoned entry — including someone else's authenticated content. The
+      caching layer amplifies a front/back-end framing desync into cross-user data exposure.
+    ref: "concepts.md#http-request-smuggling"
+
+  - id: proxies-gateways-load-balancing-081
+    difficulty: expert
+    tags: [request-smuggling, http2-downgrade, mitigation]
+    question: |
+      Which mitigation most fundamentally eliminates HTTP/2-downgrade (H2.CL / H2.TE) smuggling?
+    options:
+      - "Increasing the LB's idle timeout"
+      - "Speaking HTTP/2 end-to-end so there is no HTTP/2→HTTP/1.1 downgrade to mis-serialize length/chunking"
+      - "Enabling sticky sessions"
+      - "Switching to least-connections balancing"
+    answer: 1
+    explanation: |
+      H2.CL/H2.TE arise when the front-end downgrades HTTP/2 to HTTP/1.1 and mis-serializes the
+      body framing. Keeping HTTP/2 to the backend removes the downgrade step (HTTP/2 has explicit,
+      length-prefixed framing without CL/TE ambiguity), eliminating that smuggling vector.
+    ref: "concepts.md#http-request-smuggling"
+
+  - id: proxies-gateways-load-balancing-082
+    difficulty: expert
+    tags: [ecmp, consistent-hashing, connection-tracking, scenario]
+    question: |
+      You run a fleet of stateless L4 LB nodes behind ECMP, all advertising the same VIP. A node
+      dies, ECMP re-pins some existing flows to a different LB node, and those connections reset.
+      What design prevents the resets?
+    options:
+      - "Give each LB node a unique VIP so ECMP never re-pins"
+      - "Have every LB node independently pick the SAME backend for a given flow using Maglev/consistent hashing (plus connection tracking), so a re-pinned flow still reaches its original backend"
+      - "Disable ECMP and use a single LB node"
+      - "Terminate TLS on the LB to add stickiness"
+    answer: 1
+    explanation: |
+      ECMP can move a live flow to a different LB node when membership changes. If each node
+      independently maps the flow to the same backend (via Maglev/consistent hashing, backed by
+      connection tracking for correctness), the re-pinned packets still reach the original
+      backend and the connection survives. This is why consistent hashing matters at the LB tier.
+    ref: "concepts.md#ecmp-and-anycast-for-scaling-l4-fleets"
+
+  - id: proxies-gateways-load-balancing-083
+    difficulty: advanced
+    tags: [anycast, vip, ddos]
+    question: |
+      Advertising the same VIP via BGP from many geographic sites (anycast) primarily provides:
+    options:
+      - "Guaranteed in-order packet delivery"
+      - "Automatic TLS termination"
+      - "Routing clients to the nearest site for lower latency and spreading/absorbing DDoS across sites"
+      - "Per-request L7 routing without a proxy"
+    answer: 2
+    explanation: |
+      Anycast lets the routing fabric steer each client to the topologically nearest site
+      advertising the VIP, cutting latency and dispersing volumetric attacks across many
+      points-of-presence. It operates at the routing layer, independent of L7 features or TLS.
+    ref: "concepts.md#ecmp-and-anycast-for-scaling-l4-fleets"
+
+  - id: proxies-gateways-load-balancing-084
+    difficulty: advanced
+    tags: [buffering, slowloris, streaming, scenario]
+    question: |
+      A proxy fully buffers each client request before forwarding it to the backend. This
+      defends against Slowloris, but users report that a Server-Sent Events (SSE) endpoint and
+      large streaming uploads no longer work in real time. What is the correct fix?
+    options:
+      - "Increase the connect timeout"
+      - "Enable streaming/pass-through mode for those routes so bytes flow as they arrive, while keeping request buffering for ordinary endpoints"
+      - "Switch those routes to L4 passthrough only"
+      - "Disable health checks on the streaming backend"
+    answer: 1
+    explanation: |
+      Request buffering absorbs slow/trickle clients (Slowloris defense) but delays streaming
+      because it withholds bytes until the message is complete. SSE, gRPC streaming, and large
+      uploads/downloads need pass-through/streaming so data flows incrementally — typically
+      configured per-route rather than globally.
+    ref: "concepts.md#timeouts-buffering-and-streaming"
+
+  - id: proxies-gateways-load-balancing-085
+    difficulty: advanced
+    tags: [timeouts, idle-timeout, scenario]
+    question: |
+      Clients intermittently see 'connection reset' on reused keep-alive connections through a
+      proxy. The proxy's idle timeout is 60 s; the backend's is 5 s. What is happening?
+    options:
+      - "The backend closes the idle connection at 5 s while the proxy still considers it usable and sends a request onto the half-closed connection, racing into a reset"
+      - "The proxy is buffering responses too aggressively"
+      - "TLS re-encryption doubled the crypto load"
+      - "Round robin chose a dead backend"
+    answer: 0
+    explanation: |
+      When the backend's idle timeout is shorter than the proxy's, the backend closes the pooled
+      connection first; the proxy, unaware, dispatches a new request onto a connection the backend
+      is tearing down, producing a reset. The fix is to make the proxy's idle timeout shorter than
+      the backend's (and/or retry idempotent requests).
+    ref: "concepts.md#timeouts-buffering-and-streaming"
+
+  - id: proxies-gateways-load-balancing-086
+    difficulty: expert
+    tags: [retries, idempotency, scenario]
+    question: |
+      A proxy is configured to auto-retry any request that times out. After a latency blip,
+      customers report being double-charged. What went wrong?
+    options:
+      - "Retries should never be used on any request"
+      - "The proxy retried non-idempotent POST requests; a timed-out payment that actually succeeded got resent, so the charge happened twice"
+      - "The retries used the wrong load-balancing algorithm"
+      - "TLS termination corrupted the request body"
+    answer: 1
+    explanation: |
+      A timeout doesn't mean the request failed — the backend may have processed it and the
+      response was just slow. Retrying a non-idempotent POST (a payment) re-executes the side
+      effect. Only safe/idempotent methods, or requests with an idempotency key, should be
+      auto-retried.
+    ref: "concepts.md#retries-hedging-and-idempotency-at-the-proxy"
+
+  - id: proxies-gateways-load-balancing-087
+    difficulty: expert
+    tags: [retries, retry-storm, retry-budget]
+    question: |
+      A multi-tier system where every layer retries 3× melts down under partial failure. Which
+      pair of techniques best contains the retry amplification?
+    options:
+      - "Longer timeouts and larger connection pools"
+      - "Sticky sessions and IP hashing"
+      - "Retry budgets (cap retries to a small fraction of requests) and circuit breaking (stop sending to a failing dependency for a cooldown)"
+      - "DSR and anycast"
+    answer: 2
+    explanation: |
+      Naive per-layer retries multiply (3×3×3 = 27× load) precisely during failure. A retry budget
+      caps retries as a percentage of traffic so they can't explode, and a circuit breaker stops
+      hammering a downstream that is already failing, letting it recover. Together they bound the
+      amplification.
+    ref: "concepts.md#retries-hedging-and-idempotency-at-the-proxy"
+
+  - id: proxies-gateways-load-balancing-088
+    difficulty: advanced
+    tags: [hedging, tail-latency]
+    question: |
+      Request hedging reduces tail latency by:
+    options:
+      - "Caching every response for reuse"
+      - "Sending a duplicate of an idempotent request to another backend after a latency threshold (e.g. p95) and taking whichever response returns first"
+      - "Compressing the request before sending"
+      - "Pinning the request to the fastest backend permanently"
+    answer: 1
+    explanation: |
+      Hedging fires a second copy of an idempotent request to a different backend once the first
+      exceeds a latency threshold, then uses the first response to arrive — trading extra load for
+      lower tail latency. It must be bounded by a hedge budget or it becomes a self-inflicted
+      retry storm.
+    ref: "concepts.md#retries-hedging-and-idempotency-at-the-proxy"
+
+  - id: proxies-gateways-load-balancing-089
+    difficulty: expert
+    tags: [service-mesh, mtls, spiffe]
+    question: |
+      In a service mesh, how do two services authenticate each other for east-west mTLS?
+    options:
+      - "By comparing source IP addresses against an allowlist"
+      - "By a shared API key in a header"
+      - "By cryptographic identity — a SPIFFE ID carried in an SVID (X.509 or JWT) presented during the mTLS handshake — rather than by IP"
+      - "By the gateway's JWT validation on north-south traffic"
+    answer: 2
+    explanation: |
+      Mesh east-west security binds identity to a SPIFFE ID encoded in an SVID (X.509 cert or
+      JWT), verified in the mTLS handshake, so services trust cryptographic identity, not spoofable
+      IPs. That complements the gateway's north-south auth (API keys/JWT/OAuth) at the edge.
+    ref: "concepts.md#service-mesh-xds-and-the-gateway-boundary"
+
+  - id: proxies-gateways-load-balancing-090
+    difficulty: advanced
+    tags: [xds, control-plane, service-mesh]
+    question: |
+      The xDS API family (LDS/RDS/CDS/EDS) used by modern proxies and meshes serves what role?
+    options:
+      - "It is a wire encryption protocol replacing TLS"
+      - "It is a control-plane API that streams listener, route, cluster, and endpoint configuration to data-plane proxies"
+      - "It is a load-balancing algorithm similar to least-connections"
+      - "It is a health-check probe format"
+    answer: 1
+    explanation: |
+      xDS is the discovery/config plane: LDS (listeners), RDS (routes), CDS (clusters), and EDS
+      (endpoints) push dynamic configuration to data-plane proxies. It embodies the control-plane
+      / data-plane split — the same idea behind lookaside gRPC balancing.
+    ref: "concepts.md#service-mesh-xds-and-the-gateway-boundary"
+
+  - id: proxies-gateways-load-balancing-091
+    difficulty: advanced
+    tags: [ambient-mesh, sidecarless, service-mesh]
+    question: |
+      The 2024-25 'ambient' / sidecarless service-mesh model restructures the data plane by:
+    options:
+      - "Moving all proxying into the kernel with no user-space component"
+      - "Splitting work into a per-node L4 layer plus a shared L7 'waypoint' proxy, instead of a full per-pod sidecar, to cut the sidecar's memory/latency tax"
+      - "Eliminating mTLS to reduce overhead"
+      - "Requiring every application to embed the mesh library"
+    answer: 1
+    explanation: |
+      Ambient mesh removes the per-pod sidecar, handling secure L4 transport at a per-node layer
+      and doing L7 policy in a shared waypoint proxy only when needed. This reduces the resource
+      and latency overhead of running a sidecar next to every workload while keeping mTLS/policy.
+    ref: "concepts.md#service-mesh-xds-and-the-gateway-boundary"
+
+  - id: proxies-gateways-load-balancing-092
+    difficulty: advanced
+    tags: [xff, trusted-hop, security]
+    question: |
+      Your edge appends to X-Forwarded-For and you have two trusted reverse proxies in the chain.
+      What is the correct way to extract the real client IP for a per-IP rate limiter?
+    options:
+      - "Always take the leftmost XFF value"
+      - "Walk the XFF list from the right, skipping addresses that are your known trusted-proxy CIDRs; the first untrusted address is the real client"
+      - "Take the rightmost XFF value, which is always the client"
+      - "Average all the IPs in the list"
+    answer: 1
+    explanation: |
+      The leftmost value is client-supplied and spoofable. Because each trusted proxy appends the
+      peer it received from, you walk right-to-left over your own trusted hops and stop at the
+      first address you did not add — that is the genuine client. The edge must also overwrite (not
+      merely append to) any client-supplied XFF.
+    ref: "concepts.md#x-forwarded-for-and-the-forwarded-header"
+
+  - id: proxies-gateways-load-balancing-093
+    difficulty: expert
+    tags: [dsr, tunnel, mtu, scenario]
+    question: |
+      You deploy DSR across subnets using IPIP/GRE tunneling and start seeing large downloads
+      fail or stall while small requests work. The most likely cause is:
+    options:
+      - "The loopback VIP has ARP enabled"
+      - "Encapsulation overhead reduced the effective MTU/MSS, so full-size packets exceed the path MTU and are dropped when DF is set (a PMTUD black hole)"
+      - "Round robin is sending downloads to a dead node"
+      - "TLS termination is failing on the LB"
+    answer: 1
+    explanation: |
+      IPIP/GRE add header bytes, shrinking the usable MTU. If the backend doesn't lower its
+      advertised MSS and PMTUD is broken (ICMP filtered), full-size data packets get dropped —
+      small requests succeed but bulk transfers stall. L2/MAC-rewrite DSR avoids the encapsulation
+      overhead but requires L2 adjacency.
+    ref: "concepts.md#direct-server-return-dsr"
+
+  - id: proxies-gateways-load-balancing-094
+    difficulty: expert
+    tags: [sticky-sessions, tls-resumption, passthrough, scenario]
+    question: |
+      With TLS passthrough and imperfect affinity, some clients experience full TLS handshakes
+      instead of fast resumptions. Why does affinity interact with TLS session resumption here?
+    options:
+      - "Resumption requires the LB to decrypt the session"
+      - "TLS session-ID/session-ticket resumption only succeeds if the client lands on a backend that holds (or can validate) that session; if affinity sends it elsewhere, the backend can't resume and forces a full handshake"
+      - "Passthrough disables resumption entirely by spec"
+      - "Session tickets are stored on the LB, not the backend"
+    answer: 1
+    explanation: |
+      In passthrough, each backend terminates TLS itself. Session-ID resumption relies on the same
+      backend's cache, and session tickets must be decryptable by whichever backend receives them
+      (shared ticket keys). If affinity is imperfect, a client can hit a backend that can't resume
+      its session, triggering a costlier full handshake.
+    ref: "concepts.md#sticky-sessions-session-affinity"
+
+  - id: proxies-gateways-load-balancing-095
+    difficulty: advanced
+    tags: [algorithms, p2c, ewma, envoy]
+    question: |
+      Which statement about modern load-balancing policies is correct?
+    options:
+      - "Envoy's default 'least request' uses power-of-two-choices to approximate least-loaded without scanning the whole pool, and latency-weighted policies like peak-EWMA bias toward historically faster backends"
+      - "Power-of-two-choices requires scanning every backend on each request"
+      - "EWMA policies pick backends purely at random"
+      - "Ring-hash and Maglev are latency-based, not hash-based, policies"
+    answer: 0
+    explanation: |
+      Least-request-with-P2C samples two hosts and picks the one with fewer active requests,
+      approximating least-loaded cheaply. Peak-EWMA (as in Finagle/Linkerd) weights by a decaying
+      latency estimate to favor faster hosts. Ring-hash and Maglev are hash-based (affinity)
+      policies, distinct from these load-aware ones.
+    ref: "concepts.md#load-balancing-algorithms"
+
+  - id: proxies-gateways-load-balancing-096
+    difficulty: advanced
+    tags: [health-checks, thundering-herd, jitter]
+    question: |
+      A large LB fleet probes a shared backend pool on identical fixed intervals. What
+      operational problem can this cause, and what mitigates it?
+    options:
+      - "Nothing; synchronized probes are always ideal"
+      - "Synchronized probes create a thundering herd (N LBs × M backends spiking together); adding jitter to probe timing spreads the load"
+      - "Probes decrypt TLS and leak keys; use passthrough"
+      - "It forces round robin to become least-connections"
+    answer: 1
+    explanation: |
+      If every LB probes on the same schedule, all probes hit the backends simultaneously — an
+      amplified, synchronized load spike (N×M) that can itself degrade the backends. Jittering the
+      probe intervals de-synchronizes them and smooths the health-check load.
+    ref: "concepts.md#health-checks"
+

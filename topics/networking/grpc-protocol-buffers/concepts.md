@@ -424,6 +424,284 @@ binary efficiency, subscriptions for streaming are bolt-on.
 
 ---
 
+## HTTP/2 mapping internals: flow control, GOAWAY, and Trailers-Only
+
+**Why it matters.** The unary anatomy above is the happy path. Senior debugging hinges on
+the less obvious frames.
+
+**Trailers-Only response.** For an error known *before* any message is produced, a server
+may respond with a **single HEADERS frame** that carries `:status: 200`, `content-type`,
+`grpc-status`, `grpc-message`, and `END_STREAM` — **no DATA and no separate leading
+HEADERS**. This is the "Trailers-Only" case, distinct from the normal
+headers → data → trailers sequence. It matters for retries (see below): if the server
+defers leading headers and uses Trailers-Only for early failures, the RPC has not
+"committed" and can still be retried.
+
+**Flow control / backpressure.** gRPC streaming backpressure is HTTP/2 flow control. Each
+stream and the whole connection have a receive **window**; a receiver advertises capacity
+with `WINDOW_UPDATE` frames. A fast server streaming to a slow client will block once the
+window is exhausted, so a well-behaved producer stops writing rather than buffering
+unboundedly. `SETTINGS_MAX_CONCURRENT_STREAMS` caps how many RPCs can be in flight on one
+connection at once; hitting it queues or refuses new streams (see transparent retries on
+`REFUSED_STREAM`).
+
+**RST_STREAM and GOAWAY.** Cancellation of a single RPC is an HTTP/2 `RST_STREAM` on that
+stream. Graceful shutdown/drain is a `GOAWAY` frame carrying the **last stream ID** the
+sender will process; streams above that ID were not accepted and are safe to retry
+elsewhere. `GOAWAY` can also carry debug data (e.g. `too_many_pings`, `ENHANCE_YOUR_CALM`
+error code `0x0b`).
+
+**`grpc-status-details-bin`.** Richer than the flat `grpc-status`/`grpc-message` trailers:
+a base64-encoded `google.rpc.Status` (numeric `code`, `message`, and a `details` list of
+`Any`-packed messages such as `RetryInfo`, `QuotaFailure`, `BadRequest`).
+
+---
+
+## Retries, hedging, and retry throttling
+
+**Why it matters.** Automatic retries are configured declaratively in the channel's
+**service config** (`methodConfig[].retryPolicy` or `.hedgingPolicy` — a method may use
+**only one**), governed by gRFC **A6**. Getting this wrong causes retry storms and
+metastable outages.
+
+**`retryPolicy`.** Fields: `maxAttempts` (integer > 1, **capped at 5** by the client),
+`initialBackoff`, `maxBackoff`, `backoffMultiplier`, and `retryableStatusCodes` (the set of
+codes that trigger a retry — the service owner chooses these, since gRPC has **no
+idempotency marker**). Backoff before attempt *n* is
+`random(0, min(initialBackoff * backoffMultiplier^(n-1), maxBackoff))` with jittered spread
+(implementations apply randomization to avoid synchronized retries).
+
+**`hedgingPolicy`.** Fields: `maxAttempts`, `hedgingDelay`, `nonFatalStatusCodes`. Hedging
+sends the request to *another* backend after `hedgingDelay` **without waiting** for the
+first attempt to fail, then takes the first non-fatal response and cancels the rest. It
+trades duplicate work for **tail-latency** reduction; use it only for idempotent methods.
+
+**Retry throttling (token budget).** A top-level `retryThrottling` object (`maxTokens` in
+(0, 1000], `tokenRatio`) maintains a per-server-name token bucket: each failed RPC
+**decrements** the token count by 1, each success **adds** `tokenRatio`. Retries are
+**disabled while tokens are below `maxTokens / 2`**. This throttles retries during a broad
+outage, preventing a retry storm from amplifying load — the classic defense against
+metastable failure.
+
+**Commit points.** A retry attempt becomes **committed** (non-retryable) when the client
+receives **response headers** (leading metadata) or when an outgoing message **overflows
+the send buffer**. Once committed, the response is passed through as-is. This is why
+servers should **defer leading headers** until the first response message and use
+**Trailers-Only** for early errors — so a failed call remains retryable.
+
+**Retry signaling metadata.** `grpc-previous-rpc-attempts` (integer, how many prior
+attempts) is added by the client on retries; `grpc-retry-pushback-ms` is sent by the
+**server** to tell the client to wait that many ms before the next retry (a negative or
+unparseable value means **do not retry**).
+
+**Transparent retries.** If an RPC provably never reached application logic — a
+`RST_STREAM` with `REFUSED_STREAM`, or a stream above a `GOAWAY`'s last-stream-ID — the
+client retries **transparently**; these do **not** count against `maxAttempts` or the retry
+budget.
+
+---
+
+## Service config and wait_for_ready
+
+**Service config** is the channel-level control plane: a JSON document delivered via **DNS
+TXT records** (`grpc_config` prefix) or **xDS**, or set programmatically. It contains
+`methodConfig[]` entries scoped per-service/per-method with `timeout`, `retryPolicy` /
+`hedgingPolicy`, `waitForReady`, `maxRequestMessageBytes`, `maxResponseMessageBytes`, plus a
+top-level `loadBalancingConfig` and `retryThrottling`. It is what ties deadlines, retries,
+and load-balancing policy together without recompiling clients.
+
+**`wait_for_ready`.** By default an RPC issued while the channel has **no ready connection**
+**fails fast** with `UNAVAILABLE` (14). Setting `wait_for_ready = true` instead **queues**
+the RPC until a connection becomes ready or the deadline elapses — trading fail-fast
+behavior for resilience across transient reconnects. Use it when the caller would rather
+wait than see spurious `UNAVAILABLE` during a rollout; avoid it where fast failure and
+shedding are preferable.
+
+---
+
+## Client-side load balancing and the L4 pinning pitfall
+
+**Why it matters.** This is the single most common gRPC production trap.
+
+**Architecture.** A gRPC channel is a pipeline: **name resolver** (turns a target into an
+address list + service config) → **LB policy** (maintains one **subchannel** per backend)
+→ **picker** (selects a subchannel for each RPC, on the hot path, so it must be O(1)). The
+default policy is **`pick_first`** (one connection to the first reachable address);
+**`round_robin`** spreads RPCs across all resolved backends' subchannels.
+
+**Look-aside (lookaside) LB.** An external load-balancer service tells the client which
+backends to use and reports load; the original **gRPCLB** protocol is now largely
+superseded by **xDS** (gRFC A27/A52), the Envoy control-plane API. Backend load can be
+reported in-band via **ORCA** metrics or out-of-band.
+
+**The pitfall.** Because one long-lived HTTP/2 connection multiplexes *all* of a client's
+streams, an **L4 (connection-level) load balancer pins every stream to whichever backend it
+first routed the connection to** — so newly added backends get no traffic and existing ones
+hot-spot. Fixes: do **client-side LB** with `round_robin` (or xDS); set
+`MAX_CONNECTION_AGE` on the server to force periodic connection recycling and
+**re-resolution/rebalancing**; or front the fleet with an **L7 / xDS-aware proxy** (e.g.
+Envoy) that balances per-RPC.
+
+---
+
+## Keepalive and connection lifecycle
+
+**Why it matters.** Long-lived HTTP/2 connections need liveness detection and abuse
+defense (gRFC A8/A9/A18).
+
+**Keepalive PINGs.** The client sends HTTP/2 **PING** frames every `KEEPALIVE_TIME`; if no
+ACK arrives within `KEEPALIVE_TIMEOUT` (default 20s) the connection is considered dead and
+torn down. `KEEPALIVE_WITHOUT_CALLS` controls whether PINGs are sent when no RPC is active;
+the server's `PERMIT_KEEPALIVE_WITHOUT_CALLS` and `PERMIT_KEEPALIVE_TIME` (minimum allowed
+ping spacing, default 5 minutes) gate whether that is tolerated.
+
+**Abuse defense.** If a client pings **more often than `PERMIT_KEEPALIVE_TIME` allows**, the
+server sends a **`GOAWAY` with debug data `too_many_pings`** (HTTP/2 `ENHANCE_YOUR_CALM`,
+error code `0x0b`) and closes the connection. Misconfiguring aggressive client keepalive
+below the server's permitted rate is a real cause of clients being repeatedly dropped.
+
+**Connection recycling.** Servers cap connection lifetime with `MAX_CONNECTION_IDLE` (idle
+timeout), `MAX_CONNECTION_AGE` (max total lifetime), and `MAX_CONNECTION_AGE_GRACE` (grace
+window to drain in-flight RPCs via `GOAWAY` before forcing closure). On Linux,
+`TCP_USER_TIMEOUT` is typically set from the keepalive timeout so the kernel gives up on
+un-ACKed data in the same window.
+
+---
+
+## Health checking protocol
+
+**Why it matters.** `grpc.health.v1.Health` is the standard readiness/liveness signal that
+load balancers and orchestrators (Kubernetes' native gRPC probe or `grpc_health_probe`)
+consume.
+
+**Service definition.** Two methods: `Check` (unary) and `Watch` (server-streaming, pushes
+status changes). `HealthCheckRequest { string service = 1; }` and
+`HealthCheckResponse { ServingStatus status = 1; }` where `ServingStatus` is
+`UNKNOWN = 0`, `SERVING = 1`, `NOT_SERVING = 2`, and `SERVICE_UNKNOWN = 3` (returned only by
+`Watch`).
+
+**Semantics.** An **empty service string (`""`) queries overall server health**; a specific
+service name queries that service. If `Check` is asked about a service the server doesn't
+know, it returns the gRPC status **`NOT_FOUND` (5)** — distinct from `Watch`, which returns
+a `SERVICE_UNKNOWN` status message and keeps the stream open.
+
+---
+
+## Message compression
+
+**Why it matters.** Compression is negotiated and applied **per message**, and it carries a
+security caveat.
+
+**Negotiation headers.** `grpc-encoding` names the algorithm used for **this message's**
+payload (`identity`, `gzip`, `deflate`, `snappy`, …); `grpc-accept-encoding` advertises what
+the sender can decompress. The **compressed-flag byte** in the 5-byte length prefix is set
+to 1 when a given message is compressed — so compression can **vary message-to-message and
+per direction** within one stream. A peer that receives an algorithm it can't decompress
+responds with **`UNIMPLEMENTED` (12)** and advertises its supported set via
+`grpc-accept-encoding`.
+
+**Security angle.** Compressing **before** encrypting mixes attacker-controlled input with
+secret data in the same compressed stream, enabling **CRIME/BREACH-class** attacks that
+recover secrets from length side-channels. Being able to **disable compression per message**
+(or per field-bearing call) matters when payloads carry secrets alongside attacker-supplied
+content.
+
+---
+
+## Wire-format edge cases: maps, merge, and determinism
+
+**`map<K,V>` is sugar.** A map is encoded exactly as a `repeated` message of entries
+`message Entry { key = 1; value = 2; }` (LEN records). Consequently **map entry order is
+not guaranteed** on the wire, and duplicate keys resolve last-one-wins.
+
+**Duplicate fields and merge.** For a **non-repeated scalar**, if a tag appears more than
+once, **last one wins**. For a **repeated** field the values **concatenate**. For an
+**embedded message**, duplicate occurrences **merge** (recursively, as if `MergeFrom`).
+This gives the identity **`parse(a + b) == parse(a).MergeFrom(parse(b))`**: concatenating
+two serialized messages and parsing equals parsing each and merging — singular fields
+replaced, repeated concatenated, sub-messages merged.
+
+**Serialization is non-deterministic by default.** There is **no canonical form**: map
+ordering, unknown-field placement, and encoder choices vary. "Deterministic" serialization
+modes exist but are only stable **within one binary build**, not across languages or
+versions. Therefore **do not hash or sign serialized protobuf bytes** to test for equality —
+two encoders can emit different bytes for the same logical message (a frequent
+false-negative dedup bug). Sign a canonicalized form or compare parsed messages instead.
+
+**Field ordering is unspecified.** Parsers must accept fields in any order, and unknown
+fields need not be contiguous. **Packed and unpacked repeated encodings interoperate** — a
+compliant parser accepts both, so toggling `[packed]` is wire-compatible.
+
+**Limits and groups.** A single message is limited to **2 GiB**; `string`/`bytes` length is
+an int32 varint (~2 GB cap). **Groups** (wire types 3/4, `SGROUP`/`EGROUP`) are a deprecated
+but still-legal delimited framing that brackets a submessage with start/end tags instead of
+a length prefix.
+
+---
+
+## Field presence, deeper
+
+**Implicit vs explicit presence.** With **implicit** presence (proto3 scalar without
+`optional`), there is no hasbit: a field equal to its default (0/""/false) is **not
+serialized** and reads as the default whether it was set or absent — you cannot tell "unset"
+from "default". With **explicit** presence (`optional` scalar, any message field, or a
+`oneof` member) a hasbit tracks whether it was set, and an explicitly-set default value
+**is** serialized.
+
+**Why PATCH needs it.** Implicit-presence defaults **cannot be merged/patched** — a JSON
+`{"count": 0}` is indistinguishable from omitting `count`, so a naive merge can't tell
+"clear to zero" from "leave unchanged". PATCH semantics therefore require **`optional`
+fields** (explicit presence) or a **`FieldMask`** listing exactly which paths to update.
+Repeated fields and maps **never** track presence — empty is indistinguishable from absent.
+
+---
+
+## Protobuf Editions (2023 and 2024)
+
+**Why it matters.** A 2025 must-know: **Editions** replace the proto2-vs-proto3 syntax
+split. Instead of `syntax = "proto2"` / `"proto3"`, a file declares `edition = "2023";` and
+tunes behavior with **features** applied at file/message/field scope.
+
+**Key features.** `field_presence` (`IMPLICIT` / `EXPLICIT` / `LEGACY_REQUIRED`),
+`enum_type` (`OPEN` / `CLOSED` — proto2 enums were closed, proto3 open), `repeated_field_encoding`
+(`PACKED` / `EXPANDED`), and `utf8_validation`. This makes previously fixed syntax decisions
+per-field knobs, so a candidate should understand that "proto2 vs proto3" is being unified
+into one language with feature toggles. **Edition 2024** adds `import option` and symbol
+**visibility** (`export` / `local`).
+
+---
+
+## Interceptors and middleware
+
+**What it is.** Interceptors are gRPC's cross-cutting middleware, the analog of HTTP
+middleware. They wrap the handler/stub so you can inject behavior around every call without
+touching business logic. There are four kinds by axis: **unary vs streaming** and **client
+vs server**. They **chain** in a defined order, forming a pipeline around the RPC.
+
+**What lives there.** Authentication/authorization (validate the `authorization` metadata),
+deadline injection and propagation, retry/hedging logic (below the app), request/response
+logging, metrics and distributed **tracing** (read/write `-bin` trace metadata), rate
+limiting, and error translation to `google.rpc.Status`. Client interceptors typically add
+credentials and tracing on the way out; server interceptors typically enforce auth and emit
+metrics on the way in.
+
+---
+
+## Transport security: TLS, mTLS, and credentials
+
+**Transport.** gRPC runs over **TLS 1.3 (RFC 8446)** on HTTP/2. HTTP/2 requires **ALPN**
+negotiation of the token **`h2`** during the TLS handshake; without it, a peer may fall back
+to HTTP/1.1 and gRPC breaks. **mTLS** (mutual TLS) authenticates both ends and is the norm
+for service-to-service traffic.
+
+**Credential layers.** gRPC separates **channel credentials** (the transport identity — TLS
+/ mTLS certs securing the connection) from **call credentials** (per-RPC caller identity,
+e.g. a bearer token in the `authorization` metadata). The two **compose**: a channel can
+carry mTLS transport security *and* attach a per-call OAuth token. Call credentials are only
+allowed to be sent over a secured (encrypted) channel, so tokens aren't leaked in plaintext.
+
+---
+
 ## Common follow-up questions
 
 - **Why must `te: trailers` be sent?** It tells intermediaries the client accepts HTTP/2
@@ -460,3 +738,12 @@ binary efficiency, subscriptions for streaming are bolt-on.
 - RFC 7541 — HPACK header compression
 - RFC 8446 — TLS 1.3 (transport security for gRPC)
 - grpc.io core concepts — https://grpc.io/docs/what-is-grpc/core-concepts/
+- gRFC A6 — client retries/hedging — https://github.com/grpc/proposal/blob/master/A6-client-retries.md
+- gRFC A8/A9/A18 — keepalive & connection management — https://github.com/grpc/proposal
+- gRFC A27/A52 — xDS-based load balancing & custom LB policies — https://github.com/grpc/proposal
+- gRPC health checking — https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+- gRPC compression — https://github.com/grpc/grpc/blob/master/doc/compression.md
+- gRPC service config — https://github.com/grpc/grpc/blob/master/doc/service_config.md
+- Protobuf Editions — https://protobuf.dev/editions/overview/
+- Protobuf field presence — https://protobuf.dev/programming-guides/field_presence/
+- google.rpc.Status / google.rpc.Code — https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto

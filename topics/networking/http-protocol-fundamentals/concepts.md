@@ -191,6 +191,20 @@ A header (field line) is `field-name ":" OWS field-value OWS`, e.g.
   **end-to-end** and are forwarded.
 - **Trailers** are header fields sent *after* a chunked body (announced with the
   `Trailer` header) — useful for values computed only after the body, like a checksum.
+  Only a client that sent `TE: trailers` is guaranteed to want them, and most clients
+  **silently discard** trailers. Framing/routing/auth-sensitive fields are **forbidden**
+  in trailers — notably `Transfer-Encoding`, `Content-Length`, `Host`, `Cache-Control`,
+  and authentication headers — because a recipient may have already acted on the head. The
+  main real-world consumer is **gRPC**, which carries its `grpc-status`/`grpc-message` in
+  trailers.
+
+Chunked wire detail worth knowing: each chunk-size line may carry **chunk extensions**
+(`1a;name=value\r\n`) after the hex size; `chunked` must be the **last** transfer coding;
+each hop **decodes then re-frames** (a proxy may de-chunk before forwarding); and an
+oversized or malformed chunk-size line is a **smuggling/DoS vector**, so parsers bound it
+strictly. Per RFC 9112 §6.1, a message bearing **both** `Content-Length` and
+`Transfer-Encoding` should be treated as an **error** (respond `400`, or for a proxy close
+the connection) — modern stacks **reject** rather than silently prefer TE.
 
 Rough size limits are implementation-defined; servers commonly cap total header size
 (e.g. 8–16 KB) and reply **431 Request Header Fields Too Large** when exceeded.
@@ -218,7 +232,17 @@ Attribute meanings:
 - **HttpOnly** — not readable by JavaScript (mitigates XSS token theft).
 - **SameSite=Strict/Lax/None** — controls cross-site sending (CSRF defense).
   `SameSite=None` must be paired with `Secure`.
-- **`__Host-` / `__Secure-` prefixes** enforce Secure + scoping constraints.
+- **`__Host-` / `__Secure-` prefixes** enforce Secure + scoping constraints:
+  `__Secure-` requires `Secure`; `__Host-` requires `Secure` **and** `Path=/` **and no
+  `Domain`** (locking the cookie to the exact host).
+
+**Current SameSite reality (2025).** Chrome and other major browsers treat a cookie with
+**no `SameSite` attribute as `Lax` by default** (since 2020). The implicit default-Lax
+has a **2-minute "top-level POST" exception** (a newly set cookie is still sent on a
+top-level cross-site POST for up to 2 minutes) that an **explicit** `SameSite=Lax` does
+**not** get. With third-party cookies being phased out, the **`Partitioned` attribute
+(CHIPS)** opts a cross-site cookie into per-top-level-site partitioned storage; it is
+recommended alongside `__Host-` for embedded third-party contexts.
 
 **Sessions** are the classic pattern: the cookie holds an opaque **session ID**, and the
 server keeps the real state (login, cart) server-side keyed by that ID. Because each
@@ -388,6 +412,305 @@ in the `http2-http3-quic` topic.)
 | HTTP/1.1 HOL | serialized responses / in-order pipelining | HTTP/2 stream multiplexing |
 | Transport HOL | one lost TCP segment stalls all HTTP/2 streams | HTTP/3 over QUIC |
 
+## Request-Target Forms and Host Reconciliation
+
+The request line carries the target in one of four forms (RFC 9112 §3.2), and the
+*interaction* between the target and the `Host` header is a routing- and
+security-critical rule interviewers probe:
+
+- **origin-form** — `/search?q=cat` (path+query). The normal case; the authority comes
+  from the `Host` header.
+- **absolute-form** — `GET http://example.com/path HTTP/1.1`. Used to a forward proxy.
+  Critical rule: when absolute-form is used, the server **MUST ignore any `Host` header
+  and use the authority from the request line** (RFC 9112 §3.2.1). A mismatch between the
+  absolute-form authority and a conflicting `Host` is a routing/smuggling vector.
+- **authority-form** — `CONNECT example.com:443` (host:port only). Only for CONNECT.
+- **asterisk-form** — `OPTIONS * HTTP/1.1`. Server-wide OPTIONS.
+
+**Host reconciliation and injection.** A request with **two `Host` headers** (or a Host
+whose value disagrees with an absolute-form authority) is ambiguous and MUST be rejected
+with **400** — front-end/back-end disagreement here is a classic smuggling/routing
+desync. **Host header injection** is a distinct attack: if an application builds an
+absolute URL from the incoming `Host` (e.g. a password-reset link), an attacker who sets
+`Host: attacker.com` can poison the link so the victim's reset token is sent to the
+attacker; the same trick poisons caches keyed on the wrong host. Defenses: validate
+`Host` against an allowlist of expected authorities; never trust it to build absolute
+links.
+
+**HTTP/2 and HTTP/3** replace the `Host` header with the **`:authority` pseudo-header**;
+`Host`, if also present, must agree. When an HTTP/2 front-end rewrites to HTTP/1.1 for a
+back-end, it derives `Host` from `:authority` — a mismatch here is the root of H2 downgrade
+smuggling (see below).
+
+## Conditional Requests and Validators
+
+Conditional requests (RFC 9110 §13) let a client say "only act if the resource is in the
+state I expect," powering both cache revalidation and optimistic concurrency. The server
+supplies **validators** in responses:
+
+- **`ETag`** — an opaque representation identifier. **Strong** (`"abc"`) means byte-for-byte
+  identical; **weak** (`W/"abc"`) means semantically equivalent but possibly
+  byte-different. Range requests and byte-level caching require a **strong** validator;
+  weak validators only permit **weak comparison** (equal tags, ignoring the `W/`).
+- **`Last-Modified`** — a timestamp validator (1-second granularity, hence weaker).
+
+Request precondition headers:
+
+- **`If-None-Match: "abc"`** / **`If-Modified-Since`** — used by GET for cache
+  revalidation. If the validator still matches, the server returns **`304 Not Modified`**
+  with **no body**, echoing the current validators; the client reuses its cached copy.
+- **`If-Match: "abc"`** / **`If-Unmodified-Since`** — used by unsafe methods (PUT/DELETE)
+  for **optimistic concurrency**. If the resource changed since the client last read it,
+  the ETag no longer matches and the server returns **`412 Precondition Failed`**,
+  preventing the **lost-update** problem without locking.
+- **`If-Range`** — combined with `Range`: if the validator still matches, serve the
+  requested range (`206`); if it changed, serve the whole current representation (`200`)
+  atomically, so the client never stitches together mismatched pieces.
+
+> [!INTERVIEW]
+> "Optimistic concurrency without locking?" Read the resource, keep its `ETag`, then
+> `PUT` with `If-Match: <etag>`. A concurrent writer's change bumps the ETag, so your
+> conditional PUT fails with **412** and you re-read/merge — no server-side lock needed.
+
+## Range Requests and Partial Content
+
+Range requests (RFC 9110 §14) fetch part of a representation — the basis of resumable
+downloads and media seeking. A server that supports them advertises **`Accept-Ranges:
+bytes`**.
+
+```
+GET /video.mp4 HTTP/1.1
+Range: bytes=1000-1999
+
+HTTP/1.1 206 Partial Content
+Accept-Ranges: bytes
+Content-Range: bytes 1000-1999/1048576
+Content-Length: 1000
+```
+
+- A satisfiable single range → **`206 Partial Content`** with a **`Content-Range`** header
+  giving `start-end/total`.
+- **Multiple ranges** in one request → a **`multipart/byteranges`** body with a boundary
+  delimiting each part (each part carries its own `Content-Range`).
+- An unsatisfiable range (e.g. start beyond the resource size) → **`416 Range Not
+  Satisfiable`**, with a `Content-Range: bytes */<total>` telling the client the true size.
+- `If-Range` (above) makes "resume or restart" atomic.
+
+**Video seeking on the wire**: the player issues `Range` requests for the byte offsets it
+needs as the user scrubs, rather than downloading the whole file.
+
+> [!WARNING]
+> **Range-based DoS amplification**: a request with a huge number of tiny, overlapping
+> ranges can force the origin to assemble a `multipart/byteranges` response far larger
+> than the resource, or to do expensive work. Servers cap the number/size of ranges and
+> may ignore or `200` a pathological `Range`.
+
+## The Expect 100-continue Handshake
+
+`Expect: 100-continue` (RFC 9110 §10.1.1) is a bandwidth-saving handshake for large or
+unsafe bodies. The client sends the **request headers only**, with `Expect: 100-continue`,
+and **pauses** before sending the body:
+
+- If the server is willing, it replies **`100 Continue`** (an interim 1xx) and the client
+  then streams the body.
+- If the server would reject the request regardless of the body — auth failure (`401`),
+  body too large (`413`), or it doesn't understand the expectation (`417 Expectation
+  Failed`) — it sends that **final** response immediately, so a 2 GB upload is never sent.
+- If the server never answers, a conformant client should **still send the body after a
+  short timeout** (a few seconds) so a proxy or old server that ignores `Expect` doesn't
+  deadlock the request.
+
+Proxies must forward the expectation and relay the interim `100` back. This is why large
+`PUT`/`POST` uploads commonly use it.
+
+## Redirects and Method Preservation
+
+The 3xx redirects differ precisely in **whether they preserve the method and body**
+(RFC 9110 §15.4) — a distinction that matters enormously for non-idempotent requests:
+
+| Code | Name | Effect on method/body |
+|---|---|---|
+| 301 | Moved Permanently | Historically clients rewrote POST→GET (spec discourages but permits) |
+| 302 | Found | Same historical POST→GET rewriting in practice |
+| 303 | See Other | **Always** switch to GET, drop the body (Post/Redirect/Get pattern) |
+| 307 | Temporary Redirect | **Preserve** method and body exactly |
+| 308 | Permanent Redirect | **Preserve** method and body exactly (permanent) |
+
+The redirect target is the **`Location`** header (may be relative or absolute; resolved
+against the request URI). Clients cap redirect chains to avoid loops.
+
+> [!INTERVIEW]
+> "301 vs 308 after a POST payment?" A `301`/`302` might make the client re-issue the
+> payment as a `GET` (dropping the body) — dangerous. `308` guarantees the browser
+> re-`POST`s the same body to the new URL. Use `308`/`307` whenever method preservation
+> matters; use `303` to *deliberately* turn a POST into a follow-up GET.
+
+## HTTP Authentication Framing
+
+At the wire level, HTTP authentication (RFC 9110 §11) is a challenge/response using a
+small set of headers — the *usage* of specific token schemes (OAuth/JWT flows) belongs to
+`rest-api-design`, but the framing lives here:
+
+- A server demanding credentials for the **origin** returns **`401 Unauthorized`** with a
+  **`WWW-Authenticate`** challenge naming the scheme and a `realm`. The client retries
+  with an **`Authorization`** header.
+- A **proxy** demanding credentials returns **`407 Proxy Authentication Required`** with
+  **`Proxy-Authenticate`**; the client answers with **`Proxy-Authorization`**.
+- Common schemes: **Basic** — `Authorization: Basic base64(user:pass)` — is base64
+  **encoding, not encryption**, so it is only safe over TLS. **Bearer** — `Authorization:
+  Bearer <token>` — carries an opaque/JWT token. **Digest** uses a nonce-based hash.
+- **`401` vs `403`**: `401` means "not authenticated — here's how to authenticate"
+  (challenge included); `403` means "authenticated (or auth won't help) — you are not
+  allowed," and carries no `WWW-Authenticate` retry hint.
+
+## URL Percent-Encoding and Normalization
+
+URLs on the wire follow RFC 3986. **Unreserved** characters (`A–Z a–z 0–9 - . _ ~`) pass
+literally; **reserved** and unsafe characters are **percent-encoded** as `%HH`. Where
+encoding is required differs by component:
+
+- The **path** and **query** are sent to the server; the **fragment** (`#...`) is **never
+  transmitted** — it is client-side only.
+- A literal `?` or `#` in a path segment must be `%3F`/`%23`; `+` means space only in
+  `application/x-www-form-urlencoded`, not in the path.
+
+**Path normalization discrepancies** are a live attack surface: if a proxy and origin
+resolve dot-segments (`/a/../b`), trailing slashes, or `%2e%2e` differently, an attacker
+can achieve **path confusion** — routing a request past an access-control rule, or **web
+cache deception** (tricking a cache into storing a private page under a static-looking
+URL like `/account/nonexistent.css`). Normalize consistently, and key caches on the
+normalized path.
+
+## Request Smuggling and Desync Attacks
+
+Request smuggling exploits **disagreement about where one request ends** between a
+front-end (proxy/CDN/load balancer) and a back-end that share a keep-alive connection.
+The attacker's smuggled bytes get prepended to the *next* victim's request. The taxonomy
+(PortSwigger "HTTP Desync Attacks," "HTTP/2: The Sequel Is Always Worse," "Browser-Powered
+Desync Attacks"):
+
+- **CL.TE** — front-end uses `Content-Length`, back-end uses `Transfer-Encoding`. The
+  front-end forwards what it thinks is one body; the back-end de-chunks and treats the
+  tail as a new request.
+- **TE.CL** — the reverse: front-end honors chunked, back-end honors CL.
+- **TE.TE** — both support chunked, but one is tricked into ignoring the `Transfer-Encoding`
+  header via **obfuscation**: `Transfer-Encoding: xchunked`, a space/tab before the colon,
+  a duplicate `Transfer-Encoding` line, or a value prefixed with a bare `\n`. One hop
+  falls back to `Content-Length`, desyncing.
+- **CL.CL** — duplicate, conflicting `Content-Length` headers honored differently.
+- **CL.0 / 0.CL** — the back-end ignores the body entirely (or expects none) while the
+  front-end forwards one; a pure Content-Length desync that is often **browser-compatible**
+  (needs no malformed request), enabling client-side attacks.
+- **H2.CL / H2.TE downgrade smuggling** — an HTTP/2 front-end rewrites to HTTP/1.1 and
+  trusts an attacker-injected `Content-Length`/`Transfer-Encoding` (HTTP/2 has its own
+  length, so a conflicting CL/TE should be stripped, not forwarded).
+- **Response queue poisoning** — desync leaves an extra response in the connection's queue,
+  so victims receive **someone else's response**.
+- **Request tunnelling** — smuggling a request whose response the attacker reads directly
+  (blind or via `HEAD`).
+- **Client-side / pause-based desync** — the desync is triggered from the browser or by
+  pausing mid-request to exploit read timeouts.
+
+The modern hardening (RFC 9112 §6.1/§6.3) is to **reject rather than reconcile**: a
+message with both `Content-Length` and `Transfer-Encoding`, or with malformed/obfuscated
+framing headers, should be answered **400** (and the connection closed) rather than
+"preferring" one — silently preferring TE is exactly what makes CL.TE exploitable.
+
+## CRLF Injection and Response Splitting
+
+Because CRLF is structural in HTTP/1.x, an attacker-controlled `\r\n` reflected into a
+**header value** — classically a `Location` (open redirect endpoints) or `Set-Cookie` —
+lets the attacker terminate the current header block and inject arbitrary headers or even
+a **second complete response**. This is **HTTP response splitting**, and it enables cache
+poisoning (the injected second response gets cached and served to others) and reflected
+XSS. RFC 9110 §5.5 therefore forbids CR, LF, and NUL in field values; servers and
+frameworks must strip/reject them.
+
+**HTTP/2 and HTTP/3 structurally eliminate classic response splitting** because headers
+are carried as length-prefixed binary fields (HPACK/QPACK), not CRLF-delimited text — a
+`\r\n` in a value is just data, not a delimiter. But the risk **reappears on downgrade**:
+when an HTTP/2 front-end translates to HTTP/1.1 for a back-end (or vice versa) without
+validating field values, the injected CRLF becomes a delimiter again.
+
+## HTTP Caching Protocol Mechanics
+
+HTTP caching (RFC 9111) is the on-the-wire machinery for reusing responses. The core
+directives senior interviews filter on:
+
+- **`Cache-Control: max-age=<s>`** — freshness lifetime for private caches; **`s-maxage`**
+  overrides it for **shared** (proxy/CDN) caches.
+- **`no-cache`** — MAY store, but MUST **revalidate** with the origin before each reuse
+  (conditional request). **`no-store`** — MUST NOT store at all. These are frequently
+  confused; `no-cache` still caches, `no-store` doesn't.
+- **`private`** — only a single-user (browser) cache may store it; a shared cache MUST
+  NOT. **`public`** — explicitly cacheable even when it otherwise wouldn't be.
+- **`must-revalidate`** — once stale, the cache MUST NOT serve it without revalidating
+  (no serving stale on error/disconnect); pairs with `max-age`.
+- **`immutable`** — the response won't change during its freshness lifetime, so clients
+  skip revalidation even on reload (used for fingerprinted static assets).
+- **`stale-while-revalidate` / `stale-if-error`** (RFC 5861) — serve a stale copy
+  immediately while revalidating in the background, or serve stale if the origin errors.
+- **`Age`** — seconds since the response was generated at the origin (added by caches);
+  **`Expires`** — an absolute expiry date (legacy; `max-age` wins if both present).
+
+**Freshness** = a cache may reuse a stored response while `age < freshness_lifetime`
+(from `s-maxage`/`max-age`/`Expires`, or heuristics). When stale, the cache
+**revalidates** via a conditional request; a `304` refreshes the stored copy's metadata
+without re-transferring the body.
+
+**`Vary` cache-key semantics** (RFC 9111 §4.1): a cache must key a stored response by the
+request headers named in `Vary` (e.g. `Vary: Accept-Encoding`). **`Vary: *`** means the
+response is effectively **uncacheable** (every request is unique). Varying on `Cookie` or
+`Authorization` causes **cache-key explosion** (a distinct entry per user) — an
+anti-pattern that destroys shared-cache hit rates.
+
+## Connection Management and Lifecycle
+
+Beyond "keep-alive is default," the lifecycle details drive real debugging:
+
+- **`Connection`** is a **hop-by-hop** control. `Connection: close` announces the socket
+  closes after this message; `Connection: keep-alive` (HTTP/1.0 opt-in) requests reuse.
+  Crucially, `Connection` also **names other headers to strip** before forwarding
+  (e.g. `Connection: close, X-Foo` tells a proxy to remove `X-Foo` as hop-by-hop).
+- **`Keep-Alive: timeout=5, max=100`** hints how long the peer keeps an idle socket open
+  and how many more requests it will serve on it.
+- **Idle-timeout race**: a client may reuse a socket at the exact moment the server is
+  closing it for idleness; the request hits a `FIN`/`RST` and fails. This is why clients
+  transparently **retry idempotent** requests on a reused connection — but must **not**
+  blindly retry a non-idempotent `POST`.
+- **Connection-close as delimiter is ambiguous**: for an HTTP/1.0-style body framed only
+  by connection close, a premature close is **indistinguishable from a complete
+  response** — a truncated download can look "successful." `Content-Length` or the
+  chunked terminating 0-chunk removes this ambiguity (a missing terminator reveals
+  truncation).
+
+> [!INTERVIEW]
+> "curl works but the browser intermittently truncates on a keep-alive connection." Prime
+> suspects: an **idle-timeout race** (socket reused as the server closes it — verify with
+> `Keep-Alive` timeout and retry-on-idempotent behavior), or a response **framed by
+> connection close** so truncation is silently accepted. Fix framing (send
+> `Content-Length`/chunked) and align client/server idle timeouts.
+
+## Specialized and Modern Status Codes
+
+Beyond the everyday codes, senior interviews probe these:
+
+- **`103 Early Hints`** (RFC 8297) — an interim 1xx sent *before* the final response to
+  let the client **preload** critical assets (`Link: rel=preload`) while the origin
+  computes the page. The modern server-push replacement.
+- **`421 Misdirected Request`** — the connection was **coalesced** to an authority this
+  server can't serve (e.g. HTTP/2 reused one connection for two hostnames sharing a cert,
+  but this origin isn't authoritative for the requested `:authority`). The client should
+  retry on a fresh connection.
+- **`425 Too Early`** (RFC 8470) — the server refuses to process a request sent in TLS
+  1.3 **0-RTT** data, because 0-RTT is **replayable**; the client retries after the
+  handshake completes.
+- **`451 Unavailable For Legal Reasons`** — blocked for legal/censorship reasons.
+- **`511 Network Authentication Required`** — a **captive portal** signals the client must
+  authenticate to the network.
+- **`418 I'm a teapot`** — a joke (RFC 2324); not a real HTTP feature, but interviewers
+  like to see you know it's not serious.
+
 ## Common follow-up questions
 
 - **Why can't TCP just deliver "one request"?** TCP is a byte stream with no message
@@ -413,11 +736,17 @@ in the `http2-http3-quic` topic.)
 
 ## References
 
-- RFC 9110 — HTTP Semantics (methods, status codes, headers, content negotiation)
-- RFC 9111 — HTTP Caching (`Vary`, `Cache-Control`)
-- RFC 9112 — HTTP/1.1 (message syntax, framing, chunked transfer coding)
+- RFC 9110 — HTTP Semantics (methods, status codes §15, headers, content negotiation,
+  Host §7.2, auth §11, conditional requests §13, ranges §14, field-value CR/LF §5.5)
+- RFC 9111 — HTTP Caching (`Cache-Control` §5.2, `Vary` §4.1)
+- RFC 9112 — HTTP/1.1 (message syntax, request-target/Host §3.2, framing precedence
+  §6.1/§6.3, chunked/trailers §7.1)
+- RFC 5861 — `stale-while-revalidate` / `stale-if-error` cache directives
+- RFC 8297 — 103 Early Hints · RFC 8470 — Using Early Data (0-RTT) in HTTP / 425 Too Early
+- RFC 3986 — URI Generic Syntax (percent-encoding, normalization)
 - RFC 1945 — HTTP/1.0 (informational)
-- RFC 6265 — HTTP State Management Mechanism (Cookies)
+- RFC 6265 — HTTP State Management Mechanism (Cookies; attributes/prefixes §4.1) +
+  cookie-bis draft (SameSite default-Lax, `__Host-`, `Partitioned`/CHIPS)
 - RFC 5789 — PATCH method
 - RFC 9113 — HTTP/2 · RFC 9114 — HTTP/3 · RFC 9000 — QUIC (cross-references)
 - RFC 1952 — GZIP file format · RFC 7932 — Brotli compressed data format

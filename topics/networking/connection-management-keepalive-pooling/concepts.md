@@ -322,6 +322,339 @@ setup into one exchange.
 
 ---
 
+## Ephemeral ports, the 4-tuple, and TIME_WAIT
+
+Pooling is not just a latency optimization — at scale it is what keeps you from running out
+of *sockets*.
+
+**A connection is a unique 4-tuple.** TCP (and UDP) identifies a connection by
+`(source IP, source port, destination IP, destination port)`. Two connections may share three
+of the four fields but must differ in at least one. For a single client talking to a single
+`(dst IP, dst port)`, the only field that can vary is the **source (ephemeral) port**.
+
+**Ephemeral-port exhaustion.** The OS allocates a source port from the *ephemeral range*. On
+Linux `net.ipv4.ip_local_port_range` defaults to **32768–60999** — roughly **28,000 ports**.
+So a single client can hold at most ~28k *simultaneous* connections to one destination
+`IP:port`. Blow past that and `connect()` fails with `EADDRNOTAVAIL`/`EADDRINUSE`. Mitigations:
+- **Pool / keep-alive** so you reuse a handful of sockets instead of opening thousands.
+- Spread load across **multiple destination IPs or ports** (each new dst widens the 4-tuple space).
+- Add **more source IPs** on the client.
+- `IP_BIND_ADDRESS_NO_PORT` lets the kernel defer source-port selection until `connect()`, so it
+  can pick a port that is unique *for that specific destination* — dramatically increasing the
+  usable port count when connecting to many destinations.
+
+**TIME_WAIT — the active closer pays.** Whichever side sends the first `FIN` and completes the
+close (the **active closer**) parks the socket in **`TIME_WAIT` for 2×MSL** (Maximum Segment
+Lifetime) — commonly **~60 s** on Linux (30–120 s on other stacks). This exists to (a) absorb
+delayed/duplicate segments from the old connection so they aren't mis-delivered to a new
+connection reusing the same 4-tuple, and (b) ensure the final ACK can be retransmitted if lost.
+High connection churn (open→close→open→close) piles up thousands of `TIME_WAIT` sockets,
+consuming ports and memory → `EADDRINUSE`. **The clean fix is to stop closing connections at
+all — reuse them via keep-alive/pooling.**
+
+- `SO_REUSEADDR` lets a listener rebind while old sockets sit in `TIME_WAIT`; `SO_REUSEPORT`
+  lets multiple sockets bind the same port for load distribution — neither "removes" TIME_WAIT.
+- `net.ipv4.tcp_tw_reuse` lets the *client* reuse a `TIME_WAIT` socket for a new outbound
+  connection when it's provably safe (timestamps). The old `tcp_tw_recycle` was **removed** from
+  Linux because it broke clients behind NAT (it keyed on per-source timestamps).
+
+**CLOSE_WAIT is a different animal — and usually a bug.** When the peer closes and you receive
+its `FIN`, your socket enters `CLOSE_WAIT` and stays there **until your application calls
+`close()`**. It is *not* governed by a timer. A growing pile of `CLOSE_WAIT` sockets means the
+application is leaking connections (not closing them after the peer hung up) — a code defect,
+in contrast to `TIME_WAIT`, which is normal protocol behavior on the active closer.
+
+> [!INTERVIEW]
+> "Under load you get `EADDRINUSE` connecting to one downstream." → ephemeral-port/`TIME_WAIT`
+> exhaustion from per-request connections. "`CLOSE_WAIT` sockets are piling up on my server." →
+> the app isn't calling `close()` after the peer's `FIN`; distinct from `TIME_WAIT`.
+
+---
+
+## Happy Eyeballs: dual-stack connection racing
+
+On a dual-stack (IPv6 + IPv4) host, a broken or slow IPv6 path used to cause multi-second
+connect stalls because clients tried IPv6 first and only fell back to IPv4 after a long
+timeout. **Happy Eyeballs v2 (RFC 8305)** minimizes cold-connection setup latency by *racing*
+address families instead of serially timing out.
+
+- **Resolution:** issue the **AAAA (IPv6)** and **A (IPv4)** DNS queries roughly together. If
+  the A answer arrives first, wait a short **Resolution Delay (default 50 ms)** for the AAAA
+  answer so IPv6 gets a fair chance (the algorithm *prefers* IPv6 when both work).
+- **Connection racing:** start a TCP (or QUIC) handshake to the first address, then stagger
+  attempts to further addresses by the **Connection Attempt Delay** — default **250 ms**
+  (bounded to a minimum of 100 ms and a maximum of 2 s; a hard floor of 10 ms). The **first
+  handshake to complete wins**; all other in-flight attempts are cancelled.
+- **Caching:** remember the winning address family for subsequent connections to avoid
+  re-racing.
+
+The effect: on a healthy IPv6 path you use IPv6; on a broken one you fail over in ~250 ms
+instead of stalling on a 20+ s TCP timeout. This is a *connection-setup* optimization — it
+affects only how fast a **cold** connection is established, not reuse.
+
+> [!INTERVIEW]
+> "IPv6 users see multi-second connect stalls, IPv4 users don't." → a broken IPv6 path with no
+> Happy Eyeballs racing; implement RFC 8305 (50 ms resolution delay, 250 ms attempt staggering).
+
+---
+
+## HTTP/2 flow control and concurrent-stream limits
+
+Multiplexing many streams over one connection needs its own throttles, or one greedy stream
+would starve the rest or overrun a slow receiver.
+
+**Credit-based flow control (RFC 9113 §5.2, §6.9).** Only **DATA frames** are flow-controlled
+(headers, SETTINGS, etc. are not). Flow control operates at **two levels simultaneously**: per
+**stream** and for the **whole connection**. The initial per-stream window is
+**65,535 octets** (`SETTINGS_INITIAL_WINDOW_SIZE` default). A sender may transmit DATA only up
+to the smaller of the two available windows; the receiver replenishes credit with
+**`WINDOW_UPDATE`** frames as it consumes data. Flow control is **hop-by-hop** (each endpoint
+manages its own windows) and cannot be disabled, though you can effectively neutralize it by
+advertising a very large window.
+
+**Why "HTTP/2 is slow under load" is often a flow-control bug.** If windows stay small (default
+64 KB per stream), a high-bandwidth-delay-product path can't keep enough data in flight — each
+stream stalls waiting for `WINDOW_UPDATE`, re-introducing *per-stream* stalls that look like
+HOL blocking but are actually self-inflicted throttling. Tuning `SETTINGS_INITIAL_WINDOW_SIZE`
+and the connection window upward is the fix.
+
+**`SETTINGS_MAX_CONCURRENT_STREAMS` (§6.5.2).** HTTP/2 removes the browser 6-connection limit
+but replaces it with a *per-peer* cap on how many streams may be open at once. The spec
+**recommends ≥ 100** and says it SHOULD NOT be 0. This is the real answer to "how many
+concurrent requests can one HTTP/2 connection run?" — it is bounded by the peer's advertised
+setting, not unlimited. Exceeding it doesn't error the connection: the server returns
+**`REFUSED_STREAM`** (see below), telling the client to open the stream later or on another
+connection.
+
+---
+
+## SETTINGS_MAX_CONCURRENT_STREAMS, REFUSED_STREAM, and safe retries
+
+HTTP/1.1 has no safe way to auto-retry a non-idempotent request after a mid-flight failure —
+you can't tell whether the server processed it. **HTTP/2 gives you an explicit wire signal.**
+
+**`REFUSED_STREAM` (RFC 9113 §8.1.1, error code 0x7).** A server sends `RST_STREAM` with error
+`REFUSED_STREAM` to say "I have **not** started processing this stream" — e.g., it hit
+`SETTINGS_MAX_CONCURRENT_STREAMS`, or is shutting down and the stream is above a `GOAWAY`
+Last-Stream-ID. Because the guarantee is *definitely not processed*, the client **may safely
+retry the request on a new connection — even a non-idempotent POST.** Contrast
+`PROTOCOL_ERROR`/`INTERNAL_ERROR`, which give no such "not processed" guarantee, so retrying a
+non-idempotent request is unsafe. `REFUSED_STREAM` is the H2 answer to the idle-timeout/half-open
+retry problem the HTTP/1.1 sections raise.
+
+> [!INTERVIEW]
+> "Is it ever safe to auto-retry a POST?" Normally no — but **yes** if the server signalled the
+> request was not processed: `REFUSED_STREAM`, or a stream above a `GOAWAY` Last-Stream-ID.
+> Those are the precise wire signals that make an otherwise-unsafe retry safe.
+
+---
+
+## GOAWAY and graceful connection draining
+
+Long-lived multiplexed connections must be *cycled* — for deploys, autoscaling, and LB
+rebalancing — without dropping in-flight requests. **`GOAWAY` (RFC 9113 §6.8)** is how HTTP/2
+does it (HTTP/3 mirrors this in RFC 9114 §5.2).
+
+A `GOAWAY` frame carries three things:
+- **Last-Stream-ID** — the highest stream the sender "processed or might have processed."
+  Streams with a **higher** ID were definitively **not** processed and are safe to retry on a
+  new connection (they'll get `REFUSED_STREAM` semantics).
+- **Error Code** — `NO_ERROR (0x0)` for a graceful shutdown, or a real error.
+- **Optional debug data** — free-form diagnostic bytes.
+
+**The double-GOAWAY graceful-shutdown pattern.** The canonical "deploy without dropping
+requests" recipe:
+1. Send a **first `GOAWAY` with `NO_ERROR` and Last-Stream-ID = 2³¹−1 (the maximum)**. This
+   tells the peer "stop opening *new* streams" while explicitly promising that everything
+   currently in flight will still be processed. (In HTTP/3 the "max" sentinel is a large
+   VarInt.)
+2. Let in-flight streams **drain** (optionally after one RTT so the peer has seen the first
+   GOAWAY).
+3. Send a **second `GOAWAY` with the real Last-Stream-ID** once you're done, then close.
+
+This lets a client cleanly migrate remaining/new requests to a fresh connection while finishing
+the ones already accepted — no lost RPCs during a rolling restart.
+
+> [!INTERVIEW]
+> "How do you restart an HTTP/2 / gRPC server behind an LB without dropping in-flight RPCs?" →
+> double-`GOAWAY` graceful drain (first with max Last-Stream-ID to stop new streams, second with
+> the real one after draining), often paired with gRPC `MAX_CONNECTION_AGE` + `_GRACE`.
+
+---
+
+## HTTP/2 connection coalescing and 421 Misdirected Request
+
+"One HTTP/2 connection per origin" understates reality: a client MAY **coalesce** requests for
+*multiple* authorities onto a single connection (RFC 9113 §9.1.1).
+
+**When coalescing is allowed.** A client may reuse an existing connection for a different host
+if **(1)** the connection's TLS certificate is valid for that host (e.g., a wildcard or SAN
+covering both), **and (2)** the host resolves to the **same IP address** the connection already
+goes to. This saves handshakes across sibling domains served by the same fleet/CDN.
+
+**When it goes wrong — 421.** If a request is coalesced onto a connection whose server can't (or
+won't) serve that authority, the server responds **`421 Misdirected Request`**. The client must
+then **retry that request on a fresh connection** to the correct origin (and stop coalescing it).
+This is common behind sharded backends where the cert covers many hosts but each backend serves
+only some.
+
+**HTTP/3 tightens this.** Over QUIC (RFC 9114 §3.3) a client must **re-validate the certificate
+for each origin** before reusing a connection and SHOULD NOT open more than one connection to a
+given `IP:UDP-port`. The coalescing concept interacts directly with domain sharding and pool
+design: aggressive coalescing reduces connections but can concentrate load and trigger 421s.
+
+---
+
+## HTTP/2 PING and gRPC keepalive
+
+The "three keepalives" section covers HTTP keep-alive and TCP keepalive; **HTTP/2 (and HTTP/3)
+PING is a genuine fourth liveness tool**, living at the protocol/framing layer.
+
+**H2 PING (RFC 9113 §6.7).** A `PING` frame carries **8 opaque octets** of payload. The receiver
+**MUST** send back a `PING` with the **ACK flag (0x1)** set and the *identical* payload. PING is
+a connection-level frame (stream 0) used for two things: **liveness** (is the peer still
+responsive?) and **RTT measurement** (time from PING to its ACK). It is distinct from TCP
+keepalive (transport probe on an idle socket) and HTTP keep-alive (leaving the socket open for
+reuse).
+
+**gRPC keepalive is H2 PING in practice.** gRPC exposes concrete knobs:
+- Client `KEEPALIVE_TIME` (how often to PING; **default disabled**), `KEEPALIVE_TIMEOUT`
+  (**20 s** to wait for the ACK before declaring the connection dead), and
+  `KEEPALIVE_WITHOUT_CALLS` (whether to PING even with no active RPCs).
+- Server enforcement: `PERMIT_KEEPALIVE_TIME` (minimum interval it will tolerate, **default
+  5 min**) and `PERMIT_KEEPALIVE_WITHOUT_CALLS`. A client that PINGs **too aggressively** gets a
+  **`GOAWAY` with error `ENHANCE_YOUR_CALM (0xb)`** and debug data **`"too_many_pings"`**, and is
+  disconnected.
+- `MAX_CONNECTION_AGE` + `MAX_CONNECTION_AGE_GRACE` force the server to cycle connections after a
+  bounded lifetime (via graceful `GOAWAY`), which is how gRPC deployments **rebalance long-lived
+  multiplexed connections across backends**.
+
+> [!INTERVIEW]
+> "gRPC clients get `ENHANCE_YOUR_CALM` / `too_many_pings` and disconnect." → the client's
+> keepalive interval is below the server's `PERMIT_KEEPALIVE_TIME`; raise the client interval or
+> lower the server's minimum (and set `KEEPALIVE_WITHOUT_CALLS` deliberately).
+
+---
+
+## Connection affinity vs stateless pooling
+
+Long-lived, multiplexed connections change how load balancing behaves.
+
+**Stateless pooling** routes each request to *any* backend; a pool of short-or-long connections
+can fan out across the fleet. **Sticky / affinity** routing pins a client (or connection) to a
+*specific* backend — required for stateful sessions.
+
+**The multiplexing/LB tension.** An **L4 (transport) load balancer** balances *connections*, not
+requests. It pins an entire HTTP/2 connection to one backend, so **all multiplexed streams on
+that connection land on the same server** — a single long-lived connection can hotspot one pod
+while others sit idle. An **L7 / gRPC-aware load balancer** balances per-request/per-stream, so
+multiplexed streams spread across backends.
+
+**Fixes for H2/gRPC imbalance:** use an L7 (request-level) balancer or client-side per-call load
+balancing; and/or force periodic reconnection with gRPC `MAX_CONNECTION_AGE` so the pinned
+connection is torn down (via graceful `GOAWAY`) and re-established, letting the balancer re-spread
+it.
+
+> [!INTERVIEW]
+> "My gRPC/H2 traffic piles onto one backend pod despite 20 replicas." → an L4 LB pinned the
+> long-lived multiplexed connection to one backend; switch to L7/per-request balancing or churn
+> connections with `MAX_CONNECTION_AGE`.
+
+---
+
+## QUIC connection migration and Connection IDs
+
+TCP identifies a connection by its **4-tuple**, so any change to the tuple — a NAT rebinding, a
+device roaming from Wi-Fi to cellular — **kills** the TCP connection and forces a full
+re-handshake. QUIC (RFC 9000) fixes this at the design level.
+
+**Connection ID, not the 4-tuple.** A QUIC connection is keyed by a **Connection ID** carried in
+the packet header, negotiated during the handshake (each side can supply several). Because
+identity is decoupled from the IP/port tuple, packets arriving from a **new source address/port**
+can still be matched to the existing connection.
+
+**Connection migration.** When the client's address changes (NAT timeout re-mapping, Wi-Fi →
+cellular handoff), it continues on the **same** QUIC connection — no new handshake, no lost TLS
+state, in-flight streams survive. The endpoint validates the new path (a **path challenge /
+response** to prevent address-spoofing amplification) and carries on. This also gives natural
+resilience to NAT idle timeouts.
+
+**Why H2 can't do this.** HTTP/2 rides TCP; TCP's connection *is* the 4-tuple, so there is no
+protocol mechanism to move a live connection to a new address. Connection migration is a concrete
+"what can HTTP/3 do that HTTP/2 fundamentally cannot?" answer.
+
+---
+
+## Congestion window state: slow start after idle
+
+Slow start isn't only a cold-start cost — it can bite a **warm but idle** pooled connection too.
+
+**Congestion window is per-connection state, and it decays when idle.** The `cwnd` a connection
+grew during a burst is not kept forever. Under RFC 5681 guidance (and the Linux
+`net.ipv4.tcp_slow_start_after_idle` default of **1/on**), a connection that has been **idle
+longer than one RTO** resets its congestion window back to the initial window and must
+**slow-start again** on the next send. So a pooled connection that sat quiet between bursts can
+deliver its first post-idle response *slower* than you'd expect from a "warm" connection — a
+subtle reason pooling alone doesn't guarantee full throughput. Disabling
+`tcp_slow_start_after_idle` (or sending periodic traffic) keeps the window warm.
+
+**BBR vs CUBIC.** The ramp behavior also depends on the congestion-control algorithm. **CUBIC**
+(long the Linux default) is loss-based: it grows `cwnd` until loss, then backs off — it can
+under-fill high-bandwidth-delay paths and is sensitive to random loss. **BBR** (Bottleneck
+Bandwidth and RTT, from Google) models the path's bandwidth and RTT directly instead of treating
+loss as the only congestion signal, often ramping faster and sustaining higher throughput on
+lossy long-fat networks. The modern shift toward BBR (widely deployed for QUIC/HTTP/3) changes how
+quickly a fresh or post-idle connection reaches full speed.
+
+---
+
+## Retry safety: idempotency and method semantics
+
+Several connection-management failure modes (idle-timeout race, half-open pooled connection,
+`GOAWAY`, 0-RTT) all reduce to one question: **is this request safe to send again?** RFC 9110
+§9.2 defines the vocabulary:
+
+- **Safe** methods — `GET`, `HEAD`, `OPTIONS`, `TRACE` — are read-only; sending them has no
+  side effects.
+- **Idempotent** methods — safe methods **plus** `PUT` and `DELETE` — can be sent N times with
+  the same effect as once.
+- **Neither** — `POST` (and `PATCH`) are not idempotent by default; a duplicate may create two
+  resources or double-charge.
+
+**The rule.** Only **safe/idempotent** requests may be *automatically* retried on a broken or
+half-open pooled connection, or placed in TLS 1.3 **0-RTT early data** (which is replayable). A
+`POST` may be auto-retried **only** when the server guarantees it was **not processed** —
+`REFUSED_STREAM`, or a stream above a `GOAWAY` Last-Stream-ID. Application-level **idempotency
+keys** let you make a POST safely retryable regardless of transport signals. This ties together
+the idle-timeout race, `REFUSED_STREAM`, and 0-RTT sections.
+
+---
+
+## 0-RTT anti-replay defenses
+
+The resumption section flags that TLS 1.3 **0-RTT early data is replayable**; here is what
+actually defends against it (RFC 8446 §8, and RFC 9001 for QUIC).
+
+- **Single-use session tickets** — the server issues a ticket the client may use only once; a
+  replayed early-data flight presents an already-consumed ticket and is rejected.
+- **Freshness / strike registers** — the server records recently-seen ClientHello identifiers
+  (within a bounded time window) and rejects duplicates.
+- **Bounded early-data window** — `max_early_data_size` caps how much 0-RTT data is accepted, and
+  time-windows the risk.
+- **Server MAY reject early data entirely** — it can respond as if the data weren't sent; the
+  client **must be prepared to re-send the request at 1-RTT** once the handshake completes. So
+  0-RTT is best-effort: never rely on it succeeding.
+- Even with these, application semantics still matter — keep non-idempotent operations out of
+  0-RTT regardless.
+
+**QUIC adds address validation.** Before doing expensive work for a new client, a QUIC server MAY
+send a **`Retry` packet** carrying a token the client must echo, proving it owns its source
+address (anti-spoofing). QUIC also enforces an **anti-amplification limit** (a server may send at
+most ~3× the bytes it has received from an unvalidated address), which bounds how much a spoofed
+0-RTT/Initial flight can be abused as a reflection amplifier.
+
+---
+
 ## Common follow-up questions
 
 - **"Why is opening a new connection per request slow?"** TCP handshake (~1 RTT) + TLS
@@ -347,6 +680,24 @@ setup into one exchange.
   retry idempotent requests.
 - **"What's the benefit of TLS session resumption?"** Skip the full handshake on new
   connections: TLS 1.2 → 1 RTT; TLS 1.3 → 0-RTT (with replay-safety caveats).
+- **"Why does high connection churn cause `EADDRINUSE`?"** The active closer holds each socket
+  in `TIME_WAIT` for ~2×MSL (~60 s), exhausting the ~28k ephemeral ports to one destination.
+  Pool/keep-alive to stop closing; or widen the 4-tuple with more dst IPs/ports.
+- **"`TIME_WAIT` vs `CLOSE_WAIT`?"** `TIME_WAIT` is normal, on the active closer, timer-based
+  (~2×MSL). `CLOSE_WAIT` sits until the app calls `close()` — a pile-up is a connection leak bug.
+- **"How many concurrent requests on one HTTP/2 connection?"** Bounded by the peer's
+  `SETTINGS_MAX_CONCURRENT_STREAMS` (recommended ≥100); exceeding it yields `REFUSED_STREAM`.
+- **"When is it safe to auto-retry a POST?"** Only when the server guarantees non-processing:
+  `REFUSED_STREAM`, or a stream above a `GOAWAY` Last-Stream-ID — or with an idempotency key.
+- **"How do you deploy an H2/gRPC server without dropping in-flight RPCs?"** Double-`GOAWAY`
+  drain (first with max Last-Stream-ID to stop new streams, second after draining), plus
+  gRPC `MAX_CONNECTION_AGE`/`_GRACE`.
+- **"Why does gRPC traffic pile onto one pod?"** An L4 LB pins the long-lived multiplexed
+  connection to one backend; use L7/per-request balancing or churn with `MAX_CONNECTION_AGE`.
+- **"What can HTTP/3 do that HTTP/2 fundamentally can't?"** Survive a 4-tuple change (NAT
+  rebind, Wi-Fi→cellular) via QUIC connection migration keyed on Connection ID — TCP dies.
+- **"Why do IPv6 users see connect stalls but IPv4 users don't?"** Broken IPv6 path with no
+  Happy Eyeballs (RFC 8305) racing; add the 50 ms resolution delay + 250 ms attempt staggering.
 
 ## References
 
@@ -358,5 +709,12 @@ setup into one exchange.
 - RFC 896 — Congestion Control (Nagle's algorithm)
 - RFC 1122 — Requirements for Internet Hosts (delayed ACK, TCP keepalive)
 - RFC 5681 — TCP Congestion Control (slow start); RFC 6928 — Increasing the initial window (IW10)
-- RFC 8446 — TLS 1.3 (1-RTT / 0-RTT resumption, PSK); RFC 5077 — TLS session tickets
-- MDN Web Docs — "Connection management in HTTP/1.x", "Connection", "Keep-Alive" headers
+- RFC 8446 — TLS 1.3 (1-RTT / 0-RTT resumption, PSK, §8 anti-replay); RFC 5077 — TLS session tickets
+- RFC 9001 — Using TLS to secure QUIC (0-RTT, `Retry`/address validation, amplification limit)
+- RFC 8305 — Happy Eyeballs v2 (dual-stack connection racing)
+- RFC 9000 — QUIC transport (Connection IDs, connection migration, path validation)
+- RFC 9113 — HTTP/2 (§5.2/§6.9 flow control, §6.5.2 SETTINGS_MAX_CONCURRENT_STREAMS, §6.7 PING, §6.8 GOAWAY, §8.1.1 REFUSED_STREAM, §9.1.1 coalescing)
+- RFC 9114 — HTTP/3 (§5.2 GOAWAY, §3.3 connection reuse/coalescing)
+- gRPC docs — keepalive (`KEEPALIVE_TIME`/`_TIMEOUT`, `PERMIT_KEEPALIVE_TIME`, `MAX_CONNECTION_AGE`), ENHANCE_YOUR_CALM/too_many_pings
+- Linux tunables — `ip_local_port_range`, `tcp_tw_reuse`, `tcp_slow_start_after_idle`; `IP_BIND_ADDRESS_NO_PORT`
+- MDN Web Docs — "Connection management in HTTP/1.x", "Connection", "Keep-Alive" headers; MDN "421 Misdirected Request"

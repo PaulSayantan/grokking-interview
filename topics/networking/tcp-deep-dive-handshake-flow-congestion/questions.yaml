@@ -989,3 +989,505 @@ questions:
       plus option overhead, so only about 3–4 fit — and fewer when the 10-byte Timestamps
       option is also present.
     ref: "concepts.md#selective-acknowledgment-sack"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-057
+    difficulty: expert
+    tags: [rack-tlp, tail-loss, loss-detection]
+    question: |
+      A short HTTP response is sent as five segments; only the last two are lost. The
+      connection has been idle since. Why does classic three-dup-ACK fast retransmit fail
+      to recover here, and what modern mechanism does?
+    options:
+      - "There is no data behind the lost tail to generate dup ACKs, so recovery falls to the RTO — RACK's time-based detection plus TLP's tail-loss probe recover it sooner"
+      - "SACK recovers it; fast retransmit only fails when SACK is disabled"
+      - "Delayed ACK suppresses the dup ACKs; disabling it fixes the case"
+      - "Nagle holds the retransmission; TCP_NODELAY recovers it"
+    answer: 0
+    explanation: |
+      Tail losses produce no subsequent segments to trigger duplicate ACKs, so dup-ACK
+      counting never reaches three and the sender waits for a full RTO. RACK-TLP (RFC 8985)
+      arms a PTO (~2·SRTT) tail-loss probe to elicit an ACK/SACK, and RACK infers the loss
+      from transmit timestamps, converting a slow RTO into fast recovery.
+    ref: "concepts.md#rack-tlp-time-based-loss-detection"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-058
+    difficulty: expert
+    tags: [rack, reordering-window, dsack]
+    question: |
+      In RACK (RFC 8985), how is a segment declared lost, and how does the reordering
+      window behave over the life of a connection?
+    options:
+      - "After exactly three SACK blocks name a later segment; the window is fixed at 3 segments"
+      - "When the RTO fires; RACK simply renames the RTO timer"
+      - "When the advertised window closes; the window equals the receive buffer size"
+      - "When a later segment is SACKed and the unacked segment's time-since-transmit exceeds RTT plus a reordering window that starts near min_RTT/4 and grows adaptively (bounded by SRTT) when D-SACK reveals real reordering"
+    answer: 3
+    explanation: |
+      RACK is time- and SACK-based: once a later segment is acknowledged, an earlier
+      still-unacked segment is deemed lost when now − xmit_time > RTT + reorder_window. The
+      reordering window starts small (≈min_RTT/4) and adapts upward via D-SACK evidence of
+      genuine reordering, bounded by SRTT — replacing the rigid 3-dup-ACK threshold.
+    ref: "concepts.md#rack-tlp-time-based-loss-detection"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-059
+    difficulty: advanced
+    tags: [tlp, pto, tail-loss]
+    question: |
+      The Tail Loss Probe (TLP) component of RACK-TLP arms a timer to probe a quiet flight.
+      Roughly what is that Probe Timeout (PTO), and why is it set that way?
+    options:
+      - "About 2·SRTT — short enough to probe well before the coarse RTO, long enough to let a real ACK arrive first"
+      - "Exactly the RTO — TLP is just a renamed RTO"
+      - "One MSL, to guarantee old segments have drained"
+      - "200 ms fixed, matching the delayed-ACK timer"
+    answer: 0
+    explanation: |
+      TLP sets a PTO of roughly 2·SRTT, much shorter than the RTO but long enough to avoid
+      firing before a legitimately delayed ACK returns. When the flight goes silent, TLP
+      transmits a probe (the last or a new segment) to trigger an ACK/SACK and drive fast
+      recovery instead of an expensive RTO.
+    ref: "concepts.md#rack-tlp-time-based-loss-detection"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-060
+    difficulty: expert
+    tags: [prr, recovery, cwnd]
+    question: |
+      Proportional Rate Reduction (RFC 6937), the Linux default, changes how cwnd is
+      reduced during loss recovery. Compared with the textbook "halve cwnd instantly,"
+      what does PRR actually do?
+    options:
+      - "It reduces cwnd to 1 MSS and re-enters slow start"
+      - "It doubles the reduction to be safe, ending at ssthresh/2"
+      - "It leaves cwnd untouched and relies on the receive window"
+      - "It paces the reduction across the recovery RTT using per-ACK delivery info, so cwnd converges smoothly to ssthresh, keeping the ACK clock alive and cutting follow-on timeouts"
+    answer: 3
+    explanation: |
+      PRR spreads the window reduction over the recovery round trip, sending in proportion
+      to data leaving the network (from ACK/SACK feedback). This lands cwnd near ssthresh
+      smoothly rather than in one abrupt step, preserving the ACK clock, avoiding a stall,
+      and reducing the chance of a subsequent timeout.
+    ref: "concepts.md#proportional-rate-reduction-prr"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-061
+    difficulty: expert
+    tags: [hystart, slow-start, cubic]
+    question: |
+      HyStart++ (RFC 9406), which RFC 9438 says CUBIC SHOULD use, changes slow-start exit.
+      What signal does it use and what happens on exit?
+    options:
+      - "It counts three dup ACKs, then jumps straight to congestion avoidance"
+      - "It exits when cwnd equals the receive window, then freezes cwnd"
+      - "It detects a sustained RTT increase (queue starting to fill) and enters a Conservative/Limited Slow Start phase rather than jumping directly to congestion avoidance"
+      - "It waits for an ECN mark and halves cwnd"
+    answer: 2
+    explanation: |
+      Classic slow start overshoots by doubling until loss. HyStart++ watches for a
+      sustained rise in the round's minimum RTT (indicating the bottleneck queue is
+      filling) and leaves exponential growth early, entering a cautious Limited Slow Start
+      phase to hedge against a premature exit from transient jitter.
+    ref: "concepts.md#hystart-and-slow-start-exit"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-062
+    difficulty: advanced
+    tags: [pacing, ack-clocking, bbr]
+    question: |
+      What problem does TCP pacing address that pure ACK-clocking does not, and which
+      algorithm depends on it?
+    options:
+      - "Pacing spreads a window's packets evenly over the RTT to avoid micro-bursts (from large cwnd, TSO/GSO, or stretch ACKs) that overrun shallow buffers — BBR fundamentally paces to its computed rate"
+      - "Pacing encrypts inter-packet gaps; TLS depends on it"
+      - "Pacing replaces sequence numbers; QUIC depends on it"
+      - "Pacing doubles the initial window; slow start depends on it"
+    answer: 0
+    explanation: |
+      ACK-clocking releases new data as ACKs return, which can produce bursts (a big cwnd,
+      segmentation offload, or clumped ACKs), overflowing shallow buffers even at a fine
+      average rate. Pacing spaces packets by ≈RTT/cwnd. BBR relies on pacing to a computed
+      rate (pacing_gain × bottleneck bandwidth) so its model-based rate does not arrive as
+      bursts.
+    ref: "concepts.md#pacing-and-ack-clocking"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-063
+    difficulty: expert
+    tags: [ecn, rfc3168, handshake, codepoints]
+    question: |
+      In classic ECN (RFC 3168), which statement about how congestion is signaled and
+      echoed is correct?
+    options:
+      - "A router drops the packet and the sender infers ECN from the gap"
+      - "The receiver sets the CE bit; the router echoes it with CWR"
+      - "A congested router sets CE in the IP DS field on an ECT-marked packet; the receiver echoes with the ECE flag on its ACKs, and the sender reduces cwnd as if one loss and sets CWR"
+      - "ECN is carried entirely in the TCP window field and needs no IP support"
+    answer: 2
+    explanation: |
+      The sender marks packets ECT(0)/ECT(1) in the two-bit IP DS codepoint. A congested
+      router sets CE ("Congestion Experienced") instead of dropping. The receiver reflects
+      this by setting ECE on ACKs; the sender then reduces cwnd as though a single loss
+      occurred and sets CWR to acknowledge the signal.
+    ref: "concepts.md#ecn-in-detail-accecn-and-l4s"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-064
+    difficulty: expert
+    tags: [accecn, l4s, feedback]
+    question: |
+      Why do L4S scalable congestion controllers require Accurate ECN (AccECN, RFC 9768)
+      rather than classic RFC 3168 ECN feedback?
+    options:
+      - "AccECN encrypts the ECN bits so middleboxes cannot strip them"
+      - "AccECN moves ECN into UDP so QUIC can use it"
+      - "Classic ECN feedback conveys only a single 'congestion happened' bit per RTT, whereas L4S needs a per-RTT count of CE marks to respond proportionally to frequent, immediate marking"
+      - "Classic ECN only works on IPv4; AccECN adds IPv6 support"
+    answer: 2
+    explanation: |
+      Classic ECN's ECE bit signals only that congestion occurred in an RTT, not how much.
+      L4S marks packets frequently and immediately (marks are not drop-equivalent), so a
+      scalable controller must know the count of CE marks to react proportionally. AccECN
+      feeds back a running count, which requires both endpoints to be upgraded.
+    ref: "concepts.md#ecn-in-detail-accecn-and-l4s"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-065
+    difficulty: expert
+    tags: [l4s, dualq, ect1]
+    question: |
+      In the L4S architecture (RFC 9330/9331/9332), what role does the ECT(1) codepoint
+      play and how does the DualQ Coupled AQM use it?
+    options:
+      - "ECT(1) means 'do not mark'; DualQ drops those packets first"
+      - "ECT(1) classifies traffic into the low-latency L4S queue, which the DualQ AQM keeps shallow and couples with the classic queue so both share bandwidth fairly"
+      - "ECT(1) requests fragmentation; DualQ reassembles it"
+      - "ECT(1) is the legacy Reno marker; DualQ routes it to the classic queue only"
+    answer: 1
+    explanation: |
+      L4S uses ECT(1) as the classifier that steers scalable-CC traffic into a separate
+      low-latency queue. The DualQ Coupled AQM runs a classic queue (CUBIC/Reno) and an L4S
+      queue, coupling their marking/dropping so the two share the link fairly while the L4S
+      queue stays near-empty for sub-millisecond delay.
+    ref: "concepts.md#ecn-in-detail-accecn-and-l4s"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-066
+    difficulty: expert
+    tags: [rfc5961, challenge-ack, rst]
+    question: |
+      Under RFC 5961, an established connection receives an RST whose sequence number falls
+      inside the receive window but is NOT the exact next-expected byte. What does TCP do?
+    options:
+      - "Immediately resets the connection, since the RST is in-window"
+      - "Silently drops the RST and never responds"
+      - "Does not reset; it sends a challenge ACK carrying the true expected sequence number, forcing the sender to prove it knows the correct sequence"
+      - "Escalates to a full three-way handshake to re-validate"
+    answer: 2
+    explanation: |
+      RFC 5961 hardens against blind (off-path) RST attacks: an RST is honored only if its
+      sequence number exactly matches the next expected byte. An in-window-but-inexact RST
+      triggers a challenge ACK instead of a reset; a legitimate peer replies with the
+      correct sequence, while a blind attacker cannot.
+    ref: "concepts.md#rfc-5961-blind-attacks-and-the-challenge-ack"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-067
+    difficulty: expert
+    tags: [rfc5961, side-channel, cve]
+    question: |
+      The challenge-ACK mechanism (RFC 5961) introduced a subtle vulnerability
+      (CVE-2016-5696). What was the root cause?
+    options:
+      - "Challenge ACKs were sent unencrypted, leaking sequence numbers"
+      - "A global (system-wide) rate limit on challenge ACKs let an off-path attacker infer whether two hosts shared a connection by observing the shared counter"
+      - "Challenge ACKs reset the congestion window, enabling a throughput attack"
+      - "The mechanism disabled PAWS, allowing sequence wrap attacks"
+    answer: 1
+    explanation: |
+      The challenge-ACK rate limiter was global rather than per-connection. An attacker
+      could probe the shared counter as a side channel to detect an existing connection and
+      then infer sequence numbers off-path. The fix was to randomize/localize the rate
+      limit so it no longer leaks cross-connection state.
+    ref: "concepts.md#rfc-5961-blind-attacks-and-the-challenge-ack"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-068
+    difficulty: advanced
+    tags: [half-open, half-closed, reset]
+    question: |
+      A server crashes and reboots, losing all TCP state. A client that still thinks the
+      connection is ESTABLISHED sends data. What happens, and what is this called?
+    options:
+      - "The rebooted server has no matching TCB for the 4-tuple and replies with an RST; this is a half-open connection"
+      - "The connection silently continues; this is a half-closed connection"
+      - "The client enters TIME_WAIT; this is a simultaneous close"
+      - "The server buffers the data until it re-learns the connection; this is fast open"
+    answer: 0
+    explanation: |
+      With no TCB for the arriving segment's 4-tuple, the rebooted peer sends an RST and the
+      survivor discovers the connection is dead — a half-open connection. This differs from
+      a half-closed connection, where one direction was intentionally shut with FIN while
+      the other remains valid.
+    ref: "concepts.md#half-open-connections"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-069
+    difficulty: intermediate
+    tags: [mss, mtu, options]
+    question: |
+      Which statement about the TCP MSS option is correct?
+    options:
+      - "MSS equals the link MTU and is renegotiated on every segment"
+      - "MSS is the largest TCP payload a host will accept, advertised only in the SYN; if absent it defaults to 536 (IPv4) or 1220 (IPv6), and each side advertises independently"
+      - "MSS is set by the receive window and changes as the buffer fills"
+      - "MSS is a router-only field invisible to endpoints"
+    answer: 1
+    explanation: |
+      MSS is the maximum TCP payload (MTU minus IP and TCP headers), carried in the MSS
+      option of the SYN and only the SYN. Each side advertises the MSS it is willing to
+      receive; absent the option the defaults are 536 (IPv4) and 1220 (IPv6) per RFC 9293/
+      6691.
+    ref: "concepts.md#path-mtu-discovery-mss-and-clamping"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-070
+    difficulty: expert
+    tags: [pmtud, blackhole, mss-clamping, scenario]
+    question: |
+      SSH sessions and pings to a host work fine, but large file transfers stall and
+      eventually reset. A capture shows big data packets leaving but never acknowledged.
+      What is the most likely cause and fix?
+    options:
+      - "A PMTUD black-hole: a middlebox filters the ICMP 'fragmentation needed' messages, so the sender never shrinks its segments — fix with MSS clamping on the tunnel or PLPMTUD"
+      - "The receive window is too small; increase the socket buffer"
+      - "Nagle plus delayed ACK; set TCP_NODELAY"
+      - "The congestion window collapsed from random loss; switch to BBR"
+    answer: 0
+    explanation: |
+      The signature — small packets pass, large ones vanish — is a classic PMTUD black-hole
+      caused by filtered ICMP Fragmentation-Needed/Packet-Too-Big messages. The DF-bit
+      packets are dropped silently. Remedies are MSS clamping (rewrite the SYN's MSS down to
+      fit the path) or PLPMTUD (RFC 4821/8899), which probes the path MTU without relying on
+      ICMP.
+    ref: "concepts.md#path-mtu-discovery-mss-and-clamping"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-071
+    difficulty: advanced
+    tags: [plpmtud, pmtud, icmp]
+    question: |
+      Why is PLPMTUD (RFC 4821/8899) more robust than classic ICMP-based PMTUD on the
+      modern Internet?
+    options:
+      - "It fragments packets at the sender so MTU never matters"
+      - "It probes the path MTU using the transport's own loss/acknowledgment signals, so it works even when ICMP 'too big' messages are filtered by firewalls"
+      - "It negotiates MTU in the TCP SYN like the MSS option"
+      - "It relies on routers advertising MTU via a routing protocol"
+    answer: 1
+    explanation: |
+      Classic PMTUD depends on receiving ICMP Fragmentation-Needed/Packet-Too-Big messages,
+      which are widely filtered, causing black-holes. PLPMTUD instead sends probe packets of
+      increasing size and uses the transport's acknowledgment/loss feedback to find the
+      largest that gets through — no ICMP dependency.
+    ref: "concepts.md#path-mtu-discovery-mss-and-clamping"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-072
+    difficulty: expert
+    tags: [cubic, beta, model, rfc9438]
+    question: |
+      In CUBIC's window model W_cubic(t) = C·(t−K)³ + W_max (RFC 9438), which set of facts
+      is correct?
+    options:
+      - "C = 0.5, β = 0.5, and growth is proportional to RTT"
+      - "C = 1.0, β = 0.9, and K equals the current RTT"
+      - "C is the receive window, β is the loss rate, and K is the MSS"
+      - "C = 0.4, the multiplicative-decrease factor β = 0.7, K is the time to climb back to W_max, and growth is RTT-independent because t is wall-clock time"
+    answer: 3
+    explanation: |
+      RFC 9438 fixes C = 0.4 and β_cubic = 0.7 (window kept at 70% on loss vs Reno's 50%).
+      K = cbrt(W_max·β/C) is the time to return to W_max. Since t is elapsed wall-clock time
+      since the last congestion event, growth does not depend on RTT — a key CUBIC property.
+    ref: "concepts.md#deeper-congestion-control-internals"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-073
+    difficulty: advanced
+    tags: [cubic, regions, reno-friendly]
+    question: |
+      CUBIC's growth curve has concave and convex regions around W_max, plus a
+      "Reno-friendly" region. What is the purpose of the Reno-friendly region?
+    options:
+      - "To disable cubic growth entirely on wireless links"
+      - "To track an estimated Reno window (W_est) so CUBIC does not underperform Reno on low-BDP paths where Reno would otherwise grow faster"
+      - "To force a switch to BBR when RTT is high"
+      - "To guarantee zero loss during the convex phase"
+    answer: 1
+    explanation: |
+      On low-BDP paths a pure cubic curve could grow more slowly than Reno right after a
+      loss, so CUBIC computes an estimated Reno window W_est and uses the larger of the two.
+      This keeps CUBIC at least as aggressive as Reno there, preserving fairness with
+      Reno-style flows.
+    ref: "concepts.md#deeper-congestion-control-internals"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-074
+    difficulty: expert
+    tags: [bbr, phases, startup, probe-rtt]
+    question: |
+      BBRv1 cycles through phases while estimating BtlBw and RTprop. What is the purpose of
+      its PROBE_RTT phase?
+    options:
+      - "To exponentially ramp cwnd at connection start"
+      - "To drain the queue built during startup"
+      - "To periodically cut inflight data low enough to re-measure the minimum RTT (RTprop), since a persistently full pipe would hide the true propagation delay"
+      - "To probe for more bandwidth by doubling the pacing gain"
+    answer: 2
+    explanation: |
+      BBR's RTprop estimate is the minimum RTT observed, but if the pipe is kept full the
+      queue inflates every RTT sample. PROBE_RTT periodically drops inflight to a small
+      value so BBR can observe the true, unqueued minimum RTT. STARTUP ramps, DRAIN empties
+      the startup queue, and PROBE_BW is the steady-state bandwidth-probing phase.
+    ref: "concepts.md#deeper-congestion-control-internals"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-075
+    difficulty: advanced
+    tags: [bbr, versions, fairness, ecn]
+    question: |
+      What is the main behavioral change BBRv2 introduced over BBRv1 to address v1's
+      coexistence problems?
+    options:
+      - "It removed pacing and reverted to pure ACK-clocking"
+      - "It switched from a bandwidth model to counting three dup ACKs"
+      - "It made cwnd a fixed constant to avoid queue buildup"
+      - "It added an explicit loss and ECN response (including AccECN/L4S awareness) plus an inflight cap, improving fairness with loss-based CUBIC/Reno flows"
+    answer: 3
+    explanation: |
+      BBRv1 ignored loss and could starve CUBIC/Reno or build a standing queue in deep
+      buffers. BBRv2 added a response to loss and ECN (with AccECN/L4S support) and an
+      inflight cap so it coexists more fairly; BBRv3 further refined convergence and probing
+      bugs.
+    ref: "concepts.md#deeper-congestion-control-internals"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-076
+    difficulty: advanced
+    tags: [so-reuseport, so-reuseaddr, scaling]
+    question: |
+      A service wants many worker processes to accept connections on the same port with the
+      kernel load-balancing across them. Which socket option provides this, and how does it
+      differ from SO_REUSEADDR?
+    options:
+      - "SO_REUSEADDR — it load-balances accepts; SO_REUSEPORT only silences bind errors"
+      - "SO_REUSEPORT (Linux 3.9+) lets multiple sockets bind the identical address+port and the kernel spreads incoming connections across them; SO_REUSEADDR merely allows binding a port that has a lingering/TIME_WAIT socket and does not load-balance"
+      - "Both are identical aliases; either works"
+      - "Neither — you must use a single accept thread with a mutex"
+    answer: 1
+    explanation: |
+      SO_REUSEPORT (Linux 3.9+) allows several sockets to bind the same address+port and has
+      the kernel distribute incoming connections, removing the single-accept bottleneck.
+      SO_REUSEADDR only permits rebinding when a previous socket lingers (e.g., TIME_WAIT)
+      and does not distribute load.
+    ref: "concepts.md#time_wait-scaling-so_reuseaddr-vs-so_reuseport"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-077
+    difficulty: expert
+    tags: [time-wait, active-close, load-balancer, architecture]
+    question: |
+      A server behind a load balancer that terminates and actively closes connections is
+      exhausting local ephemeral ports under load. Which change most directly attacks the
+      root cause?
+    options:
+      - "Enable tcp_tw_recycle to recycle TIME_WAIT sockets faster"
+      - "Shorten MSL to a few seconds so TIME_WAIT clears quickly"
+      - "Arrange for the client to perform the active close (so TIME_WAIT lands on clients) and use keep-alive/connection pooling; SO_REUSEPORT scales accepts"
+      - "Randomize ISNs more aggressively to free ports"
+    answer: 2
+    explanation: |
+      TIME_WAIT accumulates on whichever side does the active close. Moving the active close
+      to the client (plus keep-alive/pooling to reduce connection churn) removes the
+      accumulation from the server. tcp_tw_recycle was removed for breaking NAT, and
+      shortening MSL breaks TCP's correctness guarantees.
+    ref: "concepts.md#time_wait-scaling-so_reuseaddr-vs-so_reuseport"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-078
+    difficulty: expert
+    tags: [incast, datacenter, dctcp, rto]
+    question: |
+      In a partition/aggregate datacenter workload, many servers reply to one client at
+      once, collapsing throughput far below link capacity. What is this, and which
+      mitigation is most on-point?
+    options:
+      - "Bufferbloat — switch all flows to BBR"
+      - "TCP incast: synchronized senders overflow a shallow ToR buffer causing synchronized RTOs — mitigate with DCTCP's fine-grained ECN and a microsecond-scale RTO_min"
+      - "Silly Window Syndrome — apply the receiver SWS avoidance rule"
+      - "Nagle/delayed-ACK deadlock — set TCP_NODELAY everywhere"
+    answer: 1
+    explanation: |
+      TCP incast collapse arises when many synchronized senders overrun a shallow switch
+      buffer, dropping packets and causing many flows to time out together and retransmit in
+      lockstep after the large default RTO_min. DCTCP (RFC 8257) uses proportional ECN
+      marking to keep queues short, and lowering RTO_min to microsecond scale matches
+      datacenter RTTs.
+    ref: "concepts.md#datacenter-tcp-and-incast"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-079
+    difficulty: advanced
+    tags: [dctcp, ecn, proportional]
+    question: |
+      How does DCTCP (RFC 8257) use ECN differently from classic RFC 3168 ECN?
+    options:
+      - "It marks CE based on a shallow queue threshold and reduces cwnd in proportion to the FRACTION of marked packets, rather than halving on any single mark"
+      - "It ignores ECN and relies solely on packet loss"
+      - "It marks only the SYN and SYN-ACK to negotiate congestion up front"
+      - "It uses ECN to increase the window when queues are short"
+    answer: 0
+    explanation: |
+      Classic ECN treats a mark like a loss (roughly halve cwnd). DCTCP has switches mark CE
+      once a shallow instantaneous-queue threshold is crossed and reduces cwnd proportional
+      to the estimated fraction of marked packets — a gentle, fine-grained response that
+      keeps datacenter queues very short. This proportional-marking idea underlies L4S/TCP
+      Prague.
+    ref: "concepts.md#datacenter-tcp-and-incast"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-080
+    difficulty: expert
+    tags: [window-scale, middlebox, throughput, scenario]
+    question: |
+      A 10 Gbps, 100 ms RTT path delivers only a few Mbps for a single flow. A capture of
+      the handshake shows the SYN carries a Window Scale option but the SYN-ACK does not.
+      What is happening?
+    options:
+      - "Window scaling is off for the connection (both sides must send the option), so the window is capped at 64 KiB and throughput ≤ 64 KiB / RTT — a middlebox likely stripped the option from the SYN-ACK"
+      - "The receiver's application is slow; increase its read rate"
+      - "The congestion window collapsed from ECN marks"
+      - "PAWS rejected the data segments due to timestamp wrap"
+    answer: 0
+    explanation: |
+      Window scaling is enabled only if BOTH SYN and SYN-ACK carry the option. If one side's
+      option is missing (often stripped by a firewall/middlebox), scaling is disabled and
+      the effective window is capped at 65535 bytes, limiting throughput to window/RTT ≈ a
+      few Mbps on a 100 ms path regardless of link speed.
+    ref: "concepts.md#window-scale-and-paws-wire-details"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-081
+    difficulty: expert
+    tags: [window-scale, wire-format, options]
+    question: |
+      Which statement about the Window Scale option (RFC 7323) on the wire is correct?
+    options:
+      - "It is a 4-byte multiplier sent on every segment"
+      - "It is negotiated in a mid-connection option and can change the scale factor dynamically"
+      - "It is a 1-byte shift count (0–14) carried only in SYN/SYN-ACK, yielding a maximum effective window of about 1 GiB (65535 << 14), and it applies to all later segments including retransmits"
+      - "It replaces the 16-bit Window field with a 32-bit field in every header"
+    answer: 2
+    explanation: |
+      The option is a single-byte shift count in the range 0–14, exchanged only in the SYN
+      and SYN-ACK. The negotiated shift left-shifts the 16-bit Window field on all
+      subsequent segments (including retransmissions), giving a maximum of 65535 << 14 ≈ 1
+      GiB. It cannot change after the handshake.
+    ref: "concepts.md#window-scale-and-paws-wire-details"
+
+  - id: tcp-deep-dive-handshake-flow-congestion-082
+    difficulty: advanced
+    tags: [paws, timestamps, sequence-wrap]
+    question: |
+      Why does PAWS become necessary on very high-speed links, and what does it reuse to do
+      its job?
+    options:
+      - "Because the receive window overflows; it reuses SACK blocks"
+      - "Because the 32-bit sequence space can wrap within an MSL at high rates (≈17 s at 1 Gbps, sub-second at 10–100 Gbps), so PAWS uses the Timestamps option (which also serves as the RTT clock) to reject old segments"
+      - "Because the checksum weakens at high speed; it reuses the urgent pointer"
+      - "Because ISNs collide; it reuses SYN cookies"
+    answer: 1
+    explanation: |
+      At high throughput the 4 GiB sequence space wraps quickly — within one MSL — so an old
+      delayed segment could masquerade as new data. PAWS uses the monotonically increasing
+      Timestamps option (TSval/TSecr) to discard segments with stale timestamps. The same
+      Timestamps option doubles as the RTT clock for SRTT/RTTVAR, which is why both live in
+      RFC 7323.
+    ref: "concepts.md#window-scale-and-paws-wire-details"

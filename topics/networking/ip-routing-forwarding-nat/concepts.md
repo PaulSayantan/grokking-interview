@@ -332,6 +332,404 @@ addresses line up.
 > domain name" — often worked around with **split-horizon DNS** that hands inside clients
 > the private IP directly.
 
+## NAT type taxonomy: cone vs symmetric (RFC 4787)
+
+The classic "four NAT types" (from the old STUN spec RFC 3489) describe how a NAT treats
+inbound packets relative to a mapping it created for an outbound flow:
+
+- **Full-cone:** once inside `A:a` maps to public `X:x`, *any* external host can reach
+  `A:a` by sending to `X:x`. Mapping is reusable; filtering is open.
+- **(Address-)restricted-cone:** external host may reach `X:x` only if `A:a` first sent to
+  *that host's IP* (any port).
+- **Port-restricted-cone:** external host may reach `X:x` only if `A:a` first sent to that
+  host's *IP **and** port*.
+- **Symmetric:** the NAT allocates a **different public port per destination tuple**, so
+  `A:a → dst1` and `A:a → dst2` get *different* external ports. Only the exact destination
+  that saw the mapping can reply.
+
+> [!WARNING]
+> RFC 4787 **deliberately deprecated** the cone/symmetric vocabulary as "inadequate" and
+> replaced it with two orthogonal axes. Strong candidates use the modern framing:
+> - **Mapping behavior (§4.1):** Endpoint-Independent Mapping (EIM — same external port
+>   regardless of destination), Address-Dependent Mapping, or Address-and-Port-Dependent
+>   Mapping. "Symmetric" = address-and-port-dependent mapping.
+> - **Filtering behavior (§5):** Endpoint-Independent, Address-Dependent, or
+>   Address-and-Port-Dependent Filtering.
+> **REQ-1** says a NAT MUST use Endpoint-Independent Mapping. **REQ-9/9a** says it MUST
+> support hairpinning. A NAT can have EIM but strict (address-and-port-dependent) filtering
+> — that still allows hole punching, whereas address-and-port-dependent *mapping*
+> (symmetric) is the case that defeats it.
+
+Why it matters: symmetric NAT breaks the assumption STUN relies on (that the port you
+learned for one destination is the port a peer can use), forcing a TURN relay. This is the
+single most-probed NAT distinction in P2P/WebRTC/VoIP interviews.
+
+## NAT traversal: STUN, TURN, ICE, and UDP hole punching
+
+The named tools in "why NAT breaks E2E" have precise mechanics:
+
+- **STUN** (RFC 8489, obsoletes 5389): the client sends a **Binding Request** to a STUN
+  server; the server copies the packet's observed source into a **XOR-MAPPED-ADDRESS**
+  attribute and reflects it back. That is the client's **server-reflexive (srflx)**
+  candidate — its public IP:port *as seen from outside*. STUN only *tells you* your mapping;
+  it does not relay data.
+- **UDP hole punching:** the actual traversal trick. Both peers learn each other's srflx
+  candidates (via a signaling channel), then **send outbound packets to each other
+  simultaneously**. The first outbound packet opens the local NAT's filter state so the
+  peer's inbound packet is accepted. This works when both NATs use **endpoint-independent
+  mapping**; it **fails if either side is symmetric**, because the port the peer was told
+  is not the port the NAT will use toward that peer.
+- **TURN** (RFC 8656): a **relay** of last resort. The client allocates an address on the
+  TURN server and both peers send through it. Always works (it is just a client-initiated
+  outbound flow to the relay) but adds latency, cost, and a bottleneck — hence "relay only
+  when hole punching fails."
+- **ICE** (RFC 8445): the orchestration. Each side **gathers candidates** (host,
+  server-reflexive via STUN, relayed via TURN), exchanges them, forms **candidate pairs**,
+  and runs **connectivity checks** (STUN Binding requests over each pair) to find the
+  best working pair, preferring host > srflx > relay.
+
+> [!INTERVIEW]
+> "Which NAT combination makes direct hole punching impossible?" → **either peer behind a
+> symmetric (address-and-port-dependent-mapping) NAT.** Answer with the RFC 4787 mapping
+> axis, then say the fallback is a TURN relay.
+
+## PAT port exhaustion and CGNAT
+
+A single public IPv4 address has only **~64K TCP and ~64K UDP source ports** to hand out.
+How far that stretches depends on the mapping model:
+
+- With **endpoint-independent mapping** the NAT reuses one external port across many
+  destinations, so the limit is roughly 64K *concurrent flows per public IP per protocol*.
+- With **per-destination (symmetric) mapping** each new destination consumes a fresh port,
+  exhausting far faster.
+
+**CGNAT** (RFC 6888 requirements; **RFC 6598** defines the `100.64.0.0/10` shared address
+space) stacks a carrier NAT on top of subscriber NATs, so thousands of subscribers share a
+pool of public IPs — dramatically amplifying exhaustion pressure. Mitigations:
+
+- **Port-block allocation (PBA, RFC 7422):** pre-assign each subscriber a contiguous block
+  of ports so the carrier logs one line per *block*, not per flow — critical for logging
+  scale and legal attribution.
+- Tuning **NAT idle timeouts** (RFC 5382 recommends TCP idle ≥ 2 h 4 min for established,
+  UDP ≥ 5 min) to reclaim stale mappings.
+
+> [!WARNING]
+> Symptom of exhaustion: **new connections fail even though bandwidth is fine and there is
+> no packet loss** — the NAT can't allocate a port/mapping. The **NAT state table** is also
+> a finite resource and a DoS target: a flood of tiny flows can fill it, denying service to
+> legitimate users. This is distinct from link congestion and points at PAT/CGNAT limits.
+
+## BGP best-path selection and attributes
+
+The full ordered tie-break ladder (common vendor implementation of RFC 4271 decision
+process) — memorize the order, not just LOCAL_PREF/AS_PATH/MED:
+
+1. **Weight** (vendor-local, not advertised) — highest wins.
+2. **LOCAL_PREF** — highest wins (your AS's *outbound* preference; iBGP-only).
+3. **Locally originated** (network/redistribute/aggregate) preferred.
+4. **Shortest AS_PATH.**
+5. **Lowest ORIGIN** (IGP `i` < EGP `e` < Incomplete `?`).
+6. **Lowest MED** (only compared among paths from the *same neighbor AS*).
+7. **eBGP over iBGP.**
+8. **Lowest IGP metric to the BGP NEXT_HOP.**
+9. **Oldest eBGP route** (stability).
+10. **Lowest Router-ID**, then lowest neighbor IP.
+
+**Attribute categories:**
+
+| Category | Attributes | Property |
+|---|---|---|
+| Well-known mandatory | ORIGIN, AS_PATH, NEXT_HOP | every BGP router must recognize; in every update |
+| Well-known discretionary | LOCAL_PREF, ATOMIC_AGGREGATE | recognized by all; optional to send |
+| Optional transitive | COMMUNITIES (RFC 1997), AGGREGATOR | pass through unknown routers with partial flag |
+| Optional non-transitive | MED (RFC 4451) | dropped by routers that don't recognize it |
+
+> [!INTERVIEW]
+> Direction is the classic trap: **LOCAL_PREF steers *outbound* traffic** (you tell your own
+> routers which exit to prefer; propagated only inside your AS via iBGP). **MED is a *hint*
+> to a neighbor AS about which of your links it should use for *inbound*** traffic — but the
+> neighbor may ignore it. Reliable *inbound* engineering usually needs **AS_PATH prepending**
+> or advertising **more-specific prefixes** on the preferred link; you fundamentally cannot
+> *force* how others route toward you.
+
+## iBGP scaling: route reflectors and confederations
+
+iBGP has a **loop-prevention rule**: a router must **not re-advertise an iBGP-learned route
+to another iBGP peer** (AS_PATH doesn't grow inside the AS, so it can't catch loops). The
+consequence is a required **full mesh** of iBGP sessions — `n(n-1)/2` sessions for `n`
+routers, which explodes with size. Two fixes:
+
+- **Route reflectors (RFC 4456):** a designated RR is allowed to reflect routes between
+  iBGP peers. Its clients form sessions only with the RR, cutting the mesh. Loop prevention
+  moves to two new attributes: **ORIGINATOR_ID** (the router that first injected the route —
+  drop if it's you) and **CLUSTER_LIST** (list of RR clusters traversed — drop if your
+  cluster appears). Reflection rules: a route from a client is reflected to all peers; from
+  a non-client, only to clients.
+- **Confederations (RFC 5065):** split the AS into **sub-ASes** that run eBGP-like sessions
+  among themselves (using a confederation AS_PATH segment) while appearing as one AS
+  externally.
+
+Two more iBGP gotchas interviewers use:
+
+- **NEXT_HOP handling:** eBGP-learned routes carry the *external* next hop unchanged into
+  iBGP. If internal routers have no route to that external next hop the path is unusable —
+  fixed with **next-hop-self** on the border router.
+- **Synchronization** (legacy, now default-off): the old rule that iBGP wouldn't use a route
+  until the IGP also knew it, to avoid blackholing across non-BGP routers.
+
+## OSPF internals: LSA types, areas, DR/BDR, adjacency
+
+OSPFv2 (RFC 2328; OSPFv3 RFC 5340) runs **directly on IP protocol 89** — not TCP/UDP —
+using multicast `224.0.0.5` (AllSPFRouters) and `224.0.0.6` (AllDRouters).
+
+**LSA types (the flooding vocabulary):**
+
+| Type | Name | Scope/meaning |
+|---|---|---|
+| 1 | Router LSA | a router's own links, flooded within its area |
+| 2 | Network LSA | generated by the DR for a multi-access segment |
+| 3 | Summary LSA | inter-area prefixes, injected by an ABR |
+| 4 | ASBR-Summary LSA | how to reach an ASBR, injected by an ABR |
+| 5 | AS-External LSA | routes redistributed from outside OSPF (by ASBR) |
+| 7 | NSSA-External LSA | external routes inside a Not-So-Stubby Area (translated to Type 5 at the ABR) |
+
+**Area types:** backbone (**area 0**, all others must touch it), **stub** (blocks Type 5,
+uses default), **totally stubby** (blocks Type 3 and 5), **NSSA** (allows local externals as
+Type 7 while otherwise stub-like).
+
+**DR/BDR election:** on a multi-access (broadcast) segment, forming a full mesh of
+adjacencies would be `O(n²)`. OSPF elects a **Designated Router** (and Backup) that every
+other router adjoins, so LSAs are exchanged through the DR. Election is by highest **OSPF
+priority**, tie-broken by highest **Router-ID**; it is **non-preemptive** (a higher-priority
+router joining later does not take over).
+
+**Neighbor state machine:** Down → Init → **2-Way** (bidirectional Hello seen; DR/BDR
+elected here) → ExStart → Exchange (DBD packets) → Loading (LSRs) → **Full** (databases
+synced). Hello/Dead timers (default 10 s / 40 s on broadcast links) detect failure.
+**Cost = reference-bandwidth ÷ interface-bandwidth** (default reference 100 Mbps, so it must
+be raised on ≥ 1 Gbps links or fast links tie at cost 1).
+
+## Convergence and fast reroute (BFD, LFA, BGP PIC)
+
+"How fast does the network heal, and why?" is a staple senior question. Convergence has
+distinct phases: **detect** the failure → **flood/propagate** → **recompute** (SPF or
+best-path) → **install** into the FIB.
+
+- **Detection** is usually the slow part. Protocol Hello/Dead timers are coarse (OSPF 40 s
+  default). **BFD (RFC 5880)** is a lightweight hello protocol that both sides run to detect
+  liveness in **milliseconds**, then signals the routing protocol — decoupling failure
+  detection from protocol timers.
+- **SPF/LSA throttling:** link-state protocols rate-limit LSA generation and SPF runs
+  (exponential backoff) so a flapping link doesn't melt every CPU. This trades a little
+  convergence latency for stability.
+- **Precomputed backups** avoid recomputation entirely: **Loop-Free Alternates (LFA) /
+  remote-LFA** install a backup next hop in advance; **BGP PIC (Prefix-Independent
+  Convergence)** lets a single next-hop update reroute many prefixes at once instead of
+  touching each prefix.
+- **BGP** converges slowly by design: the **MRAI timer** (Minimum Route Advertisement
+  Interval, ~30 s eBGP) rate-limits updates, and **route flap damping (RFC 2439)** suppresses
+  repeatedly-flapping prefixes — now largely **deprecated/relaxed** (RIPE) because it
+  over-penalized normal path exploration.
+
+## ECMP, hashing, and polarization
+
+**Equal-cost multipath** spreads traffic over several equal-cost next hops. The critical
+design rule: hash a **per-flow key** (typically the 5-tuple: src/dst IP, src/dst port,
+protocol) to pick the path, so **all packets of one TCP flow take the same path** and never
+reorder (reordering is misread as loss and kills throughput).
+
+Failure modes and fixes:
+
+- **Hash polarization:** if every tier of a Clos/leaf-spine fabric uses the *same* hash
+  function and inputs, downstream stages make correlated decisions and some links get no
+  traffic. Fix: **per-device hash seed/salt** so each tier decorrelates.
+- **Elephant flows / low entropy:** a few huge flows (or few distinct 5-tuples) hash
+  unevenly, so one link can carry the majority of bytes even with 4 equal paths. Fixes:
+  **flowlet switching** (rebalance at gaps in a flow), better entropy sources, or
+  **consistent/resilient hashing** so adding/removing a member remaps *minimal* flows
+  instead of reshuffling all of them.
+- Relation to L2: **LAG/LACP** is the link-layer analogue (hash across bundle members).
+  **Unequal-cost** load balancing exists too (EIGRP `variance`, BGP multipath with relaxed
+  attributes).
+
+## Reverse path forwarding (RPF and uRPF)
+
+RPF means two different things — a common precision check:
+
+1. **Multicast RPF check:** a router accepts a multicast packet **only if it arrived on the
+   interface the unicast route back toward the source would use**. This builds loop-free
+   distribution trees (PIM) and prevents multicast packets from looping or duplicating on a
+   LAN.
+2. **Unicast RPF (uRPF, RFC 3704 / BCP 84; ingress filtering is BCP 38):** an *anti-spoofing*
+   control. Modes:
+   - **Strict:** drop if the source's best return route doesn't point out the interface the
+     packet arrived on. Strongest, but **breaks under asymmetric routing** (legitimate
+     traffic arriving on a non-return path is dropped — a real false positive).
+   - **Loose:** accept as long as the source exists *somewhere* in the FIB (not tied to
+     ingress interface) — survives asymmetry but catches far less spoofing.
+   - **Feasible-path:** like strict but considers *all* advertised paths (alternate routes),
+     a middle ground for multihomed edges.
+
+> [!INTERVIEW]
+> "Design a stateless anti-spoofing filter and give a false positive." → uRPF strict per
+> BCP 38; false positive = a multihomed customer with **asymmetric routing** whose return
+> path differs from the ingress link, dropped by strict mode → relax to feasible-path or
+> loose.
+
+## IP fragmentation and header mechanics
+
+IPv4 fragmentation uses three header fields: **Identification** (shared by all fragments of
+one datagram), **Flags** (`DF` = Don't Fragment, `MF` = More Fragments), and **Fragment
+Offset** (in 8-byte units). Key facts:
+
+- **Reassembly happens only at the final destination**, never at intermediate routers —
+  fragments can take different paths and arrive out of order.
+- Fragmentation is harmful: **loss amplification** (losing one fragment discards the whole
+  datagram), reassembly buffer pressure, and **firewall/IDS evasion** (overlapping
+  fragments). PMTUD exists precisely to avoid it.
+- **IPv6 forbids router fragmentation entirely.** A router that can't fit a packet drops it
+  and returns **ICMPv6 Packet Too Big (Type 2)** with the MTU; only the *source* may
+  fragment (via a Fragment extension header). PMTUD is therefore **mandatory** in IPv6
+  (RFC 8201).
+- **Minimum MTU:** **1280 bytes in IPv6** (links must support it), **68 bytes in IPv4**
+  (minimum a host must be able to reassemble is 576).
+
+## LPM data structures and FIB scale
+
+Longest-prefix match must run at line rate for hundreds of thousands of prefixes. Common
+implementations:
+
+- **Binary/PATRICIA (radix) trie:** compressed prefix tree; simple but multiple memory
+  accesses per lookup.
+- **Multibit / LC-trie / DIR-24-8:** trade memory for speed by examining several bits per
+  step; DIR-24-8 uses a 2^24 first-level table so most lookups are a single memory access.
+- **TCAM (Ternary CAM):** hardware that matches all entries in parallel using mask ("don't
+  care") bits; entries must be **ordered by prefix length** so the longest match is returned.
+  TCAM is fast but power-hungry and **finite** — the constraint behind FIB-scale incidents.
+
+> [!INTERVIEW]
+> "Why did the internet break for many networks in **August 2014**?" → the global IPv4 BGP
+> table crossed **512K routes**, overflowing the default TCAM FIB partition on widely
+> deployed routers (e.g. older Catalyst 6500 / 7600 with a 512K IPv4 default). Routes spilled
+> to software or were dropped, causing loss and instability until operators re-partitioned
+> TCAM. Great signal of FIB-scale awareness. IPv6 at **/128** granularity makes efficient LPM
+> even harder.
+
+## Policy-based routing and VRF
+
+Ordinary forwarding is **destination-only** LPM. Two mechanisms break or partition that:
+
+- **Policy-based routing (PBR):** override the routing table using *other* packet fields —
+  source IP, DSCP/ToS, protocol, or port — e.g. route guest-VLAN traffic out a cheap link
+  and finance traffic out a premium link, or implement **source-based routing** for
+  multi-WAN/multihoming. PBR is evaluated before the normal FIB lookup.
+- **VRF (Virtual Routing and Forwarding):** multiple **independent routing tables** on one
+  physical device, each with its own FIB. Interfaces are bound to a VRF, so overlapping
+  address space (two tenants both using `10.0.0.0/8`) can't collide. VRFs underpin
+  **multi-tenant** networks and **MPLS L3VPNs**; controlled sharing between them is
+  **route leaking**.
+
+## Anycast routing
+
+**Anycast** advertises the **same prefix/address from many locations**; ordinary
+BGP/IGP LPM then routes each client to the **topologically nearest** instance. No special
+protocol is needed — it's a *deployment* of normal routing.
+
+- Powers **DNS root servers**, public resolvers (**1.1.1.1**, **8.8.8.8**), and CDN edges.
+- **Failover** is implicit: if an instance withdraws its route, traffic reconverges to the
+  next-nearest — usually within routing convergence time.
+- **TCP-anycast caveat:** because a routing change mid-connection can steer packets to a
+  *different* instance that has no state for the flow, long-lived stateful sessions can
+  break. In practice modern anycast TCP works because routes are stable and instances are
+  well-provisioned, but it is why anycast historically favored short UDP transactions (DNS).
+
+## ICMP types and codes in depth
+
+Precise codes separate seniors from juniors:
+
+- **Destination Unreachable (Type 3):** code **0** net, **1** host, **3** port, **4**
+  fragmentation-needed-and-DF-set (the **PMTUD signal — carries the Next-Hop MTU** in the
+  message), **9/10** admin-prohibited, **13** administratively filtered.
+- **Time Exceeded (Type 11):** code **0** = TTL/hop-limit reached 0 in transit (traceroute);
+  code **1** = fragment reassembly timeout.
+- **Redirect (Type 5):** a router telling a host a better first hop — a **security risk**
+  (can be abused to reroute traffic), so often disabled.
+- **ICMPv6 (RFC 4443):** **Packet Too Big = Type 2** (the v6 PMTUD signal); **Neighbor
+  Discovery** (RS/RA/NS/NA = Types 133–136) rides on ICMPv6, so blanket-blocking ICMPv6
+  breaks address resolution and autoconfig, not just diagnostics.
+- Every ICMP error carries the **IP header + first 8 bytes** of the offending packet — just
+  enough for the source to see the protocol and port and match the error to the right socket.
+
+## TTL fingerprinting and GTSM
+
+- **Initial-TTL fingerprinting:** common defaults are **64** (Linux/macOS/most Unix), **128**
+  (Windows), **255** (many network devices). Since routers only decrement, the *received*
+  TTL reveals both a hop-count estimate and a hint at the sender's OS.
+- **GTSM — Generalized TTL Security Mechanism (RFC 5082):** protect a directly-connected
+  protocol session (eBGP, OSPF) by **sending with TTL 255 and accepting only packets with
+  TTL ≥ 254**. Since a spoofed packet from more than one hop away arrives with a lower TTL,
+  off-path attackers can't inject — a cheap anti-spoofing guard for control-plane peers.
+- **Asymmetric paths and `* * *`:** traceroute shows different forward/return paths because
+  routing is directional, and shows `* * *` when a hop **rate-limits or filters ICMP**
+  (many routers deprioritize control-plane ICMP generation).
+
+## Traceroute variants and pitfalls
+
+- **UDP-probe (classic Unix):** sends UDP to high, unlikely destination ports; the final host
+  returns **Destination Unreachable / Port Unreachable (Type 3 Code 3)** to end the trace.
+- **ICMP-Echo (Windows `tracert`):** uses Echo Requests with increasing TTL; the target's
+  Echo Reply ends it.
+- **TCP-SYN traceroute:** probes to port **80/443** to slip through firewalls that drop
+  UDP/ICMP; a SYN-ACK or RST ends it.
+- **Distortions:** **ECMP** makes classic traceroute show phantom/alternating hops because
+  each probe (different port → different hash) takes a different path — **Paris-traceroute**
+  fixes this by holding the flow key constant. **MPLS** clouds may hide hops or expose them
+  via **ICMP extensions (RFC 4950)**; **anycast** can make one "hop" resolve to different
+  physical sites.
+
+## Administrative distance and route preference
+
+When two *different protocols* offer the same prefix, routers pick by **administrative
+distance (AD)** — lowest wins. Typical (vendor) defaults:
+
+| Source | AD |
+|---|---|
+| Connected | 0 |
+| Static | 1 |
+| eBGP | 20 |
+| EIGRP (internal) | 90 |
+| OSPF | 110 |
+| IS-IS | 115 |
+| RIP | 120 |
+| iBGP | 200 |
+| Unknown/unusable | 255 |
+
+> [!WARNING]
+> These numbers are **vendor conventions, not an internet standard** — quote them as "Cisco
+> defaults" and speak vendor-neutrally about **route preference / origin preference**
+> otherwise. The two-stage rule: **AD chooses *between* protocols; the metric chooses
+> *within* a protocol.** Note eBGP (20) is trusted over OSPF, but iBGP (200) is trusted less
+> than any IGP.
+
+## BGP security: RPKI, BGPsec, and famous incidents
+
+Beyond RPKI origin validation (already covered), seniors should know the layers:
+
+- **Prefix filters / max-prefix limits / IRR:** the first line of defense — filter what a
+  peer may announce, cap the count, and validate against Internet Routing Registry objects.
+- **RPKI ROV (RFC 6480/6811):** validates only the **origin AS** of a prefix (via signed
+  ROAs). It does **not** verify the rest of the AS_PATH.
+- **BGPsec (RFC 8205):** cryptographically validates the **entire AS_PATH** (each AS signs).
+  Far stronger but heavy and barely deployed.
+- **RPKI-to-Router (RTR) protocol:** how routers fetch validated prefix-origin data from a
+  local validator cache.
+- **AS_PATH prepending:** a traffic-engineering trick — advertise your own ASN multiple times
+  to make a path *look* longer and less preferred for inbound traffic.
+- **Incidents as scenario fodder:** **Pakistan Telecom / YouTube (2008)** — a more-specific
+  hijack blackholed YouTube globally; **Facebook (Oct 2021)** — a *self-inflicted* BGP
+  withdrawal took its prefixes off the internet (also breaking its own DNS and remote
+  access). Both illustrate LPM (more-specific wins) and the fragility of implicit trust.
+
 ## Common follow-up questions
 
 - **What's the difference between the routing table and the forwarding table (RIB vs
@@ -372,7 +770,17 @@ addresses line up.
 - RFC 1918 — *Address Allocation for Private Internets*
 - RFC 1631 (obsoleted by) RFC 3022 — *Traditional IP NAT (NAT/NAPT)*
 - RFC 2663 — *IP NAT Terminology and Considerations*
-- RFC 4787 — *NAT Behavioral Requirements for UDP* (mapping/filtering terms, hairpinning)
-- RFC 5382 — *NAT Behavioral Requirements for TCP*
-- RFC 5389 / RFC 8656 / RFC 8445 — *STUN* / *TURN* / *ICE* (NAT traversal)
+- RFC 4787 — *NAT Behavioral Requirements for UDP* (mapping/filtering axes, REQ-1/REQ-9, hairpinning)
+- RFC 5382 — *NAT Behavioral Requirements for TCP* (idle-timeout guidance)
+- RFC 6888 — *Common Requirements for Carrier-Grade NATs (CGN)*
+- RFC 6598 — *IANA-Reserved IPv4 Prefix for Shared Address Space* (`100.64.0.0/10`)
+- RFC 7422 — *Deterministic Address Mapping to Reduce Logging in CGN* (port-block allocation)
+- RFC 8489 (obsoletes RFC 5389) — *STUN*; RFC 8656 — *TURN*; RFC 8445 — *ICE*
 - RFC 6887 — *Port Control Protocol (PCP)*
+- RFC 4456 — *BGP Route Reflection*; RFC 5065 — *BGP Confederations*; RFC 4451 — *BGP MED*; RFC 1997 — *BGP Communities*
+- RFC 6480 / RFC 6811 — *RPKI* / *BGP Prefix Origin Validation (ROV)*; RFC 8205 — *BGPsec*
+- RFC 5880 — *Bidirectional Forwarding Detection (BFD)*; RFC 2439 — *BGP Route Flap Damping*
+- RFC 3704 / BCP 84 — *Ingress Filtering for Multihomed Networks (uRPF)*; BCP 38 — *Network Ingress Filtering*
+- RFC 5082 — *The Generalized TTL Security Mechanism (GTSM)*
+- RFC 8201 — *Path MTU Discovery for IPv6*
+- RFC 4950 — *ICMP Extensions for MPLS*

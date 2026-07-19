@@ -516,6 +516,515 @@ common HTTP/3 interview thread.
 
 ---
 
+## TLS 1.3 key schedule and HKDF
+
+**Why it matters.** A staff-level probe is "walk me through, key by key, how both sides
+end up with the same application-traffic keys." TLS 1.3 answers this with a deterministic
+**HKDF (RFC 5869) key ladder** (RFC 8446 §7.1). Both peers feed the same inputs (PSK,
+(EC)DHE shared secret, and the running **transcript hash**) into the same functions, so
+they derive identical keys without ever transmitting them.
+
+Two helper functions build everything:
+
+- `HKDF-Expand-Label(secret, label, context, len)` — a wrapper over `HKDF-Expand` whose
+  info string is a structured `HkdfLabel` containing the length, the label **prefixed with
+  `"tls13 "`**, and the context. The label prefix domain-separates TLS 1.3 key material
+  from any other HKDF usage.
+- `Derive-Secret(secret, label, messages) = HKDF-Expand-Label(secret, label,
+  Transcript-Hash(messages), Hash.length)` — expands a secret while **binding it to the
+  handshake transcript hash** up to that point.
+
+The ladder (each `HKDF-Extract` mixes in a new keying input):
+
+```
+        0
+        |
+PSK -> HKDF-Extract = Early Secret
+        |  +--> Derive-Secret(., "ext binder"|"res binder", "")  = binder keys
+        |  +--> Derive-Secret(., "c e traffic", ClientHello)      = 0-RTT client early key
+        |  +--> Derive-Secret(., "e exp master", ClientHello)
+        v
+   Derive-Secret(., "derived", "")
+        |
+(EC)DHE -> HKDF-Extract = Handshake Secret
+        |  +--> Derive-Secret(., "c hs traffic", CH..SH) = client handshake traffic secret
+        |  +--> Derive-Secret(., "s hs traffic", CH..SH) = server handshake traffic secret
+        v
+   Derive-Secret(., "derived", "")
+        |
+   0    -> HKDF-Extract = Master Secret
+           +--> Derive-Secret(., "c ap traffic", CH..server Finished) = client app secret
+           +--> Derive-Secret(., "s ap traffic", CH..server Finished) = server app secret
+           +--> Derive-Secret(., "exp master",  CH..server Finished)  = exporter master
+           +--> Derive-Secret(., "res master",  CH..client Finished)  = resumption master
+```
+
+- When there is **no PSK**, the Early Secret's input is a string of zeros; when there is
+  **no (EC)DHE** (a `psk_ke` resumption), the Handshake Secret's input is zeros instead.
+- From each `*_traffic_secret`, the actual AEAD key and IV come from
+  `HKDF-Expand-Label(secret, "key"/"iv", "", len)`. The `finished_key` for the Finished MAC
+  is `HKDF-Expand-Label(handshake_traffic_secret, "finished", "", Hash.length)`.
+- Because the app-traffic secrets are derived over the transcript **through the server
+  Finished**, and the resumption secret through the **client Finished**, both keys are
+  cryptographically bound to the entire negotiation — any tampering changes the hash and
+  breaks key agreement.
+
+> [!KEY-TAKEAWAY]
+> TLS 1.3 keys are never sent — they are *derived* by both sides via the HKDF ladder from
+> (optional PSK) + (EC)DHE secret + transcript hash. `Derive-Secret` folds the transcript
+> into every stage, which is why the whole handshake is authenticated and downgrade/tamper
+> resistant.
+
+---
+
+## TLS 1.3 message semantics (EncryptedExtensions, CertificateVerify, Finished)
+
+**Why it matters.** The 1.3 diagram lists messages; seniors are expected to know what each
+one *does*.
+
+- **EncryptedExtensions** — the first encrypted message after ServerHello. It carries all
+  server responses to extensions that are **not** needed to establish keys (e.g. ALPN
+  selection, SNI acknowledgement, `max_fragment_length`, QUIC transport params). Moving
+  them here hides them from passive observers; only the key-establishment extensions
+  (`key_share`, `supported_versions`, `pre_shared_key`) stay in the cleartext ServerHello.
+- **CertificateVerify** — a **signature over the transcript hash** of everything sent so far
+  (RFC 8446 §4.4.3), using the private key matching the leaf cert's public key. It proves
+  two things at once: (1) proof of possession of the private key, and (2) that the signer
+  observed the *exact* handshake the client sent — binding the identity to this specific
+  negotiation. It is **not** a signature over a mere nonce.
+- **Finished** — an HMAC computed with the `finished_key` over the transcript hash. It is
+  the integrity check over the **entire** negotiation, so any downgrade, cipher stripping,
+  or bit-flip anywhere in the handshake makes the two sides' Finished values disagree and
+  aborts the connection. Both client and server send one; each verifies the peer's.
+
+> [!INTERVIEW]
+> "How does TLS stop an attacker tampering with the ClientHello to strip strong ciphers?"
+> The Finished MAC covers the full transcript hash, so a modified ClientHello yields a
+> mismatched Finished and the handshake fails. Combined with the CertificateVerify signature
+> over the transcript, the whole negotiation is tamper-evident.
+
+---
+
+## Downgrade protection
+
+**Why it matters.** "How does TLS stop an active attacker forcing a client and modern server
+down to TLS 1.0?" is a standard senior probe. TLS 1.3 has two distinct mechanisms.
+
+**ServerHello.random downgrade sentinels (RFC 8446 §4.1.3).** A TLS 1.3-capable server that
+ends up negotiating a lower version writes a fixed canary into the **last 8 bytes** of
+`ServerHello.random`:
+
+- Negotiating TLS 1.2: `44 4F 57 4E 47 52 44 01` — ASCII `DOWNGRD` + `0x01`.
+- Negotiating TLS 1.1 or below: `44 4F 57 4E 47 52 44 00` (`...00`).
+
+A client that itself supports 1.3 checks these bytes. If it sees the sentinel but expected a
+higher version, an on-path attacker must have edited the version negotiation, so the client
+aborts with `illegal_parameter`. The sentinel is inside `ServerHello.random`, which is
+covered by the server's signature/Finished, so the attacker cannot forge or strip it.
+
+**TLS_FALLBACK_SCSV (RFC 7507).** Historically, when a handshake failed, browsers would
+*retry* with a lower max version (a "downgrade dance"), and an attacker could deliberately
+break the first handshake to force the retry (the POODLE-era problem). `TLS_FALLBACK_SCSV`
+is a pseudo-cipher-suite the client includes **only on a fallback retry**. A server that
+supports a higher version than the client is offering on that retry knows a downgrade dance
+is happening and aborts with `inappropriate_fallback`. This is a 1.2-era defense; TLS 1.3's
+built-in version negotiation (`supported_versions`) largely removes the need for the dance.
+
+> [!KEY-TAKEAWAY]
+> Two downgrade defenses: the `DOWNGRD` sentinel in ServerHello.random (a 1.3 server tells a
+> 1.3 client "I was forced down") and `TLS_FALLBACK_SCSV` (a client tells the server "this is
+> a fallback retry, reject it if you can do better"). Both defeat active version-downgrade MITM.
+
+---
+
+## Certificate Transparency and SCTs
+
+**Why it matters.** CT (RFC 6962) is now **mandatory** for public certs in Chrome and
+Safari. It is how mis-issuance is detected after the fact, and it replaced HPKP. Expect
+"how would you find out a CA mis-issued a cert for your domain?"
+
+- **Append-only Merkle-tree logs.** CAs (or submitters) publish every issued cert to public,
+  cryptographically verifiable, append-only logs. The log's current state is a signed
+  **Signed Tree Head (STH)**.
+- **SCT (Signed Certificate Timestamp).** A log returns an SCT: a signed promise to include
+  the certificate in its Merkle tree within the **Maximum Merge Delay (MMD, typically 24h)**.
+  The browser policy requires a leaf to carry **enough SCTs from qualifying logs** (roughly
+  ≥2, scaled by certificate lifetime) or it is rejected.
+- **Three SCT delivery methods:** (1) embedded in the certificate as an **X.509v3 extension**
+  (by far the most common), (2) via a **TLS extension** (`signed_certificate_timestamp`) in
+  the handshake, (3) inside a **stapled OCSP response**.
+- **Precertificate + poison extension.** To embed an SCT inside the cert, the log must sign
+  it *before* the cert is finalized — a chicken-and-egg problem. The CA first logs a
+  **precertificate** carrying a critical **poison extension** (making it unusable for TLS);
+  the log returns SCTs, which the CA embeds into the real certificate.
+- **Monitors and auditors.** Monitors watch logs for certs naming their domains (mis-issuance
+  detection); auditors use **inclusion proofs** (a cert is in the tree) and **consistency
+  proofs** (the tree only grew, never rewrote history) to keep logs honest.
+
+> [!INTERVIEW]
+> "You suspect a CA mis-issued a cert for your domain — how do you find out, and what stops
+> it being used?" You monitor CT logs (e.g. crt.sh, or a CT monitor) for certs naming your
+> domain; every publicly-trusted cert must be logged with SCTs or browsers reject it. CAA
+> records + short lifetimes + MPIC reduce the chance of mis-issuance in the first place.
+
+---
+
+## HSTS and SSL stripping
+
+**Why it matters.** HSTS (HTTP Strict Transport Security, RFC 6797) is the protocol-level
+mechanism that makes HTTPS actually *enforced* rather than merely available. "How do you
+guarantee a browser NEVER speaks plaintext HTTP to you, even on the first visit?" leads here.
+
+- The server sends `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`.
+  `max-age` (seconds) tells the browser to auto-upgrade all future `http://` requests to
+  `https://` for that host and to **forbid click-through** on certificate errors (no "proceed
+  anyway"). `includeSubDomains` extends this to every subdomain.
+- **SSL stripping** is the attack HSTS defeats: an on-path attacker intercepts the initial
+  cleartext `http://` request (or a mixed-content link) and proxies it, keeping the user on
+  plaintext while talking HTTPS to the origin. HSTS makes the browser refuse plaintext to a
+  known-HSTS host outright, issuing a browser-internal **`307 Internal Redirect`** to HTTPS
+  before any packet leaves the machine.
+- **TOFU gap.** A plain HSTS header is trust-on-first-use: the very first visit (before any
+  header is seen) is still vulnerable. The **HSTS preload list** (hstspreload.org) closes
+  this — domains meeting `max-age >= 31536000` + `includeSubDomains` + `preload` are compiled
+  **into the browser binary**, so even the first-ever request is forced to HTTPS.
+
+> [!WARNING]
+> `preload` is hard to undo — removal from the baked-in list ships only with future browser
+> releases and propagates slowly. Preload a domain only when every subdomain can serve HTTPS
+> indefinitely.
+
+---
+
+## Certificate pinning and why HPKP was abandoned
+
+**Why it matters.** "How do you pin certificates, and why doesn't the web pin anymore?" is a
+classic.
+
+- **HPKP (HTTP Public Key Pinning)** let a site send `Public-Key-Pins` headers listing hashes
+  of allowed public keys; browsers would then refuse any chain not matching a pin.
+- It was **deprecated and removed** because of two failure modes: **HPKP suicide** (a site
+  pins keys it then loses/rotates incorrectly and bricks itself for the pin's lifetime with
+  no recovery) and **ransom pinning / hostile pinning** (an attacker who briefly controls a
+  response pins an attacker key to lock out the real owner). The blast radius and
+  irreversibility were unacceptable.
+- The replacement is **Certificate Transparency** (detect mis-issuance globally) plus the
+  now-also-retired **Expect-CT** transitional header. **Native app pinning** (pinning in a
+  mobile app you control, where you can ship updates) is still legitimate — it is *browser*
+  header-based pinning that died.
+
+---
+
+## Post-quantum key exchange
+
+**Why it matters.** This is the hottest 2024/25 TLS interview topic. "An attacker records all
+your TLS traffic today — what can they read in 10 years?"
+
+- **Store-now-decrypt-later (harvest-now-decrypt-later).** A future large quantum computer
+  running **Shor's algorithm** breaks ECDHE/RSA, so ciphertext captured today could be
+  retroactively decrypted once such a machine exists. This makes **PQ key exchange urgent
+  now**, even though the quantum computer does not yet exist. PQ **signatures** are less
+  urgent, because forging a signature requires an *active* attacker present at handshake time
+  (you cannot retroactively forge authentication on already-completed handshakes).
+- **Hybrid key exchange.** Deployments use a hybrid group such as **`X25519MLKEM768`** (the
+  finalized code point; the earlier experiment was `X25519Kyber768`), which concatenates a
+  classical X25519 share with a PQ **ML-KEM-768** share and mixes both secrets into the key
+  schedule. **ML-KEM is FIPS 203** (standardized from CRYSTALS-Kyber). Hybrid is used as a
+  **hedge**: security holds if *either* algorithm survives, protecting against both future
+  quantum attacks and implementation bugs in the young PQ code (e.g. KyberSlash timing bugs).
+- **Ossification cost.** ML-KEM key shares are large (~1.1 KB), so the ClientHello no longer
+  fits in a single TCP/QUIC initial packet. This exposes **middlebox ossification** (boxes
+  that assumed a small ClientHello) and interacts with QUIC's anti-amplification limits;
+  clients may "fast-send" and fall back to HelloRetryRequest if the big hello is dropped.
+- **Status (2025).** Chrome, Firefox, and Cloudflare ship `X25519MLKEM768` widely; it is
+  effectively the default for new connections between updated clients and major CDNs.
+
+> [!KEY-TAKEAWAY]
+> Forward secrecy protects recorded traffic against *later key theft*, but not against a
+> *future quantum computer*. Hybrid `X25519MLKEM768` (X25519 + FIPS 203 ML-KEM) addresses
+> store-now-decrypt-later today, at the cost of a larger ClientHello that stresses
+> middleboxes.
+
+---
+
+## Certificate lifetimes, CAA and MPIC
+
+**Why it matters.** A current-events question that shows the candidate tracks the ecosystem.
+Public certificate max validity is collapsing.
+
+- **47-day certificates.** The CA/Browser Forum ballot **SC-081 (2025)** phases the maximum
+  certificate validity down: **398 → 200 days (2026-03-15) → 100 days (2027-03-15) → 47 days
+  (2029-03-15)**. In parallel, the reuse window for **domain control validation (DCV)** data
+  shrinks toward **10 days by 2029**. The net effect: **ACME automation becomes mandatory** —
+  manual renewal at these cadences is infeasible.
+- **CAA records (RFC 8659).** A DNS `CAA` record lets a domain owner list **which CAs are
+  permitted to issue** for the domain (e.g. `example.com. CAA 0 issue "letsencrypt.org"`). A
+  compliant CA must refuse issuance if CAA forbids it, limiting mis-issuance surface.
+- **MPIC (Multi-Perspective Issuance Corroboration).** CAs must now perform domain validation
+  from **multiple network vantage points** and require agreement, so a localized BGP hijack or
+  on-path attacker near the CA cannot spoof domain control from a single perspective.
+
+---
+
+## TLS record layer wire format
+
+**Why it matters.** "What does an eavesdropper actually see per record — can they tell a
+handshake record from application data?" is a wire-level question. (RFC 8446 §5.)
+
+The `TLSPlaintext`/`TLSCiphertext` record header on the wire is 5 bytes:
+
+```
+struct {
+  ContentType type;                 // 1 byte
+  uint16 legacy_record_version;     // 2 bytes, always 0x0303 in TLS 1.3
+  uint16 length;                    // 2 bytes: length of the following fragment
+  opaque fragment[length];
+}
+```
+
+- **Content types:** `handshake(22)`, `application_data(23)`, `alert(21)`,
+  `change_cipher_spec(20)`. Max plaintext per record is **2^14 (16384) bytes**.
+- **TLS 1.3 `TLSInnerPlaintext`.** For every *encrypted* record, the real content type is
+  moved **inside** the encrypted payload, followed by optional **zero padding**:
+  `content || type || zeros`. The outer header's `opaque_type` is therefore **always
+  `application_data(23)`** for protected records, regardless of whether the plaintext is a
+  handshake message, alert, or app data. The `legacy_record_version` is pinned to `0x0303`
+  (TLS 1.2) for middlebox compatibility.
+- **Consequence:** a passive observer of a TLS 1.3 connection sees only `application_data`
+  records after ServerHello and cannot tell handshake-continuation, alerts, or app data
+  apart, nor learn true message boundaries (the zero padding hides plaintext length).
+
+---
+
+## AEAD nonces, sequence numbers, and KeyUpdate
+
+**Why it matters.** Explains why GCM nonce reuse is catastrophic and why long connections
+must rekey. (RFC 8446 §5.3, §4.6.3.)
+
+- **Per-record nonce.** There is **no explicit per-record IV on the wire**. Each side keeps a
+  64-bit **record sequence number** that starts at 0 and increments per record. The AEAD
+  nonce is `write_iv XOR (seq padded to iv length)`, where `write_iv` is the static
+  per-direction IV from the key schedule. Both peers track the counter independently, so it
+  need not be transmitted.
+- **Why this matters.** AES-GCM catastrophically loses confidentiality *and* integrity if a
+  (key, nonce) pair is ever reused. Deriving the nonce from a monotonic counter guarantees
+  uniqueness for the lifetime of a key.
+- **KeyUpdate (`key_update(24)`).** A post-handshake message that rekeys the traffic keys
+  mid-connection: the sender derives a new `*_ap_traffic_secret` via
+  `HKDF-Expand-Label(secret, "traffic upd", "", len)` and resets its sequence number. This is
+  used to stay under AEAD usage limits (AES-GCM has a record-count safety bound) and to
+  provide forward secrecy *within* a long-lived connection. `NewSessionTicket(4)` is likewise
+  sent **after** the handshake completes, and `post_handshake_auth` enables a later
+  `CertificateRequest` (client auth after the connection is already up).
+
+---
+
+## Signature algorithms and named groups
+
+**Why it matters.** Cipher-suite anatomy covers bulk crypto, but "what actually signs
+CertificateVerify?" and "does resumption keep forward secrecy?" need the signature and
+key-exchange extensions. (RFC 8446 §4.2.3, §4.2.7–4.2.9.)
+
+- **`signature_algorithms` extension.** Separately from the cipher suite, the client
+  advertises which signature schemes it accepts for CertificateVerify and for cert
+  signatures. TLS 1.3 **mandates RSA-PSS** (`rsa_pss_rsae_*`) for RSA signatures and forbids
+  legacy **PKCS#1 v1.5** signatures in the handshake (they remain only for old cert-chain
+  signatures via a distinct code point). Other schemes: **ECDSA** (`ecdsa_secp256r1_sha256`,
+  P-384), **Ed25519/Ed448**. **SHA-1 and MD5 signature schemes are banned.** This is distinct
+  from the certificate's own key type — key-exchange authentication and cert signatures are
+  negotiated independently.
+- **`supported_groups` extension.** Lists the (EC)DHE named groups the client offers: **X25519**
+  (common default), **secp256r1/secp384r1** (P-256/P-384), and finite-field **ffdhe2048+**.
+  `key_share` carries the actual public value(s) for the guessed group(s).
+- **`psk_key_exchange_modes` extension** (resumption): **`psk_ke`** = PSK-only resumption with
+  **no fresh (EC)DHE, therefore NO forward secrecy** for the resumed session; **`psk_dhe_ke`**
+  = PSK **combined with a fresh ECDHE exchange**, which **restores forward secrecy**. This is
+  the subtle trap: a resumed connection is forward-secret only if `psk_dhe_ke` was used.
+
+> [!INTERVIEW]
+> "A client resumes with a session ticket — is that connection forward-secret?" Trick
+> question. Only if the resumption used `psk_dhe_ke` (PSK + fresh ECDHE). With `psk_ke` there
+> is no new DH, so a later PSK/ticket-key compromise exposes it. Also, even with ECDHE, an
+> un-rotated Session Ticket Encryption Key (STEK) undermines forward secrecy — see resumption.
+
+---
+
+## Renegotiation and the secure-renegotiation extension
+
+**Why it matters.** TLS 1.3 removed renegotiation; seniors should know *why*, not just *that*.
+
+- **The 2009 renegotiation attack.** In TLS 1.2 and earlier, either side could trigger a fresh
+  handshake within an existing connection. An MITM could open a connection, send an
+  attacker-chosen prefix (e.g. an HTTP request fragment), then splice in the client's
+  renegotiation — the server treated the attacker's prefix and the client's authenticated data
+  as one stream (**prefix injection**), because the two handshakes were not cryptographically
+  linked.
+- **Fix: `renegotiation_info` (RFC 5746).** The secure-renegotiation extension (and the
+  `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` signaling suite) binds each renegotiation to the previous
+  handshake's Finished values, so a renegotiation cannot be spliced onto an unrelated prior
+  context.
+- **TLS 1.3 removes renegotiation entirely**, replacing its use cases with **KeyUpdate**
+  (rekeying) and **post-handshake authentication** (client auth after connect). Removing the
+  feature removes the whole class of footguns.
+
+---
+
+## Middlebox compatibility mode and GREASE
+
+**Why it matters.** The gotcha "why does a Wireshark capture of a TLS 1.3 connection show a
+ChangeCipherSpec record if 1.3 removed it?" (RFC 8446 §D.4, RFC 8701.)
+
+- To traverse middleboxes that were ossified around TLS 1.2's on-the-wire shape, TLS 1.3
+  **disguises itself as 1.2**: `legacy_version` in ClientHello/record headers is pinned to
+  **`0x0303`** and the *real* version travels in the **`supported_versions`** extension.
+- The client sends a **non-empty `legacy_session_id`** and both sides emit a **dummy
+  ChangeCipherSpec record** (`change_cipher_spec(20)`) even though 1.3 has no CCS semantics —
+  purely so middleboxes expecting the classic pattern do not choke. Hence CCS appears in
+  captures.
+- **GREASE (RFC 8701)** reserves random-looking dummy values (cipher suites, extensions,
+  versions, groups) that clients advertise so servers/middleboxes learn to **ignore unknown
+  values** — preventing future ossification that would block real new extensions.
+
+---
+
+## HelloRetryRequest and the cookie extension
+
+**Why it matters.** Deepens the HRR mention with the DoS/stateless-server angle. (RFC 8446
+§4.2.2.)
+
+- **HelloRetryRequest (HRR)** reuses the ServerHello structure with a **fixed magic random**
+  (`CF 21 AD 74 ...`) so it is recognizable as an HRR rather than a real ServerHello. The
+  server sends it when the client's `key_share` group is unacceptable (asking the client to
+  resend with a supported group) — costing one extra RTT.
+- **The `cookie` extension** serves two purposes: (1) a **reachability / DoS check** —
+  forcing the client to echo a server-provided cookie proves it can receive at its claimed
+  address before the server commits resources; (2) it lets the server stay **stateless across
+  the HRR** by encoding a hash of the first ClientHello (and its own HRR) into the cookie,
+  rather than holding connection state in memory between the two client flights.
+
+---
+
+## 0-RTT anti-replay in depth
+
+**Why it matters.** "How would you actually make 0-RTT safe for a checkout API?" needs the
+named mechanisms, not just "restrict to idempotent." (RFC 8446 §8.)
+
+- **Single-use tickets (§8.1).** The server records each resumption ticket and accepts it for
+  0-RTT at most once; a replay presents the same ticket and is rejected (falls back to a full
+  1-RTT handshake). Requires server-side state, so it is hard across a distributed fleet.
+- **ClientHello recording (§8.2).** The server remembers recently seen ClientHellos (within a
+  window) and rejects duplicates. Also stateful and bounded by memory/time.
+- **Freshness checks (§8.3).** The client sends `obfuscated_ticket_age`; the server compares
+  the reported age against the expected age from when it issued the ticket, accepting early
+  data only inside a narrow window. This bounds how long a captured 0-RTT flight is useful.
+- **Design answer.** 0-RTT is **not forward-secret** and is replayable, so: allow it only for
+  **idempotent** paths, combine single-use tickets + a tight freshness window, and route any
+  non-idempotent request (checkout POST) through the full handshake (server rejects early data
+  for those endpoints). In QUIC, 0-RTT also interacts with **address validation /
+  anti-amplification** limits.
+
+---
+
+## Session-ticket forward-secrecy caveat (STEK rotation)
+
+**Why it matters.** A subtle FS gotcha that resumption sections often miss.
+
+- Session tickets (TLS 1.2) and PSK tickets (TLS 1.3 with `psk_dhe_ke`) are encrypted by the
+  server under a **Session Ticket Encryption Key (STEK)**. If that STEK is **long-lived and
+  then compromised**, an attacker can decrypt every ticket it protected and thereby recover
+  the resumed sessions' secrets — undermining forward secrecy **even though ECDHE was used**.
+- The mitigation is **frequent STEK rotation** (and secure distribution across a server
+  fleet). A leaked-key exposure window then only spans one rotation period. This is why
+  large-scale ticket-based resumption needs disciplined key management.
+
+---
+
+## Legacy TLS attack catalog
+
+**Why it matters.** "Name TLS vulnerabilities and the design lesson each taught" is a staple.
+A key meta-lesson: distinguish **protocol flaws** from **implementation bugs**.
+
+| Attack | Target | Lesson / fix |
+|---|---|---|
+| **BEAST** | CBC IV predictability in TLS 1.0 | Per-record explicit IVs (1.1+); AEAD in 1.3 |
+| **POODLE** | SSLv3 CBC padding | Kill SSLv3; AEAD-only |
+| **Lucky13** | CBC MAC-then-encrypt timing | Constant-time or AEAD |
+| **CRIME / BREACH** | TLS / HTTP compression + secrets | **Compression removed from TLS** |
+| **Heartbleed** | OpenSSL heartbeat buffer over-read | *Implementation* bug, not a protocol flaw |
+| **ROBOT / Bleichenbacher** | RSA PKCS#1 v1.5 padding oracle | Why static RSA is gone and RSA-**PSS** is mandated |
+| **Sweet32** | 64-bit block ciphers (3DES) birthday bound | Retire 64-bit-block ciphers |
+| **DROWN** | SSLv2 cross-protocol on shared key | Never enable SSLv2 anywhere |
+| **Logjam / FREAK** | Downgrade to EXPORT-grade DH/RSA | Remove export ciphers; validate DH params |
+| **Raccoon** | DH shared-secret timing (leading-zero) | Prefer ECDHE; constant-time handling |
+
+> [!INTERVIEW]
+> The distinction interviewers want: **Heartbleed was an OpenSSL implementation bug**
+> (a missing bounds check on the heartbeat extension), *not* a weakness in the TLS protocol
+> itself. CRIME/BREACH are why TLS-level compression was removed. ROBOT is why static-RSA key
+> transport and PKCS#1 v1.5 signatures were dropped in favour of ECDHE + RSA-PSS.
+
+---
+
+## Chain building and famous root-expiry outages
+
+**Why it matters.** "The leaf cert is valid but an old Android device can't connect — why?"
+is a real debugging scenario. (Extends the "serve intermediates" advice.)
+
+- **Path building is not linear.** With **cross-signing**, a single leaf can chain to a
+  trusted root via **multiple valid paths** (e.g. one path to a newer root, another via an
+  older cross-signed root that old devices trust). Clients build a path using **AIA (Authority
+  Information Access)** fetching to retrieve missing issuer certs, and different clients pick
+  different paths — which is why "works in curl, fails on old Android" happens.
+- **AddTrust / Sectigo root expiry (May 2020).** The `AddTrust External CA Root` expired;
+  clients that anchored on it (many older/OpenSSL 1.0.x stacks) broke even though a newer valid
+  path existed, because their path-building preferred the expired anchor.
+- **Let's Encrypt DST Root CA X3 expiry (Sept 2021).** The old cross-signing root expired;
+  modern devices trusted the newer ISRG Root X1, but **old Android (<7.1.1)** lacked X1 and
+  relied on the expired cross-sign — so those devices broke despite a technically valid leaf.
+- **Debugging takeaway:** a valid leaf is not enough; the client must build a path to a root
+  **it** trusts and that **hasn't expired**. Old clients fail on modern chains due to missing
+  roots, expired anchors, or unsupported ciphers/curves.
+
+---
+
+## Debugging TLS on the wire
+
+**Why it matters.** Seniors are expected to reach for concrete tools, not just theory.
+
+- **"curl works, browser fails" (or the inverse).** Likely causes: missing intermediate
+  (some clients cache it, others don't), missing/insufficient **SCTs** (browsers enforce CT,
+  curl does not), a **private CA** not in the client's store, or a **SHA-1 / weak** chain a
+  browser rejects but a lenient client accepts.
+- **`openssl s_client`.** Inspect the served chain and negotiation:
+  `openssl s_client -connect host:443 -servername host -showcerts` shows every cert the
+  server sent (verify the intermediate is present); add **`-status`** to see the **stapled
+  OCSP** response. Look at `Verify return code` and the negotiated version/cipher.
+- **`SSLKEYLOGFILE` + Wireshark.** Point a browser/curl at `SSLKEYLOGFILE=/path` and it logs
+  the per-session secrets; Wireshark reads that file to **decrypt** a captured TLS session for
+  inspection — the standard way to debug TLS 1.3 traffic without the server's private key
+  (which wouldn't help anyway under ECDHE).
+
+---
+
+## Certificate SAN, name constraints and EKU detail
+
+**Why it matters.** mTLS and internal-CA design questions probe X.509 naming rules beyond
+"use the SAN." (RFC 5280.)
+
+- **SAN entry types.** The `subjectAltName` can hold **`dNSName`** (hostnames), **`iPAddress`**
+  (for certs issued to IPs), and others. **Wildcards** match only the **single left-most
+  label** — `*.example.com` matches `a.example.com` but **not** `example.com`, not
+  `a.b.example.com`, and never `*.*` or a partial label like `f*.example.com`.
+- **Name Constraints (on intermediates).** A `nameConstraints` extension on a CA cert
+  restricts the namespaces it may issue for (e.g. permit only `*.corp.example.com`). This lets
+  an org delegate a constrained sub-CA that provably cannot issue for arbitrary domains — key
+  for internal-CA and mTLS trust design.
+- **EKU (Extended Key Usage).** OIDs like **`serverAuth`** and **`clientAuth`** scope what a
+  cert may be used for. mTLS client certs carry `clientAuth`; a server cert carries
+  `serverAuth`. Chains are also validated for EKU consistency.
+
+---
+
 ## Common follow-up questions
 
 - **Is SSL the same as TLS?** No — SSL is the obsolete predecessor (SSL 2.0/3.0, all broken).
@@ -560,5 +1069,17 @@ common HTTP/3 interview thread.
 - RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport
 - RFC 9460 — Service Binding via DNS (SVCB/HTTPS records; used by ECH)
 - draft-ietf-tls-esni — TLS Encrypted Client Hello (ECH)
+- RFC 5869 — HMAC-based Extract-and-Expand Key Derivation Function (HKDF)
+- RFC 6962 — Certificate Transparency
+- RFC 6797 — HTTP Strict Transport Security (HSTS)
+- RFC 7507 — TLS Fallback Signaling Cipher Suite Value (SCSV) for downgrade prevention
+- RFC 5746 — TLS Renegotiation Indication Extension (secure renegotiation)
+- RFC 8701 — Applying GREASE to TLS Extensibility
+- RFC 8879 — TLS Certificate Compression
+- RFC 9345 — TLS Delegated Credentials
+- RFC 8659 / RFC 8657 — DNS Certification Authority Authorization (CAA)
+- FIPS 203 — Module-Lattice-Based Key-Encapsulation Mechanism (ML-KEM)
+- draft-ietf-tls-hybrid-design — Hybrid key exchange (X25519MLKEM768)
+- CA/Browser Forum ballot SC-081 — 47-day certificate lifetimes
 - Mozilla / MDN Web Docs — TLS, HTTPS, Transport Layer Security
 - Cloudflare Learning Center — What is TLS, SSL certificates, mTLS, ECH, QUIC

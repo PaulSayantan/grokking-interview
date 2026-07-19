@@ -377,6 +377,291 @@ connections stitched together.
 
 ---
 
+## Consistent hashing done right (ring and virtual nodes)
+
+The one-liner in the algorithms section deserves the full mechanism, because it is the
+marquee senior question here.
+
+**Why `hash % N` breaks on membership change.** If you map a key to a backend with
+`backend = hash(key) % N`, then changing `N` (adding or removing one node) changes the
+divisor for *every* key. Going from 4→5 backends remaps roughly `(N-1)/N ≈ 80%` of keys.
+For a cache pool that means an ~80% miss storm and a stampede onto origins; for session
+affinity it means most clients suddenly land on a different backend. Modulo hashing only
+survives if the pool never changes size — which production pools always do.
+
+**The ring.** Consistent hashing maps both keys *and* backends onto a fixed circular
+keyspace (e.g. `0 .. 2^32 - 1`). To find a key's backend, hash the key and walk
+**clockwise** to the next backend point on the ring. Adding or removing a backend only
+re-homes the keys in the *one arc* between the changed node and its predecessor — about
+`K/N` keys — instead of nearly all of them. That bounded disruption is the whole point.
+
+**Virtual nodes (replicas).** Placing each physical backend at a *single* ring point gives
+badly uneven arcs (load skew) and can't express weights. The fix is **virtual nodes**: hash
+each backend to *many* points (e.g. 100–1000 `hash(node#i)` positions). Averaging over many
+small arcs smooths load toward even, and giving a bigger box proportionally more virtual
+nodes expresses **weight**. More vnodes = smoother balance but more ring memory and lookup
+cost. `ring-hash` in real proxies (Envoy) is exactly this.
+
+## Maglev and rendezvous hashing
+
+Two consistent-hashing families that avoid a literal ring.
+
+**Maglev hashing** (Google, NSDI 2016) builds a fixed-size **lookup table** (size a prime,
+e.g. 65537) instead of a ring. Each backend derives a `(offset, skip)` pair from a hash of
+its name and thereby a **permutation** of table slots; slots are then filled by letting
+backends take turns claiming their most-preferred still-empty slot. The result is a table
+that is **near-perfectly evenly balanced** *and* changes only minimally when a backend is
+added/removed, with **O(1) per-packet lookup** (index the table). That combination — even
+spread + minimal disruption + constant-time lookup — is why Maglev-style hashing is the
+modern standard for **per-packet L4 balancing at line rate** (Maglev, Katran, Cilium),
+where a ring walk per packet would be too slow. Its disruption on membership change is
+slightly worse than an idealized ring but negligible in practice.
+
+**Rendezvous / Highest-Random-Weight (HRW) hashing.** For a key, compute `hash(key, node)`
+for **every** node and pick the node with the maximum score. Removing a node only affects
+the keys that scored highest on *that* node (they fall to their next-highest), so
+disruption is minimal and there is no ring or virtual-node bookkeeping to maintain. The
+cost is **O(N) per lookup** (score every node), so HRW suits smaller pools or where the
+per-key work is amortized. Weights are handled by a weighted scoring function.
+
+| | Ring (with vnodes) | Maglev table | Rendezvous (HRW) |
+|---|---|---|---|
+| Lookup cost | O(log V) ring search | O(1) table index | O(N) score all nodes |
+| Balance quality | good with many vnodes | near-perfect | good |
+| Disruption on change | minimal (~K/N) | minimal | minimal |
+| State to keep | ring of V points | prime-size table | none (recompute) |
+| Typical use | L7 affinity, caches | per-packet L4 at scale | small pools, no state |
+
+## Connection draining and graceful backend removal
+
+Removing a backend (deploy, scale-in, deregister) without dropping live work requires
+**draining**: stop sending it *new* connections/requests while letting *in-flight* ones
+finish, up to a **drain timeout / deregistration delay**. After the timeout, remaining
+connections are force-closed.
+
+- **Lame-duck mode:** the backend deliberately starts *failing its health check* (or
+  advertises "not ready") so the LB bleeds traffic off it *before* the process shuts down,
+  turning an abrupt removal into a graceful one. Ties into Kubernetes readiness gates.
+- **Telling clients to stop reusing a connection:** on HTTP/1.1 the proxy can send
+  `Connection: close` so the client opens a fresh connection (which lands on a live
+  backend). On HTTP/2 it sends a **`GOAWAY` frame (RFC 9113 §6.8)**: the peer finishes
+  streams below the last-stream-ID and opens a new connection for anything else — the clean
+  way to rebalance long-lived multiplexed connections.
+- **Order matters:** deregister from the LB / go lame-duck **first**, wait a drain window
+  so in-flight requests and health-check propagation complete, *then* stop the process.
+  Stopping first (or with too short a drain) drops requests and causes connection resets.
+
+## Load balancing HTTP/2 and gRPC long-lived connections
+
+HTTP/2 (and gRPC over it) multiplexes many requests over **one long-lived TCP connection**.
+An **L4** LB — and even an L7 LB that only balances at *connection* establishment — pins
+that whole connection to a single backend. So all of a client's requests pile onto one
+server, and **newly added backends receive zero traffic** until clients happen to
+reconnect. Classic symptom: you scale from 3→13 pods and the 3 original pods stay pegged at
+100% CPU while the 10 new ones idle.
+
+Fixes:
+- **L7 proxy that balances per-stream/per-request** — it terminates HTTP/2 and can send
+  each request (stream) to a different backend, spreading load immediately.
+- **Client-side (thick-client) load balancing** — the client is given the full endpoint
+  list and balances requests across its own subchannels/connections, one per backend.
+- **Lookaside / one-arm balancing (gRPC-LB, xDS)** — clients ask a **control plane** for
+  the current endpoint set, then connect **directly** to backends, keeping data-path
+  latency low while centralizing the membership/policy decision.
+- **Connection recycling** — set a **max-connection-age** so the server periodically sends
+  `GOAWAY`, forcing clients to reconnect and rebalance onto newer backends even under a
+  dumb L4 LB.
+
+## Transparent (intercepting) proxies
+
+A **transparent (intercepting) proxy** processes traffic with **no client configuration** —
+the client isn't pointed at a proxy; the network *redirects* its packets into one (via
+routing policy, WCCP, or an `iptables`/eBPF redirect on the local host). Because the client
+never addressed the proxy, the proxy must handle the destination the client intended.
+
+- **Preserving the client IP to the backend:** with `TPROXY` / `IP_TRANSPARENT`-style
+  interception the proxy can originate the backend connection **spoofing the client's
+  source IP**, so the backend still sees the real client — something an ordinary
+  connection-terminating proxy can't do (it would use its own IP).
+- **Where it shows up:** CGNAT and carrier boxes, captive portals, corporate content
+  inspection, and **service-mesh sidecars** (the mesh's `iptables`/eBPF rules transparently
+  redirect a pod's outbound traffic into the local sidecar). This is the third category
+  alongside forward and reverse proxies: forward = client explicitly configured; reverse =
+  server-side and client-unaware; transparent = client-unaware *and* unconfigured, spliced
+  in by the network.
+
+## PROXY protocol (v1 and v2)
+
+The **PROXY protocol** (HAProxy spec) carries the *real* client address across an **L4**
+proxy that would otherwise hide it — because at L4 there is no HTTP layer in which to put an
+`X-Forwarded-For`. The sender prepends a small header **before any application bytes**, then
+the original stream follows unchanged.
+
+- **v1** — a human-readable ASCII line:
+  `PROXY TCP4 198.51.100.7 203.0.113.5 56324 443\r\n` (protocol/family, src IP, dst IP, src
+  port, dst port).
+- **v2** — binary, beginning with a fixed **12-byte signature**
+  (`\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A`), then a version/command byte, an
+  address-family/transport byte, length, the addresses, and optional **TLV** extensions
+  (e.g. ALPN, SNI/authority, TLS details, cloud VPC-endpoint IDs). Binary parsing is cheaper
+  and unambiguous.
+- **Security:** the receiver **must accept the PROXY header only from trusted senders**
+  (an allowlist of upstream proxy IPs) and, when configured to expect it, **must reject
+  connections that lack it**. Otherwise any client could prepend a forged PROXY line and
+  spoof its source IP — the same trust problem as XFF, one layer down.
+
+## Outlier detection and the panic threshold
+
+Passive health checking has real internals beyond "eject after N 5xx":
+
+- **Ejection triggers:** **consecutive-5xx**, **consecutive-gateway-failure** (502/503/504
+  or connect failures), and **success-rate / statistical** ejection (eject hosts whose
+  success rate is a set number of standard deviations below the pool mean).
+- **Bounded, escalating ejection:** ejection time grows (often exponentially) with repeat
+  offenses, but **`max-ejection-percent`** caps how much of the pool can be ejected at once
+  so you never remove everything.
+- **Panic mode / panic threshold:** when the *healthy fraction* of the pool drops below a
+  threshold (Envoy default **50%**), the LB concludes its health view is probably wrong
+  (correlated failure, bad probe) and **ignores health status, load-balancing across all
+  hosts** rather than hammering the handful still marked healthy. This is why "half the
+  fleet fails health checks and latency gets *worse*, not better" — the LB has entered panic
+  mode and is spraying traffic at hosts it just marked unhealthy, which is usually the safer
+  bet during a correlated event.
+
+## Slow start for new backends
+
+A backend that just joined (or just recovered) has cold caches, un-JITed code, empty
+connection pools, and lazy-loaded config. If least-connections or round robin gives it a
+full, instant share, it can be swamped and time out — looking unhealthy and flapping.
+**Slow start** ramps its weight up gradually over a window (e.g. linearly over 30–60 s) so
+it warms up under partial load before taking its full share. Pairs naturally with health
+checks and connection draining as the "add" side of graceful membership changes.
+
+## Load balancing QUIC and HTTP/3
+
+HTTP/3 runs over **QUIC (RFC 9000)** on **UDP**, which breaks the L4 assumption that the
+**4-tuple** identifies a flow:
+
+- QUIC supports **connection migration** (RFC 9000 §9): a client can change its IP/port
+  (Wi-Fi → cellular, NAT rebinding) and keep the *same* QUIC connection alive. So the
+  4-tuple is not a stable routing key — a migrating client would be re-hashed to a different
+  backend mid-connection and dropped.
+- QUIC identifies connections by **Connection IDs (RFC 9000 §5.1)**, carried in the packet
+  header, not by the 4-tuple. An L4 LB must route on the **Destination Connection ID**. The
+  **QUIC-LB draft** has the server encode a routing prefix into the CID it issues, so any LB
+  node can map a CID back to the right backend without shared state — the QUIC analog of
+  connection tracking.
+- Only the first flight is minimally visible; almost everything (including much of the
+  handshake) is encrypted, and **stateless reset** must be handled. Practically: balance
+  QUIC on the CID, and design the CID-encoding so an ECMP re-pin still resolves to the same
+  backend.
+
+## Encrypted Client Hello (ECH) and SNI routing
+
+L4/passthrough hostname routing relies on the **cleartext SNI** in the TLS ClientHello.
+**Encrypted Client Hello (ECH)** — a TLS 1.3 extension (`encrypted_client_hello`, current
+IETF draft, built on RFC 8446 + HPKE) — encrypts the *inner* ClientHello, including
+`server_name`, so a passthrough LB sees only the **outer/public** name (typically a shared
+provider front). The consequence: **SNI-based routing silently stops working** for
+ECH-enabled clients — a fraction of clients suddenly can't be routed to the right pool. To
+route those you must either terminate TLS at a node that can decrypt the inner hello (e.g.
+the shared frontend that owns the ECH keys) or route them by the outer name. It is the
+sharp modern counter to "just route on SNI."
+
+## HTTP request smuggling
+
+When a front-end proxy and a back-end server **disagree on where one request ends and the
+next begins**, an attacker can smuggle a second request inside the first — poisoning caches,
+bypassing auth/WAF, or hijacking another user's request. This is precisely a *proxy*
+problem, because it lives at the boundary where one hop parses and re-emits requests.
+
+- **CL.TE / TE.CL:** the request carries *both* `Content-Length` and `Transfer-Encoding:
+  chunked`; front-end honors one, back-end honors the other, so their boundaries differ.
+- **TE.TE:** both honor `Transfer-Encoding`, but one is fooled by an **obfuscated** header
+  (`Transfer-Encoding: xchunked`, duplicate/space tricks) into ignoring it.
+- **H2.CL / H2.TE:** HTTP/2 front-end **downgrades** to HTTP/1.1 to the back-end and
+  mis-serializes length/chunking, smuggling on the downgrade.
+- **Mitigation:** **RFC 9112 §6.3** says when both `Content-Length` and `Transfer-Encoding`
+  are present, `Transfer-Encoding` overrides `Content-Length` and the message ought to be
+  handled as an error (a server MAY reject it — §6.1); normalize and reject conflicting or
+  malformed framing; prefer **HTTP/2
+  end-to-end** (no downgrade); and use the *same* strict parser on both hops. A caching
+  proxy in front makes a successful smuggle worse (poisoned entries served to many users).
+
+## ECMP and anycast for scaling L4 fleets
+
+A single L4 LB node can't scale infinitely, so a **fleet** of LB nodes all advertise the
+same VIP and routers spread flows across them with **ECMP** (equal-cost multi-path),
+hashing the packet's 4-tuple to pick an LB node. Two consequences:
+
+- ECMP is (mostly) **stateless** and can **re-pin** a flow to a *different* LB node when the
+  LB set changes (a node dies/joins and the hash buckets shift). If that new LB node picks a
+  *different backend*, the live connection breaks. The fix: every LB node must independently
+  choose the **same** backend for a given flow — which is exactly why **Maglev/consistent
+  hashing plus connection tracking** live at the LB tier, not just the cache tier. This is
+  the staff-level reason consistent hashing matters at the balancer itself.
+- **Anycast VIP:** advertise the same VIP from many geographic sites via BGP; clients reach
+  the nearest site (latency, and DDoS absorption/spread). Combined with ECMP inside each
+  site, you get global + local horizontal scale for a stateless-ish L4 layer, typically
+  paired with **DSR** so responses skip the LB.
+
+## Timeouts, buffering, and streaming
+
+A proxy owns several **distinct** timeouts, and conflating them causes outages:
+
+- **Connect timeout** — how long to wait establishing the backend TCP/TLS connection.
+- **Idle / keepalive timeout** — how long an *established but quiet* connection may sit
+  before being closed (mismatched client/backend idle timeouts cause "connection reset"
+  races).
+- **Request (per-try) timeout** — max time for a single request/response.
+- **Overall/route timeout** — budget across retries.
+
+**Buffering vs streaming:** a **buffering** proxy fully reads the client's request (and/or
+the backend's response) before forwarding, which absorbs **slow clients** and defends
+against **Slowloris** (many trickle-fed partial requests holding connections open). But
+buffering **breaks streaming** workloads — Server-Sent Events, gRPC streaming, large
+uploads/downloads, long-poll — which need **pass-through/streaming** mode so bytes flow as
+they arrive. Also note **head-of-line blocking**: HTTP/1.1 pipelining blocks behind the
+slowest response on a connection, whereas HTTP/2 streams don't (at the HTTP layer) —
+though they still share one TCP connection, so packet loss stalls all streams (fixed by
+HTTP/3/QUIC's independent streams).
+
+## Retries, hedging, and idempotency at the proxy
+
+Proxies can retry failed requests, but doing it naively turns a small incident into an
+outage:
+
+- **Only retry safe/idempotent requests** — GET/HEAD/PUT/DELETE (per HTTP semantics) or
+  requests carrying an **idempotency key**. Blindly retrying a POST can double-charge or
+  double-create.
+- **Retry storms / amplification:** if every layer retries 3×, a deep call stack multiplies
+  load (3×3×3 = 27×) exactly when the system is already failing. Mitigate with **retry
+  budgets** (cap retries to, say, 10–20% of requests) and **circuit breaking** (stop sending
+  to a failing backend/dependency entirely for a cooldown).
+- **Request hedging:** send a *second* copy of a (idempotent) request to another backend
+  after a latency threshold (e.g. p95) and take whichever responds first, trading extra load
+  for tail-latency reduction. Cost must be bounded (hedge budget) or it becomes a
+  self-inflicted retry storm.
+
+## Service mesh, xDS, and the gateway boundary
+
+Deepening the gateway-vs-mesh split:
+
+- **xDS control plane:** both API gateways and service meshes are increasingly configured by
+  the **xDS** family of APIs — **LDS** (listeners), **RDS** (routes), **CDS** (clusters),
+  **EDS** (endpoints) — that stream config to data-plane proxies. The **lookaside/xDS** gRPC
+  balancing above is the same idea: a control plane owns membership/policy, the data plane
+  owns bytes.
+- **Sidecar vs sidecarless / ambient mesh:** the 2024–25 shift moves the per-request L7 work
+  out of a per-pod sidecar into a **per-node L4 layer** plus a shared **waypoint** proxy for
+  L7 — cutting the sidecar's memory/latency tax while keeping mTLS and policy.
+- **East-west identity:** a mesh secures service-to-service traffic with **mTLS** where
+  identity is a **SPIFFE ID** carried in an **SVID** (X.509 or JWT), so services
+  authenticate by cryptographic identity, not IP. This is where the mesh's security lives
+  (east-west), complementing the gateway's north-south auth (API keys/JWT/OAuth).
+- **Gateway API** is the emerging vendor-neutral standard for north-south ingress
+  configuration, succeeding the older Ingress model.
+
 ## Common follow-up questions
 
 - **"Difference between a load balancer and a reverse proxy?"** Every load balancer that
@@ -411,6 +696,15 @@ connections stitched together.
 - RFC 6066 — TLS Extensions (Server Name Indication)
 - RFC 7239 — Forwarded HTTP Extension (standardized `Forwarded` header)
 - RFC 6455 — The WebSocket Protocol (long-lived connections and stickiness)
-- HAProxy PROXY protocol specification (carrying original client address to backends)
+- RFC 9113 §6.8 — HTTP/2 `GOAWAY` frame (graceful connection shutdown / rebalancing)
+- RFC 9112 §6.1, §6.3 — HTTP/1.1 message length, `Content-Length` vs `Transfer-Encoding`
+  precedence and rejection (request-smuggling defense)
+- RFC 9000 §5.1 (Connection IDs), §9 (connection migration); QUIC-LB draft
+- RFC 8446 — TLS 1.3; Encrypted Client Hello (`encrypted_client_hello`) IETF draft + HPKE
+- Maglev: A Fast and Reliable Software Network Load Balancer (Eisenbud et al., NSDI 2016)
+- Consistent hashing (Karger et al.) and Rendezvous / Highest-Random-Weight hashing
+- SPIFFE/SVID identity, xDS (LDS/RDS/CDS/EDS) config APIs, and Gateway API
+- HAProxy PROXY protocol specification v1/v2 (carrying original client address to backends)
 - Cloudflare / NGINX / Envoy documentation — reverse proxy, L4/L7 load balancing, TLS
-  termination vs passthrough, health checks, session affinity (conceptual references)
+  termination vs passthrough, health checks, outlier detection / panic threshold, slow start,
+  ring-hash/Maglev LB policies, session affinity (conceptual references)

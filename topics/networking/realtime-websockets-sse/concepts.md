@@ -136,6 +136,14 @@ Key facts interviewers probe:
 - `Sec-WebSocket-Protocol` negotiates an application **subprotocol** (e.g. `wamp`, a chat
   format); the server echoes the one it picked. `Sec-WebSocket-Extensions` negotiates
   wire-level extensions like `permessage-deflate` compression.
+- **Subprotocol vs extension — don't conflate them.** A *subprotocol*
+  (`Sec-WebSocket-Protocol`) defines the **application-layer message grammar** that rides
+  inside the frames — real examples: **WAMP, STOMP-over-WS, MQTT-over-WS,
+  `graphql-ws` / `graphql-transport-ws`**. The server picks **exactly one** and echoes it, or
+  omits the header entirely (no agreement — the app decides whether to proceed). An *extension*
+  (`Sec-WebSocket-Extensions`) is a **wire transform** applied to the frames themselves —
+  `permessage-deflate` is the only widely-deployed one. Subprotocol = what the bytes *mean*;
+  extension = how the bytes are *encoded*.
 - `wss://` runs the same handshake **inside TLS** on 443. Prefer it: `wss` handshakes
   survive intercepting proxies far better than plaintext `ws`.
 
@@ -144,6 +152,17 @@ Key facts interviewers probe:
 > (extended CONNECT, RFC 8441) and over HTTP/3 (RFC 9220). The classic
 > `Upgrade: websocket` header does **not** exist in HTTP/2 — HTTP/2 removed the `Upgrade`
 > mechanism entirely.
+
+**RFC 8441 mechanics (deeper).** For WebSocket to run over HTTP/2, the server first advertises
+support by sending the **`SETTINGS_ENABLE_CONNECT_PROTOCOL`** (0x8) setting = 1 in its SETTINGS
+frame. The client then opens the WebSocket with an **extended CONNECT** request: a `CONNECT`
+whose new **`:protocol` pseudo-header = `websocket`** (alongside `:scheme`, `:path`,
+`:authority`). The WebSocket then lives **inside a single HTTP/2 stream**, so it shares the one
+TCP+TLS connection with other streams and is multiplexed — but it still **inherits TCP-level
+head-of-line blocking**, because all H2 streams ride one TCP connection. RFC 9220 defines the
+identical bootstrap for HTTP/3, where per-stream QUIC delivery finally removes that HOL
+blocking. This is why "WebSocket over HTTP/2" saves a connection but does not fix HOL — see the
+WebTransport section for the real fix.
 
 ---
 
@@ -182,6 +201,35 @@ random 32-bit key that changes per frame. Server→client frames MUST NOT be mas
 exists to defend intermediaries (proxies/caches) against **cache-poisoning attacks** where
 attacker-controlled bytes could otherwise look like a crafted HTTP request. It is not
 confidentiality — use `wss://`/TLS for that.
+
+The exact transform (RFC 6455 §5.3) is per-octet:
+`transformed[i] = original[i] XOR masking-key[i mod 4]`, where the masking key is 32 bits
+drawn fresh **from a strong RNG for every frame** (a predictable key defeats the purpose).
+The concrete attack masking defends against is the **transparent-proxy cache-poisoning /
+request-smuggling** vector demonstrated in the "Talking to Yourself for Fun and Profit"
+research: without an unpredictable mask, a client could upgrade and then emit bytes that a
+poisoning proxy parses as a second `GET`, caching attacker content under a victim URL.
+Enforcement is strict: a **server MUST fail the connection (close 1002) if it receives an
+unmasked client frame**, and a client MUST fail if it receives a masked server frame.
+
+**Byte order and length precision.** Multi-byte fields — the extended payload length and the
+masking key — are **network byte order (big-endian)**. For the 64-bit extended length the
+**most significant bit MUST be 0**, so the maximum single-frame payload is 2^63−1. The 7-bit
+sentinels are exact: 0–125 literal, 126 → next 16 bits, 127 → next 64 bits.
+
+**Fragmentation semantics (RFC 6455 §5.4).** A logical message may be split across frames: the
+first frame carries the real opcode (`0x1`/`0x2`) with **FIN=0**, subsequent frames are
+**continuation frames (opcode `0x0`)**, and the final one sets **FIN=1**. The rules that trip
+candidates up:
+
+- **Control frames may be interleaved** between the fragments of a data message (so a Ping can
+  be answered promptly mid-transfer), but **two data messages may NOT be interleaved** on one
+  connection — you must finish one fragmented message before starting another.
+- The receiver must **buffer** fragments until FIN. Unbounded reassembly buffers are a DoS
+  vector (a peer that sends endless `FIN=0` fragments), so implementations enforce a **maximum
+  message size** and close with **1009 (message too big)** when exceeded.
+- Fragmentation lets a sender stream a message of unknown total length without buffering it
+  all first, and lets an endpoint multiplex control traffic during a large transfer.
 
 Framing consequences:
 
@@ -248,6 +296,113 @@ The **reserved** codes (1005, 1006, 1015) are used by APIs to *report* a state l
 must never be put in an actual Close frame. **1006** is the one you see most in the wild: it
 means the TCP connection dropped without a proper close handshake (crash, network loss) —
 that is your cue to reconnect.
+
+**Close-handshake ordering and edge cases.** Either side may initiate. The initiator sends its
+Close frame, **then stops sending data frames** (it may still process incoming ones), waits for
+the peer's echoed Close, and only *then* closes the TCP connection — this ordering (send Close
+→ receive Close → TCP FIN) is what makes it "clean." To avoid hanging on a peer that never
+replies, implementations run a **closing-handshake timeout** and force the TCP socket shut once
+it fires. Practically: you get **1000** when a proper Close frame was exchanged; you get
+**1006** (synthesized by the API, never on the wire) when the socket died first — so a graceful
+server shutdown should *send* 1001 (going away) rather than just dropping the socket, or every
+client logs 1006.
+
+**Close-code ranges (RFC 6455 §7.4.2 + IANA registry).** `0–999` are unused. `1000–2999` are
+reserved for the protocol/RFC and IANA-registered extensions. `3000–3999` are registered for
+**libraries and frameworks** (via IANA) — use these for reusable library semantics.
+`4000–4999` are **private / application-defined** — free for your own app to assign meaning
+without registration.
+
+---
+
+## WebSocket security: CSWSH, Origin, and authentication
+
+**Why it matters.** RFC 6455 §10 deliberately prescribes **no authentication mechanism** of
+its own — the handshake is "just an HTTP request," so you inherit whatever HTTP auth you bolt
+on, and the defaults are dangerous. This is the security topic senior interviewers probe
+hardest.
+
+**Cross-Site WebSocket Hijacking (CSWSH / CWE-1385).** The single most important gotcha. A
+WebSocket handshake from the browser is **NOT subject to the Same-Origin Policy or CORS** — the
+browser will open a `wss://your-app` connection from *any* origin's page, and it does so even
+with **no CORS response headers at all**. This is the inverse of `fetch`/XHR, which *fail
+closed* without CORS; WebSocket **fails open**. Worse, the handshake is a normal request, so
+**cookies for your origin ride along cross-site**. Consequence: if your WebSocket auth is
+"the session cookie," an attacker's page (`evil.com`) can silently open an authenticated socket
+as the logged-in victim and read/write their data — a full hijack, essentially CSRF for
+WebSocket with a live bidirectional channel.
+
+Defenses:
+
+- **Validate the `Origin` header server-side** during the handshake against an allowlist. This
+  is the primary defense (the browser sets `Origin` and scripts can't forge it). Beware the
+  classic pentester bypass: **weak suffix/substring matching** — `startsWith`/`endsWith`/
+  `contains` checks let `https://victim.com.evil.com` or `https://evil-victim.com` through.
+  Match the full origin exactly.
+- Add a **CSRF-style unguessable per-session token** on the handshake (query param or first
+  message) that an off-origin attacker cannot read.
+- **Best: authenticate via a token carried inside the WS layer, not the ambient session
+  cookie** — then a cross-site handshake has no credential to abuse. (Note `Origin` is
+  attacker-controlled *outside* the browser, e.g. from a raw socket tool, so Origin checks stop
+  *browser*-driven CSWSH but are not a general authZ mechanism.)
+
+**Authentication patterns (and their traps).** The browser `WebSocket` constructor **cannot set
+custom request headers** — there is no way to send `Authorization: Bearer …` on the handshake.
+Real-world options:
+
+- **Cookie** — automatic, but this is exactly the CSWSH exposure above; needs Origin + CSRF
+  token.
+- **Smuggle a bearer token in `Sec-WebSocket-Protocol`** — the constructor's second argument
+  (subprotocols) *is* sendable from the browser, so a common hack is to pass the token as a
+  "subprotocol" and have the server pull it out (and echo a real subprotocol). Ugly but avoids
+  cookies.
+- **Query-string token** (`wss://app/ws?token=…`) — works everywhere but the token lands in
+  **access logs, proxy logs, and browser history** — leaky; use short-lived tokens.
+- **First-message auth after connect** — open the socket, immediately send an auth message, and
+  have the server refuse all other traffic until it validates. Clean, but the socket exists
+  (consuming resources) before auth, so rate-limit and time-out unauthenticated sockets.
+
+---
+
+## permessage-deflate compression
+
+**Why it matters.** `permessage-deflate` (RFC 7692) is the standard WebSocket compression
+extension — great for repetitive text (JSON), but it carries CRIME/BREACH-class and
+zip-bomb risks that a senior engineer must weigh.
+
+Negotiation happens in `Sec-WebSocket-Extensions` on the handshake, with these parameters:
+
+- **`server_no_context_takeover` / `client_no_context_takeover`** — force that endpoint to
+  **reset its LZ77 compression state (the sliding window) after every message** rather than
+  carrying it across messages.
+- **`server_max_window_bits` / `client_max_window_bits`** — cap the LZ77 window size; the value
+  8–15 is the **base-2 log of the window** (2^15 = 32 KiB max). Smaller window = less memory,
+  worse ratio.
+
+Wire mechanics:
+
+- **RSV1** is set to 1 on the **first frame of a compressed message** to flag "this message is
+  compressed" (which is why RSV1 must be 0 unless this extension is negotiated).
+- **Tail trimming** (RFC 7692 §7.2.1): the compressor DEFLATEs the payload, then **strips the
+  trailing 4 bytes `0x00 0x00 0xFF 0xFF`** (the empty-block marker) before sending; the
+  decompressor **re-appends** them before inflating. This saves 4 bytes per message.
+- **Context takeover** = *reusing* the LZ77 window across messages: better compression ratio
+  (later messages reference earlier ones) at the cost of **holding the window in memory for the
+  connection's whole life** (per connection, per direction).
+
+Security and resource trade-offs:
+
+- **CRIME/BREACH-style leak.** Because context takeover lets the compressed size of a message
+  depend on *previously seen bytes*, an attacker who can inject partial content and **observe
+  ciphertext/compressed size** can infer secrets (a guess that matches earlier bytes compresses
+  smaller). Mitigate by disabling context takeover (`*_no_context_takeover`) on sensitive
+  streams, or not compressing attacker-influenced-plus-secret data together.
+- **Decompression bomb / amplification DoS.** A tiny compressed frame can inflate to a huge
+  payload — cheap for the attacker, expensive for you. Bound the **decompressed** size and the
+  window (`*_max_window_bits`), and enforce a max message size (close 1009).
+- **Memory cost.** Context takeover holds a compression + decompression window *per
+  connection*; at hundreds of thousands of connections this dominates memory. Many large-scale
+  servers disable it or turn compression off entirely.
 
 ---
 
@@ -328,6 +483,86 @@ id; if events aren't persisted, gaps still occur. Also `Last-Event-ID` is only s
 
 ---
 
+## SSE in practice: EventSource limits, fetch-based SSE, and buffering pitfalls
+
+**Why it matters.** SSE's wire format is simple, but the `EventSource` API and real deployments
+have sharp edges that dominate production SSE questions — especially for LLM token-streaming
+endpoints.
+
+**`EventSource` is GET-only, no custom headers, no request body.** The browser `EventSource`
+constructor issues a **`GET`** and gives you no way to add an `Authorization` header or send a
+body. So, exactly like WebSocket, you're pushed to **cookies** (with CSRF/Origin caveats) or a
+**query-string token** (log-leak caveat). The modern workaround is to **hand-roll SSE over
+`fetch`**: call `fetch` with your method/headers/body, then read the streaming response via
+`response.body.getReader()` (piped through `TextDecoderStream`) and parse the
+`event:`/`data:`/`id:` grammar yourself. Cost: you lose `EventSource`'s built-in reconnect and
+`Last-Event-ID` handling and must re-implement them. This is exactly why most LLM
+**token-streaming APIs use fetch-based SSE** — they need `POST` + `Authorization` + a JSON body,
+which `EventSource` can't provide.
+
+**HTTP status semantics on (re)connect** (WHATWG spec) — how the client reacts to the response:
+
+- **`200` + `Content-Type: text/event-stream`** → accept and process the stream.
+- **`204 No Content`** → the client treats this as "**stop reconnecting**," a clean shutdown
+  signal to permanently end the stream.
+- **`3xx` redirect** → followed to the new location.
+- **Any non-2xx status, or `200` with the wrong Content-Type** → **fatal**: fire `onerror`, set
+  `readyState = CLOSED`, and **do NOT auto-reconnect**.
+- **Network drop / connection reset** (not an HTTP error response) → the retriable case:
+  `readyState = CONNECTING` and EventSource **auto-reconnects** after the retry delay.
+
+The practical tell: check **`readyState`** in `onerror` — `CONNECTING` means "will retry,"
+`CLOSED` means "permanent failure, won't retry."
+
+**Cross-origin SSE and credentials.** For a cross-origin `EventSource`, standard CORS applies to
+the underlying GET. To send cookies you set **`withCredentials: true`**, and the server must
+respond with **`Access-Control-Allow-Credentials: true`** and an **explicit** origin in
+`Access-Control-Allow-Origin` (not `*`).
+
+**Proxy/gzip buffering breaks SSE — the #1 production bug.** SSE only works if bytes are
+**flushed to the client immediately**; anything that buffers the response destroys real-time
+delivery (events arrive in a burst at the end, or on connection close). Common culprits and
+fixes:
+
+- **nginx buffers proxied responses by default** → set **`proxy_buffering off`**, or have the
+  app emit **`X-Accel-Buffering: no`** to disable buffering for that response.
+- **`Content-Encoding: gzip` buffers to fill compression blocks** → **disable compression on
+  the SSE endpoint** (or the response sits in the gzip buffer until it's full).
+- **App-server / framework output buffering** → call an explicit **flush** after each event.
+
+The canonical symptom: **"it works in `curl` but the browser gets everything at once at the
+end"** — that's buffering somewhere in the chain, not an SSE-format bug.
+
+---
+
+## WebTransport over HTTP/3: the modern alternative
+
+**Why it matters.** WebSocket's key structural weakness is that it rides **one TCP stream**, so
+a single lost packet **head-of-line blocks** every message behind it, and you get exactly one
+ordered reliable stream. **WebTransport** is the forward-looking answer to "what replaces
+WebSocket," and naming it signals awareness of where real-time transport is heading.
+
+WebTransport runs over **HTTP/3 / QUIC (UDP)** (`draft-ietf-webtrans-http3`), and on one
+connection it offers:
+
+- **Unreliable, unordered datagrams** — fire-and-forget, no retransmission. Ideal for game
+  state and live media where a **stale packet is worthless** and you'd rather send the next one
+  than retransmit the old.
+- **Reliable, ordered streams** — uni- or bidirectional, and you can open **many parallel
+  streams** on one connection.
+- **No TCP head-of-line blocking** — QUIC isolates loss per stream, so a drop on one stream
+  doesn't stall the others (the thing HTTP/2's single TCP connection can't fix).
+- **Backpressure via the Streams API** and a `congestionControl` hint
+  (`"high-throughput"` vs `"low-latency"`).
+
+When to switch from WebSocket: **games, real-time media, telemetry** (want unreliable datagrams
++ drop-stale-over-retransmit), or workloads with **many independent flows** that suffer from
+WebSocket's single-stream HOL blocking. QUIC's transport security is TLS 1.3-based
+(RFC 9001). WebTransport is comparatively new; WebSocket/SSE remain the ubiquitous, broadly
+supported baseline.
+
+---
+
 ## WebSocket vs SSE vs long polling: choosing
 
 The decision hinges on **direction of data flow**, **payload type**, and **infrastructure
@@ -382,9 +617,25 @@ Key challenges and standard techniques:
   (the socket stays on one node), but **fan-out across nodes** is.
 - **Fan-out / horizontal scale**: a message from user A on server 1 must reach user B whose
   socket lives on server 3. Servers therefore subscribe to a shared **pub/sub bus**
-  (e.g. a Redis pub/sub, Kafka, or a message broker); each node delivers only to the
+  (e.g. a Redis pub/sub, Kafka, or a NATS/message broker); each node delivers only to the
   connections it locally owns. This decouples "who is connected where" from "who needs the
   message."
+- **Delivery semantics across the backplane**: decide **at-most-once** (fire-and-forget over
+  pub/sub — a message published while B is mid-reconnect is simply lost) vs **at-least-once**
+  (persist to a durable log/stream and replay on reconnect, which forces consumers to be
+  **idempotent** because duplicates will occur). **Ordering** across a reconnect is not free:
+  tag messages with a monotonic **sequence id** per conversation/channel so a resuming client
+  can request "everything after seq N" and detect gaps — the WebSocket analogue of SSE's
+  `Last-Event-ID`.
+- **Presence tracking**: "who is online / in this room" is itself distributed state. A common
+  pattern is per-node presence keys in a shared store with TTLs refreshed by heartbeats, so a
+  node crash expires its users rather than leaving them falsely "online."
+- **Proxy/LB traversal**: `wss://` is TLS, so it is **opaque to intermediaries** and tunnels
+  cleanly end-to-end; plaintext `ws://` is frequently mangled or blocked by transparent
+  proxies. Through a *forward* proxy, browsers tunnel using an HTTP **`CONNECT`**. `Connection`
+  and `Upgrade` are **hop-by-hop headers** (RFC 9110), which is precisely why a naive proxy
+  that doesn't special-case them **strips** them and breaks the upgrade — L7 proxies must be
+  configured to forward them and to disable response buffering.
 - **Backpressure**: a slow client whose send buffer fills can bloat server memory. Servers
   must bound per-connection queues and drop/close slow consumers.
 - **Reconnect storms & thundering herds**: a deploy or LB blip disconnects everyone at once;
@@ -422,12 +673,47 @@ Key challenges and standard techniques:
 - **Long polling vs SSE — both hold a connection, why prefer SSE?** SSE keeps one connection
   open for *many* events with tiny framing and built-in reconnect/resume; long polling pays
   a full request/response cycle per event.
+- **An attacker's page opens a `wss://` to your app as a logged-in user — how, and how do you
+  stop it?** Cross-Site WebSocket Hijacking (CWE-1385): handshakes aren't bound by SOP/CORS and
+  cookies ride cross-site. Stop it with server-side `Origin` allowlist validation + a CSRF
+  token, or auth via a token inside the WS layer instead of the ambient cookie.
+- **Why can't you send an `Authorization` header on a browser WebSocket or `EventSource`?** The
+  constructors don't expose custom request headers. Use cookie (+CSWSH mitigation), a token in
+  `Sec-WebSocket-Protocol`, a query-string token (log-leak risk), post-connect auth, or (for
+  SSE) fetch-based streaming which *can* set headers.
+- **You enabled `permessage-deflate` and memory ballooned / a scanner flagged you — why?**
+  Context takeover holds an LZ77 window per connection (memory), and history-based compression
+  enables CRIME-style size-oracle leaks and decompression-bomb DoS. Use `*_no_context_takeover`
+  and bound the window / max message size.
+- **WebSocket works locally but drops after ~60s behind a corporate LB/cloud ALB — why?** Idle
+  timeout reaping. Fix with app-level heartbeats or protocol pings *within* the timeout;
+  browsers can't send protocol pings, so use app-level heartbeat messages.
+- **SSE works in `curl` but the browser gets all events at once at the end.** Response buffering
+  in the chain: `proxy_buffering off` / `X-Accel-Buffering: no`, disable gzip on the endpoint,
+  and flush after each event.
+- **Does WebSocket over HTTP/2 fix head-of-line blocking?** No. RFC 8441 extended CONNECT
+  multiplexes the socket onto one H2 stream but all streams share one TCP connection, so
+  TCP-level HOL blocking remains. HTTP/3/QUIC (RFC 9220, WebTransport) is the real fix.
+- **How do you detect a half-open connection where the peer vanished?** TCP won't tell you;
+  only an application ping/pong (or heartbeat) timeout reveals it — OS TCP keepalive defaults to
+  ~2 hours, far too coarse.
 
 ## References
 
-- RFC 6455 — The WebSocket Protocol: https://www.rfc-editor.org/rfc/rfc6455
-- RFC 8441 — Bootstrapping WebSockets with HTTP/2: https://www.rfc-editor.org/rfc/rfc8441
+- RFC 6455 — The WebSocket Protocol (incl. §5.3 masking, §5.4 fragmentation, §7.4 close codes,
+  §10 security): https://www.rfc-editor.org/rfc/rfc6455
+- RFC 7692 — Compression Extensions for WebSocket (`permessage-deflate`):
+  https://www.rfc-editor.org/rfc/rfc7692
+- RFC 8441 — Bootstrapping WebSockets with HTTP/2 (extended CONNECT,
+  `SETTINGS_ENABLE_CONNECT_PROTOCOL`): https://www.rfc-editor.org/rfc/rfc8441
 - RFC 9220 — Bootstrapping WebSockets with HTTP/3: https://www.rfc-editor.org/rfc/rfc9220
+- CWE-1385 — Missing Origin Validation in WebSockets: https://cwe.mitre.org/data/definitions/1385.html
+- OWASP — WebSocket Security Cheat Sheet:
+  https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html
+- WebTransport over HTTP/3 (draft-ietf-webtrans-http3):
+  https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/
+- MDN — WebTransport API: https://developer.mozilla.org/en-US/docs/Web/API/WebTransport
+- RFC 9001 — Using TLS to Secure QUIC: https://www.rfc-editor.org/rfc/rfc9001
 - WHATWG HTML Living Standard — Server-sent events (`EventSource`):
   https://html.spec.whatwg.org/multipage/server-sent-events.html
 - RFC 9110 — HTTP Semantics (status codes incl. 101): https://www.rfc-editor.org/rfc/rfc9110

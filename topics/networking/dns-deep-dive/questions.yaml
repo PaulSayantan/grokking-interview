@@ -969,3 +969,842 @@ questions:
     user-visible "propagation" delay is downstream resolver caching, not the transfer.
   ref: concepts.md#the-dns-propagation-misconception
 
+- id: dns-deep-dive-049
+  difficulty: advanced
+  tags:
+  - wire-format
+  - header
+  question: |
+    In the 12-byte DNS header, which set of fields tells the parser how many entries to
+    expect in each of the four message sections?
+  options:
+  - QDCOUNT, ANCOUNT, NSCOUNT, ARCOUNT
+  - ID, QR, Opcode, RCODE
+  - AA, TC, RD, RA
+  - RDLENGTH for each of the four sections
+  answer: 0
+  explanation: |
+    The four 16-bit counts QDCOUNT/ANCOUNT/NSCOUNT/ARCOUNT give the number of entries in
+    the Question, Answer, Authority, and Additional sections respectively. RDLENGTH is a
+    per-RR field, not a section count; ID/flags/RCODE carry other header state.
+  ref: concepts.md#dns-message-format-on-the-wire
+
+- id: dns-deep-dive-050
+  difficulty: expert
+  tags:
+  - wire-format
+  - name-encoding
+  question: |
+    How is the name `www.example.com` encoded in the question section, and how is the
+    root represented?
+  options:
+  - As the ASCII string "www.example.com" followed by a NUL byte
+  - As a 4-byte hash of the full name
+  - As a sequence of length-prefixed labels `3www7example3com` terminated by a zero-length
+    octet (0x00), which alone represents the root
+  - As dot-separated labels with each dot encoded as 0xFF
+  answer: 2
+  explanation: |
+    DNS names are sequences of length-prefixed labels ending in a zero-length octet. So
+    `www.example.com` becomes 3 w w w 7 e x a m p l e 3 c o m 0. The lone terminating 0x00
+    is the root label; a bare root name (".") is just that single zero octet.
+  ref: concepts.md#dns-message-format-on-the-wire
+
+- id: dns-deep-dive-051
+  difficulty: advanced
+  tags:
+  - wire-format
+  - transport
+  question: |
+    Why do DNS messages over TCP, DoT, and DoQ carry a 2-octet length prefix that UDP
+    messages do not?
+  options:
+  - TCP requires all application data to be checksummed with a 2-byte field
+  - The prefix stores the EDNS buffer size for stream transports
+  - It encodes the transaction ID redundantly for reliability
+  - A byte stream has no inherent message boundaries, so the length prefix delimits each
+    message; a UDP datagram is self-delimiting
+  answer: 3
+  explanation: |
+    UDP delivers one datagram per message, so its boundary is implicit. TCP/TLS/QUIC
+    streams are byte streams with no framing, so DNS prepends a 2-octet length so the
+    receiver knows where each message ends.
+  ref: concepts.md#dns-message-format-on-the-wire
+
+- id: dns-deep-dive-052
+  difficulty: expert
+  tags:
+  - name-compression
+  question: |
+    In DNS name compression (RFC 1035 §4.1.4), how is a compression pointer recognized and
+    what does it reference?
+  options:
+  - A label whose first byte is 0x00, pointing to the next message
+  - A 4-octet absolute memory address into the resolver's cache
+  - A 2-octet field with the two high bits set (0xC0 mask); the low 14 bits are an offset
+    from the start of the message to an earlier name
+  - Any label longer than 63 octets, which is treated as a forward reference
+  answer: 2
+  explanation: |
+    A pointer is two octets with the top two bits set (0xC0). The remaining 14 bits are an
+    offset, measured from the start of the DNS message, to a previously-encoded name. The
+    two high bits distinguish it from a normal label length (0-63).
+  ref: concepts.md#name-compression
+
+- id: dns-deep-dive-053
+  difficulty: expert
+  tags:
+  - name-compression
+  - edns
+  question: |
+    Which statement about DNS name compression is correct?
+  options:
+  - The OPT (EDNS) pseudo-record's owner name is compressed to save space
+  - Compression pointers may reference names in a later part of the message (forward
+    references) for efficiency
+  - Compression may only point backward within the same message, and some RDATA names
+    must not be compressed so type-agnostic parsers stay correct
+  - Compression is mandatory for every repeated label or the message is malformed
+  answer: 2
+  explanation: |
+    Pointers only reference earlier offsets in the same message. The OPT record's owner is
+    always the root (uncompressed), and names inside certain RDATA must not be compressed
+    so a parser that doesn't know the RR type can still skip it correctly. Compression is
+    optional.
+  ref: concepts.md#name-compression
+
+- id: dns-deep-dive-054
+  difficulty: advanced
+  tags:
+  - rcode
+  - refused
+  question: |
+    A recursive resolver query to an authoritative server returns RCODE 5 (REFUSED). What
+    is the most likely meaning?
+  options:
+  - The name definitively does not exist
+  - The server failed internally and should be retried
+  - The server declined for policy reasons — e.g. it doesn't serve that zone or an ACL
+    blocked the query
+  - The response was truncated and must be retried over TCP
+  answer: 2
+  explanation: |
+    REFUSED (5) is a policy refusal: the server won't answer, commonly because it isn't
+    authoritative/recursive for the query or an ACL denied it. NXDOMAIN (3) is
+    non-existence; SERVFAIL (2) is failure; truncation is signalled by the TC bit.
+  ref: concepts.md#response-codes-rcodes-and-extended-dns-errors
+
+- id: dns-deep-dive-055
+  difficulty: expert
+  tags:
+  - servfail
+  - ede
+  - debugging
+  question: |
+    Users intermittently get SERVFAIL for a DNSSEC-signed domain. Which is NOT a plausible
+    root cause to investigate?
+  options:
+  - An expired RRSIG or a DS at the registrar that doesn't match the current DNSKEY
+  - A large signed response being dropped by a middlebox with no working TCP fallback
+  - The resolver rejecting the answer because the CAA record names the wrong CA
+  - Authoritative servers timing out or being rate-limited
+  answer: 2
+  explanation: |
+    CAA is consulted by certificate authorities at issuance, never by resolvers during
+    lookups, so it cannot cause SERVFAIL. Expired signatures, a broken DS chain,
+    EDNS/fragmentation blackholes, and auth timeouts are all classic SERVFAIL causes —
+    an Extended DNS Error (RFC 8914) code usually pinpoints which.
+  ref: concepts.md#response-codes-rcodes-and-extended-dns-errors
+
+- id: dns-deep-dive-056
+  difficulty: advanced
+  tags:
+  - ede
+  question: |
+    What do Extended DNS Errors (EDE, RFC 8914) add over the classic 4-bit RCODE?
+  options:
+  - They replace SERVFAIL with a numeric HTTP-style status code in the header
+  - They encrypt the failure reason so only the client can read it
+  - They force the resolver to retry over a different transport automatically
+  - They provide a machine-readable reason (e.g. DNSSEC Bogus, Signature Expired, Blocked,
+    Stale Answer) as an EDNS option, without changing the RCODE
+  answer: 3
+  explanation: |
+    EDE is an informational EDNS option carrying a code and optional text explaining why a
+    (usually SERVFAIL/REFUSED) response occurred. It does not alter the RCODE; it turns an
+    opaque failure into an actionable reason for operators.
+  ref: concepts.md#response-codes-rcodes-and-extended-dns-errors
+
+- id: dns-deep-dive-057
+  difficulty: expert
+  tags:
+  - qname-minimization
+  - privacy
+  question: |
+    With QNAME minimization (RFC 9156) enabled, what does a resolver send to the root
+    servers when a client asks for `A shop.eu.example.com`?
+  options:
+  - The full name `shop.eu.example.com` with QTYPE A
+  - "`example.com` with QTYPE NS, revealing the second-level domain"
+  - Nothing — QNAME minimization skips the root entirely
+  - Just `com` (typically with QTYPE A/AAAA), because the root only needs one label to
+    return the .com referral
+  answer: 3
+  explanation: |
+    QNAME minimization sends each server only one more label than known. Querying the root,
+    the resolver reveals only `com`; it uses A/AAAA (not NS) for the probe to avoid servers
+    that misbehave on non-apex NS queries. The root never learns the full name.
+  ref: concepts.md#qname-minimization
+
+- id: dns-deep-dive-058
+  difficulty: advanced
+  tags:
+  - qname-minimization
+  - privacy
+  question: |
+    QNAME minimization primarily improves privacy on which segment, and how does it relate
+    to DoH/DoT?
+  options:
+  - The stub→resolver hop, making DoH/DoT redundant
+  - It encrypts the resolver→authoritative hop the way DoT encrypts stub→resolver
+  - The resolver→authoritative hops (limiting what root/TLD servers learn); it complements
+    DoH/DoT, which instead encrypt the stub→resolver hop
+  - It only affects negative caching, not privacy
+  answer: 2
+  explanation: |
+    QNAME minimization limits how much of the name each upstream authoritative server sees
+    — a recursive-side privacy win. DoH/DoT encrypt the stub-to-resolver hop. They address
+    different exposures and are complementary.
+  ref: concepts.md#qname-minimization
+
+- id: dns-deep-dive-059
+  difficulty: expert
+  tags:
+  - dns-cookies
+  - security
+  question: |
+    Which class of attacker do DNS Cookies (RFC 7873/9018) primarily defend against, and
+    what is their key limitation?
+  options:
+  - On-path attackers who can read the traffic; they fail against off-path spoofing
+  - Only DNSSEC-validation failures, replacing RRSIG checks
+  - Off-path spoofers and reflection/amplification abuse (a forged request can't echo a
+    valid Server Cookie); they do NOT stop an on-path attacker who can observe the cookie
+  - Zone-transfer thieves, replacing TSIG for AXFR authentication
+  answer: 2
+  explanation: |
+    Cookies give a cheap proof that a client can receive replies at its source address,
+    defeating off-path spoofers and blunting amplification (no valid cookie → BADCOOKIE or
+    rate-limited). An on-path attacker who sees the cookie is unaffected; that needs
+    DoT/DoQ or DNSSEC.
+  ref: concepts.md#dns-cookies
+
+- id: dns-deep-dive-060
+  difficulty: advanced
+  tags:
+  - dns-cookies
+  - edns
+  question: |
+    Where do DNS Cookies live on the wire, and what does a mismatched/absent Server Cookie
+    trigger?
+  options:
+  - In the DNS header flags; a mismatch sets the TC bit
+  - In a dedicated COOKIE resource record in the Answer section; a mismatch returns NXDOMAIN
+  - In the TLS session ticket; a mismatch aborts the connection
+  - In an EDNS OPT option (code 10); a bad or missing cookie can yield BADCOOKIE (RCODE 23)
+    or rate-limited handling
+  answer: 3
+  explanation: |
+    DNS Cookies are an EDNS0 OPT option (code 10) carrying an 8-byte Client Cookie and an
+    8-32 byte Server Cookie. A missing/invalid cookie can prompt BADCOOKIE (extended RCODE
+    23) so the client re-queries with the correct cookie, or the server rate-limits it.
+  ref: concepts.md#dns-cookies
+
+- id: dns-deep-dive-061
+  difficulty: expert
+  tags:
+  - doq
+  - transport
+  question: |
+    What advantage does DNS over QUIC (RFC 9250) have over DoT and DoH-over-HTTP/2 for
+    multiplexed queries?
+  options:
+  - It runs unencrypted, so it is faster
+  - It removes the need for the 2-octet length prefix
+  - Independent QUIC streams eliminate the TCP head-of-line blocking that stalls all
+    multiplexed queries when a single packet is lost
+  - It allows the DNS transaction ID to be any 32-bit value
+  answer: 2
+  explanation: |
+    DoT and DoH/2 ride a single TCP connection, so one lost segment head-of-line-blocks
+    every multiplexed query. QUIC's per-stream delivery means loss on one stream doesn't
+    stall the others. DoQ still uses length-prefixed messages and is fully encrypted.
+  ref: concepts.md#dns-over-quic-doq
+
+- id: dns-deep-dive-062
+  difficulty: expert
+  tags:
+  - doq
+  - message-id
+  question: |
+    RFC 9250 requires the DNS Message ID to be set to 0 on DoQ, and it restricts 0-RTT to
+    QUERY and NOTIFY. Why?
+  options:
+  - The ID is 0 because the QUIC stream itself correlates request/response; 0-RTT is limited
+    to replay-safe opcodes so a replayed early-data message can't cause state changes
+  - The ID must be 0 to enable name compression; 0-RTT is limited to reduce packet size
+  - Both rules exist only to match the DoT port number 853
+  - The ID is 0 so DNSSEC signatures validate; 0-RTT covers UPDATE for faster writes
+  answer: 0
+  explanation: |
+    On DoQ each query has its own stream, so the 16-bit ID is redundant and MUST be 0.
+    QUIC 0-RTT data is replayable, so it is restricted to idempotent/replay-safe opcodes
+    (QUERY, NOTIFY); allowing UPDATE in 0-RTT would let an attacker replay a zone change.
+  ref: concepts.md#dns-over-quic-doq
+
+- id: dns-deep-dive-063
+  difficulty: expert
+  tags:
+  - amplification
+  - ddos
+  - security
+  question: |
+    In a DNS amplification DDoS, what makes DNS an effective reflector and which defense
+    operates at the network layer to stop the spoofing itself?
+  options:
+  - DNS answers are always encrypted; RRL decrypts them
+  - DNS uses TCP, so SYN cookies stop it; DNSSEC prevents the reflection
+  - A small spoofed-source query yields a much larger response aimed at the victim; BCP 38
+    ingress filtering prevents spoofed source IPs from leaving a network
+  - The victim must run an open resolver; disabling AAAA records stops the attack
+  answer: 2
+  explanation: |
+    Attackers spoof the victim's IP as source and pick large-response query types, so the
+    victim receives amplified traffic. Response Rate Limiting and DNS Cookies help at the
+    server, but BCP 38 ingress filtering is the network-level fix: it drops packets whose
+    source address doesn't belong to the originating network.
+  ref: concepts.md#dns-amplification-and-reflection-attacks
+
+- id: dns-deep-dive-064
+  difficulty: advanced
+  tags:
+  - amplification
+  - open-resolver
+  question: |
+    Why are "open resolvers" a particular problem in the context of DNS amplification?
+  options:
+  - They cache records for too long, so answers become stale
+  - They refuse EDNS, forcing everything over TCP
+  - They answer recursive queries from anyone, so attackers use them as reflectors to
+    amplify spoofed queries toward a victim
+  - They can only serve DNSSEC-signed zones
+  answer: 2
+  explanation: |
+    An open resolver recurses for any client, making it a convenient amplifier: the attacker
+    sends spoofed-source queries and the resolver blasts large responses at the victim.
+    Resolvers should be restricted to their intended users.
+  ref: concepts.md#dns-amplification-and-reflection-attacks
+
+- id: dns-deep-dive-065
+  difficulty: expert
+  tags:
+  - glue-records
+  - delegation
+  question: |
+    `example.com` is served by `ns1.example.com` and `ns2.example.com`. Why must the .com
+    servers include glue records, and what are they?
+  options:
+  - Glue is a TXT record proving domain ownership to the registry
+  - Glue records are CNAMEs that alias the nameservers to the registrar
+  - Glue is only needed when the nameservers are in a different TLD
+  - Without A/AAAA glue for the in-bailiwick nameservers, a resolver can't resolve
+    ns1.example.com (which itself lives in example.com), so the parent publishes their
+    addresses in the referral's Additional section
+  answer: 3
+  explanation: |
+    When nameservers are inside the zone they serve (in-bailiwick), resolving their names
+    requires querying the very zone they define — a deadlock. The parent breaks it by
+    publishing A/AAAA glue for those names in the Additional section of the delegation.
+    Out-of-bailiwick nameservers need no glue.
+  ref: concepts.md#registration-delegation-and-glue-records
+
+- id: dns-deep-dive-066
+  difficulty: advanced
+  tags:
+  - delegation
+  - registry
+  question: |
+    In the registration chain, which party actually publishes your domain's NS records in
+    the TLD zone?
+  options:
+  - The registrant, by editing the root zone directly
+  - Every recursive resolver, when it first caches the domain
+  - The registry that operates the TLD (e.g. Verisign for .com), based on the delegation
+    the registrar submits
+  - ICANN, on a per-query basis
+  answer: 2
+  explanation: |
+    The registrant registers via a registrar, which submits the delegation to the registry
+    operating the TLD. The registry publishes the NS delegation in the TLD zone. Resolvers
+    merely cache what they learn.
+  ref: concepts.md#registration-delegation-and-glue-records
+
+- id: dns-deep-dive-067
+  difficulty: advanced
+  tags:
+  - zone-transfer
+  - ixfr-axfr
+  question: |
+    What is the practical difference between AXFR and IXFR for keeping secondaries in sync?
+  options:
+  - AXFR uses UDP and IXFR uses TCP
+  - IXFR is unauthenticated while AXFR always requires DNSSEC
+  - AXFR transfers the entire zone; IXFR transfers only the delta since the secondary's
+    serial, falling back to AXFR when the delta isn't available
+  - AXFR is incremental and IXFR is full — the names are historically swapped
+  answer: 2
+  explanation: |
+    AXFR (RFC 1035) sends the whole zone; IXFR (RFC 1995) sends only changes since the
+    secondary's known serial, which is far cheaper for big zones with small edits, and
+    falls back to AXFR if the incremental history isn't retained.
+  ref: concepts.md#zone-transfers-axfr-ixfr-notify-and-tsig
+
+- id: dns-deep-dive-068
+  difficulty: expert
+  tags:
+  - notify
+  - tsig
+  - ha
+  question: |
+    Design a resilient authoritative setup. Which combination correctly pairs each
+    mechanism with its job?
+  options:
+  - NOTIFY authenticates transfers; TSIG triggers refresh; AXFR encrypts the zone
+  - TSIG signs the zone data for end resolvers, replacing DNSSEC
+  - NOTIFY pushes a "zone changed" trigger to secondaries; IXFR/AXFR pull the data; TSIG
+    (HMAC + timestamp) authenticates the transfer/update
+  - NOTIFY performs the full transfer; TSIG caps the negative-cache TTL
+  answer: 2
+  explanation: |
+    NOTIFY (RFC 1996) is a lightweight push telling secondaries the zone changed; they then
+    pull via IXFR/AXFR. TSIG (RFC 8945) authenticates those transfers/dynamic updates with a
+    shared-secret HMAC and timestamp. TSIG protects the transfer, distinct from DNSSEC which
+    signs data for resolvers.
+  ref: concepts.md#zone-transfers-axfr-ixfr-notify-and-tsig
+
+- id: dns-deep-dive-069
+  difficulty: expert
+  tags:
+  - serve-stale
+  - resilience
+  question: |
+    A record's TTL expired, but your authoritative servers are briefly unreachable. Under
+    RFC 8767, what may a resolver do, and what side effect does this explain?
+  options:
+  - It must immediately return SERVFAIL; there is no fallback
+  - It must switch the client to the authoritative server directly
+  - It may keep serving the expired (stale) answer within a bounded stale window to preserve
+    availability, which also explains why a change can linger past its nominal TTL
+  - It re-signs the record with its own key and serves it as authentic
+  answer: 2
+  explanation: |
+    Serve-stale lets a resolver return an expired answer when it cannot refresh from the
+    authoritative source, trading strict freshness for availability during outages. It is
+    also one reason a change may appear to persist beyond the record's TTL.
+  ref: concepts.md#serve-stale-and-prefetching
+
+- id: dns-deep-dive-070
+  difficulty: expert
+  tags:
+  - happy-eyeballs
+  - dual-stack
+  question: |
+    A packet capture of a single browser navigation shows two DNS questions for the same
+    hostname — one A and one AAAA — and the AAAA returns NOERROR with an empty answer. What
+    is happening?
+  options:
+  - The resolver is misconfigured and duplicating queries
+  - The AAAA NODATA is an error that will break the page load
+  - The browser is performing DNSSEC validation, which requires two queries
+  - "Happy Eyeballs (RFC 8305): the dual-stack client queries both families in parallel;
+    the empty AAAA is NODATA (the host is IPv4-only), which is normal"
+  answer: 3
+  explanation: |
+    Happy Eyeballs v2 issues A and AAAA lookups and races connections across families. An
+    IPv4-only host returns NODATA (NOERROR, empty) for AAAA — expected, not an error. This
+    is why one navigation shows two DNS questions.
+  ref: concepts.md#happy-eyeballs-and-dual-stack-lookups
+
+- id: dns-deep-dive-071
+  difficulty: expert
+  tags:
+  - soa
+  - expire
+  question: |
+    A secondary authoritative server has been unable to reach the primary for longer than
+    the SOA EXPIRE value. What happens, and how does EXPIRE differ from MINIMUM?
+  options:
+  - The secondary keeps serving forever; EXPIRE and MINIMUM both control record TTL
+  - The secondary lowers all record TTLs to MINIMUM and continues
+  - The secondary stops serving the whole zone (SERVFAIL/refused) because its data is too
+    stale to trust; EXPIRE is zone-level, whereas MINIMUM caps the negative-cache TTL in
+    resolvers
+  - EXPIRE controls how long resolvers cache positive answers; MINIMUM controls REFRESH
+  answer: 2
+  explanation: |
+    EXPIRE bounds how long a secondary will serve a zone without successfully contacting the
+    primary; past it, the secondary stops answering rather than serve very stale data. That
+    is a zone-level, secondary-side timer — completely different from MINIMUM, which (per RFC
+    2308) caps how long resolvers cache negative answers.
+  ref: concepts.md#soa-timers-in-depth
+
+- id: dns-deep-dive-072
+  difficulty: advanced
+  tags:
+  - soa
+  - serial
+  question: |
+    You edit a zone on the primary but secondaries never pick up the change, even though
+    NOTIFY is configured. Which SOA-related mistake is the classic cause?
+  options:
+  - You forgot to bump the SOA SERIAL, so secondaries compare serials and conclude nothing
+    changed
+  - You set REFRESH too low
+  - The EXPIRE value is negative
+  - You used a YYYYMMDDnn serial format, which secondaries reject
+  answer: 0
+  explanation: |
+    Secondaries decide whether to transfer by comparing the SOA serial (with wraparound
+    arithmetic, RFC 1982). If you edit records but don't increment the serial, the secondary
+    sees the same version and skips the transfer, even after a NOTIFY.
+  ref: concepts.md#soa-timers-in-depth
+
+- id: dns-deep-dive-073
+  difficulty: expert
+  tags:
+  - svcb-https
+  - alias-mode
+  question: |
+    In an HTTPS/SVCB record (RFC 9460), what distinguishes AliasMode from ServiceMode?
+  options:
+  - AliasMode has SvcPriority = 0 and aliases the owner to a TargetName; ServiceMode has a
+    non-zero priority and describes an endpoint with SvcParams
+  - AliasMode uses type 65 and ServiceMode uses type 64, regardless of priority
+  - AliasMode carries ECH while ServiceMode cannot
+  - ServiceMode is only valid at the apex; AliasMode only below it
+  answer: 0
+  explanation: |
+    SvcPriority = 0 signals AliasMode (a CNAME-like redirection to TargetName, usable at the
+    apex). A non-zero SvcPriority signals ServiceMode, where the record advertises endpoint
+    parameters (alpn, port, hints, ech) and priority orders multiple records.
+  ref: concepts.md#svcb-and-https-records-in-depth
+
+- id: dns-deep-dive-074
+  difficulty: expert
+  tags:
+  - svcb-https
+  - ech
+  - http3
+  question: |
+    How does an HTTPS record let a browser reach an HTTP/3 origin with a hidden SNI in
+    fewer round-trips?
+  options:
+  - It forces the browser to open a TCP connection first to negotiate h3
+  - Its SvcParams can advertise `alpn=h3` (so the client uses HTTP/3 without an Alt-Svc
+    round-trip) and carry the `ech` config for Encrypted Client Hello; resolvers can bundle
+    the target's A/AAAA in Additional
+  - It stores the TLS private key so the browser can decrypt the SNI
+  - It replaces the need for any A/AAAA record entirely
+  answer: 1
+  explanation: |
+    The `alpn` SvcParam lets the client jump straight to HTTP/3 without discovering it via
+    Alt-Svc over an initial HTTP connection, and the `ech` param (key 5) carries the ECH
+    config to encrypt the ClientHello (hiding SNI). Bundling A/AAAA in Additional saves
+    another lookup — address, ALPN, and ECH in one query.
+  ref: concepts.md#svcb-and-https-records-in-depth
+
+- id: dns-deep-dive-075
+  difficulty: expert
+  tags:
+  - dnssec
+  - ksk-zsk
+  question: |
+    Why does DNSSEC split signing into a KSK and a ZSK?
+  options:
+  - The KSK signs only the DNSKEY RRset (and is what the parent's DS references), while the
+    ZSK signs zone data — so you can roll the ZSK frequently without involving the registrar's
+    DS
+  - The KSK encrypts data and the ZSK decrypts it
+  - The KSK is for IPv4 zones and the ZSK for IPv6 zones
+  - The ZSK is published in the parent and the KSK in the child, reversing the trust chain
+  answer: 0
+  explanation: |
+    The KSK signs the DNSKEY RRset and is hashed into the parent's DS, anchoring trust. The
+    ZSK signs the actual RRsets. This separation lets operators roll the operationally-active
+    ZSK often without a registrar DS change, which is only needed for KSK rollovers.
+  ref: concepts.md#dnssec-internals-ksk-zsk-rrsig-and-denial-of-existence
+
+- id: dns-deep-dive-076
+  difficulty: expert
+  tags:
+  - dnssec
+  - nsec3
+  - zone-walking
+  question: |
+    Why do RFC 9276 and providers using "compact denial / black lies" push beyond ordinary
+    NSEC3 for denial of existence?
+  options:
+  - NSEC3 cannot prove non-existence at all, unlike NSEC
+  - Plain NSEC lets attackers walk the zone, and NSEC3's hashed names are still crackable
+    offline (especially with high iterations), so RFC 9276 recommends iterations=0 and
+    on-the-fly minimally-covering records avoid enumeration entirely
+  - NSEC3 responses are unsigned, so they must be replaced
+  - Black lies encrypt the zone contents so resolvers can't read them
+  answer: 1
+  explanation: |
+    NSEC exposes the zone to enumeration via its name chain; NSEC3 hashes names but remains
+    vulnerable to offline dictionary/brute-force cracking, worsened by high iteration counts.
+    RFC 9276 recommends iterations=0 and an empty salt; compact-denial/"black lies" synthesize
+    minimally-covering signed records per query so there is nothing to walk.
+  ref: concepts.md#dnssec-internals-ksk-zsk-rrsig-and-denial-of-existence
+
+- id: dns-deep-dive-077
+  difficulty: expert
+  tags:
+  - dnssec
+  - cd-bit
+  question: |
+    A troubleshooter wants a resolver to return DNSSEC-signed data even if validation would
+    normally fail as bogus. Which mechanism does that, and what is its purpose?
+  options:
+  - Setting the DO bit, which disables signatures
+  - Setting the AD bit in the query to force acceptance
+  - Setting the TC bit to bypass the signature check over TCP
+  - Setting the CD (Checking Disabled) bit, which tells the resolver to skip validation and
+    return the data — useful for debugging or when the client validates itself
+  answer: 3
+  explanation: |
+    CD (Checking Disabled) in the query tells the resolver not to reject on validation
+    failure and to return the data regardless — useful for diagnosing a broken chain or when
+    the stub does its own validation. DO requests signatures; AD is a response flag saying the
+    resolver validated.
+  ref: concepts.md#dnssec-internals-ksk-zsk-rrsig-and-denial-of-existence
+
+- id: dns-deep-dive-078
+  difficulty: expert
+  tags:
+  - cache-poisoning
+  - sad-dns
+  - security
+  question: |
+    Source-port randomization added ~16 bits of entropy against off-path cache poisoning.
+    How did SAD DNS (CVE-2020-25705) defeat it?
+  options:
+  - It brute-forced the full 32-bit space faster with GPUs
+  - It abused the shared global ICMP rate limit (RFC 1812) as a side channel to infer which
+    source port was open, collapsing the problem back to guessing the 16-bit transaction ID
+  - It disabled DNSSEC on the victim resolver
+  - It forced all queries onto TCP where ports are predictable
+  answer: 1
+  explanation: |
+    SAD DNS probes ports and observes ICMP "port unreachable" behavior through a shared
+    global ICMP rate-limit counter, leaking which port is open. Once the source port is
+    known, the attacker only needs to guess the 16-bit TXID. Mitigations include randomized
+    ICMP rate limits (Linux 5.10+), DNS Cookies, and DNSSEC.
+  ref: concepts.md#cache-poisoning-and-sad-dns
+
+- id: dns-deep-dive-079
+  difficulty: expert
+  tags:
+  - cache-poisoning
+  - bailiwick
+  question: |
+    In the original off-path poisoning threat, an attacker stuffs a malicious record into a
+    response. What is the resolver's first-line defense that rejects out-of-zone records?
+  options:
+  - Source-port randomization
+  - Bailiwick checking — discarding records the answering server is not authoritative for
+  - DNS 0x20 case randomization
+  - Truncation via the TC bit
+  answer: 1
+  explanation: |
+    Bailiwick checking rejects records outside the zone the responding server is authoritative
+    for, so an attacker can't inject, say, a bank's A record in a response about an unrelated
+    name. Port randomization and 0x20 add entropy on top, but bailiwick is the structural
+    first defense.
+  ref: concepts.md#cache-poisoning-and-sad-dns
+
+- id: dns-deep-dive-080
+  difficulty: expert
+  tags:
+  - edns
+  - opt
+  - wire-format
+  question: |
+    In the EDNS(0) OPT pseudo-record, how are the requestor's UDP payload size and the
+    DNSSEC OK (DO) bit encoded?
+  options:
+  - Both are new fields appended after the DNS header
+  - The CLASS field is repurposed as the UDP payload size, and the DO bit lives in the
+    repurposed TTL field (alongside the extended RCODE and EDNS version)
+  - The UDP size is in RDATA and the DO bit is in the header Z field
+  - The payload size is in the ID field and DO is a separate resource record
+  answer: 1
+  explanation: |
+    OPT (type 41, owner = root) repurposes RR fields: CLASS carries the requestor's UDP
+    payload size (e.g. 1232), and the TTL field encodes the extended RCODE, EDNS version, and
+    the DO bit. Options like ECS(8), COOKIE(10), and EDE(15) travel in RDATA.
+  ref: concepts.md#edns0-opt-pseudo-record-in-depth
+
+- id: dns-deep-dive-081
+  difficulty: advanced
+  tags:
+  - edns
+  - flag-day
+  - fragmentation
+  question: |
+    DNS Flag Day 2020 recommended an EDNS UDP buffer of 1232 bytes. What is the reasoning
+    behind that specific number?
+  options:
+  - It is the maximum size a DNS message may ever reach
+  - It matches the TCP maximum segment size on all networks
+  - It is the largest value the CLASS field in OPT can hold
+  - It fits within the IPv6 minimum MTU (1280) minus IPv6 and UDP headers, avoiding
+    fragmentation while staying above the legacy 512-byte limit
+  answer: 3
+  explanation: |
+    1232 = 1280 (IPv6 minimum MTU) minus 40 bytes IPv6 header minus 8 bytes UDP header. Staying
+    at or below it keeps UDP responses inside the guaranteed path and avoids fragmentation,
+    which is unreliable and a poisoning vector; oversize answers cleanly fall back to TCP.
+  ref: concepts.md#edns0-opt-pseudo-record-in-depth
+
+- id: dns-deep-dive-082
+  difficulty: expert
+  tags:
+  - acceptance-tuple
+  - security
+  question: |
+    For a resolver to accept a UDP response as the answer to its outstanding query, which
+    combination must all match — the exact set an off-path attacker must forge?
+  options:
+  - Only the 16-bit transaction ID and the destination IP
+  - Source IP, source port (53), destination port (the resolver's query port), transaction
+    ID, the question, and bailiwick of the returned records
+  - Just the ALPN token and the SNI
+  - The TTL and the EDNS buffer size only
+  answer: 1
+  explanation: |
+    The implicit acceptance tuple is src IP = queried server, src port = 53, dst port = the
+    resolver's randomized query port, matching TXID, matching question (subject to 0x20 case),
+    and in-bailiwick records. All poisoning attacks must forge every element at once — which is
+    why DoT/DoQ, by authenticating the channel, remove the race entirely.
+  ref: concepts.md#the-response-acceptance-tuple
+
+- id: dns-deep-dive-083
+  difficulty: advanced
+  tags:
+  - reverse-dns
+  - ip6-arpa
+  question: |
+    How is the reverse-DNS name for an IPv6 address constructed?
+  options:
+  - The 32 hex nibbles are reversed, one per label, under ip6.arpa
+  - The 8 hextets are reversed and placed under in-addr.arpa
+  - The address is base64-encoded under ip6.arpa
+  - IPv6 has no reverse DNS; only IPv4 PTR records exist
+  answer: 0
+  explanation: |
+    IPv6 reverse names expand the address to its 32 nibbles, reverse them, and place one nibble
+    per label under ip6.arpa. IPv4 uses reversed octets under in-addr.arpa. Both trees are
+    independent of forward zones.
+  ref: concepts.md#reverse-dns-and-ptr-in-depth
+
+- id: dns-deep-dive-084
+  difficulty: expert
+  tags:
+  - reverse-dns
+  - rfc-2317
+  question: |
+    A provider assigns you a /26 and wants you to manage its reverse DNS. Since /26 is not on
+    an octet boundary, how does RFC 2317 classless delegation solve this?
+  options:
+  - It delegates the whole /24 to you regardless of the boundary
+  - The provider CNAMEs each address's PTR name into a specially-named child zone that you
+    control, so sub-/24 reverse delegation works
+  - It requires switching the block to IPv6
+  - It stores PTR records as TXT records instead
+  answer: 1
+  explanation: |
+    Reverse zones naturally delegate on octet boundaries. RFC 2317 works around sub-/24 blocks
+    by having the parent /24 CNAME each PTR owner name to a differently-named subzone that the
+    customer is delegated authority over, enabling classless reverse delegation.
+  ref: concepts.md#reverse-dns-and-ptr-in-depth
+
+- id: dns-deep-dive-085
+  difficulty: advanced
+  tags:
+  - reverse-dns
+  - fcrdns
+  - mail
+  question: |
+    Why does running a legitimate mail server usually require a correctly configured PTR
+    record?
+  options:
+  - Because SMTP cannot open a TCP connection without a PTR
+  - "Because receivers perform FCrDNS: the connecting IP's PTR must resolve to a name whose
+    forward A/AAAA points back to that IP, and a mismatch is treated as a spam signal"
+  - Because PTR records encrypt the mail contents
+  - Because MX records are stored inside the in-addr.arpa zone
+  answer: 1
+  explanation: |
+    Forward-confirmed reverse DNS checks that the sending IP's PTR maps to a hostname that
+    forward-resolves back to the same IP. Missing or mismatched PTR is a common reason mail is
+    rejected or scored as spam. PTR is set by the IP block's owner, independent of your forward
+    zone.
+  ref: concepts.md#reverse-dns-and-ptr-in-depth
+
+- id: dns-deep-dive-086
+  difficulty: advanced
+  tags:
+  - resolv-conf
+  - ndots
+  - debugging
+  question: |
+    `dig api.internal` returns the right answer, but an application in a Kubernetes pod is slow
+    to resolve the same name and logs several NXDOMAINs first. What is the most likely cause?
+  options:
+  - dig uses TCP while the app uses UDP
+  - The pod's resolv.conf has ndots:5, so the stub appends each search domain and fires several
+    NXDOMAIN lookups before trying the name as absolute
+  - The application is missing a DNSSEC trust anchor
+  - The app cannot parse AAAA records
+  answer: 1
+  explanation: |
+    With ndots:5, a name with fewer than 5 dots is first tried with each search-domain suffix,
+    producing multiple NXDOMAIN round-trips before the bare/absolute name resolves. dig queries
+    the name directly and skips that expansion, so it looks fine while getaddrinfo is slow.
+  ref: concepts.md#happy-eyeballs-and-dual-stack-lookups
+
+- id: dns-deep-dive-087
+  difficulty: expert
+  tags:
+  - fragmentation
+  - edns
+  - debugging
+  question: |
+    A large DNSSEC/TXT answer resolves fine from one network but times out from another, with
+    no explicit error. What is the most likely mechanism and fix?
+  options:
+  - The zone is not signed on the second network; re-sign it
+  - The EDNS buffer is large enough that the UDP response IP-fragments, and a middlebox on the
+    second path drops the fragments; lowering the buffer to 1232 and ensuring TCP:53 is
+    reachable fixes it
+  - The second network uses IPv6, which cannot carry TXT records
+  - The recursive resolver clamps the TTL to zero on that network
+  answer: 1
+  explanation: |
+    Oversize UDP responses fragment at the IP layer; some firewalls/middleboxes drop non-first
+    fragments, so the answer silently never completes and no clean TC-triggered TCP retry
+    happens. Advertising ~1232 avoids fragmentation, and reachable TCP:53 provides the fallback.
+  ref: concepts.md#edns0-opt-pseudo-record-in-depth
+

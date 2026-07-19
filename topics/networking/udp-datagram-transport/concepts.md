@@ -280,6 +280,278 @@ provided are all reimplemented inside QUIC in user space.
 - **NAT traversal.** UDP NAT mappings are shorter-lived and less predictable than TCP's;
   apps use keepalives and STUN/TURN/ICE (WebRTC) to punch and maintain holes.
 
+## RFC 8085: UDP usage guidelines and mandatory congestion control
+
+The informal rule "apps on UDP must add their own congestion control" is codified as a
+**Best Current Practice: RFC 8085 (UDP Usage Guidelines)**. Senior candidates are expected
+to cite it by number. Key normative requirements:
+
+- **Congestion control is not optional (§3).** Any application that can send more than a
+  few datagrams **MUST** implement congestion control. Bulk-transfer apps **SHOULD** use
+  **TFRC (TCP-Friendly Rate Control)** or a **TCP-like windowing** scheme, aiming to
+  "compete fairly within an order of magnitude of TCP" (§3.1.2).
+- **Rate ceilings when you have no feedback (§3.1.3).** With **no RTT estimate and no
+  return traffic**, an application **SHOULD NOT send more than one datagram every 3
+  seconds**. A low data-volume app **SHOULD** send at most **one datagram per RTT**.
+- **Retransmission timers (§3.1.1).** Initial **RTO SHOULD be 1 second**; maintain the
+  estimate with an **EWMA** of RTT samples and apply **Karn's algorithm** — do not sample
+  RTT from a retransmitted (ambiguous) exchange, and use exponential backoff on repeated
+  loss.
+- **Transport circuit breaker (§3.1.10).** As a last resort, non-congestion-controlled
+  flows (e.g. media that can't reduce rate) **SHOULD** implement a circuit breaker that
+  halts the flow if the path is persistently overloaded.
+- **Keep-alives are discouraged (§3.5).** Keep-alives are **NOT RECOMMENDED**; if used,
+  send them at most **once every 15 seconds** and add jitter. This interacts with the
+  **RFC 4787** guidance that a NAT UDP mapping timeout floor is ~2 minutes.
+
+> [!INTERVIEW]
+> "Your team wants to push data over UDP at line rate for speed. What does the standards
+> track require?" — RFC 8085 makes congestion control mandatory; a flow that ignores it is
+> a congestion-collapse hazard and a bad internet citizen. You either implement TFRC /
+> TCP-like windowing, or you use an existing transport (QUIC) that already does.
+
+## Datagram sizing: path MTU, PLPMTUD, and safe payload floors
+
+"Keep within the path MTU" has a precise mechanism and precise safe floors.
+
+- **Classic Path MTU Discovery (RFC 1191 / RFC 8201 for IPv6)** sets the IPv4 **DF (Don't
+  Fragment)** bit and relies on routers returning **ICMPv4 "Fragmentation Needed"** /
+  **ICMPv6 "Packet Too Big"** when a packet is too large. Its fatal weakness is the **PMTU
+  black hole**: many middleboxes filter that ICMP, so the sender never learns and packets
+  vanish silently.
+- **Packetization-Layer PMTUD (PLPMTUD, RFC 4821; datagram version RFC 8899)** does not
+  depend on ICMP. It **probes upward** with progressively larger packets and uses the
+  transport's own loss signal to confirm what got through, so it is robust to ICMP
+  black-holing. This is the modern, correct answer to "how do you pick a datagram size?"
+- **Safe fallback floors (EMTU_S).** When PMTU is unknown, use the effective-MTU-for-
+  sending floor: **IPv4 = min(576, first-hop MTU); IPv6 = 1280 bytes**. Subtract the IP
+  header + 8 (UDP) to get the safe payload. QUIC codifies this pragmatically by requiring
+  an **initial max datagram of 1200 bytes** and keeping payloads there until a larger PMTU
+  is validated.
+
+> [!TIP]
+> Debugging "works on LAN, drops ~5% of *large* datagrams over the internet" almost always
+> points at a **PMTU black hole / fragment drop**. Fix by enabling PLPMTUD or capping the
+> payload to ~1200 bytes (the QUIC floor), not by raising buffers.
+
+## IP fragmentation of UDP datagrams
+
+Fragmentation deserves more than "it's dangerous."
+
+- **It happens at the IP layer, not in UDP.** IP splits an oversized packet into fragments
+  keyed on the **IP Identification field, fragment offset, and the MF (More Fragments)
+  flag**. UDP is unaware; only the first fragment carries the UDP header/ports.
+- **All-or-nothing reassembly.** Losing **any single fragment** forces the receiver to
+  discard the **entire** datagram after the reassembly timer expires — so a large UDP
+  datagram has an effective loss rate that compounds per fragment.
+- **Middlebox hazard.** Only the first fragment has L4 ports, so stateful firewalls/NATs
+  and ECMP hashers struggle with later fragments; many simply **drop non-initial
+  fragments**. Fragment **reassembly is also a DoS vector** (overlapping/incomplete
+  fragments exhaust buffers).
+- **IPv6 differs.** IPv6 routers **never fragment**; only the **source** may fragment (via
+  a Fragment extension header), and if a packet is too big a router returns Packet Too Big.
+- **RFC 8900 ("IP Fragmentation Considered Fragile")** formally advises upper layers to
+  **avoid relying on IP fragmentation**. This is the concrete justification for the "apps
+  cap datagram size" rule.
+
+## Checksum internals: one's-complement and incremental update
+
+Deeper mechanics behind the checksum field:
+
+- **Algorithm.** The checksum is the **16-bit one's-complement of the one's-complement
+  sum** of the pseudo-header + UDP header + payload (padded to 16 bits). One's-complement
+  addition means carries out of the top bit are **added back into the low bit
+  ("end-around carry")**. The receiver sums everything including the checksum and expects
+  **all-ones (0xFFFF)**.
+- **Incremental update (RFC 1624).** Because it's a sum, a device that changes a few bytes
+  (a **NAT rewriting the port/IP**) can adjust the checksum with a small arithmetic delta
+  instead of rescanning the whole packet — cheap for routers/NATs. RFC 1624 corrects an
+  earlier RFC 1141 formula edge case around the ~0 representation.
+- **IPv6 context.** IPv6 has **no IP header checksum**, so UDP's checksum is the only
+  end-to-end integrity check and is therefore mandatory (RFC 8200). **RFC 6935/6936**
+  permit a **zero UDP checksum only for specific tunnel/encapsulation** use in controlled
+  environments, and it must be explicitly enabled per destination port.
+
+## GSO, GRO, and batched syscalls
+
+Scaling UDP throughput is a real staff-level topic.
+
+- **UDP_SEGMENT (Generic Segmentation Offload).** The application hands the kernel one
+  large "super-buffer" plus a segment size; the kernel/NIC slices it into up to **64**
+  MTU-sized datagrams on the way out. This amortizes the per-datagram stack traversal.
+  (Linux ≥ 4.18.)
+- **GRO (Generic Receive Offload).** On RX, consecutive same-flow datagrams are coalesced
+  into one larger buffer handed up the stack, cutting per-packet cost.
+- **sendmmsg / recvmmsg.** Send or receive **many datagrams in one syscall**. Real-world
+  impact: Cloudflare reported dropping from ~900k to ~15k syscalls/sec on a QUIC path.
+- **The GSO-vs-pacing tension.** Batching hands many packets to the NIC at once, which
+  **defeats per-packet pacing** that congestion control (e.g. BBR) relies on. The fix is
+  hardware/kernel pacing: **SO_MAX_PACING_RATE** or per-packet transmit timestamps
+  (**SO_TXTIME**, the Earliest Departure Time / EDT model) so batched packets still leave
+  spaced out.
+
+## Amplification and reflection attacks
+
+Because UDP has **no handshake to verify the source address**, an attacker can **spoof the
+victim's IP as the source** of a small request to a public server, and the server's
+**larger reply is reflected at the victim**. Two properties combine: **reflection** (hide
+the real attacker, aim traffic at the victim) + **amplification** (reply ≫ request).
+
+- **Bandwidth Amplification Factor (BAF)** = response size ÷ request size. Named vectors:
+
+| Service | Port (UDP) | Approx BAF | Trigger |
+|---|---|---|---|
+| memcached | 11211 | ~10,000–51,000× | `stats`/large stored value |
+| NTP | 123 | ~556× | `monlist` |
+| chargen | 19 | ~358× | any byte |
+| DNS (ANY/EDNS) | 53 | ~28–179× | ANY query, large zone |
+| CLDAP | 389 | ~56–70× | connectionless LDAP query |
+| SSDP | 1900 | ~30× | M-SEARCH |
+| SNMP | 161 | ~6× | GetBulk |
+
+- The **2018 GitHub 1.35 Tbps** attack used **memcached reflection** — the record at the
+  time.
+- **Mitigations to name:**
+  - **BCP 38 / RFC 2827** (ingress filtering / **Source Address Validation, SAV**) and
+    **BCP 84 / RFC 3704** — networks drop packets whose source address couldn't legitimately
+    originate from them, killing spoofing at the source. The definitive network-side fix.
+  - **DNS Response Rate Limiting (RRL)** and returning **REFUSED**/small responses.
+  - Disabling **NTP `monlist`**; memcached shipping with **UDP disabled by default (1.5.6)**.
+  - Anycast + traffic scrubbing to absorb/scatter reflected floods.
+
+> [!INTERVIEW]
+> "You find an internal service answering on UDP/11211 or UDP/389 reachable from the
+> internet — what's the risk?" — memcached or CLDAP reflection/amplification. Firewall it,
+> bind to localhost/private only, and push **BCP 38** ingress filtering upstream.
+
+## QUIC internals: anti-amplification, connection IDs, and header protection
+
+QUIC is the canonical "reliable, secure transport on UDP," and it directly answers UDP's
+security and ossification problems.
+
+- **Anti-amplification limit (RFC 9000 §8.1).** Before it has **validated the client's
+  address**, a QUIC server **MUST NOT send more than 3× the bytes it has received** from
+  that client. This is precisely how QUIC avoids becoming a UDP reflector during its own
+  handshake — contrast open DNS/NTP resolvers that will happily amplify. Address is
+  validated either by completing the handshake or via a **Retry** token round-trip.
+- **Connection IDs decouple identity from the 4-tuple (RFC 9000 §5).** A CID identifies the
+  connection independently of source/dest IP+port, enabling **connection migration** (Wi-Fi
+  ↔ LTE) **and** server-side routing: a **load balancer can encode routing info into the
+  CID** and steer packets to the right backend even when the 5-tuple changes.
+- **Header protection (RFC 9001).** QUIC encrypts not just payload but **most header
+  fields** (packet numbers, parts of the CID), so middleboxes cannot inspect or ossify on
+  them. **GREASE** (reserved values deliberately exercised) and **version negotiation**
+  further prevent middleboxes from freezing the protocol.
+- **Real-world counter-pressure.** Some networks **rate-limit or block UDP** (or QUIC
+  specifically), so clients race QUIC against TCP+TLS and fall back — a "Happy Eyeballs"-
+  style approach for HTTP/3.
+
+> [!INTERVIEW]
+> "A stateful L4 load balancer sends a client's QUIC packets to a different backend after a
+> Wi-Fi→LTE switch — why, and how is it solved?" — The 5-tuple changed so 5-tuple hashing
+> re-buckets the flow. Solution: route on the **Connection ID** (which the LB parses),
+> since the CID is stable across migration.
+
+## Source-port randomization and off-path spoofing
+
+UDP's lack of a handshake makes it vulnerable to **off-path response forgery**: an attacker
+who never sees the request can still inject a forged reply if they guess the tuple that
+identifies the exchange. The classic case is **DNS cache poisoning (the Kaminsky attack)**.
+
+- The reply is accepted if it matches the **4-tuple (src/dst IP + src/dst port)** plus the
+  **16-bit DNS transaction ID** — only ~16 bits of entropy if the source port is fixed.
+- **RFC 5452** hardens DNS by **adding entropy**: **source-port randomization** (formalized
+  as **RFC 6056 / BCP 156**, why the OS picks a random high ephemeral port) and optional
+  **0x20 case randomization** of the query name. This turns a ~16-bit guess into ~32 bits.
+- The **cryptographic** fix is **DNSSEC** (origin authentication of records); port
+  randomization only raises the bar.
+
+## The source port as flow-hash entropy (ECMP and L4 load balancing)
+
+RFC 8085 §5.1.1 notes that the **source port doubles as flow entropy**. Routers doing
+**ECMP** and L4 load balancers hash the **5-tuple** (which includes the UDP source port) to
+pick a path/backend.
+
+- The source port **SHOULD be in the ephemeral range 49152–65535** and **SHOULD stay
+  stable for the life of a flow**. Changing it mid-flow **re-hashes** the flow onto a
+  different path — causing reordering — and **breaks stateful LB pinning**.
+- This is the flip side of source-port randomization (entropy for security) and interacts
+  with QUIC connection-migration edge cases, where the transport must be prepared for the
+  path (and its ordering/PMTU) to change.
+
+## NAT behavior, NAT types, and traversal (STUN/TURN/ICE)
+
+Peer-to-peer UDP across NATs is a deep topic (RFC 4787 documents required NAT behavior).
+
+- **NAT mapping types (classic taxonomy):**
+  - **Full-cone** — one external mapping; any external host can send in once the mapping
+    exists.
+  - **(Address-)restricted-cone** — external host may send in only if the internal host
+    first sent to that host's IP.
+  - **Port-restricted-cone** — as above but must match IP **and** port.
+  - **Symmetric** — a **new external port per destination**, so the mapping learned via one
+    server is useless for a different peer.
+- **Symmetric NAT breaks hole punching.** The external port a STUN server observes is not
+  the port a different peer will see, so the mapping can't be reused → you must fall back to
+  a **TURN relay**.
+- **The tools (STUN/TURN/ICE):**
+  - **STUN (RFC 8489)** — a host asks a public server "what source IP:port do you see?" to
+    discover its external mapping.
+  - **TURN (RFC 8656)** — a relay that forwards traffic when direct paths fail (the
+    symmetric-NAT fallback); costs bandwidth/latency.
+  - **ICE (RFC 8445)** — the framework that gathers candidate addresses (host, server-
+    reflexive via STUN, relayed via TURN), then **hole-punches** by having both peers send
+    to each other simultaneously to open matching mappings, and picks the best working pair.
+- UDP mappings are **short-lived** (seconds to a couple of minutes) versus TCP's longer
+  connection-tracked state, which is why UDP P2P needs periodic keepalives.
+
+## DTLS: securing datagrams
+
+TLS assumes a **reliable, ordered byte stream**, so it can't run directly over UDP — a lost
+or reordered record would break the stream cipher state. **DTLS (Datagram TLS)** adapts TLS
+to datagrams.
+
+- **Versions: RFC 6347 = DTLS 1.2, RFC 9147 = DTLS 1.3.**
+- DTLS adds an **explicit epoch + sequence number** per record and a **replay window**, so
+  it tolerates reordering and loss. It runs **its own handshake retransmission** (with
+  timers) since there's no TCP underneath, and includes **anti-amplification / cookie
+  (HelloVerifyRequest)** protection against spoofed-source floods.
+- Used by **WebRTC (DTLS-SRTP key exchange), SIP, and IoT/CoAP**. Contrast with **QUIC**,
+  which does not use DTLS — it integrates **TLS 1.3** directly into its own transport.
+
+## UDP-based protocols and encapsulation
+
+Beyond DNS/DHCP/NTP, UDP is the substrate for a wide range of modern protocols — useful for
+"name a protocol that does X on UDP" questions:
+
+- **CoAP (RFC 7252)** — RESTful protocol for constrained IoT devices; UDP + optional DTLS,
+  with its own lightweight confirmable/non-confirmable reliability.
+- **RTP / RTCP (RFC 3550)** and **SRTP** — real-time media transport + control/statistics;
+  the media plane for VoIP/WebRTC, secured by SRTP (keys from DTLS).
+- **WireGuard** and **IPsec (NAT-T, UDP/4500)** — VPNs encapsulating encrypted traffic in
+  UDP for NAT traversal and middlebox friendliness.
+- **VXLAN (UDP/4789)** and **GTP-U (UDP/2152)** — L2-over-L3 overlay tunneling (data-center
+  network virtualization) and mobile-core user-plane tunneling. These carry entire inner
+  packets as UDP payload; the outer UDP source port is often a **hash of the inner flow** to
+  spread load across ECMP paths.
+
+## Multicast depth: IGMP/MLD versions, scoping, and SSM
+
+Deepening one-to-many delivery:
+
+- **IGMP versions (IPv4 group membership):** **IGMPv1** (join, timeout-based leave),
+  **IGMPv2** (adds explicit Leave), **IGMPv3 (RFC 3376)** adds **source filtering** →
+  enables **Source-Specific Multicast (SSM)** in **232.0.0.0/8** (RFC 4604/4607), where a
+  receiver subscribes to (source, group) and avoids needing shared distribution trees.
+- **MLD (IPv6):** **MLDv1/MLDv2** are the IPv6 equivalents (MLDv2 ↔ IGMPv3 for SSM).
+- **Scoping:** **224.0.0.0/24 is link-local and never forwarded** (used by routing
+  protocols, e.g. OSPF 224.0.0.5). Reach is bounded by the **TTL / hop-limit** on the
+  packet and by administrative scope ranges. Routers apply **RPF (Reverse Path Forwarding)**
+  checks to prevent loops when building trees (PIM).
+- **Not internet-routable / unauthenticated.** Broadcast and multicast are **LAN or managed-
+  overlay** mechanisms — they are not delivered across the public internet and carry no
+  authentication, so treat them as trusted-segment-only.
+
 ## Common follow-up questions
 
 - **How big is the UDP header and what are its fields?** 8 bytes: source port, dest port,
@@ -304,6 +576,20 @@ provided are all reimplemented inside QUIC in user space.
 - **What's UDP's IP protocol number?** 17 (TCP is 6).
 - **What happens if a UDP receive buffer overflows?** Datagrams are dropped silently;
   no backpressure to the sender.
+- **What spec mandates congestion control for UDP apps?** RFC 8085 — congestion control is
+  required; ≤1 datagram/3 s with no feedback; initial RTO 1 s with Karn's algorithm.
+- **How do you pick a datagram size safely?** PLPMTUD (RFC 8899) probing, or fall back to
+  the EMTU_S floor (IPv4 576, IPv6 1280) minus IP+8; QUIC uses a 1200-byte floor.
+- **Why is UDP amplification possible and how is it stopped?** No handshake → spoofed source
+  + reply ≫ request (memcached ~10,000×+, NTP monlist ~556×). Fix: BCP 38 ingress filtering.
+- **How does QUIC avoid being a reflector?** RFC 9000 §8.1: server sends ≤3× received bytes
+  before validating the client address (Retry token).
+- **Why does the OS randomize the UDP source port?** RFC 6056/5452 — entropy against off-path
+  DNS spoofing (Kaminsky); the port is also ECMP flow-hash entropy.
+- **Why can't TLS run directly on UDP?** TLS needs a reliable ordered stream; DTLS (RFC 9147/
+  6347) adds epoch/sequence + replay window + its own handshake retransmission.
+- **What breaks UDP hole punching?** Symmetric NAT (new external port per destination) →
+  fall back to a TURN relay.
 
 ## References
 
@@ -319,3 +605,18 @@ provided are all reimplemented inside QUIC in user space.
 - RFC 1034 / RFC 1035 — DNS (UDP transport, 512-byte limit, TCP fallback).
 - RFC 6891 — Extension Mechanisms for DNS (EDNS0): larger UDP payloads.
 - RFC 9293 — Transmission Control Protocol (for the TCP contrast).
+- RFC 8085 — UDP Usage Guidelines (BCP 145): congestion control, RTO, keep-alives.
+- RFC 8899 / RFC 4821 — Packetization Layer Path MTU Discovery (PLPMTUD).
+- RFC 1191 / RFC 8201 — classic Path MTU Discovery (IPv4 / IPv6).
+- RFC 8900 — IP Fragmentation Considered Fragile.
+- RFC 1624 — Computation of the Internet Checksum via Incremental Update.
+- RFC 5452 — Measures for Making DNS More Resilient against Forged Answers.
+- RFC 6056 (BCP 156) — Recommendations for Transport-Protocol Port Randomization.
+- RFC 2827 (BCP 38) / RFC 3704 (BCP 84) — ingress filtering / source-address validation.
+- RFC 4787 — NAT Behavioral Requirements for Unicast UDP.
+- RFC 8489 / RFC 8656 / RFC 8445 — STUN / TURN / ICE.
+- RFC 6347 / RFC 9147 — DTLS 1.2 / DTLS 1.3.
+- RFC 9001 / RFC 9002 — QUIC TLS (header protection) / QUIC loss detection & congestion.
+- RFC 3376 / RFC 4604 / RFC 4607 — IGMPv3, MLDv2, and Source-Specific Multicast.
+- RFC 7252 — Constrained Application Protocol (CoAP).
+- RFC 3550 — RTP: A Transport Protocol for Real-Time Applications.

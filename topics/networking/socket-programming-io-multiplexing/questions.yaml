@@ -981,3 +981,634 @@ questions:
       networking (DPDK), per-core SO_REUSEPORT sharding, and careful lock-free designs to
       remove per-packet kernel and syscall overhead.
     ref: "concepts.md#the-c10k-problem"
+
+  - id: socket-programming-io-multiplexing-056
+    difficulty: expert
+    tags: [shutdown, close, dup, fork]
+    question: |
+      A connection's fd was inherited by a forked child process. The parent calls
+      `close(fd)` on it, yet the peer's `recv` never returns 0 (no FIN arrives). Why, and
+      what call would have sent the FIN regardless?
+    options:
+      - "close() always sends FIN; the peer must be buggy — retry with a second close()"
+      - "close() only decrements the open file description's refcount, so the FIN is deferred until the child also closes; shutdown(fd, SHUT_WR) sends FIN immediately regardless of refcount"
+      - "The FIN was sent but the kernel dropped it; setting SO_LINGER would resend it"
+      - "fork() converts the socket to UDP, which has no FIN; only close() on the child matters"
+    answer: 1
+    explanation: |
+      close() decrements the reference count on the underlying open file description; TCP
+      sends FIN only when the *last* referencing fd is closed. A forked (or dup'd) copy
+      keeps the connection alive. shutdown(fd, SHUT_WR) acts on the connection itself and
+      sends FIN immediately, independent of how many fds reference it.
+    ref: "concepts.md#graceful-shutdown-shutdown-vs-close"
+
+  - id: socket-programming-io-multiplexing-057
+    difficulty: advanced
+    tags: [shutdown, graceful-drain, deploy]
+    question: |
+      You want a zero-downtime deploy where in-flight responses are not truncated. What is
+      the correct per-connection drain sequence?
+    options:
+      - "close() every socket immediately, then start the new process"
+      - "Set SO_LINGER to 0 and close(), forcing a fast RST on each connection"
+      - "shutdown(SHUT_RD) on each socket, then exit"
+      - "Stop accepting, shutdown(fd, SHUT_WR) to send FIN, keep recv-ing until recv returns 0, then close()"
+    answer: 3
+    explanation: |
+      The graceful drain half-closes your write side with shutdown(SHUT_WR) (sends FIN)
+      while you continue reading the peer's remaining data until EOF (recv == 0), then
+      close(). Immediately closing — especially with a zero-linger RST — can discard
+      in-flight response bytes.
+    ref: "concepts.md#graceful-shutdown-shutdown-vs-close"
+
+  - id: socket-programming-io-multiplexing-058
+    difficulty: advanced
+    tags: [close-wait, debugging, teardown]
+    question: |
+      `ss -tan` shows thousands of sockets stuck in `CLOSE_WAIT` on your server, growing
+      until it hits the fd limit. What does this indicate?
+    options:
+      - "Your application received the peer's FIN (recv == 0) but never called close()/shutdown() on those fds"
+      - "Your side is actively closing many connections; this is normal and self-clearing"
+      - "A SYN flood is filling the accept queue"
+      - "The peer is refusing to send its final ACK, a network problem"
+    answer: 0
+    explanation: |
+      CLOSE_WAIT means the peer sent FIN but your application never responded by closing
+      the fd. Unlike TIME_WAIT (which drains on a timer), CLOSE_WAIT never clears until your
+      code acts — a growing pile is a classic fd-leak bug where EOF is detected but close()
+      is forgotten.
+    ref: "concepts.md#tcp-teardown-states-time-wait-and-close-wait"
+
+  - id: socket-programming-io-multiplexing-059
+    difficulty: expert
+    tags: [time-wait, teardown, active-close]
+    question: |
+      Which end of a TCP connection enters `TIME_WAIT`, and what is its primary purpose?
+    options:
+      - "The passive listener; it reserves the port for the next accept()"
+      - "Whichever end sends the first FIN (the active closer); it absorbs delayed duplicate segments and lets the final ACK be retransmitted"
+      - "Both ends simultaneously; it synchronizes their sequence numbers"
+      - "The end with the larger receive window; it throttles the connection rate"
+    answer: 1
+    explanation: |
+      The active closer (sender of the first FIN) enters TIME_WAIT for ~2×MSL. It ensures
+      any delayed duplicates from the old connection die out before the 4-tuple is reused,
+      and that the final ACK can be re-sent if the peer retransmits its FIN (RFC 9293 §3.5).
+    ref: "concepts.md#tcp-teardown-states-time-wait-and-close-wait"
+
+  - id: socket-programming-io-multiplexing-060
+    difficulty: expert
+    tags: [epollexclusive, thundering-herd, epoll]
+    question: |
+      Eight worker processes each add the same shared listening fd to their own epoll
+      instance. Under load you see all eight wake per incoming connection, seven getting
+      EAGAIN on accept(). Which epoll flag directly addresses this?
+    options:
+      - "EPOLLRDHUP on the listening fd"
+      - "EPOLLONESHOT on each worker's registration"
+      - "EPOLLEXCLUSIVE, added with EPOLL_CTL_ADD, so the kernel wakes only a subset of waiters"
+      - "EPOLLET, converting the listener to edge-triggered"
+    answer: 2
+    explanation: |
+      This is the epoll-level thundering herd (many epoll instances on one shared listener).
+      EPOLLEXCLUSIVE (Linux 4.5+) tells the kernel to wake only one/a subset of waiters. It
+      is valid only with EPOLL_CTL_ADD; EPOLL_CTL_MOD on it returns EINVAL.
+    ref: "concepts.md#epoll-flags-epollexclusive-epolloneshot-epollrdhup"
+
+  - id: socket-programming-io-multiplexing-061
+    difficulty: expert
+    tags: [epollexclusive, constraints, epoll-ctl]
+    question: |
+      Which statement about `EPOLLEXCLUSIVE` is correct?
+    options:
+      - "It can be freely toggled on and off with EPOLL_CTL_MOD"
+      - "It is only valid with EPOLL_CTL_ADD; calling EPOLL_CTL_MOD on an EPOLLEXCLUSIVE fd fails with EINVAL, and only EPOLLIN/OUT/WAKEUP/ET may accompany it"
+      - "It replaces SO_REUSEPORT and works on separate per-worker sockets"
+      - "It guarantees exactly one waiter wakes with strict round-robin fairness"
+    answer: 1
+    explanation: |
+      EPOLLEXCLUSIVE may only be set at EPOLL_CTL_ADD time; EPOLL_CTL_MOD returns EINVAL,
+      and the only companion flags permitted are EPOLLIN/EPOLLOUT/EPOLLWAKEUP/EPOLLET. It
+      wakes one or more (a subset), not with guaranteed strict fairness, and it addresses a
+      *shared* fd — distinct from SO_REUSEPORT's separate sockets.
+    ref: "concepts.md#epoll-flags-epollexclusive-epolloneshot-epollrdhup"
+
+  - id: socket-programming-io-multiplexing-062
+    difficulty: expert
+    tags: [epolloneshot, multithreaded, re-arm]
+    question: |
+      In a multi-threaded epoll server, you use `EPOLLONESHOT` on each connection fd. What
+      is its effect and what must you do after handling an event?
+    options:
+      - "It disables the fd after one event so only one thread processes it at a time; you must re-arm it with EPOLL_CTL_MOD when done"
+      - "It fires the event exactly once ever; the fd must be closed afterward"
+      - "It converts the fd to level-triggered; nothing further is needed"
+      - "It delivers the event to all threads at once; you must lock the fd"
+    answer: 0
+    explanation: |
+      EPOLLONESHOT disables further events for the fd after one is delivered, guaranteeing
+      only one worker thread handles a given connection concurrently. Once the handler
+      finishes, you re-arm the fd via EPOLL_CTL_MOD to receive the next event.
+    ref: "concepts.md#epoll-flags-epollexclusive-epolloneshot-epollrdhup"
+
+  - id: socket-programming-io-multiplexing-063
+    difficulty: advanced
+    tags: [epollrdhup, half-close, edge-triggered]
+    question: |
+      Under edge-triggered epoll, you want to detect that the peer has half-closed (sent
+      FIN via shutdown(SHUT_WR)) while you may still be writing. Which mechanism is designed
+      for this?
+    options:
+      - "SO_KEEPALIVE probes"
+      - "EPOLLRDHUP, which fires on peer half-close so you notice it without waiting for a failed recv"
+      - "EPOLLONESHOT re-arming"
+      - "Polling SO_ERROR on every write"
+    answer: 1
+    explanation: |
+      EPOLLRDHUP (Linux 2.6.17+) reports that the peer shut down its write side / sent FIN,
+      the correct edge-triggered way to learn a peer went away while you might still have
+      data to send, rather than discovering it later on a failing recv.
+    ref: "concepts.md#epoll-flags-epollexclusive-epolloneshot-epollrdhup"
+
+  - id: socket-programming-io-multiplexing-064
+    difficulty: expert
+    tags: [thundering-herd, accept, so-reuseport]
+    question: |
+      A candidate proposes "add EPOLLEXCLUSIVE" to fix a herd where each worker has its own
+      separate socket bound to the same port via SO_REUSEPORT. Why is this misguided?
+    options:
+      - "EPOLLEXCLUSIVE only works on UDP sockets"
+      - "SO_REUSEPORT already gives each worker a distinct socket with no shared wait queue, so there is no herd on a shared fd for EPOLLEXCLUSIVE to fix"
+      - "EPOLLEXCLUSIVE disables SO_REUSEPORT load balancing"
+      - "SO_REUSEPORT requires level-triggered mode, which is incompatible with EPOLLEXCLUSIVE"
+    answer: 1
+    explanation: |
+      EPOLLEXCLUSIVE fixes a herd on a *shared* listening fd watched by multiple epoll
+      instances. SO_REUSEPORT removes the shared fd entirely — each worker has its own
+      socket and the kernel picks one per connection — so there is no shared wait queue to
+      stampede and EPOLLEXCLUSIVE is irrelevant.
+    ref: "concepts.md#the-three-thundering-herd-cases"
+
+  - id: socket-programming-io-multiplexing-065
+    difficulty: expert
+    tags: [accept4, cloexec, race]
+    question: |
+      Why is `accept4(fd, ..., SOCK_NONBLOCK | SOCK_CLOEXEC)` preferred over `accept()`
+      followed by `fcntl()` to set the same flags?
+    options:
+      - "accept4 is faster because it skips the TCP handshake"
+      - "fcntl cannot set SOCK_NONBLOCK on accepted sockets at all"
+      - "accept() plus fcntl() leaves a race window in which a concurrent fork()+exec() can leak the new socket into a child; accept4 sets both flags atomically"
+      - "accept4 returns the listening fd, avoiding an extra descriptor"
+    answer: 2
+    explanation: |
+      Plain accept() returns a blocking fd without close-on-exec; setting the flags after
+      the fact leaves a window where another thread's fork()+exec() inherits the socket,
+      leaking the connection into the child. accept4 sets SOCK_NONBLOCK|SOCK_CLOEXEC
+      atomically at accept time, closing the race.
+    ref: "concepts.md#accept4-and-the-epoll-fd-lifetime-gotcha"
+
+  - id: socket-programming-io-multiplexing-066
+    difficulty: expert
+    tags: [epoll, fd-lifetime, dup, gotcha]
+    question: |
+      You `EPOLL_CTL_ADD` an fd, then `dup()` it. You later `close()` the original fd but
+      epoll keeps reporting events for the connection. Why?
+    options:
+      - "epoll caches events for 2×MSL after close()"
+      - "An fd is removed from the interest set only when all fds referring to the same open file description are closed; the dup keeps it registered — you must EPOLL_CTL_DEL explicitly"
+      - "dup() automatically re-adds the fd with level-triggered mode"
+      - "close() on a duplicated fd is a no-op until the process exits"
+    answer: 1
+    explanation: |
+      epoll tracks the underlying open file description. It drops the registration only when
+      every fd referring to that description is closed. After dup()/fork(), closing one copy
+      does not stop events — you must EPOLL_CTL_DEL (or close all duplicates).
+    ref: "concepts.md#accept4-and-the-epoll-fd-lifetime-gotcha"
+
+  - id: socket-programming-io-multiplexing-067
+    difficulty: expert
+    tags: [epoll, stale-event, batch, debugging]
+    question: |
+      Processing a batch returned by one `epoll_wait`, you close a connection while handling
+      event #13. Later in the same batch, event #47 references the same fd number and you
+      operate on the wrong connection. What is the root cause and a robust fix?
+    options:
+      - "epoll_wait returned corrupted data; call it again to refresh"
+      - "The fd number was reused by a new connection after you closed it mid-batch; track a per-fd generation/validity marker or defer closes until the batch is fully processed"
+      - "The kernel should never reuse fd numbers; this is a kernel bug"
+      - "Edge-triggered mode caused a duplicate event; switch to level-triggered"
+    answer: 1
+    explanation: |
+      Closing an fd mid-batch frees its integer, which the kernel can immediately reassign
+      to a new connection. A stale event later in the same batch then points at the reused
+      number. Robust loops validate each event against a generation counter or defer closes
+      until the batch completes.
+    ref: "concepts.md#accept4-and-the-epoll-fd-lifetime-gotcha"
+
+  - id: socket-programming-io-multiplexing-068
+    difficulty: expert
+    tags: [tcp-cork, nodelay, sendfile]
+    question: |
+      A server uses `TCP_CORK` around a header write plus a `sendfile()` body. It also has
+      `TCP_NODELAY` set. What is the interaction?
+    options:
+      - "TCP_NODELAY overrides TCP_CORK, so corking has no effect"
+      - "The two options are mutually exclusive and setsockopt returns EINVAL"
+      - "While TCP_CORK is set it overrides TCP_NODELAY, coalescing the header and body into full segments; toggling TCP_NODELAY while corked forces a one-time flush"
+      - "Both must be set for sendfile() to function at all"
+    answer: 2
+    explanation: |
+      TCP_CORK holds partial segments (up to ~200 ms) so header+body coalesce into
+      full-sized packets, and it overrides TCP_NODELAY while set. Explicitly toggling
+      TCP_NODELAY on a corked socket triggers a one-time flush of what is buffered.
+    ref: "concepts.md#tcp-latency-and-buffering-knobs"
+
+  - id: socket-programming-io-multiplexing-069
+    difficulty: expert
+    tags: [nagle, delayed-ack, quickack, mechanics]
+    question: |
+      Explain precisely why Nagle plus delayed-ACK produces a ~40 ms stall, and which knob
+      resets on its own.
+    options:
+      - "Nagle withholds a new small segment until the prior one is ACKed, while the peer's delayed-ACK withholds that ACK (~40 ms) hoping to piggyback — a mutual wait; TCP_QUICKACK disables delayed ACK but is non-permanent and must be re-set"
+      - "The receiver drops small packets, forcing 40 ms retransmit timers; SO_RCVBUF fixes it permanently"
+      - "The 40 ms is the SYN retransmit timer; TCP_DEFER_ACCEPT resets it once"
+      - "Delayed ACK doubles every RTT via slow start; TCP_NODELAY on the receiver is the only fix"
+    answer: 0
+    explanation: |
+      Nagle (RFC 896) holds a new small segment until the previous unacked one is ACKed; the
+      peer's delayed ACK (RFC 1122) holds the ACK up to ~40–200 ms awaiting piggyback data.
+      Each waits for the other. TCP_QUICKACK disables delayed ACK but the kernel resets it,
+      so it is not permanent.
+    ref: "concepts.md#tcp-latency-and-buffering-knobs"
+
+  - id: socket-programming-io-multiplexing-070
+    difficulty: advanced
+    tags: [tcp-fastopen, rfc7413, 0-rtt]
+    question: |
+      What does `TCP_FASTOPEN` (RFC 7413) enable, and what is its key caveat?
+    options:
+      - "It carries application data in the SYN using a Fast Open cookie so data can be delivered before the handshake completes; the caveat is SYN data can be replayed, so only idempotent requests are safe"
+      - "It compresses the handshake into a single packet with no downside"
+      - "It removes the need for a listening socket entirely"
+      - "It encrypts the SYN, replacing TLS for the first byte"
+    answer: 0
+    explanation: |
+      TCP Fast Open lets a client include data in the SYN using a server-issued cookie,
+      giving a 0-RTT data path for repeat clients so accept() can return before the
+      handshake fully completes. Because SYN payloads can be replayed by the network or an
+      attacker, only idempotent operations should use it.
+    ref: "concepts.md#tcp-latency-and-buffering-knobs"
+
+  - id: socket-programming-io-multiplexing-071
+    difficulty: advanced
+    tags: [tcp-defer-accept, wakeup, request-response]
+    question: |
+      What does `TCP_DEFER_ACCEPT` change about when `accept()` returns?
+    options:
+      - "accept() returns as soon as the SYN arrives, before the handshake finishes"
+      - "accept() blocks until the accept queue is full"
+      - "accept() returns only once the client has sent data, not merely completed the handshake — saving a wakeup for request/response servers whose first read then has data waiting"
+      - "accept() returns one fd per SYN cookie issued"
+    answer: 2
+    explanation: |
+      TCP_DEFER_ACCEPT delays the accept()-visible completion until the client sends its
+      first data (e.g. the HTTP request). The server thread is not woken for a bare
+      connection with nothing to read, and its first recv immediately has data.
+    ref: "concepts.md#tcp-latency-and-buffering-knobs"
+
+  - id: socket-programming-io-multiplexing-072
+    difficulty: expert
+    tags: [tcp-user-timeout, keepalive, dead-peer]
+    question: |
+      You need to detect a dead peer within seconds on a connection that is actively trying
+      to send, faster than the 2-hour keepalive default. Which option is the direct answer?
+    options:
+      - "Lower SO_RCVBUF to force faster timeouts"
+      - "TCP_NODELAY, which forces immediate error reporting"
+      - "SO_LINGER with a short timeout"
+      - "TCP_USER_TIMEOUT, which bounds how long unacknowledged data may sit before TCP fails the connection with ETIMEDOUT (and also modifies keepalive tolerance)"
+    answer: 3
+    explanation: |
+      TCP_USER_TIMEOUT (RFC 5482) caps how long transmitted-but-unacknowledged data may
+      remain outstanding before TCP errors with ETIMEDOUT. Unlike keepalive it applies to
+      actively-sending connections, and it also overrides how long keepalive probes are
+      tolerated.
+    ref: "concepts.md#detecting-dead-peers-keepalive-and-user-timeout"
+
+  - id: socket-programming-io-multiplexing-073
+    difficulty: expert
+    tags: [io-uring, sqpoll, rings]
+    question: |
+      In `io_uring`, what does `SQPOLL` mode achieve?
+    options:
+      - "It polls each socket individually like select()"
+      - "It disables the completion queue to save memory"
+      - "A dedicated kernel thread polls the submission queue, so submitting work needs zero syscalls in steady state"
+      - "It converts io_uring into a readiness (Reactor) interface"
+    answer: 2
+    explanation: |
+      io_uring uses shared submission (SQ) and completion (CQ) rings. In SQPOLL mode a kernel
+      thread continuously polls the SQ, so the application enqueues SQEs without calling
+      io_uring_enter() — eliminating submission syscalls in the steady state.
+    ref: "concepts.md#io_uring-internals"
+
+  - id: socket-programming-io-multiplexing-074
+    difficulty: advanced
+    tags: [io-uring, security, multishot]
+    question: |
+      Which statement about `io_uring` is accurate?
+    options:
+      - "It is a readiness API like epoll and cannot do file I/O"
+      - "It requires one ring per file descriptor"
+      - "It only works with UDP sockets"
+      - "It is completion-based, supports multishot accept/recv and registered buffers, works for regular-file I/O, and is disabled by default in some hardened environments due to kernel CVEs"
+    answer: 3
+    explanation: |
+      io_uring is a completion-based (Proactor) interface: multishot ops keep producing
+      completions without re-submission, registered/fixed buffers avoid per-op overhead, and
+      it handles regular files unlike epoll. Because of several kernel CVEs, some hardened
+      setups disable it by default.
+    ref: "concepts.md#io_uring-internals"
+
+  - id: socket-programming-io-multiplexing-075
+    difficulty: expert
+    tags: [msg-zerocopy, errqueue, zero-copy]
+    question: |
+      With `MSG_ZEROCOPY` on `send()`, why is completion notification delivered
+      asynchronously via the error queue (`MSG_ERRQUEUE`), and when is it worthwhile?
+    options:
+      - "Because the kernel copies the data twice and reports the second copy; worthwhile for tiny buffers"
+      - "Because zero-copy disables ACKs, which arrive on the error queue"
+      - "Because the kernel pins the user pages and transmits directly from them, so they must stay stable until the NIC is done; worthwhile mainly for large buffers where the saved copy outweighs pinning/tracking overhead"
+      - "Because it converts the socket to UDP, whose errors use the error queue"
+    answer: 2
+    explanation: |
+      Zero-copy send pins user pages and DMAs from them, so the buffer cannot be reused until
+      transmission completes — hence an async completion on MSG_ERRQUEUE. The page-pinning
+      and completion bookkeeping only pay off for large transfers.
+    ref: "concepts.md#zero-copy-transmit-sendfile-splice-and-zero-copy-send"
+
+  - id: socket-programming-io-multiplexing-076
+    difficulty: advanced
+    tags: [sendfile, splice, zero-copy]
+    question: |
+      A static-file server wants to send a file to a socket without copying bytes through
+      user space. Which call does this, and what generalizes it for socket-to-socket
+      proxying?
+    options:
+      - "read()+write() in a loop; splice() generalizes it"
+      - "mmap()+send(); sendmsg() generalizes it"
+      - "sendfile() copies file→socket entirely in-kernel; splice() moves bytes between two fds via a kernel pipe, useful for socket→socket proxying"
+      - "recvfrom()+sendto(); writev() generalizes it"
+    answer: 2
+    explanation: |
+      sendfile() transfers file→socket inside the kernel with no user-space buffer. splice()
+      generalizes zero-copy movement between two descriptors through a kernel pipe, which is
+      the basis for zero-copy socket-to-socket proxying.
+    ref: "concepts.md#zero-copy-transmit-sendfile-splice-and-zero-copy-send"
+
+  - id: socket-programming-io-multiplexing-077
+    difficulty: expert
+    tags: [unix-sockets, scm-rights, fd-passing]
+    question: |
+      A privilege-separated design must hand an already-accepted TCP connection from one
+      process to another on the same host. Which mechanism does this?
+    options:
+      - "Serialize the socket's 4-tuple and re-connect() in the other process"
+      - "Share the fd number through shared memory"
+      - "Use SO_REUSEPORT so both processes see the same connection"
+      - "Pass the open file descriptor as SCM_RIGHTS ancillary data over a Unix domain socket via sendmsg()/recvmsg()"
+    answer: 3
+    explanation: |
+      SCM_RIGHTS over an AF_UNIX socket passes an actual open file descriptor (including a
+      live connection) to another process using sendmsg()/recvmsg() ancillary data. Merely
+      sharing the integer fd number is meaningless across processes; the kernel must
+      duplicate the description.
+    ref: "concepts.md#unix-domain-sockets-vs-tcp-loopback"
+
+  - id: socket-programming-io-multiplexing-078
+    difficulty: advanced
+    tags: [unix-sockets, so-peercred, seqpacket]
+    question: |
+      Which capability is unique to Unix domain sockets (versus TCP over loopback)?
+    options:
+      - "Congestion control across processes"
+      - "A 3-way handshake with sequence numbers"
+      - "Automatic TLS between processes"
+      - "Peer authentication via SO_PEERCRED/SCM_CREDENTIALS (kernel-verified PID/UID) and fd passing, plus SOCK_SEQPACKET for reliable message-boundary-preserving streams"
+    answer: 3
+    explanation: |
+      Unix domain sockets skip the TCP/IP stack and add features TCP cannot: SO_PEERCRED /
+      SCM_CREDENTIALS give kernel-verified peer identity for authorization, SCM_RIGHTS passes
+      fds, and SOCK_SEQPACKET offers connection-oriented, reliable, message-bounded delivery.
+    ref: "concepts.md#unix-domain-sockets-vs-tcp-loopback"
+
+  - id: socket-programming-io-multiplexing-079
+    difficulty: expert
+    tags: [so-reuseport, rebalance-race, drain]
+    question: |
+      A worker in a `SO_REUSEPORT` group calls `close()` on its socket to exit. Some
+      in-flight client connections are reset. Why, and how do you avoid it?
+    options:
+      - "SO_REUSEPORT never loses connections; the resets are unrelated"
+      - "The kernel migrates the connections automatically; the resets are a client bug"
+      - "Connections already committed to that socket's accept/SYN queue are dropped when it closes; the worker must stop accepting but drain its queue before closing"
+      - "close() on a REUSEPORT socket sends RST to the whole group; use shutdown() instead"
+    answer: 2
+    explanation: |
+      The kernel commits an incoming connection to a specific socket in the group (by 4-tuple
+      hash). Connections already queued on the closing socket are lost on close(). Graceful
+      worker shutdown stops accepting new work but drains the existing accept queue before
+      closing.
+    ref: "concepts.md#so_reuseport-internals-and-the-rebalance-race"
+
+  - id: socket-programming-io-multiplexing-080
+    difficulty: expert
+    tags: [so-reuseport, bpf, incoming-cpu, numa]
+    question: |
+      To improve cache/NUMA locality you want each connection handled by the worker running
+      on the same CPU as the NIC RX queue that received it. Which facilities enable this?
+    options:
+      - "Only the default 4-tuple hash; locality cannot be controlled"
+      - "TCP_NODELAY plus SO_RCVBUF tuning"
+      - "EPOLLEXCLUSIVE with CPU affinity flags"
+      - "SO_ATTACH_REUSEPORT_CBPF/EBPF (or BPF_PROG_TYPE_SK_REUSEPORT) to steer selection, combined with SO_INCOMING_CPU to pin to the RX-queue CPU"
+    answer: 3
+    explanation: |
+      The default SO_REUSEPORT selection is a 4-tuple hash, but SO_ATTACH_REUSEPORT_CBPF/EBPF
+      and BPF_PROG_TYPE_SK_REUSEPORT let you replace it with a custom program that, together
+      with SO_INCOMING_CPU, steers a connection to the worker on the NIC RX-queue's CPU.
+    ref: "concepts.md#so_reuseport-internals-and-the-rebalance-race"
+
+  - id: socket-programming-io-multiplexing-081
+    difficulty: expert
+    tags: [sigpipe, msg-nosignal, crash]
+    question: |
+      Your server occasionally dies with no logged error right when a client disconnects
+      abruptly. The handler does a plain `write()`/`send()` to the socket. What is the cause
+      and fix?
+    options:
+      - "The socket ran out of buffer; enlarge SO_SNDBUF"
+      - "The connection reset corrupted the stack; enable ASLR"
+      - "Writing to a socket whose peer sent FIN/RST raises SIGPIPE, whose default action kills the process; pass MSG_NOSIGNAL (or ignore SIGPIPE / set SO_NOSIGPIPE) so send returns -1/EPIPE instead"
+      - "recv returned 0 and the loop divided by zero"
+    answer: 2
+    explanation: |
+      send()/write() to a socket whose peer has closed generates SIGPIPE, which by default
+      terminates the process — a classic silent crash on client disconnect. MSG_NOSIGNAL per
+      call (or globally ignoring SIGPIPE, or SO_NOSIGPIPE on BSD) makes it return -1 with
+      EPIPE for normal error handling.
+    ref: "concepts.md#vectored-io-and-sendrecv-flags"
+
+  - id: socket-programming-io-multiplexing-082
+    difficulty: advanced
+    tags: [writev, sendmsg, scatter-gather]
+    question: |
+      Why send a message header and body with a single `writev()`/`sendmsg()` scatter-gather
+      call instead of two separate writes?
+    options:
+      - "It encrypts the header automatically"
+      - "It guarantees the peer reads header and body as two datagrams"
+      - "It emits header and body in one syscall from separate buffers, avoiding an extra concatenation copy and the tiny-header-then-body pattern that can trigger Nagle stalls; sendmsg also carries ancillary data (cmsg)"
+      - "It disables partial writes entirely"
+    answer: 2
+    explanation: |
+      Vectored I/O gathers multiple buffers into one syscall, so you avoid copying to
+      concatenate and avoid sending a small header packet followed separately by the body
+      (which can incur Nagle delay). sendmsg/recvmsg additionally carry ancillary data such
+      as SCM_RIGHTS.
+    ref: "concepts.md#vectored-io-and-sendrecv-flags"
+
+  - id: socket-programming-io-multiplexing-083
+    difficulty: expert
+    tags: [edge-triggered, epollout, starvation]
+    question: |
+      In an edge-triggered server, which practice about `EPOLLOUT` and fairness is correct?
+    options:
+      - "Register EPOLLOUT permanently so writes are always ready"
+      - "Never register EPOLLOUT; writes never block under ET"
+      - "Keep reading one hot fd until EAGAIN before touching any other fd, always"
+      - "Register EPOLLOUT only after a write returns EAGAIN, drain the send buffer on the writable edge, then deregister EPOLLOUT; and cap per-fd reads with a round-robin ready list to avoid starving other fds"
+    answer: 3
+    explanation: |
+      A connected socket is usually writable, so a permanent EPOLLOUT registration causes
+      busy wakeups. The correct ET pattern arms EPOLLOUT only when a write hits EAGAIN,
+      drains on the writable edge, then disarms it. Draining one hot fd to EAGAIN can starve
+      others, so cap per-fd work and round-robin a ready list (epoll(7)).
+    ref: "concepts.md#edge-triggered-writes-and-starvation"
+
+  - id: socket-programming-io-multiplexing-084
+    difficulty: advanced
+    tags: [kqueue, ev-clear, one-syscall]
+    question: |
+      Which pair of statements about `kqueue` (versus epoll) is correct?
+    options:
+      - "kqueue needs a separate registration syscall like epoll_ctl; EV_CLEAR means level-triggered"
+      - "kqueue only reports socket readiness and needs timerfd/signalfd like epoll"
+      - "A single kevent() call passes both a changelist and an eventlist (modify and wait in one syscall); EV_CLEAR gives edge-triggered semantics and filters like EVFILT_TIMER/SIGNAL/VNODE unify timers, signals and file events"
+      - "kqueue is Linux-only and identical to epoll_wait"
+    answer: 2
+    explanation: |
+      kevent() takes a changelist and eventlist together, so registration and waiting happen
+      in one syscall (epoll splits them into epoll_ctl + epoll_wait). EV_CLEAR is kqueue's
+      edge-triggered mode, and filters (EVFILT_READ/WRITE/TIMER/SIGNAL/VNODE/PROC) unify
+      event sources that Linux handles with separate fds.
+    ref: "concepts.md#kqueue-specifics"
+
+  - id: socket-programming-io-multiplexing-085
+    difficulty: advanced
+    tags: [accept-queue, overflow, debugging, scenario]
+    question: |
+      Under load, clients see occasional connection timeouts/resets but the server's CPU is
+      low. `ss -lnt` shows the listener's Recv-Q at its Send-Q (backlog) limit and
+      `nstat` reports rising `TcpExtListenOverflows`. What is happening?
+    options:
+      - "Ephemeral port exhaustion on the server"
+      - "A SYN flood is exhausting the SYN queue only"
+      - "The accept queue is overflowing — the app is accepting too slowly or the backlog/somaxconn is too small — so completed connections are dropped and clients retransmit"
+      - "TCP_NODELAY is missing, adding 40 ms per connection"
+    answer: 2
+    explanation: |
+      Recv-Q hitting the backlog on a listening socket plus ListenOverflows/ListenDrops
+      means the accept queue is full: the application dequeues too slowly or the effective
+      backlog (min(backlog, somaxconn)) is too small. Completed connections get dropped,
+      forcing client retransmits seen as latency/resets despite low CPU.
+    ref: "concepts.md#the-listen-backlog-and-accept-queue"
+
+  - id: socket-programming-io-multiplexing-086
+    difficulty: advanced
+    tags: [ephemeral-ports, proxy, exhaustion, mitigation]
+    question: |
+      A reverse proxy fanning out to a single backend IP:port under high load starts failing
+      to open new upstream connections. Which mitigation does NOT address the underlying
+      4-tuple exhaustion?
+    options:
+      - "Connection pooling / keep-alive to reuse established upstream connections"
+      - "Adding more source IPs on the proxy (or more backend ports) to widen the tuple space"
+      - "Enabling TCP_NODELAY on the upstream sockets"
+      - "Widening net.ipv4.ip_local_port_range (and enabling tcp_tw_reuse)"
+    answer: 2
+    explanation: |
+      With fixed proxy-IP and fixed backend IP:port, only the source port varies (~28K
+      tuples). Pooling, more source IPs/dest ports, and widening the local port range (plus
+      tw_reuse) all enlarge or conserve the tuple space. TCP_NODELAY only affects Nagle
+      buffering and does nothing for port exhaustion.
+    ref: "concepts.md#tcp-teardown-states-time-wait-and-close-wait"
+
+  - id: socket-programming-io-multiplexing-087
+    difficulty: expert
+    tags: [select, epoll, scaling, comparison]
+    question: |
+      Why can `epoll` scale to ~1M connections while `select` struggles past ~10K, stated
+      precisely?
+    options:
+      - "select uses UDP internally; epoll uses TCP"
+      - "epoll runs each connection on a separate kernel thread"
+      - "select cannot use non-blocking sockets, forcing one thread per fd"
+      - "select is capped by FD_SETSIZE (~1024), rescans all fds O(n), and rebuilds the fd_sets each call; epoll keeps a kernel-resident interest set and returns only ready fds (O(ready))"
+    answer: 3
+    explanation: |
+      select is bounded by FD_SETSIZE (~1024), performs an O(n) rescan of every monitored
+      fd, and destroys/rebuilds its fd_sets every call. epoll registers fds once in a
+      kernel-resident interest set and epoll_wait returns only the ready fds, so cost tracks
+      activity rather than total connections.
+    ref: "concepts.md#readiness-io-models-select-poll-epoll-kqueue"
+
+  - id: socket-programming-io-multiplexing-088
+    difficulty: intermediate
+    tags: [somaxconn, sysctl, current]
+    question: |
+      On a current mainstream Linux kernel (5.4+), what is the default value of
+      `net.core.somaxconn` that caps the accept queue?
+    options:
+      - "128, unchanged since the 1990s"
+      - "1024, matching FD_SETSIZE"
+      - "4096, raised from the old 128 default in Linux 5.4"
+      - "65535, equal to the max port number"
+    answer: 2
+    explanation: |
+      net.core.somaxconn defaulted to 128 for decades but was raised to 4096 in Linux 5.4
+      (2019). The effective accept-queue cap is still min(backlog, somaxconn), so passing a
+      large backlog now works without a sysctl bump on modern kernels.
+    ref: "concepts.md#the-listen-backlog-and-accept-queue"
+
+  - id: socket-programming-io-multiplexing-089
+    difficulty: advanced
+    tags: [non-blocking, connect, writable-readable]
+    question: |
+      After a non-blocking `connect()` returns EINPROGRESS, the socket becomes both readable
+      and writable at once in your event loop. How do you tell success from failure?
+    options:
+      - "Readable-and-writable always means success; proceed"
+      - "Call connect() again; a second EINPROGRESS confirms success"
+      - "Readable means failure and writable means success, unconditionally"
+      - "Check SO_ERROR via getsockopt (or a getpeername that fails): 0 means connected, a non-zero errno like ECONNREFUSED means the connect failed — writable-with-error can look identical to writable-with-data"
+    answer: 3
+    explanation: |
+      A failed non-blocking connect can make the socket appear both readable and writable, so
+      readiness alone is ambiguous. The definitive test is SO_ERROR (0 = connected, else the
+      connection error); a failing getpeername() is a secondary signal.
+    ref: "concepts.md#blocking-vs-non-blocking-sockets"

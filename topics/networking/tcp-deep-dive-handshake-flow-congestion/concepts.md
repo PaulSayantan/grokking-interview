@@ -380,6 +380,270 @@ byte-stream workloads that write in small chunks.
 > large, well-buffered chunks, `TCP_NODELAY` gains nothing and can increase packet count.
 > It matters specifically for chatty small-message traffic.
 
+**Delayed-ACK wire rules.** RFC 9293 (following RFC 1122) requires that an ACK **SHOULD
+be generated for at least every second full-sized segment** and that the delay **MUST be
+less than 500 ms** (200 ms is the common implementation cap). This "ack every other
+segment" rule is why a bulk sender typically sees one ACK per two MSS. On Linux,
+`TCP_QUICKACK` forces an immediate ACK but is **one-shot** — the kernel resets to delayed
+behaviour after the quick-ack quota drains, so it is not a persistent socket property like
+`TCP_NODELAY`.
+
+## RACK-TLP: Time-Based Loss Detection
+
+Counting three duplicate ACKs (fast retransmit) fails in three important cases: **tail
+losses** (the last segments of a flight have nothing behind them to generate dup ACKs),
+**lost retransmissions** (a retransmit that is itself dropped produces no new dup ACKs),
+and **application-limited flights** (too few packets in flight to ever accumulate three
+dup ACKs). In all three, the connection falls back to a slow RTO. **RACK-TLP (RFC 8985)**,
+now the default loss detector in Linux, Windows, FreeBSD, and QUIC, replaces dup-ACK
+counting with a time-and-SACK-based scheme.
+
+- **RACK ("Recent ACKnowledgment")** timestamps every segment on transmission. When a
+  later segment is SACKed, RACK infers that an *earlier*, still-unacknowledged segment is
+  lost if enough time has passed — specifically once `now − xmit_time > RTT + reordering
+  window`. The **reordering window** starts at `min_RTT/4`, grows adaptively when D-SACK
+  reveals real reordering, and is bounded by SRTT. This makes loss detection **per-segment
+  and time-driven** rather than counting a fixed number of dup ACKs, and it handles
+  reordering gracefully without a hard "3 dup-ACK" threshold.
+- **TLP (Tail Loss Probe)** arms a **PTO timer of roughly 2·SRTT** (much shorter than the
+  RTO). If the flight goes quiet, TLP retransmits the last (or a new) segment to elicit an
+  ACK or SACK, converting what would have been an expensive RTO-driven recovery into fast
+  recovery. This is the key fix for tail losses on short flows (e.g., the final segments of
+  a web response).
+
+RACK-TLP **deepens**, not replaces, the fast-retransmit story: dup-ACK-based detection
+still exists, but modern stacks lean on RACK's reordering window plus TLP's tail probe.
+
+## Proportional Rate Reduction (PRR)
+
+The textbook "halve cwnd instantly on loss" is not what modern stacks do during recovery.
+**PRR (RFC 6937)**, the Linux default since kernel 3.2, **paces the window reduction across
+the recovery round trip** so that by the end of recovery cwnd converges smoothly to
+`ssthresh` instead of dropping in one step. PRR uses the delivery information from ACKs/
+SACKs during recovery to send in proportion to the data leaving the network, which keeps
+the ACK clock alive, avoids an abrupt stall, reduces the chance of a follow-on timeout, and
+lowers tail latency. Compared to the older "rate-halving" and "fast recovery" behaviours,
+PRR is both smoother and more accurate at hitting the target window.
+
+## HyStart++ and Slow-Start Exit
+
+Classic slow start doubles cwnd every RTT until it *overshoots* and induces a burst of
+drops — wasteful, especially on high-BDP paths. **HyStart++ (RFC 9406)** exits slow start
+*early* using delay and ACK-train signals rather than waiting for loss:
+
+- It watches for a **sustained increase in RTT** (the round-trip delay creeping up signals
+  the bottleneck queue starting to fill). When the minimum RTT of a round rises past a
+  threshold above the connection's baseline, HyStart++ leaves exponential growth.
+- On exit it does **not** jump straight to congestion avoidance; it enters a
+  **Conservative Slow Start / Limited Slow Start (LSS)** phase that grows more cautiously,
+  hedging against a premature exit caused by transient jitter.
+
+RFC 9438 states that CUBIC **SHOULD use HyStart++**, so on a modern Linux stack the default
+path is effectively *slow start → HyStart++ exit → CUBIC congestion avoidance*, not the
+"double until loss" of the textbook.
+
+## Pacing and ACK Clocking
+
+Classic TCP is **ACK-clocked**: new data is sent only as ACKs return, so the sending rate
+is self-limited by the returning ACK stream. The problem is **burstiness** — a large cwnd,
+TSO/GSO segmentation offload, or a burst of ACKs after a stretch ACK can release many
+segments back-to-back (a **micro-burst**), overrunning a shallow buffer and causing loss
+even when the average rate is fine.
+
+**Pacing** spreads a congestion window's worth of packets evenly over the RTT
+(inter-packet gap ≈ RTT / cwnd) instead of firing them in a clump. Pacing is **fundamental
+to BBR**, which computes an explicit sending rate (`pacing_gain × bottleneck bandwidth`)
+and paces to it; without pacing, BBR's model-based rate would still arrive as bursts.
+Linux implements pacing via the `fq` qdisc or internal TCP pacing. The mental model:
+ACK-clocking reacts to the network's feedback loop; pacing proactively shapes the
+departure process so the feedback loop never sees a burst.
+
+## ECN in Detail, AccECN, and L4S
+
+The one-line "ECN lets routers mark instead of drop" needs senior-level unpacking.
+
+**Classic ECN (RFC 3168).** ECN is negotiated in the handshake: the initiator sets **ECE+
+CWR** in the SYN and the responder confirms with **ECE** in the SYN-ACK. At the IP layer,
+two bits of the DS field carry the codepoints **Not-ECT, ECT(0), ECT(1), and CE**. A
+sender marks packets **ECT** ("ECN-Capable Transport"); a congested router, instead of
+dropping, sets **CE ("Congestion Experienced")**. The receiver echoes this back by setting
+the **ECE** flag on its ACKs; the sender reduces cwnd **as if a single loss occurred** and
+sets **CWR** to acknowledge it. Crucially, classic ECN feedback is *one bit* — it signals
+"congestion happened this RTT," not how much.
+
+**Accurate ECN (AccECN, RFC 9768).** Classic ECN's single ECE bit cannot convey a *count*
+of CE marks per RTT, which scalable controllers need. AccECN renegotiates the handshake
+(a distinct SYN/SYN-ACK codepoint combination) and feeds back a **running count of CE-marked
+bytes/packets**, using a repurposed set of header bits plus a TCP option. It requires both
+endpoints to be upgraded.
+
+**L4S — Low Latency, Low Loss, Scalable throughput (RFC 9330 architecture, RFC 9331 ECN
+identifier, RFC 9332 DualQ Coupled AQM).** L4S targets **sub-millisecond queuing delay**.
+Its pieces:
+
+- **ECT(1) as a classifier.** L4S traffic marks packets **ECT(1)** so the network can steer
+  it into a separate low-latency queue.
+- **DualQ Coupled AQM.** A router runs two queues — a classic queue (for CUBIC/Reno) and an
+  L4S queue — coupled so the two share bandwidth fairly while the L4S queue is kept shallow.
+- **Scalable congestion controls.** L4S flows run controllers like **TCP Prague** or
+  **BBRv2/v3** that respond to *frequent, immediate* CE marks (marks are **not**
+  drop-equivalent here — they are early and proportional), keeping the queue tiny.
+
+L4S is the hot 2020s standards-track effort in congestion control and a strong
+staff-level differentiator. Its lineage runs through **DCTCP (RFC 8257)**, the
+datacenter algorithm that first used fine-grained ECN marking proportional to queue
+occupancy.
+
+## RFC 5961 Blind Attacks and the Challenge ACK
+
+SYN cookies defend connection setup; **RFC 5961** hardens *established* connections against
+**off-path (blind) attackers** who cannot see the real sequence numbers but try to guess
+them. Three attack families:
+
+- **Blind RST attack** — a spoofed RST with an in-window sequence number could tear down
+  the connection.
+- **Blind SYN attack** — a spoofed SYN into an established connection could force a reset.
+- **Blind data injection** — a spoofed data segment with a plausible sequence number could
+  inject bytes into the stream.
+
+**Defense — the challenge ACK.** RFC 5961 tightens acceptance: an RST is only acted on if
+its sequence number **exactly** matches the next expected byte; if it is merely *in-window*
+(not exact), TCP does **not** reset but instead sends a **challenge ACK** carrying the real
+expected sequence number, forcing a legitimate peer to prove it knows the true sequence by
+responding correctly. (A special case: in **SYN_SENT**, an RST must acknowledge the SYN to
+be accepted.) The challenge-ACK mechanism itself is rate-limited, and that global rate
+limit became a **side channel (CVE-2016-5696)** that let attackers infer whether two hosts
+shared a connection — later mitigated by randomizing/per-connection limiting.
+
+## Half-Open Connections
+
+A **half-open** connection is one where **one side has lost all state** — typically it
+crashed and rebooted — while the peer still believes the connection is ESTABLISHED. The
+classic symptom: the surviving side sends data; the rebooted side has no matching TCB
+(Transmission Control Block) for the 4-tuple, so it replies with an **RST**, and the
+survivor learns the connection is dead. This is **distinct from a half-*closed*
+connection**, where one direction has been shut with FIN (via `shutdown(SHUT_WR)`) but the
+other direction is still open and valid — a normal, intentional state, not an error.
+RFC 9293 (Figures 9–11) walks through half-open recovery. Confusing "half-open" with
+"half-closed" or with CLOSE_WAIT is a common interview stumble.
+
+## Path MTU Discovery, MSS, and Clamping
+
+**MSS (Maximum Segment Size)** is the largest TCP *payload* a host will accept in one
+segment; it is advertised as the **MSS option in the SYN** (and only the SYN). MSS is **not
+the MTU** — it is the MTU minus the IP and TCP headers (e.g., 1500-byte Ethernet MTU →
+1460-byte MSS with no options). If no MSS option is present, the default is **536 bytes for
+IPv4 and 1220 for IPv6** (RFC 9293 / RFC 6691). Each side advertises the MSS *it* is
+willing to receive; they are independent.
+
+**Path MTU Discovery (PMTUD, RFC 1191 for IPv4, RFC 8201 for IPv6).** MSS only accounts for
+the two endpoints' link MTUs; an intermediate link may be smaller. Classic PMTUD sets the
+**Don't Fragment (DF)** bit on IPv4 packets (IPv6 never fragments in transit); a router
+that cannot forward a too-big packet drops it and returns **ICMP "Fragmentation Needed"
+(type 3 code 4)** / ICMPv6 "Packet Too Big," carrying the next-hop MTU, and the sender
+lowers its effective segment size.
+
+**The PMTUD black-hole.** If a firewall or middlebox **filters the ICMP messages**, the
+sender never learns to shrink; large packets are silently dropped while small ones get
+through. The signature scenario: **SSH logins and pings work, but large transfers hang or
+reset.** Fixes: **MSS clamping** — a router/VPN gateway rewrites the MSS option in passing
+SYNs down to fit the tunnel (e.g., PPPoE 1492, IPsec/GRE overhead), so endpoints never send
+oversized segments; or **PLPMTUD (Packetization Layer PMTUD, RFC 4821, and the newer
+datagram RFC 8899)**, which probes for the path MTU using the transport's own loss signals
+and therefore does **not depend on ICMP** at all.
+
+## Deeper Congestion Control Internals
+
+**CUBIC's actual model (RFC 9438).** CUBIC grows the window as a cubic function of time
+since the last congestion event:
+
+```
+W_cubic(t) = C · (t − K)³ + W_max
+```
+
+where `W_max` is the window at the last reduction, `C = 0.4` is a fixed scaling constant,
+and `K = cbrt(W_max · β / C)` is the time it takes to climb back to `W_max`. The
+multiplicative decrease factor is **β_cubic = 0.7** (window kept at 70% on loss, versus
+Reno's 0.5). The curve has three regions: a **concave** region as it approaches `W_max`
+(cautious near the last loss point), a **convex** region above `W_max` (aggressive probing
+into new bandwidth), and a **Reno-friendly** region where CUBIC tracks an estimated Reno
+window `W_est` so it does not lose to Reno on low-BDP paths. A **fast convergence**
+heuristic lowers `W_max` further when consecutive losses show the available bandwidth
+dropped, helping new flows grab their share faster. Because `t` is wall-clock time, growth
+is **RTT-independent**.
+
+**BBR versions.**
+- **BBRv1** builds a model of two quantities: **BtlBw** (bottleneck bandwidth, the max
+  delivery rate observed) and **RTprop** (round-trip propagation delay, the min RTT
+  observed). It cycles through phases **STARTUP** (exponential ramp to find BtlBw) →
+  **DRAIN** (empty the queue built during startup) → **PROBE_BW** (steady state; gently
+  probes up and drains via pacing-gain cycling) → **PROBE_RTT** (periodically cuts inflight
+  to re-measure RTprop). Its weaknesses: it can **starve loss-based CUBIC/Reno** flows and
+  **build a standing queue in deep buffers** because v1 ignores loss.
+- **BBRv2** adds an explicit **loss and ECN response** (including AccECN/L4S awareness) and
+  an inflight cap, substantially improving coexistence with CUBIC.
+- **BBRv3** refines v2's bandwidth-convergence and probing bugs for more stable, fair
+  steady-state behaviour.
+
+## TIME_WAIT Scaling, SO_REUSEADDR vs SO_REUSEPORT
+
+TIME_WAIT accumulates on the **active closer**, so the architectural fix for server/LB port
+exhaustion is to make the **client** perform the active close (and to pool/keep-alive
+connections). Two socket options are frequently confused:
+
+- **`SO_REUSEADDR`** lets a socket **bind to a port that has a connection in TIME_WAIT**
+  (and to bind while a previous socket on the port lingers), avoiding "address already in
+  use" on quick server restarts. It does **not** load-balance.
+- **`SO_REUSEPORT`** (Linux 3.9+) lets **multiple sockets bind the identical address+port
+  simultaneously**, and the kernel load-balances incoming connections across them — the
+  standard way to scale `accept()` across many worker processes/threads without a single
+  accept bottleneck.
+
+**Ephemeral port math.** Outbound connections draw a source port from
+`net.ipv4.ip_local_port_range` (commonly ~28k–32k ports). Since a connection is a 4-tuple,
+exhaustion happens per (dst IP, dst port) destination: talking to one backend endpoint caps
+you at roughly the size of that range in concurrent + TIME_WAIT connections. **TIME_WAIT
+assassination** is the hazard where an old segment or RST prematurely terminates a
+TIME_WAIT socket, potentially letting an old duplicate corrupt a new incarnation —
+timestamps (PAWS) mitigate it.
+
+## Datacenter TCP and Incast
+
+**TCP incast collapse** is a datacenter pathology: in a **partition/aggregate** workload
+(e.g., MapReduce/Hadoop, a distributed key-value or storage read that fans out to many
+servers), **many senders reply to one client almost simultaneously**. Their combined burst
+overflows the **shallow buffer** of the top-of-rack switch port, causing synchronized drops
+and, worse, **synchronized RTOs** — many flows time out together, wait the (relatively huge)
+`RTO_min`, and retransmit in lockstep, so goodput **collapses** far below link capacity even
+though each flow is tiny. Mitigations:
+
+- **DCTCP (RFC 8257)** — uses fine-grained ECN: the switch marks CE proportional to queue
+  occupancy and the sender reduces cwnd *in proportion to the fraction of marked packets*,
+  keeping queues short and avoiding the synchronized cliff. DCTCP is the ancestor of the
+  scalable controllers (TCP Prague) used by L4S.
+- **Lowering `RTO_min`** to microsecond scale (datacenter RTTs are tens of microseconds, so
+  the default millisecond RTO_min is enormous).
+- **ECN generally**, larger/smarter switch buffers, and AQM.
+
+## Window Scale and PAWS Wire Details
+
+**Window Scale option (RFC 7323).** It is a **1-byte shift count in the range 0–14**,
+carried **only in the SYN and SYN-ACK**. Both endpoints must send it or scaling is off for
+the connection; the negotiated shift then applies to the 16-bit Window field on **all**
+subsequent segments (including retransmissions). Maximum effective window is
+`65535 << 14 ≈ 1 GiB`. Because it is negotiated only in the SYN, a **middlebox/firewall
+that strips the option from the SYN** silently disables scaling and caps throughput at
+64 KiB/RTT — a classic "high-BDP link stuck at a few Mbps" bug that a packet capture reveals
+by the missing option.
+
+**Sequence wrap and PAWS.** The sequence space is 32 bits ≈ 4 GiB. At high rates it wraps
+fast: roughly **17 s at 1 Gbps**, and **sub-second at 10–100 Gbps** — potentially within one
+MSL, so an old delayed segment could be mistaken for new data. **PAWS** uses the
+**Timestamps option (TSval/TSecr)** to reject any segment whose timestamp is older than what
+has already been seen. The very same Timestamps option **doubles as the RTT clock** for
+SRTT/RTTVAR estimation — which is why window scaling, timestamps, and PAWS all live together
+in RFC 7323.
+
 ## Common follow-up questions
 
 - **Why exactly three packets in the handshake, not two or four?** Each direction must
@@ -406,6 +670,25 @@ byte-stream workloads that write in small chunks.
   linear additive increase; scales much better on high-bandwidth, high-latency links.
 - **Why is BBR different in kind from CUBIC?** BBR models bottleneck bandwidth and RTT and
   paces to the BDP rather than treating loss as the congestion signal.
+- **Why can't three dup ACKs detect a tail loss?** There is no later data behind the lost
+  tail segments to generate dup ACKs; RACK's time-based detection plus TLP's tail probe
+  fix this without waiting for an RTO.
+- **Large transfers hang but SSH and ping work — why?** A PMTUD black-hole: ICMP
+  "fragmentation needed" is filtered, so the sender never shrinks its segments. Fix with
+  MSS clamping or PLPMTUD.
+- **A high-BDP link is stuck at a few Mbps despite headroom — why?** Throughput ≤
+  window/RTT; likely the Window Scale option was never negotiated or was stripped by a
+  middlebox, capping the window at 64 KiB.
+- **CLOSE_WAIT pile-up vs FIN_WAIT_2 pile-up?** CLOSE_WAIT = your app never called close
+  (never times out on its own); FIN_WAIT_2 = peer isn't closing (bounded by
+  `tcp_fin_timeout`).
+- **SO_REUSEADDR vs SO_REUSEPORT?** REUSEADDR lets you rebind a port with TIME_WAIT
+  lingering; REUSEPORT lets many sockets share one port and load-balances accepts across
+  workers.
+- **BBR vs CUBIC on a shared link — who wins?** BBRv1 can starve CUBIC by not backing off
+  on loss; BBRv2/v3 add a loss/ECN response to fix it.
+- **Design a low-latency datacenter transport?** Address incast with DCTCP/ECN, µs-scale
+  RTO_min, and L4S/DualQ for sub-ms queuing.
 
 ## References
 
@@ -423,3 +706,15 @@ byte-stream workloads that write in small chunks.
 - [RFC 6528 — Defending against Sequence Number Attacks (ISN randomization)](https://www.rfc-editor.org/rfc/rfc6528)
 - [RFC 7413 — TCP Fast Open](https://www.rfc-editor.org/rfc/rfc7413)
 - [BBR: Congestion-Based Congestion Control (Cardwell et al., ACM Queue 2016)](https://queue.acm.org/detail.cfm?id=3022184)
+- [RFC 8985 — The RACK-TLP Loss Detection Algorithm for TCP](https://www.rfc-editor.org/rfc/rfc8985)
+- [RFC 6937 — Proportional Rate Reduction for TCP](https://www.rfc-editor.org/rfc/rfc6937)
+- [RFC 9406 — HyStart++: Modified Slow Start for TCP](https://www.rfc-editor.org/rfc/rfc9406)
+- [RFC 8257 — Data Center TCP (DCTCP)](https://www.rfc-editor.org/rfc/rfc8257)
+- [RFC 9330 — Low Latency, Low Loss, and Scalable Throughput (L4S) Architecture](https://www.rfc-editor.org/rfc/rfc9330)
+- [RFC 9331 — The ECN Protocol for Low Latency, Low Loss, and Scalable Throughput (L4S)](https://www.rfc-editor.org/rfc/rfc9331)
+- [RFC 9332 — Dual-Queue Coupled Active Queue Management (AQM) for L4S](https://www.rfc-editor.org/rfc/rfc9332)
+- [RFC 9768 — Accurate ECN (AccECN) Feedback for TCP](https://www.rfc-editor.org/rfc/rfc9768)
+- [RFC 5961 — Improving TCP's Robustness to Blind In-Window Attacks (challenge ACK)](https://www.rfc-editor.org/rfc/rfc5961)
+- [RFC 6691 — TCP Options and Maximum Segment Size (MSS)](https://www.rfc-editor.org/rfc/rfc6691)
+- [RFC 1191 — Path MTU Discovery](https://www.rfc-editor.org/rfc/rfc1191) / [RFC 8201 — Path MTU Discovery for IPv6](https://www.rfc-editor.org/rfc/rfc8201)
+- [RFC 4821 — Packetization Layer Path MTU Discovery](https://www.rfc-editor.org/rfc/rfc4821) / [RFC 8899 — PLPMTUD for Datagram Transports](https://www.rfc-editor.org/rfc/rfc8899)
