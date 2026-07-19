@@ -1,0 +1,946 @@
+topic: "Secrets Management & Key Lifecycle"
+domain: security
+topic_slug: secrets-management-and-key-lifecycle
+version: 1
+questions:
+- id: secrets-management-and-key-lifecycle-001
+  difficulty: beginner
+  tags: [what-is-a-secret, fundamentals]
+  question: |
+    Which of the following is NOT a secret (i.e., disclosing it alone does not directly
+    enable an attack)?
+  options:
+  - "An RSA public key / JWKS key ID (kid)"
+  - "A database password embedded in a connection string"
+  - "A TLS private key"
+  - "An OAuth client secret"
+  answer: 0
+  explanation: |
+    A public key and a key ID are meant to be shared; publishing them causes no direct
+    compromise. Database passwords, private keys, and client secrets all grant access or
+    protect confidentiality, so disclosing them enables an attack. The test for "is it a
+    secret?" is whether disclosure lets an attacker do or read something they shouldn't.
+  ref: "concepts.md#what-counts-as-a-secret"
+
+- id: secrets-management-and-key-lifecycle-002
+  difficulty: beginner
+  tags: [what-is-a-secret, config]
+  question: |
+    A team argues a Postgres connection string like
+    `postgres://app:S3cr3t@db.internal:5432/prod` is "just configuration, not a secret."
+    What is the correct assessment?
+  options:
+  - "Correct — connection strings are infrastructure config, not secrets"
+  - "Only the hostname portion is sensitive; the rest is safe"
+  - "It embeds a password, so it IS a secret and must be protected like one"
+  - "It becomes a secret only after the database is in production"
+  answer: 2
+  explanation: |
+    The string embeds a password (S3cr3t). Anyone who reads it can authenticate to the
+    database. Treating credential-bearing config as "just config" is exactly how database
+    passwords end up committed to Git. Disclosure enables an attack, so it is a secret.
+  ref: "concepts.md#what-counts-as-a-secret"
+
+- id: secrets-management-and-key-lifecycle-003
+  difficulty: beginner
+  tags: [what-is-a-secret, keys-vs-data]
+  question: |
+    Why is an encryption key generally considered a higher-value target than the sensitive
+    data it protects?
+  options:
+  - "Keys are larger and easier to steal than data"
+  - "Data is never a target for attackers"
+  - "Keys are stored unencrypted while data is always encrypted"
+  - "One key can unlock all the data it encrypts, so compromising it exposes everything at once"
+  answer: 3
+  explanation: |
+    Sensitive data is protected by keys, but a single key can decrypt all the data it was
+    used on. Compromising one key therefore yields the whole dataset, which is why key
+    management is treated as a first-class security concern (OWASP A02:2021).
+  ref: "concepts.md#what-counts-as-a-secret"
+
+- id: secrets-management-and-key-lifecycle-004
+  difficulty: beginner
+  tags: [anti-patterns, git]
+  question: |
+    A developer commits an API key, then in the next commit deletes the line containing it
+    and pushes both commits. Is the secret safe?
+  options:
+  - "No — Git history retains the old version, so any clone can recover the key"
+  - "Yes — the current version of the file no longer contains the key"
+  - "Yes — as long as the repository is private"
+  - "No — but only if the repo has more than one branch"
+  answer: 0
+  explanation: |
+    Deleting a line in a later commit does not remove it from history. `git log -p`,
+    `git show <oldsha>`, or any clone recovers the earlier version. The secret must be
+    considered committed forever; the correct response is to rotate it.
+  ref: "concepts.md#secret-sprawl-anti-patterns"
+
+- id: secrets-management-and-key-lifecycle-005
+  difficulty: intermediate
+  tags: [anti-patterns, containers, docker]
+  question: |
+    A Dockerfile contains `ENV API_KEY=sk_live_abc` early on, then a later stage runs
+    `RUN unset API_KEY`. Why is the key still exposed?
+  options:
+  - "Because `unset` only works in interactive shells"
+  - "Because the earlier image layer still contains the value; anyone who pulls the image can read it via `docker history` / layer inspection"
+  - "Because ENV variables are always printed to stdout at build time"
+  - "It is not exposed — unsetting the variable removes it from the image"
+  answer: 1
+  explanation: |
+    Each Dockerfile instruction creates a layer, and layers are immutable and additive.
+    The layer that set API_KEY still contains it even if a later layer unsets/removes it.
+    Anyone who can pull the image can inspect earlier layers. Secrets must be injected at
+    runtime, never baked into image layers.
+  ref: "concepts.md#secret-sprawl-anti-patterns"
+
+- id: secrets-management-and-key-lifecycle-006
+  difficulty: intermediate
+  tags: [anti-patterns, env-vars]
+  question: |
+    Environment variables avoid committing a secret to the repo, but they still leak
+    through several channels. Which of these is a real leak vector for env-var secrets?
+  options:
+  - "The compiler embedding them into the binary at build time"
+  - "TLS automatically transmitting them to the server"
+  - "Crash/error pages that dump the process environment, and `/proc/<pid>/environ`"
+  - "DNS queries containing the variable names"
+  answer: 2
+  explanation: |
+    Env vars leak via error/crash handlers that print the environment, `/proc/<pid>/environ`
+    readable by co-located processes, child-process inheritance, APM agents that capture
+    env, and startup logging. They also don't rotate without a restart. Files with tight
+    permissions or direct secret-manager reads are safer.
+  ref: "concepts.md#secret-sprawl-anti-patterns"
+
+- id: secrets-management-and-key-lifecycle-007
+  difficulty: beginner
+  tags: [anti-patterns, logs, urls]
+  question: |
+    Why should you avoid putting an access token in a URL query string
+    (e.g. `GET /data?token=abc123`)?
+  options:
+  - "Query strings have a maximum length that tokens exceed"
+  - "URLs cannot be encrypted by TLS"
+  - "Query strings are always cached by the CPU"
+  - "Tokens in URLs land in access logs, proxy logs, browser history, and Referer headers"
+  answer: 3
+  explanation: |
+    URLs (including query strings) are logged by servers and proxies, stored in browser
+    history, and leaked to other origins via the Referer header. Secrets belong in headers
+    or the request body, never in the URL. TLS encrypts the URL in transit but not these
+    side channels.
+  ref: "concepts.md#secret-sprawl-anti-patterns"
+
+- id: secrets-management-and-key-lifecycle-008
+  difficulty: intermediate
+  tags: [anti-patterns, incident-response, git]
+  question: |
+    You discover a live AWS access key hardcoded in a public repo. Which action should
+    come FIRST?
+  options:
+  - "Rotate/revoke the key immediately, treating it as compromised"
+  - "Rewrite Git history with git-filter-repo to remove the key"
+  - "Add a .gitignore entry so it isn't committed again"
+  - "Email the developer to ask if the key was ever actually used"
+  answer: 0
+  explanation: |
+    Assume compromise. Scrapers abuse public cloud keys within minutes, and you cannot
+    prove it was not read. Rotate/revoke first, then audit usage (CloudTrail), remove it
+    from code and load from a secret manager, and finally purge history and add scanning.
+    Scrubbing history alone is not remediation.
+  ref: "concepts.md#secret-sprawl-anti-patterns"
+
+- id: secrets-management-and-key-lifecycle-009
+  difficulty: beginner
+  tags: [secret-manager, fundamentals]
+  question: |
+    What core capabilities does a centralized secret manager (Vault, AWS Secrets Manager,
+    etc.) provide over scattering secrets across code and config?
+  options:
+  - "Faster application startup and lower memory usage"
+  - "Encryption at rest, fine-grained access policies, audit logging, versioning, and often automatic rotation"
+  - "Automatic conversion of secrets to public keys"
+  - "Guaranteed prevention of all secret leaks"
+  answer: 1
+  explanation: |
+    A secret manager centralizes secrets into an access-controlled, audited, encrypted
+    store with versioning and often automatic rotation. It reduces secret sprawl but cannot
+    guarantee zero leaks; detection and rotation still matter.
+  ref: "concepts.md#secret-managers-and-dynamic-secrets"
+
+- id: secrets-management-and-key-lifecycle-010
+  difficulty: intermediate
+  tags: [dynamic-secrets, vault, leases]
+  question: |
+    With Vault's dynamic database secrets, the app requests `database/creds/<role>` and
+    receives a freshly generated DB user with a 1h lease. What is the main security
+    advantage?
+  options:
+  - "The credential is encrypted with the app's public key"
+  - "The database no longer needs authentication"
+  - "A leaked credential is useless after its short TTL, and each instance gets a unique credential (precise audit attribution)"
+  - "It eliminates the need for network encryption"
+  answer: 2
+  explanation: |
+    Dynamic secrets are short-lived and per-instance. A leaked credential expires quickly
+    (tiny exposure window), revocation is instant (revoke the lease), and unique
+    credentials let audit logs attribute activity to a specific instance for forensics.
+  ref: "concepts.md#secret-managers-and-dynamic-secrets"
+
+- id: secrets-management-and-key-lifecycle-011
+  difficulty: intermediate
+  tags: [dynamic-secrets, static-secrets, trade-offs]
+  question: |
+    Compared to a static secret stored in a secret manager, a dynamic/short-lived secret
+    primarily reduces which risk dimension?
+  options:
+  - "The CPU cost of encryption"
+  - "The number of secret managers you must run"
+  - "The size of the ciphertext produced"
+  - "The blast radius / exposure window if the credential leaks"
+  answer: 3
+  explanation: |
+    A static secret persists until manually rotated, so a leak has a long exploit window
+    and is often shared across instances. A dynamic secret expires in minutes to hours and
+    is per-instance, shrinking the blast radius and enabling automatic revocation.
+  ref: "concepts.md#secret-managers-and-dynamic-secrets"
+
+- id: secrets-management-and-key-lifecycle-012
+  difficulty: intermediate
+  tags: [kms, secret-manager, comparison]
+  question: |
+    What is the key distinction between a KMS (e.g. AWS KMS, CloudHSM) and a secret manager
+    (e.g. AWS Secrets Manager)?
+  options:
+  - "A KMS holds key material and performs crypto so the raw key never leaves its boundary; a secret manager stores and returns arbitrary secret values"
+  - "A KMS stores arbitrary secret values; a secret manager only stores TLS certificates"
+  - "They are two names for exactly the same service"
+  - "A secret manager performs encryption while a KMS only stores passwords"
+  answer: 0
+  explanation: |
+    A KMS/HSM guards key material and does encrypt/decrypt/sign operations without ever
+    releasing the raw key. A secret manager stores and returns arbitrary secret values
+    (passwords, API keys). They compose: a secret manager encrypts stored secrets using a
+    KMS key.
+  ref: "concepts.md#secret-managers-and-dynamic-secrets"
+
+- id: secrets-management-and-key-lifecycle-013
+  difficulty: intermediate
+  tags: [envelope-encryption, dek, kek]
+  question: |
+    In envelope encryption, what is the relationship between the DEK and the KEK?
+  options:
+  - "The KEK encrypts the actual data; the DEK encrypts the KEK"
+  - "The DEK encrypts the data; the KEK encrypts (wraps) the DEK"
+  - "The DEK and KEK are the same key used twice"
+  - "The KEK is the public half of the DEK"
+  answer: 1
+  explanation: |
+    Envelope encryption encrypts data with a data-encryption key (DEK), then wraps the DEK
+    with a key-encryption key (KEK) that stays in a KMS/HSM. You store ciphertext plus the
+    wrapped DEK; the KEK never leaves the KMS boundary.
+  ref: "concepts.md#encryption-key-hierarchy-and-envelope-encryption"
+
+- id: secrets-management-and-key-lifecycle-014
+  difficulty: intermediate
+  tags: [envelope-encryption, kms, performance]
+  question: |
+    Why does envelope encryption call the KMS only for a tiny wrap/unwrap operation instead
+    of sending all the data to the KMS?
+  options:
+  - "KMS cannot perform symmetric encryption"
+  - "The KMS charges per byte of plaintext, not per operation"
+  - "Bulk data is encrypted locally with the fast symmetric DEK; the KMS only wraps/unwraps the small DEK, so it scales to huge datasets and millions of DEKs"
+  - "The DEK must be regenerated for every byte of data"
+  answer: 2
+  explanation: |
+    Sending terabytes to a KMS would be slow and expensive. Instead, data is encrypted
+    locally with a fast symmetric DEK, and the KMS is only invoked to wrap/unwrap the small
+    DEK. This lets you have millions of DEKs (per object/tenant) all protected by one KEK.
+  ref: "concepts.md#encryption-key-hierarchy-and-envelope-encryption"
+
+- id: secrets-management-and-key-lifecycle-015
+  difficulty: advanced
+  tags: [envelope-encryption, gotcha, dek]
+  question: |
+    Which mistake completely defeats the purpose of envelope encryption?
+  options:
+  - "Discarding the plaintext DEK from memory after encrypting"
+  - "Storing the wrapped DEK next to the ciphertext"
+  - "Using AES-GCM to encrypt the data with the DEK"
+  - "Logging or persisting the plaintext DEK for convenience"
+  answer: 3
+  explanation: |
+    The plaintext DEK must be ephemeral — used to encrypt, then wiped from memory. Logging
+    or persisting the plaintext DEK means the DEK leaks without ever needing the KEK,
+    defeating the entire hierarchy. Storing the wrapped DEK beside the ciphertext is normal
+    and correct.
+  ref: "concepts.md#encryption-key-hierarchy-and-envelope-encryption"
+
+- id: secrets-management-and-key-lifecycle-016
+  difficulty: intermediate
+  tags: [envelope-encryption, flow]
+  question: |
+    In the envelope-encryption ENCRYPT flow using a KMS, what does the KMS
+    GenerateDataKey-style call typically return?
+  options:
+  - "Both the plaintext DEK and the DEK encrypted (wrapped) under the KEK"
+  - "Only the wrapped DEK"
+  - "The KEK in plaintext"
+  - "The final ciphertext of your data"
+  answer: 0
+  explanation: |
+    The KMS returns the plaintext DEK (used to encrypt data locally, then discarded) and
+    the DEK wrapped under the KEK (persisted alongside the ciphertext). On decrypt you send
+    the wrapped DEK back and the KMS unwraps it with the KEK.
+  ref: "concepts.md#encryption-key-hierarchy-and-envelope-encryption"
+
+- id: secrets-management-and-key-lifecycle-017
+  difficulty: advanced
+  tags: [key-rotation, envelope-encryption, scale]
+  question: |
+    You must rotate the master key protecting 100 TB of encrypted data. How does envelope
+    encryption let you do this without re-encrypting all 100 TB?
+  options:
+  - "By decrypting and re-encrypting all data in a background job"
+  - "Data is encrypted with per-object DEKs; the KEK only wraps DEKs, so rotating the KEK re-wraps the small set of DEKs and the bulk ciphertext is untouched"
+  - "By deleting the old data and asking users to re-upload it"
+  - "By switching from AES to RSA for the bulk data"
+  answer: 1
+  explanation: |
+    The master KEK never encrypts data directly — it only wraps DEKs. Rotating the KEK
+    means re-wrapping the (small, few) DEKs under the new KEK, or letting KMS version the
+    key internally. The 100 TB of ciphertext is never re-encrypted.
+  ref: "concepts.md#key-rotation-without-re-encrypting-all-data"
+
+- id: secrets-management-and-key-lifecycle-018
+  difficulty: intermediate
+  tags: [key-rotation, versioning, kid]
+  question: |
+    Why should a key identifier / version be stored alongside each ciphertext (or in a
+    token's `kid` header)?
+  options:
+  - "To make ciphertext smaller"
+  - "Because encryption fails without a visible key value"
+  - "So you know which key version decrypts/verifies each artifact, enabling graceful rotation where the old key stays available until old artifacts age out"
+  - "To let anyone reconstruct the key from the identifier"
+  answer: 2
+  explanation: |
+    Storing a key version (kid) with each artifact means you always know which key
+    decrypts/verifies it. This enables graceful rotation: enable the new key for new
+    data/signatures while keeping the old key available to decrypt/verify existing artifacts
+    until they age out, then retire it.
+  ref: "concepts.md#key-rotation-without-re-encrypting-all-data"
+
+- id: secrets-management-and-key-lifecycle-019
+  difficulty: advanced
+  tags: [key-rotation, gotcha]
+  question: |
+    During key rotation for signed tokens, why is it wrong to remove the OLD signing key
+    immediately when you enable the new one?
+  options:
+  - "Removing the old key is fine and has no downside"
+  - "The new key cannot be used until the old one is deleted"
+  - "Removing the old key doubles the size of new tokens"
+  - "Tokens/artifacts still signed with the old key would fail verification until they expire; the old key must remain available for verification during the overlap"
+  answer: 3
+  explanation: |
+    Rotation needs an overlap window. Artifacts signed/encrypted with the old key are still
+    valid until they age out, so the old key must stay available for verify/decrypt.
+    Removing it first (the reverse order) breaks verification of still-valid artifacts.
+    NIST's recipient-usage period captures exactly this.
+  ref: "concepts.md#key-rotation-without-re-encrypting-all-data"
+
+- id: secrets-management-and-key-lifecycle-020
+  difficulty: intermediate
+  tags: [key-rotation, dek, lazy-rotation]
+  question: |
+    What does "rotate-on-write" (lazy DEK rotation) mean?
+  options:
+  - "The next time an object is written, it is encrypted with a fresh DEK, so you re-encrypt only that slice of data rather than everything upfront"
+  - "Every read triggers a full re-encryption of the object"
+  - "The DEK is rotated only when the KEK is destroyed"
+  - "Writes are blocked until all DEKs are rotated"
+  answer: 0
+  explanation: |
+    Because each DEK protects a bounded slice of data, you can rotate a DEK by re-encrypting
+    just that slice — and defer it until the object is next written. This spreads the cost
+    of DEK rotation over normal write activity instead of a big-bang re-encryption.
+  ref: "concepts.md#key-rotation-without-re-encrypting-all-data"
+
+- id: secrets-management-and-key-lifecycle-021
+  difficulty: beginner
+  tags: [key-lifecycle, generation, csprng]
+  question: |
+    How should cryptographic keys be generated?
+  options:
+  - "From the current timestamp for uniqueness"
+  - "From a CSPRNG or an HSM's hardware RNG, with adequate length"
+  - "From Math.random() seeded with the process ID"
+  - "By hashing the username with MD5"
+  answer: 1
+  explanation: |
+    Keys must come from a cryptographically secure RNG (CSPRNG) or an HSM's hardware RNG,
+    with full entropy and adequate length (NIST SP 800-133). Timestamps, Math.random(), PIDs,
+    or MD5 of a username are predictable and produce guessable keys.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-022
+  difficulty: intermediate
+  tags: [key-lifecycle, nist, phases]
+  question: |
+    Which sequence best describes the cryptographic key lifecycle per NIST SP 800-57?
+  options:
+  - "Distribution, generation, destruction, rotation, use"
+  - "Use, generation, revocation, storage, destruction"
+  - "Generation, distribution, storage, use, rotation, revocation, destruction"
+  - "Rotation, destruction, generation, distribution"
+  answer: 2
+  explanation: |
+    NIST SP 800-57 frames key management as generate → distribute/establish → store → use
+    (within a cryptoperiod) → rotate → revoke (as needed) → destroy (zeroize). The order
+    reflects a key's life from creation to secure destruction.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-023
+  difficulty: intermediate
+  tags: [key-lifecycle, cryptoperiod, nist]
+  question: |
+    What is a key's "cryptoperiod" as defined by NIST SP 800-57?
+  options:
+  - "The time it takes to generate the key"
+  - "The number of bits in the key"
+  - "The interval between two KMS API calls"
+  - "The time span during which the key is authorized for use, bounded to limit exposure and attack time"
+  answer: 3
+  explanation: |
+    A cryptoperiod is the authorized-use lifespan of a key. Bounding it limits how much
+    data is exposed if the key is compromised and how long an attacker has to attack it.
+    SP 800-57 distinguishes the originator-usage period (encrypt/sign) from the longer
+    recipient-usage period (decrypt/verify).
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-024
+  difficulty: advanced
+  tags: [key-lifecycle, key-states, nist]
+  question: |
+    In the NIST SP 800-57 key-state model, which state describes a key that is past its
+    cryptoperiod for protecting NEW data but is retained so it can still process (decrypt/
+    verify) existing data?
+  options:
+  - "Deactivated"
+  - "Pre-activation"
+  - "Active"
+  - "Destroyed"
+  answer: 0
+  explanation: |
+    A deactivated key can no longer be used to protect (encrypt/sign) new data but is
+    retained to process (decrypt/verify) data already protected under it. Pre-activation is
+    before use, active is in use, and destroyed means the material is zeroized and
+    unrecoverable.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-025
+  difficulty: intermediate
+  tags: [key-lifecycle, key-states, destruction]
+  question: |
+    Why is "deactivated" not the same as "destroyed" for a cryptographic key?
+  options:
+  - "They are the same; the terms are interchangeable"
+  - "A deactivated key may still be needed to decrypt/verify old data, whereas a destroyed key is zeroized and unrecoverable"
+  - "A destroyed key can be reactivated later, but a deactivated one cannot"
+  - "Deactivated keys are public and destroyed keys are private"
+  answer: 1
+  explanation: |
+    Destroying a key too early loses access to everything it protected. A deactivated (or
+    compromised) key often must remain available to decrypt/verify existing artifacts; you
+    destroy (zeroize) it only once nothing it protected is still needed.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-026
+  difficulty: advanced
+  tags: [key-lifecycle, key-states, compromise]
+  question: |
+    A signing key is suspected to be exposed. In the NIST key-state model, which state
+    should it move to, and what is the operational rule?
+  options:
+  - "Active — keep using it until you can confirm the compromise"
+  - "Pre-activation — reset it and start over"
+  - "Compromised — it must not be used to protect new data; it may be used to process old data only under strict control"
+  - "Destroyed — immediately zeroize it before investigating"
+  answer: 2
+  explanation: |
+    A key known or suspected to be exposed moves to the compromised state: stop using it to
+    protect (sign/encrypt) new data immediately. It may still be needed to verify/decrypt
+    existing data, but only under strict control. Destroying it immediately could orphan
+    data that still needs it.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-027
+  difficulty: intermediate
+  tags: [key-lifecycle, separation, purpose]
+  question: |
+    Why should you use separate keys for different purposes (e.g. one for signing, one for
+    encryption) rather than reusing a single key?
+  options:
+  - "It makes the keys shorter"
+  - "It is required for keys to fit in an HSM"
+  - "It allows the same key to be public and private simultaneously"
+  - "Purpose separation limits blast radius and avoids cryptographic interactions between operations that can weaken security"
+  answer: 3
+  explanation: |
+    Using distinct keys per purpose (and per environment) limits blast radius — a compromise
+    of one key affects only its scope — and avoids dangerous cross-protocol interactions
+    from reusing a key across incompatible operations. NIST recommends single-purpose keys.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-028
+  difficulty: beginner
+  tags: [secret-zero, bootstrapping]
+  question: |
+    What is the "secret zero" (bootstrapping) problem?
+  options:
+  - "The app still needs one credential to authenticate to the secret manager, and that credential can't itself be stored in the manager"
+  - "The problem of choosing a key length of zero bits"
+  - "The problem of secrets that expire at time zero"
+  - "The difficulty of counting how many secrets an app uses"
+  answer: 0
+  explanation: |
+    Even with all secrets in a manager, the app needs a first credential to authenticate to
+    the manager — secret zero. You can't store it in the manager, so it appears you've only
+    moved the problem. The fix is to make secret zero ephemeral, single-use, or a
+    non-copyable platform identity.
+  ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+- id: secrets-management-and-key-lifecycle-029
+  difficulty: intermediate
+  tags: [secret-zero, workload-identity, cloud]
+  question: |
+    Which approach best solves the secret-zero problem for an application running on a cloud
+    VM or Kubernetes pod?
+  options:
+  - "Bake a long-lived Vault token into the container image"
+  - "Use platform/workload identity (IAM role via IMDSv2, Kubernetes service-account token, SPIFFE) that the infrastructure vouches for — no stored secret"
+  - "Email the bootstrap token to the on-call engineer at deploy time"
+  - "Hardcode the token in an environment variable set by the orchestrator"
+  answer: 1
+  explanation: |
+    The strongest solution is platform/workload identity: the infrastructure attests the
+    workload's identity (IAM role/IMDSv2, K8s SA token, SPIFFE-SVID), which the secret
+    manager verifies and exchanges for a short-lived token. No copyable secret is stored.
+    Baking in a long-lived token recreates the original problem.
+  ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+- id: secrets-management-and-key-lifecycle-030
+  difficulty: advanced
+  tags: [secret-zero, response-wrapping, vault]
+  question: |
+    Vault "response wrapping" hands a workload a single-use, short-TTL wrapping token that
+    it unwraps once to get its real credential. What security property does this provide?
+  options:
+  - "It encrypts the credential with the workload's TLS certificate"
+  - "It makes the credential valid forever"
+  - "Tamper evidence — if anyone else unwraps the token first, the legitimate unwrap fails, revealing interception"
+  - "It removes the need for any authentication to Vault"
+  answer: 2
+  explanation: |
+    A response-wrapping token is single-use. If an attacker intercepts and unwraps it, the
+    legitimate consumer's unwrap fails — giving tamper evidence that the bootstrap was
+    intercepted. Combined with a short TTL, this limits the exposure of the bootstrap step.
+  ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+- id: secrets-management-and-key-lifecycle-031
+  difficulty: intermediate
+  tags: [secret-zero, approle, vault]
+  question: |
+    In Vault's AppRole auth, how are the two pieces of the bootstrap credential handled?
+  options:
+  - "Both role_id and secret_id are baked into the image together"
+  - "role_id is short-lived and secret_id is permanent"
+  - "Both are public values printed in logs"
+  - "The role_id is non-secret and can be deployed with the app, while the short-lived secret_id is delivered separately through a trusted channel"
+  answer: 3
+  explanation: |
+    AppRole splits identity into a non-secret role_id (safe to ship with the app) and a
+    short-lived secret_id delivered separately (often via response wrapping from a trusted
+    orchestrator). Splitting and separating delivery avoids a single long-lived baked-in
+    credential.
+  ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+- id: secrets-management-and-key-lifecycle-032
+  difficulty: advanced
+  tags: [secret-zero, anti-pattern]
+  question: |
+    A team "solves" secret zero by storing a permanent Vault token in the app's environment
+    variable. What is the flaw?
+  options:
+  - "It just recreates the original secret-sprawl problem with extra steps; the bootstrap credential is long-lived and copyable"
+  - "Nothing — this is the recommended approach"
+  - "Vault tokens cannot be stored in environment variables"
+  - "It makes Vault run slower"
+  answer: 0
+  explanation: |
+    A permanent env-var token is a long-lived, copyable secret that leaks through all the
+    usual env channels — recreating the very problem the secret manager was supposed to
+    solve. The bootstrap credential must be ephemeral, single-use, or a non-copyable
+    platform identity.
+  ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+- id: secrets-management-and-key-lifecycle-033
+  difficulty: beginner
+  tags: [leak-detection, scanning]
+  question: |
+    Where is the CHEAPEST place to catch a secret before it becomes a problem?
+  options:
+  - "After it has been abused in production, via incident response"
+  - "In a pre-commit / pre-push hook that scans the diff before the secret is committed"
+  - "During the annual security audit"
+  - "When a customer reports fraudulent charges"
+  answer: 1
+  explanation: |
+    Pre-commit/pre-push hooks (gitleaks, git-secrets, detect-secrets) catch secrets in the
+    diff before they ever enter history — the cheapest point. CI/history scanning and push
+    protection are backstops; incident response is the most expensive place to catch it.
+  ref: "concepts.md#leaked-secret-detection-and-rotation-on-leak"
+
+- id: secrets-management-and-key-lifecycle-034
+  difficulty: intermediate
+  tags: [leak-detection, techniques]
+  question: |
+    Secret scanners combine two main detection techniques. What are they, and what is the
+    trade-off?
+  options:
+  - "Compression and hashing; the trade-off is disk space"
+  - "DNS lookups and TLS inspection; the trade-off is latency"
+  - "Regex/pattern matching for known token formats and entropy analysis for random-looking strings; entropy catches unknown formats at the cost of false positives"
+  - "Manual code review only; the trade-off is time"
+  answer: 2
+  explanation: |
+    Scanners use provider-specific regex/patterns (e.g. AKIA…, sk_live_…, ghp_…) plus
+    Shannon-entropy analysis to flag high-randomness strings that look like keys. Entropy
+    catches unknown formats but produces more false positives, so the two are combined.
+  ref: "concepts.md#leaked-secret-detection-and-rotation-on-leak"
+
+- id: secrets-management-and-key-lifecycle-035
+  difficulty: intermediate
+  tags: [leak-detection, github, push-protection]
+  question: |
+    What does GitHub's secret scanning "push protection" do?
+  options:
+  - "It encrypts every push automatically"
+  - "It deletes the repository if any secret is found"
+  - "It rotates the secret automatically without developer involvement"
+  - "It blocks a push that contains a recognized provider-token pattern before it enters the repo, and can notify the provider"
+  answer: 3
+  explanation: |
+    Push protection detects known provider token patterns at push time and blocks the push,
+    preventing the secret from entering history. Partner programs also let providers be
+    notified so they can quarantine/rotate leaked tokens.
+  ref: "concepts.md#leaked-secret-detection-and-rotation-on-leak"
+
+- id: secrets-management-and-key-lifecycle-036
+  difficulty: intermediate
+  tags: [rotation-on-leak, assume-compromise]
+  question: |
+    A secret was briefly pushed to a repo, then removed. Access logs show no obvious
+    unauthorized use. What is the correct posture?
+  options:
+  - "Treat it as compromised and rotate/revoke it regardless, because you can't prove it wasn't scraped and attackers act fast"
+  - "No action needed since logs show no misuse"
+  - "Wait 30 days and rotate only if misuse appears"
+  - "Only rotate if the repo was public"
+  answer: 0
+  explanation: |
+    You cannot prove a negative, and automated scrapers copy secrets within minutes. Once a
+    secret hits a repo/log/ticket, treat it as compromised and rotate regardless of whether
+    you can prove it was read. Then assess impact, remove it, and add prevention.
+  ref: "concepts.md#leaked-secret-detection-and-rotation-on-leak"
+
+- id: secrets-management-and-key-lifecycle-037
+  difficulty: intermediate
+  tags: [rotation-on-leak, mitigation, dynamic-secrets]
+  question: |
+    Which practice best MITIGATES the impact of a future secret leak (as opposed to just
+    detecting it)?
+  options:
+  - "Using longer regexes in the scanner"
+  - "Preferring short-lived/dynamic secrets so a leaked credential auto-expires quickly and is largely worthless"
+  - "Storing secrets in more repositories for redundancy"
+  - "Disabling audit logging to reduce noise"
+  answer: 1
+  explanation: |
+    Short-lived/dynamic secrets are the best mitigation: if a credential auto-expires in an
+    hour, a leaked copy has almost no value — the leak is self-limiting. This turns
+    "rotate in a panic" into "it already rotated."
+  ref: "concepts.md#leaked-secret-detection-and-rotation-on-leak"
+
+- id: secrets-management-and-key-lifecycle-038
+  difficulty: intermediate
+  tags: [least-privilege, secret-access]
+  question: |
+    What does least privilege for secret access look like in practice?
+  options:
+  - "Every service can read all secrets to simplify configuration"
+  - "Only the CTO can read any secret"
+  - "Policies bound to a specific workload identity grant read access only to the specific secret paths that service needs (e.g. payments reads secret/payments/* only)"
+  - "All secrets are world-readable but encrypted"
+  answer: 2
+  explanation: |
+    Least privilege means scoping access by identity and path: a service reads only the
+    secrets it needs, never a broad read-all. This limits what a compromised identity can
+    reach. Read should also be separated from manage/rotate/delete permissions.
+  ref: "concepts.md#least-privilege-and-auditing-for-secret-access"
+
+- id: secrets-management-and-key-lifecycle-039
+  difficulty: intermediate
+  tags: [least-privilege, separation-of-duties]
+  question: |
+    Why separate the permission to READ a secret from the permission to WRITE/ROTATE/DELETE
+    it?
+  options:
+  - "It has no security benefit; it's only for billing"
+  - "Because reading is slower than writing"
+  - "Because secrets can only be read by humans"
+  - "So a compromised app identity that can read a value cannot also destroy or overwrite secrets; management is restricted to a small admin/rotation role"
+  answer: 3
+  explanation: |
+    Separating read from manage follows separation of duties: the app needs only to read
+    its value, so a compromised app identity cannot rotate, overwrite, or delete secrets.
+    Management is confined to a small admin/rotation role, and humans use break-glass with
+    approval rather than standing prod read access.
+  ref: "concepts.md#least-privilege-and-auditing-for-secret-access"
+
+- id: secrets-management-and-key-lifecycle-040
+  difficulty: intermediate
+  tags: [audit, forensics, secret-access]
+  question: |
+    After a suspected breach, what does comprehensive audit logging of secret access
+    primarily enable?
+  options:
+  - "Forensics — determining exactly which secrets were read, by which identity, when, and from where, to scope the blast radius"
+  - "Faster encryption of the secrets"
+  - "Automatic key generation"
+  - "Reducing the number of secrets stored"
+  answer: 0
+  explanation: |
+    Audit logs of every read/write/rotation/denied access give forensics (which secrets
+    were accessed and by whom), detection (anomalous access patterns trigger alerts), and
+    compliance evidence. This is essential to scope a breach's blast radius.
+  ref: "concepts.md#least-privilege-and-auditing-for-secret-access"
+
+- id: secrets-management-and-key-lifecycle-041
+  difficulty: intermediate
+  tags: [least-privilege, environment-separation]
+  question: |
+    Why should production secrets use different keys/credentials than dev and staging?
+  options:
+  - "To make dev environments harder to use"
+  - "So a leak or compromise in a lower environment (which is often less protected) cannot be used to access production"
+  - "Because prod secrets must always be longer than dev secrets"
+  - "It is only a naming convention with no security effect"
+  answer: 1
+  explanation: |
+    Environment separation ensures a leak in dev/staging — typically less locked down and
+    more widely accessible — cannot touch production. Distinct keys/credentials per
+    environment (and per purpose) contain the blast radius of any single compromise.
+  ref: "concepts.md#least-privilege-and-auditing-for-secret-access"
+
+- id: secrets-management-and-key-lifecycle-042
+  difficulty: advanced
+  tags: [audit, dynamic-secrets, attribution]
+  question: |
+    Why do dynamic, per-instance credentials produce a more useful audit trail than a single
+    shared database credential?
+  options:
+  - "They are logged in a different color"
+  - "Shared credentials cannot be logged at all"
+  - "Each credential maps to one workload instance, so database activity can be attributed to a specific instance rather than an anonymous shared account"
+  - "Dynamic credentials disable logging to improve performance"
+  answer: 2
+  explanation: |
+    With a shared credential, every instance looks identical in the DB logs. Dynamic
+    per-instance credentials mean each unique username maps to one workload instance, so
+    suspicious activity can be traced to the specific instance — a major forensics advantage.
+  ref: "concepts.md#least-privilege-and-auditing-for-secret-access"
+
+- id: secrets-management-and-key-lifecycle-043
+  difficulty: beginner
+  tags: [what-is-a-secret, owasp]
+  question: |
+    Which OWASP Top 10 2021 category most directly covers weaknesses in secrets and key
+    management (weak/exposed keys, poor cryptographic practices)?
+  options:
+  - "A01:2021 – Broken Access Control"
+  - "A07:2021 – Identification and Authentication Failures"
+  - "A09:2021 – Security Logging and Monitoring Failures"
+  - "A02:2021 – Cryptographic Failures"
+  answer: 3
+  explanation: |
+    A02:2021 – Cryptographic Failures (formerly "Sensitive Data Exposure") covers weak or
+    exposed keys, poor key management, and cryptographic misuse — the home category for
+    secrets/key-management failures.
+  ref: "concepts.md#what-counts-as-a-secret"
+
+- id: secrets-management-and-key-lifecycle-044
+  difficulty: advanced
+  tags: [envelope-encryption, hierarchy, kek]
+  question: |
+    In a multi-level key hierarchy (root/master key → KEKs → DEKs), why keep the root key in
+    an HSM and use it rarely?
+  options:
+  - "The root is the highest-value key; keeping it in an HSM (never exportable) and using it only to wrap KEKs minimizes its exposure and blast radius"
+  - "HSMs are cheaper than software for bulk encryption"
+  - "The root key must encrypt all data directly for performance"
+  - "HSMs can only store one key, so it must be the root"
+  answer: 0
+  explanation: |
+    The root/master key is the crown jewel — its compromise cascades to everything below.
+    Keeping it in a non-exportable HSM and using it narrowly (only to wrap KEKs, rarely)
+    minimizes exposure. DEKs are cheap and disposable; the root is protected and seldom used.
+  ref: "concepts.md#encryption-key-hierarchy-and-envelope-encryption"
+
+- id: secrets-management-and-key-lifecycle-045
+  difficulty: intermediate
+  tags: [key-lifecycle, storage, backup]
+  question: |
+    Why is backing up keys that protect long-lived data an important part of key storage?
+  options:
+  - "Because keys expire faster than data"
+  - "Losing the only copy of a key means permanently losing access to all data it encrypts"
+  - "Backups make keys shorter and faster"
+  - "Backups are required to make keys public"
+  answer: 1
+  explanation: |
+    For keys protecting long-lived data, availability matters: if the sole copy of a key is
+    lost, the data it encrypted becomes permanently unrecoverable. Such keys need secure,
+    access-controlled backups (still wrapped by a KEK), balanced against the risk of extra
+    copies.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-046
+  difficulty: advanced
+  tags: [key-lifecycle, distribution]
+  question: |
+    Which is the SAFEST way to get a symmetric key to a party that needs it?
+  options:
+  - "Email the key as a password-protected ZIP"
+  - "Post it in a private Slack channel"
+  - "Use key wrapping, key agreement (e.g. ECDH), or a KMS that never releases raw key material"
+  - "Print it and hand-type it into each server"
+  answer: 2
+  explanation: |
+    Secure key establishment uses key wrapping (encrypt the key under a KEK), key agreement
+    like ECDH, or a KMS that performs operations without ever releasing the raw key.
+    Emailing or chatting a key exposes it in transit and at rest in those systems.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-047
+  difficulty: beginner
+  tags: [key-lifecycle, destruction, zeroize]
+  question: |
+    What does "destruction" (zeroization) of a key mean in the key lifecycle?
+  options:
+  - "Marking the key as inactive but keeping the bytes on disk"
+  - "Publishing the key so it is no longer secret"
+  - "Renaming the key file"
+  - "Securely wiping all copies of the key material so it can never be recovered, once no data still needs it"
+  answer: 3
+  explanation: |
+    Destruction means zeroizing (securely wiping) every copy of the key so it is
+    unrecoverable. It's done only once nothing the key protected is still needed —
+    destroying prematurely would orphan data that still requires the key to decrypt/verify.
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-048
+  difficulty: advanced
+  tags: [anti-patterns, ci-cd, logs]
+  question: |
+    A CI pipeline echoes all environment variables to the build log for debugging, and the
+    logs are readable by anyone with repo access. What is the correct fix?
+  options:
+  - "Stop echoing secrets/environment to logs, mask known secret values in the log pipeline, and inject secrets via the CI's masked-secret mechanism"
+  - "Encrypt the build logs but keep echoing the secrets"
+  - "Move the secrets into the Dockerfile instead"
+  - "Make the repo private so the logs are safe"
+  answer: 0
+  explanation: |
+    Secrets must never be printed to CI logs. The fix is to stop dumping the environment,
+    use the CI's masked-secret injection, and add log redaction for known patterns. Encrypt-
+    but-still-echo, moving to Dockerfiles, or relying on repo privacy all still expose the
+    secret to anyone with access.
+  ref: "concepts.md#secret-sprawl-anti-patterns"
+
+- id: secrets-management-and-key-lifecycle-049
+  difficulty: intermediate
+  tags: [key-lifecycle, key-states, suspended]
+  question: |
+    In the NIST key-state model, which state represents a key temporarily taken out of use
+    (e.g., pending an investigation) that may later return to active?
+  options:
+  - "Destroyed"
+  - "Suspended"
+  - "Pre-activation"
+  - "Compromised"
+  answer: 1
+  explanation: |
+    The suspended state is a temporary hold — the key is out of use (for example during an
+    investigation) but may be reinstated to active. This differs from compromised (known/
+    suspected exposure) and destroyed (permanent zeroization).
+  ref: "concepts.md#key-lifecycle-and-nist-sp-800-57"
+
+- id: secrets-management-and-key-lifecycle-050
+  difficulty: advanced
+  tags: [envelope-encryption, kms-rotation, scenario]
+  question: |
+    AWS KMS "automatic key rotation" keeps the same key ID while retaining old key versions
+    internally. For a system using envelope encryption, what is the practical effect?
+  options:
+  - "All existing ciphertext must be re-encrypted immediately when rotation occurs"
+  - "The old wrapped DEKs become permanently unreadable"
+  - "New data is protected with the new key version while old wrapped DEKs still unwrap with the retained old version — no visible re-wrapping needed"
+  - "The key ID changes, so all references in your code must be updated"
+  answer: 2
+  explanation: |
+    Because the key ID is stable and KMS retains prior versions, new wrap operations use the
+    new version while previously wrapped DEKs still unwrap using the retained old version.
+    There's no forced re-encryption of data or even visible re-wrapping — rotation is
+    transparent to callers.
+  ref: "concepts.md#key-rotation-without-re-encrypting-all-data"
+
+- id: secrets-management-and-key-lifecycle-051
+  difficulty: beginner
+  tags: [secret-manager, kms, comparison]
+  question: |
+    Your app needs to store a third-party API key and retrieve its value at runtime. Which
+    service is the natural fit?
+  options:
+  - "A KMS, because it returns raw key material for any stored value"
+  - "A public S3 bucket with a long random name"
+  - "An environment variable committed to the repo"
+  - "A secret manager, because it stores and returns arbitrary secret values under access control and auditing"
+  answer: 3
+  explanation: |
+    A secret manager stores and returns arbitrary secret values (like an API key) with
+    access policies and audit logging. A KMS guards key material and does crypto operations;
+    it isn't designed to hand back arbitrary secret values as its primary function.
+  ref: "concepts.md#secret-managers-and-dynamic-secrets"
+
+- id: secrets-management-and-key-lifecycle-052
+  difficulty: intermediate
+  tags: [anti-patterns, secret-sprawl]
+  question: |
+    What is "secret sprawl"?
+  options:
+  - "The proliferation of the same or many secrets across code, config, images, tickets, chat, and CI logs, each copy an independent leak surface"
+  - "Using secrets that are too long"
+  - "A secret manager running out of storage"
+  - "Rotating secrets too frequently"
+  answer: 0
+  explanation: |
+    Secret sprawl is the scattering and duplication of secrets across many locations. Every
+    copy is an independent place the secret can leak from, which is why centralizing secrets
+    in a manager (and preferring short-lived dynamic secrets) reduces the attack surface.
+  ref: "concepts.md#secret-sprawl-anti-patterns"

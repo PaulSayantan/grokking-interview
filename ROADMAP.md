@@ -89,7 +89,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 0 |
-| [Security (App & Web)](topics/security/README.md) | 16 | 0 |
+| [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (Pass 1, 813 MCQs) |
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
 | [Observability](topics/observability/README.md) | 17 | 0 |
 | [Software Testing](topics/testing/README.md) | 16 | 0 |
@@ -98,6 +98,19 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 21 (2026-07-19):** Security (Application & Web) **Pass 1** — authored all 16
+  topics, **813 MCQs** (173 B / 428 I / 212 adv; 46-55/topic). Framework-agnostic,
+  OWASP/NIST/RFC-grounded (OWASP Top 10 2021, ASVS, NIST SP 800-63B/57/207, OAuth 6749/
+  PKCE 7636, JWT 7519/JWS 7515, TOTP 6238/HOTP 4226, Cookie 6265, Argon2id RFC 9106).
+  Built via `.claude/workflows/scripts/security-authoring.js` (author → verify, 32 agents,
+  0 errors). Boundary reconciliation: OAuth/OIDC/JWT taught at protocol/threat level
+  (rest-api-design owns API-contract view), crypto primitives only (networking owns TLS),
+  web OWASP Top 10 references but doesn't duplicate the API Top 10. Verify stage fact-checked
+  algorithm params + defense correctness. Post-check caught answer clustering in 2 topics
+  (jwt 43%, rate-limiting 46%) that verify missed — rebalanced deterministically to ~25%
+  (correctness preserved). Validator clean (16 files, 813 Qs); promoted to AUTHORED_DOMAINS.
+  Content-only commit (concurrent web-design work left untouched). Pass 2 (deepen to 70-90)
+  still TODO.
 - **Session 20 (2026-07-19):** Networking & Protocols **Pass 2 (deepen)** — took all 16
   topics from 844 → **1,372 MCQs** (220 B / 435 I / 414 adv / 303 expert; every topic
   76-96, strong adv+expert block 33-53/topic). Built via `.claude/workflows/scripts/
