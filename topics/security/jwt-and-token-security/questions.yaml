@@ -168,10 +168,10 @@ questions:
     resource servers must verify tokens issued by one authorization server?
   options:
   - "RS256 tokens are smaller than HS256 tokens"
-  - "With asymmetric signing, verifiers hold only the public key and cannot mint tokens, so a compromised verifier can't forge"
   - "HS256 cannot express an expiration claim"
   - "RS256 encrypts the payload while HS256 does not"
-  answer: 1
+  - "With asymmetric signing, verifiers hold only the public key and cannot mint tokens, so a compromised verifier can't forge"
+  answer: 3
   explanation: |
     Asymmetric signing separates signing (private key, held only by the issuer)
     from verifying (public key, freely distributable). A compromised resource
@@ -812,3 +812,529 @@ questions:
     issuer's, a just-minted token can look not-yet-valid. Allow a small clock-skew
     leeway and synchronize clocks.
   ref: "concepts.md#jwt-claims-iss-sub-aud-exp-nbf-iat-jti"
+
+- id: jwt-and-token-security-047
+  difficulty: advanced
+  tags: [jwk-injection, header, attack]
+  question: |
+    A token arrives with header {"alg":"RS256","typ":"JWT","jwk":{"kty":"RSA",
+    "n":"...","e":"AQAB"}} and the verifier accepts it. Why is this a total
+    forgery, and what is the fix?
+  options:
+  - "The jwk header only affects encryption, so it is harmless here"
+  - "The verifier trusts the public key embedded in the token itself, so an attacker self-signs with their own keypair; resolve keys only from trusted server-side config/JWKS by kid, never from the token"
+  - "The token is fine as long as e is AQAB (65537)"
+  - "The risk is only an SSRF because the server fetches the key"
+  answer: 1
+  explanation: |
+    RFC 7515 §4.1.3's jwk header carries an inline public key. A verifier that
+    trusts it will validate any signature the attacker makes with their matching
+    private key. Unlike jku, no fetch/SSRF is involved — it is self-referential
+    trust. Fix: resolve verification keys only from trusted config, never from the
+    token header.
+  ref: "concepts.md#attack-embedded-key-header-injection-jwk-and-x5c"
+
+- id: jwt-and-token-security-048
+  difficulty: advanced
+  tags: [x5c, jwk, jku, header, distinction]
+  question: |
+    Which statement best distinguishes the jwk/x5c headers from the jku/x5u
+    headers as attack surfaces?
+  options:
+  - "jwk/x5c embed the key material directly in the token, while jku/x5u point at a URL the verifier fetches; both share the root cause of trusting token-supplied keys"
+  - "jwk/x5c are for encryption only; jku/x5u are for signing only"
+  - "jku/x5u are safe because they use HTTPS, whereas jwk/x5c are always malicious"
+  - "Only jku can be exploited; jwk and x5c are ignored by all libraries"
+  answer: 0
+  explanation: |
+    jwk (inline JWK) and x5c (inline X.509 chain) put the key in the header; jku
+    (JWK Set URL) and x5u (X.509 URL) reference a fetchable URL (also an SSRF
+    primitive). All four are the same flaw: the token dictating its own
+    verification key. The universal fix is to resolve keys from trusted config.
+  ref: "concepts.md#attack-embedded-key-header-injection-jwk-and-x5c"
+
+- id: jwt-and-token-security-049
+  difficulty: expert
+  tags: [x5c, x509, cert-chain, defense]
+  question: |
+    A design genuinely requires the x5c (X.509 certificate chain) header. Which
+    handling is correct?
+  options:
+  - "Trust the embedded leaf certificate as long as it parses without error"
+  - "Accept any self-signed chain, since the signature over the token still verifies against the leaf"
+  - "Validate the full chain to a pinned trust anchor and confirm the leaf's subject/thumbprint matches the expected issuer; never accept a self-signed embedded chain"
+  - "Skip chain validation but require the alg to be ES256"
+  answer: 2
+  explanation: |
+    An attacker can embed a self-signed chain in x5c; verifying the token's
+    signature against that leaf always succeeds. Safe handling validates the chain
+    to a pinned CA and checks the leaf identity. Complex ASN.1/X.509 parsing has
+    also caused forgery CVEs (e.g. CVE-2017-2800, CVE-2018-2633).
+  ref: "concepts.md#attack-embedded-key-header-injection-jwk-and-x5c"
+
+- id: jwt-and-token-security-050
+  difficulty: expert
+  tags: [crit, header, rfc-7515, validation]
+  question: |
+    Per RFC 7515 §4.1.11, what must a verifier do when a JWS carries a crit
+    header listing an extension parameter the verifier does not understand?
+  options:
+  - "Ignore the crit header and process the token normally"
+  - "Reject the token — crit lists parameters the recipient MUST understand and process, so an unrecognized one requires failure"
+  - "Strip the unknown parameter and continue"
+  - "Downgrade the token to alg:none and re-verify"
+  answer: 1
+  explanation: |
+    crit enumerates critical header extensions the recipient is required to
+    understand. If any listed extension is not implemented, the spec mandates
+    rejecting the token. Libraries that silently ignore crit violate RFC 7515 and
+    can be tricked into skipping directives.
+  ref: "concepts.md#header-abuse-cty-crit-and-content-type-confusion"
+
+- id: jwt-and-token-security-051
+  difficulty: expert
+  tags: [cty, content-type, chained-injection, attack]
+  question: |
+    After an attacker has already achieved a signature bypass, how can the cty
+    (content type) header escalate the impact?
+  options:
+  - "It forces the token to expire, denying service"
+  - "It re-encrypts the payload so defenders cannot inspect it"
+  - "It changes the signing algorithm to none automatically"
+  - "Setting cty to e.g. application/x-java-serialized-object or text/xml can steer a consumer that dispatches on cty into insecure deserialization or XXE on the attacker-controlled payload"
+  answer: 3
+  explanation: |
+    cty declares the payload's content type. A consumer that hands the payload to
+    a content-type-driven parser/deserializer can be pivoted into XXE or insecure
+    deserialization once the signature no longer protects the content — turning the
+    JWT into a second-stage injection vector.
+  ref: "concepts.md#header-abuse-cty-crit-and-content-type-confusion"
+
+- id: jwt-and-token-security-052
+  difficulty: expert
+  tags: [key-confusion, sig2n, rsa, attack]
+  question: |
+    A service verifies RS256 with a hardcoded RSA public key that is NOT published
+    anywhere. A candidate claims algorithm-confusion forgery is therefore
+    impossible. Why are they wrong?
+  options:
+  - "The private key is always recoverable from a single token"
+  - "Given two tokens signed by the same key, tools like sig2n/rsa_sign2n recover candidate RSA moduli n from the signatures; the attacker then tries each as an HMAC secret for a forged HS256 token"
+  - "RS256 tokens leak the private key in the kid header"
+  - "The server will always fall back to alg:none when the key is hidden"
+  answer: 1
+  explanation: |
+    Two signatures over known data let sig2n (docker run portswigger/sig2n)
+    derive candidate n values. Each candidate is tried as the HMAC key for an
+    HS256 forgery. Secrecy of a public key is not a control — the fix is binding
+    the algorithm to the key type so an RSA key can never be an HMAC secret.
+  ref: "concepts.md#algorithm-confusion-when-the-public-key-is-not-published"
+
+- id: jwt-and-token-security-053
+  difficulty: expert
+  tags: [key-confusion, byte-exactness, pem, attack]
+  question: |
+    In an HS/RS confusion forgery, the recovered public key is correct but the
+    forged token still fails to verify. What byte-level detail most likely
+    explains this?
+  options:
+  - "The HMAC secret must byte-for-byte match the server's exact key serialization — including PEM header/footer, trailing newline, and X.509 (SPKI) vs PKCS#1 encoding"
+  - "The token's exp must be omitted for HMAC to work"
+  - "The kid header must be removed before signing"
+  - "HS256 forgeries only work on weekends due to clock skew"
+  answer: 0
+  explanation: |
+    The server keys HMAC on the exact bytes of its stored public key. If the
+    attacker's secret differs by a trailing newline or uses PKCS#1 where the server
+    uses X.509/SPKI, the HMAC won't match. Tools emit both encodings precisely
+    because the attacker doesn't know which the server holds.
+  ref: "concepts.md#algorithm-confusion-when-the-public-key-is-not-published"
+
+- id: jwt-and-token-security-054
+  difficulty: advanced
+  tags: [sidejacking, fingerprint, defense, owasp]
+  question: |
+    OWASP's user-context fingerprint defense against token sidejacking stores what
+    where?
+  options:
+  - "The raw random fingerprint in the JWT payload and its hash in a cookie"
+  - "The raw random fingerprint in a hardened __Secure-Fgp; HttpOnly; Secure; SameSite=Strict cookie, and only its SHA-256 hash as a claim in the JWT"
+  - "The user's password hash in both the cookie and the token"
+  - "A copy of the access token in localStorage for redundancy"
+  answer: 1
+  explanation: |
+    The raw high-entropy value goes in a hardened cookie; the token stores only the
+    SHA-256 hash. The verifier re-hashes the cookie and compares. A stolen token
+    alone is useless without the cookie, and storing the hash means an XSS reading
+    the token cannot reconstruct the cookie value.
+  ref: "concepts.md#token-sidejacking-and-the-user-context-fingerprint-defense"
+
+- id: jwt-and-token-security-055
+  difficulty: expert
+  tags: [sidejacking, fingerprint, hash, reasoning]
+  question: |
+    Why does the fingerprint defense store the SHA-256 HASH of the fingerprint in
+    the token rather than the raw value?
+  options:
+  - "Hashing compresses the token to save bandwidth"
+  - "So the token verifies faster"
+  - "If the token itself is stolen (e.g. via XSS reading it), the attacker still cannot derive the raw cookie value needed to pass the check; the HttpOnly cookie is also unreadable to JS"
+  - "Because NumericDate requires hashed values"
+  answer: 2
+  explanation: |
+    Storing only the hash means possession of the token does not reveal the raw
+    fingerprint. Combined with the HttpOnly cookie (unreadable by JS), an attacker
+    must steal BOTH the token and the raw cookie to replay — defeating pure
+    token-theft via XSS.
+  ref: "concepts.md#token-sidejacking-and-the-user-context-fingerprint-defense"
+
+- id: jwt-and-token-security-056
+  difficulty: expert
+  tags: [rfc-8725, bcp, algorithm-verification]
+  question: |
+    RFC 8725 §3.1 "Perform Algorithm Verification" prescribes which behavior?
+  options:
+  - "Read the alg from the token header and trust it, since the issuer set it"
+  - "Determine the acceptable algorithm(s) from an out-of-band allowlist and reject any token whose alg is not in it — do not let the token choose"
+  - "Accept any algorithm as long as the signature verifies"
+  - "Prefer alg:none for internal services to reduce CPU"
+  answer: 1
+  explanation: |
+    BCP §3.1 requires the verifier to decide acceptable algorithms independently of
+    the token and reject mismatches. This is the standards-level statement of the
+    "pin the algorithm" defense against alg:none and key-confusion attacks.
+  ref: "concepts.md#rfc-8725-jwt-best-current-practices"
+
+- id: jwt-and-token-security-057
+  difficulty: expert
+  tags: [rfc-8725, cross-jwt, substitution, threats]
+  question: |
+    Which RFC 8725 threat describes one kind of JWT being accepted where a
+    different kind was intended (e.g. an ID token used as an access token)?
+  options:
+  - "§2.8 Cross-JWT Confusion"
+  - "§2.3 Incorrect Composition of Encryption and Signature"
+  - "§2.6 Weak Symmetric Keys"
+  - "§2.1 Weak Signatures and Insufficient Signature Validation"
+  answer: 0
+  explanation: |
+    RFC 8725 §2.8 is Cross-JWT Confusion. The mitigations are explicit typing
+    (§3.11) and mutually exclusive validation rules (§3.12), realized concretely by
+    RFC 9068's typ: at+jwt requirement for access tokens.
+  ref: "concepts.md#rfc-8725-jwt-best-current-practices"
+
+- id: jwt-and-token-security-058
+  difficulty: expert
+  tags: [cross-jwt, at-jwt, rfc-9068, explicit-typing]
+  question: |
+    A resource server is found to accept OIDC ID tokens as access tokens. Which
+    standards-based fix directly addresses this?
+  options:
+  - "Shorten the ID token's exp so it can't be reused"
+  - "Enforce RFC 9068 explicit typing: require the header typ: at+jwt and a resource-specific aud, rejecting tokens that are not access tokens"
+  - "Encrypt all ID tokens as JWEs"
+  - "Move the access token from the Authorization header to a cookie"
+  answer: 1
+  explanation: |
+    RFC 9068 profiles OAuth 2.0 access tokens with typ: at+jwt and per-resource
+    aud, and the verifier must check typ. This implements BCP §3.11/§3.12 so an ID
+    token (different typ/aud) is rejected by the access-token verifier. RFC 9068
+    also prohibits none and mandates RS256 as MTI.
+  ref: "concepts.md#cross-jwt-confusion-and-explicit-typing-atjwt"
+
+- id: jwt-and-token-security-059
+  difficulty: advanced
+  tags: [clock-skew, leeway, exp, nbf]
+  question: |
+    Choosing the leeway for exp/nbf validation is a trade-off. Which statement
+    correctly captures both sides?
+  options:
+  - "More leeway is always safer because it never rejects valid tokens"
+  - "Leeway has no security impact; set it as high as convenient"
+  - "Too little leeway intermittently rejects valid tokens across desynced clocks; too much leeway keeps expired tokens acceptable longer, widening the replay window"
+  - "Leeway only matters for HS256, not asymmetric algorithms"
+  answer: 2
+  explanation: |
+    exp/nbf compare against the verifier's clock, so skew matters. A small leeway
+    (commonly <=60s) plus NTP balances rejecting legitimate tokens against
+    extending the window in which an expired token is still honored.
+  ref: "concepts.md#clock-skew-and-leeway-for-exp-nbf-and-iat"
+
+- id: jwt-and-token-security-060
+  difficulty: expert
+  tags: [cve-2022-21449, ecdsa, psychic-signatures]
+  question: |
+    On Java 17.0.2, an ES256 JWT with an all-zero signature verifies against any
+    key. Name the vulnerability and its root cause.
+  options:
+  - "Heartbleed — a buffer over-read in TLS"
+  - "CVE-2022-21449 'Psychic Signatures' — the JVM failed to check that ECDSA r and s satisfy 1 <= r,s < n (and reject the point at infinity), so (r=0,s=0) validated for any key"
+  - "CVE-2021-44228 'Log4Shell' — JNDI lookup in log messages"
+  - "POODLE — SSLv3 padding oracle"
+  answer: 1
+  explanation: |
+    CVE-2022-21449 affected Java 15–18 before the April 2022 CPU. ECDSA requires
+    1 <= r,s < n; skipping that check let an all-zero (r,s) verify against any
+    public key/message, forging any ES256/384/512 JWT (raw P1363 format). Fixed in
+    15.0.7/16.0.3/17.0.3/18.0.1.
+  ref: "concepts.md#ecdsa-pitfalls-psychic-signatures-and-malleable-signatures"
+
+- id: jwt-and-token-security-061
+  difficulty: expert
+  tags: [ecdsa, malleability, denylist, jti]
+  question: |
+    Your logout adds SHA-256(rawToken) to a Redis denylist. A revoked ES256 token
+    keeps working. What is happening and how do you fix the denylist?
+  options:
+  - "ECDSA signatures are malleable: (r, -s mod n) is also valid, so the attacker produces a byte-different token with a different SHA-256 that isn't on the denylist. Key the denylist on the signed (jti, iss) pair instead"
+  - "The token's exp is refreshed automatically; shorten the TTL"
+  - "Redis silently dropped the entry; use a SQL database"
+  - "The signature is cached; disable verification caching"
+  answer: 0
+  explanation: |
+    Both (r,s) and (r,-s mod n) verify but serialize to different bytes, so a raw
+    token hash denylist is bypassable (non-strict base64url parsing causes the same
+    issue). Key revocation on stable signed fields — (jti, iss); the pair because
+    jti uniqueness is only per-issuer.
+  ref: "concepts.md#ecdsa-pitfalls-psychic-signatures-and-malleable-signatures"
+
+- id: jwt-and-token-security-062
+  difficulty: expert
+  tags: [denylist, jti, iss, keying]
+  question: |
+    Why key a revocation denylist on the pair (jti, iss) rather than jti alone?
+  options:
+  - "jti is encrypted, so iss is needed to decrypt it"
+  - "jti uniqueness is only guaranteed per issuer, so two different issuers could mint colliding jti values; the (jti, iss) pair disambiguates"
+  - "iss is required to compute the signature"
+  - "A single jti cannot fit in a Redis key"
+  answer: 1
+  explanation: |
+    RFC 7519 only guarantees jti uniqueness within a given issuer. Two issuers
+    could reuse the same jti string, so a denylist keyed on jti alone could revoke
+    the wrong token or miss one. Both fields are inside the signed payload, so the
+    pair is tamper-evident.
+  ref: "concepts.md#ecdsa-pitfalls-psychic-signatures-and-malleable-signatures"
+
+- id: jwt-and-token-security-063
+  difficulty: expert
+  tags: [dos, jwe, decompression-bomb, cve-2024-33664]
+  question: |
+    A ~200-byte JWE causes a python-jose verifier to allocate gigabytes of memory.
+    What is the mechanism and the fix?
+  options:
+  - "A huge exp value; clamp exp to a sane range"
+  - "A JWE zip:\"DEF\" decompression bomb (CVE-2024-33664): tiny ciphertext inflates to enormous plaintext on decryption; cap decompression output size (RFC 8725 §3.6 avoid compressing encryption inputs)"
+  - "An oversized kid; limit kid length"
+  - "A base64url padding attack; require strict padding"
+  answer: 1
+  explanation: |
+    JWE's zip:"DEF" DEFLATE-compresses plaintext before encryption. A malicious
+    highly-compressible payload expands massively on decompression, exhausting
+    memory. Defense: disable zip where unneeded and hard-cap decompression output.
+    RFC 8725 §3.6 advises against compressing encryption inputs.
+  ref: "concepts.md#jwt-denial-of-service-decompression-bombs-and-resource-exhaustion"
+
+- id: jwt-and-token-security-064
+  difficulty: advanced
+  tags: [dos, resource-exhaustion, key-size, nesting]
+  question: |
+    Besides decompression bombs, which set of limits best mitigates JWT/JOSE
+    resource-exhaustion DoS?
+  options:
+  - "Only enforcing HTTPS on the JWKS endpoint"
+  - "Bounding accepted key sizes, limiting JWE nesting depth, and capping token and JWKS response sizes before performing crypto"
+  - "Increasing the leeway on exp so tokens don't need re-verification"
+  - "Switching all tokens to alg:none to skip signature CPU cost"
+  answer: 1
+  explanation: |
+    Huge RSA moduli make verification arbitrarily costly, deeply nested JWEs
+    multiply parse cost, and oversized JWKS responses exhaust memory. Enforce
+    parse-time size/depth/key limits before doing crypto work.
+  ref: "concepts.md#jwt-denial-of-service-decompression-bombs-and-resource-exhaustion"
+
+- id: jwt-and-token-security-065
+  difficulty: advanced
+  tags: [algorithm-selection, rs256, eddsa, owasp]
+  question: |
+    For a NEW asymmetric JWT design, which signing algorithm choice best reflects
+    current OWASP guidance?
+  options:
+  - "RS256 (RSASSA-PKCS1-v1_5), which OWASP recommends as the default"
+  - "alg:none for internal services"
+  - "EdDSA (Ed25519), ES256, or PS256 — OWASP now marks RS256 (PKCS1-v1_5) as not recommended for new designs"
+  - "HS256 shared across all services for simplicity"
+  answer: 2
+  explanation: |
+    OWASP now flags RS256 (RSASSA-PKCS1-v1_5) as not recommended and points to
+    EdDSA (Ed25519), ES256, or PS256 (RSA-PSS). RFC 9068 still lists RS256 as
+    mandatory-to-implement for interop, but stronger algorithms are preferred.
+  ref: "concepts.md#algorithm-selection-and-jwe-hardening"
+
+- id: jwt-and-token-security-066
+  difficulty: expert
+  tags: [jwe, nested-jwt, sign-then-encrypt, ordering]
+  question: |
+    For a nested JWT that must be both authentic and confidential, why is
+    sign-then-encrypt (rather than encrypt-then-sign) the correct ordering?
+  options:
+  - "Encrypt-then-sign is faster, so it is always chosen"
+  - "Sign-then-encrypt hides both header and payload; with encrypt-then-sign an attacker can strip or replace the outer signature since it is over ciphertext they can reproduce, and the signer identity is exposed"
+  - "Both orderings are cryptographically identical"
+  - "Encrypt-then-sign is required by RFC 7519 for all JWTs"
+  answer: 1
+  explanation: |
+    RFC 8725 §2.3 warns about incorrect composition. Signing first then encrypting
+    binds the signature under confidentiality; encrypt-then-sign leaves an outer
+    signature over ciphertext that an attacker can strip/replace and also exposes
+    who signed. Sign-then-encrypt is the recommended nested-JWT ordering.
+  ref: "concepts.md#algorithm-selection-and-jwe-hardening"
+
+- id: jwt-and-token-security-067
+  difficulty: expert
+  tags: [jwe, aead, padding-oracle, invalid-curve]
+  question: |
+    Which JWE choice most directly defends against padding-oracle attacks on the
+    ciphertext?
+  options:
+  - "Use an AEAD content-encryption algorithm (e.g. A256GCM, or AES-CBC-HMAC with its integrated MAC) rather than a non-authenticated mode"
+  - "Compress the plaintext with zip:\"DEF\" before encrypting"
+  - "Use RSA-1_5 key wrapping for compatibility"
+  - "Disable the authentication tag to reduce token size"
+  answer: 0
+  explanation: |
+    Padding-oracle attacks target non-authenticated encryption. AEAD modes
+    (A256GCM, or AES-CBC-HMAC which authenticates the ciphertext) reject tampered
+    ciphertext before decryption is observable. Also validate ECDH points on-curve
+    to avoid invalid-curve key recovery.
+  ref: "concepts.md#algorithm-selection-and-jwe-hardening"
+
+- id: jwt-and-token-security-068
+  difficulty: advanced
+  tags: [hmac, key-size, entropy, rfc-2104]
+  question: |
+    Which HMAC secret most precisely meets current best practice for HS512?
+  options:
+  - "A memorable passphrase of at least 12 characters"
+  - "A 16-byte value derived from the application name"
+  - "A CSPRNG-generated random secret at least as long as the hash output (512 bits for HS512) with sufficient entropy, never a password"
+  - "The RSA public key, reused as the HMAC secret"
+  answer: 2
+  explanation: |
+    The secret must be at least the hash output size (512 bits for HS512), CSPRNG
+    generated with real entropy, and never a human password (RFC 2104 §3, RFC 7518
+    §3.2). Reusing a public key as a secret is the key-confusion antipattern.
+  ref: "concepts.md#algorithm-selection-and-jwe-hardening"
+
+- id: jwt-and-token-security-069
+  difficulty: advanced
+  tags: [when-not-jwt, opaque-session, revocation, architecture]
+  question: |
+    A single monolithic app creates and consumes its own sessions and needs
+    instant logout. Which choice is the better architectural fit and why?
+  options:
+  - "A stateless JWT, because JWTs are always the modern default"
+  - "An opaque random session id in a HttpOnly; Secure; SameSite cookie backed by server-side state — it revokes instantly, stays small on the wire, and avoids stateless-verification crypto that JWTs don't need here"
+  - "A JWT with alg:none to avoid key management"
+  - "A JWT with a one-year exp to reduce re-auth friction"
+  answer: 1
+  explanation: |
+    JWTs pay off for stateless cross-service verification. With one trust boundary
+    and an instant-revocation requirement, an opaque server session is simpler and
+    revokes immediately (delete it server-side), whereas a JWT needs a bolt-on
+    denylist that reintroduces state.
+  ref: "concepts.md#when-not-to-use-a-jwt"
+
+- id: jwt-and-token-security-070
+  difficulty: expert
+  tags: [revocation, status-list, relying-parties, modern]
+  question: |
+    You must provide near-instant revocation across a large fleet of independent
+    relying parties without each maintaining its own denylist. Which modern
+    approach fits best?
+  options:
+  - "Give every token a 10-year exp and rely on TLS"
+  - "Have each relying party call the issuer's introspection endpoint on every single request synchronously, accepting the added latency and coupling"
+  - "An issuer-published Token Status List (IETF draft-ietf-oauth-status-list): a compact, cacheable bitmap the issuer maintains and relying parties consult to check whether a token's index is revoked"
+  - "Embed the full revoked-token set inside every new access token"
+  answer: 2
+  explanation: |
+    The IETF Token Status List draft (used in SD-JWT VCs) lets the issuer publish a
+    compact, cacheable status bitmap indexed per token, so many relying parties get
+    near-real-time revocation without each running a denylist or introspecting
+    every request. Per-request synchronous introspection works but couples every
+    RP to the issuer with per-call latency.
+  ref: "concepts.md#the-revocation-problem-short-ttl-denylists-jti"
+
+- id: jwt-and-token-security-071
+  difficulty: intermediate
+  tags: [iat, freshness, max-age]
+  question: |
+    Beyond ordering events, what security use does the iat (issued-at) claim
+    enable?
+  options:
+  - "It encrypts the payload after issuance"
+  - "It replaces the signature for internal services"
+  - "It enforces a maximum token age (freshness) — e.g. requiring a recently issued token for sensitive operations — and anchors a per-user min_iat revocation check"
+  - "It guarantees the token cannot be replayed"
+  answer: 2
+  explanation: |
+    iat records when the token was minted. Verifiers can require step-up freshness
+    (reject tokens older than N minutes for sensitive actions) and compare iat
+    against a per-user min_iat to revoke all tokens issued before a logout/password
+    change. It does not by itself prevent replay.
+  ref: "concepts.md#clock-skew-and-leeway-for-exp-nbf-and-iat"
+
+- id: jwt-and-token-security-072
+  difficulty: expert
+  tags: [alg-none, rfc-7515, allowlist, nuance]
+  question: |
+    Which is the CORRECT fix for the alg:none vulnerability?
+  options:
+  - "Blocklist the exact string 'none' in the header"
+  - "Require that the signature segment always be non-empty"
+  - "Pin a positive algorithm allowlist bound to the key material, rejecting any alg not on it (including all casings of none)"
+  - "Reject only tokens whose header is lowercase"
+  answer: 2
+  explanation: |
+    A string blocklist is defeated by case variants (None, nOnE). Merely requiring
+    a non-empty signature can be gamed and doesn't address key-confusion. The robust
+    fix is a positive allowlist tied to the key type, so the verifier — not the
+    token — decides the algorithm.
+  ref: "concepts.md#algorithm-selection-and-jwe-hardening"
+
+- id: jwt-and-token-security-073
+  difficulty: advanced
+  tags: [rfc-8725, do-not-trust-claims, authorization]
+  question: |
+    RFC 8725 §3.10 "Do Not Trust Received Claims" is best summarized as which
+    verifier behavior?
+  options:
+  - "A claim's mere presence proves the assertion, so accept it as-is"
+  - "Validate each claim against expected values and current authorization state — a signed claim proves the issuer said it, not that it is currently authorized or intended for this action"
+  - "Ignore all claims and rely only on the signature"
+  - "Trust claims only if the token uses ES256"
+  answer: 1
+  explanation: |
+    A valid signature proves the issuer emitted the claims, not that they satisfy
+    this service's authorization rules. §3.10 says validate claims (iss/aud/scope/
+    roles) against expectations and live state rather than trusting their presence.
+  ref: "concepts.md#rfc-8725-jwt-best-current-practices"
+
+- id: jwt-and-token-security-074
+  difficulty: expert
+  tags: [deterministic-ecdsa, rfc-6979, nonce-reuse]
+  question: |
+    Why might a signer in a low-entropy or embedded environment prefer
+    deterministic ECDSA (RFC 6979)?
+  options:
+  - "It makes signatures shorter than randomized ECDSA"
+  - "It derives the per-signature nonce k deterministically from the key and message, avoiding weak-RNG nonce reuse that would leak the private key"
+  - "It removes the need to validate exp"
+  - "It converts ECDSA into an HMAC scheme"
+  answer: 1
+  explanation: |
+    ECDSA leaks the private key if the nonce k repeats or is predictable. RFC 6979
+    derives k deterministically from the private key and message hash, eliminating
+    dependence on a possibly-weak RNG — valuable on embedded/low-entropy signers.
+  ref: "concepts.md#ecdsa-pitfalls-psychic-signatures-and-malleable-signatures"

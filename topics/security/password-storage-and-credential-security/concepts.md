@@ -176,8 +176,8 @@ is only CPU-hard (not memory-hard), so it's the *weakest* against GPU attacks �
 value is FIPS compliance. Tunable **iteration count**; OWASP current guidance:
 
 - PBKDF2-HMAC-SHA256: **600,000** iterations
-- PBKDF2-HMAC-SHA512: **210,000** iterations
-- PBKDF2-HMAC-SHA1: 1,300,000 (legacy only)
+- PBKDF2-HMAC-SHA512: **220,000** iterations
+- PBKDF2-HMAC-SHA1: 1,400,000 (legacy only)
 
 NIST's floor is "at least 10,000 iterations" (SP 800-63B) — treat that as an absolute
 minimum, not a target; use OWASP's much-higher numbers for real deployments.
@@ -389,6 +389,297 @@ so migration happens **at login**, the one moment the plaintext is available:
   verifier supports multiple formats during the transition and knows when to upgrade.
 
 ---
+
+## NIST SP 800-63B Rev. 4: the 15-character minimum and updated rules
+
+NIST finalized **SP 800-63B Revision 4** (2024/2025), which supersedes the older
+800-63-3 numbers cited in the policy section above. The headline changes for
+"memorized secrets":
+
+- **Minimum length rose to 15 characters (SHALL) for single-factor password use.**
+  The old "8-character minimum" now applies *only* when the password is used **inside
+  a multi-factor authentication process** (i.e., password + a second factor). If the
+  password is the sole factor, verifiers **SHALL** require at least 15 characters.
+  Interviewers use this to catch candidates still quoting the stale "8."
+- **Maximum: SHALL permit at least 64 characters**; accept all printable ASCII, the
+  space character, and Unicode (each Unicode code point counts as ≥1 character); **do
+  not truncate**.
+- **No composition rules, no periodic rotation** (unchanged from Rev-3 — rotate only
+  on evidence of compromise).
+- **Blocklist screening is a SHALL**, not a SHOULD: verifiers SHALL compare prospective
+  secrets against a list of commonly-used, expected, or compromised values.
+- **Salt ≥ 32 bits; keyed hash (pepper) SHOULD use an HSM/secure hardware.** Rev-4
+  reiterates that the secret salt/key SHALL be stored separately from the hashed
+  passwords (e.g., in a hardware security module or otherwise-isolated secret store).
+- **Rate-limit failed attempts** (no more than 100 consecutive failures per account).
+- Rev-4 explicitly states **passwords are not phishing-resistant**, steering new designs
+  toward phishing-resistant authenticators (passkeys / FIDO2) — see the passkeys section.
+
+> [!INTERVIEW]
+> "What's the NIST minimum password length in 2025?" Correct answer: **15 characters
+> for single-factor** (800-63B Rev-4); 8 is allowed only when the password is one factor
+> within MFA. Composition rules and forced rotation remain discouraged.
+
+## Argon2id / scrypt / PBKDF2 parameter internals (deep dive)
+
+Beyond the OWASP minimum tables, senior interviews probe *why* particular parameters and
+the algorithm-specific tuning logic.
+
+**Argon2id — RFC 9106 baselines.** The RFC itself gives two recommended settings:
+
+- **First (high-memory):** m = 2 GiB (2,097,152 KiB), t = 1, p = 4 — for back-end auth
+  servers with generous RAM.
+- **Second (memory-constrained):** m = 64 MiB, t = 3, p = 4 — a portable default.
+
+OWASP's smaller floor (m = 19 MiB, t = 2, p = 1) is a *minimum*, tuned to keep per-login
+memory low enough for high-concurrency web tiers. Key tuning logic:
+
+- **Why p = 1 for web:** parallelism consumes an extra CPU core *per concurrent login*.
+  Under a login storm, p > 1 multiplies core pressure; p = 1 keeps the concurrency budget
+  predictable. (RFC's p = 4 assumes a dedicated auth service, not a shared web tier.)
+- **`t` compensates when `m` is forced down.** If memory must be small, raise iterations
+  to keep the total work (and verify latency) at target — the OWASP table rows are
+  iso-strength trades of `m` for `t`.
+- Argon2 also takes **salt length ≥ 16 bytes** and **tag/output length ≥ 32 bytes**
+  (RFC 9106 §4).
+
+**scrypt memory-hardness.** scrypt fills a large array with a pseudorandom sequence and
+then accesses it in a data-dependent order, so an attacker must *store the whole array*
+per guess — that is the memory-hardness. Note **`p` in scrypt multiplies both memory and
+time**, and OWASP lists iso-strength trades (e.g., N=2^17/r=8/p=1, N=2^16/r=8/p=2,
+N=2^15/r=8/p=3). scrypt is the KDF behind Litecoin/Dogecoin mining — the "why memory-hard
+matters" intuition (it resisted ASICs longer than SHA-256-based coins).
+
+**PBKDF2 — FIPS reality and current numbers.** Only **PBKDF2 is FIPS-140 validated**;
+Argon2, scrypt, and bcrypt are **not** FIPS-approved, which is the sole reason to choose
+PBKDF2 in a regulated environment. Current OWASP iteration counts (2024): PBKDF2-HMAC-
+SHA256 = **600,000**, PBKDF2-HMAC-SHA512 = **220,000**, PBKDF2-HMAC-SHA1 = **1,400,000**
+(legacy only — **SHA-1 is disallowed for this use after 2030** per NIST SP 800-131A Rev.2).
+PBKDF2 **auto-pre-hashes** any input longer than the HMAC block size (64 bytes for
+SHA-256), which has its own DoS nuance (next section).
+
+**bcrypt pre-hash — why base64 and why HMAC-SHA-384 specifically.** The safe long-password
+construction is `bcrypt( base64( HMAC-SHA384(password, pepper) ) )`, and each piece has a
+reason:
+
+- **HMAC (keyed by the pepper)** is what actually defeats *shucking* — base64 alone does
+  not. Plain `bcrypt(base64(sha512(pw)))` is "only as strong as SHA-512": an attacker with
+  a `sha512(pw)` breach corpus can still shuck it. The secret key is essential.
+- **base64** removes NUL bytes (Blowfish is a C-string cipher that truncates at NUL) *and*
+  keeps the encoded digest within 72 bytes. This is why **SHA-384** is chosen: its 48-byte
+  digest base64-encodes to **64 characters ≤ 72**. SHA-512's 64-byte digest would encode to
+  88 characters — **exceeding** the 72-byte limit and silently truncating.
+
+## High-entropy secrets vs. low-entropy passwords: when NOT to use a slow hash
+
+The deciding factor for how to store a credential is **the entropy of the input**, not
+the fact that it "is a credential."
+
+- **Low-entropy human passwords** need a slow, salted, memory-hard adaptive hash
+  (Argon2id) because their small keyspace makes offline guessing feasible — the slowness
+  is what raises per-guess cost.
+- **High-entropy machine secrets** — random API keys, session tokens, 128-bit random
+  values, refresh-token identifiers — do **not** need (and should not use) a slow adaptive
+  hash. Brute-forcing 128 bits of randomness is infeasible *regardless of hash speed*, so a
+  single **fast** hash (SHA-256) or **HMAC** is both correct and desirable: verification
+  must be cheap because these tokens are checked on *every* request. Salting is also
+  unnecessary for a value that is already globally unique and unpredictable (though a keyed
+  HMAC is fine).
+
+> [!INTERVIEW]
+> "Why is fast SHA-256 the *right* choice for a session token but *wrong* for a password?"
+> Input entropy. A 128-bit random token cannot be brute-forced no matter how fast the hash;
+> a low-entropy human password can, so it needs deliberate slowness. Candidates who
+> "Argon2 everything" reveal a shallow model — Argon2 on a random 256-bit token just wastes
+> CPU and adds login latency for zero security gain.
+
+## When reversible encryption IS the correct choice
+
+The rule "never encrypt passwords, always hash" applies to **credentials you only need to
+*verify*** (your own users' login passwords). It does **not** apply to secrets your app
+must later **replay to a third party** in cleartext:
+
+- Downstream/service passwords, stored SMTP/IMAP mail-server credentials, third-party API
+  passwords, OAuth **refresh tokens** you must present back to an authorization server.
+
+For these you *must* recover the original value to use it, so a one-way hash is impossible.
+The correct control is **authenticated, envelope encryption with a KMS/HSM-managed key**
+(e.g., AES-GCM under a data key wrapped by a KMS master key), with tight access control and
+audit logging — not a hash, and not a hard-coded key. The distinction is **verify vs.
+re-present**: verify → hash; re-present → KMS-encrypt.
+
+## Password spraying (low-and-slow)
+
+**Password spraying** is a distinct member of the credential-stuffing family: the attacker
+tries **one (or a few) common password(s)** (`Winter2026!`, `Password1`) across a **large
+number of accounts**, deliberately staying **under** each account's lockout/rate-limit
+threshold. Because per-account counters only ever see one or two failures per account, naive
+per-account lockout is blind to it — the signal is *global* (one password value attempted
+against thousands of usernames), not per-account.
+
+Defenses: **global/tenant-wide anomaly detection** (volume of distinct usernames hitting the
+same password or the same source), **per-IP + connection-fingerprint** limits, **breached-
+password screening** (removes the common passwords sprayers rely on), and **MFA**. Maps to
+OWASP OAT-008 (Credential Stuffing) family and A07:2021 — Identification and Authentication
+Failures.
+
+## Credential-stuffing / ATO defense stack (deep dive)
+
+Because attackers now use **100k+ residential-proxy IPs** and toolkits (e.g., Sentry MBA,
+OpenBullet), IP/User-Agent limits alone are insufficient. A layered stack:
+
+- **Connection/TLS fingerprinting — JA3/JA4, HTTP/2 fingerprints, header-ordering.** These
+  fingerprint the client's TLS and HTTP stack and are far harder to spoof than an IP or
+  User-Agent string, letting you cluster bot traffic across rotating IPs.
+- **IP intelligence:** flag traffic from hosting/datacenter ASNs and known residential-proxy
+  networks; weight risk accordingly rather than hard-blocking (residential proxies overlap
+  with real users).
+- **Graduated, non-fixed-threshold mitigation:** raise friction progressively (delays,
+  CAPTCHA/JS proof-of-work challenges) instead of a single hard cutoff an attacker can tune
+  under.
+- **Multi-step login flow** breaks single-POST bots that expect one request.
+- **Breached-password screening** and **impossible-travel / device-history** risk scoring.
+- **Login-notification hygiene:** if the *password was correct but MFA failed*, that account's
+  password is compromised — notify the user and prompt a reset.
+- **MFA is the durable control** — Microsoft's figure is that MFA blocks ~99.9% of automated
+  account-takeover attempts.
+
+## User enumeration beyond timing
+
+Timing is only one enumeration channel. An attacker distinguishes "valid username" from
+"invalid" using any *observable difference*:
+
+- **Different HTTP status codes** or **response length/content** between the two cases.
+- **Registration** revealing "email already taken."
+- **Password-reset** responses that differ for known vs. unknown addresses.
+- **Lockout / rate-limit messages** that only appear for real accounts.
+
+Fix set (apply *all*, not just timing): **one generic message** ("Login failed; invalid user
+ID or password"), **identical HTTP status**, **identical response shape/length**, **uniform
+timing** (hash a dummy password when the user is missing so the slow-hash cost is paid either
+way), and make registration/reset responses generic ("if that email exists, we've sent a
+link"). Covered by OWASP WSTG and ASVS §2.x authentication requirements.
+
+## Denial-of-service via password / KDF input
+
+Adaptive hashes are *designed* to be expensive — which makes the login endpoint a DoS target
+if inputs and parameters are unbounded:
+
+- **Long-password DoS.** If the KDF (or a naive pre-hash implementation) processes the full
+  input *per iteration*, a multi-megabyte "password" can pin CPU for seconds. Real CVE:
+  **Django CVE-2013-1443** — unbounded password length fed to PBKDF2 enabled a DoS; the fix
+  was to **cap the accepted input length** (Django capped at 4096 bytes). Defense: enforce a
+  **maximum input length** (e.g., 64–128 chars, or block-size-aware) *before* hashing.
+- **Memory-exhaustion DoS from large Argon2 `m`.** Cranking Argon2 to, say, m = 1 GiB means
+  each concurrent login allocates ~1 GiB. A modest login flood (or many parallel legitimate
+  logins) exhausts server RAM. Defense: **size `m` against your peak concurrent-login budget**
+  (concurrent logins × per-hash memory ≤ available RAM), target ~250–500 ms verify latency,
+  and cap concurrency at the auth layer.
+
+> [!INTERVIEW]
+> "You set Argon2 m = 1 GiB, t = 10 for 'maximum security' — the reviewer objects. Why?"
+> Login-storm CPU/memory-exhaustion DoS and multi-second verify latency. Tune to ~250–500 ms
+> and size memory so `concurrent_logins × m` fits in RAM with headroom. Security that takes
+> the login endpoint down is not security.
+
+## The Okta 2024 bcrypt truncation incident (root-cause it)
+
+On **2024-10-30 Okta disclosed** an AD/LDAP Delegated Authentication vulnerability that is the
+canonical modern proof that the 72-byte limit is *not* academic. The cache key for the DelAuth
+path was computed as **`bcrypt(userId + username + password)`** — attacker-influenceable,
+variable-length fields concatenated **before** the password. When the `userId + username`
+prefix reached **≥ 52 characters**, the actual password bytes fell **past byte 72** and were
+silently truncated away by bcrypt — so on a cache hit, authentication would succeed with **any
+password**. Okta's fix was to switch the hash from **bcrypt to PBKDF2** (no 72-byte limit).
+
+The senior takeaway is that there were **two independent mistakes**:
+
+1. **bcrypt's 72-byte truncation** silently dropped the security-critical bytes.
+2. **Concatenating variable-length, attacker-controlled data (username) *before* the secret
+   (password)** — so an attacker could push the password out of the hashed range by choosing a
+   long username. Order and length-framing of inputs to a hash matter; secrets should never sit
+   behind attacker-controlled variable-length prefixes.
+
+## Comparison-function bypasses: type juggling and magic hashes
+
+Distinct from *timing* attacks, some languages' **loose equality** turns a hash comparison into
+an auth bypass:
+
+- **PHP type juggling / "magic hashes."** With loose `==`, a hash whose hex digest looks like
+  `0e` followed by all digits (e.g., `0e15…`) is coerced to a float `0 × 10^n = 0`. Two
+  *different* passwords whose digests both match the `0e[digits]` pattern therefore compare
+  **equal** (`"0e830400..." == "0e462097..."` → `true`), yielding an authentication bypass
+  independent of timing.
+- **Fix:** use **strict, type-safe comparison** — `===` in PHP, and for secret comparison the
+  **constant-time** `hash_equals()` — and set explicit types so string digests are never coerced
+  to numbers. This is a *correctness/type* bug on top of the timing concern; both matter.
+
+> [!INTERVIEW]
+> "Which is safe: `md5(pw) == stored`, `==`, or `hash_equals()`?" `hash_equals()` (constant-time
+> **and** type-safe). Loose `==` fails two ways: magic-hash type juggling (returns true for
+> unequal `0e…` digests) *and* a timing side channel. And `md5` is the wrong hash entirely.
+
+## Secrets management for the pepper and keys
+
+Where the pepper/keys actually live determines whether peppering adds anything:
+
+- **Pepper in the same DB, app config file, or repo as the hashes/DB connection string ⇒
+  near-zero benefit** — one compromise (config read, source leak, backup) yields both hashes
+  and pepper. For defense-in-depth the pepper must sit in a *separately compromised* trust
+  boundary.
+- **Correct homes:** an **HSM/TPM/TEE** (NIST 800-63B Rev-4 SHOULD), a cloud **KMS**, or a
+  secrets manager / **HashiCorp Vault**. Best is to have the HSM/KMS perform the keyed
+  operation so the raw key never leaves hardware.
+- **Envelope encryption** for encrypt-the-hash constructions: a KMS master key wraps a data
+  key that encrypts the stored hash, enabling pepper/key **rotation** (re-wrap without the
+  plaintext password).
+
+## Password-reset flow security
+
+Reset is a first-class credential surface — a reset-token leak equals account takeover:
+
+- **Token = CSPRNG, single-use, time-limited** (e.g., minutes to an hour), and **stored
+  hashed** in the DB (treat it like a password — a DB leak of raw reset tokens is ATO).
+- **Do not auto-login** after reset; require a fresh login. **Invalidate all existing sessions**
+  on password change/reset.
+- **Host-header injection:** if the reset link is built from the request `Host` header, an
+  attacker can poison it to point the token at their domain. Build links from a trusted,
+  server-configured origin, not the incoming `Host`.
+- **Referrer-Policy leakage:** ensure the token isn't leaked via the `Referer` header to
+  third-party assets on the reset page (set a strict `Referrer-Policy`, keep tokens out of
+  URLs where feasible).
+- **Generic responses** ("if that account exists, we sent a link") to avoid enumeration;
+  **rate-limit** reset requests; **never** let the reset flow lock accounts (a DoS vector).
+
+## Re-authentication, step-up, and change notifications
+
+- **Step-up / re-authentication.** Before **sensitive actions** (changing password, email, or
+  MFA settings; adding a payment method), require the user to **re-enter the current password**
+  even with an active session (NIST 800-63B / OWASP). This blocks an attacker riding a hijacked
+  session or an unattended device. After a successful re-auth, **rotate the session and
+  invalidate other sessions**.
+- **Notification-on-change protocol.** On a password/email change, send a **notification email
+  to the *old* address** (so the legitimate owner can react to an unauthorized change) and a
+  **confirmation-required nonce to the *new* address**. This catches account-takeover attempts
+  in progress.
+
+## Passwordless and passkeys (WebAuthn / FIDO2)
+
+The strategic endgame is to **get out of the password-storage business entirely**. NIST 800-63B
+Rev-4 flatly states passwords are **not phishing-resistant**. **Passkeys** (WebAuthn / FIDO2)
+replace the shared secret with **public-key** credentials:
+
+- The authenticator generates a key pair **per origin (relying party)**; the **server stores
+  only the *public* key**. A database breach therefore yields **nothing crackable** — there is
+  no secret on the server to steal or brute-force.
+- Authentication is a **signed challenge** (a fresh, per-login nonce), so it is **non-replayable**
+  and **phishing-resistant**: the credential is scoped to the real origin and won't fire on a
+  look-alike domain.
+- This structurally eliminates credential stuffing (no reusable shared secret), offline cracking
+  (no password hash), and phishing of the primary factor.
+
+Passwords don't vanish overnight, so passkeys are typically added alongside password+MFA, with
+the password path hardened per everything above during the transition.
 
 ## Common follow-up questions
 

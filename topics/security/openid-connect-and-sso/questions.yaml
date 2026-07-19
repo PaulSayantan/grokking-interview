@@ -867,3 +867,486 @@ questions:
       audience confusion; API_B must reject it. The correct pattern is token exchange (RFC 8693)
       or a fresh token scoped to API_B, and sender-constrained tokens further limit theft impact.
     ref: "concepts.md#federation-trust-and-token-audience-confusion"
+
+  - id: openid-connect-and-sso-051
+    difficulty: expert
+    tags: [hybrid, at_hash, token-substitution]
+    question: |
+      An RP uses the hybrid flow (`response_type=code id_token`) and validates the front-channel
+      ID Token's signature, `iss`, `exp`, and `nonce` — but not `aud`, `c_hash`, or `at_hash`.
+      Which fix actually closes the token-substitution hole?
+    options:
+      - Rotate the OP signing keys more frequently so substituted tokens expire faster
+      - Move `nonce` validation to the back-channel token response instead of the ID Token
+      - Validate `c_hash` against the received code and `at_hash` against the received access token, AND pin `aud` to the client_id
+      - Switch the ID Token `alg` from RS256 to ES256
+    answer: 2
+    explanation: |
+      In the hybrid flow the ID Token rides the front channel alongside the code/access token, so
+      an attacker can swap a different `code`/`access_token` while the honest ID Token still
+      verifies (OIDC Core §16.11). Only `c_hash`/`at_hash` bind the ID Token to those artifacts;
+      pinning `aud` is also required. Key rotation, alg choice, and moving nonce do nothing here.
+    ref: "concepts.md#at_hash--c_hash-and-hybrid-flow-token-substitution"
+
+  - id: openid-connect-and-sso-052
+    difficulty: expert
+    tags: [at_hash, hashing, algorithm]
+    question: |
+      An ID Token is signed with `RS256` and carries an `at_hash`. How is `at_hash` computed and
+      verified against the access token?
+    options:
+      - SHA-256 the ASCII octets of the access token, take the left-most half of the digest, then base64url-encode
+      - HMAC-SHA256 of the access token using the client secret, base64url-encoded in full
+      - SHA-512 the access token bytes and compare the full base64-encoded digest
+      - Concatenate access token and nonce, SHA-1 the result, hex-encode
+    answer: 0
+    explanation: |
+      Per OIDC Core §3.3.2.11, the hash function matches the JWS `alg` (RS256 → SHA-256). You hash
+      the ASCII octets of the value, take the LEFT-MOST HALF of the digest (128 bits of a 256-bit
+      hash), and base64url-encode that half. `c_hash` is computed the same way over the code.
+    ref: "concepts.md#at_hash--c_hash-and-hybrid-flow-token-substitution"
+
+  - id: openid-connect-and-sso-053
+    difficulty: advanced
+    tags: [code-flow, c_hash, binding]
+    question: |
+      Why is validating `c_hash` optional in the pure Authorization Code flow but required in the
+      hybrid flow?
+    options:
+      - The code flow never returns an ID Token at all
+      - In the code flow the ID Token arrives on the back channel with the code, so it is already bound; in hybrid the ID Token rides the untrusted front channel alongside the code
+      - '`c_hash` cannot be computed for authorization codes, only for access tokens'
+      - The code flow uses symmetric signatures which make `c_hash` redundant
+    answer: 1
+    explanation: |
+      In the code flow the ID Token is delivered server-to-server in the token response together
+      with the code, so nothing can be swapped in transit. In the hybrid flow the ID Token travels
+      through the browser next to the code, so `c_hash` is the only thing binding them.
+    ref: "concepts.md#at_hash--c_hash-and-hybrid-flow-token-substitution"
+
+  - id: openid-connect-and-sso-054
+    difficulty: expert
+    tags: [request_uri, jar, ssrf]
+    question: |
+      An OP supports `request_uri` (JAR / RFC 9101) and fetches the referenced JWT server-side.
+      An attacker sets `request_uri=http://169.254.169.254/latest/meta-data/`. What is the risk
+      and the correct mitigation?
+    options:
+      - Denial of service only; mitigate by increasing the fetch timeout
+      - Cross-site scripting on the consent page; mitigate with output encoding
+      - No risk, because the JWT signature check will reject the metadata response
+      - Server-Side Request Forgery to internal endpoints; mitigate by allowlisting request_uri to pre-registered values, blocking internal address ranges, and capping response size
+    answer: 3
+    explanation: |
+      Fetching an attacker-controlled `request_uri` lets them target cloud IMDS / internal admin
+      URLs — classic SSRF. The signature check happens after the fetch, so it does not prevent the
+      request being made. Mitigate by restricting `request_uri` to registered/allowlisted URLs,
+      blocking link-local/internal ranges, and limiting response size.
+    ref: "concepts.md#request-objects-request_uri-and-jar-ssrf--validation-bypass"
+
+  - id: openid-connect-and-sso-055
+    difficulty: expert
+    tags: [jar, request-object, redirect-uri]
+    question: |
+      A server validates the query-string `redirect_uri` against its allowlist, but when a signed
+      Request Object (`request` JWT) is present it uses the `redirect_uri` inside the JWT — which
+      it does NOT re-check. What is the consequence?
+    options:
+      - The attacker can smuggle an unvalidated `redirect_uri` inside the JWT and steal the authorization code — a redirect-URI validation bypass
+      - Nothing, because a signed Request Object is inherently trusted end to end
+      - The token endpoint will reject the flow due to a duplicate parameter error
+      - The ID Token `aud` will silently change to the attacker's client
+    answer: 0
+    explanation: |
+      Parameters can appear both in the query string and inside the Request Object. If validation
+      runs on the query copy but the JWT copy is honored, an attacker smuggles a malicious
+      `redirect_uri` past the check and captures the code. Per JAR the in-JWT parameters take
+      precedence and must be the ones validated.
+    ref: "concepts.md#request-objects-request_uri-and-jar-ssrf--validation-bypass"
+
+  - id: openid-connect-and-sso-056
+    difficulty: expert
+    tags: [dynamic-registration, ssrf, logo_uri]
+    question: |
+      Your OIDC OP fetches the client's `logo_uri` server-side to render it on the consent screen,
+      and registration is unauthenticated. Referencing CVE-2021-26715, what can go wrong?
+    options:
+      - Only increased bandwidth cost; no security impact
+      - Second-order SSRF (the OP fetches attacker URLs) and, if content-type is unchecked, stored XSS on the consent page
+      - The client secret leaks in the logo request
+      - The logo replaces the OP's TLS certificate
+    answer: 1
+    explanation: |
+      `logo_uri` is a server-fetched URL. An attacker registering it can drive SSRF to internal
+      endpoints, and if the fetched content-type is not validated the "image" can become stored
+      XSS on the consent page (MITREid Connect CVE-2021-26715). Defenses: gate registration,
+      allowlist/validate hosts, block internal ranges, and check content-type.
+    ref: "concepts.md#dynamic-client-registration-abuse--second-order-ssrf"
+
+  - id: openid-connect-and-sso-057
+    difficulty: advanced
+    tags: [dynamic-registration, ssrf, metadata]
+    question: |
+      Which set of Dynamic Client Registration metadata fields are the SERVER-FETCHED URLs that
+      need SSRF hardening (allowlist, host validation, size caps)?
+    options:
+      - '`redirect_uri`, `client_uri`, `policy_uri`, `tos_uri`'
+      - '`client_name`, `contacts`, `grant_types`, `scope`'
+      - '`jwks_uri`, `logo_uri`, `sector_identifier_uri`, `request_uris`'
+      - '`token_endpoint_auth_method`, `response_types`, `application_type`'
+    answer: 2
+    explanation: |
+      The OP fetches `jwks_uri` (for JWT client auth), `logo_uri` (consent rendering),
+      `sector_identifier_uri` (pairwise grouping), and `request_uris` — all SSRF-prone. The others
+      are stored or handed to the browser (`redirect_uri`, `client_uri`, `policy_uri`, `tos_uri`)
+      and are client-side only.
+    ref: "concepts.md#dynamic-client-registration-abuse--second-order-ssrf"
+
+  - id: openid-connect-and-sso-058
+    difficulty: expert
+    tags: [account-takeover, email, sign-in-with]
+    question: |
+      An app supports "Sign in with Google" and matches federated logins to existing local
+      accounts by `email`. Why is this dangerous, and what is the correct fix?
+    options:
+      - It is fine as long as the ID Token signature is valid
+      - The only risk is email deliverability; fix by verifying MX records
+      - Match on `name` + `email` together to eliminate the risk
+      - Unverified-email / pre-hijack ATO — key accounts on `(iss, sub)`, require `email_verified: true`, and never auto-link a federated identity to a local account by email alone
+    answer: 3
+    explanation: |
+      If an OP does not verify email ownership (or the RP ignores `email_verified`), an attacker
+      can obtain a token asserting the victim's email and be matched/linked into their account.
+      Key on the stable `(iss, sub)` pair, require `email_verified`, and require re-auth /
+      ownership proof before linking — never auto-merge by email.
+    ref: "concepts.md#sign-in-with-x-account-takeover-via-unverified-email"
+
+  - id: openid-connect-and-sso-059
+    difficulty: advanced
+    tags: [account-linking, merge, defense]
+    question: |
+      Which practice most directly prevents account-linking/merge attacks in federated login?
+    options:
+      - Automatically merging any federated identity into a local account whenever the emails match
+      - Requiring the user to authenticate to the existing local account (or complete ownership proof) before linking a federated identity, and treating linking as a step-up operation
+      - Trusting the first OP that returns a matching email
+      - Storing the federated `sub` but ignoring `iss`
+    answer: 1
+    explanation: |
+      Auto-merging by matching email is exactly the vulnerability. Safe linking requires the user
+      to prove control of the existing account before a federated identity is attached, and
+      linking should be gated like a sensitive operation.
+    ref: "concepts.md#sign-in-with-x-account-takeover-via-unverified-email"
+
+  - id: openid-connect-and-sso-060
+    difficulty: expert
+    tags: [saml, cve, parser-differential]
+    question: |
+      A single valid signed SAML assertion for a low-privilege user lets an attacker sign in as
+      admin (Ruby-SAML CVE-2025-25291/25292). What is the class of bug and its root cause?
+    options:
+      - Weak signing key; root cause is a 1024-bit RSA key
+      - Replay attack; root cause is a missing NotOnOrAfter
+      - Open redirect via RelayState; root cause is an unvalidated deep link
+      - Parser-differential signature-wrapping — two XML parsers interpret the same document differently and signature verification was not linked to the consumed/hashed content
+    answer: 3
+    explanation: |
+      Ruby-SAML used REXML and Nokogiri, which disagree on a document containing a second
+      `<Signature>` hidden in `StatusDetail`. Because hash verification and signature verification
+      were not linked, each passed independently — so one valid signed assertion for any user
+      allowed impersonating anyone. It is a parser-differential form of XML signature wrapping.
+    ref: "concepts.md#saml-parser-differential-auth-bypass-cve-2025-25291292-and-response-validation"
+
+  - id: openid-connect-and-sso-061
+    difficulty: advanced
+    tags: [saml, destination, replay]
+    question: |
+      Beyond Issuer/Audience/timestamps, which SAML `<Response>`/`<SubjectConfirmationData>`
+      checks specifically stop an assertion minted for a DIFFERENT SP being replayed to yours?
+    options:
+      - Verifying the `Destination` matches this SP's ACS URL and the `Recipient` matches the ACS URL (plus `InResponseTo` and `NotOnOrAfter`)
+      - Checking the assertion contains a `logo_uri`
+      - Ensuring the signature algorithm is SHA-1
+      - Confirming the RelayState is reflected verbatim
+    answer: 0
+    explanation: |
+      `Destination` (on the Response) and `Recipient` (in SubjectConfirmationData) must match this
+      SP's ACS URL, so an assertion intended for another SP is rejected; `InResponseTo` and
+      `NotOnOrAfter` add request-binding and freshness. SHA-1 should be rejected, not required.
+    ref: "concepts.md#saml-parser-differential-auth-bypass-cve-2025-25291292-and-response-validation"
+
+  - id: openid-connect-and-sso-062
+    difficulty: advanced
+    tags: [saml, relaystate, open-redirect]
+    question: |
+      A SAML SP reflects the `RelayState` parameter as the post-login redirect target without
+      validation. What is the vulnerability and the fix?
+    options:
+      - Open redirect (and post-login bounce); treat RelayState as opaque and validate it against an allowlist of internal targets
+      - Signature bypass; fix by signing RelayState
+      - XXE; fix by disabling DTDs
+      - CSRF; fix by adding a nonce to RelayState
+    answer: 0
+    explanation: |
+      `RelayState` is unsigned deep-link state. Reflecting an arbitrary URL turns it into an open
+      redirect that can bounce a user to an attacker site after login. Treat it as opaque and
+      validate against an allowlist rather than redirecting to arbitrary values.
+    ref: "concepts.md#saml-parser-differential-auth-bypass-cve-2025-25291292-and-response-validation"
+
+  - id: openid-connect-and-sso-063
+    difficulty: expert
+    tags: [saml, xml-comment, canonicalization]
+    question: |
+      The 2018 SAML "XML comment" bug let an attacker controlling `evil.com` impersonate
+      `admin@example.com` using a NameID like `admin@example.com<!---->.evil.com`. What made this
+      work, and how is it distinct from XSW?
+    options:
+      - The signature was forged; XSW also forges signatures
+      - The assertion was unsigned; XSW requires signed assertions
+      - Canonicalization stripped the comment while the library's text extraction read only the text before it (`admin@example.com`), so the signed-but-differently-canonicalized value was misread — distinct from XSW, which injects a separate unsigned element
+      - The bug was a TLS downgrade unrelated to XML
+    answer: 2
+    explanation: |
+      Inserting an XML comment split the NameID text node; some libraries concatenated only the
+      first text chunk after canonicalization removed the comment, extracting `admin@example.com`.
+      Unlike XSW (which injects a forged unsigned element the logic reads instead of the signed
+      one), this abuses a canonicalization/text-extraction mismatch on a single element.
+    ref: "concepts.md#saml-parser-differential-auth-bypass-cve-2025-25291292-and-response-validation"
+
+  - id: openid-connect-and-sso-064
+    difficulty: expert
+    tags: [session-management, postmessage, xss]
+    question: |
+      In OIDC Session Management, the RP iframe and the OP's `check_session_iframe` communicate
+      via `postMessage`. What is the mandatory security control on that channel?
+    options:
+      - Strictly validating the message origin on both sides; accepting messages from any origin is an XSS/spoofing vector
+      - Encrypting the session_state with the client secret
+      - Setting the session-state cookie to HttpOnly
+      - Polling only once per session to avoid amplification
+    answer: 0
+    explanation: |
+      `postMessage` handlers MUST validate the sender/target origin; an unrestricted handler lets a
+      malicious frame spoof session-state responses. Note the session-state cookie cannot be
+      HttpOnly (JS must read it), so it must carry no PII — only opaque state.
+    ref: "concepts.md#oidc-session-management-check_session_iframe--session_state"
+
+  - id: openid-connect-and-sso-065
+    difficulty: advanced
+    tags: [session-management, third-party-cookies, reliability]
+    question: |
+      An RP relies on the OIDC `check_session_iframe` to detect OP logout. After browsers block
+      third-party cookies, users hit an infinite silent re-auth loop. Why, and what is the fix?
+    options:
+      - The `nonce` expired; fix by removing nonce validation
+      - The cross-site OP iframe can no longer read its session-state cookie, so it reports `changed`/`error` repeatedly, triggering endless `prompt=none` re-auth; add retry caps and graceful fallback
+      - The JWKS rotated; fix by pinning a single key forever
+      - The access token is too short-lived; fix by making it never expire
+    answer: 1
+    explanation: |
+      The `check_session_iframe` is cross-site, so third-party-cookie blocking / ITP prevents it
+      from reading the OP session cookie, producing spurious `changed`/`error` results that drive
+      repeated silent re-auth. Defensive code must cap retries and degrade gracefully — the same
+      fragility that makes front-channel Single Logout unreliable.
+    ref: "concepts.md#oidc-session-management-check_session_iframe--session_state"
+
+  - id: openid-connect-and-sso-066
+    difficulty: expert
+    tags: [nist, fal, holder-of-key]
+    question: |
+      Per NIST SP 800-63C Federation Assurance Levels, what distinguishes FAL3 from FAL1/FAL2?
+    options:
+      - FAL3 requires holder-of-key — the subscriber proves possession of a key bound to the assertion — whereas FAL1 (signed bearer) and FAL2 (signed+encrypted bearer) are bearer assertions
+      - FAL3 uses a longer signing key than FAL1/FAL2
+      - FAL3 removes the signature requirement
+      - FAL3 is only for SAML, FAL1/2 only for OIDC
+    answer: 0
+    explanation: |
+      FAL1 = signed bearer; FAL2 = signed AND encrypted-to-RP bearer (encryption required for
+      front-channel presentation); FAL3 = holder-of-key, where the subscriber must prove
+      possession of a bound key directly to the RP, so a stolen assertion alone is useless.
+    ref: "concepts.md#assurance-levels-bearer-vs-holder-of-key-nist-800-63c"
+
+  - id: openid-connect-and-sso-067
+    difficulty: advanced
+    tags: [bearer, holder-of-key, sender-constrained]
+    question: |
+      Which statement best contrasts a bearer assertion with a holder-of-key assertion?
+    options:
+      - Bearer assertions are always encrypted; holder-of-key assertions never are
+      - Holder-of-key assertions cannot be signed
+      - With a bearer assertion, possession equals use (steal-and-replay works); a holder-of-key assertion is bound to a key the subscriber must prove they hold, so a stolen assertion alone is useless
+      - Bearer assertions require mTLS; holder-of-key assertions require TLS only
+    answer: 2
+    explanation: |
+      Bearer = anyone in possession can impersonate the subject. Holder-of-key binds the assertion
+      to a subscriber-held key proven to the RP — the SSO analog of sender-constrained tokens
+      (DPoP/mTLS). A merely referenced, unproven key degrades back to bearer.
+    ref: "concepts.md#assurance-levels-bearer-vs-holder-of-key-nist-800-63c"
+
+  - id: openid-connect-and-sso-068
+    difficulty: advanced
+    tags: [assertion-presentation, front-channel, back-channel]
+    question: |
+      In NIST 800-63C terms, what is the security advantage of back-channel assertion
+      presentation over front-channel presentation?
+    options:
+      - Back-channel is faster because it skips signature verification
+      - Front-channel assertions are automatically holder-of-key
+      - Back-channel presentation eliminates the need to check audience
+      - The subscriber passes only a single-use artifact/reference through the browser and the RP fetches the real assertion directly from the IdP, so the full assertion never traverses the browser (smaller attack surface, less replay exposure)
+    answer: 3
+    explanation: |
+      Back-channel (like SAML Artifact Binding) passes only a single-use reference through the
+      browser; the RP retrieves the assertion server-to-server. Front-channel (like POST Binding)
+      sends the full assertion through the browser where it is visible and replayable — which is
+      why front-channel assertions must be encrypted (FAL2).
+    ref: "concepts.md#assurance-levels-bearer-vs-holder-of-key-nist-800-63c"
+
+  - id: openid-connect-and-sso-069
+    difficulty: expert
+    tags: [ppid, pairwise, privacy]
+    question: |
+      Two RPs run by different teams must be able to correlate the same user; a third RP must NOT
+      be correlatable with them. How does an OP support both using subject identifiers?
+    options:
+      - Use `subject_type=public` for all three so the `sub` is always the same
+      - Give all three the same `client_id`
+      - Use `subject_type=pairwise`, place the two correlatable RPs in the same sector (shared `sector_identifier_uri`) so they receive the same PPID, and give the third its own sector so it gets a different `sub`
+      - Disable the `sub` claim and correlate on email instead
+    answer: 2
+    explanation: |
+      Pairwise (PPID) issues a different `sub` per sector. Grouping RPs under the same
+      `sector_identifier_uri` makes them share a PPID (correlatable), while a separate sector
+      yields a different `sub` for the third RP (not correlatable). Public would make all three
+      correlatable.
+    ref: "concepts.md#pairwise-vs-public-subject-identifiers-ppid"
+
+  - id: openid-connect-and-sso-070
+    difficulty: advanced
+    tags: [ppid, sector-identifier, gotcha]
+    question: |
+      An RP using pairwise subject identifiers changes its `sector_identifier_uri`. What happens
+      to existing users keyed on `(iss, sub)`?
+    options:
+      - The `sub` values change, so accounts keyed on `(iss, sub)` appear to "reset" and users look like new accounts
+      - Nothing; pairwise `sub` values are independent of the sector identifier
+      - The OP automatically migrates the old `sub` values
+      - The ID Token signature becomes invalid
+    answer: 0
+    explanation: |
+      With pairwise subjects the OP derives `sub` from the sector host. Changing the sector
+      identifier changes every user's `sub`, so accounts keyed on `(iss, sub)` no longer match —
+      a well-known operational gotcha requiring a planned migration.
+    ref: "concepts.md#pairwise-vs-public-subject-identifiers-ppid"
+
+  - id: openid-connect-and-sso-071
+    difficulty: expert
+    tags: [step-up, acr, max_age]
+    question: |
+      A banking RP must force phishing-resistant MFA before a wire transfer and prove it happened.
+      Which approach is correct?
+    options:
+      - Trust the original login's ID Token indefinitely since the user already authenticated
+      - Send `prompt=none` and assume MFA occurred if no error comes back
+      - Ask the resource server to check the access token scope for `mfa`
+      - Re-run `/authorize` requesting the stronger `acr_values` (and/or a low `max_age`), then verify `acr`/`amr`/`auth_time` in the returned ID Token and re-prompt if the level is insufficient
+    answer: 3
+    explanation: |
+      Step-up means requesting the required `acr_values` (e.g. a phishing-resistant level) or a
+      tighter `max_age`, then VERIFYING the returned `acr`/`amr`/`auth_time` meets the bar and
+      re-prompting otherwise. Merely requesting `acr_values` without verifying the returned `acr`
+      is a common bug; a prior ID Token does not prove fresh, strong auth for this action.
+    ref: "concepts.md#step-up-authentication-and-assertion-strength-acr-amr-max_age"
+
+  - id: openid-connect-and-sso-072
+    difficulty: advanced
+    tags: [prompt, silent-auth, max_age]
+    question: |
+      What does `prompt=none` do, and what must the RP be prepared to handle?
+    options:
+      - It attempts silent authentication and returns `error=login_required` / `interaction_required` if any UI would be needed, which the RP must handle by starting an interactive flow
+      - It logs the user out silently; the RP must clear its session
+      - It forces re-authentication every time regardless of session
+      - It disables `nonce` validation for that request
+    answer: 0
+    explanation: |
+      `prompt=none` requests authentication without any user interaction; if the OP would need to
+      show UI it returns `login_required`/`interaction_required` instead of prompting. The RP must
+      catch that and fall back to an interactive flow. `prompt=login` is what forces re-auth.
+    ref: "concepts.md#step-up-authentication-and-assertion-strength-acr-amr-max_age"
+
+  - id: openid-connect-and-sso-073
+    difficulty: expert
+    tags: [redirect-uri, code-theft, state]
+    question: |
+      A reviewer argues that `state` and `nonce` alone protect the login callback, so exact
+      redirect-URI matching is unnecessary. Why is this reasoning wrong?
+    options:
+      - '`state` and `nonce` are only used in SAML, not OIDC'
+      - '`state`/`nonce` cannot be validated on the callback'
+      - Exact matching is redundant because the OP already encrypts the code
+      - In a redirect-hijack the attacker runs their own flow with their own valid `state`/`nonce`, so those checks pass on the attacker side; exact redirect-URI matching (plus PKCE binding the code to the legitimate client) is what actually prevents code theft
+    answer: 3
+    explanation: |
+      `state`/`nonce` bind a callback to the session that started it, but an attacker generating
+      their own values passes those checks. Parsing-discrepancy redirect tricks (path traversal,
+      duplicate params, deceptive hosts) land the code on an attacker URL; exact-match registration
+      and PKCE are what close code theft.
+    ref: "concepts.md#redirect_uri-validation-in-the-oidc-login-context"
+
+  - id: openid-connect-and-sso-074
+    difficulty: intermediate
+    tags: [redirect-uri, matching]
+    question: |
+      Which redirect-URI registration strategy is the robust default against parsing-discrepancy
+      attacks?
+    options:
+      - Exact string matching against pre-registered redirect URIs
+      - Prefix matching (any URL starting with the registered value is allowed)
+      - Allowing any subdomain of the registered host
+      - Matching only the host, ignoring path and query
+    answer: 0
+    explanation: |
+      Exact-match registration avoids the loopholes that prefix/host/subdomain matching open
+      (path append/traversal, `localhost.evil.com`, duplicate params). Loose matching repeatedly
+      leads to open-redirect / code-theft bugs.
+    ref: "concepts.md#redirect_uri-validation-in-the-oidc-login-context"
+
+  - id: openid-connect-and-sso-075
+    difficulty: intermediate
+    tags: [nist, currency, 800-63-4]
+    question: |
+      A candidate cites NIST SP 800-63C for federation guidance. What currency caveat should they
+      mention as of 2025?
+    options:
+      - 800-63C (part of 800-63-3) was superseded by SP 800-63-4, finalized July 2025, though its FAL/PPID/bearer-vs-holder-of-key concepts carry over
+      - 800-63C was withdrawn with no replacement
+      - 800-63C now mandates SAML only
+      - 800-63C was merged into RFC 6749
+    answer: 0
+    explanation: |
+      SP 800-63-4 was finalized on July 31, 2025, superseding the 800-63-3 family (including
+      800-63C). The federation concepts — FALs, PPID, bearer vs holder-of-key, audience checks —
+      remain relevant, but citing the current revision shows awareness.
+    ref: "concepts.md#assurance-levels-bearer-vs-holder-of-key-nist-800-63c"
+
+  - id: openid-connect-and-sso-076
+    difficulty: expert
+    tags: [jwks, kid-injection, dynamic-registration]
+    question: |
+      A multi-tenant OIDC broker lets clients register a `jwks_uri` for private_key_jwt client
+      authentication and uses the token's `kid` to select a verification key. Which combination of
+      hardening is correct?
+    options:
+      - Fetch whatever `jwks_uri` the incoming token names, and trust any `kid` it references
+      - Disable signature verification for registered clients to reduce JWKS traffic
+      - Accept `alg:none` from clients that registered a `jwks_uri`
+      - Pin each client's `jwks_uri` from its registration (not from the token), allowlist/validate that URL against SSRF, cap key-set and response size, and reject a `kid` that resolves to a key outside the pinned set
+    answer: 3
+    explanation: |
+      The trusted `jwks_uri` must come from server-side registration, not be dictated by the token,
+      and it must be SSRF-hardened (allowlist, block internal ranges, cap size). `kid` must only
+      select among the pinned keys, preventing `kid`-injection at attacker keys. Disabling
+      verification or accepting `alg:none` is never acceptable.
+    ref: "concepts.md#dynamic-client-registration-abuse--second-order-ssrf"

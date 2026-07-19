@@ -89,7 +89,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 0 |
-| [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (Pass 1, 813 MCQs) |
+| [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (all tiers, 1,291 MCQs) |
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
 | [Observability](topics/observability/README.md) | 17 | 0 |
 | [Software Testing](topics/testing/README.md) | 16 | 0 |
@@ -98,6 +98,18 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 22 (2026-07-19):** Security (Application & Web) **Pass 2 (deepen)** — took all 16
+  topics from 813 → **1,291 MCQs** (172 B / 449 I / 401 adv / 269 expert; every topic 74-92,
+  strong adv+expert block 37-52/topic). Built via `.claude/workflows/scripts/security-deepen.js`
+  (research → deepen → verify, high effort, 48 agents, 0 errors). Research stage did exhaustive
+  OWASP/NIST/RFC/PortSwigger gap-analysis per topic; deepen added real-CVE/attack-internals depth
+  (alg-confusion & psychic-signatures for JWT, DPoP/PAR/mix-up for OAuth, mXSS/Trusted-Types/CSP-
+  bypass for XSS, DNS-rebinding/IMDSv2 for SSRF, Rapid-Reset/GCRA for rate-limiting, envelope-
+  encryption/crypto-shredding for secrets, ML-KEM/ML-DSA & padding-oracle mechanics for crypto).
+  Verify stage fact-checked defense correctness (no insecure fix is ever the key), fixed an
+  Argon2id RFC 9106 p-param error, and rebalanced several clustered answer distributions. Content-
+  only commit (concurrent web-design work untouched). Validator clean (16 files, 1,291 Qs); no
+  answer-index clustering (top share ≤34% every topic). Security now complete across all four tiers.
 - **Session 21 (2026-07-19):** Security (Application & Web) **Pass 1** — authored all 16
   topics, **813 MCQs** (173 B / 428 I / 212 adv; 46-55/topic). Framework-agnostic,
   OWASP/NIST/RFC-grounded (OWASP Top 10 2021, ASVS, NIST SP 800-63B/57/207, OAuth 6749/

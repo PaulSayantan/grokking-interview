@@ -372,6 +372,275 @@ Key points to say out loud:
 > backed AND phishing-resistant.** When someone says "we require MFA," the sharp question is
 > "AAL2 or AAL3?" — i.e., "is it phishing-resistant?"
 
+## AiTM reverse-proxy phishing (Evilginx and friends)
+
+The single most important modern attack against MFA is **adversary-in-the-middle (AiTM)
+reverse-proxy phishing** — the reason "MFA ≠ phishing-resistant" is now the interview
+punchline. It defeated MFA *at scale* across 2022–2025.
+
+**Mechanics.** The attacker stands up a **reverse proxy** on a look-alike domain
+(`login-microsoft.com`, `okta-sso.io`). The victim lands there (email/SMS lure) and the
+proxy **relays every request/response to the real site in real time**:
+
+1. Victim types username + password → proxy forwards them to the genuine site.
+2. Genuine site prompts for the second factor (TOTP/push/number-match) → proxy relays that
+   too; the victim completes the challenge against the *real* verifier through the proxy.
+3. The genuine site, satisfied, **issues a session cookie / tokens** — and the proxy is
+   sitting in the middle, so it **captures the post-authentication session cookie**.
+4. The attacker imports that cookie into their own browser and is **fully logged in** — MFA
+   already satisfied. No password re-entry, no second factor, nothing to re-solve.
+
+This is why AiTM connects *authentication* to *session management*: the payoff is a stolen
+**authenticated session**, not the password. Number-matching does **not** help — the proxy
+simply shows the victim the number it received from the real site. TOTP/push/SMS all fall.
+
+**Named tooling:** **Evilginx2**, **Modlishka**, **Muraena** (open-source frameworks), and
+phishing-as-a-service kits **EvilProxy**, **Tycoon 2FA**, **NakedPages** that sell turnkey
+AiTM pages plus cookie exfiltration.
+
+**Why WebAuthn/FIDO2 alone survives it.** The signed `clientDataJSON` carries the
+**origin the browser actually connected to** (the proxy's origin), and the credential is
+scoped to the real RP ID. The assertion the proxy relays therefore fails origin/RP-ID
+validation at the genuine site — the signature is *for the wrong origin*. There is nothing
+the proxy can relay that the real RP will accept.
+
+**Defense stack (layered):**
+- **Phishing-resistant WebAuthn/passkeys** — the only factor that structurally blocks the
+  relay.
+- **Sender-constrained / token-bound sessions** (DPoP, mTLS) so a stolen cookie/token is
+  useless without the client's private key (next section).
+- **Short session TTL + step-up re-auth** on sensitive actions; **continuous access
+  evaluation** (CAEP / Shared Signals Framework) to revoke sessions on risk signals.
+- **Session-anomaly detection:** flag an existing session suddenly used from a new
+  IP/ASN/user-agent/geo or exhibiting **impossible travel** — the classic tell of a
+  replayed cookie.
+
+> [!INTERVIEW]
+> "Users have TOTP MFA, no password reuse, and attackers still get in — what's happening?"
+> The answer interviewers want is **AiTM reverse proxy (Evilginx-style) relaying the OTP and
+> stealing the issued session cookie.** The fix is **phishing-resistant WebAuthn + token
+> binding + session-anomaly detection**, not "add number matching."
+
+## Sender-constrained tokens: DPoP and mTLS
+
+A **bearer** token or session cookie is "whoever holds it, wins" — exactly what makes the
+AiTM cookie-theft payoff so devastating. **Sender-constrained (proof-of-possession) tokens**
+bind the token to a key the legitimate client holds, so a *stolen* token is useless without
+that private key. This is the direct answer to "the attacker stole my session/access token —
+which single control makes it worthless?" (The grant contract and JWT format live in the
+`oauth2-and-oauth21` / `jwt-and-token-security` siblings; here it is the **anti-theft/replay
+defense**.)
+
+**DPoP — Demonstrating Proof-of-Possession (RFC 9449).** The client sends a `DPoP` header
+carrying a **DPoP proof JWT** on every request:
+
+- JOSE header: `typ` = **`dpop+jwt`**; `alg` an **asymmetric** signature alg (never `none`,
+  never a symmetric MAC); `jwk` = the client's **public** key (private key never included).
+- Claims: **`htm`** (HTTP method), **`htu`** (target URI, *without query/fragment*),
+  **`iat`** (issued-at), **`jti`** (unique ID, ≥96-bit random / UUIDv4, tracked for
+  **replay** detection), **`ath`** (base64url SHA-256 of the access token — **required when
+  presenting an access token** at a resource), and **`nonce`** (when the server demands one
+  via a `DPoP-Nonce` header).
+- **Binding:** the access token carries a **`cnf`** claim with **`jkt`** = base64url SHA-256
+  **JWK thumbprint** of the DPoP public key; `token_type` is **`DPoP`** (not `Bearer`). The
+  authorization request may pass **`dpop_jkt`** to bind the whole flow from the code
+  onward; client metadata `dpop_bound_access_tokens` opts in.
+- **Errors:** `invalid_dpop_proof` (proof failed validation) and `use_dpop_nonce` (server
+  requires a fresh nonce in the next proof).
+
+A resource server accepts a DPoP token only if the proof is signed by the key whose
+thumbprint matches `cnf.jkt` **and** `ath` matches the presented token **and** `htm`/`htu`
+match the actual request. A thief with the token but not the private key cannot mint a valid
+proof.
+
+**mTLS-bound tokens (RFC 8705).** The token's `cnf` carries **`x5t#S256`** = the SHA-256
+thumbprint of the **client TLS certificate**. The token is usable only over a mutual-TLS
+connection presenting that same cert (whose private key the thief lacks). Heavier to deploy
+(PKI) but strong; common in high-assurance/financial APIs (FAPI).
+
+> [!KEY-TAKEAWAY]
+> DPoP and mTLS turn a **bearer** token ("any holder wins") into a **proof-of-possession**
+> token ("only the holder of the private key wins"). This is the real defense against stolen
+> access tokens / session cookies — the AiTM payoff evaporates because the exfiltrated token
+> can't be replayed from the attacker's machine.
+
+## Username and account enumeration
+
+If an attacker can tell **which usernames/emails exist**, they can target credential-stuffing
+and password-spraying precisely and (for a company) map the org. **Account enumeration**
+(OWASP WSTG-IDNT-04, ASVS) leaks that existence through **observable differences**:
+
+- **Message differences:** "user not found" vs "wrong password" on login; "email not
+  registered" vs "reset link sent" on forgot-password; "email already in use" on
+  registration.
+- **Timing side channel:** the server runs an expensive password hash (bcrypt/Argon2)
+  **only for valid users**, so valid usernames respond measurably slower — a **timing
+  oracle** even when messages are identical.
+- **Status/redirect/length differences:** different HTTP status, redirect target, or
+  response body length for existing vs non-existing accounts; even distinct rate-limit
+  behavior per user.
+
+**Defenses:**
+- **Generic, identical responses:** "If an account exists, we've sent a reset link";
+  "Invalid username or password" for every login failure.
+- **Constant-time behavior:** always run a **dummy password hash** for non-existent users so
+  valid and invalid accounts take the same time; keep status codes, redirects, and lengths
+  uniform.
+- **Rate-limit / CAPTCHA** the enumerable endpoints (login, register, forgot-password).
+
+## Credential stuffing, password spraying, and brute force
+
+Three distinct online password attacks — interviewers probe whether you can tell them apart
+and pick the right defense:
+
+| Attack | Shape | Why it works | Primary defense |
+|---|---|---|---|
+| **Credential stuffing** | Replay breached `user:pass` **pairs** across sites | Password **reuse** | Breach-corpus check, MFA, bot/device detection |
+| **Password spraying** | **One** common password against **many** accounts | Evades **per-account** lockout by staying under the threshold | MFA, per-IP/global throttling, spray detection |
+| **Brute force** | **Many** passwords against **one** account | Weak/short password | Per-account throttling, strong password policy, MFA |
+
+Key nuances:
+- **Breach-corpus checks:** compare new/changed passwords against known-compromised lists.
+  **Have I Been Pwned** exposes a **k-anonymity range API** — the client sends the first 5
+  hex chars of the SHA-1 of the password and gets back all matching suffixes, so the full
+  password/hash never leaves the client. NIST **SHALL** blocklist-check against such lists.
+- **Account lockout is a double-edged sword:** hard lockout enables a **denial-of-service**
+  (lock every user by failing their logins) and can *aid enumeration* (locked vs not).
+  Modern guidance favors **throttling / exponential backoff + MFA** over aggressive hard
+  lockout.
+
+## Brute-force and rate-limit bypasses
+
+Rate limiting is only as good as the key it counts on. Common **bypasses** (PortSwigger /
+WSTG):
+
+- **`X-Forwarded-For` (or `X-Real-IP`) spoofing:** if per-IP counters trust a
+  client-supplied header, the attacker rotates the header to reset the counter each request.
+  Fix: derive the client IP from the **trusted edge/proxy**, never from an arbitrary request
+  header.
+- **Per-username-only lockout:** the attacker sidesteps it by **spraying** (rotating the
+  username) — one attempt per account stays under the threshold. Need per-account *and*
+  global/IP throttling.
+- **Resettable "lock after N failures" logic:** if a successful login (or any specific
+  request) resets the failure counter, an attacker interleaves a known-valid login to zero
+  it out.
+- **Unthrottled OTP endpoint:** the login may be rate-limited but the **6-digit OTP
+  verification** step is not → brute-force the 1-in-10⁶ code. RFC 4226 caps attempts;
+  NIST SP 800-63B caps at **≤100 consecutive failures per authenticator**. Add per-account
+  throttling on the OTP step.
+- **Race conditions:** firing many OTP guesses concurrently before the counter increments
+  can slip past a naive check-then-increment.
+
+## Password-reset and forgot-password flow attacks
+
+"Recovery" is discussed abstractly above; the reset *flow* itself has specific, exam-worthy
+bugs (OWASP Forgot Password Cheat Sheet):
+
+- **Password-reset poisoning / Host-header injection:** the app builds the reset link from
+  the request's `Host` (or `X-Forwarded-Host`) header. An attacker sends a reset request
+  with `Host: attacker.com`; the victim receives an email whose link points at
+  `attacker.com/reset?token=…`, and when they click it the **token leaks** to the attacker.
+  **Fix:** build links from a **server-configured canonical base URL**, never from a
+  request header.
+- **Weak/predictable tokens:** sequential, timestamp-seeded, or short tokens are guessable.
+  Use a **high-entropy** (≥128-bit) random token.
+- **Token lifecycle bugs:** token not **single-use**, no **TTL**, not **invalidated** after
+  use / after the password changes / when a new reset is requested. Correct: single-use,
+  short-lived, hashed at rest, invalidated on use/expiry/new request.
+- **Token leakage via `Referer`:** if the reset page loads third-party assets, the full URL
+  (with token) leaks in the `Referer` header. Avoid tokens in URLs sent to pages with
+  external resources, or scrub referrers.
+- **User-controllable reset parameter:** the reset POST includes a `userId`/email the server
+  trusts → an attacker changes it to **reset anyone's password** (an access-control flaw in
+  the reset flow). Bind the token to the account server-side; never trust a client-supplied
+  identity.
+- **Magic-link / OTP delivery quirks:** mail-scanner/AV **prefetching** clicks the
+  single-use link and consumes it; links in **shared inboxes**; **open redirect** in a
+  `next=` parameter; OTP **autofill leaking to lock-screen** previews; OTP **reuse across
+  steps**. Design links single-use, short-TTL, and session-bound; validate redirect targets.
+
+## FIDO2 architecture: CTAP2, UP vs UV, and WebAuthn hardening
+
+The file above says "WebAuthn + CTAP"; the two-protocol split and the assertion internals
+are frequent senior probes.
+
+**Two protocols.** **WebAuthn** (W3C) is the JS API between the **browser/RP** and the
+platform. **CTAP2** (Client-to-Authenticator Protocol, FIDO2) is how the **client talks to a
+roaming authenticator** over USB/NFC/BLE. **Hybrid transport ("caBLE")** lets a **phone act
+as an authenticator** for a nearby computer over BLE proximity + a cloud relay. Roaming keys
+can require a **clientPIN** for user verification.
+
+**User Presence (UP) vs User Verification (UV)** — the distinction that underpins "passkey =
+MFA in one tap":
+- **UP** = *someone is physically there* (a touch/tap). Proves presence, not identity.
+- **UV** = *who* is there — a **biometric or PIN** verified locally by the authenticator.
+- When **UV is satisfied**, one gesture supplies **possession** (the key) **+**
+  **inherence/knowledge** (the biometric/PIN) → the assertion is effectively **multi-factor
+  in one action**. The RP requests it via `userVerification: required|preferred|discouraged`
+  and **must check the UV flag** in `authenticatorData` (don't just trust that you asked).
+
+**`excludeCredentials`** (registration): a list of the user's already-registered credential
+IDs. It tells the authenticator **not to create a second credential** on a key that already
+holds one for this account — preventing duplicate/re-enrollment abuse and confusing UX.
+
+**`signCount` clone detection** (WebAuthn §6.1.1): the authenticator returns a **monotonic
+signature counter**. The RP stores the last value; if a later assertion returns a counter
+**≤ stored**, that suggests a **cloned authenticator** is in use → flag / step-up / lock.
+**Caveat:** many platform authenticators and **synced passkeys always return `signCount =
+0`**, so clone detection is **best-effort**, not a guarantee.
+
+**Attestation formats** (what a `direct` attestation can carry): `packed` (most common;
+self- or CA-attested), `tpm`, `android-key`, `android-safetynet` (deprecated),
+`fido-u2f`, `apple` (anonymous), `none` (most consumer RPs), and `compound` (WebAuthn L3).
+**Conveyance** is requested as `none | indirect | direct | enterprise`; **enterprise
+attestation** returns a *uniquely identifying* attestation and is opt-in for managed devices
+only (a privacy trade-off).
+
+**`credProtect` extension** governs whether a **discoverable (resident) credential** can be
+used/enumerated without UV: `userVerificationOptional`,
+`userVerificationOptionalWithCredentialIDList`, `userVerificationRequired`. Discoverable
+credentials enable **usernameless** login but consume limited on-authenticator storage.
+
+## NIST SP 800-63-4 updates (finalized 2025)
+
+The **-4 revision** of the Digital Identity Guidelines is now published and changes several
+specifics interviewers ask about (the sections above cite the -3 draft; these are the
+deltas). The family: **800-63A** = identity proofing (IAL), **800-63B** = authentication
+(AAL), **800-63C** = federation (FAL).
+
+**Terminology:**
+- **"Password"** replaces "memorized secret."
+- **"Phishing resistance"** replaces "verifier impersonation resistance." Two recognized
+  mechanisms: **channel binding** (client-authenticated TLS, PIV/CAC — considered *stronger*
+  because it resists cert misissuance) and **verifier name binding** (WebAuthn/FIDO2). OTP
+  and out-of-band authenticators do **not** qualify — manual entry doesn't bind the output
+  to the session.
+
+**Assurance-level changes:**
+- **AAL2 SHALL offer at least one phishing-resistant option;** federal staff/contractors
+  SHALL use phishing-resistant authentication.
+- **AAL3 requires a non-exportable private key** in a hardware-protected environment →
+  **syncable passkeys SHALL NOT be used at AAL3** (they're exportable across the cloud
+  fabric). Device-bound keys only.
+- **AAL3 session:** overall reauthentication **SHALL be ≤12 hours** and inactivity ≤15
+  minutes, and reauth must use the full authentication (not a single factor). **AAL2:**
+  overall ≤24 hours, inactivity ≤1 hour (a single factor may suffice after inactivity).
+
+**Password rules to state verbatim:**
+- **Minimum 8 characters when used in MFA; 15 when single-factor;** allow **≥64**.
+- **No composition rules** (no forced upper/lower/symbol); **no periodic rotation** (rotate
+  only on evidence of compromise); **no password hints**; **no knowledge-based auth /
+  security questions**; allow paste and password managers; salt ≥32 bits.
+- **SHALL blocklist-check** prospective passwords against known-compromised/dictionary lists.
+
+**Throttling:** limit to **≤100 consecutive failed attempts** per authenticator (an upper
+bound; lower is fine).
+
+> [!INTERVIEW]
+> "Why can't a synced passkey meet AAL3?" → **AAL3 requires a non-exportable key; a syncable
+> passkey is exportable across its cloud keychain, so it cannot satisfy AAL3** — only
+> device-bound authenticators (security keys, PIV) can. Great senior-level discriminator.
+
 ## Common follow-up questions
 
 - **"Password + security question — is that MFA?"** No. Both are knowledge factors; true MFA
@@ -415,3 +684,13 @@ Key points to say out loud:
 - **OWASP Credential Stuffing / Forgot-Password Cheat Sheets** — recovery-flow guidance.
 - **CISA / industry guidance on phishing-resistant MFA and number matching** (defense
   against MFA fatigue).
+- **RFC 9449** — *OAuth 2.0 Demonstrating Proof of Possession (DPoP)*.
+  https://www.rfc-editor.org/rfc/rfc9449
+- **RFC 8705** — *OAuth 2.0 Mutual-TLS Client Authentication and Certificate-Bound Access
+  Tokens*. https://www.rfc-editor.org/rfc/rfc8705
+- **NIST SP 800-63B-4 / 800-63-4** (finalized 2025) — phishing resistance, AAL3
+  non-exportable keys, password and throttling rules. https://pages.nist.gov/800-63-4/
+- **OWASP WSTG-IDNT** (account enumeration) and **OWASP Forgot Password / Credential
+  Stuffing / Password Reset Cheat Sheets**.
+- **W3C WebAuthn L3** — `excludeCredentials`, `signCount`, UV/UP flags, `credProtect`,
+  attestation formats/conveyance.

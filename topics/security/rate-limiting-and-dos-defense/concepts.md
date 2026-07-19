@@ -506,6 +506,285 @@ go bankrupt or throttle yourself.
 > broke." The choice between *degrade/shed* and *scale (and pay)* is a business decision that
 > should be made deliberately, not defaulted.
 
+## HTTP/2 Rapid Reset and CONTINUATION flood
+
+HTTP/2 multiplexes many **streams** over one TCP+TLS connection, bounded by
+`SETTINGS_MAX_CONCURRENT_STREAMS`. Two 2023–2024 attack classes weaponize the protocol's
+own control frames, and both defeat a naive **concurrency limit**.
+
+**HTTP/2 Rapid Reset (CVE-2023-44487).** The client opens a stream with `HEADERS` (a full
+request the server begins to process) and *immediately* sends `RST_STREAM` to cancel it. A
+canceled stream **no longer counts** against the concurrency cap, so the client can open and
+cancel new streams in an unbounded loop over a single connection. The server does the
+expensive work (routing, upstream calls) while the attacker pays almost nothing. The August
+2023 campaign peaked at **~201 million requests/sec** from a botnet of only ~20,000 machines
+(coordinated disclosure by Google, Cloudflare, AWS).
+
+- **Why concurrency limits fail:** the exploit primitive is *cancellation*, not concurrency —
+  streams are reset before they ever occupy a concurrent slot.
+- **Mitigation:** count and monitor **client-initiated `RST_STREAM` frames per connection**;
+  when the reset rate crosses a threshold, send `GOAWAY` and **close the connection** (some
+  vendors add an "IP jail" for repeat offenders). Cap the *rate of new streams* and the ratio
+  of resets to completed streams, not just the in-flight count.
+
+**HTTP/2 CONTINUATION flood (CERT VU#421644, 2024).** HTTP/2 header blocks too large for one
+frame continue across `CONTINUATION` frames; the block ends only when a frame sets
+`END_HEADERS`. An attacker sends an endless stream of `CONTINUATION` frames **without ever
+setting `END_HEADERS`**, forcing the server to buffer and HPACK-decode (RFC 7541 Huffman)
+headers without bound → CPU/memory exhaustion. Critically, because the request **never
+completes**, it typically **evades request logging** — you see pinned CPU with no access-log
+entries. Affected implementations included Go (**CVE-2023-45288**), nghttp2
+(**CVE-2024-28182**), Envoy (**CVE-2024-27919 / -30255**), Node.js (**CVE-2024-27983**), and
+Apache httpd (**CVE-2024-27316**).
+
+- **Which limit stops it:** cap **total header list size**, **header field count**, and the
+  **number of CONTINUATION/HEADERS frames per stream** — bound the *header work*, not the
+  request rate. RFC 9113 already warns that streams of small or empty frames are a DoS vector.
+
+> [!INTERVIEW]
+> *"Concurrency cap is 100 streams but one HTTP/2 connection is flooding you at 200M rps —
+> what's happening?"* → Rapid Reset; alarm on `RST_STREAM` rate and `GOAWAY`+close.
+> *"CPU is pinned but nothing appears in the access log — diagnose."* → CONTINUATION flood
+> (incomplete request) or slowloris; cap header frames/size and log at the connection layer.
+
+## HashDoS and hash-flooding
+
+**HashDoS** (algorithmic-complexity DoS, sibling of ReDoS) targets **hash tables**. Inserting
+*n* keys that all collide into the same bucket degrades average `O(1)` operations to `O(n²)`,
+so a small payload of crafted keys pins a CPU. Attack surfaces are anywhere untrusted input
+becomes hash keys: **HTTP POST form fields, JSON object keys, query parameters, and HTTP
+headers**. The classic **28C3 (2011)** disclosure showed PHP, Java, Python, Ruby, ASP.NET, and
+others were all vulnerable — a few hundred KB of colliding parameters could burn minutes of CPU.
+
+**Defenses:** use a **keyed/randomized hash** so an attacker cannot precompute collisions —
+modern runtimes seed their string hash with a per-process random key and many adopted
+**SipHash** (a fast keyed PRF) for this exact purpose. Independently, **cap the number of keys**
+accepted per request (e.g. PHP `max_input_vars`, a header-count limit, a JSON key-count/depth
+limit). Like ReDoS, count/size limits alone miss it — you must bound the *work* or remove the
+collision primitive.
+
+## GCRA: the generic cell rate algorithm
+
+**GCRA** is a rate limiter that stores a **single timestamp** — the **Theoretical Arrival Time
+(TAT)**, the earliest moment the *next* conforming request may arrive. With emission interval
+`T = 1/rate` and a **burst tolerance** `τ` (tau):
+
+```
+allow if:  now >= TAT - τ
+on allow:  TAT = max(now, TAT) + T
+```
+
+It enforces the sustained rate **and** a bounded burst using one timestamp of state (O(1),
+no bucket refill loop). GCRA is provably **equivalent to a token bucket** — `τ` corresponds to
+the bucket depth and `T` to the refill interval — but is often preferred in distributed stores
+because a single-value compare-and-set is trivially atomic. This is what **redis-cell**
+implements via the `CL.THROTTLE` command (returns allowed/limit/remaining/retry-after/reset in
+one round-trip). Knowing GCRA is the standard "elegant single-value limiter" follow-up to the
+token-bucket question.
+
+## Load shedding and adaptive concurrency control
+
+When the flood is *valid-looking* traffic you cannot simply block, the goal shifts from "stop
+the attacker" to "**stay up and serve as much good traffic as possible**." That is **load
+shedding**: reject excess work **cheaply and early** (before it consumes expensive resources)
+rather than letting it queue until everything times out.
+
+- **Admission control / concurrency limits.** Bound *in-flight* requests, not just arrival
+  rate. By **Little's Law** (`L = λ·W`), a fixed concurrency limit plus rising latency
+  automatically caps throughput and pushes back — this protects a fixed resource (threads, DB
+  connections) better than a req/sec limit under variable cost.
+- **Adaptive concurrency limits (Netflix).** Instead of a hand-tuned constant, infer the limit
+  from observed latency using an **AIMD** control loop (like TCP congestion control): additively
+  raise the limit while latency is healthy, multiplicatively cut it when latency climbs.
+- **CoDel / adaptive LIFO queues.** Bound *queue sojourn time*, not queue length; when the
+  oldest item has waited too long, drop it. Some systems flip to **LIFO under load** so fresh
+  requests (likely still within their deadline) are served while stale ones are shed.
+- **Prioritized / graceful degradation ("brownout").** Shed low-priority traffic first (batch,
+  prefetch, non-critical features) and keep the core path alive; return a reduced/cached
+  experience rather than a hard failure.
+
+> [!KEY-TAKEAWAY]
+> Rate limiting caps *arrival rate per key*; load shedding caps *concurrent work regardless of
+> who sent it* and is the staff-level answer to a flood of "legitimate" requests. Prefer
+> shedding early over queuing — a full queue just converts an overload into a latency collapse.
+
+## Circuit breakers, bulkheads and retry budgets
+
+Availability is often lost not to an attacker but to a system **DoSing itself**. A brief blip
+makes clients retry; each retry multiplies load on an already-struggling dependency, and if
+every layer retries, load multiplies *per layer* — a **retry storm / retry amplification** that
+turns a 1-second hiccup into a cascading outage.
+
+- **Retry budgets.** Cap retries to a small fraction of total requests (e.g. **≤10–20%**);
+  when the budget is exhausted, fail fast instead of retrying. This bounds the amplification
+  factor regardless of how many layers exist.
+- **Exponential backoff with jitter.** Backoff alone still synchronizes; add **jitter**
+  (equal-jitter or **decorrelated jitter**) so retries spread over time instead of forming a
+  thundering herd.
+- **Circuit breakers.** After a failure threshold, "open" the circuit and fail fast for a
+  cooldown, then probe with a **half-open** trial before closing — this stops hammering a dead
+  dependency and lets it recover.
+- **Bulkheads.** Isolate resources per dependency (separate connection/thread pools) so one
+  saturated downstream cannot consume every worker and sink unrelated traffic.
+- **Deadline propagation.** Pass a shrinking deadline down the call chain so no layer keeps
+  working on a request the caller has already abandoned.
+
+> [!INTERVIEW]
+> *"A brief blip caused a full outage that outlasted the blip — why, and how do you prevent
+> recurrence?"* → retry storm; add retry budgets, backoff **with jitter**, circuit breakers,
+> bulkheads, and deadline propagation. "Retries considered harmful" without a budget.
+
+## Cache-busting and cache-piercing DDoS
+
+Putting content behind a CDN only protects the origin if requests actually **hit the cache**.
+In a **cache-busting / cache-piercing** attack, the adversary appends a **random, unkeyed
+input** — most often a junk query string (`GET /page?x=<random>`) or a varying header — so
+every request is a **unique cache key**, misses the edge cache, and is forwarded to the
+**origin**. "Just cache it" is defeated because nothing is ever a hit.
+
+**Defenses:**
+- **Normalize the cache key:** strip or **ignore unknown query parameters** and only vary on an
+  **allowlist** of parameters/headers that actually change the response.
+- **Rate-limit cache-miss traffic specifically** (a high miss ratio from one client/edge is a
+  strong abuse signal).
+- Combine with **origin lock-down** (edge-only IP allowlist / mTLS) so bypassing the cache
+  still can't reach the origin directly.
+
+> [!WARNING]
+> Two independent reasons a CDN-fronted origin still gets flooded: (1) the attacker discovered
+> the **origin IP** and skipped the edge (fix: lock origin to edge ranges/mTLS), and (2)
+> **cache-busting** query strings pierce the cache to origin (fix: cache-key normalization +
+> miss-rate limiting). A candidate should name *both*.
+
+## Modern amplification vectors and DNS RRL
+
+The DNS/NTP/memcached trio is dated for a 2025 interview. Post-2020 vectors worth naming:
+
+| Vector | Amplification | Note |
+|---|---|---|
+| **CLDAP** (UDP 389) | ~**56–70×** | Connectionless LDAP; common in recent reflection floods |
+| **TCP middlebox reflection** (2021) | potentially "**infinite**" | Abuses RFC-noncompliant censorship/filtering middleboxes that inject large block-page responses to spoofed SYNs |
+| **BitTorrent DHT** | moderate | Sharp resurgence (+~304% QoQ in 2024 reports) |
+| **memcached** | up to ~51,000× | Resurgent (+~314% QoQ) despite the 2018 fixes |
+
+Cloudflare's 2024-Q4 reporting logged a record **5.6 Tbps** Mirai UDP flood (~80 s, ~13,000
+devices) and **420+** hyper-volumetric events exceeding **1 Tbps / 1 Bpps**, with SYN (~38%),
+DNS (~16%), and UDP (~14%) leading by vector.
+
+**Authoritative-DNS defense — Response Rate Limiting (RRL):** an authoritative server that
+detects many near-identical responses to the *same* (spoofed) client slows/drops them, blunting
+its use as a reflector. On the routing side, **BCP 84 / RFC 3704** extends BCP 38 ingress
+filtering with guidance for **multihomed** networks (reverse-path / feasible-path checks) where
+simple strict uRPF would wrongly drop legitimate asymmetric traffic.
+
+## RateLimit header structured fields
+
+The IETF work on rate-limit headers **changed shape**. The legacy de-facto trio
+(`RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset`) has been refactored in
+`draft-ietf-httpapi-ratelimit-headers` (v11) into **two HTTP Structured Fields**:
+
+- **`RateLimit-Policy`** — advertises the *quota policy/policies* (static): parameters
+  `q` = quota, `qu` = quota-units, `w` = window (seconds), `pk` = partition key.
+- **`RateLimit`** — the *current state*: `r` = remaining, `t` = seconds until reset, `pk`.
+
+```http
+RateLimit-Policy: "burst";q=100;w=60, "daily";q=1000;w=86400
+RateLimit: "burst";r=50;t=30
+```
+
+Each is a Structured-Fields list of named members, so a server can advertise **multiple
+simultaneous policies**. Senior candidates should know the standard **landed on structured
+fields** and that the old three-header form is now legacy. (This is the client-*contract*
+surface owned by rest-api-design; here it matters as "know the current standard.")
+
+## Two-tier distributed limiting and clock skew
+
+Deepening distributed limiting: a purely **centralized** counter adds a network round-trip to
+every request and makes the store a bottleneck/SPOF; purely **local** counters overshoot by
+~N×. The production compromise for many edge PoPs is a **two-tier local + global** design:
+
+- Each edge node holds a **local allowance** (a slice of the global budget) it can spend
+  **without any round-trip**, and **periodically reconciles** with the central store, requesting
+  more budget or reporting usage. This slashes latency and central load while keeping the global
+  limit *approximately* enforced.
+- You explicitly **accept a bounded overcount** (or undercount) as the price of low latency; the
+  key design question an interviewer wants is *which consistency you give up* and by how much.
+- **Atomic Lua / `CL.THROTTLE`.** When you do go to the store, the multi-step check-and-decrement
+  must be a **single atomic** operation (a server-side Lua script or a purpose-built command) —
+  otherwise concurrent nodes race exactly like the `GET`/compare/`SET` bug.
+- **Clock skew.** Timestamp-based limiters (token bucket, GCRA, sliding-window) assume a common
+  clock; skew across nodes/PoPs can let requests through early or reject them late. Prefer the
+  **store's clock/monotonic time** for the authoritative decision, and keep hosts NTP-synced.
+- **Fail-open vs fail-closed** still applies per endpoint when the central store is unreachable
+  mid-reconcile.
+
+> [!INTERVIEW]
+> *"Design a distributed limiter for 50 PoPs with a sub-millisecond budget."* → two-tier
+> local+global allowance, GCRA/token-bucket in Redis via atomic Lua, **accept bounded
+> overcount**, handle clock skew via the store's clock, and pick a fail-open policy for public
+> traffic.
+
+## Challenge evolution: Privacy Pass, Turnstile, PoW pages
+
+Visual CAPTCHAs are being displaced by **attestation** and **cryptographic** challenges that
+avoid puzzles and reduce the privacy/UX cost:
+
+- **Privacy Pass (RFC 9576 architecture) / Private Access Tokens (PATs).** A client obtains
+  blind-signed, **unlinkable tokens** from an attester/issuer (e.g. a device attesting via the
+  OS, as Apple does) and redeems one per request to prove "likely-human/attested device"
+  **without** solving a puzzle and **without** the origin learning the client's identity. This is
+  the direction of 2025 best practice — attestation, not image grids.
+- **Cloudflare Turnstile / managed & JS challenges.** Non-interactive proofs (lightweight
+  browser challenges, telemetry) replace click-the-traffic-lights for most users, escalating
+  only on risk.
+- **Proof-of-Work challenge pages (Anubis-style).** Under active L7 flood, an interstitial makes
+  each client compute a small hash puzzle before proceeding — cheap for one human, expensive for
+  a botnet issuing millions of requests, and increasingly used to fend off aggressive scrapers.
+
+Trade-offs remain: attestation can exclude older/atypical clients and centralizes trust in
+attesters; PoW burdens low-power devices. Trigger **adaptively on risk**, not universally.
+
+## Slow-attack family: Slow Read, RUDY, concrete knobs
+
+Beyond slowloris (slow *request headers*), the slow-attack family also includes:
+
+- **RUDY / Slow POST (R-U-Dead-Yet).** Announce a large `Content-Length`, then dribble the
+  **body** a byte or two at a time, holding a worker for the whole upload.
+- **Slow Read.** The request is normal, but the client advertises a **tiny TCP receive window**
+  (or a zero window), so the server cannot flush its response and the connection/socket stays
+  pinned. This exhausts the *write* side, which body-read timeouts alone don't catch.
+
+**Concrete server knobs** (framework-agnostic, but named because interviewers ask):
+- **nginx:** `client_header_timeout`, `client_body_timeout`, `send_timeout`, and
+  `limit_conn` (cap concurrent connections per key).
+- **Apache httpd:** `mod_reqtimeout` (per-phase header/body min data-rate + timeout).
+- Enforce **minimum data rates** on both read and write, and cap **connections per source**.
+- **Test tool:** `slowhttptest` is the standard OWASP WSTG utility for reproducing slowloris,
+  slow POST, and slow read.
+
+## Breached-credential checks and login throttling
+
+Deepening credential-abuse defense with current standards:
+
+- **Breached-password check via k-anonymity (Pwned Passwords range API).** Instead of sending a
+  password (or its full hash) to a third party, the client hashes it (SHA-1), sends only the
+  **first 5 hex characters** of the hash, and receives *all* suffixes in that prefix bucket to
+  match **locally**. The server learns only a 5-char prefix shared by thousands of hashes — the
+  full credential never leaves. **NIST SP 800-63B** requires screening chosen passwords against
+  known-breached lists.
+- **NIST SP 800-63B guidance.** *Do not* impose knowledge-based **composition rules** or
+  routine forced rotation; *do* rate-limit authentication attempts (the guideline references
+  limiting to on the order of **≤100 consecutive failed attempts** per account) and add
+  throttling/step-up rather than blunt **knowledge-based lockout**, which enables account-lockout
+  DoS.
+- **CAPTCHA-after-N vs always.** Trigger the challenge **after a few failures / on risk**, not on
+  every login, to preserve UX for the overwhelming majority of legitimate sign-ins.
+- **Fingerprinting for bot detection.** **JA3/JA4 (TLS)** and **HTTP/2 fingerprinting** hash the
+  client's TLS ClientHello / H2 settings into a signature; mismatches between the claimed
+  user-agent and the fingerprint expose automation. Feed these into **behavioral/anomaly**
+  scoring rather than static thresholds — but treat fingerprints as *signals*, since they can be
+  cloned.
+
 ## Common follow-up questions
 
 - **"Token bucket vs leaky bucket — which allows bursts?"** Token bucket: it accumulates up to
@@ -538,6 +817,28 @@ go bankrupt or throttle yourself.
   checks — avoid hard lockout keyed only on username (an attacker could lock out victims).
 - **"Rate limiting didn't stop the attack — why?"** It was volumetric (packets saturated the
   uplink before reaching the app) or algorithmic (tiny payload, huge work) — wrong layer/control.
+- **"HTTP/2 Rapid Reset — why does a concurrency cap fail and what stops it?"** The client
+  cancels streams with `RST_STREAM` before they occupy a concurrent slot, so the cap is never
+  reached; monitor the client reset rate and `GOAWAY`+close the connection above a threshold.
+- **"A CONTINUATION flood pins CPU with no access logs — what's the fix?"** The request never
+  completes (no `END_HEADERS`), so it isn't logged; cap header list size, field count, and
+  frames per stream, and log at the connection layer.
+- **"What is HashDoS and how is it fixed?"** Crafted colliding keys turn hash-table ops into
+  O(n²); fix with a randomized/keyed hash (SipHash) and a cap on parameter/key count.
+- **"How does GCRA relate to token bucket?"** GCRA tracks one Theoretical Arrival Time and is
+  provably equivalent to a token bucket (τ ≈ bucket depth, T ≈ refill interval); its single
+  timestamp makes atomic distributed use easy (redis-cell `CL.THROTTLE`).
+- **"The flood is all valid traffic — how do you stay up?"** Load shedding: admission control /
+  concurrency limits (Little's Law), adaptive concurrency (AIMD), CoDel/LIFO queues, and
+  prioritized graceful degradation — reject cheaply and early.
+- **"Our own retries caused a cascading outage — prevent it."** Retry storm; add retry budgets,
+  backoff with jitter, circuit breakers, bulkheads, and deadline propagation.
+- **"CDN in front but origin still floods — two independent reasons."** Origin-IP discovery
+  bypass (lock origin to edge ranges/mTLS) and cache-busting query strings (normalize the cache
+  key + rate-limit cache misses).
+- **"Design a distributed limiter for many PoPs with a sub-ms budget."** Two-tier local+global
+  allowance, GCRA/token-bucket via atomic Lua, accept bounded overcount, handle clock skew via
+  the store's clock, fail-open for public traffic.
 
 ## References
 
@@ -568,3 +869,28 @@ go bankrupt or throttle yourself.
   https://www.cisa.gov/news-events/alerts/2014/01/17/udp-based-amplification-attacks
 - Cloudflare Learning Center — DDoS attack types (memcached, NTP, DNS amplification, slowloris):
   https://www.cloudflare.com/learning/ddos/what-is-a-ddos-attack/
+- **CVE-2023-44487** — HTTP/2 Rapid Reset: https://nvd.nist.gov/vuln/detail/CVE-2023-44487
+- Cloudflare / Google — HTTP/2 Rapid Reset write-ups (Oct 2023, 201M+ rps):
+  https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack/
+- CERT/CC **VU#421644** — HTTP/2 CONTINUATION flood (CVE-2023-45288 Go, CVE-2024-28182 nghttp2,
+  CVE-2024-27919 Envoy, CVE-2024-27983 Node.js, CVE-2024-27316 Apache httpd):
+  https://kb.cert.org/vuls/id/421644
+- **RFC 9113** — HTTP/2 (small/empty-frame DoS guidance): https://www.rfc-editor.org/rfc/rfc9113
+- **RFC 7541** — HPACK header compression: https://www.rfc-editor.org/rfc/rfc7541
+- 28C3 (2011) — "Efficient Denial of Service Attacks on Web Application Platforms" (HashDoS);
+  SipHash: https://www.aumasson.jp/siphash/
+- **RFC 3704 / BCP 84** — Ingress Filtering for Multihomed Networks:
+  https://www.rfc-editor.org/rfc/rfc3704
+- DNS **Response Rate Limiting (RRL)**: https://kb.isc.org/docs/aa-00994
+- **RFC 9576** — The Privacy Pass Architecture (Private Access Tokens):
+  https://www.rfc-editor.org/rfc/rfc9576
+- redis-cell — GCRA rate limiter (`CL.THROTTLE`): https://github.com/brandur/redis-cell
+- Netflix TechBlog — Performance Under Load (adaptive concurrency limits):
+  https://netflixtechblog.medium.com/performance-under-load-3e6fa9a60581
+- CoDel — Controlling Queue Delay (Nichols & Jacobson): https://queue.acm.org/detail.cfm?id=2209336
+- AWS Architecture Blog — Exponential backoff and jitter:
+  https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+- NIST **SP 800-63B** — Digital Identity Guidelines (authentication throttling, breached-password
+  screening): https://pages.nist.gov/800-63-3/sp800-63b.html
+- Have I Been Pwned — Pwned Passwords k-anonymity range API:
+  https://haveibeenpwned.com/API/v3#PwnedPasswords

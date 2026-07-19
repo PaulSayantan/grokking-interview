@@ -890,3 +890,556 @@ questions:
       and headers, and (for credentials) echoes the explicit origin with
       Allow-Credentials: true. api and app are different origins, so CORS applies.
     ref: "concepts.md#simple-requests-vs-preflighted-requests"
+
+  - id: sop-cors-and-csrf-051
+    difficulty: advanced
+    tags: [postmessage, cross-window, targetorigin]
+    question: |
+      A page calls `popup.postMessage(sensitiveToken, "*")` right after opening an SSO popup.
+      What is the concrete risk of the wildcard `targetOrigin`?
+    options:
+      - "If the popup navigated to an attacker origin (e.g. via an open redirect) before delivery, the token is delivered to the attacker"
+      - "The message is rejected because `*` is not a valid targetOrigin"
+      - "The browser strips the message body when targetOrigin is `*`"
+      - "It forces a CORS preflight before the message is delivered"
+    answer: 0
+    explanation: |
+      targetOrigin is a delivery constraint. With `"*"`, the browser delivers to whatever
+      origin the target window currently holds — if it was navigated to an attacker origin
+      between the call and delivery, the sensitive message leaks. Always name the exact
+      recipient origin.
+    ref: "concepts.md#cross-window-messaging-with-postmessage"
+
+  - id: sop-cors-and-csrf-052
+    difficulty: expert
+    tags: [postmessage, origin-check, anti-pattern]
+    question: |
+      A message handler guards with `if (event.origin.indexOf("trusted.com") !== -1) { ... }`.
+      Which origin bypasses this check?
+    options:
+      - "https://trusted.com"
+      - "https://api.trusted.com"
+      - "https://trusted.com.attacker.com"
+      - "https://TRUSTED.COM"
+    answer: 2
+    explanation: |
+      A substring/`indexOf` test matches any origin that merely contains the string
+      "trusted.com", including `https://trusted.com.attacker.com` (and `attacker-trusted.com`).
+      Receivers must compare `event.origin` by exact FQDN equality, not substring.
+    ref: "concepts.md#cross-window-messaging-with-postmessage"
+
+  - id: sop-cors-and-csrf-053
+    difficulty: advanced
+    tags: [postmessage, dom-xss]
+    question: |
+      Beyond validating `event.origin`, what is the other essential rule when handling a
+      received postMessage `event.data`?
+    options:
+      - "Echo it back to the sender with postMessage to confirm receipt"
+      - "Store it in localStorage so other tabs can read it"
+      - "Treat it as untrusted input and never sink it into innerHTML, eval, or document.write"
+      - "Base64-encode it before use to neutralize any scripts"
+    answer: 2
+    explanation: |
+      event.data is attacker-influenced input. Sinking it into innerHTML/eval/document.write/
+      Function is a top DOM-XSS vector (and a client-side CSRF enabler). Validate/sanitize it
+      and use safe sinks; exact-origin checking alone is not enough.
+    ref: "concepts.md#cross-window-messaging-with-postmessage"
+
+  - id: sop-cors-and-csrf-054
+    difficulty: expert
+    tags: [document-domain, origin-agent-cluster, deprecation]
+    question: |
+      Which statement about `document.domain` is correct in a modern browser?
+    options:
+      - "It is the recommended way for two subdomains to share the DOM securely"
+      - "Setting it only relaxes access to the exact same host, preserving the port"
+      - "Setting it grants blanket DOM access across the eTLD+1 and nulls the port; it is deprecated and disabled under Origin-Agent-Cluster: ?1 or COOP+COEP isolation"
+      - "It has no effect on the Same-Origin Policy at all"
+    answer: 2
+    explanation: |
+      document.domain widens the trust boundary to the whole registrable domain and resets
+      the origin's port to null (so a different-port neighbor gains access). It is deprecated;
+      Origin-Agent-Cluster: ?1 and cross-origin isolation disable it. Use postMessage instead.
+    ref: "concepts.md#documentdomain-and-origin-agent-cluster"
+
+  - id: sop-cors-and-csrf-055
+    difficulty: expert
+    tags: [cswsh, websocket, csrf]
+    question: |
+      A chat backend authenticates the WebSocket handshake using only the session cookie, with
+      no Origin check and no CSRF token. Why is this MORE dangerous than a classic CSRF write?
+    options:
+      - "The WebSocket handshake cannot carry cookies, so no session is used"
+      - "CORS blocks the handshake but allows the data frames"
+      - "Sec-WebSocket-Key authenticates the connection, so only replay is possible"
+      - "The handshake is a GET carrying cookies, and the WebSocket data channel is not gated by CORS, so the attacker gets bidirectional read AND write in the victim's session"
+    answer: 3
+    explanation: |
+      The handshake is a plain HTTP GET with Upgrade: websocket and carries cookies. Because
+      WebSocket data is not subject to CORS read-blocking, cross-site WebSocket hijacking lets
+      the attacker both send commands and read replies. Sec-WebSocket-Key is anti-caching, not
+      auth. Fix: server-side Origin validation + CSRF ticket + SameSite.
+    ref: "concepts.md#cross-site-websocket-hijacking-cswsh"
+
+  - id: sop-cors-and-csrf-056
+    difficulty: advanced
+    tags: [cswsh, defense]
+    question: |
+      Which set of measures correctly defends a cookie-authenticated WebSocket endpoint
+      against Cross-Site WebSocket Hijacking?
+    options:
+      - "Rely on Sec-WebSocket-Key and wss:// (TLS) alone"
+      - "Add Access-Control-Allow-Origin: * to the handshake response"
+      - "Validate the Origin header server-side on the handshake, require a CSRF token/ticket in the handshake, and set SameSite on the session cookie"
+      - "Switch the handshake from GET to POST"
+    answer: 2
+    explanation: |
+      CORS does not protect WebSockets, so the defenses are: server-side Origin validation on
+      the handshake, an unpredictable CSRF token/one-time ticket, and SameSite cookies so the
+      cookie isn't sent cross-site. TLS and Sec-WebSocket-Key do not stop CSWSH; the handshake
+      method is fixed as GET.
+    ref: "concepts.md#cross-site-websocket-hijacking-cswsh"
+
+  - id: sop-cors-and-csrf-057
+    difficulty: expert
+    tags: [coop, xs-leaks, window-opener]
+    question: |
+      What does `Cross-Origin-Opener-Policy: same-origin` accomplish?
+    options:
+      - "It allows any origin to read the page's fetch responses"
+      - "It forces all subresources to be loaded with CORS"
+      - "It severs the window.opener relationship across origins, so a cross-origin window cannot reach back into your window"
+      - "It sets SameSite=Strict on all cookies for the document"
+    answer: 2
+    explanation: |
+      COOP: same-origin isolates the browsing-context group so cross-origin windows you open
+      (or that open you) lose the window.opener reference, mitigating XS-Leaks and
+      tabnabbing-style probing. It is unrelated to reading fetch responses (that's CORS).
+    ref: "concepts.md#cross-origin-isolation-coop-coep-corp"
+
+  - id: sop-cors-and-csrf-058
+    difficulty: expert
+    tags: [coep, coop, sharedarraybuffer]
+    question: |
+      Which header combination makes a document "cross-origin isolated," unlocking APIs like
+      SharedArrayBuffer and high-resolution timers?
+    options:
+      - "Cross-Origin-Opener-Policy: same-origin AND Cross-Origin-Embedder-Policy: require-corp"
+      - "Access-Control-Allow-Origin: * AND Access-Control-Allow-Credentials: true"
+      - "X-Frame-Options: DENY AND Content-Security-Policy: frame-ancestors 'none'"
+      - "Strict-Transport-Security AND Referrer-Policy: no-referrer"
+    answer: 0
+    explanation: |
+      Cross-origin isolation requires COOP: same-origin plus COEP: require-corp. Those powerful
+      APIs are gated behind isolation because they enable Spectre-style timing side channels.
+      The other combinations control framing, CORS, or transport, not isolation.
+    ref: "concepts.md#cross-origin-isolation-coop-coep-corp"
+
+  - id: sop-cors-and-csrf-059
+    difficulty: advanced
+    tags: [corp, embedding]
+    question: |
+      What does `Cross-Origin-Resource-Policy: same-origin` on a response do?
+    options:
+      - "Lets any origin's script read the response body via fetch"
+      - "Adds the resource to the CORS safelist"
+      - "Forces the resource to be served only over HTTP/2"
+      - "Instructs the browser to refuse cross-origin no-cors embedding of that resource"
+    answer: 3
+    explanation: |
+      CORP lets a resource declare who may embed it (same-origin, same-site, cross-origin). It
+      lets a sensitive endpoint block cross-origin no-cors embedding, mitigating Spectre-style
+      side-channel reads and XSSI. It is about embedding, not fetch-response reading (CORS).
+    ref: "concepts.md#cross-origin-isolation-coop-coep-corp"
+
+  - id: sop-cors-and-csrf-060
+    difficulty: expert
+    tags: [private-network-access, preflight]
+    question: |
+      Under Private Network Access, when a page on a public origin fetches from a loopback/
+      private IP, what handshake must succeed?
+    options:
+      - "The browser sends a preflight with Access-Control-Request-Private-Network: true and the target must reply Access-Control-Allow-Private-Network: true (plus a matching ACAO)"
+      - "The server must send Strict-Transport-Security"
+      - "No preflight is sent because loopback is always same-origin"
+      - "The browser requires the target to present a valid TLS certificate for the public origin"
+    answer: 0
+    explanation: |
+      PNA adds a preflight carrying Access-Control-Request-Private-Network: true when a
+      less-private origin targets a more-private address; the target must respond with
+      Access-Control-Allow-Private-Network: true and allow the origin. This guards routers/IoT/
+      localhost from CSRF and DNS rebinding.
+    ref: "concepts.md#private-network-access-pna"
+
+  - id: sop-cors-and-csrf-061
+    difficulty: expert
+    tags: [private-network-access, no-cors]
+    question: |
+      What is notable about when the Private Network Access preflight fires, compared to
+      ordinary CORS?
+    options:
+      - "It only fires for requests with Content-Type: application/json"
+      - "It never fires for GET requests"
+      - "It fires even for no-cors requests (and otherwise-simple/same-origin ones) when the target address is more private than the initiator"
+      - "It only fires when credentials are included"
+    answer: 2
+    explanation: |
+      PNA guards exactly the requests classic CORS never did: it triggers a preflight even for
+      no-cors requests and requests that would otherwise be simple/same-origin, whenever the
+      destination is a more-private address space. That's what closes the localhost/IoT CSRF
+      gap.
+    ref: "concepts.md#private-network-access-pna"
+
+  - id: sop-cors-and-csrf-062
+    difficulty: expert
+    tags: [dns-rebinding, sop-bypass]
+    question: |
+      In a DNS rebinding attack, how does the attacker read responses from an internal service
+      despite the Same-Origin Policy?
+    options:
+      - "By sending Access-Control-Allow-Origin: * from the attacker's server"
+      - "By exploiting a CORS reflection bug on the internal service"
+      - "By re-resolving their own hostname to an internal IP after serving JS, so the browser still treats requests to that unchanged hostname as same-origin"
+      - "By setting document.domain to the internal service's hostname"
+    answer: 2
+    explanation: |
+      SOP keys on hostname, not resolved IP. The attacker serves JS from attacker.com, then
+      rebinds attacker.com's DNS (short TTL) to 127.0.0.1 or an internal IP. The browser still
+      considers attacker.com same-origin, so the JS reads the internal service's responses.
+    ref: "concepts.md#dns-rebinding"
+
+  - id: sop-cors-and-csrf-063
+    difficulty: advanced
+    tags: [dns-rebinding, defense]
+    question: |
+      Which defense most directly stops DNS rebinding against an internal HTTP service?
+    options:
+      - "Adding Vary: Origin to responses"
+      - "Strict Host-header validation/allowlisting (reject unexpected Host values like attacker.com)"
+      - "Setting SameSite=Lax on the service's cookies"
+      - "Enabling gzip compression on responses"
+    answer: 1
+    explanation: |
+      After rebinding, requests still carry Host: attacker.com. Validating the Host header
+      against an allowlist rejects them. Complementary defenses: resolver rebinding protection,
+      Private Network Access, authentication, and TLS (a cert for attacker.com won't validate
+      for 127.0.0.1).
+    ref: "concepts.md#dns-rebinding"
+
+  - id: sop-cors-and-csrf-064
+    difficulty: expert
+    tags: [login-csrf, session-fixation]
+    question: |
+      Why does a login form need CSRF protection even though the user is not yet
+      authenticated, and what is the correct mechanism?
+    options:
+      - "It doesn't — CSRF only applies after login"
+      - "Use the victim's password hash as the token"
+      - "Require the login to be a GET request so the browser attaches SameSite cookies"
+      - "Login CSRF logs the victim into the ATTACKER's account; use a pre-session token issued to the anonymous visitor and rotate the session ID on successful login"
+    answer: 3
+    explanation: |
+      In login CSRF the attacker forges a login with their own credentials so the victim's
+      activity lands in the attacker's account. Since no session exists yet, bind a pre-session
+      token to the anonymous visitor and rotate the session ID on authentication (which also
+      prevents session fixation).
+    ref: "concepts.md#login-csrf-and-logout-csrf"
+
+  - id: sop-cors-and-csrf-065
+    difficulty: expert
+    tags: [samesite, lax-by-default, two-minute-window]
+    question: |
+      Chrome's "Lax-by-default" behavior has a subtlety attackers exploit. Which statement is
+      accurate?
+    options:
+      - "Cookies with an explicit SameSite=Lax are sent on cross-site top-level POST for 2 minutes after being set"
+      - "Cookies set with NO explicit SameSite are still sent on cross-site top-level POST for ~120 seconds after being set; explicitly setting SameSite=Lax avoids this window"
+      - "The default is SameSite=None, so all cookies are sent cross-site"
+      - "The 2-minute window applies to fetch/XHR requests, not navigations"
+    answer: 1
+    explanation: |
+      Cookies with no explicit SameSite are Lax-by-default but exempt top-level cross-site POST
+      for ~120s (an SSO/POST compatibility grace). This does NOT apply to explicit
+      SameSite=Lax. Attackers can refresh the window by forcing a fresh cookie via a top-level
+      OAuth round trip — so set SameSite explicitly.
+    ref: "concepts.md#samesite-bypasses-and-edge-cases"
+
+  - id: sop-cors-and-csrf-066
+    difficulty: expert
+    tags: [samesite, redirect-gadget, strict]
+    question: |
+      Even with SameSite=Strict session cookies, a state change is forged. The app has a
+      CLIENT-SIDE open redirect (`location = params.next`). Why does the cookie get sent?
+    options:
+      - "Strict cookies are always sent on GET requests"
+      - "SameSite=Strict is ignored on HTTPS"
+      - "A client-side (DOM) redirect makes the secondary request originate from the site's own document, so the browser treats it as same-site and includes Strict cookies — unlike a server-side 3xx which the browser remembers as cross-site"
+      - "The redirect converts the request to same-origin by changing the Host header"
+    answer: 2
+    explanation: |
+      With a client-side redirect the navigation is initiated by the site's own document, so
+      the browser considers the resulting request same-site and sends Strict cookies. A
+      server-side 3xx redirect does NOT do this — the browser preserves the cross-site initiator
+      and withholds the cookie. This asymmetry is a well-known Strict bypass.
+    ref: "concepts.md#samesite-bypasses-and-edge-cases"
+
+  - id: sop-cors-and-csrf-067
+    difficulty: advanced
+    tags: [samesite, method-override]
+    question: |
+      How can a `_method=POST` (method-override) gadget help bypass SameSite=Lax?
+    options:
+      - "It lets an attacker smuggle a state change through a Lax-allowed top-level GET navigation that the server internally treats as a POST"
+      - "It encrypts the request so SameSite can't inspect it"
+      - "It disables the cookie's Secure attribute"
+      - "It forces the browser to attach SameSite=None cookies"
+    answer: 0
+    explanation: |
+      Lax allows the cookie on top-level GET navigations. If the framework honors _method=POST
+      (or X-HTTP-Method-Override) on a GET, the attacker fires a top-level GET that the server
+      processes as a state-changing POST — smuggling the write past Lax. Don't honor method
+      override for state changes on GET.
+    ref: "concepts.md#samesite-bypasses-and-edge-cases"
+
+  - id: sop-cors-and-csrf-068
+    difficulty: expert
+    tags: [client-side-csrf, tokens]
+    question: |
+      Why do valid, correctly-implemented anti-CSRF tokens fail to stop client-side CSRF?
+    options:
+      - "The token expires too quickly"
+      - "The app's own JavaScript reads attacker-controlled input and builds the state-changing request itself, automatically attaching the legitimate token"
+      - "Client-side CSRF strips the token from the request"
+      - "The token is stored in a cookie that the attacker can overwrite"
+    answer: 1
+    explanation: |
+      In client-side CSRF, the victim page's trusted JS consumes attacker-controlled input (URL
+      param, postMessage) and forges the request itself, attaching the real token. The token is
+      present and valid, so token checks pass. The root cause is an unsafe client-side sink; fix
+      it with input validation/safe sinks.
+    ref: "concepts.md#client-side-csrf"
+
+  - id: sop-cors-and-csrf-069
+    difficulty: expert
+    tags: [cors, null-origin, sandboxed-iframe, exploit]
+    question: |
+      A server allowlists `Access-Control-Allow-Origin: null` with credentials "for local dev."
+      How does an attacker weaponize this from a normal web page?
+    options:
+      - "By spoofing the Origin header to null with fetch()"
+      - "By embedding a sandboxed iframe (allow-scripts) whose document emits Origin: null and performing the credentialed fetch from inside it"
+      - "By setting document.domain to null"
+      - "By sending an OPTIONS request with no Origin header"
+    answer: 1
+    explanation: |
+      Script cannot set the Origin header, but a sandboxed iframe (sandbox="allow-scripts ...")
+      forces its document's origin to null. The attacker runs the credentialed fetch inside
+      that iframe, matching the null allowlist and reading the victim's authenticated data.
+      Never allowlist null.
+    ref: "concepts.md#advanced-cors-exploitation"
+
+  - id: sop-cors-and-csrf-070
+    difficulty: expert
+    tags: [cors, trusted-subdomain, http-downgrade]
+    question: |
+      An HTTPS API has a CORRECT, exact-match allowlist but includes `http://dev.example.com`.
+      What is the risk?
+    options:
+      - "None — the allowlist is exact-match so it is safe"
+      - "The browser will refuse to send credentials to any https origin"
+      - "A network MITM can inject a page on the plaintext http origin that then performs the credentialed CORS read of the https data, effectively breaking TLS for the app"
+      - "It only slows down the preflight"
+    answer: 2
+    explanation: |
+      Allowlisting an http:// origin means an on-path attacker who can tamper with plaintext
+      traffic to that subdomain can serve a page there that issues the credentialed cross-origin
+      read of the https:// API — downgrading an otherwise HTTPS-only app. Allowlist only https://
+      origins.
+    ref: "concepts.md#advanced-cors-exploitation"
+
+  - id: sop-cors-and-csrf-071
+    difficulty: expert
+    tags: [cors, cache-poisoning, vary]
+    question: |
+      A CDN caches API responses keyed only on the URL, and the origin reflects the request
+      Origin into ACAO. What is the attack, and the fix?
+    options:
+      - "No attack is possible because ACAO is per-request"
+      - "The CDN will automatically add Vary: Origin, so nothing is needed"
+      - "An attacker can poison the shared cache so a response carrying their origin's ACAO (or a victim-origin ACAO) is served to other users; fix with Vary: Origin and not caching credentialed responses"
+      - "The fix is to add Access-Control-Allow-Credentials: true"
+    answer: 2
+    explanation: |
+      When the reflected ACAO is an unkeyed cache input, an attacker poisons the shared cache
+      so the wrong ACAO is served to victims (CORS cache poisoning). The fix is Vary: Origin so
+      the cache keys on Origin, and never caching credentialed responses in shared caches.
+      Adding Allow-Credentials would make it worse.
+    ref: "concepts.md#advanced-cors-exploitation"
+
+  - id: sop-cors-and-csrf-072
+    difficulty: advanced
+    tags: [cors, expose-headers]
+    question: |
+      What does `Access-Control-Expose-Headers` control, and what is the risk of over-using it?
+    options:
+      - "Which request headers the browser may send; over-use forces preflights"
+      - "Which response headers cross-origin script may READ (beyond the small default safelist); over-exposing can leak sensitive response headers to allowed origins"
+      - "Which cookies are exposed to JavaScript"
+      - "How long the preflight is cached"
+    answer: 1
+    explanation: |
+      By default script can read only a few response headers (Cache-Control, Content-Language,
+      Content-Type, Expires, Last-Modified, Pragma). Expose-Headers opts additional response
+      headers into being readable cross-origin; listing sensitive headers (internal IDs, tokens)
+      leaks them to allowed origins.
+    ref: "concepts.md#advanced-cors-exploitation"
+
+  - id: sop-cors-and-csrf-073
+    difficulty: expert
+    tags: [csrf, text-plain, content-type]
+    question: |
+      An API parses request bodies as JSON regardless of Content-Type and relies on "we only
+      accept JSON" as its CSRF defense. How does an attacker bypass this without a preflight?
+    options:
+      - "Send the request as multipart/form-data with a JSON part"
+      - "Send the JSON-shaped body with Content-Type: text/plain, a CORS-safelisted type that triggers no preflight"
+      - "Send an OPTIONS request first and ignore the response"
+      - "Use HTTP/2 to skip the preflight"
+    answer: 1
+    explanation: |
+      text/plain is one of the three safelisted content types, so a cross-origin fetch with a
+      JSON body labeled text/plain is a simple request — no preflight — and the lax server parses
+      it as JSON. Defense: strictly reject non-application/json Content-Types (or require and
+      validate a token/custom header).
+    ref: "concepts.md#content-type-boundary-textplain-smuggling-and-graphql-csrf"
+
+  - id: sop-cors-and-csrf-074
+    difficulty: expert
+    tags: [csrf, graphql, content-type]
+    question: |
+      Why can a single-endpoint GraphQL server be CSRF-vulnerable despite the "GraphQL is JSON
+      so it's preflighted" assumption?
+    options:
+      - "GraphQL always uses WebSockets, which ignore CSRF tokens"
+      - "GraphQL responses are cached, enabling replay"
+      - "GraphQL introspection discloses the CSRF token"
+      - "If it accepts operations via GET or via x-www-form-urlencoded/text/plain POST, a mutation can be forged as a simple request that isn't preflighted"
+    answer: 3
+    explanation: |
+      Many GraphQL servers accept queries over GET or accept form-encoded/text-plain POST
+      bodies. Those are simple requests (no preflight), so a mutation can be CSRF-forged.
+      Defense: accept only application/json, disable mutations over GET, verify Content-Type,
+      and/or require a token/custom header.
+    ref: "concepts.md#content-type-boundary-textplain-smuggling-and-graphql-csrf"
+
+  - id: sop-cors-and-csrf-075
+    difficulty: expert
+    tags: [cookie-prefix, host-prefix, double-submit]
+    question: |
+      Why is a `__Host-` prefixed cookie preferable to a `__Secure-` prefixed one for a session
+      or CSRF-token cookie?
+    options:
+      - "__Host- cookies are encrypted at rest by the browser"
+      - "__Secure- cookies are sent over HTTP, __Host- over HTTPS"
+      - "__Host- cookies bypass SameSite restrictions"
+      - "__Host- forbids the Domain attribute and requires Path=/, pinning the cookie to the exact host so a sibling subdomain cannot overwrite it; __Secure- only requires the Secure flag"
+    answer: 3
+    explanation: |
+      __Secure- only mandates the Secure flag. __Host- additionally forbids Domain and requires
+      Path=/, so it is bound to the exact host that set it. A sibling/attacker subdomain cannot
+      overwrite a __Host- cookie for the parent (no Domain scope to widen), hardening
+      double-submit against the sibling-subdomain cookie-injection bypass.
+    ref: "concepts.md#cookie-prefixes-and-cookie-stored-jwts"
+
+  - id: sop-cors-and-csrf-076
+    difficulty: advanced
+    tags: [csrf, jwt-in-cookie]
+    question: |
+      A team stores their JWT in a cookie ("stateless auth, no CSRF needed"). Evaluate this.
+    options:
+      - "Correct — JWTs are immune to CSRF because they are signed"
+      - "Correct — cookies are origin-isolated so CSRF cannot occur"
+      - "Wrong — once the JWT is in a cookie the browser auto-sends it, so the endpoint is CSRF-able and needs SameSite plus a token/Origin check"
+      - "Wrong — JWTs cannot be stored in cookies at all"
+    answer: 2
+    explanation: |
+      Bearer tokens are CSRF-safe only because the app attaches them manually. Putting the JWT
+      in a cookie means the browser auto-sends it on cross-site requests (ambient authority), so
+      classic CSRF is back. JWT-in-cookie sessions need SameSite + token/Origin defenses like
+      any cookie session.
+    ref: "concepts.md#cookie-prefixes-and-cookie-stored-jwts"
+
+  - id: sop-cors-and-csrf-077
+    difficulty: expert
+    tags: [cors, misconfiguration, fix-selection]
+    question: |
+      A server does `Access-Control-Allow-Origin: <reflected Origin>` + `Access-Control-Allow-
+      Credentials: true` with no allowlist. Which change actually closes the vulnerability?
+    options:
+      - "Add Vary: Origin while keeping the reflection and credentials"
+      - "Change ACAO to `*` (and drop credentials), leaving reflection logic in place"
+      - "Reflect the Origin only when it exactly matches a strict server-side allowlist of trusted https origins"
+      - "Cache the response so the ACAO is computed only once"
+    answer: 2
+    explanation: |
+      The bug is trusting arbitrary origins, not caching. Vary: Origin only fixes cache keying,
+      not the trust flaw. ACAO: * drops credentials but still leaks any non-credentialed data
+      and doesn't address the design. The correct fix is an exact-match allowlist of trusted
+      https origins before reflecting.
+    ref: "concepts.md#advanced-cors-exploitation"
+
+  - id: sop-cors-and-csrf-078
+    difficulty: expert
+    tags: [csrf, scenario, end-to-end]
+    question: |
+      SPA on `app.example.com`, API on `api.example.com`, session in a cookie. Which end-to-end
+      CSRF design is both correct and most robust?
+    options:
+      - "SameSite=None session cookie + reflect-origin CORS with credentials"
+      - "__Host- session cookie with SameSite=Lax/Strict, PLUS a signed session-bound (HMAC) double-submit token or a required custom header that forces a preflight against a strict CORS allowlist"
+      - "Rely solely on the API accepting only application/json"
+      - "Naive double-submit cookie (compare cookie value to a submitted field) with no signing"
+    answer: 1
+    explanation: |
+      Layered: a __Host- SameSite cookie removes most ambient authority and resists sibling
+      overwrite; a signed session-bound token (or custom-header-forcing-preflight behind a strict
+      allowlist) closes the same-site/subdomain and legacy gaps. SameSite=None + reflection,
+      JSON-only, and naive double-submit are all inadequate or dangerous.
+    ref: "concepts.md#cookie-prefixes-and-cookie-stored-jwts"
+
+  - id: sop-cors-and-csrf-079
+    difficulty: advanced
+    tags: [cors, trust-chain, xss]
+    question: |
+      Even with a correct, exact-match CORS allowlist, what residual risk remains?
+    options:
+      - "The preflight can be replayed to bypass the allowlist"
+      - "An XSS on any allowlisted origin lets attacker script issue the credentialed cross-origin read — your CORS security is only as strong as the weakest allowlisted origin"
+      - "The allowlist automatically expires after Access-Control-Max-Age"
+      - "Browsers ignore exact-match allowlists for credentialed requests"
+    answer: 1
+    explanation: |
+      An exact allowlist still forms a trust chain: script running (via XSS) on any allowlisted
+      subdomain can perform the credentialed CORS read against the main API. Minimize allowlisted
+      origins and secure every one of them against XSS.
+    ref: "concepts.md#advanced-cors-exploitation"
+
+  - id: sop-cors-and-csrf-080
+    difficulty: intermediate
+    tags: [samesite, strict, immunity]
+    question: |
+      "We set SameSite=Strict on every cookie, so we're fully CSRF-immune." What is the correct
+      critique?
+    options:
+      - "Correct — Strict eliminates all CSRF"
+      - "Wrong — sibling-subdomain requests, a client-side open-redirect gadget re-issuing a same-site request, and client-side CSRF all survive Strict, so a token/Origin check is still needed"
+      - "Wrong — Strict only works if cookies are also HttpOnly"
+      - "Correct as long as the site uses HTTP/2"
+    answer: 1
+    explanation: |
+      Strict is strong but not complete: same-site (sibling-subdomain) requests count as
+      same-site, a client-side DOM redirect makes a secondary request same-site (sending Strict
+      cookies), and client-side CSRF forges requests from the site's own code. Keep
+      defense-in-depth with tokens/Origin checks.
+    ref: "concepts.md#samesite-bypasses-and-edge-cases"

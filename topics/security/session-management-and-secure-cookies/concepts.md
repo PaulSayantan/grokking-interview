@@ -358,6 +358,317 @@ well-understood token defenses.
 > plus anti-CSRF tokens.** Choosing `localStorage` trades a solvable CSRF problem for an
 > unsolvable "every XSS = total token compromise" problem.
 
+## RFC 6265bis: Modern Cookie Rules and Limits
+
+RFC 6265 (2011) is being superseded by **RFC 6265bis** (draft-ietf-httpbis-rfc6265bis),
+which codifies the behavior modern browsers already enforce. The concrete changes a senior
+candidate should be able to enumerate:
+
+1. **`SameSite=Lax` is the default** when no `SameSite` attribute is present (§ SameSite).
+2. **`SameSite=None` MUST be `Secure`** — a `None` cookie without `Secure` is **rejected**.
+3. **Cookie name prefixes `__Host-` and `__Secure-` are formalized** and browser-enforced.
+4. **Size cap: a single `Set-Cookie` is limited to 4096 bytes** (name + value + attributes,
+   combined). Oversized cookies are rejected. Per-domain limits also apply (browsers commonly
+   allow ~50 cookies per domain and cap total cookie bytes per domain).
+5. **Schemeful same-site** — `http://` and `https://` versions of the same registrable domain
+   are treated as **cross-site** for `SameSite` purposes.
+6. **`Max-Age`/`Expires` are capped at 400 days** — Chrome enforces this upper bound on cookie
+   lifetime regardless of a larger requested value.
+7. **`Domain` cannot be a public suffix** — you cannot set a cookie `Domain=.com` or
+   `Domain=.co.uk` (Public Suffix List / PSL enforcement), which prevents "supercookies."
+
+> [!KEY-TAKEAWAY]
+> The trend across 6265bis is **secure-by-default and browser-enforced**: Lax by default,
+> `None` implies `Secure`, prefixes are honored, and hard limits (4096 bytes, 400 days, PSL,
+> schemeful) close historical downgrade and tracking gaps that attributes alone couldn't.
+
+## Schemeful Same-Site and the Lax POST Grace Window
+
+Two subtle browser behaviors trip up CSRF reasoning:
+
+- **Schemeful same-site.** Modern browsers treat `http://example.com` and
+  `https://example.com` as **cross-site** for `SameSite`. This closes a downgrade gap: an
+  active network attacker who can force traffic to the plaintext `http://` origin previously
+  counted as "same-site" and could ride `Lax`/`Strict` cookies. With schemeful same-site the
+  cross-scheme request is cross-site, so those cookies are withheld. (This is also why a
+  legitimate cross-scheme flow can suddenly "break" after a browser update — a common
+  "what changed recently?" probe.)
+- **The Lax+POST two-minute intervention.** A cookie set with **no** `SameSite` attribute is
+  treated as `Lax`, **but** Chrome added a compatibility carve-out: for the **first 2 minutes**
+  after such a cookie is set, it is **still sent on top-level cross-site POST** navigations.
+  This grace window preserves some legacy POST-based SSO/redirect flows — but it means a
+  **freshly set default-`Lax` cookie is briefly CSRF-exposed on cross-site POST**.
+
+> [!WARNING]
+> Relying on the **default** is not the same as **explicitly** setting `SameSite=Lax`. A
+> default-`Lax` cookie inherits the 2-minute Lax+POST window; an explicitly declared
+> `SameSite=Lax` (or `Strict`) cookie does not get that carve-out. Always set `SameSite`
+> explicitly and keep an anti-CSRF token for state-changing POSTs.
+
+## Cookie Tossing and Shadowing
+
+**Cookie tossing** (a.k.a. cookie shadowing / cookie injection) exploits a structural
+weakness of RFC 6265: the `Cookie` request header carries **only name=value pairs, with no
+attribute, origin, or scope information**. The server cannot tell which host set a cookie,
+whether it was `Secure`, or what `Domain`/`Path` it had.
+
+**Mechanism:**
+1. An attacker who controls a sibling context — a compromised or attacker-registered
+   subdomain (`evil.example.com`), or a MITM on a plaintext `http://example.com` sibling
+   origin — sets a cookie with the **same name** as the real one, scoped `Domain=.example.com`.
+2. The browser now holds **two cookies with the same name**. On requests to the app it sends
+   **both** in the `Cookie` header: `Cookie: sess=REAL; sess=ATTACKER`.
+3. RFC 6265 sort order for the `Cookie` header puts cookies with a **longer `Path` first**,
+   then **earlier creation time**. By setting a more specific `Path` (e.g. `Path=/app/login`),
+   the attacker's cookie sorts **ahead** of the real one, so a naive server that reads "the
+   first `sess`" reads the **attacker's** value — the real cookie is *shadowed*.
+
+**Impact:** breaks the **naive double-submit CSRF** pattern (attacker overwrites the CSRF
+cookie so it matches their forged token), can force **session fixation** (attacker's known ID
+shadows the victim's), and generally lets a weaker sibling origin influence the main app.
+
+**Defense:** the **`__Host-` prefix** is the direct fix — a `__Host-` cookie is host-locked
+(no `Domain`, `Path=/`, `Secure`) so a subdomain **cannot set or shadow it**. Also validate the
+session server-side (not "trust the first cookie value") and never grant trust based on a
+cookie a sibling origin could write.
+
+## Session Puzzling and Variable Overloading
+
+**Session puzzling** (session variable overloading) is a logic/authorization flaw that lives in
+**server-side session state**, not in the cookie attributes. It occurs when the application
+**reuses the same session attribute for two different purposes** across different flows.
+
+**Classic example:** a password-reset flow stores the target account in `session.userId` so
+later steps know whose password to change. The authenticated area *also* reads `session.userId`
+to decide who is logged in. An attacker who walks the password-reset flow far enough to populate
+`session.userId` — **without ever authenticating** — can then hit an authenticated endpoint,
+which trusts the now-present `session.userId` and treats them as that user. The attacker has
+**populated an auth-granting session variable out of sequence**.
+
+**Defense:**
+- **Namespace session variables per flow** (`resetFlow.targetUserId` ≠ `auth.userId`); never
+  let a pre-auth or side-flow variable feed an authorization decision.
+- **Do not trust a partially populated session.** An authenticated area must require an explicit
+  "authenticated" marker set *only* by successful login, not infer identity from whatever
+  happens to be in the session bag.
+- **Regenerate the session and reset flow state on privilege transitions** (ties back to
+  fixation defense). When you regenerate the ID at login, be careful **not to carry over
+  attacker-influenced pre-auth data**.
+
+## Cookie Bomb and Header Overflow DoS
+
+A **cookie bomb** (cookie jar overflow) is a **client-side denial-of-service** that turns the
+victim's own browser against them. Cookies have limits (~4096 bytes per cookie, ~50 cookies per
+domain, ~180 KB total per domain in some browsers).
+
+**Mechanism:** an attacker — via **XSS**, a **subdomain** they control that sets
+`Domain=.example.com` cookies, or a **shared-hosting/CDN neighbor** on the same registrable
+domain — plants many large cookies scoped to the target domain. The victim's browser then
+attaches a **huge `Cookie` header** to every request. The server (or an upstream proxy/CDN)
+responds **`400 Bad Request`** or **`431 Request Header Fields Too Large`**, so the victim
+**can no longer load the site** until they manually clear cookies. The attacker never touches the
+server — they weaponize the browser's automatic cookie-sending.
+
+**Why it matters:** it ties abstract cookie limits to a concrete **availability** attack, and it
+underpins **cache-poisoned DoS** (a poisoned oversized response is cached and served to others).
+Defenses: `__Host-` (blocks subdomain-set cookies), isolate untrusted content on a separate
+registrable domain (not a subdomain), fix XSS, and keep cookie footprint small.
+
+## Sender-Constrained Sessions: DBSC, DPoP, mTLS
+
+Every cookie attribute in this topic protects against **guessing or interception** — none stops
+an attacker who has **already obtained a valid, live session credential**. The #1 real-world
+session threat today is exactly that: **infostealer malware** (Lumma, RedLine, Raccoon, etc.)
+that runs on the victim's own machine and **exfiltrates session cookies directly from the browser
+profile**, then replays them from attacker infrastructure. `HttpOnly`, `Secure`, and `SameSite`
+are all set and all **irrelevant** — the malware reads the cookie store on disk, bypassing the
+JavaScript sandbox entirely. This is the mechanism behind widely documented **"pass-the-cookie"**
+attacks that **bypass MFA** against O365/Okta (2023–2025): the stolen live session already
+represents a post-MFA state, so no second factor is re-prompted.
+
+The strategic answer is to make a stolen credential **useless off the original device** by
+**binding the session to a key the attacker cannot exfiltrate** (sender-constrained /
+proof-of-possession sessions):
+
+- **DBSC — Device Bound Session Credentials** (shipping in Chrome, 2025). The browser generates a
+  key pair whose private key is stored in a **TPM/hardware security module** and is
+  **non-exportable**. Cookies are issued short-lived; the browser silently refreshes them only by
+  a **challenge–response signed with the hardware key**. Registration/refresh headers:
+  `Sec-Session-Registration` and a `Sec-Secure-Session` challenge → server returns a challenge →
+  the browser returns a signed **JWT proof**. A cookie copied to another machine can't be
+  refreshed there (no private key), so it dies at the next short interval.
+- **DPoP (RFC 9449)** — "Demonstration of Proof-of-Possession." The client holds a private key and
+  attaches a per-request signed **`DPoP` JWT** proving possession; the access token is bound to the
+  key's thumbprint (`cnf.jkt`). A stolen bearer token can't be used without the private key.
+- **mTLS-bound tokens (RFC 8705)** — the token is bound to the client's **TLS client certificate**
+  (certificate-bound access tokens); a stolen token replayed without the cert is rejected.
+- **Token Binding (RFC 8471)** was the earlier attempt to bind tokens to a TLS-layer key, but it
+  **failed to gain adoption and is effectively dead** — DBSC/DPoP/mTLS are its successors.
+
+> [!INTERVIEW]
+> "Infostealer malware stole a valid session cookie; `HttpOnly`/`Secure`/`SameSite` were all set.
+> What actually stops replay?" **Nothing attribute-based** — cookie hygiene ≠ theft prevention.
+> The real answers are **sender-constrained sessions (DBSC / DPoP / mTLS)** plus short renewal
+> timeouts and anomaly detection (impossible-travel, new-device). A modern session token should
+> be **bound to something the attacker can't copy**.
+
+## Partitioned Cookies (CHIPS)
+
+As browsers phase out third-party cookies, **CHIPS — Cookies Having Independent Partitioned
+State** provides an opt-in for embeds that legitimately need per-embed state (e.g. a support
+chat widget) without enabling cross-site tracking.
+
+`Set-Cookie: __Host-widget=abc; Secure; Path=/; SameSite=None; Partitioned`
+
+The **`Partitioned`** attribute **double-keys** the cookie by **(top-level site + cookie host)**
+instead of only the cookie host. Consequences:
+
+- The same third-party embed on `siteA.com` and `siteB.com` gets **separate, isolated cookie
+  jars** — it cannot correlate the user across the two top-level sites, so it **can't be used for
+  cross-site tracking**.
+- Partitioned cookies must be `Secure` and are typically used with `SameSite=None` for the
+  cross-site embed context; `__Host-` is recommended for scoping.
+
+> [!TIP]
+> The senior framing: after third-party-cookie deprecation, **`Partitioned`/CHIPS is how a
+> cross-site embed keeps its own state** while being structurally incapable of shared tracking —
+> state is isolated per top-level site.
+
+## Stateless Token Revocation Toolkit
+
+Deepening the "you can't log out a JWT" problem — the concrete toolkit for making stateless
+tokens revocable, from least to most stateful:
+
+- **Short access-token TTL (5–15 min) + long-lived refresh token.** The access token is stateless
+  and never checked against a store; you only revoke by refusing to mint new ones. Worst-case
+  exposure of a leaked/logged-out access token is one TTL window.
+- **Refresh-token rotation with reuse detection.** Every refresh issues a **new** refresh token
+  and invalidates the old one. If an **already-used (old) refresh token is presented again**, that
+  signals theft — the server **revokes the entire token family/lineage** (OAuth 2.1 / RFC 6749-bis
+  guidance). This detects a stolen refresh token even though tokens are opaque bearer credentials.
+- **`jti` denylist.** Give each token a unique `jti` and maintain a server-side denylist of revoked
+  IDs, checked per request. Effective but **reintroduces shared state** — you're partway back to a
+  server-side session.
+- **Token/session versioning (`token_version` / `sessionEpoch`).** Store a per-user integer; embed
+  it as a claim. On logout / password change / "log out everywhere," **bump the integer**, which
+  **invalidates all outstanding tokens at once** with a single cheap per-user lookup — far cheaper
+  than a per-token denylist.
+- **Reference (opaque) tokens + introspection** are the *hybrid* extreme: the token is just a
+  handle and the resource server calls an introspection endpoint — fully revocable, but you've
+  traded away statelessness.
+
+> [!KEY-TAKEAWAY]
+> Distinguish **stateless-but-not-revocable** (plain JWT) from **hybrid** (denylist / versioning /
+> introspection). "JWT logout with 15-minute expiry — is the token dead the instant I click
+> logout?" **No** — the access token still validates for up to its remaining TTL unless you
+> denylist its `jti` or bump `token_version`; typically only the **refresh** token is revoked.
+
+## Re-Authentication and Step-Up Authentication
+
+A long-lived session should not silently authorize the **most sensitive** actions. Two related
+controls, grounded in **NIST SP 800-63B §7.2** and OWASP:
+
+- **Periodic reauthentication** by Authenticator Assurance Level:
+  - **AAL2:** reauthenticate at least every **12 hours** of use, **or** after **30 minutes** of
+    inactivity — whichever comes first.
+  - **AAL3:** every **12 hours**, **or** after **15 minutes** of inactivity.
+- **Step-up authentication** for high-value operations even *mid-session*: require a **fresh**
+  factor (password re-entry, MFA, an OIDC `max_age=0`/re-`prompt`, or a higher `acr`) before
+  **password change, email/phone change, adding MFA, payments, or admin actions**. This defeats an
+  attacker riding an already-open session and limits blast radius if a session is hijacked.
+
+Regenerate the session ID on a successful step-up (a privilege elevation, same rationale as
+regenerating at login) and record the time of the last strong authentication so you can enforce a
+`max_age` on sensitive endpoints.
+
+## Persistent Remember-Me Tokens
+
+"Remember me" deliberately survives browser close, so it is a **separate long-lived credential**,
+not the session ID — and it must **not** defeat the **absolute session timeout** (the absolute
+timeout still forces re-auth; remember-me only lets that re-auth be silent/streamlined, and even
+then sensitive actions should step up).
+
+The safe design is the **selector + validator** pattern:
+
+- The token is `selector:validator`. The **selector** is a lookup key (indexed, stored in
+  plaintext); the **validator** is a high-entropy secret stored **only as a hash** server-side.
+- On use, look up by selector, then **constant-time compare** the hash of the presented validator.
+- The token is **single-use / rotated**: each successful use issues a fresh validator (and often
+  selector). If a token is presented whose selector exists but whose validator **doesn't match**,
+  that indicates theft/cloning → **invalidate the whole remember-me series** and alert.
+
+This avoids the classic mistakes: storing a raw persistent token (a store leak = instant account
+takeover) or reusing the session ID as a long-lived disk cookie.
+
+## Federated Logout and Clearing Client State
+
+Server-side invalidation of the local session is necessary but, in **SSO/federated** setups, not
+sufficient — "I logged out of the app but the IdP still has me logged in (and any relying party can
+silently re-log me in)" is a classic gap. The **OpenID Connect** logout mechanisms:
+
+- **RP-Initiated Logout** — the relying party redirects the user to the IdP's
+  `end_session_endpoint` (with `id_token_hint`, `post_logout_redirect_uri`) to end the **IdP**
+  session, not just the local one.
+- **Front-Channel Logout** — the IdP loads hidden iframes to each RP's logout URL to clear RP
+  sessions via the browser.
+- **Back-Channel Logout** — the IdP sends a server-to-server POST of a signed **`logout_token`**
+  (containing `sub`/`sid`) directly to each RP's back-channel logout endpoint. This is the robust
+  option: it works even if the browser is closed and doesn't depend on third-party-cookie/iframe
+  behavior. The task's "back-channel invalidation" refers to exactly this.
+
+Additionally:
+
+- **`Clear-Site-Data` response header** — `Clear-Site-Data: "cookies", "storage"` tells the browser
+  to wipe cookies, `localStorage`/`sessionStorage`, and caches for the origin on logout, cleaning up
+  client-side state the server can't reach.
+- **Invalidate all sessions on password reset** (global logout), and on any credential change.
+- **Logout must be CSRF-protected.** A `GET`/no-token logout endpoint is itself **CSRF-able** — an
+  attacker can force-log-out the victim (a denial/annoyance, and it can be chained with login-CSRF).
+  Make logout a **POST** with an anti-CSRF token.
+
+## Backend-for-Frontend (BFF) Pattern
+
+For SPAs, the modern (2025) answer to "cookie vs `localStorage` for the token" is often
+**"neither — the browser holds no token at all."** In the **Backend-for-Frontend (BFF)** pattern:
+
+- A small **server component** owned by the frontend performs the OAuth flow, **holds the access
+  and refresh tokens server-side**, and exposes only an **`HttpOnly`, `Secure`, `SameSite`
+  first-party session cookie** to the SPA.
+- The SPA calls its own BFF (same origin); the BFF attaches the real tokens when it proxies to the
+  resource/API. **No OAuth token ever reaches JavaScript**, so an XSS cannot exfiltrate a bearer
+  token — it can at most ride the existing session, which is far easier to bound (short-lived,
+  server-revocable) and to sender-constrain.
+
+> [!INTERVIEW]
+> "Cookies vs `localStorage` — and now a third answer." Beyond the XSS/CSRF trade-off, the mature
+> answer is the **BFF pattern**: keep tokens on a first-party backend behind an `HttpOnly` session
+> cookie so the SPA is token-less. It converts an unbounded "every XSS = token theft" problem into
+> a bounded server-side session you fully control.
+
+## Signed Double-Submit Cookies and CSRF Token Binding
+
+The **naive double-submit cookie** CSRF defense (send a random value in both a cookie and a request
+header/field, and compare them server-side) is attractive because it is **stateless** — but it is
+**broken by cookie tossing**. An attacker who can write a cookie on the target domain (compromised
+subdomain, sibling `http://` origin) **overwrites the CSRF cookie with a value they know**, then
+submits a matching token in their forged request — the naive equality check passes.
+
+The correct forms:
+
+- **Signed / HMAC'd double-submit token** — the token is `HMAC(session_id, secret)` (bound to the
+  authenticated session) rather than a bare random value. An attacker who can toss a CSRF cookie
+  still cannot forge a token bound to the **victim's** session, and the server verifies the HMAC.
+- **`__Host-` prefixed CSRF cookie** — host-locks the CSRF cookie so a subdomain **cannot toss/
+  overwrite** it in the first place.
+- For stateful apps, the **synchronizer token pattern** (token stored server-side in the session and
+  compared) sidesteps the cookie-writability problem entirely.
+
+> [!WARNING]
+> "Our double-submit CSRF cookie is bypassed in prod — why?" The usual answer is **cookie tossing
+> from a compromised/sibling subdomain overwriting the CSRF cookie**. Fix with a **`__Host-`
+> prefixed** CSRF cookie **and/or an HMAC-signed token bound to the session** — not a plain random
+> value the attacker can also set.
+
 ## Common follow-up questions
 
 - **"How much entropy does a session ID need and where does it come from?"** ≥64 bits
@@ -396,5 +707,15 @@ well-understood token defenses.
 - OWASP Top 10 2021 — A07:2021 Identification and Authentication Failures
 - NIST SP 800-63B — Digital Identity Guidelines (session bindings, reauthentication, session secrets ≥ 64 bits)
 - RFC 6265 — HTTP State Management Mechanism (cookies)
-- RFC 6265bis (draft) — SameSite attribute and cookie name prefixes (`__Host-`, `__Secure-`)
+- RFC 6265bis (draft-ietf-httpbis-rfc6265bis) — SameSite default, `None`+`Secure`, name prefixes, 4096-byte / 400-day / PSL limits, schemeful same-site
+- RFC 9449 — OAuth 2.0 Demonstrating Proof-of-Possession (DPoP)
+- RFC 8705 — OAuth 2.0 Mutual-TLS Client Authentication and Certificate-Bound Access Tokens
+- RFC 8471 — Token Binding Protocol (deprecated / effectively unused; predecessor to DBSC/DPoP)
+- OAuth 2.1 / RFC 6749-bis — refresh-token rotation and reuse detection guidance
+- NIST SP 800-63B §7 (session management), §7.1 (session secret ≥ 64 bits), §7.2 (reauthentication AAL2/AAL3 intervals)
+- OWASP ASVS v4/v5 — V7 Session Management (formerly V3)
+- OpenID Connect — RP-Initiated Logout, Front-Channel Logout 1.0, Back-Channel Logout 1.0 (`logout_token`, `sid`)
+- CHIPS — Cookies Having Independent Partitioned State (`Partitioned` attribute)
+- Chrome — Device Bound Session Credentials (DBSC) explainer
+- W3C / MDN — [`Clear-Site-Data`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Clear-Site-Data) response header
 - MDN — [Set-Cookie header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie) and [SameSite cookies](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie/SameSite)

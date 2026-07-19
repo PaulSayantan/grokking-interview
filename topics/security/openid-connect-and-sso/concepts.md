@@ -567,6 +567,267 @@ assert requiredScope in claims.scope.split(" ");
 > **issuer** and check **audience** (and scope). Audience confusion and mix-up attacks are the
 > defining threats of federated identity.
 
+## at_hash / c_hash and Hybrid-Flow Token Substitution
+
+In the code flow, the ID Token arrives on the **back channel** together with the code/access
+token, so nothing can be swapped in transit. In the **hybrid** (`response_type=code id_token`)
+and implicit-with-token flows, the ID Token travels on the **front channel** (URL fragment)
+*alongside* a `code` and/or `access_token`. The browser is a hostile relay here: an attacker
+who controls the front channel can **substitute a different `code` or `access_token`** while
+leaving the honest, correctly-signed ID Token untouched. This is OIDC Core §16.11
+**Token Substitution** (a.k.a. code substitution / cut-and-paste attack).
+
+The **only** thing that binds the front-channel ID Token to the artifacts delivered with it
+is the `c_hash` and `at_hash` claims. Their computation (OIDC Core §3.3.2.11):
+
+1. Take the **ASCII octets** of the value (the `access_token` string for `at_hash`, the
+   authorization `code` string for `c_hash`).
+2. Hash them with the hash function that matches the ID Token's JWS `alg` — `RS256`/`ES256`/
+   `PS256` → SHA-256, `ES384` → SHA-384, `ES512`/`RS512` → SHA-512.
+3. Take the **left-most half** of the digest (e.g. left 128 bits of a 256-bit hash).
+4. **base64url-encode** that half. The result must equal the claim.
+
+```
+at_hash =? base64url( LEFTMOST_HALF( SHA-256( ascii(access_token) ) ) )   // for RS256
+c_hash  =? base64url( LEFTMOST_HALF( SHA-256( ascii(code) ) ) )
+```
+
+If the RP skips these, an attacker swaps in a `code`/`access_token` of their own (or one
+belonging to another session) and the RP happily binds the honest identity to the attacker's
+token — enabling account-mixing / token injection. **A hybrid-flow RP MUST validate `c_hash`
+against the received code and `at_hash` against the received access token, in addition to
+pinning `aud`.** (In the pure code flow these are optional because the back channel already
+provides the binding.)
+
+> [!WARNING]
+> The classic "which fix is correct?" trap: an RP validates ID-Token signature + `iss` + `exp`
+> + `nonce` but not `aud`, in a hybrid flow, and an attacker substitutes a `code`. The correct
+> fix is **both** — validate `c_hash`/`at_hash` AND pin `aud`. Fixing only one leaves the
+> substitution open.
+
+## Request Objects, request_uri and JAR (SSRF & Validation Bypass)
+
+OIDC/JAR (RFC 9101, "JWT-Secured Authorization Request") lets authorization-request parameters
+ride **inside a signed JWT** instead of (or in addition to) plain query parameters, using two
+mechanisms advertised in discovery (`request_parameter_supported`,
+`request_uri_parameter_supported`):
+
+- **`request`** — the Request Object JWT passed **by value** in the query string.
+- **`request_uri`** — a **URL the OP fetches server-side** to retrieve the Request Object JWT.
+
+Two attack classes fall out of this:
+
+1. **SSRF via `request_uri`.** If the OP fetches an attacker-supplied `request_uri` without an
+   allowlist, the attacker points it at internal metadata endpoints (cloud IMDS
+   `169.254.169.254`, internal admin URLs) — a classic server-side request forgery pivot. The
+   OP must restrict `request_uri` to pre-registered values and/or an allowlist, block internal
+   address ranges, and cap response size.
+2. **Parameter-precedence / validation bypass.** Parameters may appear **both** in the query
+   string and inside the signed Request Object. If the server validates the query-string
+   `redirect_uri` (e.g. checks it against the allowlist) but then **honors a different
+   `redirect_uri` smuggled inside the JWT**, an attacker bypasses redirect-URI validation and
+   steals the code. Per JAR, when a Request Object is used, parameters **inside** it take
+   precedence and query-string copies should be ignored — but implementations that mix the two
+   get this wrong. (PortSwigger "Hidden OAuth attack vectors".)
+
+## Dynamic Client Registration Abuse & Second-Order SSRF
+
+OIDC Dynamic Client Registration (RFC 7591 / OpenID Connect Registration) lets a client
+`POST /register` its own metadata and receive a `client_id`. When the endpoint is
+**unauthenticated**, an attacker self-registers a malicious client — and several metadata
+fields are **URLs the OP fetches server-side**, turning registration into a second-order SSRF
+(and sometimes stored-XSS) primitive:
+
+- **`jwks_uri`** — fetched by the OP when the client authenticates with a signed JWT; an SSRF
+  and a key-injection vector (attacker controls the "trusted" signing keys).
+- **`logo_uri`** — fetched by the OP to render on the **consent screen**; SSRF, and if the
+  content-type is not validated, **stored XSS** on the consent page. Real CVE:
+  **CVE-2021-26715** (MITREid Connect `logo_uri` SSRF/XSS).
+- **`sector_identifier_uri`** — fetched to resolve pairwise subject grouping (see PPID below).
+- **`request_uris`** — pre-registered Request Object URLs.
+
+Distinguish **server-fetched** URIs (above — must be allowlisted / host-validated / size-capped
+/ content-type-checked, internal ranges blocked) from **client-side-only** URIs the OP merely
+stores or hands to the browser (`redirect_uri`, `client_uri`, `policy_uri`, `tos_uri`,
+`initiate_login_uri`). Defenses: authenticate/gate registration (software statements, initial
+access tokens), validate every server-fetched URL, and never fetch arbitrary attacker URLs at
+registration time.
+
+## "Sign in with X" Account Takeover via Unverified Email
+
+The single most common federated-login ATO class. An RP that supports "Sign in with Google/
+GitHub/…" and **matches federated logins to local accounts by `email`** is exposed to two
+distinct attacks:
+
+1. **Unverified-email / pre-hijack.** The attacker signs up at an OP that does **not verify
+   email ownership**, using the *victim's* address. If the RP keys accounts on `email` (and
+   doesn't check `email_verified`), the attacker's federated login lands in the victim's
+   account — or, conversely, the attacker pre-registers so the victim's later real login merges
+   into the attacker-controlled account.
+2. **Account-linking / merge attacks.** The RP auto-links a new federated identity to an
+   existing local account whenever the emails match, without re-proving ownership. An attacker
+   who can obtain *any* token asserting the victim's email gets linked in.
+
+Defenses:
+
+- Key accounts on the **`(iss, sub)`** pair, never on `email` alone.
+- Require **`email_verified: true`** before using an email for anything sensitive, and trust
+  it only from OPs you know actually verify email.
+- **Never auto-merge** a federated identity into a local account by email; require the user to
+  log into the existing account (or complete an ownership-proof / verification step) before
+  linking.
+- Treat linking as a sensitive operation (re-auth / step-up).
+
+## SAML Parser-Differential Auth Bypass (CVE-2025-25291/292) and Response Validation
+
+The 2012/2018 XSW research is the historical anchor; the **2025 Ruby-SAML** vulnerabilities
+(**CVE-2025-25291** and **CVE-2025-25292**) are the modern one interviewers reach for. Root
+cause: Ruby-SAML used **two different XML parsers** — REXML for one purpose and Nokogiri
+(added for canonicalization) for another — and the two **interpret the same document
+differently**. A second `<Signature>` hidden inside a `StatusDetail` element is visible to one
+parser but not the other, so the signature check and the assertion the app consumes are on
+different bytes. Because **hash verification and signature verification were not linked**, each
+step passed independently: a single valid signed assertion for *any* user could be used to
+impersonate *anyone* — a full authentication bypass. (GitHub's own SAML implementation was
+affected.) The generalizable lesson: XML-DSig + canonicalization is dangerous precisely because
+"what was signed" and "what was consumed" can diverge, and parser differentials are a whole
+class of that.
+
+Beyond XSW, a SAML SP must validate more than Issuer/Audience/timestamps to stop
+**cross-SP assertion replay**:
+
+- **`Destination`** on the `<Response>` must match this SP's ACS (Assertion Consumer Service)
+  URL — stops an assertion minted for another SP being replayed here.
+- **`<SubjectConfirmationData>`** `Recipient` must match the ACS URL, `NotOnOrAfter` must be in
+  the future, and `InResponseTo` must match a request this SP issued.
+- Reject **SHA-1** signatures; require ≥ RSA-SHA-256.
+
+Also distinct from XSW: the **2018 SAML XML-comment / canonicalization truncation** bug, where
+a comment injected into the NameID (`admin@example.com<!---->.evil.com`) caused some libraries'
+text extraction to read only `admin@example.com` after canonicalization stripped the comment —
+letting an attacker who controlled `...evil.com` impersonate `admin@example.com`. And
+**`RelayState`** is unsigned deep-link state: if the SP reflects it as a post-login redirect
+without validation it becomes an **open redirect** — treat it as opaque and validate against an
+allowlist. (XXE is yet another distinct SAML XML risk — see `injection-attacks`.)
+
+Concrete XSW defenses (OWASP SAML cheat sheet): never select security elements with
+`getElementsByTagName`; use **absolute XPath**; verify the `<ds:Reference URI>` actually covers
+the consumed `<saml:Assertion>`; schema-validate against **local trusted schemas** (never
+auto-download); ignore in-document `KeyInfo` and use a pinned key selector (`StaticKeySelector`/
+`X509KeySelector`).
+
+## OIDC Session Management (check_session_iframe / session_state)
+
+OIDC **Session Management 1.0** lets an RP detect that the user's session at the OP **changed**
+(e.g. they logged out or switched accounts) *without* constantly redirecting. Mechanism:
+
+- The auth response returns a **`session_state`** value — a salted hash of `client_id` +
+  origin + the OP's User-Agent session state.
+- The OP publishes a **`check_session_iframe`** (an OP-origin iframe). The RP loads it in a
+  hidden iframe, and its own RP iframe **`postMessage`s** the current `session_state` to the OP
+  iframe on a polling interval. The OP iframe replies `unchanged`, `changed`, or `error`.
+- On **`changed`**, the RP performs a silent re-auth (`prompt=none` with `id_token_hint`) to
+  learn the new state or re-establish the session.
+
+Security notes:
+
+- **Origin validation on `postMessage` is mandatory** — accepting messages from any origin is
+  an XSS/spoofing vector.
+- The session-state cookie the OP iframe reads **cannot be `HttpOnly`** (JS needs it), so it
+  MUST contain no PII — only opaque state.
+- **Third-party-cookie blocking / ITP breaks the OP iframe** (it's cross-site), which can throw
+  the RP into an **infinite silent re-auth loop**; defensive code must cap retries and fall
+  back gracefully. This is the same fragility that makes front-channel Single Logout unreliable.
+
+## Assurance Levels, Bearer vs Holder-of-Key (NIST 800-63C)
+
+NIST **SP 800-63C** defines **Federation Assurance Levels (FAL)** for how strongly an assertion
+is protected (note: 800-63C was **superseded by SP 800-63-4, finalized July 2025** — worth
+flagging for currency, though the FAL concepts carry over):
+
+- **FAL1** — assertion is **signed** by the IdP (bearer). Integrity/authenticity but anyone in
+  possession can present it.
+- **FAL2** — assertion is signed **and encrypted to the RP** (bearer). Encryption is **required
+  for front-channel presentation** (the assertion passes through the browser). Confidentiality
+  plus authenticity.
+- **FAL3** — **holder-of-key**: the subscriber must **prove possession of a key** bound to the
+  assertion directly to the RP; assertion is signed and encrypted.
+
+**Bearer vs holder-of-key** is the central distinction and the SSO analog of sender-constrained
+tokens (DPoP/mTLS in `oauth2-and-oauth21`):
+
+- **Bearer** — possession = use. Steal it and replay it and you *are* the subject.
+- **Holder-of-key** — the assertion is bound to a key the subscriber proves they hold, so a
+  stolen assertion alone is useless. (A merely *referenced* key that isn't proven degrades back
+  to bearer; the key SHALL NOT be transmitted unencrypted.)
+
+800-63C also mandates that the RP **SHALL check the audience**, and that assertions carry
+Subject, Issuer, Audience, issuance & expiry times, a unique identifier, and a signature; and
+that a **back-channel assertion reference SHALL be single-use and bound to one RP**.
+
+**Front-channel vs back-channel assertion *presentation*** (generalizes SAML POST vs Artifact
+Binding, and complements the logout-channel material): in **back-channel** presentation the
+subscriber passes only an **artifact/reference** through the browser and the RP fetches the
+real assertion directly from the IdP over a server-to-server channel — smaller attack surface,
+artifact single-use. In **front-channel** presentation the **full assertion** travels through
+the browser — visible, replayable, and "multi-RP use is not recommended," which is exactly why
+front-channel assertions must be encrypted (FAL2).
+
+## Pairwise vs Public Subject Identifiers (PPID)
+
+OIDC lets an OP issue two kinds of `sub` (the `subject_type` discovery/registration setting):
+
+- **`public`** — the OP returns the **same `sub`** for a given user to **every** RP. Simple,
+  but colluding RPs can correlate the same person across services.
+- **`pairwise`** (PPID — Pairwise Pseudonymous Identifier) — the OP returns a **different `sub`
+  per RP** (or per group of RPs), so two unrelated RPs cannot tell they're seeing the same user.
+  This is the privacy-preserving / anti-correlation option (a GDPR and NIST PPID consideration).
+
+Clients that should share the same pairwise `sub` are grouped via a **`sector_identifier_uri`**
+(a URL listing the RP's redirect URIs; the OP derives the pairwise `sub` from the sector host
+rather than per-client). Gotcha: if an RP's **sector identifier changes**, its users' `sub`
+values **change too**, and accounts keyed on `(iss, sub)` appear to "reset." Interview scenario:
+"two RPs from different teams must correlate the same user; a third must *not* be
+correlatable" → put the two in the same sector (shared pairwise `sub`) and give the third its
+own sector, using `subject_type=pairwise`.
+
+## Step-Up Authentication and Assertion Strength (acr, amr, max_age)
+
+OIDC gives the RP levers to **request and verify** authentication strength — essential for
+"force MFA for a wire transfer" scenarios:
+
+- **`prompt`** — `prompt=none` attempts silent auth and returns `error=login_required` /
+  `interaction_required` if any UI would be needed; `prompt=login` forces re-authentication;
+  `prompt=consent` re-prompts consent.
+- **`max_age`** — maximum acceptable age (seconds) since the last authentication; the OP
+  re-authenticates if exceeded and the RP verifies the resulting **`auth_time`**.
+- **`acr_values`** — the RP **requests** one or more Authentication Context Class References
+  (e.g. an MFA level, or `phr` = phishing-resistant). The OP returns the achieved level in the
+  **`acr`** claim, which the RP **must verify meets its requirement**.
+- **`amr`** — Authentication Methods References (e.g. `["pwd","otp"]`, `["hwk"]`) let the RP
+  confirm *which* methods were used.
+- **`id_token_hint` / `login_hint`** — carry a prior ID Token / a username hint into a re-auth
+  or silent-auth request.
+
+**Step-up pattern** for a sensitive action: re-run `/authorize` with `acr_values` (or a lower
+`max_age`) demanding the stronger level; on return, verify `acr`/`amr`/`auth_time` in the fresh
+ID Token and **reject or re-prompt** if the assertion doesn't meet the bar. Merely *requesting*
+`acr_values` and not *verifying* the returned `acr` is a common bug.
+
+## Redirect_uri Validation in the OIDC Login Context
+
+Redirect-URI validation mechanics live in `oauth2-and-oauth21`, but the **login-bypass /
+code-theft** angle belongs here too. Parsing discrepancies between the OP's registration check
+and the browser's actual navigation let an attacker land the `code` on a URL they control:
+path append/traversal (`/callback/../../evil`), duplicate `redirect_uri` parameters, deceptive
+hosts (`localhost.evil.com`, `rp.example.com.evil.com`), `response_mode` swap (query→fragment),
+and prefix- vs exact-match registration. **Exact-match** registration is the robust default.
+
+Crucially, **`state` and `nonce` do NOT save you from code theft** when the attacker generates
+their own values: in a login-CSRF / redirect-hijack the attacker runs their own flow with their
+own `state`/`nonce`, so those checks pass on the attacker's side. Redirect-URI exact matching
+(plus PKCE binding the code to the legitimate client) is what actually closes it.
+
 ## Common follow-up questions
 
 - **What is the difference between authentication and authorization, and which does OIDC add to
@@ -593,6 +854,23 @@ assert requiredScope in claims.scope.split(" ");
 - **What is a mix-up attack and how do you prevent it?** Attacker steers a multi-OP client's
   response to the wrong OP; pin expected `iss` per request, use the `iss` response param
   (RFC 9207).
+- **How are `c_hash`/`at_hash` computed and why?** Hash the ASCII value with the hash matching
+  the ID Token's JWS `alg`, take the left-most half, base64url-encode. They bind a
+  front-channel ID Token to the code/access token to stop hybrid-flow token substitution.
+- **Why is matching "Sign in with X" users by email dangerous?** Unverified-email / pre-hijack
+  ATO and merge attacks; key on `(iss, sub)`, require `email_verified`, never auto-link by email.
+- **Name a recent SSO CVE and its root cause.** Ruby-SAML CVE-2025-25291/292 — parser
+  differential (REXML vs Nokogiri) with signature and hash verification not linked → full auth
+  bypass from one valid signed assertion.
+- **What can go wrong if your OP fetches `logo_uri`/`jwks_uri`/`sector_identifier_uri`?**
+  Second-order SSRF (and stored XSS for `logo_uri`); allowlist and validate server-fetched URLs
+  (CVE-2021-26715).
+- **Public vs pairwise `sub`?** Public = same `sub` to all RPs; pairwise (PPID) = different
+  `sub` per RP/sector to prevent cross-RP correlation, grouped by `sector_identifier_uri`.
+- **Bearer vs holder-of-key assertion?** Bearer = possession is use (replayable); holder-of-key
+  binds the assertion to a key the subscriber proves — the FAL3 / sender-constrained analog.
+- **How do you prove MFA and enforce step-up via OIDC?** Request `acr_values`/`max_age`, then
+  verify `acr`/`amr`/`auth_time` in the returned ID Token and re-prompt if insufficient.
 
 ## References
 
@@ -609,6 +887,13 @@ assert requiredScope in claims.scope.split(" ");
 - RFC 8414 — OAuth 2.0 Authorization Server Metadata — https://www.rfc-editor.org/rfc/rfc8414
 - RFC 8693 — OAuth 2.0 Token Exchange — https://www.rfc-editor.org/rfc/rfc8693
 - RFC 9207 — OAuth 2.0 Authorization Server Issuer Identification — https://www.rfc-editor.org/rfc/rfc9207
+- RFC 9101 — JWT-Secured Authorization Request (JAR) — https://www.rfc-editor.org/rfc/rfc9101
+- RFC 7591 — OAuth 2.0 Dynamic Client Registration — https://www.rfc-editor.org/rfc/rfc7591
+- OpenID Connect Session Management 1.0 — https://openid.net/specs/openid-connect-session-1_0.html
+- NIST SP 800-63-4 — Digital Identity Guidelines (supersedes 800-63-3/63C, Jul 2025) — https://pages.nist.gov/800-63-4/
+- CVE-2025-25291 / CVE-2025-25292 — Ruby-SAML parser-differential auth bypass — https://github.com/advisories/GHSA-jw9c-mfg7-9rx2
+- CVE-2021-26715 — MITREid Connect logo_uri SSRF/XSS — https://nvd.nist.gov/vuln/detail/CVE-2021-26715
+- PortSwigger — Hidden OAuth attack vectors / OAuth & OIDC authentication vulnerabilities — https://portswigger.net/web-security/oauth
 - OAuth 2.0 Security Best Current Practice — https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics
 - SAML 2.0 (OASIS) core & Web Browser SSO Profile — https://docs.oasis-open.org/security/saml/v2.0/
 - OWASP SAML Security Cheat Sheet — https://cheatsheetseries.owasp.org/cheatsheets/SAML_Security_Cheat_Sheet.html

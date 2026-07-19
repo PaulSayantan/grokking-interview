@@ -896,3 +896,599 @@ questions:
     (CDN caching, WAF, rate limits) so the flood never triggers billable work. The
     degrade-vs-pay trade-off should be a deliberate business decision.
   ref: "concepts.md#autoscaling-vs-bill-shock-economic-denial-of-service"
+
+- id: rate-limiting-and-dos-defense-049
+  difficulty: expert
+  tags: [http2, rapid-reset, cve-2023-44487]
+  question: |
+    In the HTTP/2 Rapid Reset attack (CVE-2023-44487), why does a strict
+    `SETTINGS_MAX_CONCURRENT_STREAMS` limit fail to stop a single connection generating
+    hundreds of millions of requests per second?
+  options:
+  - "The client sends HEADERS then an immediate RST_STREAM; a canceled stream stops counting against the concurrency cap, so new streams can be opened and canceled without bound"
+  - "The client compresses the stream IDs so the server undercounts them"
+  - "The concurrency limit only applies to server-initiated streams, not client ones"
+  - "The attack downgrades the connection to HTTP/1.1 where no concurrency limit exists"
+  answer: 0
+  explanation: |
+    Rapid Reset weaponizes stream cancellation. The client opens a stream with HEADERS
+    (which the server begins processing) and immediately sends RST_STREAM. Because a
+    reset stream no longer occupies a concurrent slot, the attacker loops open+cancel
+    indefinitely over one connection. The exploit primitive is cancellation, not
+    concurrency, so the cap is never reached.
+  ref: "concepts.md#http2-rapid-reset-and-continuation-flood"
+
+- id: rate-limiting-and-dos-defense-050
+  difficulty: expert
+  tags: [http2, rapid-reset, mitigation]
+  question: |
+    Which mitigation most directly addresses HTTP/2 Rapid Reset?
+  options:
+  - "Lower SETTINGS_MAX_CONCURRENT_STREAMS to 1 per connection"
+  - "Disable HPACK header compression"
+  - "Monitor the rate of client-initiated RST_STREAM frames per connection and send GOAWAY + close the connection when a reset threshold is crossed"
+  - "Require TLS 1.3 for all HTTP/2 connections"
+  answer: 2
+  explanation: |
+    Since the abuse signal is excessive cancellation, the fix is to count client
+    RST_STREAM frames (and the ratio of resets to completed streams) and, above a
+    threshold, GOAWAY and tear down the connection, optionally jailing the source IP.
+    Lowering the concurrency cap does not help because reset streams never occupy a
+    slot.
+  ref: "concepts.md#http2-rapid-reset-and-continuation-flood"
+
+- id: rate-limiting-and-dos-defense-051
+  difficulty: expert
+  tags: [http2, continuation-flood, logging]
+  question: |
+    An HTTP/2 server has its CPU pinned and memory climbing, yet the access log shows no
+    corresponding requests. Which attack best explains this, and what is the mechanism?
+  options:
+  - "A SYN flood exhausting the backlog before TLS completes"
+  - "A CONTINUATION flood: endless CONTINUATION frames never set END_HEADERS, so the server buffers and HPACK-decodes headers without bound and the request never completes (so it is never logged)"
+  - "A DNS amplification attack reflecting off the server"
+  - "A leaky-bucket misconfiguration queuing requests indefinitely"
+  answer: 1
+  explanation: |
+    The CONTINUATION flood (CERT VU#421644) sends a stream of CONTINUATION frames with
+    END_HEADERS never set, forcing unbounded header buffering and Huffman/HPACK decode
+    work. Because the request is never finished, most servers never write an access-log
+    entry, producing the hallmark "pinned CPU, empty log" symptom.
+  ref: "concepts.md#http2-rapid-reset-and-continuation-flood"
+
+- id: rate-limiting-and-dos-defense-052
+  difficulty: advanced
+  tags: [http2, continuation-flood, mitigation]
+  question: |
+    Which control actually stops an HTTP/2 CONTINUATION flood?
+  options:
+  - "A requests-per-second rate limit keyed on the client IP"
+  - "Enabling gzip on responses to reduce bandwidth"
+  - "Caps on total header-list size, header field count, and the number of HEADERS/CONTINUATION frames per stream"
+  - "Increasing the number of worker threads"
+  answer: 2
+  explanation: |
+    The cost lives in unbounded header material, not in request count, so a per-second
+    request limiter never trips (the request never completes). You must bound the header
+    work: maximum header-list size, field count, and frames per stream. RFC 9113 already
+    flags streams of small/empty frames as a DoS vector.
+  ref: "concepts.md#http2-rapid-reset-and-continuation-flood"
+
+- id: rate-limiting-and-dos-defense-053
+  difficulty: expert
+  tags: [http2, cve, continuation-flood]
+  question: |
+    CVE-2023-45288 (Go net/http2), CVE-2024-28182 (nghttp2), and CVE-2024-27919 (Envoy)
+    were all disclosed together in 2024. What class of vulnerability do they share?
+  options:
+  - "HTTP request smuggling via ambiguous Content-Length/Transfer-Encoding"
+  - "TLS renegotiation denial of service"
+  - "Integer overflow in stream-ID handling"
+  - "The HTTP/2 CONTINUATION flood — unbounded processing of CONTINUATION frames lacking END_HEADERS"
+  answer: 3
+  explanation: |
+    That CVE cluster (tracked under CERT VU#421644) is the HTTP/2 CONTINUATION flood:
+    multiple implementations failed to bound the header material accumulated across
+    CONTINUATION frames, allowing CPU/memory exhaustion from incomplete requests.
+  ref: "concepts.md#http2-rapid-reset-and-continuation-flood"
+
+- id: rate-limiting-and-dos-defense-054
+  difficulty: expert
+  tags: [hashdos, algorithmic-complexity]
+  question: |
+    A 2 KB POST body with hundreds of carefully chosen form-field names pins a CPU core,
+    though the same endpoint is fine under load tests with random fields. What is
+    happening?
+  options:
+  - "A ReDoS in the field-name validation regex"
+  - "HashDoS: the crafted keys all collide into one hash-table bucket, degrading insertion from O(1) to O(n^2)"
+  - "A zip bomb decompressing the body"
+  - "A slowloris attack holding the connection open"
+  answer: 1
+  explanation: |
+    HashDoS (hash flooding) exploits the hash table that stores parsed parameters: keys
+    engineered to collide in the same bucket turn average O(1) inserts into O(n^2),
+    so a small number of fields consumes disproportionate CPU. Random fields do not
+    collide, which is why fuzz/load tests miss it.
+  ref: "concepts.md#hashdos-and-hash-flooding"
+
+- id: rate-limiting-and-dos-defense-055
+  difficulty: advanced
+  tags: [hashdos, mitigation, siphash]
+  question: |
+    Which pair of defenses best addresses HashDoS?
+  options:
+  - "A per-process randomized/keyed hash function (e.g. SipHash) plus a cap on the number of parameters/keys accepted per request"
+  - "A larger hash table and a faster CPU"
+  - "Rejecting requests larger than 1 MB"
+  - "Rate-limiting the endpoint to 100 requests per second"
+  answer: 0
+  explanation: |
+    A keyed/randomized hash (SipHash is widely adopted for this) prevents an attacker
+    from precomputing colliding keys, removing the O(n^2) primitive. Independently,
+    capping the parameter/key count (e.g. max_input_vars, header-count limits) bounds
+    worst-case work. Size or rate limits alone miss it because the payload is tiny.
+  ref: "concepts.md#hashdos-and-hash-flooding"
+
+- id: rate-limiting-and-dos-defense-056
+  difficulty: expert
+  tags: [gcra, token-bucket, algorithms]
+  question: |
+    The GCRA (Generic Cell Rate Algorithm) rate limiter stores which piece of state, and
+    how does it decide whether to admit a request?
+  options:
+  - "A FIFO queue of pending requests, admitting when the queue is not full"
+  - "A single Theoretical Arrival Time (TAT); it admits when now >= TAT - burst_tolerance, then advances TAT by the emission interval T = 1/rate"
+  - "One counter per fixed window, admitting when the counter is below the limit"
+  - "A sorted set of every request timestamp, admitting when the count in the window is under the limit"
+  answer: 1
+  explanation: |
+    GCRA keeps just one timestamp, the Theoretical Arrival Time. A request conforms if
+    now is no earlier than TAT minus the burst tolerance tau; on admission TAT advances
+    by T = 1/rate. This enforces rate and a bounded burst with O(1) single-value state,
+    which is what redis-cell's CL.THROTTLE implements.
+  ref: "concepts.md#gcra-the-generic-cell-rate-algorithm"
+
+- id: rate-limiting-and-dos-defense-057
+  difficulty: advanced
+  tags: [gcra, token-bucket, distributed]
+  question: |
+    Why is GCRA often preferred over a classic token bucket for a distributed limiter
+    backed by a shared store?
+  options:
+  - "GCRA allows unlimited bursts while token bucket does not"
+  - "GCRA needs no state at all, so no store is required"
+  - "GCRA is mathematically superior and enforces stricter limits than token bucket"
+  - "GCRA's state is a single timestamp, so the check-and-update is a trivial atomic compare-and-set, and it is provably equivalent to a token bucket (tau ~ bucket depth, T ~ refill interval)"
+  answer: 3
+  explanation: |
+    GCRA and token bucket are provably equivalent, but GCRA's single-timestamp state
+    makes the atomic check-and-update easy in a shared store (one value to compare-and-
+    set), avoiding the read-modify-write race. This is why redis-cell uses it.
+  ref: "concepts.md#gcra-the-generic-cell-rate-algorithm"
+
+- id: rate-limiting-and-dos-defense-058
+  difficulty: expert
+  tags: [load-shedding, concurrency, littles-law]
+  question: |
+    A service is flooded with requests that are individually valid but collectively
+    overwhelming, so you cannot simply block a bad key. Which approach best keeps the
+    service up?
+  options:
+  - "Increase the request-per-second rate limit so fewer requests are rejected"
+  - "Load shedding via a concurrency/admission limit (bound in-flight requests, e.g. via Little's Law) that rejects excess work cheaply and early"
+  - "Queue all excess requests until capacity frees up"
+  - "Return 200 OK immediately and process later"
+  answer: 1
+  explanation: |
+    When traffic is valid you shift from blocking to staying up: bound in-flight work
+    with a concurrency/admission limit (Little's Law ties concurrency, latency, and
+    throughput) and shed the excess cheaply and early. Unbounded queuing just converts
+    overload into a latency collapse.
+  ref: "concepts.md#load-shedding-and-adaptive-concurrency-control"
+
+- id: rate-limiting-and-dos-defense-059
+  difficulty: expert
+  tags: [load-shedding, adaptive-concurrency, aimd]
+  question: |
+    Netflix's adaptive concurrency limits infer the concurrency ceiling instead of
+    hard-coding it. What signal and control loop do they use?
+  options:
+  - "CPU temperature, adjusted linearly"
+  - "The number of open TCP sockets, halved every second"
+  - "The Retry-After values returned by downstreams"
+  - "Observed request latency, adjusted with an AIMD loop (like TCP congestion control): raise the limit while latency is healthy, cut it multiplicatively when latency climbs"
+  answer: 3
+  explanation: |
+    Adaptive concurrency limits watch latency and apply additive-increase/
+    multiplicative-decrease, mirroring TCP congestion control: gently raise the limit
+    while latency stays low, sharply cut it when latency rises, so the system finds a
+    safe operating point without manual tuning.
+  ref: "concepts.md#load-shedding-and-adaptive-concurrency-control"
+
+- id: rate-limiting-and-dos-defense-060
+  difficulty: advanced
+  tags: [load-shedding, codel, queues]
+  question: |
+    A load-shedding queue uses CoDel-style management and flips to LIFO under load.
+    What is the rationale?
+  options:
+  - "LIFO guarantees fairness by serving the oldest request first"
+  - "CoDel bounds queue length by dropping the newest arrivals only"
+  - "CoDel bounds queue sojourn time (how long items wait) and dropping/serving the freshest requests first means those still within their deadline get served while stale ones are shed"
+  - "LIFO reduces memory usage compared to FIFO"
+  answer: 2
+  explanation: |
+    CoDel manages the time an item spends in the queue rather than its length; under
+    overload, serving fresh requests (LIFO) means those likely still within their
+    deadline are handled, while long-waiting requests the client has probably abandoned
+    are shed. It targets latency, not raw depth.
+  ref: "concepts.md#load-shedding-and-adaptive-concurrency-control"
+
+- id: rate-limiting-and-dos-defense-061
+  difficulty: expert
+  tags: [retry-storm, resilience, cascading-failure]
+  question: |
+    A one-second downstream blip triggered a multi-minute outage that far outlasted the
+    blip. Every service tier retried failed calls. What happened and what bounds it?
+  options:
+  - "A memory leak; restart the services"
+  - "A retry storm/amplification (each tier's retries multiply load); bound it with a retry budget capping retries to a small fraction of requests, plus backoff with jitter"
+  - "Clock skew between the tiers; sync NTP"
+  - "A cache stampede; add a longer TTL"
+  answer: 1
+  explanation: |
+    When every layer retries, load multiplies per layer, so a brief fault becomes a
+    self-sustaining flood that outlives the trigger. A retry budget (cap retries to,
+    say, 10-20% of requests) bounds the amplification regardless of tier count; add
+    backoff with jitter and circuit breakers so callers stop hammering a struggling
+    dependency.
+  ref: "concepts.md#circuit-breakers-bulkheads-and-retry-budgets"
+
+- id: rate-limiting-and-dos-defense-062
+  difficulty: advanced
+  tags: [circuit-breaker, bulkhead, resilience]
+  question: |
+    A single slow downstream dependency consumes every worker thread in your service,
+    taking down endpoints that don't even use that dependency. Which pattern prevents
+    this?
+  options:
+  - "Bulkhead isolation: give each dependency its own bounded resource pool (threads/connections) so one saturated dependency cannot exhaust all workers"
+  - "A longer request timeout so calls eventually succeed"
+  - "A leaky-bucket rate limiter on the healthy endpoints"
+  - "Switching the downstream call to UDP"
+  answer: 0
+  explanation: |
+    Bulkheads isolate failures by partitioning resources per dependency. If the calls to
+    the slow dependency draw from a separate bounded pool, they cannot consume every
+    worker, so unrelated endpoints keep serving. A circuit breaker complements this by
+    failing fast once the dependency is clearly unhealthy.
+  ref: "concepts.md#circuit-breakers-bulkheads-and-retry-budgets"
+
+- id: rate-limiting-and-dos-defense-063
+  difficulty: advanced
+  tags: [backoff, jitter, retry]
+  question: |
+    Clients already use exponential backoff, yet retries still arrive in synchronized
+    waves that re-overload the service. What is the fix?
+  options:
+  - "Shorten the base backoff interval"
+  - "Increase the maximum retry count"
+  - "Have clients retry immediately without backoff"
+  - "Add randomized jitter (e.g. decorrelated jitter) to the backoff so retries spread over time instead of clustering at the same computed instants"
+  answer: 3
+  explanation: |
+    Pure exponential backoff still lands many clients on the same computed retry times,
+    forming waves. Adding jitter (equal-jitter or decorrelated jitter) randomizes each
+    client's wait, spreading retries across the interval and smoothing the load.
+  ref: "concepts.md#circuit-breakers-bulkheads-and-retry-budgets"
+
+- id: rate-limiting-and-dos-defense-064
+  difficulty: expert
+  tags: [cache-busting, cdn, l7]
+  question: |
+    Despite serving a page from a CDN, your origin is being flooded. The attack requests
+    look like `GET /article?nocache=<random>` with a unique value each time. What is
+    this and how do you stop it?
+  options:
+  - "Cache poisoning; sign all cached responses"
+  - "Cache-busting/cache-piercing: each unique query string is a distinct cache key that misses and is forwarded to origin. Normalize the cache key to ignore unknown params (allowlist) and rate-limit cache-miss traffic"
+  - "A slowloris variant; add read timeouts"
+  - "DNS amplification; enable RRL"
+  answer: 1
+  explanation: |
+    Random unkeyed query strings make every request a unique cache key, so the edge
+    always misses and forwards to origin, defeating caching. Fix by normalizing the
+    cache key to ignore unknown parameters (vary only on an allowlist) and by
+    specifically rate-limiting high cache-miss traffic.
+  ref: "concepts.md#cache-busting-and-cache-piercing-ddos"
+
+- id: rate-limiting-and-dos-defense-065
+  difficulty: expert
+  tags: [cdn-bypass, origin-protection, cache-busting]
+  question: |
+    Name the TWO independent reasons a CDN-fronted origin can still be flooded, with the
+    correct fix for each.
+  options:
+  - "TLS version too old (upgrade) and cache TTL too short (raise it)"
+  - "Origin-IP discovery lets attackers skip the edge (lock the origin to edge IP ranges/mTLS), and cache-busting query strings pierce to origin (normalize the cache key + limit cache misses)"
+  - "Weak WAF rules (rewrite them) and slow DNS (add anycast)"
+  - "Compression disabled (enable gzip) and HTTP/1.1 in use (upgrade to HTTP/2)"
+  answer: 1
+  explanation: |
+    Two distinct bypasses: (1) attackers find the origin IP (DNS history, TLS certs) and
+    hit it directly, fixed by restricting the origin firewall to the edge provider's
+    ranges or mTLS; and (2) cache-busting query strings force cache misses that reach
+    origin, fixed by cache-key normalization and cache-miss rate limiting.
+  ref: "concepts.md#cache-busting-and-cache-piercing-ddos"
+
+- id: rate-limiting-and-dos-defense-066
+  difficulty: expert
+  tags: [amplification, tcp-middlebox-reflection]
+  question: |
+    TCP middlebox reflection (disclosed 2021) is notable because it can produce
+    effectively unbounded amplification. Why is it possible despite TCP normally
+    resisting source spoofing?
+  options:
+  - "It exploits the TCP timestamp option to replay packets"
+  - "It uses TCP fast open to skip the handshake entirely"
+  - "RFC-noncompliant censorship/filtering middleboxes reply to a spoofed SYN with large block-page content without completing a handshake, so the response is sent to the spoofed victim"
+  - "It abuses TCP window scaling to multiply payload size"
+  answer: 2
+  explanation: |
+    Certain in-path middleboxes (censorship/content filters) violate TCP by injecting
+    large block-page or redirect responses in reply to a single spoofed SYN, without a
+    completed handshake. Because they respond to the spoofed source, they act as
+    reflectors and can be triggered repeatedly, yielding very high (near-unbounded)
+    amplification.
+  ref: "concepts.md#modern-amplification-vectors-and-dns-rrl"
+
+- id: rate-limiting-and-dos-defense-067
+  difficulty: advanced
+  tags: [dns, rrl, amplification]
+  question: |
+    What does Response Rate Limiting (RRL) on an authoritative DNS server accomplish?
+  options:
+  - "It caches recursive queries to speed up resolution"
+  - "It encrypts DNS responses to prevent eavesdropping"
+  - "It blocks all queries from outside the local network"
+  - "It detects many near-identical responses being sent to the same (spoofed) client and slows/drops them, reducing the server's usefulness as a reflection amplifier"
+  answer: 3
+  explanation: |
+    RRL limits how many similar responses an authoritative server will send to the same
+    apparent client in a time window. Since amplification relies on flooding a spoofed
+    victim with large responses, throttling near-identical responses blunts the server's
+    abuse as a reflector while leaving normal diverse traffic unaffected.
+  ref: "concepts.md#modern-amplification-vectors-and-dns-rrl"
+
+- id: rate-limiting-and-dos-defense-068
+  difficulty: expert
+  tags: [ingress-filtering, bcp84, multihoming]
+  question: |
+    BCP 38 ingress filtering can wrongly drop legitimate traffic at a multihomed network
+    where routing is asymmetric. Which guidance addresses that case?
+  options:
+  - "RFC 6585 (HTTP 429)"
+  - "RFC 4987 (SYN cookies)"
+  - "RFC 3704 / BCP 84 (ingress filtering for multihomed networks, e.g. feasible-path reverse-path checks)"
+  - "RFC 7541 (HPACK)"
+  answer: 2
+  explanation: |
+    Strict unicast reverse-path forwarding can discard valid packets when a multihomed
+    site sends and receives over different links. RFC 3704 / BCP 84 refines BCP 38 with
+    feasible-path/loose modes so anti-spoofing filtering still works without dropping
+    legitimate asymmetric traffic.
+  ref: "concepts.md#modern-amplification-vectors-and-dns-rrl"
+
+- id: rate-limiting-and-dos-defense-069
+  difficulty: expert
+  tags: [ratelimit-headers, structured-fields, standards]
+  question: |
+    The current IETF `draft-ietf-httpapi-ratelimit-headers` refactored the legacy
+    RateLimit-Limit/Remaining/Reset trio. What is the new shape?
+  options:
+  - "A single JSON body field named rateLimit"
+  - "Two Structured Fields: RateLimit-Policy (advertises quota policies, params q/qu/w/pk) and RateLimit (current state, params r/t/pk)"
+  - "An X-RateLimit-* set of vendor-prefixed headers"
+  - "A single Retry-After header replacing all rate-limit headers"
+  answer: 1
+  explanation: |
+    The draft moved to two HTTP Structured Fields: RateLimit-Policy advertises one or
+    more quota policies (q=quota, qu=quota-units, w=window, pk=partition-key), and
+    RateLimit conveys current state (r=remaining, t=reset seconds, pk). Senior candidates
+    should know the standard landed on structured fields and the old three-header form is
+    now legacy.
+  ref: "concepts.md#ratelimit-header-structured-fields"
+
+- id: rate-limiting-and-dos-defense-070
+  difficulty: advanced
+  tags: [ratelimit-headers, structured-fields]
+  question: |
+    A response carries `RateLimit-Policy: "burst";q=100;w=60` and
+    `RateLimit: "burst";r=50;t=30`. What does this tell a client?
+  options:
+  - "The burst policy permits 100 requests per 60-second window; 50 remain and the window resets in 30 seconds"
+  - "The client has been rate-limited for 100 seconds and must wait 60"
+  - "The server allows 50 requests total and 30 have been used"
+  - "The client must retry after 100 seconds using policy version 60"
+  answer: 0
+  explanation: |
+    RateLimit-Policy advertises the quota: q=100 over w=60 seconds for the policy named
+    "burst". RateLimit reports live state for that policy: r=50 remaining, t=30 seconds
+    until reset. The two structured fields separate the static policy from the current
+    state.
+  ref: "concepts.md#ratelimit-header-structured-fields"
+
+- id: rate-limiting-and-dos-defense-071
+  difficulty: expert
+  tags: [distributed, two-tier, consistency]
+  question: |
+    You must design a rate limiter for 50 edge PoPs with a sub-millisecond per-request
+    budget. Which design and consistency trade-off is most appropriate?
+  options:
+  - "A synchronous central Redis check on every request, accepting the added round-trip for exactness"
+  - "Fully independent per-PoP counters with no coordination, accepting an N-times overshoot"
+  - "A two-tier design: each PoP spends a local allowance without a round-trip and periodically reconciles with a central store, explicitly accepting a bounded overcount"
+  - "Sticky-route every user to one PoP so a single in-memory counter suffices"
+  answer: 2
+  explanation: |
+    A central check per request blows the latency budget and creates a bottleneck/SPOF;
+    fully independent counters overshoot by ~N. The two-tier local+global design lets
+    each PoP spend a local slice with no round-trip and reconcile periodically, trading a
+    bounded, quantified overcount for very low latency, which is the right call at this
+    scale.
+  ref: "concepts.md#two-tier-distributed-limiting-and-clock-skew"
+
+- id: rate-limiting-and-dos-defense-072
+  difficulty: expert
+  tags: [distributed, clock-skew, gcra]
+  question: |
+    Why can clock skew across nodes corrupt a distributed token-bucket/GCRA limiter, and
+    what is the mitigation?
+  options:
+  - "Skew changes the TTL of counters; disable TTLs entirely"
+  - "Skew corrupts the Lua script bytecode; recompile per node"
+  - "These limiters compute allowances from timestamps, so a fast/slow node clock can admit requests early or reject them late; base the authoritative decision on the shared store's clock/monotonic time and keep hosts NTP-synced"
+  - "Skew only affects fixed-window limiters, not token bucket or GCRA"
+  answer: 2
+  explanation: |
+    Token bucket and GCRA derive the allowance from elapsed time, so if each node uses
+    its own skewed wall clock, requests can be admitted too early or rejected too late.
+    Use the store's clock (or monotonic time) for the authoritative check and keep hosts
+    NTP-synchronized to bound skew.
+  ref: "concepts.md#two-tier-distributed-limiting-and-clock-skew"
+
+- id: rate-limiting-and-dos-defense-073
+  difficulty: expert
+  tags: [privacy-pass, private-access-tokens, challenge]
+  question: |
+    How do Privacy Pass / Private Access Tokens (RFC 9576) reduce abuse while preserving
+    privacy compared with a visual CAPTCHA?
+  options:
+  - "They send the user's device ID to the origin so it can be rate-limited"
+  - "The client redeems blind-signed, unlinkable tokens (attesting likely-human/attested device) per request, so the origin gets proof without a puzzle and without learning the client's identity"
+  - "They require the user to solve a harder puzzle but store the result in a cookie"
+  - "They proxy all traffic through an anonymizer that strips headers"
+  answer: 1
+  explanation: |
+    In the Privacy Pass model a client obtains blind-signed, unlinkable tokens from an
+    attester/issuer and spends one per request. The origin verifies a valid token
+    (evidence of a human/attested device) without any interactive puzzle and without
+    learning who the client is, avoiding CAPTCHA's UX and privacy costs.
+  ref: "concepts.md#challenge-evolution-privacy-pass-turnstile-pow-pages"
+
+- id: rate-limiting-and-dos-defense-074
+  difficulty: advanced
+  tags: [proof-of-work, challenge, scraping]
+  question: |
+    An interstitial proof-of-work challenge page (Anubis-style) is deployed against an
+    aggressive L7 scraping flood. Why is it effective, and what is its main downside?
+  options:
+  - "It authenticates users cryptographically; downside is it needs a password"
+  - "It forces each client to compute a small hash puzzle before proceeding — negligible for one human but costly for a bot issuing millions of requests; downside is it burdens low-power/legitimate devices"
+  - "It blocks the attacker's IP permanently; downside is collateral CGNAT blocking"
+  - "It encrypts responses; downside is added latency from TLS"
+  answer: 1
+  explanation: |
+    A PoW interstitial makes every visitor spend CPU on a puzzle; the cost is trivial for
+    a single human but multiplies painfully for a mass scraper. The trade-off is that it
+    also taxes legitimate low-power devices, so it should be triggered adaptively on risk
+    rather than universally.
+  ref: "concepts.md#challenge-evolution-privacy-pass-turnstile-pow-pages"
+
+- id: rate-limiting-and-dos-defense-075
+  difficulty: expert
+  tags: [slow-read, slow-attacks, tcp]
+  question: |
+    A Slow Read attack differs from slowloris in that it pins server resources on the
+    response side. What is the mechanism, and why do body-read timeouts alone miss it?
+  options:
+  - "It sends a huge request body slowly; body-read timeouts do catch it"
+  - "It opens millions of connections instantly, overwhelming the accept queue"
+  - "The request is normal, but the client advertises a tiny/zero TCP receive window so the server cannot flush its response, holding the socket; read timeouts target inbound data, not stalled writes"
+  - "It floods the server with RST packets"
+  answer: 2
+  explanation: |
+    Slow Read sends a valid request but shrinks its TCP receive window (or advertises
+    zero), so the server's response cannot drain and the connection/socket stays pinned.
+    Header/body read timeouts watch inbound progress, so they do not fire; you need send
+    timeouts / minimum write-rate enforcement and per-source connection caps.
+  ref: "concepts.md#slow-attack-family-slow-read-rudy-concrete-knobs"
+
+- id: rate-limiting-and-dos-defense-076
+  difficulty: advanced
+  tags: [slow-attacks, nginx, apache, knobs]
+  question: |
+    Which concrete configuration set most directly hardens a reverse proxy against the
+    slow-HTTP family (slowloris, RUDY, slow read)?
+  options:
+  - "nginx client_header_timeout/client_body_timeout/send_timeout + limit_conn, or Apache mod_reqtimeout, enforcing per-phase timeouts, minimum data rates, and per-source connection caps"
+  - "Increasing worker_processes and keepalive_timeout to very high values"
+  - "Enabling gzip and HTTP/2 push"
+  - "Setting a global requests-per-second rate limit only"
+  answer: 0
+  explanation: |
+    Slow attacks are beaten by refusing to wait on trickling clients: nginx's
+    client_header_timeout, client_body_timeout, and send_timeout (plus limit_conn) and
+    Apache's mod_reqtimeout enforce per-phase timeouts and minimum data rates and cap
+    concurrent connections per source. A req/sec limit alone does not help because the
+    request count is low.
+  ref: "concepts.md#slow-attack-family-slow-read-rudy-concrete-knobs"
+
+- id: rate-limiting-and-dos-defense-077
+  difficulty: expert
+  tags: [breached-passwords, k-anonymity, nist]
+  question: |
+    The Pwned Passwords range API screens a password against a breach corpus without
+    exposing it. How does the k-anonymity model work?
+  options:
+  - "The client sends the plaintext password over TLS and trusts the server to discard it"
+  - "The client sends the full SHA-1 hash and the server returns yes/no"
+  - "The client sends only the first 5 hex chars of the password's SHA-1 hash; the server returns all hash suffixes in that prefix bucket and the client matches locally, so the full credential never leaves"
+  - "The server sends the entire breach list to the client to check offline"
+  answer: 2
+  explanation: |
+    In the k-anonymity range model the client hashes the password (SHA-1) and sends only
+    the 5-character prefix. The API returns every suffix sharing that prefix (thousands
+    of candidates), and the client completes the match locally. The server learns only a
+    prefix common to many hashes, never the password or full hash. NIST SP 800-63B
+    requires screening passwords against known-breached lists.
+  ref: "concepts.md#breached-credential-checks-and-login-throttling"
+
+- id: rate-limiting-and-dos-defense-078
+  difficulty: expert
+  tags: [nist-800-63b, login-throttling, lockout]
+  question: |
+    Per NIST SP 800-63B, which authentication-throttling approach is recommended over a
+    hard username-keyed lockout?
+  options:
+  - "Lock the account permanently after 3 failures and require an admin to unlock"
+  - "Impose complex password-composition rules and force 30-day rotation"
+  - "Rate-limit failed attempts (on the order of <=100 consecutive failures) with throttling/step-up such as CAPTCHA-on-risk and MFA, avoiding knowledge-based lockout that enables account-lockout DoS"
+  - "Disable rate limiting so legitimate users are never inconvenienced"
+  answer: 2
+  explanation: |
+    SP 800-63B advises limiting consecutive failed attempts (referencing an order of
+    <=100 per account) and using throttling and risk-based step-up (CAPTCHA, MFA) rather
+    than blunt username-keyed lockout, which an attacker can weaponize to lock out
+    victims (account-lockout DoS). It also drops composition rules and routine rotation.
+  ref: "concepts.md#breached-credential-checks-and-login-throttling"
+
+- id: rate-limiting-and-dos-defense-079
+  difficulty: advanced
+  tags: [fingerprinting, ja3, bot-detection]
+  question: |
+    A request claims a common browser User-Agent, but its JA3/JA4 TLS fingerprint matches
+    a scripting library. How should this signal be used?
+  options:
+  - "Immediately hard-block every request with that fingerprint as definitive proof of a bot"
+  - "Ignore it, since TLS fingerprints are not related to bot detection"
+  - "Feed the User-Agent/fingerprint mismatch into behavioral/anomaly risk scoring as a strong signal, while remembering fingerprints can be cloned so it should not be the sole basis for a hard block"
+  - "Use it to set the rate-limit key, replacing the IP entirely"
+  answer: 2
+  explanation: |
+    A mismatch between the claimed client and its JA3/JA4 (TLS) or HTTP/2 fingerprint
+    strongly suggests automation, but fingerprints can be spoofed/cloned, so they are
+    signals for risk/anomaly scoring rather than standalone verdicts. Combine them with
+    behavior and reserve hard challenges for high-risk sessions.
+  ref: "concepts.md#breached-credential-checks-and-login-throttling"

@@ -462,6 +462,362 @@ detail. What to know here:
 
 ---
 
+## The 2025 edition — what changed from 2021
+
+> [!KEY-TAKEAWAY]
+> **OWASP Top 10:2025 is now released** (owasp.org/Top10/2025/) and materially reorders,
+> renames, and merges the list. The *topic slug stays* `owasp-top-10-walkthrough`, and 2021
+> remains the edition most production programs still cite — but a 2025-era senior interview
+> expects you to know the new list, the moves, and *why* they moved.
+
+**The 2025 list (order):**
+
+| ID | 2025 Category | vs 2021 |
+|---|---|---|
+| A01 | Broken Access Control | still #1; **SSRF merged in** (dashed-line mapping) |
+| A02 | Security Misconfiguration | ↑ from #5 |
+| A03 | **Software Supply Chain Failures** | **expanded** from A06 "Vulnerable & Outdated Components"; community-survey #1 concern |
+| A04 | Cryptographic Failures | ↓ from #2 |
+| A05 | Injection | ↓ from #3 |
+| A06 | Insecure Design | ↓ from #4 |
+| A07 | Authentication Failures | renamed (drops "Identification and") from A07:2021 |
+| A08 | Software **or** Data Integrity Failures | "and" → "or" |
+| A09 | Security Logging **and Alerting** Failures | "Monitoring" → "Alerting" |
+| A10 | **Mishandling of Exceptional Conditions** | **NEW** |
+
+**The moves that make good interview questions:**
+
+- **SSRF is no longer its own category.** A10:2021 SSRF was **merged up into A01 Broken
+  Access Control** (shown as a dashed-line mapping in the official change table). This is a
+  classic trap: many candidates memorized "SSRF = A10," which is now wrong. SSRF is still a
+  real, tested class — it just lives under Broken Access Control conceptually (the server is
+  induced to access resources it shouldn't).
+- **Software Supply Chain Failures (A03:2025)** expanded A06:2021 "Vulnerable and Outdated
+  Components" from *just dependencies* to the whole chain: direct **and transitive**
+  dependencies, **build systems** (CI/CD, IDEs and IDE extensions, image/artifact
+  repositories), and **distribution** (package registries, SaaS integrations). It also adds
+  **separation-of-duty** concerns ("no single person writes code and promotes it to prod
+  without oversight"). It was the **#1 community-survey concern** in 2025 — a data-informed
+  list still elevated it because incidents (SolarWinds, Log4Shell, xz-utils, npm worms)
+  outpace what test data captures.
+- **A10:2025 Mishandling of Exceptional Conditions is brand new** (see its own section).
+- **Authentication Failures (A07)** dropped "Identification and"; **Logging** became
+  **Logging and Alerting** (emphasizing *detection*, not just recording).
+
+**2025 methodology numbers (pair these with the 2021 numbers above):**
+
+- **~2.8 million applications** contributed (vs ~500k in 2021).
+- **589 CWEs analyzed** (vs ~400 in 2021).
+- **248 CWEs mapped across the final ten categories** (avg ~25 per category, capped at 40).
+- **~175k CVE records** mapped (vs ~125k in 2021).
+- Still **"8 from data, 2 from community survey"** and **"data-informed, not blindly
+  data-driven."** The **2025 survey picks were Software Supply Chain Failures and Security
+  Logging & Alerting Failures** (in 2021 they were Insecure Design and SSRF).
+
+> [!INTERVIEW]
+> If asked "the 2025 Top 10 just dropped — what changed?": lead with **Supply Chain jumps
+> to A03 (survey #1), SSRF merged into A01, new A10 Mishandling of Exceptional Conditions,
+> Misconfiguration up to A02.** The *why* is cloud/CI-CD reality plus a run of high-profile
+> supply-chain incidents. Then note the numbers grew ~5x (2.8M apps).
+
+---
+
+## A10:2025 – Mishandling of Exceptional Conditions
+
+**Definition.** A **brand-new 2025 category** (24 CWEs) about what happens on the *error /
+exception path* — the code that runs when something goes wrong. The headline failure is
+**not failing securely**: when a component errors, times out, or hits an unexpected state,
+the system should **fail closed** (deny), preserve integrity, and not leak internals.
+
+**Concrete examples.**
+- **Failing OPEN instead of closed (CWE-636, "Not Failing Securely").** The classic
+  scenario: an authorization/authentication service times out, and the calling code's
+  `catch` block **allows the request through** ("fail open") instead of rejecting it. An
+  attacker who can induce the timeout bypasses auth.
+- **Uncaught exceptions (CWE-248)** that crash a worker or leave a request half-processed.
+- **Resource leaks on the exception path** — a connection/file/lock not released when an
+  exception unwinds, exhausting the pool and causing **denial of service**.
+- **Verbose error messages** (CWE-209) returning stack traces or **raw database errors** to
+  the client — powerful reconnaissance for SQL injection (the DB error reveals query
+  structure) and version/path disclosure.
+- **State/transaction corruption** when a multi-step flow is interrupted with **no
+  rollback** — money debited but not credited, or a partial state an attacker can exploit
+  (a TOCTOU/race angle).
+
+**Primary defense.**
+- **Fail closed / fail secure by default:** on any error in a security decision, deny.
+  Design the error path deliberately, not as an afterthought.
+- **Catch and handle exceptions explicitly**; never let control-flow decisions depend on an
+  exception silently being swallowed.
+- **Release resources deterministically** on every path (try-with-resources / finally /
+  RAII / context managers) so the exception path can't leak connections or locks.
+- **Return generic errors to clients**; log details server-side only (ties to A02 and A09).
+- Make multi-step operations **atomic / transactional** so an interruption rolls back
+  cleanly rather than leaving corrupt partial state.
+
+> [!WARNING]
+> "Fail open vs fail closed" is a favorite scenario: *"your auth service times out — what
+> should the gateway do?"* The secure answer is **fail closed (deny)**. Availability
+> pressure ("don't lock users out") is exactly what pushes teams to the insecure fail-open
+> choice — call that trade-off out explicitly.
+
+---
+
+## CWE vs CVE vs CVSS, and prioritizing patches (KEV, EPSS)
+
+Senior interviews probe the vocabulary the whole list is built on. Keep these distinct:
+
+- **CWE (Common Weakness Enumeration)** — a *class* of weakness / bug type (e.g. CWE-89 SQL
+  injection, CWE-79 XSS, CWE-22 path traversal). The Top 10 categories are **groupings of
+  CWEs**. A CWE is the *kind* of flaw, not a specific occurrence.
+- **CVE (Common Vulnerabilities and Exposures)** — a specific *instance* of a vulnerability
+  in a specific product/version (e.g. **CVE-2021-44228** = Log4Shell in Log4j 2). A CVE is
+  usually *categorized by* one or more CWEs.
+- **CVSS (Common Vulnerability Scoring System)** — a *severity score* (0–10) for a CVE.
+  Current versions are **v3.1** and **v4.0**. CVSS Base is intrinsic severity; it says
+  nothing about whether the bug is *actually being exploited*.
+- **CISA KEV (Known Exploited Vulnerabilities catalog)** — an authoritative list of CVEs
+  **observed being exploited in the wild.** A CVE appearing in KEV is a strong "patch now"
+  signal regardless of its CVSS number.
+- **EPSS (Exploit Prediction Scoring System, FIRST.org)** — a *probability* (0–1) that a CVE
+  will be exploited in the next 30 days. Complements CVSS: high CVSS + low EPSS may be less
+  urgent than a moderate CVSS with high EPSS.
+
+> [!TIP]
+> Prioritization answer: **don't patch by CVSS alone.** Combine **KEV (is it being
+> exploited?)** + **EPSS (how likely soon?)** + **CVSS (how bad if it is?)** + **your own
+> reachability/exposure** (is the vulnerable code path even reachable, is the asset
+> internet-facing?). "Patch promptly" is too vague for senior level.
+
+---
+
+## The OWASP framework family — Top 10 vs ASVS, WSTG, MASVS, SAMM, Proactive Controls
+
+The Top 10 is *awareness*. Senior candidates should place it among OWASP's other projects
+and say *when to reach for each*:
+
+- **Top 10 — awareness.** "What are the big risk classes?" Not certifiable, not a checklist.
+- **ASVS (Application Security Verification Standard) — verifiable requirements.** A list of
+  testable security requirements at three levels:
+  - **L1** — opportunistic; achievable with automated tooling + some manual effort; a
+    baseline for all apps.
+  - **L2** — standard; for most apps that handle sensitive data; the recommended target.
+  - **L3** — advanced; for high-value / critical apps (finance, health, life-safety);
+    requires the most rigor and manual verification.
+- **WSTG (Web Security Testing Guide) — *how to test*** for the issues.
+- **MASVS / MASTG — mobile** equivalents (verification standard + testing guide).
+- **SAMM (Software Assurance Maturity Model) — program maturity.** How to *run* an appsec
+  program across governance, design, implementation, verification, operations. (BSIMM is a
+  similar, data-derived maturity model.)
+- **Proactive Controls (2024) — the "positive" counterpart** to the Top 10: the top
+  defensive techniques to build in, framed as things to *do* rather than risks to avoid.
+
+> [!INTERVIEW]
+> One-liner to memorize: **Top 10 = awareness, ASVS = verifiable requirement, WSTG = how to
+> test, MASVS = mobile, SAMM/BSIMM = program maturity, Proactive Controls = defenses to
+> build in.** "Certify against the Top 10" is a red flag — you verify against **ASVS**.
+
+---
+
+## Access-control models and deeper A01 attacks (RBAC/ABAC/ReBAC, path traversal, mass assignment)
+
+The A01 section above gives the ownership-check fundamentals. Deeper senior material:
+
+**Authorization models (name a mechanism, don't just say "centralize"):**
+- **RBAC (Role-Based)** — permissions attached to roles, users assigned roles. Simple;
+  struggles with per-object ("can Alice edit *this* doc?") decisions.
+- **ABAC (Attribute-Based)** — decisions from attributes of subject/resource/action/
+  environment (department, clearance, time, resource owner). Flexible, expressive.
+- **ReBAC (Relationship-Based)** — permission derived from a *graph of relationships*
+  ("Alice is an editor of a folder that contains this doc"). Google **Zanzibar** is the
+  canonical design; used for fine-grained, object-level authorization at scale.
+- **PBAC / policy-as-code** — externalize decisions to a policy engine: **OPA/Rego**, AWS
+  **Cedar**, or a Zanzibar-style service. Centralizes the `can(subject, action, resource)`
+  decision so it isn't reimplemented per handler.
+
+**Vertical vs horizontal escalation (name the axes):**
+- **Vertical privilege escalation** — gaining *higher* privileges (user → admin).
+- **Horizontal privilege escalation** — accessing *peer* resources at the same level
+  (Alice reading Bob's invoice = the IDOR/BOLA case).
+
+**Other A01 members worth naming:**
+- **Path / directory traversal (CWE-22)** — `../../etc/passwd` in a filename/path parameter
+  escapes the intended directory. Defend with canonicalization + allowlisting, not blocklists.
+- **Mass assignment / auto-binding (write-side IDOR)** — a request body sets a field the
+  client shouldn't control (`{"isAdmin": true}` or `{"ownerId": <someone else>}`) and the
+  framework binds it straight onto the model. Defend by binding only explicitly-allowed
+  fields (DTO/allowlist), never the whole object.
+- **CSRF** — historically its own item; in 2021+ CSRF-style issues sit near A01. (Deep
+  coverage lives in the CSRF topic; here just know it *belongs to the access-control family*.)
+- **JWT/token tampering** — beyond "change `role:admin`": **`alg:none`** (drop the
+  signature), **key confusion RS256→HS256** (verify an RS256 token as HS256 using the public
+  key as the HMAC secret), and accepting unsigned/expired tokens. (Protocol depth lives in
+  the OAuth/JWT topic; here it's an authorization-bypass vector.)
+
+**IDOR at scale (systemic fix):** the durable fix isn't fixing one endpoint — it's a
+**centralized authorization layer / policy engine** invoked on *every* object access with a
+per-request `can(subject, action, resource)` check. At API scale this is BOLA: authorization
+must be **per-object-instance**, not just per-endpoint.
+
+---
+
+## Security headers, CORS, and cloud misconfiguration (A02/A05 deep dive)
+
+The misconfiguration section says "missing security headers" and "overly permissive CORS"
+generically. Senior interviews want specifics.
+
+**Security headers by name:**
+- **`Strict-Transport-Security`** — e.g. `max-age=31536000; includeSubDomains; preload`.
+  Forces HTTPS; `preload` gets the domain baked into browsers' **HSTS preload list**.
+- **`Content-Security-Policy`** — controls allowed script/style/frame sources; the strongest
+  defense-in-depth against XSS. CSP Level 3 adds **Trusted Types** for DOM-XSS sink control.
+- **`X-Content-Type-Options: nosniff`** — stops MIME-sniffing that can turn an upload into
+  executable content.
+- **`X-Frame-Options` / CSP `frame-ancestors`** — clickjacking defense; `frame-ancestors`
+  is the modern replacement.
+- **`Referrer-Policy`** — limits how much URL is leaked in the `Referer` header.
+- **`Permissions-Policy`** — gates powerful browser features (camera, geolocation, etc.).
+- **`X-XSS-Protection`** — the legacy IE/Chrome XSS auditor header, **deprecated**; modern
+  guidance is to set it to `0` (or omit) and rely on CSP. Recommending it is a red flag.
+
+**CORS internals (a favorite gotcha):**
+- **`Access-Control-Allow-Origin: *` together with `Access-Control-Allow-Credentials:
+  true` is forbidden by the Fetch spec** — the browser refuses to expose the response.
+  Credentialed requests require an **explicit, exact origin** to be echoed (and even then,
+  reflecting *any* origin turns every authenticated endpoint into a cross-origin read).
+- **Reflecting the `Origin` header blindly** back into ACAO is the common bug — it trusts
+  every site. **Trusting `null`** (from sandboxed iframes/redirects) is exploitable. Sloppy
+  **regex** (`^https://example\.com` without anchoring the end) matches
+  `https://example.com.evil.com`.
+- CORS is **not an access-control mechanism** — it relaxes the same-origin *read* policy in
+  the browser. It never protects the server; server-side authorization is still required.
+
+**Cloud misconfiguration breadth:** public **S3/blob** buckets, over-permissive **IAM**,
+exposed Kubernetes dashboards / **etcd**, an exposed **`.git`** directory or **`.env`** file,
+and unauthenticated **Elasticsearch / Redis / MongoDB** bound to a public interface.
+
+---
+
+## Password hashing and AEAD — concrete parameters (A04 deep dive)
+
+"Use Argon2id/bcrypt" is not enough at senior level; know the numbers (per OWASP Password
+Storage Cheat Sheet, RFC 9106, and RFC 7914):
+
+- **Argon2id (preferred, RFC 9106)** — memory-hard. OWASP baseline example: **m ≈ 19 MiB,
+  t = 2, p = 1** (with higher memory, e.g. up to ~47 MiB, if you can afford it). Memory cost
+  is what defeats GPU/ASIC cracking.
+- **bcrypt** — **work factor ≥ 10–12.** Caveat: bcrypt **truncates input at 72 bytes**, so
+  long passwords (or "pepper-then-append" schemes) can silently lose entropy; pre-hash with
+  SHA-256 + base64 if you must support >72 bytes.
+- **scrypt (RFC 7914)** — memory-hard; acceptable where Argon2 isn't available.
+- **PBKDF2** — FIPS-friendly but *not* memory-hard. OWASP (2023) recommends **≈ 600,000
+  iterations for PBKDF2-HMAC-SHA256** (adjust per hash). Use it when a certification requires
+  a NIST-approved KDF.
+
+All must use a **unique random salt per password** (the KDFs generate/store this for you).
+
+**AEAD nonce discipline:**
+- **AES-GCM uses a 96-bit (12-byte) nonce.** **Nonce reuse under the same key is
+  catastrophic** — it leaks the XOR of plaintexts *and* enables recovery of the GCM
+  authentication subkey (forgery of arbitrary messages). Use a counter or random 96-bit
+  nonce with a strict no-reuse guarantee; rotate keys before the nonce space is at risk.
+- **ChaCha20-Poly1305** is the common AEAD alternative (better on hardware without AES
+  acceleration).
+
+**Named crypto attacks a senior should recognize:**
+- **Padding oracle** (CBC + unauthenticated MAC-then-nothing) — decrypt/forge via padding
+  error side channel; the reason to use AEAD.
+- **BEAST** (TLS 1.0 CBC), **POODLE** (SSL 3.0 padding), **Lucky13** (CBC timing),
+  **CRIME / BREACH** (compression + secret in the same context leaks it).
+- **Crypto-agility & post-quantum:** "harvest now, decrypt later" motivates migrating to
+  **NIST PQC — ML-KEM (FIPS 203)** for key exchange and **ML-DSA (FIPS 204)** for
+  signatures. Worth one forward-looking sentence in 2025.
+
+---
+
+## Injection breadth and XSS taxonomy (A05 deep dive)
+
+The A03/A05 injection section shows SQLi + reflected XSS. The category is much broader:
+
+- **NoSQL injection** — e.g. MongoDB operator injection (`{"$where": "..."}` or
+  `{"password": {"$ne": null}}` to bypass a login). Defend by rejecting operator objects
+  where a scalar is expected and using typed query builders.
+- **LDAP injection**, **XPath injection**, **OS command injection**, **ORM injection**
+  (unsafe HQL/JPQL concatenation), **CRLF / HTTP response splitting** and **host-header
+  injection**, and **log injection**.
+- **Server-Side Template Injection (SSTI)** — user input reaches a template engine as
+  *template*, not data (`{{7*7}}` → `49`), often escalating to RCE. Defend by never
+  compiling user input as a template; use logic-less/sandboxed templates.
+- **Second-order SQL injection** — malicious input is *stored* safely, then later
+  concatenated into a query by a different code path that trusts "internal" data. The gotcha:
+  parameterize **everywhere**, not just at the front door.
+
+**XSS taxonomy** (all under A05:2025 / A03:2021 Injection):
+- **Stored (persistent)** — payload saved server-side, runs for every viewer.
+- **Reflected** — payload echoed from the request into the immediate response.
+- **DOM-based** — the vulnerability is entirely client-side: a JS **sink**
+  (`innerHTML`, `eval`, `document.write`) consumes attacker-controlled **source**
+  (`location.hash`, `postMessage`). Server-side output encoding doesn't help; you need safe
+  DOM APIs and **Trusted Types**.
+- **Mutation XSS (mXSS)** — sanitized markup is *mutated* by the browser's HTML parser back
+  into something executable, defeating a naive sanitizer.
+
+---
+
+## Modern authentication depth — passkeys and NIST 800-63 AALs (A07 deep dive)
+
+The A07 section covers credential stuffing, session fixation, and password policy. Deeper:
+
+- **NIST SP 800-63B → 800-63-4 (finalized 2025).** Defines **Authenticator Assurance Levels
+  (AAL1/2/3)**. AAL2 requires MFA; AAL3 requires a **hardware-based, phishing-resistant**
+  authenticator with verifier impersonation resistance. **SMS OTP is a "restricted"
+  authenticator** — allowed but discouraged (SIM-swap, SS7 interception).
+- **WebAuthn / FIDO2 / passkeys** — public-key credentials **bound to the origin**, so a
+  phishing site on a look-alike domain can't use them (phishing-resistant by design).
+  - **Device-bound passkeys** stay on one authenticator (highest assurance).
+  - **Synced passkeys** replicate across a user's devices via a cloud keychain (better UX,
+    slightly lower assurance because the key material syncs).
+- **Session vs token revocation:** a server-side session can be invalidated instantly; a
+  **stateless JWT cannot be easily revoked** before its expiry. That's why bearer-token
+  designs need **short TTLs + refresh-token rotation with reuse detection** (a replayed old
+  refresh token signals theft → revoke the family). (Protocol depth lives in the OAuth topic.)
+
+---
+
+## Supply-chain defense internals — SLSA, SBOM, provenance, dependency confusion (A03:2025 deep dive)
+
+Expanding A06:2021 → A03:2025, know the standards and the distinctions:
+
+- **SCA vs SBOM vs provenance** — *SCA* scans your dependency tree for known-vulnerable
+  versions; an *SBOM* (**SPDX** or **CycloneDX** format) is the inventory of what you ship;
+  **provenance** attests *how/where* an artifact was built. **VEX** (Vulnerability
+  Exploitability eXchange) states whether a listed component's vuln is actually
+  exploitable in your product.
+- **SLSA (Supply-chain Levels for Software Artifacts, slsa.dev)** — a framework of levels
+  (roughly 0–3+) raising **build integrity and provenance** guarantees: L1 provenance
+  exists, higher levels require a hardened, tamper-resistant, non-falsifiable build.
+- **Sigstore / cosign** (sign artifacts & container images), **in-toto attestations**
+  (signed statements about build steps) — the concrete tooling for provenance.
+- **Reachability analysis** — a vulnerable dependency matters far more if the vulnerable
+  *function is actually called*; modern SCA prioritizes reachable vulns. **Lockfile pinning +
+  hash verification** stop silent version/content substitution.
+- **Dependency confusion (Alex Birsan, 2021)** — if a build resolves an *internal* package
+  name and the public registry is also consulted, an attacker publishes a **higher-version
+  package of the same name publicly**, and the resolver pulls the attacker's package. Defend
+  with scoped/namespaced packages, explicit private-registry pinning, and reserving your
+  names publicly.
+- **Incidents to name:** **SolarWinds** (build-pipeline backdoor), **Log4Shell**
+  (ubiquitous transitive dep, CVE-2021-44228), **Codecov bash-uploader (2021)**,
+  **event-stream (npm)**, **xz-utils backdoor (CVE-2024-3094, 2024)** — a multi-year social
+  engineering of a maintainer, and **Shai-Hulud (2025)**, a self-propagating npm worm.
+
+> [!TIP]
+> "Would SCA have caught Log4Shell?" — **Yes, if your inventory was current** (it's a known
+> CVE in a listed dependency). Pen-testing your *own* code would likely miss it. This is why
+> A03:2025 is an inventory/SCA/provenance problem, not a code-review problem.
+
+---
+
 ## Common follow-up questions
 
 - **"Is the OWASP Top 10 a standard you can certify against?"** No — it's an *awareness*
@@ -487,12 +843,41 @@ detail. What to know here:
 - **"How does A08 relate to SolarWinds?"** A compromised CI/CD build pipeline shipped a
   signed-but-backdoored update — an integrity failure; defense is pipeline hardening,
   artifact signing, and dependency verification.
+- **"The 2025 Top 10 just dropped — what changed and why?"** Supply Chain → A03 (survey #1),
+  SSRF merged into A01, new A10 Mishandling of Exceptional Conditions, Misconfiguration up to
+  A02; driven by cloud/CI-CD reality and major supply-chain incidents.
+- **"Where is SSRF in 2025?"** Not standalone anymore — merged up into **A01 Broken Access
+  Control**. Memorizing "SSRF = A10" is now the wrong answer.
+- **"CWE vs CVE vs CVSS vs KEV vs EPSS?"** CWE = weakness *class*; CVE = specific *instance*;
+  CVSS = severity *score*; KEV = *being exploited in the wild*; EPSS = *probability* of
+  exploitation soon. Prioritize with KEV + EPSS + CVSS + your own reachability/exposure.
+- **"Auth service times out — fail open or fail closed?"** **Fail closed (deny).** Failing
+  open (CWE-636) is the core A10:2025 Mishandling of Exceptional Conditions failure.
+- **"`Access-Control-Allow-Origin: *` with `credentials: true` — what happens?"** The Fetch
+  spec forbids it; the browser blocks the response. Credentialed CORS needs an explicit
+  echoed origin.
+- **"Is SHA-256 + salt OK for passwords?"** No — still a *fast* hash. Use Argon2id
+  (m≈19MiB, t=2, p=1), bcrypt (cost ≥10–12), scrypt, or PBKDF2 (~600k iterations).
+- **"How do ASVS L1/L2/L3 differ?"** L1 opportunistic/mostly-automated baseline; L2 standard
+  for most sensitive-data apps (recommended target); L3 for high-value/critical systems.
 
 ## References
 
 - OWASP Top 10 2021 — <https://owasp.org/Top10/> (per-category pages A01–A10)
+- OWASP Top 10:2025 (current edition) — <https://owasp.org/Top10/2025/> (Introduction page
+  has the full 2021→2025 change table; A03 Supply Chain and A10 Exceptional Conditions pages)
 - OWASP Top 10 2021 "About / How data is used" & methodology —
   <https://owasp.org/Top10/A00_2021_Introduction/>
+- OWASP ASVS levels, SAMM, MASVS, Proactive Controls — <https://owasp.org/projects/>
+- OWASP Password Storage Cheat Sheet (Argon2id/bcrypt/scrypt/PBKDF2 params) —
+  <https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html>
+- CISA Known Exploited Vulnerabilities (KEV) catalog — <https://www.cisa.gov/known-exploited-vulnerabilities-catalog>
+- FIRST EPSS & CVSS v4.0 — <https://www.first.org/epss/> and <https://www.first.org/cvss/>
+- SLSA supply-chain framework — <https://slsa.dev/> ; Sigstore — <https://www.sigstore.dev/>
+- SBOM formats: SPDX — <https://spdx.dev/> ; CycloneDX — <https://cyclonedx.org/>
+- NIST SP 800-63-4 Digital Identity (AAL levels) — <https://pages.nist.gov/800-63-4/>
+- RFC 9106 (Argon2), RFC 7914 (scrypt), RFC 7519/7515/7518 (JWT/JWS/JWA), NIST SP 800-38D (GCM)
+- CVE-2024-3094 (xz-utils backdoor) — <https://cve.mitre.org/>
 - OWASP API Security Top 10 2023 — <https://owasp.org/API-Security/editions/2023/en/0x00-header/>
 - OWASP Application Security Verification Standard (ASVS) — <https://owasp.org/www-project-application-security-verification-standard/>
 - OWASP Web Security Testing Guide (WSTG) — <https://owasp.org/www-project-web-security-testing-guide/>

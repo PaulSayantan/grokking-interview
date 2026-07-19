@@ -566,6 +566,224 @@ frameworks to cite: **OWASP SAMM** and **BSIMM** (measure/mature an org's securi
 design *and* continuously in operations (runtime protection, monitoring) — because you can't
 find every issue pre-production.
 
+## LINDDUN Privacy Threat Modeling
+
+**Beginner.** STRIDE finds *security* threats; **LINDDUN** (KU Leuven, 2010) is its privacy
+dual — a systematic method for finding *privacy* threats against a system's data subjects.
+Where privacy-by-design and GDPR/CCPA are in scope, a senior engineer is expected to say
+"STRIDE for security, LINDDUN for privacy." Its seven threat types (linddun.org):
+
+| Letter | Threat type | Attacker/system... |
+|---|---|---|
+| **L** | **Linking** | associates data items or actions to learn more about an individual/group |
+| **I** | **Identifying** | learns the identity behind data through leaks, deduction, or inference |
+| **N** | **Non-repudiation** | can *undeniably* attribute a claim/action to an individual |
+| **D** | **Detecting** | deduces an individual's involvement merely by observing (e.g. a response exists) |
+| **D** | **Data disclosure** | excessively collects, stores, processes, or shares personal data |
+| **U** | **Unawareness & unintervenability** | fails to inform/involve/empower the data subject |
+| **N** | **Non-compliance** | deviates from privacy legislation, standards, and best practice |
+
+**Intermediate — the STRIDE inversion that trips people up.** In STRIDE, **repudiation is a
+threat** and **non-repudiation is a desirable property**. In LINDDUN it is the *opposite*:
+**non-repudiation is the threat** — being unable to plausibly deny an action harms privacy
+(e.g. a whistleblower or voter who cannot deny having submitted something). This inversion is
+a favorite interview probe: the same word is a goal in security and a harm in privacy.
+
+**Advanced — variants and countermeasures.** LINDDUN comes in three flavors:
+**LINDDUN GO** (a lightweight card deck for quick brainstorming), **LINDDUN PRO** (the
+systematic DFD-driven analysis with per-element/per-interaction mapping tables and threat
+trees), and **LINDDUN MAESTRO** (model-driven/automated). Mitigations lean on **PETs**
+(privacy-enhancing technologies): **data minimization**, **pseudonymization**,
+**k-anonymity**, and **differential privacy**, plus consent/transparency mechanisms. It maps
+to GDPR privacy-by-design (Art. 25) and ISO 31700. The senior test question — "model privacy,
+not just security, for an analytics pipeline" — wants Linking + Identifying + Non-compliance
+called out and data minimization/PETs proposed, *not* just "encrypt it" (which is a
+confidentiality control, not a privacy one).
+
+## Adversary-Centric Analysis: Kill Chain, MITRE ATT&CK, Diamond Model
+
+Threat modeling (STRIDE/LINDDUN) is *system-centric*. The complementary lens is
+*adversary-centric*: model the attacker's behaviour. Three frameworks form the standard trio —
+know how they differ.
+
+**Lockheed Martin Cyber Kill Chain.** A **linear, 7-stage** model of an intrusion:
+**Reconnaissance → Weaponization → Delivery → Exploitation → Installation → Command & Control
+(C2) → Actions on Objectives.** Its defender value is that breaking *any single link* stops
+the attack. Its recognized weaknesses (why it's no longer the last word): it is
+**perimeter- and malware-centric**, assumes a linear intrusion-from-outside, and largely
+ignores **insider threat** and **post-compromise lateral movement** — exactly the modern attack
+patterns. This is why ATT&CK and the Unified Kill Chain superseded it.
+
+**MITRE ATT&CK.** A continuously-updated, real-world **knowledge base of adversary TTPs** —
+**Tactics** (the *why* / adversarial goal), **Techniques & sub-techniques** (the *how*, e.g.
+T1566 Phishing), and **Procedures** (a specific actor's implementation). ATT&CK Enterprise
+has **14 tactics**: Reconnaissance, Resource Development, Initial Access, Execution,
+Persistence, Privilege Escalation, Defense Evasion, Credential Access, Discovery, Lateral
+Movement, Collection, Command & Control, Exfiltration, Impact. Unlike the kill chain it is a
+**non-linear matrix** with deep **post-exploitation** coverage — the lingua franca of detection
+engineering, purple-teaming, and threat-informed defense. Seniors map their controls/detections
+to ATT&CK technique IDs.
+
+**Diamond Model of Intrusion Analysis** (Caltagirone, Pendergast, Betz, 2013). Every intrusion
+event has four vertices — **Adversary, Capability, Infrastructure, Victim** — plus meta-features
+(timestamp, phase, result, direction, methodology, resources). You *pivot* along edges (e.g.
+from an observed Infrastructure IP to other Victims it touched) to correlate events into
+campaigns. It answers "how are these intrusions related?" rather than "what stage?" (kill chain)
+or "what technique?" (ATT&CK) — the three are complementary, not competing.
+
+> [!KEY-TAKEAWAY]
+> "Place this breach in the kill chain vs ATT&CK" — the kill chain gives you the *phase* but
+> falls apart once the attacker is inside (lateral movement, living-off-the-land, insiders);
+> ATT&CK gives you the *technique* and covers the post-compromise depth the kill chain misses.
+> Diamond Model links events across a campaign. Use all three, for different questions.
+
+## Quantitative Risk with FAIR
+
+The doc already covers SLE/ALE point estimates and the qualitative L×I heat map. **FAIR**
+(Factor Analysis of Information Risk, an Open Group standard — O-RA) is the rigorous
+*quantitative* alternative that fixes two problems with both: heat-map subjectivity and the
+false precision of a single ALE number.
+
+**The decomposition.** FAIR expresses:
+
+```
+Risk = Loss Event Frequency (LEF) × Loss Magnitude (LM)
+  LEF = Threat Event Frequency (TEF) × Vulnerability
+  Vulnerability = f(Threat Capability  vs  Resistance/Control Strength)
+  LM  = Primary Loss + Secondary Loss (fines, legal, reputation, response)
+```
+
+**Why it matters (the senior nuance).** FAIR does not produce a single number; you feed
+**distributions** (min/most-likely/max) for each factor and run a **Monte Carlo simulation**
+to get a **loss-exceedance curve** — "80% chance annual loss is under \$2M, 5% chance it exceeds
+\$10M." That is defensible to a CFO in a way a "High/Red" heat-map cell or a single
+"\$200k/yr ALE" is not, because it makes the uncertainty explicit and comparable across risks.
+Contrast with NIST SP 800-30, which is primarily qualitative. The interview framing — "quantify
+this risk defensibly for the CFO" — wants FAIR's LEF×LM with ranges, and an acknowledgement that
+qualitative heat maps mislead because two "High" risks can differ 100× in expected loss.
+
+## Scaling Threat Modeling: Threat-Modeling-as-Code, VAST, and the Manifesto
+
+**The problem.** Whiteboard STRIDE per service does not scale to 200+ microservices shipping
+daily. The senior answer to "how do you threat model at scale?" is **not** "hire more security
+engineers" — it is to make threat modeling *continuous* and *codified*.
+
+**Threat-modeling-as-code / continuous TM.** Represent the system in a text DSL that lives in
+the repo and runs in CI, so the model updates with the code and diffs in code review:
+
+- **OWASP pytm** — a Python DSL; you declare elements/dataflows/boundaries and it
+  auto-generates the DFD and a STRIDE findings report.
+- **Threagile** — a YAML model processed in CI to produce a threat model and risk report.
+- **OWASP Threat Dragon** and the **Microsoft Threat Modeling Tool** — GUI diagram-driven
+  tools; **IriusRisk** — commercial, questionnaire/pattern-driven with control libraries.
+
+**VAST** (Visual, Agile, Simple Threat modeling — from ThreatModeler) is the *enterprise-scale*
+methodology: it distinguishes **application threat models** (DFD-based, for developers) from
+**operational threat models** (attacker/process-flow view, for infra/ops), so both audiences
+scale across an Agile organization from reusable components rather than bespoke per-service
+sessions.
+
+**Threat Modeling Manifesto (2020).** A values/principles statement by leading practitioners —
+values such as *"a culture of finding and fixing design issues over checkbox compliance"* and
+*"doing threat modeling over talking about it."* Cite it as the philosophy behind lightweight,
+continuous, developer-owned threat modeling.
+
+## Supply-Chain Security: SBOM, SLSA, and Provenance
+
+The doc mentions **SCA**; a 2024-2025 senior bar expects the fuller supply-chain picture,
+because the dependency-ingestion point is a **trust boundary** most teams never modeled. Maps to
+**OWASP A06 (Vulnerable & Outdated Components)** and **A08 (Software & Data Integrity Failures)**,
+and to **NIST SSDF (SP 800-218)**.
+
+**SBOM (Software Bill of Materials).** A machine-readable inventory of every component/dependency
+in a build, so that when the next Log4Shell drops you can answer "are we affected?" in minutes.
+Two dominant formats: **CycloneDX** (OWASP) and **SPDX** (Linux Foundation/ISO).
+
+**SLSA v1.0 (Supply-chain Levels for Software Artifacts, slsa.dev)** — Build track L0-L3, each
+raising the bar against build tampering:
+
+- **L0** — no guarantees.
+- **L1** — **provenance exists** (documents how the artifact was built), but may be unsigned and
+  is easy to forge; it mainly prevents mistakes and enables expectations.
+- **L2** — build runs on a **hosted build platform** that **signs** the provenance; protects
+  against tampering *after* the build and lets consumers verify authenticity.
+- **L3** — **hardened, isolated builds**: runs can't influence each other and the provenance
+  **signing key is inaccessible to user-defined build steps**, so forging provenance requires a
+  serious exploit. L3 is what actually resists an *in-build* backdoor.
+
+**Provenance & attestations** are captured with **in-toto** (signed statements about build steps
+and materials). Verifying signed provenance at deploy time is the control that catches a tampered
+build.
+
+**Landmark incidents** to cite: **SolarWinds/SUNBURST** (malicious code injected into the *build
+pipeline* — the poster child for why L3 build isolation matters), **Log4Shell**
+(**CVE-2021-44228**, a transitive-dependency RCE — SBOM answers "am I affected?"),
+**xz-utils backdoor** (**CVE-2024-3094**, a multi-year social-engineering supply-chain
+compromise of a maintainer), plus **event-stream** and **Codecov**. The interview mapping: the
+weakness lives at the **dependency-ingestion trust boundary**; category is **A08/A06**; the
+control that would have caught it is **SLSA L3 + signed provenance verification + SBOM +
+dependency pinning/review**.
+
+## Assurance vs Security, and the ASVS Ladder
+
+A staff-level distinction the doc did not draw: **security** is the set of protective properties
+a system *actually has*; **assurance** is the **justified confidence — the evidence — that those
+properties hold**. You can be *secure without assurance* (correct by luck, but nobody can
+demonstrate it) and, more dangerously, have *assurance without security* (a passed checklist over
+a flawed system). "Trust but verify" becomes, in modern security, just **verify** — and the thing
+you produce is *assurance evidence*.
+
+Grounds for assurance, weakest to strongest: testing → SAST/DAST → **penetration testing** →
+**formal verification**; and, as an assurance *ladder*, **OWASP ASVS Levels 1/2/3** (L1 basic /
+opportunistic, L2 the standard for most apps handling sensitive data, L3 for the highest-value
+systems) and **Common Criteria EAL** levels. Provenance/attestations (above) are *supply-chain*
+assurance evidence. When an interviewer asks "can a system be secure without assurance?" — yes,
+but you cannot *defend* the claim or catch regressions, which is why regulated/high-value systems
+demand assurance artifacts, not just good intentions.
+
+## CWE vs CVE vs CAPEC, and SSVC
+
+Seniors are expected to speak these fluently and not conflate them:
+
+- **CVE** (Common Vulnerabilities and Exposures) — a specific, identified **instance** of a
+  vulnerability in a particular product/version (e.g. CVE-2021-44228 = Log4Shell).
+- **CWE** (Common Weakness Enumeration) — the **class of weakness** behind instances (e.g.
+  **CWE-89** SQL Injection, **CWE-79** XSS). The OWASP Top 10 categories map to CWEs; a single
+  CWE spawns many CVEs.
+- **CAPEC** (Common Attack Pattern Enumeration and Classification) — the **attacker's method**
+  used to exploit weaknesses (e.g. CAPEC-66 SQL Injection *pattern*). ATT&CK is TTP-level;
+  CAPEC is application-attack-pattern-level.
+
+Relationship: a **CAPEC** attack pattern exploits a **CWE** weakness class, which manifests as a
+concrete **CVE** instance.
+
+**SSVC** (Stakeholder-Specific Vulnerability Categorization, CISA) is a **decision-tree**
+alternative to CVSS-numeric prioritization: instead of a 0-10 score it walks qualitative
+decision points (Exploitation status, Exposure, Automatable, Mission/Well-being impact) to a
+categorical action — **Track / Track\* / Attend / Act**. It complements the EPSS/KEV signals
+already covered: CVSS = severity, EPSS = probability, KEV = known-exploited, SSVC = a structured
+*decision* about what to do.
+
+## Threat Actors and Threat Intelligence
+
+Beyond the one-line "threat actor" definition, know the taxonomy, because "who are we defending
+against?" shapes likelihood and which controls are worth their cost:
+
+- **Script kiddies** — low skill, opportunistic, run others' tools; stopped by basic hygiene.
+- **Hacktivists** — ideologically motivated (defacement, DoS, leaks).
+- **Organized cybercrime** — financially motivated, professional (ransomware, fraud); the bulk
+  of real-world volume.
+- **Nation-state / APTs** (Advanced Persistent Threats) — well-resourced, patient, stealthy,
+  goal-driven (espionage, sabotage); assume they can burn a zero-day. You rarely "stop" an APT —
+  you raise cost, detect, and limit blast radius.
+- **Insiders** — **malicious** (disgruntled, bribed) or **negligent** (misconfiguration, phishing
+  victim); bypass the perimeter entirely, which is a core argument for Zero Trust and separation
+  of duties.
+
+Their **capability** feeds the FAIR *Threat Capability* factor and OWASP's threat-agent skill/
+motive/opportunity likelihood inputs. Overpaying to defeat a nation-state when your realistic
+adversary is commodity crimeware is as wrong as the reverse.
+
 ## Common follow-up questions
 
 - **"Which is more important, C, I, or A?"** — It depends on the asset: a public news site
@@ -596,6 +814,32 @@ find every issue pre-production.
 - **"What is zero trust — is the internal network trusted?"** — No implicit trust based on
   network location; authenticate/authorize every request, per session, using dynamic context.
   Assume breach and micro-segment.
+- **"STRIDE vs LINDDUN?"** — STRIDE finds security threats; LINDDUN finds *privacy* threats
+  (Linking, Identifying, Non-repudiation, Detecting, Data disclosure, Unawareness,
+  Non-compliance). Note the inversion: non-repudiation is *desired* in STRIDE but is a *threat*
+  in LINDDUN.
+- **"Kill chain vs ATT&CK?"** — Kill chain = linear phases, perimeter/malware-centric, weak on
+  insiders and lateral movement; ATT&CK = a non-linear TTP matrix with deep post-compromise
+  coverage. Diamond Model links events across a campaign.
+- **"Quantify risk for the CFO — heat map or something better?"** — FAIR: Risk = LEF × LM with
+  input distributions and Monte Carlo, giving a loss-exceedance curve, not a single ALE or a
+  subjective "High." Two "High" cells can differ 100× in expected loss.
+- **"How do you threat model 200 microservices?"** — Threat-modeling-as-code (pytm/Threagile in
+  CI) + reusable component libraries + VAST's application vs operational split — not per-service
+  whiteboards.
+- **"CWE vs CVE?"** — CWE is the weakness *class* (CWE-89 SQLi); CVE is a specific *instance* in a
+  product. CAPEC is the attack *pattern* that exploits the CWE.
+- **"Is defense-in-depth one of Saltzer & Schroeder's principles?"** — No. Defense in depth and
+  secure defaults are later additions; the canonical eight are economy of mechanism, fail-safe
+  defaults, complete mediation, open design, separation of privilege, least privilege, least
+  common mechanism, and psychological acceptability (plus work factor and compromise recording
+  as bonus items).
+- **"Security vs assurance?"** — Security = the properties a system has; assurance = the evidence
+  that they hold. You can be secure without assurance (unprovable) or have assurance without
+  security (a passed checklist over a flawed system). ASVS L1/2/3 is an assurance ladder.
+- **"What control would have caught xz-utils / Log4Shell?"** — Treat dependency ingestion as a
+  trust boundary (A06/A08): SBOM to know what you ship, SLSA L3 build isolation + signed
+  provenance verification to detect in-build tampering, and dependency pinning/review.
 
 ## References
 
@@ -615,3 +859,12 @@ find every issue pre-production.
 - FIRST — [CVSS v3.1 Specification](https://www.first.org/cvss/v3-1/specification-document) and [CVSS v4.0 Specification](https://www.first.org/cvss/v4-0/specification-document)
 - FIRST — [EPSS (Exploit Prediction Scoring System)](https://www.first.org/epss/) · CISA — [Known Exploited Vulnerabilities (KEV) Catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)
 - Saltzer & Schroeder — *The Protection of Information in Computer Systems* (1975) — classic design principles
+- LINDDUN — [Privacy threat modeling](https://linddun.org/) (GO / PRO / MAESTRO, 7 threat types)
+- MITRE — [ATT&CK](https://attack.mitre.org/) · [CWE](https://cwe.mitre.org/) · [CAPEC](https://capec.mitre.org/) · [CVE](https://www.cve.org/)
+- Lockheed Martin — [Cyber Kill Chain](https://www.lockheedmartin.com/en-us/capabilities/cyber/cyber-kill-chain.html)
+- Caltagirone, Pendergast, Betz — [The Diamond Model of Intrusion Analysis](https://www.activeresponse.org/the-diamond-model/) (2013)
+- The Open Group — [FAIR (O-RA) / Open FAIR](https://www.opengroup.org/open-fair) risk taxonomy and analysis
+- [SLSA v1.0](https://slsa.dev/spec/v1.0/levels) (Build track L0-L3) · [in-toto](https://in-toto.io/) · SBOM formats [CycloneDX](https://cyclonedx.org/) & [SPDX](https://spdx.dev/)
+- [Threat Modeling Manifesto](https://www.threatmodelingmanifesto.org/) (2020) · [OWASP pytm](https://github.com/OWASP/pytm) · [OWASP Threat Dragon](https://owasp.org/www-project-threat-dragon/) · [Threagile](https://threagile.io/)
+- CISA — [SSVC (Stakeholder-Specific Vulnerability Categorization)](https://www.cisa.gov/ssvc) · [Zero Trust Maturity Model](https://www.cisa.gov/zero-trust-maturity-model)
+- OWASP — [ASVS](https://owasp.org/www-project-application-security-verification-standard/) (assurance levels L1/L2/L3)

