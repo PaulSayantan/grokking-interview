@@ -27,6 +27,15 @@ export default {
         "group-core": "var(--color-group-core)",
         "group-advanced": "var(--color-group-advanced)",
         "group-aws": "var(--color-group-aws)",
+        // FutureAGI-style accent palette
+        "accent-orange": "var(--accent-orange)",
+        "accent-purple": "var(--accent-purple)",
+        "accent-blue": "var(--accent-blue)",
+        "accent-green": "var(--accent-green)",
+        "accent-red": "var(--accent-red)",
+        "accent-pink": "var(--accent-pink)",
+        "accent-amber": "var(--accent-amber)",
+        "accent-teal": "var(--accent-teal)",
       },
       borderColor: {
         app: "var(--color-border)",
@@ -49,18 +58,20 @@ export default {
         "step-3": "var(--step-3)",
         "step-4": "var(--step-4)",
         "step-5": "var(--step-5)",
+        "step-6": "var(--step-6)",
       },
       fontFamily: {
         sans: [
+          "Inter Variable",
+          "Inter",
           "system-ui",
           "-apple-system",
           "Segoe UI",
-          "Roboto",
-          "Helvetica",
-          "Arial",
           "sans-serif",
         ],
         mono: [
+          "JetBrains Mono Variable",
+          "JetBrains Mono",
           "ui-monospace",
           "SFMono-Regular",
           "Menlo",
@@ -71,6 +82,8 @@ export default {
       },
       maxWidth: {
         prose: "68ch",
+        "prose-wide": "80ch",
+        "prose-narrow": "60ch",
       },
     },
   },

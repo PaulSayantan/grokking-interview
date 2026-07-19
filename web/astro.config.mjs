@@ -38,8 +38,15 @@ export default defineConfig({
       rehypeCallouts,
     ],
     // Shiki is Astro's built-in syntax highlighter.
+    // `defaultColor: false` disables inline color styles entirely — Shiki
+    // emits only `--shiki-light` / `--shiki-dark` / `--shiki-light-bg` /
+    // `--shiki-dark-bg` CSS vars on each token. Our stylesheet reads whichever
+    // pair matches the site's `[data-theme]`, so the site's toggle drives the
+    // code theme (not the OS `prefers-color-scheme`), and first paint matches
+    // the toggle state with no flicker.
     shikiConfig: {
       themes: { light: "github-light", dark: "github-dark" },
+      defaultColor: false,
       wrap: true,
     },
   },
