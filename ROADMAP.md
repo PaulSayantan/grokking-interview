@@ -90,7 +90,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 0 |
 | [Security (App & Web)](topics/security/README.md) | 16 | 0 |
-| [Networking & Protocols](topics/networking/README.md) | 16 | 0 |
+| [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (Pass 1, 844 MCQs) |
 | [Observability](topics/observability/README.md) | 17 | 0 |
 | [Software Testing](topics/testing/README.md) | 16 | 0 |
 

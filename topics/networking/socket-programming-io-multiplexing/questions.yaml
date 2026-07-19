@@ -1,0 +1,983 @@
+topic: "Socket Programming & I/O Multiplexing"
+domain: networking
+topic_slug: socket-programming-io-multiplexing
+version: 1
+questions:
+  - id: socket-programming-io-multiplexing-001
+    difficulty: beginner
+    tags: [bsd-sockets, api, fundamentals]
+    question: |
+      In the BSD socket API, what does the return value of a successful
+      `socket()` call represent?
+    options:
+      - "An integer file descriptor referring to the socket"
+      - "A pointer to a kernel connection structure"
+      - "The chosen ephemeral port number"
+      - "A copy of the peer's IP address"
+    answer: 0
+    explanation: |
+      `socket()` returns an integer file descriptor. Because it is an fd, the same
+      read/write/close and select/poll machinery that works on files and pipes also
+      works on sockets — the uniformity is the point of the abstraction.
+    ref: "concepts.md#the-bsd-socket-api-model"
+
+  - id: socket-programming-io-multiplexing-002
+    difficulty: beginner
+    tags: [socket-type, tcp, udp]
+    question: |
+      Which socket `type` produces a reliable, ordered byte stream (i.e. TCP)?
+    options:
+      - "SOCK_DGRAM"
+      - "SOCK_STREAM"
+      - "SOCK_RAW"
+      - "SOCK_SEQPACKET"
+    answer: 1
+    explanation: |
+      `SOCK_STREAM` gives a reliable, ordered, connection-oriented byte stream, which
+      over AF_INET maps to TCP. `SOCK_DGRAM` gives connectionless, message-oriented
+      datagrams (UDP).
+    ref: "concepts.md#the-bsd-socket-api-model"
+
+  - id: socket-programming-io-multiplexing-003
+    difficulty: beginner
+    tags: [byte-order, sockaddr, gotcha]
+    question: |
+      In what byte order must the port number be stored in a `sockaddr_in`
+      structure before calling `bind()` or `connect()`?
+    options:
+      - "Host byte order (whatever the CPU uses)"
+      - "Little-endian always"
+      - "Network byte order (big-endian)"
+      - "ASCII decimal string"
+    answer: 2
+    explanation: |
+      Addresses and ports in sockaddr are stored in network byte order (big-endian).
+      You convert with htons()/htonl(); forgetting this byte-swaps the port (e.g. 8080
+      becomes 0x901F) and the server appears to bind to the wrong port.
+    ref: "concepts.md#the-bsd-socket-api-model"
+
+  - id: socket-programming-io-multiplexing-004
+    difficulty: beginner
+    tags: [tcp, lifecycle, server]
+    question: |
+      What is the correct call sequence for a blocking TCP server?
+    options:
+      - "socket → connect → listen → accept"
+      - "socket → accept → bind → listen"
+      - "socket → listen → bind → recv"
+      - "socket → bind → listen → accept"
+    answer: 3
+    explanation: |
+      A TCP server does socket() → bind() (attach to a local IP:port) → listen() (mark
+      it passive, start queuing completed handshakes) → accept() (dequeue a connection).
+      connect() is a client call.
+    ref: "concepts.md#tcp-sockets-the-connection-lifecycle"
+
+  - id: socket-programming-io-multiplexing-005
+    difficulty: intermediate
+    tags: [accept, fd, gotcha]
+    question: |
+      A server calls `int c = accept(listen_fd, ...)`. Over which descriptor should it
+      exchange data with that specific client?
+    options:
+      - "listen_fd, the original listening socket"
+      - "Either one; they are aliases for the same connection"
+      - "c, the new descriptor accept() returned"
+      - "A new descriptor obtained from a second connect()"
+    answer: 2
+    explanation: |
+      accept() returns a *new* fd bound to that one client connection; you send/recv on
+      it. The listening fd stays open only to accept further connections and never
+      carries application data.
+    ref: "concepts.md#tcp-sockets-the-connection-lifecycle"
+
+  - id: socket-programming-io-multiplexing-006
+    difficulty: intermediate
+    tags: [tcp, 4-tuple, connections]
+    question: |
+      How can a single server listening on TCP port 443 maintain thousands of
+      simultaneous connections on that one port?
+    options:
+      - "The kernel silently rotates the server port for each client"
+      - "TCP multiplexes them into a single stream demuxed by sequence number"
+      - "Each connection gets a unique destination port assigned during the handshake"
+      - "Each connection is identified by the full 4-tuple (src IP, src port, dst IP, dst port), so tuples stay distinct"
+    answer: 3
+    explanation: |
+      A TCP connection is keyed by the 4-tuple. All clients share the server's dst IP:port
+      but differ in their (src IP, src port), so every connection has a unique tuple. The
+      server port is not duplicated per client.
+    ref: "concepts.md#tcp-sockets-the-connection-lifecycle"
+
+  - id: socket-programming-io-multiplexing-007
+    difficulty: beginner
+    tags: [ephemeral-ports, client]
+    question: |
+      When a TCP client calls `connect()` without first calling `bind()`, where does
+      its source port come from?
+    options:
+      - "The kernel auto-assigns an ephemeral port (typically 49152–65535)"
+      - "It is always port 0 until the server assigns one"
+      - "The client reuses the server's port number"
+      - "The connection fails; bind() is mandatory for clients"
+    answer: 0
+    explanation: |
+      Clients normally skip bind(); the kernel auto-assigns an ephemeral source port from
+      the dynamic range (49152–65535 per RFC 6335, though Linux defaults differ). This
+      source port is part of the connection's identifying 4-tuple.
+    ref: "concepts.md#tcp-sockets-the-connection-lifecycle"
+
+  - id: socket-programming-io-multiplexing-008
+    difficulty: beginner
+    tags: [udp, connectionless]
+    question: |
+      Which pair of calls is used by a UDP application instead of accept/recv, because
+      UDP has no connection to accept?
+    options:
+      - "listen() and accept()"
+      - "sendto() and recvfrom()"
+      - "connect() and send()"
+      - "poll() and epoll_wait()"
+    answer: 1
+    explanation: |
+      UDP (SOCK_DGRAM) is connectionless: there is no listen()/accept(). You bind() then
+      use recvfrom()/sendto(), where recvfrom() also yields the sender's address so you
+      know who to reply to.
+    ref: "concepts.md#udp-sockets-connectionless-datagrams"
+
+  - id: socket-programming-io-multiplexing-009
+    difficulty: intermediate
+    tags: [udp, message-boundaries]
+    question: |
+      A UDP receiver calls `recvfrom()` with a 512-byte buffer, but the arriving
+      datagram is 900 bytes. What happens by default?
+    options:
+      - "recvfrom() returns all 900 bytes, growing the buffer"
+      - "recvfrom() blocks until a smaller datagram arrives"
+      - "recvfrom() returns 512 bytes now and the rest on the next call"
+      - "recvfrom() reads 512 bytes and the remaining 388 are discarded"
+    answer: 3
+    explanation: |
+      UDP preserves message boundaries: one recvfrom() reads exactly one datagram. If the
+      buffer is too small, the excess is discarded (MSG_TRUNC lets you detect it). Unlike
+      TCP, the leftover is not queued for a later read.
+    ref: "concepts.md#udp-sockets-connectionless-datagrams"
+
+  - id: socket-programming-io-multiplexing-010
+    difficulty: advanced
+    tags: [udp, connect, icmp]
+    question: |
+      Why might an application call `connect()` on a UDP socket even though UDP is
+      connectionless?
+    options:
+      - "To set a default peer for send/recv and receive asynchronous ICMP errors like port-unreachable"
+      - "To perform a 3-way handshake and guarantee delivery"
+      - "To enable in-order delivery of datagrams"
+      - "It is illegal to call connect() on a UDP socket"
+    answer: 0
+    explanation: |
+      connect() on UDP sends no packets; it records a default peer so you can use
+      send/recv and, crucially, lets the socket surface asynchronous ICMP errors (e.g.
+      ECONNREFUSED for port-unreachable) — which an unconnected UDP socket cannot report.
+    ref: "concepts.md#udp-sockets-connectionless-datagrams"
+
+  - id: socket-programming-io-multiplexing-011
+    difficulty: beginner
+    tags: [blocking, recv]
+    question: |
+      On a default (blocking) TCP socket, what does `recv()` do when no data is
+      currently available but the connection is still open?
+    options:
+      - "Returns -1 with errno EAGAIN"
+      - "Blocks the calling thread until data arrives"
+      - "Returns 0 immediately"
+      - "Returns a random partial buffer"
+    answer: 1
+    explanation: |
+      A blocking recv() sleeps the calling thread until data arrives (or the peer closes).
+      That is exactly why one blocking thread can only wait on one connection at a time,
+      motivating non-blocking sockets and multiplexing.
+    ref: "concepts.md#blocking-vs-non-blocking-sockets"
+
+  - id: socket-programming-io-multiplexing-012
+    difficulty: intermediate
+    tags: [non-blocking, errno, eagain]
+    question: |
+      On a non-blocking TCP socket, `recv()` is called but no data is available. What is
+      returned?
+    options:
+      - "0, indicating end of stream"
+      - "The number of bytes still buffered by the peer"
+      - "-1 with errno set to EAGAIN/EWOULDBLOCK"
+      - "It blocks briefly then returns 0"
+    answer: 2
+    explanation: |
+      A non-blocking recv() with no data returns -1 and sets errno to EAGAIN/EWOULDBLOCK
+      (same value on Linux). This is distinct from recv() returning 0, which means the
+      peer performed an orderly shutdown (FIN).
+    ref: "concepts.md#blocking-vs-non-blocking-sockets"
+
+  - id: socket-programming-io-multiplexing-013
+    difficulty: intermediate
+    tags: [recv, shutdown, eof]
+    question: |
+      A blocking `recv()` returns exactly 0. What does this indicate?
+    options:
+      - "The peer performed an orderly shutdown (sent FIN); end of stream"
+      - "The socket buffer is empty but the connection is fine"
+      - "A transient error; retry the call"
+      - "A zero-length keepalive probe was received"
+    answer: 0
+    explanation: |
+      recv() == 0 means end of stream: the peer closed its send side (FIN received). It is
+      not an error and not 'try again' — it signals you should stop reading and typically
+      close your side.
+    ref: "concepts.md#blocking-vs-non-blocking-sockets"
+
+  - id: socket-programming-io-multiplexing-014
+    difficulty: advanced
+    tags: [non-blocking, connect, einprogress]
+    question: |
+      A non-blocking `connect()` returns -1 with errno EINPROGRESS. How do you correctly
+      detect that the handshake has completed successfully?
+    options:
+      - "Call connect() again in a loop until it returns 0"
+      - "Wait for the socket to become writable, then check SO_ERROR for success/failure"
+      - "Call accept() on the client socket"
+      - "Sleep for one RTT then assume success"
+    answer: 1
+    explanation: |
+      EINPROGRESS means the handshake is underway. You register the fd for writability in
+      your event loop; when it becomes writable you read SO_ERROR via getsockopt to
+      distinguish a completed connect (0) from a failure (e.g. ECONNREFUSED).
+    ref: "concepts.md#blocking-vs-non-blocking-sockets"
+
+  - id: socket-programming-io-multiplexing-015
+    difficulty: intermediate
+    tags: [tcp, byte-stream, framing]
+    question: |
+      An application sends one 8 KB logical message over TCP. The receiver's first
+      `recv()` returns only 1460 bytes. What is the correct interpretation?
+    options:
+      - "The connection is corrupted and should be reset"
+      - "The sender must have called send() twice"
+      - "TCP is a byte stream with no message boundaries; loop and re-read until the full message is assembled"
+      - "The receive buffer size must be increased or data will be lost"
+    answer: 2
+    explanation: |
+      TCP delivers a byte stream, not messages. A single send can arrive as multiple recv
+      chunks (and vice versa). The application must frame messages (length prefix,
+      delimiter, or fixed size) and loop reading until a complete message is assembled.
+    ref: "concepts.md#partial-reads-and-writes"
+
+  - id: socket-programming-io-multiplexing-016
+    difficulty: intermediate
+    tags: [send, short-write, semantics]
+    question: |
+      `send(fd, buf, 4096, 0)` returns 1500. What is the correct next step?
+    options:
+      - "Treat it as an error and close the socket"
+      - "Assume the peer received 1500 bytes and stop"
+      - "Resend all 4096 bytes from the beginning"
+      - "Loop and send the remaining 2596 bytes starting at the returned offset"
+    answer: 3
+    explanation: |
+      A short write means the kernel send buffer accepted only part of the data. Correct
+      code loops, advancing the offset by the returned count until all bytes are handed
+      off (waiting for writability if EAGAIN on a non-blocking socket).
+    ref: "concepts.md#partial-reads-and-writes"
+
+  - id: socket-programming-io-multiplexing-017
+    difficulty: intermediate
+    tags: [send, delivery-semantics, gotcha]
+    question: |
+      A `send()` call returns successfully with the full byte count. What has this
+      actually guaranteed?
+    options:
+      - "The peer application has read the bytes"
+      - "The peer's kernel has received and ACKed the bytes"
+      - "The bytes were copied into the local kernel send buffer"
+      - "The bytes have been rendered on the peer's screen"
+    answer: 2
+    explanation: |
+      A successful send() only means the data was copied into the local kernel socket
+      buffer. It says nothing about delivery — that requires TCP ACKs and, for
+      application-level confirmation, a reply. Never treat send success as end-to-end
+      delivery.
+    ref: "concepts.md#partial-reads-and-writes"
+
+  - id: socket-programming-io-multiplexing-018
+    difficulty: beginner
+    tags: [so-reuseaddr, time-wait]
+    question: |
+      Which socket option is commonly set before `bind()` so a server can restart
+      immediately without an "Address already in use" error?
+    options:
+      - "TCP_NODELAY"
+      - "SO_LINGER"
+      - "SO_KEEPALIVE"
+      - "SO_REUSEADDR"
+    answer: 3
+    explanation: |
+      SO_REUSEADDR lets bind() reuse a local port still held by a connection in TIME_WAIT
+      (~2×MSL) from the previous run, avoiding EADDRINUSE on restart. Nearly every server
+      sets it.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-019
+    difficulty: advanced
+    tags: [so-reuseport, scaling, load-balancing]
+    question: |
+      What is the primary purpose of `SO_REUSEPORT` (as distinct from SO_REUSEADDR)?
+    options:
+      - "It allows multiple sockets to bind the same IP:port so the kernel load-balances incoming connections across them"
+      - "It lets bind() rebind a port stuck in TIME_WAIT"
+      - "It disables Nagle's algorithm for that port"
+      - "It reserves the port so no other process can ever use it"
+    answer: 0
+    explanation: |
+      SO_REUSEPORT allows several distinct sockets (e.g. one per worker process/core) to
+      bind the same IP:port; the kernel distributes incoming connections among them. It
+      scales the accept path across cores and avoids single-listener thundering herds —
+      different from SO_REUSEADDR's TIME_WAIT reuse.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-020
+    difficulty: intermediate
+    tags: [tcp-nodelay, nagle, latency]
+    question: |
+      Setting `TCP_NODELAY` on a socket does what?
+    options:
+      - "Increases the socket send buffer size"
+      - "Disables Nagle's algorithm so small writes are sent immediately"
+      - "Enables TCP keepalive probes"
+      - "Turns off delayed ACKs on the receiver"
+    answer: 1
+    explanation: |
+      TCP_NODELAY disables Nagle's algorithm, which otherwise coalesces small writes
+      until the previous small segment is ACKed. Disabling it reduces latency for
+      interactive request/response protocols at the cost of more small packets.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-021
+    difficulty: advanced
+    tags: [nagle, delayed-ack, latency, scenario]
+    question: |
+      An RPC client sees ~40 ms latency spikes on small requests over a healthy LAN with
+      sub-millisecond RTT. Which combination is the most likely culprit?
+    options:
+      - "SYN flood on the server"
+      - "Edge-triggered epoll missing readiness events"
+      - "An undersized listen backlog"
+      - "Nagle's algorithm interacting with the peer's delayed ACK, stalling small writes"
+    answer: 3
+    explanation: |
+      The classic Nagle + delayed-ACK deadlock: the sender withholds a small segment
+      waiting for an ACK, while the receiver delays its ACK (~40 ms) waiting for data to
+      piggyback on. Setting TCP_NODELAY on latency-sensitive request/response sockets
+      eliminates the stall.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-022
+    difficulty: intermediate
+    tags: [so-keepalive, half-open]
+    question: |
+      What problem is `SO_KEEPALIVE` designed to detect?
+    options:
+      - "A silently dead peer on an idle connection that never sent a FIN (half-open)"
+      - "Excessive small packets flooding the network"
+      - "A full listen backlog under burst traffic"
+      - "Byte-order mistakes in the sockaddr"
+    answer: 0
+    explanation: |
+      SO_KEEPALIVE sends periodic probes on idle TCP connections to detect a peer that
+      vanished without a FIN (crash, cable pull, NAT timeout) — a half-open connection.
+      Defaults are coarse (Linux: 2 hours), so tune TCP_KEEPIDLE/INTVL/CNT.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-023
+    difficulty: advanced
+    tags: [so-rcvbuf, bandwidth-delay-product, throughput]
+    question: |
+      On a long-distance, high-latency link, TCP throughput is capped well below the
+      available bandwidth. Which socket-level setting most directly influences this?
+    options:
+      - "TCP_NODELAY, by removing Nagle delays"
+      - "SO_RCVBUF, because the receive buffer caps the receive window versus the bandwidth-delay product"
+      - "SO_REUSEADDR, by allowing more connections"
+      - "SO_LINGER, by flushing data faster on close"
+    answer: 1
+    explanation: |
+      Throughput is limited by window / RTT. A receive buffer (SO_RCVBUF) smaller than the
+      bandwidth-delay product caps the advertised receive window and thus throughput on
+      high-latency links. Sizing the buffer (or enabling autotuning) is the fix.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-024
+    difficulty: advanced
+    tags: [so-linger, rst, close]
+    question: |
+      Setting `SO_LINGER` with a timeout of 0 and then calling `close()` causes what TCP
+      behavior?
+    options:
+      - "A graceful FIN-based shutdown after flushing all data"
+      - "The close() call to block for exactly 2×MSL"
+      - "An abortive close sending a RST, discarding unsent data and skipping TIME_WAIT"
+      - "The connection to switch to UDP"
+    answer: 2
+    explanation: |
+      SO_LINGER with a zero timeout makes close() send an abortive RST rather than a
+      graceful FIN: unsent data is discarded and the connection skips the normal
+      TIME_WAIT. Useful in narrow cases but risks data loss.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-025
+    difficulty: intermediate
+    tags: [backlog, listen, accept-queue]
+    question: |
+      What does the `backlog` argument to `listen(fd, backlog)` primarily bound on
+      modern Linux?
+    options:
+      - "The number of fully established connections waiting to be accept()ed"
+      - "The maximum number of bytes buffered per connection"
+      - "The number of threads the server may spawn"
+      - "The TCP receive window size"
+    answer: 0
+    explanation: |
+      backlog bounds the accept queue of completed (established) connections awaiting
+      accept(). The effective cap is min(backlog, net.core.somaxconn). A separate SYN
+      queue holds half-open handshakes.
+    ref: "concepts.md#the-listen-backlog-and-accept-queue"
+
+  - id: socket-programming-io-multiplexing-026
+    difficulty: advanced
+    tags: [backlog, somaxconn, gotcha]
+    question: |
+      A service passes `listen(fd, 1024)` but under load still drops connections as if the
+      queue were much smaller. What is the most likely explanation?
+    options:
+      - "backlog values above 128 are ignored by the API"
+      - "The effective queue is min(backlog, somaxconn), and somaxconn was left at a low default"
+      - "TCP_NODELAY must be set to enlarge the queue"
+      - "The accept queue is unlimited, so drops must be from bad checksums"
+    answer: 1
+    explanation: |
+      The kernel caps the accept queue at min(backlog, net.core.somaxconn). If somaxconn is
+      at a low default (historically 128), passing 1024 doesn't help — you must raise the
+      sysctl as well.
+    ref: "concepts.md#the-listen-backlog-and-accept-queue"
+
+  - id: socket-programming-io-multiplexing-027
+    difficulty: advanced
+    tags: [syn-queue, syn-cookies, security]
+    question: |
+      SYN cookies defend against SYN flood attacks by doing what?
+    options:
+      - "Rate-limiting all inbound TCP by source IP"
+      - "Requiring TLS before the TCP handshake"
+      - "Encoding connection state into the SYN-ACK sequence number so no per-connection state is held until the handshake completes"
+      - "Dropping every third SYN to slow attackers"
+    answer: 2
+    explanation: |
+      A SYN flood exhausts the SYN (incomplete) queue with half-open handshakes. SYN
+      cookies encode the needed state into the SYN-ACK's initial sequence number, so the
+      server allocates no per-connection state until the client returns a valid final ACK.
+    ref: "concepts.md#the-listen-backlog-and-accept-queue"
+
+  - id: socket-programming-io-multiplexing-028
+    difficulty: intermediate
+    tags: [c10k, definition]
+    question: |
+      What does the "C10K problem" refer to?
+    options:
+      - "Compressing 10,000 packets into one frame"
+      - "Limiting a process to 10,000 file descriptors"
+      - "A 10-kilobyte maximum TCP segment size"
+      - "Handling 10,000 concurrent connections efficiently on a single server"
+    answer: 3
+    explanation: |
+      Coined by Dan Kegel (~1999), C10K asks how one server handles 10,000 simultaneous
+      connections. The naive thread-per-connection + O(n) select/poll model breaks down;
+      the answer is non-blocking I/O plus a scalable readiness API.
+    ref: "concepts.md#the-c10k-problem"
+
+  - id: socket-programming-io-multiplexing-029
+    difficulty: intermediate
+    tags: [c10k, thread-per-connection, memory]
+    question: |
+      Why does a pure thread-per-connection model struggle at 10,000 connections?
+    options:
+      - "TCP connections themselves consume gigabytes of kernel memory each"
+      - "The 4-tuple space is exhausted at 10,000 connections"
+      - "Per-thread stacks and context-switch/scheduling overhead grow with connection count"
+      - "select() cannot be called from more than one thread"
+    answer: 2
+    explanation: |
+      TCP connections are cheap; the coordination model is the problem. Each thread needs a
+      stack (often ~1 MB) and adds scheduler/context-switch overhead, so 10K threads is
+      expensive in memory and CPU. Event loops multiplex many connections per thread.
+    ref: "concepts.md#the-c10k-problem"
+
+  - id: socket-programming-io-multiplexing-030
+    difficulty: advanced
+    tags: [c10k, select, complexity]
+    question: |
+      Beyond thread cost, which property of `select`/`poll` makes them poor for the C10K
+      problem specifically?
+    options:
+      - "They only work with UDP sockets"
+      - "They require one thread per fd"
+      - "They cannot be used with non-blocking sockets"
+      - "They are O(n) per call, rescanning all monitored fds each wakeup even if few are ready"
+    answer: 3
+    explanation: |
+      select/poll are O(n): the kernel and application walk the entire fd set on every
+      call, so cost scales with total connections regardless of how few are active. epoll/
+      kqueue are O(ready), scaling with activity instead.
+    ref: "concepts.md#the-c10k-problem"
+
+  - id: socket-programming-io-multiplexing-031
+    difficulty: intermediate
+    tags: [select, fd-setsize, limits]
+    question: |
+      A well-known limitation of `select()` is that the fd values it can monitor are
+      capped by which constant (commonly 1024)?
+    options:
+      - "FD_SETSIZE"
+      - "SOMAXCONN"
+      - "MSS"
+      - "TCP_MAXWIN"
+    answer: 0
+    explanation: |
+      select() uses fixed-size fd_set bitmaps limited by FD_SETSIZE, commonly 1024. poll()
+      removes this limit by taking an array of pollfd structs; epoll/kqueue also have no
+      such cap.
+    ref: "concepts.md#readiness-io-models-select-poll-epoll-kqueue"
+
+  - id: socket-programming-io-multiplexing-032
+    difficulty: intermediate
+    tags: [select, poll, comparison]
+    question: |
+      What is the main practical advantage of `poll()` over `select()`?
+    options:
+      - "poll() is O(1) regardless of fd count"
+      - "poll() takes an array of pollfd structs, so it has no FD_SETSIZE limit and separates input events from returned events"
+      - "poll() keeps its interest set in the kernel across calls"
+      - "poll() supports edge-triggered notification"
+    answer: 1
+    explanation: |
+      poll() uses a pollfd array (no FD_SETSIZE cap) with separate `events`/`revents`
+      fields, so you don't rebuild the set each call. It is still O(n), though — epoll/
+      kqueue are the O(ready), stateful upgrades.
+    ref: "concepts.md#readiness-io-models-select-poll-epoll-kqueue"
+
+  - id: socket-programming-io-multiplexing-033
+    difficulty: advanced
+    tags: [epoll, complexity, scaling]
+    question: |
+      Why does `epoll` scale to hundreds of thousands of connections where `poll` does
+      not?
+    options:
+      - "epoll uses UDP internally for speed"
+      - "epoll compresses the fd set before scanning it"
+      - "epoll runs each fd on its own kernel thread"
+      - "epoll keeps the interest set in the kernel (registered once via epoll_ctl) and epoll_wait returns only the ready fds — O(ready) not O(total)"
+    answer: 3
+    explanation: |
+      With epoll you register fds once with epoll_ctl; epoll_wait returns only the ready
+      fds, so cost tracks activity, not total connection count. poll re-scans and re-copies
+      the whole array on every call.
+    ref: "concepts.md#readiness-io-models-select-poll-epoll-kqueue"
+
+  - id: socket-programming-io-multiplexing-034
+    difficulty: intermediate
+    tags: [kqueue, bsd, macos]
+    question: |
+      `kqueue` is the scalable readiness API on which platforms, and what makes it more
+      general than epoll?
+    options:
+      - "BSD/macOS; a single kevent interface reports socket readiness plus timers, signals, and file/process events"
+      - "Windows only; it integrates with the registry"
+      - "Linux only; it replaces epoll entirely"
+      - "All POSIX systems; it is another name for poll"
+    answer: 0
+    explanation: |
+      kqueue is the BSD/macOS equivalent of epoll and is more general: the kevent interface
+      can report not only socket readiness but timers, signals, file, and process events
+      through one mechanism. It is also O(ready).
+    ref: "concepts.md#readiness-io-models-select-poll-epoll-kqueue"
+
+  - id: socket-programming-io-multiplexing-035
+    difficulty: intermediate
+    tags: [select, gotcha, fd-set]
+    question: |
+      Why must code using `select()` typically rebuild its fd_sets before every call?
+    options:
+      - "Because select() closes the sockets after each call"
+      - "Because select() modifies the fd_sets in place to indicate which fds are ready"
+      - "Because FD_SETSIZE changes at runtime"
+      - "Because the kernel randomizes the fd numbers"
+    answer: 1
+    explanation: |
+      select() overwrites the passed fd_sets in place with only the ready fds, destroying
+      your original interest set. You must rebuild the sets each iteration — one reason
+      epoll's persistent kernel-side interest set is more efficient.
+    ref: "concepts.md#readiness-io-models-select-poll-epoll-kqueue"
+
+  - id: socket-programming-io-multiplexing-036
+    difficulty: intermediate
+    tags: [level-triggered, epoll, default]
+    question: |
+      In level-triggered (LT) mode, if data is readable and you read only part of it,
+      what does the next `epoll_wait()` report for that fd?
+    options:
+      - "Nothing, until new data arrives"
+      - "An error indicating an incomplete read"
+      - "The fd as still ready, because the readable condition still holds"
+      - "The fd as writable instead of readable"
+    answer: 2
+    explanation: |
+      Level-triggered mode reports readiness as long as the condition holds. If unread data
+      remains, the next epoll_wait still reports the fd ready — forgiving behavior that
+      matches select/poll semantics.
+    ref: "concepts.md#level-triggered-vs-edge-triggered"
+
+  - id: socket-programming-io-multiplexing-037
+    difficulty: advanced
+    tags: [edge-triggered, drain, gotcha]
+    question: |
+      When using edge-triggered (ET) epoll, why must you read from a ready socket until it
+      returns EAGAIN?
+    options:
+      - "Because ET notifies only on a state transition; unread data yields no further notification and the connection stalls"
+      - "To reset the TCP window"
+      - "Because ET automatically closes the fd otherwise"
+      - "To force the peer to send an ACK"
+    answer: 0
+    explanation: |
+      ET fires once per new edge (e.g. empty → data). If you don't drain the fd fully, the
+      leftover data produces no new notification, so the connection appears to hang until
+      the next edge. Hence ET requires looping reads/writes to EAGAIN and non-blocking
+      sockets.
+    ref: "concepts.md#level-triggered-vs-edge-triggered"
+
+  - id: socket-programming-io-multiplexing-038
+    difficulty: advanced
+    tags: [edge-triggered, non-blocking, requirement]
+    question: |
+      Why does edge-triggered mode effectively require non-blocking sockets?
+    options:
+      - "Edge-triggered mode disables the kernel receive buffer"
+      - "Because the drain loop's final recv (when the buffer is empty) would block on a blocking socket instead of returning EAGAIN"
+      - "Because ET only works with UDP"
+      - "Because blocking sockets cannot be registered with epoll_ctl"
+    answer: 1
+    explanation: |
+      ET requires draining to EAGAIN. On a blocking socket the last recv (after the buffer
+      empties) would block the whole event-loop thread instead of returning
+      EAGAIN/EWOULDBLOCK, so ET is used with non-blocking sockets.
+    ref: "concepts.md#level-triggered-vs-edge-triggered"
+
+  - id: socket-programming-io-multiplexing-039
+    difficulty: intermediate
+    tags: [edge-triggered, performance, nginx]
+    question: |
+      What is the main performance benefit of edge-triggered over level-triggered
+      notification under high load?
+    options:
+      - "It guarantees in-order packet delivery"
+      - "It automatically increases the socket buffer"
+      - "It generates fewer wakeups and syscalls because it fires only on transitions"
+      - "It removes the need for non-blocking sockets"
+    answer: 2
+    explanation: |
+      ET fires only on state transitions, so a busy fd produces fewer redundant wakeups and
+      epoll_wait/recv syscalls than LT, which keeps re-reporting readiness. High-performance
+      servers like nginx use ET (with careful full draining).
+    ref: "concepts.md#level-triggered-vs-edge-triggered"
+
+  - id: socket-programming-io-multiplexing-040
+    difficulty: intermediate
+    tags: [event-loop, blocking-call, gotcha]
+    question: |
+      In a single-threaded event-loop server, what is the danger of a handler that makes a
+      blocking database call or does heavy CPU work?
+    options:
+      - "It only slows down that one connection"
+      - "It causes the listening socket to close"
+      - "It automatically spawns a new thread"
+      - "It stalls the entire event loop, blocking every other connection on that thread"
+    answer: 3
+    explanation: |
+      In an event loop, one thread multiplexes all connections, so any blocking call or
+      CPU-heavy handler freezes the loop and every connection it serves. Such work must be
+      offloaded to a thread pool or made non-blocking.
+    ref: "concepts.md#thread-per-connection-vs-event-loop"
+
+  - id: socket-programming-io-multiplexing-041
+    difficulty: intermediate
+    tags: [thread-per-connection, event-loop, tradeoffs]
+    question: |
+      For a mostly-idle chat service holding 200,000 long-lived connections, which
+      architecture is generally the better fit?
+    options:
+      - "Thread-per-connection, one OS thread per client"
+      - "A new process forked per message"
+      - "An event loop (reactor) over epoll/kqueue with a few threads multiplexing all connections"
+      - "Pure busy-polling of every socket in a tight loop"
+    answer: 2
+    explanation: |
+      High-connection, I/O-bound, mostly-idle workloads are the sweet spot for event loops:
+      a few threads over epoll/kqueue multiplex hundreds of thousands of connections
+      cheaply. Thread-per-connection would need 200K stacks and is impractical.
+    ref: "concepts.md#thread-per-connection-vs-event-loop"
+
+  - id: socket-programming-io-multiplexing-042
+    difficulty: intermediate
+    tags: [thread-per-connection, ergonomics]
+    question: |
+      What is the primary programming-model advantage of the thread-per-connection model?
+    options:
+      - "It scales to millions of connections with no memory cost"
+      - "It requires no operating-system threads"
+      - "It never context-switches"
+      - "Each handler is straight-line blocking code that is easy to write and debug"
+    answer: 3
+    explanation: |
+      Thread-per-connection lets each request handler be simple, linear, blocking code —
+      easy to reason about and debug — versus the inverted control flow (callbacks/state
+      machines/async) of an event loop. Its cost is memory and scaling ceiling.
+    ref: "concepts.md#thread-per-connection-vs-event-loop"
+
+  - id: socket-programming-io-multiplexing-043
+    difficulty: advanced
+    tags: [virtual-threads, goroutines, netpoller]
+    question: |
+      How do runtimes with green threads/goroutines/virtual threads serve 100,000
+      connections without 100,000 OS threads?
+    options:
+      - "They park a blocked logical thread and use an epoll/kqueue-backed poller to resume it when its fd is ready, multiplexing many logical threads onto few OS threads"
+      - "They open one UDP socket shared by all connections"
+      - "They disable the OS scheduler entirely"
+      - "They convert every socket to non-blocking select() with FD_SETSIZE raised"
+    answer: 0
+    explanation: |
+      These runtimes let you write blocking-style code, but under the hood a blocked
+      logical thread is parked and an epoll/kqueue netpoller resumes it when the fd is
+      ready — combining event-loop scalability with thread-per-connection ergonomics.
+    ref: "concepts.md#thread-per-connection-vs-event-loop"
+
+  - id: socket-programming-io-multiplexing-044
+    difficulty: advanced
+    tags: [reactor, proactor, io-uring]
+    question: |
+      What distinguishes the Proactor (completion-based) model from the Reactor
+      (readiness-based) model?
+    options:
+      - "Proactor waits for an fd to be 'ready' and then the application does the read"
+      - "In Proactor you submit an operation and the OS performs the I/O into your buffer, notifying you when it is complete"
+      - "Proactor only works with select(), Reactor only with epoll"
+      - "Proactor is limited to UDP; Reactor to TCP"
+    answer: 1
+    explanation: |
+      Reactor (epoll/kqueue) reports readiness and you then perform the non-blocking I/O.
+      Proactor (Windows IOCP, Linux io_uring) is completion-based: you submit the operation,
+      the kernel does the transfer into your buffer and notifies you when finished — avoiding
+      the ready-then-syscall round-trip.
+    ref: "concepts.md#reactor-proactor-and-true-async-io"
+
+  - id: socket-programming-io-multiplexing-045
+    difficulty: advanced
+    tags: [epoll, regular-files, io-uring]
+    question: |
+      Why is `epoll` ineffective for asynchronous access to regular disk files, motivating
+      APIs like `io_uring`?
+    options:
+      - "Regular files cannot be given a file descriptor"
+      - "The kernel forbids registering files with epoll_ctl"
+      - "epoll only accepts UDP sockets"
+      - "Regular files are always reported as ready, so readiness notification provides no useful signal for disk I/O"
+    answer: 3
+    explanation: |
+      Regular files never 'block' in the readiness sense — they are always reported ready —
+      so epoll gives no useful signal for disk I/O. Completion-based io_uring performs the
+      actual transfer asynchronously and notifies on completion, working for files and
+      sockets alike.
+    ref: "concepts.md#reactor-proactor-and-true-async-io"
+
+  - id: socket-programming-io-multiplexing-046
+    difficulty: beginner
+    tags: [close, fin, teardown]
+    question: |
+      For a TCP socket, calling `close()` on the connected fd normally triggers what?
+    options:
+      - "Connection teardown beginning with a FIN"
+      - "An immediate RST on the connection"
+      - "A new 3-way handshake"
+      - "Nothing until the peer also calls close()"
+    answer: 0
+    explanation: |
+      close() releases the fd and, for TCP, initiates graceful teardown by sending a FIN
+      (barring a zero-timeout SO_LINGER, which forces an abortive RST). The peer's recv
+      then returns 0.
+    ref: "concepts.md#tcp-sockets-the-connection-lifecycle"
+
+  - id: socket-programming-io-multiplexing-047
+    difficulty: advanced
+    tags: [ephemeral-ports, client, exhaustion, scenario]
+    question: |
+      A load-test client from a single source IP opens tens of thousands of connections to
+      one server IP:port and starts failing to make new connections. What is the most
+      likely limit being hit?
+    options:
+      - "The server's SO_KEEPALIVE interval"
+      - "Exhaustion of the client's ~28K ephemeral source ports for that (src IP, dst IP:port), worsened by TIME_WAIT accumulation"
+      - "The TCP maximum segment size"
+      - "FD_SETSIZE on the server's epoll"
+    answer: 1
+    explanation: |
+      With a fixed source IP and a fixed destination IP:port, only the ephemeral source
+      port varies, giving ~28K possible 4-tuples. Rapid connect/close cycles pile up
+      TIME_WAIT entries and exhaust that space. Mitigations: multiple source IPs/dest ports,
+      connection reuse, or tuning.
+    ref: "concepts.md#tcp-sockets-the-connection-lifecycle"
+
+  - id: socket-programming-io-multiplexing-048
+    difficulty: intermediate
+    tags: [udp, single-fd, server]
+    question: |
+      Unlike a TCP server, a UDP server typically serves all of its peers through how many
+      sockets?
+    options:
+      - "One socket per peer, obtained from accept()"
+      - "Two sockets: one for reading and one for writing"
+      - "A single bound socket that receives datagrams from all peers via recvfrom()"
+      - "One socket per source port range"
+    answer: 2
+    explanation: |
+      UDP has no per-connection fd. A single bound socket receives datagrams from every
+      peer; recvfrom() tells you each sender's address. There is no accept() creating a new
+      fd per client as in TCP.
+    ref: "concepts.md#udp-sockets-connectionless-datagrams"
+
+  - id: socket-programming-io-multiplexing-049
+    difficulty: intermediate
+    tags: [non-blocking, spin, event-loop]
+    question: |
+      Why is repeatedly calling `recv()` on a non-blocking socket in a tight loop (busy
+      polling) a poor design?
+    options:
+      - "It burns CPU spinning while the socket has no data; the correct pattern pairs non-blocking sockets with a readiness API that sleeps until an fd is ready"
+      - "It violates the TCP specification"
+      - "recv() is not allowed on non-blocking sockets"
+      - "It causes the socket to switch to blocking mode"
+    answer: 0
+    explanation: |
+      Spinning on a non-blocking recv() wastes CPU returning EAGAIN. The efficient pattern
+      is non-blocking sockets plus epoll/kqueue: the thread sleeps in epoll_wait until at
+      least one fd is ready, then does non-blocking I/O only on ready fds.
+    ref: "concepts.md#blocking-vs-non-blocking-sockets"
+
+  - id: socket-programming-io-multiplexing-050
+    difficulty: intermediate
+    tags: [socket-address, sockaddr, api]
+    question: |
+      Which structure is used to hold an IPv4 address and port for `bind()`/`connect()`?
+    options:
+      - "sockaddr_in6"
+      - "sockaddr_in"
+      - "sockaddr_un"
+      - "in6_addr"
+    answer: 1
+    explanation: |
+      sockaddr_in holds an AF_INET (IPv4) address family, port, and 32-bit address.
+      sockaddr_in6 is for IPv6 and sockaddr_un for AF_UNIX local sockets. They are passed
+      via a generic sockaddr pointer.
+    ref: "concepts.md#the-bsd-socket-api-model"
+
+  - id: socket-programming-io-multiplexing-051
+    difficulty: advanced
+    tags: [so-reuseport, thundering-herd, scaling, scenario]
+    question: |
+      An 8-core server runs 8 worker processes that all block in accept() on one shared
+      listening socket, and you observe uneven load and wakeup contention. Which technique
+      most directly addresses this?
+    options:
+      - "Set TCP_NODELAY on the listening socket"
+      - "Increase FD_SETSIZE"
+      - "Give each worker its own socket bound to the same port with SO_REUSEPORT so the kernel load-balances accepts"
+      - "Switch all sockets to blocking mode"
+    answer: 2
+    explanation: |
+      SO_REUSEPORT lets each worker bind its own socket to the same IP:port; the kernel
+      hashes incoming connections across the sockets, spreading accept load evenly and
+      avoiding the thundering-herd contention of many workers waking on one shared listener.
+    ref: "concepts.md#key-socket-options"
+
+  - id: socket-programming-io-multiplexing-052
+    difficulty: intermediate
+    tags: [readiness, workflow, epoll]
+    question: |
+      What is the intended workflow when using a readiness API like epoll or kqueue?
+    options:
+      - "Block in recv() on each socket in turn"
+      - "Let the kernel copy data directly and notify on completion"
+      - "Poll every fd with recv() regardless of readiness"
+      - "Wait for the API to report which fds are ready, then perform non-blocking I/O only on those fds"
+    answer: 3
+    explanation: |
+      Readiness (synchronous multiplexing) APIs report which fds are ready to read/write;
+      you then do non-blocking I/O only on the ready ones. (Copy-then-notify-on-completion
+      describes completion-based models like io_uring/IOCP, not epoll.)
+    ref: "concepts.md#readiness-io-models-select-poll-epoll-kqueue"
+
+  - id: socket-programming-io-multiplexing-053
+    difficulty: beginner
+    tags: [udp, listen, misconception]
+    question: |
+      Which statement about a UDP server is correct?
+    options:
+      - "It must call listen() and accept() before receiving data"
+      - "It performs a 3-way handshake per datagram"
+      - "It does not call listen() or accept(); after bind() it uses recvfrom()"
+      - "It uses SOCK_STREAM sockets"
+    answer: 2
+    explanation: |
+      UDP is connectionless, so there is nothing to listen for or accept. A UDP server does
+      socket() → bind() → recvfrom()/sendto(). listen()/accept() are TCP (SOCK_STREAM)
+      concepts.
+    ref: "concepts.md#udp-sockets-connectionless-datagrams"
+
+  - id: socket-programming-io-multiplexing-054
+    difficulty: advanced
+    tags: [level-triggered, edge-triggered, tradeoff]
+    question: |
+      Which statement best contrasts level-triggered and edge-triggered modes?
+    options:
+      - "LT only works on UDP, ET only on TCP"
+      - "ET reports readiness while the condition persists; LT reports once per transition"
+      - "Both require busy-polling to detect readiness"
+      - "LT reports readiness while the condition persists (forgiving); ET reports once per transition (fewer wakeups but you must fully drain the fd)"
+    answer: 3
+    explanation: |
+      Level-triggered keeps reporting an fd ready as long as the condition holds (like
+      select/poll). Edge-triggered notifies only on transitions, giving fewer wakeups but
+      requiring you to drain the fd to EAGAIN or lose the notification.
+    ref: "concepts.md#level-triggered-vs-edge-triggered"
+
+  - id: socket-programming-io-multiplexing-055
+    difficulty: intermediate
+    tags: [c10m, kernel-bypass, scaling]
+    question: |
+      The "C10M" evolution of the C10K problem pushes toward which kinds of techniques?
+    options:
+      - "Kernel-bypass user-space networking (e.g. DPDK) and SO_REUSEPORT sharding across cores"
+      - "Reverting to one thread per connection"
+      - "Using select() with a larger FD_SETSIZE"
+      - "Switching all traffic to UDP"
+    answer: 0
+    explanation: |
+      C10M (10 million connections) goes beyond epoll to kernel-bypass/user-space
+      networking (DPDK), per-core SO_REUSEPORT sharding, and careful lock-free designs to
+      remove per-packet kernel and syscall overhead.
+    ref: "concepts.md#the-c10k-problem"
