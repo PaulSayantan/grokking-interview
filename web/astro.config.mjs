@@ -5,6 +5,7 @@ import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import remarkGfm from "remark-gfm";
 import rehypeCallouts from "./plugins/rehype-callouts.mjs";
+import remarkMermaid from "./plugins/rehype-mermaid.mjs";
 
 // Static site (output: "static" is the Astro default — no SSR adapter).
 // `site` is used for canonical URLs / sitemaps; override via env for prod.
@@ -21,7 +22,9 @@ export default defineConfig({
   markdown: {
     // GFM (tables in comparison sections) is enabled by default in Astro; we add
     // remark-gfm explicitly so the pipeline is unambiguous and portable.
-    remarkPlugins: [remarkGfm],
+    // remarkMermaid rewrites ```mermaid code nodes into raw <pre class="mermaid">
+    // HTML BEFORE Shiki runs, so Shiki never tries to highlight the graph source.
+    remarkPlugins: [remarkGfm, remarkMermaid],
     // rehype-slug generates github-slugger-compatible ids on headings so that
     // `concepts.md#some-heading` refs line up with in-page anchors.
     // rehype-autolink-headings wraps each heading in an anchor affordance.

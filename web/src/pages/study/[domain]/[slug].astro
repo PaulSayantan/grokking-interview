@@ -295,6 +295,121 @@ const domainHref = `/domain/${domain}`;
     })();
   </script>
 
+  {/* Mermaid diagram rendering. The remark plugin emits diagram sources as
+      <pre class="mermaid" data-mermaid>DEFINITION</pre>. We lazy-import mermaid
+      ONLY on pages that actually contain a diagram (keeps the ~500KB library off
+      every other page), initialize with startOnLoad:false, and pick the theme
+      from the site's [data-theme] so diagrams match the light/dark toggle. A
+      MutationObserver re-renders when the theme flips. Re-runs on
+      astro:page-load for ClientRouter navigations. Degrades gracefully: if the
+      import fails or JS is off, the raw definition stays visible as <pre> text. */}
+  <script>
+    (function () {
+      let mermaidMod = null;
+      let rendering = false;
+
+      function theme() {
+        return document.documentElement.getAttribute("data-theme") === "light"
+          ? "default"
+          : "dark";
+      }
+
+      async function renderMermaid() {
+        const nodes = Array.prototype.slice.call(
+          document.querySelectorAll("pre.mermaid[data-mermaid]"),
+        );
+        if (!nodes.length || rendering) return;
+        rendering = true;
+        try {
+          if (!mermaidMod) {
+            mermaidMod = (await import("mermaid")).default;
+          }
+          // Mermaid sizes node boxes by measuring label text at render time, so
+          // the webfont must be loaded BEFORE rendering or boxes are sized to
+          // the fallback font's metrics and labels clip once Inter swaps in.
+          if (document.fonts && document.fonts.ready) {
+            try {
+              await document.fonts.ready;
+            } catch (e) {}
+          }
+          mermaidMod.initialize({
+            startOnLoad: false,
+            theme: theme(),
+            securityLevel: "strict",
+            // Pin the site MONO stack (same as tailwind fontFamily.mono / code
+            // blocks) — diagrams read as technical artifacts alongside code.
+            // Mermaid measures each label's width to size its node boxes; the
+            // matching CSS rule below forces the SVG to paint in this SAME
+            // family so measured width == painted width (a mismatch clips/
+            // overflows labels).
+            fontFamily:
+              '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            // 14px (down from Mermaid's 16px default) matches the site's
+            // code-block scale. Set here — not via CSS — so Mermaid MEASURES
+            // labels at 14px too; smaller text also means tighter node boxes,
+            // so wide diagrams need less downscaling to fit the column.
+            fontSize: 14,
+            themeVariables: { fontSize: "14px" },
+            // useMaxWidth:false => emit the SVG at its NATURAL size instead of
+            // scaling it to 100% of the container. A wide `flowchart LR` scaled
+            // to a 375px phone becomes an unreadable smudge; at natural size it
+            // stays legible and the container (overflow-x:auto) scrolls instead.
+            flowchart: { htmlLabels: true, useMaxWidth: false },
+          });
+          for (let idx = 0; idx < nodes.length; idx++) {
+            const pre = nodes[idx];
+            // Cache the original definition so re-renders (theme flip) reparse
+            // from source rather than the already-rendered SVG.
+            const def = pre.getAttribute("data-mermaid-src") || pre.textContent;
+            pre.setAttribute("data-mermaid-src", def);
+            try {
+              const { svg } = await mermaidMod.render(
+                "mmd-" + idx + "-" + Math.random().toString(36).slice(2, 8),
+                def,
+              );
+              pre.innerHTML = svg;
+              pre.setAttribute("data-mermaid-done", "1");
+            } catch (e) {
+              // Leave the raw definition visible if this one diagram fails.
+              pre.setAttribute("data-mermaid-error", "1");
+            }
+          }
+        } catch (e) {
+          /* mermaid failed to load — raw <pre> definitions remain visible */
+        } finally {
+          rendering = false;
+        }
+      }
+
+      // Re-render on theme toggle (data-theme mutates on <html>).
+      let themeObserver = null;
+      function watchTheme() {
+        if (themeObserver) return;
+        themeObserver = new MutationObserver(function () {
+          document.querySelectorAll("pre.mermaid[data-mermaid-done]").forEach(
+            function (pre) {
+              const def = pre.getAttribute("data-mermaid-src");
+              if (def) {
+                pre.textContent = def;
+                pre.removeAttribute("data-mermaid-done");
+              }
+            },
+          );
+          renderMermaid();
+        });
+        themeObserver.observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ["data-theme"],
+        });
+      }
+
+      document.addEventListener("astro:page-load", function () {
+        renderMermaid();
+        watchTheme();
+      });
+    })();
+  </script>
+
   <style is:global>
   /* ================================================================= */
   /* Study page. All selectors are prefixed with `.study-page` so these */
@@ -688,6 +803,69 @@ const domainHref = `/domain/${domain}`;
     to {
       transform: scaleX(1);
     }
+  }
+
+  /* ---- Mermaid diagrams -------------------------------------------- */
+  /* Before render: the raw definition shows as monospace (graceful
+     fallback). After render: pre.mermaid holds an <svg>; center it, let it
+     scroll horizontally on narrow screens, and drop the code-block chrome. */
+  .study-page .study-prose pre.mermaid {
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 1.5rem 0;
+    text-align: center;
+    overflow-x: auto;
+    line-height: normal;
+  }
+  .study-page .study-prose pre.mermaid[data-mermaid-done] {
+    white-space: normal;
+  }
+  /* With useMaxWidth:false the SVG carries its natural width/height.
+     Default (roomy screens): scale DOWN to fit the column (max-width:100%) so a
+     diagram a little wider than the text column doesn't force a scrollbar — a
+     mild shrink stays perfectly legible on desktop/tablet.
+     Narrow screens (phones): a wide LR flowchart scaled to ~340px becomes an
+     unreadable smudge, so below 640px we DON'T shrink — the SVG keeps natural
+     size and the pre (overflow-x:auto) scrolls horizontally instead.
+     Tailwind preflight sets svg{display:block}, so text-align on the pre can't
+     center it — center with auto inline margins instead (harmless when the SVG
+     overflows: the pre just scrolls from the left edge). */
+  .study-page .study-prose pre.mermaid svg {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin-inline: auto;
+  }
+  @media (max-width: 640px) {
+    .study-page .study-prose pre.mermaid svg {
+      max-width: none;
+    }
+  }
+  /* CRITICAL: the study prose sets font-family / line-height / letter-spacing /
+     word-spacing that otherwise cascade into Mermaid's <text> labels and change
+     their painted width vs. what Mermaid measured when sizing node boxes — the
+     result is clipped/overflowing labels. Force the SVG text to paint in the
+     SAME neutral metrics Mermaid measured with. */
+  .study-page .study-prose pre.mermaid svg,
+  .study-page .study-prose pre.mermaid svg text,
+  .study-page .study-prose pre.mermaid svg .nodeLabel,
+  .study-page .study-prose pre.mermaid svg .edgeLabel,
+  .study-page .study-prose pre.mermaid svg span,
+  .study-page .study-prose pre.mermaid svg div,
+  .study-page .study-prose pre.mermaid svg foreignObject * {
+    font-family: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
+      SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+    line-height: normal !important;
+    letter-spacing: normal !important;
+    word-spacing: normal !important;
+    white-space: normal;
+  }
+  /* Until rendered, keep it readable as preformatted text. */
+  .study-page .study-prose pre.mermaid:not([data-mermaid-done]) {
+    white-space: pre;
+    font-size: 0.8em;
+    color: var(--color-text-muted, #8b949e);
   }
 </style>
 </BaseLayout>
