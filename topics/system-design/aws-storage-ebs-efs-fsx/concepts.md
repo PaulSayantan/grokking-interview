@@ -77,13 +77,17 @@ failure — but it does **not** span AZs. A volume attaches to an EC2 instance
 `us-east-1b` instance. To move a volume across AZs you snapshot it (snapshots
 are Regional, stored in S3) and restore in the target AZ.
 
-```
-   EC2 instance (AZ-a)                 EBS storage fleet (AZ-a)
-  ┌──────────────────┐    Nitro /     ┌───────────────────────┐
-  │  app / DB / OS    │  EBS-optimized │  primary block replica │
-  │  /dev/nvme1n1  ───┼───────────────▶│  + in-AZ replica       │
-  └──────────────────┘   network path  └───────────────────────┘
-        (single writer, single AZ — snapshot to cross AZ/Region)
+```mermaid
+flowchart LR
+    subgraph EC2["EC2 instance (AZ-a)"]
+        A["app / DB / OS"]
+        B["/dev/nvme1n1"]
+    end
+    subgraph FLEET["EBS storage fleet (AZ-a)"]
+        C["primary block replica + in-AZ replica"]
+    end
+    B -->|"Nitro / EBS-optimized network path"| C
+    N["single writer, single AZ — snapshot to cross AZ/Region"]
 ```
 
 **Real-world usage.** EBS is the boot volume and the database volume of choice:

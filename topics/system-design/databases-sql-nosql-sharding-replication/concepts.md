@@ -289,13 +289,16 @@ pre-split into many logical shards up front and pack multiple onto a node (Vites
 MongoDB chunks); consistent hashing to minimize movement; or use a directory to
 remap. This is why choosing a scalable shard key *early* matters so much.
 
-```
-        WRITES (scale via sharding)          READS (scale via replication)
-   ┌─────────┐  ┌─────────┐  ┌─────────┐
-   │ Shard A │  │ Shard B │  │ Shard C │   each shard = 1 primary + N replicas
-   │  keys   │  │  keys   │  │  keys   │
-   │  0-333  │  │ 334-666 │  │ 667-999 │
-   └─────────┘  └─────────┘  └─────────┘
+```mermaid
+flowchart LR
+  subgraph writes["WRITES (scale via sharding)"]
+    A["Shard A<br/>keys 0-333"]
+    B["Shard B<br/>keys 334-666"]
+    C["Shard C<br/>keys 667-999"]
+  end
+  subgraph reads["READS (scale via replication)"]
+    N["each shard = 1 primary + N replicas"]
+  end
 ```
 
 **Trade-offs.**

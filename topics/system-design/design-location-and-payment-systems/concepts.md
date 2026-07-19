@@ -181,12 +181,14 @@ push points down. Recurse. Leaves are small in dense areas (downtown) and large
 in sparse areas (ocean). It's an **in-memory tree**, rebuilt/updated as points
 move.
 
-```
-        Root (whole city)
-       /   |    |    \
-     NW    NE   SW    SE
-    /|\               (leaf: 8 drivers)
-  ... (dense downtown splits deeper)
+```mermaid
+flowchart TD
+    Root["Root (whole city)"] --> NW
+    Root --> NE
+    Root --> SW
+    Root --> SE
+    NW --> D["... (dense downtown splits deeper)"]
+    SE --> L["leaf: 8 drivers"]
 ```
 
 **Query.** Descend to the leaf containing the query point; collect points from
@@ -258,18 +260,15 @@ deployment."
 **The write path is the hard part.** 1M+ pings/sec cannot hit a disk RDBMS. The
 standard architecture:
 
-```
- Drivers --pings(4s)--> [API/edge gateways] --> [Kafka: location topic,
-                                                 keyed by driver/city]
-                                                       |
-                              +------------------------+------------------+
-                              v                                           v
-                  [Location state store]                       [Analytics/stream
-                  Redis Geo / in-mem grid,                      processing:
-                  sharded by geo-cell/city]                     surge, ETA, heatmap
-                              ^                                  (Flink/Kafka Streams)]
-                              |
-   Riders --"nearby?"-->[Matching service]--query cell + neighbors-->refine(haversine)
+```mermaid
+flowchart TD
+    Drivers -- "pings(4s)" --> GW["API/edge gateways"]
+    GW --> Kafka["Kafka: location topic, keyed by driver/city"]
+    Kafka --> Store["Location state store: Redis Geo / in-mem grid, sharded by geo-cell/city"]
+    Kafka --> Analytics["Analytics/stream processing: surge, ETA, heatmap (Flink/Kafka Streams)"]
+    Riders -- "nearby?" --> Matching["Matching service"]
+    Matching -- "query cell + neighbors" --> Refine["refine(haversine)"]
+    Matching --> Store
 ```
 
 Key decisions:
@@ -473,14 +472,12 @@ and bugs. **Reconciliation** is the periodic (often daily) batch process that
 compares your ledger against processor/bank statements and flags/repairs
 discrepancies.
 
-```
-Your ledger entries  ┐
-                     ├──> Matcher (by txn id, amount, time) ──> Matched (OK)
-Processor statement  ┘                                     └──> Exceptions
-                                                                (investigate:
-                                                                 missing, dup,
-                                                                 amount mismatch,
-                                                                 fee-only)
+```mermaid
+flowchart LR
+    Ledger["Your ledger entries"] --> Matcher["Matcher (by txn id, amount, time)"]
+    Statement["Processor statement"] --> Matcher
+    Matcher --> Matched["Matched (OK)"]
+    Matcher --> Exceptions["Exceptions (investigate: missing, dup, amount mismatch, fee-only)"]
 ```
 
 **Techniques:**
@@ -524,9 +521,15 @@ returns a **token**. Your servers only ever see the token, so raw card data
 never enters your backend → your PCI scope shrinks dramatically (SAQ-A instead
 of full audit).
 
-```
-Browser --card #--> [Processor vault] --token--> Browser --token--> Your API
-Your servers store/charge the TOKEN, never the PAN.
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant Vault as Processor vault
+    participant API as Your API
+    Browser->>Vault: card #
+    Vault-->>Browser: token
+    Browser->>API: token
+    Note over API: Your servers store/charge the TOKEN, never the PAN.
 ```
 
 **Other controls:** encryption in transit (TLS) and at rest, network
@@ -550,10 +553,12 @@ the last seat. The core mechanic is a **hold / reservation** with a **TTL**:
 temporarily remove a unit from the available pool while the buyer checks out,
 then either confirm (permanent) or release on expiry.
 
-```
-State machine per seat:  AVAILABLE --hold--> HELD(ttl) --pay--> SOLD
-                                     ^          |
-                                     +--expire--+   (auto-release)
+```mermaid
+stateDiagram-v2
+    HELD: HELD(ttl)
+    AVAILABLE --> HELD: hold
+    HELD --> SOLD: pay
+    HELD --> AVAILABLE: expire (auto-release)
 ```
 
 **Why holds (vs charge-then-refund)?** Users need time to pay (30s-10min).

@@ -10,25 +10,26 @@ as "what you gain, what you give up, and when to pick it."
 
 A mental model to carry through the whole topic:
 
-```
-                    ┌─────────────── Offline / Ingestion path ───────────────┐
-  documents ──► loaders ──► chunker ──► embedding model ──► vector DB (index)
-                                                                   │
-  ┌──────────────────── Online / Query path ───────────────────┐  │
-  user query ─► guardrails(in) ─► query rewrite ─► embed ───────┼──┘
-                                                                │ ANN search + metadata filter
-                                       hybrid (BM25 + vector) ──┤
-                                            top-K candidates ───► re-ranker (cross-encoder)
-                                                                        │ top-N
-                              prompt assembly (system + context + query)│
-                                                                        ▼
-                        semantic cache ◄──────────────► LLM inference server (GPU)
-                                                                        │ streamed tokens
-                                              guardrails(out) + citations
-                                                                        ▼
-                                                                    response
-                                                                        │
-                                              feedback / eval / traces ◄┘
+```mermaid
+flowchart TD
+  subgraph ingestion["Offline / Ingestion path"]
+    documents --> loaders --> chunker --> embeddingmodel["embedding model"] --> vectordb["vector DB (index)"]
+  end
+
+  subgraph query["Online / Query path"]
+    userquery["user query"] --> guardin["guardrails(in)"] --> rewrite["query rewrite"] --> embed
+  end
+
+  embed --> vectordb
+  vectordb -->|"ANN search + metadata filter"| topk["top-K candidates"]
+  hybrid["hybrid (BM25 + vector)"] --> topk
+  topk --> reranker["re-ranker (cross-encoder)"]
+  reranker -->|"top-N"| prompt["prompt assembly (system + context + query)"]
+  prompt --> llm["LLM inference server (GPU)"]
+  semcache["semantic cache"] <--> llm
+  llm -->|"streamed tokens"| guardout["guardrails(out) + citations"]
+  guardout --> response
+  response --> feedback["feedback / eval / traces"]
 ```
 
 ---

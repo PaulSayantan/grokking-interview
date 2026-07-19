@@ -77,9 +77,10 @@ does it reach the home timelines of A's followers?
 **insert the tweet id into each follower's materialized timeline** (a per-user
 list in Redis/an inbox table). Reads are then trivial: read your own precomputed
 list.
-```
-POST tweet ─► fanout worker ─► for each follower f: LPUSH timeline:f tweetId
-GET  feed  ─► LRANGE timeline:me 0 N   (already assembled, ~1 lookup)
+```mermaid
+flowchart LR
+    A["POST tweet"] --> B["fanout worker"] --> C["for each follower f: LPUSH timeline:f tweetId"]
+    D["GET feed"] --> E["LRANGE timeline:me 0 N (already assembled, ~1 lookup)"]
 ```
 - **Gain:** blazing-fast reads (O(1) list read, sub-10ms from Redis), read path
   trivially cacheable, ranking can be done incrementally. Best when read:write is
@@ -91,9 +92,9 @@ GET  feed  ─► LRANGE timeline:me 0 N   (already assembled, ~1 lookup)
 **Fanout-on-read (pull / on-demand).** Store only the author→tweets mapping. At
 read time, look up everyone A follows, **fetch their recent tweets, merge-sort by
 time/score.**
-```
-GET feed ─► followees = who I follow (say 500) ─► fetch recent tweets from each
-         ─► k-way merge, rank, return top N
+```mermaid
+flowchart LR
+    A["GET feed"] --> B["followees = who I follow (say 500)"] --> C["fetch recent tweets from each"] --> D["k-way merge, rank, return top N"]
 ```
 - **Gain:** zero write amplification, no wasted storage, always fresh, trivial for
   celebrities (their tweets are read on demand). Best when write:read is high or
@@ -263,14 +264,13 @@ persistent bidirectional channel.
 - **Short polling:** repeated GETs. Simple, wasteful, laggy. Avoid for chat.
 
 **Architecture.**
-```
-clients ── WSS ──► [ Connection / Gateway servers ]  (stateful: hold 100s of K–1M sockets each)
-                        │  register (userId -> serverId) in a session registry (Redis)
-                        ▼
-                   [ Chat service ] ── write ──► [ message store (Cassandra/Scylla) ]
-                        │  publish
-                        ▼
-                   [ Pub/Sub bus ] ─► pushes to the recipient's connection server ─► WS ─► recipient
+```mermaid
+flowchart TD
+    A["clients"] -->|WSS| B["Connection / Gateway servers (stateful: hold 100s of K–1M sockets each)"]
+    B -->|"register (userId -> serverId) in a session registry (Redis)"| C["Chat service"]
+    C -->|write| D["message store (Cassandra/Scylla)"]
+    C -->|publish| E["Pub/Sub bus"]
+    E -->|"pushes to the recipient's connection server"| F["WS"] --> G["recipient"]
 ```
 - **Connection servers are stateful** — this is the key departure from stateless
   web tiers. A user is pinned to one gateway; a **session registry** maps
@@ -447,15 +447,13 @@ Android/web), SMS (Twilio), email (SES/SendGrid), and in-app/WebSocket. The core
 design is a pipeline that abstracts providers and handles retries.
 
 **Pipeline.**
-```
-event ─► [ Ingestion API ] ─► [ Notification service ]
-             │  (validate, dedup, look up user prefs + device tokens, render template)
-             ▼
-        [ per-channel queues (Kafka/SQS) ]  push | sms | email | in-app
-             ▼
-        [ channel workers ] ─► [ provider adapters: APNs/FCM/Twilio/SES ]
-             ▼                       (retry, rate-limit, track delivery/failed)
-        third-party providers ─► device / phone / inbox
+```mermaid
+flowchart TD
+    A["event"] --> B["Ingestion API"] --> C["Notification service"]
+    C -->|"validate, dedup, look up user prefs + device tokens, render template"| D["per-channel queues (Kafka/SQS): push | sms | email | in-app"]
+    D --> E["channel workers"]
+    E --> F["provider adapters: APNs/FCM/Twilio/SES (retry, rate-limit, track delivery/failed)"]
+    F --> G["third-party providers"] --> H["device / phone / inbox"]
 ```
 - **Provider abstraction (adapter pattern).** Each channel worker talks to an
   adapter that hides provider APIs, auth, payload format, and error semantics —
@@ -555,13 +553,11 @@ clients. A shared real-time layer decouples "who is connected" (stateful
 gateways) from "what to deliver" (business services) via a pub/sub bus.
 
 **Components.**
-```
-[ stateless services ] ─publish(topic=userId/channel)─► [ Pub/Sub bus (Kafka/Redis Streams) ]
-                                                              │ subscribe by userId shard
-[ stateful gateway fleet ] ◄──────────────────────────────────┘
-        │ holds WebSocket/SSE connections; session registry userId->gateway
-        ▼
-     online clients   (offline -> store & push-notification)
+```mermaid
+flowchart TD
+    A["stateless services"] -->|"publish(topic=userId/channel)"| B["Pub/Sub bus (Kafka/Redis Streams)"]
+    B -->|"subscribe by userId shard"| C["stateful gateway fleet"]
+    C -->|"holds WebSocket/SSE connections; session registry userId->gateway"| D["online clients (offline -> store & push-notification)"]
 ```
 - **Session registry.** userId → gatewayId mapping (Redis), so a publish routes to
   the right gateway. Alternatively gateways subscribe to their users' topics.

@@ -69,10 +69,12 @@ consumer among many competing workers. The message is *destroyed* on
 acknowledgment. Used for task distribution — you want each job done once.
 Examples: RabbitMQ classic queue, SQS, Celery/Sidekiq backends, ActiveMQ.
 
-```
-producer --> [ m1 m2 m3 m4 ] --> worker A (gets m1, m3)
-                  queue      \--> worker B (gets m2, m4)
-   each message consumed by ONE worker; deleted after ack
+```mermaid
+flowchart LR
+    producer --> queue["queue [ m1 m2 m3 m4 ]"]
+    queue --> workerA["worker A (gets m1, m3)"]
+    queue --> workerB["worker B (gets m2, m4)"]
+    %% each message consumed by ONE worker; deleted after ack
 ```
 
 **2. Publish-subscribe.** A message is delivered to *every* subscriber. Each
@@ -81,11 +83,13 @@ pub/sub (SNS, RabbitMQ fanout exchange) messages are typically transient — a
 subscriber that's offline misses them (unless a durable per-subscriber queue is
 attached).
 
-```
-                 /--> subscriber A
-publisher --> topic --> subscriber B
-                 \--> subscriber C
-   every subscriber gets EVERY message
+```mermaid
+flowchart LR
+    publisher --> topic
+    topic --> subscriberA["subscriber A"]
+    topic --> subscriberB["subscriber B"]
+    topic --> subscriberC["subscriber C"]
+    %% every subscriber gets EVERY message
 ```
 
 **3. Log-based streaming.** Messages are appended to an ordered, immutable,
@@ -356,10 +360,11 @@ guaranteed *only within a partition*. The producer chooses a partition via
 partition and are ordered relative to each other. Different keys may interleave
 across partitions — and that's fine.
 
-```
-key=user42 --hash--> partition 1: [e1 e2 e3]   ordered for user42
-key=user99 --hash--> partition 3: [f1 f2]       ordered for user99
-   NO ordering guarantee BETWEEN partition 1 and partition 3
+```mermaid
+flowchart LR
+    user42["key=user42"] -->|hash| p1["partition 1: [e1 e2 e3] (ordered for user42)"]
+    user99["key=user99"] -->|hash| p3["partition 3: [f1 f2] (ordered for user99)"]
+    %% NO ordering guarantee BETWEEN partition 1 and partition 3
 ```
 
 **Consequences and gotchas**

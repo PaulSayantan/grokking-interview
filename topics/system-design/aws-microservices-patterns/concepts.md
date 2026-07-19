@@ -34,17 +34,12 @@ session store on ElastiCache. You can run separate schemas, separate database
 instances, or separate accounts — the boundary is logical (no cross-service table
 access), the physical isolation is a cost/blast-radius decision.
 
-```
-   ┌─────────────┐   ┌──────────────┐   ┌───────────────┐
-   │ Orders svc  │   │ Payments svc │   │ Inventory svc │
-   │  (ECS/Lambda)│   │              │   │               │
-   └──────┬──────┘   └──────┬───────┘   └──────┬────────┘
-          │ owns            │ owns             │ owns
-     ┌────▼─────┐      ┌────▼─────┐       ┌────▼──────┐
-     │ Aurora   │      │ DynamoDB │       │ DynamoDB  │
-     │ (orders) │      │(payments)│       │(inventory)│
-     └──────────┘      └──────────┘       └───────────┘
-   No service touches another's store. Data crosses via API or events.
+```mermaid
+flowchart TD
+    Orders["Orders svc (ECS/Lambda)"] -->|owns| Aurora["Aurora (orders)"]
+    Payments["Payments svc"] -->|owns| DDBpay["DynamoDB (payments)"]
+    Inventory["Inventory svc"] -->|owns| DDBinv["DynamoDB (inventory)"]
+    %% No service touches another's store. Data crosses via API or events.
 ```
 
 **Consequences you must design around:**
@@ -142,16 +137,18 @@ visibility timeout default 30 s, max 12 h; delay max 15 min; long polling max 20
 **Kinesis record max 1 MB**; enhanced fan-out gives each consumer a dedicated
 2 MB/s per shard. **EventBridge event max 256 KB.**
 
-```
-Fan-out patterns:
-
- SNS + SQS fan-out (durable, per-consumer buffering, DLQs):
-   Producer ──▶ SNS topic ──┬──▶ SQS ──▶ Service A
-                            ├──▶ SQS ──▶ Service B
-                            └──▶ SQS ──▶ Service C
-
- EventBridge (content-based routing, schema, many AWS targets):
-   Producer ──▶ Event bus ──rule(pattern)──▶ Lambda / SQS / Step Fn / API
+```mermaid
+flowchart LR
+    subgraph FanOut1["SNS + SQS fan-out (durable, per-consumer buffering, DLQs)"]
+        P1[Producer] --> SNS["SNS topic"]
+        SNS --> SQSA[SQS] --> SvcA["Service A"]
+        SNS --> SQSB[SQS] --> SvcB["Service B"]
+        SNS --> SQSC[SQS] --> SvcC["Service C"]
+    end
+    subgraph FanOut2["EventBridge (content-based routing, schema, many AWS targets)"]
+        P2[Producer] --> Bus["Event bus"]
+        Bus -->|"rule(pattern)"| Targets["Lambda / SQS / Step Fn / API"]
+    end
 ```
 
 **How to choose (the interview payoff):**
@@ -246,10 +243,17 @@ semantically undoes it if a later step fails. There is no rollback — you *comp
 (all-or-nothing at the business level) but only **eventual consistency** and no
 isolation, so you must handle intermediate states (an order briefly "pending").
 
-```
-Happy path:            Reserve ─▶ Charge ─▶ Ship ─▶ Confirm
-Failure at Charge:     Reserve ─▶ Charge✗
-Compensation (unwind): Release reservation ◀─ (mark order failed)
+```mermaid
+flowchart LR
+    subgraph Happy["Happy path"]
+        H1[Reserve] --> H2[Charge] --> H3[Ship] --> H4[Confirm]
+    end
+    subgraph Fail["Failure at Charge"]
+        F1[Reserve] --> F2["Charge ✗"]
+    end
+    subgraph Comp["Compensation (unwind)"]
+        C1["mark order failed"] --> C2["Release reservation"]
+    end
 ```
 
 **Two coordination styles:**
@@ -363,13 +367,12 @@ idempotent).
   consumers max per shard, tightly integrated with Lambda; **Kinesis adapter for
   DynamoDB** = up to 365-day retention and more consumers.
 
-```
-Outbox via DynamoDB Streams (no dual write):
-  [Order svc] --single Tx--> DynamoDB item (business state)
-                                   │  (change record)
-                             DynamoDB Streams (24h, ordered per key)
-                                   │
-                             Lambda relay --> EventBridge/SNS  (at-least-once)
+```mermaid
+flowchart TD
+    Order["Order svc"] -->|single Tx| Item["DynamoDB item (business state)"]
+    Item -->|change record| Streams["DynamoDB Streams (24h, ordered per key)"]
+    Streams --> Relay["Lambda relay"]
+    Relay -->|at-least-once| Pub["EventBridge/SNS"]
 ```
 
 **Trade-offs.**
@@ -439,10 +442,14 @@ API Gateway + Lambda/Fargate aggregation layer, or **AWS AppSync** (GraphQL) whi
 a natural BFF: the client asks for exactly the fields it needs and AppSync resolves
 from many sources, avoiding over/under-fetching.
 
-```
-   Web ─▶ Web BFF ──┐
-   iOS ─▶ Mobile BFF ┼──▶ [Orders] [Catalog] [Pricing] [Reviews]
- Partner ─▶ Partner API ─┘   (internal microservices)
+```mermaid
+flowchart LR
+    Web[Web] --> WebBFF["Web BFF"]
+    iOS[iOS] --> MobileBFF["Mobile BFF"]
+    Partner[Partner] --> PartnerAPI["Partner API"]
+    WebBFF --> Services["Orders / Catalog / Pricing / Reviews (internal microservices)"]
+    MobileBFF --> Services
+    PartnerAPI --> Services
 ```
 
 **Trade-offs.**
@@ -505,14 +512,13 @@ each request to its cell. A failure, bad deploy, or poison workload is contained
 one cell (**bounded blast radius**), not the whole fleet, and you scale by adding
 cells rather than growing one giant stack.
 
-```
-            ┌──────── thin cell router (by partition key) ────────┐
-            ▼                    ▼                    ▼
-        ┌────────┐          ┌────────┐          ┌────────┐
-        │ Cell 1 │          │ Cell 2 │          │ Cell 3 │  each = full stack
-        │ svc+db │          │ svc+db │          │ svc+db │  (compute + data)
-        └────────┘          └────────┘          └────────┘
-   A bad deploy / poison tenant in Cell 2 doesn't touch Cell 1 or 3.
+```mermaid
+flowchart TD
+    Router["thin cell router (by partition key)"] --> Cell1["Cell 1 (svc+db)"]
+    Router --> Cell2["Cell 2 (svc+db)"]
+    Router --> Cell3["Cell 3 (svc+db)"]
+    %% each = full stack (compute + data)
+    %% A bad deploy / poison tenant in Cell 2 doesn't touch Cell 1 or 3.
 ```
 
 **Trade-offs.**

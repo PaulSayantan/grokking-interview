@@ -64,23 +64,15 @@ Caching is not one thing; it is a **stack of caches**, each with different
 scope, TTL, and consistency properties. A request may be served from any tier;
 the closer to the user, the faster and cheaper, but the harder to invalidate.
 
-```
- [ Browser ]      HTTP cache, memory/disk, Service Worker, localStorage
-     |            (private, per-user; TTL via Cache-Control)
-     v
- [ CDN / Edge ]   PoPs worldwide; static assets + cacheable API responses
-     |            (shared, geo-distributed; purge is eventually consistent)
-     v
- [ Load Balancer / Reverse Proxy ]  Nginx/Varnish/ATS microcache
-     |            (shared, single DC; sub-second TTL "microcaching")
-     v
- [ Application ]  in-process (local heap: Caffeine/Guava) + distributed
-     |            (Redis/Memcached cluster; shared across app fleet)
-     v
- [ Database ]     buffer pool / page cache, query cache, materialized views,
-     |            replica read caches
-     v
- [ OS page cache / storage ]  files served from RAM by the kernel
+```mermaid
+flowchart TD
+    Browser["Browser<br/>HTTP cache, memory/disk, Service Worker, localStorage<br/>(private, per-user; TTL via Cache-Control)"]
+    CDN["CDN / Edge<br/>PoPs worldwide; static assets + cacheable API responses<br/>(shared, geo-distributed; purge is eventually consistent)"]
+    LB["Load Balancer / Reverse Proxy<br/>Nginx/Varnish/ATS microcache<br/>(shared, single DC; sub-second TTL &quot;microcaching&quot;)"]
+    App["Application<br/>in-process (local heap: Caffeine/Guava) + distributed<br/>(Redis/Memcached cluster; shared across app fleet)"]
+    DB["Database<br/>buffer pool / page cache, query cache, materialized views, replica read caches"]
+    OS["OS page cache / storage<br/>files served from RAM by the kernel"]
+    Browser --> CDN --> LB --> App --> DB --> OS
 ```
 
 - **Client (browser/mobile) cache**: fastest possible (zero network). Governed
@@ -162,9 +154,18 @@ function), then caches and returns. The app never sees the DB on reads.
 **Write-through:** writes go to the cache, and the cache **synchronously**
 writes to the DB before acknowledging. Cache and DB are updated together.
 
-```
-Read-through:  app -> cache.get(k) --miss--> [cache loads from db] -> app
-Write-through: app -> cache.put(k,v) -> cache writes db (sync) -> ack
+```mermaid
+flowchart LR
+    subgraph RT["Read-through"]
+        RTapp["app"] --> RTget["cache.get(k)"]
+        RTget -- miss --> RTload["cache loads from db"]
+        RTload --> RTapp2["app"]
+    end
+    subgraph WT["Write-through"]
+        WTapp["app"] --> WTput["cache.put(k,v)"]
+        WTput --> WTdb["cache writes db (sync)"]
+        WTdb --> WTack["ack"]
+    end
 ```
 
 **Real-world usage:** NCache, Ehcache, AWS DAX (DynamoDB Accelerator, both
@@ -488,10 +489,12 @@ Presence (PoPs)** / edge servers that cache content close to users. The
 reduce latency (serve from a nearby PoP), offload origin bandwidth/compute, and
 absorb traffic spikes and DDoS.
 
-```
-User (Tokyo) --> nearest PoP (Tokyo edge) --hit--> served locally (~5-20 ms)
-                                          --miss--> regional/parent cache
-                                                   --miss--> Origin (us-east)
+```mermaid
+flowchart LR
+    User["User (Tokyo)"] --> PoP["nearest PoP (Tokyo edge)"]
+    PoP -- hit --> Local["served locally (~5-20 ms)"]
+    PoP -- miss --> Parent["regional/parent cache"]
+    Parent -- miss --> Origin["Origin (us-east)"]
 ```
 
 Many CDNs use a **tiered / hierarchical cache** (edge PoP → regional "parent"

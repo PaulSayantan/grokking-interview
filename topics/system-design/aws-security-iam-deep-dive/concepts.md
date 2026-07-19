@@ -159,33 +159,23 @@ mistake is putting the permissions in the trust policy or vice versa.
 The exact order matters and is a top expert-level question. AWS evaluates a request
 by gathering **all** applicable policies and applying this decision flow:
 
-```
-                 ┌─────────────────────────────────────────┐
-  Request  ──▶   │ 1. Is there an EXPLICIT DENY anywhere?    │──Yes──▶ DENY
-                 │    (identity, resource, SCP, RCP,         │
-                 │     boundary, session)                   │
-                 └───────────────────┬─────────────────────┘
-                                     │ No
-                 ┌───────────────────▼─────────────────────┐
-                 │ 2. Does an SCP allow it? (Org accounts)  │──No───▶ DENY
-                 └───────────────────┬─────────────────────┘
-                 ┌───────────────────▼─────────────────────┐
-                 │ 3. Does an RCP allow it? (resource side) │──No───▶ DENY
-                 └───────────────────┬─────────────────────┘
-                 ┌───────────────────▼─────────────────────┐
-                 │ 4. Does a resource-based policy allow?   │──Yes──▶ ALLOW (short-circuits boundary in some cases)
-                 └───────────────────┬─────────────────────┘
-                 ┌───────────────────▼─────────────────────┐
-                 │ 5. Permission boundary allow? (if set)   │──No───▶ DENY
-                 └───────────────────┬─────────────────────┘
-                 ┌───────────────────▼─────────────────────┐
-                 │ 6. Session policy allow? (if present)    │──No───▶ DENY
-                 └───────────────────┬─────────────────────┘
-                 ┌───────────────────▼─────────────────────┐
-                 │ 7. Identity-based policy allow?          │──Yes──▶ ALLOW
-                 └───────────────────┬─────────────────────┘
-                                     │ No
-                                   DENY (implicit / default deny)
+```mermaid
+flowchart TD
+    Request["Request"] --> S1
+    S1["1. Is there an EXPLICIT DENY anywhere? (identity, resource, SCP, RCP, boundary, session)"] --Yes--> D1["DENY"]
+    S1 --No--> S2["2. Does an SCP allow it? (Org accounts)"]
+    S2 --No--> D2["DENY"]
+    S2 --> S3["3. Does an RCP allow it? (resource side)"]
+    S3 --No--> D3["DENY"]
+    S3 --> S4["4. Does a resource-based policy allow?"]
+    S4 --Yes--> A1["ALLOW (short-circuits boundary in some cases)"]
+    S4 --> S5["5. Permission boundary allow? (if set)"]
+    S5 --No--> D4["DENY"]
+    S5 --> S6["6. Session policy allow? (if present)"]
+    S6 --No--> D5["DENY"]
+    S6 --> S7["7. Identity-based policy allow?"]
+    S7 --Yes--> A2["ALLOW"]
+    S7 --No--> D6["DENY (implicit / default deny)"]
 ```
 
 The rules distilled:

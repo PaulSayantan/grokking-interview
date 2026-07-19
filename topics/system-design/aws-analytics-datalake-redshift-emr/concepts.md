@@ -9,16 +9,37 @@ real usage, and (most importantly) the **trade-offs** and *when to use what*.
 
 Mental model of the modern AWS analytics stack:
 
-```
-   INGEST                 STORE / CATALOG              PROCESS / QUERY           SERVE
- ┌──────────┐          ┌────────────────────┐      ┌───────────────────┐    ┌───────────┐
- Kinesis/     ──► S3 (raw) ─► S3 (curated,      ─►   Athena (SQL, serverless) ─► QuickSight
- Firehose                    Parquet, part-        Redshift (MPP warehouse) ─► JDBC/BI
- DMS/CDC                     itioned)               EMR / EMR Serverless
- App events               Glue Data Catalog        Glue ETL (Spark)          OpenSearch
- SaaS (AppFlow)           (schema metadata)        Redshift Spectrum         (search/logs)
-                          Lake Formation
-                          (governance)
+```mermaid
+flowchart LR
+    subgraph INGEST
+        K["Kinesis/Firehose"]
+        D["DMS/CDC"]
+        AE["App events"]
+        SA["SaaS (AppFlow)"]
+    end
+    subgraph STORE["STORE / CATALOG"]
+        RAW["S3 (raw)"]
+        CUR["S3 (curated, Parquet, partitioned)"]
+        GDC["Glue Data Catalog (schema metadata)"]
+        LF["Lake Formation (governance)"]
+    end
+    subgraph PROCESS["PROCESS / QUERY"]
+        ATH["Athena (SQL, serverless)"]
+        RS["Redshift (MPP warehouse)"]
+        EMR["EMR / EMR Serverless"]
+        GE["Glue ETL (Spark)"]
+        SPEC["Redshift Spectrum"]
+    end
+    subgraph SERVE
+        QS["QuickSight"]
+        JDBC["JDBC/BI"]
+        OS["OpenSearch (search/logs)"]
+    end
+    K --> RAW
+    RAW --> CUR
+    CUR --> ATH
+    ATH --> QS
+    RS --> JDBC
 ```
 
 The center of gravity for most modern designs is a **data lake on S3** with a shared

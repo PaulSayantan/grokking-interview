@@ -266,21 +266,30 @@ failure. Two coordination styles:
   and drives compensation on failure.
 
 **ASCII — order saga, orchestrated (Step Functions):**
-```
-        +----------------------------------------------------+
-        |              Step Functions (saga)                 |
-Start ->| ReserveInventory -> ChargePayment -> CreateShipment|-> Success
-        |        |                 |                |        |
-        |     (catch)           (catch)          (catch)     |
-        |        v                 v                v        |
-        | ReleaseInv <- RefundPayment <- CancelShipment      |  (compensations)
-        +----------------------------------------------------+
+```mermaid
+flowchart LR
+    Start --> ReserveInventory
+    subgraph SF["Step Functions (saga)"]
+        ReserveInventory --> ChargePayment
+        ChargePayment --> CreateShipment
+        ReserveInventory -->|catch| ReleaseInv
+        ChargePayment -->|catch| RefundPayment
+        CreateShipment -->|catch| CancelShipment
+        CancelShipment -->|compensations| RefundPayment
+        RefundPayment --> ReleaseInv
+    end
+    CreateShipment --> Success
 ```
 
 **Choreography (events):**
-```
-OrderCreated --> [EventBridge] --> InventorySvc --InventoryReserved--> [bus] --> PaymentSvc
-                                                     PaymentFailed --> [bus] --> InventorySvc(compensate)
+```mermaid
+flowchart LR
+    OrderCreated --> EventBridge["[EventBridge]"]
+    EventBridge --> InventorySvc
+    InventorySvc -->|InventoryReserved| bus1["[bus]"]
+    bus1 --> PaymentSvc
+    PaymentSvc -->|PaymentFailed| bus2["[bus]"]
+    bus2 --> InvCompensate["InventorySvc (compensate)"]
 ```
 
 **Trade-offs:**
@@ -306,10 +315,15 @@ Functions. Real systems mix both (orchestrate a bounded context, choreograph bet
 one. The service you pick sets ordering, durability, throughput, and cost.
 
 **Canonical fan-out: SNS → multiple SQS (fan-out with buffering).**
-```
-Producer -> SNS topic --+--> SQS A -> Lambda A
-                        +--> SQS B -> Lambda B   (each queue buffers, retries, DLQs independently)
-                        +--> SQS C -> Lambda C
+```mermaid
+flowchart LR
+    Producer --> SNS["SNS topic"]
+    SNS --> SQSA["SQS A"]
+    SNS --> SQSB["SQS B"]
+    SNS --> SQSC["SQS C"]
+    SQSA --> LambdaA["Lambda A"]
+    SQSB --> LambdaB["Lambda B (each queue buffers, retries, DLQs independently)"]
+    SQSC --> LambdaC["Lambda C"]
 ```
 Why SQS between SNS and Lambda: each subscriber gets its own durable buffer, independent
 retry/DLQ, and back-pressure — one slow consumer doesn't drop messages.

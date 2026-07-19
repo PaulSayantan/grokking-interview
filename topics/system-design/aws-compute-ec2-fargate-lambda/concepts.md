@@ -18,18 +18,13 @@ Think of AWS compute as a spectrum of *how much of the stack AWS manages for you
 Moving right, you give up control and give up per-unit cost efficiency at steady
 load, but gain elasticity, lower operational burden, and faster time-to-market.
 
-```
- More control / more ops                         Less control / less ops
- Cheaper at steady high load          Cheaper at spiky/low/unpredictable load
-        │                                                        │
-   ┌────▼────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐  ┌───▼────┐
-   │   EC2   │→  │ ECS/EKS  │→  │ Fargate  │→  │  Lambda  │  │ (Edge) │
-   │  (VMs)  │   │ on EC2   │   │(serverl. │   │(functions│
-   │         │   │(containers│  │ containers│  │ /FaaS)   │
-   └─────────┘   └──────────┘   └──────────┘   └──────────┘
-  You patch OS   You patch OS   AWS runs the   No servers,
-  scale ASGs     manage nodes   node/kernel    no scaling
-  own everything scale cluster  you own image  you own code
+```mermaid
+flowchart LR
+    Left["More control / more ops<br/>Cheaper at steady high load"] --> EC2
+    Right["Less control / less ops<br/>Cheaper at spiky/low/unpredictable load"] --> Edge["(Edge)"]
+    EC2["EC2 (VMs)<br/>You patch OS, scale ASGs, own everything"] --> ECS["ECS/EKS on EC2 (containers)<br/>You patch OS, manage nodes, scale cluster"]
+    ECS --> Fargate["Fargate (serverless containers)<br/>AWS runs the node/kernel, you own image"]
+    Fargate --> Lambda["Lambda (functions /FaaS)<br/>No servers, no scaling, you own code"]
 ```
 
 **The four rungs:**

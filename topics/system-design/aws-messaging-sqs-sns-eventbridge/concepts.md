@@ -187,11 +187,13 @@ Firehose**. It is push (SNS calls you), whereas SQS is pull (you call SQS).
 
 **The SNS + SQS fan-out pattern (the canonical AWS design).**
 
-```
-                         ┌────────► SQS: order-fulfillment ─► workers
-   producer ─► SNS topic ┼────────► SQS: analytics ─────────► workers
-                         ├────────► SQS: search-index ──────► workers
-                         └────────► Lambda: fraud-check
+```mermaid
+flowchart LR
+    P["producer"] --> SNS["SNS topic"]
+    SNS --> Q1["SQS: order-fulfillment"] --> W1["workers"]
+    SNS --> Q2["SQS: analytics"] --> W2["workers"]
+    SNS --> Q3["SQS: search-index"] --> W3["workers"]
+    SNS --> L["Lambda: fraud-check"]
 ```
 
 Each consumer gets its **own** SQS queue subscribed to the topic. Benefits:

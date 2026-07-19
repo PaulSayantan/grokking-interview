@@ -70,28 +70,26 @@ thin API and layer a workflow engine on top only if DAGs appear.
 **Intuition.** Almost every design decomposes into the same five roles. Name them
 explicitly; it signals seniority.
 
-```
-                 +-------------+
-   clients  ---> |  API / Ingest| --- validate, assign id, idempotency ---.
-                 +-------------+                                          |
-                        |                                                 v
-                        v                                        +-----------------+
-                +---------------+   scheduled?   time-indexed --> |  Job Store (DB) |
-                | Scheduler /   |--------------------------------> | jobs, state,    |
-                | Timer Wheel   |   due jobs -> enqueue            | schedules       |
-                +---------------+                                 +-----------------+
-                        |                                                 ^
-                        v                                                 |
-                +---------------+    pull/push        +----------------+   |
-                |  Queue /      | <-----------------> |  Worker Fleet  |---'  status/ack
-                |  Broker(s)    |   visibility lease  |  (executors)   |
-                +---------------+                     +----------------+
-                        |                                     |
-                        v                                     v
-                     +-----+                            +-----------+
-                     | DLQ |                            | Downstream|
-                     +-----+                            | side-effect|
-                                                        +-----------+
+```mermaid
+flowchart TD
+    clients["clients"]
+    API["API / Ingest"]
+    Scheduler["Scheduler / Timer Wheel"]
+    Store["Job Store (DB): jobs, state, schedules"]
+    Queue["Queue / Broker(s)"]
+    Workers["Worker Fleet (executors)"]
+    DLQ["DLQ"]
+    Downstream["Downstream side-effect"]
+
+    clients --> API
+    API -->|"validate, assign id, idempotency"| Store
+    API --> Scheduler
+    Scheduler -->|"scheduled? time-indexed; due jobs -> enqueue"| Store
+    Scheduler --> Queue
+    Queue <-->|"pull/push; visibility lease"| Workers
+    Workers -->|"status/ack"| Store
+    Queue --> DLQ
+    Workers --> Downstream
 ```
 
 - **Ingest / API layer** — stateless, validates, assigns job id, applies

@@ -21,19 +21,21 @@ rules engine (a serverless "if this message, then route to that AWS service") pl
 device state store (shadows).** It is the front door; it deliberately does *not* store
 telemetry long-term — you route it out to Kinesis/Firehose/Timestream/S3.
 
-```
-        DEVICES                 EDGE                    CLOUD (Region)
-   ┌───────────┐          ┌──────────────┐        ┌────────────────────────┐
-   │ sensors   │  MQTT    │ Greengrass   │  MQTT   │  IoT Core              │
-   │ MQTT/TLS  │─────────▶│ core device  │────────▶│  (device gateway +     │
-   │ X.509     │  (local) │ local compute│  bulk   │   registry + shadow +  │
-   └───────────┘          │ local ML     │         │   rules engine)        │
-        │                 │ StreamMgr    │         └───────────┬────────────┘
-        │ direct MQTT      │ offline+sync │            rules route to:
-        └─────────────────┼──────────────┘        ┌───────────┼───────────────┐
-                          (buffers when            ▼           ▼               ▼
-                           disconnected)      Kinesis/    Timestream        DynamoDB /
-                                              Firehose→S3  (time-series)     Lambda / SNS
+```mermaid
+flowchart LR
+    sensors["sensors<br/>MQTT/TLS<br/>X.509"]
+    greengrass["Greengrass core device<br/>local compute<br/>local ML<br/>StreamMgr<br/>offline+sync<br/>(buffers when disconnected)"]
+    iotcore["IoT Core<br/>(device gateway + registry + shadow + rules engine)"]
+    kinesis["Kinesis/<br/>Firehose→S3"]
+    timestream["Timestream<br/>(time-series)"]
+    dynamodb["DynamoDB /<br/>Lambda / SNS"]
+
+    sensors -->|"MQTT (local)"| greengrass
+    greengrass -->|"MQTT bulk"| iotcore
+    sensors -->|"direct MQTT"| iotcore
+    iotcore -->|"rules route to"| kinesis
+    iotcore -->|"rules route to"| timestream
+    iotcore -->|"rules route to"| dynamodb
 ```
 
 The interview reflexes to internalize:
@@ -258,13 +260,18 @@ This is the canonical IoT data-pipeline question. IoT Core is the front door; th
 engine tees data into a pipeline. The key fork is **Kinesis Data Streams vs Data
 Firehose**.
 
-```
-devices ─MQTT─▶ IoT Core ─rule─┬─▶ Firehose ──(buffer 60s/5MB)──▶ S3 (parquet) ─▶ Athena/Glue
-                               │
-                               ├─▶ Kinesis Data Streams ─▶ Managed Flink / Lambda ─▶ realtime
-                               │                          └▶ (replay, multiple consumers)
-                               ├─▶ Timestream (time-series queries + Grafana)
-                               └─▶ DynamoDB (latest reading per device for the app)
+```mermaid
+flowchart LR
+    devices["devices"] -->|MQTT| iotcore["IoT Core"]
+    iotcore -->|rule| firehose["Firehose"]
+    iotcore -->|rule| kds["Kinesis Data Streams"]
+    iotcore -->|rule| timestream["Timestream (time-series queries + Grafana)"]
+    iotcore -->|rule| dynamodb["DynamoDB (latest reading per device for the app)"]
+    firehose -->|"buffer 60s/5MB"| s3["S3 (parquet)"]
+    s3 --> athena["Athena/Glue"]
+    kds --> flink["Managed Flink / Lambda"]
+    flink --> realtime["realtime"]
+    kds --> replay["(replay, multiple consumers)"]
 ```
 
 **Kinesis Data Streams** — ordered, retained (default 24 h, up to 365 days), replayable

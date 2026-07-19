@@ -48,11 +48,12 @@ everything piles up), `country`, a boolean. The number of distinct PK values, an
 evenly traffic spreads across them, determines whether you get linear scale or a hot
 partition.
 
-```
-Request  ->  Router hashes PK  ->  Partition (leader in AZ-a)
-                                        |-- replica AZ-b  (quorum write)
-                                        |-- replica AZ-c
-   PK="user#42", SK="order#2024-01-01"  stored sorted by SK within partition
+```mermaid
+flowchart LR
+    Request --> Router["Router hashes PK"] --> Partition["Partition (leader in AZ-a)"]
+    Partition -->|quorum write| ReplicaB["replica AZ-b"]
+    Partition --> ReplicaC["replica AZ-c"]
+    Item["PK=#quot;user#42#quot;, SK=#quot;order#2024-01-01#quot; stored sorted by SK within partition"]
 ```
 
 **Item size and key limits (memorize these):** item max **400 KB** (all attribute
@@ -595,10 +596,11 @@ don't Scan for these.
 Aurora/RDS for joins, ad-hoc queries, complex ACID, and evolving/unknown patterns.
 Polyglot persistence is often the best real-world answer.
 
-```
-        Known patterns + huge/spiky scale + key access?  -> DynamoDB
-        Joins / ad-hoc / reporting / complex ACID?        -> Aurora/RDS
-        Both?                                              -> DynamoDB + stream to OpenSearch/Redshift
+```mermaid
+flowchart LR
+    Q1["Known patterns + huge/spiky scale + key access?"] --> A1["DynamoDB"]
+    Q2["Joins / ad-hoc / reporting / complex ACID?"] --> A2["Aurora/RDS"]
+    Q3["Both?"] --> A3["DynamoDB + stream to OpenSearch/Redshift"]
 ```
 
 **Failure modes to recite:** hot partition throttling despite spare total capacity;

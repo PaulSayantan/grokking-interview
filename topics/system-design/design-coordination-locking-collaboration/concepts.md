@@ -499,15 +499,20 @@ Linear, local-first apps.
 
 This is the marquee comparison of the collaborative-editing subtopic.
 
-```
-            OT                              CRDT
-        insert@pos ─┐                  each char has unique id
-                    │  transform            (no positions to shift)
- concurrent ops ────┤  against each         merge is commutative/
- rewritten to fit   │  other                associative/idempotent
-                    ▼                              ▼
-  central server orders & transforms     any replica merges locally,
-  (simpler, but a coordination point)    converges w/o coordinator
+```mermaid
+flowchart TD
+    subgraph OT
+        OT1["insert@pos"]
+        OT2["concurrent ops rewritten to fit"]
+        OT3["central server orders & transforms (simpler, but a coordination point)"]
+        OT1 & OT2 -->|"transform against each other"| OT3
+    end
+    subgraph CRDT
+        C1["each char has unique id (no positions to shift)"]
+        C2["merge is commutative/associative/idempotent"]
+        C3["any replica merges locally, converges w/o coordinator"]
+        C1 & C2 --> C3
+    end
 ```
 
 | Dimension | Operational Transformation | CRDT |

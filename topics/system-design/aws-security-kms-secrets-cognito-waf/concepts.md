@@ -102,21 +102,20 @@ master key in the HSM. The intuition: use a cheap, fast local key to encrypt the
 then encrypt *that* key with a KMS master key. You store the encrypted data key next to the
 ciphertext.
 
-```
-                    ┌──────────────────────── KMS ────────────────────────┐
-  App calls          │  CMK (never leaves KMS)                              │
-  GenerateDataKey ──►│  ── generates a 256-bit AES data key                │
-                    │  ── returns: {Plaintext DK, Encrypted DK (wrapped)}  │
-                    └──────────────────────────────────────────────────────┘
-        │ Plaintext DK                     │ Encrypted DK
-        ▼                                  ▼
-  encrypt 5 GB locally (AES-GCM)     store alongside ciphertext
-        │                                  │
-        ▼                                  ▼
-  ciphertext  ─────────────────────►  [ Encrypted DK | ciphertext ]  (to S3/disk)
-  (discard plaintext DK from memory ASAP)
-
-  DECRYPT: read Encrypted DK ─► KMS Decrypt ─► Plaintext DK ─► decrypt bulk locally
+```mermaid
+flowchart TD
+    App["App calls GenerateDataKey"] --> CMK
+    subgraph KMS["KMS"]
+        CMK["CMK (never leaves KMS); generates a 256-bit AES data key; returns {Plaintext DK, Encrypted DK (wrapped)}"]
+    end
+    CMK -->|"Plaintext DK"| Encrypt["encrypt 5 GB locally (AES-GCM)"]
+    CMK -->|"Encrypted DK"| StoreDK["store alongside ciphertext"]
+    Encrypt --> Ciphertext["ciphertext (discard plaintext DK from memory ASAP)"]
+    Ciphertext --> Combined["[ Encrypted DK | ciphertext ] (to S3/disk)"]
+    StoreDK --> Combined
+    subgraph Decrypt["DECRYPT"]
+        D1["read Encrypted DK"] --> D2["KMS Decrypt"] --> D3["Plaintext DK"] --> D4["decrypt bulk locally"]
+    end
 ```
 
 `GenerateDataKey` returns both a **plaintext** data key (use it immediately, then wipe from
@@ -330,13 +329,11 @@ takes an identity token (from a Cognito user pool, or Google/Facebook/SAML/OIDC,
 "guest"/unauthenticated access) and **exchanges it for temporary, limited-privilege AWS
 credentials via STS** so the client can call AWS services (S3, DynamoDB) directly.
 
-```
-  User pool (or Google/Apple/SAML)      Identity pool                STS
-  ────────────────────────────────      ─────────────                ───
-  authenticate  ──►  ID token (JWT) ──►  validates token ──►  AssumeRoleWithWebIdentity
-                                          maps to IAM role ──►  temp AWS creds (15min–12h)
-                                                                        │
-                                          client uses creds ────────────┘──► S3 / DynamoDB directly
+```mermaid
+flowchart LR
+    UP["User pool (or Google/Apple/SAML)"] -->|"authenticate → ID token (JWT)"| IP["Identity pool: validates token, maps to IAM role"]
+    IP -->|"AssumeRoleWithWebIdentity"| STS["STS: temp AWS creds (15min–12h)"]
+    STS -->|"client uses creds"| AWS["S3 / DynamoDB directly"]
 ```
 
 - **User pool = authentication** (issues JWTs; "who are you"). Analogous to an OIDC IdP.

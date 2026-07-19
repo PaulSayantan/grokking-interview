@@ -322,24 +322,24 @@ API deployment at different backend Lambda aliases/ARNs per environment.
 
 The decision tree an interviewer wants to hear:
 
-```
-Need server→client PUSH / real-time?
-  ├─ Data-change driven (sync when server data changes) → AppSync subscriptions
-  └─ Custom bidirectional protocol / game / non-GraphQL → API Gateway WebSocket
+```mermaid
+flowchart TD
+    Q1{"Need server→client PUSH / real-time?"}
+    Q1 -- "Data-change driven (sync when server data changes)" --> A1["AppSync subscriptions"]
+    Q1 -- "Custom bidirectional protocol / game / non-GraphQL" --> A2["API Gateway WebSocket"]
 
-Client needs flexible field selection / one call over many sources / mobile-first?
-  └─ GraphQL → AppSync
+    Q2{"Client needs flexible field selection / one call over many sources / mobile-first?"}
+    Q2 -- "GraphQL" --> A3["AppSync"]
 
-Simple/standard REST-style HTTP API, serverless backend?
-  ├─ Need API keys/usage plans, VTL mapping, per-method cache, WAF-on-API,
-  │  edge-optimized, or private endpoint  → API Gateway REST API
-  └─ None of those, want lowest cost/latency → API Gateway HTTP API
+    Q3{"Simple/standard REST-style HTTP API, serverless backend?"}
+    Q3 -- "Need API keys/usage plans, VTL mapping, per-method cache, WAF-on-API, edge-optimized, or private endpoint" --> A4["API Gateway REST API"]
+    Q3 -- "None of those, want lowest cost/latency" --> A5["API Gateway HTTP API"]
 
-High sustained RPS, long/streaming requests, container stack, cost predictability?
-  └─ ALB + Fargate/ECS/EKS  (NLB if L4/static-IP/TLS-passthrough)
+    Q4{"High sustained RPS, long/streaming requests, container stack, cost predictability?"}
+    Q4 --> A6["ALB + Fargate/ECS/EKS (NLB if L4/static-IP/TLS-passthrough)"]
 
-Extreme control / on-prem parity / multi-cloud portability?
-  └─ Self-hosted NGINX / Kong / Envoy gateway (you own scaling, HA, patching)
+    Q5{"Extreme control / on-prem parity / multi-cloud portability?"}
+    Q5 --> A7["Self-hosted NGINX / Kong / Envoy gateway (you own scaling, HA, patching)"]
 ```
 
 **Service comparison:**

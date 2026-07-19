@@ -18,16 +18,28 @@ The mental model to carry into the interview:
   SageMaker (you own the model/container/instance). You trade control and cost-at-scale
   for ops burden and speed-to-market.
 
-```
-                        AWS ML / GenAI landscape
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  BUILD / TRAIN                SERVE                 GENAI           │
-  │  SageMaker Training   →  SageMaker Endpoints   Bedrock (FM API)    │
-  │  Feature Store            (real-time/async/     Knowledge Bases    │
-  │  Pipelines/Registry        batch/serverless)    (managed RAG)      │
-  │  Ground Truth             MME / autoscaling     Agents / Guardrails│
-  └──────────────────────────────────────────────────────────────────┘
-        S3 (data lake)      •  KMS (encryption)  •  VPC / PrivateLink
+```mermaid
+flowchart LR
+    %% AWS ML / GenAI landscape
+    subgraph BUILD["BUILD / TRAIN"]
+        T["SageMaker Training"]
+        FS["Feature Store"]
+        PR["Pipelines/Registry"]
+        GT["Ground Truth"]
+    end
+    subgraph SERVE["SERVE"]
+        EP["SageMaker Endpoints (real-time/async/batch/serverless)"]
+        MME["MME / autoscaling"]
+    end
+    subgraph GENAI["GENAI"]
+        BR["Bedrock (FM API)"]
+        KB["Knowledge Bases (managed RAG)"]
+        AG["Agents / Guardrails"]
+    end
+    T --> EP
+    S3["S3 (data lake)"]
+    KMS["KMS (encryption)"]
+    VPC["VPC / PrivateLink"]
 ```
 
 ---
@@ -231,10 +243,16 @@ citations). It fixes stale knowledge and hallucination without retraining.
 
 **How it works (two paths on AWS):**
 
-```
- INGEST (offline):  S3 docs → chunk → Bedrock/SageMaker embeddings → vector store
- QUERY (online):    user Q → embed Q → ANN search top-k → (re-rank) →
-                    prompt = system + retrieved chunks + Q → Bedrock LLM → answer+citations
+```mermaid
+flowchart LR
+    subgraph INGEST["INGEST (offline)"]
+        direction LR
+        I1["S3 docs"] --> I2["chunk"] --> I3["Bedrock/SageMaker embeddings"] --> I4["vector store"]
+    end
+    subgraph QUERY["QUERY (online)"]
+        direction LR
+        Q1["user Q"] --> Q2["embed Q"] --> Q3["ANN search top-k"] --> Q4["(re-rank)"] --> Q5["prompt = system + retrieved chunks + Q"] --> Q6["Bedrock LLM"] --> Q7["answer+citations"]
+    end
 ```
 
 1. **Managed path — Bedrock Knowledge Bases:** point it at an S3 data source; it handles

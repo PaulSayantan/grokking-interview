@@ -241,13 +241,13 @@ over-engineer.
 
 The typical scaling ladder:
 
-```
-single box (app+DB)
-  → break at CPU/connections → add stateless app tier behind a load balancer
-  → break at DB reads       → add cache + read replicas
-  → break at DB writes/size → shard (partition by key); add write-optimized store
-  → break at hot keys       → replicate hot keys / dedicated cache / request coalescing
-  → break at cross-region   → geo-replicate, route to nearest, accept weaker consistency
+```mermaid
+flowchart TD
+    A["single box (app+DB)"] -->|"break at CPU/connections"| B["add stateless app tier behind a load balancer"]
+    B -->|"break at DB reads"| C["add cache + read replicas"]
+    C -->|"break at DB writes/size"| D["shard (partition by key); add write-optimized store"]
+    D -->|"break at hot keys"| E["replicate hot keys / dedicated cache / request coalescing"]
+    E -->|"break at cross-region"| F["geo-replicate, route to nearest, accept weaker consistency"]
 ```
 
 **Little's Law** — `L = λ × W` (concurrency = arrival rate × latency) — is the single

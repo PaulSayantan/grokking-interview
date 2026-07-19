@@ -8,12 +8,14 @@ This document is organized so that every subtopic goes intuition → how it work
 
 A useful mental model of the round trips a single "fresh" HTTPS request pays:
 
-```
-Client                                                     Server
-  |-- DNS lookup ------------------------------------------>|   (0-2 RTT, often cached)
-  |-- TCP SYN / SYN-ACK / ACK ---------------------------->|   (1 RTT)
-  |-- TLS 1.3 ClientHello / ServerHello + Finished ------->|   (1 RTT, or 0-RTT resume)
-  |-- HTTP request / response ---------------------------->|   (1 RTT + server think time)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    Client->>Server: DNS lookup (0-2 RTT, often cached)
+    Client->>Server: TCP SYN / SYN-ACK / ACK (1 RTT)
+    Client->>Server: TLS 1.3 ClientHello / ServerHello + Finished (1 RTT, or 0-RTT resume)
+    Client->>Server: HTTP request / response (1 RTT + server think time)
 ```
 
 Every RTT you remove is real user-perceived latency. Much of protocol evolution
@@ -188,8 +190,13 @@ cert from the internal CA. Identity is cryptographic, not "we trust the network.
 heavily-cached hierarchy, and it's often the *first* latency and *first* failure point.
 
 **How it works.** A recursive resolver walks the hierarchy (with caching at each hop):
-```
-Stub resolver → Recursive resolver → Root (.) → TLD (.com) → Authoritative (example.com) → IP
+```mermaid
+flowchart LR
+    A["Stub resolver"] --> B["Recursive resolver"]
+    B --> C["Root (.)"]
+    C --> D["TLD (.com)"]
+    D --> E["Authoritative (example.com)"]
+    E --> F["IP"]
 ```
 Records: **A** (IPv4), **AAAA** (IPv6), **CNAME** (alias), **MX** (mail), **TXT**, **NS**,
 **SOA**. **TTL** controls cache lifetime: low TTL = fast failover/change propagation but more

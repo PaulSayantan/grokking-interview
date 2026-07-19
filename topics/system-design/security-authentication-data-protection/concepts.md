@@ -31,14 +31,15 @@ then authorize on every action.
 
 **How it works.**
 
-```
-Request ──▶ [ AuthN ]  who is this?      ──▶ identity (userId, tenant, scopes)
-                │ fail → 401 Unauthorized
-                ▼
-            [ AuthZ ]  may they do X?     ──▶ allow / deny
-                │ fail → 403 Forbidden
-                ▼
-            Business logic
+```mermaid
+flowchart TD
+    Request["Request"] --> AuthN["AuthN: who is this?"]
+    AuthN --> Identity["identity (userId, tenant, scopes)"]
+    AuthN -->|fail| E401["401 Unauthorized"]
+    AuthN --> AuthZ["AuthZ: may they do X?"]
+    AuthZ --> Allow["allow / deny"]
+    AuthZ -->|fail| E403["403 Forbidden"]
+    AuthZ --> Logic["Business logic"]
 ```
 
 - `401 Unauthorized` really means *unauthenticated* (identity missing/invalid) — a
@@ -205,12 +206,16 @@ token**, and (OIDC) **ID token** (who the user is).
 
 **Authorization Code flow with PKCE** (the modern default for web/mobile/SPA):
 
-```
-1. App → AuthServer: /authorize?response_type=code&code_challenge=SHA256(verifier)
-2. User authenticates + consents
-3. AuthServer → App: redirect back with one-time ?code=...
-4. App → AuthServer: /token  code + code_verifier   (server-to-server, back channel)
-5. AuthServer verifies SHA256(verifier)==challenge → returns access/refresh/id tokens
+```mermaid
+sequenceDiagram
+    participant App
+    participant User
+    participant AuthServer
+    App->>AuthServer: /authorize?response_type=code&code_challenge=SHA256(verifier)
+    User->>AuthServer: User authenticates + consents
+    AuthServer->>App: redirect back with one-time ?code=...
+    App->>AuthServer: /token code + code_verifier (server-to-server, back channel)
+    AuthServer->>App: verifies SHA256(verifier)==challenge, returns access/refresh/id tokens
 ```
 
 - **PKCE (Proof Key for Code Exchange)** stops an attacker who intercepts the redirect

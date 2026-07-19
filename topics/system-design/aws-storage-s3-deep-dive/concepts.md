@@ -38,12 +38,12 @@ splitting on `/`. A **prefix** is any leading substring of keys; it is the unit 
 `ListObjectsV2` filters on (with `prefix=` and `delimiter=/`) and, crucially, the unit
 S3 uses to **auto-partition for throughput** (see request-rate section).
 
-```
-Region: us-east-1
- └── bucket: acme-media  (unique DNS name, single region)
-      ├── key: users/42/avatar.png       (object: bytes + metadata + versionId)
-      ├── key: users/42/profile.json
-      └── key: raw/2026/07/16/events.gz   ("raw/2026/07/16/" is a prefix)
+```mermaid
+flowchart TD
+    R["Region: us-east-1"] --> B["bucket: acme-media (unique DNS name, single region)"]
+    B --> K1["key: users/42/avatar.png (object: bytes + metadata + versionId)"]
+    B --> K2["key: users/42/profile.json"]
+    B --> K3["key: raw/2026/07/16/events.gz ('raw/2026/07/16/' is a prefix)"]
 ```
 
 **Trade-off — one bucket vs many.** Prefer **few buckets, many prefixes**. Bucket
@@ -389,10 +389,11 @@ replication events, lifecycle events, etc.) to **Lambda, SQS, SNS**, and to
 **Amazon EventBridge**. This makes S3 the front door of serverless, event-driven
 pipelines (upload → process → store).
 
-```
-Client --PUT--> S3 bucket --ObjectCreated--> [ Lambda | SQS | SNS | EventBridge ]
-                                                    │
-                                          transcode / index / ETL / notify
+```mermaid
+flowchart LR
+    Client -->|PUT| S3["S3 bucket"]
+    S3 -->|ObjectCreated| D["Lambda | SQS | SNS | EventBridge"]
+    D --> P["transcode / index / ETL / notify"]
 ```
 
 **Delivery semantics / gotchas:**

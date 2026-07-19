@@ -263,14 +263,13 @@ into fast failures.
 
 **State machine:**
 
-```
-        failures exceed threshold
- CLOSED ─────────────────────────▶ OPEN
-   ▲                                 │
-   │ trial succeeds                  │ after cool-down timer
-   │                                 ▼
-   └──────────  HALF-OPEN  ◀─────────┘
-      trial fails (back to OPEN)
+```mermaid
+stateDiagram-v2
+    state "HALF-OPEN" as HALF_OPEN
+    CLOSED --> OPEN: failures exceed threshold
+    OPEN --> HALF_OPEN: after cool-down timer
+    HALF_OPEN --> CLOSED: trial succeeds
+    HALF_OPEN --> OPEN: trial fails (back to OPEN)
 ```
 
 - **CLOSED** — normal; requests flow; failures are counted (often over a rolling

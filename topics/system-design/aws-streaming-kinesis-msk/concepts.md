@@ -86,13 +86,17 @@ Each record carries a **partition key** (chosen by the producer), a **sequence n
 hashes the partition key (MD5) to a 128-bit space and routes the record to the shard
 whose hash-key range contains it. **Ordering is guaranteed only within a shard.**
 
-```
-producers --putRecord(partitionKey, data)-->  KDS stream
-   MD5(partitionKey) -> hash range -> Shard-2
-   Shard-0: [seq..][seq..]     (ordered within shard)
-   Shard-1: [seq..][seq..]
-   Shard-2: [seq..][seq..] --> consumers read by sequence number
-   each shard replicated across 3 AZs
+```mermaid
+flowchart LR
+    producers["producers"]
+    subgraph KDS["KDS stream (each shard replicated across 3 AZs)"]
+        S0["Shard-0: [seq..][seq..] (ordered within shard)"]
+        S1["Shard-1: [seq..][seq..]"]
+        S2["Shard-2: [seq..][seq..]"]
+    end
+    producers -->|"putRecord(partitionKey, data)"| KDS
+    producers -->|"MD5(partitionKey) -> hash range"| S2
+    S2 -->|"read by sequence number"| consumers["consumers"]
 ```
 
 **Aggregate throughput = shards × per-shard limits.** A 10-shard stream ingests up to
@@ -448,10 +452,14 @@ Two canonical big-data architectures show up in design rounds:
   reprocess history fast enough; large historical replays can be slow/expensive.
 
 **AWS mapping:**
-```
-Producers -> Kinesis/MSK (retained log = source of truth)
-   |-> Flink (Managed Service for Apache Flink)  -> real-time views (OpenSearch/DynamoDB)
-   |-> Firehose -> S3 data lake (Parquet) -> Athena/Redshift/EMR (batch/replay)
+```mermaid
+flowchart LR
+    Producers["Producers"] --> Log["Kinesis/MSK (retained log = source of truth)"]
+    Log --> Flink["Flink (Managed Service for Apache Flink)"]
+    Flink --> RTViews["real-time views (OpenSearch/DynamoDB)"]
+    Log --> Firehose["Firehose"]
+    Firehose --> Lake["S3 data lake (Parquet)"]
+    Lake --> Batch["Athena/Redshift/EMR (batch/replay)"]
 ```
 
 **Trade-off / when:** Kappa is the modern, serverless-first default — pick it when the

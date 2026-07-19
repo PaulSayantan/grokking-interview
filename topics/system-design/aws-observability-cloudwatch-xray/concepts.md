@@ -21,14 +21,21 @@ The mental model:
   NOT operational health. → **CloudTrail**.
 - **Resource configuration state and compliance over time** → **AWS Config**.
 
-```
-                         ┌─────────────────────────────────────────┐
-   app / infra emits →   │  METRICS  →  CloudWatch Metrics + Alarms │ → SNS → PagerDuty
-                         │  LOGS     →  CloudWatch Logs + Insights  │ → subscription → OpenSearch/Kinesis
-                         │  TRACES   →  X-Ray / ADPT (OTel)         │ → service map
-                         └─────────────────────────────────────────┘
-   control-plane API calls → CloudTrail (audit)   resource state → AWS Config
-   any event → EventBridge (route/react)          dashboards → CloudWatch Dashboards
+```mermaid
+flowchart LR
+    Emit["app / infra emits"]
+    subgraph box[" "]
+        M["METRICS → CloudWatch Metrics + Alarms"]
+        L["LOGS → CloudWatch Logs + Insights"]
+        T["TRACES → X-Ray / ADPT (OTel)"]
+    end
+    Emit --> M --> SNS["SNS"] --> PD["PagerDuty"]
+    Emit --> L --> Sub["subscription"] --> OSK["OpenSearch/Kinesis"]
+    Emit --> T --> SM["service map"]
+    CP["control-plane API calls"] --> CT["CloudTrail (audit)"]
+    RS["resource state"] --> Config["AWS Config"]
+    AE["any event"] --> EB["EventBridge (route/react)"]
+    Dash["dashboards"] --> CWD["CloudWatch Dashboards"]
 ```
 
 This document ends most sections in trade-offs, because that is what gets probed.

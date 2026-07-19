@@ -38,15 +38,23 @@ key and runs operator instances in parallel across a cluster. Two families:
   Higher latency floor (hundreds of ms) but reuses the batch engine and gives
   high throughput. (Spark's newer *Continuous Processing* mode targets ~1ms.)
 
-```
- Kafka topic          Flink / Kafka Streams DAG                    Sink
- ┌────────┐   ┌───────┐  ┌───────┐  ┌──────────┐  ┌────────┐   ┌─────────┐
- │ events │──▶│ source│─▶│ keyBy │─▶│ window +  │─▶│  map/  │──▶│ Pinot/  │
- │(part.  │   │(par.  │  │(shuffle│  │ aggregate │  │ enrich │   │ Druid/  │
- │  0..N) │   │ read) │  │ by key)│  │ (state)   │  │        │   │ Kafka   │
- └────────┘   └───────┘  └───────┘  └──────────┘  └────────┘   └─────────┘
-                              │            │
-                          state backend  checkpoint barriers → durable snapshot
+```mermaid
+flowchart LR
+    subgraph kt["Kafka topic"]
+        ev["events (part. 0..N)"]
+    end
+    subgraph dag["Flink / Kafka Streams DAG"]
+        src["source (par. read)"]
+        kb["keyBy (shuffle by key)"]
+        win["window + aggregate (state)"]
+        enr["map/ enrich"]
+    end
+    subgraph snk["Sink"]
+        out["Pinot/ Druid/ Kafka"]
+    end
+    ev --> src --> kb --> win --> enr --> out
+    kb -.-> sb["state backend"]
+    win -.-> cb["checkpoint barriers"] --> snap["durable snapshot"]
 ```
 
 **Real-world usage.** Uber runs thousands of Flink jobs for surge pricing, fraud,
@@ -227,13 +235,19 @@ retries. This is achieved with **idempotency + atomic state commits**, not magic
     `entity+window`) and let the sink dedupe (Pinot **upsert**, DB `UPSERT`,
     dedupe by key). This turns at-least-once delivery into exactly-once *state*.
 
+```mermaid
+flowchart LR
+    src["source"] -->|barrier| op1["op1"]
+    op1 -->|barrier| op2["op2"]
+    op2 -->|barrier| sink["sink (2PC pre-commit)"]
+    src -.-> s1["snapshot offsets"]
+    op1 -.-> s2["snapshot state"]
+    op2 -.-> s3["snapshot state"]
+    sink -.-> s4["on checkpoint complete → commit"]
 ```
-Flink barrier alignment (exactly-once):
- source ──barrier──▶ op1 ──barrier──▶ op2 ──barrier──▶ sink(2PC pre-commit)
-   │                  │                 │                    │
- snapshot offsets   snapshot state    snapshot state      on checkpoint complete → commit
- (on failure: restore all snapshots + rewind Kafka offsets + abort uncommitted txn)
-```
+
+Flink barrier alignment (exactly-once). On failure: restore all snapshots +
+rewind Kafka offsets + abort uncommitted txn.
 
 **Real-world usage.** Uber's ad platform layers all three: Flink checkpoints (2-min
 interval) + Kafka read_committed 2PC + per-record UUID for Pinot upsert and
@@ -328,11 +342,19 @@ Query: broker scatter-gathers across real-time + historical → merges → sub-s
   views to cover the gap since the last batch run.
 - **Serving layer:** queries merge batch + speed views.
 
-```
-LAMBDA                                     KAPPA
-             ┌── batch (Spark) ──┐          events ─▶ log (Kafka, long retention)
-events ─┤                         ├─ serve                    │
-             └── speed (Flink) ──┘          reprocess by replaying the log ─▶ Flink ─▶ serve
+```mermaid
+flowchart LR
+    subgraph LAMBDA
+        levents["events"] --> batch["batch (Spark)"]
+        levents --> speed["speed (Flink)"]
+        batch --> lserve["serve"]
+        speed --> lserve
+    end
+    subgraph KAPPA
+        kevents["events"] --> klog["log (Kafka, long retention)"]
+        klog --> kflink["reprocess by replaying the log → Flink"]
+        kflink --> kserve["serve"]
+    end
 ```
 
 **Kappa architecture.** One streaming pipeline. To "recompute history," you
@@ -372,10 +394,11 @@ warehouse) computes daily/hourly exact aggregates, backfills, and corrects the h
 path's approximations. A reconciliation job overwrites hot-path estimates with
 cold-path truth.
 
-```
-                  ┌─▶ HOT: Flink ─▶ Redis/Pinot ─▶ live dashboard  (sec, approx)
-events ─▶ Kafka ──┤
-                  └─▶ COLD: S3 lake ─▶ Spark/warehouse ─▶ BI, reconcile (hr, exact)
+```mermaid
+flowchart LR
+    events["events"] --> kafka["Kafka"]
+    kafka --> hot["HOT: Flink → Redis/Pinot → live dashboard (sec, approx)"]
+    kafka --> cold["COLD: S3 lake → Spark/warehouse → BI, reconcile (hr, exact)"]
 ```
 
 **Trade-offs.** The hot path optimizes latency and cost-per-freshness but is
@@ -503,13 +526,18 @@ manageable; the **read/broadcast amplification** is the hard part.
   systems sample, rate-limit per user, and prioritize (creator, moderators,
   Super Chat) — YouTube/Twitch do this.
 
-```
-clients ─POST─▶ API ─▶ Kafka ─▶ aggregator (count per 1s)
-                                      │
-             Redis Pub/Sub / topic ◀──┘
-                    │ fan-out
-   ┌────────────────┼────────────────┐
- WS-GW-1          WS-GW-2          WS-GW-3   (each holds ~50k conns, pushes to clients)
+```mermaid
+flowchart TD
+    clients["clients"] -->|POST| api["API"]
+    api --> kafka["Kafka"]
+    kafka --> agg["aggregator (count per 1s)"]
+    agg --> pubsub["Redis Pub/Sub / topic"]
+    pubsub -->|fan-out| gw1["WS-GW-1"]
+    pubsub -->|fan-out| gw2["WS-GW-2"]
+    pubsub -->|fan-out| gw3["WS-GW-3"]
+    gw1 --- note["each holds ~50k conns, pushes to clients"]
+    gw2 --- note
+    gw3 --- note
 ```
 
 **Capacity / back-of-envelope.** 1M concurrent viewers, each idle connection ~

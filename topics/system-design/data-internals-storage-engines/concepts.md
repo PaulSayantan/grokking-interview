@@ -37,14 +37,11 @@ random-write endurance matters.
   that are dropped too early resurrect deleted data (the "zombie" bug); RocksDB/
   Cassandra keep them for `gc_grace_seconds` to let all replicas converge.
 
-```
-write ──► WAL (fsync) ──► memtable (RAM, sorted)
-                              │ flush at threshold
-                              ▼
-        SSTable_0  SSTable_1  SSTable_2 ...   (immutable, on disk)
-                              │ background compaction
-                              ▼  merged, dedup'd, tombstones dropped
-                    fewer / larger SSTables
+```mermaid
+flowchart TD
+    W["write"] --> WAL["WAL (fsync)"] --> MT["memtable (RAM, sorted)"]
+    MT -->|"flush at threshold"| SS["SSTable_0  SSTable_1  SSTable_2 ...  (immutable, on disk)"]
+    SS -->|"background compaction; merged, dedup'd, tombstones dropped"| FL["fewer / larger SSTables"]
 ```
 
 **Read path.** A point read checks the memtable, then SSTables newest→oldest. Each

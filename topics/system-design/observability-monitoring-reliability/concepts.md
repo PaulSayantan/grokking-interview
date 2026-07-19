@@ -61,16 +61,13 @@ over many narrow pre-aggregated metrics.
 - **Traces** — the causal path of one request across many services, with timing per hop.
   "*Where did the time/error go across the call graph.*"
 
-```
-                    detects a problem
-   METRICS  ───────────────────────────────►  "error rate up, p99 latency 800ms"
-      │  (alert fires, cheap, aggregate)
-      ▼
-   TRACES   ───────────────────────────────►  "the slow span is payment-svc -> fraud-db"
-      │  (localize: which service/hop)
-      ▼
-   LOGS     ───────────────────────────────►  "fraud-db: connection pool exhausted, N waiters"
-         (root cause: exact error/context)
+```mermaid
+flowchart TD
+    METRICS["METRICS"] -->|"detects a problem"| M_OUT["error rate up, p99 latency 800ms"]
+    METRICS -->|"alert fires, cheap, aggregate"| TRACES["TRACES"]
+    TRACES --> T_OUT["the slow span is payment-svc -> fraud-db"]
+    TRACES -->|"localize: which service/hop"| LOGS["LOGS"]
+    LOGS -->|"root cause: exact error/context"| L_OUT["fraud-db: connection pool exhausted, N waiters"]
 ```
 
 The canonical workflow: **metrics tell you *that* something is wrong and page you; traces
@@ -190,14 +187,15 @@ start time, duration, attributes, and a parent span id. The root span is the edg
 request; children are downstream calls. Traces answer "where did the 800ms go?" and
 "which service returned the error?" in a call graph humans can't hold in their head.
 
-```
-Trace: checkout request (total 780ms)
-[edge-gateway ................................................] 780ms
-   [checkout-svc .........................................]   740ms
-      [cart-svc ...] 40ms
-      [payment-svc .............................]           520ms  <-- culprit
-         [fraud-db query .....................]            480ms   <-- slow span
-      [inventory-svc ..] 60ms
+```mermaid
+flowchart TD
+    root["Trace: checkout request (total 780ms)"]
+    root --> edge["edge-gateway — 780ms"]
+    edge --> checkout["checkout-svc — 740ms"]
+    checkout --> cart["cart-svc — 40ms"]
+    checkout --> payment["payment-svc — 520ms (culprit)"]
+    payment --> fraud["fraud-db query — 480ms (slow span)"]
+    checkout --> inventory["inventory-svc — 60ms"]
 ```
 
 **Context propagation.** The magic is passing the `trace_id` + `span_id` across process
@@ -313,13 +311,15 @@ is queried with **PromQL**. Grafana is the visualization/dashboard layer on top 
 logs/traces too).
 
 **Architecture.**
-```
-   app /metrics ──scrape──► Prometheus ──► local TSDB (short-term)
-                               │  │            │
-                               │  └─► rules ──► Alertmanager ──► PagerDuty/Slack
-                               │  (recording/alerting)
-                               └─remote_write─► long-term store (Thanos/Cortex/Mimir/VictoriaMetrics)
-   Grafana ◄──query (PromQL)── Prometheus / long-term store
+```mermaid
+flowchart LR
+    app["app /metrics"] -->|scrape| prom["Prometheus"]
+    prom --> tsdb["local TSDB (short-term)"]
+    prom -->|"rules (recording/alerting)"| am["Alertmanager"]
+    am --> notify["PagerDuty/Slack"]
+    prom -->|remote_write| lts["long-term store (Thanos/Cortex/Mimir/VictoriaMetrics)"]
+    prom -->|"query (PromQL)"| grafana["Grafana"]
+    lts -->|"query (PromQL)"| grafana
 ```
 - **PromQL** computes `rate()`, aggregations, `histogram_quantile()` at query time.
 - **Recording rules** precompute expensive queries; **alerting rules** fire to

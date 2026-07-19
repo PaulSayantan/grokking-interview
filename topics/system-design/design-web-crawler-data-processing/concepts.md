@@ -72,37 +72,16 @@ fetch → parse → extract links → dedup → add new links back to the fronti
 store the content. Scale it by making each stage an independent, horizontally
 scalable service connected by queues.
 
-```
-              +-------------------+
-   seeds ---> |   URL Frontier    | <---------------------------+
-              | (priority+polite) |                             |
-              +---------+---------+                             |
-                        | (URL)                                 |
-                        v                                       |
-        +---------------------------------+                     |
-        |   Fetcher / Downloader workers  |                     |
-        |  (DNS cache, HTTP, robots cache)|                     |
-        +---------------+-----------------+                     |
-                        | (raw HTML)                            |
-             +----------+-----------+                           |
-             v                      v                           |
-   +------------------+    +------------------+                 |
-   | Content Store    |    |  Parser / Link   |                 |
-   | (S3/HDFS, blob)  |    |  Extractor       |                 |
-   +------------------+    +--------+---------+                 |
-                                    | (extracted URLs)          |
-                          +---------v----------+                |
-                          | URL Dedup / Seen?  |                |
-                          | (Bloom + KV store) |----------------+
-                          +---------+----------+  (new URLs only)
-                                    |
-                          +---------v----------+
-                          | Content dedup      |
-                          | (SimHash/MinHash)  |
-                          +--------------------+
-                                    |
-                          downstream data pipeline
-                          (index / embeddings / analytics)
+```mermaid
+flowchart TD
+    seeds[seeds] --> Frontier["URL Frontier (priority+polite)"]
+    Frontier -->|URL| Fetcher["Fetcher / Downloader workers (DNS cache, HTTP, robots cache)"]
+    Fetcher -->|raw HTML| Store["Content Store (S3/HDFS, blob)"]
+    Fetcher -->|raw HTML| Parser["Parser / Link Extractor"]
+    Parser -->|extracted URLs| URLDedup["URL Dedup / Seen? (Bloom + KV store)"]
+    URLDedup -->|new URLs only| Frontier
+    URLDedup --> ContentDedup["Content dedup (SimHash/MinHash)"]
+    ContentDedup --> Pipeline["downstream data pipeline (index / embeddings / analytics)"]
 ```
 
 Real reference designs: **Mercator** (Heydon & Najork, 1999 — the design most
@@ -132,29 +111,13 @@ and **priority** (crawl important/fresh pages first). The classic answer is the
 **Mercator two-stage frontier**: front queues for priority, back queues for
 politeness.
 
-```
-                 (new URLs)
-                     |
-             +-------v--------+
-             | Prioritizer    |  assigns priority 1..n (PageRank, freshness,
-             +-------+--------+   business value)
-                     |
-        +------------v-------------+
-        |  Front queues  F1..Fn    |  one FIFO per priority level
-        +------------+-------------+
-                     | (biased dequeue: higher priority picked more often)
-        +------------v-------------+
-        | Back-queue router        |  maps each URL to a back queue by HOST
-        +------------+-------------+
-                     |
-        +------------v-------------+
-        |  Back queues  B1..Bm     |  ONE host per back queue (politeness)
-        +------------+-------------+
-                     |
-        +------------v-------------+
-        | Min-heap of (host,       |  worker pulls the queue whose next-fetch
-        | next_fetch_time)         |  time <= now  -> enforces crawl delay
-        +--------------------------+
+```mermaid
+flowchart TD
+    new["(new URLs)"] --> Prioritizer["Prioritizer — assigns priority 1..n (PageRank, freshness, business value)"]
+    Prioritizer --> Front["Front queues F1..Fn — one FIFO per priority level"]
+    Front -->|"biased dequeue: higher priority picked more often"| Router["Back-queue router — maps each URL to a back queue by HOST"]
+    Router --> Back["Back queues B1..Bm — ONE host per back queue (politeness)"]
+    Back --> Heap["Min-heap of (host, next_fetch_time) — worker pulls the queue whose next-fetch time <= now -> enforces crawl delay"]
 ```
 
 - **Front queues** encode **priority** — more important URLs are dequeued more
@@ -447,13 +410,15 @@ complete answer *eventually* (e.g., "pages crawled in the last minute" vs "total
 link graph"). Two patterns reconcile this.
 
 **Lambda architecture** — run **two** pipelines:
-```
-                +-----------------------+   accurate, high-latency
-   ingest --+-->|  Batch layer (Spark)  |---> batch views ---+
-   (log)    |   +-----------------------+                    +--> Serving layer
-            |   +-----------------------+   fast, approximate |    (merge) --> query
-            +-->|  Speed layer (Flink)  |---> realtime views -+
-                +-----------------------+
+```mermaid
+flowchart LR
+    ingest["ingest (log)"] --> Batch["Batch layer (Spark)"]
+    ingest --> Speed["Speed layer (Flink)"]
+    Batch -->|"accurate, high-latency"| BatchViews["batch views"]
+    Speed -->|"fast, approximate"| RealtimeViews["realtime views"]
+    BatchViews --> Serving["Serving layer (merge)"]
+    RealtimeViews --> Serving
+    Serving --> query["query"]
 ```
 Batch layer recomputes from the immutable master dataset (perfect accuracy); speed
 layer covers only the recent window the batch hasn't caught up on. Serving layer

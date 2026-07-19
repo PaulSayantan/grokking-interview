@@ -106,11 +106,11 @@ decision, prepared participants must **wait** (holding locks) until the coordina
 and reads its log. They cannot time out and abort (the coordinator might have already told
 someone else to commit), and cannot time out and commit (it might have decided abort).
 
-```
-p1 votes YES ─┐
-p2 votes YES ─┤──▶ coordinator ✗ crashes before sending decision
-              └─  p1, p2 stuck IN-DOUBT: locks held, cannot proceed
-                  (a partition between coordinator and participants has the same effect)
+```mermaid
+flowchart LR
+    p1["p1 votes YES"] --> C["coordinator ✗ crashes before sending decision"]
+    p2["p2 votes YES"] --> C
+    C --> D["p1, p2 stuck IN-DOUBT: locks held, cannot proceed<br/>(a partition between coordinator and participants has the same effect)"]
 ```
 
 Consequences and the reason 2PC is avoided at scale:
@@ -188,9 +188,17 @@ a **sequence of local transactions** T1..Tn, each in its own service/DB, and pro
 The saga guarantees that either all Ti complete, or the completed ones are compensated —
 i.e. it trades ACID atomicity for **eventual, application-level** atomicity.
 
-```
-Forward:   T1 → T2 → T3 → T4        (each commits locally & independently)
-On failure at T4:  run C3 → C2 → C1 (compensate in reverse; each is itself a local txn)
+```mermaid
+flowchart LR
+    subgraph Forward["Forward (each commits locally & independently)"]
+        direction LR
+        T1 --> T2 --> T3 --> T4
+    end
+    subgraph Compensate["On failure at T4: compensate in reverse (each is itself a local txn)"]
+        direction LR
+        C3 --> C2 --> C1
+    end
+    T4 -->|failure| C3
 ```
 
 **Two coordination styles:**

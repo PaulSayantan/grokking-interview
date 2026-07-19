@@ -101,11 +101,17 @@ These are engine-agnostic patterns you implement around ElastiCache (and concept
 what DAX/CloudFront automate for you).
 
 **Cache-aside (lazy loading) — the default.**
-```
-read:  app -> GET key from cache
-       hit  -> return
-       miss -> read DB -> SET key in cache (with TTL) -> return
-write: app -> write DB -> DELETE/invalidate key in cache
+```mermaid
+flowchart TD
+    RApp["read: app"] --> Get["GET key from cache"]
+    Get --> Hit["hit"]
+    Get --> Miss["miss"]
+    Hit --> Return1["return"]
+    Miss --> ReadDB["read DB"]
+    ReadDB --> Set["SET key in cache (with TTL)"]
+    Set --> Return2["return"]
+    WApp["write: app"] --> WriteDB["write DB"]
+    WriteDB --> Inval["DELETE/invalidate key in cache"]
 ```
 - Pros: only requested data is cached (memory-efficient); cache failure is survivable
   (you fall back to DB); simple.
@@ -114,8 +120,9 @@ write: app -> write DB -> DELETE/invalidate key in cache
 - This is what most ElastiCache-in-front-of-RDS designs use.
 
 **Write-through — cache updated synchronously on every write.**
-```
-write: app -> write DB AND write cache in the same path
+```mermaid
+flowchart LR
+    App["write: app"] --> DBCache["write DB AND write cache in the same path"]
 ```
 - Pros: cache is always fresh for written keys; reads after write are fast and
   consistent-ish. **DAX uses write-through** for writes it proxies.
@@ -124,8 +131,11 @@ write: app -> write DB AND write cache in the same path
   before the cache existed.
 
 **Write-behind (write-back) — cache absorbs writes, flushes to DB asynchronously.**
-```
-write: app -> write cache -> return; background flush -> DB
+```mermaid
+flowchart LR
+    App["write: app"] --> Cache["write cache"]
+    Cache --> Return["return"]
+    Cache -. "background flush" .-> DB["DB"]
 ```
 - Pros: lowest write latency, smooths write bursts, batches DB writes.
 - Cons: **durability risk** — a cache node failure before flush loses writes; complex;

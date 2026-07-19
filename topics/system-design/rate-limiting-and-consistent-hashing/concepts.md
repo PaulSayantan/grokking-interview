@@ -61,16 +61,11 @@ cluster. That "it's cheap to store" fact drives most design choices below.
 tokens/sec. Each request removes one token (or `N` tokens for weighted requests). If
 the bucket has a token, the request is allowed; if empty, it's rejected (or queued).
 
-```
-refill rate r tokens/sec
-        |
-        v
-   +---------+
-   | tokens  |  capacity B (max burst)
-   +---------+
-        |
-   request takes 1 token --> allowed
-   empty --> 429
+```mermaid
+flowchart TD
+    R["refill rate r tokens/sec"] --> T["tokens (capacity B, max burst)"]
+    T -->|"request takes 1 token"| A["allowed"]
+    T -->|"empty"| E["429"]
 ```
 
 **Mechanics.** You don't run a background thread adding tokens. You store
@@ -116,16 +111,10 @@ and most cloud API quota systems use token bucket or a close variant.
 rate. Requests pour in; they drain at a fixed rate `r`. If the bucket (queue) is full,
 new requests overflow and are dropped.
 
-```
-requests in (bursty)
-     | | |
-     v v v
-   +-------+
-   | queue |  capacity = B
-   +-------+
-       |  leaks at fixed rate r  (smooth output)
-       v
-   processed
+```mermaid
+flowchart TD
+    In["requests in (bursty)"] --> Q["queue (capacity = B)"]
+    Q -->|"leaks at fixed rate r (smooth output)"| P["processed"]
 ```
 
 **Mechanics.** Two variants:
@@ -309,14 +298,12 @@ Atomicity via `INCR`, or a **Lua script** that reads-computes-writes the whole
 token-bucket/sliding-window logic in one atomic server-side round trip (avoids race
 conditions between GET and SET).
 
-```
-   inst1  inst2  inst3  ...  instN
-      \      |     |        /
-       \     |     |       /
-        v    v     v      v
-        +------------------+
-        |   Redis (counter)|  <- atomic INCR / Lua
-        +------------------+
+```mermaid
+flowchart TD
+    I1["inst1"] --> R["Redis (counter) — atomic INCR / Lua"]
+    I2["inst2"] --> R
+    I3["inst3"] --> R
+    IN["instN"] --> R
 ```
 
 - **Accuracy:** high/global — one source of truth.
@@ -341,12 +328,10 @@ Each node maintains a local counter for speed and periodically (every few hundre
 syncs deltas to a central store or gossips to peers, then adjusts. This is what large
 gateways do.
 
-```
-node local decision (fast, approximate)
-        |
-        |  async flush/gossip every ~200ms-1s
-        v
-   shared aggregate  -> corrects local budgets
+```mermaid
+flowchart TD
+    N["node local decision (fast, approximate)"] -->|"async flush/gossip every ~200ms-1s"| S["shared aggregate"]
+    S -->|"corrects local budgets"| N
 ```
 
 - **Accuracy:** eventually consistent — can overshoot the global limit within a sync
@@ -380,9 +365,13 @@ Redis+Lua** when limits must be tight and QPS is moderate.
 
 **Options along the request path:**
 
-```
-client -> CDN/edge -> API gateway / LB -> service mesh sidecar -> service -> datastore
-   (1)       (2)            (3)                  (4)                 (5)
+```mermaid
+flowchart LR
+    C["client (1)"] --> E["CDN/edge (2)"]
+    E --> G["API gateway / LB (3)"]
+    G --> M["service mesh sidecar (4)"]
+    M --> S["service (5)"]
+    S --> D["datastore"]
 ```
 
 1. **Client-side (SDK):** best UX (avoids wasted round trips) but *untrusted* — never

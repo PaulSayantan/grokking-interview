@@ -30,17 +30,20 @@ subscribe and react on their own schedule.
 - **Spatial** — the producer doesn't know the consumers' addresses or count.
 - **Load** — the log/queue absorbs bursts; consumers drain at their own rate.
 
-```
-Request/response (synchronous, coupled):
-  Order ──HTTP──▶ Payment ──HTTP──▶ Inventory ──HTTP──▶ Shipping
-   (blocks; if Shipping is down, the whole chain fails or times out)
-
-Event-driven (asynchronous, decoupled):
-  Order ──emit "OrderPlaced"──▶ [ Event Log / Broker ]
-                                    │  │  │
-                        Payment ◀───┘  │  └──▶ Analytics
-                        Inventory ◀────┘        Search index
-   (each reacts independently; a down consumer just lags, doesn't fail Order)
+```mermaid
+flowchart LR
+  subgraph RR["Request/response (synchronous, coupled)"]
+    direction LR
+    O1[Order] -->|HTTP| P1[Payment] -->|HTTP| I1[Inventory] -->|HTTP| S1[Shipping]
+  end
+  subgraph ED["Event-driven (asynchronous, decoupled)"]
+    direction LR
+    O2[Order] -->|"emit OrderPlaced"| B["Event Log / Broker"]
+    B --> P2[Payment]
+    B --> I2[Inventory]
+    B --> AN[Analytics]
+    B --> SI["Search index"]
+  end
 ```
 
 **What you gain**
@@ -129,14 +132,18 @@ just separate code paths / separate DTOs. In its heavier form it's separate
 and one or more denormalized read stores (materialized views) optimized for query
 shapes, kept in sync asynchronously via events.
 
-```
-        Command side (writes)                Query side (reads)
-  ┌───────────────────────────┐        ┌──────────────────────────┐
-  Client ─cmd▶ Write model ─▶ Write DB   Read model ◀─ Read DB(s)
-                    │                          ▲   (denormalized views:
-                    └── emits events ──────────┘    Elasticsearch, Redis,
-                        (async projection)          per-query SQL tables)
-                                              ◀─query─ Client
+```mermaid
+flowchart LR
+  subgraph CMD["Command side (writes)"]
+    direction LR
+    C1[Client] -->|cmd| WM[Write model] --> WDB[Write DB]
+  end
+  subgraph QRY["Query side (reads)"]
+    direction LR
+    RDB["Read DB(s): denormalized views — Elasticsearch, Redis, per-query SQL tables"] --> RM[Read model]
+    C2[Client] -->|query| RM
+  end
+  WM -->|"emits events (async projection)"| RM
 ```
 
 **How it works.** Commands validate business rules and mutate the write store,
@@ -306,23 +313,34 @@ There are two coordination styles:
 **Choreography** — no central coordinator. Each service listens for events and
 emits its own. The flow emerges from the chain of reactions.
 
-```
-OrderCreated ─▶ Payment: charge ─▶ PaymentDone ─▶ Inventory: reserve
-   ─▶ StockReserved ─▶ Shipping: ship ─▶ Shipped
-   (on failure, service emits e.g. PaymentFailed → others compensate)
+```mermaid
+flowchart LR
+  OC[OrderCreated] --> PC["Payment: charge"]
+  PC --> PD[PaymentDone]
+  PD --> IR["Inventory: reserve"]
+  IR --> SR[StockReserved]
+  SR --> SH["Shipping: ship"]
+  SH --> SP[Shipped]
+  PC -.->|on failure| PF["PaymentFailed (others compensate)"]
 ```
 
 **Orchestration** — a central saga orchestrator (a state machine) tells each
 service what to do via commands and awaits replies, driving compensation on
 failure.
 
-```
-        ┌───────── Saga Orchestrator (state machine) ─────────┐
-        │  1. cmd Charge ─▶ Payment ─▶ reply                  │
-        │  2. cmd Reserve ─▶ Inventory ─▶ reply               │
-        │  3. cmd Ship ─▶ Shipping ─▶ reply                   │
-        │  on failure at step k: send compensating cmds k-1..1│
-        └──────────────────────────────────────────────────── ┘
+```mermaid
+sequenceDiagram
+    participant O as Saga Orchestrator (state machine)
+    participant P as Payment
+    participant I as Inventory
+    participant S as Shipping
+    O->>P: 1. cmd Charge
+    P-->>O: reply
+    O->>I: 2. cmd Reserve
+    I-->>O: reply
+    O->>S: 3. cmd Ship
+    S-->>O: reply
+    Note over O: on failure at step k: send compensating cmds k-1..1
 ```
 
 **Choreography — trade-offs**
@@ -385,14 +403,17 @@ so you cannot make the two writes atomic directly.
 
 **The transactional outbox pattern — the fix.**
 
-```
-   ┌──────────────── single local DB transaction ───────────────┐
-   │  1. INSERT/UPDATE business row (e.g., orders)               │
-   │  2. INSERT event row into `outbox` table                    │
-   └────────────────────────── COMMIT ───────────────────────── ┘
-                     │  (both or neither — atomic)
-                     ▼
-   Relay / CDC reads outbox rows ──▶ publishes to Kafka ──▶ mark sent
+```mermaid
+flowchart TD
+  subgraph TX["single local DB transaction (COMMIT)"]
+    direction TB
+    S1["1. INSERT/UPDATE business row (e.g., orders)"]
+    S2["2. INSERT event row into outbox table"]
+    S1 --- S2
+  end
+  TX -->|"both or neither — atomic"| R["Relay / CDC reads outbox rows"]
+  R --> K[publishes to Kafka]
+  K --> M[mark sent]
 ```
 
 Write the business change *and* an "outbox" event row in the **same local ACID
@@ -436,11 +457,12 @@ database and streams them as events, by **tailing the database's transaction log
 (on Kafka Connect) is the de facto open-source tool; managed equivalents include
 AWS DMS and Google Datastream.
 
-```
-  App ──writes──▶ Postgres ──WAL──▶ Debezium (log tail) ──▶ Kafka topics
-                                                             │
-                              downstream: search index, cache, data lake,
-                              other microservices, outbox relay
+```mermaid
+flowchart LR
+  App -->|writes| PG[Postgres]
+  PG -->|WAL| DZ["Debezium (log tail)"]
+  DZ --> KT[Kafka topics]
+  KT --> DS["downstream: search index, cache, data lake, other microservices, outbox relay"]
 ```
 
 **Why log-based beats query-based CDC.**

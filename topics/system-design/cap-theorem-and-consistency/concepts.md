@@ -46,20 +46,17 @@ So the meaningful classification is:
   answering with whatever it has; replicas may diverge and reconcile later.
   Examples: Cassandra, DynamoDB (default), Riak, CouchDB.
 
-```
-        Normal operation (no partition)
-        both C and A are available
-                 |
-      +----------+-----------+
-      |     PARTITION!        |
-      |  nodes can't talk     |
-      +----------+-----------+
-                 |
-         must choose ONE:
-      /                      \
-   CP: refuse writes/reads    AP: keep serving,
-   to preserve consistency    accept divergence
-   (lose Availability)        (lose Consistency)
+```mermaid
+flowchart TD
+    Normal["Normal operation (no partition): both C and A are available"]
+    Partition["PARTITION! nodes can't talk"]
+    Choose{"must choose ONE"}
+    CP["CP: refuse writes/reads to preserve consistency (lose Availability)"]
+    AP["AP: keep serving, accept divergence (lose Consistency)"]
+    Normal --> Partition
+    Partition --> Choose
+    Choose --> CP
+    Choose --> AP
 ```
 
 **Real-world usage.** A leader-based SQL replica set that requires majority
@@ -501,15 +498,19 @@ root hashes match, the ranges are identical and nothing is sent; if they
 differ, they recurse only into the subtrees whose hashes differ, transferring
 **only the divergent leaves**.
 
-```
-        Merkle tree diff (log N comparison)
-        replica A root  ==  replica B root ?  -> equal: DONE, 0 data shipped
-                 |  differ
-          +------+------+
-        h(L)           h(R)      compare children
-       equal?         differ?  -> recurse only into R
-                        |
-                  ship only the mismatched leaf ranges
+```mermaid
+flowchart TD
+    Root{"Merkle tree diff (log N comparison): replica A root == replica B root ?"}
+    Done["equal: DONE, 0 data shipped"]
+    Children{"differ: compare children h(L) vs h(R)"}
+    Left["h(L) equal?"]
+    Right["h(R) differ? -> recurse only into R"]
+    Ship["ship only the mismatched leaf ranges"]
+    Root -->|equal| Done
+    Root -->|differ| Children
+    Children --> Left
+    Children --> Right
+    Right --> Ship
 ```
 
 - **Cost/benefit:** comparison is **O(log N)** hash exchanges to *locate*
@@ -677,12 +678,17 @@ once a majority stores them), and **safety** (election restrictions guarantee a
 new leader has all committed entries). Used by etcd, Consul, CockroachDB,
 TiKV, RabbitMQ quorum queues, Kafka's KRaft.
 
-```
-        Raft happy path (N=5, majority=3)
-Client -> Leader: write X
-Leader appends to log, sends AppendEntries to 4 followers
->=2 followers ack  ->  entry committed (leader + 2 = 3)
-Leader applies to state machine, replies to client
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Leader
+    participant Followers as 4 Followers
+    Note over Client,Followers: Raft happy path (N=5, majority=3)
+    Client->>Leader: write X
+    Leader->>Followers: AppendEntries (leader appends to log)
+    Followers-->>Leader: >=2 followers ack -> entry committed (leader + 2 = 3)
+    Leader->>Leader: applies to state machine
+    Leader-->>Client: reply
 ```
 
 **Key properties.** Both need a **majority quorum** (⌊N/2⌋+1), so they tolerate

@@ -68,22 +68,15 @@ Assume **100 M new URLs/day** (Bit.ly-scale is order-of-magnitude here).
 **Intuition.** A thin, stateless write API that mints keys, a fat read path that is
 almost entirely cache/CDN, and a sharded durable store behind both.
 
-```
-                         (writes ~2k/s)                 (reads ~200k/s)
-     Client ── POST /shorten ──► API/Write Service       Client ── GET /aXb3Kd ──►
-                                     │                                │
-                                     ▼                                ▼
-                            Key Generation (KGS/                 CDN / Edge (301 cache)
-                            Snowflake/counter)                        │ miss
-                                     │                                ▼
-                                     ▼                          Redis cache (key→URL)
-                            ┌─────────────────┐                       │ miss
-                            │  Metadata DB     │◄──────────────────────┘
-                            │ (sharded KV/SQL) │  read-through populate cache
-                            └─────────────────┘
-                                     │ (async)
-                                     ▼
-                            Analytics pipeline (Kafka → OLAP)
+```mermaid
+flowchart TD
+    CW["Client"] -->|"POST /shorten (writes ~2k/s)"| API["API/Write Service"]
+    API --> KGS["Key Generation (KGS/Snowflake/counter)"]
+    KGS --> DB["Metadata DB (sharded KV/SQL)"]
+    DB -->|"async"| AN["Analytics pipeline (Kafka → OLAP)"]
+    CR["Client"] -->|"GET /aXb3Kd (reads ~200k/s)"| CDN["CDN / Edge (301 cache)"]
+    CDN -->|"miss"| REDIS["Redis cache (key→URL)"]
+    REDIS -->|"miss / read-through populate cache"| DB
 ```
 
 - **Write path**: validate URL → obtain unique key → persist `{key, longURL, meta}` →
@@ -367,10 +360,11 @@ Implementation options:
 synchronously on the redirect path (it would add latency and a failure dependency to every
 read). Instead emit an event asynchronously:
 
-```
-GET /{key} → redirect (fast) ── fire-and-forget ──► Kafka/Kinesis ──► stream processor
-                                                          └──► OLAP store (ClickHouse,
-                                                               Druid, Redshift) for dashboards
+```mermaid
+flowchart LR
+    R["GET /{key} → redirect (fast)"] -->|"fire-and-forget"| Q["Kafka/Kinesis"]
+    Q --> SP["stream processor"]
+    SP --> OLAP["OLAP store (ClickHouse, Druid, Redshift) for dashboards"]
 ```
 
 Trade-off: async analytics keeps redirects fast and available but makes counts eventually

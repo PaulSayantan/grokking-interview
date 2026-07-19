@@ -78,9 +78,12 @@ important and most neglected resilience primitive.
   passes the *remaining* budget. This prevents the wasteful case where service A
   has already given up but B, C, D keep working on a doomed request.
 
-```
-Client --deadline=now+300ms--> A --remaining=270ms--> B --remaining=180ms--> C
-   if remaining <= 0 at any hop, fail fast instead of doing useless work
+```mermaid
+flowchart LR
+    Client -->|"deadline=now+300ms"| A
+    A -->|"remaining=270ms"| B
+    B -->|"remaining=180ms"| C
+    caveat["if remaining <= 0 at any hop, fail fast instead of doing useless work"]
 ```
 
 **Trade-offs.**
@@ -284,15 +287,19 @@ timeouts) on doomed calls. A breaker **fails fast** instead of failing slow.
 
 **How it works — three states:**
 
-```
-        failures exceed threshold
- CLOSED ─────────────────────────────► OPEN
-   ▲                                     │  (reject immediately, no calls)
-   │ success                             │  after cooldown timer
-   │                                     ▼
-   └────────── HALF-OPEN ◄───────────────┘
-     let a few trial requests through;
-     succeed -> CLOSED, fail -> OPEN
+```mermaid
+stateDiagram-v2
+    CLOSED --> OPEN: failures exceed threshold
+    OPEN --> HALFOPEN: after cooldown timer
+    HALFOPEN --> CLOSED: success
+    HALFOPEN --> OPEN: fail
+    note right of OPEN
+        reject immediately, no calls
+    end note
+    note left of HALFOPEN
+        let a few trial requests through;
+        succeed -> CLOSED, fail -> OPEN
+    end note
 ```
 
 - **CLOSED:** normal, requests flow, failures counted (often over a rolling
@@ -450,9 +457,15 @@ queue fills, you get an explicit, early signal to apply backpressure or shed.
   so the publisher produces only what's requested (RxJava, Project Reactor,
   Akka Streams).
 
-```
-Push (no backpressure):  producer ──flood──► [ unbounded buffer ] ──► slow consumer  → OOM
-Credit-based:            producer ◄─grant N credits─ consumer; sends ≤ credits held  → bounded
+```mermaid
+flowchart LR
+    subgraph push["Push (no backpressure)"]
+        p1["producer"] -->|flood| buf["unbounded buffer"] --> c1["slow consumer"] --> oom["OOM"]
+    end
+    subgraph credit["Credit-based"]
+        c2["consumer"] -->|grant N credits| p2["producer"]
+        p2 -->|"sends ≤ credits held"| bounded["bounded"]
+    end
 ```
 
 **Backpressure vs load shedding.** They are complements. Backpressure *propagates*
@@ -760,11 +773,14 @@ serve traffic) and **active-passive** (a standby waits to take over).
 - **N+1 / N+2 redundancy:** provision enough spare capacity to survive 1 (or 2)
   simultaneous failures without degrading.
 
-```
-Active-passive:                 Active-active:
-[Primary]==replicate==>[Standby] [Node A]<->[Node B]<->[Node C]
-  writes here          idle       all take writes; must resolve conflicts
-  fail -> promote (RTO gap)       no promotion; consistency is weaker
+```mermaid
+flowchart LR
+    subgraph ap["Active-passive"]
+        Primary["Primary (writes here; fail -> promote, RTO gap)"] ==>|replicate| Standby["Standby (idle)"]
+    end
+    subgraph aa["Active-active (all take writes; must resolve conflicts; no promotion; consistency is weaker)"]
+        NodeA["Node A"] <--> NodeB["Node B"] <--> NodeC["Node C"]
+    end
 ```
 
 **Trade-offs.**
@@ -864,13 +880,13 @@ copy serving a subset of customers. A failure is contained to one cell.
 - Used by AWS (many services are internally cellular), Slack, DoorDash, Roblox,
   Facebook, and is a core **AWS Well-Architected** resilience pattern.
 
-```
-        ┌── cell router (thin, HA) ──┐
-        ▼            ▼               ▼
-   ┌ Cell 1 ┐   ┌ Cell 2 ┐  ...  ┌ Cell N ┐
-   │ LB+svc │   │ LB+svc │       │ LB+svc │   each serves ~1/N of customers
-   │  + DB  │   │  + DB  │       │  + DB  │   failure stays inside one cell
-   └────────┘   └────────┘       └────────┘
+```mermaid
+flowchart TD
+    router["cell router (thin, HA)"]
+    router --> cell1["Cell 1: LB+svc + DB"]
+    router --> cell2["Cell 2: LB+svc + DB"]
+    router --> celln["Cell N: LB+svc + DB"]
+    note["each serves ~1/N of customers; failure stays inside one cell"]
 ```
 
 **Trade-offs.**

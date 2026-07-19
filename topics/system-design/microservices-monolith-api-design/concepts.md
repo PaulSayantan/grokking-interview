@@ -29,17 +29,23 @@ underrated middle ground: one deployable unit, but with strictly enforced
 internal module boundaries (clear interfaces, no reaching into another module's
 tables) so it *could* be split later.
 
-```
-MONOLITH                    MODULAR MONOLITH            MICROSERVICES
-+-----------------+         +-----------------+         +------+ +------+ +------+
-| orders  users   |         | [orders]|[users]|         |orders| |users | |pay   |
-| payments  ship  |         | [pay]   |[ship] |         +--+---+ +--+---+ +--+---+
-|                 |         |  (1 deploy,     |            |        |        |
-|  one process    |         |   enforced      |          +-v--+  +--v-+  +--v-+
-|  one DB         |         |   module APIs)  |          |DB  |  |DB  |  |DB  |
-+-------+---------+         +--------+--------+          +----+  +----+  +----+
-        |                            |                  independent deploy + data
-     one DB                       one DB
+```mermaid
+flowchart TD
+    subgraph Monolith
+        M["orders, users, payments, ship (one process)"]
+        MDB[("one DB")]
+        M --> MDB
+    end
+    subgraph "Modular monolith"
+        MM["[orders] [users] [pay] [ship] (1 deploy, enforced module APIs)"]
+        MMDB[("one DB")]
+        MM --> MMDB
+    end
+    subgraph "Microservices (independent deploy + data)"
+        MSO["orders"] --> MSODB[("DB")]
+        MSU["users"] --> MSUDB[("DB")]
+        MSP["pay"] --> MSPDB[("DB")]
+    end
 ```
 
 **How it works / what changes.** The defining property of microservices is
@@ -210,10 +216,11 @@ from browsers (needs gRPC-Web + proxy), binary payloads are not human-readable,
 less mature edge/CDN caching, steeper tooling. Used pervasively at Google, and
 internally at many companies for east-west traffic.
 
-```
-Public / browser edge  ->  REST or GraphQL (JSON, cache-friendly / flexible)
-Internal east-west     ->  gRPC (protobuf, HTTP/2, fast, streaming)
-Rich aggregated UI     ->  GraphQL (or BFF) to avoid N+1 round trips
+```mermaid
+flowchart LR
+    A["Public / browser edge"] --> B["REST or GraphQL (JSON, cache-friendly / flexible)"]
+    C["Internal east-west"] --> D["gRPC (protobuf, HTTP/2, fast, streaming)"]
+    E["Rich aggregated UI"] --> F["GraphQL (or BFF) to avoid N+1 round trips"]
 ```
 
 **Comparison.**
@@ -265,15 +272,14 @@ serve everyone. Popularized by SoundCloud and Netflix. It solves the problem
 where a shared "one size fits all" API becomes a coordination bottleneck between
 frontend and backend teams and forces the mobile client to over-fetch.
 
-```
-         +----------- Web BFF -----------+
-Web  --->|  tailors payloads for web     |---+
-         +-------------------------------+   |
-         +----------- iOS BFF -----------+   +--> [order] [user] [catalog] ...
-iOS  --->|  tailors payloads for mobile  |---+        (internal services)
-         +-------------------------------+   |
-Android->|  Android BFF                  |---+
-         +-------------------------------+
+```mermaid
+flowchart LR
+    Web["Web"] --> WebBFF["Web BFF (tailors payloads for web)"]
+    iOS["iOS"] --> iOSBFF["iOS BFF (tailors payloads for mobile)"]
+    Android["Android"] --> AndroidBFF["Android BFF"]
+    WebBFF --> Svc["[order] [user] [catalog] ... (internal services)"]
+    iOSBFF --> Svc
+    AndroidBFF --> Svc
 ```
 
 **TRADE-OFFS.**
@@ -476,12 +482,19 @@ you now **maintain a second copy of the data** and the projection code; and you
 must handle **rebuilds** (replay events to reconstruct a corrupted/changed view)
 and out-of-order/duplicate events (idempotent, order-tolerant projectors).
 
-```
-API COMPOSITION (read-time join)        CQRS READ MODEL (write-time join)
-  query -> [composer]                     events ---> [projector] --> [read DB]
-             |  |  |  (fan-out, sync)                                     ^
-          [svcA][svcB][svcC]              query -----------------> single lookup
-  fresh, simple, slow/fragile at scale    fast, scalable, eventually consistent
+```mermaid
+flowchart LR
+    subgraph "API composition (read-time join)"
+        Q1["query"] --> Composer["composer"]
+        Composer -->|"fan-out, sync"| SvcA["svcA"]
+        Composer -->|"fan-out, sync"| SvcB["svcB"]
+        Composer -->|"fan-out, sync"| SvcC["svcC"]
+    end
+    subgraph "CQRS read model (write-time join)"
+        Events["events"] --> Projector["projector"]
+        Projector --> ReadDB[("read DB")]
+        Q2["query"] -->|"single lookup"| ReadDB
+    end
 ```
 
 **TRADE-OFFS / when to pick.**
@@ -566,12 +579,13 @@ next to each service instance. Application traffic flows through the sidecar
 (e.g. Envoy); a **control plane** (e.g. Istio, Linkerd) configures all the
 sidecars.
 
-```
-   +------------------- Pod -------------------+
-   |  App container  <-->  Sidecar proxy(Envoy)|---mTLS--> other sidecars
-   +-------------------------------------------+
-              ^ config/policy/telemetry
-        +-----+------ Control plane (Istio) -----+
+```mermaid
+flowchart LR
+    subgraph Pod
+        App["App container"] <--> Sidecar["Sidecar proxy (Envoy)"]
+    end
+    Sidecar -->|"mTLS"| Others["other sidecars"]
+    ControlPlane["Control plane (Istio)"] -->|"config/policy/telemetry"| Sidecar
 ```
 
 **What it gives you:** mTLS everywhere (zero-trust), consistent retries/timeouts/
@@ -621,10 +635,17 @@ latency, and resilience more than almost anything else.
   and duplicate-delivery concerns (need idempotent consumers), and you must
   handle poison messages / dead-letter queues.
 
-```
-SYNC:   Order --HTTP--> Payment --HTTP--> Inventory   (all must be up; latency adds up)
-ASYNC:  Order --event--> [ broker ] --> Payment
-                                   \--> Inventory     (decoupled, eventual)
+```mermaid
+flowchart LR
+    subgraph "SYNC (all must be up; latency adds up)"
+        SOrder["Order"] -->|"HTTP"| SPayment["Payment"]
+        SPayment -->|"HTTP"| SInventory["Inventory"]
+    end
+    subgraph "ASYNC (decoupled, eventual)"
+        AOrder["Order"] -->|"event"| Broker["broker"]
+        Broker --> APayment["Payment"]
+        Broker --> AInventory["Inventory"]
+    end
 ```
 
 **Real-world.** Uber/DoorDash place an order synchronously (need an immediate

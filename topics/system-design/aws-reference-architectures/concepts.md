@@ -76,12 +76,13 @@ analytics on clicks is a nice-to-have.
 
 **Architecture (serverless).**
 
-```
-                         ┌───────────── CloudFront (edge cache 301s) ─────────────┐
- Client ── GET /abc123 ──▶  cache hit? ── yes ──▶ 301 to long URL (never hits origin)
-                         └── miss ──▶ API Gateway ──▶ Lambda (lookup) ──▶ DynamoDB
- Client ── POST /shorten ─▶ API Gateway ──▶ Lambda (create) ──▶ DynamoDB (PutItem, condition)
-                                                             └──▶ (async) Kinesis/Firehose ─▶ S3 (click logs) ─▶ Athena
+```mermaid
+flowchart LR
+    Client -->|GET /abc123| CF["CloudFront (edge cache 301s)"]
+    CF -->|cache hit? yes| Redirect["301 to long URL (never hits origin)"]
+    CF -->|miss| APIGW1["API Gateway"] --> LambdaLookup["Lambda (lookup)"] --> DDB1[DynamoDB]
+    Client -->|POST /shorten| APIGW2["API Gateway"] --> LambdaCreate["Lambda (create)"] --> DDB2["DynamoDB (PutItem, condition)"]
+    LambdaCreate -->|async| KF["Kinesis/Firehose"] --> S3Logs["S3 (click logs)"] --> Athena
 ```
 
 **How the pieces work / choices:**
@@ -115,13 +116,14 @@ your app servers.
 
 **Architecture (event-driven, serverless).**
 
-```
-Client ──(1) request presigned URL──▶ API Gateway ─▶ Lambda ─▶ returns S3 presigned PUT
-Client ──(2) PUT bytes directly──────▶ S3 (bucket, SSE-KMS)         (bypasses app entirely)
-S3 ──(3) s3:ObjectCreated event──────▶ EventBridge / SQS
-   ├─ small images ─▶ Lambda (Sharp/Pillow) ─▶ thumbnails ─▶ S3 ─▶ metadata to DynamoDB
-   └─ videos ───────▶ MediaConvert job ─▶ HLS/DASH renditions ─▶ S3 ─▶ metadata to DynamoDB
-CloudFront (OAC) ── serves originals + derivatives globally from S3
+```mermaid
+flowchart LR
+    Client -->|"(1) request presigned URL"| APIGW["API Gateway"] --> Lambda --> PUTurl["returns S3 presigned PUT"]
+    Client -->|"(2) PUT bytes directly (bypasses app entirely)"| S3["S3 (bucket, SSE-KMS)"]
+    S3 -->|"(3) s3:ObjectCreated event"| EB["EventBridge / SQS"]
+    EB -->|small images| LambdaImg["Lambda (Sharp/Pillow)"] --> Thumbs[thumbnails] --> S3b[S3] --> DDB1[metadata to DynamoDB]
+    EB -->|videos| MC["MediaConvert job"] --> Renditions["HLS/DASH renditions"] --> S3c[S3] --> DDB2[metadata to DynamoDB]
+    CF["CloudFront (OAC)"] -->|serves originals + derivatives globally from S3| S3
 ```
 
 **How it works / key choices:**
@@ -161,12 +163,13 @@ and egress cost.
 
 **Architecture.**
 
-```
-Ingest/mezzanine ─▶ S3 (source) ─▶ MediaConvert ─▶ HLS+DASH renditions (240p…4K) ─▶ S3
-Playback: Player ─▶ CloudFront (huge cache) ─▶ S3 origin (OAC)   [+ signed URLs/cookies]
-Live path: Encoder ─▶ MediaLive ─▶ MediaPackage ─▶ CloudFront
-Control plane: API Gateway/AppSync + Lambda + DynamoDB (catalog, watch history, entitlements)
-Recommendations/analytics: Kinesis ─▶ S3 ─▶ EMR/Athena/Redshift; Personalize for recs
+```mermaid
+flowchart LR
+    Ingest["Ingest/mezzanine"] --> S3src["S3 (source)"] --> MC[MediaConvert] --> Rend["HLS+DASH renditions (240p…4K)"] --> S3out[S3]
+    Player --> CF["CloudFront (huge cache)"] --> S3origin["S3 origin (OAC) [+ signed URLs/cookies]"]
+    Encoder --> ML[MediaLive] --> MP[MediaPackage] --> CF2[CloudFront]
+    CP["Control plane: API Gateway/AppSync + Lambda + DynamoDB (catalog, watch history, entitlements)"]
+    Kinesis --> S3an[S3] --> Analytics["EMR/Athena/Redshift; Personalize for recs"]
 ```
 
 **How it works:**
@@ -203,15 +206,15 @@ users; scale to millions of connections; ordered messages within a conversation.
 
 **Architecture (WebSocket, serverless).**
 
-```
-Client ⇄ API Gateway WebSocket API  ($connect/$disconnect/$default routes)
-                    │ connectionId
-                    ▼
-                 Lambda ── store connectionId ─▶ DynamoDB (connections table, TTL)
- Send msg: Lambda ─▶ DynamoDB (message store, PK=convId, SK=timestamp) ─▶ look up recipients'
-           connectionIds ─▶ ApiGatewayManagementApi.postToConnection() to push
- Offline / mobile push: ─▶ SNS / Amazon Pinpoint ─▶ APNs/FCM
- Fan-out to many rooms: ─▶ SNS or Kinesis
+```mermaid
+flowchart TD
+    Client <-->|WebSocket| WS["API Gateway WebSocket API ($connect/$disconnect/$default routes)"]
+    WS -->|connectionId| Lambda
+    Lambda -->|store connectionId| DDBconn["DynamoDB (connections table, TTL)"]
+    LambdaSend["Send msg: Lambda"] --> DDBmsg["DynamoDB (message store, PK=convId, SK=timestamp)"]
+    DDBmsg -->|look up recipients' connectionIds| Push["ApiGatewayManagementApi.postToConnection() to push"]
+    Offline["Offline / mobile push"] --> SNS["SNS / Amazon Pinpoint"] --> APNs["APNs/FCM"]
+    Fanout["Fan-out to many rooms"] --> SNSK["SNS or Kinesis"]
 ```
 
 **How it works:**
@@ -249,14 +252,16 @@ flash sales; audit trail.
 
 **Architecture (microservices, event-driven).**
 
-```
-Client ─▶ CloudFront ─▶ ALB ─▶ ECS/EKS microservices (catalog, cart, order, payment, inventory)
-Catalog: DynamoDB (+ OpenSearch for search) ; Cart: DynamoDB/ElastiCache
-Checkout ─▶ Step Functions (SAGA orchestration):
-     reserve inventory ─▶ charge payment ─▶ create order ─▶ notify
-     (any step fails → run compensating actions: release inventory, refund)
-Async events ─▶ EventBridge (order.placed, payment.failed) ─▶ SQS ─▶ fulfillment workers
-Order/ledger: Aurora (relational, ACID) or DynamoDB (transactions); analytics via Kinesis→S3
+```mermaid
+flowchart LR
+    Client --> CF[CloudFront] --> ALB --> Micro["ECS/EKS microservices (catalog, cart, order, payment, inventory)"]
+    Catalog["Catalog: DynamoDB (+ OpenSearch for search)"]
+    Cart["Cart: DynamoDB/ElastiCache"]
+    Checkout --> SF["Step Functions (SAGA orchestration)"]
+    SF --> Reserve["reserve inventory"] --> Charge["charge payment"] --> CreateOrder["create order"] --> Notify[notify]
+    SF -.->|"any step fails → run compensating actions: release inventory, refund"| Compensate["compensating actions"]
+    AsyncEvents["Async events"] --> EB["EventBridge (order.placed, payment.failed)"] --> SQS --> Fulfill["fulfillment workers"]
+    Ledger["Order/ledger: Aurora (relational, ACID) or DynamoDB (transactions)"] --> Kinesis --> S3["analytics via Kinesis→S3"]
 ```
 
 **How it works:**
@@ -298,12 +303,13 @@ of followers (celebrities); feed reads dominate; low-latency timeline load.
 
 **Architecture (hybrid fan-out).**
 
-```
-Post ─▶ API ─▶ DynamoDB (posts table) ─▶ Stream/EventBridge ─▶ fan-out workers
-  fan-out-on-write: push postId into each follower's timeline (DynamoDB list) via SQS/Kinesis
-  fan-out-on-read (celebrities): don't push; followers pull celeb posts at read time and merge
-Timeline read ─▶ ElastiCache (Redis) hot timelines ─▶ DynamoDB fallback
-Media ─▶ S3 + CloudFront
+```mermaid
+flowchart LR
+    Post --> API --> DDB["DynamoDB (posts table)"] --> Stream["Stream/EventBridge"] --> Workers["fan-out workers"]
+    Workers --> OnWrite["fan-out-on-write: push postId into each follower's timeline (DynamoDB list) via SQS/Kinesis"]
+    Workers --> OnRead["fan-out-on-read (celebrities): don't push; followers pull celeb posts at read time and merge"]
+    TimelineRead["Timeline read"] --> EC["ElastiCache (Redis) hot timelines"] --> DDBfallback["DynamoDB fallback"]
+    Media --> S3CF["S3 + CloudFront"]
 ```
 
 **How it works:**
@@ -337,13 +343,14 @@ dashboards and batch/ad-hoc analytics; durable raw storage; cost-efficient at TB
 
 **Architecture (Lambda/streaming + lake).**
 
-```
-Producers ─▶ Kinesis Data Streams (or MSK) ──▶ real-time: Lambda / Managed Flink ─▶ dashboards
-                                          └──▶ Firehose ─▶ S3 (raw, partitioned, Parquet)
-                                                            │
-                                          Glue Catalog ─────┤
-                                                            ├─▶ Athena (serverless SQL, ad-hoc)
-                                                            └─▶ Redshift (Spectrum) / EMR (batch)
+```mermaid
+flowchart LR
+    Producers --> KDS["Kinesis Data Streams (or MSK)"]
+    KDS -->|real-time| Flink["Lambda / Managed Flink"] --> Dashboards[dashboards]
+    KDS --> Firehose --> S3["S3 (raw, partitioned, Parquet)"]
+    Glue["Glue Catalog"] --> S3
+    S3 --> Athena["Athena (serverless SQL, ad-hoc)"]
+    S3 --> Redshift["Redshift (Spectrum) / EMR (batch)"]
 ```
 
 **How it works:**

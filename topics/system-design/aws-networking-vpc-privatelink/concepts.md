@@ -41,13 +41,25 @@ all). This limits blast radius: even if an app host is compromised it cannot be
 reached directly from the internet, and an isolated DB subnet can't exfiltrate to the
 internet.
 
-```
-VPC 10.0.0.0/16  (Region us-east-1, spans AZ-a / AZ-b / AZ-c)
-  AZ-a                         AZ-b
-  ├─ public   10.0.0.0/24  →IGW ├─ public   10.0.1.0/24  →IGW    (ALB / NAT GW)
-  ├─ private  10.0.10.0/24 →NAT ├─ private  10.0.11.0/24 →NAT    (app tier)
-  └─ isolated 10.0.20.0/24 (no  └─ isolated 10.0.21.0/24 (no      (RDS, no internet)
-              0.0.0.0/0)                    0.0.0.0/0)
+```mermaid
+flowchart TD
+  VPC["VPC 10.0.0.0/16 (Region us-east-1, spans AZ-a / AZ-b / AZ-c)"]
+  VPC --> AZa
+  VPC --> AZb
+  subgraph AZa["AZ-a"]
+    A1["public 10.0.0.0/24 (ALB / NAT GW)"]
+    A2["private 10.0.10.0/24 (app tier)"]
+    A3["isolated 10.0.20.0/24 no 0.0.0.0/0 (RDS, no internet)"]
+  end
+  subgraph AZb["AZ-b"]
+    B1["public 10.0.1.0/24 (ALB / NAT GW)"]
+    B2["private 10.0.11.0/24 (app tier)"]
+    B3["isolated 10.0.21.0/24 no 0.0.0.0/0 (RDS, no internet)"]
+  end
+  A1 -->|"→IGW"| IGW["IGW"]
+  B1 -->|"→IGW"| IGW
+  A2 -->|"→NAT"| NAT["NAT"]
+  B2 -->|"→NAT"| NAT
 ```
 
 **Reserved addresses:** AWS reserves the **first four and the last** IP in every
@@ -194,11 +206,19 @@ provider fronts their service with a **Network Load Balancer (NLB)** (or GWLB) a
 publishes a **VPC endpoint service**; consumers create an **interface endpoint** that
 appears as an ENI in *their* VPC.
 
-```
-Consumer VPC (10.20.0.0/16)          Provider VPC (10.99.0.0/16)
-  app → interface endpoint ENI  ══PrivateLink══►  NLB → service fleet
-        (private IP 10.20.x.x)   (AWS backbone,     (target group)
-                                  unidirectional)
+```mermaid
+flowchart LR
+  subgraph Consumer["Consumer VPC (10.20.0.0/16)"]
+    app["app"]
+    ENI["interface endpoint ENI (private IP 10.20.x.x)"]
+  end
+  subgraph Provider["Provider VPC (10.99.0.0/16)"]
+    NLB["NLB"]
+    fleet["service fleet (target group)"]
+  end
+  app --> ENI
+  ENI -->|"PrivateLink (AWS backbone, unidirectional)"| NLB
+  NLB --> fleet
 ```
 
 Key properties and why interviewers love it:

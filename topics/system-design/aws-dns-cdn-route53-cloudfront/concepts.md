@@ -12,15 +12,19 @@ you pick, in what combination, and what you give up**.
 
 Mental model of the three layers:
 
-```
-                 ┌───────────── the AWS edge ──────────────┐
-  User ──DNS──►  Route 53         (control: "which IP?")     resolves names → IPs
-  User ──HTTP─►  CloudFront       (data plane: cacheable web) caches + edge compute
-  User ──TCP/UDP► Global Accel.   (data plane: any TCP/UDP)  anycast IP → backbone
-                 └──────────────────────────────────────────┘
-                                    │
-                          ┌─────────┴──────────┐
-                       Region A              Region B   (ALB / NLB / EC2 / S3 / API GW)
+```mermaid
+flowchart TD
+    User(["User"])
+    subgraph edge["the AWS edge"]
+        R53["Route 53 (control: which IP?)<br/>resolves names → IPs"]
+        CF["CloudFront (data plane: cacheable web)<br/>caches + edge compute"]
+        GA["Global Accel. (data plane: any TCP/UDP)<br/>anycast IP → backbone"]
+    end
+    User -->|DNS| R53
+    User -->|HTTP| CF
+    User -->|TCP/UDP| GA
+    edge --> RegionA["Region A"]
+    edge --> RegionB["Region B (ALB / NLB / EC2 / S3 / API GW)"]
 ```
 
 - **Route 53 is control plane for names**: it hands the client an IP (or a set of
@@ -221,10 +225,13 @@ edge-function associations, and TTLs. Classic split: `/*` static → long TTL ca
 
 **Architecture:**
 
-```
-Viewer ─► CloudFront PoP ─(miss)─► Regional Edge Cache ─► [Origin Shield] ─► Origin
-            │ cache hit                                                        (S3/ALB)
-            └────► fast response                        many PoPs collapse to few origin fetches
+```mermaid
+flowchart LR
+    Viewer["Viewer"] --> PoP["CloudFront PoP"]
+    PoP -->|miss| REC["Regional Edge Cache"]
+    REC --> Shield["[Origin Shield]"]
+    Shield --> Origin["Origin (S3/ALB)<br/>many PoPs collapse to few origin fetches"]
+    PoP -->|cache hit| Fast["fast response"]
 ```
 
 **Performance facts.** CloudFront supports **HTTP/2 and HTTP/3 (QUIC)**, TLS 1.3, and
@@ -461,17 +468,14 @@ The edge is your first line of defense because it absorbs attacks far from your 
 
 A canonical "design a global website/app" answer, layering the three services:
 
-```
-                     Route 53 (Alias, latency or geolocation, health-checked)
-                                     │
-             ┌───────────────────────┴───────────────────────┐
-             ▼                                                 ▼
-        CloudFront distribution                          (for non-HTTP tier)
-   (WAF + Shield + OAC + edge functions)              Global Accelerator (static IPs)
-       │ static /*        │ /api/*                              │
-       ▼                  ▼                                     ▼
-   S3 (private, OAC)   ALB → app (Region A / B)           NLB → game/VoIP fleet
-   long TTL, versioned  short/no TTL, origin group failover   ~30s data-plane failover
+```mermaid
+flowchart TD
+    R53["Route 53 (Alias, latency or geolocation, health-checked)"]
+    R53 --> CF["CloudFront distribution<br/>(WAF + Shield + OAC + edge functions)"]
+    R53 --> GA["Global Accelerator (static IPs)<br/>(for non-HTTP tier)"]
+    CF -->|"static /*"| S3["S3 (private, OAC)<br/>long TTL, versioned"]
+    CF -->|"/api/*"| ALB["ALB → app (Region A / B)<br/>short/no TTL, origin group failover"]
+    GA --> NLB["NLB → game/VoIP fleet<br/>~30s data-plane failover"]
 ```
 
 **Design reasoning to verbalize:**

@@ -292,14 +292,21 @@ quotas becoming a shared bottleneck.
   logging, security) you deploy before workloads.
 
 **Typical structure:**
-```
-Management account (billing, Organizations root) -- keep it empty of workloads
- ├── Security OU: Log Archive acct (central CloudTrail/Config logs), Audit acct (GuardDuty/SecHub)
- ├── Infrastructure OU: shared networking (Transit Gateway), shared services
- ├── Workloads OU
- │     ├── Prod OU  -> prod accounts (per app/team)
- │     └── Non-prod OU -> dev/test/staging accounts
- └── Sandbox OU: experimentation, tight SCP budget guardrails
+```mermaid
+flowchart TD
+    MGMT["Management account (billing, Organizations root) -- keep it empty of workloads"]
+    SEC["Security OU: Log Archive acct (central CloudTrail/Config logs), Audit acct (GuardDuty/SecHub)"]
+    INFRA["Infrastructure OU: shared networking (Transit Gateway), shared services"]
+    WORK["Workloads OU"]
+    PROD["Prod OU -> prod accounts (per app/team)"]
+    NONPROD["Non-prod OU -> dev/test/staging accounts"]
+    SANDBOX["Sandbox OU: experimentation, tight SCP budget guardrails"]
+    MGMT --> SEC
+    MGMT --> INFRA
+    MGMT --> WORK
+    MGMT --> SANDBOX
+    WORK --> PROD
+    WORK --> NONPROD
 ```
 
 **Trade-offs.** More accounts = better isolation and cleaner blast radius/cost, but more

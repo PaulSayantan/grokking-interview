@@ -156,16 +156,14 @@ search quality far more than recall.
 
 The modern search stack is a **funnel** (multi-stage retrieval + ranking):
 
-```
-Query
-  │  (1) Retrieval / candidate generation  — cheap, high recall, ~millions→~1000s
-  │       BM25 postings intersection, ANN vector recall, filters
-  ▼
-  │  (2) First-pass ranking (L1)           — cheap features, ~1000s→~100s
-  ▼
-  │  (3) Re-ranking (L2, learning-to-rank) — expensive features/model, ~100s→~10s
-  ▼
-Top-k results
+```mermaid
+flowchart TD
+    Q["Query"]
+    R["(1) Retrieval / candidate generation — cheap, high recall, ~millions→~1000s; BM25 postings intersection, ANN vector recall, filters"]
+    L1["(2) First-pass ranking (L1) — cheap features, ~1000s→~100s"]
+    L2["(3) Re-ranking (L2, learning-to-rank) — expensive features/model, ~100s→~10s"]
+    T["Top-k results"]
+    Q --> R --> L1 --> L2 --> T
 ```
 
 **BM25** is the workhorse lexical scorer (Lucene default). It improves on TF-IDF
@@ -205,16 +203,32 @@ Intuition: to return completions for a prefix, store all candidate strings in a
 **trie** (prefix tree) so that walking down the prefix path lands you at the
 subtree of all strings sharing that prefix.
 
-```
-        (root)
-       /   |   \
-      c    t    ...
-      |    |
-      a    e
-     /|    |
-    r t    a
-    | |    |
-   [car][cat][tea]      each terminal node stores frequency/weight
+```mermaid
+flowchart TD
+    root["(root)"]
+    c["c"]
+    t["t"]
+    dots["..."]
+    a1["a"]
+    e["e"]
+    r["r"]
+    t2["t"]
+    a2["a"]
+    car["[car]"]
+    cat["[cat]"]
+    tea["[tea]"]
+    root --> c
+    root --> t
+    root --> dots
+    c --> a1
+    t --> e
+    a1 --> r
+    a1 --> t2
+    e --> a2
+    r --> car
+    t2 --> cat
+    a2 --> tea
+    note["each terminal node stores frequency/weight"]
 ```
 
 Naive trie query = walk to prefix node (O(len(prefix))), then **DFS the subtree**
@@ -305,19 +319,24 @@ you serve from RAM and cache aggressively.
 
 Reference serving architecture:
 
-```
-          ┌───────── CDN / edge (cache popular prefixes) ─────────┐
-Client ──> │  debounce + client cache                            │
-           ▼
-        API Gateway / LB
-           ▼
-     Suggestion Service (stateless)
-        │        │
-   L1 cache   L2 distributed cache (Redis: prefix -> topk JSON)
-        │        │  (miss)
-        ▼        ▼
-     Trie shards (in-memory, sharded by prefix)  <── periodic rebuild
-                                                     from Data Aggregation
+```mermaid
+flowchart TD
+    Client["Client (debounce + client cache)"]
+    CDN["CDN / edge (cache popular prefixes)"]
+    GW["API Gateway / LB"]
+    SS["Suggestion Service (stateless)"]
+    L1["L1 cache"]
+    L2["L2 distributed cache (Redis: prefix -> topk JSON)"]
+    Trie["Trie shards (in-memory, sharded by prefix)"]
+    DA["Data Aggregation"]
+    Client --> CDN
+    CDN --> GW
+    GW --> SS
+    SS --> L1
+    SS --> L2
+    L1 -->|miss| Trie
+    L2 -->|miss| Trie
+    DA -->|periodic rebuild| Trie
 ```
 
 Client-side techniques (huge leverage, cost nothing server-side):
@@ -371,13 +390,19 @@ it to the serving tier. How fast this loop runs determines **freshness**.
 
 Autocomplete data-aggregation pipeline:
 
-```
-Query logs / clickstream
-     ▼  (stream: Kafka/Kinesis)
-Aggregator (count, time-decay, filter spam/PII)
-     ▼
-Weighted query set  ──batch──>  Trie/FST builder  ──publish──> Serving shards
-                     ──stream──> incremental top-k updates
+```mermaid
+flowchart TD
+    QL["Query logs / clickstream"]
+    AG["Aggregator (count, time-decay, filter spam/PII)"]
+    WQ["Weighted query set"]
+    TB["Trie/FST builder"]
+    SS["Serving shards"]
+    INC["incremental top-k updates"]
+    QL -->|"stream: Kafka/Kinesis"| AG
+    AG --> WQ
+    WQ -->|batch| TB
+    TB -->|publish| SS
+    WQ -->|stream| INC
 ```
 
 Two update paradigms:
@@ -475,10 +500,19 @@ This is the backbone of modern RAG, recommendations, and "search that understand
 intent."
 
 How it works:
-```
-Query text ──> embedding model ──> query vector q (e.g. 768-dim)
-Corpus docs ──> embedding model ──> doc vectors (indexed in ANN structure)
-Retrieval: find vectors nearest to q by cosine/dot product (top-k)
+```mermaid
+flowchart LR
+    QT["Query text"]
+    EM1["embedding model"]
+    QV["query vector q (e.g. 768-dim)"]
+    CD["Corpus docs"]
+    EM2["embedding model"]
+    DV["doc vectors (indexed in ANN structure)"]
+    RET["Retrieval: find vectors nearest to q by cosine/dot product (top-k)"]
+    QT --> EM1 --> QV
+    CD --> EM2 --> DV
+    QV --> RET
+    DV --> RET
 ```
 
 **Approximate Nearest Neighbor (ANN)** — exact NN over billions of vectors is too

@@ -238,17 +238,11 @@ not gold-plate a nightly batch system with a zero-downtime parallel run.
 Named after the strangler fig vine that grows around a tree until it replaces it. Instead
 of a risky big-bang rewrite, you **incrementally** carve functionality out of the monolith:
 
-```
-        ┌─────────────────────────────────────────┐
-Clients │        Facade / Proxy (routing)          │
-───────▶│   (API Gateway / ALB / reverse proxy)    │
-        └───────┬─────────────────────────┬────────┘
-                │ legacy paths            │ migrated paths
-                ▼                          ▼
-        ┌───────────────┐         ┌──────────────────┐
-        │   Monolith    │         │  New microservice │
-        │  (shrinking)  │         │  (Lambda/ECS/EKS) │
-        └───────────────┘         └──────────────────┘
+```mermaid
+flowchart TD
+    Clients["Clients"] --> Facade["Facade / Proxy (routing)<br/>(API Gateway / ALB / reverse proxy)"]
+    Facade -->|legacy paths| Monolith["Monolith (shrinking)"]
+    Facade -->|migrated paths| Microservice["New microservice (Lambda/ECS/EKS)"]
 ```
 
 1. Put a **facade/proxy** in front of the monolith (API Gateway, ALB path-based routing,

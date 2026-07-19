@@ -127,14 +127,25 @@ Segments are typically **2-10 seconds**.
 graph** of tasks (inspired by Facebook's streaming engine; orchestrated by
 Temporal/Airflow/custom):
 
-```
-                    +--> encode 240p --+
-                    +--> encode 480p --+
- upload --> split   +--> encode 720p --+--> generate manifests --> mark ready
- (GOP chunks)       +--> encode 1080p -+        (HLS/DASH)          --> publish
-                    +--> encode 4K ----+
-                    +--> extract audio +--> thumbnails
-                    +--> subtitles/ASR +--> content moderation
+```mermaid
+flowchart LR
+    upload["upload"] --> split["split (GOP chunks)"]
+    split --> e240["encode 240p"]
+    split --> e480["encode 480p"]
+    split --> e720["encode 720p"]
+    split --> e1080["encode 1080p"]
+    split --> e4k["encode 4K"]
+    split --> audio["extract audio"]
+    split --> subs["subtitles/ASR"]
+    e240 --> manifests["generate manifests (HLS/DASH)"]
+    e480 --> manifests
+    e720 --> manifests
+    e1080 --> manifests
+    e4k --> manifests
+    manifests --> ready["mark ready"]
+    ready --> publish["publish"]
+    audio --> thumbnails["thumbnails"]
+    subs --> moderation["content moderation"]
 ```
 
 - **Preprocessor:** GOP split, DAG generation.
@@ -215,10 +226,13 @@ caches it. Because content is immutable and content-addressed by
 `videoId/rendition/segment`, cache invalidation is trivial (new content = new
 URL).
 
-```
- viewer --HTTP GET segment--> [CDN edge PoP] --miss--> [regional shield] --miss--> [origin/object store]
-                                   |hit                    |hit
-                                   +--- serves from edge cache (majority) ---+
+```mermaid
+flowchart LR
+    viewer["viewer"] -->|"HTTP GET segment"| edge["CDN edge PoP"]
+    edge -->|miss| shield["regional shield"]
+    shield -->|miss| origin["origin/object store"]
+    edge -->|"hit (serves from edge cache, majority)"| viewer
+    shield -->|hit| edge
 ```
 
 **Push vs pull CDN:**
@@ -267,11 +281,14 @@ so playback never stalls — start low, ramp up when bandwidth allows.
    boundaries** based on measured throughput and buffer level.
 4. It prefetches ahead to build a buffer against jitter.
 
-```
- master.m3u8
-   +-- 240p/index.m3u8  -> seg0.ts, seg1.ts, ...
-   +-- 720p/index.m3u8  -> seg0.ts, seg1.ts, ...
-   +-- 1080p/index.m3u8 -> seg0.ts, seg1.ts, ...
+```mermaid
+flowchart LR
+    master["master.m3u8"] --> m240["240p/index.m3u8"]
+    master --> m720["720p/index.m3u8"]
+    master --> m1080["1080p/index.m3u8"]
+    m240 --> s240["seg0.ts, seg1.ts, ..."]
+    m720 --> s720["seg0.ts, seg1.ts, ..."]
+    m1080 --> s1080["seg0.ts, seg1.ts, ..."]
 ```
 
 **HLS (Apple, .m3u8, TS or fMP4/CMAF)** vs **MPEG-DASH (open standard, .mpd, fMP4):**
@@ -353,10 +370,13 @@ interviewer wants a *high-level* pipeline, not an ML deep-dive.
    updates via a streaming layer consuming a **CDC/event stream** of watch
    events). Feature store serves features at low latency.
 
-```
- events (Kafka/CDC) --> feature store
-                                |
- user --> [candidate gen: ANN over embeddings] --> [ranker] --> cached feed
+```mermaid
+flowchart LR
+    events["events (Kafka/CDC)"] --> fs["feature store"]
+    fs --> candgen["candidate gen: ANN over embeddings"]
+    user["user"] --> candgen
+    candgen --> ranker["ranker"]
+    ranker --> feed["cached feed"]
 ```
 
 **Trade-offs:**

@@ -15,24 +15,27 @@ alternative*. This document is organized around that discipline.
 
 A mental model to carry throughout:
 
-```
-        Clients
-          |
-      [ DNS / GSLB ]        <- geo + coarse LB, TTL-bound, layer "0"
-          |
-      [ Anycast edge / CDN ]<- terminate TLS close to user, cache, DDoS scrub
-          |
-      [ L4 LB ]             <- fast, connection-level (NLB, IPVS, Maglev)
-          |
-      [ L7 LB / reverse proxy ] <- routing, retries, headers (ALB, Envoy, NGINX)
-          |
-   +------+------+------+
-   | app | app  | app   |  <- stateless horizontal fleet (auto-scaled)
-   +------+------+------+
-          |
-   [ cache ] [ queue ]      <- absorb read load / smooth write spikes
-          |
-   [ data tier: primary + replicas / shards ]  <- the hard part to scale
+```mermaid
+flowchart TD
+    Clients["Clients"]
+    DNS["DNS / GSLB — geo + coarse LB, TTL-bound, layer 0"]
+    CDN["Anycast edge / CDN — terminate TLS close to user, cache, DDoS scrub"]
+    L4["L4 LB — fast, connection-level (NLB, IPVS, Maglev)"]
+    L7["L7 LB / reverse proxy — routing, retries, headers (ALB, Envoy, NGINX)"]
+    subgraph AppTier["stateless horizontal fleet (auto-scaled)"]
+        App1["app"]
+        App2["app"]
+        App3["app"]
+    end
+    subgraph Absorb["absorb read load / smooth write spikes"]
+        Cache["cache"]
+        Queue["queue"]
+    end
+    Data["data tier: primary + replicas / shards — the hard part to scale"]
+    Clients --> DNS --> CDN --> L4 --> L7
+    L7 --> AppTier
+    AppTier --> Absorb
+    Absorb --> Data
 ```
 
 The app tier is the *easy* part to scale (stateless boxes behind a balancer). The
@@ -339,9 +342,14 @@ them to the internet (servers see the proxy, not the real client).
   *to* the proxy, which fetches on their behalf — used for egress filtering, caching,
   anonymity, access control, bypassing geo-restrictions.
 
-```
-Forward proxy:   [client] -> (proxy) -> internet servers      (hides the client)
-Reverse proxy:   internet clients -> (proxy) -> [servers]      (hides the servers)
+```mermaid
+flowchart LR
+    subgraph Forward["Forward proxy (hides the client)"]
+        FClient["client"] --> FProxy["proxy"] --> FServers["internet servers"]
+    end
+    subgraph Reverse["Reverse proxy (hides the servers)"]
+        RClients["internet clients"] --> RProxy["proxy"] --> RServers["servers"]
+    end
 ```
 
 **Trade-offs / role.** A reverse proxy is a scalability workhorse: it centralizes TLS,
@@ -585,13 +593,17 @@ how AWS builds many of its own services.
   and manages cell placement — deliberately separated from the data plane so a control-
   plane problem doesn't take down serving.
 
-```
-                    [ cell router (thin, ultra-reliable) ]
-                     /            |             \
-              [ Cell 1 ]     [ Cell 2 ]  ...  [ Cell K ]
-              app + data     app + data       app + data
-              (10% of users) (10% of users)   (10% of users)
-   bad deploy / poison pill / hot tenant in Cell 2 -> only ~10% impacted
+```mermaid
+flowchart TD
+    Router["cell router (thin, ultra-reliable)"]
+    Cell1["Cell 1<br/>app + data<br/>(10% of users)"]
+    Cell2["Cell 2<br/>app + data<br/>(10% of users)"]
+    CellK["Cell K<br/>app + data<br/>(10% of users)"]
+    Router --> Cell1
+    Router --> Cell2
+    Router -.->|"..."| CellK
+    Note["bad deploy / poison pill / hot tenant in Cell 2 -> only ~10% impacted"]
+    Cell2 -.-> Note
 ```
 
 **Blast radius & shuffle sharding.** With K cells, a cell-level failure caps impact at

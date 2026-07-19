@@ -171,11 +171,10 @@ API/Interface → (Data Flow for pipelines) → High-Level Design → Deep Dives
 30-45 min : deep dives + scaling + trade-offs + follow-ups
 ```
 
-```
-   [Requirements] -> [Estimation] -> [Entities/API] -> [High-level design]
-                                                              |
-                                                              v
-                                            [Deep dives + scale + trade-offs]
+```mermaid
+flowchart LR
+    A["Requirements"] --> B["Estimation"] --> C["Entities/API"] --> D["High-level design"]
+    D --> E["Deep dives + scale + trade-offs"]
 ```
 
 **Trade-offs / how it's graded.** Seniority shows in the *back half*. Mid-level candidates
