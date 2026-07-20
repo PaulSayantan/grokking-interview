@@ -1,0 +1,937 @@
+topic: "Image Internals & Storage Drivers"
+domain: docker
+topic_slug: image-internals-storage-drivers
+version: 1
+questions:
+  - id: image-internals-storage-drivers-001
+    difficulty: beginner
+    tags: [image, structure, manifest, config, layers]
+    question: |
+      At the storage level, a Docker/OCI image is made up of which three kinds of
+      objects?
+    options:
+      - "A manifest, a config JSON, and one or more layer blobs"
+      - "A single filesystem blob, a Dockerfile, and a tag"
+      - "A running process, a network namespace, and a cgroup"
+      - "A base image, a bind mount, and a volume"
+    answer: 0
+    explanation: |
+      An image is not one file. It is a manifest (table of contents referencing the
+      other objects by digest), a config JSON (runtime metadata plus rootfs.diff_ids
+      and history), and one or more layer blobs (tarballs of filesystem changes).
+    ref: "concepts.md#an-image--ordered-layers--config--manifest"
+
+  - id: image-internals-storage-drivers-002
+    difficulty: beginner
+    tags: [layers, diff, changeset]
+    question: |
+      What does a single image layer actually contain?
+    options:
+      - "A full snapshot of the entire root filesystem at that point"
+      - "A tarball of the filesystem *changes* that step introduced (files added, modified, or deleted-via-whiteout)"
+      - "Only the environment variables set by that instruction"
+      - "A block-level binary delta against the previous layer"
+    answer: 1
+    explanation: |
+      Layers are changesets: a (usually gzipped) tar of just the files added/modified,
+      plus whiteout markers for deletions — not a full snapshot and not a block-level
+      delta. The final root fs is the layers applied in order onto an empty directory.
+    ref: "concepts.md#layers-as-filesystem-diffs-changesets-not-snapshots"
+
+  - id: image-internals-storage-drivers-003
+    difficulty: beginner
+    tags: [content-addressable, digest, sha256]
+    question: |
+      How are the manifest, config, and layer blobs of an image identified and stored?
+    options:
+      - "By the SHA-256 digest of their own content (content-addressable)"
+      - "By a sequential integer ID assigned at build time"
+      - "By their filename inside the image tar"
+      - "By the tag the user assigned, e.g. myapp:latest"
+    answer: 0
+    explanation: |
+      Docker/OCI uses a content-addressable store: every object is keyed by the
+      sha256 digest of its bytes. This gives immutability, verifiability, and
+      deduplication. Tags are separate mutable pointers.
+    ref: "concepts.md#content-addressable-storage-and-digests"
+
+  - id: image-internals-storage-drivers-004
+    difficulty: beginner
+    tags: [storage-driver, overlay2, default]
+    question: |
+      What is the default storage driver on modern Docker installations running on a
+      current Linux kernel?
+    options:
+      - "devicemapper"
+      - "aufs"
+      - "vfs"
+      - "overlay2"
+    answer: 3
+    explanation: |
+      overlay2 is the default and recommended driver on Linux kernel 4.0+ (or RHEL
+      3.10.0-514+). devicemapper and aufs are legacy; vfs is a no-CoW fallback.
+    ref: "concepts.md#overlay2-the-default-storage-driver"
+
+  - id: image-internals-storage-drivers-005
+    difficulty: beginner
+    tags: [union-filesystem, layers]
+    question: |
+      What is the role of a union (overlay) filesystem in a running container?
+    options:
+      - "It encrypts the image layers at rest"
+      - "It compresses the layers to save network bandwidth"
+      - "It assigns the container its network namespace"
+      - "It presents multiple stacked layer directories as one merged root filesystem"
+    answer: 3
+    explanation: |
+      A union filesystem stacks the read-only image layers (lower) beneath the
+      writable container layer (upper) and exposes them as a single merged directory
+      that the container process uses as its root.
+    ref: "concepts.md#the-union-filesystem-stacking-layers-into-one-view"
+
+  - id: image-internals-storage-drivers-006
+    difficulty: beginner
+    tags: [copy-on-write, reads]
+    question: |
+      When a container process reads a file that exists only in a lower (image) layer,
+      what happens?
+    options:
+      - "The file is copied into the writable layer first, then read"
+      - "It is read directly from the shared read-only layer, with no copy"
+      - "The read fails because lower layers are not readable by containers"
+      - "The whole layer is decompressed into memory"
+    answer: 1
+    explanation: |
+      Reads of unmodified lower-layer files are served directly from the shared
+      read-only layer — no copy, no extra disk. A copy only happens on the first
+      *write* (copy_up).
+    ref: "concepts.md#copy-on-write-and-copy_up"
+
+  - id: image-internals-storage-drivers-007
+    difficulty: intermediate
+    tags: [copy-on-write, copy_up, performance]
+    question: |
+      A container modifies one line of a 2 GB file that came from a lower image layer.
+      What does overlay2 do?
+    options:
+      - "Copies the entire 2 GB file up into the writable layer, then applies the change"
+      - "Copies only the changed 4 KB block into the writable layer"
+      - "Modifies the file in place in the lower layer"
+      - "Rejects the write because lower-layer files are immutable"
+    answer: 0
+    explanation: |
+      overlay2 works at the file level, not the block level. The first write triggers
+      a copy_up of the *entire* file into the upperdir. This is why large-file writes
+      belong on a volume, not the container's writable layer.
+    ref: "concepts.md#copy-on-write-and-copy_up"
+
+  - id: image-internals-storage-drivers-008
+    difficulty: intermediate
+    tags: [overlay2, lowerdir, upperdir, merged, workdir]
+    question: |
+      In overlay2, which directory is the writable layer holding the container's
+      private changes?
+    options:
+      - "lowerdir"
+      - "upperdir"
+      - "merged"
+      - "workdir"
+    answer: 1
+    explanation: |
+      upperdir is the single writable layer. lowerdir holds the read-only image
+      layers, merged is the unified mount the process sees, and workdir is overlayfs's
+      internal scratch directory.
+    ref: "concepts.md#overlay2-the-default-storage-driver"
+
+  - id: image-internals-storage-drivers-009
+    difficulty: intermediate
+    tags: [overlay2, merged]
+    question: |
+      In overlay2 terminology, what does the "merged" directory represent?
+    options:
+      - "The internal working directory overlayfs uses for atomic operations"
+      - "The unified view of all layers — effectively the container's mount point / root fs"
+      - "The compressed archive of all image layers"
+      - "The list of parent layer digests"
+    answer: 1
+    explanation: |
+      merged is the union of lowerdir + upperdir presented as one directory; it is
+      effectively the container's mount point. workdir (not merged) is the internal
+      atomicity scratch space.
+    ref: "concepts.md#overlay2-the-default-storage-driver"
+
+  - id: image-internals-storage-drivers-010
+    difficulty: intermediate
+    tags: [whiteout, deletion, overlay2]
+    question: |
+      A container deletes /etc/app.conf, a file that exists in a read-only image layer.
+      What actually happens on disk?
+    options:
+      - "The file is removed from the image layer"
+      - "The entire image layer is rewritten without that file"
+      - "Docker refuses the delete and returns an error"
+      - "A whiteout marker is created in the writable (upper) layer that hides the lower file"
+    answer: 3
+    explanation: |
+      You can't modify a read-only lower layer. overlay2 records a whiteout in the
+      upperdir that hides the lower file from the merged view. The bytes remain in the
+      lower layer, untouched and still shared.
+    ref: "concepts.md#whiteouts-and-opaque-directories-how-deletions-work"
+
+  - id: image-internals-storage-drivers-011
+    difficulty: intermediate
+    tags: [layers, size, rm, gotcha]
+    question: |
+      A Dockerfile does `RUN curl -o /tmp/big.tar https://...` in one layer and
+      `RUN rm /tmp/big.tar` in the next. Why is the final image still large?
+    options:
+      - "Layers are changesets; the later rm only adds a whiteout — big.tar's bytes still ship in the earlier layer"
+      - "The rm command silently failed"
+      - "Docker caches deleted files in a hidden directory"
+      - "The image must be rebuilt with --no-cache for deletes to take effect"
+    answer: 0
+    explanation: |
+      Each layer is a diff. Deleting a file in a *later* layer just records a whiteout;
+      the file's bytes remain in the earlier layer's blob and ship with the image. Fix
+      by not adding it in an earlier layer (single RUN, or multi-stage build).
+    ref: "concepts.md#layers-as-filesystem-diffs-changesets-not-snapshots"
+
+  - id: image-internals-storage-drivers-012
+    difficulty: intermediate
+    tags: [digest, diff_id, manifest, config]
+    question: |
+      What is the difference between a layer's "digest" (in the manifest) and its
+      "diff_id" (in the config's rootfs)?
+    options:
+      - "digest is the hash of the stored/compressed blob; diff_id is the hash of the uncompressed tar"
+      - "They are always identical — two names for the same hash"
+      - "digest is assigned by the registry; diff_id is assigned by the client at random"
+      - "diff_id is the hash of the compressed blob; digest is the hash of the Dockerfile"
+    answer: 0
+    explanation: |
+      A layer has two hashes: the manifest lists the digest of the stored (usually
+      gzipped) blob, while the config's rootfs.diff_ids lists the hash of the
+      *uncompressed* tar. Same layer, two identifiers for two purposes.
+    ref: "concepts.md#diff_id-vs-digest-uncompressed-content-vs-stored-blob"
+
+  - id: image-internals-storage-drivers-013
+    difficulty: intermediate
+    tags: [image-id, config, digest]
+    question: |
+      The IMAGE ID shown by `docker images` is the SHA-256 digest of which object?
+    options:
+      - "The manifest"
+      - "The image config JSON"
+      - "The largest layer blob"
+      - "The Dockerfile"
+    answer: 1
+    explanation: |
+      The ImageID is the digest of the image *config* JSON (which itself commits to
+      the layers via diff_ids). That's why it differs from the manifest/repo digest
+      (repo@sha256:...) and from any single layer digest.
+    ref: "concepts.md#diff_id-vs-digest-uncompressed-content-vs-stored-blob"
+
+  - id: image-internals-storage-drivers-014
+    difficulty: intermediate
+    tags: [config, metadata, cmd, env, layer]
+    question: |
+      Where are an image's `CMD`, `ENV`, `USER`, and `WorkingDir` stored?
+    options:
+      - "In the image config JSON, not in any layer blob"
+      - "In the topmost layer's tarball"
+      - "In a dedicated 'metadata' layer at the base of the image"
+      - "Only in the Dockerfile, which ships inside the image"
+    answer: 0
+    explanation: |
+      Runtime defaults like Cmd, Env, User, WorkingDir live in the image *config*
+      JSON. Only filesystem-changing instructions (RUN/COPY/ADD) produce layer blobs;
+      metadata instructions are recorded as empty_layer history entries.
+    ref: "concepts.md#the-image-config-runtime-metadata--rootfsdiff_ids"
+
+  - id: image-internals-storage-drivers-015
+    difficulty: intermediate
+    tags: [tag, digest, immutability, pinning]
+    question: |
+      Why is pinning a base image by digest (`FROM debian:12@sha256:...`) more
+      reproducible than pinning by tag (`FROM debian:12`)?
+    options:
+      - "Digests download faster than tags"
+      - "A tag is a mutable pointer that can be repointed at new bytes; a digest always refers to exactly those bytes"
+      - "Tags are not supported by private registries"
+      - "Digest-pinned images skip the build cache"
+    answer: 1
+    explanation: |
+      Tags are mutable labels — someone can re-push debian:12 with different content.
+      A digest is the content hash, so it always resolves to the identical image.
+      Digest pinning is the basis of reproducible, verifiable builds.
+    ref: "concepts.md#content-addressable-storage-and-digests"
+
+  - id: image-internals-storage-drivers-016
+    difficulty: intermediate
+    tags: [manifest, ordering, layers]
+    question: |
+      In an image manifest's `layers` array, what does the ordering represent?
+    options:
+      - "Alphabetical order of layer digests"
+      - "Order by descending layer size"
+      - "The stack order — layers[0] is the base, applied first; the last entry is the top"
+      - "The order the layers were pushed to the registry, which is arbitrary"
+    answer: 2
+    explanation: |
+      The layers array is ordered bottom-to-top: layers[0] is applied first onto an
+      empty directory and each subsequent layer is applied on top, later files
+      overriding earlier ones.
+    ref: "concepts.md#the-manifest-the-images-table-of-contents"
+
+  - id: image-internals-storage-drivers-017
+    difficulty: intermediate
+    tags: [dedup, layer-sharing, disk]
+    question: |
+      You run 50 containers from the same `python:3.12` image. How are the Python
+      image layers stored on disk?
+    options:
+      - "Copied once per container — 50 copies"
+      - "Stored in each container's writable layer"
+      - "Not stored locally; re-fetched from the registry per container"
+      - "Stored once and shared read-only by all 50 containers; each container only adds its own thin writable layer"
+    answer: 3
+    explanation: |
+      Content-addressed read-only layers are stored once and shared across all
+      containers of the image. Each container adds only a thin upperdir. This is why
+      high-density container hosts are disk-efficient.
+    ref: "concepts.md#layer-sharing-dedup-and-why-order-saves-space"
+
+  - id: image-internals-storage-drivers-018
+    difficulty: intermediate
+    tags: [layer-ordering, cache, dedup, dockerfile]
+    question: |
+      Why should frequently-changing content (your app code) go in the *top* layers and
+      rarely-changing content (base + dependencies) in the *lower* layers?
+    options:
+      - "The kernel reads top layers faster"
+      - "Stable lower-layer digests maximize build-cache reuse and cross-image/network dedup; only the small top layer gets a new digest on each rebuild"
+      - "Top layers are compressed more aggressively"
+      - "Docker only allows writes to the top three layers"
+    answer: 1
+    explanation: |
+      Keeping lower layers stable means their digests don't change, so the build cache
+      reuses them and registries/hosts dedup them. Rebuilding only re-creates the small
+      top layer — one new digest to push and store instead of the whole image.
+    ref: "concepts.md#layer-sharing-dedup-and-why-order-saves-space"
+
+  - id: image-internals-storage-drivers-019
+    difficulty: intermediate
+    tags: [multi-arch, image-index, manifest-list]
+    question: |
+      How does a single image tag (e.g. `nginx:1.27`) run on both amd64 and arm64 hosts?
+    options:
+      - "The image contains one universal binary that runs on any CPU"
+      - "The tag points to an image index (manifest list) that references a per-platform manifest; each host resolves the one matching its architecture/os"
+      - "Docker recompiles the image for the host at pull time"
+      - "arm64 hosts always use QEMU emulation of the amd64 image"
+    answer: 1
+    explanation: |
+      A multi-arch tag points at an image index / manifest list. On pull, the daemon
+      picks the platform-specific manifest matching the host. If no matching manifest
+      exists, you fall back to emulation or hit exec format error.
+    ref: "concepts.md#multi-arch-images-the-image-index-manifest-list"
+
+  - id: image-internals-storage-drivers-020
+    difficulty: intermediate
+    tags: [architecture, config, exec-format-error]
+    question: |
+      You pull an image and get "exec format error" when running it. Which config
+      field most likely explains this?
+    options:
+      - "Cmd is empty"
+      - "The config's architecture/os does not match the host (e.g. arm64 image on an amd64 host with no emulation)"
+      - "The image has too many layers"
+      - "The Env block is missing PATH"
+    answer: 1
+    explanation: |
+      The image config records architecture and os. A runtime refuses to run a binary
+      built for a mismatched platform, surfacing as "exec format error" — commonly an
+      arm64 image on amd64 (or vice versa) without an emulator or matching manifest.
+    ref: "concepts.md#the-image-config-runtime-metadata--rootfsdiff_ids"
+
+  - id: image-internals-storage-drivers-021
+    difficulty: advanced
+    tags: [overlay2, on-disk, l-directory, mount, page-size]
+    question: |
+      What is the purpose of the lowercase `l/` directory under
+      /var/lib/docker/overlay2 that contains short symlinks to layer directories?
+    options:
+      - "To store log files for each layer"
+      - "To keep the `lowerdir=` argument to the mount syscall under the kernel's page-size limit for deep layer stacks"
+      - "To hold localized (language) versions of the layers"
+      - "To cache the last accessed layer for faster reads"
+    answer: 1
+    explanation: |
+      The mount syscall has a page-size limit on its argument string. Deep images with
+      many layers would exceed it if full paths were used, so overlay2 uses short
+      symlink names in l/ to keep the lowerdir list compact.
+    ref: "concepts.md#overlay2-on-disk-layout-under-varlibdockeroverlay2"
+
+  - id: image-internals-storage-drivers-022
+    difficulty: advanced
+    tags: [overlay2, on-disk, diff, link, lower]
+    question: |
+      In an overlay2 layer directory under /var/lib/docker/overlay2/<id>/, what does
+      the `diff/` subdirectory hold?
+    options:
+      - "A binary delta against the parent layer"
+      - "The list of parent layer digests"
+      - "The overlayfs internal working state"
+      - "The layer's actual file contents (the files this layer adds/changes)"
+    answer: 3
+    explanation: |
+      diff/ contains the layer's real contents. The `link` file holds the layer's
+      short id, the `lower` file lists parent layers, merged/ is the union mount, and
+      work/ is overlayfs's internal scratch dir.
+    ref: "concepts.md#overlay2-on-disk-layout-under-varlibdockeroverlay2"
+
+  - id: image-internals-storage-drivers-023
+    difficulty: advanced
+    tags: [overlay2, layers-limit]
+    question: |
+      overlay2 natively supports up to how many lower layers, effectively capping how
+      many layers an image can have?
+    options:
+      - "128"
+      - "8"
+      - "42"
+      - "unlimited"
+    answer: 0
+    explanation: |
+      overlay2 natively supports up to 128 lower OverlayFS layers, which is why images
+      are effectively limited to around ~127 layers. This is one reason to keep layer
+      counts reasonable (e.g. by combining RUN steps).
+    ref: "concepts.md#overlay2-the-default-storage-driver"
+
+  - id: image-internals-storage-drivers-024
+    difficulty: advanced
+    tags: [storage-driver, vfs, no-cow]
+    question: |
+      What is distinctive (and problematic for production) about the `vfs` storage
+      driver?
+    options:
+      - "It only works with encrypted volumes"
+      - "It requires a btrfs backing filesystem"
+      - "It caps images at 8 layers"
+      - "It performs no copy-on-write — each layer is a full deep copy, so it is very slow and disk-hungry"
+    answer: 3
+    explanation: |
+      vfs implements no union/CoW: every layer is a complete copy of the one below.
+      That means huge disk usage and slow builds. It exists as a fallback for
+      testing/environments without a union fs, not for production.
+    ref: "concepts.md#storage-drivers-compared-overlay2-fuse-overlayfs-btrfs-zfs-vfs-devicemapper"
+
+  - id: image-internals-storage-drivers-025
+    difficulty: advanced
+    tags: [rootless, fuse-overlayfs, storage-driver]
+    question: |
+      Which storage driver is typically used for rootless Docker on older kernels that
+      lack rootless overlay support?
+    options:
+      - "fuse-overlayfs"
+      - "devicemapper"
+      - "vfs"
+      - "zfs"
+    answer: 0
+    explanation: |
+      fuse-overlayfs implements overlay in userspace via FUSE and is used for rootless
+      Docker on kernels lacking native rootless overlay (native overlay2 rootless works
+      on kernel 5.11+).
+    ref: "concepts.md#storage-drivers-compared-overlay2-fuse-overlayfs-btrfs-zfs-vfs-devicemapper"
+
+  - id: image-internals-storage-drivers-026
+    difficulty: advanced
+    tags: [overlay2, xfs, d_type, backing-filesystem]
+    question: |
+      overlay2 on an xfs backing filesystem requires which condition to behave
+      correctly?
+    options:
+      - "xfs must be mounted read-only"
+      - "xfs must have quotas disabled"
+      - "xfs must be formatted with d_type enabled (ftype=1)"
+      - "xfs must use 512-byte blocks"
+    answer: 2
+    explanation: |
+      overlay2 requires d_type support on the backing filesystem. On xfs that means
+      formatting with -n ftype=1 (verify ftype=1 via xfs_info). ext4 is also
+      supported. Without d_type, overlay2 misbehaves.
+    ref: "concepts.md#storage-drivers-compared-overlay2-fuse-overlayfs-btrfs-zfs-vfs-devicemapper"
+
+  - id: image-internals-storage-drivers-027
+    difficulty: advanced
+    tags: [storage-driver, switch, daemon]
+    question: |
+      What happens to your existing local images and containers if you change the
+      Docker storage driver (e.g. from overlay2 to btrfs)?
+    options:
+      - "They become inaccessible on the local system, because each driver uses its own on-disk layout"
+      - "They are automatically migrated to the new driver's layout"
+      - "Nothing — layers are driver-independent"
+      - "They are pushed to the registry automatically before the switch"
+    answer: 0
+    explanation: |
+      Each storage driver stores layers in its own on-disk format. Switching drivers
+      makes existing images/containers inaccessible locally. Save (docker save) or
+      push them to a registry first, then reconfigure the driver.
+    ref: "concepts.md#storage-drivers-compared-overlay2-fuse-overlayfs-btrfs-zfs-vfs-devicemapper"
+
+  - id: image-internals-storage-drivers-028
+    difficulty: advanced
+    tags: [opaque-directory, deletion, overlay2]
+    question: |
+      When a container deletes or replaces an entire *directory* that exists in a lower
+      layer, overlay2 marks it how?
+    options:
+      - "With one whiteout file per contained file"
+      - "By making the directory 'opaque' in the upper layer, so none of the lower layer's contents of that directory show through"
+      - "By physically deleting the directory from the image layer"
+      - "By moving the directory into workdir"
+    answer: 1
+    explanation: |
+      A directory deletion/replacement is recorded as an opaque directory in upperdir.
+      That blocks all lower-layer contents of that directory from the merged view, even
+      though they still exist in the image blob (a single whiteout, not one per file).
+    ref: "concepts.md#whiteouts-and-opaque-directories-how-deletions-work"
+
+  - id: image-internals-storage-drivers-029
+    difficulty: advanced
+    tags: [copy_up, chmod, metadata]
+    question: |
+      Which of the following operations on a lower-layer file will trigger a copy_up
+      into the writable layer?
+    options:
+      - "A metadata-only change such as chmod or chown on the file"
+      - "Reading the file"
+      - "Listing the directory that contains it"
+      - "Computing its checksum"
+    answer: 0
+    explanation: |
+      copy_up happens on the first modification — and that includes metadata changes
+      like chmod/chown, not just content writes. Reads and directory listings do not
+      trigger a copy. The whole file is copied up regardless of how small the change is.
+    ref: "concepts.md#copy-on-write-and-copy_up"
+
+  - id: image-internals-storage-drivers-030
+    difficulty: advanced
+    tags: [page-cache, overlay2, memory]
+    question: |
+      Why is overlay2 memory-efficient when many containers read the same file from a
+      shared lower layer?
+    options:
+      - "It compresses the file in RAM"
+      - "It disables caching entirely for lower layers"
+      - "overlayfs supports page-cache sharing — multiple containers reading the same lower-layer file share a single page-cache entry"
+      - "Each container gets its own private copy in RAM, which the kernel deduplicates hourly"
+    answer: 2
+    explanation: |
+      overlayfs shares the page cache for identical lower-layer files, so N containers
+      reading the same file use one cache entry rather than N. This is a big win for
+      high-density/PaaS hosts.
+    ref: "concepts.md#copy-on-write-and-copy_up"
+
+  - id: image-internals-storage-drivers-031
+    difficulty: intermediate
+    tags: [volumes, writable-layer, databases]
+    question: |
+      Why should a database's data directory be mounted on a volume rather than left on
+      the container's writable layer?
+    options:
+      - "Volumes are automatically encrypted"
+      - "Every write to the writable layer triggers a full-file copy_up (slow), and the data is lost when the container is removed; volumes write straight to the host and bypass the union filesystem"
+      - "The writable layer is read-only for databases"
+      - "Volumes give the database more layers to work with"
+    answer: 1
+    explanation: |
+      Write-heavy workloads on the CoW writable layer suffer copy_up overhead and lose
+      data on container removal. Volumes write directly to the host filesystem,
+      bypassing the union fs and CoW — the right home for databases and large writes.
+    ref: "concepts.md#copy-on-write-and-copy_up"
+
+  - id: image-internals-storage-drivers-032
+    difficulty: intermediate
+    tags: [inspect, tooling, manifest]
+    question: |
+      Which command shows the RAW image manifest / image index JSON straight from the
+      registry without pulling the whole image?
+    options:
+      - "docker ps -s"
+      - "docker system df -v"
+      - "docker logs <image>"
+      - "docker buildx imagetools inspect --raw <image>"
+    answer: 3
+    explanation: |
+      `docker buildx imagetools inspect --raw <image>` prints the raw manifest / index
+      JSON from the registry. `docker manifest inspect` is similar. `docker ps -s` and
+      `docker system df` report sizes; docker logs is unrelated.
+    ref: "concepts.md#inspecting-image-internals-the-toolbox"
+
+  - id: image-internals-storage-drivers-033
+    difficulty: intermediate
+    tags: [inspect, docker-history, size, empty-layer]
+    question: |
+      Which command is the fastest way to see each build step's size and spot which
+      instruction bloated an image?
+    options:
+      - "docker inspect --format '{{.State}}'"
+      - "docker history <image>"
+      - "docker top <container>"
+      - "docker stats"
+    answer: 1
+    explanation: |
+      `docker history <image>` lists each layer/step, its size, and the command that
+      created it (and which steps were metadata-only empty_layer entries). It's the
+      go-to for "why is this image huge?" Pair with dive to see files per layer.
+    ref: "concepts.md#inspecting-image-internals-the-toolbox"
+
+  - id: image-internals-storage-drivers-034
+    difficulty: advanced
+    tags: [ps-size, writable-layer, virtual-size]
+    question: |
+      In `docker ps -s`, the SIZE column and the "virtual size" differ. What does each
+      represent?
+    options:
+      - "SIZE is the image on the registry; virtual size is the download size"
+      - "SIZE is bytes written in this container's writable layer; virtual size is that writable layer plus the shared read-only image data"
+      - "SIZE is RAM used; virtual size is swap used"
+      - "They are identical and the distinction is cosmetic"
+    answer: 1
+    explanation: |
+      SIZE = the container's own writable-layer bytes. "virtual" size = that writable
+      layer plus the shared read-only image layers. Because image layers are shared,
+      summing virtual sizes across containers double-counts the shared data.
+    ref: "concepts.md#inspecting-image-internals-the-toolbox"
+
+  - id: image-internals-storage-drivers-035
+    difficulty: beginner
+    tags: [manifest, config, table-of-contents]
+    question: |
+      What is the role of the image manifest?
+    options:
+      - "It is the writable layer of the container"
+      - "It contains the application source code"
+      - "It stores the container's runtime logs"
+      - "It is the entry point that references the config blob and the ordered layer blobs, each by digest and size"
+    answer: 3
+    explanation: |
+      The manifest is the image's table of contents: a small JSON with a config
+      descriptor and an ordered layers array, each referencing content by digest and
+      size. Pulling reads the manifest to know which blobs to fetch.
+    ref: "concepts.md#the-manifest-the-images-table-of-contents"
+
+  - id: image-internals-storage-drivers-036
+    difficulty: intermediate
+    tags: [history, empty-layer, metadata]
+    question: |
+      A Dockerfile has 12 instructions but `docker history` shows only 4 layers with
+      non-zero size. Why?
+    options:
+      - "8 instructions failed silently"
+      - "Docker merged all instructions into 4 to save space"
+      - "The other 8 layers are stored in the manifest, not shown by history"
+      - "Only filesystem-changing instructions (RUN/COPY/ADD) create layer blobs; metadata instructions like ENV/CMD/USER/WORKDIR are empty_layer history entries"
+    answer: 3
+    explanation: |
+      Only instructions that change the filesystem produce layers. Metadata
+      instructions (ENV, CMD, ENTRYPOINT, USER, WORKDIR, LABEL, EXPOSE) are recorded in
+      the config's history as empty_layer entries with zero size.
+    ref: "concepts.md#the-image-config-runtime-metadata--rootfsdiff_ids"
+
+  - id: image-internals-storage-drivers-037
+    difficulty: advanced
+    tags: [verifiability, digest, integrity, security]
+    question: |
+      After downloading a layer blob, how does the client know it wasn't corrupted or
+      tampered with in transit?
+    options:
+      - "It trusts the registry's TLS certificate and does nothing further"
+      - "It checks the file's modification timestamp"
+      - "It asks the registry to re-send the blob and diffs the two copies"
+      - "It re-computes the sha256 of the downloaded blob and compares it to the digest requested from the manifest; a mismatch is rejected"
+    answer: 3
+    explanation: |
+      Content addressing gives integrity for free: the client hashes the blob and
+      compares to the requested digest. A mismatch means corruption/tampering and the
+      blob is rejected. (Provenance/who-built-it is a separate concern — image signing.)
+    ref: "concepts.md#content-addressable-storage-and-digests"
+
+  - id: image-internals-storage-drivers-038
+    difficulty: intermediate
+    tags: [supply-chain, signing, cross-reference]
+    question: |
+      Content-addressed digests guarantee an image's *integrity* (the bytes match the
+      hash). What do they NOT guarantee, requiring a separate mechanism?
+    options:
+      - "That the layers are ordered correctly"
+      - "Provenance/authenticity — *who* produced the image (that needs cryptographic signing, e.g. cosign/Sigstore)"
+      - "That the image is deduplicated"
+      - "That the manifest is valid JSON"
+    answer: 1
+    explanation: |
+      A digest proves the content hasn't changed, but not who created it — an attacker
+      could publish their own image with a valid digest. Authenticity requires signing
+      (cosign/Sigstore), covered under image-scanning-supply-chain and
+      devops-cicd/software-supply-chain-security.
+    ref: "concepts.md#content-addressable-storage-and-digests"
+
+  - id: image-internals-storage-drivers-039
+    difficulty: advanced
+    tags: [overlay2, rename, exdev, gotcha]
+    question: |
+      Under overlay2, `rename(2)` of a directory can fail with EXDEV ("cross-device link
+      not permitted") in which situation?
+    options:
+      - "When both source and destination are on the upper (top) layer"
+      - "Whenever the container is read-only"
+      - "When the source or destination path is not entirely on the top layer, forcing apps to fall back to copy-and-unlink"
+      - "Only when renaming files, never directories"
+    answer: 2
+    explanation: |
+      overlayfs supports directory rename only when both source and destination are on
+      the top layer; otherwise it returns EXDEV and applications must copy-and-unlink.
+      This is a known overlayfs POSIX-compatibility quirk.
+    ref: "concepts.md#overlay2-on-disk-layout-under-varlibdockeroverlay2"
+
+  - id: image-internals-storage-drivers-040
+    difficulty: intermediate
+    tags: [layer-blob, compression, gzip, media-type]
+    question: |
+      An OCI image layer with media type
+      `application/vnd.oci.image.layer.v1.tar+gzip` is stored on disk/registry in what
+      form?
+    options:
+      - "An uncompressed directory tree"
+      - "A gzip-compressed tar archive of the layer's filesystem changes"
+      - "A raw block device image"
+      - "A JSON list of file paths"
+    answer: 1
+    explanation: |
+      The +gzip media type means the layer blob is a gzip-compressed tar of the
+      changeset. The manifest digest hashes this compressed blob; the config's diff_id
+      hashes the uncompressed tar of the same content.
+    ref: "concepts.md#diff_id-vs-digest-uncompressed-content-vs-stored-blob"
+
+  - id: image-internals-storage-drivers-041
+    difficulty: advanced
+    tags: [devicemapper, legacy, deprecated]
+    question: |
+      Which statement about the historical `devicemapper` storage driver is correct?
+    options:
+      - "It is the current default on all Linux distributions"
+      - "It stores each layer as a plain directory copy with no CoW"
+      - "It uses block-level CoW via LVM thin pools and is deprecated/removed in modern Docker; loop-lvm mode was a common production footgun"
+      - "It is the recommended driver for rootless Docker"
+    answer: 2
+    explanation: |
+      devicemapper used LVM thin pools for block-level CoW and was historically the
+      RHEL default. loop-lvm mode was notoriously bad for production (direct-lvm was
+      required). It is now deprecated/removed; overlay2 is the modern choice.
+    ref: "concepts.md#storage-drivers-compared-overlay2-fuse-overlayfs-btrfs-zfs-vfs-devicemapper"
+
+  - id: image-internals-storage-drivers-042
+    difficulty: intermediate
+    tags: [multi-arch, buildx, pull-resolution]
+    question: |
+      You run `docker pull nginx:1.27` on an arm64 host where the tag is a multi-arch
+      image index. Which layers/manifest get fetched?
+    options:
+      - "All platform manifests and all their layers, to be safe"
+      - "The amd64 manifest, then emulated at runtime"
+      - "Only the arm64 platform manifest and its layers, resolved from the index by matching the host platform"
+      - "A random platform manifest chosen by the registry"
+    answer: 2
+    explanation: |
+      The daemon reads the image index and fetches only the manifest (and its layers)
+      matching the host's architecture/os — here linux/arm64. Other platforms' blobs
+      are not downloaded.
+    ref: "concepts.md#multi-arch-images-the-image-index-manifest-list"
+
+  - id: image-internals-storage-drivers-043
+    difficulty: advanced
+    tags: [warning, var-lib-docker, safety]
+    question: |
+      Why does Docker warn against directly manipulating files under
+      /var/lib/docker/overlay2/?
+    options:
+      - "The files are encrypted and unreadable anyway"
+      - "It voids the Docker license"
+      - "Hand-editing diff/, l/, or lower corrupts the driver's internal view and can make images/containers inaccessible; use docker commands instead"
+      - "The directory is a remote NFS mount that must not be touched"
+    answer: 2
+    explanation: |
+      The overlay2 layout (diff/, link, lower, l/ symlinks, merged/, work/) is an
+      internal, consistent structure. Editing it by hand breaks the driver's bookkeeping
+      and can render images/containers inaccessible. Inspect via docker, not by hand.
+    ref: "concepts.md#overlay2-on-disk-layout-under-varlibdockeroverlay2"
+
+  - id: image-internals-storage-drivers-044
+    difficulty: intermediate
+    tags: [union-filesystem, obscure, upper-wins]
+    question: |
+      A file `/app/config.yml` exists in BOTH a lower image layer and the container's
+      writable (upper) layer. Which does the container process see?
+    options:
+      - "The lower-layer version — image layers take priority"
+      - "Both, concatenated together"
+      - "The upper-layer (writable) version — it obscures the lower one with the same name"
+      - "Neither — a conflict error is raised"
+    answer: 2
+    explanation: |
+      In a union filesystem the upper layer wins: the container's copy obscures the
+      identically-named file in the lower image layer. This is exactly what a copy_up
+      produces after the first modification.
+    ref: "concepts.md#the-union-filesystem-stacking-layers-into-one-view"
+
+  - id: image-internals-storage-drivers-045
+    difficulty: advanced
+    tags: [manifest-digest, immutability, chain]
+    question: |
+      Why does changing a single layer's content change the image's overall (repo)
+      digest?
+    options:
+      - "Because the registry renames the image"
+      - "Because Docker reassigns tags on every build"
+      - "Because the manifest embeds each layer's digest; changing a layer changes its digest, which changes the manifest, which changes the manifest's digest"
+      - "It doesn't — the digest is based only on the tag name"
+    answer: 2
+    explanation: |
+      Digests chain: layer bytes -> layer digest (in manifest) -> manifest bytes ->
+      manifest digest (the repo@sha256 image reference). Any change to a layer or the
+      config ripples up and changes the manifest digest, which is what makes the image
+      immutable and tamper-evident.
+    ref: "concepts.md#content-addressable-storage-and-digests"
+
+  - id: image-internals-storage-drivers-046
+    difficulty: intermediate
+    tags: [inspect, rootfs, diff_ids, mismatch]
+    question: |
+      `docker image inspect` lists layers under RootFS.Layers, but
+      `docker manifest inspect` lists different hashes for the same image. Why don't
+      they match?
+    options:
+      - "One of the commands is buggy"
+      - "The image was corrupted"
+      - "inspect shows only half the layers"
+      - "inspect shows uncompressed diff_ids (from the config); manifest inspect shows compressed blob digests — two different hashes of the same layers"
+    answer: 3
+    explanation: |
+      RootFS.Layers are the config's diff_ids (hashes of the uncompressed tars) while
+      the manifest lists the compressed blob digests. Same layers, different hashes for
+      different purposes — so the two lists legitimately differ.
+    ref: "concepts.md#diff_id-vs-digest-uncompressed-content-vs-stored-blob"
+
+  - id: image-internals-storage-drivers-047
+    difficulty: intermediate
+    tags: [tag, latest, gotcha, reproducibility]
+    question: |
+      A team deploys `myapp:latest`. Last week's pull and today's pull produced
+      different running images with no error. What's the root cause?
+    options:
+      - "The image digest changed but the layers didn't"
+      - "Docker randomly picks a version when you use latest"
+      - "`latest` is just a mutable tag/pointer that was re-pushed to point at new content; pin by digest for reproducibility"
+      - "The storage driver corrupted the older image"
+    answer: 2
+    explanation: |
+      Tags including `latest` are mutable pointers. Re-pushing `myapp:latest` repoints
+      it at a new manifest digest. Pulling the same tag at different times can yield
+      different images silently. Deploy by digest (myapp@sha256:...) for reproducibility.
+    ref: "concepts.md#content-addressable-storage-and-digests"
+
+  - id: image-internals-storage-drivers-048
+    difficulty: advanced
+    tags: [whiteout, tar-format, oci-layer]
+    question: |
+      In the OCI layer tar format, how is the deletion of a file represented so it can
+      be applied when the layer is unpacked?
+    options:
+      - "The file is simply omitted from the tar"
+      - "A negative-size tar header"
+      - "A special entry named `.wh.<filename>` (a whiteout) marks the file as removed"
+      - "A symlink to /dev/null"
+    answer: 2
+    explanation: |
+      The OCI/AUFS-derived layer format encodes a deletion as a `.wh.<filename>` entry
+      (and `.wh..wh..opq` for opaque directories). When layers are applied in order,
+      these whiteouts remove the corresponding lower-layer paths.
+    ref: "concepts.md#whiteouts-and-opaque-directories-how-deletions-work"
+
+  - id: image-internals-storage-drivers-049
+    difficulty: advanced
+    tags: [network-dedup, push, pull, blobs]
+    question: |
+      You push a new tag of an app whose base image the registry already stores. What
+      transfers over the network?
+    options:
+      - "The entire image, every layer, every time"
+      - "Only the manifest, never any layers"
+      - "Only the blobs whose digests the registry does not already have — typically just the changed top layers"
+      - "Nothing; push only updates a tag pointer"
+    answer: 2
+    explanation: |
+      Push/pull are digest-aware: the registry and client skip blobs already present by
+      digest. Sharing a base means only the new/changed top-layer blobs (and the
+      manifest/config) transfer — the whole point of content-addressed dedup.
+    ref: "concepts.md#layer-sharing-dedup-and-why-order-saves-space"
+
+  - id: image-internals-storage-drivers-050
+    difficulty: expert
+    tags: [scenario, huge-image, secret, layers, multi-stage]
+    question: |
+      A build does: layer 1 `COPY id_rsa /tmp/`, layer 2 `RUN git clone ...`, layer 3
+      `RUN rm /tmp/id_rsa`. The image is both bloated AND leaks the key. Why, and what
+      fixes both?
+    options:
+      - "The rm didn't run; add --no-cache"
+      - "The key is safe once removed; only size is the issue, fixed by gzip"
+      - "Because layers are immutable diffs, id_rsa still exists in layer 1's blob (recoverable + counts toward size); use a multi-stage build or BuildKit secret mount so it never lands in a committed layer"
+      - "Squashing the manifest hides the key and shrinks the image"
+    answer: 2
+    explanation: |
+      A whiteout in layer 3 hides id_rsa but layer 1's blob still contains it —
+      recoverable by anyone with the image and still counting toward size. The fix is
+      to never commit it: use `RUN --mount=type=secret` (BuildKit) or copy the key only
+      in a throwaway build stage and never COPY it into the final stage.
+    ref: "concepts.md#layers-as-filesystem-diffs-changesets-not-snapshots"
+
+  - id: image-internals-storage-drivers-051
+    difficulty: expert
+    tags: [scenario, copy_up, performance, volume]
+    question: |
+      A container appends to a 5 GB log file (inherited from the image layer) on its
+      first write and users report a multi-second stall, repeated per fresh container.
+      What's happening and the fix?
+    options:
+      - "The disk is failing; replace it"
+      - "overlay2 is decompressing the whole image; switch to vfs"
+      - "The log file is locked by another container; add --privileged"
+      - "The first write triggers a copy_up of the entire 5 GB file into the writable layer; write logs to a volume or tmpfs (bypassing the union fs), and don't ship large mutable files in the image"
+    answer: 3
+    explanation: |
+      overlay2 copies the whole file up on first modification, so the first append to a
+      5 GB lower-layer file copies all 5 GB — a per-container stall. Point logs at a
+      volume/tmpfs (which bypass CoW) and avoid baking large mutable files into image
+      layers.
+    ref: "concepts.md#copy-on-write-and-copy_up"
+
+  - id: image-internals-storage-drivers-052
+    difficulty: expert
+    tags: [scenario, dedup, base-image, standardization]
+    question: |
+      An org runs 200 microservice images. Storage on the hosts is far smaller than
+      200 × (avg image size). Which design choice best explains the savings?
+    options:
+      - "All services share a common base image, so the identical base layers are stored once by digest and only per-service top layers add unique bytes"
+      - "Every image is squashed to a single layer"
+      - "The registry compresses images 200×"
+      - "Docker keeps only the most recent image and rebuilds the rest on demand"
+    answer: 0
+    explanation: |
+      Content-addressed dedup: sharing a standardized base means its layer digests are
+      identical across all 200 images and stored once on each host. Only the unique
+      top layers cost extra space — a strong argument for base-image standardization.
+    ref: "concepts.md#layer-sharing-dedup-and-why-order-saves-space"

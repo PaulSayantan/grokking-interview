@@ -1,0 +1,862 @@
+topic: "Container Runtimes, Isolation Internals & OCI Standards"
+domain: docker
+topic_slug: runtimes-oci-standards
+version: 1
+questions:
+  - id: runtimes-oci-standards-001
+    difficulty: beginner
+    tags: [runtime-stack, architecture]
+    question: |
+      In the Docker runtime stack, what is the relationship between the `docker` CLI and `dockerd`?
+    options:
+      - "The CLI is a thin client that sends API requests to the dockerd daemon, which does the work"
+      - "The CLI creates containers directly and dockerd only handles image storage"
+      - "They are the same binary running in two modes"
+      - "dockerd is a client of the CLI, which acts as the server"
+    answer: 0
+    explanation: |
+      The `docker` CLI is a thin client. It sends REST API calls over a Unix socket
+      (`/var/run/docker.sock`) or TCP to the long-running `dockerd` daemon, which orchestrates
+      networking, volumes, builds, and delegates the actual container lifecycle to containerd.
+    ref: "concepts.md#the-docker-runtime-stack-cli-dockerd-containerd-runc"
+
+  - id: runtimes-oci-standards-002
+    difficulty: intermediate
+    tags: [runtime-stack, containerd, runc]
+    question: |
+      Order the components that participate when you run `docker run nginx`, from highest-level
+      client to the component that makes the actual kernel calls to create the container.
+    options:
+      - "runc → containerd → dockerd → docker CLI"
+      - "dockerd → docker CLI → runc → containerd"
+      - "docker CLI → containerd → runc → dockerd"
+      - "docker CLI → dockerd → containerd → runc"
+    answer: 3
+    explanation: |
+      The chain is: `docker` CLI (client) → `dockerd` (daemon) → `containerd` (high-level runtime:
+      image + lifecycle) → `runc` (low-level OCI runtime that creates namespaces/cgroups and execs
+      the process). runc is the one that talks to the kernel.
+    ref: "concepts.md#the-docker-runtime-stack-cli-dockerd-containerd-runc"
+
+  - id: runtimes-oci-standards-003
+    difficulty: advanced
+    tags: [containerd-shim, live-restore]
+    question: |
+      Why does a `containerd-shim` process exist for each running container?
+    options:
+      - "It acts as the container's persistent parent — holding stdio and the exit code — so containerd/dockerd can restart without killing running containers"
+      - "It compiles the image layers into a single binary at runtime"
+      - "It enforces cgroup memory limits that runc cannot set"
+      - "It is the process that pulls images from the registry"
+    answer: 0
+    explanation: |
+      runc runs, sets up the container, and exits. The shim stays as PID 1's parent: it keeps
+      stdio/pty open and reports the exit code. This is what lets containerd (and dockerd) restart
+      independently of running containers (live-restore).
+    ref: "concepts.md#the-docker-runtime-stack-cli-dockerd-containerd-runc"
+
+  - id: runtimes-oci-standards-004
+    difficulty: intermediate
+    tags: [runtime-stack, separation-of-concerns, interoperability]
+    question: |
+      What is the main architectural benefit of splitting the runtime into a high-level runtime
+      (containerd) and a low-level OCI runtime (runc)?
+    options:
+      - "You can swap the low-level runtime (e.g. runc → gVisor's runsc or Kata) without changing containerd or Docker, because they talk standard interfaces"
+      - "It halves memory usage of the daemon"
+      - "It lets containerd cache images in RAM"
+      - "It removes the need for a container filesystem"
+    answer: 0
+    explanation: |
+      Because both speak standardized interfaces (containerd's API and the OCI runtime-spec), the
+      low-level runtime is pluggable: you can substitute runc with crun, gVisor's runsc, or Kata's
+      runtime for stronger isolation, without touching the layers above.
+    ref: "concepts.md#the-docker-runtime-stack-cli-dockerd-containerd-runc"
+
+  - id: runtimes-oci-standards-005
+    difficulty: beginner
+    tags: [containerd, high-level-runtime]
+    question: |
+      Which set of responsibilities belongs to containerd (the high-level runtime)?
+    options:
+      - "Pulling and unpacking images, managing snapshots, and driving the low-level runtime through a shim"
+      - "Only intercepting syscalls for sandboxing"
+      - "Rendering the docker CLI help text"
+      - "Assigning host IP addresses to physical NICs"
+    answer: 0
+    explanation: |
+      containerd manages the complete host-side container lifecycle: image pull/unpack via the
+      distribution API, snapshot (layered filesystem) management, and invoking the low-level OCI
+      runtime (runc) through the shim.
+    ref: "concepts.md#containerd-the-high-level-runtime"
+
+  - id: runtimes-oci-standards-006
+    difficulty: advanced
+    tags: [containerd, namespaces, k8s]
+    question: |
+      On a node running both Docker and a Kubernetes kubelet against one containerd, why can
+      `docker images` not show the images Kubernetes pulled?
+    options:
+      - "Docker uses a completely separate containerd binary"
+      - "They live in different containerd metadata namespaces (moby vs k8s.io), which logically partition containerd's objects"
+      - "Kubernetes images are stored in a proprietary encrypted format"
+      - "Docker deletes any image it did not pull itself"
+    answer: 1
+    explanation: |
+      containerd has its own concept of namespaces (metadata partitions, not Linux namespaces).
+      Docker uses the `moby` namespace and Kubernetes uses `k8s.io`, so each sees only its own
+      images. `ctr -n k8s.io images ls` reveals Kubernetes' images.
+    ref: "concepts.md#containerd-the-high-level-runtime"
+
+  - id: runtimes-oci-standards-007
+    difficulty: intermediate
+    tags: [oci-bundle, runc, config-json]
+    question: |
+      What two things make up an OCI bundle that runc consumes to create a container?
+    options:
+      - "A Dockerfile and a .dockerignore"
+      - "A rootfs (root filesystem) directory and a config.json describing namespaces, cgroups, capabilities, mounts, and the process"
+      - "A compressed tarball and a registry URL"
+      - "An image manifest and a signature file"
+    answer: 1
+    explanation: |
+      An OCI bundle is a `rootfs/` (the unpacked filesystem) plus `config.json` — the runtime-spec
+      document that declares which namespaces to create, cgroup limits, the capability set, mounts,
+      user, and the process args. runc reads config.json and makes the kernel calls.
+    ref: "concepts.md#runc-and-the-oci-runtime-flow"
+
+  - id: runtimes-oci-standards-008
+    difficulty: advanced
+    tags: [runc, lifecycle, create-start]
+    question: |
+      Why does the OCI runtime split container startup into separate `create` and `start` phases?
+    options:
+      - "So the image can be pulled between the two phases"
+      - "`create` runs the process and `start` merely renames the container"
+      - "`create` builds the full environment (namespaces, cgroups, mounts) but does not run the program, letting an orchestrator set up networking/cgroups in the 'created' state before `start` execs the process"
+      - "It is required to support Windows containers only"
+    answer: 2
+    explanation: |
+      `runc create` builds everything but leaves the process waiting; `runc start` then execs
+      `process.args`. The two-phase design lets an orchestrator do setup (e.g. attach networking,
+      apply cgroups) while the container is in the `created` state, before the workload runs.
+    ref: "concepts.md#runc-and-the-oci-runtime-flow"
+
+  - id: runtimes-oci-standards-009
+    difficulty: intermediate
+    tags: [runc, oci-states]
+    question: |
+      Which sequence correctly lists the OCI runtime container states?
+    options:
+      - "pending → active → paused → gone"
+      - "creating → created → running → stopped"
+      - "created → running → paused → deleted"
+      - "init → boot → up → halt"
+    answer: 1
+    explanation: |
+      The OCI runtime-spec defines four states: `creating` (environment being built), `created`
+      (built, process not yet run), `running` (process started, not exited), and `stopped` (process
+      exited). `delete` is then valid only on a stopped container.
+    ref: "concepts.md#runc-and-the-oci-runtime-flow"
+
+  - id: runtimes-oci-standards-010
+    difficulty: advanced
+    tags: [runc, config-json, immutability]
+    question: |
+      According to the OCI runtime-spec, what happens if you edit `config.json` after the `create`
+      operation has completed?
+    options:
+      - "The changes have no effect on the container"
+      - "runc re-reads it and applies the changes live"
+      - "The container is automatically restarted with the new config"
+      - "runc refuses to start the container until you revert the file"
+    answer: 0
+    explanation: |
+      `config.json` is the contract read at create time. The spec states changes made after
+      `create` do not affect the container — mirroring why you cannot change a container's
+      namespaces/limits/command without recreating it.
+    ref: "concepts.md#runc-and-the-oci-runtime-flow"
+
+  - id: runtimes-oci-standards-011
+    difficulty: intermediate
+    tags: [runc, daemon]
+    question: |
+      Is runc a long-running daemon?
+    options:
+      - "Yes, it stays resident and supervises every container it starts"
+      - "Yes, but only in rootless mode"
+      - "No — it never actually runs, it only validates config.json"
+      - "No — it sets up the container and exits; the container process is reparented to the containerd-shim"
+    answer: 3
+    explanation: |
+      runc is a CLI, not a daemon. It performs the create/start work (namespaces, cgroups, exec)
+      and exits. The container's PID 1 is then reparented to the containerd-shim, which supervises it.
+    ref: "concepts.md#runc-and-the-oci-runtime-flow"
+
+  - id: runtimes-oci-standards-012
+    difficulty: beginner
+    tags: [oci-specs, overview]
+    question: |
+      Which three specifications does the Open Container Initiative (OCI) maintain?
+    options:
+      - "build-spec, deploy-spec, monitor-spec"
+      - "dockerfile-spec, compose-spec, swarm-spec"
+      - "image-spec, runtime-spec, distribution-spec"
+      - "cri-spec, cni-spec, csi-spec"
+    answer: 2
+    explanation: |
+      OCI maintains image-spec (the image format: manifest/config/layers), runtime-spec (bundle +
+      config.json + lifecycle), and distribution-spec (the registry HTTP API). Together they cover
+      build → ship → run.
+    ref: "concepts.md#the-oci-specifications-image-runtime-distribution"
+
+  - id: runtimes-oci-standards-013
+    difficulty: intermediate
+    tags: [oci-specs, image-spec, digest]
+    question: |
+      In the OCI image-spec, how are an image's config and layer blobs referenced?
+    options:
+      - "By their tag name only"
+      - "By content-addressable SHA-256 digests (e.g. sha256:...)"
+      - "By a mutable filename that can change per push"
+      - "By an auto-incrementing integer ID"
+    answer: 1
+    explanation: |
+      An OCI image manifest lists a config blob and ordered layer blobs, each identified by its
+      content-addressable SHA-256 digest. Content addressing is what makes pulls verifiable and
+      layers deduplicable.
+    ref: "concepts.md#the-oci-specifications-image-runtime-distribution"
+
+  - id: runtimes-oci-standards-014
+    difficulty: advanced
+    tags: [oci-specs, manifest-list, multi-arch]
+    question: |
+      How does a single tag like `nginx:latest` transparently serve both linux/amd64 and
+      linux/arm64?
+    options:
+      - "A manifest list / image index maps the one tag to multiple per-architecture manifests, and the client picks the matching one"
+      - "The registry recompiles the image on demand for the client's architecture"
+      - "Docker ships a universal binary that runs on any CPU"
+      - "The client downloads all architectures and discards the wrong ones"
+    answer: 0
+    explanation: |
+      A manifest list (OCI image index) maps one tag to several per-platform manifests. The client
+      selects the manifest matching its OS/architecture, so the same tag works across amd64 and
+      arm64 without user intervention.
+    ref: "concepts.md#the-oci-specifications-image-runtime-distribution"
+
+  - id: runtimes-oci-standards-015
+    difficulty: intermediate
+    tags: [oci-specs, distribution-spec]
+    question: |
+      What does the OCI distribution-spec govern?
+    options:
+      - "The Dockerfile instruction syntax"
+      - "How cgroups limit memory"
+      - "The gRPC interface between kubelet and containerd"
+      - "The registry HTTP API (the /v2/ endpoints for pushing and pulling manifests and blobs)"
+    answer: 3
+    explanation: |
+      The distribution-spec standardizes the registry HTTP API — the `/v2/` endpoints for
+      manifests, blobs, tags, and content-addressable pulls — so any client can push/pull to any
+      compliant registry.
+    ref: "concepts.md#the-oci-specifications-image-runtime-distribution"
+
+  - id: runtimes-oci-standards-016
+    difficulty: beginner
+    tags: [oci-specs, mapping]
+    question: |
+      Which OCI spec answers the question "how do I run a container from a filesystem bundle"?
+    options:
+      - "runtime-spec"
+      - "image-spec"
+      - "distribution-spec"
+      - "compose-spec"
+    answer: 0
+    explanation: |
+      runtime-spec governs running a container: the bundle layout, config.json, the lifecycle
+      operations (create/start/kill/delete), and the container states. image-spec = "what is an
+      image?"; distribution-spec = "how do I ship it?".
+    ref: "concepts.md#the-oci-specifications-image-runtime-distribution"
+
+  - id: runtimes-oci-standards-017
+    difficulty: intermediate
+    tags: [interoperability, standards, portability]
+    question: |
+      An image is built with BuildKit, then Buildah, then Kaniko. Why can all three run identically
+      on containerd, CRI-O, or Podman?
+    options:
+      - "Because they all produce the same OCI image artifact, which any OCI runtime and registry understand"
+      - "Because they all embed the Docker daemon"
+      - "Because the images are converted to a proprietary format at pull time"
+      - "Because each runtime ships its own copy of every build tool"
+    answer: 0
+    explanation: |
+      OCI standardization means the output is the same OCI image regardless of builder. Any OCI
+      runtime can run it and any OCI registry can store it — that portability is the whole point of
+      the standards.
+    ref: "concepts.md#why-standards-matter-interoperability"
+
+  - id: runtimes-oci-standards-018
+    difficulty: intermediate
+    tags: [interoperability, k8s, images]
+    question: |
+      Why did Kubernetes removing the Docker daemon as a runtime NOT break existing images?
+    options:
+      - "Because Kubernetes automatically rebuilds every image from source"
+      - "Because images are an OCI standard, independent of the Docker daemon — only the daemon's runtime path changed"
+      - "Because Docker images were secretly stored inside the kubelet"
+      - "Because containerd cannot actually run Docker images and users had to migrate them"
+    answer: 1
+    explanation: |
+      Images produced by `docker build` follow the OCI image standard. They are independent of the
+      Docker daemon, so switching the node runtime to containerd/CRI-O leaves images fully runnable.
+    ref: "concepts.md#why-standards-matter-interoperability"
+
+  - id: runtimes-oci-standards-019
+    difficulty: beginner
+    tags: [cri, definition, k8s]
+    question: |
+      What is the Container Runtime Interface (CRI)?
+    options:
+      - "A Dockerfile linter"
+      - "A Linux kernel module that creates namespaces"
+      - "A gRPC API defined by Kubernetes so the kubelet can manage containers through any conforming runtime"
+      - "The registry API for pushing images"
+    answer: 2
+    explanation: |
+      CRI is a Kubernetes-defined gRPC API (RuntimeService + ImageService) that decouples the
+      kubelet from any specific runtime, letting it use containerd, CRI-O, or others that implement
+      the interface.
+    ref: "concepts.md#cri-the-container-runtime-interface-and-dockershim-removal"
+
+  - id: runtimes-oci-standards-020
+    difficulty: intermediate
+    tags: [cri, dockershim, k8s-history]
+    question: |
+      In which Kubernetes version was dockershim actually removed?
+    options:
+      - "v1.24"
+      - "v1.20"
+      - "v1.22"
+      - "v1.28"
+    answer: 0
+    explanation: |
+      Dockershim was deprecated in v1.20 (a warning was added) and removed in v1.24 (2022).
+      Maintaining the Docker-daemon adapter was a burden and blocked features like cgroups v2 and
+      user namespaces.
+    ref: "concepts.md#cri-the-container-runtime-interface-and-dockershim-removal"
+
+  - id: runtimes-oci-standards-021
+    difficulty: advanced
+    tags: [cri, dockershim, containerd]
+    question: |
+      Why did Docker Engine need a shim (dockershim) to work with Kubernetes, while containerd does
+      not?
+    options:
+      - "containerd is written in C and Docker is not"
+      - "containerd runs as root and Docker does not"
+      - "Docker images are incompatible with the kubelet"
+      - "Docker Engine never implemented CRI, so Kubernetes needed glue code, whereas containerd implements CRI directly via its CRI plugin"
+    answer: 3
+    explanation: |
+      The kubelet speaks CRI. containerd has a built-in CRI plugin so the kubelet talks to it
+      directly. Docker Engine never implemented CRI, so Kubernetes shipped in-tree dockershim glue
+      to bridge it — later removed in favor of CRI-native runtimes.
+    ref: "concepts.md#cri-the-container-runtime-interface-and-dockershim-removal"
+
+  - id: runtimes-oci-standards-022
+    difficulty: intermediate
+    tags: [cri, cri-o, containerd]
+    question: |
+      After receiving a CRI request, what do containerd and CRI-O both ultimately use to create the
+      container?
+    options:
+      - "A hypervisor by default"
+      - "An OCI low-level runtime such as runc"
+      - "The docker CLI"
+      - "A Python subprocess"
+    answer: 1
+    explanation: |
+      containerd (via its CRI plugin) and CRI-O both handle the CRI/image work and then delegate
+      actual container creation to an OCI low-level runtime — runc by default — which sets up
+      namespaces and cgroups.
+    ref: "concepts.md#cri-the-container-runtime-interface-and-dockershim-removal"
+
+  - id: runtimes-oci-standards-023
+    difficulty: advanced
+    tags: [cri, cri-dockerd]
+    question: |
+      A team wants to keep using Docker Engine as their runtime on Kubernetes v1.24+. What lets them
+      do that?
+    options:
+      - "Re-enabling the in-tree dockershim with a feature flag"
+      - "Downgrading all images to Docker Schema 1"
+      - "cri-dockerd, an external CRI adapter (maintained by Mirantis) that bridges Docker Engine to the kubelet"
+      - "Nothing — Docker images cannot run on v1.24+"
+    answer: 2
+    explanation: |
+      The in-tree dockershim is gone, but `cri-dockerd` is an externally maintained CRI adapter
+      that provides the same bridge to Docker Engine, so teams that insist on the Docker daemon as
+      runtime can still use it.
+    ref: "concepts.md#cri-the-container-runtime-interface-and-dockershim-removal"
+
+  - id: runtimes-oci-standards-024
+    difficulty: beginner
+    tags: [namespaces, isolation, definition]
+    question: |
+      What do Linux namespaces provide to a container?
+    options:
+      - "Resource limits such as CPU and memory caps"
+      - "Encryption of the container's filesystem"
+      - "An isolated view of a class of global resources (its own PIDs, network stack, mounts, hostname, etc.)"
+      - "Automatic restart on crash"
+    answer: 2
+    explanation: |
+      Namespaces isolate *what a container sees*. Each namespace type virtualizes one global
+      resource (PIDs, network, mounts, hostname, IPC, UIDs) so processes inside see their own
+      private instance. Limits (CPU/memory) are cgroups, a separate mechanism.
+    ref: "concepts.md#linux-namespaces-what-a-container-sees"
+
+  - id: runtimes-oci-standards-025
+    difficulty: intermediate
+    tags: [namespaces, net, docker-networking]
+    question: |
+      Which namespace is responsible for a container having its own IP address, interfaces, and port
+      space?
+    options:
+      - "The NET (network) namespace"
+      - "The MNT (mount) namespace"
+      - "The UTS namespace"
+      - "The IPC namespace"
+    answer: 0
+    explanation: |
+      The network (NET) namespace gives each container its own interfaces, IPs, routing table, and
+      ports. It's why Docker wires a veth pair into the docker0 bridge for each container.
+    ref: "concepts.md#linux-namespaces-what-a-container-sees"
+
+  - id: runtimes-oci-standards-026
+    difficulty: intermediate
+    tags: [namespaces, uts, hostname]
+    question: |
+      Why does a freshly started container have a random-looking hostname?
+    options:
+      - "Docker generates it from the image digest"
+      - "The PID namespace assigns hostnames"
+      - "The UTS namespace gives the container its own hostname/domain, which Docker sets to the container's short ID by default"
+      - "It reflects the host's hostname with a suffix"
+    answer: 2
+    explanation: |
+      The UTS namespace isolates the hostname and domain name. Docker sets it to the container's
+      short ID by default (unless you pass `--hostname`), which is why it looks random.
+    ref: "concepts.md#linux-namespaces-what-a-container-sees"
+
+  - id: runtimes-oci-standards-027
+    difficulty: advanced
+    tags: [namespaces, user-ns, rootless]
+    question: |
+      What is the security value of the USER namespace for containers?
+    options:
+      - "It encrypts all environment variables"
+      - "It prevents the container from opening any network sockets"
+      - "It lets a process be uid 0 (root) inside the container while mapping to an unprivileged uid on the host, so an escape does not grant host root"
+      - "It gives every container a unique MAC address"
+    answer: 2
+    explanation: |
+      The user namespace maps container UIDs/GIDs to different host UIDs/GIDs. A process can be root
+      inside the container yet be an ordinary unprivileged user on the host — the foundation of
+      rootless containers and user-namespace remapping.
+    ref: "concepts.md#linux-namespaces-what-a-container-sees"
+
+  - id: runtimes-oci-standards-028
+    difficulty: advanced
+    tags: [namespaces, pid-host, sharing]
+    question: |
+      What does `docker run --pid=host` do?
+    options:
+      - "Gives the container a brand-new empty PID namespace"
+      - "Limits the container to a maximum number of PIDs"
+      - "Runs the container as host root only"
+      - "Drops the container's own PID namespace so it shares (and can see/signal) the host's processes"
+    answer: 3
+    explanation: |
+      `--pid=host` removes PID-namespace isolation, so the container shares the host's process
+      tree — useful for debugging but a serious reduction in isolation. Similarly `--net=host` and
+      `--ipc=host` share those namespaces.
+    ref: "concepts.md#linux-namespaces-what-a-container-sees"
+
+  - id: runtimes-oci-standards-029
+    difficulty: beginner
+    tags: [cgroups, limits, definition]
+    question: |
+      What do control groups (cgroups) control for a container?
+    options:
+      - "What the container can see (its isolated view)"
+      - "Which capabilities the root user holds"
+      - "What resources the container can use (CPU, memory, I/O, PID count)"
+      - "The container's DNS resolution"
+    answer: 2
+    explanation: |
+      cgroups govern *consumption*: CPU time, memory, block I/O, and process counts. They enforce
+      `docker run --memory` / `--cpus` and let the kernel OOM-kill a container that exceeds its
+      memory cap. (Visibility is namespaces; privilege is capabilities.)
+    ref: "concepts.md#cgroups-what-a-container-can-use"
+
+  - id: runtimes-oci-standards-030
+    difficulty: intermediate
+    tags: [cgroups, oom, exit-137]
+    question: |
+      A container is started with `--memory=512m`. Its process allocates beyond that. What happens?
+    options:
+      - "The kernel OOM-kills the process (SIGKILL); the container exits 137 with OOMKilled=true"
+      - "The allocation silently succeeds using host swap forever"
+      - "Docker automatically raises the limit to fit"
+      - "The CPU is throttled until memory frees up"
+    answer: 0
+    explanation: |
+      Exceeding the memory cgroup limit triggers the kernel OOM killer, which SIGKILLs the process.
+      The container exits with code 137 (128 + 9) and `docker inspect` shows `OOMKilled=true`.
+    ref: "concepts.md#cgroups-what-a-container-can-use"
+
+  - id: runtimes-oci-standards-031
+    difficulty: intermediate
+    tags: [cgroups, cpu, throttling]
+    question: |
+      How does a CPU limit set by `--cpus=1.5` behave when the container tries to use more CPU?
+    options:
+      - "The container is OOM-killed like a memory overrun"
+      - "Docker refuses to start the container"
+      - "The extra CPU is billed but always granted"
+      - "The container is throttled (runs slower) via the CFS quota, but is not killed"
+    answer: 3
+    explanation: |
+      CPU limits throttle rather than kill: `--cpus=1.5` sets a CFS quota of 1.5 cores' worth of
+      time per period, so the container just runs slower under load. Only memory overruns cause OOM
+      kills.
+    ref: "concepts.md#cgroups-what-a-container-can-use"
+
+  - id: runtimes-oci-standards-032
+    difficulty: advanced
+    tags: [cgroups, v1-v2, rootless]
+    question: |
+      What is a key difference between cgroups v1 and v2 relevant to containers?
+    options:
+      - "v2 uses a single unified hierarchy with a consistent interface and enables rootless cgroup delegation"
+      - "v2 removes memory limits entirely"
+      - "v1 uses a single unified hierarchy while v2 uses one hierarchy per controller"
+      - "v1 is required for Kubernetes and v2 is unsupported"
+    answer: 0
+    explanation: |
+      cgroups v2 replaces v1's per-controller hierarchies with a single unified hierarchy, giving a
+      consistent interface, better memory accounting, and proper cgroup delegation to non-root users
+      (needed for rootless). Modern distros default to v2.
+    ref: "concepts.md#cgroups-what-a-container-can-use"
+
+  - id: runtimes-oci-standards-033
+    difficulty: advanced
+    tags: [cgroups, jvm, scenario]
+    question: |
+      A Java service in a container with `--memory=512m` keeps dying with exit 137, though the host
+      has plenty of RAM. What is the most likely cause?
+    options:
+      - "The image is corrupted"
+      - "Docker does not support Java workloads"
+      - "The CPU limit is too low"
+      - "A container-unaware JVM sizes its heap from host memory, exceeds the 512m cgroup limit, and gets OOM-killed"
+    answer: 3
+    explanation: |
+      An old/container-unaware JVM reads total host memory and sets a large heap, then blows past
+      the cgroup memory limit → OOM kill → exit 137. Fix: use a JVM with container support
+      (`-XX:+UseContainerSupport`, default in modern Java) so it reads the cgroup limit.
+    ref: "concepts.md#cgroups-what-a-container-can-use"
+
+  - id: runtimes-oci-standards-034
+    difficulty: intermediate
+    tags: [cgroups, pids-limit]
+    question: |
+      Which flag protects the host against a fork bomb inside a container?
+    options:
+      - "--memory"
+      - "--pids-limit"
+      - "--cpuset-cpus"
+      - "--cpu-shares"
+    answer: 1
+    explanation: |
+      `--pids-limit` caps the number of processes/threads a container can create via the pids
+      cgroup controller, mitigating fork bombs. Memory/CPU flags govern other resources.
+    ref: "concepts.md#cgroups-what-a-container-can-use"
+
+  - id: runtimes-oci-standards-035
+    difficulty: beginner
+    tags: [capabilities, privilege]
+    question: |
+      What do Linux capabilities do?
+    options:
+      - "Limit how much memory a process can allocate"
+      - "Encrypt inter-container traffic"
+      - "Break the monolithic power of root into ~40 distinct privileges that a process can hold individually"
+      - "Define which images a registry accepts"
+    answer: 2
+    explanation: |
+      Capabilities split root's all-or-nothing power into fine-grained privileges (e.g.
+      CAP_NET_BIND_SERVICE, CAP_NET_ADMIN, CAP_SYS_ADMIN). A process can hold a subset, enabling
+      least-privilege containers.
+    ref: "concepts.md#capabilities-slicing-up-root"
+
+  - id: runtimes-oci-standards-036
+    difficulty: intermediate
+    tags: [capabilities, least-privilege, pattern]
+    question: |
+      Which command follows the recommended least-privilege capability pattern for a web server that
+      only needs to bind port 80?
+    options:
+      - "docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE nginx"
+      - "docker run --privileged nginx"
+      - "docker run --cap-add=ALL nginx"
+      - "docker run --security-opt seccomp=unconfined nginx"
+    answer: 0
+    explanation: |
+      Drop all capabilities, then add back only what is required — here NET_BIND_SERVICE to bind a
+      privileged port. `--privileged` and `--cap-add=ALL` do the opposite, granting everything.
+    ref: "concepts.md#capabilities-slicing-up-root"
+
+  - id: runtimes-oci-standards-037
+    difficulty: intermediate
+    tags: [capabilities, privileged, danger]
+    question: |
+      Which statement about `docker run --privileged` is correct?
+    options:
+      - "It grants all capabilities plus host device access and disables seccomp/AppArmor, effectively giving root on the host"
+      - "It only adds the CAP_NET_ADMIN capability"
+      - "It runs the container as an unprivileged user"
+      - "It enables rootless mode"
+    answer: 0
+    explanation: |
+      `--privileged` grants all capabilities, host device access, and turns off the default
+      seccomp/AppArmor confinement — roughly equivalent to host root. It should be avoided; detailed
+      hardening is covered in docker-security.
+    ref: "concepts.md#capabilities-slicing-up-root"
+
+  - id: runtimes-oci-standards-038
+    difficulty: advanced
+    tags: [capabilities, namespaces, cgroups, orthogonal]
+    question: |
+      How do capabilities relate to namespaces and cgroups?
+    options:
+      - "Capabilities are just another name for cgroups"
+      - "Capabilities replace namespaces entirely in rootless mode"
+      - "They are orthogonal axes: namespaces = what you see, cgroups = what you can use, capabilities = which privileged operations you may perform"
+      - "Capabilities determine the container's IP address"
+    answer: 2
+    explanation: |
+      The three are independent isolation axes. Namespaces control visibility, cgroups control
+      resource consumption, and capabilities gate which privileged operations the process may
+      perform even within its namespace.
+    ref: "concepts.md#capabilities-slicing-up-root"
+
+  - id: runtimes-oci-standards-039
+    difficulty: beginner
+    tags: [alt-runtimes, gvisor, kata]
+    question: |
+      Why might you choose gVisor or Kata Containers over the default runc?
+    options:
+      - "To reduce image size"
+      - "To avoid using the OCI runtime-spec"
+      - "For stronger isolation of untrusted workloads, since plain runc containers share the host kernel"
+      - "To make images multi-arch automatically"
+    answer: 2
+    explanation: |
+      runc containers share the host kernel, so a kernel bug can be a full escape. gVisor (a
+      user-space kernel) and Kata (a microVM with its own guest kernel) add a much stronger boundary
+      for untrusted or multi-tenant workloads.
+    ref: "concepts.md#alternative-runtimes-gvisor-and-kata-stronger-isolation"
+
+  - id: runtimes-oci-standards-040
+    difficulty: advanced
+    tags: [alt-runtimes, gvisor, mechanism]
+    question: |
+      How does gVisor (runsc) achieve stronger isolation than runc?
+    options:
+      - "It runs each container in a full virtual machine with QEMU"
+      - "It encrypts the container's memory pages"
+      - "It provides a user-space kernel that intercepts and re-implements syscalls, so the container rarely touches the host kernel directly"
+      - "It disables all namespaces"
+    answer: 2
+    explanation: |
+      gVisor interposes a user-space kernel (Sentry) that intercepts container syscalls and
+      re-implements them, sharply reducing the host-kernel attack surface — at some
+      syscall-performance cost and with occasional compatibility gaps.
+    ref: "concepts.md#alternative-runtimes-gvisor-and-kata-stronger-isolation"
+
+  - id: runtimes-oci-standards-041
+    difficulty: advanced
+    tags: [alt-runtimes, kata, microvm]
+    question: |
+      What is the distinguishing isolation mechanism of Kata Containers?
+    options:
+      - "It runs each container in a lightweight microVM with its own guest kernel (via QEMU/Firecracker)"
+      - "It intercepts syscalls in user space like gVisor"
+      - "It relies purely on dropping capabilities"
+      - "It shares the host kernel but adds AppArmor"
+    answer: 0
+    explanation: |
+      Kata runs each container inside a lightweight microVM with its own guest kernel, giving
+      VM-grade isolation at the cost of higher startup and memory overhead. AWS Fargate/Lambda use
+      Firecracker microVMs for the same tenant-isolation reason.
+    ref: "concepts.md#alternative-runtimes-gvisor-and-kata-stronger-isolation"
+
+  - id: runtimes-oci-standards-042
+    difficulty: intermediate
+    tags: [alt-runtimes, runtime-flag, oci]
+    question: |
+      How do you select gVisor for a specific container, assuming it is installed?
+    options:
+      - "Rebuild the image with a special base"
+      - "Set an environment variable GVISOR=1"
+      - "You cannot; gVisor requires replacing Docker entirely"
+      - "docker run --runtime=runsc <image>"
+    answer: 3
+    explanation: |
+      Because gVisor's runsc is an OCI-compatible low-level runtime, you select it per container
+      with `--runtime=runsc` (Kata similarly via `--runtime=kata-runtime`). No image change is
+      needed.
+    ref: "concepts.md#alternative-runtimes-gvisor-and-kata-stronger-isolation"
+
+  - id: runtimes-oci-standards-043
+    difficulty: intermediate
+    tags: [alt-runtimes, spectrum]
+    question: |
+      Rank these from weakest to strongest isolation boundary.
+    options:
+      - "Kata microVM → gVisor → runc"
+      - "runc (shared kernel) → gVisor (intercepted syscalls) → Kata/Firecracker (separate kernel)"
+      - "gVisor → runc → Kata"
+      - "They all provide identical isolation"
+    answer: 1
+    explanation: |
+      The spectrum runs from runc (shares the host kernel, thinnest boundary) to gVisor
+      (user-space kernel intercepting syscalls) to Kata/Firecracker (a separate guest kernel in a
+      microVM, the strongest boundary).
+    ref: "concepts.md#alternative-runtimes-gvisor-and-kata-stronger-isolation"
+
+  - id: runtimes-oci-standards-044
+    difficulty: beginner
+    tags: [rootless, definition]
+    question: |
+      What does "rootless" Docker mean?
+    options:
+      - "The container has no filesystem"
+      - "The image has no root user account"
+      - "The daemon/containerd, runc, and the container all run as an unprivileged host user, with no root daemon"
+      - "Networking is disabled"
+    answer: 2
+    explanation: |
+      Rootless mode runs the entire stack as an unprivileged host user. There is no root daemon, so
+      a daemon or escape bug lands an attacker as an ordinary user rather than host root.
+    ref: "concepts.md#rootless-containers"
+
+  - id: runtimes-oci-standards-045
+    difficulty: advanced
+    tags: [rootless, user-ns, subuid]
+    question: |
+      Which kernel feature is the foundation that makes rootless containers possible?
+    options:
+      - "The PID namespace"
+      - "The user namespace, which maps the container's uid 0 to an unprivileged host uid via /etc/subuid and /etc/subgid"
+      - "The memory cgroup controller"
+      - "The seccomp BPF filter"
+    answer: 1
+    explanation: |
+      User namespaces let an unprivileged user create a container whose root maps to their own
+      unprivileged host uid (using subuid/subgid ranges). This is what enables running the runtime
+      and container without host root.
+    ref: "concepts.md#rootless-containers"
+
+  - id: runtimes-oci-standards-046
+    difficulty: advanced
+    tags: [rootless, limitations, networking]
+    question: |
+      Which is a real limitation of rootless mode?
+    options:
+      - "It cannot run any Linux image"
+      - "By default it cannot bind ports below 1024 without extra configuration, and uses user-mode networking (slirp4netns/pasta) with some overhead"
+      - "It disables all cgroup limits permanently"
+      - "It requires a separate physical machine"
+    answer: 1
+    explanation: |
+      Without extra setup an unprivileged user cannot bind low ports, and rootless networking uses
+      user-mode stacks (slirp4netns/pasta) plus fuse-overlayfs, which add some performance overhead.
+      Operations needing real root also do not work.
+    ref: "concepts.md#rootless-containers"
+
+  - id: runtimes-oci-standards-047
+    difficulty: intermediate
+    tags: [rootless, user-directive, distinction]
+    question: |
+      How is running rootless Docker different from putting `USER 1000` in a Dockerfile?
+    options:
+      - "They are exactly the same thing"
+      - "USER disables the daemon entirely"
+      - "Rootless makes the daemon/runtime unprivileged; USER makes the app process non-root inside the container — the daemon can still be root"
+      - "Rootless only affects the image, not the daemon"
+    answer: 2
+    explanation: |
+      `USER 1000` runs the *workload* as non-root inside the container but the daemon/runtime may
+      still be host-root. Rootless mode makes the *daemon and runtime* unprivileged. They defend
+      different layers; best practice uses both.
+    ref: "concepts.md#rootless-containers"
+
+  - id: runtimes-oci-standards-048
+    difficulty: expert
+    tags: [runtime-stack, security, untrusted, scenario]
+    question: |
+      You must run untrusted customer code with a real trust boundary, not just "it's in a
+      container." Which approach is soundest?
+    options:
+      - "Run it in a normal runc container with default settings — containers are a security boundary"
+      - "Add --privileged so it is contained"
+      - "Layer mitigations (drop capabilities, seccomp, rootless) and use a stronger runtime like gVisor or a Kata/Firecracker microVM that does not share the host kernel"
+      - "Rely solely on a memory cgroup limit"
+    answer: 2
+    explanation: |
+      A plain runc container shares the host kernel, so it is not a strong trust boundary. Combine
+      hardening (cap-drop, seccomp, rootless) with a runtime that adds a kernel boundary — gVisor
+      (user-space kernel) or Kata/Firecracker (separate guest kernel). --privileged does the
+      opposite of isolating.
+    ref: "concepts.md#alternative-runtimes-gvisor-and-kata-stronger-isolation"
+
+  - id: runtimes-oci-standards-049
+    difficulty: expert
+    tags: [runtime-stack, shim, live-restore, scenario]
+    question: |
+      You restart the `dockerd` service (or upgrade containerd) and notice your running containers
+      keep running. Which component makes this possible?
+    options:
+      - "runc, which stays resident supervising each container"
+      - "The docker CLI caching the process state"
+      - "The kernel automatically re-parenting containers to init"
+      - "The containerd-shim, which is each container's persistent parent holding stdio and the exit code, decoupling container lifetime from the daemons"
+    answer: 3
+    explanation: |
+      Each container is owned by its containerd-shim, which persists across daemon restarts,
+      keeping stdio and the exit code and reparenting PID 1. That decoupling is what enables
+      live-restore of running containers during a daemon/containerd restart.
+    ref: "concepts.md#the-docker-runtime-stack-cli-dockerd-containerd-runc"
+
+  - id: runtimes-oci-standards-050
+    difficulty: expert
+    tags: [namespaces, cgroups, capabilities, synthesis]
+    question: |
+      An interviewer asks you to summarize container isolation in one sentence. Which is most
+      accurate?
+    options:
+      - "Containers are lightweight VMs with their own kernel"
+      - "cgroups isolate the network while namespaces limit CPU"
+      - "Capabilities create the container filesystem and namespaces limit memory"
+      - "Namespaces control what a container sees, cgroups control what it can use, and capabilities control which privileged operations it may perform — all on the shared host kernel"
+    answer: 3
+    explanation: |
+      The crisp mental model: namespaces = visibility/isolation, cgroups = resource limits,
+      capabilities = privilege — three orthogonal knobs applied to a normal process on the shared
+      host kernel (no guest kernel, unlike a VM).
+    ref: "concepts.md#linux-namespaces-what-a-container-sees"

@@ -83,7 +83,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ✅ (all tiers) |
 | [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 25 | 25 ✅ (all tiers) |
 | [REST APIs & API Design](topics/rest-api-design/README.md) | 18 | 18 ✅ (all tiers, 1,529 MCQs) |
-| [Docker](topics/docker/README.md) | 16 | 0 |
+| [Docker](topics/docker/README.md) | 16 | 16 ✅ (Pass 1, 794 MCQs) |
 | [Kubernetes](topics/kubernetes/README.md) | 19 | 0 |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 21 ✅ (Pass 1, 1,065 MCQs) |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
@@ -98,6 +98,20 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 30 (2026-07-21):** **Docker Pass 1** (sequence domain 4) — 16 topics, **794 MCQs**
+  (180 B / 382 I / 214 adv / 18 exp), 46 Mermaid diagrams (render 0-error). Covers container
+  fundamentals (images vs containers, lifecycle, Dockerfile/layers/cache, ENTRYPOINT vs CMD),
+  multi-stage/optimization, volumes/networking/compose, registries/tags-vs-digests, production
+  (healthchecks/logging/graceful-shutdown, debugging), security, image-scanning/supply-chain,
+  BuildKit, image internals/overlay2, runtimes/OCI/namespaces-cgroups. Boundaries: container
+  internals here; K8s orchestration → upcoming k8s; general SLSA framework → devops-cicd;
+  deep namespaces/cgroups theory → upcoming OS domain (all cross-referenced). Built via
+  `docker-authoring.js` (author → verify, 32 agents, 0 errors). Verify fixed a YAML flow-mapping
+  bug (unquoted option parsed as dict) + a couple typos/inconsistencies. Validator clean; no
+  clustering. Shiki: added `dockerignore` → bash to langAlias (dockerfile has a grammar).
+  Promoted to AUTHORED_DOMAINS. Content-only + isolated web (sync + langAlias) commit. NEXT: kubernetes.
+  ALSO this session: renamed site → LoopReady (loopready.io); landing floating-question chips
+  (side gutters, JetBrains Mono 0.9rem); footer/landing-header/search-notice web tweaks.
 - **Session 29 (2026-07-21):** **DevOps & CI/CD Pass 1** (sequence domain 3) — 21 topics,
   **1,065 MCQs** (239 B / 553 I / 268 adv / 5 exp), 53 Mermaid diagrams (render 0-error). Covers
   DevOps culture/CALMS/Three-Ways/DORA, Git/branching (trunk-based), CI/CD pipelines + tooling

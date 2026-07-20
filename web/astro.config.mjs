@@ -52,14 +52,16 @@ export default defineConfig({
       defaultColor: false,
       wrap: true,
       // Some content uses fenced-block languages Shiki has no grammar for
-      // (PromQL, LogQL, Rego). Aliasing them to a loaded language silences the
-      // "language doesn't exist, falling back to plaintext" build warnings while
-      // keeping the descriptive ```promql etc. labels in the markdown source.
-      // `bash`/`yaml` give sensible token coloring for these query/policy langs.
+      // (PromQL, LogQL, Rego, .dockerignore). Aliasing them to a loaded language
+      // silences the "language doesn't exist, falling back to plaintext" build
+      // warnings while keeping the descriptive ```promql etc. labels in the
+      // markdown source. `bash`/`yaml` give sensible token coloring here
+      // (dockerignore is glob/comment lines, like bash/gitignore).
       langAlias: {
         promql: "yaml",
         logql: "yaml",
         rego: "bash",
+        dockerignore: "bash",
       },
     },
   },

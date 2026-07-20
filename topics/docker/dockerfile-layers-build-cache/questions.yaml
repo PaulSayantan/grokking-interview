@@ -1,0 +1,884 @@
+topic: "Dockerfile, Layers & Build Cache"
+domain: docker
+topic_slug: dockerfile-layers-build-cache
+version: 1
+questions:
+  - id: dockerfile-layers-build-cache-001
+    difficulty: beginner
+    tags: [layers, image-model, definition]
+    question: |
+      What is a Docker image, structurally?
+    options:
+      - "A single editable tarball that the daemon mutates in place"
+      - "An ordered stack of read-only layers (filesystem changesets) plus an image config"
+      - "A running process isolated by namespaces and cgroups"
+      - "A YAML file describing services and networks"
+    answer: 1
+    explanation: |
+      An image is an ordered set of immutable, content-addressed layers (each a filesystem
+      diff) plus a JSON config (default CMD, ENV, WORKDIR, etc.). A running instance with a
+      writable layer and namespaces is a container; the compose YAML is a separate concept.
+    ref: "concepts.md#what-a-dockerfile-is-and-the-image-layer-model"
+
+  - id: dockerfile-layers-build-cache-002
+    difficulty: beginner
+    tags: [layers, immutability]
+    question: |
+      When you run a container from an image, where do writes go?
+    options:
+      - "Directly into the topmost image layer, mutating it"
+      - "Into the build cache"
+      - "They are discarded immediately unless a volume is used"
+      - "Into a thin writable copy-on-write layer added on top of the read-only image layers"
+    answer: 3
+    explanation: |
+      Image layers are read-only. At run time Docker adds a thin writable layer on top;
+      copy-on-write means files are copied up from lower layers only when modified. Volumes
+      are a separate mechanism for persistence.
+    ref: "concepts.md#what-a-dockerfile-is-and-the-image-layer-model"
+
+  - id: dockerfile-layers-build-cache-003
+    difficulty: beginner
+    tags: [layers, instructions]
+    question: |
+      Which set of Dockerfile instructions actually create filesystem layers?
+    options:
+      - "ENV, WORKDIR, CMD"
+      - "RUN, COPY, ADD"
+      - "LABEL, EXPOSE, USER"
+      - "ARG, HEALTHCHECK, STOPSIGNAL"
+    answer: 1
+    explanation: |
+      Only RUN, COPY, and ADD produce filesystem layers (FROM brings in the base layers).
+      ENV, WORKDIR, CMD, LABEL, EXPOSE, USER, ARG, VOLUME, HEALTHCHECK, and STOPSIGNAL only
+      write metadata into the image config.
+    ref: "concepts.md#which-instructions-create-layers-vs-metadata"
+
+  - id: dockerfile-layers-build-cache-004
+    difficulty: beginner
+    tags: [metadata, env]
+    question: |
+      Does adding several `ENV` lines meaningfully increase image size or add filesystem
+      layers?
+    options:
+      - "No — ENV is metadata written to the image config, not a filesystem layer"
+      - "Yes, each ENV adds a large layer"
+      - "Only if the variable value is longer than 256 bytes"
+      - "Yes, but only on Alpine base images"
+    answer: 0
+    explanation: |
+      ENV only sets values in the image config; it does not create a meaningful filesystem
+      layer or add bytes. The instructions that cost size and cache are RUN, COPY, and ADD.
+    ref: "concepts.md#which-instructions-create-layers-vs-metadata"
+
+  - id: dockerfile-layers-build-cache-005
+    difficulty: beginner
+    tags: [cmd, build-time, run]
+    question: |
+      A learner writes `CMD apt-get install -y curl` expecting curl to be installed in the
+      image. What actually happens?
+    options:
+      - "curl is installed during the build"
+      - "The build fails because CMD cannot take arguments"
+      - "Nothing at build time — CMD only sets the default command run at container start"
+      - "curl is installed but only in the writable layer"
+    answer: 2
+    explanation: |
+      CMD does not execute at build time; it declares the default command run when a
+      container starts. To install packages during the build you must use RUN, which
+      executes and captures the result in a layer.
+    ref: "concepts.md#which-instructions-create-layers-vs-metadata"
+
+  - id: dockerfile-layers-build-cache-006
+    difficulty: beginner
+    tags: [build-context, dockerignore]
+    question: |
+      In `docker build .`, what is the `.`?
+    options:
+      - "The output directory for the built image"
+      - "The name of the Dockerfile to use"
+      - "A flag enabling BuildKit"
+      - "The build context — the set of files sent to the builder that COPY/ADD can reference"
+    answer: 3
+    explanation: |
+      The trailing path is the build context. Its files are transferred to the builder, and
+      COPY/ADD can only reference paths inside it — you cannot COPY a file from outside the
+      context.
+    ref: "concepts.md#the-build-context-and-dockerignore"
+
+  - id: dockerfile-layers-build-cache-007
+    difficulty: beginner
+    tags: [dockerignore]
+    question: |
+      What is the main purpose of a `.dockerignore` file?
+    options:
+      - "To exclude paths from the build context so they aren't sent to the builder or copied in"
+      - "To list packages that should not be installed"
+      - "To mark layers that should be squashed"
+      - "To configure which registry to push to"
+    answer: 0
+    explanation: |
+      .dockerignore excludes files/dirs from the build context (gitignore-style globs),
+      keeping the context small, preventing accidental COPY of unwanted files, and
+      stabilizing cache by excluding volatile files like logs.
+    ref: "concepts.md#the-build-context-and-dockerignore"
+
+  - id: dockerfile-layers-build-cache-008
+    difficulty: intermediate
+    tags: [build-context, performance]
+    question: |
+      A build's first line shows `transferring context: 1.83GB` and builds are slow. What is
+      the most likely cause and fix?
+    options:
+      - "The base image is too large; switch to scratch"
+      - "Too many ENV instructions; combine them"
+      - "node_modules/.git/artifacts are in the context; add a .dockerignore to exclude them"
+      - "The Dockerfile is missing a HEALTHCHECK"
+    answer: 2
+    explanation: |
+      A huge context means large/unnecessary directories (node_modules, .git, dist, big
+      datasets) are being shipped to the builder every build. A .dockerignore excluding them
+      shrinks the context and speeds builds, and also stabilizes the cache.
+    ref: "concepts.md#the-build-context-and-dockerignore"
+
+  - id: dockerfile-layers-build-cache-009
+    difficulty: intermediate
+    tags: [cache, invalidation]
+    question: |
+      During a build, the instruction at line 5 gets a cache miss. What happens to lines 6
+      through 10?
+    options:
+      - "They still use cache if their own inputs are unchanged"
+      - "They are all rebuilt, because each layer depends on the result of the previous one"
+      - "Only COPY/ADD lines among them rebuild"
+      - "The build aborts with an error"
+    answer: 1
+    explanation: |
+      A cache miss cascades: because every instruction builds on the layer produced by the
+      previous one, once line 5 misses, its new output changes the parent for all following
+      layers, so lines 6-10 must rebuild.
+    ref: "concepts.md#how-the-build-cache-works-and-cache-invalidation-rules"
+
+  - id: dockerfile-layers-build-cache-010
+    difficulty: intermediate
+    tags: [cache, run, apt]
+    question: |
+      Why can a lone `RUN apt-get update` on its own line serve a stale package index on
+      later builds?
+    options:
+      - "apt caches indexes in a volume that never expires"
+      - "Docker signs the index and refuses to refresh it"
+      - "The layer is marked immutable by the registry"
+      - "RUN cache is keyed on the command string only; the same string is a cache hit regardless of upstream package changes"
+    answer: 3
+    explanation: |
+      RUN cache matching uses just the command string — the files the command produced
+      aren't examined. So `RUN apt-get update` keeps hitting the old layer. The fix is to
+      combine update and install in a single RUN so they invalidate together.
+    ref: "concepts.md#how-the-build-cache-works-and-cache-invalidation-rules"
+
+  - id: dockerfile-layers-build-cache-011
+    difficulty: intermediate
+    tags: [cache, copy, checksum]
+    question: |
+      How does the builder decide whether a `COPY` instruction can use the cache?
+    options:
+      - "By comparing the command string only"
+      - "By checking the file's last-access time only"
+      - "By computing a checksum of the copied files' contents/metadata and comparing it"
+      - "It never caches COPY"
+    answer: 2
+    explanation: |
+      For COPY/ADD the builder computes a checksum from the source files' contents/metadata.
+      If any copied file's contents change, the checksum changes and the cache is
+      invalidated. (Changing only mtime does not bust the cache.)
+    ref: "concepts.md#how-the-build-cache-works-and-cache-invalidation-rules"
+
+  - id: dockerfile-layers-build-cache-012
+    difficulty: advanced
+    tags: [cache, copy, mtime]
+    question: |
+      You `touch` a source file (updating only its modification time, not its contents) and
+      rebuild. Is the corresponding `COPY` layer's cache invalidated?
+    options:
+      - "Yes, any change to the file busts the cache"
+      - "No — if only the mtime changed and contents are identical, the cache is not invalidated"
+      - "Only if BuildKit is disabled"
+      - "Only for files larger than 1 MB"
+    answer: 1
+    explanation: |
+      The COPY/ADD cache checksum is based on file contents; a pure mtime change with
+      identical contents does not invalidate the cache. Content is what matters.
+    ref: "concepts.md#how-the-build-cache-works-and-cache-invalidation-rules"
+
+  - id: dockerfile-layers-build-cache-013
+    difficulty: intermediate
+    tags: [cache, no-cache, cli]
+    question: |
+      Which command forces the entire build to ignore all existing cache?
+    options:
+      - "docker build --pull ."
+      - "docker build --squash ."
+      - "docker builder prune"
+      - "docker build --no-cache ."
+    answer: 3
+    explanation: |
+      `--no-cache` disables cache for the whole build. `--pull` only refreshes the base
+      image, `--squash` flattens layers, and `builder prune` reclaims cache storage rather
+      than affecting a specific build's reuse.
+    ref: "concepts.md#how-the-build-cache-works-and-cache-invalidation-rules"
+
+  - id: dockerfile-layers-build-cache-014
+    difficulty: intermediate
+    tags: [ordering, cache, node]
+    question: |
+      Given this Dockerfile, why does `npm ci` re-run on every code change?
+
+      ```
+      FROM node:20-alpine
+      WORKDIR /app
+      COPY . .
+      RUN npm ci
+      ```
+    options:
+      - "COPY . . comes first, so any source change busts that layer and every layer after it, including npm ci"
+      - "npm ci is never cacheable"
+      - "The base image tag is mutable"
+      - "WORKDIR resets the cache"
+    answer: 0
+    explanation: |
+      Because the full source is copied before dependencies are installed, any code change
+      invalidates the COPY layer and cascades to RUN npm ci. Copy package*.json and run
+      npm ci first, then COPY the rest of the source.
+    ref: "concepts.md#ordering-instructions-least-to-most-frequently-changed"
+
+  - id: dockerfile-layers-build-cache-015
+    difficulty: intermediate
+    tags: [ordering, best-practice]
+    question: |
+      What is the guiding principle for ordering Dockerfile instructions to maximize cache
+      reuse?
+    options:
+      - "Alphabetical order of instruction keywords"
+      - "Put all COPY instructions at the very top"
+      - "Place instructions that change rarely (install deps) before ones that change often (copy source)"
+      - "Put the largest layers last regardless of change frequency"
+    answer: 2
+    explanation: |
+      Since a cache miss cascades downward, ordering from least- to most-frequently-changed
+      keeps the expensive, stable steps (dependency installs) cached and limits rebuilds to
+      the volatile tail (source copy, build).
+    ref: "concepts.md#ordering-instructions-least-to-most-frequently-changed"
+
+  - id: dockerfile-layers-build-cache-016
+    difficulty: intermediate
+    tags: [ordering, python, scenario]
+    question: |
+      For a Python app, which ordering gives the best cache behavior?
+    options:
+      - "COPY . . then RUN pip install -r requirements.txt"
+      - "RUN pip install -r requirements.txt then COPY requirements.txt ."
+      - "COPY . . then COPY requirements.txt . then RUN pip install"
+      - "COPY requirements.txt . then RUN pip install -r requirements.txt then COPY . ."
+    answer: 3
+    explanation: |
+      Copy just the manifest and install dependencies first (rarely changes → stays cached),
+      then copy the rest of the source (changes often). Copying everything before installing
+      makes pip re-run on every source edit.
+    ref: "concepts.md#ordering-instructions-least-to-most-frequently-changed"
+
+  - id: dockerfile-layers-build-cache-017
+    difficulty: beginner
+    tags: [copy, add, best-practice]
+    question: |
+      Between COPY and ADD, which does Docker recommend as the default for copying local
+      files?
+    options:
+      - "ADD, because it is more powerful"
+      - "COPY, because it is predictable and has no hidden behavior"
+      - "Neither; use RUN cp instead"
+      - "They are identical, so it doesn't matter"
+    answer: 1
+    explanation: |
+      COPY is preferred because it does exactly one thing — copy files literally. ADD adds
+      tar auto-extraction and remote/URL/git features that can surprise you, so it should be
+      reserved for when you specifically need them.
+    ref: "concepts.md#copy-vs-add"
+
+  - id: dockerfile-layers-build-cache-018
+    difficulty: intermediate
+    tags: [add, tar, scenario]
+    question: |
+      What does `ADD app.tar.gz /opt/` do that `COPY app.tar.gz /opt/` does not?
+    options:
+      - "ADD verifies a GPG signature before copying"
+      - "ADD copies the file with root ownership; COPY does not"
+      - "Nothing; they behave identically for tarballs"
+      - "ADD automatically decompresses and extracts the local tar archive into /opt"
+    answer: 3
+    explanation: |
+      ADD auto-extracts a recognized local (compressed) tar archive into the destination.
+      COPY copies it literally as a tarball. This auto-extraction is one of the few reasons
+      to choose ADD over COPY.
+    ref: "concepts.md#copy-vs-add"
+
+  - id: dockerfile-layers-build-cache-019
+    difficulty: advanced
+    tags: [add, url, remote-tar]
+    question: |
+      True or false: `ADD https://example.com/pkg.tar.gz /opt/` will download AND
+      auto-extract the remote archive into /opt.
+    options:
+      - "False — ADD downloads the remote file but does NOT auto-extract remote archives"
+      - "True — remote tars are extracted just like local ones"
+      - "True, but only with the --extract flag"
+      - "False — ADD cannot use URLs at all"
+    answer: 0
+    explanation: |
+      ADD can fetch remote URLs, but unlike local tar archives, remote archives are NOT
+      auto-extracted. For downloads, prefer RUN curl so you can verify a checksum and delete
+      the archive in the same layer.
+    ref: "concepts.md#copy-vs-add"
+
+  - id: dockerfile-layers-build-cache-020
+    difficulty: intermediate
+    tags: [add, download, best-practice]
+    question: |
+      Why is `RUN curl -fsSL <url> -o /tmp/x.tgz && tar -xzf /tmp/x.tgz -C /opt && rm
+      /tmp/x.tgz` often preferred over `ADD <url> /opt/`?
+    options:
+      - "curl is faster than ADD"
+      - "ADD cannot download over HTTPS"
+      - "It lets you verify the download and delete the archive in the same layer so it doesn't bloat the image"
+      - "RUN commands are never cached, guaranteeing freshness"
+    answer: 2
+    explanation: |
+      Using RUN, you can checksum-verify the download and clean up the archive within the
+      same layer, keeping the image small. ADD <url> leaves the download in its own layer
+      and doesn't extract remote tars anyway.
+    ref: "concepts.md#copy-vs-add"
+
+  - id: dockerfile-layers-build-cache-021
+    difficulty: intermediate
+    tags: [run, layers, size]
+    question: |
+      Why is combining related steps into a single `RUN ... && ...` often better than many
+      separate RUN lines?
+    options:
+      - "It makes the Dockerfile shorter, which Docker rewards with faster networking"
+      - "Separate RUN lines are not allowed in BuildKit"
+      - "A single RUN disables the cache, guaranteeing correctness"
+      - "Each RUN is its own layer; temp files created and deleted within one RUN never persist, whereas across layers deletions don't reclaim earlier bytes"
+    answer: 3
+    explanation: |
+      Each RUN is a layer. If you download/build in one RUN and delete in a later RUN, the
+      bytes remain in the earlier layer. Doing install-and-cleanup in one RUN commits the
+      layer after cleanup, so temp files never ship.
+    ref: "concepts.md#combining-run-commands-to-reduce-layers"
+
+  - id: dockerfile-layers-build-cache-022
+    difficulty: advanced
+    tags: [run, apt, cleanup, scenario]
+    question: |
+      Which single RUN correctly installs a build tool, uses it, and avoids bloating the
+      image?
+    options:
+      - "RUN apt-get install -y gcc on one line, RUN make on the next, RUN apt-get purge gcc on the next"
+      - "RUN apt-get update && apt-get install -y --no-install-recommends gcc && make && apt-get purge -y --auto-remove gcc && rm -rf /var/lib/apt/lists/*"
+      - "RUN apt-get install gcc; CMD make; RUN rm gcc"
+      - "ADD gcc /usr/bin && RUN make"
+    answer: 1
+    explanation: |
+      Chaining install, use, purge, and apt-list cleanup in one RUN means the build tools and
+      package lists never persist in the committed layer. Splitting across RUNs leaves the
+      earlier layer fat regardless of later purges.
+    ref: "concepts.md#combining-run-commands-to-reduce-layers"
+
+  - id: dockerfile-layers-build-cache-023
+    difficulty: advanced
+    tags: [run, cache, tradeoff]
+    question: |
+      What is the downside of collapsing an entire Dockerfile into one giant RUN?
+    options:
+      - "Docker rejects RUN commands longer than 100 characters"
+      - "It prevents the image from ever being pushed to a registry"
+      - "Any change to that line re-runs the whole thing, losing fine-grained cache reuse"
+      - "It makes ENV variables stop working"
+    answer: 2
+    explanation: |
+      Fewer layers is cleaner, but a single huge RUN re-executes entirely on any change to
+      that line. Balance: group install-and-cleanup that change together; keep independently
+      changing steps separate so they cache independently.
+    ref: "concepts.md#combining-run-commands-to-reduce-layers"
+
+  - id: dockerfile-layers-build-cache-024
+    difficulty: intermediate
+    tags: [layers, size, whiteout, scenario]
+    question: |
+      A Dockerfile has `ADD big.bin /` (500 MB) then a later `RUN rm /big.bin`. What is the
+      approximate size contribution of these steps to the final image?
+    options:
+      - "About 500 MB — the delete only adds a whiteout marker; the bytes remain in the earlier layer"
+      - "0 MB — the file was deleted"
+      - "250 MB — Docker averages the two layers"
+      - "It depends on the storage driver's compression ratio"
+    answer: 0
+    explanation: |
+      Layers are additive. Deleting the file in a later layer writes a whiteout that hides it
+      in the merged view, but the 500 MB still lives in the earlier layer and ships in the
+      image. You must delete within the same layer or use multi-stage builds.
+    ref: "concepts.md#why-each-layer-adds-size-deleting-in-a-later-layer"
+
+  - id: dockerfile-layers-build-cache-025
+    difficulty: intermediate
+    tags: [layers, size, fix]
+    question: |
+      Which technique reliably keeps build-time junk out of the FINAL image?
+    options:
+      - "Adding a `RUN rm -rf` step at the very end of the Dockerfile"
+      - "Setting ENV CLEANUP=true"
+      - "Adding more LABEL instructions"
+      - "Using a multi-stage build and COPY --from to bring only the artifacts into a slim final stage"
+    answer: 3
+    explanation: |
+      A trailing rm can't shrink earlier layers. Multi-stage builds compile in a fat stage,
+      then COPY --from only the needed artifacts into a fresh final stage, so intermediate
+      junk never enters the final image.
+    ref: "concepts.md#why-each-layer-adds-size-deleting-in-a-later-layer"
+
+  - id: dockerfile-layers-build-cache-026
+    difficulty: advanced
+    tags: [security, secrets, layers]
+    question: |
+      A Dockerfile does `COPY id_rsa /root/.ssh/id_rsa`, uses it in a RUN, then `RUN rm
+      /root/.ssh/id_rsa`. Why is the key still compromised?
+    options:
+      - "Because rm doesn't work as root"
+      - "Because the key still exists in the earlier COPY layer and can be extracted from the image"
+      - "Because SSH keys are cached in the registry"
+      - "It isn't compromised — rm removes it from the image"
+    answer: 1
+    explanation: |
+      Deleting in a later layer only hides the file; the key bytes remain in the earlier
+      layer and anyone can docker save the image and extract them. Use BuildKit secret
+      mounts (RUN --mount=type=secret) so the secret never touches a layer.
+    ref: "concepts.md#why-each-layer-adds-size-deleting-in-a-later-layer"
+
+  - id: dockerfile-layers-build-cache-027
+    difficulty: advanced
+    tags: [buildkit, cache-mount, package-manager]
+    question: |
+      What does `RUN --mount=type=cache,target=/root/.cache/pip pip install -r
+      requirements.txt` achieve?
+    options:
+      - "It bakes the pip cache into the image as a layer"
+      - "It disables caching for pip"
+      - "It provides a persistent build-time cache directory that survives across builds but is NOT part of the image"
+      - "It uploads packages to a private registry"
+    answer: 2
+    explanation: |
+      A BuildKit cache mount is a persistent scratch directory reused across builds and never
+      committed to a layer. Even on a cache miss, pip only downloads newly needed packages
+      and reuses the rest, keeping the image slim and rebuilds fast.
+    ref: "concepts.md#run-cache-with-package-managers-buildkit-cache-mounts"
+
+  - id: dockerfile-layers-build-cache-028
+    difficulty: advanced
+    tags: [buildkit, cache-mount, layers]
+    question: |
+      Is the content of a `--mount=type=cache` directory included in the resulting image
+      layers?
+    options:
+      - "Yes, it becomes a dedicated cache layer"
+      - "Only the first 100 MB is included"
+      - "Only if you tag the image with :cache"
+      - "No — cache mounts are build-time only and never shipped in the image"
+    answer: 3
+    explanation: |
+      Cache mounts exist only during the build to speed up package managers. Their contents
+      are not part of any image layer, so they don't add to image size — orthogonal to the
+      layer cache.
+    ref: "concepts.md#run-cache-with-package-managers-buildkit-cache-mounts"
+
+  - id: dockerfile-layers-build-cache-029
+    difficulty: intermediate
+    tags: [cache, two-caches, concept]
+    question: |
+      The "layer cache" and a BuildKit "cache mount" are:
+    options:
+      - "Two distinct mechanisms — the layer cache reuses whole layers; a cache mount is a persistent scratch dir for a package manager"
+      - "The same thing under different names"
+      - "Both stored inside the final image"
+      - "Both disabled by --no-cache in identical ways"
+    answer: 0
+    explanation: |
+      The layer cache reuses an entire layer when instruction+inputs are unchanged. A cache
+      mount is a persistent build-only directory (e.g., pip/npm/apt cache) that isn't a layer.
+      They are orthogonal.
+    ref: "concepts.md#run-cache-with-package-managers-buildkit-cache-mounts"
+
+  - id: dockerfile-layers-build-cache-030
+    difficulty: beginner
+    tags: [arg, env, persistence]
+    question: |
+      Which statement about ARG vs ENV is correct?
+    options:
+      - "ARG persists in the image; ENV is build-time only"
+      - "ARG is build-time only and not persisted; ENV persists into the image and is available at runtime"
+      - "Both persist into the running container's environment"
+      - "Neither is available during the build"
+    answer: 1
+    explanation: |
+      ARG variables are available only during the build and are not baked into the image.
+      ENV values are written into the image config and are visible to the running process and
+      via docker inspect.
+    ref: "concepts.md#arg-vs-env"
+
+  - id: dockerfile-layers-build-cache-031
+    difficulty: intermediate
+    tags: [arg, from, base-image]
+    question: |
+      Which instruction can appear BEFORE the first `FROM` to parameterize the base image
+      version?
+    options:
+      - "ENV"
+      - "LABEL"
+      - "RUN"
+      - "ARG"
+    answer: 3
+    explanation: |
+      ARG is the only instruction allowed before FROM. e.g. `ARG NODE_VERSION=20` then
+      `FROM node:${NODE_VERSION}-alpine`. Such an ARG is outside any stage; to use it after
+      FROM you must redeclare it.
+    ref: "concepts.md#base-images-from-scratch-tags-and-digests"
+
+  - id: dockerfile-layers-build-cache-032
+    difficulty: advanced
+    tags: [arg, scope, from, gotcha]
+    question: |
+      An `ARG TAG=1.0` is declared before `FROM`. In a `RUN echo $TAG` after FROM, what does
+      $TAG expand to (without redeclaration)?
+    options:
+      - "1.0, inherited automatically"
+      - "An empty string, because an ARG before FROM is out of scope after FROM unless redeclared"
+      - "The literal string $TAG"
+      - "The build fails with an undefined variable error"
+    answer: 1
+    explanation: |
+      An ARG declared before FROM lives outside the build stage. After FROM it is out of
+      scope; you must add a bare `ARG TAG` inside the stage to bring the outer value back
+      in. Otherwise it expands to empty.
+    ref: "concepts.md#arg-vs-env"
+
+  - id: dockerfile-layers-build-cache-033
+    difficulty: advanced
+    tags: [arg, secrets, security]
+    question: |
+      Why should you NOT pass secrets via `--build-arg`?
+    options:
+      - "Build args are encrypted and slow"
+      - "Build args cannot hold strings longer than 64 bytes"
+      - "ARG values are visible in `docker history` and thus leak; use BuildKit secret mounts instead"
+      - "Build args are ignored by RUN instructions"
+    answer: 2
+    explanation: |
+      ARG values (except predefined proxy ARGs) show up in docker history, so a secret passed
+      via --build-arg is recoverable. ENV also bakes into the image. Use RUN --mount=type=secret
+      so the secret never persists.
+    ref: "concepts.md#arg-vs-env"
+
+  - id: dockerfile-layers-build-cache-034
+    difficulty: intermediate
+    tags: [arg, env, precedence]
+    question: |
+      If both an `ARG FOO` and an `ENV FOO` of the same name are in scope, which value does a
+      subsequent RUN see in its environment?
+    options:
+      - "The ENV value overrides the ARG of the same name"
+      - "The ARG value always wins"
+      - "It is undefined behavior"
+      - "Both are concatenated"
+    answer: 0
+    explanation: |
+      Per the Dockerfile reference, an ENV instruction always overrides an ARG of the same
+      name for the environment seen by RUN. ENV takes precedence.
+    ref: "concepts.md#arg-vs-env"
+
+  - id: dockerfile-layers-build-cache-035
+    difficulty: beginner
+    tags: [from, scratch, base-image]
+    question: |
+      What is `FROM scratch`?
+    options:
+      - "A minimal Alpine image"
+      - "A placeholder that Docker replaces with ubuntu:latest"
+      - "A command to clear the build cache"
+      - "The empty image with zero base layers, used for fully static binaries"
+    answer: 3
+    explanation: |
+      scratch is the explicitly empty base image — no OS, no shell. It's used for
+      self-contained static binaries (e.g., CGO_ENABLED=0 Go builds), producing images that
+      contain only your binary.
+    ref: "concepts.md#base-images-from-scratch-tags-and-digests"
+
+  - id: dockerfile-layers-build-cache-036
+    difficulty: intermediate
+    tags: [from, tags, digest, reproducibility]
+    question: |
+      Why pin a base image to a digest (`FROM node:20-alpine@sha256:...`) instead of just a
+      tag?
+    options:
+      - "Digests download faster than tags"
+      - "Only digests support multi-arch"
+      - "Tags are mutable and can point to different contents over time; a digest is immutable, giving reproducible builds and stable base-layer caching"
+      - "Tags cannot be used with Alpine"
+    answer: 2
+    explanation: |
+      A tag like 20-alpine can be re-pushed to point at new contents, silently changing your
+      base layers (breaking reproducibility and cache). A digest identifies exact content,
+      so the base is always identical.
+    ref: "concepts.md#base-images-from-scratch-tags-and-digests"
+
+  - id: dockerfile-layers-build-cache-037
+    difficulty: beginner
+    tags: [tags, latest, gotcha]
+    question: |
+      What does the `latest` tag mean?
+    options:
+      - "The newest stable release, guaranteed by Docker"
+      - "Just the default tag with no special meaning; it can be stale or move unexpectedly"
+      - "An image that auto-updates inside running containers"
+      - "The smallest available variant of an image"
+    answer: 1
+    explanation: |
+      latest is merely the tag used when none is specified. It carries no guarantee of being
+      newest or stable and can move, so pin explicit versions (and ideally a digest) for
+      anything beyond experiments.
+    ref: "concepts.md#base-images-from-scratch-tags-and-digests"
+
+  - id: dockerfile-layers-build-cache-038
+    difficulty: intermediate
+    tags: [base-image, distroless, size, security]
+    question: |
+      What characterizes a "distroless" base image?
+    options:
+      - "It includes a full package manager for flexibility"
+      - "It is a distribution built entirely from Alpine packages"
+      - "It cannot run compiled binaries"
+      - "It contains only the app and its runtime libraries — no shell or package manager — reducing size and attack surface"
+    answer: 3
+    explanation: |
+      Distroless images ship just your app plus required runtime libraries, omitting a shell
+      and package manager. That shrinks the image and its attack surface. (More in
+      image-scanning-supply-chain.)
+    ref: "concepts.md#base-images-from-scratch-tags-and-digests"
+
+  - id: dockerfile-layers-build-cache-039
+    difficulty: intermediate
+    tags: [debugging, history, size]
+    question: |
+      Which command shows the per-layer instruction and byte size to find which layer is
+      bloating an image?
+    options:
+      - "docker history --no-trunc myimage:tag"
+      - "docker ps -a"
+      - "docker logs myimage:tag"
+      - "docker stats myimage:tag"
+    answer: 0
+    explanation: |
+      docker history lists each layer with its originating instruction and size, so you can
+      spot the fat layer (often a RUN that installed build tools or a large COPY). ps/logs/
+      stats are about running containers, not image layers.
+    ref: "concepts.md#inspecting-layers-and-diagnosing-sizecache"
+
+  - id: dockerfile-layers-build-cache-040
+    difficulty: intermediate
+    tags: [debugging, cache, build-output]
+    question: |
+      In build output, what does `CACHED` next to a step indicate, and how do you find where
+      your cache broke?
+    options:
+      - "It means the step failed; the first CACHED step is the failure"
+      - "It means the step was skipped entirely"
+      - "It means a cache hit; the first non-CACHED step is where the cache broke"
+      - "It means the layer was pushed to the registry"
+    answer: 2
+    explanation: |
+      CACHED marks a cache hit. The first step lacking CACHED is where reuse stopped — inspect
+      its inputs (changed source for COPY, changed command string for RUN, or a changed build
+      arg) to understand why.
+    ref: "concepts.md#inspecting-layers-and-diagnosing-sizecache"
+
+  - id: dockerfile-layers-build-cache-041
+    difficulty: advanced
+    tags: [debugging, scenario, size]
+    question: |
+      An interviewer says: "Your image is 1.4 GB and you don't know why. Walk me through
+      debugging." Which is the strongest first step?
+    options:
+      - "Restart the Docker daemon and rebuild"
+      - "Run `docker history --no-trunc` to find the largest layer(s), then attack that layer with same-layer cleanup, multi-stage, or a slimmer base"
+      - "Switch to Podman"
+      - "Add more HEALTHCHECK instructions"
+    answer: 1
+    explanation: |
+      The systematic approach is to locate the fat layer(s) with docker history, identify the
+      cause (build toolchain, package caches, large COPY), then fix via same-layer cleanup,
+      multi-stage builds, .dockerignore, or a slimmer base image.
+    ref: "concepts.md#inspecting-layers-and-diagnosing-sizecache"
+
+  - id: dockerfile-layers-build-cache-042
+    difficulty: intermediate
+    tags: [layers, content-addressing, sharing]
+    question: |
+      Two images are both built `FROM ubuntu:22.04`. What is true about the base layers on
+      disk and over the network?
+    options:
+      - "Each image stores its own private copy of the base layers"
+      - "Base layers are never cached and always re-downloaded"
+      - "The images must be merged before they can share layers"
+      - "The identical, content-addressed base layers are shared/deduplicated on disk, and a pull only fetches layers not already present"
+    answer: 3
+    explanation: |
+      Layers are identified by the SHA-256 digest of their contents, so identical base layers
+      are stored once and shared across images. Pulls and pushes transfer only layers the
+      target doesn't already have.
+    ref: "concepts.md#what-a-dockerfile-is-and-the-image-layer-model"
+
+  - id: dockerfile-layers-build-cache-043
+    difficulty: advanced
+    tags: [cache, build-arg, cachebust]
+    question: |
+      How does the `ARG CACHEBUST=$(date +%s)` trick force a rebuild from a certain point?
+    options:
+      - "A changed build-arg value invalidates the cache from the instruction that uses it onward"
+      - "It clears the entire Docker daemon cache"
+      - "It renames the image so cache can't match"
+      - "It disables BuildKit"
+    answer: 0
+    explanation: |
+      Changing a build-arg value that an instruction consumes causes a cache miss at that
+      point, cascading to subsequent layers. Passing a fresh CACHEBUST value (e.g., a
+      timestamp) forces re-execution from that ARG's use onward.
+    ref: "concepts.md#how-the-build-cache-works-and-cache-invalidation-rules"
+
+  - id: dockerfile-layers-build-cache-044
+    difficulty: beginner
+    tags: [expose, metadata]
+    question: |
+      What does `EXPOSE 8080` do?
+    options:
+      - "Publishes port 8080 on the host automatically"
+      - "Opens a firewall rule on the host"
+      - "Documents that the container listens on 8080; it does not publish the port"
+      - "Creates a new network layer"
+    answer: 2
+    explanation: |
+      EXPOSE is metadata documenting the intended port; it does not publish anything. You
+      still need `-p`/`--publish` (or compose `ports:`) to map it to the host. It creates no
+      filesystem layer.
+    ref: "concepts.md#which-instructions-create-layers-vs-metadata"
+
+  - id: dockerfile-layers-build-cache-045
+    difficulty: advanced
+    tags: [buildkit, cache-mount, sharing]
+    question: |
+      In `RUN --mount=type=cache,target=/var/cache/apt,sharing=locked ...`, what is the role
+      of `sharing=locked`?
+    options:
+      - "It encrypts the cache directory"
+      - "It locks the cache into the final image"
+      - "It prevents the cache from ever being reused"
+      - "It serializes concurrent builds' access to the shared cache to avoid corruption"
+    answer: 3
+    explanation: |
+      sharing=locked makes concurrent builds take turns accessing the shared cache mount,
+      preventing races/corruption in package-manager caches like apt. It has nothing to do
+      with encryption or baking into the image.
+    ref: "concepts.md#run-cache-with-package-managers-buildkit-cache-mounts"
+
+  - id: dockerfile-layers-build-cache-046
+    difficulty: intermediate
+    tags: [debugging, save, inspect]
+    question: |
+      Which command exports an image's layers as a tar so you can inspect exactly what files
+      it contains?
+    options:
+      - "docker export <container>"
+      - "docker save myimage:tag -o img.tar"
+      - "docker commit myimage:tag"
+      - "docker cp myimage:tag ."
+    answer: 1
+    explanation: |
+      docker save writes an image (all its layers + manifest) to a tar archive you can unpack
+      and inspect. docker export dumps a container's flattened filesystem (no layer history),
+      and commit/cp are different operations.
+    ref: "concepts.md#inspecting-layers-and-diagnosing-sizecache"
+
+  - id: dockerfile-layers-build-cache-047
+    difficulty: advanced
+    tags: [cache, no-cache-filter, buildkit]
+    question: |
+      What does `docker build --no-cache-filter=deps .` do?
+    options:
+      - "Skips the cache only for the stage named `deps`, while other stages may still use cache"
+      - "Disables cache for the entire build"
+      - "Deletes the deps stage from the Dockerfile"
+      - "Filters out dependency layers from the final image"
+    answer: 0
+    explanation: |
+      --no-cache-filter targets specific stages (here, deps) to bypass their cache while
+      letting the rest of the build reuse cache — useful to refresh just dependency
+      installation without a full --no-cache rebuild.
+    ref: "concepts.md#how-the-build-cache-works-and-cache-invalidation-rules"
+
+  - id: dockerfile-layers-build-cache-048
+    difficulty: intermediate
+    tags: [copy, add, from-stage]
+    question: |
+      Which capability is available to BOTH COPY and ADD?
+    options:
+      - "Auto-extracting a local tar archive"
+      - "Fetching a remote git repository"
+      - "Downloading from an HTTPS URL"
+      - "Copying files from another build stage with --from"
+    answer: 3
+    explanation: |
+      Both COPY and ADD support --from to pull files from a prior stage (or an image).
+      Local-tar extraction, git-repo fetch, and remote-URL download are ADD-only features.
+    ref: "concepts.md#copy-vs-add"
+
+  - id: dockerfile-layers-build-cache-049
+    difficulty: beginner
+    tags: [run, build-time, layers]
+    question: |
+      When does a `RUN` instruction execute?
+    options:
+      - "Every time the container starts"
+      - "Only when docker exec is called"
+      - "During the image build, capturing its filesystem changes into a new layer"
+      - "Never; RUN is only documentation"
+    answer: 2
+    explanation: |
+      RUN executes at build time in an intermediate container and commits the resulting
+      filesystem changes as a new layer. Runtime commands are specified by CMD/ENTRYPOINT,
+      not RUN.
+    ref: "concepts.md#which-instructions-create-layers-vs-metadata"
+
+  - id: dockerfile-layers-build-cache-050
+    difficulty: advanced
+    tags: [secrets, buildkit, cache]
+    question: |
+      Using `RUN --mount=type=secret,id=npmrc ...`, how does the secret interact with the
+      build cache and image layers?
+    options:
+      - "The secret's contents are stored in the layer and cache"
+      - "The secret's contents are not written to any layer and are not part of the build cache"
+      - "The secret forces --no-cache for the whole build"
+      - "The secret is embedded in docker history"
+    answer: 1
+    explanation: |
+      BuildKit secret mounts expose the secret only to that RUN's process; the contents are
+      never written to a layer and are not part of the build cache, so they don't leak into
+      the image or history.
+    ref: "concepts.md#why-each-layer-adds-size-deleting-in-a-later-layer"
