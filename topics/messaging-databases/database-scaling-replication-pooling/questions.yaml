@@ -1,0 +1,1074 @@
+topic: "Database Scaling: Replication, Read Replicas & Pooling"
+domain: messaging-databases
+topic_slug: database-scaling-replication-pooling
+version: 1
+questions:
+  - id: database-scaling-replication-pooling-001
+    difficulty: beginner
+    tags: [scaling, vertical, horizontal]
+    question: |
+      What is the key difference between vertical and horizontal scaling of a database?
+    options:
+      - "Vertical scaling gives one machine more resources; horizontal scaling adds more machines"
+      - "Vertical scaling adds more machines; horizontal scaling adds more RAM/CPU to one machine"
+      - "Vertical scaling only works for reads; horizontal scaling only works for writes"
+      - "They are two names for the same technique"
+    answer: 0
+    explanation: |
+      Vertical scaling (scale up) means giving a single machine more CPU, RAM, or faster
+      disks. Horizontal scaling (scale out) means adding more machines and distributing
+      work across them. The second option reverses the two definitions.
+    ref: "concepts.md#vertical-vs-horizontal-scaling"
+
+  - id: database-scaling-replication-pooling-002
+    difficulty: beginner
+    tags: [scaling, read-replicas, writes]
+    question: |
+      Why do read replicas NOT increase a system's write throughput?
+    options:
+      - "Replicas reject all write statements at the SQL parser"
+      - "Every write still goes through the single leader and is then replayed on every replica, so each replica does the same write work"
+      - "Writes are cached in the application before reaching any replica"
+      - "Replicas convert writes into reads automatically"
+    answer: 1
+    explanation: |
+      A read replica applies the leader's entire write stream, so it performs the same
+      write work the leader does. Reads can be spread across replicas, but the write
+      ceiling is still the single leader. Only partitioning scales writes.
+    ref: "concepts.md#vertical-vs-horizontal-scaling"
+
+  - id: database-scaling-replication-pooling-003
+    difficulty: intermediate
+    tags: [scaling, tradeoffs, progression]
+    question: |
+      A team runs a single Postgres box near its CPU/RAM ceiling. Which progression best
+      matches the usual scaling advice?
+    options:
+      - "Shard immediately, then add replicas, then scale up"
+      - "Add multi-leader replication first, then scale up"
+      - "Scale up first, then add read replicas for read scaling + HA, then shard only when a single leader can't absorb the write volume"
+      - "Always shard before scaling vertically because vertical scaling is deprecated"
+    answer: 2
+    explanation: |
+      The standard progression is scale up (simplest, keeps ACID on one node), then add
+      read replicas (read scaling + HA), then partition/shard only when writes or dataset
+      size exceed a single leader. Sharding is deferred because it makes joins,
+      transactions, and constraints distributed problems.
+    ref: "concepts.md#vertical-vs-horizontal-scaling"
+
+  - id: database-scaling-replication-pooling-004
+    difficulty: beginner
+    tags: [replication, why, ha]
+    question: |
+      Which of the following is NOT one of the primary reasons to use replication?
+    options:
+      - "High availability — a replica can take over if the leader dies"
+      - "Read scaling — route read-only queries to followers"
+      - "Latency/locality — put a replica near users in another region"
+      - "Scaling write throughput beyond a single leader"
+    answer: 3
+    explanation: |
+      Replication provides HA, read scaling, locality, and analytics offload. It does not
+      scale write throughput — every replica replays the leader's writes. Scaling writes
+      requires partitioning.
+    ref: "concepts.md#replication-what-it-is-and-why"
+
+  - id: database-scaling-replication-pooling-005
+    difficulty: beginner
+    tags: [replication, wal, binlog]
+    question: |
+      In single-leader replication, what is the core mechanism used to keep followers in
+      sync with the leader?
+    options:
+      - "The leader ships its write-ahead log (WAL) / binlog to followers, which replay it"
+      - "The leader periodically dumps and restores the full database to each follower"
+      - "Followers poll every table for changed rows using timestamps"
+      - "Each follower independently re-runs the application's business logic"
+    answer: 0
+    explanation: |
+      Single-leader replication ships the leader's WAL (Postgres) or binlog (MySQL) to
+      followers, which replay those changes to converge to the same state. Full dumps or
+      timestamp polling are not how streaming replication works.
+    ref: "concepts.md#replication-what-it-is-and-why"
+
+  - id: database-scaling-replication-pooling-006
+    difficulty: beginner
+    tags: [replication, followers, read-only]
+    question: |
+      What is true about a follower (read replica) in single-leader replication?
+    options:
+      - "It accepts writes and forwards them to the leader"
+      - "It is read-only and may lag the leader, returning slightly stale data"
+      - "It is always perfectly consistent with the leader"
+      - "It stores only a partition of the leader's data"
+    answer: 1
+    explanation: |
+      A follower is read-only and applies the leader's log with some delay, so reads can
+      be milliseconds-to-seconds stale. A follower holds a full copy (that is replication,
+      not partitioning), and never accepts writes.
+    ref: "concepts.md#replication-what-it-is-and-why"
+
+  - id: database-scaling-replication-pooling-007
+    difficulty: intermediate
+    tags: [replication, statement-based, non-determinism]
+    question: |
+      Why is statement-based replication (SBR) considered dangerous for some workloads?
+    options:
+      - "It ships row images, which are always larger than the statement"
+      - "It cannot replicate INSERT statements, only UPDATE and DELETE"
+      - "Non-deterministic statements (NOW(), RAND(), UUID(), order-dependent updates) can produce different results on the replica, silently diverging the copies"
+      - "It requires the replica to run a newer version than the leader"
+    answer: 2
+    explanation: |
+      SBR re-executes the SQL on each replica. Functions like NOW(), RAND(), UUID(), or
+      updates whose result depends on row order can evaluate differently on the replica,
+      causing the copies to silently diverge. Row-based replication ships the resulting
+      values, so it is deterministic.
+    ref: "concepts.md#statement-based-vs-row-based-logical-replication"
+
+  - id: database-scaling-replication-pooling-008
+    difficulty: intermediate
+    tags: [replication, row-based, mysql]
+    question: |
+      What is the main cost of row-based replication (RBR) compared to statement-based?
+    options:
+      - "It silently diverges on non-deterministic functions"
+      - "It cannot feed change-data-capture pipelines"
+      - "It requires all replicas to run different schemas"
+      - "It ships the actual changed row images, so a single UPDATE touching a million rows produces a large log volume"
+    answer: 3
+    explanation: |
+      RBR is deterministic and safe, but it ships before/after row images. An UPDATE ...
+      WHERE that touches a million rows ships a million row images, so log volume is
+      larger than the compact statement. It is nonetheless the modern default (MySQL ROW
+      since 5.7.7).
+    ref: "concepts.md#statement-based-vs-row-based-logical-replication"
+
+  - id: database-scaling-replication-pooling-009
+    difficulty: intermediate
+    tags: [replication, mysql, binlog-format]
+    question: |
+      What does MySQL's MIXED binlog_format do?
+    options:
+      - "Uses statement-based normally and switches to row-based when it detects a non-deterministic statement"
+      - "Uses row-based normally and switches to statement-based for large updates"
+      - "Alternates format on every transaction to balance size"
+      - "Ships both statement and row images for every change"
+    answer: 0
+    explanation: |
+      MIXED uses statement-based replication by default (compact) but automatically
+      switches to row-based when it detects a statement that could be non-deterministic,
+      combining SBR's compactness with RBR's safety where it matters.
+    ref: "concepts.md#statement-based-vs-row-based-logical-replication"
+
+  - id: database-scaling-replication-pooling-010
+    difficulty: advanced
+    tags: [replication, postgres, logical, physical]
+    question: |
+      In PostgreSQL, which statement about physical (streaming) vs logical replication is
+      correct?
+    options:
+      - "Physical replication decodes row-level INSERT/UPDATE/DELETE and can replicate selective tables across major versions"
+      - "Physical replication ships raw WAL changes and requires the same major version + architecture; logical replication decodes row-level changes and can cross versions or select tables"
+      - "Logical replication ships raw WAL byte/page changes and requires an identical major version and architecture"
+      - "Physical and logical replication are identical except for the port they use"
+    answer: 1
+    explanation: |
+      Physical/streaming replication ships raw WAL byte changes and requires the replica
+      to match the leader's major version and architecture (whole-cluster copy). Logical
+      replication (PUBLICATION/SUBSCRIPTION, pgoutput) decodes row-level changes, can
+      differ in version/schema, and supports selective tables and CDC.
+    ref: "concepts.md#statement-based-vs-row-based-logical-replication"
+
+  - id: database-scaling-replication-pooling-011
+    difficulty: intermediate
+    tags: [replication, cdc, debezium]
+    question: |
+      Change-data-capture tools like Debezium consume which of the following?
+    options:
+      - "The application's HTTP access logs"
+      - "Nightly full-table CSV exports"
+      - "The row-based/logical replication stream — the MySQL binlog or Postgres logical decoding output"
+      - "The database's query planner statistics"
+    answer: 2
+    explanation: |
+      CDC pipelines read the same row-level change stream replication uses: Debezium reads
+      the MySQL binlog or Postgres logical decoding output to capture INSERT/UPDATE/DELETE
+      events in order.
+    ref: "concepts.md#statement-based-vs-row-based-logical-replication"
+
+  - id: database-scaling-replication-pooling-012
+    difficulty: beginner
+    tags: [replication, async, latency]
+    question: |
+      In asynchronous replication, when does the leader acknowledge a commit to the
+      client?
+    options:
+      - "After at least one follower confirms it received the write"
+      - "Only after all followers have applied and made the write visible"
+      - "After a majority of followers fsync the write"
+      - "Immediately after its own commit, before streaming to followers"
+    answer: 3
+    explanation: |
+      Asynchronous replication acks the client immediately after the leader's own commit,
+      then streams to followers whenever it can. This gives the lowest write latency but
+      risks losing a committed write if the leader crashes before it ships.
+    ref: "concepts.md#synchronous-vs-asynchronous-vs-semi-synchronous-replication"
+
+  - id: database-scaling-replication-pooling-013
+    difficulty: intermediate
+    tags: [replication, sync, durability]
+    question: |
+      What is the primary risk of making a single synchronous replica part of the commit
+      path?
+    options:
+      - "If that synchronous follower is down or slow, commits on the leader block — it becomes an availability risk"
+      - "The synchronous replica silently diverges from the leader"
+      - "Writes can be lost even when the leader survives"
+      - "The leader stops accepting reads"
+    answer: 0
+    explanation: |
+      Synchronous replication waits for the follower before acking, guaranteeing no data
+      loss on leader failure. But if that single synchronous follower is slow or down,
+      every commit blocks waiting for it, turning it into an availability liability.
+    ref: "concepts.md#synchronous-vs-asynchronous-vs-semi-synchronous-replication"
+
+  - id: database-scaling-replication-pooling-014
+    difficulty: intermediate
+    tags: [replication, semi-sync, mysql]
+    question: |
+      What does semi-synchronous replication (e.g. MySQL semi-sync) guarantee before the
+      leader acks a commit?
+    options:
+      - "All replicas have applied and made the write visible"
+      - "At least one replica has acknowledged receipt of the write"
+      - "The write has been fsynced on every replica"
+      - "Nothing — it is identical to asynchronous"
+    answer: 1
+    explanation: |
+      Semi-synchronous replication waits for at least one replica to acknowledge receipt
+      of the write (not necessarily full apply) before acking the client. It bounds data
+      loss without waiting for all replicas to fully apply.
+    ref: "concepts.md#synchronous-vs-asynchronous-vs-semi-synchronous-replication"
+
+  - id: database-scaling-replication-pooling-015
+    difficulty: advanced
+    tags: [postgres, synchronous-commit, durability]
+    question: |
+      In PostgreSQL, which synchronous_commit setting makes a standby apply and make a
+      change visible before the commit returns (strongest, slowest)?
+    options:
+      - "local"
+      - "off"
+      - "remote_apply"
+      - "remote_write"
+    answer: 2
+    explanation: |
+      remote_apply waits until the standby has applied the WAL and made the change visible
+      to reads — the strongest and slowest level. remote_write only waits for the OS to
+      receive/write it, local waits only for local fsync, and off does not even wait for
+      local flush.
+    ref: "concepts.md#synchronous-vs-asynchronous-vs-semi-synchronous-replication"
+
+  - id: database-scaling-replication-pooling-016
+    difficulty: intermediate
+    tags: [replication, production-pattern, tradeoff]
+    question: |
+      Why is making ALL replicas synchronous usually a mistake?
+    options:
+      - "Synchronous replicas cannot serve reads"
+      - "Synchronous replication corrupts data over time"
+      - "It doubles the storage requirement of each replica"
+      - "One slow or down replica stalls every commit, because the leader must wait for the synchronous set"
+    answer: 3
+    explanation: |
+      A common good pattern is one synchronous standby (bounded data loss + HA) plus
+      several asynchronous read replicas. If all replicas are synchronous, any one being
+      slow or unavailable blocks every commit on the leader, hurting availability and
+      latency.
+    ref: "concepts.md#synchronous-vs-asynchronous-vs-semi-synchronous-replication"
+
+  - id: database-scaling-replication-pooling-017
+    difficulty: beginner
+    tags: [replication-lag, read-your-writes]
+    question: |
+      A user posts a comment (write to leader), the page reloads and reads from a lagging
+      follower that hasn't applied it yet, so the comment "disappears." What is this
+      anomaly called?
+    options:
+      - "Read-your-own-writes (read-after-write) violation"
+      - "Monotonic reads violation"
+      - "Consistent-prefix violation"
+      - "Phantom read"
+    answer: 0
+    explanation: |
+      Read-your-own-writes (read-after-write) is violated when a user cannot see data they
+      just wrote because the read hit a follower that hasn't applied the write yet. The
+      fix is to route the user's own recent reads to the leader or use LSN/GTID-aware
+      routing.
+    ref: "concepts.md#replication-lag-and-its-read-anomalies"
+
+  - id: database-scaling-replication-pooling-018
+    difficulty: intermediate
+    tags: [replication-lag, monotonic-reads]
+    question: |
+      A user reads from a caught-up replica and sees new data, then a second read hits a
+      laggier replica and the data appears to go backward in time. Which guarantee fixes
+      this, and how?
+    options:
+      - "Read-your-writes; route all reads to the leader"
+      - "Monotonic reads; pin each user to a single replica so they never see time move backward"
+      - "Consistent prefix; use two-phase commit"
+      - "Linearizability; disable all replicas"
+    answer: 1
+    explanation: |
+      Monotonic reads guarantees a user never sees data go backward. Pinning each user to
+      a single replica (e.g. hashing the user id to a replica) achieves it. It is weaker
+      than strong consistency but stronger than reading from any replica.
+    ref: "concepts.md#replication-lag-and-its-read-anomalies"
+
+  - id: database-scaling-replication-pooling-019
+    difficulty: intermediate
+    tags: [replication-lag, read-your-writes, fix]
+    question: |
+      Which technique does NOT solve read-your-own-writes on asynchronous read replicas?
+    options:
+      - "Read the user's own recently written data from the leader"
+      - "Pin the user's session to the leader for N seconds after a write"
+      - "Send all of the user's reads to a randomly chosen replica each time"
+      - "Track the write's LSN/GTID and only read from a replica caught up past it"
+    answer: 2
+    explanation: |
+      Randomly choosing a replica per read is exactly what causes read-your-writes and
+      monotonic-read violations. The valid fixes are leader reads for own data, session
+      pinning to the leader briefly after a write, or LSN/GTID-aware replica routing.
+    ref: "concepts.md#replication-lag-and-its-read-anomalies"
+
+  - id: database-scaling-replication-pooling-020
+    difficulty: advanced
+    tags: [replication-lag, monitoring, mysql]
+    question: |
+      A junior engineer sees Seconds_Behind_Source = 0 in SHOW REPLICA STATUS and
+      concludes the replica is perfectly caught up. Why is this potentially misleading?
+    options:
+      - "Seconds_Behind_Source only counts DELETE statements"
+      - "The value is always reported in milliseconds, not seconds"
+      - "It measures leader lag, not replica lag"
+      - "It can read 0 even when the replication thread is stalled or idle, so it doesn't always mean the replica is current"
+    answer: 3
+    explanation: |
+      Seconds_Behind_Source can misleadingly report 0 if the replication I/O or SQL thread
+      is stalled or idle, because the metric is derived from the timestamp of the event
+      being processed. A stalled thread can show 0 while actually far behind.
+    ref: "concepts.md#replication-lag-and-its-read-anomalies"
+
+  - id: database-scaling-replication-pooling-021
+    difficulty: intermediate
+    tags: [replication-lag, postgres, monitoring]
+    question: |
+      In PostgreSQL, how do you measure replication lag for a streaming standby?
+    options:
+      - "Query pg_stat_replication, comparing pg_current_wal_lsn() to each standby's replay_lsn (or use replay_lag)"
+      - "Run VACUUM ANALYZE on the standby"
+      - "Count rows in every table on both nodes"
+      - "Read the standby's error log for lag warnings"
+    answer: 0
+    explanation: |
+      pg_stat_replication on the leader exposes each standby's sent/write/flush/replay
+      LSNs. Comparing pg_current_wal_lsn() to a standby's replay_lsn (or reading
+      replay_lag) tells you how far behind that standby is.
+    ref: "concepts.md#replication-lag-and-its-read-anomalies"
+
+  - id: database-scaling-replication-pooling-022
+    difficulty: beginner
+    tags: [topology, single-leader]
+    question: |
+      Which topology has exactly one node accepting writes while others are read-only
+      copies, making it simplest to reason about with no write conflicts?
+    options:
+      - "Multi-leader"
+      - "Single-leader (leader–follower)"
+      - "Leaderless (Dynamo-style)"
+      - "Peer-to-peer gossip"
+    answer: 1
+    explanation: |
+      Single-leader replication routes all writes through one authority, so there are no
+      write conflicts and ordering is unambiguous. It is the default for PostgreSQL, MySQL,
+      SQL Server, and Oracle primary/standby setups.
+    ref: "concepts.md#single-leader-vs-multi-leader-vs-leaderless-replication"
+
+  - id: database-scaling-replication-pooling-023
+    difficulty: intermediate
+    tags: [topology, multi-leader, conflicts]
+    question: |
+      What is the fundamental cost that multi-leader (multi-master) replication introduces
+      that single-leader avoids?
+    options:
+      - "It cannot serve reads at all"
+      - "It requires synchronous replication to every node"
+      - "Write conflicts — two leaders can update the same row concurrently and conflicts must be resolved"
+      - "It stores only a partition of the data on each leader"
+    answer: 2
+    explanation: |
+      With more than one node accepting writes, two leaders can concurrently update the
+      same row, producing conflicts that must be resolved (last-write-wins, application
+      merge, or CRDTs). Single-leader avoids this by having one write authority.
+    ref: "concepts.md#single-leader-vs-multi-leader-vs-leaderless-replication"
+
+  - id: database-scaling-replication-pooling-024
+    difficulty: advanced
+    tags: [topology, leaderless, quorum]
+    question: |
+      In a leaderless (Dynamo-style) system with N=3 replicas, which quorum configuration
+      guarantees a read overlaps with the latest write by at least one replica?
+    options:
+      - "W=1, R=1"
+      - "W=1, R=1, N=5"
+      - "W=0, R=3"
+      - "W=2, R=2 (so W + R > N)"
+    answer: 3
+    explanation: |
+      Choosing W + R > N ensures write and read quorums overlap on at least one up-to-date
+      replica. With N=3, W=2 and R=2 gives 4 > 3. W=1/R=1 sums to 2, which does not exceed
+      3, so a read may miss the latest write.
+    ref: "concepts.md#single-leader-vs-multi-leader-vs-leaderless-replication"
+
+  - id: database-scaling-replication-pooling-025
+    difficulty: intermediate
+    tags: [topology, leaderless, systems]
+    question: |
+      Which set of systems is best associated with leaderless replication and quorum
+      reads/writes?
+    options:
+      - "Cassandra, DynamoDB, Riak"
+      - "PostgreSQL, MySQL, SQL Server"
+      - "SQLite, MS Access, DBase"
+      - "Redis, Memcached, Varnish"
+    answer: 0
+    explanation: |
+      Leaderless replication with quorums and anti-entropy (read repair, Merkle-tree sync)
+      is the Dynamo model, implemented by Cassandra, DynamoDB, Riak, and ScyllaDB. The
+      relational systems listed use single-leader replication.
+    ref: "concepts.md#single-leader-vs-multi-leader-vs-leaderless-replication"
+
+  - id: database-scaling-replication-pooling-026
+    difficulty: intermediate
+    tags: [failover, promotion, data-loss]
+    question: |
+      During failover, why is the most caught-up replica (highest LSN/GTID) usually chosen
+      for promotion?
+    options:
+      - "To balance load evenly across the cluster"
+      - "To minimize data loss, since it has applied the most of the old leader's writes"
+      - "Because it is guaranteed to be on faster hardware"
+      - "To force all clients to reconnect"
+    answer: 1
+    explanation: |
+      Promoting the replica with the highest applied LSN/GTID minimizes the window of
+      writes lost during failover, because that replica reflects the most of what the old
+      leader had committed and shipped.
+    ref: "concepts.md#failover-promotion-split-brain-and-fencing"
+
+  - id: database-scaling-replication-pooling-027
+    difficulty: intermediate
+    tags: [failover, split-brain]
+    question: |
+      What is "split-brain" in a failover scenario?
+    options:
+      - "A replica that applies the WAL out of order"
+      - "The pooler routing reads and writes to different nodes"
+      - "Two nodes both believing they are the leader and both accepting writes, producing divergent, conflicting data"
+      - "A replica falling more than 60 seconds behind"
+    answer: 2
+    explanation: |
+      Split-brain occurs when a network partition (or a rejoining old leader) leaves two
+      nodes each convinced they are leader. Both accept writes, creating divergent data
+      that is painful or impossible to reconcile.
+    ref: "concepts.md#failover-promotion-split-brain-and-fencing"
+
+  - id: database-scaling-replication-pooling-028
+    difficulty: advanced
+    tags: [failover, fencing, stonith, quorum]
+    question: |
+      Which approach actually prevents split-brain, rather than just hoping the old leader
+      notices it was demoted?
+    options:
+      - "Setting a very long heartbeat timeout"
+      - "Increasing the number of asynchronous replicas"
+      - "Trusting the old leader to demote itself when its clients disconnect"
+      - "Requiring a majority (quorum/consensus) to be leader plus fencing/STONITH of the loser"
+    answer: 3
+    explanation: |
+      A partitioned old leader may not know it lost. Correct designs require a majority
+      (Raft/Paxos-style consensus) to become leader and fence the loser (STONITH, storage
+      revocation, or lease expiry). A node that cannot reach a majority demotes itself.
+    ref: "concepts.md#failover-promotion-split-brain-and-fencing"
+
+  - id: database-scaling-replication-pooling-029
+    difficulty: advanced
+    tags: [failover, two-node, witness]
+    question: |
+      Why can't two nodes with no third arbiter safely perform automatic failover?
+    options:
+      - "No majority is possible with only two nodes, so a partitioned node cannot tell if it should lead — you need an odd number or a witness"
+      - "Two nodes cannot run replication at all"
+      - "Two-node clusters always have zero replication lag"
+      - "The second node is always read-only by design"
+    answer: 0
+    explanation: |
+      Quorum requires a majority. With two nodes, a partition splits them 1-1, and neither
+      side has a majority, so neither can safely claim leadership without risking
+      split-brain. An odd number of nodes or a witness/arbiter breaks the tie.
+    ref: "concepts.md#failover-promotion-split-brain-and-fencing"
+
+  - id: database-scaling-replication-pooling-030
+    difficulty: intermediate
+    tags: [failover, timeout-tuning]
+    question: |
+      What is the trade-off when tuning the failover detection timeout?
+    options:
+      - "Longer timeouts cause split-brain; shorter timeouts cause data loss"
+      - "Too short causes false-positive failovers (flapping) on transient blips; too long causes extended downtime"
+      - "Timeout length has no effect on failover behavior"
+      - "Shorter timeouts always improve durability"
+    answer: 1
+    explanation: |
+      A too-short timeout triggers unnecessary failovers on a brief network hiccup
+      (flapping); a too-long timeout means the system stays down longer before promoting a
+      replica. There is no universally safe value.
+    ref: "concepts.md#failover-promotion-split-brain-and-fencing"
+
+  - id: database-scaling-replication-pooling-031
+    difficulty: beginner
+    tags: [read-write-splitting, routing]
+    question: |
+      What does "read/write splitting" mean in the context of read replicas?
+    options:
+      - "Splitting each query into a read half and a write half"
+      - "Storing reads and writes in separate tables"
+      - "Routing writes (and reads needing the freshest data) to the leader, and read-only queries to followers"
+      - "Alternating every query between leader and follower"
+    answer: 2
+    explanation: |
+      Read/write splitting sends writes and freshness-sensitive reads to the leader and
+      offloads read-only queries to followers. It is how you actually make use of read
+      replicas.
+    ref: "concepts.md#readwrite-splitting"
+
+  - id: database-scaling-replication-pooling-032
+    difficulty: intermediate
+    tags: [read-write-splitting, correctness]
+    question: |
+      Under read/write splitting, which query must still go to the leader?
+    options:
+      - "A dashboard aggregation over last month's data"
+      - "A read-only report export"
+      - "A cache-warming SELECT of static reference data"
+      - "A SELECT ... FOR UPDATE, or any read inside a read-write transaction"
+    answer: 3
+    explanation: |
+      SELECT ... FOR UPDATE takes locks and is part of a read-write flow, and any statement
+      inside a read-write transaction must run on the leader (a transaction can't span
+      nodes). Stale-tolerant analytics and exports can safely go to replicas.
+    ref: "concepts.md#readwrite-splitting"
+
+  - id: database-scaling-replication-pooling-033
+    difficulty: intermediate
+    tags: [read-write-splitting, proxy, aurora]
+    question: |
+      Which is an example of proxy/middleware-level read/write splitting rather than
+      application-level?
+    options:
+      - "A managed Aurora/RDS cluster reader endpoint (or ProxySQL/MaxScale) that load-balances reads across replicas"
+      - "The app keeping separate writer and reader connection pools and choosing per query"
+      - "Hardcoding the leader DSN into every query"
+      - "Manually annotating each function as read or write in code"
+    answer: 0
+    explanation: |
+      Proxy-level splitting uses middleware like ProxySQL, MaxScale, pgpool-II, or a
+      managed reader endpoint (Aurora/RDS) to route automatically. Keeping two pools in the
+      app and choosing per query is application-level splitting.
+    ref: "concepts.md#readwrite-splitting"
+
+  - id: database-scaling-replication-pooling-034
+    difficulty: intermediate
+    tags: [read-write-splitting, tuning-first]
+    question: |
+      Before adding read replicas to offload a slow, frequently-run query, what does the
+      guidance recommend trying first?
+    options:
+      - "Immediately shard the table by primary key"
+      - "Exhaust caching and query/index tuning — an index fix removes far more load than spraying the same slow query across replicas"
+      - "Switch to multi-leader replication"
+      - "Increase max_connections to 5000"
+    answer: 1
+    explanation: |
+      Replicas add eventual consistency and operational surface. Fixing a slow query with
+      an index or caching removes the load at the source; spreading the same unindexed
+      query across three replicas just multiplies the wasted work.
+    ref: "concepts.md#readwrite-splitting"
+
+  - id: database-scaling-replication-pooling-035
+    difficulty: beginner
+    tags: [pooling, connection-cost]
+    question: |
+      Why does opening a fresh database connection per request hurt performance?
+    options:
+      - "Connections are limited to one query each"
+      - "The database re-indexes on every connect"
+      - "Each new connection pays TCP + TLS handshake + authentication cost, plus server-side memory, on every open"
+      - "New connections disable the query cache"
+    answer: 2
+    explanation: |
+      A new connection incurs a TCP + TLS handshake and authentication (multiple round
+      trips, tens of ms) plus server-side memory allocation, which dwarfs a fast query. A
+      pool reuses already-open connections to skip that cost.
+    ref: "concepts.md#why-connection-pooling-and-the-cost-of-a-connection"
+
+  - id: database-scaling-replication-pooling-036
+    difficulty: intermediate
+    tags: [pooling, postgres, process-model]
+    question: |
+      Why does PostgreSQL in particular need an external connection pooler more than some
+      other databases?
+    options:
+      - "Postgres cannot reuse connections at all"
+      - "Postgres charges per connection by CPU time"
+      - "Postgres connections expire after one second"
+      - "In Postgres every connection is a separate OS process (fork) costing several MB of RAM each, so thousands of connections exhaust memory"
+    answer: 3
+    explanation: |
+      PostgreSQL forks a separate OS process per connection, each costing several MB plus
+      backend structures. Thousands of connections exhaust memory and thrash the scheduler,
+      which is why an external pooler (PgBouncer) is especially important for Postgres.
+      MySQL uses a lighter thread-per-connection model.
+    ref: "concepts.md#why-connection-pooling-and-the-cost-of-a-connection"
+
+  - id: database-scaling-replication-pooling-037
+    difficulty: intermediate
+    tags: [pooling, max-connections, postgres]
+    question: |
+      What happens when a Postgres server hits its max_connections limit (default 100)?
+    options:
+      - "New connections are rejected with FATAL: sorry, too many clients already"
+      - "It silently queues new connections forever"
+      - "It automatically raises the limit"
+      - "It converts extra connections into read replicas"
+    answer: 0
+    explanation: |
+      max_connections is a hard ceiling; exceeding it returns FATAL: sorry, too many
+      clients already. Per-request connection creation or serverless autoscaling can blow
+      through it fast, which a pooler prevents by bounding real server connections.
+    ref: "concepts.md#why-connection-pooling-and-the-cost-of-a-connection"
+
+  - id: database-scaling-replication-pooling-038
+    difficulty: intermediate
+    tags: [pooling, throughput, contention]
+    question: |
+      Why does having far more concurrently active connections than CPU cores/IO capacity
+      often REDUCE throughput?
+    options:
+      - "The database refuses queries past the core count"
+      - "It increases context switching, lock contention, and latency past the sweet spot, so throughput drops"
+      - "Extra connections are billed at a higher rate"
+      - "Each connection halves the query cache"
+    answer: 1
+    explanation: |
+      A database can only truly execute as many queries in parallel as it has CPU cores
+      and IO channels. Beyond that, more active connections add context switching and lock
+      contention, so throughput drops rather than rises — more connections is not more
+      capacity.
+    ref: "concepts.md#why-connection-pooling-and-the-cost-of-a-connection"
+
+  - id: database-scaling-replication-pooling-039
+    difficulty: beginner
+    tags: [pgbouncer, pool-modes, session]
+    question: |
+      In PgBouncer session pooling mode, when is a server connection returned to the pool?
+    options:
+      - "At the end of each transaction"
+      - "After each individual statement"
+      - "When the client disconnects"
+      - "Every 30 seconds regardless of activity"
+    answer: 2
+    explanation: |
+      In session mode a server connection is tied to a client for its whole session and
+      released only when the client disconnects. This offers the least multiplexing but
+      supports all session-scoped features.
+    ref: "concepts.md#pooler-modes-session-vs-transaction-vs-statement-pgbouncer"
+
+  - id: database-scaling-replication-pooling-040
+    difficulty: intermediate
+    tags: [pgbouncer, transaction-mode, multiplexing]
+    question: |
+      Why is PgBouncer transaction pooling mode the workhorse for typical web apps?
+    options:
+      - "It guarantees zero replication lag"
+      - "It allows session-level SET variables to persist across transactions"
+      - "It disables prepared statements automatically with no downside"
+      - "Between transactions the server connection returns to the pool, so many idle clients (e.g. 1000) can share few server connections (e.g. 20)"
+    answer: 3
+    explanation: |
+      Transaction mode returns the server connection to the pool at COMMIT/ROLLBACK, so
+      thousands of mostly-idle clients multiplex onto a small set of server connections.
+      The catch is that session-scoped state does not carry across transactions.
+    ref: "concepts.md#pooler-modes-session-vs-transaction-vs-statement-pgbouncer"
+
+  - id: database-scaling-replication-pooling-041
+    difficulty: advanced
+    tags: [pgbouncer, transaction-mode, session-state]
+    question: |
+      A Java app using JDBC with server-side prepared statements starts throwing
+      intermittent "prepared statement already exists" errors after PgBouncer was switched
+      to transaction pooling. What is the root cause?
+    options:
+      - "Consecutive statements can land on different backend connections in transaction mode, so server-side session state like prepared statements doesn't carry over"
+      - "The database ran out of disk space"
+      - "Transaction mode corrupts the WAL"
+      - "JDBC is incompatible with PostgreSQL"
+    answer: 0
+    explanation: |
+      In transaction mode the next transaction may execute on a different backend
+      connection, so a prepared statement created on one backend isn't present (or
+      conflicts) on another. Fixes: use session mode, disable server-side prepared
+      statements, or configure max_prepared_statements.
+    ref: "concepts.md#pooler-modes-session-vs-transaction-vs-statement-pgbouncer"
+
+  - id: database-scaling-replication-pooling-042
+    difficulty: intermediate
+    tags: [pgbouncer, transaction-mode, restrictions]
+    question: |
+      Which feature is NOT safe to rely on under PgBouncer transaction pooling mode?
+    options:
+      - "A single autocommit INSERT"
+      - "Session-level LISTEN/NOTIFY and session SET variables that must persist across transactions"
+      - "A short read-write transaction that commits quickly"
+      - "A SELECT that returns a single row"
+    answer: 1
+    explanation: |
+      Transaction mode breaks anything relying on persistent session state across
+      transactions: session SET variables, session-level prepared statements, LISTEN/NOTIFY,
+      advisory session locks, WITH HOLD cursors, and cross-transaction temp tables. Normal
+      per-transaction work is fine.
+    ref: "concepts.md#pooler-modes-session-vs-transaction-vs-statement-pgbouncer"
+
+  - id: database-scaling-replication-pooling-043
+    difficulty: intermediate
+    tags: [pooling, client-side, server-side]
+    question: |
+      What problem does a server-side pooler (PgBouncer, RDS Proxy) solve that an in-app
+      client pool (HikariCP) alone cannot?
+    options:
+      - "It executes SQL faster than the database"
+      - "It replaces the need for indexes"
+      - "It multiplexes many client connections from many app instances onto few real server connections"
+      - "It provides synchronous replication"
+    answer: 2
+    explanation: |
+      An in-app pool only reuses connections within one process. When you run many app
+      instances that each open their own pool, a server-side pooler multiplexes all those
+      client connections onto a small number of real DB server connections, reconciling
+      them with the DB's limit.
+    ref: "concepts.md#pooler-modes-session-vs-transaction-vs-statement-pgbouncer"
+
+  - id: database-scaling-replication-pooling-044
+    difficulty: intermediate
+    tags: [pool-sizing, formula, hikaricp]
+    question: |
+      Using the HikariCP starting formula pool_size = (core_count * 2) + effective_spindle_count,
+      what is the approximate pool size for an 8-core box with a single SSD?
+    options:
+      - "Around 100"
+      - "Around 500"
+      - "Around 4"
+      - "Around 17 (8*2 + 1)"
+    answer: 3
+    explanation: |
+      8 cores * 2 = 16, plus roughly 1 for SSD IO parallelism, gives about 17 — so a pool
+      of ~15–20, not hundreds. The formula assumes physical cores (not hyperthreads) and a
+      mostly CPU-bound OLTP workload.
+    ref: "concepts.md#pool-sizing-how-many-connections"
+
+  - id: database-scaling-replication-pooling-045
+    difficulty: intermediate
+    tags: [pool-sizing, counter-intuitive]
+    question: |
+      Why can a small connection pool (~2×cores) yield higher throughput and lower latency
+      than a large one?
+    options:
+      - "It keeps the DB at its efficient operating point and lets work queue cheaply in the pool instead of expensively inside the database"
+      - "Small pools cache query results"
+      - "Large pools disable the WAL"
+      - "Small pools bypass authentication"
+    answer: 0
+    explanation: |
+      The database can only do about core-count real work in parallel. A small pool keeps
+      it at that efficient point and queues excess requests cheaply in the pool, avoiding
+      the context-switching, memory pressure, and lock contention a huge pool causes inside
+      the DB.
+    ref: "concepts.md#pool-sizing-how-many-connections"
+
+  - id: database-scaling-replication-pooling-046
+    difficulty: advanced
+    tags: [pool-sizing, scenario]
+    question: |
+      Your app is slow under load and you currently have 500 DB connections open on a
+      small box. What is the best first move?
+    options:
+      - "Raise max_connections to 1000 and add more app threads"
+      - "Reduce the pool toward ~2×cores and put a server-side pooler in front — 500 connections is likely the problem, not the solution"
+      - "Switch every read to a replica immediately"
+      - "Disable the WAL to reduce disk IO"
+    answer: 1
+    explanation: |
+      500 connections on a small box typically IS the problem (context switching, memory
+      pressure). Reducing the pool toward ~2×cores and adding a server-side pooler usually
+      improves throughput and latency. More connections do not equal more capacity.
+    ref: "concepts.md#pool-sizing-how-many-connections"
+
+  - id: database-scaling-replication-pooling-047
+    difficulty: intermediate
+    tags: [pool-sizing, signals, reserved]
+    question: |
+      Which signals should guide connection pool sizing, and what should you leave room
+      for?
+    options:
+      - "CPU temperature only; leave no headroom"
+      - "Only the number of application threads; ignore the database's capacity"
+      - "Pool-wait time and max_connections headroom; leave room for superuser/maintenance connections (superuser_reserved_connections)"
+      - "Disk color and rack position"
+    answer: 2
+    explanation: |
+      Size for the database's real capacity, watching pool-wait time and headroom against
+      max_connections, and reserve connections for superuser/maintenance
+      (superuser_reserved_connections). A too-small pool starves the app; a too-large one
+      starves the DB.
+    ref: "concepts.md#pool-sizing-how-many-connections"
+
+  - id: database-scaling-replication-pooling-048
+    difficulty: beginner
+    tags: [sharding, partitioning, writes]
+    question: |
+      Partitioning/sharding splits one large dataset across nodes primarily to scale what?
+    options:
+      - "Read throughput and availability"
+      - "Backup speed only"
+      - "Write throughput and storage beyond one machine — the thing replication cannot do"
+      - "The number of indexes per table"
+    answer: 2
+    explanation: |
+      Partitioning splits different data onto different nodes so each holds a subset,
+      scaling write throughput and storage past a single machine. Replication (copies)
+      scales reads and HA but cannot raise the write ceiling.
+    ref: "concepts.md#partitioning-and-sharding-range-hash-directory"
+
+  - id: database-scaling-replication-pooling-049
+    difficulty: intermediate
+    tags: [sharding, range, hotspot]
+    question: |
+      What is the classic failure mode of range partitioning by timestamp?
+    options:
+      - "Hot spots — all current writes land on the newest partition"
+      - "Range queries always fan out to every partition"
+      - "It is impossible to do range scans"
+      - "Keys must be re-hashed on every insert"
+    answer: 0
+    explanation: |
+      Range partitioning keeps range-scan locality but risks hot spots: sharding by
+      timestamp funnels all current writes to the newest partition, so one node absorbs the
+      write load while others sit idle.
+    ref: "concepts.md#partitioning-and-sharding-range-hash-directory"
+
+  - id: database-scaling-replication-pooling-050
+    difficulty: intermediate
+    tags: [sharding, hash, range-scans]
+    question: |
+      What does hash partitioning trade away in exchange for even load distribution?
+    options:
+      - "Durability of writes"
+      - "Range-scan locality — adjacent keys scatter across partitions, so a range query fans out to all"
+      - "The ability to do point lookups"
+      - "Support for secondary indexes"
+    answer: 1
+    explanation: |
+      Hashing the key spreads load evenly and avoids hot spots, but it destroys the
+      ordering of adjacent keys, so a range query must fan out to every partition. Range
+      partitioning is the opposite trade-off.
+    ref: "concepts.md#partitioning-and-sharding-range-hash-directory"
+
+  - id: database-scaling-replication-pooling-051
+    difficulty: advanced
+    tags: [sharding, hash, consistent-hashing]
+    question: |
+      Why is naive hash % N partitioning problematic when you add a shard, and what
+      mitigates it?
+    options:
+      - "It corrupts data on rehash; nothing can mitigate it"
+      - "It only works for exactly 2 shards; use 3 instead"
+      - "Changing N reshuffles almost every key; consistent hashing (or pre-split vnodes/ranges) minimizes data movement on resharding"
+      - "It disables range scans permanently; use a lookup table"
+    answer: 2
+    explanation: |
+      With hash % N, changing N changes almost every key's assignment, forcing a massive
+      reshuffle. Consistent hashing (or pre-split virtual nodes/ranges) limits how much
+      data moves when the shard count changes.
+    ref: "concepts.md#partitioning-and-sharding-range-hash-directory"
+
+  - id: database-scaling-replication-pooling-052
+    difficulty: intermediate
+    tags: [sharding, directory, tradeoff]
+    question: |
+      What is the main downside of directory-based (lookup-table) sharding?
+    options:
+      - "It cannot rebalance individual keys"
+      - "It forces range partitioning semantics"
+      - "It always produces hot spots"
+      - "The directory is an extra hop and a potential single point of failure/bottleneck, so it must be highly available and cached"
+    answer: 3
+    explanation: |
+      Directory-based sharding is the most flexible (you can rebalance individual keys or
+      move tenants freely), but the lookup service adds an extra hop and a potential
+      SPOF/bottleneck, so it must be highly available and cached.
+    ref: "concepts.md#partitioning-and-sharding-range-hash-directory"
+
+  - id: database-scaling-replication-pooling-053
+    difficulty: intermediate
+    tags: [sharding, shard-key, hotkey]
+    question: |
+      What are the two competing goals a good shard key must balance, and what can defeat
+      it regardless of scheme?
+    options:
+      - "Spread load evenly AND keep related data co-located; a celebrity/hot key can overwhelm a single shard regardless"
+      - "Minimize disk usage and maximize index count; a full table scan defeats it"
+      - "Maximize replication lag and minimize writes; a slow disk defeats it"
+      - "Ensure every row is unique and sorted; a NULL value defeats it"
+    answer: 0
+    explanation: |
+      A good shard key spreads load evenly while co-locating data that queries need
+      together (so most queries hit one shard). But a hot/celebrity key (e.g. a viral user)
+      concentrates load on one shard no matter which scheme you use.
+    ref: "concepts.md#partitioning-and-sharding-range-hash-directory"
+
+  - id: database-scaling-replication-pooling-054
+    difficulty: intermediate
+    tags: [cross-shard, joins, scatter-gather]
+    question: |
+      Why are cross-shard joins expensive compared to single-node joins?
+    options:
+      - "They require synchronous replication"
+      - "The app or query layer must gather rows from each shard and join in the middle tier (scatter-gather), losing the database's optimized join algorithms"
+      - "They automatically lock every shard"
+      - "They convert all joins into full table scans on the leader"
+    answer: 1
+    explanation: |
+      Once data is split, a join across shards can't use the database's optimized join
+      algorithms on one node. Instead rows are gathered from each shard and joined in the
+      middle tier (scatter-gather), which is slower and harder to optimize. Co-locating
+      joined rows via the shard key mitigates this.
+    ref: "concepts.md#cross-shard-queries-joins-and-transactions"
+
+  - id: database-scaling-replication-pooling-055
+    difficulty: intermediate
+    tags: [cross-shard, fan-out, latency]
+    question: |
+      A query that lacks the shard key must be sent to every shard. What bounds its
+      latency?
+    options:
+      - "The fastest shard"
+      - "The average shard latency"
+      - "The slowest shard, since results must be merged from all of them"
+      - "Only the coordinator's CPU"
+    answer: 2
+    explanation: |
+      A scatter-gather query fans out to every shard and merges results, so its latency is
+      bounded by the slowest shard. Adding shards makes fan-out worse, so such queries
+      don't scale — designing to include the shard key avoids the fan-out.
+    ref: "concepts.md#cross-shard-queries-joins-and-transactions"
+
+  - id: database-scaling-replication-pooling-056
+    difficulty: advanced
+    tags: [cross-shard, transactions, 2pc]
+    question: |
+      Why do most sharded systems avoid cross-shard transactions?
+    options:
+      - "Cross-shard transactions are impossible to express in SQL"
+      - "They always violate read-your-writes"
+      - "They require multi-leader replication"
+      - "They need a distributed-commit protocol (two-phase commit) that is slow and creates coordinator failure/blocking risk"
+    answer: 3
+    explanation: |
+      A transaction spanning shards requires a distributed-commit protocol such as
+      two-phase commit, which is slow and introduces coordinator-failure and blocking
+      risks. Most sharded systems design so each transaction stays within one shard.
+    ref: "concepts.md#cross-shard-queries-joins-and-transactions"
+
+  - id: database-scaling-replication-pooling-057
+    difficulty: advanced
+    tags: [cross-shard, unique-constraint]
+    question: |
+      Why is enforcing a UNIQUE constraint on a non-shard-key column hard in a sharded
+      system?
+    options:
+      - "The constraint can't be enforced locally on each shard, since duplicate values could live on different shards"
+      - "Unique constraints are not supported by any database"
+      - "It forces all reads to the leader"
+      - "It requires row-based replication"
+    answer: 0
+    explanation: |
+      Uniqueness on a non-shard-key column can't be checked with only local knowledge:
+      two rows with the same value may live on different shards, so no single shard can
+      guarantee global uniqueness without cross-shard coordination. Global secondary
+      indexes have the same difficulty.
+    ref: "concepts.md#cross-shard-queries-joins-and-transactions"
+
+  - id: database-scaling-replication-pooling-058
+    difficulty: beginner
+    tags: [replication-vs-partitioning, distinction]
+    question: |
+      Which statement correctly distinguishes replication from partitioning?
+    options:
+      - "Replication splits different data across nodes; partitioning copies the same data"
+      - "Replication copies the same data to multiple nodes; partitioning splits different data across nodes"
+      - "They are the same thing with different names"
+      - "Replication scales writes; partitioning scales reads"
+    answer: 1
+    explanation: |
+      Replication copies the same data to multiple nodes (HA + read scaling + locality).
+      Partitioning splits different data across nodes (write + storage scaling). They are
+      orthogonal and large systems combine them.
+    ref: "concepts.md#replication-vs-partitioning-the-clean-distinction"
+
+  - id: database-scaling-replication-pooling-059
+    difficulty: intermediate
+    tags: [replication-vs-partitioning, layout]
+    question: |
+      What is a typical production layout that combines replication and partitioning?
+    options:
+      - "One giant node with no replicas"
+      - "All data replicated synchronously to every node with no sharding"
+      - "N shards, each shard being a small replica set (one leader + a couple of followers), giving write scaling across shards and HA + read scaling within each"
+      - "One leader per row, chosen at random"
+    answer: 2
+    explanation: |
+      The common pattern is shard first, then replicate each shard: N shards, each a small
+      replica set (leader + followers). Sharding gives write/storage scaling across shards;
+      replication gives HA and read scaling within each shard.
+    ref: "concepts.md#replication-vs-partitioning-the-clean-distinction"
+
+  - id: database-scaling-replication-pooling-060
+    difficulty: intermediate
+    tags: [replication-vs-partitioning, misconception]
+    question: |
+      A colleague says "we added read replicas to handle more write traffic." Why is this
+      a misconception?
+    options:
+      - "Replicas can only be added in pairs"
+      - "Replicas are read-only for the first hour after creation"
+      - "Read replicas increase write latency to zero"
+      - "Replicas scale reads; each replica does all the leader's write work, so they cannot raise the write ceiling — only partitioning scales writes"
+    answer: 3
+    explanation: |
+      Every replica replays the leader's entire write stream, so it does the same write
+      work the leader does. Replicas therefore scale reads and add HA but cannot raise
+      write throughput. Only partitioning/sharding scales writes.
+    ref: "concepts.md#replication-vs-partitioning-the-clean-distinction"

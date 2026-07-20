@@ -88,7 +88,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 0 |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
-| [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 0 |
+| [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 15 ✅ (Pass 1, 815 MCQs) |
 | [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (all tiers, 1,291 MCQs) |
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
 | [Observability](topics/observability/README.md) | 17 | 0 |
@@ -98,6 +98,21 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 25 (2026-07-20):** Messaging & Databases **Pass 1** — authored all 15 topics,
+  **815 MCQs** (163 B / 438 I / 214 adv; 48-65/topic). Practitioner/mechanism-level (real SQL,
+  index B-tree/LSM internals, ACID isolation anomalies, Kafka log/consumer-group protocol, Redis
+  commands, RabbitMQ AMQP, replication WAL/binlog) — deliberately DEEPER/more hands-on than the
+  system-design pages on overlapping topics; ORM excluded (Hibernate/JPA is its own domain).
+  Diagrams authored as Mermaid (no ASCII-art), so no later conversion pass needed. Built via
+  `.claude/workflows/scripts/messaging-databases-authoring.js` (author → verify). First run hit an
+  AWS credential-timeout wave (13/15 verify + 1 author failed); resume-from-runId recovered all
+  (cached authors replayed, only failed stages re-ran) → 30 agents, 0 errors. Verify self-caught +
+  rebalanced sql-indexing answer clustering (39/48 on idx1). THEN a targeted SQL enrichment pass
+  (`messaging-databases-sql-enrich.js`) reconciled the 3 SQL topics against the Devinterview SQL
+  interview reference — added SQL command taxonomy (DDL/DML/DCL/TCL/DQL), deeper LATERAL JOIN,
+  JSONB+GIN, UUIDv7-vs-v4 & GENERATED IDENTITY key design, SARGable as a named concept (+25 MCQs).
+  Validator clean (15 files, 815 Qs); no answer clustering (top ≤31%); promoted to AUTHORED_DOMAINS.
+  Content-only commit (concurrent web-design work left untouched). Pass 2 (deepen to 70-90) TODO.
 - **Session 22 (2026-07-19):** Security (Application & Web) **Pass 2 (deepen)** — took all 16
   topics from 813 → **1,291 MCQs** (172 B / 449 I / 401 adv / 269 expert; every topic 74-92,
   strong adv+expert block 37-52/topic). Built via `.claude/workflows/scripts/security-deepen.js`
