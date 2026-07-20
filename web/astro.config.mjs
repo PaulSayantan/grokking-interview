@@ -11,7 +11,7 @@ import remarkMermaid from "./plugins/rehype-mermaid.mjs";
 // `site` is used for canonical URLs / sitemaps; override via env for prod.
 // `base` is left at "/" so it deploys cleanly at a domain root on Netlify/Vercel.
 export default defineConfig({
-  site: process.env.SITE_URL || "https://interview-prep.example.com",
+  site: process.env.SITE_URL || "https://interviewgod.io",
   output: "static",
   integrations: [
     tailwind({ applyBaseStyles: false }),
