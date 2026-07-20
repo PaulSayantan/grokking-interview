@@ -78,7 +78,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 | Domain | Topics | Authored |
 |---|---|---|
-| [System Design](topics/system-design/README.md) | 23 core + 8 adv + 7 design-patterns + 26 AWS | 64 ✅ (all tiers) |
+| [System Design](topics/system-design/README.md) | 23 core + 8 adv + 7 design-patterns + 6 arch-patterns + 26 AWS | 70 ✅ (all tiers) |
 | [Spring Boot](topics/spring-boot/README.md) | 18 | 18 ✅ |
 | [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ✅ (all tiers) |
 | [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 25 | 25 ✅ (all tiers) |
@@ -109,8 +109,20 @@ and 5 new domains added; counts below reflect the current READMEs.
   transient API error; resume-from-runId recovered it (cached topics replayed). Verify stage
   added missing content (Two-Phase Termination pattern, 8 missing diagrams) and fixed invalid
   Mermaid (semicolons in sequenceDiagram messages break the parser). Validator clean; no answer
-  clustering. Content-only commit (concurrent web-design work untouched). NEXT: Architectural
-  Patterns group (`arch-` prefix, workflow written & ready) — fires next, cross-references these.
+  clustering. Content-only commit (concurrent web-design work untouched).
+- **Session 26b (2026-07-20):** System Design **Architectural Patterns** group added — 6 new
+  topics (`arch-` prefix, new "Architectural Patterns" group), **325 MCQs**, 93 Mermaid diagrams
+  (all render 0-error). Covers the full recognized-styles taxonomy: distributed/infrastructure
+  (Client-Server, P2P, Microservices, SOA, Serverless, Space-Based), code-organization (Layered,
+  Hexagonal, Clean, Onion, Microkernel, +Blackboard added by verify), data-flow/event
+  (Event-Driven, Pipe-and-Filter, CQRS, Event Sourcing, Batch), UI (MVC/MVP/MVVM), specialized
+  (Blackboard, Primary-Replica, Broker). Each style: "Problem it solves" + diagram + trade-offs
+  + "differs-from"; overlapping styles CROSS-REFERENCE existing deep-dives (not duplicated).
+  Inclusive language: Primary-Replica (one sanctioned recognition note + one teaching MCQ). Built
+  via `architectural-patterns-authoring.js` (research → author → verify, 0 errors). Verify caught
+  + rebalanced SEVERE answer clustering (index 1 at 65-79% in 3 topics) and added a missing
+  Blackboard section. Validator clean; my post-check confirmed no clustering (top ≤35%). System
+  Design domain now 70 topics. Content-only commit.
 - **Session 25 (2026-07-20):** Messaging & Databases **Pass 1** — authored all 15 topics,
   **815 MCQs** (163 B / 438 I / 214 adv; 48-65/topic). Practitioner/mechanism-level (real SQL,
   index B-tree/LSM internals, ACID isolation anomalies, Kafka log/consumer-group protocol, Redis

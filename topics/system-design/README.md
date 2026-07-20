@@ -73,6 +73,23 @@ cross-reference the existing deep-dive topics rather than duplicate them.
 | Concurrency & Reactive Design Patterns (POSA) | `dp-concurrency` | high | advanced | ✅ (75 MCQs) |
 | Distributed & Cloud Design Patterns (Circuit Breaker, Saga, CQRS, Sidecar, ...) | `dp-distributed-cloud` | high | advanced | ✅ (70 MCQs) |
 
+## Architectural Patterns (6 topics)
+
+System-level architectural STYLES (a different altitude from the object-level Design
+Patterns group), `arch-` slug prefix. Covers distributed/infrastructure, code-organization,
+data-flow/event, UI/presentation, and specialized styles. Each style has a "problem it
+solves" statement, a Mermaid diagram, and trade-offs/-ilities; styles with a deep-dive
+elsewhere cross-reference it rather than duplicate. **325 MCQs**, mixed difficulty.
+
+| Topic | Slug | Freq | Difficulty | Status |
+|---|---|---|---|---|
+| Architectural Patterns: Fundamentals & Style Selection (-ilities, ADRs, Conway) | `arch-fundamentals-and-styles` | very-high | intermediate | ✅ (55 MCQs) |
+| Distributed & Infrastructure (Client-Server, P2P, Microservices, SOA, Serverless, Space-Based) | `arch-distributed-infrastructure` | very-high | advanced | ✅ (55 MCQs) |
+| Code-Organization (Layered, Hexagonal, Clean, Onion, Microkernel) | `arch-code-organization` | high | intermediate | ✅ (65 MCQs) |
+| Data-Flow & Event-Driven (Event-Driven, Pipe-and-Filter, CQRS, Event Sourcing, Batch) | `arch-dataflow-event` | high | advanced | ✅ (52 MCQs) |
+| UI / Presentation (MVC, MVP, MVVM) | `arch-ui-presentation` | high | intermediate | ✅ (50 MCQs) |
+| Specialized (Blackboard, Primary-Replica, Broker) | `arch-specialized` | medium | advanced | ✅ (48 MCQs) |
+
 ## AWS System Design (26 topics)
 
 Designing microservices and large-scale systems with AWS primitives (SQS, DynamoDB,
