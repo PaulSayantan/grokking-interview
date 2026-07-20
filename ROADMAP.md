@@ -92,12 +92,24 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (all tiers, 1,291 MCQs) |
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
 | [Observability](topics/observability/README.md) | 17 | 0 |
-| [Software Testing](topics/testing/README.md) | 16 | 0 |
+| [Software Testing](topics/testing/README.md) | 16 | 16 ✅ (Pass 1, 784 MCQs) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
 
+- **Session 27 (2026-07-20):** Exhaustive **gap analysis** (12-lens research → synthesize →
+  adversarial critic) for backend+senior product/startup interviews → prioritized backlog in
+  memory `gap-analysis-findings.md`. User decided: author BOTH dsa-coding + lld-and-ood, follow
+  the full recommended sequence one domain at a time. THEN authored **Software Testing Pass 1** —
+  16 topics, **784 MCQs** (178 B / 407 I / 199 adv), 42 Mermaid diagrams (render 0-error).
+  Framework-agnostic testing discipline w/ JUnit 5 / Mockito / Testcontainers examples; covers
+  test pyramid, full test-double taxonomy, TDD/BDD, integration + Testcontainers, contract testing
+  (Pact/CDC), coverage + mutation testing, load/soak/spike perf testing (coordinated omission,
+  percentiles), flaky-test/CI. Spring test-slices cross-referenced not duplicated. Built via
+  `testing-authoring.js` (author → verify, 32 agents, 0 errors). Validator clean; no clustering
+  (verify even broke a trivially-guessable 0,1,2,3 answer cycle). Promoted to AUTHORED_DOMAINS.
+  Content-only commit. NEXT in sequence: observability.
 - **Session 26 (2026-07-20):** System Design **Design Patterns** group added — 7 new topics
   (`dp-` prefix, new "Design Patterns" catalog group in sync), **427 MCQs**. Covers ALL 23
   GoF patterns (5 creational / 7 structural / 11 behavioral — completeness asserted), plus
