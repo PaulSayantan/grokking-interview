@@ -1,0 +1,1290 @@
+topic: "Distributed & Cloud Design Patterns"
+domain: system-design
+topic_slug: dp-distributed-cloud
+version: 1
+questions:
+  - id: dp-distributed-cloud-001
+    difficulty: beginner
+    tags: [fallacies, distributed-computing, fundamentals]
+    question: |
+      Which set of assumptions do the "fallacies of distributed computing" describe,
+      and why do they matter for this pattern catalog?
+    options:
+      - "False assumptions about the network (reliable, zero-latency, secure, stable topology) that each map to a resilience/integration pattern"
+      - "Rules for how to shard a relational database"
+      - "Guidelines for choosing a programming language"
+      - "Assumptions that are always true, so patterns can safely ignore them"
+    answer: 0
+    explanation: |
+      The eight fallacies (Deutsch et al.) are false assumptions engineers keep baking in —
+      the network is reliable, latency is zero, bandwidth is infinite, the network is secure,
+      topology is stable, one admin, zero transport cost, homogeneous network. Each maps to a
+      family of patterns (retries/timeouts, caching, security brokers, discovery), which is
+      why the catalog is grounded in them.
+    ref: "concepts.md#why-these-patterns-exist--the-fallacies-of-distributed-computing"
+
+  - id: dp-distributed-cloud-002
+    difficulty: beginner
+    tags: [circuit-breaker, resilience, state-machine]
+    question: |
+      A service keeps calling a dependency that is down, piling up slow timeouts on every
+      request and threatening to take the whole service down. Which pattern stops calling the
+      failing dependency and fails fast until it recovers?
+    options:
+      - "Bulkhead"
+      - "Circuit Breaker"
+      - "Cache-Aside"
+      - "Retry with backoff"
+    answer: 1
+    explanation: |
+      The Circuit Breaker trips open after a failure threshold and fails fast (no downstream
+      call) while open, then uses a half-open trial to test recovery. Retry keeps trying (the
+      opposite), a bulkhead isolates pools, and cache-aside is a read path.
+    ref: "concepts.md#circuit-breaker"
+
+  - id: dp-distributed-cloud-003
+    difficulty: intermediate
+    tags: [circuit-breaker, retry, comparison]
+    question: |
+      What is the key distinction between the Retry pattern and the Circuit Breaker pattern?
+    options:
+      - "Retry works only for reads and circuit breaker only for writes"
+      - "Circuit breaker re-attempts more aggressively than retry"
+      - "Retry keeps re-attempting a call (for transient blips) while a circuit breaker stops calling a downed dependency (for sustained failure)"
+      - "They are alternatives; you should never use both together"
+    answer: 2
+    explanation: |
+      Retry handles the individual transient fault by trying again; the breaker handles the
+      sustained outage by stopping calls to give the dependency room to recover. They are
+      complementary — retry inside, breaker around — not alternatives.
+    ref: "concepts.md#circuit-breaker"
+
+  - id: dp-distributed-cloud-004
+    difficulty: intermediate
+    tags: [retry, backoff, jitter, thundering-herd]
+    question: |
+      Why is random jitter added to exponential backoff in the Retry pattern?
+    options:
+      - "To guarantee exactly-once delivery"
+      - "To make non-idempotent operations safe to retry"
+      - "To make retries slower on average for no reason"
+      - "To de-synchronize many clients that failed at the same instant, avoiding a thundering-herd retry storm"
+    answer: 3
+    explanation: |
+      Without jitter, all clients that failed simultaneously retry simultaneously, re-killing
+      the recovering service (thundering herd / retry storm). Jitter randomizes the delays so
+      load spreads out. It does not make non-idempotent ops safe — that needs idempotency keys.
+    ref: "concepts.md#retry-with-backoff-and-jitter"
+
+  - id: dp-distributed-cloud-005
+    difficulty: intermediate
+    tags: [timeout, resilience, thread-pool]
+    question: |
+      A dependency is slow (not down) and callers block waiting on it, exhausting their thread
+      pools until the healthy caller becomes unavailable. Which primitive most directly prevents
+      this by bounding the wait?
+    options:
+      - "Timeout"
+      - "Materialized View"
+      - "Leader Election"
+      - "Publish-Subscribe"
+    answer: 0
+    explanation: |
+      A Timeout converts an unbounded wait on a hung dependency into a bounded failure, freeing
+      the thread/connection. It is the foundational resilience primitive; a slow dependency
+      without timeouts is the classic cause of resource-exhaustion cascades.
+    ref: "concepts.md#timeout"
+
+  - id: dp-distributed-cloud-006
+    difficulty: advanced
+    tags: [timeout, deadline-propagation]
+    question: |
+      In deadline propagation (as used by gRPC), what happens as a request flows through
+      multiple hops?
+    options:
+      - "Each hop resets the timeout to its own default value"
+      - "The entry service sets an absolute deadline and each hop passes the remaining budget downstream, so no hop works on an already-abandoned request"
+      - "Only the last hop enforces a timeout"
+      - "Deadlines are ignored for internal calls"
+    answer: 1
+    explanation: |
+      With deadline propagation the entry service sets an absolute deadline (now + N ms) and
+      passes the remaining budget to each downstream hop. This prevents wasted work where the
+      caller already gave up but downstream services keep processing a doomed request.
+    ref: "concepts.md#timeout"
+
+  - id: dp-distributed-cloud-007
+    difficulty: intermediate
+    tags: [bulkhead, isolation, thread-pool]
+    question: |
+      An API calls payments, search, and recommendations from one shared thread pool. When
+      recommendations hangs, all threads are consumed and payments also fails. Which pattern
+      isolates each dependency into its own pool to contain the damage?
+    options:
+      - "Retry"
+      - "Sharding"
+      - "Bulkhead"
+      - "Gateway Aggregation"
+    answer: 2
+    explanation: |
+      The Bulkhead partitions resources (separate thread/connection pools per dependency) so a
+      saturated dependency only exhausts its own compartment. It limits blast radius; a breaker
+      would instead stop the call once it detects failure.
+    ref: "concepts.md#bulkhead"
+
+  - id: dp-distributed-cloud-008
+    difficulty: advanced
+    tags: [bulkhead, compute-consolidation, tension]
+    question: |
+      Which pair of patterns represents a direct design tension between isolation and efficiency?
+    options:
+      - "CQRS vs Event Sourcing"
+      - "Sidecar vs Ambassador"
+      - "Retry vs Timeout"
+      - "Bulkhead vs Compute Resource Consolidation"
+    answer: 3
+    explanation: |
+      Bulkhead separates work into isolated pools for safety (blast-radius containment), while
+      Compute Resource Consolidation packs work together onto shared compute for cost/utilization.
+      They pull in opposite directions; the choice depends on optimizing for safety vs cost.
+    ref: "concepts.md#compute-resource-consolidation"
+
+  - id: dp-distributed-cloud-009
+    difficulty: intermediate
+    tags: [rate-limiting, throttling, load-leveling, comparison]
+    question: |
+      How does Rate Limiting/Throttling differ from Queue-Based Load Leveling when handling
+      excess load?
+    options:
+      - "Rate limiting rejects or delays excess at ingress; load leveling buffers the excess in a queue to be processed later"
+      - "Rate limiting always buffers; load leveling always rejects"
+      - "Load leveling only applies to reads"
+      - "They are identical patterns"
+    answer: 0
+    explanation: |
+      Throttling/rate limiting caps consumption and rejects (429) or delays excess at the door.
+      Queue-Based Load Leveling instead absorbs the burst in a queue so it can be processed at a
+      steady rate later. One sheds load, the other smooths it.
+    ref: "concepts.md#rate-limiting-and-throttling"
+
+  - id: dp-distributed-cloud-010
+    difficulty: advanced
+    tags: [rate-limiting, distributed-state]
+    question: |
+      What is the main added complexity when implementing rate limiting across a fleet of
+      service instances rather than on a single node?
+    options:
+      - "It becomes impossible to reject any requests"
+      - "Enforcing one global limit requires shared state (e.g., a Redis counter), adding latency and a dependency; per-node limits are inaccurate"
+      - "You must switch to synchronous replication of all data"
+      - "Rate limiting stops working entirely with more than one node"
+    answer: 1
+    explanation: |
+      Distributed rate limiting needs shared state so all nodes count against one limit; a
+      central store (Redis) adds latency and a dependency, while independent per-node counters
+      let the effective global limit drift to N times the intended value.
+    ref: "concepts.md#rate-limiting-and-throttling"
+
+  - id: dp-distributed-cloud-011
+    difficulty: intermediate
+    tags: [fallback, graceful-degradation, cache-aside, comparison]
+    question: |
+      A product page returns cached "popular products" when the personalized recommendations
+      service is down, instead of showing an error. Which pattern is this, and how does it
+      differ from Cache-Aside?
+    options:
+      - "Gatekeeper; it validates the request first"
+      - "Cache-Aside; there is no difference"
+      - "Fallback / graceful degradation; it is a failure-path substitute, whereas Cache-Aside is the normal read path"
+      - "Materialized View; it precomputes the recommendations"
+    answer: 2
+    explanation: |
+      Serving a safe alternative on the failure path is the Fallback pattern (graceful
+      degradation). Cache-Aside populates the cache during normal reads; the fallback is only
+      taken when the primary fails. A firing fallback should be alerted on since it can mask outages.
+    ref: "concepts.md#fallback-and-graceful-degradation"
+
+  - id: dp-distributed-cloud-012
+    difficulty: intermediate
+    tags: [compensating-transaction, saga, consistency]
+    question: |
+      In an eventually-consistent multi-step operation across services, step 4 fails after steps
+      1-3 already committed. Since there is no distributed rollback, what mechanism undoes the
+      prior work?
+    options:
+      - "Restarting all services"
+      - "A database savepoint"
+      - "A two-phase commit rollback"
+      - "Compensating transactions that semantically reverse each completed step"
+    answer: 3
+    explanation: |
+      With no distributed ACID rollback, each completed step needs a compensating transaction
+      (refund a charge, release a reservation) run in reverse to restore a business-consistent
+      state. This is the rollback mechanism a Saga invokes on failure.
+    ref: "concepts.md#compensating-transaction"
+
+  - id: dp-distributed-cloud-013
+    difficulty: intermediate
+    tags: [health-endpoint, liveness, readiness]
+    question: |
+      What is the difference between a liveness check and a readiness check in Health Endpoint
+      Monitoring?
+    options:
+      - "Liveness = is the process alive (restart if not); readiness = can it serve traffic now (stop routing but keep running if not)"
+      - "Liveness pulls the instance from the load balancer; readiness restarts it"
+      - "Readiness only runs at deploy time and liveness never runs"
+      - "They are the same check with different names"
+    answer: 0
+    explanation: |
+      A failing liveness probe means the process is broken and should be restarted; a failing
+      readiness probe means the instance can't serve right now (e.g., warming up) so it should
+      be removed from rotation but not restarted. Confusing them causes restart loops.
+    ref: "concepts.md#health-endpoint-monitoring"
+
+  - id: dp-distributed-cloud-014
+    difficulty: advanced
+    tags: [health-endpoint, deep-check, cascade]
+    question: |
+      Why can a "deep" health check that probes every downstream dependency be dangerous?
+    options:
+      - "It is always faster than a shallow check"
+      - "A shared dependency failing can mark the entire fleet unhealthy at once, and the checks themselves add load — causing a cascade"
+      - "Deep checks cannot return HTTP status codes"
+      - "It prevents the load balancer from ever removing an instance"
+    answer: 1
+    explanation: |
+      Deep checks that probe a shared dependency (e.g., a common DB) will fail across the whole
+      fleet simultaneously when that dependency blips, taking everything out of rotation, and
+      the probing load can itself cause problems. Readiness should not hinge on non-critical downstreams.
+    ref: "concepts.md#health-endpoint-monitoring"
+
+  - id: dp-distributed-cloud-015
+    difficulty: advanced
+    tags: [scheduler-agent-supervisor, saga, recovery]
+    question: |
+      How does the Scheduler Agent Supervisor pattern differ in emphasis from a basic Saga
+      orchestrator?
+    options:
+      - "It forbids compensating actions"
+      - "It removes the need for any state store"
+      - "It emphasizes a dedicated supervisor that detects and remediates (retries/compensates) failed remote steps, not just forward flow"
+      - "It only works for single-service transactions"
+    answer: 2
+    explanation: |
+      The Scheduler arranges steps and records state, Agents execute remote actions, and the
+      Supervisor monitors for stuck/failed steps and drives remediation. The emphasis is failure
+      detection and recovery of remote work, overlapping heavily with Saga orchestration.
+    ref: "concepts.md#scheduler-agent-supervisor"
+
+  - id: dp-distributed-cloud-016
+    difficulty: intermediate
+    tags: [queue-based-load-leveling, spiky-load, competing-consumers, comparison]
+    question: |
+      Image uploads arrive in bursts of thousands but a resizer can only sustain 200/s. Putting
+      a queue between them so the resizer works at its own rate is which pattern, and how does it
+      relate to Competing Consumers?
+    options:
+      - "Competing Consumers alone; load leveling is unrelated"
+      - "Priority Queue; it orders images by size"
+      - "Claim-Check; it stores the images by reference"
+      - "Queue-Based Load Leveling; adding more workers to the same queue (Competing Consumers) then scales throughput — they are usually combined"
+    answer: 3
+    explanation: |
+      A queue between bursty producers and a fixed-rate service is Queue-Based Load Leveling; it
+      smooths load over time. Competing Consumers (multiple workers on the same queue) scales the
+      processing throughput. They complement each other.
+    ref: "concepts.md#queue-based-load-leveling"
+
+  - id: dp-distributed-cloud-017
+    difficulty: intermediate
+    tags: [sidecar, cross-cutting, service-mesh]
+    question: |
+      A service mesh runs an Envoy proxy container next to each app container in the same pod to
+      provide mTLS, retries, and telemetry without changing app code. Which pattern is this?
+    options:
+      - "Sidecar"
+      - "Adapter"
+      - "Bulkhead"
+      - "Gateway Offloading"
+    answer: 0
+    explanation: |
+      Deploying supporting functionality as a co-located companion process/container sharing the
+      app's lifecycle is the Sidecar pattern. It provides platform capabilities language-
+      agnostically without touching the app.
+    ref: "concepts.md#sidecar"
+
+  - id: dp-distributed-cloud-018
+    difficulty: advanced
+    tags: [sidecar, ambassador, proxy, decorator, gof, comparison]
+    question: |
+      How do the Sidecar/Ambassador patterns differ from the GoF Proxy and Decorator patterns?
+    options:
+      - "They are the same patterns with cloud branding"
+      - "Sidecar/Ambassador compose behavior out-of-process across a network boundary; Proxy/Decorator wrap behavior in-process within one program"
+      - "Proxy and Decorator require Kubernetes"
+      - "Sidecar/Ambassador can only be used for databases"
+    answer: 1
+    explanation: |
+      GoF Proxy/Decorator wrap or stand in for an object in-process. Sidecar and Ambassador
+      achieve similar composition but as separate co-located processes reached over the network,
+      making them language-agnostic and independently deployable.
+    ref: "concepts.md#sidecar"
+
+  - id: dp-distributed-cloud-019
+    difficulty: intermediate
+    tags: [ambassador, sidecar, outbound-proxy, comparison]
+    question: |
+      What specifically distinguishes the Ambassador pattern from the general Sidecar pattern?
+    options:
+      - "Ambassador only handles inbound traffic"
+      - "Ambassador runs on a completely separate host far from the app"
+      - "Ambassador is a client-side proxy sidecar specialized for outbound network concerns (retry, TLS, routing)"
+      - "Ambassador is a shared server-side edge gateway"
+    answer: 2
+    explanation: |
+      An Ambassador is a Sidecar specialized for the outbound path — a client-side proxy the app
+      talks to over localhost that handles retries, TLS, and routing for outgoing calls. Sidecar
+      is the general pattern; Ambassador is a subset. A gateway, by contrast, is a shared server-side edge.
+    ref: "concepts.md#ambassador"
+
+  - id: dp-distributed-cloud-020
+    difficulty: advanced
+    tags: [anti-corruption-layer, adapter, gof, ddd, comparison]
+    question: |
+      A new ordering service reads customers from a legacy mainframe and translates cryptic
+      status codes into a clean domain model at the boundary. This is an Anti-Corruption Layer.
+      How does it differ from a GoF Adapter?
+    options:
+      - "There is no difference"
+      - "The Adapter is only for legacy systems; the ACL only for new systems"
+      - "The ACL matches a single method signature; the Adapter protects an entire domain model"
+      - "The ACL protects a bounded context's model/semantics (often a whole subsystem); a GoF Adapter matches interfaces at the class level"
+    answer: 3
+    explanation: |
+      An ACL is a DDD strategic boundary that keeps a foreign model from corrupting your domain —
+      it can be a substantial translation subsystem. A GoF Adapter is a narrower, class-level
+      interface conversion. Both translate, but at very different scopes.
+    ref: "concepts.md#anti-corruption-layer-acl"
+
+  - id: dp-distributed-cloud-021
+    difficulty: intermediate
+    tags: [adapter, anti-corruption-layer, comparison]
+    question: |
+      A monitoring platform expects Prometheus format but a legacy service emits StatsD, so a
+      component converts one to the other. Which pattern is this, and how does it differ from an
+      Anti-Corruption Layer?
+    options:
+      - "Adapter; it does interface/format conversion, whereas an ACL protects a domain model's semantics"
+      - "Anti-Corruption Layer; there is no meaningful difference"
+      - "Messaging Bridge; it connects two brokers"
+      - "Sidecar; it runs in the same pod"
+    answer: 0
+    explanation: |
+      Converting one service's interface/protocol/format into what a consumer expects is the
+      Adapter pattern. An ACL is about protecting your domain model's semantics at a bounded-
+      context boundary — a deeper concern than interface conversion.
+    ref: "concepts.md#adapter"
+
+  - id: dp-distributed-cloud-022
+    difficulty: intermediate
+    tags: [messaging-bridge, adapter, integration, comparison]
+    question: |
+      Messages must flow between an on-prem IBM MQ broker and a cloud pub/sub system that speak
+      different protocols. Which pattern consumes from one, translates, and republishes to the other?
+    options:
+      - "Gateway Routing"
+      - "Messaging Bridge"
+      - "Claim-Check"
+      - "Adapter"
+    answer: 1
+    explanation: |
+      A Messaging Bridge connects two otherwise-incompatible messaging systems by consuming,
+      translating, and republishing between them. It differs from an Adapter (which matches an
+      interface for a consumer) by connecting two messaging infrastructures to each other.
+    ref: "concepts.md#messaging-bridge"
+
+  - id: dp-distributed-cloud-023
+    difficulty: advanced
+    tags: [deployment-stamps, sharding, geodes, comparison]
+    question: |
+      A SaaS deploys multiple independent copies of the entire app + data tier, each serving a
+      subset of tenants, scaling by adding copies. This is Deployment Stamps. How does it differ
+      from Sharding?
+    options:
+      - "Sharding replicates the whole application; stamps split one table"
+      - "Stamps only apply to caches"
+      - "A stamp replicates the whole app + data as a unit; sharding partitions a single data store by key"
+      - "They are identical"
+    answer: 2
+    explanation: |
+      Deployment Stamps (cells/scale-units) replicate the full stack as an isolated unit and
+      scale by unit while containing blast radius. Sharding partitions one data store across
+      nodes by a shard key. Different granularity: whole-stack unit vs single-store partition.
+    ref: "concepts.md#deployment-stamps"
+
+  - id: dp-distributed-cloud-024
+    difficulty: advanced
+    tags: [geodes, deployment-stamps, geo-distribution, comparison]
+    question: |
+      What most distinguishes the Geodes pattern from Deployment Stamps?
+    options:
+      - "Geodes cannot handle writes"
+      - "Stamps require multi-master replication; geodes do not"
+      - "Geodes are single-region; stamps are global"
+      - "Geodes are geo-distributed active-active nodes where any node serves any request (read/write everywhere); stamps are isolated units where a tenant is pinned to one"
+    answer: 3
+    explanation: |
+      Geodes ("geographical nodes") are deployed active-active across regions so any node can
+      serve any request, backed by a globally replicated store (with hard conflict resolution).
+      Deployment Stamps are isolated scale units; a given tenant lives in exactly one stamp.
+    ref: "concepts.md#geodes"
+
+  - id: dp-distributed-cloud-025
+    difficulty: intermediate
+    tags: [static-content-hosting, cdn, gateway-offloading, comparison]
+    question: |
+      Serving images and JS directly from object storage fronted by a CDN, so the app tier never
+      handles them, is which pattern?
+    options:
+      - "Static Content Hosting"
+      - "Cache-Aside"
+      - "Valet Key"
+      - "Gateway Offloading"
+    answer: 0
+    explanation: |
+      Static Content Hosting serves static assets from storage/CDN edges rather than the app
+      tier, offloading compute and reducing latency. Gateway Offloading moves cross-cutting
+      concerns (TLS, auth) to the gateway — a different offload location and purpose.
+    ref: "concepts.md#static-content-hosting"
+
+  - id: dp-distributed-cloud-026
+    difficulty: intermediate
+    tags: [strangler-fig, migration, facade]
+    question: |
+      A team modernizes a monolith by placing a router in front and migrating functionality slice
+      by slice to new services until the monolith is empty. Which pattern is this?
+    options:
+      - "Deployment Stamps"
+      - "Strangler Fig"
+      - "Anti-Corruption Layer"
+      - "Bulkhead"
+    answer: 1
+    explanation: |
+      Strangler Fig incrementally replaces a legacy system behind a façade/router, routing each
+      migrated slice to the new implementation until nothing routes to the legacy and it is
+      retired. An ACL is often used alongside it but is the model-protection layer, not the migration strategy.
+    ref: "concepts.md#strangler-fig"
+
+  - id: dp-distributed-cloud-027
+    difficulty: advanced
+    tags: [strangler-fig, risk, forever-strangle]
+    question: |
+      What is a common risk of the Strangler Fig migration approach?
+    options:
+      - "It only works for greenfield systems"
+      - "It requires a big-bang cutover with no rollback"
+      - "The façade/routing must run for the entire (often long) migration, and the hardest slices may never migrate — a stalled 'forever strangle'"
+      - "It cannot deliver value until the migration is 100% complete"
+    answer: 2
+    explanation: |
+      Strangler Fig delivers value incrementally and allows per-slice rollback, but the
+      façade/routing layer must operate throughout the migration and there is a real risk the
+      last, hardest pieces never move, leaving both systems running indefinitely.
+    ref: "concepts.md#strangler-fig"
+
+  - id: dp-distributed-cloud-028
+    difficulty: intermediate
+    tags: [gateway-aggregation, round-trips, mobile]
+    question: |
+      A mobile home screen needs profile, orders, and recommendations. Instead of three round-
+      trips, one gateway endpoint calls all three backends and returns a single composed response.
+      Which pattern is this?
+    options:
+      - "Scatter-Gather"
+      - "BFF"
+      - "Gateway Routing"
+      - "Gateway Aggregation"
+    answer: 3
+    explanation: |
+      Gateway Aggregation collapses multiple client round-trips into one by fanning out to
+      several backends and composing their responses. Routing only dispatches one request to one
+      backend; scatter-gather sends the same request to many peers.
+    ref: "concepts.md#gateway-aggregation"
+
+  - id: dp-distributed-cloud-029
+    difficulty: advanced
+    tags: [gateway-aggregation, latency-coupling]
+    question: |
+      What is the main downside of Gateway Aggregation regarding latency?
+    options:
+      - "The gateway becomes a latency-coupling point — the slowest backend gates the entire composed response"
+      - "It cannot call backends in parallel"
+      - "It removes the ability to cache anything"
+      - "It always increases the number of client round-trips"
+    answer: 0
+    explanation: |
+      Because the gateway waits for all backends to compose the response, the slowest one gates
+      the whole reply, and the gateway grows complex and coupled to backends. Calling in parallel
+      helps but the tail is still bound by the slowest responder.
+    ref: "concepts.md#gateway-aggregation"
+
+  - id: dp-distributed-cloud-030
+    difficulty: intermediate
+    tags: [gateway-offloading, cross-cutting, sidecar, comparison]
+    question: |
+      Terminating TLS, validating JWTs, and gzipping responses once at the gateway for all
+      services is Gateway Offloading. How does it differ from doing this via a Sidecar/Ambassador?
+    options:
+      - "Sidecars can only offload database queries"
+      - "Offloading centralizes concerns at one shared edge (a potential SPOF); sidecar/ambassador put them per-instance alongside each app"
+      - "They are identical"
+      - "Offloading runs inside each application process"
+    answer: 1
+    explanation: |
+      Gateway Offloading centralizes cross-cutting concerns at the shared edge — consistent but a
+      SPOF/coupling point. Sidecar/Ambassador implement the same concerns per-instance next to
+      each app, avoiding a shared SPOF at the cost of more copies.
+    ref: "concepts.md#gateway-offloading"
+
+  - id: dp-distributed-cloud-031
+    difficulty: intermediate
+    tags: [gateway-routing, layer-7, load-balancer, comparison]
+    question: |
+      Routing "/orders/*" to one backend and "/users/*" to another through a single endpoint,
+      changeable via config without touching clients, is Gateway Routing. How does it differ from
+      an L4 load balancer?
+    options:
+      - "Gateway Routing cannot support canary deployments"
+      - "Gateway Routing is layer-4; an L4 load balancer is layer-7"
+      - "Gateway Routing is application-layer (path/host/header) routing; an L4 load balancer balances by IP/port without understanding HTTP"
+      - "They are identical"
+    answer: 2
+    explanation: |
+      Gateway Routing dispatches at layer 7 based on path, host, or header, enabling versioning
+      and canary/blue-green without client changes. An L4 load balancer distributes by IP/port
+      and does not inspect HTTP semantics.
+    ref: "concepts.md#gateway-routing"
+
+  - id: dp-distributed-cloud-032
+    difficulty: intermediate
+    tags: [bff, api-gateway, comparison]
+    question: |
+      A mobile app gets compact payloads from a mobile-specific gateway while the web app gets
+      richer payloads from a web-specific gateway, each owned by its frontend team. Which pattern
+      is this, and how does it differ from a general API Gateway?
+    options:
+      - "Gateway Aggregation; it only merges responses"
+      - "Gatekeeper; it focuses on security"
+      - "API Gateway; a BFF is just a renamed gateway"
+      - "Backends for Frontends; it is one gateway per client type, versus a single general-purpose gateway serving all clients"
+    answer: 3
+    explanation: |
+      Backends for Frontends (BFF) provides a dedicated gateway per client type, each tailored to
+      that client's needs and owned by its team. A general API Gateway is a single entry point for
+      all clients, which forces compromises when clients differ materially.
+    ref: "concepts.md#backends-for-frontends-bff"
+
+  - id: dp-distributed-cloud-033
+    difficulty: advanced
+    tags: [gatekeeper, security, valet-key, comparison]
+    question: |
+      A hardened broker in a DMZ validates and sanitizes all requests, holds no storage
+      credentials itself, and forwards clean requests to a trusted host that accesses the data.
+      Which pattern is this, and how does it differ from an API Gateway?
+    options:
+      - "Gatekeeper; it focuses on security isolation and privilege separation, whereas an API Gateway focuses on routing/aggregation"
+      - "BFF; it is client-specific"
+      - "Ambassador; it is a client-side sidecar"
+      - "Valet Key; it grants direct scoped access"
+    answer: 0
+    explanation: |
+      The Gatekeeper is a hardened broker that validates/sanitizes requests and holds no secrets,
+      forwarding to a trusted host — minimizing attack surface. An API Gateway is about
+      routing/aggregation. A compromised gatekeeper doesn't hand over the storage credentials.
+    ref: "concepts.md#gatekeeper"
+
+  - id: dp-distributed-cloud-034
+    difficulty: intermediate
+    tags: [valet-key, presigned-url, gatekeeper, comparison]
+    question: |
+      To upload a large video, a client receives a time-limited, PUT-only pre-signed URL scoped
+      to one object and uploads directly to storage, keeping the app out of the data path. Which
+      pattern is this?
+    options:
+      - "Gatekeeper"
+      - "Valet Key"
+      - "Federated Identity"
+      - "Claim-Check"
+    answer: 1
+    explanation: |
+      The Valet Key pattern issues a scoped, time-limited token (e.g., a pre-signed URL) that
+      grants direct client access to a specific resource, removing the app from the data path.
+      Unlike a Gatekeeper (which mediates every request), the valet key gives direct scoped access.
+    ref: "concepts.md#valet-key"
+
+  - id: dp-distributed-cloud-035
+    difficulty: advanced
+    tags: [valet-key, security, revocation]
+    question: |
+      What is a notable security trade-off of the Valet Key pattern?
+    options:
+      - "It only works for downloads, never uploads"
+      - "It requires the app to proxy every byte"
+      - "Tokens can leak or be over-scoped and are hard to revoke before they expire"
+      - "It cannot limit the operations allowed"
+    answer: 2
+    explanation: |
+      Because a valet key grants direct access until expiry, a leaked or over-broad token is
+      dangerous and typically cannot be revoked early — so short TTLs and tight scoping are
+      essential. The upside is removing the app from the high-bandwidth data path.
+    ref: "concepts.md#valet-key"
+
+  - id: dp-distributed-cloud-036
+    difficulty: intermediate
+    tags: [federated-identity, sso, oidc]
+    question: |
+      An app lets users "Sign in with Google" by redirecting to an external IdP that
+      authenticates them and returns a signed token, so the app never sees the password. Which
+      pattern is this?
+    options:
+      - "Valet Key"
+      - "External Configuration Store"
+      - "Gatekeeper"
+      - "Federated Identity"
+    answer: 3
+    explanation: |
+      Federated Identity delegates authentication to a trusted external IdP via OIDC/SAML; the
+      app trusts the tokens the IdP issues. Its chief risk is that an IdP outage becomes an auth
+      outage for everyone relying on it.
+    ref: "concepts.md#federated-identity"
+
+  - id: dp-distributed-cloud-037
+    difficulty: intermediate
+    tags: [external-configuration-store, config, spof]
+    question: |
+      Feature flags and connection strings live in a central store that instances read at
+      runtime, so changes take effect without a redeploy. Which pattern is this, and what is its
+      main risk?
+    options:
+      - "External Configuration Store; the store becomes a runtime dependency/SPOF and needs secret handling"
+      - "Service Registry; it tracks endpoints"
+      - "Sidecar; it runs per pod"
+      - "Materialized View; it precomputes config"
+    answer: 0
+    explanation: |
+      The External Configuration Store externalizes config from the deployment artifact into a
+      central store read at runtime. It enables change-without-redeploy but becomes a runtime
+      dependency/SPOF (mitigate with local caching) and requires careful secret handling.
+    ref: "concepts.md#external-configuration-store"
+
+  - id: dp-distributed-cloud-038
+    difficulty: intermediate
+    tags: [saga, 2pc, consistency, comparison]
+    question: |
+      How does a Saga achieve cross-service data consistency differently from a two-phase commit
+      (2PC) distributed transaction?
+    options:
+      - "A Saga holds a global lock across all services until commit"
+      - "A Saga uses a sequence of local transactions with compensations and is eventually consistent (no distributed lock); 2PC is atomic but blocking and scales poorly"
+      - "They are the same mechanism"
+      - "A Saga requires all services to share one database"
+    answer: 1
+    explanation: |
+      A Saga strings together local transactions and compensates on failure, giving eventual
+      consistency without a distributed lock — but no isolation (intermediate states are visible).
+      2PC provides atomicity but blocks participants and doesn't scale, which is why Sagas are
+      preferred in microservices.
+    ref: "concepts.md#saga"
+
+  - id: dp-distributed-cloud-039
+    difficulty: advanced
+    tags: [saga, isolation, dirty-reads]
+    question: |
+      What consistency property does a Saga notably lack, requiring extra countermeasures?
+    options:
+      - "The ability to compensate"
+      - "Durability"
+      - "Isolation — intermediate states are visible (dirty reads), so you need semantic locks or commutative updates"
+      - "Atomicity of individual local transactions"
+    answer: 2
+    explanation: |
+      A Saga's local transactions commit independently, so partial results are visible before the
+      whole saga finishes — it lacks isolation (the "I" in ACID). You design around it with
+      semantic locks, commutative updates, or by re-reading state, and use compensations to undo on failure.
+    ref: "concepts.md#saga"
+
+  - id: dp-distributed-cloud-040
+    difficulty: intermediate
+    tags: [cqrs, read-model, write-model, materialized-view, comparison]
+    question: |
+      An app writes orders through a rich domain model into normalized SQL, while a projector
+      builds a denormalized "order history" view in Elasticsearch that the read API queries.
+      Which pattern separates these read and write models?
+    options:
+      - "Sharding"
+      - "API Composition"
+      - "Event Sourcing"
+      - "CQRS"
+    answer: 3
+    explanation: |
+      CQRS (Command Query Responsibility Segregation) separates the write model from the read
+      model, often into distinct stores, letting each scale and be optimized independently — at
+      the cost of eventual consistency between them. A materialized view is a mechanism it often uses.
+    ref: "concepts.md#cqrs-command-query-responsibility-segregation"
+
+  - id: dp-distributed-cloud-041
+    difficulty: advanced
+    tags: [event-sourcing, cdc, comparison]
+    question: |
+      How does Event Sourcing differ from deriving events via Change Data Capture (CDC) from a
+      database's transaction log?
+    options:
+      - "In Event Sourcing, events ARE the source of truth (state is rebuilt by replay); CDC derives events after the fact from a DB that stores current state"
+      - "CDC stores events as the source of truth; Event Sourcing reads the WAL"
+      - "Event Sourcing cannot rebuild state"
+      - "They are identical techniques"
+    answer: 0
+    explanation: |
+      Event Sourcing persists an append-only log of events as the authoritative state and rebuilds
+      current state by replay. CDC instead tails the transaction log of a store that holds current
+      state to derive change events. Source-of-truth-is-events vs derive-events-from-a-DB.
+    ref: "concepts.md#event-sourcing"
+
+  - id: dp-distributed-cloud-042
+    difficulty: advanced
+    tags: [event-sourcing, versioning, snapshots]
+    question: |
+      Which is a genuine trade-off of Event Sourcing?
+    options:
+      - "It loses all history of changes"
+      - "Replay cost grows over time (needing snapshots) and event schema/versioning is hard because old events are immutable forever"
+      - "It cannot support audit trails"
+      - "It requires a single shared database across services"
+    answer: 1
+    explanation: |
+      Event Sourcing gives a complete audit trail and temporal queries, but replaying long streams
+      is costly (mitigated by snapshots), and evolving event schemas is hard since historical
+      events are immutable and must remain replayable. Read models are also eventually consistent.
+    ref: "concepts.md#event-sourcing"
+
+  - id: dp-distributed-cloud-043
+    difficulty: advanced
+    tags: [transactional-outbox, dual-write, idempotent-consumer]
+    question: |
+      A service must update its DB and publish an event, but doing them separately risks the DB
+      committing while the publish fails. Which pattern writes the change and the message in one
+      local transaction and has a relay publish later?
+    options:
+      - "Claim-Check"
+      - "Two-phase commit"
+      - "Transactional Outbox"
+      - "Publish-Subscribe"
+    answer: 2
+    explanation: |
+      The Transactional Outbox writes the domain change and an outbox row in one local
+      transaction (atomic), then a relay (polling publisher or CDC log-tailing) publishes the
+      message. Delivery is at-least-once, so consumers must be idempotent. It avoids a distributed transaction.
+    ref: "concepts.md#transactional-outbox"
+
+  - id: dp-distributed-cloud-044
+    difficulty: advanced
+    tags: [transactional-outbox, polling-publisher, cdc, mechanisms]
+    question: |
+      Which two mechanisms are commonly used to implement the relay in the Transactional Outbox
+      pattern?
+    options:
+      - "Circuit breaker and bulkhead"
+      - "Leader election and consistent hashing"
+      - "Two-phase commit and sagas"
+      - "Polling Publisher (poll the outbox table) and Transaction Log Tailing / CDC (tail the DB log)"
+    answer: 3
+    explanation: |
+      The outbox relay is realized either by a Polling Publisher that periodically reads unsent
+      rows, or by Transaction Log Tailing (CDC) that streams changes from the database log. CDC
+      avoids polling latency/load; both mark rows as sent after publishing.
+    ref: "concepts.md#transactional-outbox"
+
+  - id: dp-distributed-cloud-045
+    difficulty: advanced
+    tags: [idempotent-consumer, inbox, outbox, comparison]
+    question: |
+      Message delivery is at-least-once, so a consumer may receive the same message twice. Which
+      pattern records processed message ids to deduplicate, and how does it relate to the
+      Transactional Outbox?
+    options:
+      - "Idempotent Consumer (Inbox); it is the mirror image of the Outbox — reliable/dedup receive vs reliable send"
+      - "Circuit Breaker; it stops duplicate calls"
+      - "Priority Queue; it orders messages"
+      - "Materialized View; it caches results"
+    answer: 0
+    explanation: |
+      The Idempotent Consumer (Inbox) pattern records each processed message id (ideally in the
+      same transaction as the effect) and skips duplicates. It is the receive-side mirror of the
+      Transactional Outbox's reliable send; together they give exactly-once effect over at-least-once delivery.
+    ref: "concepts.md#idempotent-consumer-inbox"
+
+  - id: dp-distributed-cloud-046
+    difficulty: advanced
+    tags: [event-carried-state-transfer, claim-check, coupling, comparison]
+    question: |
+      Instead of thin "CustomerUpdated(id=42)" notifications that force consumers to call back,
+      events carry the full customer fields so consumers keep local replicas. Which pattern is
+      this, and how does it contrast with Claim-Check?
+    options:
+      - "Claim-Check; there is no contrast"
+      - "Event-Carried State Transfer; it puts state IN the event, whereas Claim-Check removes a large payload and passes only a reference"
+      - "Publish-Subscribe; it broadcasts pointers"
+      - "Cache-Aside; it lazily loads on miss"
+    answer: 1
+    explanation: |
+      Event-Carried State Transfer sends "fat" events with enough state that consumers avoid
+      callbacks and stay autonomous (at the cost of duplication/staleness). Claim-Check does the
+      opposite — it keeps big payloads out of the message, passing a reference to fetch on demand.
+    ref: "concepts.md#event-carried-state-transfer"
+
+  - id: dp-distributed-cloud-047
+    difficulty: intermediate
+    tags: [cache-aside, caching, comparison]
+    question: |
+      In Cache-Aside, on a read miss the application loads from the store, populates the cache,
+      and returns; on write it updates the store and invalidates the cache. How does this differ
+      from read-through/write-through caching?
+    options:
+      - "Cache-Aside never invalidates on write"
+      - "Cache-Aside is cache-managed; read-through/write-through are app-managed"
+      - "Cache-Aside is app-managed (your code orchestrates it); read-through/write-through are cache-managed (the cache library loads/writes the store)"
+      - "There is no difference"
+    answer: 2
+    explanation: |
+      In Cache-Aside the application code orchestrates cache reads/populates/invalidations. In
+      read-through/write-through/write-behind, the caching layer itself loads from and writes to
+      the backing store. Cache-Aside's risks include a staleness window and cache stampede on hot keys.
+    ref: "concepts.md#cache-aside"
+
+  - id: dp-distributed-cloud-048
+    difficulty: intermediate
+    tags: [materialized-view, cqrs, index-table, comparison]
+    question: |
+      A "sales by region per day" dashboard reads a precomputed, denormalized projection instead
+      of running heavy joins at query time. Which pattern is this, and how does it relate to a
+      CQRS read model?
+    options:
+      - "Sharding; it partitions the data"
+      - "API Composition; it joins in memory at query time"
+      - "Index Table; it stores lookup keys only"
+      - "Materialized View; it is the mechanism, while a CQRS read model is the architecture that often uses one"
+    answer: 3
+    explanation: |
+      A Materialized View precomputes and stores a query-optimized projection, trading storage and
+      staleness for fast reads. It is the mechanism; CQRS is the broader architecture that
+      frequently maintains materialized read models. An index table, by contrast, holds only lookup keys.
+    ref: "concepts.md#materialized-view"
+
+  - id: dp-distributed-cloud-049
+    difficulty: advanced
+    tags: [index-table, materialized-view, comparison]
+    question: |
+      Orders are stored by orderId but frequently queried by customerId in a store lacking
+      secondary indexes, so you maintain a customerId -> [orderId] table. Which pattern is this,
+      and how does it differ from a Materialized View?
+    options:
+      - "Index Table; it holds lookup keys pointing to records, whereas a Materialized View holds a full computed projection"
+      - "Sharding; it partitions by customerId"
+      - "Cache-Aside; it caches orders"
+      - "Materialized View; there is no difference"
+    answer: 0
+    explanation: |
+      An Index Table builds secondary indexes (lookup keys → primary keys) for stores without
+      native secondary indexes. A Materialized View stores the full computed answer/projection.
+      The index gives you a pointer to fetch by; the view gives you the answer directly.
+    ref: "concepts.md#index-table"
+
+  - id: dp-distributed-cloud-050
+    difficulty: advanced
+    tags: [sharding, consistent-hashing, comparison]
+    question: |
+      A team uses hash(userId) % N to spread users across database nodes. How does Consistent
+      Hashing improve on this naive modulo sharding when the node count changes?
+    options:
+      - "Consistent hashing avoids sharding entirely"
+      - "With modulo, changing N remaps almost every key; consistent hashing maps nodes and keys on a ring so only ~K/N keys move when a node is added/removed"
+      - "Consistent hashing guarantees perfectly even distribution with no extra effort"
+      - "Modulo hashing moves the fewest keys; consistent hashing moves the most"
+    answer: 1
+    explanation: |
+      Naive modulo sharding reshuffles nearly all keys when N changes (mass cache misses / data
+      movement). Consistent hashing places nodes and keys on a ring so adding/removing a node only
+      moves the keys between it and its neighbor. Virtual nodes are needed to smooth distribution.
+    ref: "concepts.md#sharding"
+
+  - id: dp-distributed-cloud-051
+    difficulty: advanced
+    tags: [consistent-hashing, virtual-nodes]
+    question: |
+      Why are virtual nodes used in Consistent Hashing?
+    options:
+      - "To reduce the total number of physical nodes required"
+      - "To eliminate the need for replication"
+      - "To smooth out uneven key distribution by placing each physical node at many points on the ring"
+      - "To guarantee strong consistency of writes"
+    answer: 2
+    explanation: |
+      Placing each physical node at many ring positions (virtual nodes) evens out the arcs of the
+      ring each node owns, avoiding lopsided load. Consistent hashing still needs replication
+      separately for high availability — placement is not durability.
+    ref: "concepts.md#consistent-hashing"
+
+  - id: dp-distributed-cloud-052
+    difficulty: advanced
+    tags: [api-composition, cqrs, database-per-service, comparison]
+    question: |
+      With database-per-service and no shared DB, a query needs data from Order, Customer, and
+      Shipping services, so a composer calls each and joins results in memory. Which pattern is
+      this, and how does it differ from CQRS?
+    options:
+      - "Sharding; it partitions the query"
+      - "Saga; it coordinates writes"
+      - "CQRS; there is no difference"
+      - "API Composition; it joins at query time with no maintained replica, whereas CQRS maintains a precomputed read model"
+    answer: 3
+    explanation: |
+      API Composition queries each owning service and joins the results in memory — simple and
+      always live, but in-memory joins are inefficient at scale and availability is the product of
+      all sources. CQRS instead maintains a precomputed read model, better for high-volume/large joins.
+    ref: "concepts.md#api-composition"
+
+  - id: dp-distributed-cloud-053
+    difficulty: intermediate
+    tags: [database-per-service, shared-database, microservices, comparison]
+    question: |
+      In the Database-per-Service pattern, why can't you simply do a cross-service SQL JOIN, and
+      what is the core trade-off versus a Shared Database?
+    options:
+      - "Each service privately owns its store (no direct cross-service access), so you use Saga/CQRS/events instead; the trade-off is autonomy/isolation vs simplicity/easy joins"
+      - "Shared databases are always the microservices default"
+      - "Database-per-service forbids using events"
+      - "You can; there is no restriction"
+    answer: 0
+    explanation: |
+      Database-per-Service gives each service a private store accessed only via its API/events,
+      enabling independent deployment and fault isolation. The cost is no cross-service ACID joins
+      — you use Saga, CQRS, and events. A Shared Database is simpler but couples services through the schema.
+    ref: "concepts.md#database-per-service"
+
+  - id: dp-distributed-cloud-054
+    difficulty: intermediate
+    tags: [competing-consumers, publish-subscribe, comparison]
+    question: |
+      Multiple worker instances read from the same queue, and the broker delivers each message to
+      exactly one worker so throughput scales with worker count. Which pattern is this, and how
+      does it differ from Publish-Subscribe?
+    options:
+      - "Publish-Subscribe; it broadcasts to all"
+      - "Competing Consumers; each message goes to one of N consumers (work-sharing), whereas Pub-Sub delivers a copy to all subscribers (broadcast)"
+      - "Priority Queue; it orders by importance"
+      - "Sequential Convoy; it preserves ordering"
+    answer: 1
+    explanation: |
+      Competing Consumers share the workload — one message is handled by exactly one of several
+      consumers, scaling throughput and tolerating crashes via redelivery (needs idempotency).
+      Publish-Subscribe instead broadcasts each message to every subscriber.
+    ref: "concepts.md#competing-consumers"
+
+  - id: dp-distributed-cloud-055
+    difficulty: intermediate
+    tags: [publish-subscribe, decoupling, fan-out]
+    question: |
+      An OrderPlaced event is published to a topic and independently received by email,
+      analytics, inventory, and search subscribers; adding a loyalty subscriber requires no
+      publisher change. Which pattern enables this decoupled fan-out?
+    options:
+      - "Asynchronous Request-Reply"
+      - "Competing Consumers"
+      - "Publish-Subscribe"
+      - "Scatter-Gather"
+    answer: 2
+    explanation: |
+      Publish-Subscribe lets a publisher broadcast events to any number of independent subscribers
+      without knowing who they are, so consumers can be added/removed freely. The trade-off is no
+      default delivery/ordering guarantees and fan-out/lag management at scale.
+    ref: "concepts.md#publish-subscribe"
+
+  - id: dp-distributed-cloud-056
+    difficulty: intermediate
+    tags: [claim-check, large-payload, messaging]
+    question: |
+      A pipeline stores a 50 MB PDF in object storage and publishes only a message containing the
+      id and storage URL; the consumer fetches the payload when needed. Which pattern is this?
+    options:
+      - "Cache-Aside"
+      - "Valet Key"
+      - "Event-Carried State Transfer"
+      - "Claim-Check"
+    answer: 3
+    explanation: |
+      Claim-Check stores a large payload externally and passes only a reference (the claim)
+      through the message bus, keeping messages small. It is the inverse of Event-Carried State
+      Transfer, which puts the state directly into the event.
+    ref: "concepts.md#claim-check"
+
+  - id: dp-distributed-cloud-057
+    difficulty: intermediate
+    tags: [priority-queue, starvation, sequential-convoy, comparison]
+    question: |
+      A support system uses high/normal/low queues drained in priority order so paid-tier tickets
+      jump ahead. Which pattern is this, and what is its main risk?
+    options:
+      - "Priority Queue; low-priority work can be starved if high-priority never drains"
+      - "Sequential Convoy; messages are strictly ordered by arrival"
+      - "Competing Consumers; ordering is guaranteed"
+      - "Claim-Check; large tickets are stored externally"
+    answer: 0
+    explanation: |
+      The Priority Queue ensures higher-priority messages are processed first (supporting SLAs and
+      tiering), but risks starving low-priority work unless you add aging or reserved capacity.
+      It reorders by importance, unlike a convoy (ordering within a group) or plain FIFO.
+    ref: "concepts.md#priority-queue"
+
+  - id: dp-distributed-cloud-058
+    difficulty: advanced
+    tags: [pipes-and-filters, chain-of-responsibility, gof, comparison]
+    question: |
+      A "Validate -> Enrich -> Transform -> Persist" pipeline of independent stages connected by
+      queues is Pipes and Filters. How does it differ from the GoF Chain of Responsibility?
+    options:
+      - "They are identical patterns"
+      - "In Pipes and Filters every stage transforms the data as it flows through all stages; in Chain of Responsibility handlers pass a request along until one handler handles it and stops"
+      - "Chain of Responsibility scales each stage independently; Pipes and Filters cannot"
+      - "Pipes and Filters can only have two stages"
+    answer: 1
+    explanation: |
+      Pipes and Filters streams data through a series of transforming stages, each doing one thing
+      and composable/independently scalable. Chain of Responsibility passes a request down a chain
+      of handlers until one handles it — a routing-to-a-single-handler intent, not a transform pipeline.
+    ref: "concepts.md#pipes-and-filters"
+
+  - id: dp-distributed-cloud-059
+    difficulty: advanced
+    tags: [scatter-gather, gateway-aggregation, comparison]
+    question: |
+      A travel site sends the same "quote" request to 10 airline APIs in parallel and returns the
+      cheapest received before a timeout. Which pattern is this, and how does it differ from
+      Gateway Aggregation?
+    options:
+      - "API Composition; it never uses a timeout"
+      - "Gateway Aggregation; there is no difference"
+      - "Scatter-Gather; it broadcasts the SAME request to many peers and aggregates, whereas Gateway Aggregation composes DISTINCT calls to different backends"
+      - "Publish-Subscribe; it is fire-and-forget"
+    answer: 2
+    explanation: |
+      Scatter-Gather fans out the same request to many recipients and aggregates responses
+      (best/merged/first), bounded by the slowest responder or a timeout with partial results.
+      Gateway Aggregation composes several different backend calls into one response instead.
+    ref: "concepts.md#scatter-gather"
+
+  - id: dp-distributed-cloud-060
+    difficulty: intermediate
+    tags: [choreography, orchestration, saga, comparison]
+    question: |
+      In a Saga, services react to each other's events with no central coordinator directing the
+      flow. Which coordination style is this, and what is its main downside versus orchestration?
+    options:
+      - "Choreography; it introduces a central bottleneck"
+      - "Orchestration; it maximizes decoupling"
+      - "Orchestration; it has a single visible controller"
+      - "Choreography; the end-to-end flow is emergent and hard to trace, with no single place showing the whole process"
+    answer: 3
+    explanation: |
+      Choreography is decentralized event-reaction with no orchestrator — maximally decoupled and
+      with no central SPOF, but the overall process is emergent and hard to trace/debug.
+      Orchestration uses a central coordinator that is easier to see/control but is a coupling point.
+    ref: "concepts.md#choreography"
+
+  - id: dp-distributed-cloud-061
+    difficulty: intermediate
+    tags: [async-request-reply, long-running, polling]
+    question: |
+      A "generate report" API returns 202 Accepted with a status URL, processes the work
+      asynchronously, and lets the client poll until the result is ready. Which pattern is this?
+    options:
+      - "Asynchronous Request-Reply"
+      - "Scatter-Gather"
+      - "Queue-Based Load Leveling"
+      - "Publish-Subscribe"
+    answer: 0
+    explanation: |
+      Asynchronous Request-Reply handles long-running work by returning a status/handle
+      immediately (e.g., 202 + status URL) and letting the client poll or receive a callback.
+      Unlike Pub-Sub (fire-and-forget), it provides a correlated response for the requester.
+    ref: "concepts.md#asynchronous-request-reply"
+
+  - id: dp-distributed-cloud-062
+    difficulty: advanced
+    tags: [sequential-convoy, competing-consumers, ordering, comparison]
+    question: |
+      You must process all events for one order in order, but different orders can be processed in
+      parallel — solved by keying events by orderId so each order maps to one partition. Which
+      pattern is this, and how does it differ from plain Competing Consumers?
+    options:
+      - "Competing Consumers; ordering is automatic"
+      - "Sequential Convoy; it guarantees in-order processing within a group while parallelizing across groups, whereas Competing Consumers process in parallel with no ordering"
+      - "Priority Queue; it orders by importance"
+      - "Pub-Sub; it broadcasts to all"
+    answer: 1
+    explanation: |
+      Sequential Convoy partitions messages by key so each group is processed in order while
+      different groups run concurrently. Plain Competing Consumers maximize throughput but give no
+      ordering. The trade-off is that a hot key serializes and becomes a bottleneck.
+    ref: "concepts.md#sequential-convoy"
+
+  - id: dp-distributed-cloud-063
+    difficulty: advanced
+    tags: [leader-election, distributed-lock, split-brain, comparison]
+    question: |
+      Three scheduler replicas must ensure exactly one runs the cron jobs; they acquire a lease in
+      etcd and the winner leads, with standbys taking over if its lease expires. Which pattern is
+      this, and how does it differ from a Distributed Lock?
+    options:
+      - "Bulkhead; it isolates the schedulers"
+      - "Distributed Lock; there is no difference"
+      - "Leader Election; it establishes ongoing leadership over time (renewed lease), whereas a distributed lock provides single mutual-exclusion for one operation"
+      - "Consistent Hashing; it places keys on a ring"
+    answer: 2
+    explanation: |
+      Leader Election picks a single owner for exclusive, ongoing responsibility with clean
+      failover, built on a consensus/lease mechanism; its risks are split-brain (needs fencing
+      tokens) and failover latency. A distributed lock is a shorter-lived mutual-exclusion for one operation.
+    ref: "concepts.md#leader-election"
+
+  - id: dp-distributed-cloud-064
+    difficulty: intermediate
+    tags: [service-registry, discovery, client-side, server-side]
+    question: |
+      In a dynamic environment, instances register with Consul/Eureka and heartbeat, and callers
+      query the registry to find healthy instances. Which pattern is this, and what is a key risk?
+    options:
+      - "Leader Election; it elects a coordinator"
+      - "Gateway Routing; it dispatches by path"
+      - "External Configuration Store; it holds settings"
+      - "Service Registry & Discovery; the registry is a critical dependency (SPOF) that can serve stale data"
+    answer: 3
+    explanation: |
+      Service Registry & Discovery tracks live instance locations (client-side or server-side
+      discovery; self- or third-party registration) so callers find instances dynamically. The
+      registry is a critical dependency and can be stale (dead instance still listed or live one missing).
+    ref: "concepts.md#service-registry-and-discovery"
+
+  - id: dp-distributed-cloud-065
+    difficulty: advanced
+    tags: [resilience-quartet, circuit-breaker, timeout, bulkhead, retry]
+    question: |
+      Which statement best captures how Retry, Timeout, Circuit Breaker, and Bulkhead relate?
+    options:
+      - "They compose: Retry handles transient blips, Timeout bounds a single call, Circuit Breaker stops calling a downed dependency, and Bulkhead isolates resource pools"
+      - "They all do the same thing at different layers"
+      - "Only Circuit Breaker is needed; the rest are obsolete"
+      - "They are mutually exclusive; pick exactly one"
+    answer: 0
+    explanation: |
+      The resilience quartet is complementary, not competing: timeouts bound individual calls,
+      retries absorb transient failures, circuit breakers cut off a sustained-failing dependency,
+      and bulkheads isolate resource pools to contain blast radius. Real systems use them together.
+    ref: "concepts.md#bulkhead"
+
+  - id: dp-distributed-cloud-066
+    difficulty: beginner
+    tags: [problem-solving, interview-technique]
+    question: |
+      When an interviewer names a design pattern, what is almost always their first probe?
+    options:
+      - "The exact UML class diagram from the GoF book"
+      - "What problem the pattern solves — the specific pain or smell it removes"
+      - "Which programming language implements it best"
+      - "The year the pattern was first published"
+    answer: 1
+    explanation: |
+      The strongest signal is leading with the problem the pattern solves in plain language before
+      the mechanism. Every pattern in this catalog opens with a "Problem it solves" line for
+      exactly this reason — interviewers probe motivation first, structure second.
+    ref: "concepts.md#why-these-patterns-exist--the-fallacies-of-distributed-computing"
+
+  - id: dp-distributed-cloud-067
+    difficulty: intermediate
+    tags: [api-gateway, bff, edge, routing]
+    question: |
+      A team exposes 30 fine-grained microservices. Clients currently call each service
+      directly, must know every address, and each service re-implements TLS and auth. Which
+      pattern introduces a single front door that routes, secures, and can aggregate for all
+      clients — and how does it differ from a BFF?
+    options:
+      - "Ambassador; it is identical to a BFF"
+      - "Sidecar; a BFF is a per-instance sidecar"
+      - "API Gateway; a BFF instead gives each client type its own tailored gateway"
+      - "Service Registry; a BFF is a registry per client"
+    answer: 2
+    explanation: |
+      An API Gateway is one general-purpose edge that routes, offloads cross-cutting concerns,
+      and can aggregate for all clients. A BFF specializes that idea per client type (mobile,
+      web), giving each its own tailored backend rather than one shared gateway.
+    ref: "concepts.md#api-gateway"
+
+  - id: dp-distributed-cloud-068
+    difficulty: advanced
+    tags: [outbox, polling-publisher, log-tailing, cdc]
+    question: |
+      You use the Transactional Outbox and must move committed outbox rows to Kafka with
+      minimal latency and no periodic query load. Which relay mechanism fits, and what is its
+      main cost compared to polling?
+    options:
+      - "Transaction Log Tailing (CDC); it is DB-specific and operationally more complex than polling"
+      - "Polling Publisher; it eliminates all query load"
+      - "Two-phase commit across DB and broker; it needs no relay"
+      - "Scatter-Gather; it fans the rows out to all consumers"
+    answer: 0
+    explanation: |
+      Log tailing (CDC, e.g. Debezium reading the WAL/binlog) publishes committed outbox rows
+      with low latency and no polling load, but it is database-specific and operationally more
+      complex/fragile than a simple Polling Publisher that periodically queries the outbox table.
+    ref: "concepts.md#polling-publisher-and-transaction-log-tailing"
+
+  - id: dp-distributed-cloud-069
+    difficulty: advanced
+    tags: [command-side-replica, api-composition, events, write-path]
+    question: |
+      An Order service must check a customer's credit on every write, but a synchronous call to
+      the Customer service couples availability and adds latency to the write path. Which pattern
+      keeps a local, event-updated copy for local validation, and how does it differ from API
+      Composition?
+    options:
+      - "Materialized View; it is the same as API Composition"
+      - "Command-side Replica; API Composition instead queries the owner remotely at request time"
+      - "Cache-Aside; API Composition writes through to the owner"
+      - "Event Sourcing; API Composition replays events on the read side"
+    answer: 1
+    explanation: |
+      A Command-side Replica keeps a read-only local copy of another service's data, maintained
+      by subscribing to its events, so the write path validates locally without a synchronous
+      call. API Composition instead queries the owning service remotely at request time; the
+      replica trades eventual-consistency staleness for write-path autonomy.
+    ref: "concepts.md#command-side-replica"
+
+  - id: dp-distributed-cloud-070
+    difficulty: intermediate
+    tags: [process-manager, orchestration, choreography, saga]
+    question: |
+      A multi-step order workflow has branching and compensation logic that is currently
+      scattered across services with no single place showing the whole flow. Which pattern
+      centralizes the process state and decides the next step, and what is its main downside
+      versus choreography?
+    options:
+      - "Choreography; its downside is it centralizes too much"
+      - "Publish-Subscribe; its downside is lost ordering"
+      - "Pipes and Filters; its downside is per-stage overhead"
+      - "Process Manager (orchestrator); its downside is it becomes a coupling point / potential god component"
+    answer: 3
+    explanation: |
+      A Process Manager (orchestration variant of Saga) is a persistent state machine that tracks
+      each process instance and decides the next command, making the flow explicit and observable.
+      The trade-off versus choreography's decentralized event reactions is that the orchestrator
+      is a coupling point that can grow into a complex god component and must persist its state.
+    ref: "concepts.md#process-manager-orchestrator"

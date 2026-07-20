@@ -1,0 +1,1252 @@
+topic: "Concurrency and Reactive Design Patterns"
+domain: system-design
+topic_slug: dp-concurrency
+version: 1
+questions:
+- id: dp-concurrency-001
+  difficulty: beginner
+  tags: [active-object, decoupling, invocation]
+  question: |
+    A logging service must never block the web request thread on disk I/O. Callers invoke
+    a proxy method that enqueues the request and returns immediately; a dedicated thread
+    later drains the queue and writes to disk. Which concurrency pattern is this?
+  options:
+  - "Active Object"
+  - "Thread-Safe Interface"
+  - "Balking"
+  - "Monitor Object"
+  answer: 0
+  explanation: |
+    Active Object decouples method invocation from execution: a proxy packages the call as a
+    request on an activation queue, and the object's own thread executes it, returning a Future
+    to the caller. Monitor Object would run in the caller's thread (blocking); the others are
+    unrelated.
+  ref: "concepts.md#active-object"
+- id: dp-concurrency-002
+  difficulty: intermediate
+  tags: [active-object, monitor-object, comparison]
+  question: |
+    What is the defining difference between Active Object and Monitor Object?
+  options:
+  - "Monitor Object always returns a Future; Active Object never does"
+  - "Active Object works only for reads; Monitor Object only for writes"
+  - "Active Object runs the method in its own thread via a request queue; Monitor Object runs it in the caller's thread with mutual exclusion"
+  - "Active Object uses no locks anywhere; Monitor Object requires a distributed lock"
+  answer: 2
+  explanation: |
+    Both serialize access to one object, but Active Object executes on its own thread
+    (asynchronous, queued, returns a Future), while Monitor Object executes synchronously in
+    the caller's thread using an object-level lock plus condition variables.
+  ref: "concepts.md#active-object"
+- id: dp-concurrency-003
+  difficulty: intermediate
+  tags: [monitor-object, condition-variable, lost-wakeup]
+  question: |
+    In a Monitor Object, why must a thread re-check its wait condition in a `while` loop
+    rather than an `if`?
+  options:
+  - "Because `if` cannot call wait()"
+  - "To guard against spurious wakeups and stale conditions after being signaled"
+  - "To acquire the lock a second time"
+  - "Because condition variables can only be used inside loops by language rule"
+  answer: 1
+  explanation: |
+    A signaled thread may wake spuriously, or another thread may have changed state again before
+    it re-runs. Re-testing the predicate in a `while` ensures the thread proceeds only when the
+    condition truly holds, preventing lost-wakeup/stale-condition bugs.
+  ref: "concepts.md#monitor-object"
+- id: dp-concurrency-004
+  difficulty: beginner
+  tags: [thread-pool, resource-bounding]
+  question: |
+    What is the primary benefit of using a thread pool instead of creating a new thread per task?
+  options:
+  - "It removes the need for any synchronization"
+  - "It makes every task run in parallel regardless of core count"
+  - "It guarantees tasks run in submission order"
+  - "It reuses a bounded set of threads, amortizing creation cost and capping concurrency"
+  answer: 3
+  explanation: |
+    A thread pool reuses pre-created workers pulling from a shared queue, amortizing the cost of
+    thread creation and bounding the number of live threads so bursts don't exhaust memory/CPU.
+    It doesn't guarantee ordering, eliminate synchronization, or exceed hardware parallelism.
+  ref: "concepts.md#thread-pool"
+- id: dp-concurrency-005
+  difficulty: advanced
+  tags: [thread-pool, starvation, deadlock]
+  question: |
+    Tasks in a fixed thread pool each submit a subtask to the SAME pool and then block waiting
+    for that subtask's result. Under load the system hangs. What is this failure mode?
+  options:
+  - "Priority inversion"
+  - "ABA problem"
+  - "Thread-pool starvation deadlock"
+  - "False sharing"
+  answer: 2
+  explanation: |
+    When every worker is blocked waiting on a subtask that cannot be scheduled because the pool
+    is full, no worker is free to run the subtasks — a thread-pool starvation deadlock. Fix by
+    using separate pools (bulkheads), async composition, or not blocking pooled threads on
+    pool-scheduled work.
+  ref: "concepts.md#thread-pool"
+- id: dp-concurrency-006
+  difficulty: advanced
+  tags: [leader-followers, thread-pool, comparison]
+  question: |
+    How does the Leader/Followers pattern differ from a conventional thread pool with a task queue?
+  options:
+  - "In Leader/Followers one thread waits on the event source and self-dispatches, avoiding a handoff queue and its context switch/copy"
+  - "Leader/Followers requires a separate dispatcher thread per event"
+  - "A thread pool cannot process network events"
+  - "Leader/Followers uses only one thread total"
+  answer: 0
+  explanation: |
+    Leader/Followers has one thread act as leader on the shared event source; when an event
+    arrives it promotes a follower and processes the event itself. This removes the
+    producer-consumer handoff queue (and its context switch and data copy) that a normal pool
+    uses between a dispatcher and workers.
+  ref: "concepts.md#leader-followers"
+- id: dp-concurrency-007
+  difficulty: intermediate
+  tags: [half-sync-half-async, layering]
+  question: |
+    Half-Sync/Half-Async structures a system into three layers. What is the middle (queueing)
+    layer's job?
+  options:
+  - "To elect a leader thread"
+  - "To copy immutable snapshots for readers"
+  - "To perform all disk I/O"
+  - "To decouple the asynchronous I/O layer from the synchronous worker layer and mediate handoff"
+  answer: 3
+  explanation: |
+    The queueing layer sits between the async (event-driven, non-blocking) I/O layer and the
+    synchronous worker layer, buffering messages so workers can use a simple blocking programming
+    model. Its cost is a context switch and often a data copy per message.
+  ref: "concepts.md#half-sync-half-async"
+- id: dp-concurrency-008
+  difficulty: expert
+  tags: [half-sync-half-async, leader-followers, comparison]
+  question: |
+    Leader/Followers is often described as an optimization over Half-Sync/Half-Async. What does
+    it optimize away?
+  options:
+  - "The need for any threads"
+  - "The queueing layer between the async and sync layers, eliminating its context switch and data copy"
+  - "The operating system's network stack"
+  - "The need for non-blocking sockets"
+  answer: 1
+  explanation: |
+    Half-Sync/Half-Async pays a context switch and copy at the queue between layers.
+    Leader/Followers removes that queue: the same thread that demultiplexes the event also
+    processes it, improving locality and reducing overhead — at the cost of harder
+    prioritization and implementation complexity.
+  ref: "concepts.md#leader-followers"
+- id: dp-concurrency-009
+  difficulty: intermediate
+  tags: [reactor, event-loop, readiness]
+  question: |
+    In the Reactor pattern, when the event demultiplexer (e.g. epoll) signals that a socket is
+    readable, who performs the actual read?
+  options:
+  - "The registered event handler performs the non-blocking read itself"
+  - "A dedicated proactor thread"
+  - "The producer that wrote the data"
+  - "The operating system copies the data before notifying anyone"
+  answer: 0
+  explanation: |
+    Reactor is readiness-based/synchronous: the demultiplexer only reports that I/O is *possible*
+    ("readable"), and the application's registered handler then performs the non-blocking read.
+    Having the OS complete the read and hand back data is the Proactor (completion) model.
+  ref: "concepts.md#reactor"
+- id: dp-concurrency-010
+  difficulty: advanced
+  tags: [reactor, proactor, comparison]
+  question: |
+    What is the single most important distinction between the Reactor and Proactor patterns?
+  options:
+  - "Reactor requires locks; Proactor is lock-free"
+  - "Reactor is single-threaded; Proactor is always multi-threaded"
+  - "Reactor dispatches on I/O readiness (you do the I/O); Proactor dispatches on I/O completion (the OS did the I/O)"
+  - "Reactor is for reads only; Proactor is for writes only"
+  answer: 2
+  explanation: |
+    Reactor = readiness/synchronous: "the socket can be read, now you read it." Proactor =
+    completion/asynchronous: "you asked the OS to read; it moved the bytes and here is the
+    result." This readiness-vs-completion difference is the classic interview probe.
+  ref: "concepts.md#proactor"
+- id: dp-concurrency-011
+  difficulty: intermediate
+  tags: [reactor, blocking, event-loop]
+  question: |
+    What is the main risk of running CPU-heavy or blocking work directly inside a Reactor's
+    single-threaded event loop?
+  options:
+  - "It causes the ABA problem"
+  - "One slow/blocking handler stalls all other connections handled by that loop"
+  - "It forces writer starvation on a read-write lock"
+  - "It leaks thread-local variables"
+  answer: 1
+  explanation: |
+    Because a Reactor processes events on one thread, a handler that blocks or runs long prevents
+    the loop from servicing any other ready events — "don't block the event loop." CPU-bound work
+    should be offloaded to a worker pool or a separate loop.
+  ref: "concepts.md#reactor"
+- id: dp-concurrency-012
+  difficulty: advanced
+  tags: [proactor, os-support, portability]
+  question: |
+    Why does the Proactor pattern see heaviest use on Windows (IOCP) and modern Linux (io_uring)
+    but historically less on older Linux?
+  options:
+  - "Proactor cannot use TCP"
+  - "Proactor only works with immutable objects"
+  - "Proactor requires a GUI event loop"
+  - "Proactor depends on strong OS asynchronous-I/O (completion) support, which older Linux lacked"
+  answer: 3
+  explanation: |
+    Proactor offloads the entire I/O operation to the OS and is notified on completion, so it
+    needs robust async I/O primitives (Windows IOCP, io_uring). Older Linux async I/O was weak,
+    which is why readiness-based Reactor (epoll) has dominated there.
+  ref: "concepts.md#proactor"
+- id: dp-concurrency-013
+  difficulty: beginner
+  tags: [event-loop, single-thread, non-blocking]
+  question: |
+    In a browser or Node.js single-threaded event loop, why does user callback code generally
+    not need locks around shared state?
+  options:
+  - "Because all objects are immutable"
+  - "Because JavaScript has no variables"
+  - "Because only one callback runs at a time (run-to-completion), so there is no concurrent access"
+  - "Because the OS locks memory automatically"
+  answer: 2
+  explanation: |
+    The event loop runs each callback to completion on one thread before picking up the next, so
+    two callbacks never execute concurrently and cannot race on shared state — hence no locks.
+    The tradeoff is the strict "never block the loop" discipline.
+  ref: "concepts.md#event-loop"
+- id: dp-concurrency-014
+  difficulty: intermediate
+  tags: [acceptor-connector, networking, separation]
+  question: |
+    What concern does the Acceptor-Connector pattern separate from service processing?
+  options:
+  - "Connection establishment and initialization from the service logic that runs once connected"
+  - "Reading from writing"
+  - "Optimistic from pessimistic locking"
+  - "Memory allocation from garbage collection"
+  answer: 0
+  explanation: |
+    Acceptor-Connector decouples how a connection is set up (passively accepting or actively
+    connecting, plus handshake/initialization) from the service handler that processes data once
+    connected, so service handlers are reusable across connection roles and transports.
+  ref: "concepts.md#acceptor-connector"
+- id: dp-concurrency-015
+  difficulty: beginner
+  tags: [future-promise, async, non-blocking]
+  question: |
+    A method returns a placeholder handle immediately, and the caller continues working while
+    the real result is computed elsewhere and later attached to that handle. What is this?
+  options:
+  - "Barrier"
+  - "Copy-on-Write"
+  - "Balking"
+  - "Future/Promise"
+  answer: 3
+  explanation: |
+    A Future is a read-side placeholder for a value that will exist later; the Promise is the
+    write-side the producer fulfills. The caller can continue and either block on get() or attach
+    completion callbacks, enabling non-blocking composition.
+  ref: "concepts.md#future-and-promise"
+- id: dp-concurrency-016
+  difficulty: intermediate
+  tags: [future-promise, callback, comparison]
+  question: |
+    Compared with raw callbacks, what advantage does a Future/Promise provide?
+  options:
+  - "It prevents the operation from being cancelled"
+  - "It is a first-class value you can pass, return, and compose, avoiding deeply nested callback hell"
+  - "It guarantees the work runs on the caller's thread"
+  - "It removes the need to ever handle errors"
+  answer: 1
+  explanation: |
+    A Future is a first-class object representing the eventual result, so it can be stored,
+    returned, and composed with combinators (thenApply, thenCombine). Raw callbacks invert
+    control and nest badly. Futures still need error handling and can support cancellation.
+  ref: "concepts.md#future-and-promise"
+- id: dp-concurrency-017
+  difficulty: advanced
+  tags: [future-promise, blocking, deadlock]
+  question: |
+    Why can calling `.get()` on a Future be dangerous, especially inside a thread pool?
+  options:
+  - "It re-introduces blocking, and can deadlock if it blocks the very pool that must complete the Future"
+  - "It permanently cancels the Future"
+  - "It converts the Future into an immutable object"
+  - "It always throws a checked exception"
+  answer: 0
+  explanation: |
+    `.get()` blocks the calling thread, defeating async non-blocking composition. Worse, if the
+    task that completes the Future needs a thread from the same pool that is now fully blocked on
+    get(), you get a deadlock. Prefer completion callbacks over blocking get().
+  ref: "concepts.md#future-and-promise"
+- id: dp-concurrency-018
+  difficulty: intermediate
+  tags: [producer-consumer, bounded-buffer, backpressure]
+  question: |
+    In a Producer-Consumer design with a *bounded* buffer, how is back-pressure applied to a
+    producer that is faster than the consumer?
+  options:
+  - "The buffer grows without limit"
+  - "The producer's items are silently dropped"
+  - "The producer blocks on put() when the buffer is full"
+  - "The consumer spawns more threads automatically"
+  answer: 2
+  explanation: |
+    A bounded buffer blocks the producer's put() when full and the consumer's take() when empty.
+    Blocking the producer is exactly the back-pressure mechanism — it forces the fast producer to
+    slow to the consumer's rate, bounding memory.
+  ref: "concepts.md#producer-consumer-and-bounded-buffer"
+- id: dp-concurrency-019
+  difficulty: advanced
+  tags: [producer-consumer, oom, unbounded-queue]
+  question: |
+    A team uses an UNBOUNDED queue between producers and consumers "to avoid ever blocking
+    producers." What is the main danger under sustained overload?
+  options:
+  - "Writer starvation"
+  - "Out-of-memory as the queue grows without limit"
+  - "ABA problem"
+  - "Priority inversion"
+  answer: 1
+  explanation: |
+    An unbounded queue removes back-pressure: if producers outpace consumers for long enough, the
+    queue grows until the process runs out of memory. Bounding the queue (and blocking or shedding)
+    is what turns the buffer into a flow-control device.
+  ref: "concepts.md#producer-consumer-and-bounded-buffer"
+- id: dp-concurrency-020
+  difficulty: advanced
+  tags: [reactive-streams, backpressure, comparison]
+  question: |
+    How does Reactive Streams back-pressure differ from bounded-buffer (blocking) back-pressure?
+  options:
+  - "Reactive Streams requires a global lock per element"
+  - "Bounded buffers cannot bound memory"
+  - "Reactive Streams drops all excess data by default"
+  - "The consumer signals demand via request(n) and the producer never overproduces, without blocking a thread"
+  answer: 3
+  explanation: |
+    In Reactive Streams the Subscriber pulls by calling request(n); the Publisher emits at most n
+    items and waits for more demand, so no thread is blocked. A bounded buffer instead blocks the
+    producer thread when full. Demand-signalling (pull) vs thread-blocking (push) is the key
+    contrast.
+  ref: "concepts.md#reactive-streams-backpressure"
+- id: dp-concurrency-021
+  difficulty: intermediate
+  tags: [reactive-streams, rate-limiting, comparison]
+  question: |
+    How does reactive back-pressure differ from a fixed rate limiter?
+  options:
+  - "Back-pressure only works for CPU-bound tasks"
+  - "A rate limiter adapts to the consumer's real-time readiness; back-pressure uses a fixed cap"
+  - "Back-pressure adapts to the consumer's actual demand/readiness, while a rate limiter enforces a fixed rate regardless of consumer state"
+  - "They are identical mechanisms"
+  answer: 2
+  explanation: |
+    Back-pressure is dynamic: the consumer signals how much it can take right now, so throughput
+    tracks actual capacity. A rate limiter caps at a predetermined rate irrespective of whether
+    the consumer is currently keeping up.
+  ref: "concepts.md#reactive-streams-backpressure"
+- id: dp-concurrency-022
+  difficulty: intermediate
+  tags: [scheduler, thread-pool, comparison]
+  question: |
+    A thread pool decides *who* runs a task. What does a Scheduler add on top of that?
+  options:
+  - "It decides *when* and *in what order* tasks run according to a policy (priority, delay, deadline, fairness)"
+  - "It guarantees tasks never fail"
+  - "It removes the need for worker threads"
+  - "It makes all tasks immutable"
+  answer: 0
+  explanation: |
+    A Scheduler applies an ordering/timing policy over ready tasks — priority, periodic/delayed
+    execution, earliest-deadline-first, fairness — and typically feeds an underlying executor.
+    The pool provides the workers; the scheduler chooses the sequence and timing.
+  ref: "concepts.md#scheduler"
+- id: dp-concurrency-023
+  difficulty: beginner
+  tags: [scheduler, periodic, real-world]
+  question: |
+    Which is the clearest real-world example of the Scheduler pattern?
+  options:
+  - "CopyOnWriteArrayList used for a listener list"
+  - "AtomicInteger incrementing a counter"
+  - "ThreadLocal storing a per-thread formatter"
+  - "ScheduledExecutorService running a health check every 5 seconds"
+  answer: 3
+  explanation: |
+    Running a task at a fixed period (scheduleAtFixedRate) is a Scheduler: it controls the timing
+    and ordering of execution by policy. The other options are thread-confinement, copy-on-write,
+    and lock-free atomics respectively.
+  ref: "concepts.md#scheduler"
+- id: dp-concurrency-024
+  difficulty: beginner
+  tags: [lock-mutex, mutual-exclusion, critical-section]
+  question: |
+    What two guarantees does acquiring and releasing a mutex provide in a memory model like
+    Java's?
+  options:
+  - "Only mutual exclusion, nothing about memory"
+  - "Mutual exclusion of the critical section AND memory visibility (a happens-before edge) of writes to the next holder"
+  - "Automatic deadlock prevention"
+  - "Lock-free progress guarantees"
+  answer: 1
+  explanation: |
+    A lock provides mutual exclusion (one holder at a time) and establishes happens-before between
+    the release and the next acquire, so writes made under the lock are visible to the next thread.
+    It does not prevent deadlock nor make progress lock-free.
+  ref: "concepts.md#lock-and-mutex"
+- id: dp-concurrency-025
+  difficulty: intermediate
+  tags: [lock-mutex, semaphore, comparison]
+  question: |
+    What is the key difference between a mutex and a counting semaphore?
+  options:
+  - "A mutex is a single permit with ownership (only the holder releases); a semaphore allows up to N permits with no ownership"
+  - "A semaphore cannot be used across threads"
+  - "A mutex is always lock-free"
+  - "A mutex allows unlimited holders; a semaphore allows one"
+  answer: 0
+  explanation: |
+    A mutex is effectively a 1-permit lock with ownership semantics (the acquirer releases). A
+    counting semaphore grants up to N permits and has no ownership — any thread can release a
+    permit — making it ideal for bounding access to a pool of N resources.
+  ref: "concepts.md#lock-and-mutex"
+- id: dp-concurrency-026
+  difficulty: advanced
+  tags: [lock-mutex, deadlock, coffman]
+  question: |
+    Two threads acquire locks A and B in opposite orders and hang forever. Which set of
+    conditions must all hold for this deadlock?
+  options:
+  - "The ABA condition and false sharing"
+  - "Writer starvation and priority inversion"
+  - "The four Coffman conditions: mutual exclusion, hold-and-wait, no preemption, circular wait"
+  - "Only high CPU usage"
+  answer: 2
+  explanation: |
+    Deadlock requires all four Coffman conditions simultaneously. Breaking any one (e.g. imposing
+    a global lock-ordering to eliminate circular wait, or using tryLock with timeout to break
+    hold-and-wait) prevents it.
+  ref: "concepts.md#lock-and-mutex"
+- id: dp-concurrency-027
+  difficulty: intermediate
+  tags: [read-write-lock, read-heavy, concurrency]
+  question: |
+    For which workload does a Read-Write Lock give the biggest advantage over a plain mutex?
+  options:
+  - "Write-heavy with tiny critical sections"
+  - "Read-mostly with infrequent writes and non-trivial read sections"
+  - "A workload with exactly one thread"
+  - "CPU-bound work with no shared state"
+  answer: 1
+  explanation: |
+    A Read-Write Lock lets many readers proceed concurrently while writes are exclusive, so it
+    shines when reads dominate and read critical sections are meaningful. For write-heavy or
+    ultra-short sections, its bookkeeping overhead can make it slower than a plain lock.
+  ref: "concepts.md#read-write-lock"
+- id: dp-concurrency-028
+  difficulty: advanced
+  tags: [read-write-lock, writer-starvation, upgrade-deadlock]
+  question: |
+    Which pair of hazards is specific to naive Read-Write Lock implementations?
+  options:
+  - "Lost wakeup and priority inversion only"
+  - "Out-of-memory and torn reads"
+  - "ABA problem and false sharing"
+  - "Writer starvation (continuous readers block writers) and upgrade deadlock (two readers both try to upgrade to write)"
+  answer: 3
+  explanation: |
+    If readers keep arriving, a read-preferring RW lock can starve writers indefinitely. And if
+    two threads holding read locks each try to upgrade to a write lock, neither can proceed until
+    the other releases — an upgrade deadlock. Write-preference and no-upgrade rules mitigate these.
+  ref: "concepts.md#read-write-lock"
+- id: dp-concurrency-029
+  difficulty: advanced
+  tags: [read-write-lock, copy-on-write, comparison]
+  question: |
+    Compared to a Read-Write Lock, what does Copy-on-Write do differently for readers during a write?
+  options:
+  - "They behave identically"
+  - "COW blocks readers longer than an RW lock"
+  - "COW never blocks readers — they read an immutable snapshot — but every write copies the whole structure"
+  - "COW requires readers to take a write lock"
+  answer: 2
+  explanation: |
+    An RW lock still blocks readers while a writer holds the exclusive lock. COW readers are never
+    blocked: they see a consistent immutable snapshot while the writer builds and atomically swaps
+    in a new copy. The tradeoff is that every write copies the entire structure.
+  ref: "concepts.md#copy-on-write"
+- id: dp-concurrency-030
+  difficulty: expert
+  tags: [double-checked-locking, memory-model, volatile]
+  question: |
+    Why is double-checked locking broken if the singleton field is NOT declared volatile (in the
+    Java memory model)?
+  options:
+  - "Instruction reordering can publish a non-null reference to a partially-constructed object, which a racing reader may then use"
+  - "Because the lock is never released"
+  - "Because volatile makes the field immutable"
+  - "Because non-volatile fields cannot be read twice"
+  answer: 0
+  explanation: |
+    Without the happens-before that volatile provides, the write that stores the new reference can
+    become visible before the object's construction is complete (reordering). Another thread taking
+    the lock-free fast path could then see a non-null but not-fully-initialized object. volatile
+    (Java 5+) prevents this.
+  ref: "concepts.md#double-checked-locking"
+- id: dp-concurrency-031
+  difficulty: advanced
+  tags: [double-checked-locking, holder-idiom, lazy-init]
+  question: |
+    Which alternative to double-checked locking gives lazy, thread-safe singleton initialization
+    with no volatile and no explicit locking?
+  options:
+  - "A CopyOnWriteArrayList"
+  - "A CyclicBarrier"
+  - "A ThreadLocal"
+  - "The initialization-on-demand holder idiom (a static nested holder class)"
+  answer: 3
+  explanation: |
+    The holder idiom relies on the JVM's guarantee that a class is initialized lazily and in a
+    thread-safe way on first use. Placing the instance in a static nested class defers creation
+    until first access with no volatile or synchronized needed — simpler and correct.
+  ref: "concepts.md#double-checked-locking"
+- id: dp-concurrency-032
+  difficulty: intermediate
+  tags: [guarded-suspension, balking, comparison]
+  question: |
+    A method's precondition is not yet satisfied. Which pattern makes the caller WAIT until the
+    precondition becomes true, rather than returning immediately?
+  options: ["Balking", "Guarded Suspension", "Scoped Locking", "Strategized Locking"]
+  answer: 1
+  explanation: |
+    Guarded Suspension suspends the caller on a condition variable until the guard predicate holds,
+    then proceeds. Balking is its sibling that returns immediately (does nothing) when the
+    precondition is not met.
+  ref: "concepts.md#guarded-suspension"
+- id: dp-concurrency-033
+  difficulty: intermediate
+  tags: [balking, one-shot, idempotent]
+  question: |
+    Calling `start()` on an already-running service simply returns and does nothing. Which pattern
+    is this?
+  options:
+  - "Balking"
+  - "Monitor Object"
+  - "Guarded Suspension"
+  - "Barrier"
+  answer: 0
+  explanation: |
+    Balking checks the object's state on entry and, if the action doesn't apply (already running),
+    returns immediately without waiting or acting. It's ideal for one-shot/idempotent operations
+    like start(), init(), and close().
+  ref: "concepts.md#balking"
+- id: dp-concurrency-034
+  difficulty: advanced
+  tags: [balking, gotcha, silent-noop]
+  question: |
+    What is the main risk of the Balking pattern that a careful design must address?
+  options:
+  - "It copies the whole data structure on every call"
+  - "It always deadlocks"
+  - "Silent no-ops can hide bugs — callers may wrongly assume the action happened"
+  - "It requires a volatile field"
+  answer: 2
+  explanation: |
+    Because Balking quietly does nothing when the state is wrong, callers that assume the operation
+    always executes can be misled. Good balking APIs signal (via return value/status) whether the
+    action was actually performed.
+  ref: "concepts.md#balking"
+- id: dp-concurrency-035
+  difficulty: intermediate
+  tags: [barrier, latch, comparison]
+  question: |
+    What distinguishes a (cyclic) Barrier from a CountDownLatch?
+  options:
+  - "A latch is reusable; a barrier is one-shot"
+  - "A barrier is cyclic/reusable and the same threads both arrive and wait; a latch is one-shot (counts down to zero once)"
+  - "A barrier works only across processes"
+  - "They are the same thing"
+  answer: 1
+  explanation: |
+    A CountDownLatch counts down to zero exactly once and then is permanently open; the counting
+    and waiting threads are usually different. A CyclicBarrier releases when N parties arrive and
+    then resets for the next phase, with the same threads arriving and waiting each cycle.
+  ref: "concepts.md#barrier"
+- id: dp-concurrency-036
+  difficulty: advanced
+  tags: [barrier, straggler, phased]
+  question: |
+    In a phased parallel computation using a Barrier, what is the dominant performance concern?
+  options:
+  - "The ABA problem"
+  - "Callback hell"
+  - "Readers block writers"
+  - "The slowest party (straggler) at each phase gates all others"
+  answer: 3
+  explanation: |
+    A barrier releases only when ALL parties arrive, so per-phase progress is limited by the
+    slowest thread. Stragglers and unbalanced work hurt barrier-based designs; a dead party or
+    wrong count can deadlock everyone.
+  ref: "concepts.md#barrier"
+- id: dp-concurrency-037
+  difficulty: intermediate
+  tags: [scoped-locking, raii, exception-safety]
+  question: |
+    What problem does Scoped Locking (RAII / try-finally) primarily prevent?
+  options:
+  - "False sharing between cache lines"
+  - "Writer starvation"
+  - "Leaking a lock (never releasing it) when control leaves the scope via early return or exception"
+  - "The ABA problem"
+  answer: 2
+  explanation: |
+    Scoped Locking ties release to scope exit (destructor or finally), so the lock is released on
+    every path — normal return, early return, or exception unwinding — eliminating the classic
+    lock-leak-on-exception bug of manual lock/unlock pairing.
+  ref: "concepts.md#scoped-locking"
+- id: dp-concurrency-038
+  difficulty: beginner
+  tags: [scoped-locking, real-world]
+  question: |
+    Which language feature is a direct implementation of Scoped Locking?
+  options:
+  - "C++ std::lock_guard, and Java try/finally around lock()/unlock()"
+  - "Java volatile fields"
+  - "AtomicReference.compareAndSet"
+  - "Reactive Streams request(n)"
+  answer: 0
+  explanation: |
+    std::lock_guard acquires in its constructor and releases in its destructor at scope exit;
+    Java's try/finally (and try-with-resources) guarantees unlock() runs even on exceptions. Both
+    are Scoped Locking. The other options are unrelated concurrency mechanisms.
+  ref: "concepts.md#scoped-locking"
+- id: dp-concurrency-039
+  difficulty: expert
+  tags: [strategized-locking, strategy, null-lock]
+  question: |
+    Strategized Locking parameterizes a component with a pluggable lock. What is the point of
+    supplying a "null lock" (no-op) strategy?
+  options:
+  - "To make all fields immutable"
+  - "To enable optimistic concurrency in a database"
+  - "To force the component to deadlock for testing"
+  - "To let the same component run with zero locking overhead in single-threaded contexts"
+  answer: 3
+  explanation: |
+    A null-lock strategy turns synchronization into no-ops, so a reusable component pays no locking
+    cost when used single-threaded, while the same code can be configured with a real mutex or
+    read-write lock in multi-threaded contexts. It is GoF Strategy applied to locking.
+  ref: "concepts.md#strategized-locking"
+- id: dp-concurrency-040
+  difficulty: expert
+  tags: [thread-safe-interface, self-deadlock, reentrancy]
+  question: |
+    The Thread-Safe Interface pattern has public methods acquire the lock and delegate to unlocked
+    private methods. What problem does this primarily prevent?
+  options:
+  - "Writer starvation"
+  - "Self-deadlock / redundant re-locking when one public method internally calls another"
+  - "The ABA problem"
+  - "Out-of-memory from unbounded queues"
+  answer: 1
+  explanation: |
+    If every public method locks, an internal call from one public method to another re-acquires
+    the same lock — self-deadlock with a non-reentrant lock, or wasteful re-locking with a reentrant
+    one. Delegating internal work to unlocked private methods keeps a single locking boundary.
+  ref: "concepts.md#thread-safe-interface"
+- id: dp-concurrency-041
+  difficulty: beginner
+  tags: [immutable-object, thread-safety]
+  question: |
+    Why is a properly constructed immutable object inherently thread-safe?
+  options:
+  - "Because its observable state never changes after construction, so there is nothing to synchronize"
+  - "Because it runs on its own thread"
+  - "Because it copies itself on every read"
+  - "Because it uses a read-write lock internally"
+  answer: 0
+  explanation: |
+    An immutable object's fields are set once at construction and never mutated, so any number of
+    threads can read it concurrently with no locking — there is no shared mutable state to protect.
+    "Changing" it means creating a new object.
+  ref: "concepts.md#immutable-object"
+- id: dp-concurrency-042
+  difficulty: intermediate
+  tags: [immutable-object, gotcha, gc]
+  question: |
+    What is the main downside of using immutable objects on a hot update path?
+  options:
+  - "Readers block writers"
+  - "They can deadlock"
+  - "Object churn: every 'modification' allocates a new object, adding GC pressure"
+  - "They require volatile fields"
+  answer: 2
+  explanation: |
+    Since immutable objects can't be modified in place, each change creates a fresh object. On a
+    hot path with frequent updates this causes allocation and garbage-collection pressure — the
+    cost you pay for lock-free shareability.
+  ref: "concepts.md#immutable-object"
+- id: dp-concurrency-043
+  difficulty: advanced
+  tags: [copy-on-write, write-heavy, gotcha]
+  question: |
+    For which workload is Copy-on-Write (e.g. CopyOnWriteArrayList) a POOR choice?
+  options:
+  - "Read-mostly listener lists"
+  - "Write-heavy or large collections, because every write copies the entire structure"
+  - "Small rarely-changing config"
+  - "Routing tables read on every request"
+  answer: 1
+  explanation: |
+    COW copies the whole structure on each mutation, so frequent writes or large data make writes
+    O(n) and memory-costly. It's designed for read-mostly, small-to-moderate structures where
+    lock-free reads dominate.
+  ref: "concepts.md#copy-on-write"
+- id: dp-concurrency-044
+  difficulty: intermediate
+  tags: [thread-specific-storage, thread-local, contention]
+  question: |
+    How does Thread-Specific Storage (ThreadLocal) eliminate the need for synchronization on
+    certain state?
+  options:
+  - "By making the state immutable"
+  - "By copying the state on every write"
+  - "By using a global lock efficiently"
+  - "By giving each thread its own private copy so the state is never shared"
+  answer: 3
+  explanation: |
+    Thread-Specific Storage keeps a separate value per thread accessed through a common key. Since
+    no thread shares another's value, there is no contention and no locking needed — it removes
+    sharing rather than synchronizing it.
+  ref: "concepts.md#thread-specific-storage"
+- id: dp-concurrency-045
+  difficulty: advanced
+  tags: [thread-specific-storage, memory-leak, thread-pool]
+  question: |
+    Why can ThreadLocal cause a memory leak when used with a thread pool?
+  options:
+  - "ThreadLocal forces a write lock"
+  - "The garbage collector cannot see thread-local variables at all"
+  - "Pooled threads outlive requests, so values not explicitly removed persist and can pin large objects"
+  - "ThreadLocal copies itself on every read"
+  answer: 2
+  explanation: |
+    In a pool, threads are reused across many tasks. A value set for one task but never remove()d
+    lives as long as the pooled thread, pinning memory (and in containers, potentially class
+    loaders). Always clear thread-locals in a finally block when using pools.
+  ref: "concepts.md#thread-specific-storage"
+- id: dp-concurrency-046
+  difficulty: expert
+  tags: [thread-specific-storage, async, context-propagation]
+  question: |
+    Why does ThreadLocal-based context break in reactive/async pipelines that hop threads?
+  options:
+  - "Because work resumes on a different thread whose thread-local slot is empty or different, losing the context"
+  - "Because ThreadLocal values are immutable"
+  - "Because reactive streams forbid variables"
+  - "Because async code is always single-threaded"
+  answer: 0
+  explanation: |
+    Thread-locals are keyed by thread identity. When an async continuation resumes on a different
+    pool thread, that thread has its own (empty/other) slot, so the original context is not there.
+    Reactive/virtual-thread code must propagate context explicitly (or use scoped values).
+  ref: "concepts.md#thread-specific-storage"
+- id: dp-concurrency-047
+  difficulty: advanced
+  tags: [atomic-cas, lock-free, aba]
+  question: |
+    A lock-free counter uses read-compute-CAS in a retry loop. Which hazard is specific to CAS-based
+    designs where a value goes A -> B -> A?
+  options:
+  - "Priority inversion"
+  - "Lost wakeup"
+  - "Writer starvation"
+  - "The ABA problem"
+  answer: 3
+  explanation: |
+    The ABA problem: a CAS comparing only the value succeeds even though the value changed to B and
+    back to A in between, masking intervening modifications. Version-stamped references
+    (AtomicStampedReference) or hazard pointers address it.
+  ref: "concepts.md#atomic-and-compare-and-swap"
+- id: dp-concurrency-048
+  difficulty: advanced
+  tags: [atomic-cas, lock, comparison]
+  question: |
+    What is the core distinction between CAS-based (lock-free) updates and using a lock?
+  options:
+  - "CAS is pessimistic (assumes conflict); locks are optimistic"
+  - "CAS is optimistic (assume no conflict, retry on failure); a lock is pessimistic (block others up front)"
+  - "CAS can protect many variables at once; locks cannot"
+  - "Locks are always faster than CAS"
+  answer: 1
+  explanation: |
+    CAS is optimistic: proceed assuming no conflict and retry if the compare fails. A lock is
+    pessimistic: block others before touching the data. CAS avoids deadlock and scales at low
+    contention but suffers ABA and retry storms and covers only a single variable.
+  ref: "concepts.md#atomic-and-compare-and-swap"
+- id: dp-concurrency-049
+  difficulty: expert
+  tags: [atomic-cas, high-contention, longadder]
+  question: |
+    Under very high write contention on a single counter, why might LongAdder outperform a plain
+    AtomicLong using CAS?
+  options:
+  - "LongAdder stripes the count across multiple cells to reduce CAS contention/retry storms, summing on read"
+  - "LongAdder is immutable"
+  - "LongAdder blocks all readers during a write"
+  - "LongAdder uses a global lock that is faster"
+  answer: 0
+  explanation: |
+    A single AtomicLong under heavy contention causes many threads to fail CAS and retry (a retry
+    storm) on the same memory location. LongAdder spreads updates across multiple cells so threads
+    contend on different cells, then sums them when the total is read.
+  ref: "concepts.md#atomic-and-compare-and-swap"
+- id: dp-concurrency-050
+  difficulty: intermediate
+  tags: [optimistic-pessimistic, concurrency-control, database]
+  question: |
+    A record has a `version` column; updates run `UPDATE ... WHERE version = :v` and retry if zero
+    rows change. Which concurrency-control strategy is this?
+  options:
+  - "Guarded Suspension"
+  - "Pessimistic locking (SELECT FOR UPDATE)"
+  - "Optimistic concurrency control"
+  - "Copy-on-Write"
+  answer: 2
+  explanation: |
+    Optimistic concurrency control takes no lock: it reads a version, works, and verifies the
+    version is unchanged at commit. A conflicting concurrent update changes the version so the
+    conditional update affects zero rows, prompting a reload and retry. It's the DB cousin of CAS.
+  ref: "concepts.md#optimistic-vs-pessimistic-concurrency-control"
+- id: dp-concurrency-051
+  difficulty: advanced
+  tags: [optimistic-pessimistic, contention, tradeoff]
+  question: |
+    When is PESSIMISTIC locking preferable to optimistic concurrency control?
+  options:
+  - "When conflicts are rare and reads dominate"
+  - "When contention on a hot row is high, so optimistic retries would waste too much work"
+  - "When you want to avoid all locks"
+  - "When the data is immutable"
+  answer: 1
+  explanation: |
+    Optimistic control wins with low contention (no lock overhead), but retries pile up when many
+    transactions hit the same hot row. Pessimistic locking then avoids wasted work by serializing
+    access up front, at the cost of reduced concurrency and deadlock risk.
+  ref: "concepts.md#optimistic-vs-pessimistic-concurrency-control"
+- id: dp-concurrency-052
+  difficulty: intermediate
+  tags: [competing-consumers, scaling, idempotency]
+  question: |
+    Multiple worker instances read from one message queue where each message goes to exactly one
+    worker. Why must the workers typically be idempotent?
+  options:
+  - "Because the queue is unbounded"
+  - "Because messages are immutable"
+  - "Because ordering is guaranteed"
+  - "Because at-least-once delivery and redelivery after failure can cause a message to be processed more than once"
+  answer: 3
+  explanation: |
+    Competing Consumers scale throughput, but broker semantics are usually at-least-once: a message
+    can be redelivered (e.g. if a consumer crashes after processing but before ack), so processing
+    must be idempotent to avoid duplicate side effects. Global ordering is generally lost.
+  ref: "concepts.md#competing-consumers"
+- id: dp-concurrency-053
+  difficulty: advanced
+  tags: [competing-consumers, producer-consumer, comparison]
+  question: |
+    How does Competing Consumers relate to the in-process Producer-Consumer pattern?
+  options:
+  - "Competing Consumers guarantees strict global ordering"
+  - "They are unrelated"
+  - "Competing Consumers is the distributed, cross-process sibling: many consumers pull from one broker-backed queue instead of an in-memory queue"
+  - "Producer-Consumer requires a message broker"
+  answer: 2
+  explanation: |
+    Both decouple producers from consumers through a queue. Producer-Consumer is in-process
+    (an in-memory bounded buffer); Competing Consumers scales the consumer side across processes/
+    machines via a message broker, trading ordering for horizontal scalability and failover.
+  ref: "concepts.md#competing-consumers"
+- id: dp-concurrency-054
+  difficulty: intermediate
+  tags: [half-sync-half-async, reactor, layering]
+  question: |
+    In a system layered as Half-Sync/Half-Async, what role does a Reactor typically play?
+  options:
+  - "It implements the asynchronous I/O layer beneath the queueing and synchronous layers"
+  - "It replaces the message queue with a barrier"
+  - "It stores per-thread context"
+  - "It is the synchronous worker layer"
+  answer: 0
+  explanation: |
+    The Reactor commonly serves as the asynchronous, event-driven lower layer that demultiplexes
+    I/O and enqueues completed messages, which the synchronous worker layer then processes with
+    blocking code. Reactor and Half-Sync/Half-Async compose.
+  ref: "concepts.md#reactor"
+- id: dp-concurrency-055
+  difficulty: expert
+  tags: [priority-inversion, scheduler, lock-mutex]
+  question: |
+    A high-priority thread blocks on a lock held by a low-priority thread, which is itself
+    preempted by a medium-priority thread. What is this, and a standard fix?
+  options:
+  - "Livelock; fixed by exponential backoff"
+  - "ABA; fixed with version stamps"
+  - "Deadlock; fixed by adding more threads"
+  - "Priority inversion; fixed by priority inheritance (temporarily boosting the lock holder) or a priority-ceiling protocol"
+  answer: 3
+  explanation: |
+    Priority inversion occurs when a medium-priority thread indirectly delays a high-priority thread
+    by preempting the low-priority lock holder. Priority inheritance boosts the holder to the
+    waiter's priority until it releases the lock; priority-ceiling protocols are the other classic
+    remedy.
+  ref: "concepts.md#lock-and-mutex"
+- id: dp-concurrency-056
+  difficulty: intermediate
+  tags: [two-phase-termination, graceful-shutdown, interrupt]
+  question: |
+    A long-running worker thread must be shut down without leaving locks held or resources
+    leaked. A manager sets a shutdown flag / interrupts the worker, and the worker checks it at
+    a safe point, stops taking new work, and runs cleanup in a finally block before exiting.
+    Which pattern is this?
+  options:
+  - "Balking"
+  - "Two-Phase Termination"
+  - "Guarded Suspension"
+  - "Barrier"
+  answer: 1
+  explanation: |
+    Two-Phase Termination splits shutdown into phase 1 (a controller requests termination via a
+    flag/interrupt) and phase 2 (the worker notices at a safe point, stops, cleans up, and ends
+    itself). It's the cooperative, leak-free alternative to force-killing a thread.
+  ref: "concepts.md#two-phase-termination"
+- id: dp-concurrency-057
+  difficulty: advanced
+  tags: [two-phase-termination, thread-stop, cooperative]
+  question: |
+    Why is cooperative Two-Phase Termination preferred over the deprecated Thread.stop() for
+    shutting down a worker?
+  options:
+  - "Thread.stop() is slower to execute than setting a flag"
+  - "Thread.stop() can abruptly abort the thread mid-operation, leaving locks held and shared state half-updated, whereas two-phase lets it stop at a safe point and clean up"
+  - "Thread.stop() only works on single-core machines"
+  - "Two-Phase Termination guarantees the thread stops instantly"
+  answer: 1
+  explanation: |
+    Thread.stop() forcibly terminates a thread at an arbitrary point, so it may still hold locks
+    and leave data structures inconsistent or resources leaked. Two-Phase Termination is
+    cooperative: the worker reaches a safe point, releases resources in finally, and exits — at
+    the cost of not being instantaneous.
+  ref: "concepts.md#two-phase-termination"
+- id: dp-concurrency-058
+  difficulty: advanced
+  tags: [two-phase-termination, interrupt, gotcha]
+  question: |
+    In the Java implementation of Two-Phase Termination, what breaks graceful shutdown if done
+    wrong?
+  options:
+  - "Declaring the shutdown flag volatile"
+  - "Using a finally block for cleanup"
+  - "Swallowing InterruptedException (or never polling the interrupt flag), so the worker never notices the stop request"
+  - "Calling awaitTermination() after shutdown()"
+  answer: 2
+  explanation: |
+    Two-Phase Termination relies on the worker actually observing the interrupt/flag at safe
+    points. If a task catches InterruptedException and ignores it (or a long section never checks
+    the flag), the stop request is lost and the thread runs on — the classic broken-interrupt bug.
+  ref: "concepts.md#two-phase-termination"
+- id: dp-concurrency-059
+  difficulty: intermediate
+  tags: [actor-model, share-nothing, message-passing]
+  question: |
+    In the Actor model, how do two actors coordinate on shared data?
+  options:
+  - "They don't share data at all; each owns private state and they interact only by asynchronous messages"
+  - "They acquire a shared read-write lock"
+  - "They both mutate a common object under a mutex"
+  - "They use double-checked locking on a singleton"
+  answer: 0
+  explanation: |
+    Actors share nothing: each has private state, a mailbox, and processes one message at a
+    time. Coordination happens purely through asynchronous message passing, so there is no
+    shared mutable state to lock — eliminating data races inside an actor.
+  ref: "concepts.md#actor-model"
+- id: dp-concurrency-060
+  difficulty: advanced
+  tags: [actor-model, active-object, comparison]
+  question: |
+    What best captures the difference between the Actor model and the Active Object pattern?
+  options:
+  - "Actors run synchronously in the caller's thread; Active Objects do not"
+  - "Active Object is message-oriented with millions of actors; the Actor model is method-oriented with one servant"
+  - "Active Object is method/object-oriented (a proxy exposes a servant's methods and returns Futures); actors are message-oriented (typed messages to many actors, usually fire-and-forget with no Future)"
+  - "They are identical; the names are interchangeable"
+  answer: 2
+  explanation: |
+    Both give an entity its own thread fed by a queue. Active Object wraps ONE servant behind
+    a proxy whose method calls return Futures. Actors send typed messages (not method calls)
+    to potentially millions of share-nothing actors, typically fire-and-forget with no return
+    value (request-reply needs an explicit "ask").
+  ref: "concepts.md#actor-model"
+- id: dp-concurrency-061
+  difficulty: intermediate
+  tags: [async-method-invocation, callback, inversion-of-control]
+  question: |
+    A .NET call `DownloadDataAsync(url)` returns immediately and later raises a
+    `DownloadDataCompleted` event with the bytes. Which pattern does this exemplify?
+  options:
+  - "Balking"
+  - "Async Method Invocation (event-based asynchronous)"
+  - "Guarded Suspension"
+  - "Copy-on-Write"
+  answer: 1
+  explanation: |
+    Async Method Invocation splits a call into initiate (returns at once) and complete
+    (delivered later via callback or event). The .NET Event-Based Asynchronous Pattern raising
+    a completion event is a textbook example.
+  ref: "concepts.md#async-method-invocation"
+- id: dp-concurrency-062
+  difficulty: advanced
+  tags: [async-method-invocation, future-promise, comparison]
+  question: |
+    How does Async Method Invocation (callback/event style) primarily differ from Future/Promise?
+  options:
+  - "It is result-object centric; Future/Promise is callback centric"
+  - "It always blocks the caller; Future/Promise never does"
+  - "It is callback/event centric (result pushed to a handler); Future/Promise is result-object centric (a first-class value you can store and compose)"
+  - "It can only be used for CPU-bound work"
+  answer: 2
+  explanation: |
+    Async Method Invocation pushes the result to a registered callback/event handler. A
+    Future/Promise hands back a first-class object representing the eventual result, which you
+    can pass, return, and compose with combinators — avoiding the nesting of raw callbacks.
+  ref: "concepts.md#async-method-invocation"
+- id: dp-concurrency-063
+  difficulty: advanced
+  tags: [asynchronous-completion-token, iocp, demultiplexing]
+  question: |
+    A high-performance I/O server issues many `WSARecv` calls, each with a per-connection
+    state pointer; on completion the OS hands that same pointer back so the server instantly
+    knows which connection finished. Which pattern is this?
+  options:
+  - "Asynchronous Completion Token"
+  - "Poison Pill"
+  - "Scoped Locking"
+  - "Read-Write Lock"
+  answer: 0
+  explanation: |
+    The Asynchronous Completion Token attaches an app-defined token (here a state pointer) to
+    an async operation; the service returns it verbatim on completion so the dispatcher locates
+    the request's context in O(1) with no lookup. IOCP completion keys are the classic case.
+  ref: "concepts.md#asynchronous-completion-token"
+- id: dp-concurrency-064
+  difficulty: expert
+  tags: [asynchronous-completion-token, gotcha, lifetime]
+  question: |
+    What is the principal hazard of using a raw-pointer Asynchronous Completion Token?
+  options:
+  - "It forces a global lock on every completion"
+  - "A dangling/stale token (context freed before completion) causes use-after-free or misrouted dispatch"
+  - "It makes the operation synchronous"
+  - "It copies the entire buffer on each completion"
+  answer: 1
+  explanation: |
+    Because the token is an opaque handle to per-request state, freeing that state before the
+    completion arrives leaves a dangling token — dereferencing it is a use-after-free or routes
+    the completion to the wrong context. ACT demands disciplined lifetime management.
+  ref: "concepts.md#asynchronous-completion-token"
+- id: dp-concurrency-065
+  difficulty: intermediate
+  tags: [publish-subscribe, observer, comparison]
+  question: |
+    How does in-process Publish-Subscribe differ from the classic GoF Observer pattern?
+  options:
+  - "Observer broadcasts to all subscribers; Pub-Sub delivers to exactly one"
+  - "Pub-Sub inserts a broker/event-bus so publishers and subscribers never reference each other (often async); Observer wires the subject directly to its observers (usually sync)"
+  - "Observer requires a message broker; Pub-Sub does not"
+  - "They are the same pattern with different names"
+  answer: 1
+  explanation: |
+    In GoF Observer the subject holds a list of observers and notifies them directly, usually
+    synchronously. Publish-Subscribe interposes an event bus/broker so publishers and
+    subscribers are mutually anonymous and delivery is often asynchronous.
+  ref: "concepts.md#publish-subscribe"
+- id: dp-concurrency-066
+  difficulty: advanced
+  tags: [publish-subscribe, lapsed-listener, leak]
+  question: |
+    What is a common failure mode of an in-process event bus (Publish-Subscribe)?
+  options:
+  - "Writer starvation on the bus"
+  - "The ABA problem on subscriptions"
+  - "The lapsed-listener leak: a subscriber that forgets to unsubscribe is kept alive by the bus"
+  - "Guaranteed strict global ordering causing deadlock"
+  answer: 2
+  explanation: |
+    Because the bus holds references to subscribers, a subscriber that never unsubscribes is
+    pinned in memory (the lapsed-listener leak). Pub-Sub also suffers hidden control flow and
+    unclear delivery/ordering guarantees.
+  ref: "concepts.md#publish-subscribe"
+- id: dp-concurrency-067
+  difficulty: intermediate
+  tags: [poison-pill, shutdown, producer-consumer]
+  question: |
+    To gracefully stop a pool of 4 consumers blocked on a shared BlockingQueue, a producer
+    enqueues 4 special sentinel objects; each consumer that dequeues one exits. Which pattern
+    is this, and why 4?
+  options:
+  - "Barrier; because there are 4 phases"
+  - "Poison Pill; each pill stops exactly one consumer, so N consumers need N pills"
+  - "Balking; because consumers give up immediately"
+  - "Two-Phase Termination; because it uses interrupts"
+  answer: 1
+  explanation: |
+    The Poison Pill is an in-band sentinel enqueued like normal work; a consumer stops when it
+    dequeues one. Since each pill terminates exactly one consumer, you must enqueue one pill per
+    consumer (miscounting hangs or prematurely stops workers). It drains real work queued before
+    it first.
+  ref: "concepts.md#poison-pill"
+- id: dp-concurrency-068
+  difficulty: advanced
+  tags: [poison-pill, interrupt, comparison]
+  question: |
+    Why might a Poison Pill be preferred over an out-of-band interrupt to stop queue consumers?
+  options:
+  - "It aborts the current task instantly"
+  - "It is in-band and ordered with the work, so all items queued before it are processed first, and it naturally wakes a consumer blocked in take()"
+  - "It requires no code in the consumer"
+  - "It guarantees the consumer stops even if stuck mid-task"
+  answer: 1
+  explanation: |
+    A poison pill travels through the queue, so pending work ahead of it is drained before
+    shutdown, and dequeuing it wakes a consumer parked in take(). An interrupt is out-of-band
+    and can abort mid-work. The pill does NOT force-stop a consumer stuck inside a task.
+  ref: "concepts.md#poison-pill"
+- id: dp-concurrency-069
+  difficulty: intermediate
+  tags: [fan-out-fan-in, parallelism, latency]
+  question: |
+    A page calls pricing, inventory, and reviews services concurrently, then combines their
+    results with CompletableFuture.allOf before rendering. Which pattern is this?
+  options:
+  - "Fan-Out/Fan-In (scatter-gather)"
+  - "Poison Pill"
+  - "Monitor Object"
+  - "Strategized Locking"
+  answer: 0
+  explanation: |
+    Fan-Out/Fan-In dispatches independent subtasks in parallel (fan-out) and joins/aggregates
+    their results (fan-in), cutting latency from the sum of the calls to roughly the slowest
+    one. allOf(...) is the join step.
+  ref: "concepts.md#fan-out-fan-in"
+- id: dp-concurrency-070
+  difficulty: advanced
+  tags: [fan-out-fan-in, tail-latency, gotcha]
+  question: |
+    What is the dominant performance concern in a Fan-Out/Fan-In design?
+  options:
+  - "Object churn from immutability"
+  - "Total latency is bounded by the slowest branch (tail latency), and partial failures complicate aggregation"
+  - "Writer starvation"
+  - "The ABA problem"
+  answer: 1
+  explanation: |
+    Because fan-in waits for all branches, one slow subtask (tail latency) drags the whole
+    response, and any branch failing forces a fail-all vs partial-result vs default decision
+    (typically handled with per-branch timeouts).
+  ref: "concepts.md#fan-out-fan-in"
+- id: dp-concurrency-071
+  difficulty: expert
+  tags: [hazards, race-condition, data-race]
+  question: |
+    Which statement correctly distinguishes a data race from a race condition?
+  options:
+  - "They are exactly the same thing"
+  - "A data race requires a database; a race condition requires threads"
+  - "A data race is unsynchronized concurrent access to the same memory with at least one write; a race condition is a timing-dependent correctness bug that can occur even when all individual operations are atomic"
+  - "A race condition only happens in single-threaded code"
+  answer: 2
+  explanation: |
+    A data race is a low-level memory-model violation (concurrent access, one a write, no
+    synchronization). A race condition is a higher-level correctness bug from bad interleaving —
+    e.g. a check-then-act done as two separate atomic steps still races even with no data race.
+  ref: "concepts.md#concurrency-hazards-primer"
+- id: dp-concurrency-072
+  difficulty: advanced
+  tags: [hazards, livelock, deadlock, comparison]
+  question: |
+    Two threads keep detecting a conflict, backing off, and retrying in lockstep, consuming CPU
+    but never progressing. Locks are held by no one. What is this?
+  options:
+  - "Deadlock"
+  - "Livelock"
+  - "Priority inversion"
+  - "False sharing"
+  answer: 1
+  explanation: |
+    Livelock: threads keep changing state in response to each other (retry/back-off in sync) and
+    make no progress, unlike deadlock where threads are blocked holding resources. Randomized
+    backoff typically breaks the symmetry.
+  ref: "concepts.md#concurrency-hazards-primer"
+- id: dp-concurrency-073
+  difficulty: expert
+  tags: [hazards, false-sharing, performance]
+  question: |
+    Two threads update two DIFFERENT counters that happen to sit on the same CPU cache line,
+    and throughput collapses. What is the cause?
+  options:
+  - "The ABA problem"
+  - "Writer starvation"
+  - "False sharing — each core's write invalidates the other's cached copy of the shared line"
+  - "Lost wakeup"
+  answer: 2
+  explanation: |
+    False sharing: independent variables co-located on one cache line cause cores to keep
+    invalidating each other's cache even though they touch different data. Padding or
+    @Contended separates them onto distinct cache lines.
+  ref: "concepts.md#concurrency-hazards-primer"
+- id: dp-concurrency-074
+  difficulty: advanced
+  tags: [selection-guide, share-nothing, strategy]
+  question: |
+    Per the selection guide, which family of approaches should you reach for FIRST when
+    designing for concurrency, because it needs no locks at all?
+  options:
+  - "Pessimistic locking on every shared object"
+  - "Share-nothing: Immutable Object, Thread-Specific Storage, Actor model, Copy-on-Write"
+  - "Double-checked locking everywhere"
+  - "A single global mutex around the whole program"
+  answer: 1
+  explanation: |
+    The safest tier is to avoid shared mutable state entirely (immutability, thread-confinement,
+    actors, copy-on-write for read-mostly data). Only when sharing is unavoidable do you drop to
+    controlled access (locks/monitors/atomics). Reaching for share-nothing first is the senior move.
+  ref: "concepts.md#selection-guide"
+- id: dp-concurrency-075
+  difficulty: intermediate
+  tags: [publish-subscribe, producer-consumer, comparison]
+  question: |
+    What is the key delivery difference between Publish-Subscribe and Producer-Consumer?
+  options:
+  - "Pub-Sub delivers each event to exactly one subscriber; Producer-Consumer broadcasts to all"
+  - "Pub-Sub broadcasts each event to all subscribers; Producer-Consumer delivers each item to exactly one consumer"
+  - "Both broadcast to all consumers"
+  - "Both deliver to exactly one consumer"
+  answer: 1
+  explanation: |
+    Publish-Subscribe fans an event out to every interested subscriber (broadcast).
+    Producer-Consumer distributes work so each item is handled by exactly one consumer
+    (work-sharing). This broadcast-vs-consume-once distinction is a frequent interview probe.
+  ref: "concepts.md#publish-subscribe"

@@ -55,6 +55,24 @@ DDD. Skewed hard (~76% advanced/expert). **588 MCQs**, math- and trade-off-heavy
 | Probabilistic Data Structures for Scale | `probabilistic-data-structures` | medium | advanced | ✅ (75 MCQs · 60 adv/expert) |
 | Microservices Depth: DDD, Service Boundaries and Anti-Patterns | `microservices-ddd-and-boundaries` | high | advanced | ✅ (74 MCQs · 62 adv/expert) |
 
+## Design Patterns (7 topics)
+
+Interview-grade catalog of software design patterns, `dp-` slug prefix. Covers ALL 23
+Gang-of-Four patterns plus enterprise (Fowler PoEAA), concurrency (POSA), and distributed/
+cloud patterns. Each pattern has a "problem it solves" statement, a Mermaid diagram, a
+concrete example, and trade-offs. **427 MCQs**, mixed difficulty. Distributed-pattern topics
+cross-reference the existing deep-dive topics rather than duplicate them.
+
+| Topic | Slug | Freq | Difficulty | Status |
+|---|---|---|---|---|
+| Design Patterns: Fundamentals & Principles (SOLID, GoF taxonomy, anti-patterns) | `dp-fundamentals-and-principles` | very-high | intermediate | ✅ (56 MCQs) |
+| Creational Design Patterns (all 5 GoF + DI/IoC, Object Pool) | `dp-creational` | very-high | intermediate | ✅ (55 MCQs) |
+| Structural Design Patterns (all 7 GoF) | `dp-structural` | very-high | intermediate | ✅ (48 MCQs) |
+| Behavioral Design Patterns (all 11 GoF) | `dp-behavioral` | very-high | intermediate | ✅ (56 MCQs) |
+| Enterprise & Application Architecture Patterns (Fowler PoEAA, MVC/MVP/MVVM) | `dp-enterprise-application` | high | advanced | ✅ (67 MCQs) |
+| Concurrency & Reactive Design Patterns (POSA) | `dp-concurrency` | high | advanced | ✅ (75 MCQs) |
+| Distributed & Cloud Design Patterns (Circuit Breaker, Saga, CQRS, Sidecar, ...) | `dp-distributed-cloud` | high | advanced | ✅ (70 MCQs) |
+
 ## AWS System Design (26 topics)
 
 Designing microservices and large-scale systems with AWS primitives (SQS, DynamoDB,

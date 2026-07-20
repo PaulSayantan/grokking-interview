@@ -78,7 +78,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 | Domain | Topics | Authored |
 |---|---|---|
-| [System Design](topics/system-design/README.md) | 23 core + 8 adv deep-dive + 26 AWS | 57 ✅ (all tiers) |
+| [System Design](topics/system-design/README.md) | 23 core + 8 adv + 7 design-patterns + 26 AWS | 64 ✅ (all tiers) |
 | [Spring Boot](topics/spring-boot/README.md) | 18 | 18 ✅ |
 | [Spring Framework Core](topics/spring-core/README.md) | 19 | 19 ✅ (all tiers) |
 | [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 25 | 25 ✅ (all tiers) |
@@ -98,6 +98,19 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 26 (2026-07-20):** System Design **Design Patterns** group added — 7 new topics
+  (`dp-` prefix, new "Design Patterns" catalog group in sync), **427 MCQs**. Covers ALL 23
+  GoF patterns (5 creational / 7 structural / 11 behavioral — completeness asserted), plus
+  enterprise (Fowler PoEAA), concurrency (POSA), and distributed/cloud patterns. Each pattern
+  has a "Problem it solves" line, a Mermaid diagram (218 total, all render 0-error), a concrete
+  example, and trade-offs; distributed-pattern topics cross-reference existing deep-dives.
+  Built via `.claude/workflows/scripts/design-patterns-authoring.js` (research → author →
+  verify with a completeness gate, high effort). One research agent (dp-behavioral) died on a
+  transient API error; resume-from-runId recovered it (cached topics replayed). Verify stage
+  added missing content (Two-Phase Termination pattern, 8 missing diagrams) and fixed invalid
+  Mermaid (semicolons in sequenceDiagram messages break the parser). Validator clean; no answer
+  clustering. Content-only commit (concurrent web-design work untouched). NEXT: Architectural
+  Patterns group (`arch-` prefix, workflow written & ready) — fires next, cross-references these.
 - **Session 25 (2026-07-20):** Messaging & Databases **Pass 1** — authored all 15 topics,
   **815 MCQs** (163 B / 438 I / 214 adv; 48-65/topic). Practitioner/mechanism-level (real SQL,
   index B-tree/LSM internals, ACID isolation anomalies, Kafka log/consumer-group protocol, Redis

@@ -164,6 +164,8 @@ async function writePoolFiles(dir, baseName, questions) {
 /** Group key for a system-design subtopic slug. */
 function sdGroupKey(slug) {
   if (slug.startsWith("aws-")) return "aws";
+  if (slug.startsWith("dp-")) return "patterns";
+  if (slug.startsWith("arch-")) return "architecture";
   if (SD_ADVANCED.has(slug)) return "advanced";
   return "core";
 }
@@ -171,10 +173,12 @@ function sdGroupKey(slug) {
 const SD_GROUP_LABELS = {
   core: "Core Topics",
   advanced: "Advanced & Expert Deep-Dives",
+  patterns: "Design Patterns",
+  architecture: "Architectural Patterns",
   aws: "AWS System Design",
 };
 // Display order for system-design groups.
-const SD_GROUP_ORDER = ["core", "advanced", "aws"];
+const SD_GROUP_ORDER = ["core", "advanced", "patterns", "architecture", "aws"];
 
 // --- Main ------------------------------------------------------------------
 
