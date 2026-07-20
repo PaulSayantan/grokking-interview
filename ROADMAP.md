@@ -85,7 +85,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [REST APIs & API Design](topics/rest-api-design/README.md) | 18 | 18 ✅ (all tiers, 1,529 MCQs) |
 | [Docker](topics/docker/README.md) | 16 | 0 |
 | [Kubernetes](topics/kubernetes/README.md) | 19 | 0 |
-| [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 0 |
+| [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 21 ✅ (Pass 1, 1,065 MCQs) |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 15 ✅ (Pass 1, 815 MCQs) |
@@ -98,6 +98,20 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 29 (2026-07-21):** **DevOps & CI/CD Pass 1** (sequence domain 3) — 21 topics,
+  **1,065 MCQs** (239 B / 553 I / 268 adv / 5 exp), 53 Mermaid diagrams (render 0-error). Covers
+  DevOps culture/CALMS/Three-Ways/DORA, Git/branching (trunk-based), CI/CD pipelines + tooling
+  (Actions/GitLab/Jenkins), deployment strategies, IaC/Terraform, Ansible, GitOps, DevSecOps,
+  supply-chain (SLSA/SBOM/Sigstore), secrets-in-deploys, platform engineering/IDP, DevOps
+  scenarios. Heavy boundary discipline: observability/testing/security/networking depth stays in
+  their dedicated domains (cross-referenced, not duplicated); linux kept at ops-toolkit level,
+  incident/SRE at DevOps-framing (deep process → upcoming reliability-ops). Built via
+  `devops-cicd-authoring.js` (author → verify). 1 author agent died (platform-engineering-and-idp,
+  transient API error) — recovered via resume-from-runId. Verify fixed 2 real Mermaid bugs (chained
+  mixed-arrow flowchart crash; validated via mermaid-cli) + an invalid duplicate-`push:` YAML key,
+  and broke guessable answer cycles. Also silenced Shiki unknown-language warnings via
+  `shikiConfig.langAlias` (promql/logql/rego → yaml/bash) in a separate commit. Validator clean;
+  no clustering. Promoted to AUTHORED_DOMAINS. Content-only commit. NEXT: docker.
 - **Session 28 (2026-07-20):** **Observability Pass 1** (sequence domain 2) — 17 topics,
   **844 MCQs** (209 B / 435 I / 196 adv / 4 exp), 48 Mermaid diagrams. Tool-grounded: three
   pillars + golden-signals/RED/USE, metric types & dimensional model, structured logging +

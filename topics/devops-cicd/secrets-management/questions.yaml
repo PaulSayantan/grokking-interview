@@ -1,0 +1,817 @@
+topic: "Secrets Management (in Deploys & Pipelines)"
+domain: devops-cicd
+topic_slug: secrets-management
+version: 1
+questions:
+  - id: secrets-management-001
+    difficulty: beginner
+    tags: [git, no-secrets-in-code, 12-factor]
+    question: |
+      Why is committing an API key to a git repository dangerous even if you
+      delete it in the very next commit?
+    options:
+      - "Git compresses secrets, making them impossible to decrypt later"
+      - "GitHub charges a fee for storing secrets"
+      - "Deleting a file in git is irreversible, so the app breaks"
+      - "The secret remains in git history and in every existing clone/fork forever"
+    answer: 3
+    explanation: |
+      Git history is permanent and distributed. A later commit that removes the
+      secret does not erase it from history — it stays in every clone, fork, and
+      packed object. Anyone with access can recover it with `git log -p`. The only
+      real remediation is to rotate the secret.
+    ref: "concepts.md#why-secrets-never-belong-in-code-or-git"
+
+  - id: secrets-management-002
+    difficulty: beginner
+    tags: [12-factor, config, environment]
+    question: |
+      The Twelve-Factor App methodology recommends what regarding credentials and
+      configuration?
+    options:
+      - "Bake config into the built artifact so it is immutable"
+      - "Store config in the environment, separate from code"
+      - "Store all config, including secrets, inside the source repo for versioning"
+      - "Encrypt config with a key hard-coded in the application"
+    answer: 1
+    explanation: |
+      Factor III (Config) says store config in the environment, strictly separated
+      from code. Code is shared and versioned; secrets are sensitive, per-environment,
+      and rotatable, so they must not live in the codebase.
+    ref: "concepts.md#why-secrets-never-belong-in-code-or-git"
+
+  - id: secrets-management-003
+    difficulty: intermediate
+    tags: [ci, masking, logs, github-actions]
+    question: |
+      A GitHub Actions job stores a token in `secrets.API_TOKEN`, then runs
+      `echo "$API_TOKEN" | base64`. What is the risk?
+    options:
+      - "The base64-encoded form does not match the masked pattern and prints in the clear in logs"
+      - "Nothing — GitHub masks the secret everywhere it appears"
+      - "base64 permanently corrupts the secret value"
+      - "The secret is automatically rotated after being echoed"
+    answer: 0
+    explanation: |
+      Log masking is best-effort exact-string matching. Once you transform a secret
+      (base64, split, substring), the output no longer matches the masked pattern, so
+      the transformed value is printed in cleartext. Never echo or transform-and-print
+      a secret.
+    ref: "concepts.md#cicd-secret-injection-and-masked-variables"
+
+  - id: secrets-management-004
+    difficulty: intermediate
+    tags: [gitlab, protected-variables, ci]
+    question: |
+      In GitLab CI, marking a CI/CD variable as "Protected" means it is:
+    options:
+      - "Encrypted with a stronger algorithm than masked variables"
+      - "Automatically rotated every 24 hours"
+      - "Readable only by the project owner"
+      - "Only exposed to jobs running on protected branches or tags"
+    answer: 3
+    explanation: |
+      A Protected variable is only passed to pipelines running on protected branches
+      or tags, so an untrusted feature branch or fork cannot access production
+      secrets. "Masked" (a separate flag) only hides it in job logs.
+    ref: "concepts.md#cicd-secret-injection-and-masked-variables"
+
+  - id: secrets-management-005
+    difficulty: advanced
+    tags: [github-actions, forks, pull-request-target, exfiltration]
+    question: |
+      Why is using `pull_request_target` combined with checking out and running the
+      PR's code considered a dangerous pattern?
+    options:
+      - "It runs untrusted PR code with access to the base repository's secrets, enabling exfiltration"
+      - "It disables all branch protection rules"
+      - "It prevents the workflow from ever accessing secrets"
+      - "It forces the runner to use a long-lived cloud key"
+    answer: 0
+    explanation: |
+      Unlike `pull_request` (which denies secrets to fork PRs), `pull_request_target`
+      runs in the base-repo context with access to secrets. If you then check out and
+      execute the untrusted PR code, an attacker can read and exfiltrate those secrets.
+    ref: "concepts.md#cicd-secret-injection-and-masked-variables"
+
+  - id: secrets-management-006
+    difficulty: intermediate
+    tags: [environments, gating, scoping]
+    question: |
+      Binding a production database password to a protected GitHub Actions
+      "environment" primarily achieves what?
+    options:
+      - "It compresses the secret to speed up jobs"
+      - "It converts the secret into an OIDC token"
+      - "It makes the secret available only to jobs targeting that environment, subject to its rules/reviewers"
+      - "It shares the secret with all forks for testing"
+    answer: 2
+    explanation: |
+      Environment-scoped secrets are only exposed to jobs that target that environment,
+      which can require reviewers, wait timers, or branch restrictions. This keeps prod
+      secrets out of reach of untrusted branches and unrelated jobs.
+    ref: "concepts.md#cicd-secret-injection-and-masked-variables"
+
+  - id: secrets-management-007
+    difficulty: beginner
+    tags: [oidc, cloud, no-stored-keys]
+    question: |
+      What is the main benefit of using OIDC federation between a CI system and a
+      cloud provider instead of storing a long-lived access key in CI?
+    options:
+      - "It makes builds run faster"
+      - "It encrypts the source code repository"
+      - "It removes the need for IAM roles entirely"
+      - "There is no long-lived stored credential to leak; the workflow gets short-lived temporary credentials"
+    answer: 3
+    explanation: |
+      With OIDC federation the CI provider mints a short-lived signed token that the
+      cloud exchanges for temporary credentials scoped to a role. There is no static
+      key stored in CI to be stolen or rotated — the best secret is no stored secret.
+    ref: "concepts.md#oidc-federation-to-the-cloud-no-stored-long-lived-keys"
+
+  - id: secrets-management-008
+    difficulty: intermediate
+    tags: [oidc, github-actions, permissions]
+    question: |
+      Which workflow permission must be granted for a GitHub Actions job to mint an
+      OIDC token for cloud federation?
+    options:
+      - "id-token: write"
+      - "contents: write"
+      - "packages: write"
+      - "actions: read"
+    answer: 0
+    explanation: |
+      `permissions: id-token: write` allows the workflow to request a signed OIDC
+      token, which is then exchanged (e.g. via AssumeRoleWithWebIdentity) for
+      short-lived cloud credentials. Without it, the token request fails.
+    ref: "concepts.md#oidc-federation-to-the-cloud-no-stored-long-lived-keys"
+
+  - id: secrets-management-009
+    difficulty: advanced
+    tags: [oidc, trust-policy, claims, misconfiguration]
+    question: |
+      An engineer configures an AWS role's trust policy to allow AssumeRoleWithWebIdentity
+      from GitHub's OIDC issuer but leaves the `sub` claim condition as `*`. What is the
+      consequence?
+    options:
+      - "Only the intended repository can assume the role"
+      - "The role can never be assumed"
+      - "Any GitHub repository using that issuer can assume the role"
+      - "The role automatically restricts to the main branch"
+    answer: 2
+    explanation: |
+      The trust policy must pin claims (org/repo, and ideally branch/environment).
+      Wildcarding the `sub` claim means any repository authenticating through GitHub's
+      OIDC provider can assume your role — a serious privilege-escalation hole.
+    ref: "concepts.md#oidc-federation-to-the-cloud-no-stored-long-lived-keys"
+
+  - id: secrets-management-010
+    difficulty: beginner
+    tags: [vault, dynamic-secrets]
+    question: |
+      What distinguishes a HashiCorp Vault "dynamic secret" from a static one?
+    options:
+      - "Dynamic secrets are stored in plaintext"
+      - "Dynamic secrets are shared by all clients"
+      - "Dynamic secrets never expire"
+      - "Vault generates a unique, short-lived credential on demand and revokes it when the lease ends"
+    answer: 3
+    explanation: |
+      A dynamic secret is generated per request (e.g. a brand-new DB user) with a lease
+      and TTL, and Vault revokes/deletes it when the lease expires. Each consumer gets
+      unique, short-lived, individually-revocable credentials, unlike a shared static
+      value.
+    ref: "concepts.md#hashicorp-vault-and-dynamic-secrets"
+
+  - id: secrets-management-011
+    difficulty: intermediate
+    tags: [vault, leasing, revocation]
+    question: |
+      In Vault, what is the purpose of a "lease" attached to a dynamic secret?
+    options:
+      - "It ties the credential to a TTL so it can be renewed or automatically revoked/destroyed on expiry"
+      - "It marks the secret as read-only"
+      - "It encrypts the secret at rest"
+      - "It replicates the secret to other clusters"
+    answer: 0
+    explanation: |
+      A lease gives a dynamic secret a TTL. Clients renew it or let it expire; on expiry
+      or explicit revocation, Vault destroys the underlying credential (e.g. drops the DB
+      user). This is what makes exposure windows short and revocation first-class.
+    ref: "concepts.md#hashicorp-vault-and-dynamic-secrets"
+
+  - id: secrets-management-012
+    difficulty: advanced
+    tags: [vault, transit, encryption-as-a-service]
+    question: |
+      A team wants Vault to encrypt and decrypt application data without Vault storing
+      that data. Which secrets engine fits?
+    options:
+      - "The kv engine"
+      - "The database engine"
+      - "The transit engine"
+      - "The pki engine"
+    answer: 2
+    explanation: |
+      The `transit` engine provides encryption-as-a-service: Vault performs
+      encrypt/decrypt/sign operations using managed keys but never stores the plaintext
+      data itself. `kv` stores values, `database` issues DB creds, `pki` issues certs.
+    ref: "concepts.md#hashicorp-vault-and-dynamic-secrets"
+
+  - id: secrets-management-013
+    difficulty: intermediate
+    tags: [vault, policies, least-privilege]
+    question: |
+      In Vault, what mechanism enforces that a given token can only read a specific set
+      of secret paths?
+    options:
+      - "Seal/unseal keys"
+      - "Path-based policies (ACLs)"
+      - "The lease TTL"
+      - "The audit device"
+    answer: 1
+    explanation: |
+      Vault policies are path-based ACLs that grant capabilities (read, list, update) on
+      specific paths. Attaching a least-privilege policy to a token restricts it to just
+      the secrets that identity needs.
+    ref: "concepts.md#hashicorp-vault-and-dynamic-secrets"
+
+  - id: secrets-management-014
+    difficulty: intermediate
+    tags: [aws, secrets-manager, parameter-store]
+    question: |
+      Which AWS service offers built-in scheduled secret rotation via a Lambda function
+      out of the box?
+    options:
+      - "SSM Parameter Store (String type)"
+      - "IAM access keys"
+      - "S3 with SSE-KMS"
+      - "AWS Secrets Manager"
+    answer: 3
+    explanation: |
+      AWS Secrets Manager provides built-in rotation driven by a Lambda function on a
+      schedule. Parameter Store's SecureString is KMS-encrypted but has no built-in
+      rotation; it is cheaper but less feature-rich.
+    ref: "concepts.md#cloud-native-secret-managers"
+
+  - id: secrets-management-015
+    difficulty: intermediate
+    tags: [cloud, secret-managers, workload-identity]
+    question: |
+      How does a Lambda function or EC2 instance typically authenticate to AWS Secrets
+      Manager to read a secret, avoiding a stored bootstrap key?
+    options:
+      - "It uses its execution/instance IAM role (platform-provided identity)"
+      - "It uses a hard-coded access key in the code"
+      - "It emails an administrator for temporary credentials"
+      - "It reads the key from a public S3 bucket"
+    answer: 0
+    explanation: |
+      The workload uses its platform-assigned IAM identity (execution role, instance
+      role, or IRSA on EKS) to call GetSecretValue. No static bootstrap key is stored —
+      the platform vouches for the workload's identity, solving secret-zero.
+    ref: "concepts.md#cloud-native-secret-managers"
+
+  - id: secrets-management-016
+    difficulty: advanced
+    tags: [vault, cloud-secret-manager, dynamic-vs-static]
+    question: |
+      A candidate claims "AWS Secrets Manager rotation is exactly the same as Vault
+      dynamic secrets." What is the accurate correction?
+    options:
+      - "They are identical in every way"
+      - "Vault cannot rotate secrets at all"
+      - "Secrets Manager rotation replaces a stored value on a schedule; Vault dynamic secrets generate a unique credential per request"
+      - "Secrets Manager generates a new credential on every read"
+    answer: 2
+    explanation: |
+      Secrets Manager rotation periodically replaces one stored value (still shared by
+      consumers between rotations). Vault dynamic secrets mint a distinct, short-lived,
+      per-request credential and revoke it on lease expiry — a different and finer-grained
+      model.
+    ref: "concepts.md#cloud-native-secret-managers"
+
+  - id: secrets-management-017
+    difficulty: beginner
+    tags: [kubernetes, secrets, base64]
+    question: |
+      By default, how is the data in a Kubernetes Secret object stored?
+    options:
+      - "AES-256 encrypted with a per-namespace key"
+      - "Only base64-encoded (not encrypted)"
+      - "Hashed with bcrypt"
+      - "Encrypted with the pod's TLS certificate"
+    answer: 1
+    explanation: |
+      By default a Kubernetes Secret's data is merely base64-encoded, which is encoding,
+      not encryption — anyone who can read it can decode it. Real at-rest protection
+      requires enabling etcd encryption (ideally with a KMS provider).
+    ref: "concepts.md#kubernetes-secrets-and-their-limitations"
+
+  - id: secrets-management-018
+    difficulty: intermediate
+    tags: [kubernetes, etcd, encryption-at-rest]
+    question: |
+      To ensure Kubernetes Secrets are actually encrypted on disk, what must a cluster
+      operator configure?
+    options:
+      - "A NetworkPolicy on the kube-system namespace"
+      - "Horizontal Pod Autoscaling"
+      - "A PodSecurityPolicy"
+      - "An EncryptionConfiguration for the API server (ideally with a KMS provider)"
+    answer: 3
+    explanation: |
+      Encryption at rest for Secrets is enabled via an EncryptionConfiguration on the
+      API server, which encrypts resources before writing to etcd. Using a KMS provider
+      keeps the encryption key out of the config itself.
+    ref: "concepts.md#kubernetes-secrets-and-their-limitations"
+
+  - id: secrets-management-019
+    difficulty: intermediate
+    tags: [kubernetes, env-var-vs-file, rbac]
+    question: |
+      Which is a valid reason to mount a Kubernetes Secret as a file rather than inject
+      it as an environment variable?
+    options:
+      - "A mounted file can be updated in place and re-read, and env vars can leak via child processes and /proc"
+      - "Files are encrypted by default while env vars are not"
+      - "Env vars cannot hold string values"
+      - "Files bypass RBAC entirely"
+    answer: 0
+    explanation: |
+      Mounted files can be rotated in place and re-read by the app, while an env var is
+      fixed for the process lifetime. Env vars are also more prone to leakage via child
+      process environments, crash dumps, and /proc/<pid>/environ.
+    ref: "concepts.md#kubernetes-secrets-and-their-limitations"
+
+  - id: secrets-management-020
+    difficulty: advanced
+    tags: [kubernetes, rbac, threat-model]
+    question: |
+      Even with etcd encryption at rest enabled, which access can still let someone read
+      a Kubernetes Secret's plaintext?
+    options:
+      - "Having only `create` on Deployments"
+      - "Having read access to the cluster's Grafana dashboards"
+      - "Having `get`/`list` on Secrets in the namespace or being able to exec into a pod that mounts it"
+      - "Being a member of a different namespace with no RBAC bindings"
+    answer: 2
+    explanation: |
+      Encryption at rest protects the on-disk etcd data, not authorized API reads. Anyone
+      with `get`/`list` on Secrets, or who can exec into a pod that mounts the secret, can
+      read the plaintext. RBAC scoping is therefore essential.
+    ref: "concepts.md#kubernetes-secrets-and-their-limitations"
+
+  - id: secrets-management-021
+    difficulty: intermediate
+    tags: [gitops, sealed-secrets, kubeseal]
+    question: |
+      With Bitnami Sealed Secrets, what makes it safe to commit a SealedSecret resource
+      to a git repository?
+    options:
+      - "The values are base64-encoded so tools can't read them"
+      - "The secret is stored in an external vault, not in git"
+      - "Git automatically encrypts files named *.sealed"
+      - "It is encrypted with a public key and only the in-cluster controller's private key can decrypt it"
+    answer: 3
+    explanation: |
+      `kubeseal` encrypts the secret with the controller's public key. Only that specific
+      in-cluster controller holds the private key needed to decrypt it into a real Secret,
+      so the committed SealedSecret is safe even in a public repo.
+    ref: "concepts.md#encrypted-secrets-in-git-for-gitops-sops-sealed-secrets-external-secrets"
+
+  - id: secrets-management-022
+    difficulty: intermediate
+    tags: [gitops, sops, kms]
+    question: |
+      What does Mozilla SOPS encrypt when you use it on a Kubernetes Secret YAML file?
+    options:
+      - "The entire file including keys, making it unreadable"
+      - "Only the values, leaving the keys/structure readable, using a KMS/age/PGP key"
+      - "Nothing — it only signs the file"
+      - "Only the metadata section"
+    answer: 1
+    explanation: |
+      SOPS encrypts the values while leaving the keys/structure readable, using a backend
+      key (AWS/GCP/Azure KMS, age, or PGP). The encrypted file is committed and decrypted
+      at apply time by whoever holds the key (e.g. Flux's SOPS integration).
+    ref: "concepts.md#encrypted-secrets-in-git-for-gitops-sops-sealed-secrets-external-secrets"
+
+  - id: secrets-management-023
+    difficulty: intermediate
+    tags: [gitops, external-secrets-operator]
+    question: |
+      With the External Secrets Operator (ESO), what actually lives in the git repository?
+    options:
+      - "A reference (ExternalSecret) naming a secret in an external store; no ciphertext"
+      - "The encrypted secret ciphertext"
+      - "The plaintext secret protected by RBAC"
+      - "A base64-encoded copy of the secret"
+    answer: 0
+    explanation: |
+      ESO commits only an ExternalSecret reference that names a secret in an external
+      store (Vault, AWS/GCP/Azure). The operator fetches the value at runtime and
+      materializes a native Secret. Nothing sensitive — not even ciphertext — is in git.
+    ref: "concepts.md#encrypted-secrets-in-git-for-gitops-sops-sealed-secrets-external-secrets"
+
+  - id: secrets-management-024
+    difficulty: advanced
+    tags: [gitops, pattern-selection, rotation]
+    question: |
+      A team already runs HashiCorp Vault and wants rotation to be driven by the store
+      (not by editing git) with nothing sensitive committed. Which GitOps pattern fits
+      best?
+    options:
+      - "Commit plaintext Secrets and rely on RBAC"
+      - "SOPS-encrypted secrets committed alongside manifests"
+      - "Sealed Secrets encrypted with kubeseal"
+      - "External Secrets Operator referencing Vault"
+    answer: 3
+    explanation: |
+      ESO keeps only a reference in git and pulls the live value from Vault, so rotation
+      happens at the store and syncs automatically — nothing sensitive is committed. SOPS
+      and Sealed Secrets both put ciphertext in git and tie rotation to git commits.
+    ref: "concepts.md#encrypted-secrets-in-git-for-gitops-sops-sealed-secrets-external-secrets"
+
+  - id: secrets-management-025
+    difficulty: advanced
+    tags: [gitops, sealed-secrets, disaster-recovery]
+    question: |
+      Why can restoring committed SealedSecrets into a freshly rebuilt cluster fail if
+      you didn't plan ahead?
+    options:
+      - "SealedSecrets expire after 24 hours"
+      - "git cannot store SealedSecret CRDs"
+      - "The new controller has a different private key, so it cannot decrypt secrets sealed for the old controller's key"
+      - "kubeseal deletes secrets on cluster restart"
+    answer: 2
+    explanation: |
+      SealedSecrets are encrypted for a specific controller key pair. A rebuilt cluster
+      generates a new key by default and cannot decrypt secrets sealed for the old key —
+      you must back up and restore the controller's private key (or re-seal everything).
+    ref: "concepts.md#encrypted-secrets-in-git-for-gitops-sops-sealed-secrets-external-secrets"
+
+  - id: secrets-management-026
+    difficulty: intermediate
+    tags: [rotation, no-redeploy, runtime-fetch]
+    question: |
+      Which design best enables rotating a database credential without redeploying every
+      consuming service?
+    options:
+      - "Bake the credential into the container image at build time"
+      - "Have services fetch the credential at runtime from a store and re-read on a TTL/lease"
+      - "Inject it as an env var at deploy time only"
+      - "Store the credential in a ConfigMap"
+    answer: 1
+    explanation: |
+      Decoupling the value from the deployment — fetching at runtime and re-reading on a
+      TTL or lease renewal (as Vault dynamic secrets and agents do) — lets the credential
+      rotate under the running app without editing config or redeploying.
+    ref: "concepts.md#secret-rotation-without-redeploy"
+
+  - id: secrets-management-027
+    difficulty: advanced
+    tags: [rotation, overlapping-validity, zero-downtime]
+    question: |
+      During zero-downtime rotation, why is a period of two simultaneously-valid secret
+      versions (old and new) important?
+    options:
+      - "It doubles throughput"
+      - "It is required by base64 encoding"
+      - "It lets you skip revoking the old secret"
+      - "It avoids a window where no consumer holds a valid credential while they roll over"
+    answer: 3
+    explanation: |
+      Overlapping/dual validity keeps the old credential working while consumers pick up
+      the new one, then the old is revoked. Without it, there is a window where the old
+      value is already invalid but not all consumers have the new one — causing outages.
+      AWS Secrets Manager models this with AWSCURRENT/AWSPENDING staging labels.
+    ref: "concepts.md#secret-rotation-without-redeploy"
+
+  - id: secrets-management-028
+    difficulty: advanced
+    tags: [rotation, env-var, pitfall]
+    question: |
+      A service reads its API key from an environment variable at startup. Operators
+      rotate the key in the secret store, but the service keeps using the old key. Why?
+    options:
+      - "An env var is captured once at process start; the store change never reaches the running process until it restarts"
+      - "The store failed to save the new key"
+      - "Environment variables are encrypted and cannot change"
+      - "The service cached the key in a database"
+    answer: 0
+    explanation: |
+      Env vars are fixed for the process lifetime. Rotating the value in the store does
+      nothing for a process that read it once at startup — it must restart or, better, be
+      designed to fetch/watch the secret at runtime. Design for rotation up front.
+    ref: "concepts.md#secret-rotation-without-redeploy"
+
+  - id: secrets-management-029
+    difficulty: beginner
+    tags: [least-privilege, scoping]
+    question: |
+      Applying least privilege to secrets means each identity should have:
+    options:
+      - "Access to all secrets so nothing breaks unexpectedly"
+      - "Write access to every secret path for flexibility"
+      - "Access only to the specific secrets it needs, for the minimum time, with minimum verbs"
+      - "A single shared admin credential across all services"
+    answer: 2
+    explanation: |
+      Least privilege grants each human/service/pipeline access to only the secrets it
+      requires, for the shortest time, with the fewest capabilities. This shrinks the
+      blast radius when any single identity is compromised.
+    ref: "concepts.md#least-privilege-access-and-scoping"
+
+  - id: secrets-management-030
+    difficulty: intermediate
+    tags: [least-privilege, pipeline-stages, identity]
+    question: |
+      Following least privilege, how should a pipeline's build-and-push job and its
+      deploy job relate in terms of credentials?
+    options:
+      - "Share one admin credential to simplify configuration"
+      - "Both should have full cloud administrator access"
+      - "Use no credentials at all"
+      - "Use different, narrowly-scoped identities so each stage can do only its task"
+    answer: 3
+    explanation: |
+      Separating identities per stage means the build job (push image) and deploy job
+      (assume a deploy role) each hold only what they need. A compromise of one stage
+      can't be leveraged into the other's privileges.
+    ref: "concepts.md#least-privilege-access-and-scoping"
+
+  - id: secrets-management-031
+    difficulty: intermediate
+    tags: [least-privilege, blast-radius, auditing]
+    question: |
+      What is the primary security payoff of scoping secret access tightly (paths,
+      namespaces, short TTLs, read-only)?
+    options:
+      - "Reduced blast radius and better attribution when an identity is compromised"
+      - "Faster CI builds"
+      - "Smaller container images"
+      - "Elimination of the need for encryption"
+    answer: 0
+    explanation: |
+      Tight scoping limits how much a compromised job or pod can reach (blast radius) and,
+      combined with per-identity issuance and audit logs, makes it clear who accessed
+      what. It doesn't speed builds or replace encryption.
+    ref: "concepts.md#least-privilege-access-and-scoping"
+
+  - id: secrets-management-032
+    difficulty: intermediate
+    tags: [secret-zero, bootstrapping]
+    question: |
+      The "secret-zero" problem refers to:
+    options:
+      - "A secret with a value of zero bytes"
+      - "The credential a workload needs to authenticate to the secret store in the first place"
+      - "The first secret ever created in an organization"
+      - "A secret that has been rotated to null"
+    answer: 1
+    explanation: |
+      Secret-zero is the bootstrapping credential a workload uses to authenticate TO the
+      secret store. If it's a long-lived static token baked into the app/image, you've
+      recreated the very problem the store was meant to solve.
+    ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+  - id: secrets-management-033
+    difficulty: advanced
+    tags: [secret-zero, kubernetes-auth, vault]
+    question: |
+      How does Vault's Kubernetes auth method let a pod authenticate without shipping a
+      static bootstrap token?
+    options:
+      - "The pod hard-codes a Vault root token"
+      - "The pod reads a token from a public ConfigMap"
+      - "Vault verifies the pod's ServiceAccount JWT with the Kubernetes API server, trusting the platform-issued identity"
+      - "Vault disables authentication for in-cluster pods"
+    answer: 2
+    explanation: |
+      The pod presents its projected ServiceAccount token; Vault validates it against the
+      Kubernetes API server. Trust is pushed down to the platform-attested identity, so no
+      static bootstrap secret is stored in the image or manifest.
+    ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+  - id: secrets-management-034
+    difficulty: advanced
+    tags: [secret-zero, vault, approle]
+    question: |
+      In Vault AppRole, why is the RoleID considered less sensitive than the SecretID,
+      and how is the SecretID typically delivered?
+    options:
+      - "RoleID is a relatively non-sensitive identifier while the short-lived SecretID is delivered just-in-time by a trusted broker so it isn't stored at rest"
+      - "RoleID is encrypted; SecretID is plaintext, so SecretID is emailed"
+      - "Both are equally sensitive and stored together in the image"
+      - "SecretID is public and RoleID is secret"
+    answer: 0
+    explanation: |
+      AppRole splits identity: the RoleID is a fairly benign identifier, while the SecretID
+      is the sensitive, short-lived half. A trusted broker (or CI) delivers the SecretID
+      just in time so it never sits at rest, mitigating secret-zero exposure.
+    ref: "concepts.md#the-secret-zero-bootstrapping-problem"
+
+  - id: secrets-management-035
+    difficulty: beginner
+    tags: [injection, env-var, file]
+    question: |
+      Compared with environment variables, mounting a secret as a file on tmpfs generally:
+    options:
+      - "Leaks more easily because files are world-readable"
+      - "Leaks less and can be rotated in place while the process runs"
+      - "Cannot be read by the application"
+      - "Requires committing the secret to git"
+    answer: 1
+    explanation: |
+      Files (on tmpfs) avoid the env-var leakage vectors (/proc, child processes, crash
+      dumps) and can be updated in place and re-read for rotation, whereas an env var is
+      fixed for the process lifetime. File permissions still need to be locked down.
+    ref: "concepts.md#injection-mechanisms-env-var-vs-file-vs-api"
+
+  - id: secrets-management-036
+    difficulty: intermediate
+    tags: [injection, api-fetch, dynamic-secrets]
+    question: |
+      Fetching a secret directly from Vault/Secrets Manager via SDK at runtime (rather
+      than injecting at deploy) has which trade-off?
+    options:
+      - "It guarantees the secret is never in memory"
+      - "It stores the secret permanently in the image"
+      - "It removes the need for any authentication"
+      - "It gives the freshest value and supports dynamic secrets, but adds a runtime dependency, latency, and needs secret-zero auth"
+    answer: 3
+    explanation: |
+      Runtime API fetch gives the freshest value and enables dynamic secrets, at the cost
+      of a runtime dependency on the store, added latency, and the need to solve secret-zero
+      (how the app authenticates to the store).
+    ref: "concepts.md#injection-mechanisms-env-var-vs-file-vs-api"
+
+  - id: secrets-management-037
+    difficulty: advanced
+    tags: [injection, sidecar, agent, csi]
+    question: |
+      What is the role of a sidecar/agent such as Vault Agent or the Secrets Store CSI
+      driver in secret injection?
+    options:
+      - "It handles authentication and renewal and writes/updates the secret as a file so the app stays simple and gets rotation"
+      - "It commits secrets to git for GitOps"
+      - "It disables encryption at rest"
+      - "It replaces the need for IAM roles"
+    answer: 0
+    explanation: |
+      A sidecar/agent authenticates to the store, renews leases, and materializes the
+      secret as a mounted file (updating it on change). The app just reads a file, gaining
+      automatic rotation and caching without embedding store logic — at the cost of an
+      extra component per pod.
+    ref: "concepts.md#injection-mechanisms-env-var-vs-file-vs-api"
+
+  - id: secrets-management-038
+    difficulty: intermediate
+    tags: [leak-detection, incident-response, rotate-first]
+    question: |
+      A live production database password is discovered committed to a repository. What
+      is the correct FIRST action?
+    options:
+      - "Run `git rm` and push a commit removing the file"
+      - "Rewrite history with git filter-repo, then continue"
+      - "Rotate/revoke the credential so the leaked value becomes worthless"
+      - "Make the repository private"
+    answer: 2
+    explanation: |
+      Rotation is the mandatory first move: assume the leaked secret is compromised the
+      moment it was pushed and revoke it. History rewriting and making the repo private are
+      cleanup steps that don't recall existing clones/forks and leave a valid secret exposed
+      if you skip rotation.
+    ref: "concepts.md#detecting-leaked-secrets-and-rotate-on-leak"
+
+  - id: secrets-management-039
+    difficulty: intermediate
+    tags: [leak-detection, scanning, prevention]
+    question: |
+      Which control prevents a secret from ever landing in the repository in the first
+      place?
+    options:
+      - "A nightly backup job"
+      - "Rotating IAM keys monthly"
+      - "Encrypting etcd at rest"
+      - "Pre-commit secret scanning (e.g. gitleaks) and GitHub push protection"
+    answer: 3
+    explanation: |
+      Pre-commit hooks (gitleaks/pre-commit) and provider push protection block a commit
+      or push that contains a detected secret before it lands. The other options are useful
+      but don't stop the initial commit.
+    ref: "concepts.md#detecting-leaked-secrets-and-rotate-on-leak"
+
+  - id: secrets-management-040
+    difficulty: advanced
+    tags: [leak-detection, git-history, misconception]
+    question: |
+      Why is "I deleted the file and rewrote history, so we're safe" an incomplete
+      response to a leaked secret?
+    options:
+      - "Existing clones/forks/CI caches may still contain the secret, and it may already have been abused, so rotation is still required"
+      - "History rewriting is impossible in git"
+      - "Deleting the file rotates the secret automatically"
+      - "git filter-repo re-encrypts the whole repo"
+    answer: 0
+    explanation: |
+      Rewriting history cannot recall clones, forks, or caches already pulled, and the
+      secret may already be in an attacker's hands. Rotation is what actually neutralizes
+      the exposure; history cleanup is complementary, not a substitute.
+    ref: "concepts.md#detecting-leaked-secrets-and-rotate-on-leak"
+
+  - id: secrets-management-041
+    difficulty: beginner
+    tags: [short-lived, long-lived, credentials]
+    question: |
+      Why are short-lived credentials generally preferred over long-lived static ones?
+    options:
+      - "They are easier to hard-code in source"
+      - "A stolen short-lived credential expires quickly, shrinking the abuse window, and rotation becomes automatic"
+      - "They never need any infrastructure"
+      - "They cannot be logged or audited"
+    answer: 1
+    explanation: |
+      Short-lived credentials expire on their own, so a leaked one is worthless within
+      minutes/hours; rotation is inherent rather than a forgotten chore, and per-issuance
+      credentials are easier to attribute in audit logs. The trade-off is added issuing
+      infrastructure.
+    ref: "concepts.md#short-lived-vs-long-lived-credentials"
+
+  - id: secrets-management-042
+    difficulty: intermediate
+    tags: [short-lived, examples, anti-pattern]
+    question: |
+      Which of these is an example of the long-lived-credential anti-pattern?
+    options:
+      - "STS temporary credentials obtained via OIDC federation"
+      - "A Vault dynamic database user with a 15-minute lease"
+      - "A projected Kubernetes ServiceAccount token with a short expiry"
+      - "A permanent IAM user access key committed to CI variables"
+    answer: 3
+    explanation: |
+      A permanent IAM user access key that is stored (and rarely rotated) is the classic
+      long-lived anti-pattern. The others are short-lived, dynamically-issued credentials
+      that expire and are individually attributable.
+    ref: "concepts.md#short-lived-vs-long-lived-credentials"
+
+  - id: secrets-management-043
+    difficulty: advanced
+    tags: [short-lived, trade-offs, dependency]
+    question: |
+      What is the main trade-off teams accept when adopting short-lived/dynamic
+      credentials over stored long-lived keys?
+    options:
+      - "Added infrastructure (an issuer/broker) and a runtime dependency to obtain credentials"
+      - "Secrets become impossible to audit"
+      - "Credentials can no longer be scoped to least privilege"
+      - "The blast radius of a leak increases"
+    answer: 0
+    explanation: |
+      Short-lived/dynamic credentials require an issuing mechanism (OIDC provider, Vault,
+      STS) and introduce a runtime dependency to fetch them. Teams accept this because the
+      security gains — tiny abuse windows, automatic rotation, attributable issuance — are
+      well worth it for production.
+    ref: "concepts.md#short-lived-vs-long-lived-credentials"
+
+  - id: secrets-management-044
+    difficulty: advanced
+    tags: [scenario, pipeline, oidc, review]
+    question: |
+      Reviewing a GitHub Actions workflow, you see: AWS access keys stored as repo
+      secrets, `echo` of a token for debugging, and fork PRs able to run against prod.
+      Which single change most reduces standing credential risk?
+    options:
+      - "Replace stored AWS keys with OIDC federation to assume a scoped role for short-lived creds"
+      - "Increase the log retention period"
+      - "Add more tags to the secrets"
+      - "Rename the secrets to uppercase"
+    answer: 0
+    explanation: |
+      The biggest standing risk is the stored long-lived AWS keys. Replacing them with
+      OIDC federation removes the persistent credential entirely, granting short-lived,
+      scoped creds per run. (The echo and fork issues must also be fixed, but the stored
+      keys are the largest attack surface.)
+    ref: "concepts.md#oidc-federation-to-the-cloud-no-stored-long-lived-keys"
+
+  - id: secrets-management-045
+    difficulty: intermediate
+    tags: [scenario, gitops, kubernetes, plaintext]
+    question: |
+      A team practicing GitOps commits a plain Kubernetes Secret manifest (base64 data)
+      to their public config repo, arguing "base64 hides it." What is the correct fix?
+    options:
+      - "Nothing — base64 is sufficient obfuscation"
+      - "Add a .gitignore entry after committing"
+      - "Move the manifest to a subfolder named 'private'"
+      - "Encrypt the values (SOPS or Sealed Secrets) or commit only a reference (External Secrets), never plaintext/base64"
+    answer: 3
+    explanation: |
+      base64 is encoding, not encryption — trivially decoded. In GitOps you commit
+      encrypted secrets (SOPS/Sealed Secrets) or a reference to an external store (ESO),
+      never plaintext or base64. A .gitignore after the fact doesn't remove it from
+      history, and the secret should also be rotated.
+    ref: "concepts.md#encrypted-secrets-in-git-for-gitops-sops-sealed-secrets-external-secrets"
