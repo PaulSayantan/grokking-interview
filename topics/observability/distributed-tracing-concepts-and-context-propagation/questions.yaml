@@ -1,0 +1,954 @@
+topic: "Distributed Tracing Concepts & Context Propagation"
+domain: observability
+topic_slug: distributed-tracing-concepts-and-context-propagation
+version: 1
+questions:
+  - id: distributed-tracing-concepts-and-context-propagation-001
+    difficulty: beginner
+    tags: [fundamentals, signals, why-tracing]
+    question: |
+      Which question is distributed tracing uniquely well-suited to answer,
+      compared with metrics and logs?
+    options:
+      - "What is the aggregate error rate across the whole fleet right now?"
+      - "How much disk is each host using over the last 30 days?"
+      - "For a single request, where did its end-to-end time go across services?"
+      - "What is the total number of log lines emitted per minute?"
+    answer: 2
+    explanation: |
+      Metrics are cheap aggregates and logs are per-event records within one
+      process. Only a trace preserves causality and timing for an individual
+      request across process boundaries, so it uniquely answers "where did the
+      time go for this request?"
+    ref: "concepts.md#why-distributed-tracing-exists"
+
+  - id: distributed-tracing-concepts-and-context-propagation-002
+    difficulty: beginner
+    tags: [span, model, definitions]
+    question: |
+      What is a "span" in distributed tracing?
+    options:
+      - "The set of HTTP headers used to propagate context"
+      - "The complete end-to-end record of a request across all services"
+      - "A single named, timed unit of work with a start time, duration, status, and attributes"
+      - "A sampling decision made at the collector"
+    answer: 2
+    explanation: |
+      A span represents one operation (an HTTP handler, an RPC, a DB query) with
+      a start timestamp, duration, status, attributes, and optional events/links.
+      The full end-to-end record is the trace, which is a collection of spans.
+    ref: "concepts.md#trace-span-and-span-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-003
+    difficulty: beginner
+    tags: [trace, model]
+    question: |
+      What connects a set of spans into a single trace?
+    options:
+      - "They were all created within the same 5-minute window"
+      - "They all have identical span names"
+      - "They were emitted by the same host"
+      - "They all share the same trace_id and are linked by parent/child references"
+    answer: 3
+    explanation: |
+      A trace is the collection of all spans that share one trace_id, connected
+      by parent/child relationships. Time windows and host identity do not define
+      a trace.
+    ref: "concepts.md#trace-span-and-span-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-004
+    difficulty: intermediate
+    tags: [span-context, propagation, model]
+    question: |
+      What exactly is carried in a SpanContext that gets injected into outgoing
+      headers?
+    options:
+      - "The full span including its name, attributes, events, and duration"
+      - "trace_id, span_id, trace_flags, and trace_state"
+      - "Only the service name and endpoint"
+      - "The entire trace collected so far"
+    answer: 1
+    explanation: |
+      SpanContext is the immutable, serializable identity: trace_id, span_id,
+      trace_flags (including the sampled bit), and trace_state. The heavyweight
+      span data (name, attributes, events, duration) stays local and is exported
+      separately — only the identity travels over the wire.
+    ref: "concepts.md#trace-span-and-span-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-005
+    difficulty: intermediate
+    tags: [span-context, misconception]
+    question: |
+      A colleague says "the whole span, with all its attributes, is sent
+      downstream in the request headers so the next service knows its parent."
+      What is wrong with this?
+    options:
+      - "Nothing — the full span is serialized into the traceparent header"
+      - "Spans are never sent anywhere; they only live in memory"
+      - "Attributes propagate but the trace_id does not"
+      - "Only the SpanContext (IDs + flags + tracestate) propagates; span data is exported separately to the backend"
+    answer: 3
+    explanation: |
+      Only the SpanContext identity (trace_id, span_id, flags, tracestate)
+      propagates downstream so the callee can name its parent. The heavyweight
+      span data is exported independently to the collector/backend, not carried
+      in the request.
+    ref: "concepts.md#trace-span-and-span-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-006
+    difficulty: intermediate
+    tags: [span-naming, cardinality]
+    question: |
+      Which span name follows best practice for a REST endpoint handler?
+    options:
+      - "GET /users/{id}"
+      - "GET /users/12345"
+      - "handleRequest-2026-07-20T10:33:01Z"
+      - "req-abc123-user-12345"
+    answer: 0
+    explanation: |
+      Span names should be low-cardinality. Use the route template
+      GET /users/{id} rather than the concrete URL with a specific id. The
+      high-cardinality id belongs in a span attribute, not the name, because
+      backends group and index by name.
+    ref: "concepts.md#trace-span-and-span-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-007
+    difficulty: beginner
+    tags: [waterfall, visualization]
+    question: |
+      In a trace waterfall (Gantt) view, what does it mean when two child span
+      bars overlap in time?
+    options:
+      - "The trace is corrupted"
+      - "One span is the parent of the other"
+      - "Those operations ran concurrently (in parallel)"
+      - "The clocks on those hosts are synchronized"
+    answer: 2
+    explanation: |
+      Overlapping bars ran concurrently. Bars where one starts only after a
+      sibling ends ran serially. Spotting a fan-out that runs serially when it
+      could be parallel is a classic waterfall finding.
+    ref: "concepts.md#the-trace-as-a-dag-and-the-waterfall-view"
+
+  - id: distributed-tracing-concepts-and-context-propagation-008
+    difficulty: intermediate
+    tags: [critical-path, latency]
+    question: |
+      A checkout trace lasts 320 ms. auth (10-40 ms), cart (55-90 ms) and
+      inventory (150-300 ms) are children of the root. inventory contains a DB
+      query (170-290 ms). Where should you focus a latency optimization?
+    options:
+      - "auth, because it is the first child to run"
+      - "The inventory service's DB query, which dominates the critical path"
+      - "The gateway root span, since it has the longest total bar"
+      - "cart, because it overlaps the most with other spans"
+    answer: 1
+    explanation: |
+      The inventory span (150-300 ms) dominates wall-clock time and its DB query
+      (170-290 ms) is the bulk of that. Everything else completed by ~90 ms. The
+      critical path runs through the inventory DB call, so that is where the time
+      goes.
+    ref: "concepts.md#the-trace-as-a-dag-and-the-waterfall-view"
+
+  - id: distributed-tracing-concepts-and-context-propagation-009
+    difficulty: advanced
+    tags: [dag, links, model]
+    question: |
+      Why is a trace best described as a DAG rather than strictly a tree once
+      span links are involved?
+    options:
+      - "Because a span can have multiple causal predecessors via links (e.g. a batch consumer linking many producer spans)"
+      - "Because spans can form cycles when a service calls itself"
+      - "Because the root span has two parents by definition"
+      - "Because links remove the trace_id from child spans"
+    answer: 0
+    explanation: |
+      Parent-child alone yields a tree. Span links let a span reference multiple
+      other spans (potentially in different traces), such as a batch consumer
+      linking to many producer spans — giving multiple predecessors, hence a DAG.
+      Traces remain acyclic.
+    ref: "concepts.md#the-trace-as-a-dag-and-the-waterfall-view"
+
+  - id: distributed-tracing-concepts-and-context-propagation-010
+    difficulty: intermediate
+    tags: [parent-child, links]
+    question: |
+      When should you model a relationship as a span link rather than
+      parent-child?
+    options:
+      - "Whenever two spans are in the same service"
+      - "Never — links are deprecated in favor of parent-child"
+      - "Only when spans are in the same thread"
+      - "When there is a causal relationship but the parent is not synchronously blocked on the work (e.g. batch/async/fan-in)"
+    answer: 3
+    explanation: |
+      Parent-child is for synchronous work where the parent blocks on the child.
+      Links express causality without the "parent is awaiting child" semantics
+      and can even cross traces — the right choice for queues, batch processing,
+      and fan-in/scatter-gather.
+    ref: "concepts.md#parent-child-relationships-vs-span-links"
+
+  - id: distributed-tracing-concepts-and-context-propagation-011
+    difficulty: intermediate
+    tags: [links, batch]
+    question: |
+      A consumer polls 100 messages from Kafka in one batch, each originally
+      produced by a different user request/trace. How should the processing span
+      relate to the producers?
+    options:
+      - "Use one processing span that links to the 100 producer spans, keeping each producer's trace intact"
+      - "Make the processing span a child of all 100 producer spans, merging them into one trace"
+      - "Start 100 separate root traces with no relationship to the producers"
+      - "Drop the context entirely; batch work cannot be traced"
+    answer: 0
+    explanation: |
+      One consumer span links to the many producer spans. Making it a child of
+      all 100 would merge 100 unrelated user requests into one giant trace. Links
+      record causality while preserving each producer's own trace.
+    ref: "concepts.md#parent-child-relationships-vs-span-links"
+
+  - id: distributed-tracing-concepts-and-context-propagation-012
+    difficulty: intermediate
+    tags: [parent-child, semantics]
+    question: |
+      In a ChildOf (parent-child) relationship for a synchronous RPC, what is
+      typically true about the parent span?
+    options:
+      - "The parent has already ended before the child starts"
+      - "The parent is waiting on (blocked by) the child while it executes"
+      - "The parent and child always live in different traces"
+      - "The parent never shares the trace_id with the child"
+    answer: 1
+    explanation: |
+      In the default synchronous parent-child relationship the parent is blocked
+      waiting on the child. They share the same trace_id, and the child records
+      the parent's span_id.
+    ref: "concepts.md#parent-child-relationships-vs-span-links"
+
+  - id: distributed-tracing-concepts-and-context-propagation-013
+    difficulty: intermediate
+    tags: [in-process, thread-local]
+    question: |
+      How is the "currently active span" typically tracked within a single
+      thread-per-request Java service?
+    options:
+      - "In a global static variable shared by all threads"
+      - "It is not tracked; each span must be passed explicitly to every method"
+      - "In the traceparent HTTP header of the incoming request only"
+      - "In thread-local storage via the tracer's Context/Scope mechanism"
+    answer: 3
+    explanation: |
+      The active span/Context is held in thread-local storage (Java
+      ThreadLocal via OTel Context/Scope; .NET AsyncLocal; Node AsyncLocalStorage;
+      Go passes context.Context explicitly). New spans become children of the
+      current one.
+    ref: "concepts.md#in-process-context-propagation"
+
+  - id: distributed-tracing-concepts-and-context-propagation-014
+    difficulty: advanced
+    tags: [in-process, thread-pool, gotcha]
+    question: |
+      In Java, downstream spans for a request are missing or appear as new roots
+      after work is submitted to a thread pool. What is the most likely cause?
+    options:
+      - "The Context (thread-local active span) was not captured/restored across the thread boundary"
+      - "The traceparent header was malformed on the network"
+      - "The collector dropped the spans due to sampling"
+      - "Clock skew between the two threads"
+    answer: 0
+    explanation: |
+      Thread-locals do not follow work onto a different thread. Unless the
+      Context is explicitly captured on the submitting thread and restored on the
+      worker (or a context-propagating executor is used), the child span is
+      created with the wrong parent or none — producing orphan/root spans.
+    ref: "concepts.md#in-process-context-propagation"
+
+  - id: distributed-tracing-concepts-and-context-propagation-015
+    difficulty: advanced
+    tags: [in-process, reactive, mitigation]
+    question: |
+      Which approach correctly preserves trace context when submitting a task to
+      an executor that will run on another thread?
+    options:
+      - "Rely on the JVM to copy all thread-locals automatically to worker threads"
+      - "Store the span in a plain static field before submitting"
+      - "Wrap the task with a context-propagating helper (e.g. Context.wrap(Runnable) or a ContextExecutorService)"
+      - "Set the traceparent as a system property"
+    answer: 2
+    explanation: |
+      OTel and Micrometer provide context-propagating wrappers
+      (Context.wrap(Runnable), ContextExecutorService, Reactor context
+      propagation, Micrometer ContextSnapshot) that capture the current context
+      and restore it on the executing thread. The JVM does not copy thread-locals
+      automatically.
+    ref: "concepts.md#in-process-context-propagation"
+
+  - id: distributed-tracing-concepts-and-context-propagation-016
+    difficulty: intermediate
+    tags: [cross-process, inject-extract, propagator]
+    question: |
+      In OpenTelemetry's TextMapPropagator model, what do inject and extract do?
+    options:
+      - "inject writes SpanContext into outgoing carrier headers; extract reads it from incoming headers into a Context"
+      - "inject creates a new trace; extract deletes the old one"
+      - "inject samples the trace; extract exports it"
+      - "Both operate only on in-process thread-locals, never on headers"
+    answer: 0
+    explanation: |
+      inject (client side) serializes the SpanContext into the carrier (HTTP/gRPC
+      headers or message metadata). extract (server side) reads those headers back
+      into a Context so the incoming span becomes a child of the caller's span.
+    ref: "concepts.md#cross-process-propagation-via-headers"
+
+  - id: distributed-tracing-concepts-and-context-propagation-017
+    difficulty: intermediate
+    tags: [cross-process, span-kind]
+    question: |
+      Across a single HTTP hop between two instrumented services, how many spans
+      are typically created and of what kind?
+    options:
+      - "A CLIENT span on the caller (egress) and a SERVER span on the callee (ingress)"
+      - "One INTERNAL span shared by both services"
+      - "Only a SERVER span on the callee; the caller creates none"
+      - "Two root spans in two separate traces"
+    answer: 0
+    explanation: |
+      Each hop usually produces a CLIENT span on the calling side and a matching
+      SERVER span on the callee, both in the same trace, with the server span a
+      child of the client span. This is how the boundary is represented.
+    ref: "concepts.md#cross-process-propagation-via-headers"
+
+  - id: distributed-tracing-concepts-and-context-propagation-018
+    difficulty: intermediate
+    tags: [cross-process, stitching]
+    question: |
+      What does the callee's incoming span inherit from the caller so that the
+      trace stays connected?
+    options:
+      - "A brand-new random trace_id"
+      - "Nothing; each service generates independent traces"
+      - "The caller's attributes and events"
+      - "The same trace_id and the sampled flag, with the caller's span as parent"
+    answer: 3
+    explanation: |
+      The callee's server span uses the same trace_id, records the caller's
+      span_id as its parent, and honors the propagated sampled flag. Sharing the
+      trace_id is exactly what stitches the trace across the hop.
+    ref: "concepts.md#cross-process-propagation-via-headers"
+
+  - id: distributed-tracing-concepts-and-context-propagation-019
+    difficulty: intermediate
+    tags: [cross-process, broken-trace]
+    question: |
+      A request passes through a proxy that strips unknown headers before
+      reaching service B. What do you observe in your tracing backend?
+    options:
+      - "One complete trace as normal"
+      - "Service B's spans get merged into an unrelated trace"
+      - "The trace breaks at the proxy; B starts a new trace, so you see two disconnected traces"
+      - "All spans are dropped and nothing appears"
+    answer: 2
+    explanation: |
+      If propagation headers are stripped, B cannot extract the caller's
+      SpanContext, so it starts a new root trace. You end up with two
+      disconnected traces instead of one — a classic broken-propagation symptom.
+    ref: "concepts.md#cross-process-propagation-via-headers"
+
+  - id: distributed-tracing-concepts-and-context-propagation-020
+    difficulty: intermediate
+    tags: [w3c, traceparent, format]
+    question: |
+      Given `traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`,
+      what are the four fields in order?
+    options:
+      - "trace-id, span-id, version, flags"
+      - "version, trace-id, parent-id (span-id), trace-flags"
+      - "flags, version, trace-id, span-id"
+      - "version, span-id, trace-id, checksum"
+    answer: 1
+    explanation: |
+      The traceparent format is version-trace_id-parent_id-trace_flags, all
+      lowercase hex. Here 00 is the version, the 32-hex value is the trace-id,
+      the 16-hex value is the parent (caller's span) id, and 01 is the flags.
+    ref: "concepts.md#w3c-trace-context-traceparent-and-tracestate"
+
+  - id: distributed-tracing-concepts-and-context-propagation-021
+    difficulty: intermediate
+    tags: [w3c, sampled-flag]
+    question: |
+      In a W3C traceparent, the trace-flags field is `01`. What does that
+      indicate?
+    options:
+      - "The trace has exactly 1 span"
+      - "The request failed with error code 1"
+      - "The traceparent version is 1"
+      - "Bit 0 (the sampled flag) is set — the caller recorded/sampled this trace"
+    answer: 3
+    explanation: |
+      trace-flags is an 8-bit field; only bit 0 (least-significant) is defined
+      today: the sampled flag. 01 means sampled (recorded), 00 means not sampled.
+      It is not a version or span count.
+    ref: "concepts.md#w3c-trace-context-traceparent-and-tracestate"
+
+  - id: distributed-tracing-concepts-and-context-propagation-022
+    difficulty: advanced
+    tags: [w3c, sizes]
+    question: |
+      In W3C Trace Context, what are the sizes of the trace-id and the parent-id
+      (span-id)?
+    options:
+      - "trace-id 128-bit (32 hex), span-id 64-bit (16 hex)"
+      - "trace-id 64-bit (16 hex), span-id 128-bit (32 hex)"
+      - "both 128-bit (32 hex)"
+      - "both 64-bit (16 hex)"
+    answer: 0
+    explanation: |
+      trace-id is a 16-byte / 128-bit value (32 hex chars) and parent-id/span-id
+      is an 8-byte / 64-bit value (16 hex chars). All-zero values for either are
+      invalid and must cause the header to be ignored.
+    ref: "concepts.md#w3c-trace-context-traceparent-and-tracestate"
+
+  - id: distributed-tracing-concepts-and-context-propagation-023
+    difficulty: advanced
+    tags: [w3c, invalid]
+    question: |
+      Per the W3C Trace Context spec, when must a vendor ignore an incoming
+      traceparent header?
+    options:
+      - "When the sampled flag is 0"
+      - "When the tracestate header is absent"
+      - "When the trace-id or parent-id is all zeros, or contains non-lowercase-hex characters"
+      - "Whenever the version is 00"
+    answer: 2
+    explanation: |
+      An all-zeros trace-id or parent-id is invalid, as are disallowed
+      (non-lowercase-hex) characters, so the traceparent must be ignored. A
+      sampled flag of 0 is perfectly valid, version 00 is the current version,
+      and tracestate is optional.
+    ref: "concepts.md#w3c-trace-context-traceparent-and-tracestate"
+
+  - id: distributed-tracing-concepts-and-context-propagation-024
+    difficulty: advanced
+    tags: [w3c, tracestate, rules]
+    question: |
+      Which statement about the W3C tracestate header is correct?
+    options:
+      - "It may contain an unlimited number of entries"
+      - "It holds up to 32 vendor key=value list-members, and a vendor that updates its entry moves it to the left-most position"
+      - "It replaces traceparent as the primary identity header"
+      - "It must be identical on every hop and can never change"
+    answer: 1
+    explanation: |
+      tracestate is a comma-separated list of up to 32 key=value members carrying
+      per-vendor state. A vendor updating its entry prepends it (moves it
+      left-most) while preserving the order of others. traceparent, not
+      tracestate, carries the standard identity.
+    ref: "concepts.md#w3c-trace-context-traceparent-and-tracestate"
+
+  - id: distributed-tracing-concepts-and-context-propagation-025
+    difficulty: intermediate
+    tags: [w3c, tracestate, purpose]
+    question: |
+      A hop drops the tracestate header but keeps a valid traceparent. What is
+      the effect on the trace?
+    options:
+      - "The trace still stitches (traceparent carries identity); you only lose vendor-specific state/hints"
+      - "The trace fractures into two disconnected traces"
+      - "All downstream sampling is forced to 100%"
+      - "The trace_id changes for all downstream spans"
+    answer: 0
+    explanation: |
+      traceparent carries the shared identity (trace_id, parent span_id, sampled
+      flag), so the trace still connects. tracestate only carries optional
+      per-vendor key/values, so dropping it merely loses those hints, not the
+      trace linkage.
+    ref: "concepts.md#w3c-trace-context-traceparent-and-tracestate"
+
+  - id: distributed-tracing-concepts-and-context-propagation-026
+    difficulty: beginner
+    tags: [otel, default-propagator]
+    question: |
+      What is the default cross-process propagation format used by OpenTelemetry?
+    options:
+      - "B3 (Zipkin) multi-header"
+      - "A proprietary binary protocol"
+      - "Jaeger uber-trace-id"
+      - "W3C Trace Context (traceparent/tracestate)"
+    answer: 3
+    explanation: |
+      OpenTelemetry defaults to the vendor-neutral W3C Trace Context propagator
+      (traceparent + tracestate). B3 and Jaeger formats are available but must be
+      configured explicitly.
+    ref: "concepts.md#w3c-trace-context-traceparent-and-tracestate"
+
+  - id: distributed-tracing-concepts-and-context-propagation-027
+    difficulty: intermediate
+    tags: [b3, headers]
+    question: |
+      In the B3 multi-header format, which header carries the sampling decision?
+    options:
+      - "X-B3-TraceId"
+      - "X-B3-ParentSpanId"
+      - "X-B3-Sampled (1 = accept, 0 = deny, absent = defer)"
+      - "X-B3-Version"
+    answer: 2
+    explanation: |
+      X-B3-Sampled carries the decision: 1 accept, 0 deny, absent means defer to
+      the receiver. X-B3-Flags:1 signals debug (which implies accept). TraceId and
+      ParentSpanId carry identity, not sampling.
+    ref: "concepts.md#b3-zipkin-headers-and-format-differences"
+
+  - id: distributed-tracing-concepts-and-context-propagation-028
+    difficulty: advanced
+    tags: [b3, w3c, differences]
+    question: |
+      Which is a real difference between B3 and W3C Trace Context?
+    options:
+      - "W3C supports a debug flag but B3 does not"
+      - "B3 trace-ids can be 64-bit or 128-bit, whereas W3C trace-ids are always 128-bit"
+      - "B3 requires the tracestate header; W3C forbids it"
+      - "W3C uses multiple headers while B3 always uses a single header"
+    answer: 1
+    explanation: |
+      B3 permits 64-bit or 128-bit trace-ids; W3C trace-ids are always 128-bit.
+      B3 (not W3C) has a debug flag (X-B3-Flags:1 / 'd'). tracestate is a W3C
+      concept, and both B3 and W3C offer single- and multi-header/single-header
+      variants respectively.
+    ref: "concepts.md#b3-zipkin-headers-and-format-differences"
+
+  - id: distributed-tracing-concepts-and-context-propagation-029
+    difficulty: intermediate
+    tags: [b3, single-header]
+    question: |
+      The single B3 header value `b3: 80f198ee56343ba864fe8b2a57d3eff7-e457b5a2e4d86bd1-1-05e3ac9a4f6e3b90`
+      encodes which fields in order?
+    options:
+      - "SpanId-TraceId-ParentSpanId-Sampling"
+      - "Version-TraceId-SpanId-Sampling"
+      - "TraceId-ParentSpanId-SpanId-Flags"
+      - "TraceId-SpanId-SamplingState-ParentSpanId"
+    answer: 3
+    explanation: |
+      The single b3 header is {TraceId}-{SpanId}-{SamplingState}-{ParentSpanId},
+      where the last two fields are optional. Sampling state chars are 1 accept,
+      0 deny, d debug, absent defer.
+    ref: "concepts.md#b3-zipkin-headers-and-format-differences"
+
+  - id: distributed-tracing-concepts-and-context-propagation-030
+    difficulty: advanced
+    tags: [b3, w3c, interop, istio]
+    question: |
+      Your OTel-instrumented apps sit behind Istio, which emits B3, and traces
+      break at the mesh boundary. What is the most appropriate fix?
+    options:
+      - "Register a composite propagator that injects and extracts both W3C and B3"
+      - "Disable tracing on the apps entirely"
+      - "Force all sampling to 100% to compensate"
+      - "Rename every span to include the trace_id"
+    answer: 0
+    explanation: |
+      A mixed fleet (W3C apps + B3 mesh) needs a composite/multi propagator that
+      handles both formats on inject and extract, so context survives the mesh
+      hop. This is a common requirement behind Istio, which historically uses B3.
+    ref: "concepts.md#b3-zipkin-headers-and-format-differences"
+
+  - id: distributed-tracing-concepts-and-context-propagation-031
+    difficulty: intermediate
+    tags: [baggage, definition]
+    question: |
+      What is "baggage" in the context of distributed tracing?
+    options:
+      - "The buffered spans a collector holds during tail sampling"
+      - "The exported span attributes stored in the backend"
+      - "Arbitrary application key/value pairs propagated with the request to all downstream services"
+      - "The debug flag that forces a trace to be kept"
+    answer: 2
+    explanation: |
+      Baggage is a separate propagation mechanism carrying arbitrary
+      application-level key/value pairs (e.g. tenant.id, user.tier) downstream to
+      every service via the W3C baggage header. It is distinct from span
+      attributes and tracestate.
+    ref: "concepts.md#baggage-propagating-application-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-032
+    difficulty: advanced
+    tags: [baggage, attributes, gotcha]
+    question: |
+      You add `tenant.id` to baggage and expect to filter traces by it in your
+      backend, but it does not appear on any span. Why?
+    options:
+      - "Baggage is encrypted and cannot be read"
+      - "Baggage propagates downstream but is not automatically added to spans; you must explicitly copy it onto a span as an attribute"
+      - "Baggage overwrites the trace_id, so filtering fails"
+      - "Baggage only works with B3, not W3C"
+    answer: 1
+    explanation: |
+      Baggage travels with the request but is not automatically attached to spans
+      or exported. To query/index on a baggage value you must explicitly read it
+      and set it as a span attribute in your instrumentation.
+    ref: "concepts.md#baggage-propagating-application-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-033
+    difficulty: advanced
+    tags: [baggage, security]
+    question: |
+      Which is a legitimate concern when using baggage?
+    options:
+      - "It travels on every hop, so it adds header bytes per request and can leak PII or be trusted unsafely"
+      - "It cannot cross process boundaries"
+      - "It permanently increases the trace_id length"
+      - "It disables sampling for the whole trace"
+    answer: 0
+    explanation: |
+      Baggage rides on every request, costing header bytes on each hop, and can
+      leak sensitive data or elevate trust if a downstream acts on an unvalidated
+      baggage value. Keep it small, exclude secrets/PII, and never make auth
+      decisions on raw baggage.
+    ref: "concepts.md#baggage-propagating-application-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-034
+    difficulty: intermediate
+    tags: [baggage, tracestate, distinction]
+    question: |
+      How does baggage differ from tracestate?
+    options:
+      - "They are the same header with different names"
+      - "Baggage is only used in-process; tracestate only cross-process"
+      - "tracestate carries app data; baggage carries vendor data"
+      - "Baggage carries your application's key/values; tracestate is reserved for tracing-vendor state and is limited to 32 entries"
+    answer: 3
+    explanation: |
+      tracestate is reserved for tracing-system vendor state (≤32 members) and
+      travels with traceparent. Baggage is a distinct header for your
+      application's arbitrary key/value data propagated to downstream services.
+    ref: "concepts.md#baggage-propagating-application-context"
+
+  - id: distributed-tracing-concepts-and-context-propagation-035
+    difficulty: beginner
+    tags: [instrumentation, auto]
+    question: |
+      What does automatic (agent/library) instrumentation give you with no code
+      changes?
+    options:
+      - "Business-logic spans like processOrder with domain attributes"
+      - "Tail-based sampling at the collector"
+      - "Spans and context inject/extract at well-known framework boundaries (HTTP, gRPC, JDBC, Kafka)"
+      - "Clock-skew correction across hosts"
+    answer: 2
+    explanation: |
+      Auto-instrumentation (e.g. the OTel Java agent) hooks common frameworks to
+      create server/client spans and inject/extract context at boundaries with
+      zero code changes. Domain-specific business spans require manual
+      instrumentation.
+    ref: "concepts.md#instrumentation-points-where-spans-are-created"
+
+  - id: distributed-tracing-concepts-and-context-propagation-036
+    difficulty: intermediate
+    tags: [instrumentation, manual-vs-auto]
+    question: |
+      Why do teams typically combine automatic and manual instrumentation?
+    options:
+      - "Manual instrumentation is required to send data over the network"
+      - "Auto gives breadth (every boundary, no code); manual gives depth (business operations that explain why), and both share the same Context so spans nest correctly"
+      - "Automatic instrumentation cannot create client spans"
+      - "Manual instrumentation replaces the need for a collector"
+    answer: 1
+    explanation: |
+      Auto-instrumentation covers all the boundaries for free; manual spans add
+      the business-meaningful operations the agent cannot see. Because both use
+      the same Context, manual spans nest correctly under the auto-generated
+      spans.
+    ref: "concepts.md#instrumentation-points-where-spans-are-created"
+
+  - id: distributed-tracing-concepts-and-context-propagation-037
+    difficulty: intermediate
+    tags: [instrumentation, boundaries]
+    question: |
+      Where are the most important instrumentation points for producing a useful
+      end-to-end trace?
+    options:
+      - "Only inside pure CPU-bound functions"
+      - "Only in the logging framework"
+      - "Only at application startup"
+      - "At the boundaries where context must cross: inbound handlers, outbound clients/RPC/DB, and message produce/consume"
+    answer: 3
+    explanation: |
+      The natural points are the boundaries: inbound request handlers (extract +
+      server span), outbound client/RPC/DB calls (client span + inject), and
+      message produce/consume. Getting these right is most of a useful trace.
+    ref: "concepts.md#instrumentation-points-where-spans-are-created"
+
+  - id: distributed-tracing-concepts-and-context-propagation-038
+    difficulty: intermediate
+    tags: [sampling, head]
+    question: |
+      What characterizes head-based sampling?
+    options:
+      - "The decision is made after the trace completes, based on errors/latency"
+      - "Every span is always kept regardless of load"
+      - "The decision is made at the root when the trace starts and propagated downstream via the sampled flag"
+      - "It requires buffering all spans at the collector"
+    answer: 2
+    explanation: |
+      Head-based sampling decides at trace start (the root) and encodes the
+      choice in the sampled flag, which propagates downstream so every service
+      makes the same decision — cheap and consistent, but blind to the outcome.
+    ref: "concepts.md#sampling-and-how-the-decision-propagates"
+
+  - id: distributed-tracing-concepts-and-context-propagation-039
+    difficulty: intermediate
+    tags: [sampling, tail]
+    question: |
+      You want to keep every trace that errored or exceeded 2 s of latency, but
+      only 1% of the fast successful ones. Which sampling strategy fits?
+    options:
+      - "Head-based sampling at a fixed 1%"
+      - "No sampling — keep everything"
+      - "Tail-based sampling, which buffers a trace until completion and decides based on the whole trace"
+      - "Randomly dropping spans at each service independently"
+    answer: 2
+    explanation: |
+      Only tail-based sampling can decide after the trace completes, so it can
+      keep the errored/slow traces and drop most fast successes. Head sampling
+      decides before the outcome is known and cannot preferentially keep the
+      interesting traces.
+    ref: "concepts.md#sampling-and-how-the-decision-propagates"
+
+  - id: distributed-tracing-concepts-and-context-propagation-040
+    difficulty: advanced
+    tags: [sampling, tail, collector]
+    question: |
+      What operational requirement does tail-based sampling impose that
+      head-based does not?
+    options:
+      - "It requires disabling the sampled flag in headers"
+      - "It requires that all spans of a given trace reach the same collector instance (trace-id-aware routing) and enough memory to buffer them"
+      - "It requires 128-bit trace-ids specifically"
+      - "It requires each service to make an independent random decision"
+    answer: 1
+    explanation: |
+      Tail sampling buffers all of a trace's spans and decides at completion, so
+      every span of a trace must land on the same collector (trace-id-aware load
+      balancing) and the collector needs memory to hold in-flight traces —
+      overhead head sampling avoids.
+    ref: "concepts.md#sampling-and-how-the-decision-propagates"
+
+  - id: distributed-tracing-concepts-and-context-propagation-041
+    difficulty: advanced
+    tags: [sampling, consistency, otel]
+    question: |
+      What does OTel's ParentBased(root=TraceIdRatioBased(0.05)) sampler do?
+    options:
+      - "Respects the parent's sampling decision if there is one; otherwise samples at 5% at the root"
+      - "Samples 5% of spans independently at every service, ignoring parents"
+      - "Keeps 5% of errored traces only"
+      - "Buffers traces at the collector and keeps 5% of slow ones"
+    answer: 0
+    explanation: |
+      ParentBased honors the incoming parent's decision (keeping the trace
+      consistent), and only when there is no parent (the root) applies the
+      TraceIdRatioBased 5% ratio. This is the standard way to make head sampling
+      consistent across services.
+    ref: "concepts.md#sampling-and-how-the-decision-propagates"
+
+  - id: distributed-tracing-concepts-and-context-propagation-042
+    difficulty: advanced
+    tags: [sampling, misconception]
+    question: |
+      Which statement about sampling and context propagation is correct?
+    options:
+      - "When a trace is not sampled, context stops propagating downstream"
+      - "Unsampled traces get a different trace_id at each hop"
+      - "Sampling prevents spans from ever being created"
+      - "The sampled flag governs whether spans are recorded/exported, but context still propagates so downstream services can make consistent decisions"
+    answer: 3
+    explanation: |
+      Context (including the sampled flag) propagates regardless of the decision;
+      the flag governs whether spans are recorded and exported, not whether
+      context travels. Propagating the flag is what keeps the keep/drop decision
+      consistent across the whole trace.
+    ref: "concepts.md#sampling-and-how-the-decision-propagates"
+
+  - id: distributed-tracing-concepts-and-context-propagation-043
+    difficulty: intermediate
+    tags: [clock-skew, gotcha]
+    question: |
+      In a trace waterfall, a child (server) span appears to start slightly
+      before its parent (client) span sent the request. What is the most likely
+      explanation?
+    options:
+      - "The child caused the parent (reverse causality)"
+      - "The trace_id was corrupted"
+      - "Clock skew between the two hosts' wall clocks"
+      - "The sampled flag was set to 0"
+    answer: 2
+    explanation: |
+      Span timestamps come from each host's wall clock, and clocks disagree by a
+      few ms even with NTP. That skew can make a child appear to start before its
+      parent — a display artifact, not real reverse causality.
+    ref: "concepts.md#clock-skew-across-spans"
+
+  - id: distributed-tracing-concepts-and-context-propagation-044
+    difficulty: advanced
+    tags: [clock-skew, adjustment]
+    question: |
+      How do backends like Jaeger mitigate clock skew when rendering a trace?
+    options:
+      - "They discard any span whose timestamp looks off"
+      - "They apply a skew-adjustment heuristic using the causal constraint that a server span must be contained within its client span"
+      - "They force all hosts to use the same clock at query time"
+      - "They ignore parent-child relationships and sort purely by timestamp"
+    answer: 1
+    explanation: |
+      Backends use the causal constraint (a server span must fall within its
+      client span) to detect and correct skew, shifting child timestamps so the
+      waterfall respects causality. The parent-child structure is authoritative
+      even when raw clocks disagree.
+    ref: "concepts.md#clock-skew-across-spans"
+
+  - id: distributed-tracing-concepts-and-context-propagation-045
+    difficulty: advanced
+    tags: [clock-skew, latency-math, gotcha]
+    question: |
+      Why is it unreliable to compute one-way network latency as
+      (server_span.start - client_span.start) across two hosts?
+    options:
+      - "Because durations are always negative"
+      - "Because the sampled flag zeroes out the timestamps"
+      - "Because trace_ids differ between the spans"
+      - "Because clock skew between hosts makes that difference (and even its sign) untrustworthy"
+    answer: 3
+    explanation: |
+      The two timestamps come from different, imperfectly-synchronized clocks, so
+      their difference can be wrong or even negative. Durations measured within a
+      single process are accurate (monotonic clock), but cross-host absolute times
+      are only approximate; trust the parent-child structure for ordering.
+    ref: "concepts.md#clock-skew-across-spans"
+
+  - id: distributed-tracing-concepts-and-context-propagation-046
+    difficulty: intermediate
+    tags: [messaging, kafka, propagation]
+    question: |
+      How is trace context typically propagated through a Kafka pipeline?
+    options:
+      - "The producer injects the SpanContext into the message's record headers; the consumer extracts it"
+      - "Via HTTP traceparent headers on the broker's admin API"
+      - "Kafka automatically shares thread-locals between producer and consumer JVMs"
+      - "Context cannot be propagated through message brokers"
+    answer: 0
+    explanation: |
+      For messaging, the same inject/extract applies but the carrier is the
+      message metadata: the producer writes the SpanContext into Kafka record
+      headers (or SQS/SNS attributes, AMQP headers) and the consumer extracts it.
+    ref: "concepts.md#async-and-messaging-context-propagation"
+
+  - id: distributed-tracing-concepts-and-context-propagation-047
+    difficulty: advanced
+    tags: [messaging, links, semantics]
+    question: |
+      Why do OpenTelemetry messaging conventions often model the consumer span as
+      linked to (rather than a child of) the producer span?
+    options:
+      - "Because the consumer runs on the same thread as the producer"
+      - "Because links are cheaper to store than parent-child references"
+      - "Because produce and consume are decoupled in time and can be many-to-one (batch), so a link preserves causality without forcing a blocked parent-child or one giant trace"
+      - "Because the trace_id must change at the broker"
+    answer: 2
+    explanation: |
+      The producer does not block on the consumer, delivery can be delayed and
+      batched, and one consume can cover many produces. Links capture that
+      causality while keeping each producer's trace intact, avoiding merging
+      unrelated requests into one trace.
+    ref: "concepts.md#async-and-messaging-context-propagation"
+
+  - id: distributed-tracing-concepts-and-context-propagation-048
+    difficulty: intermediate
+    tags: [messaging, queue-latency, waterfall]
+    question: |
+      A trace that involves a queue shows a multi-minute "gap" between the
+      producer span and the consumer span. What does this gap most likely
+      represent?
+    options:
+      - "A bug in the tracing library"
+      - "Time the message spent waiting in the queue before being consumed"
+      - "Clock skew of several minutes"
+      - "The sampled flag being toggled off and on"
+    answer: 1
+    explanation: |
+      Because the producer does not block on the consumer, a trace can legitimately
+      span minutes; the long gap is queue wait time. That is itself the insight —
+      it distinguishes queue latency from processing latency.
+    ref: "concepts.md#async-and-messaging-context-propagation"
+
+  - id: distributed-tracing-concepts-and-context-propagation-049
+    difficulty: intermediate
+    tags: [correlation, exemplars, three-pillars]
+    question: |
+      What is the join key that lets you pivot between metrics (exemplars), logs,
+      and traces for the same request?
+    options:
+      - "The host IP address"
+      - "The Prometheus scrape timestamp"
+      - "The span name"
+      - "The trace_id (and span_id)"
+    answer: 3
+    explanation: |
+      The trace_id (with span_id) unifies the pillars: it is attached to log
+      lines, carried as exemplars on metrics, and identifies the trace — enabling
+      the alert → exemplar → trace → logs diagnosis flow.
+    ref: "concepts.md#correlation-with-logs-and-metrics"
+
+  - id: distributed-tracing-concepts-and-context-propagation-050
+    difficulty: advanced
+    tags: [correlation, exemplars, workflow]
+    question: |
+      What does a Prometheus/OpenMetrics exemplar attached to a latency histogram
+      let you do?
+    options:
+      - "Jump from a specific histogram observation (e.g. a slow bucket) directly to an example trace_id for that request"
+      - "Increase the histogram's bucket count automatically"
+      - "Force tail-based sampling on the metric"
+      - "Replace the need for structured logs"
+    answer: 0
+    explanation: |
+      An exemplar attaches a trace_id to specific histogram observations, so from
+      a slow latency bucket in Grafana you can click straight into a concrete
+      example trace — the "p99 is bad → here is a p99 request's trace" workflow.
+    ref: "concepts.md#correlation-with-logs-and-metrics"
+
+  - id: distributed-tracing-concepts-and-context-propagation-051
+    difficulty: beginner
+    tags: [dependency-map, aggregation]
+    question: |
+      Besides latency breakdown, what do you get by aggregating many traces
+      across a system?
+    options:
+      - "A guaranteed reduction in storage costs"
+      - "Automatic clock synchronization"
+      - "A service dependency map showing who actually calls whom at runtime"
+      - "The exact number of physical servers in use"
+    answer: 2
+    explanation: |
+      Aggregating traces reveals the real runtime call graph — the actual service
+      dependencies and call frequencies — which often differs from the
+      architecture diagram. That dependency mapping is a key tracing benefit.
+    ref: "concepts.md#why-distributed-tracing-exists"
+
+  - id: distributed-tracing-concepts-and-context-propagation-052
+    difficulty: intermediate
+    tags: [span-events, model]
+    question: |
+      What are span "events" (a.k.a. span logs)?
+    options:
+      - "Separate traces triggered by the span"
+      - "Timestamped annotations scoped to a span, such as a logged exception at a point in time"
+      - "The parent references of a span"
+      - "The propagated baggage entries"
+    answer: 1
+    explanation: |
+      Span events are timestamped annotations attached to a span (e.g.
+      recording an exception or a milestone at a specific moment). They are logs
+      scoped to the span, distinct from attributes (which describe the whole span)
+      and links (which reference other spans).
+    ref: "concepts.md#trace-span-and-span-context"

@@ -1,0 +1,850 @@
+topic: "Prometheus Architecture & Scraping"
+domain: observability
+topic_slug: prometheus-architecture-and-scraping
+version: 1
+questions:
+  - id: prometheus-architecture-and-scraping-001
+    difficulty: beginner
+    tags: [pull, scrape-model]
+    question: |
+      In its default collection model, how does a Prometheus server obtain metrics from a
+      service?
+    options:
+      - "The service pushes samples to Prometheus over UDP whenever a metric changes"
+      - "The service writes metrics into a shared database that Prometheus reads"
+      - "Prometheus subscribes to a Kafka topic that the service publishes metrics to"
+      - "Prometheus periodically sends an HTTP GET to the target's /metrics endpoint and parses the response"
+    answer: 3
+    explanation: |
+      Prometheus is pull-based: on each scrape interval it issues an HTTP GET to the
+      target's /metrics endpoint, parses the exposition-format text, and ingests the
+      samples. Targets are passive and simply expose current values.
+    ref: "concepts.md#the-pull-scrape-model-and-why-pull-over-push"
+
+  - id: prometheus-architecture-and-scraping-002
+    difficulty: beginner
+    tags: [pull, up-metric, liveness]
+    question: |
+      A key advantage of Prometheus's pull model is a built-in liveness signal. What is it?
+    options:
+      - "A heartbeat message the target must send every second"
+      - "An ICMP ping Prometheus runs against each host"
+      - "The `up` metric, set to 1 when a scrape succeeds and 0 when it fails, per target"
+      - "A TCP keepalive on a persistent connection to each target"
+    answer: 2
+    explanation: |
+      Because Prometheus initiates every scrape, it always knows whether a target
+      responded. It records a synthetic `up` series per target each interval (1 = success,
+      0 = failure), so you can alert directly on `up == 0`.
+    ref: "concepts.md#the-pull-scrape-model-and-why-pull-over-push"
+
+  - id: prometheus-architecture-and-scraping-003
+    difficulty: intermediate
+    tags: [pull, push, trade-offs]
+    question: |
+      Which scenario is the WEAKEST fit for Prometheus's pull model and typically needs a
+      workaround?
+    options:
+      - "A long-running HTTP API with a stable /metrics endpoint"
+      - "A fleet of node_exporters on reachable hosts"
+      - "A short-lived cron/batch job that exits within seconds"
+      - "A Kubernetes Deployment of web pods"
+    answer: 2
+    explanation: |
+      Short-lived batch/cron jobs may start and finish between scrapes, so Prometheus never
+      observes them. That's the canonical case for the Pushgateway. Long-lived reachable
+      services are the ideal pull case.
+    ref: "concepts.md#the-pull-scrape-model-and-why-pull-over-push"
+
+  - id: prometheus-architecture-and-scraping-004
+    difficulty: intermediate
+    tags: [pull, push, reachability]
+    question: |
+      Which is a genuine advantage of PUSH-based systems over Prometheus's pull model?
+    options:
+      - "Push gives automatic per-target liveness detection"
+      - "Push guarantees monotonic counters"
+      - "Push lets the server centrally control the scrape interval"
+      - "Push works more easily across hard network boundaries (NAT/firewalls) where the collector can't reach the target"
+    answer: 3
+    explanation: |
+      Push shines when the collector can't reach the target (NAT, firewalls, ephemeral
+      serverless endpoints), since the target initiates the connection. Liveness and central
+      rate control are advantages of PULL, not push.
+    ref: "concepts.md#the-pull-scrape-model-and-why-pull-over-push"
+
+  - id: prometheus-architecture-and-scraping-005
+    difficulty: beginner
+    tags: [exposition-format, metrics-endpoint]
+    question: |
+      What content does a target's /metrics endpoint return by default?
+    options:
+      - "A binary protobuf blob only readable by Prometheus"
+      - "A JSON document with nested metric objects"
+      - "Plain-text lines in the Prometheus exposition format: name{labels} value"
+      - "An HTML page rendered for humans"
+    answer: 2
+    explanation: |
+      The default exposition format is plain text (text/plain; version=0.0.4). Each line is
+      `metric_name{labels} value [timestamp]`, with `# HELP` and `# TYPE` comment lines
+      describing each metric.
+    ref: "concepts.md#the-metrics-endpoint-and-the-exposition-format"
+
+  - id: prometheus-architecture-and-scraping-006
+    difficulty: intermediate
+    tags: [histogram, exposition-format]
+    question: |
+      When a classic Prometheus histogram named `http_request_duration_seconds` is exposed,
+      which series are produced?
+    options:
+      - "A single gauge series with the current p99 value"
+      - "One series per observed value"
+      - "Cumulative `_bucket` series (one per `le`, including `le=+Inf`), plus `_sum` and `_count`"
+      - "Only `_sum` and `_count`; buckets are computed at query time"
+    answer: 2
+    explanation: |
+      A classic histogram exposes cumulative `_bucket` series (one for each `le` boundary,
+      with a mandatory `le="+Inf"`) plus `_sum` and `_count`. The cumulative buckets are
+      what let histogram_quantile() interpolate.
+    ref: "concepts.md#the-metrics-endpoint-and-the-exposition-format"
+
+  - id: prometheus-architecture-and-scraping-007
+    difficulty: intermediate
+    tags: [counter, gauge, correctness]
+    question: |
+      An engineer exposes a value that can go both up and down (e.g. current queue depth) as
+      a `counter`. Why is this wrong?
+    options:
+      - "Counters cannot have labels"
+      - "Counters are stored as strings and can't hold numbers"
+      - "Counters are not scraped by Prometheus"
+      - "Counters are meant to be monotonically increasing; rate()/increase() will misread decreases as counter resets"
+    answer: 3
+    explanation: |
+      A counter must only increase (resetting to 0 on restart). rate()/increase() treat any
+      decrease as a reset and correct for it, so a value that legitimately drops will be
+      badly mismeasured. A fluctuating value should be a gauge.
+    ref: "concepts.md#the-metrics-endpoint-and-the-exposition-format"
+
+  - id: prometheus-architecture-and-scraping-008
+    difficulty: advanced
+    tags: [native-histogram, storage-efficiency]
+    question: |
+      What distinguishes native (exponential) histograms from classic Prometheus histograms?
+    options:
+      - "Native histograms store one series with dynamically-sized exponential buckets, avoiding pre-chosen boundaries and using far less storage"
+      - "Native histograms are pushed instead of scraped"
+      - "Native histograms drop the `_sum` and `_count` series"
+      - "Native histograms can only represent integer values"
+    answer: 0
+    explanation: |
+      Classic histograms need many fixed `le` bucket series chosen up front. Native
+      (exponential) histograms are a single series with automatically-sized exponential
+      buckets, dramatically more storage-efficient and with no need to pre-select
+      boundaries.
+    ref: "concepts.md#the-metrics-endpoint-and-the-exposition-format"
+
+  - id: prometheus-architecture-and-scraping-009
+    difficulty: intermediate
+    tags: [cardinality, time-series]
+    question: |
+      In Prometheus's data model, what constitutes a single, distinct time series?
+    options:
+      - "Each metric name, regardless of labels"
+      - "Each target host"
+      - "Each unique combination of metric name plus its full set of label key/value pairs"
+      - "Each scrape_config job"
+    answer: 2
+    explanation: |
+      A time series is identified by the metric name together with the exact set of label
+      key/value pairs. Every distinct label-value combination is a separate series — which
+      is why adding high-cardinality labels multiplies series count.
+    ref: "concepts.md#the-metrics-endpoint-and-the-exposition-format"
+
+  - id: prometheus-architecture-and-scraping-010
+    difficulty: intermediate
+    tags: [openmetrics, exemplars]
+    question: |
+      Which statement about OpenMetrics relative to the Prometheus text format is correct?
+    options:
+      - "OpenMetrics is an incompatible binary format Prometheus cannot read"
+      - "OpenMetrics removes support for histograms"
+      - "OpenMetrics replaces labels with positional fields"
+      - "OpenMetrics is the standardized descendant of the Prometheus format, adding things like a trailing `# EOF` and native exemplar support"
+    answer: 3
+    explanation: |
+      OpenMetrics is the standardized (IETF) evolution of the Prometheus exposition format,
+      adding features like a trailing `# EOF`, `_created` timestamps, and first-class
+      exemplars. Prometheus can scrape both formats.
+    ref: "concepts.md#the-metrics-endpoint-and-the-exposition-format"
+
+  - id: prometheus-architecture-and-scraping-011
+    difficulty: beginner
+    tags: [labels, job, instance]
+    question: |
+      Which two labels does Prometheus automatically attach to every sample from a scraped
+      target?
+    options:
+      - "`region` and `zone`"
+      - "`service` and `pod`"
+      - "`job` and `instance`"
+      - "`app` and `version`"
+    answer: 2
+    explanation: |
+      Prometheus adds `job` (the configured job name) and `instance` (the host:port
+      scraped, derived from `__address__`) to every sample from a target, in addition to the
+      metric's own labels.
+    ref: "concepts.md#targets-jobs-and-instances"
+
+  - id: prometheus-architecture-and-scraping-012
+    difficulty: beginner
+    tags: [job, instance, terminology]
+    question: |
+      In Prometheus terminology, what is an "instance"?
+    options:
+      - "A single scrapable target endpoint, typically identified by its host:port"
+      - "A group of targets performing the same role"
+      - "One PromQL query execution"
+      - "A running copy of the Alertmanager"
+    answer: 0
+    explanation: |
+      An instance is a single scrapable target — the host:port endpoint. A job is the set
+      of instances/targets doing the same thing (mapped from a scrape_config).
+    ref: "concepts.md#targets-jobs-and-instances"
+
+  - id: prometheus-architecture-and-scraping-013
+    difficulty: intermediate
+    tags: [synthetic-metrics, scrape]
+    question: |
+      Besides `up`, which synthetic series does Prometheus generate for each scrape?
+    options:
+      - "`cpu_usage_seconds_total`"
+      - "`go_goroutines`"
+      - "`scrape_duration_seconds` and `scrape_samples_scraped`"
+      - "`process_resident_memory_bytes`"
+    answer: 2
+    explanation: |
+      Per scrape, Prometheus emits synthetic health/introspection series such as
+      `scrape_duration_seconds`, `scrape_samples_scraped`, and
+      `scrape_samples_post_metric_relabeling`, alongside `up`. The others come from
+      exporters/instrumentation, not the scrape machinery.
+    ref: "concepts.md#targets-jobs-and-instances"
+
+  - id: prometheus-architecture-and-scraping-014
+    difficulty: beginner
+    tags: [service-discovery, kubernetes]
+    question: |
+      Why use service discovery (e.g. kubernetes_sd_config) instead of static_configs?
+    options:
+      - "Static configs cannot use labels"
+      - "SD is the only way to attach the `job` label"
+      - "SD makes scrapes faster on the wire"
+      - "SD lets Prometheus learn targets from a dynamic source of truth and adapt as targets come and go, without editing static lists"
+    answer: 3
+    explanation: |
+      In dynamic environments, hard-coded target lists don't scale. Service discovery queries
+      an external source (Kubernetes API, Consul, cloud APIs, files) and keeps the target set
+      current automatically as instances appear and disappear.
+    ref: "concepts.md#service-discovery-kubernetes-consul-file_sd-ec2"
+
+  - id: prometheus-architecture-and-scraping-015
+    difficulty: intermediate
+    tags: [service-discovery, file_sd]
+    question: |
+      What is `file_sd_config` most useful for?
+    options:
+      - "Scraping targets listed in JSON/YAML files that any external tool can write, reloaded automatically on change"
+      - "Discovering targets only inside Kubernetes"
+      - "Storing metrics to disk instead of the TSDB"
+      - "Federating another Prometheus"
+    answer: 0
+    explanation: |
+      file_sd is the generic escape hatch: Prometheus watches JSON/YAML files listing
+      targets, and any script or config-management tool can generate them. It reloads on
+      change without a restart.
+    ref: "concepts.md#service-discovery-kubernetes-consul-file_sd-ec2"
+
+  - id: prometheus-architecture-and-scraping-016
+    difficulty: intermediate
+    tags: [service-discovery, meta-labels]
+    question: |
+      Service discovery attaches labels prefixed `__meta_*` to discovered targets. What are
+      they used for?
+    options:
+      - "They are stored permanently on every sample"
+      - "They are the raw input to relabel_configs, which decides which targets to keep and how to label them"
+      - "They set the retention period for the target"
+      - "They are exposed to the target during the scrape"
+    answer: 1
+    explanation: |
+      SD produces meta-labels like `__meta_kubernetes_pod_label_app`. These are inputs to
+      relabel_configs; unless copied to a real label they are dropped before storage. They
+      drive keep/drop and labeling decisions.
+    ref: "concepts.md#service-discovery-kubernetes-consul-file_sd-ec2"
+
+  - id: prometheus-architecture-and-scraping-017
+    difficulty: advanced
+    tags: [relabeling, phases]
+    question: |
+      What is the fundamental difference between `relabel_configs` and
+      `metric_relabel_configs`?
+    options:
+      - "There is no difference; they are aliases"
+      - "relabel_configs runs only at startup; metric_relabel_configs runs continuously"
+      - "relabel_configs runs before the scrape on the target's labels (and can drop the whole target); metric_relabel_configs runs after the scrape on each sample's labels (filtering what is stored)"
+      - "metric_relabel_configs can drop a target; relabel_configs cannot"
+    answer: 2
+    explanation: |
+      relabel_configs operates before scraping on target-level labels (and __meta_* / __address__),
+      and a keep/drop there means the target is never scraped. metric_relabel_configs operates
+      after scraping on each sample's labels and only affects what gets stored.
+    ref: "concepts.md#relabeling-relabel_configs-vs-metric_relabel_configs"
+
+  - id: prometheus-architecture-and-scraping-018
+    difficulty: intermediate
+    tags: [relabeling, cardinality]
+    question: |
+      You want to KEEP scraping a target but STOP storing one noisy high-cardinality metric
+      it emits. Which mechanism do you use?
+    options:
+      - "relabel_configs with action: drop on the target"
+      - "Delete the target from service discovery"
+      - "Lower the scrape_interval"
+      - "metric_relabel_configs with action: drop matching __name__"
+    answer: 3
+    explanation: |
+      The scrape should still happen, so you filter at the sample stage:
+      metric_relabel_configs matching __name__ with action: drop discards that metric before
+      storage. relabel_configs drop would remove the entire target.
+    ref: "concepts.md#relabeling-relabel_configs-vs-metric_relabel_configs"
+
+  - id: prometheus-architecture-and-scraping-019
+    difficulty: intermediate
+    tags: [relabeling, kubernetes, opt-in]
+    question: |
+      Given this snippet, what does it do?
+
+      ```
+      relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: "true"
+      ```
+    options:
+      - "Drops all pods that have the annotation set to true"
+      - "Keeps (scrapes) only pods whose prometheus.io/scrape annotation equals \"true\", dropping all other targets before scraping"
+      - "Renames the metric to `true`"
+      - "Stores only samples whose value is true"
+    answer: 1
+    explanation: |
+      action: keep with regex "true" means: keep the target only if the source label matches;
+      all non-matching targets are dropped before any scrape. This is the standard opt-in
+      annotation pattern in Kubernetes.
+    ref: "concepts.md#relabeling-relabel_configs-vs-metric_relabel_configs"
+
+  - id: prometheus-architecture-and-scraping-020
+    difficulty: advanced
+    tags: [relabeling, hashmod, sharding]
+    question: |
+      Which relabeling action is typically used to shard a large set of targets across
+      multiple Prometheus servers?
+    options:
+      - "labeldrop"
+      - "labelmap"
+      - "hashmod"
+      - "keep"
+    answer: 2
+    explanation: |
+      hashmod computes a hash of the source labels modulo N into a temporary label; each
+      Prometheus then keeps only the targets whose bucket matches its shard number. This
+      cleanly partitions targets across replicas.
+    ref: "concepts.md#relabeling-relabel_configs-vs-metric_relabel_configs"
+
+  - id: prometheus-architecture-and-scraping-021
+    difficulty: beginner
+    tags: [tsdb, storage]
+    question: |
+      Where does a standalone Prometheus store its scraped samples?
+    options:
+      - "In an external PostgreSQL database"
+      - "Only in RAM, discarded on restart"
+      - "In Amazon S3 by default"
+      - "In a local, embedded time-series database on the machine's own disk"
+    answer: 3
+    explanation: |
+      Prometheus ships with its own embedded TSDB that writes to local disk — no external
+      database. This local-only design is central to its reliability and to why scaling
+      needs remote storage.
+    ref: "concepts.md#the-tsdb-head-block-wal-2h-blocks-compaction"
+
+  - id: prometheus-architecture-and-scraping-022
+    difficulty: intermediate
+    tags: [tsdb, wal, durability]
+    question: |
+      Why does Prometheus maintain a Write-Ahead Log (WAL)?
+    options:
+      - "To compress metrics before sending them to Alertmanager"
+      - "Because the head block is in memory, the WAL persists appends to disk so a crash/restart can replay and rebuild the head without data loss"
+      - "To store PromQL query results"
+      - "To hold the inverted index for label lookups"
+    answer: 1
+    explanation: |
+      Recent samples live in the in-memory head block. The WAL records every append to disk
+      first, so after a crash Prometheus replays the WAL to reconstruct the head. It's a
+      durability mechanism for in-memory data.
+    ref: "concepts.md#the-tsdb-head-block-wal-2h-blocks-compaction"
+
+  - id: prometheus-architecture-and-scraping-023
+    difficulty: intermediate
+    tags: [tsdb, blocks]
+    question: |
+      Approximately how often does Prometheus cut the head block into an immutable
+      persistent block?
+    options:
+      - "Every 15 seconds"
+      - "Every 24 hours"
+      - "Every 2 hours"
+      - "Every time a query runs"
+    answer: 2
+    explanation: |
+      The head holds roughly the most recent 2-3 hours; about every 2 hours Prometheus cuts
+      and flushes it to an immutable on-disk block (chunks + inverted index + meta.json +
+      tombstones).
+    ref: "concepts.md#the-tsdb-head-block-wal-2h-blocks-compaction"
+
+  - id: prometheus-architecture-and-scraping-024
+    difficulty: intermediate
+    tags: [tsdb, compaction]
+    question: |
+      What does TSDB compaction do?
+    options:
+      - "Deletes all metrics older than the scrape_interval"
+      - "Rewrites PromQL queries to be faster"
+      - "Compresses the WAL into the head block"
+      - "Merges adjacent smaller blocks into larger ones, reducing the number of index/chunk files to read and reclaiming space from deleted/expired data"
+    answer: 3
+    explanation: |
+      Compaction is a background process that merges adjacent 2h blocks into larger blocks
+      (e.g. daily). Fewer, larger blocks mean fewer files to open at query time and reclaimed
+      disk from tombstoned/expired data.
+    ref: "concepts.md#the-tsdb-head-block-wal-2h-blocks-compaction"
+
+  - id: prometheus-architecture-and-scraping-025
+    difficulty: intermediate
+    tags: [tsdb, retention]
+    question: |
+      What is the default local retention time for Prometheus TSDB, and at what granularity
+      is data deleted?
+    options:
+      - "24 hours; individual samples are deleted"
+      - "15 days; whole blocks are deleted once entirely older than retention"
+      - "90 days; series are deleted one at a time"
+      - "Unlimited; data is never deleted"
+    answer: 1
+    explanation: |
+      The default `--storage.tsdb.retention.time` is 15 days. Retention is block-granular:
+      an entire block is removed only once all its data is older than the retention window,
+      not sample-by-sample.
+    ref: "concepts.md#the-tsdb-head-block-wal-2h-blocks-compaction"
+
+  - id: prometheus-architecture-and-scraping-026
+    difficulty: advanced
+    tags: [tsdb, index]
+    question: |
+      A persistent TSDB block contains an inverted index. What is its purpose?
+    options:
+      - "To store the raw HTTP responses from targets"
+      - "To map labels to series (postings), enabling fast lookup of which series match a label selector"
+      - "To keep a copy of the WAL"
+      - "To hold Alertmanager routing rules"
+    answer: 1
+    explanation: |
+      Each block has an inverted index mapping label name/value pairs to the series (postings
+      lists) that contain them. This is what lets PromQL selectors like {job="api"} quickly
+      find matching series without scanning all data.
+    ref: "concepts.md#the-tsdb-head-block-wal-2h-blocks-compaction"
+
+  - id: prometheus-architecture-and-scraping-027
+    difficulty: beginner
+    tags: [scrape-interval, resolution]
+    question: |
+      What does `scrape_interval` control?
+    options:
+      - "How long a metric is retained on disk"
+      - "The HTTP timeout for a single scrape"
+      - "How often each target is scraped, which sets the resolution of the collected data"
+      - "How many labels a metric may have"
+    answer: 2
+    explanation: |
+      scrape_interval is how frequently Prometheus scrapes each target (commonly 15s or 1m).
+      It determines the temporal resolution of the data and bounds how quickly rate() can
+      observe change.
+    ref: "concepts.md#scrape_interval-scrape_timeout-and-staleness"
+
+  - id: prometheus-architecture-and-scraping-028
+    difficulty: intermediate
+    tags: [scrape-timeout, config]
+    question: |
+      Which constraint must hold between scrape_timeout and scrape_interval?
+    options:
+      - "scrape_timeout must be greater than scrape_interval"
+      - "There is no relationship between them"
+      - "They must be exactly equal"
+      - "scrape_timeout must be less than or equal to scrape_interval"
+    answer: 3
+    explanation: |
+      scrape_timeout (how long Prometheus waits for a target's response before marking the
+      scrape failed) must be less than or equal to scrape_interval; otherwise a scrape could
+      still be running when the next one is due.
+    ref: "concepts.md#scrape_interval-scrape_timeout-and-staleness"
+
+  - id: prometheus-architecture-and-scraping-029
+    difficulty: advanced
+    tags: [staleness, lookback]
+    question: |
+      A metric silently vanishes from an instant-query graph after a couple of missed
+      scrapes. With default settings, which explanation is most likely?
+    options:
+      - "Prometheus deletes any series with fewer than 100 samples"
+      - "No sample arrived within the default 5-minute staleness/lookback delta, so instant queries return no value"
+      - "The counter overflowed"
+      - "The WAL was truncated"
+    answer: 1
+    explanation: |
+      Instant queries look back up to the default 5-minute staleness delta. If a
+      scrape_interval is large and a couple of scrapes are missed, no sample falls within
+      the lookback window and the series appears empty.
+    ref: "concepts.md#scrape_interval-scrape_timeout-and-staleness"
+
+  - id: prometheus-architecture-and-scraping-030
+    difficulty: advanced
+    tags: [staleness, stale-marker, service-discovery]
+    question: |
+      What does Prometheus do when a previously-present target disappears from service
+      discovery?
+    options:
+      - "It keeps returning the last known value forever"
+      - "It inserts an explicit stale marker so queries after that point return no value for the series"
+      - "It immediately deletes all historical data for the target"
+      - "It doubles the scrape_interval for remaining targets"
+    answer: 1
+    explanation: |
+      Prometheus 2.x inserts explicit staleness markers when a target leaves SD (or a series
+      stops being reported). A query at a timestamp after the marker returns no value, rather
+      than carrying forward a stale reading.
+    ref: "concepts.md#scrape_interval-scrape_timeout-and-staleness"
+
+  - id: prometheus-architecture-and-scraping-031
+    difficulty: beginner
+    tags: [pushgateway, batch-jobs]
+    question: |
+      What is the intended purpose of the Prometheus Pushgateway?
+    options:
+      - "To be the default way all services send metrics, replacing scraping"
+      - "To store metrics long-term in object storage"
+      - "To bridge short-lived batch/cron jobs into the pull model: jobs push final metrics to it and Prometheus scrapes the gateway"
+      - "To route alerts to PagerDuty"
+    answer: 2
+    explanation: |
+      The Pushgateway exists so ephemeral batch jobs (which exit before a scrape) can push
+      their final metrics to a stable endpoint that Prometheus then scrapes normally. It's a
+      bridge, not a general-purpose ingestion point.
+    ref: "concepts.md#the-pushgateway-batch-jobs--and-why-not-for-general-use"
+
+  - id: prometheus-architecture-and-scraping-032
+    difficulty: intermediate
+    tags: [pushgateway, anti-pattern, up-metric]
+    question: |
+      Why is the Pushgateway discouraged for general (non-batch) use?
+    options:
+      - "It only supports counters, not gauges"
+      - "It requires a commercial license"
+      - "It cannot be scraped by Prometheus"
+      - "It becomes a single point of failure, breaks the per-instance `up` liveness signal, and pushed metrics persist (go stale) until explicitly deleted"
+    answer: 3
+    explanation: |
+      Routing normal services through a Pushgateway makes it a SPOF/bottleneck, collapses
+      per-instance liveness (up now reflects the gateway, not each service), and pushed
+      metrics linger with stale values until deleted via the API or a restart.
+    ref: "concepts.md#the-pushgateway-batch-jobs--and-why-not-for-general-use"
+
+  - id: prometheus-architecture-and-scraping-033
+    difficulty: intermediate
+    tags: [pushgateway, staleness]
+    question: |
+      A team pushes a metric to the Pushgateway from a job that later stops running. What
+      happens to that metric's value in Prometheus?
+    options:
+      - "It is automatically removed after one scrape_interval"
+      - "It persists at its last pushed value indefinitely until deleted via the API or the gateway restarts"
+      - "It is replaced with `up=0`"
+      - "It is converted to a gauge of 0"
+    answer: 1
+    explanation: |
+      Unlike scraped targets (which get staleness markers), the Pushgateway retains pushed
+      values indefinitely. A job that stops pushing leaves a stale value that must be
+      explicitly deleted, a common source of misleading dashboards.
+    ref: "concepts.md#the-pushgateway-batch-jobs--and-why-not-for-general-use"
+
+  - id: prometheus-architecture-and-scraping-034
+    difficulty: intermediate
+    tags: [federation, endpoint]
+    question: |
+      What is Prometheus federation?
+    options:
+      - "Two Prometheis sharing one disk"
+      - "A way to push metrics between servers over gRPC"
+      - "One Prometheus scraping selected/aggregated series from another Prometheus via its special /federate endpoint"
+      - "Automatic sharding of the TSDB across nodes"
+    answer: 2
+    explanation: |
+      Federation lets one Prometheus pull chosen series from another through the /federate
+      endpoint, which serves matching series in the exposition format. It's typically used
+      to collect aggregated series into a higher-level server.
+    ref: "concepts.md#federation"
+
+  - id: prometheus-architecture-and-scraping-035
+    difficulty: advanced
+    tags: [federation, best-practice]
+    question: |
+      Which use of federation is an ANTI-PATTERN?
+    options:
+      - "A global Prometheus pulling per-datacenter aggregated recording-rule results"
+      - "Hierarchical federation keeping the global view small"
+      - "One server pulling a handful of specific series it needs from another team's server"
+      - "Federating an entire raw high-cardinality dataset to a parent to serve as long-term/HA storage"
+    answer: 3
+    explanation: |
+      Federation is for aggregated/limited series. Federating a full raw dataset just
+      recreates the single-node cardinality problem on the parent. For long-term or scalable
+      storage, use remote_write to Thanos/Cortex/Mimir instead.
+    ref: "concepts.md#federation"
+
+  - id: prometheus-architecture-and-scraping-036
+    difficulty: advanced
+    tags: [federation, honor-labels]
+    question: |
+      Why is `honor_labels: true` conventionally set on a federation scrape_config?
+    options:
+      - "To drop all labels from federated series"
+      - "To preserve the source's `job`/`instance` labels instead of overwriting them with the federating server's values"
+      - "To speed up compaction"
+      - "To enable remote_write"
+    answer: 1
+    explanation: |
+      Normally Prometheus would overwrite conflicting labels like job/instance with the
+      scraping job's values. honor_labels: true keeps the original labels from the source
+      server, which is what you want when federating already-labeled series.
+    ref: "concepts.md#federation"
+
+  - id: prometheus-architecture-and-scraping-037
+    difficulty: intermediate
+    tags: [remote-write, long-term-storage]
+    question: |
+      What does `remote_write` do?
+    options:
+      - "Writes PromQL query results to a file"
+      - "Replicates the WAL to a standby Prometheus only"
+      - "Streams every ingested sample to a remote endpoint for durable, horizontally-scalable storage"
+      - "Pushes alerts to Alertmanager"
+    answer: 2
+    explanation: |
+      remote_write streams ingested samples (batched, compressed, with back-pressure) from
+      the WAL to a remote endpoint such as Thanos Receive, Cortex, or Mimir, which provides
+      the scalable long-term storage Prometheus itself doesn't.
+    ref: "concepts.md#remote_write--remote_read-and-long-term-storage-thanos-cortex-mimir"
+
+  - id: prometheus-architecture-and-scraping-038
+    difficulty: intermediate
+    tags: [thanos, object-storage]
+    question: |
+      In a common Thanos deployment, how does historical data reach object storage (S3/GCS)?
+    options:
+      - "Prometheus writes directly to S3 as its primary TSDB"
+      - "A Thanos sidecar ships Prometheus's local TSDB blocks to object storage, where a Store Gateway and Querier serve them"
+      - "Object storage is scraped by Prometheus"
+      - "Grafana uploads the blocks nightly"
+    answer: 1
+    explanation: |
+      The classic Thanos model uses a sidecar next to each Prometheus that uploads immutable
+      TSDB blocks to object storage. The Store Gateway exposes those blocks and the Querier
+      fans out across sidecars/stores for a global, deduplicated view.
+    ref: "concepts.md#remote_write--remote_read-and-long-term-storage-thanos-cortex-mimir"
+
+  - id: prometheus-architecture-and-scraping-039
+    difficulty: intermediate
+    tags: [remote-read, query]
+    question: |
+      What is the role of `remote_read`?
+    options:
+      - "It lets Prometheus query historical data back from a remote endpoint and merge it with local data at query time"
+      - "It reads the Prometheus config file remotely"
+      - "It streams samples out to remote storage"
+      - "It reads targets from service discovery"
+    answer: 0
+    explanation: |
+      remote_read is the query-time counterpart to remote_write: Prometheus can fetch
+      historical series from a remote store and merge them with its local TSDB when
+      answering a query.
+    ref: "concepts.md#remote_write--remote_read-and-long-term-storage-thanos-cortex-mimir"
+
+  - id: prometheus-architecture-and-scraping-040
+    difficulty: advanced
+    tags: [mimir, cortex, scaling]
+    question: |
+      Which statement about Grafana Mimir and Cortex is accurate?
+    options:
+      - "Mimir is a Grafana evolution of Cortex; both ingest via remote_write and use object storage for horizontally-scalable, multi-tenant metric storage"
+      - "Both replace PromQL with SQL"
+      - "Neither can store Prometheus metrics"
+      - "Cortex only works with the Pushgateway"
+    answer: 0
+    explanation: |
+      Cortex is a horizontally-scalable, multi-tenant Prometheus backend ingesting via
+      remote_write; Mimir is Grafana's fork/evolution of Cortex aimed at very large scale.
+      Both keep PromQL and back onto object storage.
+    ref: "concepts.md#remote_write--remote_read-and-long-term-storage-thanos-cortex-mimir"
+
+  - id: prometheus-architecture-and-scraping-041
+    difficulty: intermediate
+    tags: [single-node, design-rationale]
+    question: |
+      Why is Prometheus deliberately designed as a single node with a local TSDB rather than
+      a clustered database?
+    options:
+      - "Clustering is impossible for time-series data"
+      - "Because PromQL cannot run on multiple nodes"
+      - "To force everyone to buy the enterprise version"
+      - "For reliability and operational simplicity: a monitoring system must keep working when your infrastructure is failing, so it minimizes external dependencies"
+    answer: 3
+    explanation: |
+      Prometheus prioritizes being dependable during outages. A single binary with only local
+      disk has almost nothing else that can fail, so it can still alert when the rest of your
+      infrastructure is degraded. Scaling is layered on top rather than built in.
+    ref: "concepts.md#why-prometheus-is-single-node-and-how-it-scales"
+
+  - id: prometheus-architecture-and-scraping-042
+    difficulty: intermediate
+    tags: [high-availability, alertmanager]
+    question: |
+      How do you make Prometheus alerting highly available, and how do you avoid double
+      paging?
+    options:
+      - "Enable clustering mode in prometheus.yml"
+      - "Run two identical Prometheus servers scraping the same targets; Alertmanager deduplicates the identical alerts they send"
+      - "Use a load balancer that sends each scrape to only one server"
+      - "Configure the TSDB to replicate blocks to a follower"
+    answer: 1
+    explanation: |
+      Prometheus has no clustering, so HA is just running two (or more) identical servers
+      scraping the same targets. Both fire the same alerts, and Alertmanager dedupes them so
+      on-call is paged once.
+    ref: "concepts.md#why-prometheus-is-single-node-and-how-it-scales"
+
+  - id: prometheus-architecture-and-scraping-043
+    difficulty: advanced
+    tags: [scaling, functional-sharding]
+    question: |
+      A single Prometheus can no longer handle the scrape load for your entire estate. Which
+      is the most appropriate FIRST scaling step (before adopting remote storage)?
+    options:
+      - "Switch everything to the Pushgateway"
+      - "Federate the full raw dataset into one parent"
+      - "Functionally shard: split scraping across multiple Prometheus servers by team/service/region (using hashmod for very large jobs)"
+      - "Reduce retention to 1 hour"
+    answer: 2
+    explanation: |
+      After vertical scaling, the standard next step is functional sharding: give each
+      Prometheus a subset of jobs/services/regions, and use hashmod relabeling to split a
+      single huge job. Remote storage addresses long-term retention and global query, not the
+      scrape-load split.
+    ref: "concepts.md#why-prometheus-is-single-node-and-how-it-scales"
+
+  - id: prometheus-architecture-and-scraping-044
+    difficulty: advanced
+    tags: [high-availability, dedup, replica-label]
+    question: |
+      You run an HA pair of Prometheis and want a single deduplicated query view across both.
+      What is the typical approach?
+    options:
+      - "Merge their local TSDB directories on a shared disk"
+      - "Put Thanos/Mimir in front, which deduplicates by an external `replica` label distinguishing the two servers"
+      - "Query each server and manually diff the results"
+      - "Disable one of the servers during queries"
+    answer: 1
+    explanation: |
+      Each HA replica is tagged with an external replica label. A query layer like Thanos
+      Querier or Mimir uses that label to deduplicate the near-identical series from both
+      servers, presenting one clean series to the user.
+    ref: "concepts.md#why-prometheus-is-single-node-and-how-it-scales"
+
+  - id: prometheus-architecture-and-scraping-045
+    difficulty: beginner
+    tags: [pull, curl, debuggability]
+    question: |
+      Which practical debugging benefit follows directly from the pull model and the text
+      exposition format?
+    options:
+      - "You can `curl` a target's /metrics endpoint by hand and see exactly what Prometheus would scrape"
+      - "You can query the TSDB with SQL"
+      - "Targets automatically retry failed pushes"
+      - "Metrics are encrypted end-to-end by default"
+    answer: 0
+    explanation: |
+      Because targets expose current values as plain text over HTTP, you can just curl the
+      /metrics endpoint and read exactly what Prometheus sees, which makes local debugging
+      and instrumentation validation easy.
+    ref: "concepts.md#the-pull-scrape-model-and-why-pull-over-push"
+
+  - id: prometheus-architecture-and-scraping-046
+    difficulty: intermediate
+    tags: [exposition-format, exemplars, traces]
+    question: |
+      What is an exemplar in the (OpenMetrics) exposition format, and why is it useful?
+    options:
+      - "A default value used when a metric is missing"
+      - "A trace ID (and optional labels) attached to a sample, linking a metric bucket to a specific distributed trace"
+      - "An example PromQL query embedded in the metrics output"
+      - "A backup copy of the metric stored on the target"
+    answer: 1
+    explanation: |
+      Exemplars attach a trace ID (and labels) to a specific sample, e.g. on a histogram
+      bucket. This bridges metrics and traces: from a latency spike on a dashboard you can
+      jump to an exemplar trace that experienced it.
+    ref: "concepts.md#the-metrics-endpoint-and-the-exposition-format"
+
+  - id: prometheus-architecture-and-scraping-047
+    difficulty: intermediate
+    tags: [relabeling, job-label]
+    question: |
+      Which relabeling action would you use to set the `job` label from a Kubernetes pod
+      label such as `__meta_kubernetes_pod_label_app`?
+    options:
+      - "action: drop"
+      - "action: replace (the default) with target_label: job"
+      - "action: labelkeep"
+      - "action: hashmod"
+    answer: 1
+    explanation: |
+      The default replace action copies source_labels into target_label; setting
+      target_label: job with source_labels [__meta_kubernetes_pod_label_app] derives the job
+      name from the pod's app label.
+    ref: "concepts.md#relabeling-relabel_configs-vs-metric_relabel_configs"
+
+  - id: prometheus-architecture-and-scraping-048
+    difficulty: beginner
+    tags: [scrape-model, targets]
+    question: |
+      True or false, and why: "Each scraped target must be configured with the address of the
+      Prometheus server so it knows where to send data."
+    options:
+      - "True — targets push to the configured Prometheus address"
+      - "False — in the pull model targets are passive and need no knowledge of any Prometheus server; Prometheus initiates the connection"
+      - "True — but only in Kubernetes"
+      - "False — targets send to Alertmanager instead"
+    answer: 1
+    explanation: |
+      A defining property of pull is that targets don't know who scrapes them. They just
+      expose /metrics; Prometheus (discovered targets via SD) initiates every scrape. This is
+      why multiple Prometheis can scrape the same targets with no app-side change.
+    ref: "concepts.md#the-pull-scrape-model-and-why-pull-over-push"

@@ -1,0 +1,848 @@
+topic: "Sampling, Cardinality & Telemetry Cost Management"
+domain: observability
+topic_slug: sampling-cardinality-and-telemetry-cost-management
+version: 1
+questions:
+  - id: sampling-cardinality-and-telemetry-cost-management-001
+    difficulty: beginner
+    tags: [cardinality, definition]
+    question: |
+      In a dimensional metrics system like Prometheus, what does "cardinality" refer to?
+    options:
+      - "The number of samples ingested per second"
+      - "The total bytes stored on disk"
+      - "The number of Prometheus servers in a federation"
+      - "The number of unique combinations of metric name and label key/value pairs (distinct time series)"
+    answer: 3
+    explanation: |
+      Cardinality is the count of distinct time series: a metric name plus its full set of
+      label key/value pairs. Each unique combination is stored and indexed as its own
+      series, which is why cardinality — not raw sample rate — is the main cost driver for
+      metrics.
+    ref: "concepts.md#cardinality-and-the-cardinality-explosion"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-002
+    difficulty: beginner
+    tags: [cost-drivers, mental-model]
+    question: |
+      Which statement best captures the different cost shapes of the observability signals?
+    options:
+      - "Metrics cost scales with cardinality; traces and logs cost scales with volume"
+      - "All three signals cost the same per byte, so only total volume matters"
+      - "Metrics cost scales with volume; traces and logs cost scales with cardinality"
+      - "Only storage retention matters; ingest is free for all signals"
+    answer: 0
+    explanation: |
+      Metrics are cheap per sample but explode with cardinality (unique label combos), so
+      you control the label set. Traces and logs are cheap per field but explode with raw
+      event count, so you control them with sampling and dropping.
+    ref: "concepts.md#the-observability-cost-problem-at-scale"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-003
+    difficulty: beginner
+    tags: [cardinality-explosion, labels]
+    question: |
+      Which label is most likely to cause a cardinality explosion if added to a Prometheus
+      metric?
+    options:
+      - "user_id (millions of distinct values)"
+      - "status_code (200, 404, 500)"
+      - "http_method (GET, POST, PUT, DELETE)"
+      - "environment (dev, staging, prod)"
+    answer: 0
+    explanation: |
+      user_id has an unbounded, huge value space. Each distinct value multiplies the number
+      of stored time series, potentially into the billions. The other labels are bounded to
+      a small, known set of values.
+    ref: "concepts.md#cardinality-and-the-cardinality-explosion"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-004
+    difficulty: intermediate
+    tags: [cardinality, combinatorial]
+    question: |
+      A metric has 5 labels, each with 20 distinct bounded values. Roughly how many time
+      series can this metric produce in the worst case, and why does it matter?
+    options:
+      - "3.2 million (20^5) — cardinality is the multiplicative product of label value counts"
+      - "100 (5 x 20) — cardinality adds"
+      - "20 — only the largest label matters"
+      - "5 — one series per label"
+    answer: 0
+    explanation: |
+      Cardinality is the Cartesian product of each label's distinct values: 20^5 = 3.2M.
+      Even individually-bounded labels multiply, so you must audit the product across all
+      labels, not each label in isolation.
+    ref: "concepts.md#cardinality-and-the-cardinality-explosion"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-005
+    difficulty: beginner
+    tags: [head-sampling, definition]
+    question: |
+      What defines head-based sampling for distributed traces?
+    options:
+      - "The keep/drop decision is made at the very start of the trace, before it completes"
+      - "The decision is made only after all spans in the trace are collected"
+      - "Only the last span of a trace is kept"
+      - "The backend decides based on storage capacity"
+    answer: 0
+    explanation: |
+      Head sampling decides whether to keep a trace as early as possible — when the root
+      span is created — using information available up front (typically the trace ID and a
+      target percentage). It is cheap and stateless but blind to what happens later.
+    ref: "concepts.md#head-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-006
+    difficulty: beginner
+    tags: [tail-sampling, definition]
+    question: |
+      What is the defining characteristic of tail-based sampling?
+    options:
+      - "It decides after all/most spans of a trace are collected, using properties of the whole trace"
+      - "It runs entirely inside the application SDK with no collector"
+      - "It samples only the tail latency (p99) of requests"
+      - "It always keeps exactly the last 1% of traces by time"
+    answer: 0
+    explanation: |
+      Tail sampling buffers a trace until its spans have arrived, then decides based on the
+      whole trace — e.g. did any span error, was end-to-end latency high. This lets it keep
+      the interesting traces that head sampling would randomly discard.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-007
+    difficulty: intermediate
+    tags: [head-sampling, errors, scenario]
+    question: |
+      You head-sample at 1% and your service has a 0.5% error rate. Why is trace-based error
+      debugging nearly useless?
+    options:
+      - "Because the decision is blind to outcome, you keep roughly 1% of errors too — almost none of them"
+      - "Head sampling corrupts error spans"
+      - "Head sampling keeps only successful traces by design"
+      - "Errors are never assigned a trace ID"
+    answer: 0
+    explanation: |
+      Head sampling decides at trace start, before it knows the request will error. A 1%
+      uniform sample keeps about 1% of errors, so most failures have no trace. The fix is
+      tail sampling that always keeps status_code=ERROR plus a probabilistic baseline.
+    ref: "concepts.md#head-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-008
+    difficulty: intermediate
+    tags: [tail-sampling, buffering, cost]
+    question: |
+      What is the primary operational cost of tail-based sampling compared to head-based?
+    options:
+      - "It requires modifying every application's source code"
+      - "It must buffer all spans of every in-flight trace in memory, needing stateful collectors and trace-aware routing"
+      - "It cannot keep error traces"
+      - "It doubles the number of trace IDs generated"
+    answer: 1
+    explanation: |
+      Tail sampling is stateful: the collector holds every span of every in-flight trace
+      until the decision window closes, requiring significant RAM (often a fleet) and
+      trace-ID-aware load balancing so all spans of one trace reach the same instance.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-009
+    difficulty: advanced
+    tags: [tail-sampling, upstream-cost, gotcha]
+    question: |
+      Which resource does tail sampling NOT save, compared to head sampling?
+    options:
+      - "In-process instrumentation overhead and app-to-collector egress, since the app still generates and exports all spans"
+      - "Backend trace storage"
+      - "Backend query CPU on kept traces"
+      - "Index size for retained traces"
+    answer: 0
+    explanation: |
+      With tail sampling the drop happens at the collector, not the app, so the application
+      still creates and exports every span. It saves backend storage but not in-process
+      overhead or app-to-collector network — head sampling saves those upstream costs.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-010
+    difficulty: intermediate
+    tags: [high-cardinality, traces, wide-events]
+    question: |
+      Where should high-cardinality context like user_id and request_id live?
+    options:
+      - "As attributes on traces / spans / wide structured events, where each is one row not a new series"
+      - "Nowhere — it should never be recorded"
+      - "As Prometheus metric labels for fast aggregation"
+      - "Only in the alert annotations"
+    answer: 0
+    explanation: |
+      Traces and wide events aggregate at read time, so a high-cardinality attribute is just
+      one field on one event, not a permanent new series. Metrics pre-aggregate at write
+      time, so unbounded dimensions blow up the series count.
+    ref: "concepts.md#where-high-cardinality-data-belongs-traces-and-wide-events-not-metric-labels"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-011
+    difficulty: intermediate
+    tags: [aggregation-time, metrics-vs-traces]
+    question: |
+      Why does high cardinality blow up metrics but not traces/wide events?
+    options:
+      - "Traces are compressed and metrics are not"
+      - "Metrics pre-aggregate at write time (dimensions fixed before storage); traces aggregate at read time (raw records sliced later)"
+      - "Traces have no labels at all"
+      - "Metrics are stored on disk and traces only in memory"
+    answer: 1
+    explanation: |
+      Metrics fix their dimensions before storage, so an unbounded label creates a new
+      series per value. Traces/events keep raw high-cardinality records and let you slice by
+      any dimension at query time, so high cardinality is cheap to store (volume is the
+      separate concern there).
+    ref: "concepts.md#where-high-cardinality-data-belongs-traces-and-wide-events-not-metric-labels"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-012
+    difficulty: beginner
+    tags: [exemplars, definition]
+    question: |
+      What is a Prometheus exemplar?
+    options:
+      - "A recording rule that precomputes an aggregate"
+      - "A reference (e.g. a trace_id) attached to a metric sample, letting you jump from an aggregated metric to a specific trace"
+      - "A high-cardinality label on a histogram"
+      - "A downsampled copy of a time series"
+    answer: 1
+    explanation: |
+      Exemplars, introduced by OpenMetrics, attach a reference such as a trace_id to a
+      metric sample (often a histogram bucket). They bridge aggregate metrics to individual
+      traces cheaply without adding cardinality.
+    ref: "concepts.md#where-high-cardinality-data-belongs-traces-and-wide-events-not-metric-labels"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-013
+    difficulty: intermediate
+    tags: [exemplars, storage, cost]
+    question: |
+      Why are exemplars considered a cheap metric-to-trace bridge?
+    options:
+      - "They are stored as a fixed-size in-memory circular buffer (roughly 100 bytes each), so memory is bounded and they add no series cardinality"
+      - "They are only stored in the trace backend, never with metrics"
+      - "They create one new time series per trace"
+      - "They replace the need for any tracing"
+    answer: 0
+    explanation: |
+      Prometheus stores exemplars in a fixed-size circular buffer in memory (about 100 bytes
+      for a trace_id exemplar). Memory is bounded by the buffer size, and because they don't
+      add labels they don't increase series cardinality — you keep a low-cardinality metric
+      but still get a link to a real trace.
+    ref: "concepts.md#where-high-cardinality-data-belongs-traces-and-wide-events-not-metric-labels"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-014
+    difficulty: intermediate
+    tags: [relabeling, cardinality-control]
+    question: |
+      Which Prometheus relabeling action removes a specific runaway label from series before
+      they are stored?
+    options:
+      - "keep"
+      - "hashmod"
+      - "replace"
+      - "labeldrop"
+    answer: 3
+    explanation: |
+      labeldrop removes labels matching a regex from series. In metric_relabel_configs it can
+      strip a high-cardinality label like user_id before ingestion. drop removes whole
+      series; keep filters targets; hashmod shards.
+    ref: "concepts.md#controlling-metric-cardinality-limits-relabeling-and-design"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-015
+    difficulty: advanced
+    tags: [sample-limit, guardrails, gotcha]
+    question: |
+      A scrape config sets sample_limit: 10000. A target starts exposing 12,000 series after
+      a bad deploy. What happens?
+    options:
+      - "Only the first 10,000 series are kept; the rest are silently dropped"
+      - "The entire scrape for that target fails, so none of its metrics are ingested for that interval"
+      - "Prometheus automatically shards the target across two servers"
+      - "The excess series are downsampled to fit"
+    answer: 1
+    explanation: |
+      sample_limit fails the whole scrape for the target if exceeded — it is a blunt safety
+      net protecting the server, not a per-series filter. You lose all of that target's
+      metrics until cardinality is fixed at the source.
+    ref: "concepts.md#controlling-metric-cardinality-limits-relabeling-and-design"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-016
+    difficulty: intermediate
+    tags: [templatize, path-cardinality]
+    question: |
+      A metric uses the label path="/api/users/8134/orders/99". What is the correct fix to
+      control cardinality?
+    options:
+      - "Add more labels to balance it out"
+      - "Increase sample_limit"
+      - "Convert the metric to a gauge"
+      - "Templatize the route to path=\"/api/users/:id/orders/:id\" so IDs collapse into one bounded value"
+    answer: 3
+    explanation: |
+      Raw paths with embedded IDs are effectively unbounded. Templatizing to the route
+      pattern collapses all the per-ID variants into a single bounded label value, keeping
+      cardinality low while preserving the useful per-endpoint dimension.
+    ref: "concepts.md#controlling-metric-cardinality-limits-relabeling-and-design"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-017
+    difficulty: intermediate
+    tags: [promql, cardinality-discovery]
+    question: |
+      Which PromQL expression finds the top 10 metric names by number of series?
+    options:
+      - "topk(10, count by (__name__)({__name__=~\".+\"}))"
+      - "histogram_quantile(0.99, http_request_duration_seconds_bucket)"
+      - "rate(http_requests_total[5m])"
+      - "sum(up) by (job)"
+    answer: 0
+    explanation: |
+      count by (__name__)({__name__=~".+"}) counts series per metric name, and topk(10, ...)
+      returns the 10 largest. This is a standard way to hunt down which metric is driving
+      cardinality. The others compute rates, quantiles, or target liveness.
+    ref: "concepts.md#controlling-metric-cardinality-limits-relabeling-and-design"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-018
+    difficulty: beginner
+    tags: [probabilistic-sampling, definition]
+    question: |
+      What does probabilistic (ratio) sampling do?
+    options:
+      - "Keeps at most N traces per second regardless of traffic"
+      - "Keeps a fixed fraction of traces (e.g. 10%), typically via a deterministic hash of the trace ID"
+      - "Keeps only traces containing errors"
+      - "Adjusts the rate per endpoint to hit a target throughput"
+    answer: 1
+    explanation: |
+      Probabilistic sampling keeps a fixed fraction, usually by hashing the trace ID against
+      a threshold. It is statistically uniform and lets you scale kept traces back up to true
+      totals, but its absolute volume is unbounded and grows with traffic.
+    ref: "concepts.md#probabilistic-vs-rate-limiting-vs-adaptive-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-019
+    difficulty: beginner
+    tags: [rate-limiting-sampling, definition]
+    question: |
+      What does rate-limiting sampling guarantee?
+    options:
+      - "A hard ceiling on traces kept per second (e.g. via a leaky/token bucket), giving predictable cost"
+      - "A statistically uniform sample of all traffic"
+      - "That every error trace is kept"
+      - "Per-endpoint fairness across services"
+    answer: 0
+    explanation: |
+      Rate-limiting sampling caps traces per second with a leaky/token bucket, so cost is
+      predictable regardless of traffic. The downside is the sampled fraction varies with
+      load, so the sample is not statistically uniform and spike coverage is poor.
+    ref: "concepts.md#probabilistic-vs-rate-limiting-vs-adaptive-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-020
+    difficulty: intermediate
+    tags: [spike, probabilistic, cost, scenario]
+    question: |
+      Traffic suddenly spikes 10x during an incident. Under pure probabilistic (fixed
+      percentage) sampling, what happens to sampled trace volume and cost?
+    options:
+      - "They also rise 10x, because a fixed fraction of 10x traffic is 10x the data — at the worst possible moment"
+      - "They drop to zero"
+      - "They stay flat because the percentage is fixed"
+      - "They are automatically capped by the SDK"
+    answer: 0
+    explanation: |
+      A fixed fraction of 10x traffic is 10x the sampled data, so cost balloons exactly
+      during the incident. This is why teams add a rate-limit ceiling on top of
+      probabilistic sampling to bound worst-case cost.
+    ref: "concepts.md#probabilistic-vs-rate-limiting-vs-adaptive-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-021
+    difficulty: intermediate
+    tags: [adaptive-sampling, jaeger]
+    question: |
+      How does Jaeger's adaptive sampling work?
+    options:
+      - "It observes incoming spans and recalculates sampling probability per service/operation to meet a target throughput, with a floor for low-traffic endpoints"
+      - "It only samples traces at the backend after storage"
+      - "It keeps a fixed global percentage of all traces"
+      - "It disables sampling when traffic is low"
+    answer: 0
+    explanation: |
+      Adaptive sampling recalculates per service/endpoint probabilities to hit a target
+      samples-per-second, giving low-traffic endpoints a guaranteed floor so they aren't
+      starved by high-traffic ones. It uses an initial probability for new endpoints and
+      needs a sampling store.
+    ref: "concepts.md#probabilistic-vs-rate-limiting-vs-adaptive-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-022
+    difficulty: advanced
+    tags: [adaptive-sampling, low-traffic, fairness]
+    question: |
+      What problem does adaptive (per-operation) sampling solve that a single global
+      probabilistic rate does not?
+    options:
+      - "It removes the need for any collector"
+      - "It gives low-traffic endpoints a guaranteed minimum coverage so they aren't drowned out by high-traffic endpoints, while bounding total volume"
+      - "It eliminates the trace ID"
+      - "It makes head sampling stateful"
+    answer: 1
+    explanation: |
+      A single global rate starves rare endpoints (a 0.1% sampler on a low-traffic endpoint
+      may catch almost nothing) while over-sampling busy ones. Adaptive sampling tunes
+      per-operation to a target, guaranteeing a floor for quiet endpoints and a bounded total.
+    ref: "concepts.md#probabilistic-vs-rate-limiting-vs-adaptive-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-023
+    difficulty: intermediate
+    tags: [trace-context, propagation, w3c]
+    question: |
+      What carries the boolean sampling decision across service boundaries so that whole
+      traces are kept (no orphan spans)?
+    options:
+      - "The W3C traceparent trace-flags byte (the sampled flag), honored by ParentBased samplers downstream"
+      - "The Content-Length header"
+      - "A custom HTTP cookie set by the load balancer"
+      - "A field in the metrics exposition format"
+    answer: 0
+    explanation: |
+      The W3C traceparent header ends with a flags byte whose low bit is the sampled flag
+      (...-01 = sampled). Downstream ParentBased samplers respect it, so every hop makes the
+      same all-or-nothing decision and traces stay whole.
+    ref: "concepts.md#sampling-consistency-and-trace-context-propagation"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-024
+    difficulty: advanced
+    tags: [broken-traces, propagation, gotcha, scenario]
+    question: |
+      Services A and B each run independent 10% head samplers and do NOT propagate the
+      decision. What is the likely result?
+    options:
+      - "Perfectly consistent traces at 10%"
+      - "Broken/partial traces — A keeps a span while B independently drops its child, leaving holes in the waterfall"
+      - "Traces are duplicated"
+      - "Cardinality explosion in metrics"
+    answer: 1
+    explanation: |
+      Without propagating the decision (via traceparent) and using ParentBased, each service
+      independently decides, so a parent span can be kept while a child is dropped. The fix
+      is deterministic trace-ID sampling plus propagating traceparent/tracestate.
+    ref: "concepts.md#sampling-consistency-and-trace-context-propagation"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-025
+    difficulty: advanced
+    tags: [consistent-sampling, tracestate]
+    question: |
+      In OpenTelemetry consistent probability sampling, why is the sampling probability
+      encoded in tracestate rather than only a boolean flag?
+    options:
+      - "To hide the decision from downstream services"
+      - "Because traceparent cannot cross service boundaries"
+      - "So any point in the pipeline can make the same deterministic decision and reconstruct unbiased aggregate counts (each kept trace's 1/p weight is known)"
+      - "To increase metric cardinality"
+    answer: 2
+    explanation: |
+      Encoding the probability/threshold in tracestate lets tail samplers and backends make
+      the same deterministic keep/drop decision from the trace ID and know each kept trace's
+      weight (1/p), so aggregate counts can be reconstructed without bias.
+    ref: "concepts.md#sampling-consistency-and-trace-context-propagation"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-026
+    difficulty: beginner
+    tags: [otel-samplers, parentbased]
+    question: |
+      What does the OpenTelemetry ParentBased sampler do?
+    options:
+      - "Always samples 100% of traces"
+      - "Respects the parent span's sampled flag if there is a parent, otherwise delegates to a root sampler (often TraceIdRatioBased)"
+      - "Samples based on the child's latency"
+      - "Buffers the whole trace before deciding"
+    answer: 1
+    explanation: |
+      ParentBased honors the incoming parent's sampled decision so traces stay consistent
+      across services; for root spans (no parent) it delegates to a configured sampler such
+      as TraceIdRatioBased. It is the usual default for whole-trace consistency.
+    ref: "concepts.md#head-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-027
+    difficulty: intermediate
+    tags: [otel-samplers, traceidratiobased]
+    question: |
+      Why is TraceIdRatioBased sampling described as "deterministic" and consistent?
+    options:
+      - "It uses a random number generator seeded per request"
+      - "It always keeps the first span and drops the rest"
+      - "It decides based on wall-clock time"
+      - "It hashes the trace ID against a threshold, so every service computes the same keep/drop decision for the same trace"
+    answer: 3
+    explanation: |
+      TraceIdRatioBased maps the trace ID to a value compared against a threshold set by the
+      ratio. Since the trace ID is the same everywhere, every service reaches the same
+      decision independently — keeping whole traces without coordination.
+    ref: "concepts.md#head-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-028
+    difficulty: intermediate
+    tags: [tail-sampling, decision-wait, config]
+    question: |
+      In the OpenTelemetry tail_sampling processor, what does decision_wait control?
+    options:
+      - "The maximum number of traces stored in memory"
+      - "How long to buffer a trace (after its first span) before evaluating policies and deciding"
+      - "The sampling percentage for the probabilistic policy"
+      - "How long kept traces are retained in the backend"
+    answer: 1
+    explanation: |
+      decision_wait (default 30s) is how long the processor waits after the first span before
+      making the sampling decision. Too short risks deciding before the trace finishes; too
+      long increases memory use.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-029
+    difficulty: advanced
+    tags: [tail-sampling, num-traces, eviction, gotcha]
+    question: |
+      During a volume spike, a tail_sampling collector with num_traces: 50000 starts silently
+      dropping traces before evaluating them. Why?
+    options:
+      - "The probabilistic policy percentage was too high"
+      - "decision_wait was set to zero"
+      - "num_traces is a circular buffer; when full, the oldest trace is evicted before its decision_wait elapses, so it's never evaluated"
+      - "The status_code policy rejected them"
+    answer: 2
+    explanation: |
+      num_traces bounds the in-memory circular buffer. When more traces arrive than it holds,
+      the oldest are evicted before their decision window closes and never get policy-
+      evaluated. Mitigate by raising num_traces (more memory) or lowering decision_wait.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-030
+    difficulty: intermediate
+    tags: [tail-sampling, policies, scenario]
+    question: |
+      You want to keep every errored trace, every trace slower than 500ms, and 5% of
+      everything else. Which combination of tail_sampling policies expresses this?
+    options:
+      - "A single probabilistic policy at 5%"
+      - "status_code(ERROR) + latency(threshold 500ms) + probabilistic(5%)"
+      - "rate_limiting(5 traces/sec) only"
+      - "always_sample only"
+    answer: 1
+    explanation: |
+      Tail sampling evaluates each policy; a trace is kept if any matches. A status_code
+      policy for ERROR, a latency policy at 500ms, and a probabilistic 5% policy together
+      keep all errors and slow traces plus a baseline sample of the rest.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-031
+    difficulty: advanced
+    tags: [tail-sampling, load-balancing, routing]
+    question: |
+      Why does tail sampling require trace-ID-aware load balancing (e.g. the loadbalancing
+      exporter) in front of collector instances?
+    options:
+      - "To encrypt spans in transit"
+      - "To reduce metric cardinality"
+      - "To compress the spans before storage"
+      - "So all spans belonging to the same trace reach the same collector instance, which is required to reassemble and evaluate the whole trace"
+    answer: 3
+    explanation: |
+      A tail sampler must see the entire trace to decide. If spans of one trace land on
+      different collector instances, no instance has the full trace. Routing by trace ID
+      guarantees all spans of a trace converge on one instance.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-032
+    difficulty: beginner
+    tags: [log-sampling, levels]
+    question: |
+      What is the cheapest first control for log volume/cost in production?
+    options:
+      - "Store all logs in RAM"
+      - "Level-based filtering: don't emit DEBUG/INFO on hot paths, keep WARN/ERROR at 100%"
+      - "Randomly drop 50% of all logs including errors"
+      - "Increase log retention"
+    answer: 1
+    explanation: |
+      Level-based control is the cheapest lever: suppress DEBUG/INFO in hot production paths
+      while always keeping WARN/ERROR. Structured levels make this trivial, and you never
+      want to sample away error/audit/security logs.
+    ref: "concepts.md#log-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-033
+    difficulty: intermediate
+    tags: [log-sampling, log-storm]
+    question: |
+      A single bad code path logs the same error 100,000 times per second (a "log storm").
+      Which log-sampling technique best addresses this while keeping signal?
+    options:
+      - "Increase the log level to DEBUG"
+      - "Delete the logging library"
+      - "Rate/volume sampling: keep the first N identical entries per interval, then drop or keep every Mth duplicate"
+      - "Buffer all 100k/s in memory indefinitely"
+    answer: 2
+    explanation: |
+      Rate/volume samplers (like zap's) keep the first N identical entries per second then
+      sample the rest, so you learn the error is happening without ingesting 100k identical
+      lines per second. You retain the signal at a fraction of the cost.
+    ref: "concepts.md#log-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-034
+    difficulty: advanced
+    tags: [log-sampling, correlation, trace-id]
+    question: |
+      Best practice is to sample logs on the same key/decision as traces (e.g. trace_id).
+      Why?
+    options:
+      - "It reduces trace_id cardinality"
+      - "So a retained trace has its full, coherent log context and you can pivot between signals — instead of a random 10% of unrelated lines"
+      - "Because logs cannot be sampled otherwise"
+      - "To make logs unbounded"
+    answer: 1
+    explanation: |
+      Sampling deterministically on trace_id keeps all logs for a kept request together,
+      giving a coherent story and cross-signal pivoting. Independent random log sampling
+      would leave a kept trace with only a fraction of its log lines.
+    ref: "concepts.md#log-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-035
+    difficulty: intermediate
+    tags: [collector, drop, filter]
+    question: |
+      Why is the collector (or Prometheus relabeling) the highest-leverage place to shape
+      telemetry cost?
+    options:
+      - "It is the only place that can compress data"
+      - "It stores data more cheaply than the backend"
+      - "It automatically fixes cardinality in the application"
+      - "It is a central choke point that applies uniform drop/filter/aggregate rules before paid storage, without changing app code"
+    answer: 3
+    explanation: |
+      The collector sits between apps and storage, so one rule (drop health-check spans,
+      scrub a high-card attribute, aggregate a dimension) applies across all services before
+      anything hits paid storage — no per-service code change required.
+    ref: "concepts.md#drop-filter-and-aggregate-at-the-collector"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-036
+    difficulty: intermediate
+    tags: [collector, aggregate, cardinality-reduction]
+    question: |
+      Dropping the per-pod "instance" label and re-aggregating series into per-service
+      series is an example of what cost technique?
+    options:
+      - "Head sampling"
+      - "Downsampling by time"
+      - "Exemplar storage"
+      - "Aggregation / dimension reduction to lower cardinality"
+    answer: 3
+    explanation: |
+      Collapsing a high-cardinality dimension (per-pod) into a coarser one (per-service) by
+      summing away the label reduces series count. Recording rules and collector transforms
+      precompute these rolled-up, low-cardinality series for cheaper dashboards.
+    ref: "concepts.md#drop-filter-and-aggregate-at-the-collector"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-037
+    difficulty: beginner
+    tags: [downsampling, retention]
+    question: |
+      What is downsampling (rollup) in a metrics system?
+    options:
+      - "Dropping all data older than a threshold"
+      - "Increasing the scrape frequency over time"
+      - "Encrypting old data"
+      - "Replacing many high-resolution samples with fewer aggregated ones as data ages (e.g. 15s raw -> 5m -> 1h)"
+    answer: 3
+    explanation: |
+      Downsampling reduces resolution of aging data — raw 15s for recent days, 5-minute
+      rollups for months, 1-hour for a year — preserving long-term trend shape at a fraction
+      of the storage. Thanos Compactor and Mimir/VictoriaMetrics do this.
+    ref: "concepts.md#retention-and-downsampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-038
+    difficulty: advanced
+    tags: [downsampling, lossy, gotcha]
+    question: |
+      What is the key trade-off to remember about downsampling?
+    options:
+      - "It increases cardinality"
+      - "It only works for logs, not metrics"
+      - "It is lossy by design — a brief 20-second spike is invisible in year-old data rolled up to 1-hour, so you must choose which aggregations (min/max/sum/count) to preserve"
+      - "It makes recent data slower to query"
+    answer: 2
+    explanation: |
+      Downsampling discards fine detail: short spikes vanish once data is rolled up to coarse
+      intervals. You must decide which aggregations to keep (e.g. max for historic peak
+      latency) so old data can still answer the questions you actually ask of it.
+    ref: "concepts.md#retention-and-downsampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-039
+    difficulty: intermediate
+    tags: [retention, per-signal]
+    question: |
+      Which per-signal retention strategy is most cost-effective and typical?
+    options:
+      - "Keep everything at full resolution forever"
+      - "Keep aggregated metrics long (cheap trends), traces short (days), logs medium with tiering"
+      - "Keep traces longest and metrics shortest"
+      - "Delete metrics daily but keep raw logs for years"
+    answer: 1
+    explanation: |
+      Aggregated metrics are cheap and useful for long-term trends, so keep them long. Traces
+      are used to debug recent incidents, so days suffice. Logs sit in between with tiered
+      (hot/cold object) storage. This matches retention to how each signal is actually used.
+    ref: "concepts.md#retention-and-downsampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-040
+    difficulty: intermediate
+    tags: [cost-levers, mapping]
+    question: |
+      Which lever primarily attacks CARDINALITY (as opposed to volume)?
+    options:
+      - "Head/tail sampling of traces"
+      - "Log rate limiting"
+      - "Bounding/reducing the metric label set (and aggregating away dimensions)"
+      - "Longer retention"
+    answer: 2
+    explanation: |
+      Cardinality is a metrics problem driven by unique label combinations, so bounding the
+      label set and aggregating away dimensions attacks it directly. Sampling attacks volume
+      (traces/logs); retention attacks storage.
+    ref: "concepts.md#the-observability-cost-problem-at-scale"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-041
+    difficulty: advanced
+    tags: [cost, signal-vs-noise, philosophy]
+    question: |
+      Why is "just sample/drop everything uniformly" a poor cost-management strategy?
+    options:
+      - "Uniform reduction is impossible to implement"
+      - "The goal is to keep signal and shed noise; the most expensive telemetry is often the least useful, and blanket cuts also discard rare high-value events like errors"
+      - "It always increases cardinality"
+      - "Sampling is never allowed in production"
+    answer: 1
+    explanation: |
+      Cost management is about keeping signal and shedding noise, not blanket reduction. Much
+      cost is noise (INFO success logs, high-card labels) while rare errors are the most
+      valuable — uniform cuts throw the baby out with the bathwater.
+    ref: "concepts.md#the-observability-cost-problem-at-scale"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-042
+    difficulty: intermediate
+    tags: [hybrid-sampling, pattern]
+    question: |
+      A common production pattern combines head and tail sampling. What does the hybrid
+      typically achieve?
+    options:
+      - "It eliminates the need for a collector"
+      - "It doubles storage but halves cardinality"
+      - "A light head sample caps in-app/egress cost, while tail sampling at the collector keeps errors/slow traces plus a probabilistic baseline for storage"
+      - "It removes the need to propagate trace context"
+    answer: 2
+    explanation: |
+      Head sampling saves upstream (in-app + egress) cost; tail sampling preserves the
+      valuable errored/slow traces for storage. A hybrid gets bounded app cost and
+      high-signal retention — a frequent senior-level design answer.
+    ref: "concepts.md#tail-based-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-043
+    difficulty: beginner
+    tags: [cost-axes]
+    question: |
+      Which three cost axes matter most for telemetry at scale?
+    options:
+      - "CPU, GPU, and network only"
+      - "Number of dashboards, number of alerts, number of users"
+      - "Ingest (bytes/sec), storage (retention x ingest), and cardinality/index"
+      - "Color, layout, and refresh rate of dashboards"
+    answer: 2
+    explanation: |
+      Telemetry cost is dominated by ingest bandwidth, storage (retention times ingest rate),
+      and cardinality/index (active series for metrics, indexed fields for logs). Vendors
+      often bill on ingest, but cardinality drives RAM and query cost.
+    ref: "concepts.md#the-observability-cost-problem-at-scale"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-044
+    difficulty: advanced
+    tags: [probabilistic, scaling-up, statistics]
+    question: |
+      With consistent probabilistic sampling at rate p, how do you recover an estimate of the
+      true total count of events from the sampled data?
+    options:
+      - "Multiply the sampled count by p"
+      - "Add p to the sampled count"
+      - "Scale each kept trace by 1/p (each sampled event represents 1/p events)"
+      - "You cannot estimate totals from sampled data"
+    answer: 2
+    explanation: |
+      Because probabilistic sampling is statistically uniform, each kept event represents 1/p
+      of the population. Scaling counts by 1/p yields an unbiased estimate of totals — one
+      reason probabilistic sampling is preferred over rate-limiting when you need accurate
+      aggregates.
+    ref: "concepts.md#probabilistic-vs-rate-limiting-vs-adaptive-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-045
+    difficulty: intermediate
+    tags: [rate-limiting, statistics, gotcha]
+    question: |
+      Why is it hard to reconstruct accurate population totals from rate-limited (fixed
+      traces/sec) sampling?
+    options:
+      - "Because rate limiting keeps only errors"
+      - "Because the sampled fraction varies with traffic, so there is no single p to scale by, and coverage collapses during spikes"
+      - "Because rate limiting duplicates traces"
+      - "Because it stores no trace IDs"
+    answer: 1
+    explanation: |
+      A fixed traces/sec cap means the effective sampling probability changes with load: at
+      high traffic you keep a tiny, unknown fraction. Without a stable, known p, scaling
+      sampled counts back to totals is unreliable, and spike coverage is poor.
+    ref: "concepts.md#probabilistic-vs-rate-limiting-vs-adaptive-sampling"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-046
+    difficulty: intermediate
+    tags: [labels, bounded, design]
+    question: |
+      Which of these is a SAFE label to keep on a Prometheus metric?
+    options:
+      - "trace_id"
+      - "http_status_code (bounded set like 200, 404, 500)"
+      - "raw_error_message"
+      - "full_request_url_with_query_string"
+    answer: 1
+    explanation: |
+      http_status_code has a small, bounded set of values, so it adds limited cardinality and
+      is useful for aggregation. trace_id, raw error messages, and full URLs with query
+      strings are unbounded and belong on traces/logs, not metric labels.
+    ref: "concepts.md#cardinality-and-the-cardinality-explosion"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-047
+    difficulty: advanced
+    tags: [collector, attributes, scrub, config, scenario]
+    question: |
+      A team accidentally added user_id and request_id as span attributes that then get
+      promoted to metric labels, spiking cardinality. What is the fastest central mitigation?
+    options:
+      - "Redeploy every microservice with new code immediately"
+      - "Increase backend storage"
+      - "Turn off tracing entirely"
+      - "Add a collector attributes/transform processor rule to delete the user_id and request_id attributes before export"
+    answer: 3
+    explanation: |
+      A collector attributes/transform (or redaction) processor can delete the offending
+      high-cardinality attributes centrally, immediately, without waiting on per-service code
+      changes and redeploys. The long-term fix is to stop emitting them at the source.
+    ref: "concepts.md#drop-filter-and-aggregate-at-the-collector"
+
+  - id: sampling-cardinality-and-telemetry-cost-management-048
+    difficulty: beginner
+    tags: [questions, metric-vs-trace, mental-model]
+    question: |
+      Which question is best answered by a metric (bounded dimensions) rather than a
+      trace/wide event?
+    options:
+      - "Why was this specific request from this user slow?"
+      - "What was the exact sequence of downstream calls for order #99?"
+      - "What is my p99 latency by endpoint across all requests?"
+      - "Which unique session_id hit the payment bug?"
+    answer: 2
+    explanation: |
+      "p99 latency by endpoint" aggregates across all requests over a bounded dimension
+      (endpoint) — ideal for a metric/histogram. The others ask about one specific request or
+      a high-cardinality identifier, which belong in traces/wide events.
+    ref: "concepts.md#where-high-cardinality-data-belongs-traces-and-wide-events-not-metric-labels"

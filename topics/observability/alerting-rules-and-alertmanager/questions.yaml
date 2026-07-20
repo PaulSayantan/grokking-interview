@@ -1,0 +1,963 @@
+topic: Alerting Rules & Alertmanager
+domain: observability
+topic_slug: alerting-rules-and-alertmanager
+version: 1
+questions:
+- id: alerting-rules-and-alertmanager-001
+  difficulty: beginner
+  tags:
+  - architecture
+  - split
+  - prometheus
+  - alertmanager
+  question: |
+    In the Prometheus ecosystem, which component evaluates alerting rules and which
+    one routes/delivers the resulting notifications?
+  options:
+  - Prometheus does both evaluation and notification delivery
+  - Prometheus evaluates the rules; Alertmanager handles routing, grouping, and delivery
+  - Alertmanager evaluates the rules; Prometheus delivers the notifications
+  - Grafana evaluates the rules; Alertmanager delivers them
+  answer: 1
+  explanation: |
+    Prometheus evaluates PromQL alerting rules against its TSDB and, when a rule fires,
+    pushes the alert to Alertmanager. Alertmanager owns all of the routing, grouping,
+    deduplication, inhibition, silencing, and delivery to receivers. Prometheus knows
+    nothing about receivers or on-call schedules.
+  ref: concepts.md#the-split-prometheus-evaluates-alertmanager-routes
+- id: alerting-rules-and-alertmanager-002
+  difficulty: beginner
+  tags:
+  - handoff
+  - api
+  - firing
+  question: |
+    How does a firing alert get from Prometheus to Alertmanager?
+  options:
+  - Alertmanager scrapes Prometheus's /alerts endpoint on an interval
+  - They share a database that both read and write
+  - Prometheus pushes the alert to Alertmanager via an HTTP POST to its alerts API
+  - Alertmanager subscribes to a Kafka topic Prometheus publishes to
+  answer: 2
+  explanation: |
+    When an alert is firing, Prometheus POSTs it to every configured Alertmanager
+    (HTTP POST /api/v2/alerts). It re-sends active alerts periodically and sends a
+    resolved notification when the expression stops matching. The handoff is push-based
+    from Prometheus to Alertmanager, not pull.
+  ref: concepts.md#the-split-prometheus-evaluates-alertmanager-routes
+- id: alerting-rules-and-alertmanager-003
+  difficulty: intermediate
+  tags:
+  - design-rationale
+  - separation-of-concerns
+  question: |
+    Why is alerting split into two separate components (Prometheus + Alertmanager)
+    rather than handled entirely inside Prometheus?
+  options:
+  - Because Prometheus cannot execute PromQL comparisons
+  - Because Alertmanager stores all the time-series data
+  - So each alert rule can run on its own dedicated host
+  - So notification/routing policy can be centralized and made HA independently of the many Prometheus
+    servers that evaluate rules
+  answer: 3
+  explanation: |
+    Routing policy (who is on call, which Slack channel) changes far more often than
+    metric definitions, and you may run many Prometheus servers but want one routing
+    brain. Alertmanager is also clustered/HA so notification isn't a single point of
+    failure. Separation of concerns is the core reason.
+  ref: concepts.md#the-split-prometheus-evaluates-alertmanager-routes
+- id: alerting-rules-and-alertmanager-004
+  difficulty: beginner
+  tags:
+  - rule-anatomy
+  - expr
+  question: |
+    In a Prometheus alerting rule, what does the `expr` field contain?
+  options:
+  - A PromQL expression; any series it returns is treated as an active alert instance
+  - The Slack channel to notify
+  - A regular expression matching alert names
+  - The time to wait before firing
+  answer: 0
+  explanation: |
+    `expr` is the PromQL expression evaluated each interval. Every series the expression
+    returns is an active alert, identified by that series' label set — so an expression
+    matching three services produces three separate alerts.
+  ref: concepts.md#writing-alerting-rules-expr-for-labels-annotations
+- id: alerting-rules-and-alertmanager-005
+  difficulty: intermediate
+  tags:
+  - labels
+  - annotations
+  - identity
+  question: |
+    What is the key difference between `labels` and `annotations` on an alerting rule?
+  options:
+  - Labels are optional; annotations are required
+  - Labels are for identity and routing; annotations are descriptive text not used for routing or dedup
+  - Annotations are matched by the routing tree; labels are just for humans
+  - There is no difference; they are interchangeable
+  answer: 1
+  explanation: |
+    Labels are part of the alert's identity and are the keys Alertmanager routes,
+    groups, and deduplicates on (severity, team, region). Annotations (summary,
+    description, runbook_url) are human-facing text that never affect routing or
+    identity, so they can change freely.
+  ref: concepts.md#writing-alerting-rules-expr-for-labels-annotations
+- id: alerting-rules-and-alertmanager-006
+  difficulty: intermediate
+  tags:
+  - cardinality
+  - labels
+  - gotcha
+  question: |
+    Why is it a mistake to put a high-cardinality value like a request ID into an
+    alert's `labels`?
+  options:
+  - It fragments grouping and deduplication because labels are part of alert identity
+  - Labels cannot hold string values
+  - It makes annotations render incorrectly
+  - Prometheus rejects any rule with more than three labels
+  answer: 0
+  explanation: |
+    Labels define alert identity, so a unique per-request value makes every alert
+    distinct — defeating grouping and dedup and producing a storm of individual
+    notifications. High-cardinality descriptive data belongs in an annotation instead.
+  ref: concepts.md#writing-alerting-rules-expr-for-labels-annotations
+- id: alerting-rules-and-alertmanager-007
+  difficulty: beginner
+  tags:
+  - for
+  - states
+  - flapping
+  question: |
+    What does the `for:` field in an alerting rule control?
+  options:
+  - How many receivers the alert is sent to
+  - How often Alertmanager repeats the notification
+  - The maximum number of alerts in a group
+  - How long the expression must be continuously true before the alert transitions from pending to firing
+  answer: 3
+  explanation: |
+    `for:` debounces transient spikes: the alert stays in the pending state and only
+    becomes firing once the expression has been continuously true for the whole `for`
+    duration. It is the primary lever against flapping.
+  ref: concepts.md#pending-vs-firing-and-the-for-duration-avoiding-flapping
+- id: alerting-rules-and-alertmanager-008
+  difficulty: beginner
+  tags:
+  - states
+  - pending
+  question: |
+    An alert is in the `pending` state. What does that mean?
+  options:
+  - Alertmanager has silenced it
+  - The notification has been sent and is awaiting acknowledgement
+  - The expression matched but has not yet been true for the full `for` duration, so no notification is
+    sent
+  - The rule has a syntax error
+  answer: 2
+  explanation: |
+    Pending means the expression just started matching but has not yet satisfied the
+    `for` duration. Prometheus is watching but has not notified Alertmanager. Only after
+    the expression stays true for `>= for` does it become firing and get pushed.
+  ref: concepts.md#pending-vs-firing-and-the-for-duration-avoiding-flapping
+- id: alerting-rules-and-alertmanager-009
+  difficulty: advanced
+  tags:
+  - for
+  - gotcha
+  - staleness
+  question: |
+    An alert with `for: 10m` on a noisy signal never fires even though the condition
+    seems to be met often. What is the most likely cause?
+  options:
+  - Alertmanager is dropping the alert
+  - The expression briefly stops matching (a missing sample or one good scrape), which resets the `for`
+    timer to zero each time
+  - '`for` durations under one hour are ignored by Prometheus'
+  - The rule needs a `repeat_interval` set
+  answer: 1
+  explanation: |
+    `for` only tolerates the expression being *continuously* true. Any interruption —
+    even a single missing/stale sample — resets the pending timer to zero. On a noisy
+    raw signal it may never accumulate 10m. Smoothing with rate(...[5m]) in the expr
+    makes `for` behave predictably.
+  ref: concepts.md#pending-vs-firing-and-the-for-duration-avoiding-flapping
+- id: alerting-rules-and-alertmanager-010
+  difficulty: intermediate
+  tags:
+  - for
+  - trade-off
+  - detection-latency
+  question: |
+    What is the trade-off of setting a longer `for:` duration?
+  options:
+  - It increases cardinality of the alert
+  - It makes Alertmanager send more duplicate notifications
+  - It reduces false pages from transient blips but delays detection of real incidents
+  - It forces the alert to page instead of ticket
+  answer: 2
+  explanation: |
+    A longer `for` filters out transient spikes (fewer false positives) but adds to
+    total detection latency, since a real incident must persist for the full duration
+    before firing. This tension is exactly why burn-rate alerting uses short windows on
+    high burn rates.
+  ref: concepts.md#pending-vs-firing-and-the-for-duration-avoiding-flapping
+- id: alerting-rules-and-alertmanager-011
+  difficulty: beginner
+  tags:
+  - routing
+  - receivers
+  question: |
+    In Alertmanager, what is a "receiver"?
+  options:
+  - A named configuration of one or more notification integrations (e.g. PagerDuty, Slack, email)
+  - A Prometheus server that scrapes targets
+  - The label used to group alerts
+  - A silence created in the UI
+  answer: 0
+  explanation: |
+    A receiver is a named bundle of one or more notification integrations
+    (pagerduty_configs, slack_configs, email_configs, webhook_configs, ...). The routing
+    tree decides which receiver an alert reaches, and one receiver can hit several
+    channels at once.
+  ref: concepts.md#alertmanager-routing-tree--receivers
+- id: alerting-rules-and-alertmanager-012
+  difficulty: intermediate
+  tags:
+  - routing
+  - tree
+  - matching
+  question: |
+    How does Alertmanager's routing tree decide which receiver handles an alert?
+  options:
+  - It randomly assigns a receiver for load balancing
+  - Every receiver gets every alert; filtering happens at the receiver
+  - The alert's annotations determine the receiver
+  - Alerts enter at the root and walk down; matching is depth-first and by default stops at the first
+    matching sibling route
+  answer: 3
+  explanation: |
+    An alert enters at the root route and traverses child routes, matching by label.
+    Matching is depth-first and first-match-wins per level; by default it stops at the
+    first matching sibling. The matched node's receiver (inherited if not overridden)
+    delivers the alert.
+  ref: concepts.md#alertmanager-routing-tree--receivers
+- id: alerting-rules-and-alertmanager-013
+  difficulty: intermediate
+  tags:
+  - routing
+  - continue
+  - fan-out
+  question: |
+    You want a critical alert to both page via PagerDuty AND post to a Slack channel.
+    Which routing feature enables sending one alert to multiple receivers?
+  options:
+  - Adding two `receiver` fields to the same route
+  - 'Setting `repeat_interval: 0`'
+  - 'Setting `continue: true` on the matching route so later sibling routes are also evaluated'
+  - Using an inhibit rule
+  answer: 2
+  explanation: |
+    By default matching stops at the first matching sibling. Setting `continue: true`
+    lets Alertmanager also evaluate later sibling routes, so the alert can match a
+    PagerDuty route and a Slack route and be delivered to both.
+  ref: concepts.md#alertmanager-routing-tree--receivers
+- id: alerting-rules-and-alertmanager-014
+  difficulty: advanced
+  tags:
+  - routing
+  - best-practice
+  - labels
+  question: |
+    Why is routing on a `severity` label generally better than routing on `alertname`?
+  options:
+  - '`alertname` is not available in Alertmanager'
+  - Routing on severity means new alerts automatically route correctly without editing Alertmanager config
+  - Severity labels are cheaper to store
+  - alertname routing disables grouping
+  answer: 1
+  explanation: |
+    If you route on a generic label like severity, then any new alert that sets
+    `severity: page` automatically pages without touching Alertmanager config. Routing
+    per-alertname requires updating the tree for every new alert, which does not scale.
+  ref: concepts.md#alertmanager-routing-tree--receivers
+- id: alerting-rules-and-alertmanager-015
+  difficulty: beginner
+  tags:
+  - grouping
+  - group_by
+  question: |
+    What is the purpose of `group_by` in Alertmanager?
+  options:
+  - To sort alerts alphabetically
+  - To set how long before an alert resolves
+  - To choose the color of the Slack message
+  - To define which labels batch related alerts into a single notification instead of one notification
+    per alert
+  answer: 3
+  explanation: |
+    Grouping batches alerts sharing the same values for the group_by labels into a
+    single notification, so one underlying event (e.g. a rack-wide outage) produces one
+    page listing many instances rather than hundreds of separate pages.
+  ref: concepts.md#grouping-group_by-group_wait-group_interval-repeat_interval
+- id: alerting-rules-and-alertmanager-016
+  difficulty: intermediate
+  tags:
+  - grouping
+  - group_wait
+  - defaults
+  question: |
+    What does `group_wait` (default 30s) control?
+  options:
+  - How long to delay the first notification for a newly created group so related alerts can accumulate
+  - How long to wait before re-sending an unchanged group
+  - How long an alert stays pending before firing
+  - The timeout for scraping a target
+  answer: 0
+  explanation: |
+    group_wait (default 30s) delays the first notification for a *new* group, letting
+    sibling alerts of the same group arrive so they go out together in one notification.
+    It is distinct from group_interval and repeat_interval.
+  ref: concepts.md#grouping-group_by-group_wait-group_interval-repeat_interval
+- id: alerting-rules-and-alertmanager-017
+  difficulty: intermediate
+  tags:
+  - grouping
+  - defaults
+  - repeat_interval
+  question: |
+    What are the default values of group_wait, group_interval, and repeat_interval in
+    Alertmanager?
+  options:
+  - 5s, 1m, 1h
+  - 1m, 10m, 24h
+  - 0s, 30s, 30m
+  - 30s, 5m, 4h
+  answer: 3
+  explanation: |
+    The Alertmanager defaults are group_wait 30s (delay before first notification for a
+    new group), group_interval 5m (minimum gap before an updated notification for an
+    existing group), and repeat_interval 4h (how long before re-sending an unchanged,
+    still-firing group).
+  ref: concepts.md#grouping-group_by-group_wait-group_interval-repeat_interval
+- id: alerting-rules-and-alertmanager-018
+  difficulty: intermediate
+  tags:
+  - grouping
+  - group_interval
+  - repeat_interval
+  question: |
+    What is the difference between `group_interval` and `repeat_interval`?
+  options:
+  - group_interval is the minimum wait before an updated notification when a group's membership changes;
+    repeat_interval is how long before re-sending an unchanged, still-firing group
+  - They are the same setting with two names
+  - group_interval controls pending duration; repeat_interval controls scrape frequency
+  - group_interval applies to email only; repeat_interval to PagerDuty only
+  answer: 0
+  explanation: |
+    group_interval (default 5m) gates *updated* notifications when new alerts join an
+    existing group. repeat_interval (default 4h) is the "nag" interval for re-sending an
+    unchanged group that is still firing. repeat_interval should be a multiple of
+    group_interval.
+  ref: concepts.md#grouping-group_by-group_wait-group_interval-repeat_interval
+- id: alerting-rules-and-alertmanager-019
+  difficulty: advanced
+  tags:
+  - grouping
+  - scenario
+  - storm
+  question: |
+    A bad config causes 300 pods to start erroring, tripping 300 instances of the same
+    alert. Which Alertmanager setting collapses these into a single notification?
+  options:
+  - 'Setting `for: 300s` on the rule'
+  - '`repeat_interval: 0`'
+  - '`group_by: [alertname, service]`, which batches all 300 into one group'
+  - Disabling deduplication
+  answer: 2
+  explanation: |
+    Grouping by [alertname, service] puts all 300 same-named alerts for that service
+    into a single group, producing one notification listing the affected pods rather
+    than 300 pages. group_wait also lets the burst coalesce before the first send.
+  ref: concepts.md#grouping-group_by-group_wait-group_interval-repeat_interval
+- id: alerting-rules-and-alertmanager-020
+  difficulty: beginner
+  tags:
+  - inhibition
+  - definition
+  question: |
+    What does an inhibition rule do in Alertmanager?
+  options:
+  - Deletes alerts older than a threshold
+  - Mutes target alerts while a matching source alert is firing
+  - Delays every notification by a fixed amount
+  - Increases the severity of matching alerts
+  answer: 1
+  explanation: |
+    Inhibition expresses causal dependency: while a source alert (e.g. ClusterDown) is
+    firing, matching target alerts (e.g. per-service warnings in that cluster) are
+    muted. It prevents downstream noise when an upstream failure is already known.
+  ref: concepts.md#inhibition-suppress-downstream-alerts-when-an-upstream-fires
+- id: alerting-rules-and-alertmanager-021
+  difficulty: intermediate
+  tags:
+  - inhibition
+  - equal
+  - scoping
+  question: |
+    In an inhibit rule, what does the `equal` field do?
+  options:
+  - Makes the source and target alerts identical
+  - Sets the two alerts to the same severity
+  - Requires the listed labels to have equal values in source and target for the inhibition to apply
+  - Requires the alert values to be numerically equal
+  answer: 2
+  explanation: |
+    `equal` lists labels that must match in value between source and target for
+    inhibition to take effect. So a ClusterDown in cluster=us-east only suppresses
+    targets that also have cluster=us-east, not alerts in other clusters.
+  ref: concepts.md#inhibition-suppress-downstream-alerts-when-an-upstream-fires
+- id: alerting-rules-and-alertmanager-022
+  difficulty: advanced
+  tags:
+  - inhibition
+  - scenario
+  question: |
+    Given this inhibit rule, which target alert is muted?
+
+    source_matchers: [ severity="critical", alertname="ClusterDown" ]
+    target_matchers: [ severity=~"warning|page" ]
+    equal: [ cluster ]
+
+    Source firing: ClusterDown{cluster="us-east", severity="critical"}
+  options:
+  - HighLatency{cluster="eu-west", severity="warning"}
+  - ClusterUp{cluster="us-east", severity="info"}
+  - DiskFull{cluster="us-east", severity="info"}
+  - HighLatency{cluster="us-east", severity="warning"}
+  answer: 3
+  explanation: |
+    The target must match severity=~"warning|page" AND share the same cluster value as
+    the source. HighLatency in us-east with severity=warning matches both conditions.
+    The eu-west alert has a different cluster; the info-severity alerts don't match the
+    target severity matcher.
+  ref: concepts.md#inhibition-suppress-downstream-alerts-when-an-upstream-fires
+- id: alerting-rules-and-alertmanager-023
+  difficulty: beginner
+  tags:
+  - silences
+  - definition
+  question: |
+    What is a silence in Alertmanager?
+  options:
+  - A manually created, time-bounded mute for alerts matching a set of label matchers
+  - A rule file that disables alert evaluation in Prometheus
+  - An automatic suppression triggered by another firing alert
+  - A receiver that discards notifications
+  answer: 0
+  explanation: |
+    A silence is a human-created, time-boxed mute defined by label matchers, a
+    start/end time, a creator, and a required comment. The alert still fires in
+    Prometheus and is received by Alertmanager; it just isn't notified while silenced.
+  ref: concepts.md#silences-temporarily-muting-known-alerts
+- id: alerting-rules-and-alertmanager-024
+  difficulty: intermediate
+  tags:
+  - silences
+  - config
+  - runtime
+  question: |
+    How are silences created, and where do they live?
+  options:
+  - In the Prometheus rules file, reloaded on SIGHUP
+  - Via the Alertmanager UI, amtool, or API as runtime state stored and gossiped in the cluster
+  - As environment variables on the Prometheus server
+  - Inside each alerting rule's annotations
+  answer: 1
+  explanation: |
+    Silences are runtime state, not config-file entries. They are created through the
+    Alertmanager UI, amtool silence add, or the API, then stored in Alertmanager and
+    gossiped across the HA cluster.
+  ref: concepts.md#silences-temporarily-muting-known-alerts
+- id: alerting-rules-and-alertmanager-025
+  difficulty: intermediate
+  tags:
+  - silences
+  - inhibition
+  - comparison
+  question: |
+    What best distinguishes a silence from an inhibition?
+  options:
+  - A silence is manual and time-boxed by a human; inhibition is automatic suppression while a source
+    alert fires
+  - A silence is automatic and triggered by another alert; inhibition is manual
+  - They are identical except silences apply only to email
+  - Inhibition deletes the alert; silence only hides it in the UI
+  answer: 0
+  explanation: |
+    Silence = manual, time-bounded, human-created mute (for maintenance or a known
+    issue). Inhibition = automatic, config-defined suppression of target alerts while a
+    matching source alert is firing, scoped by `equal` labels.
+  ref: concepts.md#silences-temporarily-muting-known-alerts
+- id: alerting-rules-and-alertmanager-026
+  difficulty: advanced
+  tags:
+  - silences
+  - best-practice
+  - gotcha
+  question: |
+    What is the danger of a broad, long-lived silence such as `severity=~".*"` for a
+    week?
+  options:
+  - It increases Prometheus scrape load
+  - It forces all alerts to page
+  - It resets the `for` timer on matching rules
+  - It can swallow real incidents because nearly every alert is muted for a long time
+  answer: 3
+  explanation: |
+    A silence that matches almost everything for a long window will mute genuine
+    incidents that arise during that period. Best practice is tightly scoped matchers,
+    a short expiry, and a required comment linking the reason/ticket.
+  ref: concepts.md#silences-temporarily-muting-known-alerts
+- id: alerting-rules-and-alertmanager-027
+  difficulty: beginner
+  tags:
+  - ha
+  - dedup
+  question: |
+    You run two identical Prometheus servers for high availability, both evaluating the
+    same rules. How does Alertmanager prevent double-paging?
+  options:
+  - It only accepts alerts from the first Prometheus to connect
+  - It ignores every alert received twice within one second
+  - It deduplicates alerts by their label set (fingerprint), so identical alerts collapse into one notification
+  - Prometheus servers coordinate to decide which one sends alerts
+  answer: 2
+  explanation: |
+    Alertmanager identifies an alert by its label fingerprint. Two alerts with identical
+    labels are the same alert regardless of which Prometheus sent them, so Alertmanager
+    collapses them and notifies once — automatic deduplication.
+  ref: concepts.md#deduplication-across-ha-prometheus-pairs
+- id: alerting-rules-and-alertmanager-028
+  difficulty: advanced
+  tags:
+  - ha
+  - dedup
+  - gotcha
+  - labels
+  question: |
+    Your HA Prometheus pair is producing double pages despite Alertmanager dedup. Which
+    mistake most likely causes this?
+  options:
+  - The two servers scrape at different intervals
+  - Each alert carries a distinct per-replica label (e.g. replica/prometheus), so the label fingerprints
+    differ and dedup fails
+  - group_wait is set too high
+  - The rules file is too large
+  answer: 1
+  explanation: |
+    Dedup only works when the alerts have identical labels. A per-replica label that
+    differs between the two servers makes the fingerprints distinct, so Alertmanager
+    treats them as separate alerts. Strip such labels (e.g. via alert_relabel_configs)
+    to keep them identical.
+  ref: concepts.md#deduplication-across-ha-prometheus-pairs
+- id: alerting-rules-and-alertmanager-029
+  difficulty: advanced
+  tags:
+  - ha
+  - clustering
+  - gossip
+  question: |
+    Beyond identical alert labels, what else is required so an HA Prometheus setup does
+    NOT produce duplicate notifications?
+  options:
+  - Run the Alertmanagers as a gossip cluster so only one member actually sends each notification
+  - Point each Prometheus at its own separate, independent Alertmanager
+  - Disable resolved notifications
+  - Set repeat_interval to 0 on all routes
+  answer: 0
+  explanation: |
+    Alertmanager must run as an HA gossip cluster (--cluster.peer). The cluster
+    coordinates so only one member sends each notification. Pointing each Prometheus at
+    a separate, non-clustered Alertmanager reintroduces duplicate notifications.
+  ref: concepts.md#deduplication-across-ha-prometheus-pairs
+- id: alerting-rules-and-alertmanager-030
+  difficulty: beginner
+  tags:
+  - severity
+  - routing
+  question: |
+    What is the primary role of a `severity` label on an alert?
+  options:
+  - To store the numeric value that triggered the alert
+  - To set the scrape interval
+  - To drive routing (e.g. page vs ticket) and act as the main defense against alert fatigue
+  - To identify which Prometheus replica sent it
+  answer: 2
+  explanation: |
+    The severity label (critical/page, warning, info) is the backbone of routing:
+    Alertmanager routes page-severity alerts to a pager and warnings to tickets/Slack.
+    Keeping the set small and reserving paging for truly urgent things is a key defense
+    against alert fatigue.
+  ref: concepts.md#severity-levels-and-routing-by-severity
+- id: alerting-rules-and-alertmanager-031
+  difficulty: intermediate
+  tags:
+  - severity
+  - page
+  - actionable
+  question: |
+    Which statement best captures when an alert should be `page` severity?
+  options:
+  - Whenever any metric crosses any threshold
+  - Whenever CPU usage is high
+  - Only during business hours
+  - Only when it is both actionable and urgent — needs a human now, cannot wait until morning
+  answer: 3
+  explanation: |
+    A page-severity alert must be actionable and urgent: user-visible impact or imminent
+    SLO breach requiring immediate human attention. If it can safely wait until morning,
+    it should be a warning/ticket, not a page.
+  ref: concepts.md#severity-levels-and-routing-by-severity
+- id: alerting-rules-and-alertmanager-032
+  difficulty: intermediate
+  tags:
+  - severity
+  - decoupling
+  question: |
+    Setting `severity` in the rule and routing on it in Alertmanager achieves what?
+  options:
+  - It removes the need for a receiver
+  - It decouples 'how urgent' (owned by the rule author) from 'who/how to notify' (owned by Alertmanager)
+  - It makes all alerts fire immediately without `for`
+  - It automatically silences low-severity alerts
+  answer: 1
+  explanation: |
+    Putting severity on the rule lets the person who understands the metric declare how
+    urgent it is, while Alertmanager independently owns the mapping from severity to a
+    notification channel. This clean decoupling is why routing on severity scales well.
+  ref: concepts.md#severity-levels-and-routing-by-severity
+- id: alerting-rules-and-alertmanager-033
+  difficulty: beginner
+  tags:
+  - symptoms
+  - causes
+  - design
+  question: |
+    According to Google SRE guidance, you should preferentially alert on:
+  options:
+  - Symptoms — things the user experiences, like high error rate or latency
+  - Causes such as high CPU and full disks
+  - Every internal state change
+  - Restarts of individual pods
+  answer: 0
+  explanation: |
+    Alert on symptoms, not causes. Symptoms (errors, latency, SLO burn) map directly to
+    user pain and catch even unforeseen failure modes with few, high-signal alerts.
+    Cause-based alerts (CPU, disk) are numerous, often benign, and can't be exhaustively
+    enumerated.
+  ref: concepts.md#alert-design-symptoms-not-causes
+- id: alerting-rules-and-alertmanager-034
+  difficulty: intermediate
+  tags:
+  - symptoms
+  - causes
+  - rationale
+  question: |
+    Why is paging on a cause like "CPU > 90%" often a poor alert?
+  options:
+  - CPU is impossible to measure in Prometheus
+  - High CPU may be perfectly fine (the service is serving traffic happily) and does not necessarily correspond
+    to user impact
+  - CPU metrics have too low cardinality
+  - Prometheus cannot compare gauges
+  answer: 1
+  explanation: |
+    A cause like high CPU may not correspond to any user-visible problem — a service can
+    be busy and healthy. Paging on it generates noise unrelated to actual impact.
+    Symptom-based alerts fire on real pain regardless of the underlying cause.
+  ref: concepts.md#alert-design-symptoms-not-causes
+- id: alerting-rules-and-alertmanager-035
+  difficulty: intermediate
+  tags:
+  - golden-signals
+  - red
+  - use
+  question: |
+    Which set is the "Four Golden Signals" from the Google SRE book?
+  options:
+  - Rate, Errors, Duration, Saturation
+  - Utilization, Saturation, Errors, Latency
+  - Latency, Traffic, Errors, Saturation
+  - CPU, Memory, Disk, Network
+  answer: 2
+  explanation: |
+    The Four Golden Signals are latency, traffic, errors, and saturation. RED (Rate,
+    Errors, Duration) is Tom Wilkie's request-focused variant, and USE (Utilization,
+    Saturation, Errors) is Brendan Gregg's resource-focused method.
+  ref: concepts.md#alert-design-symptoms-not-causes
+- id: alerting-rules-and-alertmanager-036
+  difficulty: advanced
+  tags:
+  - symptoms
+  - leading-indicator
+  - exception
+  question: |
+    Symptom-based alerting is the rule, but which is a legitimate exception where paging
+    on a leading indicator is justified?
+  options:
+  - A pod restarted once
+  - CPU briefly spiked to 80%
+  - A single 500 response in the last day
+  - A TLS certificate that will expire in 24 hours, or a disk that will fill in 2 hours
+  answer: 3
+  explanation: |
+    A small, curated set of leading indicators with no fast symptom — a cert expiring
+    soon, a disk that will fill in hours — warrant a page because acting late is
+    catastrophic. Give them enough lead time; keep this as a short exception list, not a
+    general practice.
+  ref: concepts.md#alert-design-symptoms-not-causes
+- id: alerting-rules-and-alertmanager-037
+  difficulty: beginner
+  tags:
+  - alert-fatigue
+  - definition
+  question: |
+    What is "alert fatigue"?
+  options:
+  - The CPU cost of evaluating too many rules
+  - The delay between pending and firing states
+  - When too many low-value alerts train people to ignore all alerts, including real ones
+  - Alertmanager running out of memory
+  answer: 2
+  explanation: |
+    Alert fatigue is the slow death of the pager: a high volume of low-value
+    notifications conditions on-call engineers to ignore alerts, so the one real alert
+    also gets missed. Reducing noise (symptom-based, grouping, severity discipline) is
+    the cure.
+  ref: concepts.md#avoiding-alert-storms-and-alert-fatigue
+- id: alerting-rules-and-alertmanager-038
+  difficulty: intermediate
+  tags:
+  - alert-storm
+  - tools
+  question: |
+    Which combination of mechanisms most directly reduces an alert storm from a single
+    root cause?
+  options:
+  - Higher scrape interval and more receivers
+  - Grouping, inhibition, and `for` durations
+  - Disabling deduplication and lowering `for`
+  - Adding more severity levels
+  answer: 1
+  explanation: |
+    Grouping collapses many related alerts into one notification, inhibition lets a
+    root-cause alert suppress downstream children, and `for` durations debounce
+    transient blips. Together they cut a storm down to a few high-signal notifications.
+  ref: concepts.md#avoiding-alert-storms-and-alert-fatigue
+- id: alerting-rules-and-alertmanager-039
+  difficulty: advanced
+  tags:
+  - alert-fatigue
+  - process
+  - boundary
+  question: |
+    A team is drowning in pages. Which is the best systematic first step at the
+    signal-quality level?
+  options:
+  - Increase repeat_interval so pages arrive less often
+  - Delete Alertmanager and page directly from Prometheus
+  - Raise every alert to critical severity
+  - Measure which alerts fire most and which actually lead to action, then move non-actionable ones to
+    tickets/dashboards and delete ones nobody acts on
+  answer: 3
+  explanation: |
+    The systematic approach is data-driven: measure page-to-action ratios, convert
+    non-actionable alerts to tickets/dashboards, switch cause-based alerts to
+    symptom/SLO-based, add for/grouping/inhibition, and prune alerts nobody acts on.
+    (The human on-call process itself belongs to reliability-and-operations.)
+  ref: concepts.md#avoiding-alert-storms-and-alert-fatigue
+- id: alerting-rules-and-alertmanager-040
+  difficulty: intermediate
+  tags:
+  - burn-rate
+  - slo
+  - definition
+  question: |
+    In SLO-based alerting, what is the "burn rate"?
+  options:
+  - How many times faster than sustainable you are consuming the error budget
+  - The number of alerts fired per hour
+  - The CPU consumed by rule evaluation
+  - The percentage of targets that are down
+  answer: 0
+  explanation: |
+    Burn rate is the multiple of the sustainable consumption rate at which you are
+    spending error budget. Burn rate 1 exhausts the whole budget exactly at the end of
+    the SLO window; burn rate 14.4 would exhaust it in about two days.
+  ref: concepts.md#multi-window-multi-burn-rate-slo-alerting
+- id: alerting-rules-and-alertmanager-041
+  difficulty: advanced
+  tags:
+  - burn-rate
+  - math
+  - calculation
+  question: |
+    For a 99.9% SLO (0.1% error budget over 30 days), a burn rate of 14.4 exhausts the
+    budget in approximately how long?
+  options:
+  - About 30 minutes
+  - About 6 hours
+  - About 30 days
+  - About 2 days
+  answer: 3
+  explanation: |
+    Time to exhaust = SLO window / burn rate = 30 days / 14.4 ≈ 2 days. This is why a
+    14.4x burn is treated as a page-worthy fast burn, whereas a 1x burn (30 days to
+    exhaust) is only a ticket.
+  ref: concepts.md#multi-window-multi-burn-rate-slo-alerting
+- id: alerting-rules-and-alertmanager-042
+  difficulty: advanced
+  tags:
+  - burn-rate
+  - multi-window
+  - rationale
+  question: |
+    Why does the SRE Workbook recommend pairing a long window with a short window
+    (~1/12 the long window) in burn-rate alerts?
+  options:
+  - The long window avoids false positives; the short window confirms the burn is still happening so the
+    alert resets quickly after recovery
+  - To reduce the number of recording rules needed
+  - So each window can use a different SLO
+  - To let Alertmanager group the two alerts
+  answer: 0
+  explanation: |
+    A long window alone is slow to fire and slow to reset (keeps paging after recovery).
+    A short window alone is jumpy and false-positive-prone. Requiring both to exceed the
+    threshold gives fast detection plus fast reset with few false alarms.
+  ref: concepts.md#multi-window-multi-burn-rate-slo-alerting
+- id: alerting-rules-and-alertmanager-043
+  difficulty: intermediate
+  tags:
+  - burn-rate
+  - page-vs-ticket
+  - thresholds
+  question: |
+    In the recommended multi-burn-rate configuration, which pairing corresponds to a
+    fast-burn PAGE?
+  options:
+  - 3-day long window, 6-hour short window, burn rate 1
+  - 24-hour long window, 2-hour short window, burn rate 0.5
+  - 1-hour long window, 5-minute short window, burn rate 14.4
+  - 7-day long window, 1-day short window, burn rate 1
+  answer: 2
+  explanation: |
+    The SRE Workbook's fast-burn page uses a 1h/5m window pair at burn rate 14.4 (about
+    2% of budget consumed before firing). The 3-day/6-hour pair at burn rate 1 is the
+    slow-burn ticket handled the next business day.
+  ref: concepts.md#multi-window-multi-burn-rate-slo-alerting
+- id: alerting-rules-and-alertmanager-044
+  difficulty: advanced
+  tags:
+  - burn-rate
+  - recording-rules
+  - performance
+  question: |
+    What is the recommended way to keep multi-window burn-rate alert expressions cheap
+    and consistent?
+  options:
+  - Increase the evaluation_interval to once per hour
+  - Precompute the SLI ratio for each window as recording rules and reference them from the alert expressions
+  - Store the burn rate as an annotation
+  - Run each window on a separate Alertmanager
+  answer: 1
+  explanation: |
+    Precomputing per-window SLI ratios (e.g. job:slo_errors:ratio_rate5m, ...rate1h)
+    as recording rules keeps alert expressions cheap and readable, and ensures every
+    window uses the same recorded numerator/denominator.
+  ref: concepts.md#multi-window-multi-burn-rate-slo-alerting
+- id: alerting-rules-and-alertmanager-045
+  difficulty: beginner
+  tags:
+  - runbook
+  - annotations
+  - actionable
+  question: |
+    Where should the link to an alert's step-by-step remediation guide be placed?
+  options:
+  - In a label called runbook
+  - In the `expr` field
+  - In an annotation, typically `runbook_url`
+  - In the Alertmanager silence comment
+  answer: 2
+  explanation: |
+    The runbook link belongs in an annotation (conventionally runbook_url). Annotations
+    are human-facing metadata; receivers render runbook_url as a clickable link so the
+    on-call can start remediation immediately. Labels are for identity/routing, not
+    descriptive links.
+  ref: concepts.md#runbook-links-and-actionable-annotations
+- id: alerting-rules-and-alertmanager-046
+  difficulty: intermediate
+  tags:
+  - annotations
+  - templating
+  question: |
+    In an alert annotation, what does `{{ $value }}` render?
+  options:
+  - The numeric value of the expression that triggered the alert
+  - The alert's severity label
+  - The name of the receiver
+  - The time the alert was silenced
+  answer: 0
+  explanation: |
+    In Prometheus alert templating, {{ $value }} is the firing value of the expression,
+    {{ $labels.x }} accesses the alert's labels, and helpers like humanizePercentage /
+    humanizeDuration format it. This lets a description report the observed value versus
+    the threshold.
+  ref: concepts.md#runbook-links-and-actionable-annotations
+- id: alerting-rules-and-alertmanager-047
+  difficulty: intermediate
+  tags:
+  - actionable
+  - design
+  - quality-bar
+  question: |
+    Which set of properties best describes a well-designed alert?
+  options:
+  - It fires on a cause, pages frequently, and has no runbook
+  - It reflects a symptom, is urgent if it pages, is grouped/deduped so it fires once, and links a runbook
+    with context
+  - It has the highest possible cardinality for detail
+  - It routes to every receiver to be safe
+  answer: 1
+  explanation: |
+    The bar for a good alert: it is a symptom, it is urgent (if paging), it is
+    grouped/deduped so it fires once, and it carries a runbook link plus enough context
+    to start remediation. Anything failing those tests is noise.
+  ref: concepts.md#runbook-links-and-actionable-annotations
+- id: alerting-rules-and-alertmanager-048
+  difficulty: advanced
+  tags:
+  - scenario
+  - troubleshooting
+  - split
+  question: |
+    An alert is firing in Prometheus (visible on the /alerts page) but no notification
+    arrives. Where should you look FIRST?
+  options:
+  - Rewrite the PromQL expression
+  - Restart the Prometheus TSDB
+  - Increase the `for` duration on the rule
+  - 'In Alertmanager: an active silence, an inhibition rule muting it, a misrouted/misconfigured receiver,
+    or repeat_interval not yet elapsed'
+  answer: 3
+  explanation: |
+    Because Prometheus already shows the alert firing, the problem is in the routing
+    half. Check Alertmanager for an active silence, an inhibition suppressing it, a
+    route pointing at a broken receiver, or repeat_interval not yet elapsed. amtool and
+    the Alertmanager UI show the alert's current state.
+  ref: concepts.md#the-split-prometheus-evaluates-alertmanager-routes

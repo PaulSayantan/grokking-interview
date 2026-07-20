@@ -1,0 +1,841 @@
+topic: "Log Aggregation & Analysis (ELK / Loki)"
+domain: observability
+topic_slug: log-aggregation-and-analysis
+version: 1
+questions:
+  - id: log-aggregation-and-analysis-001
+    difficulty: beginner
+    tags: [pipeline, fundamentals]
+    question: |
+      What is the primary purpose of log aggregation in a distributed system?
+    options:
+      - "To reduce the number of log lines each service produces"
+      - "To ship every service's logs to a central system where they can be indexed, correlated, and queried as one dataset"
+      - "To replace metrics and traces with a single signal"
+      - "To encrypt logs before they leave the host"
+    answer: 1
+    explanation: |
+      On a single host you can grep a file, but across many ephemeral services you
+      cannot. Log aggregation centralizes logs so they can be parsed, indexed, stored,
+      correlated, and queried together — the foundation of the logs pillar.
+    ref: "concepts.md#the-centralized-logging-pipeline"
+
+  - id: log-aggregation-and-analysis-002
+    difficulty: beginner
+    tags: [pipeline, stages]
+    question: |
+      Which sequence best describes the classic five-stage centralized logging pipeline?
+    options:
+      - "Index -> ship -> parse -> query -> store"
+      - "Parse -> store -> ship -> query -> index"
+      - "Query -> buffer -> ship -> index -> parse"
+      - "Ship -> parse/enrich -> buffer -> index/store -> query"
+    answer: 3
+    explanation: |
+      Almost every log system follows: ship (agent), parse/enrich (extract fields, add
+      metadata), buffer (decouple from the store), index/store (write to the backend),
+      and query (UI/API). Naming the stages lets you reason about cost and failure per hop.
+    ref: "concepts.md#the-centralized-logging-pipeline"
+
+  - id: log-aggregation-and-analysis-003
+    difficulty: intermediate
+    tags: [pipeline, buffering, reliability]
+    question: |
+      Why is a buffer/broker stage (agent disk buffer or Kafka) placed between the
+      collectors and the storage backend?
+    options:
+      - "To decouple producers from the store so a slow or down backend does not block the app or drop logs"
+      - "To full-text index logs before they reach Elasticsearch"
+      - "To convert JSON logs into grok patterns"
+      - "To reduce label cardinality automatically"
+    answer: 0
+    explanation: |
+      The buffer stage absorbs backpressure: if the backend is slow or unavailable,
+      the buffer holds events (disk buffer and/or a broker like Kafka) so the
+      application is not blocked and logs are not lost.
+    ref: "concepts.md#the-centralized-logging-pipeline"
+
+  - id: log-aggregation-and-analysis-004
+    difficulty: intermediate
+    tags: [pipeline, cost]
+    question: |
+      In the logging pipeline cost model, which stage's cost is dominated primarily by
+      how much data a query must scan?
+    options:
+      - "Ship"
+      - "Parse/enrich"
+      - "Query"
+      - "Buffer"
+    answer: 2
+    explanation: |
+      Ingest cost is dominated by parsing + indexing (CPU), storage cost by what/where
+      you retain, and query cost by how much data a query must scan. ELK and Loki make
+      opposite bets on whether to spend at ingest or defer to query time.
+    ref: "concepts.md#the-centralized-logging-pipeline"
+
+  - id: log-aggregation-and-analysis-005
+    difficulty: beginner
+    tags: [collectors, fluent-bit]
+    question: |
+      In a Kubernetes cluster, which collector is most commonly deployed as a
+      lightweight per-node DaemonSet because of its tiny (megabytes-of-RAM) footprint?
+    options:
+      - "Logstash"
+      - "Fluent Bit"
+      - "Elasticsearch"
+      - "Kibana"
+    answer: 1
+    explanation: |
+      Fluent Bit is written in C with a very small footprint, making it the common
+      per-node agent. Logstash is a heavy JVM aggregator; Elasticsearch and Kibana are
+      the store and UI, not collectors.
+    ref: "concepts.md#collectors-agents-and-forwarders"
+
+  - id: log-aggregation-and-analysis-006
+    difficulty: intermediate
+    tags: [collectors, logstash, beats]
+    question: |
+      In a typical Elastic Stack deployment, what is the division of labor between
+      Filebeat and Logstash?
+    options:
+      - "Filebeat stores the inverted index; Logstash renders dashboards"
+      - "Filebeat is a lightweight shipper that tails files; Logstash is a heavier aggregator that does rich parsing/transforms (grok, mutate)"
+      - "Filebeat runs PromQL; Logstash runs LogQL"
+      - "They are interchangeable names for the same binary"
+    answer: 1
+    explanation: |
+      Filebeat is a lightweight shipper meant to run on every host with minimal
+      transforms. Logstash is the JVM-based aggregator with rich filter plugins (grok,
+      mutate, geoip) but higher resource use — often centralized rather than per-node.
+    ref: "concepts.md#collectors-agents-and-forwarders"
+
+  - id: log-aggregation-and-analysis-007
+    difficulty: intermediate
+    tags: [collectors, delivery-semantics]
+    question: |
+      Most log collection agents provide which delivery guarantee, and what is the
+      practical consequence?
+    options:
+      - "Exactly-once; duplicates are impossible"
+      - "At-most-once; logs may be silently dropped but never duplicated"
+      - "At-least-once; retries can produce duplicate events"
+      - "No guarantee; ordering and delivery are both random"
+    answer: 2
+    explanation: |
+      Most agents give at-least-once delivery: on failure they retry, which can
+      duplicate events. True exactly-once is rare and expensive, so downstream systems
+      often dedupe on a key when duplicates matter.
+    ref: "concepts.md#collectors-agents-and-forwarders"
+
+  - id: log-aggregation-and-analysis-008
+    difficulty: intermediate
+    tags: [collectors, push-pull]
+    question: |
+      Why are logs almost always pushed to the backend rather than pulled/scraped the
+      way Prometheus collects metrics?
+    options:
+      - "Because logs are smaller than metrics"
+      - "Because HTTP does not support pulling text"
+      - "Because push is the only method Elasticsearch supports"
+      - "Because events are produced continuously and cannot be re-derived by a later scrape"
+    answer: 3
+    explanation: |
+      Log events are discrete and continuous; a missed moment cannot be reconstructed
+      by scraping later, unlike a gauge/counter that still holds its current value. So
+      agents push events as they occur.
+    ref: "concepts.md#collectors-agents-and-forwarders"
+
+  - id: log-aggregation-and-analysis-009
+    difficulty: advanced
+    tags: [collectors, vector, performance]
+    question: |
+      A team runs heavy grok parsing inside a per-node agent at very high log volume and
+      sees node CPU saturation. Which change most directly addresses the root cause?
+    options:
+      - "Emit structured (JSON) logs at the source so no regex parsing is needed, or move heavy parsing to a central aggregator"
+      - "Add more replica shards in Elasticsearch"
+      - "Increase the query-frontend parallelism in Loki"
+      - "Switch the agent from push to pull mode"
+    answer: 0
+    explanation: |
+      Regex/grok parsing is CPU-hungry and, run on every node, competes with the
+      workload. Emitting JSON at the source removes the parse step entirely; if you
+      cannot control the format, push heavy parsing to a central aggregator.
+    ref: "concepts.md#collectors-agents-and-forwarders"
+
+  - id: log-aggregation-and-analysis-010
+    difficulty: beginner
+    tags: [parsing, grok]
+    question: |
+      What is grok used for in log processing?
+    options:
+      - "Compressing log chunks before they reach object storage"
+      - "Balancing shards across an Elasticsearch cluster"
+      - "Propagating trace context between services"
+      - "Matching unstructured text lines with named regular-expression patterns to extract fields"
+    answer: 3
+    explanation: |
+      Grok matches unstructured text using named regex patterns (e.g. %{IPORHOST:client}),
+      turning a raw line into typed, named fields the backend can index and aggregate.
+    ref: "concepts.md#parsing-grok-vs-json-structured-logs"
+
+  - id: log-aggregation-and-analysis-011
+    difficulty: intermediate
+    tags: [parsing, structured-logging]
+    question: |
+      Why do structured (JSON) logs make aggregation cheaper and more reliable than
+      grok-parsed text?
+    options:
+      - "JSON logs are always smaller on disk than text"
+      - "JSON disables the inverted index automatically"
+      - "JSON logs cannot contain high-cardinality values"
+      - "Fields arrive already named and typed, so there is no fragile regex parse step and aggregations/correlation are exact"
+    answer: 3
+    explanation: |
+      With JSON the collector just deserializes — no fragile, CPU-heavy regex. Fields
+      are already named and typed, so count-by-status aggregations are exact and joining
+      on trace_id is trivial.
+    ref: "concepts.md#parsing-grok-vs-json-structured-logs"
+
+  - id: log-aggregation-and-analysis-012
+    difficulty: intermediate
+    tags: [parsing, grok, gotcha]
+    question: |
+      What is a well-known downside of relying on grok patterns for parsing?
+    options:
+      - "Patterns are regex that break when the log format changes and can backtrack catastrophically if poorly anchored"
+      - "Grok cannot extract numeric fields"
+      - "Grok only works inside Grafana Loki"
+      - "Grok forces all fields to be indexed as text"
+    answer: 0
+    explanation: |
+      Grok patterns are regular expressions: they are fragile (break when the format
+      shifts) and CPU-hungry, and a poorly-anchored pattern can cause catastrophic
+      regex backtracking.
+    ref: "concepts.md#parsing-grok-vs-json-structured-logs"
+
+  - id: log-aggregation-and-analysis-013
+    difficulty: intermediate
+    tags: [parsing, best-practice]
+    question: |
+      What is the interview-correct guidance on "grok vs JSON"?
+    options:
+      - "Always grok everything; JSON is too verbose"
+      - "Never parse logs; store everything raw"
+      - "Use grok for JSON and JSON for plain text"
+      - "Emit JSON at the source; reserve grok for third-party/legacy logs whose format you do not control"
+    answer: 3
+    explanation: |
+      The best answer is to emit structured JSON at the application so parsing is
+      trivial and reliable, and only fall back to grok for logs you cannot change
+      (third-party or legacy systems).
+    ref: "concepts.md#parsing-grok-vs-json-structured-logs"
+
+  - id: log-aggregation-and-analysis-014
+    difficulty: beginner
+    tags: [elk, components]
+    question: |
+      What do the letters in "ELK" stand for?
+    options:
+      - "Event Log Kernel"
+      - "Elastic, Loki, Kafka"
+      - "Elasticsearch, Logstash, Kibana"
+      - "Elasticsearch, LogQL, Kubernetes"
+    answer: 2
+    explanation: |
+      ELK = Elasticsearch (store + search index) + Logstash (parse/transform) + Kibana
+      (UI). With Beats as the shipper, the whole thing is now called the Elastic Stack.
+    ref: "concepts.md#the-elastic-stack-elk--beats"
+
+  - id: log-aggregation-and-analysis-015
+    difficulty: intermediate
+    tags: [elk, kibana]
+    question: |
+      In the Elastic Stack, which component provides the query and visualization UI?
+    options:
+      - "Filebeat"
+      - "Logstash"
+      - "Elasticsearch"
+      - "Kibana"
+    answer: 3
+    explanation: |
+      Kibana is the UI (Discover, dashboards, KQL). Elasticsearch is the store/search
+      engine, Logstash parses/transforms, and Filebeat ships logs off hosts.
+    ref: "concepts.md#the-elastic-stack-elk--beats"
+
+  - id: log-aggregation-and-analysis-016
+    difficulty: intermediate
+    tags: [elk, tradeoff]
+    question: |
+      What is Elasticsearch's key strength that justifies its higher cost for log use cases?
+    options:
+      - "It stores logs in object storage for almost nothing"
+      - "Because every field (including the free-text message) is indexed, it supports fast ad-hoc full-text search and rich aggregations without knowing queries in advance"
+      - "It requires no memory to run"
+      - "It indexes only labels, like Prometheus"
+    answer: 1
+    explanation: |
+      Elasticsearch indexes every field including the message body, enabling fast,
+      exploratory full-text search, fuzzy matching, and rich aggregations. The price is
+      a large, compute- and memory-heavy index and a stateful cluster.
+    ref: "concepts.md#the-elastic-stack-elk--beats"
+
+  - id: log-aggregation-and-analysis-017
+    difficulty: beginner
+    tags: [elasticsearch, inverted-index]
+    question: |
+      An inverted index in Elasticsearch/Lucene maps which of the following?
+    options:
+      - "Each term to the list of documents (postings) that contain it"
+      - "Documents to the labels attached to their stream"
+      - "Shards to the nodes that host them"
+      - "Timestamps to compressed chunks in object storage"
+    answer: 0
+    explanation: |
+      An inverted index is a dictionary from term -> postings list (the doc ids
+      containing that term). Answering "logs containing X and Y" is then a fast
+      intersection of postings lists, independent of total log count.
+    ref: "concepts.md#elasticsearch-internals-the-inverted-index"
+
+  - id: log-aggregation-and-analysis-018
+    difficulty: intermediate
+    tags: [elasticsearch, analysis, tokenization]
+    question: |
+      When Elasticsearch indexes a text field, what does the analyzer do first?
+    options:
+      - "Compresses the field with snappy"
+      - "Tokenizes the text into terms and normalizes them (lowercasing, stemming, stop-words)"
+      - "Assigns the field to a Loki stream"
+      - "Writes the field to the frozen tier"
+    answer: 1
+    explanation: |
+      The analyzer tokenizes text into terms and normalizes them (lowercase, stem,
+      handle stop-words) before Lucene builds the inverted index from those terms. This
+      is what enables flexible full-text matching.
+    ref: "concepts.md#elasticsearch-internals-the-inverted-index"
+
+  - id: log-aggregation-and-analysis-019
+    difficulty: advanced
+    tags: [elasticsearch, mapping]
+    question: |
+      In an Elasticsearch mapping, what is the practical difference between a `text`
+      field and a `keyword` field?
+    options:
+      - "text is stored in object storage; keyword is stored on SSD"
+      - "text supports aggregations; keyword does not support any queries"
+      - "text is analyzed/tokenized for full-text search; keyword is stored verbatim for exact match and aggregations"
+      - "There is no difference; they are aliases"
+    answer: 2
+    explanation: |
+      A `text` field is analyzed (tokenized) so it supports full-text search; a
+      `keyword` field is stored verbatim and is used for exact matching, sorting, and
+      aggregations. Choosing the wrong type limits the queries you can run.
+    ref: "concepts.md#elasticsearch-internals-the-inverted-index"
+
+  - id: log-aggregation-and-analysis-020
+    difficulty: intermediate
+    tags: [elasticsearch, cost]
+    question: |
+      Why is the inverted index the main reason ELK is expensive to run?
+    options:
+      - "It is stored only in object storage, which is slow"
+      - "It duplicates every log line ten times by default"
+      - "It forces logs to be stored uncompressed forever"
+      - "It can rival or exceed the size of the raw logs and needs lots of RAM to stay fast, plus CPU to index every token"
+    answer: 3
+    explanation: |
+      Indexing every token costs CPU at ingest, and the resulting index can be as large
+      as or larger than the raw data and needs substantial RAM (heap + page cache) to
+      serve queries fast. That cost buys schema-free ad-hoc search.
+    ref: "concepts.md#elasticsearch-internals-the-inverted-index"
+
+  - id: log-aggregation-and-analysis-021
+    difficulty: advanced
+    tags: [elasticsearch, shards, lucene]
+    question: |
+      Which statement about Elasticsearch shards is correct?
+    options:
+      - "All shards must live on a single node for consistency"
+      - "Replica shards store labels while primary shards store chunks"
+      - "A shard is a self-contained Lucene index; primary shards hold data and replica shards add redundancy and read throughput"
+      - "The number of primary shards can be changed freely at any time without reindexing"
+    answer: 2
+    explanation: |
+      Each shard is a self-contained Lucene index made of immutable segments. Primary
+      shards own the data; replica shards are copies that add redundancy and serve read
+      requests. Primary shard count is fixed at index creation.
+    ref: "concepts.md#elasticsearch-internals-the-inverted-index"
+
+  - id: log-aggregation-and-analysis-022
+    difficulty: beginner
+    tags: [loki, indexing]
+    question: |
+      What does Grafana Loki index?
+    options:
+      - "Only a small set of labels per stream; raw log lines are stored as compressed chunks"
+      - "The full text of every log line"
+      - "Every unique word after stemming"
+      - "Trace spans and their durations"
+    answer: 0
+    explanation: |
+      Loki's defining decision is that it does NOT full-text index log contents. It
+      indexes only labels per stream and stores the raw lines as compressed chunks in
+      object storage — "Prometheus, but for logs."
+    ref: "concepts.md#grafana-loki-label-based-indexing"
+
+  - id: log-aggregation-and-analysis-023
+    difficulty: intermediate
+    tags: [loki, streams]
+    question: |
+      In Loki, what defines a distinct log "stream"?
+    options:
+      - "A unique set of label key/value pairs"
+      - "A single log file on disk"
+      - "A single trace_id"
+      - "One Elasticsearch shard"
+    answer: 0
+    explanation: |
+      A stream is the set of logs sharing the same unique combination of labels (e.g.
+      {app="checkout", namespace="prod", level="error"}). Each stream's lines are
+      batched, compressed into chunks, and written to object storage.
+    ref: "concepts.md#grafana-loki-label-based-indexing"
+
+  - id: log-aggregation-and-analysis-024
+    difficulty: intermediate
+    tags: [loki, storage]
+    question: |
+      Where does Loki store the actual log line data?
+    options:
+      - "In a large inverted index on local SSD"
+      - "As compressed chunks in object storage such as S3, GCS, or Azure Blob"
+      - "Only in the ingester's memory, never persisted"
+      - "Inside Grafana's dashboard JSON"
+    answer: 1
+    explanation: |
+      Loki compresses batched lines into chunks and writes them to object storage,
+      which is cheap and near-infinite. A small index only maps labels -> chunks. This
+      is the core of Loki's cost advantage.
+    ref: "concepts.md#grafana-loki-label-based-indexing"
+
+  - id: log-aggregation-and-analysis-025
+    difficulty: advanced
+    tags: [loki, query-execution]
+    question: |
+      In Loki, how is a text filter like `|= "declined"` executed given there is no
+      content index?
+    options:
+      - "It fetches every chunk in the streams matched by the label selector and brute-force scans them"
+      - "It looks up the term in an inverted index and returns matching docs instantly"
+      - "It queries Elasticsearch as a fallback"
+      - "It rejects the query because Loki cannot filter by content"
+    answer: 0
+    explanation: |
+      With no content index, Loki narrows to streams via the label selector (which uses
+      the index) and then fetches and scans the matching chunks for the substring. Fast
+      if the selector is narrow, slow if it matches huge volumes of data.
+    ref: "concepts.md#grafana-loki-label-based-indexing"
+
+  - id: log-aggregation-and-analysis-026
+    difficulty: advanced
+    tags: [loki, architecture]
+    question: |
+      Which Loki component builds chunks, holds recent data in memory, and flushes to
+      object storage?
+    options:
+      - "Distributor"
+      - "Query-frontend"
+      - "Ingester"
+      - "Querier"
+    answer: 2
+    explanation: |
+      The distributor receives and validates writes; the ingester builds chunks, holds
+      recent data in memory, and flushes to the object store. Queriers fetch chunks and
+      apply filters; the query-frontend splits and parallelizes queries.
+    ref: "concepts.md#grafana-loki-label-based-indexing"
+
+  - id: log-aggregation-and-analysis-027
+    difficulty: beginner
+    tags: [logql, basics]
+    question: |
+      What must every LogQL query begin with?
+    options:
+      - "A regular expression"
+      - "An aggregation function like sum()"
+      - "A time range in brackets"
+      - "A log stream selector (label matchers in curly braces)"
+    answer: 3
+    explanation: |
+      Every LogQL query starts with a log stream selector such as {app="checkout"}.
+      This mandatory part uses the index to narrow to streams; line filters and parsers
+      are applied afterwards.
+    ref: "concepts.md#logql-querying-loki"
+
+  - id: log-aggregation-and-analysis-028
+    difficulty: intermediate
+    tags: [logql, operators]
+    question: |
+      In LogQL, what does the `|~` line-filter operator do?
+    options:
+      - "Regular-expression match against the line"
+      - "Exact substring 'contains' match"
+      - "Parses the line as JSON"
+      - "Formats the output line"
+    answer: 0
+    explanation: |
+      Line-filter operators: |= (contains), != (not contains), |~ (regex match), !~
+      (regex not match). Parser stages like | json and | logfmt turn the line into
+      labels you can filter and format on.
+    ref: "concepts.md#logql-querying-loki"
+
+  - id: log-aggregation-and-analysis-029
+    difficulty: intermediate
+    tags: [logql, metrics]
+    question: |
+      Which LogQL query computes the per-second rate of error lines over the last 5
+      minutes, grouped by pod?
+    options:
+      - "sum by (pod) (rate({app=\"checkout\"} |= \"error\" [5m]))"
+      - "count({app=\"checkout\"})"
+      - "histogram_quantile(0.99, {app=\"checkout\"})"
+      - "select rate from logs where level = error"
+    answer: 0
+    explanation: |
+      LogQL mirrors PromQL: rate({...} |= "error" [5m]) gives per-second error rate over
+      the window, and sum by (pod) aggregates by pod. This turns logs into a time series
+      that graphs next to Prometheus metrics.
+    ref: "concepts.md#logql-querying-loki"
+
+  - id: log-aggregation-and-analysis-030
+    difficulty: advanced
+    tags: [logql, unwrap]
+    question: |
+      What does the `unwrap` expression enable in a LogQL metric query, as in
+      `quantile_over_time(0.99, {app="checkout"} | json | unwrap latency_ms [5m])`?
+    options:
+      - "It decompresses chunks before scanning"
+      - "It removes labels to reduce cardinality"
+      - "It converts the query into an Elasticsearch aggregation"
+      - "It extracts a numeric field from the parsed line so you can aggregate it as a value (e.g. a p99 latency)"
+    answer: 3
+    explanation: |
+      unwrap takes a parsed numeric field (here latency_ms) and treats it as the sample
+      value, so range aggregations like quantile_over_time or sum_over_time can compute
+      metrics directly from log content.
+    ref: "concepts.md#logql-querying-loki"
+
+  - id: log-aggregation-and-analysis-031
+    difficulty: advanced
+    tags: [logql, performance, gotcha]
+    question: |
+      A LogQL query `{level=~".+"} |= "error"` (no app/namespace selector) is extremely
+      slow. What is the root cause and fix?
+    options:
+      - "The selector matches thousands of streams, forcing Loki to fetch and scan huge volumes of chunks; narrow with high-value labels (app, namespace) first"
+      - "The regex is invalid; rewrite it as level=error"
+      - "Loki cannot use |= with a regex label matcher"
+      - "The query needs a histogram_quantile wrapper"
+    answer: 0
+    explanation: |
+      The label selector is the only part that uses the index. A broad selector matches
+      thousands of streams, so the text filter must scan an enormous amount of chunk
+      data. Always narrow with high-value labels first, then filter.
+    ref: "concepts.md#logql-querying-loki"
+
+  - id: log-aggregation-and-analysis-032
+    difficulty: intermediate
+    tags: [cardinality, loki]
+    question: |
+      In Loki, what happens if you put a high-cardinality value like `request_id` into a
+      label?
+    options:
+      - "The index shrinks because request_ids compress well"
+      - "Loki automatically demotes it to the log line"
+      - "You get a stream explosion: millions of tiny streams, a bloated index, tiny inefficient chunks, and ingesters can run out of memory"
+      - "Queries become faster because each stream is smaller"
+    answer: 2
+    explanation: |
+      Each unique label-value combination is a separate stream with its own chunks and
+      index entry. An unbounded label like request_id creates a stream explosion —
+      millions of tiny streams, bloated index, inefficient chunks, OOMing ingesters.
+    ref: "concepts.md#index-cardinality-vs-label-cardinality-cost"
+
+  - id: log-aggregation-and-analysis-033
+    difficulty: intermediate
+    tags: [cardinality, loki, best-practice]
+    question: |
+      What is the Loki rule of thumb for what belongs in a label vs the log line?
+    options:
+      - "Everything should be a label so queries are fast"
+      - "Labels should be low-cardinality, bounded, and known ahead (app, env, level); unbounded/per-event values belong in the log line, extracted at query time"
+      - "Only numeric values should be labels"
+      - "Labels should include the full message text"
+    answer: 1
+    explanation: |
+      Labels must be low-cardinality and bounded (app, env, namespace, level, region).
+      Anything unbounded or per-event (request_id, user_id, raw path) belongs in the log
+      line and is parsed at query time with | json, not put in a label.
+    ref: "concepts.md#index-cardinality-vs-label-cardinality-cost"
+
+  - id: log-aggregation-and-analysis-034
+    difficulty: advanced
+    tags: [cardinality, elasticsearch]
+    question: |
+      What is "mapping explosion" in Elasticsearch and what causes it?
+    options:
+      - "Too many replica shards created for one index"
+      - "A single field storing more than 32 KB of text"
+      - "Dynamic mapping of ever-changing JSON keys creates too many fields, degrading cluster performance"
+      - "Chunks growing too large in object storage"
+    answer: 2
+    explanation: |
+      When dynamic mapping indexes every new JSON key it encounters, an unbounded set of
+      keys produces an enormous number of fields (mapping explosion), which degrades
+      cluster performance. The fix is disciplined mappings and not indexing fields you
+      never search.
+    ref: "concepts.md#index-cardinality-vs-label-cardinality-cost"
+
+  - id: log-aggregation-and-analysis-035
+    difficulty: intermediate
+    tags: [cardinality, comparison]
+    question: |
+      High-cardinality data causes cost problems in both ELK and Loki, but in different
+      places. Where does each pay?
+    options:
+      - "Both pay only at query time"
+      - "Loki: high-cardinality labels cause stream explosion; Elasticsearch: high-cardinality keyword fields / dynamic keys inflate the index and aggregation memory"
+      - "Loki pays in the inverted index; Elasticsearch pays in chunk storage"
+      - "Neither is affected by cardinality"
+    answer: 1
+    explanation: |
+      In Loki the pain is label cardinality -> stream explosion. In Elasticsearch it is
+      field/mapping cardinality -> larger index and higher aggregation memory, plus
+      mapping explosion from unbounded dynamic keys.
+    ref: "concepts.md#index-cardinality-vs-label-cardinality-cost"
+
+  - id: log-aggregation-and-analysis-036
+    difficulty: intermediate
+    tags: [elk-vs-loki, tradeoff]
+    question: |
+      Which statement best captures the core ELK-vs-Loki trade-off?
+    options:
+      - "ELK is always better; Loki is a toy"
+      - "Loki full-text indexes; ELK indexes only labels"
+      - "ELK pays at ingest to make any search fast (full-text index); Loki pays little at ingest and defers work to query time by scanning chunks (label index only)"
+      - "Both store data identically; only the UI differs"
+    answer: 2
+    explanation: |
+      ELK builds a full-text inverted index at ingest so ad-hoc search is fast but
+      storage/compute is high. Loki indexes only labels and stores compressed chunks, so
+      ingest/storage is cheap but broad text search means scanning chunks at query time.
+    ref: "concepts.md#elk-vs-loki-the-core-trade-off"
+
+  - id: log-aggregation-and-analysis-037
+    difficulty: intermediate
+    tags: [elk-vs-loki, decision]
+    question: |
+      For which access pattern is Loki typically the better fit over Elasticsearch?
+    options:
+      - "Arbitrary exploratory full-text search and relevance-ranked analytics over log content"
+      - "Fuzzy matching and complex text aggregations without knowing queries in advance"
+      - "Any workload that requires an inverted index"
+      - "Label-scoped grep at high volume where cost dominates and logs should sit next to Prometheus metrics/traces"
+    answer: 3
+    explanation: |
+      Loki shines when you know your labels, volume/cost dominates, and your access is
+      label-scoped filter/grep correlated with Prometheus and traces. Choose ELK when
+      you need powerful ad-hoc full-text search and analytics over content.
+    ref: "concepts.md#elk-vs-loki-the-core-trade-off"
+
+  - id: log-aggregation-and-analysis-038
+    difficulty: beginner
+    tags: [elk-vs-loki, storage]
+    question: |
+      Which backend typically relies on cheap object storage (S3/GCS) for the bulk of
+      its data, keeping only a small index?
+    options:
+      - "Elasticsearch"
+      - "Grafana Loki"
+      - "Both keep everything on local SSD"
+      - "Neither uses object storage"
+    answer: 1
+    explanation: |
+      Loki stores compressed chunks in object storage and keeps only a small
+      labels->chunks index, which is why it is cheaper to operate. Elasticsearch relies
+      on SSD-backed shards and a large inverted index.
+    ref: "concepts.md#elk-vs-loki-the-core-trade-off"
+
+  - id: log-aggregation-and-analysis-039
+    difficulty: beginner
+    tags: [retention, tiering]
+    question: |
+      In a hot/warm/cold tiering strategy, what characterizes the "hot" tier?
+    options:
+      - "Rarely queried data on the cheapest object storage"
+      - "The most recent data on fast SSD/NVMe, fully indexed, with a high query rate"
+      - "Data that has already been deleted"
+      - "Only compliance/audit logs kept for years"
+    answer: 1
+    explanation: |
+      The hot tier holds the most recent data on fast storage, fully indexed and
+      frequently queried (last hours/days). As data ages it moves to warm (cheaper disk)
+      and cold/frozen (object storage), then is deleted after retention.
+    ref: "concepts.md#retention--storage-tiering-hot--warm--cold"
+
+  - id: log-aggregation-and-analysis-040
+    difficulty: intermediate
+    tags: [retention, ilm, elasticsearch]
+    question: |
+      What does Elasticsearch's Index Lifecycle Management (ILM) do?
+    options:
+      - "Attaches labels to Loki streams"
+      - "Compiles PromQL into LogQL"
+      - "Automatically moves indices through hot/warm/cold/frozen tiers as they age and enforces retention/deletion"
+      - "Deduplicates at-least-once log deliveries"
+    answer: 2
+    explanation: |
+      ILM automates the lifecycle: it ages indices through tiers (hot -> warm ->
+      cold/frozen), can shrink/force-merge and reduce replicas, backs the frozen tier
+      with searchable snapshots in object storage, and finally deletes per retention.
+    ref: "concepts.md#retention--storage-tiering-hot--warm--cold"
+
+  - id: log-aggregation-and-analysis-041
+    difficulty: advanced
+    tags: [retention, rollover]
+    question: |
+      Why does rolling indices by day or size (Elastic "rollover") make retention
+      cleanup cheap?
+    options:
+      - "It compresses each document individually"
+      - "It disables the inverted index for old data"
+      - "Deleting expired data becomes a whole-index drop instead of expensive per-document deletes"
+      - "It converts old indices into Loki chunks"
+    answer: 2
+    explanation: |
+      With time/size-based rolling indices, an entire day's index can be dropped in one
+      cheap operation when it ages out, avoiding costly per-document deletions and the
+      merge overhead they cause.
+    ref: "concepts.md#retention--storage-tiering-hot--warm--cold"
+
+  - id: log-aggregation-and-analysis-042
+    difficulty: intermediate
+    tags: [retention, strategy]
+    question: |
+      A team must keep security/audit logs for several years on a tight budget while
+      keeping debug logs queryable for only a few days. What is the sound approach?
+    options:
+      - "Match tier and retention to each log's query pattern and value: debug hot for days, audit logs in cheap cold/object storage for years"
+      - "Keep everything hot on SSD for the full retention period"
+      - "Delete all logs after 24 hours regardless of type"
+      - "Store audit logs only in the agent's memory buffer"
+    answer: 0
+    explanation: |
+      Retention is where cost is won or lost. Align tier and retention with each log's
+      value and query pattern: short hot retention for debug logs, and long-lived
+      audit/security logs parked in cheap cold/object storage (often a legal requirement).
+    ref: "concepts.md#retention--storage-tiering-hot--warm--cold"
+
+  - id: log-aggregation-and-analysis-043
+    difficulty: intermediate
+    tags: [log-based-metrics, definition]
+    question: |
+      What is a "log-based metric"?
+    options:
+      - "A metric that measures how many log files exist"
+      - "A label attached to every log stream"
+      - "A time series derived from log lines (e.g. counting matching lines or extracting a numeric field) when the signal only exists in logs"
+      - "A metric that can only be stored in Elasticsearch"
+    answer: 2
+    explanation: |
+      A log-based metric derives a time series from logs — counting matching lines or
+      extracting a numeric field. It is useful for retrofitting metrics onto legacy apps
+      or counting things you did not instrument.
+    ref: "concepts.md#log-based-metrics"
+
+  - id: log-aggregation-and-analysis-044
+    difficulty: advanced
+    tags: [log-based-metrics, tradeoff]
+    question: |
+      Why are log-based metrics considered a fallback rather than a substitute for real
+      instrumentation?
+    options:
+      - "They cannot be graphed in Grafana"
+      - "They require an inverted index that Loki lacks"
+      - "They can only produce gauges, never counters"
+      - "They are more expensive to compute (you scan logs) and break if the log wording changes"
+    answer: 3
+    explanation: |
+      Deriving a metric from logs means scanning log data to compute it (costly) and
+      couples the metric to exact log wording (brittle). Prefer emitting a real
+      counter/histogram; use log-based metrics for signals you cannot otherwise get.
+    ref: "concepts.md#log-based-metrics"
+
+  - id: log-aggregation-and-analysis-045
+    difficulty: intermediate
+    tags: [log-based-metrics, tools]
+    question: |
+      Which tools scrape log files and export Prometheus counters (a Prometheus-side
+      approach to log-based metrics)?
+    options:
+      - "Kibana and Logstash"
+      - "mtail and grok_exporter"
+      - "Alertmanager and Pushgateway"
+      - "Beats and Vector only"
+    answer: 1
+    explanation: |
+      mtail and grok_exporter read log files and expose counters/gauges that Prometheus
+      scrapes — a way to turn log events into real metrics on the Prometheus side. Loki
+      and OTel pipelines can also emit log-derived metrics.
+    ref: "concepts.md#log-based-metrics"
+
+  - id: log-aggregation-and-analysis-046
+    difficulty: intermediate
+    tags: [correlation, trace-id]
+    question: |
+      What single practice most enables jumping from a log line straight to the full
+      distributed trace for that request?
+    options:
+      - "Storing logs uncompressed"
+      - "Emitting the trace_id (and span_id) from W3C Trace Context into every structured log line"
+      - "Using more replica shards"
+      - "Disabling sampling entirely"
+    answer: 1
+    explanation: |
+      Including trace_id/span_id in structured logs lets tools (e.g. Grafana via a Loki
+      derived field) link a log line to the trace in Tempo/Jaeger, enabling the
+      metric -> logs -> trace drill-down workflow.
+    ref: "concepts.md#correlating-logs-with-traces-and-metrics"
+
+  - id: log-aggregation-and-analysis-047
+    difficulty: intermediate
+    tags: [correlation, labels, lgtm]
+    question: |
+      In the Grafana "LGTM" stack, what does each letter map to?
+    options:
+      - "Logstash, Grafana, Telegraf, Metricbeat"
+      - "Lucene, Grok, Timescale, Metrics"
+      - "Logs, Graphs, Traces, Monitors"
+      - "Loki (logs), Grafana, Tempo (traces), Mimir (metrics)"
+    answer: 3
+    explanation: |
+      LGTM = Loki (logs) + Grafana (UI) + Tempo (traces) + Mimir (metrics). Consistent
+      resource labels (service, namespace, pod, region) across all three signals let you
+      pivot between them for the same entity.
+    ref: "concepts.md#correlating-logs-with-traces-and-metrics"
+
+  - id: log-aggregation-and-analysis-048
+    difficulty: advanced
+    tags: [correlation, workflow]
+    question: |
+      Which workflow does good log aggregation (structured logs + stable labels +
+      trace_id) primarily exist to enable?
+    options:
+      - "Metric alerts -> drill to logs for that service/time -> click trace_id -> see the exact slow span"
+      - "Storing logs cheaper than metrics"
+      - "Replacing metrics and traces with logs alone"
+      - "Eliminating the need for any query language"
+    answer: 0
+    explanation: |
+      Structured logs, consistent labels, and an embedded trace_id turn three silos into
+      one navigable graph, so an alert on a metric leads to the relevant logs and then to
+      the exact trace/span — the payoff of unified observability.
+    ref: "concepts.md#correlating-logs-with-traces-and-metrics"

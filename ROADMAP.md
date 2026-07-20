@@ -91,13 +91,26 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 15 ✅ (Pass 1, 815 MCQs) |
 | [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (all tiers, 1,291 MCQs) |
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
-| [Observability](topics/observability/README.md) | 17 | 0 |
+| [Observability](topics/observability/README.md) | 17 | 17 ✅ (Pass 1, 844 MCQs) |
 | [Software Testing](topics/testing/README.md) | 16 | 16 ✅ (Pass 1, 784 MCQs) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
 
+- **Session 28 (2026-07-20):** **Observability Pass 1** (sequence domain 2) — 17 topics,
+  **844 MCQs** (209 B / 435 I / 196 adv / 4 exp), 48 Mermaid diagrams. Tool-grounded: three
+  pillars + golden-signals/RED/USE, metric types & dimensional model, structured logging +
+  ELK/Loki, distributed tracing + W3C context propagation, full OpenTelemetry stack (signals/
+  instrumentation/Collector/tail-sampling), Prometheus + PromQL + recording rules, Jaeger,
+  Grafana, Alertmanager, SLO multi-burn-rate alerting + error budgets, alert-fatigue, sampling/
+  cardinality/cost, APM/eBPF/continuous-profiling. Boundaries: system-design keeps design overview;
+  reliability-ops (upcoming) owns incident/on-call process; performance-eng owns flame-graph
+  technique. Built via `observability-authoring.js` (author → verify, 34 agents, 0 errors).
+  Validator clean; no clustering. GOTCHA: render-check caught 1 sequenceDiagram that failed to
+  render — semicolons in message text (Mermaid treats `;` as statement separator, the recurring
+  gotcha) — fixed to comma; re-verified all 48 diagrams render 0-error. Promoted to
+  AUTHORED_DOMAINS. Content-only commit. NEXT: devops-cicd.
 - **Session 27 (2026-07-20):** Exhaustive **gap analysis** (12-lens research → synthesize →
   adversarial critic) for backend+senior product/startup interviews → prioritized backlog in
   memory `gap-analysis-findings.md`. User decided: author BOTH dsa-coding + lld-and-ood, follow
