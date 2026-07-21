@@ -1,6 +1,7 @@
 # System Design
 
-23 core + 8 advanced/expert deep-dive topics + 26 AWS System Design topics (57 total).
+27 core + 8 advanced/expert deep-dive + 7 design-patterns + 6 architectural-patterns +
+26 AWS System Design topics (74 total).
 Study content and MCQs live in per-topic subfolders. See the master taxonomy in
 `../../TOPICS.md`.
 
@@ -29,6 +30,10 @@ Study content and MCQs live in per-topic subfolders. See the master taxonomy in
 | GenAI & LLM System Design: RAG, Vector DBs & Inference at Scale | `genai-llm-system-design` | high | advanced | ✅ (72 MCQs · 36 adv/expert) |
 | Real-Time & Streaming Systems: Analytics, Leaderboards & Live Data | `realtime-streaming-systems` | high | advanced | ✅ (75 MCQs · 35 adv/expert) |
 | Resilience, Fault Tolerance & Design Trade-offs Deep-Dive | `resilience-tradeoffs-deep-dive` | very-high | advanced | ✅ (116 MCQs · 73 adv/expert) |
+| Domain-Driven Design: Tactical Patterns | `ddd-tactical-patterns` | high | advanced | ✅ (48 MCQs) |
+| DDD Strategic Design & Context Mapping | `ddd-strategic-context-mapping` | high | advanced | ✅ (52 MCQs) |
+| Strangler Fig & Monolith-to-Microservices Migration | `strangler-fig-and-monolith-migration` | high | advanced | ✅ (50 MCQs) |
+| Multi-Tenancy & SaaS Isolation | `multi-tenancy-and-saas-isolation` | high | advanced | ✅ (45 MCQs) |
 
 Status: ☐ not started · ◐ concepts done · ● concepts+MCQs · ✅ validated
 

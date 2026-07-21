@@ -1,0 +1,856 @@
+topic: "Zero-Downtime Schema Migrations & Backfills"
+domain: messaging-databases
+topic_slug: zero-downtime-schema-migrations
+version: 1
+questions:
+  - id: zero-downtime-schema-migrations-001
+    difficulty: beginner
+    tags: [expand-contract, parallel-change, fundamentals]
+    question: |
+      In the expand/contract (parallel-change) pattern, what is the purpose of the
+      first "expand" phase?
+    options:
+      - "Add the new structure in a purely additive, backward-compatible way"
+      - "Drop the old column so the new one can take its place"
+      - "Switch all reads to the new column immediately"
+      - "Rename the column atomically in a single migration"
+    answer: 0
+    explanation: |
+      Expand adds new structure (nullable/defaulted column, new table, index) that old
+      code simply ignores. Nothing breaks because the change is additive; destructive
+      steps come much later in the "contract" phase.
+    ref: "concepts.md#the-expandcontract-parallel-change-pattern"
+
+  - id: zero-downtime-schema-migrations-002
+    difficulty: beginner
+    tags: [expand-contract, ordering]
+    question: |
+      What are the three phases of the expand/contract pattern, in order?
+    options:
+      - "Contract, migrate, expand"
+      - "Migrate, expand, contract"
+      - "Expand, migrate, contract"
+      - "Expand, contract, migrate"
+    answer: 2
+    explanation: |
+      Expand (add new structure), migrate (dual-write + backfill), contract (switch
+      reads, stop writing old, drop old). Each phase is a separate deploy so old and
+      new code coexist safely.
+    ref: "concepts.md#the-expandcontract-parallel-change-pattern"
+
+  - id: zero-downtime-schema-migrations-003
+    difficulty: intermediate
+    tags: [locking, postgres, lock-queue]
+    question: |
+      In PostgreSQL, a metadata-only `ALTER TABLE` that "should take 1 ms" caused a
+      multi-minute outage on a busy table. What is the most likely explanation?
+    options:
+      - "The ALTER rewrote every row in the table"
+      - "PostgreSQL always locks the entire database during DDL"
+      - "The statement triggered a full VACUUM of the table"
+      - "The ALTER waited behind a long-running query for its ACCESS EXCLUSIVE lock, and all new queries then queued behind the ALTER"
+    answer: 3
+    explanation: |
+      The ALTER needs ACCESS EXCLUSIVE. If a slow query holds a conflicting lock, the
+      ALTER waits — and every new query arriving now queues behind the ALTER in the
+      lock queue, stalling all traffic until the original slow query finishes.
+    ref: "concepts.md#why-naive-migrations-cause-downtime"
+
+  - id: zero-downtime-schema-migrations-004
+    difficulty: intermediate
+    tags: [locking, lock-timeout, safety]
+    question: |
+      Why should production DDL be run with an aggressive `lock_timeout` (Postgres) or
+      `lock_wait_timeout` (MySQL)?
+    options:
+      - "So a migration that can't acquire its lock quickly fails fast instead of parking at the head of the lock queue and blocking all traffic"
+      - "It makes the schema change execute faster"
+      - "It reduces the disk space used by the migration"
+      - "It automatically retries the migration on a replica"
+    answer: 0
+    explanation: |
+      Without a short lock timeout, a blocked DDL sits at the head of the lock queue and
+      every subsequent query queues behind it. Failing fast (then retrying with backoff)
+      keeps the migration from taking the whole service down.
+    ref: "concepts.md#why-naive-migrations-cause-downtime"
+
+  - id: zero-downtime-schema-migrations-005
+    difficulty: beginner
+    tags: [naive-migration, downtime]
+    question: |
+      What is the fundamental reason a naive `ALTER TABLE` on a large production table
+      can cause downtime?
+    options:
+      - "SQL syntax errors are common in ALTER statements"
+      - "ALTER statements can never be run while the database is online"
+      - "It always deletes and recreates the table"
+      - "It holds strong locks and/or does long-running work on a hot table, blocking or queuing other queries"
+    answer: 3
+    explanation: |
+      Downtime comes from locks and long-running work on a hot table — a table rewrite
+      holding a lock for the whole copy, a short lock queuing behind a slow query, or a
+      giant transaction exhausting shared resources — not from the change being
+      inherently impossible online.
+    ref: "concepts.md#why-naive-migrations-cause-downtime"
+
+  - id: zero-downtime-schema-migrations-006
+    difficulty: intermediate
+    tags: [rolling-deploy, compatibility]
+    question: |
+      During a rolling deploy, why must every migration leave the schema compatible with
+      both the old and the new application version?
+    options:
+      - "Because there is always a window where old and new code run simultaneously against the same schema"
+      - "Because databases cannot be upgraded during a deploy"
+      - "Because rollbacks are never allowed in production"
+      - "Because the new code is deployed to a completely separate database"
+    answer: 0
+    explanation: |
+      Rolling (and canary/blue-green) deploys run old and new instances at the same time
+      against one database. The schema must satisfy both, which is exactly why additive
+      changes are safe and destructive ones are deferred.
+    ref: "concepts.md#backward-vs-forward-compatibility-and-mixed-version-windows"
+
+  - id: zero-downtime-schema-migrations-007
+    difficulty: intermediate
+    tags: [compatibility, definitions]
+    question: |
+      "The old code must not break when it encounters the schema/data the new code
+      produces (e.g. an extra column it doesn't know about)." This describes which
+      property?
+    options:
+      - "Backward compatibility"
+      - "Referential integrity"
+      - "Forward compatibility"
+      - "Idempotency"
+    answer: 2
+    explanation: |
+      Forward compatibility means older code tolerates artifacts of newer code. Backward
+      compatibility is the reverse: newer code working with data/shape produced by older
+      code. Both must hold during a mixed-version rollout.
+    ref: "concepts.md#backward-vs-forward-compatibility-and-mixed-version-windows"
+
+  - id: zero-downtime-schema-migrations-008
+    difficulty: advanced
+    tags: [postgres, fast-default, add-column]
+    question: |
+      In PostgreSQL 11+, running `ALTER TABLE t ADD COLUMN status text NOT NULL DEFAULT
+      'pending'` on a huge table is best described as which of the following?
+    options:
+      - "A full table rewrite because of the NOT NULL"
+      - "A full table rewrite because of the default"
+      - "Rejected because you cannot add a NOT NULL column with a default"
+      - "Metadata-only (fast default) — the default is stored in the catalog and returned for existing rows"
+    answer: 3
+    explanation: |
+      Since PG 11, a non-volatile default is stored in the catalog and returned for
+      existing rows on read, so no rewrite occurs — even combined with NOT NULL, because
+      the stored default proves no existing row is null.
+    ref: "concepts.md#native-online-ddl-postgresql"
+
+  - id: zero-downtime-schema-migrations-009
+    difficulty: advanced
+    tags: [postgres, volatile-default, rewrite]
+    question: |
+      Which of these `ADD COLUMN` defaults in PostgreSQL forces a full table rewrite?
+    options:
+      - "DEFAULT 'pending' (a constant)"
+      - "DEFAULT clock_timestamp() (a volatile function)"
+      - "DEFAULT 0"
+      - "DEFAULT now()"
+    answer: 1
+    explanation: |
+      A volatile default like clock_timestamp() must be evaluated per row, so it rewrites
+      the whole table under ACCESS EXCLUSIVE. Constants and now() (stable within a
+      statement) qualify as non-volatile and use the fast-default path.
+    ref: "concepts.md#native-online-ddl-postgresql"
+
+  - id: zero-downtime-schema-migrations-010
+    difficulty: advanced
+    tags: [postgres, not-valid, validate-constraint]
+    question: |
+      In PostgreSQL, what is the advantage of adding a constraint with `NOT VALID` and
+      then running `VALIDATE CONSTRAINT` separately?
+    options:
+      - "NOT VALID makes the constraint permanent and unremovable"
+      - "It rewrites the table faster than a single ALTER"
+      - "It disables the constraint entirely"
+      - "The NOT VALID step is instant (checks only new rows) and VALIDATE scans existing rows under a weaker SHARE UPDATE EXCLUSIVE lock that allows concurrent reads and writes"
+    answer: 3
+    explanation: |
+      NOT VALID adds the constraint immediately without scanning (enforced on new writes
+      only). VALIDATE then scans existing rows under SHARE UPDATE EXCLUSIVE, which permits
+      concurrent DML — avoiding the long ACCESS EXCLUSIVE hold of a one-shot ADD CONSTRAINT.
+    ref: "concepts.md#native-online-ddl-postgresql"
+
+  - id: zero-downtime-schema-migrations-011
+    difficulty: intermediate
+    tags: [mysql, online-ddl, algorithms]
+    question: |
+      In MySQL 8, which `ALGORITHM` for an online DDL operation is the cheapest,
+      performing only a metadata change in the data dictionary with no data touched?
+    options:
+      - "COPY"
+      - "INPLACE"
+      - "REBUILD"
+      - "INSTANT"
+    answer: 3
+    explanation: |
+      INSTANT changes only the data dictionary metadata — no table rebuild or copy. It is
+      the default for ADD COLUMN since 8.0.12 (and DROP COLUMN since 8.0.29). INPLACE
+      rebuilds in the tablespace, COPY copies every row.
+    ref: "concepts.md#native-online-ddl-mysql--innodb-algorithms"
+
+  - id: zero-downtime-schema-migrations-012
+    difficulty: advanced
+    tags: [mysql, instant, row-version-limit]
+    question: |
+      What limits how many times you can use `ALGORITHM=INSTANT` for add/drop column on
+      a MySQL 8 InnoDB table before you must rebuild it?
+    options:
+      - "A maximum of 64 row versions per table"
+      - "A maximum of 1024 columns"
+      - "There is no limit"
+      - "A maximum of 8 instant operations per hour"
+    answer: 0
+    explanation: |
+      Each instant add/drop column bumps a row-version counter; after 64 you get
+      ERROR 4092 and must rebuild the table (OPTIMIZE TABLE or a rebuilding ALTER) to
+      reset the counter to 0.
+    ref: "concepts.md#native-online-ddl-mysql--innodb-algorithms"
+
+  - id: zero-downtime-schema-migrations-013
+    difficulty: intermediate
+    tags: [mysql, copy, blocking]
+    question: |
+      Which of the following MySQL 8 operations typically requires the `COPY` algorithm
+      and blocks concurrent writes?
+    options:
+      - "Adding a secondary index"
+      - "Changing a column's data type"
+      - "Adding a column at the end of the table"
+      - "Setting a column's default value"
+    answer: 1
+    explanation: |
+      Changing a column data type (along with dropping a lone primary key, shrinking
+      VARCHAR, and charset conversions) needs COPY, which copies all rows and blocks
+      writes. Adding a column/index and setting defaults are INSTANT or INPLACE.
+    ref: "concepts.md#native-online-ddl-mysql--innodb-algorithms"
+
+  - id: zero-downtime-schema-migrations-014
+    difficulty: advanced
+    tags: [mysql, algorithm-clause, safety]
+    question: |
+      Why is it a good practice to explicitly write `ALGORITHM=INSTANT` or
+      `ALGORITHM=INPLACE, LOCK=NONE` in production MySQL DDL?
+    options:
+      - "It makes the statement run in parallel across all CPUs"
+      - "It compresses the resulting table"
+      - "It is required syntax for all ALTER statements in MySQL 8"
+      - "If the operation can't meet that requirement, MySQL raises an error instead of silently falling back to a table-locking COPY"
+    answer: 3
+    explanation: |
+      Pinning the algorithm turns a silent, write-blocking COPY into a caught error. If
+      the change can't be done instantly/inplace without locking, you find out at parse
+      time rather than during an outage.
+    ref: "concepts.md#native-online-ddl-mysql--innodb-algorithms"
+
+  - id: zero-downtime-schema-migrations-015
+    difficulty: intermediate
+    tags: [pt-osc, gh-ost, tools]
+    question: |
+      What is the key mechanical difference between `pt-online-schema-change` and
+      `gh-ost`?
+    options:
+      - "pt-osc uses triggers on the original table (synchronous, on the write path) while gh-ost reads the binary log (asynchronous, off the write path)"
+      - "pt-osc is for PostgreSQL and gh-ost is for MySQL"
+      - "gh-ost rewrites the table in place while pt-osc uses a shadow table"
+      - "pt-osc requires downtime while gh-ost does not"
+    answer: 0
+    explanation: |
+      Both build a shadow/ghost table and swap it in, but pt-osc mirrors live writes via
+      AFTER triggers (running inside every production write), whereas gh-ost impersonates
+      a replica and tails the binlog, decoupling migration load from the write path.
+    ref: "concepts.md#online-schema-change-tools-pt-online-schema-change--gh-ost"
+
+  - id: zero-downtime-schema-migrations-016
+    difficulty: advanced
+    tags: [gh-ost, throttling, binlog]
+    question: |
+      Why is gh-ost often preferred over pt-online-schema-change for the very hottest
+      tables?
+    options:
+      - "It uses more triggers for better accuracy"
+      - "It never needs to copy any rows"
+      - "Its binlog-based, triggerless design keeps migration work off the production write path and offers throttling on replication lag and load"
+      - "It works without connecting to the database at all"
+    answer: 2
+    explanation: |
+      Because gh-ost applies changes asynchronously from the binlog rather than via
+      synchronous triggers, it adds no latency to production writes, can offload copy
+      load to a replica, and throttles on lag/load (--max-lag-millis, --critical-load).
+    ref: "concepts.md#online-schema-change-tools-pt-online-schema-change--gh-ost"
+
+  - id: zero-downtime-schema-migrations-017
+    difficulty: intermediate
+    tags: [tools, shadow-table, cutover]
+    question: |
+      Both pt-osc and gh-ost complete their migration with which final step?
+    options:
+      - "A full database restart"
+      - "A manual data export and import"
+      - "Dropping all indexes and rebuilding them"
+      - "An atomic swap (RENAME / cut-over) of the ghost table in place of the original"
+    answer: 3
+    explanation: |
+      After the ghost/shadow table is populated and kept in sync, both tools perform an
+      atomic cut-over (RENAME TABLE swap) to put the new table in place of the original,
+      then clean up.
+    ref: "concepts.md#online-schema-change-tools-pt-online-schema-change--gh-ost"
+
+  - id: zero-downtime-schema-migrations-018
+    difficulty: advanced
+    tags: [postgres, pg-repack, rewrite]
+    question: |
+      For rewrite-heavy schema changes in PostgreSQL (which has no ALGORITHM/LOCK clause
+      like MySQL), which approach is recommended over a raw rewriting `ALTER`?
+    options:
+      - "Locking the whole database and rewriting in a maintenance window"
+      - "Deleting and recreating the table from a backup"
+      - "Running the ALTER inside a long single transaction"
+      - "Expand/contract (new column + backfill) or a tool like pg_repack"
+    answer: 3
+    explanation: |
+      A rewriting ALTER in Postgres holds ACCESS EXCLUSIVE and, due to MVCC, creates bloat
+      and heavy WAL. Prefer expand/contract with a batched backfill, or pg_repack/pg_squeeze
+      which reorganize without a long exclusive lock.
+    ref: "concepts.md#native-online-ddl-postgresql"
+
+  - id: zero-downtime-schema-migrations-019
+    difficulty: intermediate
+    tags: [postgres, create-index-concurrently]
+    question: |
+      What is the main benefit of `CREATE INDEX CONCURRENTLY` in PostgreSQL?
+    options:
+      - "It builds the index without blocking concurrent reads, inserts, updates, or deletes on the table"
+      - "It builds the index in half the time of a normal build"
+      - "It creates the index on all replicas automatically"
+      - "It guarantees the index can never become invalid"
+    answer: 0
+    explanation: |
+      A plain CREATE INDEX locks the table against writes for the whole build. CONCURRENTLY
+      avoids that write-lockout by doing two scans and waiting for in-flight transactions,
+      so live traffic keeps flowing.
+    ref: "concepts.md#adding-indexes-without-locking"
+
+  - id: zero-downtime-schema-migrations-020
+    difficulty: advanced
+    tags: [postgres, create-index-concurrently, gotchas]
+    question: |
+      Which statement about `CREATE INDEX CONCURRENTLY` is TRUE?
+    options:
+      - "It runs faster than a normal build because it skips validation"
+      - "It never requires more work than a normal index build"
+      - "It cannot run inside a transaction block, and if it fails it can leave an INVALID index that must be dropped and rebuilt"
+      - "It automatically retries itself until it succeeds"
+    answer: 2
+    explanation: |
+      CONCURRENTLY cannot run in a transaction block (frameworks must run it standalone),
+      does two table scans (more total work/time), and on failure leaves an INVALID index
+      that still incurs write overhead and must be dropped/rebuilt or REINDEXed CONCURRENTLY.
+    ref: "concepts.md#adding-indexes-without-locking"
+
+  - id: zero-downtime-schema-migrations-021
+    difficulty: advanced
+    tags: [postgres, create-index-concurrently, internals]
+    question: |
+      Why does `CREATE INDEX CONCURRENTLY` take longer and use more CPU/IO than a normal
+      index build?
+    options:
+      - "It compresses the index as it builds it"
+      - "It rebuilds every other index on the table too"
+      - "It copies the table to a temporary location first"
+      - "It does two passes over the table and must wait for in-flight transactions to drain between and after the scans so writers are never blocked"
+    answer: 3
+    explanation: |
+      The concurrent build makes two scans and waits for concurrent transactions to finish
+      (before each scan and for snapshots predating the second scan), trading wall-clock
+      time and extra CPU/IO for zero write-lockout.
+    ref: "concepts.md#adding-indexes-without-locking"
+
+  - id: zero-downtime-schema-migrations-022
+    difficulty: intermediate
+    tags: [mysql, index, inplace]
+    question: |
+      In MySQL 8 InnoDB, adding a secondary index:
+    options:
+      - "Requires the COPY algorithm and blocks all writes"
+      - "Uses INPLACE and permits concurrent reads and writes (LOCK=NONE)"
+      - "Uses INSTANT with no scan of the data"
+      - "Is impossible without an online-schema-change tool"
+    answer: 1
+    explanation: |
+      Secondary index creation is INPLACE — it scans data (so not INSTANT) but does not
+      rewrite the table and allows concurrent read+write DML with LOCK=NONE. No special
+      CONCURRENTLY keyword exists in MySQL.
+    ref: "concepts.md#adding-indexes-without-locking"
+
+  - id: zero-downtime-schema-migrations-023
+    difficulty: advanced
+    tags: [postgres, not-null, existing-column]
+    question: |
+      You need to add `NOT NULL` to an existing nullable column on a billion-row
+      PostgreSQL table without a long blocking scan. Which sequence works?
+    options:
+      - "Just run ALTER COLUMN ... SET NOT NULL directly; it is always instant"
+      - "Drop the column and re-add it as NOT NULL"
+      - "Add a CHECK (col IS NOT NULL) NOT VALID, VALIDATE CONSTRAINT, then SET NOT NULL (which skips its scan given the valid CHECK)"
+      - "Convert the table to an unlogged table first"
+    answer: 2
+    explanation: |
+      A bare SET NOT NULL scans the whole table under ACCESS EXCLUSIVE. Adding CHECK ...
+      NOT VALID (instant), then VALIDATE (weak lock, concurrent), lets SET NOT NULL skip
+      its own scan in PG 12+ because the validated CHECK already proves no null exists.
+    ref: "concepts.md#adding-not-null-and-defaults-safely"
+
+  - id: zero-downtime-schema-migrations-024
+    difficulty: intermediate
+    tags: [not-null, add-column, ordering]
+    question: |
+      Why does adding a `NOT NULL` column with no default to a non-empty table fail?
+    options:
+      - "Because NOT NULL columns are not allowed on existing tables"
+      - "Because existing rows would have no value for the new column, violating NOT NULL"
+      - "Because the table must be empty to run any ALTER"
+      - "Because NOT NULL requires a unique index first"
+    answer: 1
+    explanation: |
+      Existing rows would get a null for the new column, which violates NOT NULL. The safe
+      order is: add nullable, backfill, then add the default/constraint (or supply a
+      non-volatile default up front so the fast-default path fills existing rows).
+    ref: "concepts.md#adding-not-null-and-defaults-safely"
+
+  - id: zero-downtime-schema-migrations-025
+    difficulty: intermediate
+    tags: [dual-write, migrate-phase]
+    question: |
+      During the "migrate" phase, what does dual-write mean?
+    options:
+      - "Writing to two separate databases"
+      - "Writing each row twice for durability"
+      - "New code writes every change to both the old and new columns/tables so both stay consistent going forward"
+      - "Running two migrations in parallel"
+    answer: 2
+    explanation: |
+      Dual-write keeps the new structure current from the moment new code deploys, by
+      writing to both old and new on each change. The backfill then handles historical
+      rows the dual-write never touched.
+    ref: "concepts.md#dual-write-and-switching-reads"
+
+  - id: zero-downtime-schema-migrations-026
+    difficulty: advanced
+    tags: [dual-write, backfill, ordering]
+    question: |
+      Why should you enable dual-write BEFORE running the backfill, rather than
+      backfilling first and then enabling dual-write?
+    options:
+      - "If you backfill first, rows changed between the backfill read and dual-write being enabled can be lost; dual-write-first means any concurrent write is already covered"
+      - "Dual-write makes the backfill run faster"
+      - "Backfilling first corrupts the old column"
+      - "The database requires dual-write to be enabled before any UPDATE"
+    answer: 0
+    explanation: |
+      With dual-write on first, live changes are already mirrored to the new structure, so
+      the backfill only needs to fill untouched historical rows idempotently (WHERE new
+      IS NULL). Backfilling first leaves a gap where concurrent updates aren't captured.
+    ref: "concepts.md#dual-write-and-switching-reads"
+
+  - id: zero-downtime-schema-migrations-027
+    difficulty: intermediate
+    tags: [shadow-read, verification, cutover]
+    question: |
+      Before switching reads to the new column, what is a common safety step?
+    options:
+      - "Dropping the old column immediately"
+      - "Disabling all writes to the table"
+      - "Running the backfill a second time in reverse"
+      - "A shadow-read/comparison phase: read from both, emit a metric on mismatches, and only cut over when the mismatch rate is zero"
+    answer: 3
+    explanation: |
+      Shadow reads compare old vs new results and surface mismatches as metrics. Only when
+      mismatches are zero (backfill complete and dual-write proven) do you switch reads to
+      the new structure.
+    ref: "concepts.md#dual-write-and-switching-reads"
+
+  - id: zero-downtime-schema-migrations-028
+    difficulty: beginner
+    tags: [backfill, batching]
+    question: |
+      What is the cardinal rule for backfilling a column across millions of existing
+      rows?
+    options:
+      - "Run it as one large UPDATE statement for consistency"
+      - "Never do it as one giant UPDATE; process it in small, batched, throttled, idempotent, resumable chunks"
+      - "Always run it on the primary during peak traffic"
+      - "Disable indexes and run without transactions"
+    answer: 1
+    explanation: |
+      A single huge UPDATE holds locks for the whole run, generates massive WAL/redo and
+      undo, spikes replication lag, and can't be paused/resumed. Batched, throttled,
+      idempotent, resumable chunks avoid all of this.
+    ref: "concepts.md#backfills-at-scale"
+
+  - id: zero-downtime-schema-migrations-029
+    difficulty: advanced
+    tags: [backfill, pagination, keyset]
+    question: |
+      For iterating over rows in a large backfill, why is keyset/range pagination on the
+      primary key preferred over `OFFSET`-based paging?
+    options:
+      - "OFFSET must scan and discard all preceding rows, getting slower as it goes deeper, while keyset ranges stay fast and don't skip or re-scan rows"
+      - "OFFSET returns rows in random order"
+      - "Keyset pagination uses less memory on the client only"
+      - "OFFSET is not supported inside transactions"
+    answer: 0
+    explanation: |
+      OFFSET N scans and throws away N rows every batch, degrading quadratically. Driving
+      batches by an indexed monotonic key range (id > last AND id <= last + batch) stays
+      O(batch) and avoids skipping or re-processing rows.
+    ref: "concepts.md#backfills-at-scale"
+
+  - id: zero-downtime-schema-migrations-030
+    difficulty: advanced
+    tags: [backfill, idempotency]
+    question: |
+      Why should each backfill batch be idempotent (e.g. scoped with `WHERE new_col IS
+      NULL`)?
+    options:
+      - "To make the backfill run in a single transaction"
+      - "To skip the primary key index"
+      - "So re-processing a batch after a crash or retry does nothing extra and can't double-apply changes"
+      - "Because non-idempotent UPDATEs are rejected by the database"
+    answer: 2
+    explanation: |
+      Backfills crash, get paused, and retried. An idempotent guard means a re-run of a
+      batch is a no-op for already-processed rows, so retries are safe and correctness is
+      preserved.
+    ref: "concepts.md#backfills-at-scale"
+
+  - id: zero-downtime-schema-migrations-031
+    difficulty: advanced
+    tags: [backfill, throttling, replication-lag]
+    question: |
+      A backfill on the primary is causing read replicas to fall badly behind. What is
+      the appropriate mitigation?
+    options:
+      - "Promote a replica to primary mid-backfill"
+      - "Increase the batch size so it finishes sooner"
+      - "Throttle the backfill: sleep between batches and back off when replication lag exceeds a threshold so replicas can keep up"
+      - "Disable replication until the backfill completes"
+    answer: 2
+    explanation: |
+      Backfill write volume becomes replication lag. Watching lag/load and pausing or
+      slowing between batches lets replicas catch up and keeps OLTP traffic from being
+      starved. Bigger batches would make lag worse, not better.
+    ref: "concepts.md#backfills-at-scale"
+
+  - id: zero-downtime-schema-migrations-032
+    difficulty: intermediate
+    tags: [backfill, resumability, checkpoint]
+    question: |
+      What makes a backfill resumable?
+    options:
+      - "Persisting a checkpoint (last processed id / cursor) so a crashed or paused run continues from where it stopped"
+      - "Running it inside one long-lived transaction"
+      - "Storing the entire table in memory"
+      - "Disabling autocommit"
+    answer: 0
+    explanation: |
+      Recording the last-processed key after each committed batch lets the job restart
+      from that point rather than from the beginning, which is essential for long backfills
+      that will inevitably be interrupted.
+    ref: "concepts.md#backfills-at-scale"
+
+  - id: zero-downtime-schema-migrations-033
+    difficulty: advanced
+    tags: [backfill, long-transaction, vacuum]
+    question: |
+      In PostgreSQL, besides holding locks, why are long-running backfill transactions
+      especially harmful?
+    options:
+      - "They automatically switch the database to read-only mode"
+      - "They disable the query planner"
+      - "A long transaction holds back the xmin horizon and blocks VACUUM from reclaiming dead tuples, causing bloat"
+      - "They force a full table rewrite"
+    answer: 2
+    explanation: |
+      A long-lived transaction keeps an old snapshot alive, holding back the xmin horizon
+      so VACUUM cannot remove dead tuples that might still be visible to it — leading to
+      table/index bloat. Short batches keep transaction age bounded.
+    ref: "concepts.md#backfills-at-scale"
+
+  - id: zero-downtime-schema-migrations-034
+    difficulty: intermediate
+    tags: [rename-column, expand-contract]
+    question: |
+      What is the WRONG way to rename a column with zero downtime?
+    options:
+      - "Add a new column, dual-write, backfill, switch reads, then drop the old column"
+      - "Run ALTER TABLE ... RENAME COLUMN in a single step"
+      - "Deploy the rename as several separate releases"
+      - "Backfill the new column before switching reads"
+    answer: 1
+    explanation: |
+      A one-step RENAME COLUMN atomically breaks every running instance of the old code
+      the instant it commits. The correct approach is the multi-phase expand/contract
+      dance: add new, dual-write + backfill, switch reads, drop old.
+    ref: "concepts.md#renaming-and-removing-columns-safely"
+
+  - id: zero-downtime-schema-migrations-035
+    difficulty: advanced
+    tags: [drop-column, select-star, ordering]
+    question: |
+      To drop a column safely with zero downtime, what must happen first?
+    options:
+      - "Add a new column to replace it"
+      - "Take a full backup and DROP immediately"
+      - "Rename the column, then drop it in the same migration"
+      - "Deploy code that no longer references the column (no SELECT *, no inserts/updates to it), fully rolled out, before running DROP COLUMN"
+    answer: 3
+    explanation: |
+      Dropping a column an old instance still references (including via SELECT *) breaks
+      that instance the moment it commits. The code must stop depending on the column and
+      be fully rolled out before the drop, which lives in its own reversible release.
+    ref: "concepts.md#renaming-and-removing-columns-safely"
+
+  - id: zero-downtime-schema-migrations-036
+    difficulty: intermediate
+    tags: [select-star, tolerant-reader]
+    question: |
+      Why is `SELECT *` described as "the silent killer" of column adds and drops?
+    options:
+      - "It is slower than selecting specific columns"
+      - "Adding a column can break old code that expects a fixed column count (e.g. INSERT ... SELECT *), and dropping one breaks old readers that map every returned column"
+      - "It always returns columns in the wrong order"
+      - "It cannot be used with prepared statements"
+    answer: 1
+    explanation: |
+      SELECT * couples code to the exact column set. Adding a column can break INSERT INTO
+      t SELECT * or fixed-arity mappers; dropping one breaks readers expecting it. Explicit
+      column lists make schema changes far safer.
+    ref: "concepts.md#renaming-and-removing-columns-safely"
+
+  - id: zero-downtime-schema-migrations-037
+    difficulty: intermediate
+    tags: [ordering, deploy-sequencing]
+    question: |
+      When should an "expand" (additive) migration run relative to the code that uses it?
+    options:
+      - "After the new code is fully deployed"
+      - "At exactly the same instant as the code deploy"
+      - "Before the new code deploys, so the new structure exists when the code that writes it starts"
+      - "Only during a maintenance window"
+    answer: 2
+    explanation: |
+      Additive migrations must precede the code that depends on them — the new column must
+      exist before code tries to write it, and old code tolerates the addition. Contract
+      (drop) migrations run after the new code is fully rolled out.
+    ref: "concepts.md#migration-ordering-deploy-sequencing--rollback"
+
+  - id: zero-downtime-schema-migrations-038
+    difficulty: advanced
+    tags: [ordering, contract, rollout]
+    question: |
+      When should a "contract" (drop/rename-away) migration run?
+    options:
+      - "Before deploying any new code"
+      - "After the new code is fully rolled out and no running instance still references the old structure"
+      - "In the same release as the code that stops using the old structure"
+      - "Immediately after the expand migration"
+    answer: 1
+    explanation: |
+      The old structure must not be dropped until the last instance referencing it is
+      gone. Coupling the drop to the same release as the code that stops using it risks
+      breaking old instances still running during the rollout.
+    ref: "concepts.md#migration-ordering-deploy-sequencing--rollback"
+
+  - id: zero-downtime-schema-migrations-039
+    difficulty: advanced
+    tags: [rollback, testing]
+    question: |
+      What does it mean to make a migration "rollback-safe"?
+    options:
+      - "Ensuring the migration can never be reversed"
+      - "Taking a backup before every migration and nothing more"
+      - "Ensuring the PREVIOUS application version can still run correctly against the NEW schema, and keeping destructive steps last in their own release"
+      - "Running all migrations inside one transaction"
+    answer: 2
+    explanation: |
+      Rollback safety means the older code you might roll back to still works against the
+      migrated schema. Because the destructive drop is the one irreversible step, it goes
+      last, in its own release, gated behind confidence (metrics, grace period, backup).
+    ref: "concepts.md#migration-ordering-deploy-sequencing--rollback"
+
+  - id: zero-downtime-schema-migrations-040
+    difficulty: intermediate
+    tags: [tolerant-reader, forward-compatibility]
+    question: |
+      Which practice best embodies the "tolerant reader" pattern for forward-compatible
+      application code?
+    options:
+      - "Always using SELECT * so the code sees every column"
+      - "Ignoring unknown extra fields and treating a not-yet-backfilled column as null/default rather than assuming it is present"
+      - "Failing fast whenever the schema differs at all"
+      - "Requiring every column to be present before processing any row"
+    answer: 1
+    explanation: |
+      A tolerant reader is liberal in what it accepts: ignore new unknown fields and don't
+      assume a value that may not be backfilled yet. This lets old and new code coexist
+      during a rollout. SELECT * does the opposite by coupling to the exact column set.
+    ref: "concepts.md#forward-compatible-application-code-tolerant-reader"
+
+  - id: zero-downtime-schema-migrations-041
+    difficulty: advanced
+    tags: [feature-flags, cutover, decoupling]
+    question: |
+      Why is feature-flagging the dual-write / read-switch useful in a zero-downtime
+      migration?
+    options:
+      - "It makes the database ignore the migration entirely"
+      - "It removes the need for a backfill"
+      - "It decouples 'code is deployed' from 'behavior changed', so you can enable dual-write only after the column is live and flip reads over independently"
+      - "It automatically rolls back failed migrations"
+    answer: 2
+    explanation: |
+      Flags separate deployment from cutover. You ship the new read/write path dark, then
+      flip a flag once the expand migration is applied and the backfill is verified —
+      giving precise, reversible control over each expand/contract transition.
+    ref: "concepts.md#forward-compatible-application-code-tolerant-reader"
+
+  - id: zero-downtime-schema-migrations-042
+    difficulty: expert
+    tags: [scenario, postgres, add-column, downtime]
+    question: |
+      A team adds `ALTER TABLE events ADD COLUMN source text DEFAULT 'unknown'` on PG 13
+      and expects it to be instant, but the deploy stalls and requests time out. The
+      column add itself is metadata-only. What is the most likely cause?
+    options:
+      - "The non-volatile default forced a table rewrite"
+      - "PostgreSQL 13 does not support fast defaults"
+      - "The ALTER could not obtain its ACCESS EXCLUSIVE lock because a long autovacuum or slow query held a conflicting lock, and all subsequent queries queued behind the waiting ALTER"
+      - "DEFAULT 'unknown' is a volatile expression"
+    answer: 2
+    explanation: |
+      The add is fast (non-volatile default, PG 11+), so the problem is lock acquisition:
+      the ALTER waited for ACCESS EXCLUSIVE behind a conflicting long operation, and every
+      new query then queued behind the blocked ALTER — stalling traffic. A short
+      lock_timeout with retry prevents this.
+    ref: "concepts.md#why-naive-migrations-cause-downtime"
+
+  - id: zero-downtime-schema-migrations-043
+    difficulty: expert
+    tags: [scenario, table-split, expand-contract]
+    question: |
+      You must split `users.address` (a single text column) into a separate `addresses`
+      table with zero downtime. Which overall plan is correct?
+    options:
+      - "Create addresses, migrate data, then in one deploy drop users.address and switch all code"
+      - "Immediately switch reads to addresses before any backfill"
+      - "Rename users.address to addresses in a single ALTER"
+      - "Expand: create addresses table. Migrate: dual-write to both users.address and addresses, backfill existing rows idempotently. Contract: switch reads to addresses, stop writing users.address, then drop it in a later release"
+    answer: 3
+    explanation: |
+      This is expand/contract applied to a cross-table split: add the new table, dual-write
+      both places while backfilling historical rows, verify, switch reads, stop the old
+      write, and only then drop the old column in its own reversible release.
+    ref: "concepts.md#the-expandcontract-parallel-change-pattern"
+
+  - id: zero-downtime-schema-migrations-044
+    difficulty: expert
+    tags: [scenario, mysql, varchar, copy]
+    question: |
+      On MySQL 8 (single-byte charset) you run `ALTER TABLE t MODIFY name VARCHAR(300)`
+      where name was `VARCHAR(255)`, pinned with `ALGORITHM=INPLACE`. It errors. Why?
+    options:
+      - "VARCHAR cannot exceed 255 characters in MySQL"
+      - "Crossing the 255-to-256 byte boundary changes the length-byte count (1 to 2 bytes), so the change requires COPY, not INPLACE"
+      - "INPLACE is never allowed for VARCHAR changes"
+      - "The table must be empty to widen a VARCHAR"
+    answer: 1
+    explanation: |
+      Extending VARCHAR is INPLACE only when the number of length bytes is unchanged (0-255
+      uses 1 byte, 256+ uses 2). Going from 255 to 300 crosses that boundary and requires
+      COPY, so ALGORITHM=INPLACE errors instead of silently doing a copy.
+    ref: "concepts.md#native-online-ddl-mysql--innodb-algorithms"
+
+  - id: zero-downtime-schema-migrations-045
+    difficulty: expert
+    tags: [scenario, create-index-concurrently, invalid-index]
+    question: |
+      A `CREATE INDEX CONCURRENTLY` on a large PG table fails partway due to a deadlock.
+      A later query is slower than before the attempt. What happened and what should you
+      do?
+    options:
+      - "The index built successfully; rebuild statistics with ANALYZE"
+      - "The table was rewritten and must be restored from backup"
+      - "It left an INVALID index that is ignored for querying but still adds write overhead; DROP INDEX CONCURRENTLY and retry (or REINDEX INDEX CONCURRENTLY)"
+      - "Nothing was created; simply re-run the same statement inside a transaction"
+    answer: 2
+    explanation: |
+      A failed concurrent build leaves an INVALID index: not used for reads but still
+      maintained on writes (extra overhead). The fix is to drop it (DROP INDEX
+      CONCURRENTLY) and retry, or REINDEX INDEX CONCURRENTLY. It also can't be run inside
+      a transaction block.
+    ref: "concepts.md#adding-indexes-without-locking"
+
+  - id: zero-downtime-schema-migrations-046
+    difficulty: intermediate
+    tags: [maintenance-window, tradeoffs]
+    question: |
+      Why isn't "just do it in a maintenance window" a general solution for schema
+      migrations?
+    options:
+      - "Maintenance windows are illegal for databases"
+      - "Migrations run faster during peak traffic"
+      - "Windows always corrupt the schema"
+      - "Large tables can exceed any acceptable window and 24/7 services can't take one; expand/contract avoids needing a window at all"
+    answer: 3
+    explanation: |
+      A window may suffice for small systems, but a multi-hour rewrite on a huge table
+      won't fit an acceptable window, and always-on services can't schedule downtime.
+      Expand/contract with online techniques removes the need for a window.
+    ref: "concepts.md#the-expandcontract-parallel-change-pattern"
+
+  - id: zero-downtime-schema-migrations-047
+    difficulty: intermediate
+    tags: [postgres, type-change, binary-coercible]
+    question: |
+      Which column type change in PostgreSQL can AVOID a full table rewrite?
+    options:
+      - "integer to text"
+      - "varchar(50) to text (binary-coercible, no content change)"
+      - "text to integer"
+      - "timestamp to bigint"
+    answer: 1
+    explanation: |
+      Binary-coercible changes such as varchar to text (or widening varchar length) don't
+      change the stored representation, so PostgreSQL skips the rewrite. Changes that alter
+      the on-disk representation (e.g. integer to text) require a full rewrite.
+    ref: "concepts.md#native-online-ddl-postgresql"
+
+  - id: zero-downtime-schema-migrations-048
+    difficulty: beginner
+    tags: [contract, drop, safety]
+    question: |
+      Why is the "contract" (drop) step placed last in the expand/contract pattern?
+    options:
+      - "Because dropping is the fastest operation"
+      - "Because it is the destructive, hardest-to-reverse step, so it only runs after the new path is fully proven and the old code is gone"
+      - "Because the database requires drops to run last"
+      - "Because it must run in the same transaction as the expand"
+    answer: 1
+    explanation: |
+      Dropping destroys data/structure and is the one irreversible step. Deferring it to
+      last — after backfill, verification, read switch, and full rollout of code that no
+      longer uses the old structure — keeps every earlier phase safely reversible.
+    ref: "concepts.md#the-expandcontract-parallel-change-pattern"

@@ -1,0 +1,1049 @@
+topic: "Search Engines & Elasticsearch Internals"
+domain: messaging-databases
+topic_slug: search-engines-and-elasticsearch
+version: 1
+questions:
+  - id: search-engines-and-elasticsearch-001
+    difficulty: beginner
+    tags: [like-scan, full-text, motivation]
+    question: |
+      Why can't a relational `WHERE body LIKE '%headphone%'` use a normal B-tree index
+      on the `body` column?
+    options:
+      - "B-tree indexes cannot store text columns at all"
+      - "LIKE is only supported on primary keys"
+      - "The optimizer always prefers a sequential scan for string comparisons"
+      - "A leading wildcard means no index prefix can be matched, so the engine full-scans every row"
+    answer: 3
+    explanation: |
+      A B-tree is ordered by value prefix. A pattern beginning with `%` gives no known prefix
+      to seek on, so the index is useless and the engine scans every row, running a substring
+      match on each — O(rows × length). That linear cost, plus the lack of ranking and
+      linguistic matching, is what motivates a dedicated search engine.
+    ref: "concepts.md#why-full-text-search-needs-a-search-engine"
+
+  - id: search-engines-and-elasticsearch-002
+    difficulty: beginner
+    tags: [inverted-index, definition]
+    question: |
+      What does an inverted index map?
+    options:
+      - "Each document ID to the list of terms it contains"
+      - "Each row to its physical disk offset"
+      - "Each term to a posting list of the document IDs that contain it"
+      - "Each query to a cached result set"
+    answer: 2
+    explanation: |
+      An inverted index maps term → posting list of doc IDs (the inverse of a forward
+      document→terms index). Answering "which docs contain this word" becomes a dictionary
+      lookup plus a read of the pre-sorted posting list, instead of scanning every document.
+    ref: "concepts.md#the-inverted-index"
+
+  - id: search-engines-and-elasticsearch-003
+    difficulty: intermediate
+    tags: [inverted-index, posting-list]
+    question: |
+      Posting lists in Lucene are stored sorted by document ID primarily so that:
+    options:
+      - "Documents can be deleted more quickly"
+      - "The index takes less disk space than any other ordering"
+      - "Relevance scores can be computed without term frequencies"
+      - "Boolean AND/OR across terms becomes a fast merge-intersection/union of sorted lists"
+    answer: 3
+    explanation: |
+      Sorting posting lists by doc ID lets an AND be computed as a merge-intersection and an OR
+      as a merge-union of sorted streams (accelerated by skip lists). This is why boolean
+      combinations of terms are efficient.
+    ref: "concepts.md#the-inverted-index"
+
+  - id: search-engines-and-elasticsearch-004
+    difficulty: intermediate
+    tags: [inverted-index, positions, phrase]
+    question: |
+      Besides document IDs, what does Lucene store in the index to support phrase and
+      proximity queries?
+    options:
+      - "A B-tree of the original column values"
+      - "Term positions (and offsets for highlighting)"
+      - "A materialized join table"
+      - "The SHA-256 of each document"
+    answer: 1
+    explanation: |
+      To answer phrase queries like "noise cancelling" (terms adjacent, in order), Lucene stores
+      term positions; offsets are stored to support highlighting. Term frequencies are stored for
+      scoring.
+    ref: "concepts.md#the-inverted-index"
+
+  - id: search-engines-and-elasticsearch-005
+    difficulty: beginner
+    tags: [analysis, pipeline]
+    question: |
+      What are the three stages of an Elasticsearch analyzer, in order?
+    options:
+      - "Character filters -> tokenizer -> token filters"
+      - "Tokenizer -> character filters -> token filters"
+      - "Token filters -> tokenizer -> character filters"
+      - "Character filters -> token filters -> tokenizer"
+    answer: 0
+    explanation: |
+      An analyzer runs character filters (on the raw stream, e.g. html_strip), then exactly one
+      tokenizer (splits into tokens), then token filters (lowercase, stop, stemmer, synonym…).
+      The output terms are what land in the inverted index.
+    ref: "concepts.md#the-analysis-pipeline"
+
+  - id: search-engines-and-elasticsearch-006
+    difficulty: beginner
+    tags: [analysis, stemming]
+    question: |
+      A stemming token filter helps a search for "running" match a document containing
+      "runs" because it:
+    options:
+      - "Reduces related word forms to a common root (e.g. run) at index and query time"
+      - "Stores both words verbatim in the index"
+      - "Expands the query with a thesaurus lookup"
+      - "Increases the BM25 score of long documents"
+    answer: 0
+    explanation: |
+      A stemmer normalizes inflected forms to a shared root ("running"/"runs"→"run"). If the same
+      analyzer runs at index and query time, both sides reduce to "run" and match. This is how
+      search matches concepts rather than exact strings.
+    ref: "concepts.md#the-analysis-pipeline"
+
+  - id: search-engines-and-elasticsearch-007
+    difficulty: intermediate
+    tags: [analysis, tokenizer]
+    question: |
+      How many tokenizers may a single analyzer have?
+    options:
+      - "Zero or one"
+      - "Exactly one"
+      - "One per token filter"
+      - "Any number, applied in sequence"
+    answer: 1
+    explanation: |
+      An analyzer has exactly one tokenizer. It may have zero or more character filters (before)
+      and zero or more token filters (after), but precisely one tokenizer splits the character
+      stream into tokens.
+    ref: "concepts.md#the-analysis-pipeline"
+
+  - id: search-engines-and-elasticsearch-008
+    difficulty: intermediate
+    tags: [analysis, char-filter]
+    question: |
+      Stripping HTML tags from a field's raw text before tokenization is the job of a:
+    options:
+      - "Token filter"
+      - "Tokenizer"
+      - "Character filter"
+      - "Similarity module"
+    answer: 2
+    explanation: |
+      Character filters operate on the raw character stream before tokenization; `html_strip`
+      removes markup so tags don't become tokens. Token filters operate after tokenization on
+      the token stream instead.
+    ref: "concepts.md#the-analysis-pipeline"
+
+  - id: search-engines-and-elasticsearch-009
+    difficulty: advanced
+    tags: [analysis, reindex, gotcha]
+    question: |
+      You add a new synonym rule to a field's index-time analyzer. Why don't documents indexed
+      last week start matching the new synonyms?
+    options:
+      - "Synonyms only work on keyword fields"
+      - "The synonym filter is disabled by default"
+      - "BM25 ignores synonym-generated terms"
+      - "Analysis is applied at index time, so existing docs keep the terms they were indexed with; you must reindex"
+    answer: 3
+    explanation: |
+      Index-time analysis produces the terms stored in the inverted index. Changing the analyzer
+      does not retroactively re-analyze old documents — they keep their old terms. You must
+      reindex (or apply the synonyms at query time instead).
+    ref: "concepts.md#the-analysis-pipeline"
+
+  - id: search-engines-and-elasticsearch-010
+    difficulty: intermediate
+    tags: [analysis, index-time, query-time]
+    question: |
+      For a `match` query to find a document, what must be true about analysis?
+    options:
+      - "The index-time terms and the query-time terms must be compatible (produce overlapping terms)"
+      - "The query must not be analyzed at all"
+      - "The query analyzer must always differ from the index analyzer"
+      - "Only the query is analyzed, never the document"
+    answer: 0
+    explanation: |
+      Analysis happens at both index time (producing stored terms) and query time (producing
+      lookup terms). For `match` to hit, the two term streams must overlap. By default the same
+      analyzer is used for both, guaranteeing compatibility.
+    ref: "concepts.md#index-time-vs-query-time-analysis"
+
+  - id: search-engines-and-elasticsearch-011
+    difficulty: advanced
+    tags: [autocomplete, edge-ngram, search-analyzer]
+    question: |
+      For edge-ngram autocomplete you index "quick" as q, qu, qui, quic, quick. Why set a
+      different (plain) `search_analyzer` on the query side?
+    options:
+      - "So the query 'qui' is looked up as-is against the indexed ngrams instead of being re-ngrammed into an explosion of terms"
+      - "To ngram the query too, so more matches are produced"
+      - "Because keyword fields require a separate search analyzer"
+      - "To disable BM25 for prefix queries"
+    answer: 0
+    explanation: |
+      You want the document broken into prefixes at index time, but the query token looked up
+      directly. If you also ngram the query, "qui" becomes q/qu/qui and matches far too much. A
+      plain search analyzer keeps the query token intact for a clean prefix match.
+    ref: "concepts.md#index-time-vs-query-time-analysis"
+
+  - id: search-engines-and-elasticsearch-012
+    difficulty: intermediate
+    tags: [debugging, analyze-api]
+    question: |
+      Which API is the fastest way to see exactly what terms a field/analyzer produces from
+      some text, to debug why a query doesn't match?
+    options:
+      - "The _explain API"
+      - "The _analyze API"
+      - "The _reindex API"
+      - "The _cat/shards API"
+    answer: 1
+    explanation: |
+      `GET /<index>/_analyze` with a field or analyzer and some text returns the exact token
+      stream. Most "why doesn't it match?" bugs are index-time vs query-time term mismatches,
+      which the Analyze API reveals immediately. (`_explain` shows scoring, not tokenization.)
+    ref: "concepts.md#index-time-vs-query-time-analysis"
+
+  - id: search-engines-and-elasticsearch-013
+    difficulty: beginner
+    tags: [scoring, bm25, default]
+    question: |
+      What is the default relevance-scoring model in current Elasticsearch/OpenSearch (Lucene)?
+    options:
+      - "Plain TF-IDF"
+      - "BM25"
+      - "Cosine similarity"
+      - "PageRank"
+    answer: 1
+    explanation: |
+      Since Lucene 6, BM25 (Okapi BM25) is the default similarity. It refines TF-IDF with
+      saturating term frequency and explicit document-length normalization.
+    ref: "concepts.md#relevance-scoring-tf-idf-and-bm25"
+
+  - id: search-engines-and-elasticsearch-014
+    difficulty: beginner
+    tags: [scoring, idf]
+    question: |
+      In TF-IDF/BM25, the IDF component gives higher weight to terms that are:
+    options:
+      - "Frequent across the whole corpus"
+      - "Rare across the corpus (more discriminating)"
+      - "Longest in character count"
+      - "Stored in keyword fields"
+    answer: 1
+    explanation: |
+      Inverse document frequency up-weights rare terms because they discriminate between
+      documents; ubiquitous terms like "the" carry little signal and are weighted down.
+    ref: "concepts.md#relevance-scoring-tf-idf-and-bm25"
+
+  - id: search-engines-and-elasticsearch-015
+    difficulty: advanced
+    tags: [scoring, bm25, k1, saturation]
+    question: |
+      The BM25 `k1` parameter (default 1.2) primarily controls:
+    options:
+      - "How much document length normalizes the score"
+      - "The minimum score threshold for a hit"
+      - "The number of shards queried"
+      - "Term-frequency saturation — the diminishing returns of repeated term occurrences"
+    answer: 3
+    explanation: |
+      `k1` controls non-linear term-frequency saturation: the 10th occurrence adds far less than
+      the 2nd. Document-length normalization is controlled by `b` (default 0.75) instead.
+    ref: "concepts.md#relevance-scoring-tf-idf-and-bm25"
+
+  - id: search-engines-and-elasticsearch-016
+    difficulty: advanced
+    tags: [scoring, bm25, b, length]
+    question: |
+      What does setting the BM25 `b` parameter to 0 do?
+    options:
+      - "Disables IDF weighting"
+      - "Makes term frequency contribute linearly with no saturation"
+      - "Turns BM25 back into cosine similarity"
+      - "Disables document-length normalization"
+    answer: 3
+    explanation: |
+      `b` (default 0.75) controls how strongly document length normalizes the term-frequency
+      component. `b=0` removes length normalization entirely, so a match in a long document
+      counts the same as in a short one.
+    ref: "concepts.md#relevance-scoring-tf-idf-and-bm25"
+
+  - id: search-engines-and-elasticsearch-017
+    difficulty: intermediate
+    tags: [scoring, bm25, tf-idf, comparison]
+    question: |
+      The key improvement of BM25 over classic TF-IDF is that BM25:
+    options:
+      - "Removes the IDF term entirely"
+      - "Requires vector embeddings"
+      - "Adds saturating term frequency and explicit length normalization"
+      - "Only works on keyword fields"
+    answer: 2
+    explanation: |
+      BM25 keeps IDF but adds saturating TF (bounded by k1) so repeated terms have diminishing
+      returns, and explicit length normalization (b) so short-field matches rank higher. Both
+      fix TF-IDF's tendency to over-reward long, keyword-stuffed documents.
+    ref: "concepts.md#relevance-scoring-tf-idf-and-bm25"
+
+  - id: search-engines-and-elasticsearch-018
+    difficulty: intermediate
+    tags: [boosting, multi-match]
+    question: |
+      In `multi_match` with `fields: ["title^3", "body"]`, what does the `^3` do?
+    options:
+      - "Boosts a match in `title` to count roughly three times as much as a match in `body`"
+      - "Requires the term to appear 3 times in the title"
+      - "Limits results to the top 3 titles"
+      - "Sets the fuzziness to edit distance 3"
+    answer: 0
+    explanation: |
+      `title^3` is a field boost: matches in `title` contribute about 3× the score of matches in
+      `body`, pushing docs whose title matches to the top. It has nothing to do with occurrence
+      counts or result limits.
+    ref: "concepts.md#boosting-and-query-time-relevance-tuning"
+
+  - id: search-engines-and-elasticsearch-019
+    difficulty: advanced
+    tags: [boosting, function-score, business-signal]
+    question: |
+      You want relevance to also reflect product popularity (units sold). Which mechanism blends
+      BM25 with such a business signal?
+    options:
+      - "`function_score` / `field_value_factor` (e.g. multiply score by log(1+sales))"
+      - "A `term` filter on sales"
+      - "Increasing the number of replicas"
+      - "Setting `b=0` in BM25"
+    answer: 0
+    explanation: |
+      `function_score` (often with `field_value_factor`) combines the text relevance score with a
+      numeric field via a function like `log(1+sales)`, letting popularity, recency, or rating
+      influence ranking without discarding BM25 relevance.
+    ref: "concepts.md#boosting-and-query-time-relevance-tuning"
+
+  - id: search-engines-and-elasticsearch-020
+    difficulty: advanced
+    tags: [scoring, explain, gotcha]
+    question: |
+      Why is it wrong to treat the `_score` value as an absolute quality metric to threshold on
+      across different queries?
+    options:
+      - "Scores are always between 0 and 1"
+      - "Scores are only computed for keyword fields"
+      - "The score equals the number of matching terms"
+      - "`_score` is relative within a query and depends on term statistics, so it isn't comparable across different queries"
+    answer: 3
+    explanation: |
+      BM25 scores are relative sums/products of term contributions and depend on corpus/term
+      statistics; they aren't normalized or comparable across different queries. Tune with the
+      `_explain` API and A/B tests, not by comparing raw magnitudes.
+    ref: "concepts.md#boosting-and-query-time-relevance-tuning"
+
+  - id: search-engines-and-elasticsearch-021
+    difficulty: beginner
+    tags: [data-model, index, shard]
+    question: |
+      In Elasticsearch, a single primary shard is implemented as:
+    options:
+      - "A row in a relational table"
+      - "A Kafka partition"
+      - "An independent Lucene index"
+      - "A Redis hash slot"
+    answer: 2
+    explanation: |
+      Each primary shard is a self-contained Lucene index. An Elasticsearch index is partitioned
+      into primary shards to scale beyond one node and parallelize search across them.
+    ref: "concepts.md#the-elasticsearch--opensearch-data-model"
+
+  - id: search-engines-and-elasticsearch-022
+    difficulty: intermediate
+    tags: [data-model, shards, immutable]
+    question: |
+      Which statement about primary shard count is correct?
+    options:
+      - "It is fixed at index creation; changing it requires reindex (or Split/Shrink)"
+      - "It can be increased at any time with a settings update"
+      - "It automatically grows as documents are added"
+      - "It must equal the number of replica shards"
+    answer: 0
+    explanation: |
+      Primary shard count is set at creation and is immutable because routing (`hash(_id) %
+      primaries`) depends on it. To change it you reindex into a new index or use the Split/Shrink
+      APIs. Replica count, by contrast, is adjustable at runtime.
+    ref: "concepts.md#the-elasticsearch--opensearch-data-model"
+
+  - id: search-engines-and-elasticsearch-023
+    difficulty: intermediate
+    tags: [data-model, replica, ha]
+    question: |
+      Replica shards provide two main benefits. Which pair?
+    options:
+      - "Higher write throughput and stronger consistency"
+      - "Smaller index size and faster merges"
+      - "High availability (survive node loss) and additional read/search throughput"
+      - "Automatic schema changes and reindexing"
+    answer: 2
+    explanation: |
+      Replicas are copies of primaries on other nodes. They keep the index available if a node
+      holding a primary fails, and searches can be served from replicas, increasing read
+      throughput. They don't speed writes (writes go to primary then replicas).
+    ref: "concepts.md#the-elasticsearch--opensearch-data-model"
+
+  - id: search-engines-and-elasticsearch-024
+    difficulty: intermediate
+    tags: [data-model, routing]
+    question: |
+      By default, which primary shard does a document with a given `_id` land on?
+    options:
+      - "The shard given by hash(_id) modulo the number of primary shards"
+      - "A random shard chosen at index time"
+      - "Always shard 0"
+      - "The least-loaded shard at that moment"
+    answer: 0
+    explanation: |
+      Default routing is `shard = hash(_id) % number_of_primary_shards`, so a document
+      deterministically maps to one primary (and its replicas). This determinism is exactly why
+      the primary count can't change without reindexing.
+    ref: "concepts.md#the-elasticsearch--opensearch-data-model"
+
+  - id: search-engines-and-elasticsearch-025
+    difficulty: beginner
+    tags: [opensearch, history]
+    question: |
+      OpenSearch originated as:
+    options:
+      - "A ground-up rewrite unrelated to Elasticsearch"
+      - "An Apache-2.0 fork of Elasticsearch 7.10, maintained after Elastic's license change"
+      - "A proprietary AWS-only closed-source product"
+      - "A plugin that runs inside Elasticsearch"
+    answer: 1
+    explanation: |
+      OpenSearch is an Apache-2.0 licensed fork of Elasticsearch/Kibana 7.10, created after
+      Elastic moved to non-OSI licenses. It shares the same core model (indices, shards, Lucene,
+      query DSL, aggregations) covered here.
+    ref: "concepts.md#the-elasticsearch--opensearch-data-model"
+
+  - id: search-engines-and-elasticsearch-026
+    difficulty: intermediate
+    tags: [segments, immutable, updates]
+    question: |
+      How is a document "update" handled given that Lucene segments are immutable?
+    options:
+      - "The segment is edited in place"
+      - "The whole shard is rebuilt on every update"
+      - "Updates are rejected on Lucene indices"
+      - "The old doc is marked deleted and a new doc is written; space is reclaimed later by segment merges"
+    answer: 3
+    explanation: |
+      Segments are write-once. An update marks the old document deleted (a .del bit) and writes a
+      new document into a newer segment. Background segment merges eventually reclaim the space of
+      deleted docs.
+    ref: "concepts.md#lucene-segments-refresh-and-near-real-time-search"
+
+  - id: search-engines-and-elasticsearch-027
+    difficulty: beginner
+    tags: [refresh, nrt, default]
+    question: |
+      What is the default refresh interval that makes newly indexed documents searchable?
+    options:
+      - "10 milliseconds"
+      - "30 seconds"
+      - "1 second"
+      - "5 minutes"
+    answer: 2
+    explanation: |
+      By default a refresh runs about every 1 second (on indices searched in the last 30s),
+      moving buffered docs into a new searchable segment. This ~1s gap is why Elasticsearch is
+      "near-real-time" rather than real-time.
+    ref: "concepts.md#lucene-segments-refresh-and-near-real-time-search"
+
+  - id: search-engines-and-elasticsearch-028
+    difficulty: intermediate
+    tags: [refresh, nrt, definition]
+    question: |
+      What exactly does a refresh do?
+    options:
+      - "Fsyncs all segments to disk for durability"
+      - "Deletes stale segments"
+      - "Replays the translog"
+      - "Writes the in-memory buffer into a new segment in the filesystem cache and opens it for search"
+    answer: 3
+    explanation: |
+      A refresh takes buffered docs, writes them to a new segment in the filesystem cache (cheap,
+      not yet fsynced), and opens it so those docs become searchable. Durability (fsync to disk)
+      is a separate, heavier operation.
+    ref: "concepts.md#lucene-segments-refresh-and-near-real-time-search"
+
+  - id: search-engines-and-elasticsearch-029
+    difficulty: advanced
+    tags: [bulk-indexing, refresh-interval, tuning]
+    question: |
+      To maximize throughput of a large bulk load, a common tuning is to:
+    options:
+      - "Set refresh_interval to 100ms and add replicas"
+      - "Increase the number of primary shards mid-load"
+      - "Switch translog durability to request for every doc"
+      - "Temporarily set refresh_interval to -1 (disable) and drop replicas to 0, then restore them"
+    answer: 3
+    explanation: |
+      Disabling refresh (`-1`) avoids building a segment every second and the resulting constant
+      re-merging, and dropping replicas avoids replicating each op during load. Restore both
+      afterward and refresh. This is one of the highest-impact indexing throughput levers.
+    ref: "concepts.md#lucene-segments-refresh-and-near-real-time-search"
+
+  - id: search-engines-and-elasticsearch-030
+    difficulty: intermediate
+    tags: [translog, durability, wal]
+    question: |
+      What is the role of the translog?
+    options:
+      - "It caches query results"
+      - "It stores the analyzed token stream"
+      - "It holds replica routing tables"
+      - "It is a write-ahead log of operations, appended before ack, and replayed on recovery to avoid losing writes"
+    answer: 3
+    explanation: |
+      Because a refresh only puts data in the filesystem cache (not durably on disk), the translog
+      records each operation as a WAL before acknowledgment. On crash recovery, unflushed
+      operations are replayed from the translog.
+    ref: "concepts.md#the-translog-and-durability"
+
+  - id: search-engines-and-elasticsearch-031
+    difficulty: advanced
+    tags: [translog, durability, default]
+    question: |
+      With the default `index.translog.durability` setting, when is the translog fsynced?
+    options:
+      - "Every 5 seconds in the background"
+      - "Only during a full flush"
+      - "After every index/delete/update/bulk request, before it is acknowledged"
+      - "Never — it stays in memory"
+    answer: 2
+    explanation: |
+      The default is `request`: the translog is fsynced and committed on the primary and each
+      allocated replica after every request, before acknowledging. So no acknowledged write is
+      lost on a single-node crash. `async` (fsync every sync_interval, default 5s) trades some
+      durability for speed.
+    ref: "concepts.md#the-translog-and-durability"
+
+  - id: search-engines-and-elasticsearch-032
+    difficulty: advanced
+    tags: [translog, async, sync-interval]
+    question: |
+      If you set `index.translog.durability: async`, what is the default `sync_interval` and the
+      main risk?
+    options:
+      - "1s; documents may become searchable late"
+      - "5s; operations from the last interval can be lost if the node crashes"
+      - "30s; queries will return stale results"
+      - "0s; there is no risk"
+    answer: 1
+    explanation: |
+      With `async`, the translog is fsynced in the background every `sync_interval` (default 5s),
+      so a crash can lose operations acknowledged in the last interval. It's faster but weaker
+      than the default per-request durability.
+    ref: "concepts.md#the-translog-and-durability"
+
+  - id: search-engines-and-elasticsearch-033
+    difficulty: intermediate
+    tags: [refresh, flush, translog, distinction]
+    question: |
+      Which correctly distinguishes refresh from flush?
+    options:
+      - "Refresh fsyncs to disk; flush only makes docs searchable"
+      - "Refresh makes docs searchable in the fs cache (cheap); flush fsyncs segments to disk and trims the translog (expensive)"
+      - "They are two names for the same operation"
+      - "Flush runs every second; refresh runs on demand only"
+    answer: 1
+    explanation: |
+      Refresh = new searchable segment in the filesystem cache, cheap, ~1s. Flush = commit
+      segments to disk with fsync and start a fresh translog, expensive, triggered by size/age.
+      Refresh gives visibility; the translog (and flush) give durability.
+    ref: "concepts.md#the-translog-and-durability"
+
+  - id: search-engines-and-elasticsearch-034
+    difficulty: beginner
+    tags: [mapping, text, keyword]
+    question: |
+      Which field type stores its value as a single, exact, un-analyzed token?
+    options:
+      - "text"
+      - "match"
+      - "keyword"
+      - "analyzed"
+    answer: 2
+    explanation: |
+      `keyword` stores the value verbatim as one token — ideal for exact-match `term` filters,
+      sorting, and aggregations. `text` is analyzed into multiple terms for full-text search.
+    ref: "concepts.md#mapping-text-vs-keyword"
+
+  - id: search-engines-and-elasticsearch-035
+    difficulty: intermediate
+    tags: [mapping, multi-field, text, keyword]
+    question: |
+      Why does dynamic mapping create both a `text` field and a `.keyword` sub-field for a string?
+    options:
+      - "To store the value twice for redundancy"
+      - "Because keyword fields cannot exist without a text parent"
+      - "So you can both full-text `match` (text) and exactly sort/aggregate/`term`-filter (keyword) on the same field"
+      - "To double the BM25 score"
+    answer: 2
+    explanation: |
+      Full-text search needs an analyzed `text` field, but sorting, aggregations, and exact
+      `term` filters need an un-analyzed `keyword`. The multi-field gives you `field` (text) plus
+      `field.keyword` (exact) so one string serves both use cases.
+    ref: "concepts.md#mapping-text-vs-keyword"
+
+  - id: search-engines-and-elasticsearch-036
+    difficulty: intermediate
+    tags: [mapping, sorting, gotcha]
+    question: |
+      You try to sort search results by a `text`-typed `brand` field and it errors or misbehaves.
+      Why?
+    options:
+      - "text fields cannot be indexed"
+      - "Sorting requires disabling BM25"
+      - "text fields are analyzed into tokens and lack doc values, so use the keyword sub-field (brand.keyword) for sorting"
+      - "You must add more replicas first"
+    answer: 2
+    explanation: |
+      Analyzed `text` fields store tokenized terms and don't have doc values enabled, so they
+      can't be used for exact sort/aggregation. Sort on the exact `keyword` sub-field
+      (`brand.keyword`) instead.
+    ref: "concepts.md#mapping-text-vs-keyword"
+
+  - id: search-engines-and-elasticsearch-037
+    difficulty: advanced
+    tags: [dynamic-mapping, type-inference, pitfall]
+    question: |
+      A field first appears as JSON number `90210` (ZIP code) and is dynamically mapped as
+      `long`. What happens when a later document sends `"SW1A"` for that field?
+    options:
+      - "It fails to index / triggers a mapping conflict, because the field type is already long and immutable"
+      - "It is silently coerced to 0"
+      - "The field is automatically re-mapped to text"
+      - "Both values are stored fine"
+    answer: 0
+    explanation: |
+      Dynamic mapping infers the type from the first value and that type is immutable. A ZIP
+      seen first as a number becomes `long`; the later alphanumeric value can't be parsed as a
+      long and the document is rejected. Explicit mappings (map ZIP as keyword) avoid this.
+    ref: "concepts.md#dynamic-mapping-pitfalls"
+
+  - id: search-engines-and-elasticsearch-038
+    difficulty: advanced
+    tags: [dynamic-mapping, mapping-explosion]
+    question: |
+      Logging documents with arbitrary, user-controlled keys under a `labels` object can cause a
+      "mapping explosion." The main defense is to:
+    options:
+      - "Set dynamic to strict/false (and/or index.mapping.total_fields.limit) so unbounded fields aren't auto-mapped"
+      - "Add more primary shards"
+      - "Enable async translog"
+      - "Increase refresh_interval"
+    answer: 0
+    explanation: |
+      Every new distinct key becomes a mapped field, bloating cluster state and heap. Setting
+      `dynamic: strict` (reject unknown fields) or `false` (store but don't index), using runtime
+      fields, and capping `total_fields.limit` prevents unbounded field growth.
+    ref: "concepts.md#dynamic-mapping-pitfalls"
+
+  - id: search-engines-and-elasticsearch-039
+    difficulty: intermediate
+    tags: [dynamic-mapping, best-practice]
+    question: |
+      For a production index, the recommended stance on dynamic mapping is:
+    options:
+      - "Always rely on it; explicit mappings are unnecessary"
+      - "Define explicit mappings and set dynamic to strict or false to control field types"
+      - "Disable indexing entirely"
+      - "Map every field as text"
+    answer: 1
+    explanation: |
+      Explicit mappings give correct, stable types and prevent surprise mapping conflicts and
+      explosions. Setting `dynamic` to `strict` (reject unknowns) or `false` (ignore) keeps the
+      schema under control. Dynamic mapping is fine for prototypes, risky in production.
+    ref: "concepts.md#dynamic-mapping-pitfalls"
+
+  - id: search-engines-and-elasticsearch-040
+    difficulty: beginner
+    tags: [query-dsl, match, term]
+    question: |
+      What is the key difference between a `match` query and a `term` query?
+    options:
+      - "match is faster; term is slower"
+      - "match works only on numbers; term only on dates"
+      - "There is no difference"
+      - "match analyzes the query string (for text fields); term looks up the value verbatim (no analysis)"
+    answer: 3
+    explanation: |
+      `match` is a full-text query: it runs the query string through the field's analyzer and
+      looks up the resulting terms. `term` does no analysis and looks up the exact value — use it
+      on keyword/numeric/date fields.
+    ref: "concepts.md#query-dsl-match-vs-term-vs-bool"
+
+  - id: search-engines-and-elasticsearch-041
+    difficulty: advanced
+    tags: [query-dsl, term, text, gotcha]
+    question: |
+      A `term` query for `{"status": "Active"}` on a `text` field returns no results even though
+      documents say "Active". Most likely cause?
+    options:
+      - "The index is corrupt"
+      - "term queries are deprecated"
+      - "The text field lowercased the indexed term to 'active', but term doesn't analyze the query value 'Active', so they don't match"
+      - "You need to increase fuzziness"
+    answer: 2
+    explanation: |
+      The `text` field's analyzer stored `active` (lowercased), but `term` looks up `Active`
+      verbatim without analysis — no match. Query the exact `keyword` sub-field
+      (`status.keyword`) or use `match`. This is the single most common query bug.
+    ref: "concepts.md#query-dsl-match-vs-term-vs-bool"
+
+  - id: search-engines-and-elasticsearch-042
+    difficulty: intermediate
+    tags: [query-dsl, bool, clauses]
+    question: |
+      In a `bool` query, which clause contributes to matching but does NOT affect the relevance
+      score and is cacheable?
+    options:
+      - "must"
+      - "should"
+      - "match_phrase"
+      - "filter"
+    answer: 3
+    explanation: |
+      `filter` clauses run in filter context: they require a match (yes/no) but assign no score
+      and their result bitset is cacheable. `must` and `should` run in query context and
+      contribute to `_score`.
+    ref: "concepts.md#query-dsl-match-vs-term-vs-bool"
+
+  - id: search-engines-and-elasticsearch-043
+    difficulty: advanced
+    tags: [query-dsl, bool, scenario]
+    question: |
+      You need: title matches "wireless headphones", brand is exactly Sony, price <= 200, and
+      exclude discontinued items — with ranking driven only by the title match. How should you
+      structure the bool query?
+    options:
+      - "Put every condition in must so they all score"
+      - "Put everything in should"
+      - "match title in must; brand term, price range in filter; discontinued in must_not"
+      - "Use a single term query on a concatenated field"
+    answer: 2
+    explanation: |
+      The title match should drive ranking, so it goes in `must` (query context). Exact brand,
+      the price range, and the exclusion are hard yes/no criteria with no bearing on relevance:
+      brand/price in `filter` (cacheable, unscored) and discontinued in `must_not`.
+    ref: "concepts.md#query-dsl-match-vs-term-vs-bool"
+
+  - id: search-engines-and-elasticsearch-044
+    difficulty: intermediate
+    tags: [filter-context, query-context, caching]
+    question: |
+      Why can filter-context clauses be cached while query-context clauses generally cannot?
+    options:
+      - "Filters run on a separate cluster"
+      - "Filters produce a yes/no matching bitset independent of scoring, whereas scores depend on term statistics that vary"
+      - "Query context results are always identical"
+      - "Filters are always evaluated first alphabetically"
+    answer: 1
+    explanation: |
+      A filter's output is a deterministic set (bitset) of matching docs — reusable across
+      queries. A scored clause's contribution depends on term/corpus statistics and the specific
+      query, so it isn't a cache-friendly boolean result.
+    ref: "concepts.md#query-context-vs-filter-context"
+
+  - id: search-engines-and-elasticsearch-045
+    difficulty: intermediate
+    tags: [filter-context, performance, best-practice]
+    question: |
+      Which criterion is the best candidate to move into `filter` context for both performance
+      and correctness?
+    options:
+      - "A hard yes/no constraint like status = active or created_at within a date range"
+      - "The main search phrase the user typed"
+      - "A relevance boost on the title"
+      - "A synonym expansion of the query"
+    answer: 0
+    explanation: |
+      Hard yes/no constraints (status, category, date/price ranges, ownership) belong in
+      `filter`: they gain caching, skip score computation, and don't pollute relevance. The
+      user's actual search phrase should stay in query context so it drives ranking.
+    ref: "concepts.md#query-context-vs-filter-context"
+
+  - id: search-engines-and-elasticsearch-046
+    difficulty: beginner
+    tags: [aggregations, bucket, facets]
+    question: |
+      Which aggregation would you use to build a "brand" facet showing counts per brand
+      (e.g. Sony (42), Bose (18))?
+    options:
+      - "avg metric aggregation"
+      - "terms bucket aggregation on brand.keyword"
+      - "cardinality aggregation"
+      - "date_histogram aggregation"
+    answer: 1
+    explanation: |
+      A `terms` bucket aggregation groups documents by field value and counts each bucket — the
+      classic faceted-navigation building block. It runs on an exact field (`brand.keyword`),
+      since aggregations use doc values, not analyzed text.
+    ref: "concepts.md#aggregations"
+
+  - id: search-engines-and-elasticsearch-047
+    difficulty: advanced
+    tags: [aggregations, approximate, cardinality]
+    question: |
+      Why can a `terms` aggregation's counts be slightly inaccurate on a multi-shard index?
+    options:
+      - "Aggregations ignore deleted documents"
+      - "BM25 rounds the counts"
+      - "Replicas double-count documents"
+      - "Each shard returns only its local top-N buckets which are then merged, so a globally frequent term missed by some shard can be undercounted"
+    answer: 3
+    explanation: |
+      Each shard computes its local top buckets and sends them to the coordinating node to merge.
+      A term that's just below a shard's local cutoff isn't reported by that shard, so merged
+      counts can be off for high-cardinality fields. Raising `shard_size` reduces the error.
+      `cardinality` (HyperLogLog++) and `percentiles` (t-digest) are also approximate by design.
+    ref: "concepts.md#aggregations"
+
+  - id: search-engines-and-elasticsearch-048
+    difficulty: intermediate
+    tags: [aggregations, doc-values]
+    question: |
+      Aggregations and sorting rely on which per-field, columnar on-disk structure?
+    options:
+      - "Doc values"
+      - "The translog"
+      - "The term dictionary FST"
+      - "The query cache"
+    answer: 0
+    explanation: |
+      Doc values are a columnar, per-field store optimized for reading a field's value across
+      many docs — exactly what sorting and aggregations need. They're enabled by default on
+      keyword/numeric fields but not on analyzed text, which is why you aggregate on keyword.
+    ref: "concepts.md#aggregations"
+
+  - id: search-engines-and-elasticsearch-049
+    difficulty: intermediate
+    tags: [reindex, alias, zero-downtime]
+    question: |
+      Why is an alias used when performing a zero-downtime mapping change via reindex?
+    options:
+      - "The app queries the stable alias name, so you can atomically repoint it from the old index to the new one without the app seeing a missing index"
+      - "Aliases compress the index"
+      - "Aliases increase shard count automatically"
+      - "Aliases disable refresh during reindex"
+    answer: 0
+    explanation: |
+      The application always uses the alias. After reindexing into the new index and catching up
+      writes, a single atomic `_aliases` call removes the old index and adds the new one, so
+      searches never break. The concrete index names are hidden behind the alias.
+    ref: "concepts.md#reindex-and-alias-swap-for-zero-downtime-mapping-changes"
+
+  - id: search-engines-and-elasticsearch-050
+    difficulty: advanced
+    tags: [reindex, alias, atomicity, scenario]
+    question: |
+      During an alias-swap reindex, why must you handle writes that arrive while `_reindex` is
+      running (via dual-write or CDC replay)?
+    options:
+      - "Because reindex copies a point-in-time snapshot; new writes to the old index after that point won't be in the new index unless you also apply them"
+      - "Because reindex locks the old index for writes"
+      - "Because aliases cannot receive writes"
+      - "Because the new index has fewer shards"
+    answer: 0
+    explanation: |
+      `_reindex` copies documents as of when it reads them. Any writes landing on the old index
+      afterward aren't automatically in the new index, so you dual-write to both (or replay from
+      the CDC stream) to catch up before the swap — otherwise those updates are lost.
+    ref: "concepts.md#reindex-and-alias-swap-for-zero-downtime-mapping-changes"
+
+  - id: search-engines-and-elasticsearch-051
+    difficulty: intermediate
+    tags: [reindex, mapping, immutability]
+    question: |
+      Why is reindexing usually required to change a field's analyzer or type (e.g. text to
+      keyword)?
+    options:
+      - "Reindex is faster than an in-place edit"
+      - "A field's mapping/analyzer is immutable once set, so you build a new index with the new mapping and copy data in"
+      - "Elasticsearch forbids editing indices with replicas"
+      - "The translog must be cleared first"
+    answer: 1
+    explanation: |
+      Once a field's mapping and analyzer are set they can't be changed in place (existing terms
+      were produced by the old analyzer). You create a new index with the desired mapping and
+      `_reindex` the documents so they're re-analyzed correctly.
+    ref: "concepts.md#reindex-and-alias-swap-for-zero-downtime-mapping-changes"
+
+  - id: search-engines-and-elasticsearch-052
+    difficulty: intermediate
+    tags: [cdc, dual-write, sync]
+    question: |
+      Why is naive dual-write (app writes to DB and to Elasticsearch in the same request) an
+      anti-pattern for correctness?
+    options:
+      - "It is too slow to be usable"
+      - "The two writes aren't atomic — a crash or partial failure between them leaves DB and index inconsistent"
+      - "Elasticsearch rejects writes from application code"
+      - "It requires disabling the translog"
+    answer: 1
+    explanation: |
+      There's no transaction spanning the DB and the search engine. If the process crashes or one
+      write fails after the other succeeds, the two stores diverge with no ordering guarantee.
+      CDC or a transactional outbox avoids this gap.
+    ref: "concepts.md#indexing-from-the-database-cdc-vs-dual-write"
+
+  - id: search-engines-and-elasticsearch-053
+    difficulty: advanced
+    tags: [cdc, debezium, robust]
+    question: |
+      The robust, industry-standard way to keep a search index in sync with a database is:
+    options:
+      - "Poll the whole table every minute and re-index everything"
+      - "Let clients write directly to both stores from the browser"
+      - "Log-based CDC (e.g. Debezium tailing the WAL/binlog into Kafka) projecting changes into the index"
+      - "Store all data only in Elasticsearch"
+    answer: 2
+    explanation: |
+      CDC tails the DB's transaction log (Postgres WAL / MySQL binlog via Debezium → Kafka) and
+      applies changes to the index asynchronously and idempotently. The DB commit remains the
+      single source of truth, and the stream can be replayed to rebuild the index.
+    ref: "concepts.md#indexing-from-the-database-cdc-vs-dual-write"
+
+  - id: search-engines-and-elasticsearch-054
+    difficulty: advanced
+    tags: [outbox, dual-write, atomicity]
+    question: |
+      The transactional outbox pattern avoids the dual-write atomicity gap by:
+    options:
+      - "Writing to Elasticsearch first, then the DB"
+      - "Disabling replicas during writes"
+      - "Writing an outbox row in the same DB transaction as the business change, then reliably relaying it to the index"
+      - "Using a distributed two-phase commit across DB and Elasticsearch"
+    answer: 2
+    explanation: |
+      The business change and an `outbox` record commit atomically in one DB transaction. A relay
+      process then reads the outbox and updates the search index. Since only the DB transaction
+      must be atomic, there's no cross-system dual-write to lose data in.
+    ref: "concepts.md#indexing-from-the-database-cdc-vs-dual-write"
+
+  - id: search-engines-and-elasticsearch-055
+    difficulty: intermediate
+    tags: [source-of-truth, derived-index]
+    question: |
+      What is the recommended relationship between the database and the search index?
+    options:
+      - "Elasticsearch is the system of record; the DB is a cache"
+      - "The DB is the system of record; the search index is a rebuildable, derived read model"
+      - "Both are independent sources of truth"
+      - "Neither stores authoritative data"
+    answer: 1
+    explanation: |
+      Elasticsearch is optimized for search, not durable OLTP state. Keep the DB authoritative
+      and treat the index as a derived, rebuildable read model — so you can reconstruct it from
+      the DB or CDC stream if it's lost or corrupted. Never store data only in the index.
+    ref: "concepts.md#search-engine-vs-the-database-as-source-of-truth"
+
+  - id: search-engines-and-elasticsearch-056
+    difficulty: advanced
+    tags: [source-of-truth, limitations]
+    question: |
+      Which limitation makes Elasticsearch a poor choice as a primary transactional datastore?
+    options:
+      - "It lacks multi-document ACID transactions and is near-real-time / eventually consistent by design"
+      - "It cannot store JSON documents"
+      - "It has no way to query by field"
+      - "It cannot scale horizontally"
+    answer: 0
+    explanation: |
+      Elasticsearch offers only per-document atomicity — no multi-doc ACID transactions, no
+      foreign keys, no general joins — and its NRT refresh plus async replication make it
+      eventually consistent. That's fine for a derived search model, wrong for authoritative
+      transactional state.
+    ref: "concepts.md#search-engine-vs-the-database-as-source-of-truth"
+
+  - id: search-engines-and-elasticsearch-057
+    difficulty: beginner
+    tags: [when-not, decision]
+    question: |
+      Which scenario is the weakest justification for introducing Elasticsearch/OpenSearch?
+    options:
+      - "Ranked full-text relevance with typo tolerance over millions of docs"
+      - "Faceting and aggregations at scale for a product catalog"
+      - "Log/observability analytics across large volumes"
+      - "Exact-match lookups by ID and status with no relevance ranking on a modest dataset"
+    answer: 3
+    explanation: |
+      Exact structured lookups with no ranking are exactly what a B-tree/GIN index in your
+      existing database handles simply and consistently. Adding a second stateful system to sync
+      buys nothing there. The other cases genuinely need search-engine capabilities.
+    ref: "concepts.md#when-not-to-use-a-search-engine"
+
+  - id: search-engines-and-elasticsearch-058
+    difficulty: intermediate
+    tags: [when-not, postgres-fts, alternative]
+    question: |
+      For a small corpus with modest full-text needs and no appetite for a second system to
+      operate, a reasonable alternative to Elasticsearch is:
+    options:
+      - "Storing documents in Redis and scanning them"
+      - "Postgres full-text search (tsvector/tsquery with a GIN index)"
+      - "A leading-wildcard LIKE scan"
+      - "A spreadsheet"
+    answer: 1
+    explanation: |
+      Postgres FTS is a real inverted index with basic ranking (`ts_rank`) and dictionaries; a
+      GIN index makes it fast enough for modest corpora — without running, securing, and syncing
+      a separate cluster. Reach for a dedicated engine when scale, relevance, or analytics needs
+      outgrow it.
+    ref: "concepts.md#when-not-to-use-a-search-engine"
+
+  - id: search-engines-and-elasticsearch-059
+    difficulty: advanced
+    tags: [xref, hybrid-search, vector]
+    question: |
+      For a query needing both keyword precision and semantic recall, the modern approach
+      combines BM25 with vector similarity (often fused via RRF). Where is that hybrid-search
+      technique covered in depth?
+    options:
+      - "In this topic's aggregations section"
+      - "In the translog section"
+      - "In the vector-databases-similarity-search topic"
+      - "It is not covered anywhere"
+    answer: 2
+    explanation: |
+      Semantic and hybrid search (BM25 + vector, reciprocal rank fusion) belongs to the
+      vector-databases-similarity-search topic. This topic focuses on the lexical/BM25 side; see
+      that topic for embeddings, ANN, and fusion details.
+    ref: "concepts.md#relevance-scoring-tf-idf-and-bm25"
+
+  - id: search-engines-and-elasticsearch-060
+    difficulty: intermediate
+    tags: [segments, merges, operations]
+    question: |
+      Over time a shard accumulates many small segments and deleted-doc markers. What background
+      process consolidates them and reclaims deleted space?
+    options:
+      - "Refresh"
+      - "Translog fsync"
+      - "Alias swap"
+      - "Segment merging"
+    answer: 3
+    explanation: |
+      Background segment merges combine smaller segments into larger ones and drop documents
+      marked deleted, reclaiming space and reducing the number of segments a search must visit.
+      Refresh creates segments; merging cleans them up.
+    ref: "concepts.md#lucene-segments-refresh-and-near-real-time-search"

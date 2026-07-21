@@ -1,0 +1,1032 @@
+topic: "Soft Deletes, Auditing & Temporal Data"
+domain: messaging-databases
+topic_slug: soft-deletes-auditing-and-temporal-data
+version: 1
+questions:
+  - id: soft-deletes-auditing-and-temporal-data-001
+    difficulty: beginner
+    tags: [soft-delete, definition]
+    question: |
+      What does a "soft delete" do instead of physically removing a row?
+    options:
+      - "It deletes the row but keeps a backup of the whole table"
+      - "It moves the row to a separate archive database immediately"
+      - "It marks the row as inactive (e.g. sets deleted_at) but leaves the bytes in the table"
+      - "It compresses the row so it takes less space"
+    answer: 2
+    explanation: |
+      A soft delete replaces a physical DELETE with an UPDATE that marks the row
+      inactive (a boolean flag or a deleted_at timestamp). The row still exists in
+      the table and must be filtered out by readers. Nothing is moved or compressed.
+    ref: "concepts.md#soft-delete-definition-and-motivation"
+
+  - id: soft-deletes-auditing-and-temporal-data-002
+    difficulty: beginner
+    tags: [soft-delete, deleted-at, design]
+    question: |
+      Why is a nullable deleted_at TIMESTAMP usually preferred over an is_deleted
+      boolean for soft deletes?
+    options:
+      - "It encodes both whether the row is deleted and when, which doubles as an audit fact and drives retention windows"
+      - "A boolean would violate first normal form"
+      - "Timestamps take less storage than booleans"
+      - "Booleans cannot be indexed in most databases"
+    answer: 0
+    explanation: |
+      deleted_at stores both the delete state (NULL = live, non-NULL = deleted) and
+      the deletion time in one column. That timestamp is a free audit fact and lets
+      you build retention/purge windows (e.g. hard-delete rows deleted over 90 days
+      ago). A boolean throws away the "when."
+    ref: "concepts.md#soft-delete-definition-and-motivation"
+
+  - id: soft-deletes-auditing-and-temporal-data-003
+    difficulty: beginner
+    tags: [soft-delete, benefits]
+    question: |
+      Which is a genuine benefit of soft deletes over hard DELETEs?
+    options:
+      - "Tables shrink over time as rows are marked deleted"
+      - "Unique constraints become easier to satisfy"
+      - "Queries automatically ignore deleted rows with no code changes"
+      - "Recoverability: deleted data can be restored without a full point-in-time database restore"
+    answer: 3
+    explanation: |
+      Soft delete keeps the data, enabling undo/trash-can UX and recovery from
+      accidental deletion without restoring the whole database. It does NOT make
+      queries auto-filter (every reader must add the filter), does not shrink tables,
+      and actually complicates unique constraints.
+    ref: "concepts.md#soft-delete-definition-and-motivation"
+
+  - id: soft-deletes-auditing-and-temporal-data-004
+    difficulty: intermediate
+    tags: [soft-delete, referential-integrity]
+    question: |
+      How does soft delete help with referential safety compared to a hard DELETE?
+    options:
+      - "It automatically converts foreign keys into nullable columns"
+      - "Child rows that still reference the parent do not become dangling FKs or trigger cascade deletes"
+      - "It disables all foreign-key checks on the table"
+      - "It rewrites child rows to point at a placeholder parent"
+    answer: 1
+    explanation: |
+      Because the parent row physically remains, foreign keys from child rows stay
+      valid and ON DELETE CASCADE does not fire. This avoids the cascade-delete and
+      dangling-reference problems of a hard DELETE. (Note the flip side: the FK now
+      points at a logically-gone row, so app logic must still re-check liveness.)
+    ref: "concepts.md#soft-delete-definition-and-motivation"
+
+  - id: soft-deletes-auditing-and-temporal-data-005
+    difficulty: intermediate
+    tags: [soft-delete, data-leak, gotcha]
+    question: |
+      What is the most common and dangerous failure mode introduced by soft deletes?
+    options:
+      - "A query, JOIN, or report forgets the deleted_at IS NULL filter and silently surfaces deleted rows"
+      - "The deleted_at column overflows after 2038"
+      - "Foreign keys are silently dropped"
+      - "The database runs out of transaction IDs"
+    answer: 0
+    explanation: |
+      Once you soft-delete, every read path must add WHERE deleted_at IS NULL. Missing
+      it in even one endpoint, JOIN, or report re-exposes deleted data (cancelled
+      orders, PII a user asked removed, double-counted analytics). It fails silently,
+      which is what makes it so dangerous.
+    ref: "concepts.md#soft-delete-trade-offs-and-gotchas"
+
+  - id: soft-deletes-auditing-and-temporal-data-006
+    difficulty: intermediate
+    tags: [soft-delete, unique-constraint, gotcha]
+    question: |
+      A user soft-deletes their account and later tries to re-register with the same
+      email, but gets a unique-constraint violation. Why?
+    options:
+      - "The database caches deleted emails for 24 hours"
+      - "The email column has a NOT NULL constraint"
+      - "A plain UNIQUE(email) constraint still counts the soft-deleted row, so the 'live' new row conflicts with the dead one"
+      - "Soft delete corrupts the unique index"
+    answer: 2
+    explanation: |
+      A standard UNIQUE(email) index includes deleted rows. The soft-deleted account's
+      email still occupies the unique slot, so re-registration collides with a row that
+      is logically gone. The fix is a partial/filtered unique index scoped to live rows.
+    ref: "concepts.md#soft-delete-trade-offs-and-gotchas"
+
+  - id: soft-deletes-auditing-and-temporal-data-007
+    difficulty: advanced
+    tags: [soft-delete, postgres, mvcc]
+    question: |
+      In PostgreSQL, why is it wrong to claim a soft-delete UPDATE is "lighter on
+      dead-tuple pressure" than a hard DELETE?
+    options:
+      - "Because UPDATE never touches indexes"
+      - "Because an UPDATE creates a new tuple version (the old one is dead until VACUUM), and the row is never reclaimed at all"
+      - "Because PostgreSQL rewrites the whole table on every UPDATE"
+      - "Because DELETE in PostgreSQL does not create dead tuples"
+    answer: 1
+    explanation: |
+      Under MVCC an UPDATE writes a new row version and leaves the old one dead until
+      VACUUM, just like a DELETE creates a dead tuple. But the soft-deleted row then
+      lives forever, so the space is never freed. Soft delete does not reduce dead-tuple
+      or bloat pressure; it makes it permanent.
+    ref: "concepts.md#soft-delete-trade-offs-and-gotchas"
+
+  - id: soft-deletes-auditing-and-temporal-data-008
+    difficulty: intermediate
+    tags: [soft-delete, cascade, gotcha]
+    question: |
+      A parent row is soft-deleted. What happens to its child rows that were previously
+      protected by ON DELETE CASCADE?
+    options:
+      - "They are moved to an orphan table"
+      - "The database refuses the soft delete"
+      - "They are cascade-deleted automatically"
+      - "They remain live and visible unless you explicitly soft-delete them too, leaving orphaned-but-visible rows"
+    answer: 3
+    explanation: |
+      ON DELETE CASCADE only fires on a real DELETE. A soft-delete UPDATE does not
+      trigger it, so children stay live and visible. You must soft-delete children
+      yourself or accept orphaned-but-visible rows — a common consistency bug.
+    ref: "concepts.md#soft-delete-trade-offs-and-gotchas"
+
+  - id: soft-deletes-auditing-and-temporal-data-009
+    difficulty: advanced
+    tags: [soft-delete, query-planner]
+    question: |
+      A table is 95% soft-deleted rows. Beyond storage, what performance problem does
+      this cause for queries against live rows?
+    options:
+      - "Autovacuum is permanently disabled"
+      - "Transactions can no longer commit"
+      - "Ordinary indexes and statistics are dominated by rows nobody queries, hurting selectivity estimates and cache hit rates"
+      - "The primary key stops being unique"
+    answer: 2
+    explanation: |
+      Dead-but-present rows bloat indexes and skew the planner's statistics toward data
+      no query wants, worsening selectivity estimates and pushing useful pages out of
+      cache. A partial index scoped to live rows mitigates this.
+    ref: "concepts.md#soft-delete-trade-offs-and-gotchas"
+
+  - id: soft-deletes-auditing-and-temporal-data-010
+    difficulty: intermediate
+    tags: [soft-delete, anti-pattern]
+    question: |
+      For which table is soft delete most clearly the WRONG choice?
+    options:
+      - "A high-churn sessions or rate-limit-counter table"
+      - "An employees table with compliance requirements"
+      - "A customers table used across the app"
+      - "An orders table feeding financial reports"
+    answer: 0
+    explanation: |
+      Transient, high-churn tables (sessions, queues, rate-limit counters) have nothing
+      worth recovering and would accumulate huge dead-row bloat. Use hard delete or TTL.
+      Business entities that need recovery/audit are exactly where soft delete pays off.
+    ref: "concepts.md#soft-delete-trade-offs-and-gotchas"
+
+  - id: soft-deletes-auditing-and-temporal-data-011
+    difficulty: intermediate
+    tags: [soft-delete, partial-index, postgres]
+    question: |
+      Which PostgreSQL construct lets you enforce email uniqueness only among non-deleted
+      rows?
+    options:
+      - "CREATE UNIQUE INDEX ... ON users (COALESCE(email, ''))"
+      - "CREATE UNIQUE INDEX ... ON users (email) WHERE deleted_at IS NULL"
+      - "ALTER TABLE users ADD CONSTRAINT ... UNIQUE (email) DEFERRABLE"
+      - "CREATE UNIQUE INDEX ... ON users (email) INCLUDE (deleted_at)"
+    answer: 1
+    explanation: |
+      A partial (filtered) unique index with WHERE deleted_at IS NULL enforces the
+      constraint only over live rows, so a deleted user's email no longer blocks
+      re-registration. DEFERRABLE only changes when the check runs; INCLUDE adds a
+      covering column but still indexes all rows.
+    ref: "concepts.md#managing-soft-deletes-partial-indexes-views-and-constraints"
+
+  - id: soft-deletes-auditing-and-temporal-data-012
+    difficulty: advanced
+    tags: [soft-delete, mysql, partial-index]
+    question: |
+      MySQL/InnoDB historically lacks partial-index syntax. What is a common workaround
+      to allow re-use of a soft-deleted email while blocking live duplicates?
+    options:
+      - "Switch the table to the MyISAM engine"
+      - "Store emails in lowercase"
+      - "Drop the unique constraint entirely and check in application code only"
+      - "Use a generated/virtual column that is NULL when deleted, exploiting that unique indexes allow multiple NULLs"
+    answer: 3
+    explanation: |
+      Since InnoDB has no WHERE-clause partial indexes, a common trick is a
+      generated column that is NULL for deleted rows; because unique indexes permit
+      multiple NULLs, deleted rows don't collide, while live rows still enforce
+      uniqueness. Folding the row id into a composite unique key is another variant.
+    ref: "concepts.md#managing-soft-deletes-partial-indexes-views-and-constraints"
+
+  - id: soft-deletes-auditing-and-temporal-data-013
+    difficulty: intermediate
+    tags: [soft-delete, views, enforcement]
+    question: |
+      Why point application queries at a view like CREATE VIEW active_orders AS SELECT *
+      FROM orders WHERE deleted_at IS NULL?
+    options:
+      - "It makes the deleted-row filter the default so readers can't forget it, reserving the base table for admin/restore/audit"
+      - "Views prevent the base table from ever growing"
+      - "It automatically hard-deletes old rows"
+      - "Views are always faster than base tables"
+    answer: 0
+    explanation: |
+      A view bakes the filter in so ordinary readers and BI tools cannot accidentally
+      see deleted rows. The base table is reserved for admin/restore/audit access.
+      Views are not inherently faster and do nothing about growth or purging.
+    ref: "concepts.md#managing-soft-deletes-partial-indexes-views-and-constraints"
+
+  - id: soft-deletes-auditing-and-temporal-data-014
+    difficulty: advanced
+    tags: [soft-delete, rls, orm, defense-in-depth]
+    question: |
+      Why is a database-level guard (e.g. PostgreSQL Row-Level Security) considered
+      stronger than an ORM default scope for enforcing the deleted_at filter?
+    options:
+      - "ORM scopes only work on SELECT, not on JOIN"
+      - "ORM scopes are slower to evaluate"
+      - "RLS is applied by the engine for every session, whereas an ORM default scope is bypassed by raw SQL and non-ORM clients"
+      - "RLS also compresses deleted rows"
+    answer: 2
+    explanation: |
+      An ORM default scope only protects queries that go through the ORM; raw SQL,
+      migrations, and other services bypass it. RLS enforces the predicate in the engine
+      for every session regardless of client, giving defense-in-depth. Ideally use both.
+    ref: "concepts.md#managing-soft-deletes-partial-indexes-views-and-constraints"
+
+  - id: soft-deletes-auditing-and-temporal-data-015
+    difficulty: intermediate
+    tags: [soft-delete, partial-index, performance]
+    question: |
+      Besides uniqueness, what performance benefit does a partial index WHERE deleted_at
+      IS NULL provide on a heavily soft-deleted table?
+    options:
+      - "It forces the planner to use sequential scans"
+      - "It automatically vacuums dead tuples"
+      - "It reclaims disk space from deleted rows"
+      - "It indexes only the small fraction of live rows queries actually touch, keeping the index small and selective"
+    answer: 3
+    explanation: |
+      A partial index only contains entries for live rows, so it stays small, more
+      selective, and cache-friendly even when most of the table is dead. It does not
+      vacuum or reclaim space — it just avoids indexing rows nobody queries.
+    ref: "concepts.md#managing-soft-deletes-partial-indexes-views-and-constraints"
+
+  - id: soft-deletes-auditing-and-temporal-data-016
+    difficulty: beginner
+    tags: [audit-columns, provenance]
+    question: |
+      What do the four audit columns created_at, created_by, updated_at, updated_by
+      record?
+    options:
+      - "The full history of every change to the row"
+      - "Who created the row and when, and who last updated it and when"
+      - "Which indexes were used to write the row"
+      - "The transaction isolation level in effect"
+    answer: 1
+    explanation: |
+      Audit columns capture the row's own provenance: creation actor/time (set once) and
+      the most-recent update actor/time. They answer "who last touched this and when,"
+      but keep only the latest actor — not the full change history.
+    ref: "concepts.md#audit-columns-for-row-provenance"
+
+  - id: soft-deletes-auditing-and-temporal-data-017
+    difficulty: intermediate
+    tags: [audit-columns, limitation]
+    question: |
+      A row has created_by/updated_by columns. A customer disputes a balance change made
+      three edits ago. Can you identify who made that change from the audit columns?
+    options:
+      - "Yes, created_by records the full edit chain"
+      - "Yes, updated_by stores every prior editor"
+      - "No — audit columns keep only the most recent actor, not intermediate versions"
+      - "Yes, but only if the row was never deleted"
+    answer: 2
+    explanation: |
+      updated_by is overwritten on each change, so it holds only the latest editor. To
+      reconstruct who made an earlier change you need a row-versioned history/audit table
+      or system-versioning. This limitation is the standard interview follow-up.
+    ref: "concepts.md#audit-columns-for-row-provenance"
+
+  - id: soft-deletes-auditing-and-temporal-data-018
+    difficulty: intermediate
+    tags: [audit-columns, triggers]
+    question: |
+      Why do teams often set updated_at via a BEFORE UPDATE trigger rather than in
+      application code?
+    options:
+      - "So the timestamp is maintained even if the application forgets to set it or a direct SQL update occurs"
+      - "Because application code cannot read the current time"
+      - "To avoid needing a default value on the column"
+      - "Triggers are the only way to set a timestamp column"
+    answer: 0
+    explanation: |
+      A trigger guarantees updated_at is refreshed on every write, including out-of-band
+      or ad-hoc SQL updates that bypass the app. Relying solely on application code means
+      any write path that forgets leaves a stale/misleading timestamp.
+    ref: "concepts.md#audit-columns-for-row-provenance"
+
+  - id: soft-deletes-auditing-and-temporal-data-019
+    difficulty: beginner
+    tags: [audit-table, history]
+    question: |
+      What is the purpose of a separate audit/history table (e.g. accounts_audit)?
+    options:
+      - "To enforce foreign-key constraints"
+      - "To hold soft-deleted rows only"
+      - "To speed up SELECTs on the main table"
+      - "To store a copy of the row (before and/or after) on each change, preserving full change history"
+    answer: 3
+    explanation: |
+      An audit/history table records each mutation (insert/update/delete) with a copy of
+      the row image(s), timestamp, and actor, so the full sequence of versions can be
+      reconstructed — something audit columns alone cannot do.
+    ref: "concepts.md#audit--history-tables-triggers-vs-app-level-vs-cdc"
+
+  - id: soft-deletes-auditing-and-temporal-data-020
+    difficulty: advanced
+    tags: [audit, triggers, completeness]
+    question: |
+      What is the key advantage of capturing audit records via database triggers rather
+      than in application code?
+    options:
+      - "Triggers can record the business reason for a change"
+      - "Triggers cannot be bypassed — they fire even for ad-hoc SQL and other applications, giving completeness"
+      - "Triggers add zero overhead to writes"
+      - "Triggers automatically capture the application user"
+    answer: 1
+    explanation: |
+      A trigger fires for every write regardless of source, so no mutation escapes the
+      audit — completeness. The trade-offs are per-row overhead, DB-specific/hidden logic,
+      and difficulty capturing the app-level user (needs a session variable).
+    ref: "concepts.md#audit--history-tables-triggers-vs-app-level-vs-cdc"
+
+  - id: soft-deletes-auditing-and-temporal-data-021
+    difficulty: advanced
+    tags: [audit, app-level, gotcha]
+    question: |
+      What is the main weakness of application-level auditing (e.g. Hibernate Envers,
+      django-simple-history)?
+    options:
+      - "It is bypassed by any write that skips the application (migrations, DBA scripts, other services), leaving an incomplete audit"
+      - "It only works on PostgreSQL"
+      - "It doubles the size of every table"
+      - "It cannot record the user who made the change"
+    answer: 0
+    explanation: |
+      App-level auditing captures rich context (user, request id, reason) but only for
+      writes that go through the app. Migrations, direct DBA SQL, or other services
+      writing to the DB produce unaudited changes — a completeness gap triggers avoid.
+    ref: "concepts.md#audit--history-tables-triggers-vs-app-level-vs-cdc"
+
+  - id: soft-deletes-auditing-and-temporal-data-022
+    difficulty: advanced
+    tags: [audit, cdc, trade-offs]
+    question: |
+      A team wants an audit trail with zero added latency on the write path that still
+      captures every write. Which capture approach best fits, and what's the main
+      downside?
+    options:
+      - "Manual audit inserts in each service; downside is higher storage cost"
+      - "Application-level hooks; downside is per-row lock contention"
+      - "Log-based CDC (e.g. Debezium reading the WAL/binlog); downside is it is asynchronous/eventually consistent and often lacks user context"
+      - "Synchronous triggers; downside is they cannot capture DELETEs"
+    answer: 2
+    explanation: |
+      Log-based CDC tails the WAL/binlog downstream, so it adds no write-path latency and
+      captures all writes. The trade-offs are extra infrastructure, eventual consistency,
+      and that the change log usually lacks the application user/reason for the change.
+    ref: "concepts.md#audit--history-tables-triggers-vs-app-level-vs-cdc"
+
+  - id: soft-deletes-auditing-and-temporal-data-023
+    difficulty: intermediate
+    tags: [audit, capture, summary]
+    question: |
+      Which statement best summarizes the trade-off among trigger, app-level, and
+      CDC-based auditing?
+    options:
+      - "CDC = completeness, triggers = decoupling, app-level = zero latency"
+      - "Triggers = completeness, app-level = business context, CDC = decoupling and zero write-latency"
+      - "All three are functionally identical"
+      - "Triggers = context, app-level = completeness, CDC = lower storage"
+    answer: 1
+    explanation: |
+      Triggers can't be bypassed (completeness) but lack easy user context; app-level has
+      rich who/why context but is bypassed by out-of-band writes; CDC is decoupled and
+      adds no write latency but is async and lacks actor context. Mature systems combine
+      them.
+    ref: "concepts.md#audit--history-tables-triggers-vs-app-level-vs-cdc"
+
+  - id: soft-deletes-auditing-and-temporal-data-024
+    difficulty: advanced
+    tags: [audit, tamper-evidence, compliance]
+    question: |
+      Which technique makes an audit trail tamper-EVIDENT rather than merely
+      append-only-by-convention?
+    options:
+      - "Adding a created_at column"
+      - "Enabling autovacuum on the audit table"
+      - "Storing audit rows in a table with a primary key"
+      - "Hash chaining, where each row stores H(prev_hash || row_data) so any retroactive edit breaks the chain"
+    answer: 3
+    explanation: |
+      Hash chaining links each audit record to the previous via a cryptographic hash, so
+      altering any past row invalidates every subsequent hash — making tampering
+      detectable. This underpins ledger features (SQL Server 2022 ledger tables, QLDB).
+    ref: "concepts.md#append-only-history-and-tamper-evidence"
+
+  - id: soft-deletes-auditing-and-temporal-data-025
+    difficulty: advanced
+    tags: [audit, tamper-evidence, security]
+    question: |
+      Why is "append-only enforced only in application code" NOT true tamper-evidence?
+    options:
+      - "Because it violates first normal form"
+      - "Because application code runs too slowly"
+      - "Because anyone with database credentials can still UPDATE or DELETE the audit rows directly"
+      - "Because application code cannot INSERT rows"
+    answer: 2
+    explanation: |
+      App-level append-only is bypassed by direct DB access. Real tamper-evidence needs
+      DB-enforced permissions (INSERT-only), WORM storage, and/or cryptographic chaining.
+      Against a sufficiently privileged insider you aim for detectability plus separation
+      of duties, since tamper-proofing is effectively impossible.
+    ref: "concepts.md#append-only-history-and-tamper-evidence"
+
+  - id: soft-deletes-auditing-and-temporal-data-026
+    difficulty: intermediate
+    tags: [audit, worm, storage]
+    question: |
+      What does writing audit data to WORM storage (e.g. S3 Object Lock in compliance
+      mode) guarantee?
+    options:
+      - "Even the account owner cannot delete or overwrite the data before its retention period expires"
+      - "The data is automatically indexed for search"
+      - "Writes are faster than to a database"
+      - "The data is encrypted at rest by default"
+    answer: 0
+    explanation: |
+      Write-Once-Read-Many storage with an immutability/compliance lock prevents deletion
+      or modification until the retention window elapses — even by privileged users. This
+      is a strong control against tampering with historical audit records.
+    ref: "concepts.md#append-only-history-and-tamper-evidence"
+
+  - id: soft-deletes-auditing-and-temporal-data-027
+    difficulty: beginner
+    tags: [temporal, valid-time]
+    question: |
+      In temporal data modeling, what does "valid time" (application time) represent?
+    options:
+      - "When the row was physically written to disk"
+      - "The period during which a fact is true in the modeled real world"
+      - "The time the last backup ran"
+      - "The transaction commit timestamp"
+    answer: 1
+    explanation: |
+      Valid time (application/business time) is when a fact holds in reality — e.g.
+      "Alice's salary was $90k from 2023-01-01 to 2024-06-30." It is set by the
+      application, can reference the future, and can be corrected.
+    ref: "concepts.md#temporal-data-valid-time-vs-transaction-time"
+
+  - id: soft-deletes-auditing-and-temporal-data-028
+    difficulty: intermediate
+    tags: [temporal, transaction-time]
+    question: |
+      Which property is TRUE of transaction time (system time) but NOT of valid time?
+    options:
+      - "It is set manually by the application"
+      - "It can be freely corrected after the fact"
+      - "It can reference facts that become true in the future"
+      - "It is append-only and cannot be back-dated, recording when the DB believed a fact"
+    answer: 3
+    explanation: |
+      Transaction time records when data was stored in the database and is append-only —
+      you cannot back-date what the system knew. Valid time, by contrast, is
+      application-set, can be future-dated, and can be corrected. This asymmetry is the
+      core of the two-axis model.
+    ref: "concepts.md#temporal-data-valid-time-vs-transaction-time"
+
+  - id: soft-deletes-auditing-and-temporal-data-029
+    difficulty: advanced
+    tags: [temporal, valid-time, transaction-time, scenario]
+    question: |
+      A raise was effective 2024-01-01 (in the real world) but was only entered into the
+      HR system on 2024-01-15. Which time axes capture each date?
+    options:
+      - "2024-01-01 is valid time; 2024-01-15 is transaction time"
+      - "Both are transaction time"
+      - "2024-01-01 is transaction time; 2024-01-15 is valid time"
+      - "Both are valid time"
+    answer: 0
+    explanation: |
+      The effective date (when the raise is true in reality) is valid time; the entry
+      date (when the DB recorded it) is transaction time. They diverge here, which is
+      exactly why you need both axes to answer both "what was her salary on Jan 5?" and
+      "what did the system think on Jan 5?".
+    ref: "concepts.md#temporal-data-valid-time-vs-transaction-time"
+
+  - id: soft-deletes-auditing-and-temporal-data-030
+    difficulty: intermediate
+    tags: [temporal, bitemporal]
+    question: |
+      What defines a bitemporal table?
+    options:
+      - "It supports only queries with two WHERE clauses"
+      - "It stores rows in two different databases"
+      - "It tracks both valid time and transaction time simultaneously, with two independent time periods per row"
+      - "It keeps two copies of every row for redundancy"
+    answer: 2
+    explanation: |
+      A bitemporal table maintains two independent temporal dimensions — valid time and
+      transaction time — so you can reproduce both what was true when, and what the
+      system believed at any past moment. Essential for regulated finance/insurance.
+    ref: "concepts.md#bitemporal-tables"
+
+  - id: soft-deletes-auditing-and-temporal-data-031
+    difficulty: advanced
+    tags: [temporal, bitemporal, scenario]
+    question: |
+      Which question can ONLY be answered by a bitemporal design (not a single time
+      axis)?
+    options:
+      - "What is the row's primary key?"
+      - "How many rows are in the table?"
+      - "What is the current salary?"
+      - "As of what we knew on March 1, what did we believe Alice's salary was for February?"
+    answer: 3
+    explanation: |
+      Reproducing a past belief (transaction time = March 1) about a past reality (valid
+      time = February) requires both axes. A single time axis can give either the audit
+      trail or the effective-dated truth, but not the combination.
+    ref: "concepts.md#bitemporal-tables"
+
+  - id: soft-deletes-auditing-and-temporal-data-032
+    difficulty: intermediate
+    tags: [temporal, bitemporal, cost]
+    question: |
+      What is a realistic cost of adopting bitemporal tables?
+    options:
+      - "They cannot use indexes"
+      - "Four temporal columns, complex non-overlap constraints across both dimensions, and every query must pin both time axes"
+      - "They require a NoSQL database"
+      - "They prevent any updates to data"
+    answer: 1
+    explanation: |
+      Bitemporality adds two period pairs, constraints preventing overlap in both
+      dimensions per key, and query complexity (pinning both axes). Most systems don't
+      need it, but where regulators demand retroactive auditability, nothing else works.
+    ref: "concepts.md#bitemporal-tables"
+
+  - id: soft-deletes-auditing-and-temporal-data-033
+    difficulty: intermediate
+    tags: [sql-2011, system-versioning]
+    question: |
+      In SQL:2011, what makes a table "system-versioned"?
+    options:
+      - "Enabling MVCC on the table"
+      - "Creating a trigger named system_version"
+      - "Declaring PERIOD FOR SYSTEM_TIME plus WITH SYSTEM VERSIONING, so the engine automatically keeps old row versions on UPDATE/DELETE"
+      - "Adding a version_number integer column"
+    answer: 2
+    explanation: |
+      System-versioning uses a PERIOD FOR SYSTEM_TIME (row-start/row-end columns) and
+      WITH SYSTEM VERSIONING. The engine maintains transaction-time automatically:
+      updates/deletes close the current row's period and retain the old version as
+      history. Constraints are enforced only on current rows.
+    ref: "concepts.md#system-versioned-temporal-tables-sql2011"
+
+  - id: soft-deletes-auditing-and-temporal-data-034
+    difficulty: advanced
+    tags: [sql-2011, query-syntax]
+    question: |
+      Which is the SQL:2011 standard syntax to see a system-versioned table's state as it
+      was at a past instant?
+    options:
+      - "SELECT * FROM employees FOR SYSTEM_TIME AS OF TIMESTAMP '2024-03-01 00:00:00'"
+      - "SELECT * FROM employees AT '2024-03-01'"
+      - "SELECT * FROM employees SNAPSHOT '2024-03-01'"
+      - "SELECT * FROM employees WHERE version = 'latest'"
+    answer: 0
+    explanation: |
+      The standard time-travel clause is FOR SYSTEM_TIME AS OF <timestamp> (with range
+      variants FOR SYSTEM_TIME BETWEEN ... AND ... and FROM ... TO ...). MariaDB, SQL
+      Server, and Db2 use this; Oracle Flashback uses AS OF TIMESTAMP instead.
+    ref: "concepts.md#system-versioned-temporal-tables-sql2011"
+
+  - id: soft-deletes-auditing-and-temporal-data-035
+    difficulty: advanced
+    tags: [sql-2011, postgres, mysql, gotcha]
+    question: |
+      Which statement about native SQL:2011 system-versioned temporal tables is correct
+      as of recent versions?
+    options:
+      - "Only PostgreSQL supports them"
+      - "No mainstream database implements the standard"
+      - "PostgreSQL and MySQL both support them natively out of the box"
+      - "PostgreSQL (through 16) and MySQL have no native system-versioning; MariaDB, SQL Server, and Db2 do"
+    answer: 3
+    explanation: |
+      MariaDB (10.3+), SQL Server (2016+), and Db2 provide native system-versioning;
+      PostgreSQL (through 16) and MySQL do not — you emulate it with triggers/history
+      tables or extensions. Assuming portability of "temporal tables" is a common trap.
+    ref: "concepts.md#system-versioned-temporal-tables-sql2011"
+
+  - id: soft-deletes-auditing-and-temporal-data-036
+    difficulty: advanced
+    tags: [sql-2011, constraints, gotcha]
+    question: |
+      In a SQL:2011 system-versioned table, how are primary-key and unique constraints
+      enforced?
+    options:
+      - "Across all historical versions, so no two versions may share a key"
+      - "Only on current (live) rows, since history necessarily repeats keys across versions"
+      - "They are disabled entirely"
+      - "Only on the oldest version of each row"
+    answer: 1
+    explanation: |
+      History rows deliberately repeat the same key across versions of one entity, so
+      constraints are enforced only on current rows. Otherwise keeping multiple versions
+      of a row would violate the primary key.
+    ref: "concepts.md#system-versioned-temporal-tables-sql2011"
+
+  - id: soft-deletes-auditing-and-temporal-data-037
+    difficulty: intermediate
+    tags: [sql-2011, application-time]
+    question: |
+      What does an application-time period table (PERIOD FOR ... with the WITHOUT OVERLAPS
+      clause) let you enforce?
+    options:
+      - "A temporal primary key ensuring no two rows for the same key have overlapping valid-time periods"
+      - "That rows are stored in period order on disk"
+      - "That deleted rows are retained forever"
+      - "That the engine auto-manages transaction time"
+    answer: 0
+    explanation: |
+      Application-time period tables model valid time and support temporal primary keys
+      via WITHOUT OVERLAPS, which forbids overlapping validity periods for the same key,
+      plus temporal referential integrity. The application manages the period columns.
+    ref: "concepts.md#system-versioned-temporal-tables-sql2011"
+
+  - id: soft-deletes-auditing-and-temporal-data-038
+    difficulty: beginner
+    tags: [scd, type-2]
+    question: |
+      In dimensional modeling, how does an SCD Type 2 handle a changed attribute?
+    options:
+      - "It adds a column holding the previous value"
+      - "It overwrites the old value in place"
+      - "It inserts a new row (new surrogate key) for the changed version, with effective/expiry dates and a current flag"
+      - "It deletes the dimension row"
+    answer: 2
+    explanation: |
+      SCD Type 2 preserves full history by adding a new row per change: same natural key,
+      new surrogate key, effective_date/end_date, and is_current flag. Overwriting is
+      Type 1; adding a prior-value column is Type 3.
+    ref: "concepts.md#slowly-changing-dimensions-scd-type-2"
+
+  - id: soft-deletes-auditing-and-temporal-data-039
+    difficulty: intermediate
+    tags: [scd, type-1, type-3]
+    question: |
+      Which SCD type OVERWRITES the old value, keeping no history at all?
+    options:
+      - "Type 0"
+      - "Type 1"
+      - "Type 2"
+      - "Type 3"
+    answer: 1
+    explanation: |
+      Type 1 overwrites with the new value, retaining no history (like a plain UPDATE).
+      Type 0 keeps the original and never changes it; Type 2 adds a new row for history;
+      Type 3 adds a column for a single prior value.
+    ref: "concepts.md#slowly-changing-dimensions-scd-type-2"
+
+  - id: soft-deletes-auditing-and-temporal-data-040
+    difficulty: advanced
+    tags: [scd, surrogate-key, fact-table, scenario]
+    question: |
+      In an SCD Type 2 dimension, why do fact rows join to the surrogate key rather than
+      the natural/business key?
+    options:
+      - "Because natural keys cannot be indexed"
+      - "To avoid storing the dimension at all"
+      - "Surrogate keys are shorter to type"
+      - "So each fact 'freezes' the dimension version that was current when the fact occurred (e.g. a 2023 order stays linked to the customer's 2023 city)"
+    answer: 3
+    explanation: |
+      Each version of the dimension has its own surrogate key. A fact row references the
+      surrogate key current at the time of the event, permanently associating the fact
+      with the attribute values as they were then — the point of Type 2 history.
+    ref: "concepts.md#slowly-changing-dimensions-scd-type-2"
+
+  - id: soft-deletes-auditing-and-temporal-data-041
+    difficulty: advanced
+    tags: [scd, type-6, hybrid]
+    question: |
+      What characterizes an SCD Type 6 dimension?
+    options:
+      - "It stores only the original value forever"
+      - "It never stores any history"
+      - "A hybrid of Types 1+2+3: a new row per change, an overwritten 'current' column across rows, and a prior-value column"
+      - "It uses two separate physical databases"
+    answer: 2
+    explanation: |
+      Type 6 (1+2+3) adds a new row (Type 2), overwrites a current-value column across all
+      rows of the entity (Type 1), and keeps a prior-value column (Type 3), giving both
+      full row history and fast access to the current value from any version.
+    ref: "concepts.md#slowly-changing-dimensions-scd-type-2"
+
+  - id: soft-deletes-auditing-and-temporal-data-042
+    difficulty: intermediate
+    tags: [scd, type-4, audit-table]
+    question: |
+      SCD Type 4 keeps current data in the main dimension and pushes changes to a
+      separate history table. Which earlier pattern is this essentially the analytics
+      name for?
+    options:
+      - "The audit/history-table pattern"
+      - "Row-level security"
+      - "Crypto-shredding"
+      - "A partial unique index"
+    answer: 0
+    explanation: |
+      Type 4 mirrors the audit/history-table approach: a current table plus a separate
+      history table capturing versions. It closely resembles audit tables and CDC
+      techniques applied to warehouse dimensions.
+    ref: "concepts.md#slowly-changing-dimensions-scd-type-2"
+
+  - id: soft-deletes-auditing-and-temporal-data-043
+    difficulty: intermediate
+    tags: [event-sourcing, audit]
+    question: |
+      Why is event sourcing described as the "ultimate" audit trail?
+    options:
+      - "Because it deletes old data to save space"
+      - "Because state is an append-only, immutable log of domain events, so the events themselves are a complete who/what/when record and any past state can be replayed"
+      - "Because it requires no storage"
+      - "Because it disables all other logging"
+    answer: 1
+    explanation: |
+      In event sourcing, current state is a fold over an immutable event log; nothing is
+      mutated or deleted. The event stream inherently captures every change (audit),
+      supports replay to any point (temporal), and models deletion as an event — a
+      complete audit by construction.
+    ref: "concepts.md#event-sourcing-as-the-ultimate-audit-trail"
+
+  - id: soft-deletes-auditing-and-temporal-data-044
+    difficulty: advanced
+    tags: [event-sourcing, trade-offs]
+    question: |
+      What is the main cost of using event sourcing purely to get a good audit trail?
+    options:
+      - "It cannot store timestamps"
+      - "It makes queries impossible"
+      - "It only works on a single machine"
+      - "It is a system-wide architectural commitment (read models/projections, eventual consistency, event versioning), not a column you add to a table"
+    answer: 3
+    explanation: |
+      Event sourcing implies CQRS-style projections, eventual consistency, and event
+      schema evolution — a whole architecture. It also makes GDPR erasure acutely hard
+      (you can't delete an event without breaking the log). Great audit, big commitment.
+    ref: "concepts.md#event-sourcing-as-the-ultimate-audit-trail"
+
+  - id: soft-deletes-auditing-and-temporal-data-045
+    difficulty: intermediate
+    tags: [gdpr, soft-delete]
+    question: |
+      Does a soft delete (deleted_at = now()) satisfy a GDPR Article 17 right-to-erasure
+      request?
+    options:
+      - "No — every byte of personal data is still present; erasure requires anonymizing or hard-deleting the PII"
+      - "Yes, as long as deleted_at is indexed"
+      - "Only if the row is also compressed"
+      - "Yes, because the row is marked deleted"
+    answer: 0
+    explanation: |
+      Soft delete hides the row from normal queries but retains all the personal data.
+      Right-to-erasure requires actually removing or anonymizing the PII (and remembering
+      copies in backups, replicas, search indexes, and CDC sinks).
+    ref: "concepts.md#gdpr-right-to-erasure-vs-immutable-history"
+
+  - id: soft-deletes-auditing-and-temporal-data-046
+    difficulty: advanced
+    tags: [gdpr, crypto-shredding, event-sourcing]
+    question: |
+      An immutable event store or WORM backup cannot physically delete a user's records.
+      What technique reconciles this with the right to erasure?
+    options:
+      - "Lowering the isolation level"
+      - "Renaming the table"
+      - "Crypto-shredding: encrypt each subject's PII with a per-subject key, then destroy the key so the ciphertext becomes permanently unreadable"
+      - "Setting deleted_at on the events"
+    answer: 2
+    explanation: |
+      Crypto-shredding (crypto-erasure) stores PII encrypted per subject; deleting the
+      key renders the retained ciphertext unrecoverable. This is the standard way to
+      honor erasure in append-only event stores and immutable backups where physical
+      deletion is impossible.
+    ref: "concepts.md#gdpr-right-to-erasure-vs-immutable-history"
+
+  - id: soft-deletes-auditing-and-temporal-data-047
+    difficulty: advanced
+    tags: [gdpr, anonymization, legal-basis]
+    question: |
+      Which statement about GDPR right-to-erasure vs an immutable audit trail is correct?
+    options:
+      - "Anonymized data must still be erased"
+      - "Audit data can never be retained after an erasure request"
+      - "Erasure is absolute and always overrides retention obligations"
+      - "Erasure is not absolute — data retained for a legal obligation (e.g. tax/KYC records) may lawfully be kept, and truly anonymized data falls outside GDPR"
+    answer: 3
+    explanation: |
+      Article 17 has exemptions: data needed to meet legal obligations or to establish/
+      defend legal claims can be retained. And if data is truly anonymized (not
+      re-identifiable), GDPR no longer applies — so anonymization preserves audit
+      structure without retaining identity.
+    ref: "concepts.md#gdpr-right-to-erasure-vs-immutable-history"
+
+  - id: soft-deletes-auditing-and-temporal-data-048
+    difficulty: intermediate
+    tags: [gdpr, anonymization]
+    question: |
+      What is the advantage of anonymizing personal fields (nulling name/email) rather
+      than hard-deleting a whole record to honor erasure?
+    options:
+      - "It is faster to run"
+      - "It preserves the non-personal skeleton for referential integrity and aggregate analytics while removing identity"
+      - "It automatically satisfies tax-retention laws"
+      - "It compresses the row"
+    answer: 1
+    explanation: |
+      Anonymization overwrites the PII but keeps the row's structure, so foreign keys and
+      aggregate reports still work while the individual is no longer identifiable. If the
+      anonymization is irreversible, the data is outside GDPR's scope.
+    ref: "concepts.md#gdpr-right-to-erasure-vs-immutable-history"
+
+  - id: soft-deletes-auditing-and-temporal-data-049
+    difficulty: intermediate
+    tags: [retention, purge]
+    question: |
+      What is a retention policy meant to define?
+    options:
+      - "How often backups are compressed"
+      - "Which columns are indexed"
+      - "How long each class of data lives before it is purged or anonymized"
+      - "The database's isolation level"
+    answer: 2
+    explanation: |
+      A retention policy sets how long each data class is kept before purge/anonymization,
+      balancing storage cost and performance, legal maximums (data minimization) and
+      minimums (e.g. tax records), and breach/subpoena risk (data you don't hold can't be
+      exposed).
+    ref: "concepts.md#data-retention-and-purge"
+
+  - id: soft-deletes-auditing-and-temporal-data-050
+    difficulty: advanced
+    tags: [retention, partitioning, purge, performance]
+    question: |
+      For a huge append-only audit table, why is time-range partitioning with DROP
+      PARTITION preferred over a bulk DELETE for purging old data?
+    options:
+      - "DROP PARTITION is a fast metadata operation, while a bulk DELETE rewrites indexes, generates huge WAL/redo, bloats the table, and competes with live traffic"
+      - "Partitions automatically encrypt old data"
+      - "DELETE does not work on audit tables"
+      - "DELETE cannot remove more than 1000 rows"
+    answer: 0
+    explanation: |
+      Dropping a whole partition is essentially a catalog operation — no per-row work, no
+      dead tuples, no VACUUM storm, minimal logging. A bulk DELETE does per-row index
+      maintenance, produces large WAL/redo, bloats the table, and contends with live
+      queries.
+    ref: "concepts.md#data-retention-and-purge"
+
+  - id: soft-deletes-auditing-and-temporal-data-051
+    difficulty: intermediate
+    tags: [retention, ttl]
+    question: |
+      Which mechanism has some datastores automatically expire and purge rows past a set
+      lifetime?
+    options:
+      - "A foreign-key constraint"
+      - "A partial index"
+      - "A CHECK constraint"
+      - "A TTL feature (e.g. DynamoDB TTL, Cassandra TTL, MongoDB TTL index)"
+    answer: 3
+    explanation: |
+      TTL (time-to-live) features let the engine purge expired rows in the background,
+      implementing retention automatically. Constraints and indexes enforce integrity or
+      speed lookups but do not expire data.
+    ref: "concepts.md#data-retention-and-purge"
+
+  - id: soft-deletes-auditing-and-temporal-data-052
+    difficulty: beginner
+    tags: [audit-columns, immutability]
+    question: |
+      Which audit column should be set once on insert and then never modified?
+    options:
+      - "updated_at"
+      - "created_at"
+      - "updated_by"
+      - "deleted_at"
+    answer: 1
+    explanation: |
+      created_at (and created_by) record the row's origin and should be immutable after
+      insert. updated_at/updated_by change on every write; deleted_at is set when the row
+      is soft-deleted.
+    ref: "concepts.md#audit-columns-for-row-provenance"
+
+  - id: soft-deletes-auditing-and-temporal-data-053
+    difficulty: advanced
+    tags: [temporal, scd, comparison]
+    question: |
+      How do SCD Type 2 and SQL:2011 system-versioning relate?
+    options:
+      - "Both keep row history, but SCD Type 2 is the warehouse (valid-time, surrogate-key) idiom for dimensions, while system-versioning is an OLTP engine feature tracking transaction time"
+      - "System-versioning only works in data warehouses"
+      - "SCD Type 2 tracks transaction time and system-versioning tracks valid time"
+      - "They are the same feature with different names"
+    answer: 0
+    explanation: |
+      Both preserve historical versions, but at different layers: SCD Type 2 is a
+      modeling convention for warehouse dimensions using surrogate keys and effective
+      dates (valid-time flavored), whereas system-versioning is a database engine feature
+      that automatically maintains transaction-time history.
+    ref: "concepts.md#slowly-changing-dimensions-scd-type-2"
+
+  - id: soft-deletes-auditing-and-temporal-data-054
+    difficulty: intermediate
+    tags: [soft-delete, foreign-key, scenario]
+    question: |
+      With soft deletes, nothing stops the app from creating a NEW child row against a
+      soft-deleted parent. Why?
+    options:
+      - "Because the parent's primary key changes when soft-deleted"
+      - "Because foreign keys are disabled by soft delete"
+      - "Because the FK sees a physically-present (live to the DB) parent row, so the constraint passes even though the parent is logically deleted"
+      - "Because child rows ignore foreign keys"
+    answer: 2
+    explanation: |
+      A foreign key only checks that the referenced row exists physically. Soft delete
+      leaves the parent present, so the FK is satisfied and a new child can be created
+      against a logically-gone parent. Only application logic can re-check liveness.
+    ref: "concepts.md#soft-delete-trade-offs-and-gotchas"
+
+  - id: soft-deletes-auditing-and-temporal-data-055
+    difficulty: advanced
+    tags: [audit, triggers, user-context, gotcha]
+    question: |
+      A DB trigger writes audit rows but struggles to record the application USER who
+      made a change. Why, and what is the usual remedy?
+    options:
+      - "Triggers run before authentication; there is no remedy"
+      - "The DB connection often uses a shared service account, so the app must pass the end-user identity via a session variable (e.g. SET LOCAL) that the trigger reads"
+      - "Triggers cannot read any columns"
+      - "The user is always NULL because triggers run asynchronously"
+    answer: 1
+    explanation: |
+      The trigger sees the DB session's identity (frequently a shared pooled service
+      account), not the end user. The common remedy is for the app to set a session/local
+      variable with the authenticated user id at the start of the transaction, which the
+      trigger reads when writing the audit row.
+    ref: "concepts.md#audit--history-tables-triggers-vs-app-level-vs-cdc"
+
+  - id: soft-deletes-auditing-and-temporal-data-056
+    difficulty: advanced
+    tags: [gdpr, retention, scope]
+    question: |
+      A user exercises their right to erasure. Which is a commonly OVERLOOKED place their
+      personal data may still persist?
+    options:
+      - "The data is automatically removed from all systems by the primary delete"
+      - "Only the application cache"
+      - "Only the primary table needs handling; nothing else stores it"
+      - "Backups, read replicas, search indexes, and downstream CDC sinks may all hold copies that must also be addressed"
+    answer: 3
+    explanation: |
+      Erasure must account for every copy: backups, replicas, search/analytics indexes,
+      and any CDC/downstream sinks fed from the source. A single DELETE on the primary
+      table leaves personal data scattered across these, which is a frequent compliance
+      gap (and where crypto-shredding of backups helps).
+    ref: "concepts.md#gdpr-right-to-erasure-vs-immutable-history"
+
+  - id: soft-deletes-auditing-and-temporal-data-057
+    difficulty: intermediate
+    tags: [temporal, sql-2011, application-time, valid-time]
+    question: |
+      Which SQL:2011 feature corresponds to VALID (application) time, where the
+      application manages the period columns?
+    options:
+      - "Generated columns"
+      - "System-versioned tables (PERIOD FOR SYSTEM_TIME + WITH SYSTEM VERSIONING)"
+      - "Application-time period tables (PERIOD FOR <name>, e.g. with WITHOUT OVERLAPS)"
+      - "Materialized views"
+    answer: 2
+    explanation: |
+      Application-time period tables model valid time: the application sets the
+      start/end columns declared by PERIOD FOR, with optional temporal primary keys
+      (WITHOUT OVERLAPS) and referential integrity. System-versioned tables instead let
+      the engine manage transaction time.
+    ref: "concepts.md#system-versioned-temporal-tables-sql2011"

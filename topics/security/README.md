@@ -1,12 +1,13 @@
 # Security (Application & Web)
 
-16 topics. Study content and MCQs live in per-topic
+17 topics. Study content and MCQs live in per-topic
 subfolders. See the master taxonomy in `../../TOPICS.md`.
 
 | Topic | Slug | Freq | Difficulty | Status |
 |---|---|---|---|---|
 | Security Fundamentals, CIA Triad & Threat Modeling | `security-fundamentals-and-threat-modeling` | very-high | beginner | ✅ |
 | Cryptography Foundations: Symmetric, Asymmetric, Hashing & Signatures | `cryptography-foundations` | high | intermediate | ✅ |
+| Application Cryptography & Data Protection (Design) | `application-cryptography-and-data-protection` | high | advanced | ✅ |
 | Password Storage & Credential Security | `password-storage-and-credential-security` | high | intermediate | ✅ |
 | Authentication & Multi-Factor Authentication | `authentication-and-mfa` | very-high | intermediate | ✅ |
 | Session Management & Secure Cookies | `session-management-and-secure-cookies` | high | intermediate | ✅ |

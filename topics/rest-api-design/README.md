@@ -1,6 +1,6 @@
 # REST APIs & API Design
 
-18 topics. Study content and MCQs live in per-topic
+20 topics. Study content and MCQs live in per-topic
 subfolders. See the master taxonomy in `../../TOPICS.md`.
 
 | Topic | Slug | Freq | Difficulty | Status |
@@ -22,6 +22,8 @@ subfolders. See the master taxonomy in `../../TOPICS.md`.
 | Rate Limiting & Throttling (Client Contract) | `rate-limiting-and-throttling` | high | intermediate | ☐ |
 | API Gateways & Backend-for-Frontend | `api-gateways-and-bff` | high | intermediate | ☐ |
 | REST vs GraphQL vs gRPC | `rest-vs-graphql-vs-grpc` | high | advanced | ☐ |
+| GraphQL: Schema Design, Execution & Federation | `graphql-schema-and-federation` | high | advanced | ✅ |
 | Webhooks & Async API Patterns | `webhooks-and-async-api-patterns` | medium | advanced | ☐ |
+| File Upload, Storage & Media Delivery | `file-upload-and-media-handling` | high | intermediate | ✅ |
 
 Status: ☐ not started · ◐ concepts done · ● concepts+MCQs · ✅ validated

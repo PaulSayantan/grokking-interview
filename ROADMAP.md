@@ -98,6 +98,19 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 32 (2026-07-21):** **Backend-craft fold-ins** (gap-analysis P1 fold-ins into EXISTING
+  domains, no new domains) — 12 topics, **620 MCQs**, 30 Mermaid diagrams. system-design +4 (DDD
+  tactical, DDD strategic/context-mapping, strangler-fig migration, multi-tenancy/SaaS isolation);
+  messaging-databases +5 (money/currency, search/Elasticsearch, soft-deletes/auditing/temporal,
+  zero-downtime migrations, serialization/schema-evolution+registry); rest-api-design +2 (file-upload/
+  media, GraphQL schema/federation); security +1 (application cryptography/data-protection). Each
+  cross-references existing adjacent topics (not duplicated). Built via `backend-craft-folds-authoring.js`
+  (author → verify, 24 agents, 0 errors); verify fixed mojibake (Cyrillic in multi-tenancy) + confirmed
+  facts (IEEE754/double-entry, BM25/inverted-index, expand-contract, protobuf compat, envelope
+  encryption). README rows added so topics number in learning order (no sync grouping change — folds
+  join existing domain groups / SD core). Validators clean (SD 74/5462, msg-db 20/1086, rest-api
+  20/1633, security 17/1341); no clustering; all diagrams render. Content-only commit. NEXT:
+  interview-craft (new domain).
 - **Session 31 (2026-07-21):** **Kubernetes Pass 1** (sequence domain 5, largest) — 19 topics,
   **981 MCQs** (220 B / 472 I / 286 adv / 3 exp), 55 Mermaid diagrams (render 0-error). Covers
   architecture/control-plane + reconciliation, API/objects/kubectl, pods & workload controllers,
