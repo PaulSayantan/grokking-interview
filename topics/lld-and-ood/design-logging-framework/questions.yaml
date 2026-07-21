@@ -1,0 +1,860 @@
+topic: "Design a Logging Framework"
+domain: lld-and-ood
+topic_slug: design-logging-framework
+version: 1
+questions:
+  - id: design-logging-framework-001
+    difficulty: beginner
+    tags: [patterns, chain-of-responsibility]
+    question: |
+      Which GoF pattern is the "star" of a Log4j/Logback-style logging framework, seen both
+      in the named-logger hierarchy delegating up to the root and in handlers each deciding
+      whether to process a message?
+    options:
+      - "Chain of Responsibility"
+      - "Visitor"
+      - "Mediator"
+      - "Flyweight"
+    answer: 0
+    explanation: |
+      A log event climbs the parent chain of loggers (level inheritance + appender additivity),
+      and filters/appenders each decide handle-or-pass. That "pass the request along a chain of
+      handlers until handled" shape is Chain of Responsibility. See dp-chain-of-responsibility.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-002
+    difficulty: beginner
+    tags: [requirements, log-level]
+    question: |
+      Why must LogLevel be modeled as an *ordered* enum (TRACE < DEBUG < INFO < WARN < ERROR < FATAL)?
+    options:
+      - "So the enum values can be serialized to JSON"
+      - "So each level can have its own appender subclass"
+      - "Because Java enums are always ordered by name"
+      - "So threshold filtering can compare severities: emit only if message.level >= threshold"
+    answer: 3
+    explanation: |
+      The entire filtering mechanism is a comparison: a message is emitted only when its level is
+      greater-or-equal to the configured threshold. That comparison requires a defined ordering,
+      which the enum's declaration order (ordinal) provides.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-logging-framework-003
+    difficulty: intermediate
+    tags: [patterns, strategy, layout]
+    question: |
+      Message formatting (plain pattern text vs JSON vs key-value) is injected into an appender
+      as a Layout object rather than coded inside the appender. Which pattern is this, and what
+      does it buy you?
+    options:
+      - "Singleton — one shared formatter per process"
+      - "Template Method — subclasses override the format step"
+      - "Strategy — format varies independently, so the same appender works with any layout"
+      - "Adapter — it adapts the message to the sink's API"
+    answer: 2
+    explanation: |
+      Layout is a Strategy: how a LogMessage is rendered is an interchangeable algorithm. A
+      FileAppender can use PatternLayout or JsonLayout unchanged, and a new format is a new class
+      — no edit to appenders (Open-Closed). See dp-strategy.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-004
+    difficulty: intermediate
+    tags: [patterns, decorator, async]
+    question: |
+      You must make logging non-blocking by buffering messages in a queue drained by a background
+      worker, but async should work with ANY destination (console, file, DB). What is the cleanest
+      design?
+    options:
+      - "An AsyncAppender that implements Appender and wraps a delegate appender (Decorator)"
+      - "Subclass every appender: AsyncFileAppender, AsyncConsoleAppender, AsyncDatabaseAppender"
+      - "Add an isAsync boolean flag to AbstractAppender and branch inside append()"
+      - "Move the queue into the Logger so all appenders share it"
+    answer: 0
+    explanation: |
+      Async is orthogonal to destination. A Decorator (AsyncAppender implements Appender, wraps a
+      delegate) composes buffering onto any appender without the combinatorial subclass explosion
+      of AsyncFileAppender/AsyncConsoleAppender/etc. See dp-decorator.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-005
+    difficulty: intermediate
+    tags: [noun-verb, method]
+    question: |
+      Doing noun extraction on the requirements, you list: Logger, LogMessage, Level, Appender,
+      Timestamp, Pattern, Thread. Which of these should NOT become its own top-level class?
+    options:
+      - "Logger and Appender"
+      - "LogMessage and Level"
+      - "Timestamp and Pattern"
+      - "Appender and LogMessage"
+    answer: 2
+    explanation: |
+      Noun extraction produces candidates; filtering is the graded skill. Timestamp is just a
+      long field inside LogMessage, and Pattern is a config string inside PatternLayout. Promoting
+      them to classes is gold-plating. Logger, Appender, LogMessage, Level are all real types.
+    ref: "concepts.md#identify-core-objects-via-nounverb-extraction"
+
+  - id: design-logging-framework-006
+    difficulty: beginner
+    tags: [srp, anti-pattern]
+    question: |
+      A candidate writes one Logger.log(level, msg) method that switches on level, if-checks the
+      destination type, string-concatenates the format inline, and opens the file. Which principle
+      does this most directly violate?
+    options:
+      - "Liskov Substitution Principle"
+      - "Interface Segregation Principle"
+      - "Dependency Inversion Principle"
+      - "Single Responsibility Principle"
+    answer: 3
+    explanation: |
+      That one method has at least five reasons to change: filtering, destination selection,
+      formatting, and I/O all live in it. Each is a separate responsibility that belongs in
+      Logger, Appender, Layout, and the sink respectively (SRP).
+    ref: "concepts.md#responsibilities-and-relationships"
+
+  - id: design-logging-framework-007
+    difficulty: intermediate
+    tags: [immutability, thread-safety, log-message]
+    question: |
+      Why is LogMessage designed as an immutable value object?
+    options:
+      - "To reduce the number of classes in the design"
+      - "So it can be stored in a HashSet as a key"
+      - "Because it is built once per event and fanned out to many appenders/threads — immutability makes that share lock-free and prevents one appender mutating what another sees"
+      - "Because Java requires objects passed to interfaces to be final"
+    answer: 2
+    explanation: |
+      A single event is created once and dispatched to multiple appenders, possibly across threads
+      (async). An immutable message can be shared with zero synchronization and no appender can
+      corrupt it for others — the cheapest thread-safety tool available.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-008
+    difficulty: intermediate
+    tags: [patterns, singleton, log-manager]
+    question: |
+      LogManager is a Singleton. What is the design justification, and what caveat should you name?
+    options:
+      - "Singletons are always the safest default; no caveat needed"
+      - "So each thread gets its own LogManager instance"
+      - "To guarantee log messages are delivered exactly once"
+      - "So there is one global logger registry/root per process (getLogger returns the same instance everywhere); caveat: Singletons hurt testability, so prefer injecting the manager where possible"
+    answer: 3
+    explanation: |
+      There must be exactly one registry and root so configuration is global and getLogger(name)
+      is idempotent across the process. But global singletons are hard to isolate in tests, so a
+      good answer names that trade-off and injects the manager where feasible. See dp-singleton.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-009
+    difficulty: advanced
+    tags: [concurrency, layout, gotcha]
+    question: |
+      A PatternLayout stores a java.text.SimpleDateFormat field and reuses it in format(). Under
+      concurrent logging this produces corrupted/garbled timestamps. Why, and what is the fix?
+    options:
+      - "SimpleDateFormat is not thread-safe (mutable internal state); use a thread-safe DateTimeFormatter"
+      - "SimpleDateFormat is too slow; cache the formatted string instead"
+      - "The layout should be a Singleton so only one thread uses it"
+      - "format() should be synchronized on the LogMessage"
+    answer: 0
+    explanation: |
+      SimpleDateFormat holds mutable internal state and is documented as not thread-safe; shared
+      across threads it corrupts output. Layout.format should stay pure — use the immutable,
+      thread-safe java.time.DateTimeFormatter. Classic concurrency gotcha.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-010
+    difficulty: intermediate
+    tags: [extensibility, open-closed, appender]
+    question: |
+      An interviewer says "now add a Kafka appender." In a well-designed framework, what should be
+      required?
+    options:
+      - "Modify Logger.log to add a Kafka branch"
+      - "Add a KAFKA case to an enum inside every existing appender"
+      - "Implement Appender (extend AbstractAppender, define doAppend) and register it via config — no changes to Logger, Layout, or existing appenders"
+      - "Rewrite the Layout interface to support Kafka records"
+    answer: 2
+    explanation: |
+      Destination is the axis of variation captured by the Appender abstraction. A new destination
+      is a new Appender implementation plus config wiring; the tested Logger and other appenders
+      never reopen. That is Open-Closed in action.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-011
+    difficulty: advanced
+    tags: [concurrency, async, blocking-queue]
+    question: |
+      When you make an AsyncAppender with a *bounded* BlockingQueue, what is the key design
+      decision an interviewer wants you to surface?
+    options:
+      - "Which JSON library to serialize messages"
+      - "Whether to use an ArrayList or LinkedList for the queue"
+      - "The overflow policy when the queue is full: block (backpressure), drop newest (lossy), or discard oldest"
+      - "How many log levels to support"
+    answer: 2
+    explanation: |
+      A bounded queue can fill when the sink is slower than producers. You must choose a policy:
+      block (safe but can stall the app), drop newest (never stalls but loses logs), or discard
+      oldest. Making it a conscious trade-off is the point; an unbounded queue just OOMs instead.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-012
+    difficulty: intermediate
+    tags: [hierarchy, chain-of-responsibility, levels]
+    question: |
+      Root logger is at INFO. Logger "com.app.noisy" is explicitly set to WARN. Logger
+      "com.app.noisy.Client" has no level set. What is the effective level of "com.app.noisy.Client"?
+    options:
+      - "INFO, inherited from root"
+      - "TRACE, the lowest default"
+      - "WARN, inherited from the nearest ancestor with an explicit level"
+      - "It throws because no level is set"
+    answer: 2
+    explanation: |
+      effectiveLevel() climbs the parent chain and returns the nearest ancestor's explicit level.
+      "com.app.noisy" is the nearest ancestor with a level (WARN), so the child inherits WARN.
+      This inheritance is exactly the Chain of Responsibility logger hierarchy.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-013
+    difficulty: intermediate
+    tags: [relationships, composition, aggregation]
+    question: |
+      An Appender "has-a" Layout that it uses to render every message. Which relationship best
+      describes Appender-to-Layout, and why?
+    options:
+      - "Inheritance — Appender is-a Layout"
+      - "Association with no ownership — they merely reference each other"
+      - "Realization — Appender implements Layout"
+      - "Composition/strategy — the appender holds and delegates to a Layout it can swap"
+    answer: 3
+    explanation: |
+      The appender owns a Layout and delegates formatting to it (a Strategy held by composition).
+      It is not a Layout (no inheritance), and the layout is a functional part of the appender's
+      behavior, not a mere loose reference.
+    ref: "concepts.md#responsibilities-and-relationships"
+
+  - id: design-logging-framework-014
+    difficulty: beginner
+    tags: [patterns, observer, fan-out]
+    question: |
+      A single logger writes each message to a console appender, a file appender, and a metrics
+      sink at once. Which pattern shape describes this one-to-many dispatch?
+    options:
+      - "Observer / fan-out — destinations 'subscribe' via addAppender and all get notified"
+      - "Proxy — one appender stands in for the others"
+      - "Bridge — it bridges logger and appender hierarchies"
+      - "Interpreter — it interprets the message for each sink"
+    answer: 0
+    explanation: |
+      The logger iterates its list of appenders and notifies each — a one-to-many notification, the
+      Observer shape. Adding a metrics sink means registering another appender with no logger
+      change. See dp-observer.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-015
+    difficulty: advanced
+    tags: [performance, disabled-level, gotcha]
+    question: |
+      Even with DEBUG disabled, `logger.debug("user=" + expensiveToString())` is still slow. Why,
+      and what is the standard fix?
+    options:
+      - "The string argument is evaluated BEFORE the debug() call, so the early level-check cannot save it; use an isDebugEnabled() guard or a Supplier<String> message"
+      - "The framework re-parses the pattern each call; cache the pattern"
+      - "debug() acquires a lock even when disabled; make it lock-free"
+      - "The message is written to disk regardless of level; add a flush guard"
+    answer: 0
+    explanation: |
+      Java evaluates method arguments eagerly, so the concatenation and expensiveToString() run
+      before debug() even checks the level. The framework's early exit protects only its own work.
+      Guard with isDebugEnabled(), or pass a Supplier<String> so the string is built lazily.
+    ref: "concepts.md#edge-cases-and-error-handling"
+
+  - id: design-logging-framework-016
+    difficulty: intermediate
+    tags: [error-handling, reliability]
+    question: |
+      A FileAppender's disk fills and its write throws IOException. What is the correct behavior?
+    options:
+      - "Propagate the exception to the caller so the app knows logging failed"
+      - "Retry the write in an infinite loop until it succeeds"
+      - "Silently swallow it and lose the message with no trace"
+      - "Catch it and report on a fallback (stderr/status logger) — a logging failure must never crash business logic"
+    answer: 3
+    explanation: |
+      Logging is a cross-cutting concern that must never take down the application. The framework
+      should catch sink failures and report them on a fallback channel, degrading gracefully rather
+      than propagating (which would crash callers) or silently vanishing (which hides the problem).
+    ref: "concepts.md#edge-cases-and-error-handling"
+
+  - id: design-logging-framework-017
+    difficulty: intermediate
+    tags: [patterns, template-method, appender]
+    question: |
+      AbstractAppender's final append() does: threshold check, then layout.format(), then calls the
+      abstract doAppend(formatted) which subclasses implement. Which pattern is the append() method?
+    options:
+      - "Strategy"
+      - "Command"
+      - "Template Method — the fixed skeleton (filter, format) with one varying step (doAppend) deferred to subclasses"
+      - "Prototype"
+    answer: 2
+    explanation: |
+      append() defines an invariant algorithm (filter -> format -> write) and defers only the
+      write step to subclasses via the abstract doAppend hook. That is Template Method; it keeps
+      filtering and formatting from being duplicated in every concrete appender.
+    ref: "concepts.md#code-skeleton"
+
+  - id: design-logging-framework-018
+    difficulty: advanced
+    tags: [concurrency, copy-on-write, appender-list]
+    question: |
+      Logger holds its appenders in a CopyOnWriteArrayList. Why is that a good fit here?
+    options:
+      - "Appenders are read (iterated) on every log call but mutated rarely (config time); COW gives lock-free reads and copies only on the rare write"
+      - "It makes logging faster than a plain ArrayList in all cases"
+      - "It guarantees messages are delivered in order across threads"
+      - "It automatically deduplicates appenders"
+    answer: 0
+    explanation: |
+      The appender list is read constantly (every log iterates it) and written seldom (only when
+      configuration changes). CopyOnWriteArrayList is optimized for exactly that read-heavy pattern:
+      iterations are lock-free and safe, and the copy cost hits only rare addAppender calls.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-019
+    difficulty: intermediate
+    tags: [patterns, factory, creation]
+    question: |
+      In the design, where does the `switch` over destination types (CONSOLE/FILE/DB -> concrete
+      appender) legitimately live?
+    options:
+      - "Inside Logger.log, so it can pick the destination per message"
+      - "Inside AbstractAppender.append"
+      - "In an AppenderFactory (creation code) — construction logic belongs in a factory, not in operational logging code"
+      - "Duplicated in every Layout implementation"
+    answer: 2
+    explanation: |
+      Mapping a config type to a concrete class is object construction, which belongs in a Factory.
+      Keeping the switch in creation code keeps the operational hot path (Logger.log, append)
+      polymorphic and closed to modification. See dp-factory-method.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-020
+    difficulty: intermediate
+    tags: [patterns, builder, config]
+    question: |
+      A LoggerConfig has a level, a list of appenders, an additivity flag, and layout patterns —
+      many optional parts. Which creational pattern best assembles it?
+    options:
+      - "A telescoping set of overloaded constructors"
+      - "Prototype cloning of a default config"
+      - "Abstract Factory over config families"
+      - "Builder — a fluent LoggerConfig.builder().level(INFO).appender(c).additive(false).build()"
+    answer: 3
+    explanation: |
+      Many optional fields make constructors telescope combinatorially and hurt readability. A
+      Builder assembles the config fluently and validates at build(), which is the standard fit for
+      objects with several optional parameters. See dp-builder.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-021
+    difficulty: advanced
+    tags: [extensibility, chain-of-responsibility, filters]
+    question: |
+      The interviewer asks to filter messages by content (e.g., only those matching a regex or
+      carrying a marker), beyond simple level filtering. What is the most extensible addition?
+    options:
+      - "Hard-code the regex check inside every appender's doAppend"
+      - "A new LogLevel called MATCH"
+      - "A Filter interface plus a filter chain evaluated before doAppend — another Chain of Responsibility"
+      - "A Layout that returns null for non-matching messages"
+    answer: 2
+    explanation: |
+      Content filtering is a separate, composable decision. A Filter interface with an ordered
+      filter chain (accept/deny/neutral) evaluated before writing layers cleanly and is itself a
+      Chain of Responsibility — new filters plug in without touching appenders.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-022
+    difficulty: intermediate
+    tags: [dependency-inversion, facade]
+    question: |
+      Application code should call logger.info("...") but should NOT be able to see append(),
+      format(), or setLayout(). Which SOLID principle drives hiding those from callers?
+    options:
+      - "Interface Segregation — callers depend only on the thin Logger facade, not on Appender/Layout methods"
+      - "Single Responsibility"
+      - "Liskov Substitution"
+      - "Open-Closed"
+    answer: 0
+    explanation: |
+      Interface Segregation says clients shouldn't be forced to depend on methods they don't use.
+      App code needs only the Logger facade (info/error); appender- and layout-facing methods live
+      on separate, focused interfaces the caller never touches.
+    ref: "concepts.md#solid-in-this-design"
+
+  - id: design-logging-framework-023
+    difficulty: advanced
+    tags: [liskov, decorator, async]
+    question: |
+      Why must AsyncAppender remain fully substitutable for any other Appender (Liskov)?
+    options:
+      - "So it can be stored in the same list type"
+      - "So it can inherit from AbstractAppender"
+      - "So it can share the same Layout object"
+      - "So a Logger dispatching to appenders cannot tell it buffers — it must honor the Appender contract (accept a message, eventually write it) transparently"
+    answer: 3
+    explanation: |
+      A decorator must be a drop-in for what it wraps. The Logger calls append() and must not need
+      to know whether the write is synchronous or queued. AsyncAppender honoring the Appender
+      contract (message accepted, eventually delivered) is what makes it a valid substitute.
+    ref: "concepts.md#solid-in-this-design"
+
+  - id: design-logging-framework-024
+    difficulty: intermediate
+    tags: [hierarchy, additivity, edge-case]
+    question: |
+      A logger is configured with additive=false. What effect does this have on message dispatch?
+    options:
+      - "The message is written to the logger's own appenders but the climb up the parent chain stops, so ancestor appenders do NOT also receive it"
+      - "The logger stops emitting messages entirely"
+      - "The message is sent only to the root logger"
+      - "The logger's level is ignored"
+    answer: 0
+    explanation: |
+      Additivity controls whether the event continues climbing to ancestor appenders. With
+      additive=false, callAppenders writes to the logger's own appenders then breaks the chain —
+      preventing double-logging when a child and an ancestor share/duplicate destinations.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-025
+    difficulty: beginner
+    tags: [scope, hld-boundary]
+    question: |
+      Mid-interview: "Now make it aggregate logs from thousands of machines into a searchable
+      central store." What is the right LLD-round response?
+    options:
+      - "Start designing consistent hashing and shard routing for the log store"
+      - "Refuse — logging frameworks cannot send over the network"
+      - "Recognize the boundary: aggregation/retention/search across hosts is HLD (ELK/CloudWatch/Loki); the LLD answer is a network Appender adapter, then redirect to system-design"
+      - "Add the cluster logic directly inside Logger.log"
+    answer: 2
+    explanation: |
+      Centralized aggregation is a distributed-systems concern, not single-machine OO. The clean
+      move is to note that a network appender (implementing Appender) is the LLD seam, then point
+      to system-design logging/observability topics rather than burning the LLD clock on infra.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-026
+    difficulty: intermediate
+    tags: [testing, strategy, purity]
+    question: |
+      Why does splitting formatting into a pure Layout.format(LogMessage) -> String make the design
+      easy to unit test?
+    options:
+      - "Because pure functions run faster"
+      - "Because the Layout is a Singleton"
+      - "Because format() is synchronized"
+      - "Because format() has no I/O or shared state, a test just asserts the returned string for a given message — no mocks or files needed"
+    answer: 3
+    explanation: |
+      A pure function of its input is the most testable unit: feed a LogMessage, assert the exact
+      rendered string. No file, database, or concurrency setup required. This is a direct payoff of
+      separating format (Layout) from write (Appender).
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: design-logging-framework-027
+    difficulty: advanced
+    tags: [concurrency, shared-sink, race]
+    question: |
+      Two threads log to the SAME FileAppender concurrently and their output lines interleave into
+      garbled text. What is the root cause and fix?
+    options:
+      - "Writes to the shared sink are not serialized per logical line; guard doAppend with a lock (or use a thread-safe sink) so each line is written atomically"
+      - "The Layout is not thread-safe; make each thread build its own layout"
+      - "LogMessage is mutable; make it immutable"
+      - "The appender list needs to be a CopyOnWriteArrayList"
+    answer: 0
+    explanation: |
+      A shared output sink written by multiple threads without serialization interleaves bytes. The
+      fix is to make each logical line's write atomic by guarding doAppend with a lock (or using an
+      already-synchronized sink). LogMessage immutability and the appender-list type solve different races.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-028
+    difficulty: intermediate
+    tags: [levels, filtering, semantics]
+    question: |
+      An appender's threshold is ERROR; its logger's level is DEBUG. A DEBUG message arrives at the
+      logger and passes the logger's own level check. What happens at the appender?
+    options:
+      - "The appender writes it, because the logger already allowed it"
+      - "The appender throws because thresholds conflict"
+      - "The message is escalated to ERROR to match the appender"
+      - "The appender re-checks its own threshold and skips it, since DEBUG < ERROR"
+    answer: 3
+    explanation: |
+      Filtering happens at two independent levels. Even though the logger passes DEBUG, each
+      appender re-applies its own threshold; an ERROR-threshold appender drops DEBUG. This lets one
+      logger feed a verbose file and an errors-only pager from the same stream.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-logging-framework-029
+    difficulty: advanced
+    tags: [concurrency, shutdown, async]
+    question: |
+      What must AsyncAppender.close() do to avoid losing buffered messages on application shutdown?
+    options:
+      - "Immediately kill the worker thread and clear the queue"
+      - "Flush only the most recent message and exit"
+      - "Stop accepting new messages, drain the remaining queue to the delegate, then join the worker"
+      - "Nothing — daemon threads are cleaned up automatically with all data intact"
+    answer: 2
+    explanation: |
+      Graceful shutdown means: stop accepting, let the worker finish draining the queue into the
+      delegate, then join. Killing the worker or relying on daemon-thread teardown discards buffered
+      logs — exactly the events you most want at shutdown.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-030
+    difficulty: intermediate
+    tags: [extensibility, decorator, strategy]
+    question: |
+      Interviewer: "Add JSON structured logging without changing any appender." What is the correct
+      seam?
+    options:
+      - "Add a toJson() method to every appender"
+      - "Subclass each appender into a Json variant"
+      - "Add a JSON flag to LogMessage"
+      - "Create a JsonLayout implementing Layout and set it on the appender — format varies independently of destination (Strategy)"
+    answer: 3
+    explanation: |
+      Format is the Layout Strategy's job. A JsonLayout that implements Layout can be set on any
+      existing appender; nothing about the destination changes. This is precisely why format was
+      separated from writing.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-031
+    difficulty: beginner
+    tags: [use-cases, hot-path, early-exit]
+    question: |
+      For a call logger.warn("disk low"), what is the FIRST thing Logger.log should do, and why?
+    options:
+      - "Check the effective threshold and return immediately if WARN is below it — a cheap early exit so disabled logging costs almost nothing"
+      - "Open the file appender's stream"
+      - "Serialize the message to JSON"
+      - "Acquire a global lock on the LogManager"
+    answer: 0
+    explanation: |
+      The hot-path optimization is to compare the message level against the effective threshold
+      first and bail out before allocating a LogMessage or touching appenders. This keeps disabled
+      logging nearly free, which matters when log calls pepper hot code.
+    ref: "concepts.md#use-cases-and-actors"
+
+  - id: design-logging-framework-032
+    difficulty: advanced
+    tags: [edge-case, root-logger, chain]
+    question: |
+      Why must the root logger be handled specially in effectiveLevel() and the parent-chain climb?
+    options:
+      - "The root logger uses a different Appender interface"
+      - "The root logger cannot have appenders"
+      - "The root logger must be async"
+      - "The root has no parent, so the CoR climb must terminate there and fall back to a default level (e.g., INFO) instead of dereferencing a null parent"
+    answer: 3
+    explanation: |
+      The logger hierarchy is a Chain of Responsibility that must terminate. The root has parent ==
+      null, so both the level-inheritance walk and the appender-additivity climb must stop there,
+      and effectiveLevel supplies a default so an unconfigured tree still logs.
+    ref: "concepts.md#edge-cases-and-error-handling"
+
+  - id: design-logging-framework-033
+    difficulty: intermediate
+    tags: [extensibility, log-rotation]
+    question: |
+      To add size-based log rotation, what is the most localized change?
+    options:
+      - "Add rotation logic to Logger.callAppenders"
+      - "A RollingFileAppender subtype (or a rollover Strategy inside FileAppender) that, on crossing a size trigger, closes, renames, and reopens the file — isolated to the file appender"
+      - "Add a ROTATE log level"
+      - "Put the rotation counter in LogMessage"
+    answer: 1
+    explanation: |
+      Rotation is specific to file output, so it belongs in a RollingFileAppender (or a rollover
+      strategy inside the file appender). Nothing about the logger, layout, or other appenders
+      needs to change — the concern stays local.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-034
+    difficulty: intermediate
+    tags: [dependency-inversion, abstraction]
+    question: |
+      Logger holds List<Appender> and Appender holds a Layout — both by interface, injected in.
+      Which principle does this illustrate, and what is the benefit?
+    options:
+      - "Open-Closed — you can subclass Logger"
+      - "Interface Segregation — the interfaces are small"
+      - "Dependency Inversion — high-level logging logic depends on the Appender/Layout abstractions (not FileAppender/JsonLayout), so concretes are swappable and testable"
+      - "Liskov Substitution — subtypes are interchangeable"
+    answer: 2
+    explanation: |
+      Depending on abstractions (Appender, Layout) rather than concretes (FileAppender, JsonLayout),
+      with the concretes injected, is Dependency Inversion. It makes the logging core independent of
+      any specific sink or format and lets tests inject fakes.
+    ref: "concepts.md#solid-in-this-design"
+
+  - id: design-logging-framework-035
+    difficulty: intermediate
+    tags: [crc, responsibilities]
+    question: |
+      Using CRC ("what does it KNOW and DO"), which is the correct single responsibility for the
+      Appender abstraction?
+    options:
+      - "Decide the logger hierarchy and inherit levels"
+      - "Given a LogMessage, apply its own threshold, format it via its Layout, and write to its sink"
+      - "Build the LogMessage from the caller's arguments"
+      - "Register loggers by name and hand them out"
+    answer: 1
+    explanation: |
+      The appender's one job is to take a message and get it to a destination: re-filter by its own
+      threshold, delegate formatting to its Layout, and write to its sink. Hierarchy/level
+      inheritance is Logger's job; message construction is Logger's; registry is LogManager's.
+    ref: "concepts.md#responsibilities-and-relationships"
+
+  - id: design-logging-framework-036
+    difficulty: advanced
+    tags: [concurrency, volatile, runtime-config]
+    question: |
+      Ops changes a logger's level at runtime while other threads are actively logging. What keeps
+      the change visible promptly without locking the hot path?
+    options:
+      - "Wrapping every log() call in a synchronized block on the logger"
+      - "Restarting the LogManager singleton"
+      - "Storing the level in a ThreadLocal"
+      - "Marking the mutable level/config fields volatile so writes are visible to all threads without hot-path locking"
+    answer: 3
+    explanation: |
+      A volatile field gives a cheap visibility guarantee: a threshold write becomes visible to all
+      readers without a lock, so the hot log path stays lock-free. Synchronizing every log call
+      would serialize all logging; a ThreadLocal would make the change per-thread, not global.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-037
+    difficulty: intermediate
+    tags: [routing, multiple-appenders]
+    question: |
+      Requirement: route ERROR-and-above to a pager appender but send everything (INFO+) to a file.
+      How does the existing design satisfy this with no new patterns?
+    options:
+      - "Attach two appenders to the same logger with different thresholds (pager=ERROR, file=INFO); the fan-out already delivers to both, each filtering itself"
+      - "Create two separate loggers with no relationship"
+      - "Add an if/else on level inside Logger.log"
+      - "Escalate every message to ERROR"
+    answer: 0
+    explanation: |
+      Per-appender thresholds plus one-to-many fan-out already cover this: one logger holds a
+      file appender (INFO) and a pager appender (ERROR). Every message goes to both; each appender
+      independently drops what is below its threshold. No new mechanism needed.
+    ref: "concepts.md#extensibility"
+
+  - id: design-logging-framework-038
+    difficulty: advanced
+    tags: [edge-case, reentrancy]
+    question: |
+      A custom Layout implementation itself calls logger.debug(...) while formatting. What risk does
+      this create?
+    options:
+      - "Slightly slower formatting only"
+      - "A compile error"
+      - "Infinite recursion / reentrancy: logging triggers formatting which logs again — must be guarded against self-logging"
+      - "Duplicate log files"
+    answer: 2
+    explanation: |
+      If a component on the logging path (layout or appender) logs, it can recurse endlessly:
+      log -> format -> log -> format. The framework must guard against reentrant self-logging (e.g.,
+      a status logger or a reentrancy flag) to avoid a stack overflow.
+    ref: "concepts.md#edge-cases-and-error-handling"
+
+  - id: design-logging-framework-039
+    difficulty: beginner
+    tags: [facade, slf4j, dependency-inversion]
+    question: |
+      SLF4J is a logging *facade* that application code compiles against, with Logback/Log4j plugged
+      in at runtime. Which design idea does this embody at library scale?
+    options:
+      - "Singleton — one logger per app"
+      - "Prototype — cloning loggers"
+      - "Flyweight — sharing logger instances"
+      - "Dependency Inversion / programming to an interface — app code depends on the abstraction, and the concrete implementation is swapped without recompiling callers"
+    answer: 3
+    explanation: |
+      A facade lets callers depend on a stable abstraction (the SLF4J API) while the actual
+      implementation (Logback, Log4j, JUL) is bound at runtime. That is Dependency Inversion /
+      program-to-an-interface applied across libraries — the same principle Logger enforces internally.
+    ref: "concepts.md#references"
+
+  - id: design-logging-framework-040
+    difficulty: intermediate
+    tags: [log-manager, idempotent, registry]
+    question: |
+      Calling LogManager.getLogger("com.app.Service") twice from different parts of the code should
+      return what?
+    options:
+      - "The same Logger instance both times — getLogger is idempotent, keyed by name in the registry"
+      - "Two independent Logger instances so configs don't collide"
+      - "A new logger only if the first was garbage collected"
+      - "The root logger, since names are advisory"
+    answer: 0
+    explanation: |
+      Named loggers are shared by name via the registry: getLogger(name) creates on first call and
+      returns the same instance thereafter. Idempotency ensures configuration set on a named logger
+      is seen consistently everywhere that name is requested.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-logging-framework-041
+    difficulty: advanced
+    tags: [async, producer-consumer, concurrency-in-lld]
+    question: |
+      The AsyncAppender uses a BlockingQueue with a producer (logging threads) and a single
+      consumer (worker). What classic concurrency construct is this, and where is it cross-referenced?
+    options:
+      - "Readers-writers lock; in solid-principles"
+      - "Barrier synchronization; in uml-class-diagrams"
+      - "Compare-and-swap spin loop; in design-cache-oo"
+      - "Producer/consumer hand-off decoupling caller latency from a slow sink; cross-referenced in concurrency-in-lld"
+    answer: 3
+    explanation: |
+      Logging threads produce messages onto the queue and a worker consumes/drains them to the
+      delegate — the textbook producer/consumer pattern that decouples the caller's latency from a
+      slow destination. The concurrency mechanics are covered in concurrency-in-lld.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-042
+    difficulty: intermediate
+    tags: [pattern-classification, intent]
+    question: |
+      Classifying the framework's patterns by GoF intent, which grouping is correct?
+    options:
+      - "Chain of Responsibility = Creational; Strategy = Structural; Builder = Behavioral"
+      - "Strategy/Observer/Chain of Responsibility = Behavioral; Decorator = Structural; Factory/Builder/Singleton = Creational"
+      - "All of them are Structural patterns"
+      - "Singleton = Behavioral; Decorator = Creational; Strategy = Structural"
+    answer: 1
+    explanation: |
+      By intent: Behavioral patterns govern algorithms/responsibility (Strategy for format, Observer
+      for fan-out, Chain of Responsibility for the logger hierarchy); Structural patterns assemble
+      objects (Decorator for async); Creational patterns handle construction (Factory, Builder,
+      Singleton). See dp-* topics.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-logging-framework-043
+    difficulty: intermediate
+    tags: [design-choice, why-framework]
+    question: |
+      Why build a logging framework instead of just calling System.out.println everywhere?
+    options:
+      - "println is deprecated in modern Java"
+      - "println cannot print to a file"
+      - "The framework makes levels/filtering, destinations, format, and thread-safe writes pluggable and testable — none of which println offers"
+      - "The framework is always faster than println"
+    answer: 2
+    explanation: |
+      println has no severity levels, no runtime filtering, one hard-coded destination, no format
+      control, no thread-safety story, and no testability seam. The framework exists precisely to
+      make each of those an independent, swappable concern.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: design-logging-framework-044
+    difficulty: advanced
+    tags: [invariant, hierarchy, double-logging]
+    question: |
+      Without additivity control, what bug appears when both a child logger and the root have a
+      console appender attached?
+    options:
+      - "Messages are lost because the appenders conflict"
+      - "The child logger's level is ignored"
+      - "The root logger stops receiving messages"
+      - "Double-logging: a message emitted at the child is written once by the child's appender and again by the root's as the event climbs the chain"
+    answer: 3
+    explanation: |
+      Because the event climbs the parent chain writing to each logger's appenders, a message logged
+      at the child hits the child's console appender and then the root's — printing twice. Additivity
+      (additive=false) exists to stop the climb and prevent this duplication.
+    ref: "concepts.md#edge-cases-and-error-handling"
+
+  - id: design-logging-framework-045
+    difficulty: beginner
+    tags: [actors, layering]
+    question: |
+      In the use-case model, which actor should application business code depend on directly?
+    options:
+      - "The thin Logger facade (info/error/etc.) — never on appenders, layouts, or config"
+      - "The concrete FileAppender it wants output in"
+      - "The BlockingQueue inside AsyncAppender"
+      - "The PatternLayout string"
+    answer: 0
+    explanation: |
+      Application code is the primary actor and should couple only to the Logger facade. Appenders,
+      layouts, and configuration are framework internals wired at bootstrap by ops; leaking them into
+      business code breaks Interface Segregation and Dependency Inversion.
+    ref: "concepts.md#use-cases-and-actors"
+
+  - id: design-logging-framework-046
+    difficulty: advanced
+    tags: [tie-break, extensibility, tradeoff]
+    question: |
+      An interviewer asks for the trade-off between LAZY (per-write flush) and buffered/async
+      writing to a file appender. What is the honest characterization?
+    options:
+      - "Buffered/async is strictly better with no downside"
+      - "Both have identical durability and latency"
+      - "Lazy flush uses more memory than async"
+      - "Per-write flush is durable but slow (blocks caller on I/O); buffered/async is fast (decoupled) but risks losing buffered messages on a crash before drain"
+    answer: 3
+    explanation: |
+      Flushing every write maximizes durability at the cost of caller latency (each log waits on
+      disk). Buffering/async keeps the hot path fast by decoupling from I/O but trades away
+      durability — messages sitting in the buffer/queue are lost if the process crashes before drain.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-logging-framework-047
+    difficulty: intermediate
+    tags: [method, noun-verb, verbs-to-methods]
+    question: |
+      Applying verb extraction to the requirements ("log, filter, format, write, delegate to
+      parent"), how do these verbs best map onto the design?
+    options:
+      - "All verbs become methods on Logger"
+      - "Each verb becomes its own class"
+      - "log/filter/delegate -> Logger; format -> Layout; write -> Appender.doAppend — verbs distribute across the classes that own each responsibility"
+      - "The verbs are irrelevant to class design"
+    answer: 2
+    explanation: |
+      Verbs become candidate methods, but they attach to the class that owns the responsibility:
+      logging/filtering/delegation live on Logger, formatting on Layout, writing on the concrete
+      appender. Distributing verbs by responsibility is how noun/verb extraction drives SRP.
+    ref: "concepts.md#identify-core-objects-via-nounverb-extraction"
+
+  - id: design-logging-framework-048
+    difficulty: expert
+    tags: [tradeoff, ordering, async]
+    question: |
+      A senior follow-up: with a single-worker AsyncAppender, are log messages guaranteed to be
+      written in the exact wall-clock order the calls happened across threads?
+    options:
+      - "Yes, always — the queue enforces global timestamp order"
+      - "Yes, because the worker sorts by timestamp before writing"
+      - "No — async logging discards ordering entirely and writes randomly"
+      - "Not strictly: concurrent producers race to enqueue, so enqueue order (and thus write order) may not match wall-clock call order; near-ordering is typical but strict total order needs extra coordination"
+    answer: 3
+    explanation: |
+      Threads calling append() race to offer onto the queue, so the enqueue order can differ from the
+      wall-clock order in which the log calls were issued. A single consumer preserves enqueue order,
+      giving near-ordering, but a strict global total order across threads would require additional
+      coordination (e.g., sequencing on a shared timestamp). It is a real trade-off to acknowledge.
+    ref: "concepts.md#concurrency-and-thread-safety"

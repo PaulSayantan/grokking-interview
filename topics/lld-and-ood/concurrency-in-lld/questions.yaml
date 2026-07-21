@@ -1,0 +1,1045 @@
+topic: Concurrency in Low-Level Design
+domain: lld-and-ood
+topic_slug: concurrency-in-lld
+version: 1
+questions:
+- id: concurrency-in-lld-001
+  difficulty: beginner
+  tags:
+  - shared-state
+  - when-it-matters
+  question: |
+    A field on your service class is written only once in the constructor and then only
+    read by many threads. Does it need locking, and why?
+  options:
+  - Yes — any field touched by multiple threads must be synchronized
+  - Yes — reads are never thread-safe in Java
+  - No — it is effectively immutable (shared but not mutable), so reads need no lock; making it final
+    removes it from the concurrency conversation
+  - No — but only if it is a primitive; object references always need locks
+  answer: 2
+  explanation: |
+    Concurrency problems require state that is both shared AND mutable. A write-once field
+    that is only read afterward is effectively immutable; marking it final publishes it
+    safely and no lock is needed. The cheapest lock is no lock.
+  ref: concepts.md#when-concurrency-matters
+- id: concurrency-in-lld-002
+  difficulty: beginner
+  tags:
+  - shared-state
+  - when-it-matters
+  question: |
+    Which of the following is NOT a concurrency concern in a single-JVM LLD design?
+  options:
+  - A local variable computed and used entirely within one method call
+  - A static counter incremented by request-handling threads
+  - The balance field of a shared Account object
+  - The free-spot count of a ParkingLot singleton
+  answer: 0
+  explanation: |
+    A local variable lives on the calling thread's stack and is not shared, so it is never a
+    concurrency concern. The other three are shared mutable state reachable by multiple
+    threads and must be protected.
+  ref: concepts.md#when-concurrency-matters
+- id: concurrency-in-lld-003
+  difficulty: intermediate
+  tags:
+  - race-condition
+  - check-then-act
+  question: |
+    Two threads run `if (seat.isAvailable()) seat.book(user);` for the same seat. Both pass
+    the check before either books. What race-condition category is this?
+  options:
+  - Read-modify-write
+  - Check-then-act
+  - Deadlock
+  - Livelock
+  answer: 1
+  explanation: |
+    A condition is observed (isAvailable) and then acted upon (book), but the condition can
+    change between the two steps. That is the check-then-act shape. The fix is to make the
+    whole check-and-act atomic under one lock or a compare-and-set.
+  ref: concepts.md#race-conditions-check-then-act-and-read-modify-write
+- id: concurrency-in-lld-004
+  difficulty: intermediate
+  tags:
+  - race-condition
+  - read-modify-write
+  question: |
+    Why is `account.setBalance(account.getBalance() - amount)` unsafe under concurrency?
+  options:
+  - setBalance throws if two threads call it
+  - getBalance returns a copy, so the write never takes effect
+  - Subtraction is not supported on shared fields
+  - 'It is a read-modify-write: two concurrent debits both read the old balance, so one update is lost
+    (overdraw)'
+  answer: 3
+  explanation: |
+    Read the balance, compute new value, write it back — three steps. Two threads can both
+    read the same starting balance and each write back their own result, losing one debit.
+    This is the classic read-modify-write lost update; it needs an atomic compound action.
+  ref: concepts.md#race-conditions-check-then-act-and-read-modify-write
+- id: concurrency-in-lld-005
+  difficulty: intermediate
+  tags:
+  - volatile
+  - atomicity
+  question: |
+    A candidate makes `int count` into `volatile int count` and claims `count++` is now
+    thread-safe. What is wrong?
+  options:
+  - Nothing — volatile makes ++ atomic
+  - volatile guarantees visibility of single reads/writes but not atomicity of the compound read-modify-write
+    that ++ performs; it is still racy
+  - volatile only works on booleans
+  - count should have been made final
+  answer: 1
+  explanation: |
+    volatile ensures each read/write of the variable is visible across threads and ordered,
+    but count++ is read-modify-write (three operations). Two threads can interleave and lose
+    an increment. Use AtomicInteger.incrementAndGet() or a lock.
+  ref: concepts.md#intrinsic-locks-and-volatile
+- id: concurrency-in-lld-006
+  difficulty: intermediate
+  tags:
+  - synchronized
+  - intrinsic-lock
+  question: |
+    What two guarantees does a `synchronized` block provide simultaneously?
+  options:
+  - Fairness and interruptibility
+  - Atomicity and immutability
+  - Mutual exclusion (one thread at a time) and visibility (happens-before for changes made under the
+    lock)
+  - Deadlock freedom and starvation freedom
+  answer: 2
+  explanation: |
+    Entering a monitor via synchronized guarantees only one thread executes the block at a
+    time (mutual exclusion) and establishes a happens-before edge so changes are visible to
+    the next acquirer (visibility). It does not by itself provide fairness or deadlock
+    freedom.
+  ref: concepts.md#intrinsic-locks-and-volatile
+- id: concurrency-in-lld-007
+  difficulty: advanced
+  tags:
+  - synchronized
+  - encapsulation
+  question: |
+    Why is locking on a private final lock object generally preferred over a `synchronized`
+    method (which locks on `this`)?
+  options:
+  - External code that holds a reference to your instance cannot acquire your lock and accidentally deadlock
+    or stall you; the lock is encapsulated
+  - It is faster at the bytecode level
+  - It automatically makes the class immutable
+  - It allows multiple threads into the critical section
+  answer: 0
+  explanation: |
+    When you synchronize on this, any caller holding your object can also synchronize on it,
+    interfering with your locking or causing deadlock. A private final lock object hides the
+    lock, so only your class controls it — cleaner encapsulation of the concurrency concern.
+  ref: concepts.md#intrinsic-locks-and-volatile
+- id: concurrency-in-lld-008
+  difficulty: intermediate
+  tags:
+  - volatile
+  - use-cases
+  question: |
+    Which use of `volatile` is appropriate and correct?
+  options:
+  - Protecting `balance -= amount` on a shared account
+  - A `volatile boolean running` flag polled by a worker loop and flipped by another thread to request
+    shutdown
+  - Making `count++` atomic
+  - Guarding a multi-field invariant across two variables
+  answer: 1
+  explanation: |
+    volatile is right for a single flag whose latest value must be visible across threads
+    with no compound update — a shutdown flag is the textbook case. It cannot make -=, ++,
+    or multi-field invariants atomic; those need a lock or atomics.
+  ref: concepts.md#intrinsic-locks-and-volatile
+- id: concurrency-in-lld-009
+  difficulty: advanced
+  tags:
+  - reentrantlock
+  - trylock
+  question: |
+    Which capability does `ReentrantLock` offer that intrinsic `synchronized` does not?
+  options:
+  - Visibility guarantees
+  - Mutual exclusion
+  - Reentrancy (re-acquiring a lock the same thread already holds)
+  - tryLock with a timeout so a thread can back off instead of blocking forever
+  answer: 3
+  explanation: |
+    Both provide mutual exclusion, visibility, and reentrancy. ReentrantLock adds
+    tryLock()/tryLock(timeout), lockInterruptibly(), optional fairness, and multiple
+    Condition objects — capabilities synchronized lacks. tryLock with timeout is a key
+    deadlock-avoidance tool.
+  ref: concepts.md#reentrantlock-and-readwritelock
+- id: concurrency-in-lld-010
+  difficulty: intermediate
+  tags:
+  - reentrantlock
+  - finally
+  question: |
+    Why must an explicit `lock.lock()` be paired with `lock.unlock()` in a `finally` block?
+  options:
+  - To make the lock reentrant
+  - So the lock is released even if the critical section throws an exception — otherwise the lock is held
+    forever and every other thread blocks
+  - To improve fairness
+  - It is only a style preference with no functional effect
+  answer: 1
+  explanation: |
+    Unlike synchronized (which releases automatically on block exit including exceptions),
+    an explicit lock is not released on an exception unless you unlock in finally. Forgetting
+    it leaks the lock and permanently stalls other threads.
+  ref: concepts.md#reentrantlock-and-readwritelock
+- id: concurrency-in-lld-011
+  difficulty: advanced
+  tags:
+  - readwritelock
+  - cache
+  question: |
+    For a configuration registry that is read thousands of times per second but updated only
+    a few times a day, which locking choice maximizes throughput while staying correct?
+  options:
+  - A single synchronized method for both reads and writes
+  - No lock at all, since reads dominate
+  - 'A ReadWriteLock: shared read lock lets many readers run concurrently, exclusive write lock for the
+    rare update'
+  - A separate ReentrantLock per reader thread
+  answer: 2
+  explanation: |
+    Read-heavy, write-rare state is the canonical ReadWriteLock case: readers don't block
+    each other, and the exclusive write lock is taken only for the infrequent update. A
+    single mutex would needlessly serialize all reads; no lock at all is a data race with
+    the writer.
+  ref: concepts.md#reentrantlock-and-readwritelock
+- id: concurrency-in-lld-012
+  difficulty: advanced
+  tags:
+  - readwritelock
+  - trade-offs
+  question: |
+    When is a plain `ReentrantLock` likely to outperform a `ReentrantReadWriteLock`?
+  options:
+  - Under write-heavy load, where the read/write bookkeeping overhead of the RW lock is not repaid by
+    reader parallelism
+  - When reads vastly outnumber writes
+  - Never — RW locks are always faster
+  - Only in single-threaded programs
+  answer: 0
+  explanation: |
+    A ReadWriteLock pays overhead to track readers and writers; that pays off only when
+    concurrent readers dominate. Under write-heavy load there is little reader parallelism to
+    exploit, so the simpler mutex wins. Match the lock to the read/write ratio.
+  ref: concepts.md#reentrantlock-and-readwritelock
+- id: concurrency-in-lld-013
+  difficulty: intermediate
+  tags:
+  - granularity
+  - coarse
+  question: |
+    A `BookingService` uses one `synchronized` on the whole service, so booking seat A blocks
+    booking seat B. What is this trade-off called and what is its virtue?
+  options:
+  - Fine-grained locking; it maximizes parallelism
+  - Optimistic locking; it never blocks
+  - Lock-free; it uses CAS
+  - Coarse-grained locking; simple and obviously correct, but it serializes unrelated operations
+  answer: 3
+  explanation: |
+    One lock guarding all state is coarse-grained: easy to reason about and correct, but it
+    serializes independent operations (booking A blocks B). The interview move is to start
+    coarse for correctness, then split the lock only where contention justifies it.
+  ref: concepts.md#lock-granularity-coarse-vs-fine-grained
+- id: concurrency-in-lld-014
+  difficulty: advanced
+  tags:
+  - granularity
+  - fine-grained
+  question: |
+    Moving from one service-wide lock to one lock per seat improves throughput but introduces
+    which new risk?
+  options:
+  - Loss of visibility guarantees
+  - Deadlock, when a single transaction needs to acquire two or more of the per-unit locks
+  - Immutability violations
+  - Automatic starvation of all readers
+  answer: 1
+  explanation: |
+    Fine-grained per-unit locks let independent operations proceed in parallel, but as soon
+    as one operation must hold two locks (e.g. a multi-seat booking or an account-to-account
+    transfer) you can deadlock. This is why lock ordering matters with fine-grained locks.
+  ref: concepts.md#lock-granularity-coarse-vs-fine-grained
+- id: concurrency-in-lld-015
+  difficulty: intermediate
+  tags:
+  - granularity
+  - method
+  question: |
+    What is the recommended interview approach to lock granularity?
+  options:
+  - Always go maximally fine-grained from the start for performance
+  - Avoid locks entirely and rely on volatile
+  - Start coarse for correctness, then split the lock only where the contention profile justifies it
+  - Use one global lock for the whole JVM
+  answer: 2
+  explanation: |
+    Correctness first: a coarse lock is simple and demonstrably correct. Then, guided by
+    where contention actually hurts (e.g. per-seat, per-row), refine granularity. Premature
+    fine-graining adds complexity and deadlock risk without measured benefit.
+  ref: concepts.md#lock-granularity-coarse-vs-fine-grained
+- id: concurrency-in-lld-016
+  difficulty: advanced
+  tags:
+  - deadlock
+  - lock-ordering
+  question: |
+    In a money-transfer method, thread T1 transfers A→B (locks A then B) and T2 transfers
+    B→A (locks B then A). What is the standard fix?
+  options:
+  - Acquire the two account locks in a consistent global order (e.g. by account id) so a circular wait
+    is impossible
+  - Make the balance fields volatile
+  - Use a bigger single lock and never release it
+  - Retry the transfer on a background thread
+  answer: 0
+  explanation: |
+    This is a classic deadlock from inconsistent lock ordering. Imposing a total order (lock
+    the lower id first, then the higher) makes a circular wait impossible, breaking one of
+    the four Coffman conditions. tryLock with timeout is an alternative.
+  ref: concepts.md#deadlock-and-lock-ordering
+- id: concurrency-in-lld-017
+  difficulty: advanced
+  tags:
+  - deadlock
+  - coffman
+  question: |
+    Breaking which of these prevents deadlock (it is one of the four Coffman conditions)?
+  options:
+  - Immutability
+  - Visibility
+  - Reentrancy
+  - Circular wait
+  answer: 3
+  explanation: |
+    The four Coffman conditions are mutual exclusion, hold-and-wait, no preemption, and
+    circular wait; breaking any one prevents deadlock. Lock ordering eliminates circular
+    wait; tryLock-with-timeout attacks no-preemption. Immutability, visibility, and
+    reentrancy are not Coffman conditions.
+  ref: concepts.md#deadlock-and-lock-ordering
+- id: concurrency-in-lld-018
+  difficulty: advanced
+  tags:
+  - livelock
+  - starvation
+  question: |
+    Threads repeatedly grab a lock, detect a conflict, release, and retry — making no
+    progress though none is blocked. What is this called?
+  options:
+  - Deadlock
+  - Starvation
+  - Livelock
+  - Priority inversion
+  answer: 2
+  explanation: |
+    In livelock threads are active (not blocked) but keep responding to each other and never
+    progress. Deadlock is threads blocked forever waiting on each other; starvation is one
+    thread never getting the resource. Randomized back-off typically cures livelock.
+  ref: concepts.md#deadlock-and-lock-ordering
+- id: concurrency-in-lld-019
+  difficulty: advanced
+  tags:
+  - optimistic
+  - pessimistic
+  - trade-offs
+  question: |
+    A seat-booking hotspot has very high contention and an expensive critical section. Which
+    concurrency strategy fits best?
+  options:
+  - Optimistic — read a version, compute, compare-and-set, retry on conflict
+  - Pessimistic — lock first, then read-modify-write, then unlock
+  - No synchronization — rely on volatile
+  - Immutability alone
+  answer: 1
+  explanation: |
+    Under high contention with a costly critical section, optimistic CAS-and-retry wastes a
+    lot of work retrying (and can livelock). Pessimistic locking does the work once. Match
+    the strategy to the contention profile: high contention/expensive → pessimistic.
+  ref: concepts.md#optimistic-vs-pessimistic-concurrency
+- id: concurrency-in-lld-020
+  difficulty: advanced
+  tags:
+  - optimistic
+  - low-contention
+  question: |
+    For a rarely-contended counter, why is optimistic concurrency (compareAndSet + retry)
+    often preferable to a lock?
+  options:
+  - It guarantees fairness
+  - It makes the counter immutable
+  - It serializes all access for correctness
+  - Conflicts are rare so retries almost never happen; you avoid lock acquisition overhead and cannot
+    deadlock
+  answer: 3
+  explanation: |
+    Optimistic concurrency assumes conflicts are rare: you read, compute, and commit only if
+    unchanged. At low contention the retry loop almost always succeeds first try, so you skip
+    lock overhead and, being lock-free, you cannot deadlock. It degrades only when contention
+    is high.
+  ref: concepts.md#optimistic-vs-pessimistic-concurrency
+- id: concurrency-in-lld-021
+  difficulty: expert
+  tags:
+  - optimistic
+  - version
+  question: |
+    What core mechanism lets optimistic concurrency detect that another thread modified the
+    state between your read and your write?
+  options:
+  - 'A version number or a compare-and-set on the value: the commit succeeds only if the observed value/version
+    is unchanged'
+  - A mutex held across the whole operation
+  - Thread priorities
+  - A volatile flag
+  answer: 0
+  explanation: |
+    Optimistic concurrency reads a value plus a version (or CASes on the value itself) and
+    commits only if nothing changed since the read; otherwise it retries. There is no lock
+    held. This is the in-JVM analogue of database optimistic (version-column) concurrency.
+  ref: concepts.md#optimistic-vs-pessimistic-concurrency
+- id: concurrency-in-lld-022
+  difficulty: intermediate
+  tags:
+  - atomics
+  - counter
+  question: |
+    You need a thread-safe hit counter with no lock. Which is the right tool?
+  options:
+  - volatile int with ++
+  - AtomicInteger with incrementAndGet()
+  - A plain int guarded by comments
+  - A HashMap of thread ids to counts
+  answer: 1
+  explanation: |
+    AtomicInteger.incrementAndGet() performs an atomic read-modify-write via CAS, giving a
+    correct lock-free counter. volatile int with ++ is still racy (++ is not atomic). For a
+    single counter an atomic beats a lock.
+  ref: concepts.md#atomics-and-lock-free-basics
+- id: concurrency-in-lld-023
+  difficulty: advanced
+  tags:
+  - atomics
+  - cas
+  - aba
+  question: |
+    What is the ABA problem in CAS-based lock-free code, and which class addresses it?
+  options:
+  - Two threads deadlock; ReentrantLock fixes it
+  - A lock is acquired twice; a fair lock fixes it
+  - A value changes A→B→A so a compareAndSet wrongly succeeds as if nothing changed; AtomicStampedReference
+    (adding a stamp/version) addresses it
+  - Readers block writers; ReadWriteLock fixes it
+  answer: 2
+  explanation: |
+    CAS only checks the current value equals the expected value. If it went A→B→A, CAS sees
+    A and succeeds, missing the intervening change. AtomicStampedReference pairs the value
+    with a monotonically changing stamp so such a change is detected.
+  ref: concepts.md#atomics-and-lock-free-basics
+- id: concurrency-in-lld-024
+  difficulty: expert
+  tags:
+  - atomics
+  - longadder
+  question: |
+    For a very high-contention metric counter that you read only occasionally, which is the
+    most scalable choice?
+  options:
+  - synchronized long
+  - AtomicLong
+  - volatile long
+  - LongAdder, which stripes the count across cells to reduce CAS contention
+  answer: 3
+  explanation: |
+    Under heavy write contention AtomicLong's single CAS becomes a hotspot. LongAdder spreads
+    updates across multiple internal cells and sums them on read, trading a slightly more
+    expensive read for far higher write throughput — ideal when you read the total rarely.
+  ref: concepts.md#atomics-and-lock-free-basics
+- id: concurrency-in-lld-025
+  difficulty: expert
+  tags:
+  - atomics
+  - lock-free
+  question: |
+    Why is CAS-based updating described as "lock-free" with respect to deadlock?
+  options:
+  - Because no thread holds a lock that another must wait on indefinitely, so a circular wait cannot form
+  - Because it uses a hidden global lock
+  - Because it disables the scheduler
+  - Because only one thread is ever allowed to run
+  answer: 0
+  explanation: |
+    Lock-free algorithms make progress without any thread holding a lock others must wait
+    for; a failed CAS just retries. Since no thread blocks holding a resource, the circular
+    wait needed for deadlock cannot form. The cost is possible retry churn under contention.
+  ref: concepts.md#atomics-and-lock-free-basics
+- id: concurrency-in-lld-026
+  difficulty: advanced
+  tags:
+  - singleton
+  - dcl
+  - volatile
+  question: |
+    In a double-checked-locking singleton, why must the instance field be declared
+    `volatile`?
+  options:
+  - To make construction faster
+  - Without volatile, instruction reordering can publish a reference before the object is fully constructed,
+    so another thread may see a half-initialized instance
+  - volatile makes the constructor synchronized
+  - It is not required; DCL works without volatile
+  answer: 1
+  explanation: |
+    new Config() involves allocate, construct, and assign the reference. Without volatile,
+    the JIT/CPU may reorder so the reference is visible before construction finishes; a
+    second thread passing the first (unlocked) null-check could return a partially built
+    object. volatile forbids that reordering and fixes DCL.
+  ref: concepts.md#thread-safe-singleton
+- id: concurrency-in-lld-027
+  difficulty: advanced
+  tags:
+  - singleton
+  - holder-idiom
+  question: |
+    Which lazy singleton approach is thread-safe with no synchronization cost on the access
+    path?
+  options:
+  - Eager static field
+  - A synchronized getInstance() on every call
+  - A plain if (instance == null) with no lock
+  - Initialization-on-demand holder idiom (a nested static Holder class initialized on first use)
+  answer: 3
+  explanation: |
+    The holder idiom relies on the JVM guarantee that a nested class is loaded and
+    initialized lazily and safely on first use. It is lazy AND thread-safe with zero locking
+    on subsequent accesses. Synchronizing every getInstance() call adds needless overhead;
+    the plain null-check is racy.
+  ref: concepts.md#thread-safe-singleton
+- id: concurrency-in-lld-028
+  difficulty: intermediate
+  tags:
+  - singleton
+  - enum
+  question: |
+    Why is the enum singleton (`enum Config { INSTANCE; }`) often recommended?
+  options:
+  - It is the only lazy option
+  - It allows multiple instances when needed
+  - It is concise and inherently safe against reflection and serialization attacks that can break other
+    singletons, while being thread-safe by class loading
+  - It avoids the need for a private constructor
+  answer: 2
+  explanation: |
+    Effective Java favors the enum singleton because the JVM guarantees a single instance,
+    it is thread-safe via class initialization, and it resists reflection and serialization
+    attacks that can otherwise create a second instance. Its main limitation is eager
+    initialization.
+  ref: concepts.md#thread-safe-singleton
+- id: concurrency-in-lld-029
+  difficulty: intermediate
+  tags:
+  - concurrent-collections
+  - concurrenthashmap
+  question: |
+    Why prefer `ConcurrentHashMap` over `Collections.synchronizedMap(new HashMap<>())` for a
+    high-traffic shared map?
+  options:
+  - ConcurrentHashMap allows much higher concurrent throughput (lock striping/CAS) and offers atomic compound
+    methods like computeIfAbsent, whereas synchronizedMap wraps every method in one coarse lock
+  - synchronizedMap loses data
+  - ConcurrentHashMap permits null keys and values
+  - synchronizedMap cannot be iterated at all
+  answer: 0
+  explanation: |
+    synchronizedMap serializes all access through a single lock (coarse) and still needs
+    external locking for compound actions and iteration. ConcurrentHashMap uses finer
+    internal concurrency and exposes atomic compound operations (putIfAbsent, computeIfAbsent,
+    merge) that close check-then-act gaps.
+  ref: concepts.md#concurrent-collections
+- id: concurrency-in-lld-030
+  difficulty: advanced
+  tags:
+  - concurrent-collections
+  - check-then-act
+  question: |
+    Even with a `ConcurrentHashMap`, why is `if (!map.containsKey(k)) map.put(k, v);` still a
+    race, and what fixes it?
+  options:
+  - It is not a race; ConcurrentHashMap makes any sequence atomic
+  - Each method is individually atomic, but the containsKey-then-put sequence is a check-then-act; use
+    putIfAbsent or computeIfAbsent to make it one atomic operation
+  - You must wrap it in synchronizedMap
+  - put is not thread-safe on ConcurrentHashMap
+  answer: 1
+  explanation: |
+    ConcurrentHashMap makes each individual method atomic, not arbitrary sequences of them.
+    Another thread can insert k between your containsKey and put. putIfAbsent/computeIfAbsent
+    perform the check-and-insert atomically inside the map.
+  ref: concepts.md#concurrent-collections
+- id: concurrency-in-lld-031
+  difficulty: advanced
+  tags:
+  - concurrent-collections
+  - producer-consumer
+  question: |
+    For a producer-consumer job pipeline where consumers should wait when the queue is empty
+    and producers should wait when it is full, which structure is the natural fit?
+  options:
+  - CopyOnWriteArrayList
+  - A plain ArrayList with synchronized
+  - A ConcurrentHashMap keyed by job id
+  - 'A BlockingQueue (e.g. ArrayBlockingQueue): put blocks when full, take blocks when empty, giving back-pressure
+    without hand-written wait/notify'
+  answer: 3
+  explanation: |
+    BlockingQueue is purpose-built for producer-consumer: bounded capacity provides
+    back-pressure, put/take block appropriately, and you avoid error-prone manual
+    wait/notify. It is the backbone of task queues and logging pipelines.
+  ref: concepts.md#concurrent-collections
+- id: concurrency-in-lld-032
+  difficulty: intermediate
+  tags:
+  - concurrent-collections
+  - observer
+  - copyonwrite
+  question: |
+    A subject holds a list of event listeners that is read on every event but mutated rarely
+    (occasional register/unregister). Which collection minimizes read contention?
+  options:
+  - CopyOnWriteArrayList — reads are lock-free; mutations copy the backing array
+  - A synchronized ArrayList
+  - A BlockingQueue
+  - A ConcurrentHashMap
+  answer: 0
+  explanation: |
+    CopyOnWriteArrayList makes reads/iteration lock-free at the cost of copying the array on
+    mutation — ideal for read-mostly observer/listener registries. A synchronized list would
+    lock on every read; the other two are for different access patterns.
+  ref: concepts.md#concurrent-collections
+- id: concurrency-in-lld-033
+  difficulty: intermediate
+  tags:
+  - immutability
+  - thread-safety
+  question: |
+    Why is a properly immutable value object (all fields final, no setters, defensive copies)
+    inherently thread-safe?
+  options:
+  - Because the JVM locks immutable objects automatically
+  - Because immutable objects live on the stack
+  - Because it has no mutable state — there is nothing for threads to change, so no synchronization is
+    required to read it
+  - Because final fields are stored in thread-local memory
+  answer: 2
+  explanation: |
+    Thread-safety problems arise from shared mutable state. An immutable object cannot change
+    after safe publication, so any number of threads can read it concurrently without locks.
+    Modeling Money, Coordinate, or a Booking as immutable is often the cleanest fix.
+  ref: concepts.md#immutability-as-a-concurrency-strategy
+- id: concurrency-in-lld-034
+  difficulty: advanced
+  tags:
+  - immutability
+  - copy-on-write
+  - atomic-reference
+  question: |
+    To evolve state while keeping objects immutable, a common pattern keeps an
+    `AtomicReference<ImmutableState>` and swaps snapshots. How is a "mutation" performed?
+  options:
+  - Mutate the fields of the current state in place
+  - Build a new immutable state from the old and publish it with compareAndSet, so the change is a single
+    atomic pointer swap (retry on conflict)
+  - Take a write lock and edit the snapshot
+  - Synchronize every read of the state
+  answer: 1
+  explanation: |
+    With immutable snapshots, you never edit in place: you construct a new immutable state and
+    atomically swap the reference via compareAndSet, retrying if another thread swapped first.
+    Mutation becomes one atomic pointer swap — lock-free and safe.
+  ref: concepts.md#immutability-as-a-concurrency-strategy
+- id: concurrency-in-lld-035
+  difficulty: advanced
+  tags:
+  - idempotency
+  - retries
+  question: |
+    A booking request may be retried by the client after a timeout, so the server can receive
+    it twice. What design property prevents a duplicate booking?
+  options:
+  - Fairness in the lock
+  - Using volatile on the booking field
+  - Increasing the thread pool size
+  - Idempotency — e.g. a client-supplied idempotency key recorded via putIfAbsent, so a duplicate short-circuits
+    to the existing result
+  answer: 3
+  explanation: |
+    Idempotency ensures applying the operation twice has the same effect as once. Recording a
+    unique request/idempotency key (atomically, e.g. putIfAbsent) lets the server detect and
+    short-circuit duplicates, returning the original result rather than creating a second
+    booking.
+  ref: concepts.md#idempotency-for-retries
+- id: concurrency-in-lld-036
+  difficulty: advanced
+  tags:
+  - idempotency
+  - absolute-vs-relative
+  question: |
+    Which operation form is naturally idempotent and therefore safer under retries?
+  options:
+  - set status = BOOKED (absolute state transition)
+  - increment balance by 10 (relative delta)
+  - append a log line
+  - add one item to a list
+  answer: 0
+  explanation: |
+    An absolute assignment ("set status = BOOKED") yields the same result no matter how many
+    times it is applied. Relative deltas (increment by 10, append, add) accumulate on each
+    retry, so they need explicit de-duplication to be safe. Prefer absolute transitions where
+    possible.
+  ref: concepts.md#idempotency-for-retries
+- id: concurrency-in-lld-037
+  difficulty: intermediate
+  tags:
+  - seat-booking
+  - worked-example
+  question: |
+    In the worked seat-booking example, the AFTER version puts a lock inside `Seat` and keeps
+    the critical section tiny. What is the primary benefit over locking the whole service?
+  options:
+  - It eliminates the need for a lock entirely
+  - It removes the check-then-act race but reduces throughput
+  - Different seats can be booked concurrently; booking seat A no longer blocks booking seat B, and the
+    lock is encapsulated in the object that owns the state
+  - It makes Seat immutable
+  answer: 2
+  explanation: |
+    Per-seat locking is fine-grained: contention is only between threads booking the SAME
+    seat, so unrelated seats proceed in parallel. Encapsulating the lock inside Seat respects
+    SRP/encapsulation — callers don't manage locking. The tiny critical section minimizes
+    hold time.
+  ref: concepts.md#worked-example-seat-booking-race
+- id: concurrency-in-lld-038
+  difficulty: advanced
+  tags:
+  - seat-booking
+  - multi-seat
+  - deadlock
+  question: |
+    Extending the booking example: a request reserves MULTIPLE seats atomically. With
+    per-seat locks, what must you do to stay deadlock-free?
+  options:
+  - Lock the seats in whatever order they arrive
+  - Acquire the per-seat locks in a consistent order (e.g. by seat id), or reserve optimistically and
+    roll back on partial failure
+  - Replace the per-seat locks with volatile flags
+  - Use a single global lock for the whole booking system
+  answer: 1
+  explanation: |
+    Holding two or more locks reintroduces deadlock risk. Acquiring them in a globally
+    consistent order (by id) prevents circular wait; alternatively reserve optimistically and
+    undo on partial failure. Reverting to one global lock works but serializes all bookings.
+  ref: concepts.md#worked-example-seat-booking-race
+- id: concurrency-in-lld-039
+  difficulty: intermediate
+  tags:
+  - patterns
+  - strategy
+  question: |
+    You want the same service to run an optimistic policy in low-contention deployments and a
+    pessimistic policy in high-contention ones, swappable via configuration. Which GoF
+    pattern fits?
+  options:
+  - Strategy — encapsulate each concurrency policy behind a common interface and inject the chosen one
+  - Singleton
+  - Observer
+  - Decorator
+  answer: 0
+  explanation: |
+    Interchangeable algorithms selected at runtime behind one interface is the Strategy
+    pattern. A ConcurrencyStrategy interface with Pessimistic and Optimistic implementations
+    lets you swap policy without changing the service (Open/Closed). Cross-ref the dp-strategy
+    topic for the pattern itself.
+  ref: concepts.md#design-decisions-and-patterns
+- id: concurrency-in-lld-040
+  difficulty: advanced
+  tags:
+  - solid
+  - encapsulation
+  question: |
+    A design exposes its internal `ReentrantLock` via a public getter so callers can lock
+    around multi-step operations. Which principle does this most directly violate?
+  options:
+  - The Liskov Substitution Principle
+  - The Interface Segregation Principle
+  - The Dependency Inversion Principle
+  - Encapsulation / Single Responsibility — locking is an internal concern of the state's owner and should
+    not leak to callers
+  answer: 3
+  explanation: |
+    Leaking the lock forces every caller to coordinate locking correctly and couples them to
+    the implementation, breaking encapsulation and spreading a single responsibility (guarding
+    this object's state) across the codebase. The owner should expose atomic operations, not
+    its lock.
+  ref: concepts.md#design-decisions-and-patterns
+- id: concurrency-in-lld-041
+  difficulty: advanced
+  tags:
+  - parking-lot
+  - cross-ref
+  question: |
+    In a parking-lot design, two cars arrive as the last spot frees. `if (freeSpots > 0)
+    { assign(); freeSpots--; }` lets both park. What is the minimal correct fix in a single
+    JVM?
+  options:
+  - Make freeSpots volatile
+  - Add more parking levels
+  - Make the check-and-decrement atomic — hold a lock across it, or use AtomicInteger with compareAndSet/decrement
+    guarded against going below zero
+  - Retry on a background thread
+  answer: 2
+  explanation: |
+    This is a check-then-act plus read-modify-write on freeSpots. volatile does not make the
+    compound atomic. Either guard the whole check-and-decrement with a lock, or CAS the count
+    (rejecting when it would drop below zero). Cross-ref design-parking-lot.
+  ref: concepts.md#race-conditions-check-then-act-and-read-modify-write
+- id: concurrency-in-lld-042
+  difficulty: advanced
+  tags:
+  - rate-limiter
+  - cross-ref
+  - atomics
+  question: |
+    A token-bucket rate limiter lets requests pass while tokens remain. Two requests race for
+    the last token. What is a clean lock-free way to admit exactly one?
+  options:
+  - Read tokens, then set tokens = tokens - 1 in two steps
+  - 'Loop: read current tokens; if 0 reject; else compareAndSet(current, current-1) and admit only if
+    the CAS succeeds, retry otherwise'
+  - Make the token count volatile and decrement it
+  - Use a synchronizedMap of request ids
+  answer: 1
+  explanation: |
+    The CAS retry loop guarantees only the thread whose compareAndSet succeeds decrements the
+    count, so exactly one request takes the last token; others see 0 and are rejected. This is
+    optimistic concurrency on an atomic counter. Cross-ref design-rate-limiter-oo.
+  ref: concepts.md#atomics-and-lock-free-basics
+- id: concurrency-in-lld-043
+  difficulty: expert
+  tags:
+  - wallet
+  - splitwise
+  - cross-ref
+  - lock-ordering
+  question: |
+    In a digital-wallet transfer, you decide on pessimistic locking of both accounts. Beyond
+    correctness of the debit/credit, what is the essential rule to avoid a hang?
+  options:
+  - Acquire both account locks in a globally consistent order (e.g. ascending account id) in every transfer,
+    regardless of direction
+  - Always lock the destination account first
+  - Never use finally to unlock
+  - Use a fresh lock object per transfer
+  answer: 0
+  explanation: |
+    With two locks per transfer, opposite-direction transfers can deadlock unless every caller
+    acquires them in the same global order. Ordering by account id makes a circular wait
+    impossible. Cross-ref design-splitwise for the balance/transfer modeling.
+  ref: concepts.md#deadlock-and-lock-ordering
+- id: concurrency-in-lld-044
+  difficulty: intermediate
+  tags:
+  - cache
+  - readwritelock
+  - cross-ref
+  question: |
+    For a read-heavy in-memory cache (many gets, occasional puts/evictions), which locking
+    choice is the textbook fit and why?
+  options:
+  - A single mutex, because caches are simple
+  - No lock, because reads are always safe
+  - One lock per cache key for reads
+  - A ReadWriteLock, because concurrent readers can share the read lock while the rarer writes take the
+    exclusive lock
+  answer: 3
+  explanation: |
+    A cache is the canonical read-mostly structure: a ReadWriteLock lets many gets proceed in
+    parallel and serializes only the infrequent mutations. (Note: eviction structure updates
+    count as writes.) Cross-ref design-cache-oo for the full design.
+  ref: concepts.md#reentrantlock-and-readwritelock
+- id: concurrency-in-lld-045
+  difficulty: advanced
+  tags:
+  - boundary
+  - hld
+  question: |
+    The interviewer says "now make this work across 100 servers." How should an LLD candidate
+    respond?
+  options:
+  - Add more ReentrantLocks
+  - Make every field volatile so it syncs across servers
+  - Acknowledge that cross-machine coordination is an HLD concern — distributed locks (Redis/ZooKeeper)
+    or DB row locks / optimistic versioning — and keep the LLD design single-JVM, pointing to the system-design
+    domain
+  - Use a bigger ConcurrentHashMap
+  answer: 2
+  explanation: |
+    Intrinsic/JUC locks and atomics coordinate threads within one JVM only; they cannot
+    synchronize across machines. Distribution requires distributed locks or DB-level
+    concurrency — an HLD topic. The right move is to name the boundary and keep the LLD answer
+    single-JVM.
+  ref: concepts.md#common-interview-follow-ups
+- id: concurrency-in-lld-046
+  difficulty: intermediate
+  tags:
+  - class-diagram
+  - patterns
+  question: |
+    In the thread-safe booking class diagram, `Seat` owns a `ReentrantLock` shown with a
+    composition relationship. What does composition communicate here?
+  options:
+  - The lock is shared among many seats
+  - The lock's lifecycle is bound to the Seat — it is created and owned by the Seat and not shared or
+    reused elsewhere
+  - Seat inherits from ReentrantLock
+  - The lock is optional and injected by the caller
+  answer: 1
+  explanation: |
+    Composition (filled diamond, --*) denotes a strong whole-part ownership with shared
+    lifecycle: the lock is an internal part of the Seat, created with it and never shared.
+    That encapsulation is exactly why per-seat locking is safe and clean.
+  ref: concepts.md#class-diagram-a-thread-safe-booking-design
+- id: concurrency-in-lld-047
+  difficulty: intermediate
+  tags:
+  - method
+  - reasoning
+  question: |
+    What is the recommended four-step way to reason about a "make it thread-safe" follow-up in
+    an interview?
+  options:
+  - Add synchronized, run tests, profile, optimize
+  - Rewrite everything as immutable, then add a global lock
+  - Switch to a distributed lock immediately
+  - Point at the exact shared mutable state, name the race class (check-then-act or read-modify-write),
+    show the smallest correct fix, then justify granularity and optimistic-vs-pessimistic by the contention
+    profile
+  answer: 3
+  explanation: |
+    The senior-signal sequence is: identify the shared mutable state, classify the race, apply
+    the minimal correct fix, and justify the strategy/granularity against contention. Reaching
+    for synchronized everywhere or jumping to distributed locks skips the reasoning
+    interviewers grade.
+  ref: concepts.md#race-conditions-check-then-act-and-read-modify-write
+- id: concurrency-in-lld-048
+  difficulty: expert
+  tags:
+  - readwritelock
+  - stampedlock
+  question: |
+    Which statement about `StampedLock` versus `ReentrantReadWriteLock` is accurate for a
+    read-dominated structure?
+  options:
+  - StampedLock offers an optimistic-read mode that can boost read throughput further, but it is non-reentrant
+    and trickier to use correctly (you must validate the stamp)
+  - StampedLock is reentrant and simpler to use
+  - StampedLock provides distributed locking
+  - StampedLock guarantees fairness by default
+  answer: 0
+  explanation: |
+    StampedLock adds a lock-free optimistic read (tryOptimisticRead + validate) that can beat a
+    ReadWriteLock under heavy reads, but it is not reentrant and misuse (forgetting to validate
+    the stamp) causes bugs. It is a valid advanced mention, not a drop-in replacement.
+  ref: concepts.md#reentrantlock-and-readwritelock
+- id: concurrency-in-lld-049
+  difficulty: intermediate
+  tags:
+  - immutability
+  - records
+  question: |
+    A candidate models `Money` as a mutable class with setAmount(). For a shared-across-threads
+    value object, what is the cleaner concurrency-safe redesign?
+  options:
+  - Add synchronized to setAmount()
+  - Make the amount field volatile
+  - Make Money immutable (final fields, no setters; e.g. a record), returning a new Money for arithmetic
+    instead of mutating in place
+  - Guard every Money with its own ReentrantLock
+  answer: 2
+  explanation: |
+    Value objects like Money are ideal immutability candidates: no setters, arithmetic returns
+    new instances. An immutable Money is inherently thread-safe with zero locking — far cleaner
+    than synchronizing or locking a value type that many threads read.
+  ref: concepts.md#immutability-as-a-concurrency-strategy
+- id: concurrency-in-lld-050
+  difficulty: advanced
+  tags:
+  - starvation
+  - fairness
+  question: |
+    Some threads never manage to acquire a contended lock while others repeatedly win it. Which
+    failure is this, and which ReentrantLock option mitigates it?
+  options:
+  - Deadlock; use tryLock
+  - Starvation; construct the ReentrantLock with fairness enabled so waiters are served in FIFO order
+  - Livelock; add random back-off
+  - Race condition; make the field volatile
+  answer: 1
+  explanation: |
+    When a thread is perpetually denied the lock it is starvation. A fair ReentrantLock (new
+    ReentrantLock(true)) grants the lock in approximate FIFO order, preventing indefinite
+    denial — at some throughput cost. Deadlock and livelock are different failure modes.
+  ref: concepts.md#deadlock-and-lock-ordering
+- id: concurrency-in-lld-051
+  difficulty: advanced
+  tags:
+  - concurrent-collections
+  - atomic-methods
+  question: |
+    You need "get the session for this user, creating it if absent" to be atomic on a shared
+    ConcurrentHashMap. Which call is correct?
+  options:
+  - get() then, if null, put()
+  - containsKey() then put()
+  - putIfAbsent(userId, new Session(userId)) is identical in cost and effect
+  - computeIfAbsent(userId, id -> new Session(id))
+  answer: 3
+  explanation: |
+    computeIfAbsent performs the check-and-create atomically and, crucially, only constructs
+    the Session when the key is truly absent. Plain putIfAbsent(userId, new Session(...)) also
+    works but always allocates the Session even on a hit; get-then-put and containsKey-then-put
+    are racy.
+  ref: concepts.md#concurrent-collections
+- id: concurrency-in-lld-052
+  difficulty: advanced
+  tags:
+  - pessimistic
+  - side-effects
+  question: |
+    Why is pessimistic locking usually preferred when the critical section performs an
+    expensive or side-effecting operation (e.g. an external call that cannot be undone)?
+  options:
+  - Because optimistic retry would redo the expensive/side-effecting work on every conflict, and side
+    effects cannot simply be rolled back and replayed
+  - Because locks are always faster
+  - Because pessimistic locking is lock-free
+  - Because it avoids the need for idempotency
+  answer: 0
+  explanation: |
+    Optimistic concurrency retries the whole computation on conflict; if that work is costly or
+    has irreversible side effects, retrying is wasteful or incorrect. Pessimistic locking does
+    the work once under exclusion. (If side effects are involved, idempotency still matters for
+    retries at the request level.)
+  ref: concepts.md#optimistic-vs-pessimistic-concurrency

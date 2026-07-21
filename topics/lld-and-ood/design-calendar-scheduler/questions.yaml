@@ -1,0 +1,878 @@
+topic: "Design a Calendar / Meeting Scheduler"
+domain: lld-and-ood
+topic_slug: design-calendar-scheduler
+version: 1
+questions:
+  - id: design-calendar-scheduler-001
+    difficulty: beginner
+    tags: [requirements, scoping]
+    question: |
+      In the first five minutes of "Design a Calendar / Meeting Scheduler", which
+      clarifying question most changes the shape of your core algorithm?
+    options:
+      - "What font should the calendar UI use?"
+      - "How many colors can an event have?"
+      - "Do we need to find a time slot common to several attendees, or only manage one person's events?"
+      - "Which database vendor will we use?"
+    answer: 2
+    explanation: |
+      Multi-attendee free-slot finding is a merge-intervals problem that adds a whole
+      subsystem (gathering and merging busy intervals across calendars). Single-user
+      management is just per-calendar overlap detection. Fonts, colors, and DB vendor
+      don't touch the object model.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-calendar-scheduler-002
+    difficulty: beginner
+    tags: [time-model, intervals, off-by-one]
+    question: |
+      Why model an event's time as the half-open interval [start, end) rather than a
+      closed interval?
+    options:
+      - "So a meeting ending at 10:00 and one starting at 10:00 are not falsely flagged as conflicting"
+      - "Half-open intervals use less memory"
+      - "Because Java's Instant cannot represent a closed range"
+      - "Because calendars legally require gaps between meetings"
+    answer: 0
+    explanation: |
+      Back-to-back meetings [9,10) and [10,11) must not conflict. With strict isBefore
+      comparisons the half-open convention gives that for free; closed intervals force
+      "-1" fudges scattered through the code — a classic off-by-one factory.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-calendar-scheduler-003
+    difficulty: intermediate
+    tags: [noun-verb, method, object-identification]
+    question: |
+      Applying noun/verb extraction, a candidate spots the noun "conflict" in the
+      requirements and proposes a Conflict class. What is the best critique?
+    options:
+      - "Conflict should be an enum instead"
+      - "Conflict should inherit from Event"
+      - "Conflict is fine as a class but needs a database table"
+      - "A conflict is the result of the overlap query, not a domain entity — return a list of overlapping events, don't manufacture a class for an algorithm's output"
+    answer: 3
+    explanation: |
+      Not every noun becomes a class. "Conflict" and "free slot" are outputs of queries:
+      conflicts are the overlapping events returned; a free slot is just a TimeSlot.
+      Creating classes for algorithm results is a common junior mistake the filtering
+      step is meant to catch.
+    ref: "concepts.md#noun--verb-object-identification"
+
+  - id: design-calendar-scheduler-004
+    difficulty: intermediate
+    tags: [value-object, timeslot, encapsulation]
+    question: |
+      Where should the overlaps() logic live?
+    options:
+      - "Duplicated in ConflictDetector and FreeSlotFinder"
+      - "On the TimeSlot value object itself"
+      - "As a static utility method in a Helpers class"
+      - "Inside the SchedulerService facade"
+    answer: 1
+    explanation: |
+      Putting overlaps() on the TimeSlot value object gives the interval rule one home,
+      makes it unit-testable in isolation, and prevents the half-open convention from
+      being re-implemented (differently) in several places.
+    ref: "concepts.md#conflict-detection-interval-overlap"
+
+  - id: design-calendar-scheduler-005
+    difficulty: intermediate
+    tags: [strategy, recurrence, patterns]
+    question: |
+      Daily, weekly, and monthly recurrences differ in how they generate occurrence
+      dates. Which pattern models this, and why?
+    options:
+      - "Strategy — each frequency is a class implementing a common occurrences() interface, so adding a new frequency is a new class, not an edit"
+      - "Singleton — there is one recurrence per app"
+      - "Adapter — it adapts dates to events"
+      - "Flyweight — to share date objects"
+    answer: 0
+    explanation: |
+      The recurrence *algorithm* varies, which is the definition of a Strategy. A
+      RecurrenceRule interface with DailyRecurrence/WeeklyRecurrence/MonthlyRecurrence
+      implementations keeps Event closed to modification when new patterns arrive.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-006
+    difficulty: intermediate
+    tags: [state, invitation, patterns]
+    question: |
+      An Invitation moves Pending -> Accepted/Declined/Tentative with rules about which
+      transitions are legal from each status. Which pattern fits, and what does it
+      encapsulate?
+    options:
+      - "Observer — it observes the meeting"
+      - "Builder — to build the invitation step by step"
+      - "State — each status is a class that defines what accept()/decline() do from there and guards illegal transitions"
+      - "Proxy — to stand in for the meeting"
+    answer: 2
+    explanation: |
+      The invitation has a genuine lifecycle with per-status behavior and guarded
+      transitions, which is exactly the State pattern. Each state object encapsulates
+      the legal moves, keeping Invitation free of a growing switch.
+    ref: "concepts.md#invitation-state-machine"
+
+  - id: design-calendar-scheduler-007
+    difficulty: intermediate
+    tags: [observer, reminders, patterns]
+    question: |
+      Reminders and invitation responses must notify multiple interested parties
+      (devices, organizer, analytics) without the scheduler knowing each one. Which
+      pattern applies?
+    options:
+      - "Template Method"
+      - "Observer — subscribers register and the scheduler fires events like onResponded, inverting the dependency"
+      - "Decorator"
+      - "Memento"
+    answer: 1
+    explanation: |
+      Observer inverts the dependency: the scheduler publishes events and channels
+      subscribe. Adding a WhatsApp channel never edits the scheduler — the payoff of the
+      Observer seam.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-008
+    difficulty: advanced
+    tags: [free-slot, merge-intervals, algorithm]
+    question: |
+      To find a 30-minute slot free for all five attendees, what is the cleanest
+      algorithmic approach?
+    options:
+      - "Compare every pair of attendees' events for direct matches"
+      - "Randomly sample times until one works for everyone"
+      - "Ask each attendee to manually approve every candidate time"
+      - "Gather all attendees' busy intervals, merge overlapping ones, take the gaps within the window, and keep gaps >= 30 min"
+    answer: 3
+    explanation: |
+      Combining everyone's busy intervals and complementing within the window is the
+      merge-intervals technique: sort by start, coalesce overlaps, and the gaps are the
+      common free time. It is O(M log M) versus pairwise intersection of free sets.
+    ref: "concepts.md#finding-a-common-free-slot"
+
+  - id: design-calendar-scheduler-008b
+    difficulty: intermediate
+    tags: [use-cases, actors]
+    question: |
+      A conference room is best modeled as which kind of participant in the use-case
+      analysis?
+    options:
+      - "A subclass of User"
+      - "An enum value on Meeting"
+      - "A field on Attendee"
+      - "A passive actor / bookable Resource with its own busy calendar that can be booked at most once per interval"
+    answer: 3
+    explanation: |
+      The room does not initiate actions but it has state (its bookings) and a constraint
+      (one booking per overlapping interval). Modeling it as a Resource with its own busy
+      calendar mirrors how attendees carry busy intervals and reuses the overlap logic.
+    ref: "concepts.md#use-cases-and-actors"
+
+  - id: design-calendar-scheduler-009
+    difficulty: advanced
+    tags: [concurrency, double-booking, locking]
+    question: |
+      Two organizers try to book the same room for overlapping times simultaneously.
+      Where is the race, and what is the interview-appropriate fix?
+    options:
+      - "There is no race because Java is single-threaded"
+      - "The isFree() check followed by book() write is check-then-act; guard it with a per-room lock so only one booking wins"
+      - "Add a global lock around the whole SchedulerService"
+      - "Retry the whole request every 100ms until it succeeds"
+    answer: 1
+    explanation: |
+      Without mutual exclusion both isFree() checks pass before either write lands,
+      double-booking the room. A per-room lock serializes only contending requests for
+      that room; the loser gets a clean ResourceUnavailableException. A global lock would
+      needlessly serialize unrelated rooms.
+    ref: "concepts.md#concurrency-double-booking-a-room"
+
+  - id: design-calendar-scheduler-010
+    difficulty: advanced
+    tags: [concurrency, lock-granularity]
+    question: |
+      Why prefer a per-room lock over a single global scheduler lock for room booking?
+    options:
+      - "A per-room lock lets bookings for different rooms proceed in parallel while still serializing contention on the same room"
+      - "A global lock is easier to deadlock"
+      - "Global locks are not supported in Java"
+      - "Per-room locks eliminate the need for any availability check"
+    answer: 0
+    explanation: |
+      Lock the contended object, not the whole service. Room A and Room B bookings should
+      never block each other; only two requests for the same room need to serialize. This
+      is the same granularity reasoning as the hotel "last room" race.
+    ref: "concepts.md#concurrency-double-booking-a-room"
+
+  - id: design-calendar-scheduler-011
+    difficulty: intermediate
+    tags: [composition, inheritance, relationships]
+    question: |
+      Should Meeting extend Event, or compose it?
+    options:
+      - "Always compose — inheritance is forbidden in LLD"
+      - "Inherit because it saves typing"
+      - "Inherit here because a Meeting genuinely adds structure (attendees, invitations, a resource) and is-a Event; favor composition only when the difference is mere data"
+      - "Compose because Event and Meeting are unrelated"
+    answer: 2
+    explanation: |
+      A Meeting is-a Event that adds real structure and behavior (attendees, invitations,
+      room), so inheritance is justified. The guideline: subclass when the subtype adds
+      behavior/structure; if types differ only in data, prefer composition or config.
+    ref: "concepts.md#responsibilities-and-relationships"
+
+  - id: design-calendar-scheduler-012
+    difficulty: intermediate
+    tags: [relationships, aggregation, composition]
+    question: |
+      Why is Calendar-to-Event modeled as aggregation (o--) rather than composition (*--)?
+    options:
+      - "Because events are value objects"
+      - "Because the same meeting object appears on several attendees' calendars, so ownership is shared/referential rather than exclusive"
+      - "Because aggregation is always preferred over composition"
+      - "Because events have no lifecycle"
+    answer: 1
+    explanation: |
+      A meeting shows up on every accepted attendee's calendar, so a calendar references
+      events rather than solely owning them. Composition would imply the event dies with
+      one calendar, which is wrong for shared meetings.
+    ref: "concepts.md#responsibilities-and-relationships"
+
+  - id: design-calendar-scheduler-013
+    difficulty: intermediate
+    tags: [attendee, association-class, modeling]
+    question: |
+      Why model Attendee as a first-class object rather than just storing a List<User>
+      on Meeting?
+    options:
+      - "Because User is abstract"
+      - "Because Java lists cannot hold User objects"
+      - "Because it reduces the number of classes"
+      - "Because the user-to-meeting link carries state (response status, required/optional) that must live on the association itself"
+    answer: 3
+    explanation: |
+      The relationship carries data — each participant's ResponseStatus and whether they
+      are required or optional. That state belongs on the link, so Attendee (an
+      association object) is modeled explicitly rather than folded into a bare user list.
+    ref: "concepts.md#noun--verb-object-identification"
+
+  - id: design-calendar-scheduler-014
+    difficulty: advanced
+    tags: [recurrence, conflict-detection, expansion]
+    question: |
+      When checking whether a proposed slot conflicts with an existing recurring event,
+      why can't you just compare the recurring event's single stored slot?
+    options:
+      - "Because stored slots are encrypted"
+      - "Because recurring events have no slot"
+      - "Because you must expand the recurring event's occurrences within the proposed window and overlap-test each generated instance"
+      - "Because the stored slot is always in the past"
+    answer: 2
+    explanation: |
+      A recurring event represents many occurrences. Conflict detection must expand its
+      occurrences within the query window (bounded so infinite series stay finite) and
+      test each — which is why occurrencesIn(window) exists.
+    ref: "concepts.md#conflict-detection-interval-overlap"
+
+  - id: design-calendar-scheduler-015
+    difficulty: advanced
+    tags: [composite, recurrence, patterns]
+    question: |
+      A recurring event is one logical event that expands into many concrete occurrences,
+      and callers should treat "the standup" and "next Tuesday's standup" uniformly.
+      Which pattern captures this?
+    options:
+      - "Composite — a common interface lets a series and a single occurrence be handled uniformly, with per-instance overrides"
+      - "Bridge"
+      - "Chain of Responsibility"
+      - "Interpreter"
+    answer: 0
+    explanation: |
+      Treating the series and an individual occurrence through a shared interface
+      (occurrencesIn returns one-or-many) is Composite-flavored: uniform handling of the
+      whole and its parts, which also supports per-instance exceptions/overrides.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-016
+    difficulty: intermediate
+    tags: [factory, construction, patterns]
+    question: |
+      Why route event/meeting creation through an EventFactory?
+    options:
+      - "To centralize wiring (id generation, default reminder, organizer's calendar) and hide whether a plain Event or a Meeting is built, so adding an AllDayEvent touches one place"
+      - "To make events immutable"
+      - "To avoid using the 'new' keyword anywhere in Java"
+      - "To make the classes thread-safe"
+    answer: 0
+    explanation: |
+      A Factory centralizes construction logic and the choice of concrete type. Callers
+      ask for an event; adding a new kind (AllDayEvent) is localized to the factory rather
+      than sprayed across every call site.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-017
+    difficulty: intermediate
+    tags: [dip, interfaces, notification]
+    question: |
+      SchedulerService fires reminders through NotificationChannel rather than calling
+      EmailService.send() directly. Which principle does this uphold, and what's the
+      payoff?
+    options:
+      - "Single Responsibility — it does one thing"
+      - "Liskov Substitution — subclasses behave like parents"
+      - "Interface Segregation — small interfaces"
+      - "Dependency Inversion — depending on the channel abstraction lets SMS/Slack channels drop in with no scheduler edits"
+    answer: 3
+    explanation: |
+      Depending on the NotificationChannel abstraction rather than a concrete email class
+      is Dependency Inversion. New channels implement the interface and register; the
+      scheduler is closed to modification for new delivery mechanisms.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-018
+    difficulty: advanced
+    tags: [extensibility, open-closed, recurrence]
+    question: |
+      The interviewer says "now support 'every last Friday of the month'." In a good
+      design, what changes?
+    options:
+      - "Add a new branch to a switch inside Event"
+      - "Add a new RecurrenceRule implementation; Event and the scheduler are untouched"
+      - "Rewrite ConflictDetector"
+      - "Add a boolean flag lastFriday to Event"
+    answer: 1
+    explanation: |
+      With recurrence behind a Strategy interface, a new pattern is a new class. Event and
+      the scheduler stay closed to modification — the direct payoff of the Strategy seam
+      and Open/Closed.
+    ref: "concepts.md#extensibility"
+
+  - id: design-calendar-scheduler-019
+    difficulty: intermediate
+    tags: [extensibility, observer, open-closed]
+    question: |
+      Adding a Slack notification channel in a well-factored design requires:
+    options:
+      - "Editing SchedulerService to add a Slack branch"
+      - "Changing the Invitation state machine"
+      - "A new NotificationChannel implementation that registers as a subscriber — no scheduler edits"
+      - "Modifying every Event subclass"
+    answer: 2
+    explanation: |
+      The Observer + DIP seam means a channel is an add-only change. The scheduler
+      publishes events; the new SlackChannel subscribes. Nothing existing is modified.
+    ref: "concepts.md#extensibility"
+
+  - id: design-calendar-scheduler-020
+    difficulty: advanced
+    tags: [timezone, dst, recurrence]
+    question: |
+      A "9 AM daily" recurring event must remain at 9 AM local time across a daylight
+      saving transition. How should occurrences be expanded?
+    options:
+      - "Add a fixed 24 hours each day in UTC"
+      - "Ignore DST since it only affects display"
+      - "Shift every event by one hour twice a year manually"
+      - "Expand in the user's ZoneId (wall-clock time) so the event re-anchors to 9 AM local across the DST shift, storing the resolved instants in UTC"
+    answer: 3
+    explanation: |
+      Adding fixed 24h in UTC drifts the local time by an hour across DST. Expanding in
+      the user's timezone keeps 9 AM local correct, then the resolved instants are stored
+      in UTC. This is a frequent senior-level probe.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-calendar-scheduler-021
+    difficulty: advanced
+    tags: [recurrence, edit-occurrence, exceptions]
+    question: |
+      An attendee edits just this week's standup time without changing the whole series.
+      How should the model handle it?
+    options:
+      - "Record a per-instance override/exception on the series so the single occurrence is detached while the series rule is unchanged"
+      - "Mutate the series' RecurrenceRule"
+      - "Delete the entire series and recreate it"
+      - "Reject the edit because recurring events are immutable"
+    answer: 0
+    explanation: |
+      The classic recurring-event edit: keep the RecurrenceRule on the series and store a
+      per-instance override (and EXDATE-style exception for deletes). The edited instance
+      becomes a detached event referencing its parent series.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-calendar-scheduler-022
+    difficulty: intermediate
+    tags: [free-slot, response-status, filtering]
+    question: |
+      When gathering an attendee's busy intervals for free-slot finding, which meetings
+      should count as busy?
+    options:
+      - "Every meeting they were ever invited to"
+      - "Only meetings they organized"
+      - "Only meetings whose invitation they accepted (with tentative being a policy choice); declined meetings must not block"
+      - "All meetings including declined ones"
+    answer: 2
+    explanation: |
+      A declined meeting should not mark the person busy; an accepted one should. Tentative
+      is a policy decision to surface. Counting declined meetings as busy would hide
+      genuinely free slots.
+    ref: "concepts.md#finding-a-common-free-slot"
+
+  - id: design-calendar-scheduler-023
+    difficulty: intermediate
+    tags: [api, exceptions, design]
+    question: |
+      Why should createEvent throw a typed EventConflictException rather than return null
+      or false on conflict?
+    options:
+      - "Exceptions are faster than return values"
+      - "The caller needs to know *why* it failed (conflict vs. bad input vs. unauthorized) and react differently — typed exceptions carry that meaning"
+      - "Returning null is illegal in Java"
+      - "It avoids writing any error handling"
+    answer: 1
+    explanation: |
+      A boolean or null collapses distinct failure reasons into one opaque signal. Typed
+      exceptions let callers distinguish a conflict from a validation or authorization
+      failure and handle each appropriately.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-calendar-scheduler-024
+    difficulty: intermediate
+    tags: [api, recurrence, parameters]
+    question: |
+      Why pass a RecurrenceRule object into createEvent rather than a boolean isRecurring
+      flag?
+    options:
+      - "Booleans are deprecated"
+      - "A boolean cannot be stored in a database"
+      - "Passing the strategy object injects the varying behavior directly, avoiding a conditional and letting new rules plug in without touching the signature's meaning"
+      - "It makes the method run faster"
+    answer: 2
+    explanation: |
+      A boolean flag would force a conditional and still not say *how* it recurs. Injecting
+      the RecurrenceRule is Strategy injection: the behavior comes with the object and new
+      frequencies need no signature or branching changes.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-calendar-scheduler-025
+    difficulty: advanced
+    tags: [delete, recurrence, api]
+    question: |
+      Why must deleteEvent distinguish "this occurrence" from "the whole series"?
+    options:
+      - "To satisfy the compiler"
+      - "Because deleting one occurrence of a recurring series must not remove the entire series — it should add an exception (EXDATE) for that instance only"
+      - "Because series cannot be deleted at all"
+      - "Because occurrences are stored in a separate database"
+    answer: 1
+    explanation: |
+      Users routinely cancel a single standup without ending the series. Modeling the
+      difference (per-instance exception vs. series delete) is essential; conflating them
+      is a common bug.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-calendar-scheduler-026
+    difficulty: intermediate
+    tags: [invitation, state, guard]
+    question: |
+      What happens when an attendee tries to accept an invitation to a meeting that was
+      already cancelled?
+    options:
+      - "The acceptance silently succeeds"
+      - "The meeting is automatically un-cancelled"
+      - "A new meeting is created"
+      - "The invitation's state guards the transition and throws IllegalInvitationStateException"
+    answer: 3
+    explanation: |
+      Guarding illegal transitions is the point of the State machine. Accepting an invite
+      to a cancelled/deleted meeting is not a legal move and must throw, keeping invalid
+      states unreachable.
+    ref: "concepts.md#invitation-state-machine"
+
+  - id: design-calendar-scheduler-027
+    difficulty: beginner
+    tags: [conflict, stored-field, derived]
+    question: |
+      Should a calendar store a boolean "hasConflict" on each event?
+    options:
+      - "No — conflict is computed on demand from event intervals; a cached boolean drifts out of sync when events change"
+      - "Yes, it speeds up rendering"
+      - "Yes, but only for recurring events"
+      - "Yes, one per attendee"
+    answer: 0
+    explanation: |
+      Conflict/availability is derived state. Storing it as a field invites drift the
+      moment an event is moved or deleted. Compute it from the intervals when asked —
+      the same lesson as never storing an isBooked flag in the hotel problem.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-028
+    difficulty: advanced
+    tags: [reminders, scheduling, observer]
+    question: |
+      How do reminders actually fire in this design?
+    options:
+      - "Each event polls the clock in a busy loop"
+      - "A due-time priority queue / scheduled executor pops reminders whose fire-time arrived and pushes to NotificationChannels, skipping past or deleted events"
+      - "The user manually triggers each reminder"
+      - "Reminders fire only when the app is opened"
+    answer: 1
+    explanation: |
+      A time-ordered queue or scheduled executor is the natural structure: pop reminders
+      whose fire-time has arrived and deliver via the Observer/NotificationChannel seam,
+      dropping reminders for elapsed or deleted events.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: design-calendar-scheduler-029
+    difficulty: advanced
+    tags: [complexity, data-structures, dsa-boundary]
+    question: |
+      Naive conflict detection scans all of a calendar's events. What is the correct way
+      to discuss optimizing it in an LLD round?
+    options:
+      - "Implement a custom red-black tree from scratch on the whiteboard"
+      - "Refuse to discuss complexity because it's HLD"
+      - "Switch the whole design to a graph database"
+      - "Name the upgrade (events sorted by start for binary search, or an interval tree for O(log n + k) queries) and move on — data-structure internals belong to dsa-coding"
+    answer: 3
+    explanation: |
+      LLD wants you to name the right structure (sorted list + binary search, interval
+      tree) and its complexity, then move on. Deriving the structure's internals is the
+      DSA round's job — cross-reference it rather than rebuild it live.
+    ref: "concepts.md#conflict-detection-interval-overlap"
+
+  - id: design-calendar-scheduler-030
+    difficulty: advanced
+    tags: [scale, hld-boundary, judgment]
+    question: |
+      Mid-round: "How would you sync calendars across data centers for a billion users?"
+      Best response in the LLD round?
+    options:
+      - "Acknowledge it as an HLD concern (sharded calendars, event store, CalDAV sync, fan-out on invite) and keep this round's design single-process"
+      - "Redesign every class around Kafka immediately"
+      - "Claim the design already scales because HashMap is O(1)"
+      - "Spend fifteen minutes on database replication"
+    answer: 0
+    explanation: |
+      The machine-coding round evaluates single-process OO design. Naming the shape of the
+      distributed answer in a sentence and deferring to system-design shows judgment;
+      derailing into infrastructure does not.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: design-calendar-scheduler-031
+    difficulty: intermediate
+    tags: [srp, responsibilities, cohesion]
+    question: |
+      Putting conflict-detection, free-slot-finding, room-booking, and notification logic
+      all directly inside the Event class most violates which principle?
+    options:
+      - "Liskov Substitution Principle"
+      - "Interface Segregation Principle"
+      - "Single Responsibility Principle — Event would change for many unrelated reasons"
+      - "Don't Repeat Yourself"
+    answer: 2
+    explanation: |
+      Event should know its own interval and occurrences. Detection, slot-finding, booking,
+      and notifications are separate responsibilities living in ConflictDetector,
+      FreeSlotFinder, ResourceService, and channels. Cramming them into Event gives it many
+      reasons to change — an SRP violation.
+    ref: "concepts.md#responsibilities-and-relationships"
+
+  - id: design-calendar-scheduler-032
+    difficulty: intermediate
+    tags: [free-slot, working-hours, timezone]
+    question: |
+      An attendee in Tokyo and one in New York need a common slot. Beyond merging busy
+      intervals, what refinement makes the result usable?
+    options:
+      - "Return only slots in UTC noon"
+      - "Force everyone to New York time"
+      - "Ignore working hours entirely"
+      - "Intersect the free result with each attendee's working hours expressed in their own timezone before returning"
+    answer: 3
+    explanation: |
+      A free slot at 3 AM local is useless. Intersecting the merged free time with each
+      attendee's working-hour window in their own timezone yields humane suggestions — a
+      common follow-up layered on FreeSlotFinder.
+    ref: "concepts.md#finding-a-common-free-slot"
+
+  - id: design-calendar-scheduler-033
+    difficulty: intermediate
+    tags: [notification, resilience, edge-case]
+    question: |
+      A push-notification service is down when a meeting is booked. What should happen?
+    options:
+      - "The booking should roll back"
+      - "The whole scheduler should crash"
+      - "The booking succeeds; observers are invoked after the state change is durable, each wrapped in its own try/catch so one channel's failure doesn't fail the booking"
+      - "Retry the booking, not the notification"
+    answer: 2
+    explanation: |
+      Notification is a side effect, not part of the booking's correctness. Fire observers
+      after the change is committed, isolating each in try/catch. A down channel must never
+      fail or roll back the booking.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-calendar-scheduler-034
+    difficulty: beginner
+    tags: [validation, timeslot, invariants]
+    question: |
+      Where is the best place to reject an event whose end is before its start?
+    options:
+      - "In the TimeSlot constructor, so an invalid slot can never be constructed"
+      - "In the UI only"
+      - "In a nightly cleanup job"
+      - "Nowhere — allow it and filter later"
+    answer: 0
+    explanation: |
+      Validate invariants at construction so bad slots simply cannot exist. This is the
+      value-object discipline (fail fast in the constructor) and prevents inverted/empty
+      ranges from propagating through the system.
+    ref: "concepts.md#code-skeleton"
+
+  - id: design-calendar-scheduler-035
+    difficulty: advanced
+    tags: [concurrency, optimistic, tradeoff]
+    question: |
+      When is an optimistic approach (version/unique-constraint, retry on conflict)
+      preferable to a pessimistic per-room lock for booking?
+    options:
+      - "When contention is high and constant"
+      - "When conflicts are rare, so most bookings avoid lock overhead and only the occasional loser retries"
+      - "Never — pessimistic is always better"
+      - "Only when there is a single room"
+    answer: 1
+    explanation: |
+      Optimistic concurrency shines under low contention: skip locking and let a version
+      check reject the rare loser. Pessimistic locking is easier to reason about live and
+      is the expected default, but naming the trade-off shows depth.
+    ref: "concepts.md#concurrency-double-booking-a-room"
+
+  - id: design-calendar-scheduler-036
+    difficulty: intermediate
+    tags: [isp, strategy, cohesion]
+    question: |
+      Why keep conflict-resolution policy (block vs. warn) and recurrence expansion as
+      separate strategy interfaces rather than one big "SchedulingPolicy" interface?
+    options:
+      - "Because they change for different reasons and clients use them independently — merging them violates Interface Segregation"
+      - "To increase the class count"
+      - "Because Java forbids large interfaces"
+      - "Because recurrence is faster than resolution"
+    answer: 0
+    explanation: |
+      Recurrence generation and conflict-handling policy vary independently and are used by
+      different collaborators. A fat combined interface forces clients to depend on methods
+      they don't use — the Interface Segregation Principle argues to keep them separate.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-037
+    difficulty: intermediate
+    tags: [facade, scheduler-service, patterns]
+    question: |
+      What role does SchedulerService play in the design?
+    options:
+      - "It stores all event data as a database"
+      - "It's the base class all events extend"
+      - "It's a Singleton enforcing one calendar per app"
+      - "It's a Facade — a single entry point wiring conflict detection, free-slot finding, invitations, and room booking while internals stay swappable"
+    answer: 3
+    explanation: |
+      SchedulerService is a Facade: the driver talks to one coherent API while the
+      subsystems (detector, finder, resource service, channels) remain replaceable behind
+      it.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-calendar-scheduler-038
+    difficulty: advanced
+    tags: [extensibility, resource, generalization]
+    question: |
+      The interviewer asks to also book projectors and pool cars, not just rooms. In a
+      good design, what changes?
+    options:
+      - "Create ProjectorBooking and CarBooking subsystems from scratch"
+      - "Almost nothing — Resource is already generic; add attributes, and the per-resource lock and isFree() check apply unchanged"
+      - "Add booking logic to Event"
+      - "Duplicate the room code for each resource type"
+    answer: 1
+    explanation: |
+      Modeling a bookable thing as a generic Resource with its own busy calendar means new
+      resource kinds are configuration, not new subsystems. The overlap check and
+      per-resource lock already generalize.
+    ref: "concepts.md#extensibility"
+
+  - id: design-calendar-scheduler-039
+    difficulty: intermediate
+    tags: [tentative, capacity, state]
+    question: |
+      When counting attendees against a room's capacity, how do accepted vs. tentative vs.
+      declined responses factor in?
+    options:
+      - "All invited users count equally"
+      - "Only the organizer counts"
+      - "The Invitation state drives it — accepted counts, declined doesn't, tentative is a policy decision"
+      - "Capacity is ignored for meetings"
+    answer: 2
+    explanation: |
+      The invitation's state carries the information needed for capacity math: an accepted
+      attendee occupies a seat, a declined one doesn't, and tentative is a business-policy
+      call. This is a concrete payoff of modeling responses as state.
+    ref: "concepts.md#invitation-state-machine"
+
+  - id: design-calendar-scheduler-040
+    difficulty: advanced
+    tags: [free-slot, ranking, optional-attendees]
+    question: |
+      How should the free-slot finder treat optional attendees differently from required
+      ones?
+    options:
+      - "Optional attendees must also be fully free or the slot is rejected"
+      - "Required attendees must be free (hard filter); optional-attendee conflicts only lower a slot's score, so slots are ranked rather than eliminated"
+      - "Optional attendees are ignored entirely"
+      - "Optional attendees are treated as rooms"
+    answer: 1
+    explanation: |
+      Requiring optional attendees to be free defeats the point of "optional." The right
+      model is a hard constraint on required attendees plus a scoring penalty for optional
+      conflicts, then rank candidate slots.
+    ref: "concepts.md#finding-a-common-free-slot"
+
+  - id: design-calendar-scheduler-041
+    difficulty: intermediate
+    tags: [reminder, edge-case, resilience]
+    question: |
+      A reminder is scheduled for an event that the organizer then deletes. What should
+      the reminder subsystem do?
+    options:
+      - "Drop reminders whose event was deleted and skip fire-times already elapsed"
+      - "Fire the reminder anyway"
+      - "Recreate the event"
+      - "Crash the scheduler"
+    answer: 0
+    explanation: |
+      A reminder for a deleted or past event is meaningless. The reminder scheduler must
+      skip elapsed fire-times and drop reminders whose event no longer exists — a
+      straightforward but frequently-missed edge case.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-calendar-scheduler-042
+    difficulty: beginner
+    tags: [timezone, storage, display]
+    question: |
+      Two attendees are in different timezones. How is the meeting's time stored and shown?
+    options:
+      - "Stored separately per attendee in their local time"
+      - "Stored in the organizer's timezone and never converted"
+      - "Stored as a string like '3pm'"
+      - "Stored once as an absolute instant (UTC) and rendered in each attendee's timezone on display"
+    answer: 3
+    explanation: |
+      A meeting has one absolute instant. Store it once (UTC) and convert for display per
+      viewer's ZoneId. Storing per-attendee local times invites inconsistency and breaks
+      when someone travels.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-calendar-scheduler-043
+    difficulty: intermediate
+    tags: [conflict-policy, allow-overlap, requirements]
+    question: |
+      Real calendars usually let a user create overlapping personal events. What does this
+      imply for the design?
+    options:
+      - "Overlap detection is unnecessary"
+      - "Every overlap must throw"
+      - "The overlap *detection* is unchanged; only the *policy* on the result differs (warn-and-allow for self-events vs. hard-block for room booking)"
+      - "Personal events cannot overlap ever"
+    answer: 2
+    explanation: |
+      Detection (does X overlap Y?) is the same computation regardless of policy. Whether
+      you block or merely warn is a separate decision — self-events warn and allow; a room
+      double-booking is a hard conflict.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-calendar-scheduler-044
+    difficulty: advanced
+    tags: [guest-attendee, extensibility, modeling]
+    question: |
+      Support external/guest attendees who have no account on the system. What's the
+      cleanest extension?
+    options:
+      - "Force every guest to create a full account first"
+      - "Create a separate ExternalMeeting class"
+      - "Store guests as rooms"
+      - "Back an Attendee with just an email rather than a User; the invitation flow is unchanged and only response tracking differs"
+    answer: 3
+    explanation: |
+      An Attendee is a participation link; it doesn't require a full User behind it. Backing
+      it with an email lets the existing invitation and notification flow work, with only
+      lighter response tracking for guests.
+    ref: "concepts.md#extensibility"
+
+  - id: design-calendar-scheduler-045
+    difficulty: intermediate
+    tags: [buffer-time, strategy, extensibility]
+    question: |
+      "Speedy meetings" adds a buffer so a 30-min meeting effectively blocks 35 min. Where
+      does this belong?
+    options:
+      - "Hardcoded into TimeSlot.overlaps()"
+      - "A policy/strategy applied when computing the effective busy interval, layered without rewriting overlap logic"
+      - "A new subclass of Meeting per buffer length"
+      - "In the database schema only"
+    answer: 1
+    explanation: |
+      Buffer/padding is a scheduling policy applied when deriving the busy interval, not a
+      change to the fundamental overlap rule. Modeling it as a strategy keeps TimeSlot and
+      detection intact — Open/Closed again.
+    ref: "concepts.md#extensibility"
+
+  - id: design-calendar-scheduler-046
+    difficulty: advanced
+    tags: [concurrency, calendar-writes, thread-safety]
+    question: |
+      Besides room booking, where else can a race occur, and how is it addressed?
+    options:
+      - "Nowhere else — only rooms race"
+      - "In the enum definitions"
+      - "Concurrent edits to one user's calendar; guard the event list with a per-calendar lock or a concurrent collection"
+      - "In the timezone conversion"
+    answer: 2
+    explanation: |
+      Two clients editing the same calendar concurrently can corrupt the event list. A
+      per-calendar lock or a thread-safe collection protects it — scope the guard to the
+      contended object, just like the per-room lock.
+    ref: "concepts.md#concurrency-double-booking-a-room"
+
+  - id: design-calendar-scheduler-047
+    difficulty: intermediate
+    tags: [organizer, role, modeling]
+    question: |
+      Should "Organizer" be a subclass of User?
+    options:
+      - "No — organizer is a *role* a User plays for a given event; model it as a reference (organizerId) rather than a subclass"
+      - "Yes, Organizer extends User"
+      - "Yes, and Attendee should also extend User"
+      - "No, organizer should be an enum"
+    answer: 0
+    explanation: |
+      The same person organizes some meetings and attends others. Roles that vary per
+      relationship are modeled as references/associations, not as inheritance — subclassing
+      User by role would fracture identity and duplicate data.
+    ref: "concepts.md#noun--verb-object-identification"
+
+  - id: design-calendar-scheduler-048
+    difficulty: intermediate
+    tags: [dsa-boundary, merge-intervals, cross-ref]
+    question: |
+      The free-slot algorithm is fundamentally the same as which classic DSA problem, and
+      how should you treat it in an LLD round?
+    options:
+      - "Dijkstra's shortest path — implement it fully"
+      - "Merge Intervals — name it, apply it (sort, coalesce, take gaps), and cross-reference dsa-coding rather than re-deriving the internals"
+      - "Binary search on a rotated array"
+      - "Topological sort"
+    answer: 1
+    explanation: |
+      Merging everyone's busy intervals and taking the complement is exactly Merge
+      Intervals. In LLD you apply and name it, deferring the pure-algorithm derivation to
+      the dsa-coding domain that owns data-structure internals.
+    ref: "concepts.md#finding-a-common-free-slot"

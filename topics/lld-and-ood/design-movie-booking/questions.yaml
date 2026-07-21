@@ -1,0 +1,860 @@
+topic: "Design a Movie Ticket Booking System"
+domain: lld-and-ood
+topic_slug: design-movie-booking
+version: 1
+questions:
+  - id: design-movie-booking-001
+    difficulty: beginner
+    tags: [requirements, scoping]
+    question: |
+      In the first five minutes of "Design a Movie Ticket Booking System", which
+      clarification most shapes the core design?
+    options:
+      - "Whether users book specific named seats or just a seat count, and whether selected seats are held with a timeout"
+      - "What font the ticket PDF uses"
+      - "Which streaming codec the trailers use"
+      - "How many pixels wide the seat-map image is"
+    answer: 0
+    explanation: |
+      Booking specific, named seats is what makes concurrency interesting, and the
+      seat-hold-with-timeout convention drives the entire lock/expiry design. Fonts,
+      codecs, and image sizes never touch the object model.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-movie-booking-002
+    difficulty: beginner
+    tags: [requirements, hld-vs-lld, boundaries]
+    question: |
+      Mid-round the interviewer asks, "How would this handle the national on-sale rush
+      for a blockbuster across 100 servers?" What is the strongest LLD-round response?
+    options:
+      - "Immediately rewrite every class around Kafka and Redis clusters"
+      - "Spend fifteen minutes on database sharding schemes"
+      - "Name it as an HLD concern (distributed lock, queue/waiting-room, idempotent API, cached availability) and keep the design single-process"
+      - "Claim it already scales because the lock manager uses a HashMap"
+    answer: 2
+    explanation: |
+      The machine-coding round evaluates single-process OO design. Naming the shape of
+      the distributed answer in a sentence and deferring shows judgment; derailing into
+      infrastructure or hand-waving does not.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-movie-booking-003
+    difficulty: beginner
+    tags: [requirements, hold, ttl]
+    question: |
+      Why is the "hold selected seats with a timeout" decision worth nailing down in the
+      first five minutes?
+    options:
+      - "It introduces a time-bounded seat state that drives the lock, expiry, and booking state machine — the heart of the design"
+      - "It only affects the color of held seats in the UI"
+      - "It determines nothing structural and can be added at the very end"
+      - "It is purely a database indexing concern"
+    answer: 0
+    explanation: |
+      The hold/TTL decision creates a third seat state (HELD) with an owner and expiry,
+      which cascades into the SeatLockManager, the expiry sweep, and the booking
+      lifecycle. It is architectural, not cosmetic.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-movie-booking-004
+    difficulty: beginner
+    tags: [actors, use-cases]
+    question: |
+      Which use case is the most important to whiteboard as a sequence for this problem?
+    options:
+      - "Book seats for a show: select -> hold -> pay -> confirm/release"
+      - "Admin uploading a movie poster"
+      - "User changing their account password"
+      - "Displaying the list of supported languages"
+    answer: 0
+    explanation: |
+      The booking flow with its hold step is where the concurrency guard lives and where
+      the design is won or lost. The other use cases are peripheral.
+    ref: "concepts.md#actors-and-use-cases"
+
+  - id: design-movie-booking-005
+    difficulty: intermediate
+    tags: [noun-verb, method, technique]
+    question: |
+      Applying noun/verb extraction, the requirement mentions "seat map." How should a
+      strong candidate classify it?
+    options:
+      - "A first-class entity persisted in its own table"
+      - "A view derived from a show's seats and their current statuses, not a stored class"
+      - "A subclass of Seat"
+      - "An enum of seat positions"
+    answer: 1
+    explanation: |
+      Not every noun becomes a class. The seat map is a projection of the show's ShowSeats
+      and their AVAILABLE/HELD/BOOKED statuses — computed for display, not a stored entity.
+      Recognizing this filtering step is exactly what interviewers reward.
+    ref: "concepts.md#noun-and-verb-object-identification"
+
+  - id: design-movie-booking-006
+    difficulty: intermediate
+    tags: [noun-verb, seat-type, enum-vs-class]
+    question: |
+      Regular, Premium, and Recliner seat types differ in price but behave identically.
+      During noun/verb extraction, how should they be modeled?
+    options:
+      - "A SeatType enum with pricing config — not a class hierarchy of Seat subclasses"
+      - "An abstract Seat class with RegularSeat, PremiumSeat, ReclinerSeat subclasses"
+      - "Three separate top-level services"
+      - "A single boolean isPremium flag"
+    answer: 0
+    explanation: |
+      The types differ in data (price, comfort), not behavior, so there is no polymorphism
+      to exploit. An enum plus pricing configuration avoids subclass ceremony. Subclassing
+      would be over-engineering; a boolean cannot represent three types.
+    ref: "concepts.md#noun-and-verb-object-identification"
+
+  - id: design-movie-booking-007
+    difficulty: intermediate
+    tags: [noun-verb, ticket, value-object]
+    question: |
+      During filtering, "ticket" is a noun in the requirements. What is the cleanest
+      classification?
+    options:
+      - "A separate aggregate root with its own lifecycle independent of bookings"
+      - "The artifact/value emitted by a confirmed Booking, not an independent entity"
+      - "A subclass of Payment"
+      - "An enum value"
+    answer: 1
+    explanation: |
+      A ticket is what a confirmed booking produces (a value object / attribute) rather
+      than an entity with its own independent lifecycle. Promoting it to an aggregate root
+      would duplicate the Booking's identity and status.
+    ref: "concepts.md#noun-and-verb-object-identification"
+
+  - id: design-movie-booking-008
+    difficulty: advanced
+    tags: [modeling, seat-vs-showseat, key-decision]
+    question: |
+      What is the single most important modeling decision that distinguishes a real design
+      from a toy in this problem?
+    options:
+      - "Storing an isBooked boolean directly on the physical Seat"
+      - "Using inheritance for the venue hierarchy"
+      - "Separating the physical Seat from a per-show ShowSeat that carries the AVAILABLE/HELD/BOOKED status"
+      - "Making Movie a subclass of Show"
+    answer: 2
+    explanation: |
+      The same physical seat is free at 3pm and booked at 9pm, so availability is per
+      (show, seat). Status must live on ShowSeat, not on Seat. Putting an isBooked flag on
+      the physical seat is the number-one modeling mistake.
+    ref: "concepts.md#core-objects-and-responsibilities"
+
+  - id: design-movie-booking-009
+    difficulty: intermediate
+    tags: [seat-status, three-state, modeling]
+    question: |
+      Why does a ShowSeat need three statuses (AVAILABLE, HELD, BOOKED) rather than two
+      (available/booked)?
+    options:
+      - "Because databases require an odd number of enum values"
+      - "To make the diagram look more complete"
+      - "Because BOOKED and CONFIRMED must be distinct enum names"
+      - "The HELD state (owner + expiry) represents a seat temporarily reserved during selection/payment — enabling the safe hold UX and the concurrency guard"
+    answer: 3
+    explanation: |
+      Without HELD, there is no way to reserve a seat for a paying user while excluding
+      others, and no expiry to release abandoned selections. HELD with an owner and TTL is
+      the crux of the whole concurrency model.
+    ref: "concepts.md#core-objects-and-responsibilities"
+
+  - id: design-movie-booking-010
+    difficulty: intermediate
+    tags: [responsibilities, crc, first-class-object]
+    question: |
+      What is the responsibility of the Booking class?
+    options:
+      - "To compute seat prices for all shows"
+      - "To hold the venue hierarchy of cities and cinemas"
+      - "A first-class stateful reservation: it owns the selected seats, user, amount, and drives the booking lifecycle state machine"
+      - "To send email and SMS notifications"
+    answer: 2
+    explanation: |
+      Booking is the stateful reservation record moving through Created -> SeatsHeld ->
+      Confirmed/Expired/Cancelled. Pricing, venues, and notifications are other classes'
+      responsibilities (single responsibility).
+    ref: "concepts.md#core-objects-and-responsibilities"
+
+  - id: design-movie-booking-011
+    difficulty: intermediate
+    tags: [relationships, composition, uml]
+    question: |
+      In the class diagram, the relationship City -> Cinema -> Hall -> Seat is modeled as
+      composition. Why is composition (not plain association) correct here?
+    options:
+      - "Because composition is always preferred over association"
+      - "Because it reduces the number of classes"
+      - "Because these parts do not exist independently of their whole — a seat has no meaning outside its hall, a hall none outside its cinema"
+      - "Because composition makes queries faster"
+    answer: 2
+    explanation: |
+      Composition expresses ownership and coincident lifetime: destroying the cinema
+      destroys its halls and their seats. The parts have no independent existence, which is
+      exactly the composition semantic.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-movie-booking-012
+    difficulty: advanced
+    tags: [relationships, showseat, association]
+    question: |
+      ShowSeat --> Seat is a plain association rather than composition. Why?
+    options:
+      - "Because ShowSeat is created before Seat"
+      - "Because associations render with a different arrow"
+      - "Because Seat is an interface"
+      - "Because many ShowSeats (one per show) reference the same shared physical Seat, which outlives any single show"
+    answer: 3
+    explanation: |
+      The physical seat is shared across all shows in that hall; each show creates its own
+      ShowSeat that references it. The physical seat outlives any single show, so ownership
+      (composition) would be wrong — it is a reference association.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-movie-booking-013
+    difficulty: advanced
+    tags: [dip, interfaces, class-diagram]
+    question: |
+      BookingService depends on SeatLockManager, PricingStrategy, PaymentProcessor, and
+      BookingObserver as interfaces. Which principle does this most directly demonstrate,
+      and what does it buy?
+    options:
+      - "Dependency Inversion — the service depends on abstractions, so you can swap an in-memory lock manager for a Redis one, or mock payments, without editing the service"
+      - "Single Responsibility — it gives the service exactly one job"
+      - "Liskov Substitution — subclasses can replace their base type"
+      - "Interface Segregation — clients see only the methods they use"
+    answer: 0
+    explanation: |
+      Depending on abstractions rather than concretes is DIP. It enables swapping
+      implementations (in-memory vs distributed lock manager, real vs mock payment) with no
+      change to BookingService.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-movie-booking-014
+    difficulty: intermediate
+    tags: [state, booking-lifecycle, terminal-states]
+    question: |
+      Which set correctly lists the terminal states of the Booking state machine?
+    options:
+      - "CREATED, SEATS_HELD"
+      - "SEATS_HELD only"
+      - "CONFIRMED, CANCELLED, EXPIRED"
+      - "CREATED only"
+    answer: 2
+    explanation: |
+      CREATED and SEATS_HELD are transient; the booking necessarily leaves them. CONFIRMED,
+      CANCELLED, and EXPIRED are the absorbing/terminal states from which no further
+      transition (except confirmed -> cancelled) occurs.
+    ref: "concepts.md#booking-state-machine"
+
+  - id: design-movie-booking-015
+    difficulty: advanced
+    tags: [state, pattern, when-to-promote]
+    question: |
+      When is it justified to promote the Booking lifecycle from a guarded transition table
+      to the full State pattern (one class per state)?
+    options:
+      - "Always — a transition table is never acceptable in interviews"
+      - "Never — enums are always sufficient"
+      - "When per-state behavior grows so each state handles operations (pay, cancel, expire) differently enough that the conditionals become unwieldy"
+      - "Only when there are exactly five states"
+    answer: 2
+    explanation: |
+      With few states and thin behavior a transition table on Booking is fine. The State
+      pattern pays off when each state carries substantial distinct behavior, replacing
+      branching conditionals with polymorphism. It is a judgment call, not a fixed rule.
+    ref: "concepts.md#booking-state-machine"
+
+  - id: design-movie-booking-016
+    difficulty: intermediate
+    tags: [state, seat-status-mirror]
+    question: |
+      As a Booking moves SEATS_HELD -> CONFIRMED, what should happen to its ShowSeats'
+      status?
+    options:
+      - "Stay HELD forever"
+      - "Transition HELD -> BOOKED"
+      - "Reset to AVAILABLE"
+      - "Change to a new UNKNOWN status"
+    answer: 1
+    explanation: |
+      The seat statuses mirror the booking lifecycle: AVAILABLE when free, HELD while
+      SEATS_HELD, BOOKED once CONFIRMED, and back to AVAILABLE on expiry or cancellation.
+    ref: "concepts.md#booking-state-machine"
+
+  - id: design-movie-booking-017
+    difficulty: intermediate
+    tags: [strategy, pricing, open-closed]
+    question: |
+      Pricing starts as seat-type base rate, then the interviewer adds weekend uplift, then
+      prime-time premium, then dynamic demand pricing. Which pattern keeps BookingService
+      closed to modification?
+    options:
+      - "Singleton"
+      - "Observer"
+      - "Strategy — each pricing rule is its own PricingStrategy class, composed as a chain"
+      - "A large if/else block inside BookingService"
+    answer: 2
+    explanation: |
+      Strategy externalizes the pricing algorithm so new rules are new classes that can be
+      chained/wrapped. An if/else chain inside the service violates Open/Closed and tangles
+      orchestration with pricing math.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-018
+    difficulty: advanced
+    tags: [strategy, isp, refund-vs-pricing]
+    question: |
+      Why keep RefundPolicy as a separate Strategy interface from PricingStrategy rather
+      than merging them?
+    options:
+      - "Because two interfaces are always better than one"
+      - "Because refunds are computed on a different thread"
+      - "They change for different reasons and ship in different combinations (a cheap fare with a strict refund) — separating them respects the Interface Segregation Principle"
+      - "Because PricingStrategy cannot return a BigDecimal"
+    answer: 2
+    explanation: |
+      Pricing and refund rules vary independently and are combined differently per fare
+      class. Keeping them as distinct abstractions avoids forcing clients to depend on
+      methods they do not use — the ISP rationale.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-019
+    difficulty: intermediate
+    tags: [observer, notifications, decoupling]
+    question: |
+      On booking confirmation, email, SMS, and later a loyalty service all need to react.
+      Which pattern lets you add channels without editing BookingService?
+    options:
+      - "Observer — the service fires onConfirmed(booking) and channels subscribe as BookingObservers"
+      - "Factory Method"
+      - "Adapter"
+      - "Template Method"
+    answer: 0
+    explanation: |
+      Observer inverts the dependency: the service publishes an event and subscribers react.
+      Adding a channel means adding an observer, not editing the publisher — the Open/Closed
+      benefit.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-020
+    difficulty: advanced
+    tags: [observer, failure-isolation]
+    question: |
+      Why must observer notifications fire after the booking is durably committed, each
+      wrapped in its own try/catch?
+    options:
+      - "To make the code shorter"
+      - "Because observers must run on the main thread"
+      - "Because notifications must complete before payment"
+      - "So a failing SMS gateway cannot roll back or fail an otherwise-successful, paid booking"
+    answer: 3
+    explanation: |
+      A notification is a side effect, not part of the booking's correctness. Firing after
+      commit and isolating each observer's failure ensures a flaky email/SMS provider never
+      corrupts or fails a confirmed booking.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-021
+    difficulty: intermediate
+    tags: [observer, live-seat-map]
+    question: |
+      A second use of Observer in this design lets the seat map update live when a seat is
+      taken. What is observed?
+    options:
+      - "The PaymentProcessor's balance"
+      - "The JVM garbage collector"
+      - "ShowSeat status changes, pushed to users currently viewing that show's seat map"
+      - "Movie ratings"
+    answer: 2
+    explanation: |
+      When a ShowSeat flips AVAILABLE -> HELD/BOOKED, observers of that show's seat map
+      receive an availability-update event so viewers see the seat gray out in near real
+      time.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-022
+    difficulty: intermediate
+    tags: [factory, creational, lock-manager]
+    question: |
+      A SeatLockProviderFactory hands out an InMemorySeatLockManager now and a Redis-backed
+      one in production. Which pattern-intent category does this belong to, and why is it
+      used here?
+    options:
+      - "Structural — it assembles objects into a tree"
+      - "Behavioral — it varies an algorithm at runtime"
+      - "Creational — it encapsulates construction so booking code never news-up a concrete lock manager"
+      - "Concurrency — it manages threads"
+    answer: 2
+    explanation: |
+      Factory is a Creational pattern: it centralizes and hides object construction. The
+      booking code depends only on the SeatLockManager interface and receives whichever
+      implementation the factory/DI chooses.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-023
+    difficulty: beginner
+    tags: [facade, structural]
+    question: |
+      MovieBookingService exposes searchShows/selectSeats/pay/cancel and delegates to
+      internal services. Which pattern is this, and what is its intent category?
+    options:
+      - "Facade — a Structural pattern that gives the client one simple entry point over a subsystem"
+      - "Mediator — a Behavioral pattern coordinating peers"
+      - "Proxy — a Structural stand-in controlling access"
+      - "Builder — a Creational step-by-step constructor"
+    answer: 0
+    explanation: |
+      Facade (Structural) provides a unified, simplified interface to a set of subsystem
+      classes. The driver talks to one class while search/booking/lock/pricing internals
+      stay swappable behind it.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-024
+    difficulty: advanced
+    tags: [pattern-intent, classification]
+    question: |
+      Classifying by GoF intent, which grouping of this design's patterns is correct?
+    options:
+      - "Strategy=Creational, Factory=Behavioral, Observer=Structural"
+      - "Strategy & State & Observer=Behavioral, Factory=Creational, Facade=Structural"
+      - "All of them are Behavioral"
+      - "State=Structural, Facade=Creational, Strategy=Structural"
+    answer: 1
+    explanation: |
+      Strategy (algorithm choice), State (behavior-by-state), and Observer (event fan-out)
+      are Behavioral. Factory (construction) is Creational. Facade (subsystem assembly/
+      simplification) is Structural. Knowing the intent buckets helps pick under pressure.
+    ref: "concepts.md#key-design-decisions-and-patterns"
+
+  - id: design-movie-booking-025
+    difficulty: advanced
+    tags: [concurrency, check-then-act, race]
+    question: |
+      Two users see seat A12 as AVAILABLE and both call book(). Without mutual exclusion,
+      why is A12 double-booked?
+    options:
+      - "Because HashMap is not synchronized"
+      - "Because payment gateways are slow"
+      - "Because the check ('is A12 available?') and the act ('mark A12 booked') are not atomic — both checks pass before either write lands"
+      - "Because the seat map cache is stale"
+    answer: 2
+    explanation: |
+      This is the classic check-then-act race. Both threads read AVAILABLE before either
+      writes BOOKED, so both proceed. Mutual exclusion around the check-and-act critical
+      section is what prevents it.
+    ref: "concepts.md#concurrency-the-seat-hold-locking-problem"
+
+  - id: design-movie-booking-026
+    difficulty: advanced
+    tags: [concurrency, lock-granularity, per-show]
+    question: |
+      For the pessimistic hold, why lock per-Show rather than using a single global lock?
+    options:
+      - "A global lock serializes bookings for unrelated shows; a per-show lock lets different shows proceed in parallel while same-show requests serialize"
+      - "Per-show locks are faster to allocate"
+      - "A global lock is impossible in Java"
+      - "Per-show locks avoid the need for the availability check"
+    answer: 0
+    explanation: |
+      Lock granularity should match contention. A global lock needlessly serializes the
+      3pm and 9pm shows against each other; a per-show monitor confines contention to
+      requests actually competing for the same seats.
+    ref: "concepts.md#concurrency-the-seat-hold-locking-problem"
+
+  - id: design-movie-booking-027
+    difficulty: advanced
+    tags: [concurrency, all-or-nothing, partial-hold]
+    question: |
+      A user requests 3 seats; one is already HELD by someone else. What is the correct
+      behavior?
+    options:
+      - "Hold the 2 available seats and tell the user to pick one more"
+      - "Queue the request until the third seat frees"
+      - "Silently swap the taken seat for a random free one"
+      - "Reject the whole request (all-or-nothing) and roll back any seats already marked in this attempt"
+    answer: 3
+    explanation: |
+      Multi-seat holds are all-or-nothing: leaving orphaned partial holds wastes inventory
+      and confuses the user. If any requested seat is unavailable, roll back and throw
+      SeatUnavailableException.
+    ref: "concepts.md#concurrency-the-seat-hold-locking-problem"
+
+  - id: design-movie-booking-028
+    difficulty: advanced
+    tags: [concurrency, optimistic-vs-pessimistic, contention]
+    question: |
+      Why is pessimistic holding usually the better default for movie seats rather than an
+      optimistic no-lock approach?
+    options:
+      - "Optimistic locking cannot be implemented in Java"
+      - "Pessimistic locking never blocks anyone"
+      - "Movie seats are high-contention (everyone wants the same center seats), and holding also delivers the 'reserved for 5:00' UX that optimistic cannot"
+      - "Optimistic locking double-charges cards"
+    answer: 2
+    explanation: |
+      Optimistic control shines when conflicts are rare; popular shows are the opposite,
+      with heavy contention on the same seats. Pessimistic holds both reduce wasted retries
+      and provide the temporary-reservation UX a hold-free scheme cannot.
+    ref: "concepts.md#concurrency-the-seat-hold-locking-problem"
+
+  - id: design-movie-booking-029
+    difficulty: expert
+    tags: [concurrency, deadlock, canonical-order]
+    question: |
+      If you switch to per-seat locks (ConcurrentHashMap CAS) instead of a per-show lock,
+      what must a multi-seat hold do to avoid deadlock?
+    options:
+      - "Acquire seat locks in a canonical order (e.g., sorted by seat id) so no two requests acquire in opposite orders"
+      - "Acquire seats in random order for fairness"
+      - "Hold a global lock while acquiring the per-seat locks"
+      - "Never release any lock"
+    answer: 0
+    explanation: |
+      Deadlock arises when thread A locks seat 1 then 2 while thread B locks 2 then 1.
+      Imposing a canonical acquisition order (sorted seat ids) breaks the circular-wait
+      condition. Rollback is still needed if a later seat in the set is taken.
+    ref: "concepts.md#concurrency-the-seat-hold-locking-problem"
+
+  - id: design-movie-booking-030
+    difficulty: advanced
+    tags: [concurrency, expiry, sweeper]
+    question: |
+      A user selects seats but abandons the flow without paying. How do the seats become
+      available again?
+    options:
+      - "An admin manually frees them"
+      - "They are permanently lost until the show ends"
+      - "The next user to click that seat forcibly steals it"
+      - "The SeatLock's TTL plus a background sweep (or lazy expiry on read) moves the booking SEATS_HELD -> EXPIRED and releases the seats; releases are idempotent"
+    answer: 3
+    explanation: |
+      Each hold carries an expiry. A scheduled sweeper releases expired locks (or a lazy
+      check filters them out on read). Because sweep and payment callback can race,
+      releases must be idempotent no-ops when already released or confirmed.
+    ref: "concepts.md#concurrency-the-seat-hold-locking-problem"
+
+  - id: design-movie-booking-031
+    difficulty: expert
+    tags: [concurrency, distributed, redis-ttl]
+    question: |
+      In a real distributed system, what is the canonical primitive that maps directly onto
+      the in-memory seat hold?
+    options:
+      - "A cron job that emails admins"
+      - "A client-side JavaScript timer"
+      - "A Redis key set with SET ... NX PX <ms> (atomic set-if-absent with an expiry), or a DB row with a unique (show, seat) constraint and expiry column"
+      - "A static Java field"
+    answer: 2
+    explanation: |
+      Redis SET NX PX atomically claims a key only if absent and auto-expires it — exactly
+      the acquire-with-TTL semantics of a seat hold. A DB unique constraint on (show, seat)
+      plus an expiry column is the relational equivalent. This is the HLD hand-off.
+    ref: "concepts.md#concurrency-the-seat-hold-locking-problem"
+
+  - id: design-movie-booking-032
+    difficulty: expert
+    tags: [edge-cases, expiry-race, confirm-verify]
+    question: |
+      Payment succeeds one second after the seat hold expired and the sweep released the
+      seats. What must the confirm step do to stay correct?
+    options:
+      - "Confirm anyway — payment always wins"
+      - "Ignore the sweep entirely"
+      - "Book whatever seats are currently free instead"
+      - "Re-verify the seats are still HELD by this user before flipping them to BOOKED; if the sweep already released them, fail the payment and refund"
+    answer: 3
+    explanation: |
+      Payment success does not guarantee the hold survived. Confirmation must re-check the
+      hold under the lock; if it lapsed, the seats may now belong to someone else, so the
+      correct action is to fail and refund rather than double-book.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-movie-booking-033
+    difficulty: advanced
+    tags: [edge-cases, idempotency, double-submit]
+    question: |
+      A user double-clicks Pay and two identical pay requests arrive for the same booking.
+      What prevents a double charge?
+    options:
+      - "Nothing — double charges are acceptable"
+      - "Rejecting all payments over $50"
+      - "An idempotency key on the booking/payment so the second request returns the existing result; a booking already CONFIRMED returns the existing ticket"
+      - "Locking the entire show forever"
+    answer: 2
+    explanation: |
+      Idempotency ensures repeated identical requests have the same effect as one. Keying on
+      the booking (or a client-supplied idempotency token) makes the second Pay a no-op that
+      returns the already-issued ticket.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-movie-booking-034
+    difficulty: advanced
+    tags: [edge-cases, invalid-state, cancel]
+    question: |
+      Booking.cancel() is called on a booking whose show has already started. What should
+      happen?
+    options:
+      - "Validate the current status/time and throw IllegalBookingStateException — you cannot cancel a booking for a show that has begun"
+      - "Silently succeed and issue a full refund"
+      - "Delete the booking record entirely"
+      - "Downgrade the seats to Regular"
+    answer: 0
+    explanation: |
+      Cancellation is only legal from valid states/times. Guarding the transition (invalid
+      state or past show start) with a typed exception keeps illegal bookings from entering
+      an inconsistent state.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-movie-booking-035
+    difficulty: expert
+    tags: [edge-cases, sweep-payment-race, idempotent]
+    question: |
+      The expiry sweep and an arriving payment touch the same SeatLock at the same time.
+      How is correctness preserved?
+    options:
+      - "Whichever thread started first always wins, regardless of locks"
+      - "Disable the sweeper during business hours"
+      - "Guard the transition under the per-show lock so exactly one side wins, and make releases idempotent so a redundant release is a harmless no-op"
+      - "Let both proceed and reconcile nightly"
+    answer: 2
+    explanation: |
+      The sweep-vs-confirm race is resolved by serializing both through the same per-show
+      lock so only one transition applies, and by making release operations idempotent so
+      the losing path does no damage.
+    ref: "concepts.md#edge-cases-and-error-states"
+
+  - id: design-movie-booking-036
+    difficulty: intermediate
+    tags: [api, exceptions, design]
+    question: |
+      Why does selectSeats(...) throw a typed SeatUnavailableException rather than returning
+      null or false?
+    options:
+      - "Exceptions are faster than return values"
+      - "Because Java forbids returning booleans from public methods"
+      - "So the caller can distinguish 'seat taken' from other failures and react specifically, since a boolean/null loses the reason"
+      - "To avoid writing a Booking class"
+    answer: 2
+    explanation: |
+      'Which seat was taken' and 'the card declined' are different failures the UI handles
+      differently. Typed exceptions carry that reason; a bare null/false forces the caller
+      to guess.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-movie-booking-037
+    difficulty: advanced
+    tags: [api, exceptions, hold-expired]
+    question: |
+      Why distinguish HoldExpiredException from PaymentFailedException on the pay(...) call?
+    options:
+      - "They are actually the same and should be merged"
+      - "Because payment exceptions cannot be caught"
+      - "To reduce the number of enum values"
+      - "So the UI can show 'your seats were released, please reselect' versus 'payment failed, retry' — different recovery paths"
+    answer: 3
+    explanation: |
+      The two failures need different user recovery: a lapsed hold means the seats are gone
+      and the user must reselect, whereas a payment failure means the seats may still be
+      held and the user can retry. Distinct exceptions encode distinct recovery.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-movie-booking-038
+    difficulty: intermediate
+    tags: [api, return-types, booking]
+    question: |
+      Why does selectSeats(...) return a Booking (with price and expiry) rather than void?
+    options:
+      - "To satisfy the compiler"
+      - "Because void methods cannot be tested"
+      - "So the seats can be re-selected automatically"
+      - "The caller needs the booking id, the amount to pay, and when the hold dies so it can show a countdown and complete payment"
+    answer: 3
+    explanation: |
+      The returned SEATS_HELD booking carries everything the client needs next: id for the
+      pay call, amount to charge, and the expiry timestamp to render the reservation
+      countdown.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-movie-booking-039
+    difficulty: advanced
+    tags: [code-skeleton, critical-section]
+    question: |
+      In the InMemorySeatLockManager.lockSeats code, why are the availability check and the
+      status-setting loop both inside the same synchronized(show) block?
+    options:
+      - "To make the method shorter"
+      - "So the check-then-act is one atomic critical section — no other thread can observe or grab a seat between the check and the mark"
+      - "Because ConcurrentHashMap requires it"
+      - "To guarantee FIFO ordering of users"
+    answer: 1
+    explanation: |
+      Splitting check and act across the lock boundary would reopen the race. Keeping both
+      inside one synchronized block makes the whole acquire atomic with respect to other
+      threads on the same show.
+    ref: "concepts.md#code-skeleton"
+
+  - id: design-movie-booking-040
+    difficulty: intermediate
+    tags: [code-skeleton, observers, copyonwrite]
+    question: |
+      BookingService stores its observers in a CopyOnWriteArrayList. Why that choice?
+    options:
+      - "Observers are read (iterated to notify) far more often than the list is modified, and copy-on-write gives safe iteration without locking during notification"
+      - "It is the fastest list for writes"
+      - "It orders observers alphabetically"
+      - "It prevents observers from ever being removed"
+    answer: 0
+    explanation: |
+      CopyOnWriteArrayList is ideal for read-mostly observer lists: iteration during
+      notification is snapshot-safe and lock-free, while the rare subscribe/unsubscribe pays
+      the copy cost. It avoids ConcurrentModificationException without explicit locking.
+    ref: "concepts.md#code-skeleton"
+
+  - id: design-movie-booking-041
+    difficulty: advanced
+    tags: [extensibility, dynamic-pricing, open-closed]
+    question: |
+      The interviewer says "add surge pricing that rises with occupancy." Which change
+      honors Open/Closed?
+    options:
+      - "Add an if-block for occupancy inside BookingService.pay()"
+      - "Add a new DemandPricing implementation of PricingStrategy and plug it into the pricing chain — no edit to existing classes"
+      - "Add an occupancy column to the Seat table and read it in the UI"
+      - "Subclass BookingService as SurgeBookingService"
+    answer: 1
+    explanation: |
+      The pricing Strategy seam exists precisely for this: a new PricingStrategy is a new
+      class composed into the chain, extending behavior without modifying BookingService or
+      other pricing rules.
+    ref: "concepts.md#extensibility"
+
+  - id: design-movie-booking-042
+    difficulty: advanced
+    tags: [extensibility, waitlist, observer]
+    question: |
+      To add a waitlist that offers freed seats to waiting users when a booking is cancelled
+      or a hold expires, what is the cleanest hook?
+    options:
+      - "Add waitlist logic directly inside Booking.cancel()"
+      - "Poll the database every second from the UI"
+      - "A WaitlistService that subscribes to onCancelled/seat-release events (Observer) and offers freed seats with its own expiry — the cancel flow does not change"
+      - "Store the waitlist as a field on each Seat"
+    answer: 2
+    explanation: |
+      The waitlist reacts to the same events notifications do, so it plugs in as another
+      observer. The core cancel/expiry flow stays untouched (Open/Closed), and the waitlist
+      manages its own FIFO queue and offer expiry.
+    ref: "concepts.md#extensibility"
+
+  - id: design-movie-booking-043
+    difficulty: advanced
+    tags: [extensibility, group-booking, adjacency]
+    question: |
+      For "group booking of N adjacent seats," where does the adjacency requirement live,
+      and why is atomicity already handled?
+    options:
+      - "It requires a brand-new booking subsystem; atomicity must be rebuilt"
+      - "It lives inside PaymentProcessor"
+      - "It requires changing SeatStatus to add a GROUP value"
+      - "Adjacency is a selection/validation strategy layered on seat selection; the existing all-or-nothing multi-seat hold already guarantees the group books together or not at all"
+    answer: 3
+    explanation: |
+      The hold API already takes a set of seats and is all-or-nothing, so a group either
+      gets all its adjacent seats or none. Finding contiguous seats is a read-side selection
+      strategy, not a change to the concurrency core.
+    ref: "concepts.md#extensibility"
+
+  - id: design-movie-booking-044
+    difficulty: intermediate
+    tags: [extensibility, payment-method, strategy]
+    question: |
+      Adding UPI and wallet payment alongside cards should require what change?
+    options:
+      - "Editing BookingService.pay() with new branches per method"
+      - "A new Booking subclass per payment method"
+      - "Changing the SeatLockManager"
+      - "A new PaymentProcessor implementation per method behind the existing interface — the booking flow is untouched"
+    answer: 3
+    explanation: |
+      Payment methods are interchangeable algorithms behind the PaymentProcessor interface
+      (Strategy). A new method is a new implementation; the orchestration in BookingService
+      does not change.
+    ref: "concepts.md#extensibility"
+
+  - id: design-movie-booking-045
+    difficulty: expert
+    tags: [extensibility, distributed, hld-boundary]
+    question: |
+      To scale seat inventory across many servers, you swap InMemorySeatLockManager for a
+      Redis-backed implementation. Why does the object model not move?
+    options:
+      - "Because Redis is written in Java"
+      - "Because BookingService depends on the SeatLockManager interface (DIP), so the implementation changes behind it while the domain classes stay put — the LLD-to-HLD hand-off"
+      - "Because the ShowSeat class is serialized to Redis automatically"
+      - "Because in-memory and distributed locks are identical"
+    answer: 1
+    explanation: |
+      The whole point of programming to the SeatLockManager abstraction is that the locking
+      implementation can go distributed without disturbing the domain model. This is exactly
+      where clean LLD hands off cleanly to HLD.
+    ref: "concepts.md#extensibility"
+
+  - id: design-movie-booking-046
+    difficulty: beginner
+    tags: [follow-ups, showseat-rationale]
+    question: |
+      The interviewer asks, "Why ShowSeat instead of a status flag on Seat?" What is the
+      one-sentence answer?
+    options:
+      - "Because Seat is immutable"
+      - "Because it reduces the number of database tables"
+      - "Because availability is per (show, seat) — the same physical seat is free at 3pm and booked at 9pm, which a single flag cannot represent"
+      - "Because ShowSeat is required by the State pattern"
+    answer: 2
+    explanation: |
+      A physical seat's bookability differs per show, so a per-seat boolean cannot capture
+      free-at-3pm / booked-at-9pm. ShowSeat holds the per-show status; the physical Seat
+      holds only identity and position.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: design-movie-booking-047
+    difficulty: intermediate
+    tags: [follow-ups, recommendations, read-side]
+    question: |
+      Adding "best available seats" auto-selection should be implemented as what, and why
+      does it not touch the booking core?
+    options:
+      - "A change to SeatLockManager, because seats must be locked while scoring"
+      - "A new BookingStatus value"
+      - "A modification to the PaymentProcessor"
+      - "A SeatRecommender strategy that scores available ShowSeats — a read-side add-on that produces a seat set the normal hold/booking flow then reserves"
+    answer: 3
+    explanation: |
+      Recommendation is a pure read-side scoring of available seats (centered, together,
+      preferred type). It outputs candidate seats that flow through the existing selectSeats
+      path, so the hold/booking machinery is unchanged.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: design-movie-booking-048
+    difficulty: advanced
+    tags: [cross-topic, hotel-contrast, modeling]
+    question: |
+      Contrasting this problem with the hotel-booking design, which statement captures the
+      key difference in availability modeling?
+    options:
+      - "Both use an isBooked boolean; there is no real difference"
+      - "Hotel availability is derived from date-range interval overlap over bookings, while movie availability is a discrete per-(show, seat) status with a time-bounded HELD state"
+      - "Movie booking has no concurrency concerns while hotels do"
+      - "Hotels use ShowSeat and movies use DateRange"
+    answer: 1
+    explanation: |
+      The hotel problem centers on continuous date-range overlap (a room free tonight,
+      booked next week), computed from bookings. The movie problem centers on discrete seat
+      statuses per show with a temporary HELD/lock state. Both reject a naive boolean, but
+      the availability mechanics differ.
+    ref: "concepts.md#core-objects-and-responsibilities"

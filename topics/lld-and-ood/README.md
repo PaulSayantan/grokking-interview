@@ -1,6 +1,6 @@
 # Low-Level Design & Object-Oriented Design
 
-18 topics. Study content and MCQs live in per-topic
+33 topics. Study content and MCQs live in per-topic
 subfolders. See the master taxonomy in `../../TOPICS.md`.
 
 The machine-coding / LLD interview round: design extensible, maintainable OO systems in
@@ -22,6 +22,8 @@ high-level distributed architecture.
 | Design Principles Beyond SOLID | `design-principles-beyond-solid` | high | intermediate | ✅ |
 | UML Class Diagrams for Interviews | `uml-class-diagrams` | high | beginner | ✅ |
 | The LLD Interview Method | `lld-interview-method` | very-high | intermediate | ✅ |
+| OOAD: From Requirements to Classes | `ooad-requirements-to-classes` | very-high | intermediate | ✅ |
+| Concurrency in Low-Level Design | `concurrency-in-lld` | high | advanced | ✅ |
 | Design a Parking Lot | `design-parking-lot` | very-high | intermediate | ✅ |
 | Design an Elevator System | `design-elevator-system` | very-high | intermediate | ✅ |
 | Design a Library Management System | `design-library-management` | high | intermediate | ✅ |
@@ -35,5 +37,18 @@ high-level distributed architecture.
 | Design a Hotel Booking System | `design-hotel-booking` | high | advanced | ✅ |
 | Design a Food Delivery App (OO) | `design-food-delivery-oo` | high | advanced | ✅ |
 | Design an Online Auction System | `design-auction-system` | high | advanced | ✅ |
+| Design an ATM | `design-atm` | very-high | intermediate | ✅ |
+| Design Stack Overflow (Q&A) | `design-stack-overflow` | very-high | advanced | ✅ |
+| Design a Movie Ticket Booking System | `design-movie-booking` | very-high | advanced | ✅ |
+| Design a Logging Framework | `design-logging-framework` | high | intermediate | ✅ |
+| Design a Notification / Pub-Sub System | `design-notification-system` | very-high | advanced | ✅ |
+| Design a Ride-Sharing Service (OO) | `design-ride-sharing` | high | advanced | ☐ |
+| Design a Traffic Signal Controller | `design-traffic-signal` | high | intermediate | ✅ |
+| Design a Digital Wallet | `design-digital-wallet` | high | advanced | ✅ |
+| Design a Calendar / Meeting Scheduler | `design-calendar-scheduler` | high | advanced | ✅ |
+| Design a Text Editor (Undo/Redo) | `design-text-editor` | high | advanced | ✅ |
+| Design an In-Memory File System | `design-file-system` | high | advanced | ✅ |
+| Design a Card Game (Deck & Blackjack) | `design-card-game` | medium | intermediate | ✅ |
+| Design a Task Management System | `design-task-management` | high | intermediate | ✅ |
 
 Status: ☐ not started · ◐ concepts done · ● concepts+MCQs · ✅ validated
