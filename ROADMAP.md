@@ -94,11 +94,25 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Observability](topics/observability/README.md) | 17 | 17 ✅ (Pass 1, 844 MCQs) |
 | [Software Testing](topics/testing/README.md) | 16 | 16 ✅ (Pass 1, 784 MCQs) |
 | [Interview Craft](topics/interview-craft/README.md) | 16 | 16 ✅ (Pass 1, 793 MCQs) |
+| [DSA & Coding Interviews](topics/dsa-coding/README.md) | 20 | 20 ✅ (Pass 1, 456 MCQs + 350 LeetCode links) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
 
+- **Session 34 (2026-07-21):** **DSA & Coding Interviews Pass 1** (NEW domain, sequence) — 20
+  topics, **456 MCQs** (87 B / 220 I / 146 adv / 3 exp) + **350 LeetCode problem links** (247
+  unique), 42 Mermaid diagrams (render 0-error). Per user: DEEP data-structure INTERNALS (hashmap
+  buckets/chaining/load-factor-0.75/treeify-8/resize; heap-as-array sift O(log n); trie nodes;
+  graph adjacency-list-vs-matrix; union-find path-compression+rank; BST balance), problem-solving
+  PATTERNS (dedicated coding-patterns-overview + per-topic recognition-signal+template), and a
+  per-topic "## Interview Problems" section with ~15 canonical LeetCode links. MCQs intentionally
+  LIGHTER (coding-first, user said MCQs optional — kept ≥12/topic so pages render, no web change;
+  focus internals/complexity/pattern-choice). Built via `dsa-coding-authoring.js` (author → verify,
+  40 agents, 0 errors). Verify heavily rebalanced index-1-skewed answer keys (LLM tendency on
+  technical MCQs — several were 67-79% index-1) + fixed complexity claims + confirmed LC slugs.
+  Net-new domain (README/taxonomy + AUTHORED_DOMAINS). CAVEAT: LC links are well-formed canonical
+  slugs & famous problems but not each live-fetched. Content-only commit. NEXT: lld-and-ood.
 - **Session 33 (2026-07-21):** **Interview Craft Pass 1** (NEW domain, sequence) — 16 topics,
   **793 MCQs** (126 B / 395 I / 258 adv / 14 exp), 40 Mermaid diagrams (render 0-error). The
   non-technical craft: STAR/behavioral, competency bank, company values/Amazon-LPs+Bar-Raiser,
