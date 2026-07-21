@@ -42,7 +42,7 @@ high-level distributed architecture.
 | Design a Movie Ticket Booking System | `design-movie-booking` | very-high | advanced | ✅ |
 | Design a Logging Framework | `design-logging-framework` | high | intermediate | ✅ |
 | Design a Notification / Pub-Sub System | `design-notification-system` | very-high | advanced | ✅ |
-| Design a Ride-Sharing Service (OO) | `design-ride-sharing` | high | advanced | ☐ |
+| Design a Ride-Sharing Service (OO) | `design-ride-sharing` | high | advanced | ✅ |
 | Design a Traffic Signal Controller | `design-traffic-signal` | high | intermediate | ✅ |
 | Design a Digital Wallet | `design-digital-wallet` | high | advanced | ✅ |
 | Design a Calendar / Meeting Scheduler | `design-calendar-scheduler` | high | advanced | ✅ |
