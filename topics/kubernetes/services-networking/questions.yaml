@@ -1,0 +1,842 @@
+topic: "Services & Cluster Networking"
+domain: kubernetes
+topic_slug: services-networking
+version: 1
+questions:
+- id: services-networking-001
+  difficulty: beginner
+  tags: [network-model, pod-ip, fundamentals]
+  question: |
+    Which statement best describes the Kubernetes network model for Pod-to-Pod
+    communication?
+  options:
+  - Each node exposes container ports and Pods talk via host port-mapping
+  - Pods share the node's single IP and are distinguished by port only
+  - All Pod traffic is proxied through the API server
+  - Every Pod gets its own cluster-routable IP and Pods communicate without NAT
+  answer: 3
+  explanation: |
+    The core Kubernetes network model requires every Pod to receive a unique,
+    cluster-routable IP and for Pods to reach each other directly without NAT. This flat
+    L3 model is what makes Services, DNS, and NetworkPolicy layer cleanly on top.
+  ref: "concepts.md#the-kubernetes-network-model"
+
+- id: services-networking-002
+  difficulty: beginner
+  tags: [network-model, pod, shared-namespace]
+  question: |
+    Two containers in the same Pod both try to bind TCP port 8080. What happens?
+  options:
+  - Both bind successfully because each container has its own network namespace
+  - Kubernetes automatically remaps one of them to a free port
+  - One fails to bind because containers in a Pod share a single network namespace
+  - The Pod is rejected at admission time for a port conflict
+  answer: 2
+  explanation: |
+    All containers in a Pod share one network namespace (shared IP and localhost), just
+    like the Linux namespace mechanism from Docker. Because they share the namespace, only
+    one process can bind a given port, so the second bind fails at runtime.
+  ref: "concepts.md#the-kubernetes-network-model"
+
+- id: services-networking-003
+  difficulty: intermediate
+  tags: [network-model, nat, client-ip]
+  question: |
+    A colleague claims "Kubernetes never uses NAT." What is the accurate correction?
+  options:
+  - There is no NAT between Pods, but ingress via NodePort/LoadBalancer and egress to the internet generally are NATed
+  - NAT is never used anywhere, the claim is fully correct
+  - All Pod-to-Pod traffic is NATed, only external traffic avoids NAT
+  - NAT applies only to headless Services
+  answer: 0
+  explanation: |
+    The model guarantees no NAT for east-west Pod-to-Pod traffic (each side sees the
+    other's real Pod IP). Traffic entering via NodePort/LoadBalancer or leaving to the
+    internet is typically SNAT'd, which is why preserving the real client IP needs
+    externalTrafficPolicy: Local.
+  ref: "concepts.md#the-kubernetes-network-model"
+
+- id: services-networking-004
+  difficulty: beginner
+  tags: [cni, plugins, responsibilities]
+  question: |
+    Who actually implements Pod networking (IP allocation, veth setup, routes) in a
+    Kubernetes cluster?
+  options:
+  - The kube-apiserver directly
+  - A CNI plugin that the kubelet invokes
+  - kube-proxy on each node
+  - CoreDNS
+  answer: 1
+  explanation: |
+    Kubernetes core does not implement Pod networking. The kubelet delegates to a CNI
+    (Container Network Interface) plugin to allocate the Pod IP, create the veth pair, and
+    program routes that satisfy the flat network model. This mirrors CRI for runtime and
+    CSI for storage.
+  ref: "concepts.md#cni-implementing-the-network-model"
+
+- id: services-networking-005
+  difficulty: intermediate
+  tags: [cni, networkpolicy, gotcha]
+  question: |
+    You apply a NetworkPolicy but it has no effect at all. Which explanation is most
+    likely?
+  options:
+  - NetworkPolicy only works on headless Services
+  - The installed CNI plugin does not enforce NetworkPolicy (e.g. plain flannel)
+  - NetworkPolicy requires IPVS mode in kube-proxy
+  - NetworkPolicy is only evaluated by CoreDNS
+  answer: 1
+  explanation: |
+    NetworkPolicy is only enforced if the CNI supports it (Calico, Cilium do). Under a
+    non-enforcing CNI like plain flannel, the policy object is accepted but silently does
+    nothing, since there is no component actually applying the rules.
+  ref: "concepts.md#cni-implementing-the-network-model"
+
+- id: services-networking-006
+  difficulty: intermediate
+  tags: [cni, troubleshooting, containercreating]
+  question: |
+    A Pod is stuck in ContainerCreating with an event "NetworkPlugin cni failed to set up
+    pod." What is the most likely root cause?
+  options:
+  - The readiness probe is failing
+  - The Service selector does not match the Pod
+  - The CNI plugin is unhealthy/missing or the Pod CIDR is exhausted
+  - CoreDNS is down
+  answer: 2
+  explanation: |
+    A CNI setup failure means Pod networking cannot be established before any Service or
+    probe is relevant. Common causes are a missing/unhealthy CNI plugin or an exhausted
+    Pod CIDR (no IPs left to assign). Readiness probes and Service selectors act later.
+  ref: "concepts.md#cni-implementing-the-network-model"
+
+- id: services-networking-007
+  difficulty: beginner
+  tags: [ephemeral-ip, services, why]
+  question: |
+    Why is it wrong to hard-code a backend Pod's IP address in a client's configuration?
+  options:
+  - Pod IPs are too long to store reliably
+  - Pod IPs are ephemeral and change whenever the Pod is rescheduled or replaced
+  - Pod IPs are only visible to the kubelet
+  - Pod IPs are encrypted and rotate every request
+  answer: 1
+  explanation: |
+    Pods are ephemeral. A crashed, rescheduled, scaled, or rolling-updated Pod comes back
+    with a new IP and the old one is recycled. A Service provides the stable VIP and DNS
+    name that clients target instead.
+  ref: "concepts.md#why-pod-ips-are-ephemeral--services"
+
+- id: services-networking-008
+  difficulty: beginner
+  tags: [services, stable-identity]
+  question: |
+    Which three things does a ClusterIP Service provide in front of a dynamic set of Pods?
+  options:
+  - A container image, a volume, and a namespace
+  - A stable virtual IP, a stable DNS name, and load balancing across healthy Pods
+  - A CPU limit, a memory limit, and a restart policy
+  - A node label, a taint, and an affinity rule
+  answer: 1
+  explanation: |
+    A Service gives a stable VIP for the Service's lifetime, a stable DNS name, and
+    load balancing across the currently-ready backing Pods. This indirection layer is what
+    survives Pod churn.
+  ref: "concepts.md#why-pod-ips-are-ephemeral--services"
+
+- id: services-networking-009
+  difficulty: beginner
+  tags: [selector, labels, services]
+  question: |
+    How does a Service determine which Pods are its backends?
+  options:
+  - By a label selector evaluated continuously against Pods
+  - By the order Pods were created
+  - By matching container image names
+  - By an explicit list of Pod names in spec.pods
+  answer: 0
+  explanation: |
+    A Service uses a label selector, not names or IPs. Any Pod whose labels match becomes a
+    backend automatically, and one whose labels stop matching drops out. The selector is
+    evaluated continuously, not once at creation.
+  ref: "concepts.md#services-and-label-selectors"
+
+- id: services-networking-010
+  difficulty: intermediate
+  tags: [selector, port, targetport]
+  question: |
+    In a Service spec, what is the difference between `port` and `targetPort`?
+  options:
+  - port is the container port, targetPort is the node port
+  - port is what clients hit on the Service, targetPort is the port on the backing Pod
+  - They must always be equal
+  - port is for TCP and targetPort is for UDP
+  answer: 1
+  explanation: |
+    `port` is the Service's own listening port (what clients connect to on the VIP);
+    `targetPort` is the port on the Pod/container that traffic is forwarded to. If
+    targetPort is omitted it defaults to port, and it can reference a named container port.
+  ref: "concepts.md#services-and-label-selectors"
+
+- id: services-networking-011
+  difficulty: intermediate
+  tags: [selector, troubleshooting, empty-endpoints]
+  question: |
+    A Service is created and its YAML looks fine, but clients get connection refused/timeout
+    and `kubectl get endpointslices` shows no ready addresses. What is the most likely cause?
+  options:
+  - kube-proxy uses IPVS instead of iptables
+  - The Service is missing a LoadBalancer type
+  - CoreDNS needs to be restarted
+  - The Service selector doesn't match any Pods, or matching Pods are failing readiness
+  answer: 3
+  explanation: |
+    An empty ready EndpointSlice means no matching ready Pods. The usual causes are a
+    selector/label mismatch (typo or wrong key) or all matching Pods failing their readiness
+    probe, so they are excluded from the ready endpoints. The Service object itself shows no
+    error.
+  ref: "concepts.md#services-and-label-selectors"
+
+- id: services-networking-012
+  difficulty: intermediate
+  tags: [selector, no-selector, external]
+  question: |
+    Is a Service without a selector valid, and what is it used for?
+  options:
+  - No, a selector is always required
+  - Yes, and you manage its EndpointSlices manually, e.g. to point at an external database
+  - Yes, but only for headless Services
+  - Yes, but it automatically selects all Pods in the namespace
+  answer: 1
+  explanation: |
+    A selector-less Service is legal. Because there is no selector, the EndpointSlice
+    controller won't populate endpoints, so you create/manage EndpointSlices manually,
+    which is handy for pointing at an external endpoint (like a database) or another target.
+  ref: "concepts.md#services-and-label-selectors"
+
+- id: services-networking-013
+  difficulty: intermediate
+  tags: [endpointslices, readiness, control-plane]
+  question: |
+    What drives whether a Pod appears as a "ready" endpoint for a Service?
+  options:
+  - The Pod's liveness probe
+  - The Pod's readiness probe (unready Pods are excluded from the ready set)
+  - The Pod's CPU usage
+  - The order of Pod creation
+  answer: 1
+  explanation: |
+    The EndpointSlice controller marks an endpoint ready based on the Pod's readiness
+    probe. An unready Pod is excluded from the ready endpoints, so it receives no Service
+    traffic until it passes readiness again. Liveness only triggers restarts.
+  ref: "concepts.md#endpoints-and-endpointslices"
+
+- id: services-networking-014
+  difficulty: advanced
+  tags: [endpointslices, scalability, endpoints]
+  question: |
+    Why were EndpointSlices introduced to replace the single legacy Endpoints object?
+  options:
+  - Endpoints could not store IPv6 addresses
+  - Endpoints did not support label selectors
+  - A single Endpoints object holding all backends had to be fully rewritten and shipped to every node on each change, a scalability bottleneck
+  - Endpoints required IPVS mode
+  answer: 2
+  explanation: |
+    The legacy Endpoints object stored all backends in one object, so any change rewrote the
+    whole object and pushed it to every node, which scaled poorly with thousands of Pods.
+    EndpointSlices shard backends into small slices so a change touches only one slice.
+  ref: "concepts.md#endpoints-and-endpointslices"
+
+- id: services-networking-015
+  difficulty: advanced
+  tags: [endpointslices, defaults, limits]
+  question: |
+    By default, how many endpoints does the control plane put in a single EndpointSlice, and
+    what is the configurable maximum?
+  options:
+  - 100 by default, up to 1000 (via --max-endpoints-per-slice)
+  - 1000 by default, up to 10000
+  - Unlimited
+  - 10 by default, up to 100
+  answer: 0
+  explanation: |
+    By default EndpointSlices hold up to 100 endpoints each; this is configurable up to 1000
+    via the kube-controller-manager --max-endpoints-per-slice flag. Sharding keeps per-change
+    update cost small.
+  ref: "concepts.md#endpoints-and-endpointslices"
+
+- id: services-networking-016
+  difficulty: beginner
+  tags: [clusterip, default, internal]
+  question: |
+    What is the default Service type, and what is its reachability?
+  options:
+  - NodePort, reachable from outside the cluster
+  - ClusterIP, reachable only from inside the cluster
+  - LoadBalancer, reachable from the internet
+  - ExternalName, reachable via CNAME only
+  answer: 1
+  explanation: |
+    ClusterIP is the default. It allocates a stable virtual IP from the service CIDR that is
+    only reachable from within the cluster, making it the workhorse for internal
+    service-to-service traffic.
+  ref: "concepts.md#clusterip-services"
+
+- id: services-networking-017
+  difficulty: intermediate
+  tags: [clusterip, virtual-ip, internals]
+  question: |
+    Which statement about a ClusterIP is correct?
+  options:
+  - It is bound to a physical network interface on one node
+  - It changes each time a backing Pod restarts
+  - It is a virtual IP that exists only as forwarding rules programmed by kube-proxy on every node
+  - It is only usable by the node hosting the Service
+  answer: 2
+  explanation: |
+    A ClusterIP is virtual: no interface owns it. It exists only as kernel forwarding rules
+    that kube-proxy programs on every node, so TCP/UDP to ClusterIP:port works from any node,
+    and the IP is stable for the Service's lifetime.
+  ref: "concepts.md#clusterip-services"
+
+- id: services-networking-018
+  difficulty: intermediate
+  tags: [clusterip, layering, service-types]
+  question: |
+    How do NodePort and LoadBalancer Services relate to ClusterIP?
+  options:
+  - They are completely separate and do not allocate a ClusterIP
+  - They replace the ClusterIP with a public IP only
+  - They only work with headless Services
+  - They are built on top of a ClusterIP, adding extra reachability layers around it
+  answer: 3
+  explanation: |
+    NodePort and LoadBalancer are supersets of ClusterIP: each still allocates a ClusterIP
+    and adds reachability layers (a static node port, and a cloud LB) on top of it.
+  ref: "concepts.md#clusterip-services"
+
+- id: services-networking-019
+  difficulty: beginner
+  tags: [nodeport, port-range]
+  question: |
+    What is the default port range from which a NodePort is allocated?
+  options:
+  - 1-1024
+  - 8000-9000
+  - 40000-65535
+  - 30000-32767
+  answer: 3
+  explanation: |
+    NodePort uses the default range 30000-32767 (configurable via the API server flag
+    --service-node-port-range). Traffic to <AnyNodeIP>:<nodePort> reaches the Service.
+  ref: "concepts.md#nodeport-services"
+
+- id: services-networking-020
+  difficulty: intermediate
+  tags: [nodeport, reachability]
+  question: |
+    A NodePort Service has backing Pods only on node A. A client hits node B on the node
+    port. What happens?
+  options:
+  - The connection is refused because node B has no Pod
+  - Only node A listens on the node port
+  - Node B forwards the traffic to a backing Pod (on node A), by default SNAT'ing the client IP
+  - The request is dropped silently
+  answer: 2
+  explanation: |
+    Every node listens on the NodePort and can forward to a backing Pod anywhere, even if no
+    Pod runs locally. By default the client IP is SNAT'd on the cross-node hop, so the Pod
+    sees a node IP. externalTrafficPolicy: Local would restrict to local Pods and preserve
+    the client IP.
+  ref: "concepts.md#nodeport-services"
+
+- id: services-networking-021
+  difficulty: intermediate
+  tags: [nodeport, production, tradeoffs]
+  question: |
+    Why is a raw NodePort usually a poor production front door?
+  options:
+  - It cannot forward TCP traffic
+  - It only supports a single backing Pod
+  - It requires IPVS mode
+  - It exposes a high unfriendly port on every node with no TLS termination or hostname routing, and couples you to node IPs
+  answer: 3
+  explanation: |
+    NodePort exposes an awkward high port on every node, provides no TLS termination or
+    host/path routing, and ties clients to node IPs. Production setups front Services with a
+    LoadBalancer and/or Ingress/Gateway for TLS and routing.
+  ref: "concepts.md#nodeport-services"
+
+- id: services-networking-022
+  difficulty: beginner
+  tags: [loadbalancer, cloud]
+  question: |
+    What does a Service of `type: LoadBalancer` do?
+  options:
+  - Provisions an external cloud load balancer that fronts the Service
+  - Creates a headless Service with per-Pod DNS
+  - Maps the Service to an external DNS name via CNAME
+  - Disables the ClusterIP
+  answer: 0
+  explanation: |
+    type: LoadBalancer asks the cloud controller manager to provision an external cloud load
+    balancer that forwards to the nodes. It builds on NodePort (and a ClusterIP) internally.
+  ref: "concepts.md#loadbalancer-services"
+
+- id: services-networking-023
+  difficulty: intermediate
+  tags: [loadbalancer, bare-metal, pending]
+  question: |
+    On a bare-metal cluster with no cloud provider, a `type: LoadBalancer` Service's external
+    IP stays `<pending>` forever. Why?
+  options:
+  - There is no cloud API to provision an LB, so you need something like MetalLB
+  - kube-proxy is disabled
+  - The Service selector is wrong
+  - The node port range is exhausted
+  answer: 0
+  explanation: |
+    LoadBalancer relies on a cloud controller calling a cloud API. Bare metal has no such
+    API, so nothing provisions the external IP and it stays pending until you install a
+    controller like MetalLB (or a provider-style LB implementation).
+  ref: "concepts.md#loadbalancer-services"
+
+- id: services-networking-024
+  difficulty: advanced
+  tags: [loadbalancer, cost, ingress]
+  question: |
+    Why do teams often front many Services with a single Ingress/Gateway instead of giving
+    each a `type: LoadBalancer`?
+  options:
+  - LoadBalancer Services cannot do TLS at all
+  - Ingress is required for ClusterIP to work
+  - Each LoadBalancer Service typically provisions its own cloud LB, which is costly and slow at scale
+  - LoadBalancer Services do not support HTTP
+  answer: 2
+  explanation: |
+    Every type: LoadBalancer Service usually gets its own cloud LB, which becomes expensive
+    and slow to manage at scale. One Ingress/Gateway can use a single LB with host/path
+    routing and TLS termination to reach many backend Services.
+  ref: "concepts.md#loadbalancer-services"
+
+- id: services-networking-025
+  difficulty: intermediate
+  tags: [loadbalancer, allocateloadbalancernodeports]
+  question: |
+    What does setting `allocateLoadBalancerNodePorts: false` on a LoadBalancer Service do?
+  options:
+  - Disables the ClusterIP
+  - Forces externalTrafficPolicy to Local
+  - Turns the Service into a headless Service
+  - Skips node-port allocation, useful for LB implementations that route directly to Pods
+  answer: 3
+  explanation: |
+    allocateLoadBalancerNodePorts defaults to true. Setting it false skips allocating node
+    ports, which is useful for LB implementations that route directly to Pod IPs and do not
+    need node ports.
+  ref: "concepts.md#loadbalancer-services"
+
+- id: services-networking-026
+  difficulty: beginner
+  tags: [externalname, dns, cname]
+  question: |
+    What does an `ExternalName` Service do?
+  options:
+  - Allocates a ClusterIP that proxies to an external host
+  - Exposes a Pod on every node's IP
+  - Maps the Service name to an external DNS name by returning a CNAME record, with no proxying
+  - Creates a cloud load balancer for an external service
+  answer: 2
+  explanation: |
+    ExternalName has no selector, ClusterIP, proxying, or EndpointSlices. It simply returns a
+    CNAME from cluster DNS pointing the Service name at the external name, giving a stable
+    internal alias for an external dependency.
+  ref: "concepts.md#externalname-services"
+
+- id: services-networking-027
+  difficulty: advanced
+  tags: [externalname, tls, gotcha]
+  question: |
+    A team points an ExternalName Service at an HTTPS endpoint and clients get TLS
+    certificate errors. Why?
+  options:
+  - ExternalName does not support TCP
+  - kube-proxy strips the TLS handshake
+  - ExternalName requires a ClusterIP for TLS
+  - The client connects to the CNAME target and sees that host's certificate, which may not match the original Service name it expected
+  answer: 3
+  explanation: |
+    ExternalName works purely at the DNS/CNAME layer with no proxying and no port remapping.
+    The client ends up connecting to the CNAME target host and validating that host's
+    certificate (SNI/CN), which can mismatch what the client expected from the internal name.
+  ref: "concepts.md#externalname-services"
+
+- id: services-networking-028
+  difficulty: intermediate
+  tags: [headless, clusterip-none, dns]
+  question: |
+    What does setting `clusterIP: None` on a Service produce?
+  options:
+  - A Service with a randomly chosen VIP
+  - A LoadBalancer Service
+  - A headless Service with no VIP, where DNS returns the A/AAAA records of the individual backing Pods
+  - A Service that rejects all traffic
+  answer: 2
+  explanation: |
+    clusterIP: None makes a headless Service: no VIP is allocated and kube-proxy does no load
+    balancing. Cluster DNS instead returns the A/AAAA records of the individual ready Pods,
+    enabling direct per-Pod addressing.
+  ref: "concepts.md#headless-services"
+
+- id: services-networking-029
+  difficulty: intermediate
+  tags: [headless, statefulset, stable-identity]
+  question: |
+    Why are headless Services commonly paired with StatefulSets?
+  options:
+  - StatefulSets cannot use ClusterIP Services
+  - Headless Services provide TLS termination for stateful apps
+  - It is required to allocate persistent volumes
+  - A headless Service gives each StatefulSet Pod a stable, predictable DNS name like pod-0.svc.ns...
+  answer: 3
+  explanation: |
+    With a StatefulSet plus a headless Service, each Pod gets a stable DNS name
+    (pod-0.<svc>.<ns>.svc.cluster.local, pod-1..., etc.). That stable per-Pod identity is
+    exactly what stateful systems rely on for leader election, sharding, and peer discovery.
+  ref: "concepts.md#headless-services"
+
+- id: services-networking-030
+  difficulty: intermediate
+  tags: [headless, clusterip, comparison]
+  question: |
+    What is the key behavioral difference between a normal ClusterIP Service and a headless
+    Service when a client resolves the Service name?
+  options:
+  - ClusterIP returns one VIP to load-balance across Pods, headless returns the list of individual Pod IPs
+  - Both return the same single VIP
+  - Headless returns a VIP, ClusterIP returns Pod IPs
+  - Neither creates DNS records
+  answer: 0
+  explanation: |
+    A ClusterIP Service resolves to a single VIP behind which kube-proxy picks a Pod.
+    A headless Service resolves to the A/AAAA records of all ready Pods, so the client can
+    address individual Pods directly.
+  ref: "concepts.md#headless-services"
+
+- id: services-networking-031
+  difficulty: beginner
+  tags: [dns, coredns, fqdn]
+  question: |
+    What is the standard fully-qualified DNS name for a Service named `catalog` in namespace
+    `default`?
+  options:
+  - default.catalog.cluster.local
+  - svc.catalog.default.local
+  - catalog.default.svc.cluster.local
+  - catalog.svc.default.cluster
+  answer: 2
+  explanation: |
+    Service DNS follows <service>.<namespace>.svc.cluster.local. So catalog in default is
+    catalog.default.svc.cluster.local. CoreDNS creates an A/AAAA record mapping it to the
+    ClusterIP.
+  ref: "concepts.md#cluster-dns-coredns"
+
+- id: services-networking-032
+  difficulty: beginner
+  tags: [dns, coredns, cross-namespace]
+  question: |
+    A Pod in namespace `default` needs to reach a Service `catalog` in namespace `other-ns`.
+    Which name works?
+  options:
+  - catalog.other-ns (or the FQDN catalog.other-ns.svc.cluster.local)
+  - other-ns.catalog
+  - catalog.default
+  - Just the short name catalog
+  answer: 0
+  explanation: |
+    The short name "catalog" only resolves within the caller's own namespace via search
+    domains. To reach another namespace, use catalog.other-ns or the FQDN
+    catalog.other-ns.svc.cluster.local.
+  ref: "concepts.md#cluster-dns-coredns"
+
+- id: services-networking-033
+  difficulty: advanced
+  tags: [dns, ndots, latency]
+  question: |
+    Pods experience slow resolution of external names like `api.stripe.com`. What default
+    behavior is the likely culprit?
+  options:
+  - CoreDNS caches negative results forever
+  - Headless Services intercept the query
+  - kube-proxy resolves DNS in userspace
+  - The default ndots:5 in the Pod's resolv.conf appends cluster search domains first, causing several failing internal lookups before the real one
+  answer: 3
+  explanation: |
+    With ndots:5, names having fewer than 5 dots get the cluster search domains appended and
+    tried first. Resolving api.stripe.com (2 dots) triggers several failing internal lookups
+    before the correct absolute one. Fixes include a trailing dot, tuning ndots, or NodeLocal
+    DNSCache.
+  ref: "concepts.md#cluster-dns-coredns"
+
+- id: services-networking-034
+  difficulty: intermediate
+  tags: [dns, coredns, records]
+  question: |
+    Which DNS record type does cluster DNS return for a normal (ClusterIP) Service versus an
+    ExternalName Service?
+  options:
+  - A record for the VIP (ClusterIP) vs a CNAME to the external name (ExternalName)
+  - CNAME for both
+  - SRV for ClusterIP vs A for ExternalName
+  - PTR for ClusterIP vs A for ExternalName
+  answer: 0
+  explanation: |
+    A normal ClusterIP Service gets an A/AAAA record for its VIP. A headless Service gets
+    per-Pod A/AAAA records, and an ExternalName Service gets a CNAME to its externalName.
+  ref: "concepts.md#cluster-dns-coredns"
+
+- id: services-networking-035
+  difficulty: beginner
+  tags: [kube-proxy, vip, control-plane]
+  question: |
+    What is kube-proxy's role for ClusterIP Services?
+  options:
+  - It is a userspace proxy that all Service traffic flows through
+  - It resolves DNS for Services
+  - It watches Services/EndpointSlices and programs kernel rules that DNAT Service-VIP packets to Pod IPs
+  - It provisions cloud load balancers
+  answer: 2
+  explanation: |
+    kube-proxy runs on every node, watches Services and EndpointSlices, and programs kernel
+    forwarding rules (iptables/IPVS/nftables) so that packets to a Service VIP are DNAT'd to a
+    real Pod IP. The kernel does the per-packet forwarding.
+  ref: "concepts.md#kube-proxy-and-service-vips-iptables-vs-ipvs-vs-nftables"
+
+- id: services-networking-036
+  difficulty: advanced
+  tags: [kube-proxy, data-path, misconception]
+  question: |
+    Where does kube-proxy sit in the request data path in iptables/IPVS/nftables mode?
+  options:
+  - Every packet is proxied through the kube-proxy process
+  - It sits between CoreDNS and the client
+  - It terminates TLS for each connection
+  - It does not sit in the data path at all; it only programs kernel rules and the kernel DNATs packets
+  answer: 3
+  explanation: |
+    In these modes kube-proxy is a controller, not a data-path proxy. It translates
+    Service+EndpointSlice state into kernel forwarding rules, and the kernel then DNATs
+    VIP packets straight to a Pod. Only the long-gone userspace mode actually proxied traffic.
+  ref: "concepts.md#kube-proxy-and-service-vips-iptables-vs-ipvs-vs-nftables"
+
+- id: services-networking-037
+  difficulty: advanced
+  tags: [kube-proxy, iptables, ipvs, scaling]
+  question: |
+    In a very large cluster with many Services and endpoints, why can the default iptables
+    mode degrade compared to IPVS?
+  options:
+  - iptables rules are evaluated linearly, so cost grows with the number of Services x endpoints, while IPVS uses an in-kernel hash table
+  - iptables requires a restart per Service change
+  - IPVS bypasses the kernel entirely
+  - iptables cannot handle UDP
+  answer: 0
+  explanation: |
+    iptables mode installs rules that are scanned linearly, so both matching and update cost
+    grow with Services x endpoints. IPVS uses an in-kernel hash table for near-constant lookup
+    and offers more LB algorithms, scaling better (though IPVS is deprecated as of v1.35).
+  ref: "concepts.md#kube-proxy-and-service-vips-iptables-vs-ipvs-vs-nftables"
+
+- id: services-networking-038
+  difficulty: intermediate
+  tags: [kube-proxy, nftables, versions]
+  question: |
+    Which statement about kube-proxy proxy modes and their status is correct?
+  options:
+  - iptables is the default, the nftables mode reached GA/stable in v1.33, and IPVS is deprecated as of v1.35
+  - IPVS is the default and nftables was removed
+  - nftables is the only supported mode
+  - userspace mode is the current default
+  answer: 0
+  explanation: |
+    iptables remains the default Linux mode. The nftables mode became GA/stable in v1.33 as
+    the modern successor with better scaling, and IPVS mode was marked deprecated as of v1.35.
+  ref: "concepts.md#kube-proxy-and-service-vips-iptables-vs-ipvs-vs-nftables"
+
+- id: services-networking-039
+  difficulty: advanced
+  tags: [kube-proxy, cilium, ebpf]
+  question: |
+    How can a CNI like Cilium change kube-proxy's role?
+  options:
+  - It forces kube-proxy into userspace mode
+  - It disables all Services
+  - It makes kube-proxy resolve DNS
+  - It can replace kube-proxy entirely, implementing Service load balancing in eBPF
+  answer: 3
+  explanation: |
+    Cilium with its eBPF datapath can replace kube-proxy, implementing Service VIP load
+    balancing directly in eBPF rather than relying on iptables/IPVS/nftables rules programmed
+    by kube-proxy.
+  ref: "concepts.md#kube-proxy-and-service-vips-iptables-vs-ipvs-vs-nftables"
+
+- id: services-networking-040
+  difficulty: intermediate
+  tags: [traffic-flow, dns, dnat, sequence]
+  question: |
+    Put the steps of a Pod calling `http://catalog/` in the correct order:
+    (1) kernel DNATs VIP packet to a ready Pod IP, (2) resolve catalog to ClusterIP via
+    CoreDNS, (3) connect to ClusterIP:port, (4) CNI routes the packet to the Pod.
+  options:
+  - "2, 3, 1, 4"
+  - "3, 2, 1, 4"
+  - "1, 2, 3, 4"
+  - "2, 1, 3, 4"
+  answer: 0
+  explanation: |
+    First the client resolves the name to the ClusterIP (2), then connects to the VIP:port
+    (3), then netfilter rules select a ready endpoint and DNAT the destination to a Pod IP
+    (1), and finally the CNI delivers the packet to the Pod, possibly across nodes (4).
+  ref: "concepts.md#how-a-request-reaches-a-pod-traffic-flow"
+
+- id: services-networking-041
+  difficulty: advanced
+  tags: [traffic-flow, conntrack, return-path]
+  question: |
+    After a request to a ClusterIP is DNAT'd to a Pod, why does the client still see the VIP
+    (not the Pod IP) as the peer on the return packets?
+  options:
+  - The Pod rewrites its own source IP to the VIP in userspace
+  - CoreDNS rewrites the packets
+  - Connection tracking (conntrack) un-DNATs the reply so the source appears as the VIP
+  - The client ignores the source IP
+  answer: 2
+  explanation: |
+    The kernel's conntrack records the DNAT translation. Reply packets from the Pod are
+    reverse-translated (un-DNAT'd) so the client sees replies coming from the VIP it connected
+    to, keeping the connection consistent.
+  ref: "concepts.md#how-a-request-reaches-a-pod-traffic-flow"
+
+- id: services-networking-042
+  difficulty: intermediate
+  tags: [traffic-flow, troubleshooting, failure-mapping]
+  question: |
+    A client Pod cannot reach a Service. Which sequence of checks best matches the traffic
+    chain "name -> VIP -> endpoint -> Pod"?
+  options:
+  - Check node CPU, then disk, then memory
+  - Check the container image, then the registry, then the tag
+  - Check CoreDNS resolution, then EndpointSlice ready addresses, then kube-proxy health, then CNI routing
+  - Check the Deployment strategy, then the HPA, then the PDB
+  answer: 2
+  explanation: |
+    Each link maps to a failure mode: DNS (CoreDNS resolves the name), endpoints
+    (selector/readiness populate the EndpointSlice), kube-proxy (programs VIP rules), and CNI
+    (routes the packet to the Pod). Walking them in order isolates the break quickly.
+  ref: "concepts.md#how-a-request-reaches-a-pod-traffic-flow"
+
+- id: services-networking-043
+  difficulty: intermediate
+  tags: [session-affinity, clientip]
+  question: |
+    How do you make a client stick to the same backend Pod across requests at the Service
+    layer?
+  options:
+  - "Set sessionAffinity: ClientIP on the Service"
+  - Enable a cookie-based affinity field on the Service
+  - "Set externalTrafficPolicy: Local"
+  - Use a headless Service
+  answer: 0
+  explanation: |
+    Service-level affinity supports only None (default) and ClientIP. sessionAffinity:
+    ClientIP keys stickiness on the source IP. Cookie-based affinity is an L7 concern
+    (Ingress/Gateway/mesh), not available at the L4 Service.
+  ref: "concepts.md#session-affinity"
+
+- id: services-networking-044
+  difficulty: advanced
+  tags: [session-affinity, timeout, limits]
+  question: |
+    What is the default and maximum timeout for `sessionAffinity: ClientIP`?
+  options:
+  - Default 60 seconds, max 600
+  - Default 3600, max 7200
+  - Default 10800 seconds (3 hours), max 86400 (24 hours)
+  - There is no timeout
+  answer: 2
+  explanation: |
+    ClientIP affinity uses sessionAffinityConfig.clientIP.timeoutSeconds, defaulting to 10800
+    seconds (3 hours) with a maximum of 86400 seconds (24 hours).
+  ref: "concepts.md#session-affinity"
+
+- id: services-networking-045
+  difficulty: advanced
+  tags: [session-affinity, nat, limitation]
+  question: |
+    Why can `sessionAffinity: ClientIP` behave poorly when many clients sit behind a shared
+    NAT or proxy?
+  options:
+  - It disables load balancing entirely
+  - It forces all traffic to CoreDNS
+  - It only works with UDP
+  - Affinity is keyed on source IP, so all clients sharing one source IP stick to the same Pod
+  answer: 3
+  explanation: |
+    ClientIP affinity keys on the source IP. If many clients share one source IP (behind a
+    NAT/proxy), they all map to the same Pod, creating imbalance. It also breaks when the
+    client IP is SNAT'd before reaching kube-proxy.
+  ref: "concepts.md#session-affinity"
+
+- id: services-networking-046
+  difficulty: advanced
+  tags: [traffic-policy, externaltrafficpolicy, client-ip]
+  question: |
+    You need external clients' real source IPs preserved when reaching Pods via a
+    LoadBalancer. Which setting achieves this, and what is the trade-off?
+  options:
+  - "internalTrafficPolicy: Cluster, no trade-off"
+  - "sessionAffinity: ClientIP, which preserves the IP with no downside"
+  - "Setting clusterIP: None"
+  - "externalTrafficPolicy: Local, which preserves client IP and avoids a hop but risks uneven load and unhealthy Pod-less nodes"
+  answer: 3
+  explanation: |
+    externalTrafficPolicy: Local forwards only to Pods on the node that received the traffic,
+    preserving the real client IP and avoiding the extra hop. The cost is uneven distribution
+    and that nodes with no local Pod fail the LB health check.
+  ref: "concepts.md#traffic-policies-and-topology-aware-routing"
+
+- id: services-networking-047
+  difficulty: advanced
+  tags: [traffic-policy, topology-aware-routing, cost]
+  question: |
+    What problem does topology-aware routing (trafficDistribution: PreferClose) address?
+  options:
+  - It encrypts Service traffic
+  - It forces all traffic through one node
+  - It replaces kube-proxy
+  - It prefers endpoints in the same zone as the client to cut cross-AZ latency and egress cost, failing over cross-zone when needed
+  answer: 3
+  explanation: |
+    Topology-aware routing uses EndpointSlice zone/nodeName data to prefer same-zone
+    endpoints, reducing cross-AZ latency and cloud egress cost, while still failing over to
+    other zones when local capacity is insufficient.
+  ref: "concepts.md#traffic-policies-and-topology-aware-routing"
+
+- id: services-networking-048
+  difficulty: intermediate
+  tags: [multi-port, named-ports, requirement]
+  question: |
+    When a Service exposes multiple ports, what does Kubernetes require?
+  options:
+  - All ports must use the same protocol
+  - Only one port may specify a targetPort
+  - The ports must be consecutive numbers
+  - Each port entry must be named, with names unique within the Service
+  answer: 3
+  explanation: |
+    A single Service can expose multiple ports, but when it does every port entry must have a
+    unique name so DNS SRV records and other consumers can disambiguate them. targetPort can
+    be numeric or a named container port.
+  ref: "concepts.md#multi-port-and-named-port-services"

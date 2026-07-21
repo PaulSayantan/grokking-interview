@@ -1,0 +1,853 @@
+topic: "Observability & Troubleshooting (Kubernetes)"
+domain: kubernetes
+topic_slug: troubleshooting-observability
+version: 1
+questions:
+- id: troubleshooting-observability-001
+  difficulty: beginner
+  tags: [kubectl, describe, workflow]
+  question: |
+    A Pod is misbehaving. Which single command shows the container State,
+    Reason, Exit Code, mounts, and the recent Events for that Pod in one place?
+  options:
+  - "kubectl get pod <p>"
+  - "kubectl logs <p>"
+  - "kubectl describe pod <p>"
+  - "kubectl top pod <p>"
+  answer: 2
+  explanation: |
+    `kubectl describe pod` renders the container State/Reason/Exit Code, probe config,
+    volume mounts, and — at the bottom — the Events for that object. `get` is only the
+    STATUS line, `logs` is app stdout, and `top` needs metrics-server.
+  ref: "concepts.md#the-kubectl-debugging-toolkit"
+
+- id: troubleshooting-observability-002
+  difficulty: beginner
+  tags: [logs, previous, crash]
+  question: |
+    A container has restarted 6 times and is currently restarting again. Which
+    command shows the logs from the instance that CRASHED (not the current one)?
+  options:
+  - "kubectl logs <p>"
+  - "kubectl logs <p> --follow"
+  - "kubectl describe pod <p> --show-logs"
+  - "kubectl logs <p> --previous"
+  answer: 3
+  explanation: |
+    `kubectl logs --previous` (`-p`) returns the stdout/stderr of the *prior* terminated
+    container instance — where the crash evidence lives. Plain `logs` shows the current
+    (possibly not-yet-crashed) instance.
+  ref: "concepts.md#the-kubectl-debugging-toolkit"
+
+- id: troubleshooting-observability-003
+  difficulty: beginner
+  tags: [status, phase, running]
+  question: |
+    A Pod shows "1/1 Running". What does the "1/1" specifically indicate?
+  options:
+  - "The Pod has been running for one minute"
+  - "One restart out of one allowed"
+  - "One node out of one is scheduling it"
+  - "One of one containers has PASSED its readiness check (is Ready)"
+  answer: 3
+  explanation: |
+    The READY column is <ready containers>/<total containers>. "1/1" means the single
+    container's readiness probe passes (or there is none). It is independent of the
+    Running phase, which only says the process is up.
+  ref: "concepts.md#reading-pod-status-and-container-state"
+
+- id: troubleshooting-observability-004
+  difficulty: intermediate
+  tags: [status, container-state]
+  question: |
+    In `kubectl describe pod` output you see: State: Waiting / Reason: CrashLoopBackOff,
+    and Last State: Terminated / Reason: Error / Exit Code: 1. How do you read this?
+  options:
+  - "The container is currently running but logged an error"
+  - "The container last exited with code 1 and is now waiting (backing off) before its next restart"
+  - "Kubernetes could not pull the image"
+  - "The container was OOMKilled"
+  answer: 1
+  explanation: |
+    Read it bottom-up: the container last Terminated with exit code 1 (an app error) and
+    is now in the Waiting state with reason CrashLoopBackOff — the kubelet is backing off
+    before restarting it again.
+  ref: "concepts.md#reading-pod-status-and-container-state"
+
+- id: troubleshooting-observability-005
+  difficulty: beginner
+  tags: [crashloopbackoff, meaning]
+  question: |
+    What does CrashLoopBackOff actually mean?
+  options:
+  - "The container repeatedly starts and exits, and the kubelet is waiting (backing off) before restarting it"
+  - "The image failed to download from the registry"
+  - "The Pod cannot be scheduled to any node"
+  - "The readiness probe is failing so traffic is withheld"
+  answer: 0
+  explanation: |
+    CrashLoopBackOff is not an error in itself — it says the container keeps
+    starting and dying, so the kubelet throttles restarts with exponential back-off
+    (10s, 20s, ... capped at 5 minutes).
+  ref: "concepts.md#crashloopbackoff--the-container-keeps-dying"
+
+- id: troubleshooting-observability-006
+  difficulty: intermediate
+  tags: [crashloopbackoff, backoff]
+  question: |
+    How does the kubelet space out restarts of a container that is in CrashLoopBackOff?
+  options:
+  - "A fixed 30-second interval between every restart"
+  - "It stops trying after 3 restarts"
+  - "Exponential back-off (10s, 20s, 40s, ...) capped at 5 minutes"
+  - "Immediate restart with no delay"
+  answer: 2
+  explanation: |
+    Restarts use exponential back-off starting at 10s and doubling, capped at a maximum
+    of 5 minutes between attempts. The delay resets after the container runs successfully
+    for long enough.
+  ref: "concepts.md#crashloopbackoff--the-container-keeps-dying"
+
+- id: troubleshooting-observability-007
+  difficulty: intermediate
+  tags: [crashloopbackoff, exit-code, job]
+  question: |
+    A container in a Deployment enters CrashLoopBackOff but its Last State shows
+    Exit Code: 0 and Reason: Completed. What is the most likely problem?
+  options:
+  - "The memory limit is too low"
+  - "The image tag does not exist"
+  - "The readiness probe is misconfigured"
+  - "The app runs a short command that finishes and exits, but a Deployment expects a long-running process"
+  answer: 3
+  explanation: |
+    Exit 0 means the process finished successfully, but a Deployment restarts it because
+    it expects a persistent process. Run-to-completion work belongs in a Job, or the
+    process must stay in the foreground.
+  ref: "concepts.md#crashloopbackoff--the-container-keeps-dying"
+
+- id: troubleshooting-observability-008
+  difficulty: beginner
+  tags: [imagepullbackoff, registry]
+  question: |
+    ImagePullBackOff / ErrImagePull indicates a failure at which stage?
+  options:
+  - "The application crashed at startup"
+  - "The container image could not be fetched, so the container never started"
+  - "The liveness probe failed"
+  - "The Pod could not be scheduled"
+  answer: 1
+  explanation: |
+    These are image-fetch failures — wrong tag, missing/invalid registry credentials, or
+    an unreachable registry. The container never starts, so there are no application logs
+    to read; the evidence is in Events.
+  ref: "concepts.md#imagepullbackoff-and-errimagepull"
+
+- id: troubleshooting-observability-009
+  difficulty: intermediate
+  tags: [imagepullbackoff, logs, events]
+  question: |
+    A Pod is stuck in ImagePullBackOff. `kubectl logs <pod>` returns
+    "Error from server (BadRequest): container ... is waiting to start". Why, and
+    where should you look instead?
+  options:
+  - "There is no running container to produce logs; the pull error is in `kubectl describe` Events"
+  - "The log storage is full; check the node disk"
+  - "You need --previous to see the logs"
+  - "The API server is down; check kube-apiserver logs"
+  answer: 0
+  explanation: |
+    With ImagePullBackOff no container has started, so there is no stdout/stderr. The
+    actual reason (manifest not found, unauthorized, timeout, toomanyrequests) appears as
+    a Warning Event in `kubectl describe pod`.
+  ref: "concepts.md#imagepullbackoff-and-errimagepull"
+
+- id: troubleshooting-observability-010
+  difficulty: intermediate
+  tags: [imagepullbackoff, private-registry]
+  question: |
+    A Pod pulling from a private registry shows an Event "pull access denied ...
+    unauthorized". What is the correct fix?
+  options:
+  - "Add a valid imagePullSecret referencing the registry credentials"
+  - "Increase the memory limit"
+  - "Add a toleration for the registry taint"
+  - "Set imagePullPolicy: Never"
+  answer: 0
+  explanation: |
+    "unauthorized / pull access denied" is an authentication failure. Create a
+    docker-registry Secret and reference it via imagePullSecrets on the Pod/ServiceAccount
+    so the kubelet can authenticate to the registry.
+  ref: "concepts.md#imagepullbackoff-and-errimagepull"
+
+- id: troubleshooting-observability-011
+  difficulty: beginner
+  tags: [pending, scheduling]
+  question: |
+    A Pod remains in Pending state. What does that tell you?
+  options:
+  - "The container crashed and is restarting"
+  - "The image is being pulled"
+  - "The Pod finished successfully"
+  - "The Pod was accepted by the API server but has not been placed on a node (or its containers are not created)"
+  answer: 3
+  explanation: |
+    Pending means the Pod object exists but is not yet scheduled/running — most commonly
+    the scheduler cannot find a suitable node. The FailedScheduling event explains why.
+  ref: "concepts.md#pending--the-pod-cant-be-scheduled"
+
+- id: troubleshooting-observability-012
+  difficulty: intermediate
+  tags: [pending, events, scheduler]
+  question: |
+    Where does the kube-scheduler record WHY a Pod cannot be scheduled?
+  options:
+  - "In the kubelet log on every node"
+  - "As a FailedScheduling Event on the Pod, visible via `kubectl describe pod`"
+  - "In `kubectl logs <pod>`"
+  - "In the Pod's annotations only"
+  answer: 1
+  explanation: |
+    The scheduler emits a FailedScheduling event on the Pod, e.g. "0/5 nodes are
+    available: Insufficient cpu". `kubectl describe pod` surfaces it — no need to read the
+    node or scheduler logs first.
+  ref: "concepts.md#pending--the-pod-cant-be-scheduled"
+
+- id: troubleshooting-observability-013
+  difficulty: intermediate
+  tags: [pending, pvc, storage]
+  question: |
+    A Pod is Pending and `kubectl describe` shows it is waiting on a volume. `kubectl
+    get pvc` shows the PersistentVolumeClaim is also Pending. What is happening?
+  options:
+  - "The container image is too large"
+  - "The node has a taint"
+  - "The Pod cannot schedule because its PVC is unbound (no matching PV / storage class issue)"
+  - "The Pod exceeded its CPU limit"
+  answer: 2
+  explanation: |
+    A Pod that mounts a PVC cannot be scheduled until the claim is Bound. An unbound PVC
+    (no matching PV, or a StorageClass that cannot provision) keeps both the PVC and the
+    Pod Pending. See storage-volumes-pv-pvc for binding details.
+  ref: "concepts.md#pending--the-pod-cant-be-scheduled"
+
+- id: troubleshooting-observability-014
+  difficulty: intermediate
+  tags: [pending, taints, tolerations]
+  question: |
+    `kubectl describe pod` on a Pending Pod shows: "0/3 nodes are available: 3 node(s)
+    had untolerated taint {dedicated: gpu}". What fixes it?
+  options:
+  - "Add a toleration for the taint (or target nodes without it)"
+  - "Add more memory to the Pod"
+  - "Delete and recreate the Pod"
+  - "Add a readiness probe"
+  answer: 0
+  explanation: |
+    A node taint repels Pods that lack a matching toleration. To schedule onto those
+    tainted nodes, add the corresponding toleration to the Pod spec; otherwise the
+    scheduler will keep it Pending.
+  ref: "concepts.md#pending--the-pod-cant-be-scheduled"
+
+- id: troubleshooting-observability-015
+  difficulty: beginner
+  tags: [oomkilled, exit-137, memory]
+  question: |
+    A container's Last State shows Reason: OOMKilled and Exit Code: 137. What does
+    exit code 137 signify?
+  options:
+  - "The application returned HTTP 137"
+  - "The container completed normally"
+  - "The image had 137 layers"
+  - "128 + 9 — the process was killed by SIGKILL (the OOM killer) for exceeding its memory limit"
+  answer: 3
+  explanation: |
+    137 = 128 + 9, where 9 is SIGKILL. When a container exceeds its memory limit (memory
+    is incompressible), the kernel OOM killer sends SIGKILL, and Kubernetes labels the
+    termination OOMKilled.
+  ref: "concepts.md#oomkilled--memory-limit-exceeded"
+
+- id: troubleshooting-observability-016
+  difficulty: intermediate
+  tags: [oomkilled, cpu, throttling]
+  question: |
+    A container repeatedly exceeds its CPU limit. What happens, and how does it differ
+    from exceeding the memory limit?
+  options:
+  - "It is CPU-throttled (slowed), not killed, because CPU is compressible while memory is incompressible"
+  - "It is OOMKilled, same as memory"
+  - "The node is rebooted"
+  - "The Pod is evicted immediately"
+  answer: 0
+  explanation: |
+    CPU is a compressible resource — exceeding the limit throttles the container (CFS
+    throttling), it is not killed. Memory is incompressible — exceeding its limit causes
+    an OOM kill (exit 137).
+  ref: "concepts.md#oomkilled--memory-limit-exceeded"
+
+- id: troubleshooting-observability-017
+  difficulty: advanced
+  tags: [oomkilled, jvm, limits]
+  question: |
+    A Java service is repeatedly OOMKilled shortly after startup even though its own
+    metrics show low usage. Which is the most likely root cause?
+  options:
+  - "The readiness probe is too aggressive"
+  - "The Service selector does not match"
+  - "The JVM heap (-Xmx) or default heap sizing is set above the container's memory limit, so total RSS exceeds the cgroup limit"
+  - "The image tag is wrong"
+  answer: 2
+  explanation: |
+    A JVM sized without regard to the container limit (or -Xmx larger than the limit) can
+    push total memory (heap + metaspace + threads + off-heap) past the cgroup limit,
+    triggering an OOM kill. Size the heap relative to the container memory limit.
+  ref: "concepts.md#oomkilled--memory-limit-exceeded"
+
+- id: troubleshooting-observability-018
+  difficulty: intermediate
+  tags: [createcontainerconfigerror, configmap, secret]
+  question: |
+    A Pod shows State: Waiting / Reason: CreateContainerConfigError with the Event
+    'configmap "app-config" not found'. What is wrong?
+  options:
+  - "The container image is missing"
+  - "The node is out of memory"
+  - "A referenced ConfigMap (or Secret/key) does not exist, so the container cannot be created"
+  - "The liveness probe endpoint returns 500"
+  answer: 2
+  explanation: |
+    CreateContainerConfigError means the kubelet cannot assemble the container's config
+    because a referenced ConfigMap, Secret, or key is missing. The Event names the missing
+    object; verify it exists in the correct namespace.
+  ref: "concepts.md#createcontainerconfigerror-and-related-config-failures"
+
+- id: troubleshooting-observability-019
+  difficulty: intermediate
+  tags: [createcontainerconfigerror, logs]
+  question: |
+    Why does `kubectl logs` show nothing for a Pod stuck in CreateContainerConfigError?
+  options:
+  - "Logs are disabled by default"
+  - "The logs are only in the previous container"
+  - "You must use kubectl top instead"
+  - "The container was never created/started, so no app code ran and there is no stdout/stderr"
+  answer: 3
+  explanation: |
+    The failure happens at container-creation time, before any application process starts.
+    With no running (or previously-run) container there is no log output — the evidence is
+    in the Events.
+  ref: "concepts.md#createcontainerconfigerror-and-related-config-failures"
+
+- id: troubleshooting-observability-020
+  difficulty: advanced
+  tags: [invalidimagename, config-errors]
+  question: |
+    Which waiting Reason indicates a malformed image reference that fails BEFORE any
+    pull attempt is made?
+  options:
+  - "ImagePullBackOff"
+  - "ErrImagePull"
+  - "InvalidImageName"
+  - "CreateContainerConfigError"
+  answer: 2
+  explanation: |
+    InvalidImageName means the image string itself is malformed (e.g. bad characters,
+    illegal reference), so the kubelet rejects it before attempting a pull.
+    ImagePullBackOff/ErrImagePull occur when a valid-looking reference fails to download.
+  ref: "concepts.md#createcontainerconfigerror-and-related-config-failures"
+
+- id: troubleshooting-observability-021
+  difficulty: intermediate
+  tags: [evicted, node-pressure, kubelet]
+  question: |
+    A Pod's phase is Failed with reason Evicted. Which component performed the eviction
+    and why?
+  options:
+  - "The kernel OOM killer, because the process used too much CPU"
+  - "The scheduler, because there was no room to schedule it"
+  - "The kubelet, because a node eviction signal (e.g. memory.available or nodefs.available) crossed a threshold"
+  - "The API server, because the object was too large"
+  answer: 2
+  explanation: |
+    Node-pressure eviction is proactive kubelet action: when memory, disk (nodefs/imagefs),
+    or inode signals cross configured thresholds, the kubelet terminates Pods to reclaim
+    resources and sets phase to Failed with reason Evicted.
+  ref: "concepts.md#evicted--node-pressure-eviction"
+
+- id: troubleshooting-observability-022
+  difficulty: advanced
+  tags: [evicted, oomkilled, difference]
+  question: |
+    What is the key difference between an Evicted Pod and an OOMKilled container?
+  options:
+  - "They are two names for the same event"
+  - "Eviction only happens on control-plane nodes"
+  - "OOMKilled only happens to BestEffort Pods"
+  - "Eviction is proactive kubelet action on a node-pressure signal; OOMKilled is the kernel reactively killing a container that exceeded memory"
+  answer: 3
+  explanation: |
+    The kubelet evicts Pods proactively when eviction signals cross thresholds (to prevent
+    node starvation), setting phase Failed. OOMKilled is the Linux kernel reactively
+    SIGKILLing a container that exceeded its cgroup memory limit (exit 137).
+  ref: "concepts.md#evicted--node-pressure-eviction"
+
+- id: troubleshooting-observability-023
+  difficulty: intermediate
+  tags: [evicted, cleanup, controller]
+  question: |
+    After node pressure eases, you still see many Evicted Pods listed. Why, and what
+    happens to the workload?
+  options:
+  - "They will automatically restart on the same node"
+  - "Evicted Pod objects linger until cleaned up; a controller (Deployment/StatefulSet) recreates replacements elsewhere"
+  - "The cluster is broken and must be rebuilt"
+  - "Evicted Pods keep consuming CPU"
+  answer: 1
+  explanation: |
+    Evicted Pod objects are not auto-deleted — they remain in Failed state until you clean
+    them up. Their controller has already created replacement Pods (typically on other
+    nodes) to maintain desired replica count.
+  ref: "concepts.md#evicted--node-pressure-eviction"
+
+- id: troubleshooting-observability-024
+  difficulty: advanced
+  tags: [eviction, qos, order]
+  question: |
+    When the kubelet must evict Pods under memory pressure, which are generally targeted
+    first?
+  options:
+  - "Guaranteed-QoS Pods first"
+  - "The newest Pods regardless of QoS"
+  - "Pods using resources over their requests, lowest-QoS first (BestEffort, then Burstable)"
+  - "System (kube-system) Pods first"
+  answer: 2
+  explanation: |
+    Eviction favors reclaiming from Pods exceeding their requests, ordered by QoS:
+    BestEffort (no requests) and over-request Burstable Pods go first; Guaranteed Pods
+    within their requests are the most protected. Set proper requests to protect critical Pods.
+  ref: "concepts.md#evicted--node-pressure-eviction"
+
+- id: troubleshooting-observability-025
+  difficulty: beginner
+  tags: [events, model]
+  question: |
+    What are Kubernetes Events?
+  options:
+  - "Application log lines written to stdout"
+  - "First-class API objects emitted by components (scheduler, kubelet, controllers) narrating what happened to an object"
+  - "Prometheus metrics scraped from the kubelet"
+  - "Audit-log entries stored forever"
+  answer: 1
+  explanation: |
+    Events are API objects (`kubectl get events`) that components emit to describe
+    scheduling decisions, image pulls, probe failures, restarts, evictions, etc. They are
+    the narrative connecting desired state to what actually occurred.
+  ref: "concepts.md#the-events-object-and-why-events-expire"
+
+- id: troubleshooting-observability-026
+  difficulty: intermediate
+  tags: [events, ttl, expire]
+  question: |
+    You investigate a Pod that failed overnight and `kubectl describe` shows no Events.
+    Why?
+  options:
+  - "Events are only shown to cluster admins"
+  - "The Pod was deleted and recreated"
+  - "Describe never shows events, only get events does"
+  - "Events have a default TTL of about 1 hour in etcd and are garbage-collected after that"
+  answer: 3
+  explanation: |
+    Events are ephemeral: the API server stores them with a default ~1-hour TTL
+    (--event-ttl) and then garbage-collects them. The Pod object persists but its event
+    narrative is gone — ship events to a persistent store for post-mortems.
+  ref: "concepts.md#the-events-object-and-why-events-expire"
+
+- id: troubleshooting-observability-027
+  difficulty: intermediate
+  tags: [events, sort, timeline]
+  question: |
+    Which command gives you a chronological timeline of what happened in a namespace?
+  options:
+  - "kubectl get events (unsorted)"
+  - "kubectl get events --sort-by=.lastTimestamp"
+  - "kubectl top events"
+  - "kubectl logs --events"
+  answer: 1
+  explanation: |
+    `kubectl get events` returns an unordered list by default; adding
+    `--sort-by=.lastTimestamp` (or .metadata.creationTimestamp) turns it into a timeline
+    that is far easier to correlate with an incident.
+  ref: "concepts.md#the-events-object-and-why-events-expire"
+
+- id: troubleshooting-observability-028
+  difficulty: beginner
+  tags: [metrics-server, top]
+  question: |
+    `kubectl top pod` returns "error: Metrics API not available". What is the fix?
+  options:
+  - "Restart the API server"
+  - "Run kubectl top with sudo"
+  - "Install/repair metrics-server, which serves the Metrics API that `kubectl top` reads"
+  - "Add a readiness probe to your Pods"
+  answer: 2
+  explanation: |
+    `kubectl top` reads the aggregated Metrics API (metrics.k8s.io), which is provided by
+    metrics-server. Without it installed and healthy, top has no data source. On some
+    clusters it also needs --kubelet-insecure-tls.
+  ref: "concepts.md#metrics-server-and-kubectl-top"
+
+- id: troubleshooting-observability-029
+  difficulty: intermediate
+  tags: [metrics-server, hpa, source]
+  question: |
+    Besides `kubectl top`, which core Kubernetes feature depends on metrics-server for
+    resource metrics?
+  options:
+  - "The kube-scheduler"
+  - "The DNS resolver"
+  - "The Horizontal Pod Autoscaler (CPU/memory-based scaling)"
+  - "The ingress controller"
+  answer: 2
+  explanation: |
+    The HPA queries the Metrics API served by metrics-server for CPU/memory utilization to
+    make scaling decisions. metrics-server scrapes the kubelet Summary API and aggregates
+    it into metrics.k8s.io.
+  ref: "concepts.md#metrics-server-and-kubectl-top"
+
+- id: troubleshooting-observability-030
+  difficulty: advanced
+  tags: [metrics-server, monitoring, limitation]
+  question: |
+    Why should you NOT use metrics-server as your monitoring/alerting system?
+  options:
+  - "It requires a paid license"
+  - "It only works on the control plane"
+  - "It cannot report memory, only CPU"
+  - "It keeps only the latest sample in memory (no history) and is meant for autoscaling/quick-look, not alerting"
+  answer: 3
+  explanation: |
+    metrics-server holds only current samples with no historical storage and is explicitly
+    not an accurate resource-accounting source. For history, dashboards, and alerts use a
+    monitoring stack like Prometheus (see the observability domain).
+  ref: "concepts.md#metrics-server-and-kubectl-top"
+
+- id: troubleshooting-observability-031
+  difficulty: intermediate
+  tags: [liveness, restart-loop, probes]
+  question: |
+    An app runs fine locally, but in the cluster it is CrashLoopBackOff. Logs look
+    healthy and `kubectl describe` shows "Liveness probe failed" and "Killing container"
+    events. What is the cause?
+  options:
+  - "The image is corrupt"
+  - "A misconfigured liveness probe is killing a healthy container, causing a self-inflicted restart loop"
+  - "The Pod is Pending due to taints"
+  - "The ConfigMap is missing"
+  answer: 1
+  explanation: |
+    A liveness probe with too-short initialDelay, too-tight thresholds, or a slow/expensive
+    endpoint will fail and make the kubelet restart a healthy container repeatedly. The
+    Unhealthy/Killing events (not an app stack trace) are the tell.
+  ref: "concepts.md#liveness-probes-and-restart-loops"
+
+- id: troubleshooting-observability-032
+  difficulty: advanced
+  tags: [liveness, startup-probe, slow-start]
+  question: |
+    A slow-booting app is being killed by its liveness probe before it finishes starting.
+    What is the recommended fix?
+  options:
+  - "Delete the liveness probe entirely"
+  - "Add more replicas"
+  - "Add a startup probe to gate liveness/readiness until the app has booted (and/or loosen thresholds)"
+  - "Increase the CPU limit"
+  answer: 2
+  explanation: |
+    A startup probe holds off the liveness and readiness probes until the app has finished
+    initializing, which is the intended mechanism for slow starters. You can also increase
+    initialDelaySeconds/failureThreshold. Liveness endpoints should be cheap and dependency-free.
+  ref: "concepts.md#liveness-probes-and-restart-loops"
+
+- id: troubleshooting-observability-033
+  difficulty: intermediate
+  tags: [init-containers, status]
+  question: |
+    A Pod is stuck showing STATUS "Init:0/2". What does this mean?
+  options:
+  - "The Pod is still running the first of two init containers; app containers have not started yet"
+  - "Two of the app containers have crashed"
+  - "Two init containers completed successfully"
+  - "The Pod failed scheduling"
+  answer: 0
+  explanation: |
+    Init containers run sequentially to completion before app containers start. "Init:0/2"
+    means zero of two init containers have completed — it is blocked on the first one. The
+    main containers will not start until all init containers succeed.
+  ref: "concepts.md#init-containers-and-stuck-initialization"
+
+- id: troubleshooting-observability-034
+  difficulty: intermediate
+  tags: [init-containers, logs, debug]
+  question: |
+    How do you view the logs of a specific init container named "wait-for-db"?
+  options:
+  - "kubectl logs <pod>"
+  - "kubectl describe init <pod>"
+  - "kubectl top pod <pod> -c wait-for-db"
+  - "kubectl logs <pod> -c wait-for-db"
+  answer: 3
+  explanation: |
+    Use `kubectl logs <pod> -c <container-name>` to target a specific container, including
+    init containers. Add --previous if it crashed. A common cause of stuck init is a
+    dependency-wait container whose dependency never becomes ready.
+  ref: "concepts.md#init-containers-and-stuck-initialization"
+
+- id: troubleshooting-observability-035
+  difficulty: beginner
+  tags: [dns, coredns]
+  question: |
+    Which component provides in-cluster DNS resolution for Service names like
+    my-svc.my-ns.svc.cluster.local?
+  options:
+  - "kube-proxy"
+  - "CoreDNS (behind the kube-dns Service)"
+  - "the API server"
+  - "metrics-server"
+  answer: 1
+  explanation: |
+    CoreDNS runs as Pods in kube-system and is fronted by the kube-dns Service (commonly
+    10.96.0.10), which is injected into each Pod's /etc/resolv.conf. It resolves cluster
+    DNS names to Service ClusterIPs.
+  ref: "concepts.md#dns-debugging"
+
+- id: troubleshooting-observability-036
+  difficulty: intermediate
+  tags: [dns, debug, nslookup]
+  question: |
+    Which is a correct way to test DNS resolution from inside the cluster?
+  options:
+  - "kubectl run dnstest --rm -it --image=busybox:1.28 --restart=Never -- nslookup kubernetes.default"
+  - "kubectl top dns"
+  - "kubectl describe dns kubernetes.default"
+  - "kubectl logs coredns"
+  answer: 0
+  explanation: |
+    Launching a throwaway Pod and running nslookup against a known name
+    (kubernetes.default) tests resolution from a Pod's perspective. You should also verify
+    CoreDNS Pods are Running and the kube-dns Service has endpoints.
+  ref: "concepts.md#dns-debugging"
+
+- id: troubleshooting-observability-037
+  difficulty: advanced
+  tags: [dns, networkpolicy, ndots]
+  question: |
+    Pods in one namespace suddenly cannot resolve any names after a NetworkPolicy rollout.
+    What is the most likely cause?
+  options:
+  - "CoreDNS was uninstalled"
+  - "The ndots setting was removed"
+  - "A NetworkPolicy is blocking egress to CoreDNS (kube-system, UDP/TCP port 53)"
+  - "metrics-server is down"
+  answer: 2
+  explanation: |
+    A default-deny egress NetworkPolicy that does not allow traffic to kube-system port 53
+    will break DNS for those Pods. You must explicitly allow egress to CoreDNS. (NetworkPolicy
+    depth is in workload-network-security.)
+  ref: "concepts.md#dns-debugging"
+
+- id: troubleshooting-observability-038
+  difficulty: intermediate
+  tags: [node, notready]
+  question: |
+    `kubectl get nodes` shows a node as NotReady. Which component sets the node's Ready
+    condition, and what does NotReady usually indicate?
+  options:
+  - "The scheduler; it means the node is full"
+  - "kube-proxy; it means Services are down"
+  - "The API server; it means etcd is corrupt"
+  - "The kubelet; NotReady usually means the kubelet stopped heart-beating or reported a problem"
+  answer: 3
+  explanation: |
+    The kubelet posts the node's status/Ready condition. NotReady almost always means the
+    kubelet is down, cannot post status, the container runtime is broken, there is resource
+    pressure, or the CNI is not ready.
+  ref: "concepts.md#node-notready"
+
+- id: troubleshooting-observability-039
+  difficulty: intermediate
+  tags: [node, notready, debug]
+  question: |
+    A node is NotReady. After `kubectl describe node` shows no resource-pressure
+    conditions, where do you look next?
+  options:
+  - "kubectl logs on the node"
+  - "SSH to the node and inspect the kubelet and container-runtime (e.g. systemctl status kubelet, journalctl -u kubelet)"
+  - "Delete the node object"
+  - "Restart the scheduler"
+  answer: 1
+  explanation: |
+    NotReady is a node-agent signal. After checking describe (Conditions/Events), go to the
+    node host: the kubelet and container runtime logs typically reveal a crashed kubelet,
+    expired cert, dead runtime, or CNI failure.
+  ref: "concepts.md#node-notready"
+
+- id: troubleshooting-observability-040
+  difficulty: advanced
+  tags: [node, notready, eviction]
+  question: |
+    A node goes NotReady and stays that way. What eventually happens to the Pods that were
+    running on it?
+  options:
+  - "They keep running and receiving traffic normally"
+  - "They are immediately deleted with no replacement"
+  - "After the not-ready toleration timeout (default ~5 min), they are marked for eviction and controllers reschedule replacements"
+  - "They move to the control-plane node"
+  answer: 2
+  explanation: |
+    Pods tolerate node.kubernetes.io/not-ready for a default of ~300s. Once that expires,
+    they are evicted and their controllers recreate replacements on healthy nodes. (Bare
+    Pods with no controller are not recreated.)
+  ref: "concepts.md#node-notready"
+
+- id: troubleshooting-observability-041
+  difficulty: intermediate
+  tags: [kubectl-debug, distroless, exec]
+  question: |
+    You need a shell inside a running Pod whose image is distroless (no shell, no debug
+    tools). Which approach works?
+  options:
+  - "kubectl exec -it <pod> -- sh"
+  - "kubectl cp a shell into the container"
+  - "kubectl debug -it <pod> --image=busybox:1.28 --target=<container> (ephemeral container sharing namespaces)"
+  - "kubectl logs -f <pod>"
+  answer: 2
+  explanation: |
+    exec fails because there is no shell in a distroless image. `kubectl debug` adds an
+    ephemeral debug container (with its own tools) that shares the target container's process
+    namespace via --target, giving you a usable shell alongside the app.
+  ref: "concepts.md#kubectl-debug-and-ephemeral-containers"
+
+- id: troubleshooting-observability-042
+  difficulty: advanced
+  tags: [kubectl-debug, copy-to, crashloop]
+  question: |
+    A container is in CrashLoopBackOff so you cannot exec into it (it is never running long
+    enough). How can you inspect its environment/volumes with kubectl debug?
+  options:
+  - "kubectl exec --force"
+  - "kubectl logs --previous is the only option"
+  - "You cannot debug a crashing container at all"
+  - "kubectl debug <pod> --copy-to=<new> --set-image=<ctr>=busybox -- sh (copy the Pod, change image so it stays up)"
+  answer: 3
+  explanation: |
+    `kubectl debug --copy-to` creates a copy of the Pod (same volumes/config) that you can
+    modify — e.g. swap the image or override the command — so it stays up and you can shell
+    in to inspect what the crashing app would have seen. The original Pod is untouched.
+  ref: "concepts.md#kubectl-debug-and-ephemeral-containers"
+
+- id: troubleshooting-observability-043
+  difficulty: advanced
+  tags: [ephemeral-containers, constraints]
+  question: |
+    Which statement about ephemeral containers (GA since v1.25) is TRUE?
+  options:
+  - "They can define readiness/liveness probes and resource requests"
+  - "They are added to a running Pod for debugging, cannot have ports/probes/resources, and cannot be removed once added"
+  - "They replace the crashed container in place"
+  - "They persist across Pod restarts"
+  answer: 1
+  explanation: |
+    Ephemeral containers are appended to a running Pod's ephemeralContainers list for
+    debugging. They are restricted (no ports, probes, or resources), cannot be removed once
+    added (they die with the Pod), and are not intended for building the application.
+  ref: "concepts.md#kubectl-debug-and-ephemeral-containers"
+
+- id: troubleshooting-observability-044
+  difficulty: intermediate
+  tags: [flow, systematic, running-no-traffic]
+  question: |
+    A Pod is "1/1 Running" but the Service in front of it returns nothing. Following a
+    systematic flow, what do you check FIRST?
+  options:
+  - "kubectl get endpoints <svc> (are there endpoints? does the selector match and readiness pass?) then DNS"
+  - "kubectl logs --previous"
+  - "Increase the memory limit"
+  - "Restart the API server"
+  answer: 0
+  explanation: |
+    If the Pod is Running and ready but no traffic flows, the problem is between the Service
+    and the Pod: check the Service's endpoints (empty means selector mismatch or readiness
+    failing), then verify DNS resolution. This is the Service/endpoints branch of the flow.
+  ref: "concepts.md#a-systematic-pod-wont-start-flow"
+
+- id: troubleshooting-observability-045
+  difficulty: beginner
+  tags: [flow, first-command]
+  question: |
+    In the systematic "pod won't start" flow, what is the universal first move regardless
+    of the eventual root cause?
+  options:
+  - "Delete the Pod and let it be recreated"
+  - "Scale the Deployment to zero"
+  - "kubectl get pod -o wide to read STATUS/READY/RESTARTS, then branch on the STATUS"
+  - "Edit the node"
+  answer: 2
+  explanation: |
+    Start by reading the observed STATUS/READY/RESTARTS with `kubectl get pod -o wide`, then
+    branch: Pending, ImagePullBackOff, CrashLoopBackOff, OOMKilled, etc. each lead to a
+    specific evidence path — almost always via `kubectl describe pod`.
+  ref: "concepts.md#a-systematic-pod-wont-start-flow"
+
+- id: troubleshooting-observability-046
+  difficulty: intermediate
+  tags: [exit-codes, sigterm, sigkill]
+  question: |
+    You see a container that Terminated with Exit Code: 143. What does that indicate?
+  options:
+  - "OOMKilled by the kernel"
+  - "An application panic"
+  - "Image pull failure"
+  - "128 + 15 — the process received SIGTERM (a graceful shutdown request) and exited"
+  answer: 3
+  explanation: |
+    143 = 128 + 15 (SIGTERM). This typically indicates a graceful stop — e.g. the Pod was
+    being terminated/rescheduled and the container honored the shutdown signal. Contrast with
+    137 (SIGKILL), often OOMKilled or a forced kill.
+  ref: "concepts.md#oomkilled--memory-limit-exceeded"
+
+- id: troubleshooting-observability-047
+  difficulty: intermediate
+  tags: [observability-domain, boundary, metrics]
+  question: |
+    A teammate asks how to build a historical metrics + alerting pipeline with dashboards
+    for the cluster. Which is the correct pointer?
+  options:
+  - "That is metrics/logs/traces mechanics — use Prometheus/OpenTelemetry (the observability domain), not the K8s troubleshooting tooling"
+  - "Use metrics-server and kubectl top for everything"
+  - "Use kubectl get events with a long TTL"
+  - "Use kubectl debug ephemeral containers"
+  answer: 0
+  explanation: |
+    Historical metrics, alerting, dashboards, logs, and traces are observability-pipeline
+    concerns (Prometheus, OpenTelemetry, log aggregation) — covered in the observability
+    domain. Cluster-native tools (kubectl top, metrics-server, events) are for quick-look
+    triage, not durable monitoring.
+  ref: "concepts.md#metrics-server-and-kubectl-top"
+
+- id: troubleshooting-observability-048
+  difficulty: advanced
+  tags: [events, aggregation, count]
+  question: |
+    A liveness probe is flapping, yet `kubectl get events` shows a single row for it with a
+    high count and "Aggregated from ..." note instead of thousands of rows. Why?
+  options:
+  - "The API server de-duplicates/aggregates repeated similar events, incrementing a count field rather than storing each one"
+  - "Events are randomly dropped"
+  - "kubectl is truncating the output"
+  - "The probe only failed once"
+  answer: 0
+  explanation: |
+    Kubernetes aggregates repeated similar events, keeping a count and first/last timestamps
+    rather than one object per occurrence. This prevents a flapping component from flooding
+    etcd with near-identical events.
+  ref: "concepts.md#the-events-object-and-why-events-expire"

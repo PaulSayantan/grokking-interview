@@ -1,0 +1,869 @@
+topic: "Operators, CRDs & Extensibility"
+domain: kubernetes
+topic_slug: operators-crds-extensibility
+version: 1
+questions:
+  - id: operators-crds-extensibility-001
+    difficulty: beginner
+    tags: [crd, extensibility, api]
+    question: |
+      What does applying a CustomResourceDefinition (CRD) to a cluster actually do?
+    options:
+      - "Deploys a controller Pod that starts managing the new resource"
+      - "Rewrites the API server binary to include the new type"
+      - "Registers a new API endpoint/kind that kube-apiserver serves and stores, with schema validation — but adds no behavior"
+      - "Creates a separate database outside etcd to hold the new objects"
+    answer: 2
+    explanation: |
+      A CRD is declarative data: it registers a new kind so the API server serves, validates,
+      and stores it in etcd, giving you free CRUD and kubectl support. It does NOT deploy any
+      controller and adds no behavior — that requires a separate custom controller.
+    ref: "concepts.md#custom-resource-definitions-crds"
+
+  - id: operators-crds-extensibility-002
+    difficulty: beginner
+    tags: [operator, definition]
+    question: |
+      In Kubernetes terminology, an Operator is best described as:
+    options:
+      - "A CRD (custom resource API) plus a custom controller that encodes operational knowledge to manage a specific application"
+      - "A managed cloud service that runs your cluster for you"
+      - "A CLI plugin that extends kubectl with new commands"
+      - "A Helm chart that packages an application's manifests"
+    answer: 0
+    explanation: |
+      An Operator = one or more CRDs (the app's desired-state API) + a custom controller that
+      reconciles them, automating install/upgrade/backup/failover for a specific (usually
+      stateful) application. It is the controller pattern applied to app-specific logic.
+    ref: "concepts.md#the-operator-pattern"
+
+  - id: operators-crds-extensibility-003
+    difficulty: beginner
+    tags: [crd, naming]
+    question: |
+      A CRD's metadata.name must follow which format?
+    options:
+      - "<kind>-<version>  (e.g. CronTab-v1)"
+      - "Any DNS label, format is unconstrained"
+      - "<group>/<version>/<kind>"
+      - "<plural>.<group>  (e.g. crontabs.stable.example.com)"
+    answer: 3
+    explanation: |
+      The CRD object's name must be exactly <plural>.<group>, e.g. crontabs.stable.example.com
+      where plural=crontabs and group=stable.example.com. Any other form is rejected by the API
+      server.
+    ref: "concepts.md#custom-resource-definitions-crds"
+
+  - id: operators-crds-extensibility-004
+    difficulty: intermediate
+    tags: [crd, storage, versions]
+    question: |
+      A CRD lists three versions (v1alpha1, v1beta1, v1). How many of them may have
+      storage: true at the same time?
+    options:
+      - "All three, one per etcd shard"
+      - "Exactly one — the storage version"
+      - "Zero — CRDs never persist to etcd"
+      - "Any number, as long as they are all served"
+    answer: 1
+    explanation: |
+      Exactly one version is the storage version (storage: true) — it defines how objects are
+      written to etcd. Multiple versions can be served: true simultaneously, but only one is the
+      storage version.
+    ref: "concepts.md#crd-versions-and-conversion"
+
+  - id: operators-crds-extensibility-005
+    difficulty: intermediate
+    tags: [reconciliation, level-triggered]
+    question: |
+      A well-designed Kubernetes controller reconcile loop should be:
+    options:
+      - "Level-triggered and idempotent — it reconciles the current observed state and converges no matter how many times it runs"
+      - "Edge-triggered — it must react to every individual event exactly once"
+      - "Single-shot — it runs once at startup and then exits"
+      - "Stateful across invocations, remembering what it did last time in memory"
+    answer: 0
+    explanation: |
+      Controllers are level-triggered (they read the current state of the world and converge
+      toward desired state) and idempotent (running reconcile N times yields the same result as
+      once). This is why missed events or controller restarts still converge — the next
+      reconcile re-reads reality.
+    ref: "concepts.md#the-controller-and-the-reconciliation-loop"
+
+  - id: operators-crds-extensibility-006
+    difficulty: intermediate
+    tags: [admission, ordering]
+    question: |
+      During an API request, in what order do mutating admission, schema validation, and
+      validating admission run?
+    options:
+      - "Validating → mutating → schema validation"
+      - "Schema validation → validating → mutating"
+      - "Mutating → schema validation → validating"
+      - "They all run concurrently with no defined order"
+    answer: 2
+    explanation: |
+      After authn/authz, mutating admission runs first (it can change the object), then the
+      (mutated) object is schema-validated, then validating admission runs last. Validating
+      admission sees the final object and can only accept/reject — never mutate.
+    ref: "concepts.md#admission-control-the-request-lifecycle"
+
+  - id: operators-crds-extensibility-007
+    difficulty: intermediate
+    tags: [webhook, mutating, validating]
+    question: |
+      What is the key capability difference between a MutatingWebhookConfiguration and a
+      ValidatingWebhookConfiguration?
+    options:
+      - "Validating webhooks run before authentication; mutating webhooks run after"
+      - "Mutating webhooks can modify (patch) the object; validating webhooks can only accept or reject it"
+      - "Mutating webhooks only work on custom resources; validating webhooks only on built-ins"
+      - "Validating webhooks can inject sidecars; mutating webhooks cannot"
+    answer: 1
+    explanation: |
+      A mutating webhook may return a JSONPatch that changes the object (e.g. inject a sidecar,
+      set defaults). A validating webhook can only allow or deny — it cannot change the object,
+      and it runs last so it sees the final stored form.
+    ref: "concepts.md#mutating--validating-admission-webhooks"
+
+  - id: operators-crds-extensibility-008
+    difficulty: intermediate
+    tags: [finalizers, deletion]
+    question: |
+      You run `kubectl delete` on a custom resource that has a finalizer. What happens
+      immediately?
+    options:
+      - "The object is deleted instantly and the finalizer is ignored"
+      - "The delete is rejected with an error because finalizers block the delete verb"
+      - "The finalizer is automatically removed by the API server after 30 seconds"
+      - "The API server sets a deletionTimestamp and the object enters Terminating, but is not removed until the finalizer is cleared"
+    answer: 3
+    explanation: |
+      With a non-empty finalizers list, delete sets metadata.deletionTimestamp and the object
+      goes Terminating but stays in etcd. A controller must observe the timestamp, do cleanup
+      (e.g. delete an external resource), then remove its finalizer; only when the list is empty
+      is the object actually deleted.
+    ref: "concepts.md#finalizers-and-garbage-collection"
+
+  - id: operators-crds-extensibility-009
+    difficulty: advanced
+    tags: [aggregation, metrics-server]
+    question: |
+      Why is metrics-server implemented via the API aggregation layer rather than as a CRD?
+    options:
+      - "CRDs cannot define a status subresource"
+      - "Aggregated APIs are always faster than CRDs"
+      - "It serves computed, live metrics (PodMetrics/NodeMetrics) that are not stored in etcd — something a CRD, which persists to etcd, cannot do"
+      - "CRDs cannot be in the metrics.k8s.io group"
+    answer: 2
+    explanation: |
+      metrics-server serves virtual, computed resources that are never persisted to etcd. A CRD
+      is always backed by etcd via kube-apiserver, so it cannot represent live-computed data.
+      Aggregation lets you run a full apiserver with custom (non-etcd) storage behind
+      kube-apiserver.
+    ref: "concepts.md#api-aggregation-layer"
+
+  - id: operators-crds-extensibility-010
+    difficulty: intermediate
+    tags: [operator, helm, decision]
+    question: |
+      Which scenario most strongly justifies writing an Operator instead of shipping a Helm
+      chart?
+    options:
+      - "A stateless web app that just needs templated manifests for install and upgrade"
+      - "A one-time job that runs to completion and exits"
+      - "A ConfigMap that holds static configuration"
+      - "A stateful database that needs automated failover, scheduled backups, and version-aware rolling upgrades — dynamic day-2 operations"
+    answer: 3
+    explanation: |
+      Helm is templated packaging with no running control loop — great for stateless/simple
+      apps. An operator adds a live reconciliation loop that automates complex, dynamic day-2
+      operations (failover, backups, ordered upgrades) for stateful apps, which a chart cannot
+      do.
+    ref: "concepts.md#when-an-operator-is-worth-it-vs-a-helm-chart--the-maturity-model"
+
+  - id: operators-crds-extensibility-011
+    difficulty: beginner
+    tags: [crd, kubectl]
+    question: |
+      After you apply a CRD for kind CronTab (plural crontabs), which command lists instances of
+      that custom resource?
+    options:
+      - "kubectl get crontabs"
+      - "kubectl describe crd CronTab"
+      - "kubectl api-resources CronTab"
+      - "kubectl logs crontabs"
+    answer: 0
+    explanation: |
+      Once the CRD is registered, custom resources behave like built-ins: `kubectl get crontabs`
+      (or the shortName / singular) lists them. `kubectl get crd` lists the definitions
+      themselves, not instances.
+    ref: "concepts.md#custom-resource-definitions-crds"
+
+  - id: operators-crds-extensibility-012
+    difficulty: advanced
+    tags: [webhook, failure-policy, availability]
+    question: |
+      A ValidatingWebhookConfiguration intercepts Pod CREATE across all namespaces with
+      failurePolicy: Fail. The webhook's own Pod crashes. What is the likely consequence?
+    options:
+      - "Nothing — the API server automatically switches to fail-open"
+      - "Only the webhook's namespace is affected; the rest of the cluster is fine"
+      - "New Pods (including a replacement for the webhook itself) are rejected, potentially bricking the cluster"
+      - "The webhook configuration is deleted automatically after the timeout"
+    answer: 2
+    explanation: |
+      With failurePolicy: Fail, if the webhook is unreachable, matching requests are rejected.
+      An unscoped Pod-creation webhook whose own Pod is down can't be recreated because its own
+      webhook rejects the new Pod — a self-inflicted outage. Mitigate with tight scoping,
+      excluding system namespaces, and/or failurePolicy: Ignore.
+    ref: "concepts.md#mutating--validating-admission-webhooks"
+
+  - id: operators-crds-extensibility-013
+    difficulty: advanced
+    tags: [cel, validating-admission-policy]
+    question: |
+      What is the main advantage of a ValidatingAdmissionPolicy (CEL) over a validating
+      admission webhook for simple field checks?
+    options:
+      - "It runs in-process in the API server, so there is no separate server, TLS, or availability risk to manage"
+      - "It can call external systems that webhooks cannot reach"
+      - "It can mutate objects, which webhooks cannot"
+      - "It bypasses RBAC authorization checks"
+    answer: 0
+    explanation: |
+      A ValidatingAdmissionPolicy (GA in v1.30) evaluates CEL expressions inside the API server —
+      no webhook Pod, no TLS certs, no HA setup, no network hop, and no risk of bricking the
+      cluster if a server is down. The trade-off is CEL's limited expressiveness (no external
+      calls); use webhooks for arbitrary logic.
+    ref: "concepts.md#cel-policies-validatingadmissionpolicy--mutatingadmissionpolicy"
+
+  - id: operators-crds-extensibility-014
+    difficulty: intermediate
+    tags: [subresources, status, scale]
+    question: |
+      Why would you enable the /scale subresource on a CRD?
+    options:
+      - "To allow the CRD to be deleted with cascading garbage collection"
+      - "To store the resource across multiple etcd shards"
+      - "So kubectl scale and the HorizontalPodAutoscaler can adjust the resource's replica count via /scale"
+      - "To let the object be validated by an admission webhook"
+    answer: 2
+    explanation: |
+      The scale subresource exposes /scale with the configured replica and selector paths. This
+      lets `kubectl scale` and, importantly, the HPA read/write the replica count of your custom
+      resource exactly as they do for a Deployment.
+    ref: "concepts.md#subresources-status-and-scale"
+
+  - id: operators-crds-extensibility-015
+    difficulty: advanced
+    tags: [subresources, status, generation]
+    question: |
+      What problem does enabling the /status subresource on a CRD solve?
+    options:
+      - "It compresses the object to save etcd space"
+      - "It automatically creates a Deployment for the resource"
+      - "It enables multi-version conversion between served versions"
+      - "It separates spec and status write paths, so a controller updating status can't clobber a user's spec change (and status writes don't bump metadata.generation)"
+    answer: 3
+    explanation: |
+      Without the status subresource, a full update to the object could overwrite either spec or
+      status. Enabling /status splits the write paths — updates to /status ignore spec and vice
+      versa — enforcing the spec=desired/status=observed split and keeping metadata.generation
+      tied to spec changes only (used with observedGeneration).
+    ref: "concepts.md#subresources-status-and-scale"
+
+  - id: operators-crds-extensibility-016
+    difficulty: intermediate
+    tags: [conversion, webhook, versions]
+    question: |
+      A CRD serves both v1beta1 and v1, and the two versions have different field structures.
+      Which conversion strategy is required so clients can request either version?
+    options:
+      - "strategy: Webhook (a conversion webhook translates between the stored version and the requested version)"
+      - "strategy: None"
+      - "strategy: Merge"
+      - "No conversion is possible; you must delete one version"
+    answer: 0
+    explanation: |
+      strategy: None only works when versions are structurally identical (only the version
+      string differs). When fields were renamed/restructured, you must use strategy: Webhook so
+      the API server calls your conversion webhook to translate objects between the stored
+      version and the requested version.
+    ref: "concepts.md#crd-versions-and-conversion"
+
+  - id: operators-crds-extensibility-017
+    difficulty: intermediate
+    tags: [garbage-collection, owner-references]
+    question: |
+      An operator creates a Deployment and a Service for each MyApp custom resource. What is the
+      simplest way to ensure those objects are deleted when the MyApp CR is deleted?
+    options:
+      - "Add a finalizer to the Deployment and Service"
+      - "Run a CronJob that periodically deletes orphaned objects"
+      - "Set ownerReferences on the created objects pointing to the MyApp CR, so garbage collection cascades the delete"
+      - "Nothing — Kubernetes deletes all objects in a namespace together"
+    answer: 2
+    explanation: |
+      Owner references implement cascading deletion: mark the created Deployment/Service as owned
+      by the CR (e.g. SetControllerReference), and the garbage collector deletes them when the
+      owner is deleted. Finalizers are for cleanup the GC can't do — typically external
+      resources.
+    ref: "concepts.md#finalizers-and-garbage-collection"
+
+  - id: operators-crds-extensibility-018
+    difficulty: intermediate
+    tags: [tooling, controller-runtime, kubebuilder]
+    question: |
+      In the controller-runtime library, what method do you implement to define an operator's
+      reconciliation logic?
+    options:
+      - "Handle(event Event)"
+      - "Sync(old, new Object)"
+      - "Watch(kind Kind)"
+      - "Reconcile(ctx, req) (Result, error)"
+    answer: 3
+    explanation: |
+      controller-runtime's Reconciler interface requires Reconcile(ctx, req) (ctrl.Result,
+      error). Returning an error requeues with backoff; returning Result{RequeueAfter: d} polls
+      later. Kubebuilder and Operator SDK scaffold this on top of controller-runtime.
+    ref: "concepts.md#building-operators-controller-runtime-kubebuilder-operator-sdk"
+
+  - id: operators-crds-extensibility-019
+    difficulty: advanced
+    tags: [leader-election, ha]
+    question: |
+      You run your operator with 3 replicas for high availability. Why do you enable leader
+      election?
+    options:
+      - "To shard custom resources evenly across the three replicas"
+      - "To load-balance API server reads across replicas"
+      - "So only the elected leader actively reconciles, preventing multiple controllers from fighting over the same objects"
+      - "Because leader election is required for informers to work"
+    answer: 2
+    explanation: |
+      Leader election (via a Lease) ensures only one replica actively reconciles at a time. The
+      others stand by ready to take over if the leader fails. Without it, multiple controllers
+      would race to update the same objects, causing thrashing.
+    ref: "concepts.md#building-operators-controller-runtime-kubebuilder-operator-sdk"
+
+  - id: operators-crds-extensibility-020
+    difficulty: intermediate
+    tags: [crd, schema, validation]
+    question: |
+      Where is CRD field validation (types, required fields, min/max) defined?
+    options:
+      - "In a separate ValidatingWebhookConfiguration that ships with every CRD"
+      - "In a ConfigMap referenced by the CRD"
+      - "In the CRD's openAPIV3Schema (OpenAPI v3 structural schema)"
+      - "It is inferred automatically from the first object created"
+    answer: 2
+    explanation: |
+      CRD validation is declared in spec.versions[].schema.openAPIV3Schema using OpenAPI v3
+      keywords (type, required, minimum, pattern, enum, etc.). The API server rejects
+      non-conforming objects before any controller sees them. apiextensions.k8s.io/v1 requires a
+      structural schema.
+    ref: "concepts.md#crd-schema-validation-and-structural-schemas"
+
+  - id: operators-crds-extensibility-021
+    difficulty: beginner
+    tags: [crd, controller, distinction]
+    question: |
+      "A CRD by itself does nothing beyond storing and validating objects." Is this accurate?
+    options:
+      - "Yes — behavior requires a separate controller that watches and acts on the resource"
+      - "No — a CRD automatically launches a controller to manage its instances"
+      - "No — a CRD requires an admission webhook to store objects"
+      - "Yes, but only for cluster-scoped CRDs"
+    answer: 0
+    explanation: |
+      A CRD only teaches the API server a new kind (store/validate/serve). To make anything
+      happen, you pair it with a custom controller. A CRD without a controller is inert data; a
+      controller reading a CRD is what makes an operator.
+    ref: "concepts.md#custom-resource-definitions-crds"
+
+  - id: operators-crds-extensibility-022
+    difficulty: advanced
+    tags: [generation, observed-generation, status]
+    question: |
+      How does a controller commonly determine whether it has already reconciled the latest spec
+      of an object?
+    options:
+      - "By comparing metadata.resourceVersion to a stored copy"
+      - "By checking metadata.creationTimestamp"
+      - "By counting the number of events on the object"
+      - "By comparing metadata.generation (bumped on spec changes) against status.observedGeneration it writes"
+    answer: 3
+    explanation: |
+      metadata.generation increments only when spec changes. A controller records the generation
+      it reconciled in status.observedGeneration; if generation > observedGeneration, there's a
+      newer spec to reconcile. This relies on the status subresource so status writes don't bump
+      generation.
+    ref: "concepts.md#subresources-status-and-scale"
+
+  - id: operators-crds-extensibility-023
+    difficulty: intermediate
+    tags: [aggregation, crd, decision]
+    question: |
+      When should you choose the API aggregation layer over a CRD?
+    options:
+      - "When you need custom (non-etcd) storage, computed/virtual resources, protobuf, or custom verbs a CRD's generic implementation can't provide"
+      - "Whenever you want kubectl support for a new kind"
+      - "Whenever the resource is namespaced"
+      - "When you want schema validation on the resource"
+    answer: 0
+    explanation: |
+      CRDs cover most cases with no code and etcd-backed storage. Aggregation means running a
+      whole apiserver behind kube-apiserver — pick it only when you need custom storage,
+      computed/virtual resources (like metrics-server), protobuf, or behaviors beyond a CRD.
+    ref: "concepts.md#api-aggregation-layer"
+
+  - id: operators-crds-extensibility-024
+    difficulty: advanced
+    tags: [finalizers, stuck-terminating, troubleshooting]
+    question: |
+      A namespace is stuck Terminating for hours. Investigation shows a custom resource in it is
+      also stuck Terminating with a finalizer set. What is the most likely root cause?
+    options:
+      - "etcd is out of disk space"
+      - "The namespace has too many Pods"
+      - "The controller responsible for that finalizer is gone or failing, so the finalizer is never removed and deletion stays blocked"
+      - "kube-proxy is not running on the node"
+    answer: 2
+    explanation: |
+      Deletion is blocked until every finalizer is cleared. If the controller that should do the
+      cleanup and remove its finalizer is crashed/uninstalled, the object (and the namespace
+      containing it) stays Terminating forever. Diagnose the controller; force-removing the
+      finalizer unblocks deletion but skips cleanup and may leak external resources.
+    ref: "concepts.md#finalizers-and-garbage-collection"
+
+  - id: operators-crds-extensibility-025
+    difficulty: advanced
+    tags: [maturity-model, operator]
+    question: |
+      In the Operator Capability/Maturity Model, which level corresponds to auto-scaling,
+      auto-healing, and auto-tuning?
+    options:
+      - "Level 1 — Basic Install"
+      - "Level 2 — Seamless Upgrades"
+      - "Level 3 — Full Lifecycle"
+      - "Level 5 — Auto Pilot"
+    answer: 3
+    explanation: |
+      The five levels are: 1 Basic Install, 2 Seamless Upgrades, 3 Full Lifecycle (backup/
+      restore), 4 Deep Insights (metrics/alerts), 5 Auto Pilot (auto-scaling, auto-healing,
+      auto-tuning, anomaly detection). Level 5 is the most sophisticated.
+    ref: "concepts.md#when-an-operator-is-worth-it-vs-a-helm-chart--the-maturity-model"
+
+  - id: operators-crds-extensibility-026
+    difficulty: beginner
+    tags: [extensibility, decision]
+    question: |
+      "How would you add a new resource type that behaves like a native Kubernetes object,
+      supporting kubectl, RBAC, and watches?" What is the standard first answer?
+    options:
+      - "Build an aggregated API server"
+      - "Define a CustomResourceDefinition (CRD)"
+      - "Patch the kube-apiserver source code"
+      - "Store the data in a ConfigMap"
+    answer: 1
+    explanation: |
+      A CRD is the standard, no-code way to add a native-feeling kind: you inherit RBAC, audit,
+      kubectl, watches, and admission for free. Reach for aggregation only for special needs like
+      custom storage — not as the default.
+    ref: "concepts.md#why-extend-the-kubernetes-api"
+
+  - id: operators-crds-extensibility-027
+    difficulty: intermediate
+    tags: [informers, cache, api-load]
+    question: |
+      controller-runtime reconcilers typically read objects from an in-memory cache kept warm by
+      a shared informer. Why?
+    options:
+      - "Because a single watch per type keeps the cache current, giving cheap Get/List reads and low API-server load instead of constant polling"
+      - "To bypass RBAC checks on reads"
+      - "Because the API server rejects direct Get calls from controllers"
+      - "To store objects that don't fit in etcd"
+    answer: 0
+    explanation: |
+      Informers maintain a local cache updated by one watch per resource type. Reconcilers
+      Get/List from that cache — fast reads with minimal API-server pressure — rather than
+      polling the API server repeatedly. This is core to how controllers scale.
+    ref: "concepts.md#building-operators-controller-runtime-kubebuilder-operator-sdk"
+
+  - id: operators-crds-extensibility-028
+    difficulty: advanced
+    tags: [cel, mutating-admission-policy]
+    question: |
+      MutatingAdmissionPolicy (the CEL-based, in-process mutating mechanism) applies changes
+      using which approaches?
+    options:
+      - "A shell script executed by the API server"
+      - "A ConfigMap of static replacement values"
+      - "A CEL ApplyConfiguration merged via server-side apply, or a CEL-generated JSONPatch"
+      - "By calling an external webhook over gRPC"
+    answer: 2
+    explanation: |
+      MutatingAdmissionPolicy expresses mutations in CEL — either an ApplyConfiguration merged
+      with the server-side-apply strategy, or an array of JSONPatch operations produced by CEL. It
+      runs in-process, offering a declarative alternative to mutating webhooks for many cases.
+    ref: "concepts.md#cel-policies-validatingadmissionpolicy--mutatingadmissionpolicy"
+
+  - id: operators-crds-extensibility-029
+    difficulty: intermediate
+    tags: [crd, pruning, structural-schema]
+    question: |
+      By default, if a custom resource contains a field that is not present in the CRD's
+      structural schema, what happens on write?
+    options:
+      - "The write is rejected with a validation error"
+      - "The field is stored and returned unchanged"
+      - "The API server logs a warning but keeps the field"
+      - "The unknown field is silently pruned (dropped) unless x-kubernetes-preserve-unknown-fields is set"
+    answer: 3
+    explanation: |
+      With a structural schema (required in apiextensions.k8s.io/v1), the API server prunes
+      fields not declared in the schema. To intentionally keep arbitrary content in a subtree,
+      set x-kubernetes-preserve-unknown-fields: true there.
+    ref: "concepts.md#crd-schema-validation-and-structural-schemas"
+
+  - id: operators-crds-extensibility-030
+    difficulty: advanced
+    tags: [cel, cross-field-validation]
+    question: |
+      You need a CRD to enforce that spec.minReplicas <= spec.maxReplicas — a cross-field
+      invariant plain OpenAPI keywords can't express. What do you use?
+    options:
+      - "A required: field list"
+      - "x-kubernetes-validations with a CEL rule (e.g. self.minReplicas <= self.maxReplicas)"
+      - "A pattern regex on both fields"
+      - "It's impossible without an admission webhook"
+    answer: 1
+    explanation: |
+      x-kubernetes-validations (CEL validation rules, GA in v1.29) lets you express cross-field
+      and conditional invariants directly in the CRD schema, evaluated by the API server — no
+      webhook needed. self refers to the object being validated.
+    ref: "concepts.md#crd-schema-validation-and-structural-schemas"
+
+  - id: operators-crds-extensibility-031
+    difficulty: beginner
+    tags: [operator, controller, distinction]
+    question: |
+      Which statement about the relationship between "controller" and "Operator" is correct?
+    options:
+      - "They are unrelated concepts"
+      - "Every controller is an Operator, but not every Operator is a controller"
+      - "Every Operator contains a controller, but not every controller is an Operator"
+      - "An Operator replaces the need for any controller"
+    answer: 2
+    explanation: |
+      Mechanically an Operator IS a controller. The distinction is intent: 'controller' is the
+      generic reconciliation pattern (built-ins have them too); 'Operator' means a controller +
+      CRDs automating a specific stateful application's lifecycle. So every Operator has a
+      controller, but many controllers aren't Operators.
+    ref: "concepts.md#the-operator-pattern"
+
+  - id: operators-crds-extensibility-032
+    difficulty: intermediate
+    tags: [database-operator, day-2]
+    question: |
+      A Postgres operator watches a `kind: PostgresCluster` resource. Which of the following is a
+      day-2 operation it would typically automate that a Helm chart cannot?
+    options:
+      - "Promoting a replica to primary automatically when the primary fails (failover)"
+      - "Rendering the StatefulSet YAML at install time"
+      - "Setting a default image tag in the manifest"
+      - "Creating the namespace"
+    answer: 0
+    explanation: |
+      Automated failover — detecting a primary failure and promoting a replica, then updating
+      endpoints — is dynamic operational logic requiring a live control loop. A Helm chart only
+      templates and installs manifests; it has no running loop to react to runtime failures.
+    ref: "concepts.md#the-operator-pattern"
+
+  - id: operators-crds-extensibility-033
+    difficulty: intermediate
+    tags: [reconcile, idempotency, bug]
+    question: |
+      An operator's reconcile handler blindly runs `create Deployment` every time it's invoked.
+      Why is this a bug?
+    options:
+      - "create is slower than update"
+      - "Deployments cannot be created by controllers"
+      - "It will exceed the etcd object size limit"
+      - "Reconcile can be called many times (retries, resyncs, restarts); a non-idempotent create will error on the second call or create duplicates — it should check-then-act"
+    answer: 3
+    explanation: |
+      Reconcile is invoked repeatedly for the same object. A correct, idempotent reconciler reads
+      current state and converges ('does the Deployment exist? if not, create; if drifted,
+      update'). Blindly creating fails on AlreadyExists or duplicates work — an edge-triggered
+      mistake.
+    ref: "concepts.md#the-controller-and-the-reconciliation-loop"
+
+  - id: operators-crds-extensibility-034
+    difficulty: advanced
+    tags: [crd, storage-version, migration]
+    question: |
+      You changed a CRD's storage version from v1beta1 to v1 and want to remove v1beta1 entirely.
+      Why might removing it prematurely be unsafe?
+    options:
+      - "Objects may still be stored as v1beta1 (tracked in status.storedVersions); you must migrate them to the new storage version before dropping the old version"
+      - "Removing a version deletes all objects immediately"
+      - "You can never remove a version once served"
+      - "Only the API server team can remove CRD versions"
+    answer: 0
+    explanation: |
+      Changing the storage version doesn't rewrite existing etcd objects; they convert lazily.
+      status.storedVersions records which versions still exist in storage. You must re-write
+      objects into the new storage version (and keep a conversion path) before removing the old
+      version, or reads/writes break.
+    ref: "concepts.md#crd-versions-and-conversion"
+
+  - id: operators-crds-extensibility-035
+    difficulty: intermediate
+    tags: [webhook, tls, cabundle]
+    question: |
+      Why does an admission webhook configuration include a caBundle, and what commonly manages
+      it?
+    options:
+      - "It authenticates the client to the webhook; managed by RBAC"
+      - "It encrypts etcd at rest; managed by the kubelet"
+      - "The API server uses it to verify the webhook server's TLS certificate; cert-manager commonly manages/injects it"
+      - "It lists allowed namespaces; managed by the scheduler"
+    answer: 2
+    explanation: |
+      Webhooks are called over HTTPS; the API server verifies the webhook server's certificate
+      against the configured caBundle. cert-manager (with a CA injector) is commonly used to
+      provision the cert and keep the caBundle in the webhook configuration in sync.
+    ref: "concepts.md#mutating--validating-admission-webhooks"
+
+  - id: operators-crds-extensibility-036
+    difficulty: beginner
+    tags: [admission, webhook, use-cases]
+    question: |
+      Sidecar injection (as done by service meshes like Istio/Linkerd) is implemented with which
+      admission mechanism?
+    options:
+      - "A mutating admission webhook that patches the Pod to add the sidecar container"
+      - "A validating admission webhook"
+      - "A CRD conversion webhook"
+      - "The scale subresource"
+    answer: 0
+    explanation: |
+      Injecting a sidecar changes the Pod, so it requires a mutating admission webhook, which
+      returns a JSONPatch adding the container. Validating webhooks can only accept/reject and
+      cannot modify the object.
+    ref: "concepts.md#mutating--validating-admission-webhooks"
+
+  - id: operators-crds-extensibility-037
+    difficulty: advanced
+    tags: [webhook, reinvocation, ordering]
+    question: |
+      Multiple mutating webhooks match a request. What is true about their execution?
+    options:
+      - "They run in alphabetical order and each runs exactly once, guaranteed"
+      - "Only the first matching webhook runs; the rest are skipped"
+      - "They all run in parallel and their patches are merged automatically"
+      - "Ordering among them is not guaranteed, and a webhook may be re-invoked (reinvocationPolicy: IfNeeded) if a later webhook mutated the object"
+    answer: 3
+    explanation: |
+      The order in which mutating webhooks run is not guaranteed. Because one webhook may need to
+      react to another's mutation, the API server can re-invoke webhooks when reinvocationPolicy
+      is IfNeeded. Design mutations to be order-independent and idempotent.
+    ref: "concepts.md#mutating--validating-admission-webhooks"
+
+  - id: operators-crds-extensibility-038
+    difficulty: intermediate
+    tags: [work-queue, backoff]
+    question: |
+      What role does the rate-limited work queue play in a controller?
+    options:
+      - "It stores the objects themselves instead of etcd"
+      - "It enqueues object keys to reconcile and applies exponential backoff so a repeatedly failing object doesn't hammer the API server"
+      - "It load-balances requests across API server replicas"
+      - "It caches Pod logs for troubleshooting"
+    answer: 1
+    explanation: |
+      Watches enqueue keys into a rate-limited work queue; reconcile pulls keys and processes
+      them. On error the key is requeued with exponential backoff, so a hot-looping/failing
+      object backs off instead of overwhelming the control plane.
+    ref: "concepts.md#the-controller-and-the-reconciliation-loop"
+
+  - id: operators-crds-extensibility-039
+    difficulty: intermediate
+    tags: [operator-sdk, ansible, helm]
+    question: |
+      Besides Go, the Operator SDK supports building operators without writing a Go controller
+      using which approaches?
+    options:
+      - "Helm-based and Ansible-based operators (reconcile = run a Helm release or an Ansible playbook)"
+      - "Bash and Python only"
+      - "Terraform and Pulumi"
+      - "Only via aggregated API servers"
+    answer: 0
+    explanation: |
+      Operator SDK supports Go (on controller-runtime/Kubebuilder), plus Helm-based operators
+      (reconcile drives a Helm release) and Ansible-based operators (reconcile runs a playbook) —
+      lowering the barrier for teams without Go expertise.
+    ref: "concepts.md#building-operators-controller-runtime-kubebuilder-operator-sdk"
+
+  - id: operators-crds-extensibility-040
+    difficulty: beginner
+    tags: [crd, scope, immutable]
+    question: |
+      A CRD's spec.scope is set to Namespaced. Can you later change it to Cluster by editing the
+      CRD?
+    options:
+      - "Yes, scope is freely mutable"
+      - "Yes, but only if no objects exist yet"
+      - "No — scope is immutable after the CRD is created"
+      - "Only the cluster admin can toggle it at runtime"
+    answer: 2
+    explanation: |
+      The scope (Namespaced vs Cluster) is fixed at creation and cannot be changed afterward. To
+      change it you'd delete and recreate the CRD (migrating objects), because scope affects how
+      objects are addressed and stored.
+    ref: "concepts.md#custom-resource-definitions-crds"
+
+  - id: operators-crds-extensibility-041
+    difficulty: advanced
+    tags: [finalizer, idiom, deletion-timestamp]
+    question: |
+      What is the standard controller-runtime finalizer idiom inside Reconcile?
+    options:
+      - "If deletionTimestamp is nil, ensure the finalizer is present; if it is set, run cleanup, then remove the finalizer"
+      - "Always delete external resources on every reconcile"
+      - "Add the finalizer only after the object is deleted"
+      - "Never use finalizers; rely solely on owner references"
+    answer: 0
+    explanation: |
+      The idiom: when deletionTimestamp is nil, add your finalizer (so you get a chance to clean
+      up later); when it is set, perform external cleanup and then remove your finalizer so the
+      API server can finally delete the object. Owner refs handle in-cluster children; finalizers
+      handle external resources.
+    ref: "concepts.md#finalizers-and-garbage-collection"
+
+  - id: operators-crds-extensibility-042
+    difficulty: intermediate
+    tags: [cel, policy, binding]
+    question: |
+      In the ValidatingAdmissionPolicy model, what is the purpose of the separate
+      ValidatingAdmissionPolicyBinding object?
+    options:
+      - "It defines the CEL validation expressions"
+      - "It attaches a policy to a scope (e.g. namespaces via label selector) and sets the action (Deny/Warn/Audit), letting one policy be reused with different enforcement"
+      - "It stores the webhook's TLS certificate"
+      - "It grants RBAC permissions to the policy"
+    answer: 1
+    explanation: |
+      The policy defines the rule (CEL); the binding attaches it to a scope and chooses the
+      enforcement action. This separation lets a single policy be enforced strictly in some
+      namespaces and only audited/warned in others.
+    ref: "concepts.md#cel-policies-validatingadmissionpolicy--mutatingadmissionpolicy"
+
+  - id: operators-crds-extensibility-043
+    difficulty: advanced
+    tags: [crd, etcd, anti-pattern]
+    question: |
+      Which use of custom resources is considered an anti-pattern?
+    options:
+      - "A small number of human-authored desired-state config objects"
+      - "Representing an abstraction over other controlled resources"
+      - "Using CRs as a high-write-rate datastore for application/end-user data (images, events, telemetry)"
+      - "Objects that support standard CRUD operations"
+    answer: 2
+    explanation: |
+      CRs live in etcd via the API server, which is small and latency-sensitive and drives
+      watches. Using CRs as a general database for high-volume app/end-user data overloads etcd
+      and the API server. CRs are for declarative, relatively small, human-authored config —
+      not application data storage.
+    ref: "concepts.md#custom-resource-definitions-crds"
+
+  - id: operators-crds-extensibility-044
+    difficulty: intermediate
+    tags: [aggregation, apiservice]
+    question: |
+      Which object do you create to register an aggregated API server so kube-apiserver proxies a
+      group/version to it?
+    options:
+      - "An APIService (apiregistration.k8s.io/v1) pointing at the extension apiserver's Service"
+      - "A CustomResourceDefinition"
+      - "A MutatingWebhookConfiguration"
+      - "A ClusterRoleBinding"
+    answer: 0
+    explanation: |
+      An APIService object tells the aggregation layer that requests for a given group/version
+      should be proxied to your extension apiserver's Service. kube-apiserver then forwards
+      matching requests, making the aggregated API appear native.
+    ref: "concepts.md#api-aggregation-layer"
+
+  - id: operators-crds-extensibility-045
+    difficulty: beginner
+    tags: [helm, operator, comparison]
+    question: |
+      Which statement best contrasts a Helm chart with an operator?
+    options:
+      - "A Helm chart runs a permanent control loop; an operator only templates YAML"
+      - "Both continuously reconcile state identically"
+      - "An operator cannot manage stateful applications; a Helm chart can"
+      - "A Helm chart is templated packaging with no running control loop; an operator runs a live loop that continuously reconciles and self-heals"
+    answer: 3
+    explanation: |
+      Helm renders and installs/upgrades manifests but is inert afterward — no watching, no
+      self-healing. An operator runs a continuous control loop that reconciles, self-heals, and
+      automates dynamic day-2 operations. Operators are often distributed as a Helm chart that
+      installs the operator.
+    ref: "concepts.md#when-an-operator-is-worth-it-vs-a-helm-chart--the-maturity-model"
+
+  - id: operators-crds-extensibility-046
+    difficulty: advanced
+    tags: [server-side-apply, field-manager, reconcile]
+    question: |
+      Why do modern operators reconcile owned objects using Server-Side Apply with a field
+      manager?
+    options:
+      - "To skip schema validation"
+      - "So the operator declaratively owns only the fields it manages and doesn't clobber fields set by other actors/controllers"
+      - "Because client-side apply is not allowed for controllers"
+      - "To store objects outside etcd"
+    answer: 1
+    explanation: |
+      Server-Side Apply with a distinct field manager lets the operator declare the desired state
+      of the fields it owns; the API server tracks field ownership so the operator's apply won't
+      overwrite fields owned by other managers, avoiding fight-over-fields conflicts.
+    ref: "concepts.md#building-operators-controller-runtime-kubebuilder-operator-sdk"
+
+  - id: operators-crds-extensibility-047
+    difficulty: intermediate
+    tags: [admission, order, sidecar-limits]
+    question: |
+      A mutating webhook injects a sidecar container, and a validating webhook enforces that every
+      Pod has resource limits. Why does this combination work correctly?
+    options:
+      - "Because validating runs before mutating, so limits are checked first"
+      - "Because both run at the same time and merge results"
+      - "Because mutating runs first (injecting the sidecar), then validating runs on the final object and can enforce limits on the injected sidecar too"
+      - "Because the sidecar bypasses admission entirely"
+    answer: 2
+    explanation: |
+      Mutating admission runs first and injects the sidecar; the object is then schema-validated;
+      validating admission runs last on the final object, so it sees and can enforce limits on
+      the injected sidecar. Order (mutate then validate) is what makes this reliable.
+    ref: "concepts.md#admission-control-the-request-lifecycle"
+
+  - id: operators-crds-extensibility-048
+    difficulty: intermediate
+    tags: [crd, versions, served]
+    question: |
+      What does setting served: true on a CRD version control?
+    options:
+      - "Whether that version is exposed/available over the API for clients to read and write"
+      - "Whether that version is written to etcd"
+      - "Whether the version triggers a conversion webhook"
+      - "Whether the CRD is namespaced"
+    answer: 0
+    explanation: |
+      served controls whether a given version is exposed over the API (clients can use that
+      apiVersion). storage (a separate flag, true on exactly one version) controls how objects
+      are persisted in etcd. A version can be served but not the storage version.
+    ref: "concepts.md#crd-versions-and-conversion"

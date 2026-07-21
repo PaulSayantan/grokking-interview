@@ -1,0 +1,783 @@
+topic: "Configuration & Secrets Management"
+domain: kubernetes
+topic_slug: config-secrets
+version: 1
+questions:
+  - id: config-secrets-001
+    difficulty: beginner
+    tags: [12-factor, images, immutability]
+    question: |
+      According to the 12-factor methodology (and K8s best practice), where should
+      environment-specific configuration like a database URL live?
+    options:
+      - "Hard-coded in the application source"
+      - "Baked into the container image at build time"
+      - "In the environment, injected at runtime via ConfigMaps/Secrets"
+      - "In a comment in the Dockerfile"
+    answer: 2
+    explanation: |
+      12-factor says config that varies per deploy belongs in the environment, not the code
+      or artifact. In K8s you build one image and inject per-environment config via
+      ConfigMaps/Secrets, so the same tested image promotes unchanged across environments.
+    ref: "concepts.md#why-not-bake-config-into-the-image-12-factor-config"
+
+  - id: config-secrets-002
+    difficulty: beginner
+    tags: [images, secrets, anti-pattern]
+    question: |
+      Why is baking a credential into a container image via an ENV instruction a security
+      anti-pattern?
+    options:
+      - "ENV variables are ignored by Kubernetes"
+      - "It makes the image smaller"
+      - "Kubernetes refuses to run images that contain ENV instructions"
+      - "The credential is stored in an image layer and remains recoverable from layer history"
+    answer: 3
+    explanation: |
+      A value in an ENV (or a COPYed file) is baked permanently into an image layer and is
+      recoverable via layer history even if a later layer "removes" it — and the image is
+      often pushed to a registry, leaking the secret.
+    ref: "concepts.md#why-not-bake-config-into-the-image-12-factor-config"
+
+  - id: config-secrets-003
+    difficulty: beginner
+    tags: [configmap, basics]
+    question: |
+      What is a ConfigMap designed to store?
+    options:
+      - "Non-confidential key/value configuration data"
+      - "Encrypted database backups"
+      - "Container image layers"
+      - "Persistent application state that survives Pod deletion"
+    answer: 0
+    explanation: |
+      A ConfigMap holds non-confidential key/value pairs (short values or whole files),
+      decoupling configuration from the Pods that consume it. Sensitive data belongs in a
+      Secret; persistent state belongs in a PersistentVolume.
+    ref: "concepts.md#configmap-non-sensitive-configuration"
+
+  - id: config-secrets-004
+    difficulty: intermediate
+    tags: [configmap, limits, etcd]
+    question: |
+      A team wants to mount a 5 MB JSON dataset into their Pods via a ConfigMap. What problem
+      will they hit?
+    options:
+      - "A ConfigMap's data cannot exceed 1 MiB, so it will be rejected"
+      - "ConfigMaps only accept YAML, not JSON"
+      - "ConfigMaps cannot be mounted as volumes"
+      - "The data will be silently truncated to 256 KB"
+    answer: 0
+    explanation: |
+      ConfigMap (and Secret) data is capped at 1 MiB due to etcd object-size constraints.
+      Larger data should go into a mounted volume, an artifact store, or a database.
+    ref: "concepts.md#configmap-non-sensitive-configuration"
+
+  - id: config-secrets-005
+    difficulty: intermediate
+    tags: [configmap, namespaces, scoping]
+    question: |
+      A Pod in namespace `team-a` references a ConfigMap named `shared-config` that only
+      exists in namespace `team-b`. What happens?
+    options:
+      - "K8s automatically copies the ConfigMap into team-a"
+      - "The Pod resolves it via the cluster-wide ConfigMap registry"
+      - "The reference fails — ConfigMaps are namespaced and a Pod can only use one in its own namespace"
+      - "The Pod starts but the ConfigMap keys are empty strings"
+    answer: 2
+    explanation: |
+      ConfigMaps are namespaced objects; a Pod can only reference a ConfigMap in its own
+      namespace. There is no cross-namespace reference; the ConfigMap must exist in team-a.
+    ref: "concepts.md#configmap-non-sensitive-configuration"
+
+  - id: config-secrets-006
+    difficulty: beginner
+    tags: [configmap, kubectl]
+    question: |
+      Which command creates a ConfigMap from a literal key/value pair?
+    options:
+      - "kubectl create configmap app --from-literal=LOG_LEVEL=info"
+      - "kubectl apply secret app LOG_LEVEL=info"
+      - "kubectl set configmap app LOG_LEVEL info"
+      - "kubectl config set LOG_LEVEL=info"
+    answer: 0
+    explanation: |
+      `kubectl create configmap <name> --from-literal=KEY=VALUE` creates a ConfigMap
+      imperatively; you can also use `--from-file`. The other forms are not valid kubectl.
+    ref: "concepts.md#configmap-non-sensitive-configuration"
+
+  - id: config-secrets-007
+    difficulty: beginner
+    tags: [secrets, base64, encryption]
+    question: |
+      How is the data in a Kubernetes Secret's `data` field stored/encoded by default?
+    options:
+      - "Encrypted with AES-256"
+      - "Base64-encoded (reversible), not encrypted"
+      - "Hashed with SHA-256"
+      - "Stored only in the container's memory, never persisted"
+    answer: 1
+    explanation: |
+      Secret `data` values are base64-encoded, which is a reversible transport encoding, not
+      encryption. Anyone can decode them with `base64 -d`. Encoding is not protection.
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"
+
+  - id: config-secrets-008
+    difficulty: intermediate
+    tags: [secrets, etcd, threat-model]
+    question: |
+      By default, where and how are Secrets stored in a stock Kubernetes cluster?
+    options:
+      - "Encrypted in etcd using the cluster CA key"
+      - "Only on the node's disk, never in the control plane"
+      - "Unencrypted (plaintext) in etcd, the API server's backing store"
+      - "In a dedicated HSM managed by the kubelet"
+    answer: 2
+    explanation: |
+      By default Secrets are stored unencrypted in etcd. Anyone with API or etcd access can
+      read them. Mitigations are encryption-at-rest (ideally KMS-backed) plus tight RBAC.
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"
+
+  - id: config-secrets-009
+    difficulty: advanced
+    tags: [secrets, rbac, threat-model]
+    question: |
+      Why does "the ability to create a Pod in a namespace" effectively grant read access to
+      the Secrets in that namespace?
+    options:
+      - "Creating a Pod grants cluster-admin"
+      - "A Pod creator can mount any Secret in the namespace into a container and read its contents"
+      - "Pod creation automatically decrypts all etcd data"
+      - "It does not — Pod creation and Secret reads are fully isolated"
+    answer: 1
+    explanation: |
+      Anyone who can create a Pod (directly or via a Deployment) can mount any Secret in that
+      namespace and read it. So Pod-create permission is effectively secret-read permission —
+      a key RBAC design consideration.
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"
+
+  - id: config-secrets-010
+    difficulty: intermediate
+    tags: [secrets, stringdata]
+    question: |
+      What does the `stringData` field in a Secret manifest do?
+    options:
+      - "Stores data that is never persisted to etcd"
+      - "Encrypts the values before storing them"
+      - "Lets you write plaintext values that the API server base64-encodes into `data` on write"
+      - "Marks the Secret as immutable"
+    answer: 2
+    explanation: |
+      `stringData` is a write-only convenience: you supply plaintext, and the API server
+      encodes it into `data`. It never appears when you read the Secret back; the value lives
+      in `data` (base64).
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"
+
+  - id: config-secrets-011
+    difficulty: intermediate
+    tags: [secrets, mitigations, encryption]
+    question: |
+      Which two measures does the Kubernetes documentation recommend as the primary
+      protections for Secrets?
+    options:
+      - "Renaming Secrets frequently and using long key names"
+      - "Storing Secrets as ConfigMaps and gzipping them"
+      - "Disabling the API server audit log"
+      - "Encryption-at-rest for etcd and least-privilege RBAC on Secrets"
+    answer: 3
+    explanation: |
+      The two real protections are enabling encryption-at-rest (ideally via a KMS provider)
+      so Secrets aren't plaintext in etcd, and tight RBAC limiting who can get/list/watch
+      secrets and create Pods.
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"
+
+  - id: config-secrets-012
+    difficulty: beginner
+    tags: [secrets, types, tls]
+    question: |
+      Which Secret `type` is used to store a TLS certificate and private key for Ingress?
+    options:
+      - "Opaque"
+      - "kubernetes.io/dockerconfigjson"
+      - "kubernetes.io/tls"
+      - "kubernetes.io/basic-auth"
+    answer: 2
+    explanation: |
+      `kubernetes.io/tls` Secrets carry a `tls.crt` and `tls.key` and are consumed by Ingress
+      controllers and cert-manager. The API server validates the required keys are present.
+    ref: "concepts.md#secret-types-opaque-dockerconfigjson-tls-service-account-token"
+
+  - id: config-secrets-013
+    difficulty: intermediate
+    tags: [secrets, types, tls-keys]
+    question: |
+      A `kubernetes.io/tls` Secret requires which two keys?
+    options:
+      - "cert.pem and key.pem"
+      - "ca.crt and server.key"
+      - "tls.crt and tls.key"
+      - ".dockerconfigjson and password"
+    answer: 2
+    explanation: |
+      A TLS Secret must contain `tls.crt` (the certificate/chain) and `tls.key` (the private
+      key). The API server enforces these required keys for the `kubernetes.io/tls` type.
+    ref: "concepts.md#secret-types-opaque-dockerconfigjson-tls-service-account-token"
+
+  - id: config-secrets-014
+    difficulty: intermediate
+    tags: [secrets, imagepullsecret, registry]
+    question: |
+      A Pod fails with `ImagePullBackOff` pulling from a private registry. Which Secret type
+      provides registry credentials referenced via `imagePullSecrets`?
+    options:
+      - "kubernetes.io/tls"
+      - "kubernetes.io/basic-auth"
+      - "kubernetes.io/dockerconfigjson"
+      - "Opaque"
+    answer: 2
+    explanation: |
+      `kubernetes.io/dockerconfigjson` (created with `kubectl create secret docker-registry`)
+      holds a serialized `~/.docker/config.json` under the `.dockerconfigjson` key and is
+      referenced by a Pod/ServiceAccount `imagePullSecrets` to authenticate to a registry.
+    ref: "concepts.md#secret-types-opaque-dockerconfigjson-tls-service-account-token"
+
+  - id: config-secrets-015
+    difficulty: beginner
+    tags: [secrets, types, default]
+    question: |
+      What is the default Secret `type` when you don't specify one?
+    options:
+      - "Opaque"
+      - "kubernetes.io/service-account-token"
+      - "Generic"
+      - "kubernetes.io/basic-auth"
+    answer: 0
+    explanation: |
+      `Opaque` is the default type for arbitrary user-defined data. When creating with
+      kubectl you use the `generic` subcommand, which produces an Opaque Secret.
+    ref: "concepts.md#secret-types-opaque-dockerconfigjson-tls-service-account-token"
+
+  - id: config-secrets-016
+    difficulty: advanced
+    tags: [secrets, service-account-token, v1.24]
+    question: |
+      Since Kubernetes v1.24, what changed about ServiceAccount tokens?
+    options:
+      - "Creating a ServiceAccount no longer auto-generates a long-lived token Secret; short-lived projected tokens are preferred"
+      - "ServiceAccounts were removed entirely"
+      - "Tokens are now stored as ConfigMaps"
+      - "Every Pod gets a cluster-admin token by default"
+    answer: 0
+    explanation: |
+      From v1.24, creating a ServiceAccount no longer auto-creates a long-lived
+      `service-account-token` Secret. The recommended path is short-lived, auto-rotated
+      projected tokens (TokenRequest API) mounted by the kubelet.
+    ref: "concepts.md#secret-types-opaque-dockerconfigjson-tls-service-account-token"
+
+  - id: config-secrets-017
+    difficulty: beginner
+    tags: [consumption, env, volume]
+    question: |
+      What are the two primary ways to inject a ConfigMap or Secret into a container?
+    options:
+      - "As environment variables or as mounted files (volume)"
+      - "As command-line flags or as init containers"
+      - "As labels or as annotations"
+      - "As sidecars or as DaemonSets"
+    answer: 0
+    explanation: |
+      Config can be injected as environment variables (via `valueFrom`/`envFrom`) or mounted
+      as files via a volume, where each key becomes a file in a directory.
+    ref: "concepts.md#consuming-config-env-vars-vs-mounted-volumes"
+
+  - id: config-secrets-018
+    difficulty: intermediate
+    tags: [consumption, envfrom]
+    question: |
+      What does `envFrom` with a `configMapRef` do in a container spec?
+    options:
+      - "Mounts the ConfigMap as a read-only file"
+      - "Copies the ConfigMap into another namespace"
+      - "Injects every key in the ConfigMap as an environment variable"
+      - "Makes the ConfigMap immutable"
+    answer: 2
+    explanation: |
+      `envFrom` with `configMapRef` (or `secretRef`) turns every key in the object into an
+      environment variable in the container. `valueFrom` with `configMapKeyRef` picks a single
+      key instead.
+    ref: "concepts.md#consuming-config-env-vars-vs-mounted-volumes"
+
+  - id: config-secrets-019
+    difficulty: intermediate
+    tags: [consumption, secrets, security, env]
+    question: |
+      Why is mounting a Secret as a volume often preferred over injecting it as an
+      environment variable?
+    options:
+      - "Env vars cannot hold base64 data"
+      - "Volume mounts are encrypted while env vars are not"
+      - "Env vars are more easily leaked (inherited by child processes, exposed in /proc and crash dumps, logged)"
+      - "Volumes update faster than the app can read them"
+    answer: 2
+    explanation: |
+      Environment variables are inherited by child processes, exposed via
+      `/proc/<pid>/environ`, and often dumped by logging frameworks or crash handlers. File
+      mounts can be read-only and are not in the Pod spec, reducing leak surface.
+    ref: "concepts.md#consuming-config-env-vars-vs-mounted-volumes"
+
+  - id: config-secrets-020
+    difficulty: intermediate
+    tags: [consumption, valuefrom, secretkeyref]
+    question: |
+      Which snippet injects only the `password` key of Secret `db-cred` as the env var
+      `DB_PASSWORD`?
+    options:
+      - "envFrom: [secretRef: {name: db-cred}]"
+      - "volumeMounts: [{name: db-cred, mountPath: /pw}]"
+      - "env: [{name: DB_PASSWORD, value: db-cred/password}]"
+      - "env: [{name: DB_PASSWORD, valueFrom: {secretKeyRef: {name: db-cred, key: password}}}]"
+    answer: 3
+    explanation: |
+      `valueFrom.secretKeyRef` selects a single key from a Secret and binds it to a named env
+      var. `envFrom` would inject all keys; a plain `value` is a literal string, not a
+      reference.
+    ref: "concepts.md#consuming-config-env-vars-vs-mounted-volumes"
+
+  - id: config-secrets-021
+    difficulty: intermediate
+    tags: [consumption, volume, items]
+    question: |
+      When you mount a ConfigMap as a volume at `/etc/config` without an `items` list, what
+      appears in that directory?
+    options:
+      - "A single file named after the ConfigMap containing all keys"
+      - "One file per key, each named after the key, containing that key's value"
+      - "Nothing until the app requests each key"
+      - "An encrypted blob"
+    answer: 1
+    explanation: |
+      Each key becomes a file whose name is the key and whose contents are the value. An
+      optional `items` list lets you select specific keys and rename their paths.
+    ref: "concepts.md#consuming-config-env-vars-vs-mounted-volumes"
+
+  - id: config-secrets-022
+    difficulty: intermediate
+    tags: [update, env, gotcha]
+    question: |
+      You edit a ConfigMap consumed by a running Pod as environment variables. When does the
+      container see the new values?
+    options:
+      - "Within about one minute automatically"
+      - "Immediately"
+      - "Never until the Pod is recreated/restarted"
+      - "After the next liveness probe"
+    answer: 2
+    explanation: |
+      Environment variables are set once when the container process starts and never update.
+      The Pod must be recreated (e.g. `kubectl rollout restart`) for env-var consumers to see
+      the change.
+    ref: "concepts.md#the-live-update-gotcha-env-vars-dont-update-volumes-do"
+
+  - id: config-secrets-023
+    difficulty: intermediate
+    tags: [update, volume, live-update]
+    question: |
+      A ConfigMap is mounted as a full-directory volume. After you edit it, how do the files
+      in the container behave?
+    options:
+      - "They are updated in place within roughly one minute (kubelet sync + cache delay)"
+      - "They never change without a Pod restart"
+      - "They are deleted and the Pod crashes"
+      - "They update instantly with zero delay"
+    answer: 0
+    explanation: |
+      The kubelet periodically refreshes mounted ConfigMap/Secret files; the delay is roughly
+      the kubelet sync period plus cache propagation delay (up to about a minute by default).
+      The app must re-read the file to use the new value.
+    ref: "concepts.md#the-live-update-gotcha-env-vars-dont-update-volumes-do"
+
+  - id: config-secrets-024
+    difficulty: advanced
+    tags: [update, subpath, gotcha]
+    question: |
+      A ConfigMap key is mounted into a container using `subPath`. The ConfigMap is later
+      updated. What happens to the mounted file?
+    options:
+      - "It updates live like a normal volume mount"
+      - "The container is automatically restarted"
+      - "It does NOT auto-update — subPath mounts keep the value from creation time"
+      - "The file becomes read-write"
+    answer: 2
+    explanation: |
+      Files mounted via `subPath` are NOT refreshed by the kubelet — they hold the value from
+      Pod creation. Use a full-directory mount (or projected volume) if you need live updates.
+    ref: "concepts.md#the-live-update-gotcha-env-vars-dont-update-volumes-do"
+
+  - id: config-secrets-025
+    difficulty: intermediate
+    tags: [update, rollout, restart]
+    question: |
+      Editing a ConfigMap does not by itself restart the Pods that consume it as env vars.
+      What is a common way to force a rolling restart on config change?
+    options:
+      - "Delete the namespace"
+      - "kubectl rollout restart deployment/<name>, or hash the config into a Pod-template annotation"
+      - "Scale the Deployment to 0 replicas permanently"
+      - "Set the ConfigMap to type Opaque"
+    answer: 1
+    explanation: |
+      `kubectl rollout restart` recreates the Pods so env-var consumers pick up the change.
+      A popular declarative pattern is hashing the config into a Pod-template annotation
+      (Helm's `checksum/config`) so a config change alters the template and triggers a rollout.
+    ref: "concepts.md#the-live-update-gotcha-env-vars-dont-update-volumes-do"
+
+  - id: config-secrets-026
+    difficulty: advanced
+    tags: [update, scenario, troubleshooting]
+    question: |
+      A developer reports: "I updated the ConfigMap an hour ago but my app still uses the old
+      log level." The app reads LOG_LEVEL from an environment variable. What's the correct
+      explanation?
+    options:
+      - "The ConfigMap update failed silently"
+      - "The kubelet cache TTL is set to one week"
+      - "Env vars are frozen at container start; the app needs a Pod restart to pick up the new value"
+      - "ConfigMaps cannot store log levels"
+    answer: 2
+    explanation: |
+      Environment variables never refresh after the container starts. Because the app consumes
+      LOG_LEVEL as an env var, it will keep the old value until the Pod is recreated. Had it
+      been a volume mount (non-subPath) and the app re-read the file, it would have updated.
+    ref: "concepts.md#the-live-update-gotcha-env-vars-dont-update-volumes-do"
+
+  - id: config-secrets-027
+    difficulty: beginner
+    tags: [immutable, field]
+    question: |
+      Which field marks a ConfigMap or Secret so its data can no longer be changed?
+    options:
+      - "readOnly: true"
+      - "immutable: true"
+      - "locked: true"
+      - "frozen: true"
+    answer: 1
+    explanation: |
+      Setting `immutable: true` prevents any further edits to a ConfigMap/Secret's data; to
+      change it you must delete and recreate (typically as a new versioned object).
+    ref: "concepts.md#immutable-configmaps-and-secrets"
+
+  - id: config-secrets-028
+    difficulty: advanced
+    tags: [immutable, performance, scale]
+    question: |
+      What is the main performance/scale benefit of marking ConfigMaps and Secrets immutable
+      in a large cluster?
+    options:
+      - "They are compressed on disk"
+      - "They are cached on every node's local SSD"
+      - "They skip base64 encoding"
+      - "The kubelet stops watching them for changes, reducing API-server and etcd load"
+    answer: 3
+    explanation: |
+      For immutable objects the kubelet does not need to watch for updates, which
+      significantly cuts API-server/etcd load in clusters with many ConfigMaps/Secrets. It
+      also prevents accidental edits.
+    ref: "concepts.md#immutable-configmaps-and-secrets"
+
+  - id: config-secrets-029
+    difficulty: intermediate
+    tags: [immutable, workflow]
+    question: |
+      Your ConfigMap is `immutable: true` and you need to change a value. What must you do?
+    options:
+      - "Patch the data field in place with kubectl edit"
+      - "Set immutable to false, edit, then set it back"
+      - "Create a new (e.g. versioned) ConfigMap and update the Deployment to reference it"
+      - "Immutable ConfigMaps can never be changed and the app must be rebuilt"
+    answer: 2
+    explanation: |
+      You cannot edit an immutable object's data, and you cannot flip immutable back to false.
+      The pattern is to create a new object (often a versioned name) and point the Deployment
+      at it, which also produces a clean, auditable rollout.
+    ref: "concepts.md#immutable-configmaps-and-secrets"
+
+  - id: config-secrets-030
+    difficulty: intermediate
+    tags: [external-secrets, eso]
+    question: |
+      What does the External Secrets Operator (ESO) do?
+    options:
+      - "Encrypts etcd at rest"
+      - "Blocks all Secret reads unless MFA is provided"
+      - "Converts ConfigMaps into Secrets automatically"
+      - "Pulls values from an external store (Vault, cloud KMS) and materializes them as native K8s Secrets on a refresh interval"
+    answer: 3
+    explanation: |
+      ESO uses an `ExternalSecret` CRD to fetch values from an external secret manager and
+      create/refresh a native Kubernetes Secret. Pods then consume that Secret normally, and
+      ESO keeps it in sync (and can rotate it).
+    ref: "concepts.md#external-secrets-vault-cloud-kms--gitops-safe-patterns"
+
+  - id: config-secrets-031
+    difficulty: advanced
+    tags: [external-secrets, csi-driver]
+    question: |
+      How does the Secrets Store CSI Driver differ from the External Secrets Operator in
+      terms of where the secret ends up?
+    options:
+      - "The CSI Driver mounts the secret directly into the Pod as a volume, without necessarily creating a K8s Secret in etcd"
+      - "The CSI Driver stores secrets only in ConfigMaps"
+      - "Both always write the secret to etcd identically"
+      - "The CSI Driver requires no external store"
+    answer: 0
+    explanation: |
+      The Secrets Store CSI Driver mounts secrets from the external store directly into the
+      Pod as a volume at attach time; nothing is stored as a K8s Secret unless you enable the
+      optional sync-to-Secret. This gives a tighter blast radius than ESO's materialized Secret.
+    ref: "concepts.md#external-secrets-vault-cloud-kms--gitops-safe-patterns"
+
+  - id: config-secrets-032
+    difficulty: advanced
+    tags: [gitops, sealed-secrets]
+    question: |
+      In a GitOps workflow (Argo CD/Flux), how do Sealed Secrets let you safely store secrets
+      in a Git repository?
+    options:
+      - "They store secrets in plaintext but in a private repo"
+      - "You encrypt the Secret with the cluster controller's public key into a SealedSecret CR; only the in-cluster controller can decrypt it"
+      - "They base64-encode the Secret, which is safe to commit"
+      - "They store the secret in a ConfigMap instead"
+    answer: 1
+    explanation: |
+      `kubeseal` encrypts a Secret with the controller's public key producing a SealedSecret
+      custom resource that is safe to commit. Only the in-cluster controller, holding the
+      private key, can decrypt it back into a real Secret. Base64 is not encryption.
+    ref: "concepts.md#external-secrets-vault-cloud-kms--gitops-safe-patterns"
+
+  - id: config-secrets-033
+    difficulty: intermediate
+    tags: [gitops, sops]
+    question: |
+      What is SOPS commonly used for in a GitOps pipeline?
+    options:
+      - "Scaling Pods based on secret access frequency"
+      - "Auditing kubectl commands"
+      - "Encrypting values in a file with a KMS/age/PGP key so the encrypted file can be committed and decrypted at apply time"
+      - "Generating TLS certificates"
+    answer: 2
+    explanation: |
+      SOPS encrypts individual values in a file using a KMS, age, or PGP key. The encrypted
+      file is safe to commit and is decrypted at apply time (e.g. by Flux or helm-secrets),
+      keeping plaintext secrets out of Git.
+    ref: "concepts.md#external-secrets-vault-cloud-kms--gitops-safe-patterns"
+
+  - id: config-secrets-034
+    difficulty: intermediate
+    tags: [gitops, secrets, best-practice]
+    question: |
+      What is the fundamental rule about storing Kubernetes Secrets in a Git repository for
+      GitOps?
+    options:
+      - "Store them plaintext but in a separate branch"
+      - "Base64-encode them, which makes them safe"
+      - "Store them as ConfigMaps to avoid RBAC issues"
+      - "Never commit plaintext; commit only an encrypted form (Sealed Secrets/SOPS) or keep them out of Git via ESO/CSI"
+    answer: 3
+    explanation: |
+      Because Git history is durable and widely readable, you must never commit plaintext
+      secrets. Use asymmetric encryption (Sealed Secrets/SOPS) so only the cluster can
+      decrypt, or keep secrets out of Git entirely with an external store via ESO/CSI.
+    ref: "concepts.md#external-secrets-vault-cloud-kms--gitops-safe-patterns"
+
+  - id: config-secrets-035
+    difficulty: beginner
+    tags: [downward-api, basics]
+    question: |
+      What is the purpose of the Downward API in Kubernetes?
+    options:
+      - "To downgrade the cluster version"
+      - "To expose a Pod's own metadata (name, namespace, node, labels, resource limits) to its containers"
+      - "To send metrics down to Prometheus"
+      - "To pull images from a downstream registry"
+    answer: 1
+    explanation: |
+      The Downward API injects facts about the Pod itself — name, namespace, node, labels,
+      annotations, resource requests/limits — into the container via env vars or a
+      downwardAPI volume, without the app calling the API server.
+    ref: "concepts.md#downward-api-podcontainer-metadata-into-the-container"
+
+  - id: config-secrets-036
+    difficulty: intermediate
+    tags: [downward-api, fieldref]
+    question: |
+      Which construct injects the Pod's name into an environment variable via the Downward
+      API?
+    options:
+      - "valueFrom.configMapKeyRef with key metadata.name"
+      - "valueFrom.fieldRef with fieldPath: metadata.name"
+      - "valueFrom.secretKeyRef with key pod-name"
+      - "value: $(POD_NAME)"
+    answer: 1
+    explanation: |
+      `valueFrom.fieldRef` with `fieldPath: metadata.name` exposes the Pod's name. Downward
+      API uses `fieldRef` for Pod fields and `resourceFieldRef` for resource requests/limits —
+      not configMap/secret refs.
+    ref: "concepts.md#downward-api-podcontainer-metadata-into-the-container"
+
+  - id: config-secrets-037
+    difficulty: advanced
+    tags: [downward-api, labels, volume]
+    question: |
+      You want to expose the Pod's labels to the container. How must you do it with the
+      Downward API?
+    options:
+      - "As an environment variable via fieldRef"
+      - "Labels cannot be exposed to containers"
+      - "Via a Secret of type Opaque"
+      - "Only through a downwardAPI volume (each label projected as a file)"
+    answer: 3
+    explanation: |
+      Labels and annotations are multi-valued and can change, so they can only be projected
+      through a `downwardAPI` volume (each becomes a file), not as env vars. Scalar fields
+      like metadata.name are available via fieldRef env vars.
+    ref: "concepts.md#downward-api-podcontainer-metadata-into-the-container"
+
+  - id: config-secrets-038
+    difficulty: intermediate
+    tags: [downward-api, resourcefieldref]
+    question: |
+      An app wants to size its JVM heap from the container's memory limit. Which Downward API
+      construct exposes that limit?
+    options:
+      - "resourceFieldRef with resource: limits.memory"
+      - "fieldRef with fieldPath: spec.memory"
+      - "secretKeyRef with key memory"
+      - "configMapKeyRef with key heap"
+    answer: 0
+    explanation: |
+      `resourceFieldRef` exposes resource requests/limits, e.g.
+      `resource: limits.memory`, letting the app read its own memory limit to size the heap.
+      `fieldRef` handles Pod metadata fields, not resources.
+    ref: "concepts.md#downward-api-podcontainer-metadata-into-the-container"
+
+  - id: config-secrets-039
+    difficulty: beginner
+    tags: [configmap, secret, comparison]
+    question: |
+      Which statement best captures the difference between a ConfigMap and a Secret?
+    options:
+      - "ConfigMaps are encrypted; Secrets are plaintext"
+      - "Both hold key/value data, but Secrets are intended for sensitive data (base64, can be encrypted at rest, typed variants, tighter RBAC/audit)"
+      - "ConfigMaps can be mounted; Secrets cannot"
+      - "Secrets can only hold TLS certificates"
+    answer: 1
+    explanation: |
+      Mechanically they are near-twins. Secrets differ in intent and handling: base64 values,
+      optional encryption at rest, typed variants (tls, dockerconfigjson, etc.), and they get
+      RBAC/audit attention. ConfigMaps are for non-sensitive data.
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"
+
+  - id: config-secrets-040
+    difficulty: intermediate
+    tags: [configmap, optional, scheduling]
+    question: |
+      A Pod references a ConfigMap that does not yet exist, and the reference is NOT marked
+      `optional: true`. What happens?
+    options:
+      - "The Pod starts with empty values"
+      - "The Pod will not start until the ConfigMap exists"
+      - "K8s creates the ConfigMap automatically"
+      - "The Pod is scheduled to a special node"
+    answer: 1
+    explanation: |
+      By default a Pod referencing a missing ConfigMap/Secret will not start; the container
+      waits until the object exists. Marking the reference `optional: true` lets the Pod start
+      without it.
+    ref: "concepts.md#configmap-non-sensitive-configuration"
+
+  - id: config-secrets-041
+    difficulty: intermediate
+    tags: [secrets, decode, kubectl]
+    question: |
+      How do you reveal the plaintext value stored in a Secret you can read with kubectl?
+    options:
+      - "You can't — Secrets are encrypted end-to-end"
+      - "Only the kubelet can decrypt it"
+      - "Run kubectl decrypt secret x"
+      - "Decode the base64 value, e.g. kubectl get secret x -o jsonpath then base64 -d"
+    answer: 3
+    explanation: |
+      Since `data` is only base64-encoded, anyone with read access can decode it, e.g.
+      `kubectl get secret x -o jsonpath='{.data.password}' | base64 -d`. This is exactly why
+      base64 is not a security control.
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"
+
+  - id: config-secrets-042
+    difficulty: advanced
+    tags: [scenario, volume, reload]
+    question: |
+      An app mounts its config as a (non-subPath) volume, and you update the ConfigMap. A
+      minute later the mounted files show the new content, but the app's behavior is
+      unchanged. What is the most likely reason?
+    options:
+      - "The kubelet failed to sync"
+      - "The application does not re-read the file; it loaded config once at startup"
+      - "Volume mounts never update"
+      - "The ConfigMap must be marked immutable to take effect"
+    answer: 1
+    explanation: |
+      The volume mount updates the file, but Kubernetes cannot make the process re-read it.
+      Unless the app watches the file or reloads (e.g. on SIGHUP), it keeps the config it read
+      at startup. Live file updates only help if the app reloads them.
+    ref: "concepts.md#the-live-update-gotcha-env-vars-dont-update-volumes-do"
+
+  - id: config-secrets-043
+    difficulty: beginner
+    tags: [secrets, best-practice, env]
+    question: |
+      Which practice reduces the risk of a Secret leaking through process inspection or logs?
+    options:
+      - "Inject it as an environment variable via envFrom"
+      - "Store it in a ConfigMap"
+      - "Mount it as a read-only file volume instead of an env var"
+      - "Bake it into the image"
+    answer: 2
+    explanation: |
+      File mounts (read-only) keep the secret out of the process environment, which is exposed
+      via /proc, inherited by children, and often logged. Env-var injection is more leak-prone;
+      ConfigMaps and image-baking are worse still.
+    ref: "concepts.md#consuming-config-env-vars-vs-mounted-volumes"
+
+  - id: config-secrets-044
+    difficulty: intermediate
+    tags: [configmap, binarydata]
+    question: |
+      You need to store a small non-UTF-8 binary file in a ConfigMap. Which field should you
+      use?
+    options:
+      - "data"
+      - "stringData"
+      - "binaryData (base64-encoded bytes)"
+      - "You cannot store binary content in a ConfigMap"
+    answer: 2
+    explanation: |
+      ConfigMap `data` holds UTF-8 strings; `binaryData` holds base64-encoded binary content
+      for non-UTF-8 blobs. Both still count against the 1 MiB limit.
+    ref: "concepts.md#configmap-non-sensitive-configuration"
+
+  - id: config-secrets-045
+    difficulty: advanced
+    tags: [encryption-at-rest, kms, etcd]
+    question: |
+      Enabling encryption-at-rest for Secrets protects against which specific threat?
+    options:
+      - "A user with RBAC get access on Secrets reading them via the API"
+      - "Env-var leakage from a running container"
+      - "Base64 being reversible"
+      - "An attacker who obtains the raw etcd data or backups reading Secret contents"
+    answer: 3
+    explanation: |
+      Encryption-at-rest encrypts Secret data in etcd, so someone who steals etcd storage or
+      backups cannot read secrets. It does NOT stop a user with RBAC read access via the API —
+      that requires tight RBAC. The two controls are complementary.
+    ref: "concepts.md#secret-sensitive-data-base64-encoded-not-encrypted"

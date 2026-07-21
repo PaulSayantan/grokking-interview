@@ -84,7 +84,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Java & JVM (framework-relevant)](topics/java-jvm/README.md) | 25 | 25 ✅ (all tiers) |
 | [REST APIs & API Design](topics/rest-api-design/README.md) | 18 | 18 ✅ (all tiers, 1,529 MCQs) |
 | [Docker](topics/docker/README.md) | 16 | 16 ✅ (Pass 1, 794 MCQs) |
-| [Kubernetes](topics/kubernetes/README.md) | 19 | 0 |
+| [Kubernetes](topics/kubernetes/README.md) | 19 | 19 ✅ (Pass 1, 981 MCQs) |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 21 ✅ (Pass 1, 1,065 MCQs) |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
@@ -98,6 +98,21 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 31 (2026-07-21):** **Kubernetes Pass 1** (sequence domain 5, largest) — 19 topics,
+  **981 MCQs** (220 B / 472 I / 286 adv / 3 exp), 55 Mermaid diagrams (render 0-error). Covers
+  architecture/control-plane + reconciliation, API/objects/kubectl, pods & workload controllers,
+  deployments/rollouts, probes & resources (liveness-vs-readiness, QoS/OOMKilled), config/secrets,
+  services & networking, Ingress + Gateway API, storage (PV/PVC/CSI), scheduling/affinity/taints,
+  autoscaling (HPA/VPA/CA/KEDA/Karpenter), RBAC, workload/network security (PSS, NetworkPolicy),
+  Helm, K8s GitOps (Argo/Flux/Rollouts), operators/CRDs, troubleshooting, cluster lifecycle/upgrades,
+  service mesh. Boundaries: container internals→docker, general GitOps/CI→devops-cicd, observability
+  mechanics→observability, appsec→security, EKS→aws group (all cross-referenced). Built via
+  `kubernetes-authoring.js` (author → verify, 38 agents, 0 errors). Verify fixed several
+  version-accuracy errors (etcd 2GiB default quota, SSA not the kubectl-apply default, immutable
+  ConfigMap GA v1.21) + broke a period-12 answer cycle. A transient "YAML parse error in
+  workload-network-security" flagged mid-run was a concurrent-edit artifact — final file parses clean
+  (validator confirms 19 files/981 Qs). Promoted to AUTHORED_DOMAINS. Content-only commit. NEXT:
+  DDD tactical + backend-craft folds into system-design/messaging-databases/rest-api-design.
 - **Session 30 (2026-07-21):** **Docker Pass 1** (sequence domain 4) — 16 topics, **794 MCQs**
   (180 B / 382 I / 214 adv / 18 exp), 46 Mermaid diagrams (render 0-error). Covers container
   fundamentals (images vs containers, lifecycle, Dockerfile/layers/cache, ENTRYPOINT vs CMD),

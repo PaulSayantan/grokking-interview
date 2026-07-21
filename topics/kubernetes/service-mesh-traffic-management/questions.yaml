@@ -1,0 +1,975 @@
+topic: "Service Mesh & Advanced Traffic Management"
+domain: kubernetes
+topic_slug: service-mesh-traffic-management
+version: 1
+questions:
+  - id: service-mesh-traffic-management-001
+    difficulty: beginner
+    tags: [mesh, definition, east-west]
+    question: |
+      What kind of traffic does a service mesh primarily manage?
+    options:
+      - North-south traffic from external clients into the cluster
+      - East-west (service-to-service) traffic inside the cluster
+      - etcd replication traffic between control-plane nodes
+      - Container image pulls from a registry
+    answer: 1
+    explanation: |
+      A service mesh is an infrastructure layer for east-west, service-to-service
+      communication: mTLS, retries/timeouts, traffic shaping, and telemetry between
+      workloads. North-south (client-to-cluster) is the job of Ingress / the Gateway API.
+    ref: "concepts.md#the-problem-a-service-mesh-solves"
+
+  - id: service-mesh-traffic-management-002
+    difficulty: beginner
+    tags: [mesh, value, no-code-change]
+    question: |
+      What is the defining promise of a service mesh regarding application code?
+    options:
+      - It adds mTLS, retries, and telemetry without changing application code
+      - It replaces the application with generated code
+      - It requires importing a mesh SDK into every service
+      - It compiles all services into a single binary
+    answer: 0
+    explanation: |
+      A mesh pushes cross-cutting networking concerns (encryption, resilience, telemetry)
+      into a proxy beside each workload, configured declaratively by a control plane, so the
+      app keeps making ordinary calls and needs no code changes.
+    ref: "concepts.md#the-problem-a-service-mesh-solves"
+
+  - id: service-mesh-traffic-management-003
+    difficulty: intermediate
+    tags: [polyglot, libraries, motivation]
+    question: |
+      Why is solving resilience (retries, circuit breaking) with per-language libraries
+      like Resilience4j problematic at scale in a polyglot microservices system?
+    options:
+      - Libraries cannot implement retries at all
+      - Libraries only work with gRPC, never HTTP
+      - Kubernetes forbids in-process resilience libraries
+      - You must reimplement and maintain the same logic in every language, and versions drift
+    answer: 3
+    explanation: |
+      In a polyglot stack you duplicate the same resilience logic across Java/Go/Python/Node,
+      versions drift, changes require app rebuilds, and behavior becomes inconsistent and
+      hard to audit centrally. A mesh centralizes this in a language-agnostic proxy.
+    ref: "concepts.md#the-problem-a-service-mesh-solves"
+
+  - id: service-mesh-traffic-management-004
+    difficulty: intermediate
+    tags: [tracing, observability, caveat]
+    question: |
+      A mesh gives distributed tracing "for free." What must the application still do for
+      traces to connect end-to-end?
+    options:
+      - Nothing — the mesh handles everything including in-process context
+      - Run a separate tracing sidecar per request
+      - Propagate the trace-context headers across its own outbound calls
+      - Disable mTLS so spans can be read
+    answer: 2
+    explanation: |
+      The proxy times spans and forwards headers, but it cannot thread trace context through
+      in-process logic. The app must propagate headers like traceparent/x-request-id on its
+      outbound calls, or traces fragment into disconnected pieces.
+    ref: "concepts.md#the-problem-a-service-mesh-solves"
+
+  - id: service-mesh-traffic-management-005
+    difficulty: beginner
+    tags: [architecture, control-plane, data-plane]
+    question: |
+      In mesh terminology, what is the "data plane"?
+    options:
+      - The etcd datastore holding cluster state
+      - The proxies that actually move bytes between workloads
+      - The component that computes and distributes configuration
+      - The persistent volume storing metrics
+    answer: 1
+    explanation: |
+      The data plane is the set of proxies (the muscle) that intercept and forward traffic.
+      The control plane (the brain) computes configuration and distributes it to those
+      proxies.
+    ref: "concepts.md#the-sidecar-data-plane-model"
+
+  - id: service-mesh-traffic-management-006
+    difficulty: beginner
+    tags: [sidecar, envoy, injection]
+    question: |
+      In the classic sidecar model, where does the proxy run relative to the application?
+    options:
+      - As a container inside every Pod, sharing the Pod's network namespace
+      - As a separate DaemonSet on each node
+      - As a kernel module on the host
+      - As a standalone VM outside the cluster
+    answer: 0
+    explanation: |
+      The sidecar proxy (Envoy for Istio) runs as a container in every Pod and shares the
+      Pod's network namespace, so iptables rules can transparently redirect all inbound and
+      outbound TCP through it.
+    ref: "concepts.md#the-sidecar-data-plane-model"
+
+  - id: service-mesh-traffic-management-007
+    difficulty: intermediate
+    tags: [injection, admission-webhook, istio]
+    question: |
+      How does Istio automatically add the Envoy sidecar to Pods in a labeled namespace?
+    options:
+      - A CronJob edits Deployments nightly
+      - The scheduler injects it during binding
+      - kubelet compiles the proxy into each container
+      - A mutating admission webhook rewrites the Pod spec at creation time
+    answer: 3
+    explanation: |
+      A mutating admission webhook intercepts Pod creation and rewrites the spec to add the
+      istio-proxy container plus an init container that programs the iptables redirect. This
+      is why namespace labeling (istio-injection=enabled) is enough.
+    ref: "concepts.md#the-sidecar-data-plane-model"
+
+  - id: service-mesh-traffic-management-008
+    difficulty: advanced
+    tags: [sidecar, iptables, transparency]
+    question: |
+      Why can the sidecar intercept all of a Pod's traffic without the application being
+      aware of it?
+    options:
+      - The app is recompiled to call the proxy explicitly
+      - Kubernetes rewrites the app's source DNS
+      - The init container programs iptables rules in the shared network namespace to redirect TCP through Envoy
+      - The proxy replaces the container runtime
+    answer: 2
+    explanation: |
+      An init container installs iptables rules in the Pod's shared network namespace that
+      transparently redirect inbound and outbound TCP through the local Envoy. The app makes
+      normal socket calls and never knows a proxy is in the path.
+    ref: "concepts.md#the-sidecar-data-plane-model"
+
+  - id: service-mesh-traffic-management-009
+    difficulty: intermediate
+    tags: [sidecar, trade-offs, overhead]
+    question: |
+      Which is a genuine drawback of the sidecar data-plane model?
+    options:
+      - It cannot do mTLS
+      - It requires disabling kube-proxy
+      - It only works on a single node
+      - A proxy per Pod adds resource overhead and extra latency hops, and upgrades require restarting every Pod
+    answer: 3
+    explanation: |
+      Sidecars give strong per-Pod isolation and full L7 features, but you pay CPU/memory per
+      Pod, two extra proxy hops of latency per request, and must restart every Pod to upgrade
+      the proxy version.
+    ref: "concepts.md#the-sidecar-data-plane-model"
+
+  - id: service-mesh-traffic-management-010
+    difficulty: advanced
+    tags: [native-sidecar, jobs, lifecycle]
+    question: |
+      A batch Job's application container finishes successfully, but the Pod never reaches
+      Completed and the Job hangs. In a pre-native-sidecar mesh, what is the classic cause?
+    options:
+      - The app crashed silently
+      - The Job has no restartPolicy
+      - The injected sidecar proxy keeps running, so the Pod never terminates
+      - etcd rejected the Pod update
+    answer: 2
+    explanation: |
+      As an ordinary container, the sidecar keeps running after the app exits, so the Pod
+      stays Running and the Job never completes. Native sidecar containers (init containers
+      with restartPolicy: Always, on by default since v1.29, GA in v1.33) fix this by
+      terminating the sidecar after the app.
+    ref: "concepts.md#the-sidecar-data-plane-model"
+
+  - id: service-mesh-traffic-management-011
+    difficulty: advanced
+    tags: [native-sidecar, startup-order, race]
+    question: |
+      What problem do Kubernetes native sidecar containers solve at Pod startup?
+    options:
+      - They make images smaller
+      - They encrypt the container filesystem
+      - They remove the need for a control plane
+      - They ensure the proxy starts before app containers, so the app's early calls aren't dropped
+    answer: 3
+    explanation: |
+      Native sidecars (init containers with restartPolicy: Always) start before regular app
+      containers and stop after them, fixing both the "app starts before proxy is ready"
+      race and the "sidecar outlives the app in a Job" problem.
+    ref: "concepts.md#the-sidecar-data-plane-model"
+
+  - id: service-mesh-traffic-management-012
+    difficulty: beginner
+    tags: [ambient, ztunnel, sidecarless]
+    question: |
+      What is the main goal of Istio's ambient (sidecar-less) mode?
+    options:
+      - To remove per-Pod sidecars, cutting overhead and decoupling mesh upgrades from app Pods
+      - To add a second sidecar per Pod for redundancy
+      - To eliminate the control plane entirely
+      - To replace Kubernetes Services
+    answer: 0
+    explanation: |
+      Ambient mode removes per-Pod sidecars to lower resource overhead and let the mesh be
+      upgraded without restarting application Pods. It splits into a per-node L4 ztunnel and
+      an optional per-namespace L7 waypoint.
+    ref: "concepts.md#ambient--sidecar-less-mode"
+
+  - id: service-mesh-traffic-management-013
+    difficulty: intermediate
+    tags: [ambient, ztunnel, layers]
+    question: |
+      In Istio ambient mode, what is the ztunnel responsible for?
+    options:
+      - Terminating and parsing all HTTP requests
+      - Running the admission webhook
+      - Serving as the mesh certificate authority
+      - Per-node L4 duties: mTLS, L4 authorization, and TCP-level telemetry — not L7/HTTP parsing
+    answer: 3
+    explanation: |
+      The ztunnel is a per-node (DaemonSet) Rust proxy handling L3/L4: mTLS, L4 authz, and
+      telemetry. It explicitly does NOT terminate or parse workload HTTP — that is the
+      optional waypoint proxy's job.
+    ref: "concepts.md#ambient--sidecar-less-mode"
+
+  - id: service-mesh-traffic-management-014
+    difficulty: intermediate
+    tags: [ambient, waypoint, l7]
+    question: |
+      When do you need a waypoint proxy in Istio ambient mode?
+    options:
+      - Always — it is mandatory for any meshed Pod
+      - Only to enable mTLS
+      - Only when you need L7 features like HTTP routing, L7 authorization, or retries
+      - Only for north-south ingress
+    answer: 2
+    explanation: |
+      The ztunnel provides the L4 secure overlay (mTLS, L4 authz) by itself. A waypoint (a
+      per-namespace/per-service-account Envoy Deployment) is added only when L7 processing is
+      required, giving a layered, opt-in adoption path.
+    ref: "concepts.md#ambient--sidecar-less-mode"
+
+  - id: service-mesh-traffic-management-015
+    difficulty: advanced
+    tags: [ambient, hbone, transport]
+    question: |
+      What transport does Istio ambient's ztunnel use to tunnel traffic securely between
+      nodes?
+    options:
+      - Plain UDP with no encryption
+      - HBONE — mTLS over HTTP CONNECT
+      - NFS mounts
+      - Raw ICMP
+    answer: 1
+    explanation: |
+      Ambient uses HBONE (HTTP-Based Overlay Network Encapsulation): mTLS tunneled over an
+      HTTP CONNECT connection (port 15008). It carries encrypted L4 traffic between ztunnels
+      and to waypoints.
+    ref: "concepts.md#ambient--sidecar-less-mode"
+
+  - id: service-mesh-traffic-management-016
+    difficulty: intermediate
+    tags: [ambient, ga, versions]
+    question: |
+      What is the current status of Istio ambient mode?
+    options:
+      - Still experimental with no production guidance
+      - Removed from Istio in favor of sidecars
+      - GA (Stable) since Istio 1.24, released November 2024
+      - Only available in Linkerd
+    answer: 2
+    explanation: |
+      Istio ambient mode reached General Availability in Istio 1.24 (November 2024) — ztunnel,
+      waypoints, and the APIs were designated Stable. Sidecar and ambient modes can coexist
+      and interoperate in one mesh.
+    ref: "concepts.md#ambient--sidecar-less-mode"
+
+  - id: service-mesh-traffic-management-017
+    difficulty: beginner
+    tags: [istiod, control-plane, istio]
+    question: |
+      What is istiod?
+    options:
+      - The Envoy sidecar container
+      - Istio's consolidated control plane (config/discovery, CA, injection webhook)
+      - A CNI plugin
+      - The Kubernetes API server
+    answer: 1
+    explanation: |
+      istiod is Istio's single control-plane binary, consolidating the former Pilot (config
+      and discovery), Citadel (certificate authority), and Galley functions, plus the sidecar
+      injection webhook.
+    ref: "concepts.md#istio-control-plane-istiod"
+
+  - id: service-mesh-traffic-management-018
+    difficulty: intermediate
+    tags: [xds, envoy, config]
+    question: |
+      How does istiod distribute configuration to the Envoy proxies?
+    options:
+      - By SSHing into each Pod
+      - Through etcd watches directly on each proxy
+      - By writing ConfigMaps the app reads
+      - Via the xDS discovery APIs (LDS/CDS/EDS/RDS)
+    answer: 3
+    explanation: |
+      istiod translates K8s objects and Istio CRDs into Envoy configuration and pushes it via
+      xDS: LDS (listeners), CDS (clusters), EDS (endpoints), RDS (routes). This is the
+      standard Envoy dynamic-configuration protocol.
+    ref: "concepts.md#istio-control-plane-istiod"
+
+  - id: service-mesh-traffic-management-019
+    difficulty: advanced
+    tags: [istiod, availability, resilience]
+    question: |
+      istiod becomes unavailable for several minutes. What happens to existing meshed
+      traffic?
+    options:
+      - All service-to-service traffic stops immediately
+      - Every Pod is restarted automatically
+      - Existing traffic keeps flowing on the proxies' last-known config; only config updates and new cert issuance pause
+      - mTLS is disabled cluster-wide
+    answer: 2
+    explanation: |
+      The data plane is decoupled from the control plane: proxies keep forwarding on their
+      cached config. istiod being down only halts configuration updates and new certificate
+      issuance — not existing connectivity. This resilience is a common interview point.
+    ref: "concepts.md#istio-control-plane-istiod"
+
+  - id: service-mesh-traffic-management-020
+    difficulty: advanced
+    tags: [istiod, revisions, upgrade]
+    question: |
+      How does Istio support canary upgrades of the control plane itself?
+    options:
+      - By deleting the old istiod and hoping proxies reconnect
+      - Control-plane upgrades are not supported
+      - By pausing all traffic during the upgrade
+      - Via revisions — run two istiod versions side by side and migrate namespaces by relabeling
+    answer: 3
+    explanation: |
+      Istio revisions let you run e.g. istiod 1-24 and 1-25 concurrently. You migrate
+      workloads by changing their revision label and restarting, and roll back by relabeling
+      — a safe, incremental control-plane upgrade.
+    ref: "concepts.md#istio-control-plane-istiod"
+
+  - id: service-mesh-traffic-management-021
+    difficulty: beginner
+    tags: [virtualservice, routing, istio]
+    question: |
+      In Istio, which resource holds the L7 routing rules (match conditions, weights,
+      rewrites, retries)?
+    options:
+      - VirtualService
+      - DestinationRule
+      - PeerAuthentication
+      - ServiceAccount
+    answer: 0
+    explanation: |
+      A VirtualService defines how requests to a host are routed: header/path/weight
+      matching, rewrites, retries, timeouts, mirroring, and fault injection. DestinationRule
+      defines post-routing policy (subsets, load balancing, circuit breaking).
+    ref: "concepts.md#istio-traffic-management-virtualservice-destinationrule-gateway"
+
+  - id: service-mesh-traffic-management-022
+    difficulty: intermediate
+    tags: [destinationrule, subsets, load-balancing]
+    question: |
+      What does an Istio DestinationRule primarily configure?
+    options:
+      - Which external clients can reach the cluster
+      - RBAC roles for users
+      - The TLS certificate for the ingress gateway
+      - Named subsets (by Pod labels), load-balancing policy, connection pools, and outlier detection
+    answer: 3
+    explanation: |
+      A DestinationRule applies after routing chooses a host: it defines subsets by Pod
+      labels (e.g. version: v1), the load-balancing algorithm, connection-pool limits, and
+      outlier detection (circuit breaking).
+    ref: "concepts.md#istio-traffic-management-virtualservice-destinationrule-gateway"
+
+  - id: service-mesh-traffic-management-023
+    difficulty: advanced
+    tags: [virtualservice, destinationrule, 503, gotcha]
+    question: |
+      A VirtualService routes to subset "v2", the v2 Pods are healthy and Ready, yet clients
+      get "503 no healthy upstream". What is the most likely cause?
+    options:
+      - The Pods are out of memory
+      - kube-proxy is disabled
+      - There is no DestinationRule defining the "v2" subset, so Envoy has no cluster for it
+      - The namespace lacks a ResourceQuota
+    answer: 2
+    explanation: |
+      Subset names are resolved via DestinationRule, not directly from Pod labels. If the
+      DestinationRule defining subset v2 is missing or misnamed, Envoy has no upstream cluster
+      and returns 503/NR even though the Pods are healthy.
+    ref: "concepts.md#istio-traffic-management-virtualservice-destinationrule-gateway"
+
+  - id: service-mesh-traffic-management-024
+    difficulty: intermediate
+    tags: [gateway, ingress, north-south]
+    question: |
+      What role does an Istio Gateway resource play?
+    options:
+      - It configures a mesh ingress/egress proxy's L4-L6 listener (port, protocol, TLS), bound to a VirtualService for L7 routing
+      - It defines Pod-to-Pod NetworkPolicy
+      - It issues workload certificates
+      - It stores application secrets
+    answer: 0
+    explanation: |
+      A Gateway configures the edge proxy's listener — ports, protocols, TLS — for
+      north-south traffic at the mesh boundary. A VirtualService is then bound to it to
+      express the L7 routing rules.
+    ref: "concepts.md#istio-traffic-management-virtualservice-destinationrule-gateway"
+
+  - id: service-mesh-traffic-management-025
+    difficulty: beginner
+    tags: [mtls, security, zero-trust]
+    question: |
+      What is the headline security capability of a service mesh?
+    options:
+      - Automatic mutual TLS (mTLS) between services, encrypting and authenticating both ends
+      - Antivirus scanning of container images
+      - Firewall rules for the host OS
+      - Password rotation for users
+    answer: 0
+    explanation: |
+      A mesh transparently gives every service-to-service connection mutual TLS: both ends
+      authenticate via certificates and traffic is encrypted, turning a flat plaintext
+      internal network into a zero-trust one based on cryptographic identity.
+    ref: "concepts.md#mtls-and-zero-trust-authentication"
+
+  - id: service-mesh-traffic-management-026
+    difficulty: intermediate
+    tags: [spiffe, identity, serviceaccount]
+    question: |
+      What is a workload's mTLS identity in Istio derived from?
+    options:
+      - Its Pod IP address
+      - Its node's hostname
+      - Its Kubernetes ServiceAccount, encoded as a SPIFFE identity
+      - A random UUID per request
+    answer: 2
+    explanation: |
+      Istio issues each workload a SPIFFE identity of the form
+      spiffe://<trust-domain>/ns/<namespace>/sa/<serviceaccount>, derived from its
+      ServiceAccount. Policy is written against these cryptographic identities, not IPs.
+    ref: "concepts.md#mtls-and-zero-trust-authentication"
+
+  - id: service-mesh-traffic-management-027
+    difficulty: intermediate
+    tags: [peerauthentication, mtls, modes]
+    question: |
+      What is the difference between PERMISSIVE and STRICT mTLS modes in a
+      PeerAuthentication?
+    options:
+      - PERMISSIVE encrypts, STRICT does not
+      - They are aliases for the same behavior
+      - PERMISSIVE accepts both plaintext and mTLS (good for migration); STRICT rejects any non-mTLS traffic
+      - STRICT applies only to egress
+    answer: 2
+    explanation: |
+      PERMISSIVE (the default) accepts both plaintext and mTLS so you can migrate gradually;
+      STRICT rejects any non-mTLS connection. The safe path is PERMISSIVE until all clients
+      are meshed, then STRICT.
+    ref: "concepts.md#mtls-and-zero-trust-authentication"
+
+  - id: service-mesh-traffic-management-028
+    difficulty: advanced
+    tags: [peerauthentication, strict, gotcha]
+    question: |
+      A team sets PeerAuthentication mtls.mode=STRICT in prod and traffic immediately breaks
+      for some callers and Prometheus scrapes. Why?
+    options:
+      - STRICT disables the Pods
+      - STRICT requires a LoadBalancer Service
+      - STRICT deletes the certificates
+      - Unmeshed clients (and plaintext scrapers/health checkers) send non-mTLS traffic, which STRICT rejects
+    answer: 3
+    explanation: |
+      STRICT rejects all plaintext. Any client not yet in the mesh, plus plaintext scrapers or
+      external health checkers, get rejected. Mesh all clients and verify mTLS is actually in
+      use under PERMISSIVE before switching to STRICT.
+    ref: "concepts.md#mtls-and-zero-trust-authentication"
+
+  - id: service-mesh-traffic-management-029
+    difficulty: advanced
+    tags: [authorizationpolicy, allow, default-deny, gotcha]
+    question: |
+      In Istio, once a single ALLOW AuthorizationPolicy selects a workload, what happens to
+      requests that do not match any rule?
+    options:
+      - They are all allowed by default
+      - They are denied by default (an ALLOW policy makes everything unmatched implicitly denied)
+      - They are queued indefinitely
+      - They bypass the mesh
+    answer: 1
+    explanation: |
+      As soon as one ALLOW policy applies to a workload, any request not matched by an
+      ALLOW rule is denied. A single narrow allow-rule can therefore lock out traffic you
+      forgot to include — a classic gotcha.
+    ref: "concepts.md#mtls-and-zero-trust-authentication"
+
+  - id: service-mesh-traffic-management-030
+    difficulty: intermediate
+    tags: [certificates, rotation, ca]
+    question: |
+      What makes automatic mTLS possible without application involvement in Istio?
+    options:
+      - Developers manually install certs in each container
+      - istiod acts as the mesh CA, issuing and auto-rotating short-lived identity certificates to each proxy
+      - The app negotiates certs with the browser
+      - Certs are stored in a public registry
+    answer: 1
+    explanation: |
+      istiod (its Citadel function) is the mesh certificate authority: it issues each workload
+      a SPIFFE-encoding cert and auto-rotates it (default ~24h). Because the proxy handles the
+      handshake, the app needs no TLS code.
+    ref: "concepts.md#mtls-and-zero-trust-authentication"
+
+  - id: service-mesh-traffic-management-031
+    difficulty: beginner
+    tags: [canary, traffic-split, weights]
+    question: |
+      How does a mesh enable a canary deployment that a plain Kubernetes Service cannot?
+    options:
+      - By sending a precise percentage of requests to a new version via weighted routing
+      - By scaling Pods to zero
+      - By deleting the old version
+      - By caching responses
+    answer: 0
+    explanation: |
+      A plain Service does flat round-robin over all Ready endpoints — the only "split" is the
+      replica ratio. A mesh VirtualService assigns explicit weights (e.g. 90/10) independent of
+      Pod counts, enabling true percentage-based canaries.
+    ref: "concepts.md#traffic-splitting-canary-fault-injection"
+
+  - id: service-mesh-traffic-management-032
+    difficulty: intermediate
+    tags: [header-routing, dark-launch]
+    question: |
+      Which capability lets you route only requests with header x-user: beta to a new version
+      while everyone else stays on the old one?
+    options:
+      - NodePort exposure
+      - HorizontalPodAutoscaler
+      - Attribute-based (header/cookie/path) request routing in the VirtualService
+      - PersistentVolumeClaim binding
+    answer: 2
+    explanation: |
+      A mesh can match on request attributes (headers, cookies, path) and route accordingly,
+      enabling dark launches to internal/beta users while all other traffic stays on the
+      stable version. Plain Services cannot route by request attributes.
+    ref: "concepts.md#traffic-splitting-canary-fault-injection"
+
+  - id: service-mesh-traffic-management-033
+    difficulty: intermediate
+    tags: [mirroring, shadowing, testing]
+    question: |
+      What does traffic mirroring (shadowing) do?
+    options:
+      - Duplicates the database
+      - Blocks half of all requests
+      - Replays yesterday's logs
+      - Copies live traffic to a new version and discards its responses, testing with real traffic at zero user risk
+    answer: 3
+    explanation: |
+      Mirroring sends a copy of live requests to a new version while the primary still serves
+      users; the mirror's responses are discarded. You exercise the new version with real
+      production traffic without affecting users.
+    ref: "concepts.md#traffic-splitting-canary-fault-injection"
+
+  - id: service-mesh-traffic-management-034
+    difficulty: intermediate
+    tags: [fault-injection, chaos, testing]
+    question: |
+      What is the purpose of fault injection (delays/aborts) in a mesh?
+    options:
+      - To deliberately inject delays or error responses to verify clients' retries, timeouts, and fallbacks work
+      - To permanently disable a service
+      - To speed up requests
+      - To encrypt traffic
+    answer: 0
+    explanation: |
+      Fault injection introduces controlled delays or HTTP aborts (e.g. 500 for 0.1% of calls)
+      so you can validate that callers handle failures correctly — chaos testing of resilience
+      logic without changing application code.
+    ref: "concepts.md#traffic-splitting-canary-fault-injection"
+
+  - id: service-mesh-traffic-management-035
+    difficulty: advanced
+    tags: [progressive-delivery, flagger, argo-rollouts]
+    question: |
+      How do progressive-delivery controllers like Argo Rollouts or Flagger use the mesh?
+    options:
+      - They replace the mesh control plane
+      - They only work without a mesh
+      - They disable mTLS during rollout
+      - They automatically shift the mesh's traffic weights while watching golden metrics to promote or roll back a canary
+    answer: 3
+    explanation: |
+      Flagger/Argo Rollouts drive the mesh's weighted routing programmatically, gradually
+      increasing traffic to the new version while analyzing golden metrics (success rate,
+      latency) and automatically rolling back on regressions. See gitops-continuous-delivery.
+    ref: "concepts.md#traffic-splitting-canary-fault-injection"
+
+  - id: service-mesh-traffic-management-036
+    difficulty: beginner
+    tags: [timeouts, resilience]
+    question: |
+      What does a mesh-configured request timeout protect against?
+    options:
+      - A slow dependency tying up caller resources indefinitely
+      - Container image bloat
+      - Certificate expiry
+      - Excessive log volume
+    answer: 0
+    explanation: |
+      A timeout caps how long a proxy waits for a response, so one slow downstream dependency
+      cannot hold caller threads/connections open forever and cascade back-pressure through
+      the system.
+    ref: "concepts.md#resilience-retries-timeouts-circuit-breaking"
+
+  - id: service-mesh-traffic-management-037
+    difficulty: intermediate
+    tags: [retries, idempotency, gotcha]
+    question: |
+      Why should mesh retries be applied carefully to non-idempotent requests?
+    options:
+      - Retries are always safe for any request
+      - Retries only work over gRPC
+      - Non-idempotent requests cannot be proxied
+      - Retrying a non-idempotent request (e.g. POST that charges a card) can duplicate the side effect
+    answer: 3
+    explanation: |
+      Retries safely help idempotent operations, but blindly retrying a non-idempotent POST
+      (e.g. a payment) can execute the side effect twice. Restrict automatic retries to
+      idempotent operations.
+    ref: "concepts.md#resilience-retries-timeouts-circuit-breaking"
+
+  - id: service-mesh-traffic-management-038
+    difficulty: intermediate
+    tags: [circuit-breaking, outlier-detection]
+    question: |
+      In Istio, how is circuit breaking implemented?
+    options:
+      - By deleting failing Pods
+      - By blocking all traffic to the service
+      - Via DestinationRule outlier detection, which ejects endpoints returning too many consecutive 5xx from the LB pool
+      - Via a HorizontalPodAutoscaler
+    answer: 2
+    explanation: |
+      Outlier detection in a DestinationRule temporarily ejects an endpoint that returns too
+      many consecutive 5xx errors, removing it from the load-balancing pool so failures don't
+      cascade. Connection-pool limits complement this by shedding excess load.
+    ref: "concepts.md#resilience-retries-timeouts-circuit-breaking"
+
+  - id: service-mesh-traffic-management-039
+    difficulty: advanced
+    tags: [retry-storm, cascading, gotcha]
+    question: |
+      Every hop in a 3-service call chain independently retries 3 times. Why is this
+      dangerous during a downstream failure?
+    options:
+      - It reduces latency too much
+      - It has no effect at all
+      - It disables mTLS
+      - Retries multiply up the chain (3×3×3), amplifying a small failure into a self-inflicted outage
+    answer: 3
+    explanation: |
+      Stacked retries at every layer multiply: a bottom failure can generate 27 attempts,
+      overwhelming the struggling service — a "retry storm." Mitigate with retry budgets,
+      small attempt counts, and not retrying at every layer.
+    ref: "concepts.md#resilience-retries-timeouts-circuit-breaking"
+
+  - id: service-mesh-traffic-management-040
+    difficulty: advanced
+    tags: [outlier-detection, max-ejection, gotcha]
+    question: |
+      Why should you cap maxEjectionPercent in an outlier-detection config?
+    options:
+      - To make ejection faster
+      - To prevent outlier detection from ejecting the entire backend fleet at once during a broad error spike
+      - Because ejection requires it to be 100%
+      - To disable circuit breaking
+    answer: 1
+    explanation: |
+      If a widespread error spike hits many endpoints, uncapped ejection could remove the
+      whole pool, leaving no upstream. maxEjectionPercent bounds how much of the fleet can be
+      ejected simultaneously, preserving some capacity.
+    ref: "concepts.md#resilience-retries-timeouts-circuit-breaking"
+
+  - id: service-mesh-traffic-management-041
+    difficulty: intermediate
+    tags: [linkerd, rust, comparison]
+    question: |
+      What distinguishes Linkerd's data plane from Istio's?
+    options:
+      - Linkerd uses a purpose-built lightweight Rust micro-proxy rather than full Envoy
+      - Linkerd has no data plane
+      - Linkerd runs the proxy in the kernel
+      - Linkerd uses the same Envoy binary as Istio
+    answer: 0
+    explanation: |
+      Linkerd's data plane is a small, purpose-built Rust proxy (linkerd2-proxy), designed to
+      be lighter and lower-latency than a full Envoy sidecar, reflecting Linkerd's minimal,
+      opinionated philosophy. Istio uses Envoy.
+    ref: "concepts.md#istio-vs-linkerd-vs-cilium"
+
+  - id: service-mesh-traffic-management-042
+    difficulty: intermediate
+    tags: [cilium, ebpf, comparison]
+    question: |
+      What is Cilium's distinctive approach to mesh capabilities?
+    options:
+      - It runs a full Envoy in every Pod
+      - It requires Istio to function
+      - It implements L3/L4 routing, policy, and encryption in the kernel via eBPF, using Envoy only when L7 is needed
+      - It only works on Windows nodes
+    answer: 2
+    explanation: |
+      Cilium uses eBPF in the kernel for L3/L4 (routing, policy, encryption), avoiding per-Pod
+      proxies for those layers, and is itself a CNI. Full L7 processing still needs a userspace
+      Envoy (run per-node), and observability comes via Hubble.
+    ref: "concepts.md#istio-vs-linkerd-vs-cilium"
+
+  - id: service-mesh-traffic-management-043
+    difficulty: advanced
+    tags: [ebpf, l7, nuance]
+    question: |
+      What is the key nuance in the "eBPF replaces sidecars entirely" claim?
+    options:
+      - eBPF cannot do any networking
+      - eBPF requires a sidecar per Pod anyway
+      - eBPF only runs in Istio
+      - eBPF handles L3/L4 efficiently in-kernel, but full L7 processing (HTTP parsing, retries) still needs a userspace proxy
+    answer: 3
+    explanation: |
+      eBPF is excellent for L3/L4 in the kernel with no userspace proxy, but parsing HTTP and
+      doing L7 logic still requires a userspace proxy (Cilium uses per-node Envoy). eBPF
+      reduces, but doesn't fully eliminate, proxies.
+    ref: "concepts.md#istio-vs-linkerd-vs-cilium"
+
+  - id: service-mesh-traffic-management-044
+    difficulty: intermediate
+    tags: [linkerd, choice, simplicity]
+    question: |
+      For a team that mainly wants mTLS, golden metrics, and basic reliability with minimal
+      operational overhead, which mesh is often the best fit?
+    options:
+      - Linkerd
+      - A hand-rolled proxy
+      - No mesh is capable of mTLS
+      - Only Istio in sidecar mode
+    answer: 0
+    explanation: |
+      Linkerd is deliberately minimal and opinionated with a tiny Rust proxy, making it the
+      lightest-to-operate option when you don't need Istio's advanced L7 traffic-management
+      knobs. Istio fits when you need the richest feature set.
+    ref: "concepts.md#istio-vs-linkerd-vs-cilium"
+
+  - id: service-mesh-traffic-management-045
+    difficulty: beginner
+    tags: [observability, golden-metrics]
+    question: |
+      Which metrics does a mesh emit automatically for every service-to-service edge without
+      app instrumentation?
+    options:
+      - The golden signals: request rate, error rate, and latency
+      - Only CPU usage
+      - Only disk I/O
+      - Only DNS query counts
+    answer: 0
+    explanation: |
+      Because the proxy sees every request, it emits the golden signals — rate, errors, and
+      latency — per source→destination pair, with no application instrumentation. It also
+      derives the service dependency graph.
+    ref: "concepts.md#observability-golden-metrics-for-free"
+
+  - id: service-mesh-traffic-management-046
+    difficulty: intermediate
+    tags: [observability, free-vs-work, tracing]
+    question: |
+      Which observability aspect is NOT automatically complete just by adding a mesh?
+    options:
+      - Per-edge request rate
+      - Per-edge error rate
+      - Trace-context propagation across an app's in-process calls
+      - Per-edge latency percentiles
+    answer: 2
+    explanation: |
+      Rate, error rate, and latency per edge come free from the proxy. But connecting traces
+      end-to-end requires the app to propagate trace-context headers on its outbound calls —
+      the mesh cannot thread context through in-process logic.
+    ref: "concepts.md#observability-golden-metrics-for-free"
+
+  - id: service-mesh-traffic-management-047
+    difficulty: intermediate
+    tags: [observability, topology, kiali]
+    question: |
+      Why can a mesh render a live service dependency graph (e.g. Kiali)?
+    options:
+      - It reads the application source code
+      - The proxy observes every service-to-service call, so it knows which services talk to which
+      - It queries the container registry
+      - It inspects Dockerfiles
+    answer: 1
+    explanation: |
+      Since the data-plane proxy intercepts every request, the mesh knows the full set of
+      source→destination edges in real time, which powers topology/graph views like Kiali or
+      the Linkerd dashboard.
+    ref: "concepts.md#observability-golden-metrics-for-free"
+
+  - id: service-mesh-traffic-management-048
+    difficulty: beginner
+    tags: [mesh-vs-ingress, axes]
+    question: |
+      What is the clean mental model distinguishing Ingress/Gateway from a service mesh?
+    options:
+      - Ingress/Gateway = getting into the cluster (north-south); mesh = moving around inside (east-west)
+      - They are identical
+      - Mesh handles TLS termination at the edge only
+      - Ingress handles Pod-to-Pod mTLS
+    answer: 0
+    explanation: |
+      Ingress/Gateway is the front door (north-south: client → cluster), while a mesh manages
+      the internal hallways (east-west: service ↔ service). They solve different axes and are
+      typically used together.
+    ref: "concepts.md#mesh-vs-ingress--gateway-api"
+
+  - id: service-mesh-traffic-management-049
+    difficulty: intermediate
+    tags: [gamma, gateway-api, mesh]
+    question: |
+      What does the Gateway API's GAMMA initiative do?
+    options:
+      - Removes the Gateway API
+      - Extends HTTPRoute to configure east-west mesh routing with the same portable API
+      - Replaces mTLS with plaintext
+      - Deprecates Services
+    answer: 1
+    explanation: |
+      GAMMA extends the Gateway API (originally north-south) so HTTPRoute can express
+      east-west mesh routing too, giving one vendor-neutral config model spanning edge and
+      mesh. Both Istio and Linkerd support Gateway API for mesh routing.
+    ref: "concepts.md#mesh-vs-ingress--gateway-api"
+
+  - id: service-mesh-traffic-management-050
+    difficulty: intermediate
+    tags: [ingress-gateway, mesh, overlap]
+    question: |
+      Where does a service mesh legitimately overlap with north-south handling?
+    options:
+      - It never touches north-south traffic
+      - It replaces DNS
+      - A mesh's own ingress gateway (e.g. Istio Gateway) also handles north-south edge traffic
+      - It manages PersistentVolumes
+    answer: 2
+    explanation: |
+      A meshed cluster can use the mesh's ingress gateway (Istio Gateway) for north-south
+      traffic instead of a separate Ingress controller, so the mesh does handle edge traffic
+      in that mode — one place the north-south/east-west line blurs.
+    ref: "concepts.md#mesh-vs-ingress--gateway-api"
+
+  - id: service-mesh-traffic-management-051
+    difficulty: intermediate
+    tags: [when-worth-it, decision]
+    question: |
+      Which situation most strongly justifies adopting a full service mesh?
+    options:
+      - Two services in a single language behind one Service
+      - Dozens of polyglot services needing uniform mTLS, resilience, traffic control, and observability plus compliance-driven encryption everywhere
+      - A static website with no backend
+      - A single monolith
+    answer: 1
+    explanation: |
+      A mesh pays off when you have many (often polyglot) services where per-app resilience
+      and mTLS don't scale, plus compliance demands for encryption-in-transit and auditable
+      authz across teams. Small/single-language systems rarely justify the overhead.
+    ref: "concepts.md#when-a-mesh-is-worth-it-and-when-its-overkill"
+
+  - id: service-mesh-traffic-management-052
+    difficulty: intermediate
+    tags: [overkill, alternatives, networkpolicy]
+    question: |
+      A team's only requirement is coarse network segmentation between namespaces. What is
+      the simpler tool than a full mesh?
+    options:
+      - NetworkPolicy (see workload-network-security)
+      - Deploy Istio in ambient mode with waypoints everywhere
+      - A HorizontalPodAutoscaler
+      - A second Ingress controller
+    answer: 0
+    explanation: |
+      For coarse L3/L4 allow/deny segmentation, NetworkPolicy is far simpler than standing up
+      a mesh control plane. Reach for a mesh only when you need the combination of encryption,
+      resilience, traffic control, and observability across many services.
+    ref: "concepts.md#when-a-mesh-is-worth-it-and-when-its-overkill"
+
+  - id: service-mesh-traffic-management-053
+    difficulty: advanced
+    tags: [anti-pattern, single-need, cost]
+    question: |
+      What is the anti-pattern warned about when a team needs only mTLS between services?
+    options:
+      - Using WireGuard or a CNI for encryption
+      - Adopting a full mesh (with all its control-plane, upgrade, and per-hop-latency cost) just to get one feature
+      - Writing NetworkPolicy
+      - Terminating TLS at the ingress
+    answer: 1
+    explanation: |
+      Adopting a full mesh to solve a single need (e.g. mTLS) inherits all its operational
+      cost — control plane, upgrades, per-hop latency, new config surface. Match the tool to
+      the requirement: CNI-level encryption (Cilium WireGuard) or ambient L4-only may suffice.
+    ref: "concepts.md#when-a-mesh-is-worth-it-and-when-its-overkill"
+
+  - id: service-mesh-traffic-management-054
+    difficulty: beginner
+    tags: [mtls-vs-networkpolicy, layers]
+    question: |
+      How do mesh mTLS and Kubernetes NetworkPolicy relate?
+    options:
+      - They are the same feature under different names
+      - They are complementary: NetworkPolicy is L3/L4 allow-deny by selector/IP; mesh mTLS adds cryptographic identity, encryption, and L7 authz
+      - NetworkPolicy replaces the mesh entirely
+      - mTLS makes NetworkPolicy impossible
+    answer: 1
+    explanation: |
+      NetworkPolicy is an L3/L4 firewall by Pod selector/IP; mesh mTLS provides
+      identity-based encryption and L7 authorization. They operate at different layers and are
+      best used together — coarse segmentation plus identity-based zero-trust.
+    ref: "concepts.md#mtls-and-zero-trust-authentication"
+
+  - id: service-mesh-traffic-management-055
+    difficulty: advanced
+    tags: [ambient, upgrade, benefit]
+    question: |
+      Compared with sidecars, what operational benefit does ambient mode provide for mesh
+      upgrades?
+    options:
+      - It requires restarting every Pod on each upgrade
+      - You can upgrade the mesh (ztunnel/waypoint) without restarting application Pods, since proxies aren't inside them
+      - Upgrades become impossible
+      - It forces a full cluster reboot
+    answer: 1
+    explanation: |
+      Because ambient's proxies (per-node ztunnel, per-namespace waypoint) live outside
+      application Pods, they can be upgraded and scaled independently — no per-Pod restart
+      just to pick up a new proxy version, unlike sidecars.
+    ref: "concepts.md#ambient--sidecar-less-mode"
+
+  - id: service-mesh-traffic-management-056
+    difficulty: intermediate
+    tags: [scenario, service-vs-mesh, canary]
+    question: |
+      You put v1 and v2 behind one Service (10 Pods total, 1 running v2) hoping for a 10%
+      canary. Why is this an inferior canary compared to a mesh?
+    options:
+      - The Service will send 0% to v2
+      - The split is only the crude replica ratio and you cannot route by request attributes
+      - The Service encrypts traffic, breaking v2
+      - It sends 100% to v2
+    answer: 1
+    explanation: |
+      A plain Service round-robins across endpoints, so your "percentage" is just the Pod
+      ratio and shifts as Pods scale. You also can't route by headers/cookies. A mesh sets
+      explicit weights and does attribute-based routing independent of Pod counts.
+    ref: "concepts.md#traffic-splitting-canary-fault-injection"

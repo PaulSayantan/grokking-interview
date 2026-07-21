@@ -1,0 +1,997 @@
+topic: "Kubernetes Architecture & Control Plane"
+domain: kubernetes
+topic_slug: architecture-control-plane
+version: 1
+questions:
+  - id: architecture-control-plane-001
+    difficulty: beginner
+    tags: [architecture, control-plane, overview]
+    question: |
+      A Kubernetes cluster is split into two planes. What is the primary
+      responsibility of the control plane?
+    options:
+      - "Running the application containers for your workloads"
+      - "Storing cluster state and making global decisions (scheduling, reconciliation)"
+      - "Terminating TLS for incoming user traffic"
+      - "Building container images from Dockerfiles"
+    answer: 1
+    explanation: |
+      The control plane is the brain: it stores the source of truth (etcd) and runs the
+      loops that decide what should run and where. Worker nodes actually run the
+      application containers. Kubernetes does not build images (that's the docker domain).
+    ref: "concepts.md#cluster-architecture-control-plane-and-worker-nodes"
+
+  - id: architecture-control-plane-002
+    difficulty: beginner
+    tags: [components, node]
+    question: |
+      Which set of components runs on every worker node?
+    options:
+      - "kube-apiserver, etcd, kube-scheduler"
+      - "controller-manager, cloud-controller-manager, etcd"
+      - "CoreDNS, kube-scheduler, kubelet"
+      - "kubelet, kube-proxy, container runtime"
+    answer: 3
+    explanation: |
+      Worker nodes run the kubelet (node agent), kube-proxy (service networking), and a
+      container runtime (via the CRI). The apiserver, etcd, scheduler, and
+      controller-managers are control-plane components.
+    ref: "concepts.md#cluster-architecture-control-plane-and-worker-nodes"
+
+  - id: architecture-control-plane-003
+    difficulty: intermediate
+    tags: [architecture, communication, hub-and-spoke]
+    question: |
+      How do Kubernetes components (scheduler, kubelet, controllers) coordinate with
+      each other?
+    options:
+      - "They all communicate through the kube-apiserver; none talk to each other directly"
+      - "They open direct gRPC connections to one another peer-to-peer"
+      - "They share a message queue (Kafka) deployed alongside the cluster"
+      - "The scheduler directly commands each kubelet over SSH"
+    answer: 0
+    explanation: |
+      Kubernetes uses a hub-and-spoke model: every component reads and writes through the
+      apiserver and watches for changes. The scheduler doesn't call the kubelet — it writes
+      a binding decision to the API, and the kubelet reads it. This loose coupling is central
+      to the design.
+    ref: "concepts.md#cluster-architecture-control-plane-and-worker-nodes"
+
+  - id: architecture-control-plane-004
+    difficulty: beginner
+    tags: [apiserver, front-door]
+    question: |
+      What role does the kube-apiserver play in the cluster?
+    options:
+      - "It schedules Pods onto nodes"
+      - "It runs the application containers on control-plane nodes"
+      - "It provides DNS resolution for Services"
+      - "It is the REST front door that all clients and components talk to, and the only etcd client"
+    answer: 3
+    explanation: |
+      The apiserver is the front door: kubectl, controllers, the scheduler, and kubelets all
+      go through it. It is also the only component that reads from and writes to etcd.
+      Scheduling is the scheduler's job; DNS is CoreDNS.
+    ref: "concepts.md#kube-apiserver-the-front-door"
+
+  - id: architecture-control-plane-005
+    difficulty: intermediate
+    tags: [apiserver, request-pipeline, admission]
+    question: |
+      An incoming request to create a Pod passes through the apiserver's pipeline. What is
+      the correct order of stages before the object is persisted?
+    options:
+      - "Authentication → Authorization → Admission → Validation/persistence"
+      - "Authorization → Authentication → Validation → Admission"
+      - "Admission → Authentication → Authorization → Validation"
+      - "Validation → Authentication → Admission → Authorization"
+    answer: 0
+    explanation: |
+      The apiserver first authenticates (who are you), then authorizes (are you allowed),
+      then runs admission control (mutating then validating webhooks/plugins), then does
+      schema validation and persists to etcd. Only after all stages pass does the object
+      become visible to watchers.
+    ref: "concepts.md#kube-apiserver-the-front-door"
+
+  - id: architecture-control-plane-006
+    difficulty: advanced
+    tags: [apiserver, watch, informers]
+    question: |
+      Controllers keep a local cache in sync with the cluster using which apiserver
+      capability?
+    options:
+      - "Polling every object type on a fixed 1-second interval"
+      - "Direct reads from etcd bypassing the apiserver"
+      - "A list+watch stream of add/update/delete events keyed by resourceVersion"
+      - "Server-sent webhooks pushed to each controller's HTTP endpoint"
+    answer: 2
+    explanation: |
+      The apiserver exposes a watch API. Controllers list once, then watch for deltas keyed
+      by resourceVersion (sourced from etcd revisions) rather than polling. This is the basis
+      of informer caches and is far more efficient than polling.
+    ref: "concepts.md#kube-apiserver-the-front-door"
+
+  - id: architecture-control-plane-007
+    difficulty: intermediate
+    tags: [apiserver, scalability, stateless]
+    question: |
+      Why can you run many kube-apiserver replicas behind a load balancer without
+      coordination between them?
+    options:
+      - "Each apiserver keeps its own private copy of the cluster state"
+      - "One apiserver is elected leader and the rest stay idle"
+      - "The load balancer serializes all requests to a single replica"
+      - "The apiserver is stateless — all durable state lives in etcd"
+    answer: 3
+    explanation: |
+      The apiserver holds no durable state itself; everything persistent is in etcd. That
+      makes it stateless and horizontally scalable — you can run several replicas behind a LB.
+      (Leader election applies to the scheduler and controller-manager, not the apiserver.)
+    ref: "concepts.md#kube-apiserver-the-front-door"
+
+  - id: architecture-control-plane-008
+    difficulty: beginner
+    tags: [etcd, state-store]
+    question: |
+      What does etcd store in a Kubernetes cluster?
+    options:
+      - "Only Secrets and ConfigMaps"
+      - "Container image layers"
+      - "Application logs and metrics"
+      - "All cluster state — every object (Pods, Deployments, Secrets, nodes, RBAC, etc.)"
+    answer: 3
+    explanation: |
+      etcd is the cluster's single source of truth: it holds every API object. Image layers
+      live in registries/nodes (docker domain); logs and metrics are handled by separate
+      systems (observability domain). Lose etcd with no backup and you've lost the cluster's brain.
+    ref: "concepts.md#etcd-the-cluster-state-store"
+
+  - id: architecture-control-plane-009
+    difficulty: intermediate
+    tags: [etcd, consensus, raft]
+    question: |
+      etcd provides strong consistency and high availability using which mechanism?
+    options:
+      - "Eventually-consistent gossip between all members"
+      - "A single primary with asynchronous, best-effort replicas"
+      - "The Raft consensus algorithm with quorum-based writes"
+      - "Two-phase commit across the kubelets"
+    answer: 2
+    explanation: |
+      etcd replicates a log across members using Raft. Writes require a quorum (majority) to
+      agree, giving linearizable (strongly consistent) reads and writes. Gossip/eventual
+      consistency would violate the read-after-write guarantee Kubernetes relies on.
+    ref: "concepts.md#etcd-the-cluster-state-store"
+
+  - id: architecture-control-plane-010
+    difficulty: intermediate
+    tags: [etcd, quorum, sizing]
+    question: |
+      You run a 5-member etcd cluster. How many member failures can it tolerate while
+      remaining available for writes?
+    options:
+      - "2"
+      - "1"
+      - "3"
+      - "4"
+    answer: 0
+    explanation: |
+      Quorum is floor(N/2)+1 = 3 for N=5. The cluster tolerates N - quorum = 5 - 3 = 2
+      failures. With 3 members it tolerates 1; with 5, it tolerates 2.
+    ref: "concepts.md#etcd-the-cluster-state-store"
+
+  - id: architecture-control-plane-011
+    difficulty: advanced
+    tags: [etcd, quorum, sizing]
+    question: |
+      Why is running a 4-member etcd cluster generally discouraged versus a 3-member one?
+    options:
+      - "A 4-member cluster tolerates only 1 failure (same as 3) but costs more and slows writes"
+      - "4 members exceed etcd's hard maximum of 3"
+      - "Even-numbered clusters cannot elect a leader at all"
+      - "4 members double the fault tolerance but require more disk"
+    answer: 0
+    explanation: |
+      Quorum for 4 is 3, so it tolerates only 4-3=1 failure — the same as a 3-member cluster —
+      while adding cost and write latency (more members must ack). That's why you use odd
+      numbers (3 or 5). It can still elect a leader; it's just inefficient.
+    ref: "concepts.md#etcd-the-cluster-state-store"
+
+  - id: architecture-control-plane-012
+    difficulty: advanced
+    tags: [etcd, safety, direct-access]
+    question: |
+      Why is writing directly to etcd (bypassing the apiserver) dangerous?
+    options:
+      - "It bypasses authentication, authorization, admission, validation, and the watch machinery, and can corrupt state"
+      - "etcd is read-only and will reject the write"
+      - "It automatically triggers a full cluster restart"
+      - "etcd will silently forward the write to the apiserver anyway"
+    answer: 0
+    explanation: |
+      The apiserver being the only etcd client is a hard invariant. Direct writes skip authn,
+      authz, admission, schema validation, and the resourceVersion/watch mechanism, so they can
+      silently corrupt cluster state and desync watchers. Only touch etcd directly for
+      backup/restore.
+    ref: "concepts.md#etcd-the-cluster-state-store"
+
+  - id: architecture-control-plane-013
+    difficulty: beginner
+    tags: [scheduler, placement]
+    question: |
+      What is the kube-scheduler's job?
+    options:
+      - "To decide which node each newly created, unassigned Pod should run on"
+      - "To start containers on nodes"
+      - "To store the desired state of the cluster"
+      - "To load-balance Service traffic across Pods"
+    answer: 0
+    explanation: |
+      The scheduler watches for Pods with no node assigned and binds each to a node. It does
+      not start containers — that's the kubelet on the chosen node. Storing state is etcd;
+      Service load-balancing is kube-proxy.
+    ref: "concepts.md#kube-scheduler-placing-pods-on-nodes"
+
+  - id: architecture-control-plane-014
+    difficulty: intermediate
+    tags: [scheduler, filtering, scoring]
+    question: |
+      The scheduler uses a two-phase algorithm for each pending Pod. What are the two phases?
+    options:
+      - "Filtering (find feasible nodes) then scoring (rank them)"
+      - "Compile then link"
+      - "Authenticate then authorize"
+      - "Pull image then start container"
+    answer: 0
+    explanation: |
+      First filtering (predicates) eliminates nodes that cannot run the Pod (insufficient
+      resources, unmatched affinity, unsatisfied taints). Then scoring (priorities) ranks the
+      feasible nodes; the highest score wins and the Pod is bound there.
+    ref: "concepts.md#kube-scheduler-placing-pods-on-nodes"
+
+  - id: architecture-control-plane-015
+    difficulty: intermediate
+    tags: [scheduler, requests, pending, scenario]
+    question: |
+      A Pod stays Pending and `kubectl describe pod` shows:
+      `0/5 nodes are available: 5 Insufficient cpu`. What is the most likely cause?
+    options:
+      - "No node has enough allocatable CPU to satisfy the Pod's CPU requests"
+      - "The container image cannot be pulled"
+      - "The Pod's readiness probe is failing"
+      - "kube-proxy is not running on any node"
+    answer: 0
+    explanation: |
+      The scheduler filters nodes on resource requests. 'Insufficient cpu' on all nodes means
+      no node can satisfy the Pod's CPU request, so it stays Pending. Note it's requests (not
+      actual usage) that gate scheduling. Image pulls and probes happen after a node is chosen.
+    ref: "concepts.md#kube-scheduler-placing-pods-on-nodes"
+
+  - id: architecture-control-plane-016
+    difficulty: advanced
+    tags: [scheduler, requests-vs-limits]
+    question: |
+      When deciding whether a Pod fits on a node, the scheduler considers which of the
+      following?
+    options:
+      - "The Pod's actual real-time CPU/memory usage"
+      - "The Pod's resource limits"
+      - "The Pod's resource requests"
+      - "The container image size"
+    answer: 2
+    explanation: |
+      Scheduling fit is based on requests — the amount reserved for the Pod — not on live usage
+      or on limits. A node's allocatable capacity minus the sum of requested resources
+      determines whether another Pod fits. Limits cap runtime usage but don't drive placement.
+    ref: "concepts.md#kube-scheduler-placing-pods-on-nodes"
+
+  - id: architecture-control-plane-017
+    difficulty: beginner
+    tags: [controllers, controller-manager]
+    question: |
+      What is a "controller" in Kubernetes?
+    options:
+      - "A hardware device that manages the cluster network"
+      - "A non-terminating control loop that watches desired state and drives actual state toward it"
+      - "A one-shot script that runs at cluster startup"
+      - "The load balancer in front of the apiserver"
+    answer: 1
+    explanation: |
+      A controller is a control loop that watches one or more object types and continuously
+      acts to make the cluster's actual state match the desired state. Examples: the
+      Deployment, ReplicaSet, Node, and Job controllers.
+    ref: "concepts.md#kube-controller-manager-and-controllers"
+
+  - id: architecture-control-plane-018
+    difficulty: intermediate
+    tags: [controller-manager, packaging]
+    question: |
+      What is the kube-controller-manager?
+    options:
+      - "A single binary/process that runs most of the built-in controllers"
+      - "A separate Pod per controller, one for each object type"
+      - "The component that stores controller state in etcd"
+      - "A CLI tool for creating custom controllers"
+    answer: 0
+    explanation: |
+      The controller-manager packages most built-in controllers (Deployment, ReplicaSet, Node,
+      Job/CronJob, EndpointSlice, ServiceAccount, etc.) into one process for operational
+      simplicity, though each loop is logically independent.
+    ref: "concepts.md#kube-controller-manager-and-controllers"
+
+  - id: architecture-control-plane-019
+    difficulty: advanced
+    tags: [controller-manager, leader-election, ha]
+    question: |
+      In an HA control plane with three kube-controller-manager replicas, how do they avoid
+      two controllers fighting over the same object?
+    options:
+      - "They shard objects by hash so each replica owns a subset"
+      - "Leader election via a Lease object — only one replica is active at a time"
+      - "They run in strict round-robin, each active for one second"
+      - "etcd rejects duplicate reconciliations automatically"
+    answer: 1
+    explanation: |
+      The controller-manager (and scheduler, CCM) use leader election backed by a Lease object.
+      Only the leader actively reconciles; if it stops renewing the lease, another replica takes
+      over. This prevents concurrent, conflicting reconciliation of the same object.
+    ref: "concepts.md#kube-controller-manager-and-controllers"
+
+  - id: architecture-control-plane-020
+    difficulty: intermediate
+    tags: [cloud-controller-manager, cloud-integration]
+    question: |
+      What is the purpose of the cloud-controller-manager (CCM)?
+    options:
+      - "To manage the on-node container runtime"
+      - "To store cluster state in the cloud provider's database"
+      - "To build and push container images to a cloud registry"
+      - "To run controllers whose logic is cloud-provider-specific, keeping core K8s cloud-agnostic"
+    answer: 3
+    explanation: |
+      The CCM isolates cloud-specific logic (node lifecycle checks against the cloud API,
+      network routes, provisioning LoadBalancers) so the core components stay cloud-agnostic.
+      It lets vendors ship integrations out-of-tree on their own schedule.
+    ref: "concepts.md#cloud-controller-manager"
+
+  - id: architecture-control-plane-021
+    difficulty: intermediate
+    tags: [cloud-controller-manager, loadbalancer, scenario]
+    question: |
+      On a bare-metal cluster with no cloud provider, you create a `Service type=LoadBalancer`
+      and its EXTERNAL-IP stays `<pending>` forever. Why?
+    options:
+      - "The Service selector matches no Pods"
+      - "There is no cloud-controller-manager / LB provider to fulfill the request"
+      - "type=LoadBalancer is not a valid Service type"
+      - "kube-proxy is running in iptables mode instead of IPVS"
+    answer: 1
+    explanation: |
+      A type=LoadBalancer Service asks the cloud (via the CCM's service controller) to
+      provision an external load balancer. On bare metal with no cloud provider and no
+      substitute like MetalLB, nothing fulfills it, so EXTERNAL-IP stays pending.
+    ref: "concepts.md#cloud-controller-manager"
+
+  - id: architecture-control-plane-022
+    difficulty: advanced
+    tags: [cloud-controller-manager, history, out-of-tree]
+    question: |
+      Why was the cloud-controller-manager split out as a separate component?
+    options:
+      - "Because the controller-manager could not handle more than a few controllers"
+      - "To store cloud credentials directly in etcd"
+      - "To replace the kubelet on cloud-hosted nodes"
+      - "To let cloud providers maintain and ship integrations out-of-tree, removing provider code from core K8s"
+    answer: 3
+    explanation: |
+      Historically cloud logic was 'in-tree' inside the kube-controller-manager and kubelet.
+      The CCM lets vendors develop and release integrations independently (out-of-tree) and lets
+      the core project drop provider-specific code. On EKS/GKE/AKS the provider runs the CCM for you.
+    ref: "concepts.md#cloud-controller-manager"
+
+  - id: architecture-control-plane-023
+    difficulty: beginner
+    tags: [kubelet, node-agent]
+    question: |
+      What is the kubelet's primary responsibility?
+    options:
+      - "To decide which node a Pod runs on"
+      - "To ensure the containers of Pods assigned to its node are running and healthy"
+      - "To store cluster state"
+      - "To provide the cluster's REST API"
+    answer: 1
+    explanation: |
+      The kubelet is the node agent. Given the Pods bound to its node, it drives the container
+      runtime to run them, mounts volumes, injects config, runs probes, and reports status.
+      Scheduling is the scheduler's job; state is etcd; the API is the apiserver.
+    ref: "concepts.md#kubelet-the-node-agent"
+
+  - id: architecture-control-plane-024
+    difficulty: intermediate
+    tags: [kubelet, autonomy, scenario]
+    question: |
+      The entire control plane goes offline for 10 minutes. What happens to Pods already
+      running on a healthy worker node?
+    options:
+      - "They are immediately terminated because the apiserver is unreachable"
+      - "They keep running — the kubelet operates autonomously and keeps existing Pods alive"
+      - "They are paused until the control plane returns"
+      - "They migrate themselves to another cluster"
+    answer: 1
+    explanation: |
+      Existing Pods keep running: the kubelet doesn't need the control plane to sustain
+      already-running Pods (it restarts crashed containers per restart policy locally). What
+      you lose is the ability to make changes or reschedule — control-plane outage is not the
+      same as application outage.
+    ref: "concepts.md#kubelet-the-node-agent"
+
+  - id: architecture-control-plane-025
+    difficulty: advanced
+    tags: [kubelet, node-controller, notready]
+    question: |
+      A node's kubelet stops sending heartbeats due to a network partition. What does the
+      control plane eventually do?
+    options:
+      - "Nothing — nodes never lose their Ready status"
+      - "Immediately deletes the node's VM"
+      - "Marks the Node NotReady after a grace period and eventually evicts/reschedules its Pods"
+      - "Restarts the apiserver"
+    answer: 2
+    explanation: |
+      The node controller marks a non-heartbeating node NotReady after a grace period and, after
+      further timeout, triggers eviction so Pods are rescheduled elsewhere. Note the partitioned
+      node's Pods may still be running locally — a split-brain risk that motivates fencing for
+      stateful workloads.
+    ref: "concepts.md#kubelet-the-node-agent"
+
+  - id: architecture-control-plane-026
+    difficulty: beginner
+    tags: [kube-proxy, services]
+    question: |
+      What does kube-proxy implement?
+    options:
+      - "The Service abstraction — routing/load-balancing traffic for a Service's virtual IP to backend Pods"
+      - "DNS resolution for Service names"
+      - "Storage volume provisioning"
+      - "Container image pulls"
+    answer: 0
+    explanation: |
+      kube-proxy programs node networking so that traffic to a Service's ClusterIP is
+      load-balanced across the Service's ready backend Pods. DNS is CoreDNS; storage is CSI;
+      image pulls are the runtime.
+    ref: "concepts.md#kube-proxy-service-networking-on-nodes"
+
+  - id: architecture-control-plane-027
+    difficulty: intermediate
+    tags: [kube-proxy, iptables, ipvs, dataplane]
+    question: |
+      Which statement about kube-proxy's data path is correct?
+    options:
+      - "kube-proxy is a userspace proxy that every packet flows through"
+      - "kube-proxy stores Service definitions in etcd"
+      - "kube-proxy resolves Service DNS names to ClusterIPs"
+      - "kube-proxy programs kernel rules (iptables/IPVS/nftables); the kernel forwards the packets"
+    answer: 3
+    explanation: |
+      In the default modes kube-proxy is a control-plane-on-the-node component: it watches
+      Services/EndpointSlices and programs kernel rules (iptables DNAT, IPVS hash tables, or
+      nftables). The kernel then forwards traffic — kube-proxy is not in the per-packet path.
+    ref: "concepts.md#kube-proxy-service-networking-on-nodes"
+
+  - id: architecture-control-plane-028
+    difficulty: advanced
+    tags: [kube-proxy, ebpf, cilium]
+    question: |
+      Which of the following can fully replace kube-proxy for Service load-balancing?
+    options:
+      - "CoreDNS"
+      - "The kube-scheduler"
+      - "etcd's built-in proxy"
+      - "A CNI like Cilium using eBPF"
+    answer: 3
+    explanation: |
+      Some CNIs (notably Cilium) implement Service load-balancing in eBPF and can run in
+      kube-proxy-replacement mode, removing kube-proxy entirely for better performance and
+      observability. CoreDNS handles name resolution, a separate concern.
+    ref: "concepts.md#kube-proxy-service-networking-on-nodes"
+
+  - id: architecture-control-plane-029
+    difficulty: beginner
+    tags: [cri, runtime]
+    question: |
+      How does the kubelet run containers?
+    options:
+      - "It delegates to a container runtime through the CRI (Container Runtime Interface)"
+      - "It runs them itself using its own built-in runtime"
+      - "It calls the scheduler to run them"
+      - "It writes them directly into etcd"
+    answer: 0
+    explanation: |
+      Kubernetes doesn't run containers itself. The kubelet talks to a container runtime
+      (containerd, CRI-O) over the standard CRI gRPC API; the runtime uses runc/OCI under the
+      hood (docker domain) to actually create containers.
+    ref: "concepts.md#container-runtime-and-the-cri"
+
+  - id: architecture-control-plane-030
+    difficulty: intermediate
+    tags: [cri, decoupling, history]
+    question: |
+      Why was the CRI (Container Runtime Interface) introduced?
+    options:
+      - "To build container images faster"
+      - "To let the kubelet drive any runtime that implements a standard gRPC API, decoupling K8s from Docker"
+      - "To store container state in etcd"
+      - "To replace the CNI for networking"
+    answer: 1
+    explanation: |
+      Before the CRI, Docker support was hardwired into the kubelet. The CRI standardized the
+      kubelet↔runtime interface so any conforming runtime (containerd, CRI-O) can be plugged in,
+      which is what enabled swapping Docker for containerd without changing Kubernetes.
+    ref: "concepts.md#container-runtime-and-the-cri"
+
+  - id: architecture-control-plane-031
+    difficulty: intermediate
+    tags: [cri, dockershim, gotcha]
+    question: |
+      "Kubernetes removed Docker in v1.24." What is the accurate implication for images you
+      built with `docker build`?
+    options:
+      - "Those images must be rebuilt with a special Kubernetes tool"
+      - "They still run unchanged — they're OCI images; only the kubelet's dockershim adapter was removed"
+      - "They only run on control-plane nodes now"
+      - "Docker images are no longer supported anywhere in the ecosystem"
+    answer: 1
+    explanation: |
+      Docker-built images follow the OCI image spec and run unchanged on containerd/CRI-O. What
+      was removed (deprecated v1.20, removed v1.24) was the kubelet's built-in dockershim adapter
+      for talking to Docker Engine — not image compatibility. This is a classic interview gotcha.
+    ref: "concepts.md#container-runtime-and-the-cri"
+
+  - id: architecture-control-plane-032
+    difficulty: advanced
+    tags: [cri, runtimeclass, sandboxing]
+    question: |
+      You need to run untrusted workloads with stronger isolation than a shared kernel
+      provides. Which mechanism lets you select an alternative runtime like gVisor or Kata
+      Containers per Pod?
+    options:
+      - "PriorityClass"
+      - "StorageClass"
+      - "NetworkPolicy"
+      - "RuntimeClass"
+    answer: 3
+    explanation: |
+      RuntimeClass lets you select an alternative OCI runtime (e.g. gVisor's runsc, or Kata
+      microVMs) for specific Pods, providing sandboxing beyond the default runc. PriorityClass
+      affects scheduling/preemption; StorageClass is storage; NetworkPolicy is network security.
+    ref: "concepts.md#container-runtime-and-the-cri"
+
+  - id: architecture-control-plane-033
+    difficulty: beginner
+    tags: [declarative, desired-state]
+    question: |
+      What does it mean that Kubernetes is "declarative"?
+    options:
+      - "You describe the desired end state and Kubernetes works to make it true"
+      - "You issue step-by-step imperative commands and own the outcome"
+      - "You must recompile the cluster after every change"
+      - "You write shell scripts that SSH into each node"
+    answer: 0
+    explanation: |
+      Declarative means you specify what you want (e.g. 3 replicas of an image) and the system
+      continuously reconciles toward it. You don't tell it the how or the steps. This underpins
+      self-healing, idempotency, and GitOps.
+    ref: "concepts.md#the-declarative-model-and-desired-state"
+
+  - id: architecture-control-plane-034
+    difficulty: intermediate
+    tags: [declarative, self-healing, scenario]
+    question: |
+      A Deployment declares `replicas: 3`. A node dies, killing one of its Pods. With no human
+      intervention, what happens?
+    options:
+      - "The Deployment permanently runs with 2 replicas until you re-apply the manifest"
+      - "A controller notices actual (2) ≠ desired (3) and creates a replacement Pod"
+      - "The whole Deployment is deleted"
+      - "The apiserver refuses further writes until the node returns"
+    answer: 1
+    explanation: |
+      Because desired state (3) is stored, the system is self-healing: the ReplicaSet controller
+      observes only 2 Pods, sees a gap, and creates one more, which the scheduler places on a
+      healthy node. No human action is needed.
+    ref: "concepts.md#the-declarative-model-and-desired-state"
+
+  - id: architecture-control-plane-035
+    difficulty: advanced
+    tags: [declarative, spec-status, generation]
+    question: |
+      What is the distinction between an object's `spec` and `status`?
+    options:
+      - "spec is written by the controller; status is written by the user"
+      - "spec is the desired state (written by users/controllers); status is the observed actual state (written by the controlling component)"
+      - "They are identical copies for redundancy"
+      - "spec is stored in etcd; status is stored on the node's disk"
+    answer: 1
+    explanation: |
+      spec records desired state; status records the actual observed state written by the
+      controller. Reconciliation is the work of driving status toward spec. Fields like
+      metadata.generation vs status.observedGeneration reveal whether the controller has caught
+      up to your latest change.
+    ref: "concepts.md#the-declarative-model-and-desired-state"
+
+  - id: architecture-control-plane-036
+    difficulty: intermediate
+    tags: [reconciliation, loop]
+    question: |
+      The reconciliation loop that every controller runs consists of which repeating steps?
+    options:
+      - "Compile, link, run"
+      - "Authenticate, authorize, admit"
+      - "Observe current state, compare to desired, act to close the gap — repeat forever"
+      - "Pull, tag, push"
+    answer: 2
+    explanation: |
+      Reconciliation is a non-terminating loop: observe actual state, diff against desired
+      state, and take action (create/update/delete) to converge — over and over. This is the
+      heartbeat of Kubernetes.
+    ref: "concepts.md#the-reconciliation-loop"
+
+  - id: architecture-control-plane-037
+    difficulty: advanced
+    tags: [reconciliation, level-triggered]
+    question: |
+      Kubernetes controllers are described as "level-triggered, not edge-triggered." What does
+      that mean and why does it matter?
+    options:
+      - "They only run when triggered by a cron schedule"
+      - "They act on the current observed state, not on change events, so they self-correct after missed events or restarts"
+      - "They fire exactly once per object and never again"
+      - "They require an event for every action or they stall permanently"
+    answer: 1
+    explanation: |
+      Level-triggered means a controller acts on the full current state, not on the edge (the
+      event) that something changed. If it misses an event or restarts, it re-reads reality on
+      the next sync and still converges. Watches are just an optimization; periodic resync
+      guarantees eventual correctness.
+    ref: "concepts.md#the-reconciliation-loop"
+
+  - id: architecture-control-plane-038
+    difficulty: intermediate
+    tags: [reconciliation, replicaset, example]
+    question: |
+      A ReplicaSet with `replicas: 3` currently has 2 Pods after one was deleted. Walk through
+      what the ReplicaSet controller does.
+    options:
+      - "Lists matching Pods (observes 2), compares to desired 3, and creates 1 new Pod"
+      - "Deletes the remaining 2 Pods and starts over"
+      - "Waits for a human to re-apply the manifest"
+      - "Scales the ReplicaSet down to 2 to match reality"
+    answer: 0
+    explanation: |
+      The controller lists Pods matching its selector, observes 2 vs desired 3, and creates one
+      new Pod to close the gap. The scheduler then places it and a kubelet runs it. It converges
+      to desired, not the other way around.
+    ref: "concepts.md#the-reconciliation-loop"
+
+  - id: architecture-control-plane-039
+    difficulty: beginner
+    tags: [api, objects, structure]
+    question: |
+      Nearly every Kubernetes object shares a common structure. Which fields are part of it?
+    options:
+      - "host, port, protocol"
+      - "apiVersion, kind, metadata, and usually spec/status"
+      - "image, tag, digest"
+      - "cpu, memory, disk"
+    answer: 1
+    explanation: |
+      Every object has apiVersion, kind, metadata (name, namespace, labels, annotations), and
+      usually spec (desired) and status (actual). This uniform shape is what lets tooling, RBAC,
+      admission, and watches work identically for any resource.
+    ref: "concepts.md#everything-is-an-object-the-api-model"
+
+  - id: architecture-control-plane-040
+    difficulty: intermediate
+    tags: [api, scope, cluster-scoped]
+    question: |
+      Which of these resources is cluster-scoped rather than namespaced?
+    options:
+      - "Node"
+      - "Pod"
+      - "ConfigMap"
+      - "Deployment"
+    answer: 0
+    explanation: |
+      Nodes are cluster-scoped (as are Namespaces, PersistentVolumes, and ClusterRoles). Pods,
+      ConfigMaps, and Deployments are namespaced — scoped to a Namespace. Knowing the scope
+      matters for RBAC and for `kubectl get` behavior.
+    ref: "concepts.md#everything-is-an-object-the-api-model"
+
+  - id: architecture-control-plane-041
+    difficulty: advanced
+    tags: [api, labels-annotations, ownerreferences]
+    question: |
+      Which statement about labels, annotations, and ownerReferences is correct?
+    options:
+      - "Annotations are used by selectors; labels are just free-text notes"
+      - "ownerReferences store the container image digest"
+      - "Labels are selectable (used by selectors); annotations are non-selectable metadata; ownerReferences link child to parent for garbage collection"
+      - "Labels can only be set at cluster scope"
+    answer: 2
+    explanation: |
+      Labels are key/value pairs that selectors match on (how a Service finds its Pods, how a
+      ReplicaSet finds its Pods). Annotations are arbitrary non-selectable metadata.
+      ownerReferences establish parent→child relationships enabling cascading delete and garbage
+      collection.
+    ref: "concepts.md#everything-is-an-object-the-api-model"
+
+  - id: architecture-control-plane-042
+    difficulty: intermediate
+    tags: [api, crd, extensibility]
+    question: |
+      How do you add an entirely new object kind that behaves like a built-in resource
+      (RBAC-able, watchable, admission-controlled)?
+    options:
+      - "Recompile the apiserver from source"
+      - "Define a CustomResourceDefinition (CRD)"
+      - "Edit etcd directly to insert the new kind"
+      - "Add it to the kubelet's config file"
+    answer: 1
+    explanation: |
+      CustomResourceDefinitions let you register new object kinds that flow through the same API
+      with the same verbs — so RBAC, admission, audit, and watches all work for them. This
+      uniformity is the foundation of the operator pattern (operators-crds-extensibility).
+    ref: "concepts.md#everything-is-an-object-the-api-model"
+
+  - id: architecture-control-plane-043
+    difficulty: intermediate
+    tags: [kubectl-apply, flow, async]
+    question: |
+      Immediately after `kubectl apply -f deploy.yaml` returns successfully, what is
+      guaranteed to be true?
+    options:
+      - "All Pods are running and ready"
+      - "The image has been pulled on every node"
+      - "The Service endpoints are populated"
+      - "The Deployment object has been validated and stored in etcd; the rest happens asynchronously"
+    answer: 3
+    explanation: |
+      apply returns once the apiserver has run authn/authz/admission/validation and persisted the
+      object. Controllers, the scheduler, and kubelets then act asynchronously. So a successful
+      apply means state is stored, not that Pods are running — use `kubectl rollout status` for that.
+    ref: "concepts.md#anatomy-of-kubectl-apply"
+
+  - id: architecture-control-plane-044
+    difficulty: advanced
+    tags: [kubectl-apply, end-to-end, ordering]
+    question: |
+      Which sequence correctly traces a Deployment from `kubectl apply` to a running container?
+    options:
+      - "kubelet → scheduler → apiserver → etcd → controller"
+      - "scheduler → apiserver → kubelet → etcd → controller"
+      - "apiserver/etcd → Deployment controller creates ReplicaSet → ReplicaSet controller creates Pods → scheduler binds Pods → kubelet runs them via CRI"
+      - "etcd → kubelet → scheduler → apiserver → runtime"
+    answer: 2
+    explanation: |
+      The object is stored via apiserver→etcd; the Deployment controller creates a ReplicaSet;
+      the ReplicaSet controller creates Pods (no nodeName); the scheduler binds each Pod to a
+      node; the target kubelet pulls the image and starts containers through the CRI, then reports
+      status back. It's all watch-driven and asynchronous.
+    ref: "concepts.md#anatomy-of-kubectl-apply"
+
+  - id: architecture-control-plane-045
+    difficulty: advanced
+    tags: [kubectl-apply, server-side-apply, managedfields]
+    question: |
+      What problem does server-side apply solve when multiple actors (you, a controller, a
+      GitOps tool) edit the same object?
+    options:
+      - "It disables all but one writer entirely"
+      - "It copies the object into a separate namespace per actor"
+      - "It merges by always taking the last write, silently"
+      - "It tracks per-field ownership (managedFields) so actors own different fields without clobbering each other, and surfaces conflicts"
+    answer: 3
+    explanation: |
+      Server-side apply records field ownership in managedFields so different actors can own
+      distinct fields. If two actors try to own the same field, a conflict is surfaced rather
+      than silently overwritten — much safer than client-side last-write-wins.
+    ref: "concepts.md#anatomy-of-kubectl-apply"
+
+  - id: architecture-control-plane-046
+    difficulty: intermediate
+    tags: [ha, etcd-topology]
+    question: |
+      In a "stacked etcd" HA topology (the kubeadm default), where does etcd run?
+    options:
+      - "On a dedicated, separate etcd cluster"
+      - "On the worker nodes"
+      - "Co-located on each control-plane node alongside the apiserver"
+      - "Inside the cloud provider's managed database"
+    answer: 2
+    explanation: |
+      Stacked etcd runs an etcd member on each control-plane node next to the apiserver — fewer
+      machines and simpler to bootstrap, but losing a node loses both an apiserver and an etcd
+      member (coupled failure domains). External etcd decouples them at the cost of more machines.
+    ref: "concepts.md#control-plane-high-availability"
+
+  - id: architecture-control-plane-047
+    difficulty: advanced
+    tags: [ha, quorum-loss, scenario]
+    question: |
+      A 3-member stacked etcd cluster loses 2 members (quorum lost). What is the immediate
+      effect?
+    options:
+      - "All application Pods immediately stop"
+      - "The cluster automatically promotes a worker node to restore quorum"
+      - "The control plane can no longer accept writes, but already-running Pods keep running"
+      - "Nothing — 1 member is enough for a 3-node cluster"
+    answer: 2
+    explanation: |
+      Quorum for 3 is 2, so losing 2 members breaks it: no new writes to the cluster (can't
+      create/change objects). But kubelets are autonomous, so existing Pods keep running — until
+      something needs rescheduling. Control-plane outage is not the same as app outage.
+    ref: "concepts.md#control-plane-high-availability"
+
+  - id: architecture-control-plane-048
+    difficulty: intermediate
+    tags: [ha, apiserver, leader-election]
+    question: |
+      In an HA control plane, which statement about running multiple instances of each
+      component is correct?
+    options:
+      - "All components use leader election and run only one active instance"
+      - "The apiserver uses leader election; the scheduler runs all replicas active"
+      - "apiserver replicas are all active behind a LB; scheduler and controller-manager use leader election so only one is active"
+      - "Only etcd can be replicated; the rest run as singletons"
+    answer: 2
+    explanation: |
+      The stateless apiserver runs many active replicas behind a load balancer. The scheduler and
+      controller-manager (and CCM) use leader election so exactly one instance acts at a time,
+      avoiding conflicting decisions. etcd replicates via Raft quorum.
+    ref: "concepts.md#control-plane-high-availability"
+
+  - id: architecture-control-plane-049
+    difficulty: intermediate
+    tags: [static-pods, bootstrapping]
+    question: |
+      What is a static Pod?
+    options:
+      - "A Pod that never uses CPU"
+      - "A Pod that cannot be scheduled"
+      - "A Pod managed directly by the kubelet from local manifest files, not by the API server or a controller"
+      - "A Pod pinned to a fixed IP address"
+    answer: 2
+    explanation: |
+      A static Pod is defined by a manifest in a directory the kubelet watches (default
+      /etc/kubernetes/manifests) and run directly by that kubelet — no apiserver or controller
+      involved. This is how the control plane bootstraps: kubeadm runs apiserver, scheduler,
+      controller-manager, and etcd as static Pods.
+    ref: "concepts.md#static-pods-and-control-plane-bootstrapping"
+
+  - id: architecture-control-plane-050
+    difficulty: advanced
+    tags: [static-pods, mirror-pod, gotcha, scenario]
+    question: |
+      You run `kubectl delete pod kube-apiserver-cp1 -n kube-system` for a static Pod and it
+      reappears almost instantly. Why, and how do you actually remove it?
+    options:
+      - "A ReplicaSet recreates it; scale the ReplicaSet to 0"
+      - "The scheduler rescheduled it; cordon the node"
+      - "kubectl only deleted the mirror Pod; the kubelet recreates it from the on-disk manifest — remove/move the manifest file on that node"
+      - "etcd restored it from a snapshot; disable snapshots"
+    answer: 2
+    explanation: |
+      The API only shows a mirror Pod for a static Pod; you can't manage the real one via the
+      API. Deleting the mirror just makes the kubelet recreate it. To stop a static Pod you edit
+      or move its manifest file in the kubelet's static-pod directory on that node.
+    ref: "concepts.md#static-pods-and-control-plane-bootstrapping"
+
+  - id: architecture-control-plane-051
+    difficulty: beginner
+    tags: [static-pods, control-plane]
+    question: |
+      In a kubeadm-provisioned cluster, how do the core control-plane components
+      (apiserver, scheduler, controller-manager, etcd) typically run?
+    options:
+      - "As systemd services with no relation to Kubernetes objects"
+      - "As a single monolithic binary"
+      - "As Deployments in the default namespace"
+      - "As static Pods defined by manifests in /etc/kubernetes/manifests"
+    answer: 3
+    explanation: |
+      kubeadm runs the control-plane components as static Pods from manifests in
+      /etc/kubernetes/manifests. This solves the chicken-and-egg problem — the kubelet can start
+      the apiserver from local files before any control plane exists.
+    ref: "concepts.md#static-pods-and-control-plane-bootstrapping"
+
+  - id: architecture-control-plane-052
+    difficulty: beginner
+    tags: [components, matching]
+    question: |
+      Which component is responsible for load-balancing traffic sent to a Service's ClusterIP
+      across its backend Pods on a node?
+    options:
+      - "kube-scheduler"
+      - "kube-controller-manager"
+      - "etcd"
+      - "kube-proxy"
+    answer: 3
+    explanation: |
+      kube-proxy programs the node's kernel rules so traffic to a Service's ClusterIP is
+      distributed across the ready backend Pods. The scheduler places Pods; the
+      controller-manager runs controllers; etcd stores state.
+    ref: "concepts.md#kube-proxy-service-networking-on-nodes"
+
+  - id: architecture-control-plane-053
+    difficulty: intermediate
+    tags: [dns, coredns, kube-proxy, division-of-labor]
+    question: |
+      When a Pod connects to `my-svc.my-ns.svc.cluster.local`, which component resolves that
+      name to the Service's ClusterIP?
+    options:
+      - "kube-proxy"
+      - "the scheduler"
+      - "etcd"
+      - "CoreDNS"
+    answer: 3
+    explanation: |
+      CoreDNS resolves Service DNS names to ClusterIPs. kube-proxy then turns traffic destined
+      for that ClusterIP into load-balanced connections to Pod IPs. Mixing these two up is a
+      common tell that someone hasn't operated a cluster.
+    ref: "concepts.md#kube-proxy-service-networking-on-nodes"
+
+  - id: architecture-control-plane-054
+    difficulty: advanced
+    tags: [dataplane, control-plane, packet-path]
+    question: |
+      Once Pods are running and serving traffic, is the kube-apiserver in the per-packet data
+      path for Pod-to-Pod or Service traffic?
+    options:
+      - "Yes — every packet is proxied through the apiserver"
+      - "No — traffic flows via the CNI and kube-proxy/eBPF in the kernel; the apiserver is not per-packet"
+      - "Yes — but only for Services, not Pod-to-Pod"
+      - "Only when the control plane is unhealthy"
+    answer: 1
+    explanation: |
+      The apiserver is a control-plane component; it is not in the data path. Pod-to-Pod
+      connectivity is provided by the CNI, and Service load-balancing by kube-proxy (or eBPF) in
+      the kernel. Data-plane traffic keeps flowing even during a control-plane outage.
+    ref: "concepts.md#cluster-architecture-control-plane-and-worker-nodes"
+
+  - id: architecture-control-plane-055
+    difficulty: expert
+    tags: [reconciliation, idempotency, observedgeneration]
+    question: |
+      A well-written controller must be idempotent. Which of these best explains what that
+      means for its reconcile function?
+    options:
+      - "It must run exactly once per object over the cluster's lifetime"
+      - "It must never write to the API server"
+      - "Re-invoking reconcile on the same observed state must not cause duplicate or harmful actions — it converges without double-acting"
+      - "It must process objects strictly in creation order"
+    answer: 2
+    explanation: |
+      Because reconciliation is level-triggered and may run repeatedly on the same state (resync,
+      duplicate events, restarts), reconcile must be idempotent: seeing the same state again
+      yields no new side effects once converged. Checking observedGeneration and existing child
+      objects before acting is how controllers achieve this.
+    ref: "concepts.md#the-reconciliation-loop"
+
+  - id: architecture-control-plane-056
+    difficulty: expert
+    tags: [api, finalizers, deletion]
+    question: |
+      An object has a `deletionTimestamp` set but is not actually removed from the cluster.
+      What is the most likely reason?
+    options:
+      - "The apiserver is down"
+      - "etcd has run out of disk space"
+      - "It has a finalizer that blocks deletion until an associated controller performs cleanup and removes the finalizer"
+      - "The object is a static Pod"
+    answer: 2
+    explanation: |
+      Finalizers block hard deletion: when you delete such an object, the apiserver sets a
+      deletionTimestamp but keeps it until the responsible controller does its cleanup and removes
+      the finalizer entry. This is common with CRDs/operators and PVs. A stuck finalizer is a
+      frequent cause of 'stuck terminating' objects.
+    ref: "concepts.md#everything-is-an-object-the-api-model"
