@@ -95,10 +95,26 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Software Testing](topics/testing/README.md) | 16 | 16 ✅ (Pass 1, 784 MCQs) |
 | [Interview Craft](topics/interview-craft/README.md) | 16 | 16 ✅ (Pass 1, 793 MCQs) |
 | [DSA & Coding Interviews](topics/dsa-coding/README.md) | 20 | 20 ✅ (Pass 1, 456 MCQs + 350 LeetCode links) |
+| [Low-Level Design & OOD](topics/lld-and-ood/README.md) | 18 | 18 ✅ (Pass 1, 919 MCQs) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
+
+- **Session 35 (2026-07-22):** **Low-Level Design & OOD Pass 1** (NEW domain, sequence) — 18
+  topics, **919 MCQs**, 36 Mermaid diagrams (headless sweep: all render 0-error). The machine-coding /
+  LLD interview round — the 45-90 min live OO design session between DSA and HLD. 5 foundational
+  topics (OOP pillars, SOLID deep-dive, principles beyond SOLID / GRASP, UML class diagrams for
+  interviews, the LLD interview method) + 13 canonical problems (parking lot, elevator, library,
+  vending machine, tic-tac-toe, chess, snake & ladder, rate limiter, LRU/LFU cache, Splitwise,
+  hotel booking, food delivery, auction). Each problem topic walks the full method: requirements
+  → entities → Mermaid classDiagram → pattern application → API → code skeleton → extensibility →
+  edge cases. Boundaries: patterns referenced by name (cross-ref `dp-*`, not re-taught), DS internals
+  → dsa-coding, scaling → system-design. Built via `lld-and-ood-authoring.js` (author → verify).
+  GOTCHA: a multi-hour Bedrock 503 wave failed most agents per run; recovered 16/18 via resume, and
+  authored the last 2 (solid-principles, lld-interview-method) with direct Opus 4.8 agents rather than
+  racing the flaky workflow. Validator clean, answer indices balanced (max 35%). Content + sync commit
+  a8b5c5f. NEXT: reliability-ops.
 
 - **Session 34 (2026-07-21):** **DSA & Coding Interviews Pass 1** (NEW domain, sequence) — 20
   topics, **456 MCQs** (87 B / 220 I / 146 adv / 3 exp) + **350 LeetCode problem links** (247
