@@ -93,11 +93,27 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
 | [Observability](topics/observability/README.md) | 17 | 17 ✅ (Pass 1, 844 MCQs) |
 | [Software Testing](topics/testing/README.md) | 16 | 16 ✅ (Pass 1, 784 MCQs) |
+| [Interview Craft](topics/interview-craft/README.md) | 16 | 16 ✅ (Pass 1, 793 MCQs) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
 
+- **Session 33 (2026-07-21):** **Interview Craft Pass 1** (NEW domain, sequence) — 16 topics,
+  **793 MCQs** (126 B / 395 I / 258 adv / 14 exp), 40 Mermaid diagrams (render 0-error). The
+  non-technical craft: STAR/behavioral, competency bank, company values/Amazon-LPs+Bar-Raiser,
+  hiring-manager/project-deep-dive, seniority ladder & scope signals, Staff+ archetypes (Larson),
+  trade-off articulation, estimation/napkin-math (latency numbers), handling ambiguity, mentorship/
+  cross-team influence, incident leadership (behavioral), design-docs/RFCs/ADRs, engineering
+  strategy/prioritization, product-sense & startup-vs-FAANG, take-home/pairing/code-review rounds,
+  leveling/negotiation/reverse-questions. Net-new domain (created dir+README+taxonomy). Boundary:
+  behavioral/career craft only — technical SD-interview method stays in system-design; coding-round
+  skills in dsa/lld (cross-referenced). Judgment-quality guard: MCQ correct answers defensible vs a
+  named framework, distractors realistic-but-weaker. Built via `interview-craft-authoring.js`
+  (author → verify, 32 agents, 0 errors). Verify fixed stale Meta company values + broke guessable
+  answer cycles. Added to AUTHORED_DOMAINS. ALSO fixed garbled `☐✅` README status markers in
+  docker/kubernetes/observability/devops-cicd (buggy flip script — cosmetic, sync reads slugs not
+  markers). Content-only commit. NEXT: dsa-coding.
 - **Session 32 (2026-07-21):** **Backend-craft fold-ins** (gap-analysis P1 fold-ins into EXISTING
   domains, no new domains) — 12 topics, **620 MCQs**, 30 Mermaid diagrams. system-design +4 (DDD
   tactical, DDD strategic/context-mapping, strangler-fig migration, multi-tenancy/SaaS isolation);
