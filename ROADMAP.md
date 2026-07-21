@@ -95,11 +95,28 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Software Testing](topics/testing/README.md) | 16 | 16 ✅ (Pass 1, 784 MCQs) |
 | [Interview Craft](topics/interview-craft/README.md) | 16 | 16 ✅ (Pass 1, 793 MCQs) |
 | [DSA & Coding Interviews](topics/dsa-coding/README.md) | 20 | 20 ✅ (Pass 1, 456 MCQs + 350 LeetCode links) |
-| [Low-Level Design & OOD](topics/lld-and-ood/README.md) | 18 | 18 ✅ (Pass 1, 919 MCQs) |
+| [Low-Level Design & OOD](topics/lld-and-ood/README.md) | 33 | 33 ✅ (1,671 MCQs) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
+
+- **Session 36 (2026-07-22):** **LLD & OOD expansion** — grew the domain 18 → **33 topics**,
+  919 → **1,671 MCQs**, driven by a deep-research workflow (99 agents, cross-referenced across
+  awesome-low-level-design, low-level-design-primer, and Grokking OOD). Added **2 method topics**
+  (`ooad-requirements-to-classes` — noun/verb/Abbott extraction, CRC cards, Responsibility-Driven
+  Design, GRASP, with a worked pipeline; `concurrency-in-lld` — race conditions, pessimistic/optimistic
+  locking, thread-safe singleton, the senior differentiator) + **13 new canonical problems**: ATM
+  (State), Stack Overflow (rich domain), Movie Booking (seat-lock concurrency), Logging Framework
+  (Chain of Responsibility), Notification/Pub-Sub (Observer), Ride-Sharing (Strategy/State matching),
+  Traffic Signal (State+timers), Digital Wallet (ledger), Calendar Scheduler (interval conflicts),
+  Text Editor (Command/Memento undo-redo), File System (Composite), Card Game (reusable abstractions),
+  Task Management (Composite+workflow). Every problem topic emphasizes the step-by-step method:
+  requirements → noun/verb object identification → responsibility/relationship assignment → class
+  diagram → pattern justification → code → extensibility → concurrency. 34 new Mermaid diagrams (all
+  render 0-error, headless sweep). Validator clean; answer indices balanced (max 38%). Built via
+  `lld-and-ood-expansion.js` (author→verify) + a direct agent for `design-ride-sharing` (author died
+  mid-response). Commits 010b6ae, c17371e, 4cd27c3.
 
 - **Session 35 (2026-07-22):** **Low-Level Design & OOD Pass 1** (NEW domain, sequence) — 18
   topics, **919 MCQs**, 36 Mermaid diagrams (headless sweep: all render 0-error). The machine-coding /
