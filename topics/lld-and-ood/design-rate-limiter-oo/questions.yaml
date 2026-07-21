@@ -1,0 +1,1002 @@
+topic: "Design a Rate Limiter (OO)"
+domain: lld-and-ood
+topic_slug: design-rate-limiter-oo
+version: 1
+
+questions:
+  - id: design-rate-limiter-oo-001
+    difficulty: beginner
+    tags: [strategy-pattern, design-reasoning]
+    question: |
+      Your rate limiter must support token bucket, fixed window, and sliding window
+      algorithms, selectable per rule. Which pattern is the core of the class design?
+    options:
+      - "Observer — algorithms observe incoming requests and react"
+      - "Strategy — each algorithm implements a common RateLimiter interface"
+      - "Singleton — one global limiter instance coordinates all algorithms"
+      - "Template Method — a base class defines the algorithm skeleton"
+    answer: 1
+    explanation: |
+      The algorithms are interchangeable policies with one job — decide allow/deny
+      for a key. Strategy puts them behind a common `RateLimiter` interface so
+      callers, the registry, and tests never depend on a concrete algorithm.
+      Template Method would force all algorithms into one inheritance skeleton,
+      but token bucket and sliding log share almost no common steps.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-rate-limiter-oo-002
+    difficulty: beginner
+    tags: [requirements, scoping]
+    question: |
+      In the first five minutes of the interview, the strongest scoping statement
+      about distribution is:
+    options:
+      - "\"I'll design a Redis-backed distributed limiter since single-machine is trivial\""
+      - "\"Distribution doesn't affect class design, so I'll ignore it entirely\""
+      - "\"I'll design a single-process in-memory limiter with a storage abstraction so a distributed backend can slot in later\""
+      - "\"I'll design both single-machine and distributed versions in parallel\""
+    answer: 2
+    explanation: |
+      The LLD round wants single-machine OO design, but acknowledging the
+      distributed follow-up and leaving a seam (a storage abstraction) shows
+      senior judgment. Jumping to Redis turns the session into HLD; ignoring it
+      entirely misses the chance to design the extension point.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-rate-limiter-oo-003
+    difficulty: beginner
+    tags: [api-design, return-types]
+    question: |
+      Why should allow() return a RateLimitDecision object rather than a bare boolean?
+    options:
+      - "Objects are faster to return than primitives in Java"
+      - "The caller needs retry-after and remaining-quota data to emit 429 responses with headers, without querying the limiter again"
+      - "Booleans cannot be used in concurrent code"
+      - "It allows the limiter to mutate the decision after returning it"
+    answer: 1
+    explanation: |
+      A decision value object carries `allowed`, `retryAfter`, and `remaining` in
+      one immutable result, so the HTTP layer can build a 429 with Retry-After and
+      X-RateLimit-Remaining headers directly. A bare boolean forces follow-up
+      queries (racy) or a fatter interface. Decisions should be immutable, not
+      mutated after return.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-rate-limiter-oo-004
+    difficulty: intermediate
+    tags: [solid, open-closed]
+    question: |
+      A candidate writes one RateLimiter class with an AlgorithmType field and a
+      switch statement inside allow(). Which SOLID principle does adding a new
+      algorithm to this design violate most directly?
+    options:
+      - "Open/Closed — the class must be modified for every new algorithm"
+      - "Liskov Substitution — subtypes can no longer replace the base type"
+      - "Interface Segregation — the interface has too many methods"
+      - "Dependency Inversion — the class depends on low-level modules"
+    answer: 0
+    explanation: |
+      Every new algorithm reopens the class: a new switch case plus new state
+      fields unioned onto the existing ones. Strategy inverts this — new
+      algorithms are new classes, and existing code stays closed to modification.
+      There are no subtypes here (so not LSP), and the interface is a single
+      method (so not ISP).
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-rate-limiter-oo-005
+    difficulty: beginner
+    tags: [entities, responsibility]
+    question: |
+      What is the responsibility of RateLimitRule in this design?
+    options:
+      - "Executing the rate-limiting algorithm for one key"
+      - "Storing live token counts for each user"
+      - "Mapping HTTP requests to 429 responses"
+      - "Holding pure configuration data: max requests, window, and the dimension it applies to"
+    answer: 3
+    explanation: |
+      A rule is a value object — "100 requests per minute per user" — with no
+      algorithm logic or live state. Separating rule (data) from limiter
+      (algorithm + per-key state) lets rules be shared, compared, and hot-reloaded.
+      Live counters belong to limiter instances; HTTP mapping belongs to the
+      web-layer filter.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-rate-limiter-oo-006
+    difficulty: intermediate
+    tags: [factory-pattern, creation]
+    question: |
+      TokenBucketLimiter needs (capacity, refillRate) while FixedWindowLimiter needs
+      (maxRequests, window). Why route construction through a RateLimiterFactory?
+    options:
+      - "Factories make object creation faster by pooling instances"
+      - "Java requires a factory when constructors have different arities"
+      - "It centralizes the config-to-concrete-class mapping so callers depend only on the RateLimiter interface"
+      - "It guarantees each limiter is a singleton"
+    answer: 2
+    explanation: |
+      Different strategies have different constructor shapes. The factory is the
+      single place that knows how to turn a `RateLimitRule` into the right concrete
+      strategy, so adding an algorithm touches the factory and the new class only.
+      Factories don't inherently pool or enforce singletons, and Java has no such
+      constructor rule.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-rate-limiter-oo-007
+    difficulty: intermediate
+    tags: [algorithms, token-bucket]
+    question: |
+      In a token bucket limiter, what is the standard interview-grade way to refill tokens?
+    options:
+      - "A background thread that adds one token every interval"
+      - "Refill the bucket to capacity at the start of each calendar minute"
+      - "Ask the caller to add tokens before each allow() call"
+      - "Lazily, inside allow(): tokens += elapsedTime × refillRate, capped at capacity"
+    answer: 3
+    explanation: |
+      Lazy refill computes tokens owed since the last call — no scheduler thread,
+      no work for idle keys, identical observable behavior. A background thread per
+      key doesn't scale and adds lifecycle complexity. Refilling to capacity each
+      minute is fixed-window behavior, not token bucket.
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-008
+    difficulty: beginner
+    tags: [algorithms, fixed-window]
+    question: |
+      What is the classic weakness of the fixed window algorithm?
+    options:
+      - "A client can send up to 2× the limit by straddling a window boundary"
+      - "It requires O(n) memory per key"
+      - "It cannot be implemented with atomic counters"
+      - "It permanently blocks clients that exceed the limit once"
+    answer: 0
+    explanation: |
+      Sending `max` requests at the very end of one window and `max` more at the
+      start of the next admits 2× the intended rate across the boundary. Memory is
+      O(1) (just a counter), atomic counters work fine, and windows reset — no
+      permanent blocking.
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-009
+    difficulty: intermediate
+    tags: [algorithms, trade-offs]
+    question: |
+      Sliding window log vs. sliding window counter — the essential trade-off is:
+    options:
+      - "Log is approximate but fast; counter is exact but slow"
+      - "Log is exact but O(max) memory per key; counter is approximate but O(1) memory"
+      - "Log only works for per-IP limits; counter only works for per-user limits"
+      - "Log requires a database; counter works in memory"
+    answer: 1
+    explanation: |
+      The log keeps every timestamp in the window — exact counting, but memory
+      grows with the limit and key count. The counter keeps two numbers (current
+      and previous window counts) and estimates via the overlap fraction —
+      approximate, but O(1). That's why sliding counter is the production
+      compromise at scale.
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-010
+    difficulty: intermediate
+    tags: [algorithms, leaky-bucket, trade-offs]
+    question: |
+      A downstream legacy service can process exactly 50 requests/sec and nothing
+      more. Which algorithm best protects it, and why?
+    options:
+      - "Fixed window — it's the simplest to implement"
+      - "Token bucket — bursts are passed through immediately"
+      - "Leaky bucket — it smooths arrivals into a constant outflow rate"
+      - "Sliding window log — it's the most accurate counter"
+    answer: 2
+    explanation: |
+      Leaky bucket queues (or drops) bursts and releases work at a constant leak
+      rate — exactly what a fixed-throughput downstream needs. Token bucket is the
+      wrong fit here precisely because it lets bursts through up to capacity.
+      Accuracy of counting (sliding log) doesn't smooth arrival shape.
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-011
+    difficulty: beginner
+    tags: [algorithms, token-bucket]
+    question: |
+      Which algorithm should you name when the requirement is "enforce an average
+      rate but let well-behaved clients burst briefly"?
+    options:
+      - "Leaky bucket"
+      - "Fixed window"
+      - "Sliding window log"
+      - "Token bucket"
+    answer: 3
+    explanation: |
+      Token bucket's capacity is exactly a burst allowance: an idle client
+      accumulates tokens (up to capacity) and may spend them in a burst, while the
+      refill rate enforces the long-run average. Leaky bucket does the opposite —
+      it flattens bursts into uniform outflow.
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-012
+    difficulty: intermediate
+    tags: [composite-pattern, composition]
+    question: |
+      Requirement: "100/min per user AND 10,000/min per API endpoint." The cleanest
+      OO structure is:
+    options:
+      - "A UserAndApiRateLimiter subclass that inherits from both limiters"
+      - "A CompositeRateLimiter that implements RateLimiter and ANDs a list of delegate limiters"
+      - "Merging both counters into a single shared AtomicLong"
+      - "Two if-statements inside the servlet handler"
+    answer: 1
+    explanation: |
+      The composite itself implements `RateLimiter` and holds child limiters,
+      denying if any child denies. Each child stays single-purpose (SRP), and
+      composites nest for arbitrarily complex policies. Multiple inheritance isn't
+      available in Java and would explode combinatorially; hardcoding checks in
+      the handler scatters policy into the web layer.
+    ref: "concepts.md#composing-limits-with-composite-and-chain"
+
+  - id: design-rate-limiter-oo-013
+    difficulty: advanced
+    tags: [composite-pattern, edge-cases]
+    question: |
+      A CompositeRateLimiter checks per-user then per-API limits, short-circuiting
+      on deny. What subtle flaw should a senior candidate volunteer?
+    options:
+      - "Short-circuiting makes the composite thread-unsafe"
+      - "The composite can only hold exactly two delegates"
+      - "When a later limiter denies, earlier limiters have already consumed quota for a request that was never served"
+      - "The composite must return the decision of the last delegate only"
+    answer: 2
+    explanation: |
+      If the per-user bucket consumed a token but the per-API check then denies,
+      the user paid quota for nothing — a small systematic over-count. Fixes:
+      a two-phase check-then-commit contract, compensating refunds, or explicitly
+      accepting the drift. Noticing this without prompting is strong signal.
+    ref: "concepts.md#composing-limits-with-composite-and-chain"
+
+  - id: design-rate-limiter-oo-014
+    difficulty: intermediate
+    tags: [chain-of-responsibility, whitelisting]
+    question: |
+      "Internal admin IPs must bypass all rate limits." Where does this logic belong?
+    options:
+      - "An early handler in a chain (or outer wrapper) that short-circuits to allowed before any limiter runs"
+      - "An isWhitelisted flag checked inside every concrete limiter's allow()"
+      - "A special rule with maxRequests = Integer.MAX_VALUE in every limiter"
+      - "A subclass of each limiter that overrides allow() to return true"
+    answer: 0
+    explanation: |
+      A bypass is not a rate-limiting algorithm, so it doesn't belong inside any
+      limiter. An allowlist handler at the head of a Chain of Responsibility (or a
+      decorator around the composite) short-circuits with "allowed" and keeps every
+      limiter single-purpose. Flags in every limiter duplicate logic; MAX_VALUE
+      rules still pay bookkeeping cost and blur intent.
+    ref: "concepts.md#composing-limits-with-composite-and-chain"
+
+  - id: design-rate-limiter-oo-015
+    difficulty: intermediate
+    tags: [decorator-pattern, cross-cutting]
+    question: |
+      You must emit a metric on every allow/deny decision without touching any
+      algorithm class. Which pattern fits?
+    options:
+      - "State — the limiter transitions to a MetricsEmitting state"
+      - "Builder — build limiters with metrics pre-attached"
+      - "Prototype — clone a metrics-enabled limiter"
+      - "Decorator — a MetricsEmittingRateLimiter wraps any RateLimiter, emits, and delegates"
+    answer: 3
+    explanation: |
+      Metrics are cross-cutting behavior orthogonal to the algorithm. A decorator
+      implements `RateLimiter`, wraps another `RateLimiter`, and adds the metric
+      emission around delegation — zero changes to algorithm classes, and it
+      composes with any strategy. State models mode-dependent behavior changes,
+      which this isn't.
+    ref: "concepts.md#composing-limits-with-composite-and-chain"
+
+  - id: design-rate-limiter-oo-016
+    difficulty: intermediate
+    tags: [concurrency, race-conditions]
+    question: |
+      Why is this fixed-window check broken under concurrency?
+      `if (count.get() < max) { count.incrementAndGet(); return allowed; }`
+    options:
+      - "AtomicInteger.get() is not thread-safe"
+      - "It's a check-then-act race: two threads can both pass the check with one slot left, admitting more than the limit"
+      - "incrementAndGet() can overflow silently"
+      - "The window reset cannot happen while get() is executing"
+    answer: 1
+    explanation: |
+      Both operations are individually atomic, but the gap between them isn't.
+      With `count == max - 1`, two threads both see the check pass and both
+      increment — the limit is exceeded. The fix is increment-then-compare
+      (`incrementAndGet() <= max`, optionally decrementing on failure),
+      `synchronized`, or a CAS loop.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-017
+    difficulty: advanced
+    tags: [concurrency, cas]
+    question: |
+      For a lock-free token bucket, the standard technique is:
+    options:
+      - "Pack (tokens, lastRefillTime) into an immutable state object inside an AtomicReference and loop with compareAndSet until the update sticks"
+      - "Mark the tokens field volatile so writes are visible to all threads"
+      - "Use two independent AtomicLongs, one for tokens and one for lastRefillTime"
+      - "Have each thread keep its own thread-local token count"
+    answer: 0
+    explanation: |
+      Tokens and lastRefill must change together atomically; two separate atomics
+      can interleave and corrupt the invariant. Packing both into one immutable
+      state object behind an `AtomicReference` with a CAS retry loop makes the
+      compound update atomic. Volatile gives visibility, not atomicity; thread-local
+      counts don't enforce a shared limit.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-018
+    difficulty: intermediate
+    tags: [concurrency, registry]
+    question: |
+      Two threads make the first-ever request for user 42 simultaneously. Why does
+      the registry use ConcurrentHashMap.computeIfAbsent to create the limiter?
+    options:
+      - "computeIfAbsent is the only ConcurrentHashMap method that accepts a lambda"
+      - "It makes limiter creation lazy, which is required for garbage collection"
+      - "A plain check-then-put could create two limiter instances and silently drop one's consumed quota"
+      - "It sorts keys so lookups are O(log n)"
+    answer: 2
+    explanation: |
+      `containsKey` then `put` is a check-then-act race: both threads miss, both
+      create limiters, and one instance (possibly with a consumed token) is
+      overwritten — quota leaks. `computeIfAbsent` guarantees the mapping function
+      runs at most once per key, so exactly one limiter exists.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-019
+    difficulty: intermediate
+    tags: [testability, dependency-injection]
+    question: |
+      Why inject a Clock into every limiter instead of calling
+      System.currentTimeMillis() directly?
+    options:
+      - "System.currentTimeMillis() is too slow for the hot path"
+      - "Injected clocks automatically handle time zones"
+      - "The JVM forbids static time calls inside synchronized blocks"
+      - "Tests can advance a fake clock deterministically instead of using Thread.sleep, and the design follows Dependency Inversion"
+    answer: 3
+    explanation: |
+      Every algorithm is a function of time; hard-coding the system clock makes
+      tests slow and flaky (sleep-based). Injecting a `Clock` abstraction lets
+      tests advance time instantly and precisely. It's Dependency Inversion
+      applied to time — depend on an abstraction, not the concrete system source.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-rate-limiter-oo-020
+    difficulty: advanced
+    tags: [concurrency, time]
+    question: |
+      Why should elapsed-time math in a token bucket use a monotonic time source
+      rather than wall-clock time?
+    options:
+      - "Monotonic time is expressed in seconds, which simplifies the math"
+      - "Wall-clock time can jump backward (NTP adjustment), producing negative elapsed time and corrupting the token count"
+      - "Wall-clock time is only readable by one thread at a time"
+      - "Monotonic time is persisted across JVM restarts"
+    answer: 1
+    explanation: |
+      NTP corrections can move wall-clock time backward; `now - lastRefill` then
+      goes negative and the refill math subtracts tokens or corrupts state.
+      Monotonic sources (System.nanoTime semantics) only move forward. Defensive
+      designs also clamp negative elapsed to zero.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-021
+    difficulty: intermediate
+    tags: [extensibility, distributed]
+    question: |
+      The interviewer asks "now make it distributed." The best LLD-round answer is:
+    options:
+      - "Redesign every limiter class to take a Redis connection in its constructor"
+      - "Explain that distribution is impossible with this class design"
+      - "Switch the interview to designing a Redis cluster topology"
+      - "Point to the RateLimitStore seam: a Redis-backed store (atomic via Lua script) is a new implementation, and note cluster-wide accuracy is an HLD topic"
+    answer: 3
+    explanation: |
+      The OO answer is that per-key state already lives behind a storage
+      abstraction, so a `RedisRateLimitStore` slots in without touching algorithm
+      classes. Lua scripting keeps read-modify-write atomic server-side. Deeper
+      distributed concerns (hot keys, sync accuracy) belong to the HLD round —
+      saying so shows you know the boundary.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-022
+    difficulty: beginner
+    tags: [extensibility, open-closed]
+    question: |
+      With the Strategy + Factory design in place, adding a brand-new
+      "sliding window counter" algorithm requires changing:
+    options:
+      - "The new strategy class plus one case in the factory — nothing else"
+      - "The RateLimiter interface, to add a slidingCounterAllow() method"
+      - "Every existing limiter class, to add a shared base field"
+      - "The registry, the composite, and all call sites"
+    answer: 0
+    explanation: |
+      That's the Open/Closed payoff: the new class implements the existing
+      `RateLimiter` interface, and the factory learns one new mapping from
+      config to class. Registry, composite, decorators, and callers all depend
+      only on the interface and stay untouched.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-023
+    difficulty: intermediate
+    tags: [extensibility, rules]
+    question: |
+      "Free users get 10 req/min; premium users get 1,000 req/min." What changes in
+      the design?
+    options:
+      - "Create FreeUserRateLimiter and PremiumUserRateLimiter subclasses"
+      - "Nothing structural — rules are data, so the registry selects a rule set by the user's tier"
+      - "Add an if (isPremium) branch inside each algorithm's allow()"
+      - "Give premium users a second, parallel registry"
+    answer: 1
+    explanation: |
+      Tiered limits are configuration, not new behavior. Because `RateLimitRule`
+      is a value object separate from the algorithms, the registry (or config
+      layer) maps tier to rule set and the factory builds limiters as usual.
+      Subclasses or in-algorithm branches would couple business tiers to
+      algorithm code.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-024
+    difficulty: advanced
+    tags: [edge-cases, memory]
+    question: |
+      Your registry creates one limiter object per (rule, key) pair. With millions
+      of distinct IPs, what problem emerges and what's the standard fix?
+    options:
+      - "Hash collisions make lookups O(n); fix with a TreeMap"
+      - "The factory becomes a bottleneck; fix by pre-creating all limiters at startup"
+      - "Unbounded memory growth from idle per-key limiters; fix with TTL/LRU eviction of idle entries"
+      - "Token buckets interfere across keys; fix with a global lock"
+    answer: 2
+    explanation: |
+      Every distinct key mints a long-lived object; abusive scans or wide IP
+      ranges grow the map without bound. Evict entries idle longer than their
+      window (TTL sweep) or cap the map with LRU eviction — an eviction-safe
+      design since an evicted idle limiter would have refilled/reset anyway.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-025
+    difficulty: beginner
+    tags: [class-relationships, uml]
+    question: |
+      In the class diagram, the relationship between TokenBucketLimiter and the
+      RateLimiter interface is:
+    options:
+      - "Aggregation — the limiter has-a interface"
+      - "Composition — the interface owns the limiter's lifecycle"
+      - "Dependency — the limiter briefly uses the interface"
+      - "Realization — the concrete class implements the interface"
+    answer: 3
+    explanation: |
+      Concrete strategies implement (realize) the `RateLimiter` interface —
+      drawn as a dashed line with a hollow triangle in UML. Aggregation and
+      composition describe whole-part object ownership, which doesn't apply
+      between a class and the interface it implements.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-rate-limiter-oo-026
+    difficulty: intermediate
+    tags: [class-relationships, composite]
+    question: |
+      CompositeRateLimiter both implements RateLimiter and holds a
+      List<RateLimiter>. This recursive shape is significant because:
+    options:
+      - "It lets the registry treat a single limit and a bundle of limits uniformly, and composites can nest"
+      - "It guarantees thread safety through structural recursion"
+      - "It avoids implementing the allow() method"
+      - "It converts the design from Strategy to Singleton"
+    answer: 0
+    explanation: |
+      That is the essence of Composite: the container satisfies the same
+      interface as its leaves, so clients never branch on "is this one limiter
+      or many?" and policies nest arbitrarily — (per-user AND (per-API OR
+      premium-override)). Recursion says nothing about thread safety.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-rate-limiter-oo-027
+    difficulty: intermediate
+    tags: [srp, responsibility]
+    question: |
+      Key extraction (turning a Request into "USER:42" or "IP:10.0.0.1") is placed
+      in the registry rather than inside each limiter because:
+    options:
+      - "Limiters cannot access String objects"
+      - "Strategies should stay ignorant of HTTP/request structure — extraction is a separate responsibility (SRP)"
+      - "The registry is the only thread-safe component"
+      - "Key extraction requires reflection, which limiters must avoid"
+    answer: 1
+    explanation: |
+      An algorithm's job is counting against a key; parsing requests into keys is
+      a different reason to change. Keeping `allow(String key)` protocol-agnostic
+      means the same strategies serve HTTP, gRPC, or message consumers, and each
+      class has one responsibility.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-rate-limiter-oo-028
+    difficulty: intermediate
+    tags: [api-design, error-handling]
+    question: |
+      Should a denied request cause allow() to throw a RateLimitExceededException?
+    options:
+      - "Yes — exceptions guarantee the caller cannot ignore the denial"
+      - "Yes — HTTP 429 maps naturally onto an exception hierarchy"
+      - "No — denial is an expected hot-path outcome, so return a decision object; exceptions are for exceptional conditions"
+      - "No — exceptions cannot carry retry-after information"
+    answer: 2
+    explanation: |
+      Rate-limit denials happen constantly by design — they're a normal outcome,
+      not a failure. Throwing on the hot path costs stack-trace construction and
+      contorts control flow. Return `RateLimitDecision` and let the web filter
+      map it to 429. (Exceptions can carry data — that's not the reason.)
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-rate-limiter-oo-029
+    difficulty: advanced
+    tags: [algorithms, sliding-counter]
+    question: |
+      A sliding window counter with a 60s window saw 100 requests in the previous
+      fixed window and 20 so far in the current one. 15 seconds into the current
+      window, the estimated count in the trailing 60s is:
+    options:
+      - "120 — previous plus current, unweighted"
+      - "20 — only the current window counts"
+      - "45 — 25% of previous plus current"
+      - "95 — 75% of previous (100 × 0.75) plus current (20)"
+    answer: 3
+    explanation: |
+      The trailing 60s window still overlaps 75% of the previous fixed window
+      (45 of its 60 seconds), so the estimate is 100 × 0.75 + 20 = 95. This
+      weighted-overlap approximation is what buys O(1) memory at the cost of
+      assuming requests were evenly spread in the previous window.
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-030
+    difficulty: intermediate
+    tags: [algorithms, sliding-log]
+    question: |
+      Which data structure naturally backs a sliding window log limiter for one key?
+    options:
+      - "A time-ordered deque of timestamps — evict old ones from the front, append new ones at the back"
+      - "A HashMap from timestamp to request object"
+      - "A single AtomicLong counter"
+      - "A priority queue ordered by user ID"
+    answer: 0
+    explanation: |
+      Requests arrive in time order, so a deque keeps timestamps sorted for free:
+      evict expired entries from the head, append the newest at the tail, and the
+      size is the in-window count. A bare counter loses the timing information
+      the algorithm depends on. (Deque internals belong to the DSA domain.)
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-031
+    difficulty: beginner
+    tags: [entities, value-objects]
+    question: |
+      RateLimitDecision is designed as an immutable record because:
+    options:
+      - "Records use less memory than classes in all cases"
+      - "Immutable results are safe to log, cache, and pass across threads without defensive copies"
+      - "Mutable objects cannot be returned from interfaces"
+      - "The JVM requires records for return types in concurrent code"
+    answer: 1
+    explanation: |
+      A decision is a snapshot of "what the limiter decided at this instant."
+      Immutability means no thread can corrupt it after the fact and callers can
+      share it freely. That's the general value-object argument — it appears all
+      over LLD interviews (Money, Coordinates, Decisions).
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-rate-limiter-oo-032
+    difficulty: advanced
+    tags: [concurrency, locking-granularity]
+    question: |
+      The design uses `synchronized allow()` on each limiter instance. Why is this
+      usually acceptable performance-wise?
+    options:
+      - "synchronized methods are compiled to lock-free code by the JIT"
+      - "Rate limiters are only called once per second"
+      - "The JVM removes locks when only one core is present"
+      - "Limiter instances are per-key, so threads only contend when hitting the same key — contention is naturally partitioned"
+    answer: 3
+    explanation: |
+      The registry maps each key to its own limiter instance, so the lock scope
+      is one user/IP/API — two different users never share a lock. Global
+      throughput stays high because contention only occurs on genuinely hot keys.
+      Say "correct and coarse first, optimize hot keys with CAS if profiling
+      demands" — that ordering is the senior answer.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-033
+    difficulty: intermediate
+    tags: [edge-cases, initialization]
+    question: |
+      Should a token bucket start full or empty for a brand-new key?
+    options:
+      - "Full — a new client gets its burst allowance immediately instead of being throttled on first contact"
+      - "Empty — new clients must prove good behavior before earning tokens"
+      - "Half full — a compromise between the two"
+      - "It doesn't matter; the refill rate erases the difference within one window"
+    answer: 0
+    explanation: |
+      Starting empty throttles every new client's very first request — almost
+      never the intended behavior for an API. Starting full grants the designed
+      burst allowance from the first call. The difference absolutely matters at
+      time zero, which is exactly when many clients make several setup calls.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-034
+    difficulty: advanced
+    tags: [edge-cases, failure-modes]
+    question: |
+      Your Redis-backed store starts timing out. "Fail open vs. fail closed" means:
+    options:
+      - "Fail open = crash the process; fail closed = log and continue"
+      - "Fail open = admit requests when the limiter errors; fail closed = reject them — an availability vs. protection trade-off you must state explicitly"
+      - "Fail open = open a circuit breaker; fail closed = close the TCP connection"
+      - "Fail open = reset all counters; fail closed = freeze all counters"
+    answer: 1
+    explanation: |
+      When the limiter itself fails, you must choose: let traffic through
+      (protecting availability, risking overload) or block it (protecting the
+      backend, causing an outage for users). Availability-oriented public APIs
+      usually fail open. The design point is to make the choice explicit and
+      configurable, not accidental.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-035
+    difficulty: intermediate
+    tags: [design-reasoning, retry-after]
+    question: |
+      How should a denied token-bucket response compute retryAfter?
+    options:
+      - "Always return the full window length as a safe overestimate"
+      - "Return zero and let the client poll"
+      - "From actual state: time until enough tokens accrue, i.e. (1 - tokens) / refillRate"
+      - "Return a random jittered value to prevent thundering herds"
+    answer: 2
+    explanation: |
+      The bucket knows exactly when the next token arrives — the deficit divided
+      by the refill rate. Hard-coding the window length overestimates (bad client
+      experience) and returning zero invites hammering. (Jitter is a client-side
+      retry strategy, not the server's honest answer.)
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-036
+    difficulty: intermediate
+    tags: [chain-of-responsibility, pattern-choice]
+    question: |
+      When would you pick Chain of Responsibility over Composite for combining
+      rate-limit checks?
+    options:
+      - "When you need to serialize the limiter state to JSON"
+      - "When all rules always apply and results must be aggregated symmetrically"
+      - "When there are more than three rules"
+      - "When handlers are heterogeneous and ordered — e.g., an allowlist bypass must run first and short-circuit before any limiter"
+    answer: 3
+    explanation: |
+      Chain shines when the pipeline mixes non-limiter concerns (allowlist,
+      blocklist) with limiters and ordering/short-circuit semantics matter.
+      Composite fits the symmetric "all these limits apply, AND the results"
+      case. Being able to articulate when each fits is worth more than naming
+      either pattern.
+    ref: "concepts.md#composing-limits-with-composite-and-chain"
+
+  - id: design-rate-limiter-oo-037
+    difficulty: beginner
+    tags: [boundary, hld-vs-lld]
+    question: |
+      Which of these follow-ups should you explicitly park as an HLD (system
+      design) concern rather than solve in the LLD round?
+    options:
+      - "Making allow() thread-safe"
+      - "Cluster-wide quota accuracy when the limiter runs on 50 gateway nodes"
+      - "Adding a new algorithm behind the RateLimiter interface"
+      - "Computing retryAfter for a denied request"
+    answer: 1
+    explanation: |
+      Cross-node coordination (shared counters, sync intervals, hot-key
+      sharding) is distributed-systems territory. The LLD answer ends at the
+      storage seam: "a Redis-backed store implementation slots in here." Thread
+      safety, extensibility, and decision contents are squarely LLD.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-rate-limiter-oo-038
+    difficulty: intermediate
+    tags: [design-reasoning, state-separation]
+    question: |
+      Why is it a design smell for RateLimitRule to hold the live token count?
+    options:
+      - "Token counts are doubles and rules only store integers"
+      - "YAML config files cannot represent token counts"
+      - "Rules would become unloadable at startup"
+      - "It conflates shared configuration with per-key mutable state — the same rule applies to millions of keys, each needing its own counters"
+    answer: 3
+    explanation: |
+      One rule ("100/min per user") governs every user; the live counters differ
+      per user. Merging them means either one rule object per user (rules no
+      longer shareable or hot-reloadable) or shared mutable state across keys
+      (wrong behavior). Data/state separation is the fix.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-rate-limiter-oo-039
+    difficulty: advanced
+    tags: [extensibility, dynamic-config]
+    question: |
+      Ops wants to change "100/min" to "50/min" at runtime without a restart. The
+      cleanest mechanism in this design is:
+    options:
+      - "Swap the registry's rule list atomically (volatile reference to an immutable list) and rebuild or expire affected limiters"
+      - "Mutate the maxRequests field on each live limiter via reflection"
+      - "Restart the JVM with new arguments — dynamic config is impossible"
+      - "Store the limit in a static global variable that limiters re-read on each call"
+    answer: 0
+    explanation: |
+      Because rules are immutable value objects held by the registry, publishing
+      a new immutable rule list through a volatile reference is a safe atomic
+      swap; affected limiters are rebuilt or lazily expired. Reflection-based
+      mutation breaks encapsulation and thread safety; mutable globals reintroduce
+      races.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-040
+    difficulty: beginner
+    tags: [requirements, clarification]
+    question: |
+      Which clarifying question most directly determines whether you need the
+      Composite/Chain part of the design?
+    options:
+      - "\"Should denied requests get an HTTP 429?\""
+      - "\"Do limits apply per user, per API, or can multiple limits apply to one request simultaneously?\""
+      - "\"Should the limiter be written in Java or Python?\""
+      - "\"How many requests per second is the limit?\""
+    answer: 1
+    explanation: |
+      If multiple dimensions apply simultaneously (per-user AND per-API), you
+      need a way to compose limiters — Composite or Chain. A single dimension
+      needs only Strategy + Factory + Registry. The numeric limit and response
+      format don't change the class structure.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-rate-limiter-oo-041
+    difficulty: intermediate
+    tags: [strategy-pattern, trade-offs]
+    question: |
+      An interviewer challenges: "Strategy adds classes — why not one class with
+      if-else on algorithm type?" The strongest defense is:
+    options:
+      - "Strategy classes are automatically thread-safe"
+      - "if-else chains are slower than virtual dispatch in modern JVMs"
+      - "Each algorithm's state stays isolated in its own class, and new algorithms don't reopen or re-risk tested code — the change surface per algorithm shrinks to one file"
+      - "The GoF book forbids conditional logic in production code"
+    answer: 2
+    explanation: |
+      The state argument is the sharpest: a merged class carries the union of
+      every algorithm's fields (tokens, windowStart, timestamp deque...), most
+      of them meaningless per mode. With Strategy, each class owns exactly its
+      own state and tests, and adding an algorithm can't break existing ones.
+      Performance is a wash; don't argue it.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-rate-limiter-oo-042
+    difficulty: advanced
+    tags: [concurrency, atomicity]
+    question: |
+      Why can't a lock-free token bucket store tokens and lastRefillTime in two
+      separate AtomicLongs?
+    options:
+      - "AtomicLong cannot store timestamps past 2038"
+      - "The two fields form one invariant that must change together; separate atomics let threads interleave between the updates and corrupt the refill math"
+      - "Two atomics use more memory than the JVM allows per object"
+      - "AtomicLong only supports increment, not arbitrary set"
+    answer: 1
+    explanation: |
+      Refill reads (tokens, lastRefill) and writes both. If thread A updates
+      tokens, then thread B runs a full refill before A writes lastRefill, B
+      computes elapsed time against a stale timestamp — double-granting tokens.
+      Atomicity must cover the pair: one AtomicReference to an immutable
+      (tokens, lastRefill) state, updated via CAS.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-043
+    difficulty: beginner
+    tags: [algorithms, comparison]
+    question: |
+      Which algorithm has O(max-requests) memory per key, making it costly at scale
+      despite being exactly accurate?
+    options:
+      - "Fixed window"
+      - "Token bucket"
+      - "Sliding window counter"
+      - "Sliding window log"
+    answer: 3
+    explanation: |
+      The sliding window log stores a timestamp for every request in the window
+      — with a 10,000/hour limit and a million keys, that's potentially 10^10
+      timestamps. Fixed window, token bucket, and sliding counter all keep O(1)
+      state per key.
+    ref: "concepts.md#rate-limiting-algorithms-as-strategies"
+
+  - id: design-rate-limiter-oo-044
+    difficulty: intermediate
+    tags: [class-relationships, uml]
+    question: |
+      RateLimiterRegistry holds limiters in a map, but limiters could outlive or be
+      recreated independently of the registry. The most precise UML relationship is:
+    options:
+      - "Aggregation — the registry has limiters, but they are not an inseparable part of it"
+      - "Realization — the registry implements the limiters"
+      - "Generalization — the registry is a kind of limiter"
+      - "Dependency — the registry only uses limiters transiently"
+    answer: 0
+    explanation: |
+      The registry owns references to limiters (has-a, whole-part) but the
+      relationship isn't lifecycle-locked composition in the strict sense —
+      limiters can be evicted, rebuilt, or (in tests) supplied externally.
+      It's far more than a transient dependency: the map reference persists
+      across calls.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-rate-limiter-oo-045
+    difficulty: intermediate
+    tags: [testability, design-reasoning]
+    question: |
+      A test needs to verify "101st request within a minute is denied, and allowed
+      again after 60 seconds." With the recommended design, the test:
+    options:
+      - "Calls Thread.sleep(60000) between assertions"
+      - "Constructs the limiter with a fake Clock, sends 101 calls, asserts the denial, advances the fake clock 60s, asserts allowed"
+      - "Mocks the RateLimitDecision record to return allowed"
+      - "Uses reflection to reset the private windowStart field"
+    answer: 1
+    explanation: |
+      This is the payoff of injecting Clock: the test controls time. Sleeping
+      makes tests slow and flaky; mocking the decision tests nothing; reflection
+      into privates couples tests to implementation details. Deterministic
+      time-travel is the professional answer.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-rate-limiter-oo-046
+    difficulty: advanced
+    tags: [design-reasoning, interface-design]
+    question: |
+      To fix the "composite consumes quota before a later deny" problem cleanly,
+      which interface change is most defensible?
+    options:
+      - "Make allow() take a rollback callback parameter"
+      - "Have the composite call allow() twice and average the results"
+      - "Add a global lock around the whole composite so no quota is consumed concurrently"
+      - "Split the contract into a check phase and a commit phase (two-phase), so the composite checks all children before any consume quota"
+    answer: 3
+    explanation: |
+      Check-then-commit lets the composite verify every child would allow before
+      committing consumption on all of them — no quota lost to a partial deny.
+      The cost is a wider interface and a small TOCTOU window between phases
+      (or holding locks across children); naming that trade-off is the
+      senior-level move. A global lock kills the per-key contention model.
+    ref: "concepts.md#composing-limits-with-composite-and-chain"
+
+  - id: design-rate-limiter-oo-047
+    difficulty: beginner
+    tags: [entities, facade]
+    question: |
+      Application code calls rateLimiterRegistry.check(request) rather than
+      touching individual limiters. The registry is best described as:
+    options:
+      - "A Builder that assembles requests"
+      - "An Adapter converting HTTP to gRPC"
+      - "A facade/manager: it resolves keys, lazily creates limiters via the factory, and delegates the decision"
+      - "A Visitor that traverses the limiter hierarchy"
+    answer: 2
+    explanation: |
+      The registry is the single entry point that hides key extraction, lazy
+      per-key limiter creation, and rule iteration behind one `check()` call —
+      a facade over the limiter subsystem. It adapts nothing between protocols
+      and builds no complex object step-by-step.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-rate-limiter-oo-048
+    difficulty: intermediate
+    tags: [algorithms, fixed-window, concurrency]
+    question: |
+      For a thread-safe fixed window limiter without locks, the correct admission
+      check is:
+    options:
+      - "count.incrementAndGet() <= max — increment first, then compare (optionally decrement on failure)"
+      - "count.get() < max, then incrementAndGet() if true"
+      - "count.get() + 1 <= max, then set(count.get() + 1)"
+      - "synchronized is mandatory — atomics cannot implement fixed window"
+    answer: 0
+    explanation: |
+      Increment-then-compare makes the reservation atomic: each thread claims a
+      slot and then checks whether its claim was within the limit. Both
+      get-then-increment forms are check-then-act races where two threads pass
+      the check with one slot left. Atomics handle the counter fine; the window
+      reset needs slightly more care (CAS on windowStart).
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-049
+    difficulty: intermediate
+    tags: [boundary, cross-reference]
+    question: |
+      Per the domain boundaries of this topic, which detail should you NOT spend
+      interview time re-deriving?
+    options:
+      - "Why Strategy fits interchangeable algorithms"
+      - "How ConcurrentHashMap's internal bucket structure achieves lock striping"
+      - "Why the composite consumes quota on partial denies"
+      - "How retryAfter is computed from bucket state"
+    answer: 1
+    explanation: |
+      HashMap/ConcurrentHashMap internals belong to the DSA domain — in the LLD
+      round you say "I'll use ConcurrentHashMap.computeIfAbsent for atomic lazy
+      creation" and move on. Pattern choice, composition semantics, and decision
+      contents are exactly what this round grades.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-rate-limiter-oo-050
+    difficulty: advanced
+    tags: [design-reasoning, guava]
+    question: |
+      Guava's RateLimiter uses a short synchronized block instead of a CAS loop.
+      What's the right way to use this fact in an interview?
+    options:
+      - "Cite it as proof that CAS is always premature optimization"
+      - "Avoid mentioning libraries — interviewers penalize outside knowledge"
+      - "Claim Guava is wrong and CAS is strictly better"
+      - "Present both: synchronized is simpler and proven at scale for per-instance locks; CAS avoids blocking under hot-key contention — choose based on measured contention"
+    answer: 3
+    explanation: |
+      Production evidence (Guava's choice) legitimizes the simple approach, and
+      knowing the lock-free alternative (Bucket4j-style CAS on immutable state)
+      shows depth. Presenting the trade-off and a decision criterion — measured
+      contention on hot keys — is stronger than dogma in either direction.
+    ref: "concepts.md#concurrency-and-thread-safety"
+
+  - id: design-rate-limiter-oo-051
+    difficulty: intermediate
+    tags: [edge-cases, clock]
+    question: |
+      A defensive limiter clamps negative elapsed time to zero in its refill logic.
+      What real-world condition is this guarding against?
+    options:
+      - "Integer overflow after 292 years of uptime"
+      - "Wall-clock time stepping backward due to NTP adjustment, which would otherwise subtract tokens or corrupt window math"
+      - "Threads calling allow() in the wrong order"
+      - "The JVM pausing for garbage collection"
+    answer: 1
+    explanation: |
+      NTP can step the wall clock backward; `now - lastRefill` goes negative and
+      the refill math misbehaves (negative tokens, windows that never end).
+      Prefer a monotonic source, and clamp as defense in depth. GC pauses only
+      stretch elapsed time forward, which the math already handles.
+    ref: "concepts.md#extensibility-and-edge-cases"
+
+  - id: design-rate-limiter-oo-052
+    difficulty: beginner
+    tags: [design-reasoning, pattern-mapping]
+    question: |
+      Match the concern to the pattern used in this design: creating the right
+      limiter from a config rule is handled by ______.
+    options:
+      - "Observer"
+      - "Strategy"
+      - "Factory"
+      - "State"
+    answer: 2
+    explanation: |
+      The factory owns the mapping from `RateLimitRule` (config data, including
+      algorithm type) to the correct concrete strategy with the right constructor
+      arguments. Strategy is the algorithms themselves; Observer and State have
+      no role in the core design.
+    ref: "concepts.md#key-design-decisions"

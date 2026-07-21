@@ -1,0 +1,959 @@
+topic: "Design an Online Auction System"
+domain: lld-and-ood
+topic_slug: design-auction-system
+version: 1
+questions:
+  - id: design-auction-system-001
+    difficulty: beginner
+    tags: [requirements, scoping]
+    question: |
+      In the first five minutes of a "Design an Online Auction System" interview, which
+      clarifying question most directly shapes the class structure you will draw?
+    options:
+      - "Which payment gateway will process credit cards?"
+      - "How many servers will host the bidding service?"
+      - "Which auction types must be supported (English, Dutch, sealed-bid), and should new types be easy to add?"
+      - "Should the mobile app support dark mode?"
+    answer: 2
+    explanation: |
+      The set of auction types — and whether new ones must plug in — drives the central
+      design decision: a BiddingStrategy hierarchy composed into Auction. Gateway choice,
+      server count, and UI theming don't change the class diagram; server count is an HLD
+      concern entirely.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-auction-system-002
+    difficulty: beginner
+    tags: [requirements, scoping, hld-boundary]
+    question: |
+      The interviewer asks "what if a million users bid on the same auction?" during an
+      LLD round. What is the strongest response?
+    options:
+      - "Acknowledge it as a distributed-systems concern (partitioning, event streams), state it's out of LLD scope, and keep the single-process OO design correct and thread-safe"
+      - "Redesign the class diagram around Kafka topics and consumer groups"
+      - "Add a load balancer class to the diagram"
+      - "Replace all locks with lock-free data structures before continuing"
+    answer: 0
+    explanation: |
+      An LLD round evaluates clean, extensible OO design on one machine. Naming the
+      scale-out concern and deferring it to HLD shows judgment; embedding infrastructure
+      into the class diagram muddles the domain model and burns the clock. Lock-free
+      rewrites are premature optimization for the round's scope.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-auction-system-003
+    difficulty: beginner
+    tags: [entities, modeling]
+    question: |
+      Why should you model User with role relationships (auction.seller, bid.bidder)
+      instead of creating Buyer and Seller subclasses of User?
+    options:
+      - "Subclassing User makes serialization slower"
+      - "Java limits a class hierarchy to two levels"
+      - "Buyers need more fields than the User base class allows"
+      - "The same person can sell one item while bidding on another, so buyer/seller is a per-auction role, not an identity type"
+    answer: 3
+    explanation: |
+      A user who both sells and bids would have to be two objects under a subclass model —
+      an immediate contradiction. Roles are relationships to a specific auction, so they
+      belong on the association (seller reference, bidder reference), keeping User a
+      single identity object. The other options are not real constraints.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-auction-system-004
+    difficulty: beginner
+    tags: [entities, srp]
+    question: |
+      In this design, which class is responsible for enforcing the invariant "a bid must
+      be placed only while the auction is active"?
+    options:
+      - "Bid, by validating itself in its constructor"
+      - "Auction, since it is the aggregate that owns status and the bid history"
+      - "User, by tracking which auctions it may bid on"
+      - "EmailNotifier, since it observes all auction events"
+    answer: 1
+    explanation: |
+      Auction is the aggregate root: all bids enter through Auction.placeBid, which checks
+      status under one lock. A Bid cannot know the auction's current state at construction
+      time without reaching outward (backwards coupling), User would duplicate state, and
+      notifiers only react to events — they never enforce invariants.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-auction-system-005
+    difficulty: intermediate
+    tags: [immutability, entities]
+    question: |
+      Why is Bid designed as an immutable value object (bidder, amount, timestamp fixed
+      at construction)?
+    options:
+      - "Immutable objects use less memory than mutable ones"
+      - "YAML cannot represent mutable objects"
+      - "The bid history becomes an append-only audit log, concurrent reads need no locking, and 'editing' a bid is correctly modeled as placing a new one"
+      - "Only immutable objects can be stored in an ArrayList"
+    answer: 2
+    explanation: |
+      Immutability turns the bid list into a tamper-proof record — vital for disputes —
+      and eliminates read races on individual bids. Domain-wise, auction bids are
+      commitments: you can't lower one, only place a higher one. Memory and collection
+      constraints are red herrings.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-auction-system-006
+    difficulty: intermediate
+    tags: [relationships, composition, aggregation]
+    question: |
+      Which UML relationship best describes Auction and its Bid history, versus Auction
+      and its Item?
+    options:
+      - "Bids: aggregation (bids outlive the auction); Item: composition (items die with the auction)"
+      - "Both are inheritance since Bid and Item specialize Auction"
+      - "Both are plain dependencies with no ownership"
+      - "Bids: composition (bids have no meaning outside their auction); Item: aggregation (the item exists independently and could be relisted)"
+    answer: 3
+    explanation: |
+      A Bid is created by and belongs to exactly one auction — its lifecycle is bound to
+      the auction, which is composition. An Item exists before the auction and survives it
+      (unsold items get relisted), so the auction only aggregates a reference. Getting
+      this backwards suggests you'd cascade-delete items or let bids float free.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-auction-system-007
+    difficulty: beginner
+    tags: [strategy-pattern, design-decisions]
+    question: |
+      English, Dutch, and sealed-bid auctions differ in bidding rules and winner
+      determination but share lifecycle, bid history, and notifications. Which approach
+      does this call for?
+    options:
+      - "A BiddingStrategy interface composed into Auction, with one implementation per auction type"
+      - "Three subclasses: EnglishAuction, DutchAuction, SealedAuction extending Auction"
+      - "A switch statement on AuctionType inside placeBid"
+      - "Three separate services: EnglishAuctionService, DutchAuctionService, SealedAuctionService"
+    answer: 0
+    explanation: |
+      Only the rules vary, so encapsulate exactly that behind Strategy and compose it in.
+      Subclasses couple type to construction and multiply when a second axis (buy-it-now,
+      reserve variants) appears; a switch reopens Auction for every new type (OCP
+      violation); parallel services duplicate the shared lifecycle logic three times.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-008
+    difficulty: intermediate
+    tags: [strategy-pattern, ocp]
+    question: |
+      The interviewer asks you to add a Vickrey auction (sealed bids, winner pays the
+      second-highest price). In the Strategy-based design, what changes?
+    options:
+      - "Auction gains a new isVickrey flag checked inside placeBid and close"
+      - "The AuctionStatus enum gains a VICKREY state"
+      - "A new BiddingStrategy implementation is added; existing Auction code is untouched (and AuctionResult should carry price-to-pay separately from the winning bid)"
+      - "A VickreyAuction subclass overrides close() and placeBid()"
+    answer: 2
+    explanation: |
+      This is the Open/Closed payoff of the Strategy seam: new type = new class, zero
+      modification to Auction. The Vickrey wrinkle — winner pays the runner-up's amount —
+      is why the result object should separate "who won" from "what they pay". Flags and
+      status values conflate type with lifecycle; a subclass reintroduces the hierarchy
+      Strategy was chosen to avoid.
+    ref: "concepts.md#extensibility"
+
+  - id: design-auction-system-009
+    difficulty: intermediate
+    tags: [state-pattern, lifecycle]
+    question: |
+      Which pattern (or mechanism) governs that placeBid is legal only in ACTIVE, cancel
+      only before meaningful bids, and pay only in PAYMENT_PENDING?
+    options:
+      - "Factory Method — each status constructs the right auction"
+      - "The State pattern (or an enum-backed state machine with transitions validated inside Auction)"
+      - "Decorator — wrap Auction in a PayableAuction when it ends"
+      - "Singleton — one global lifecycle manager validates all calls"
+    answer: 1
+    explanation: |
+      Operation legality depending on lifecycle stage is the textbook State problem. At
+      interview scale an enum plus transition checks inside the aggregate is fine; if the
+      status conditionals grow, promote to State objects where each state class owns its
+      legal operations. Factory, Decorator, and Singleton don't model "what's legal when".
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-010
+    difficulty: beginner
+    tags: [observer-pattern, notifications]
+    question: |
+      Bidders must be notified when outbid, and winner/seller notified at close — via
+      email today, push tomorrow. Which pattern decouples Auction from delivery channels?
+    options:
+      - "Builder — construct notifications step by step"
+      - "Adapter — convert Auction into an EmailMessage"
+      - "Template Method — subclass Auction per channel"
+      - "Observer — Auction announces domain events; channel implementations subscribe via an AuctionObserver interface"
+    answer: 3
+    explanation: |
+      Observer inverts the dependency: Auction knows only the AuctionObserver interface,
+      and each channel (email, push, SMS) is a subscriber. Adding a channel means one new
+      implementation and zero changes to the domain. Subclassing Auction per channel would
+      be a catastrophic conflation of domain and delivery.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-011
+    difficulty: intermediate
+    tags: [money, correctness]
+    question: |
+      Why must bid amounts be a Money value type (integer cents or BigDecimal) rather
+      than double?
+    options:
+      - "The validation 'amount >= highest + increment' must be exact; binary floating point makes such comparisons drift and fail nondeterministically"
+      - "double cannot store negative values for refunds"
+      - "Money objects render better in JSON APIs"
+      - "The JVM garbage-collects doubles more slowly"
+    answer: 0
+    explanation: |
+      Increment arithmetic on doubles (e.g., 0.1 + 0.2) produces inexact results, so a bid
+      that should exactly clear the floor may be rejected or accepted inconsistently.
+      Exact decimal arithmetic makes the invariant checkable with plain comparison. The
+      other options are fabricated constraints.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-012
+    difficulty: intermediate
+    tags: [encapsulation, reserve-price]
+    question: |
+      How should the reserve price be handled in the design?
+    options:
+      - "Broadcast it to bidders so they know the minimum to bid"
+      - "Store it on the Item, since the reserve describes the item's value"
+      - "Keep it private on Auction, consulted only inside close() and via a boolean isReserveMet(), never exposed through a value-returning getter"
+      - "Store it in the winning Bid once the auction ends"
+    answer: 2
+    explanation: |
+      The reserve is a hidden minimum by definition — leaking the number changes bidder
+      behavior. Encapsulation here is a business rule, not just style: expose at most a
+      boolean. It's an auction-level term (the same item could be relisted with a
+      different reserve), so it belongs on Auction, not Item or Bid.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-013
+    difficulty: beginner
+    tags: [bid-validation, invariants]
+    question: |
+      Which of the following is NOT a bid-time validation in the English auction design?
+    options:
+      - "Auction status is ACTIVE"
+      - "The bid amount is at least the reserve price"
+      - "The bidder is not the seller"
+      - "Amount is at least the current highest bid plus the minimum increment"
+    answer: 1
+    explanation: |
+      The reserve is deliberately evaluated only at close: bids below it are still valid
+      bids (they establish price discovery), and rejecting them at bid time would reveal
+      the hidden reserve through trial and error. Status, self-bidding, and the increment
+      floor are all genuine bid-time checks.
+    ref: "concepts.md#bid-validation"
+
+  - id: design-auction-system-014
+    difficulty: intermediate
+    tags: [api-design, error-handling]
+    question: |
+      Why should placeBid return a BidResult (accepted/rejected + reason) instead of
+      throwing an exception when a bid is too low?
+    options:
+      - "Exceptions cannot carry string messages"
+      - "Returning objects is faster in all JVM versions"
+      - "Exceptions would break the Observer notifications"
+      - "Being outbid or too low is an expected domain outcome, not an exceptional condition; result objects keep the happy and unhappy paths explicit for callers"
+    answer: 3
+    explanation: |
+      In a competitive auction, rejection is routine — another bidder winning by a
+      millisecond is normal operation. Modeling expected outcomes as exceptions abuses
+      control flow and forces try/catch on every call. Reserve exceptions for genuine
+      contract violations (null auction ID, closed system).
+    ref: "concepts.md#bid-validation"
+
+  - id: design-auction-system-015
+    difficulty: intermediate
+    tags: [anti-sniping, design-decisions]
+    question: |
+      What is the standard "soft close" mechanism to counter last-second bid sniping?
+    options:
+      - "If a bid arrives within the final N seconds, extend endTime by M seconds (possibly capped), re-scheduling the close task"
+      - "Reject any bid placed in the final N seconds"
+      - "Randomly pick the auction's end time so snipers can't predict it"
+      - "Let only prior bidders bid during the final minute"
+    answer: 0
+    explanation: |
+      Extension removes the sniping incentive: a late bid always leaves opponents time to
+      respond. Rejecting late bids punishes legitimate bidders; random end times harm
+      everyone's planning; restricting the final minute to prior bidders adds unfairness
+      without removing the last-second race among them.
+    ref: "concepts.md#anti-sniping-and-auction-close"
+
+  - id: design-auction-system-016
+    difficulty: advanced
+    tags: [anti-sniping, concurrency]
+    question: |
+      With soft-close extensions, the scheduled close task fires but a late bid had
+      already pushed endTime out. How must close() behave?
+    options:
+      - "Trust the scheduler and transition to ENDED, since timers are authoritative"
+      - "Cancel all pending bids and restart the auction"
+      - "Under the same lock used for bidding, re-check now >= endTime and return without closing if the deadline moved"
+      - "Close the auction but reopen it if a bidder complains"
+    answer: 2
+    explanation: |
+      Extension makes endTime mutable shared state, so a stale timer racing a late bid is
+      inevitable. The close task must re-validate the deadline under the bidding lock —
+      otherwise a bid that legitimately extended the auction gets voided. This is why
+      "the same lock covers bidding, extension, and closing" is a stated invariant.
+    ref: "concepts.md#anti-sniping-and-auction-close"
+
+  - id: design-auction-system-017
+    difficulty: beginner
+    tags: [state-machine, lifecycle]
+    question: |
+      Per the auction state machine, what happens when an ACTIVE auction's end time is
+      reached and the highest bid is below the reserve price?
+    options:
+      - "The auction transitions to PAYMENT_PENDING at the highest bid amount"
+      - "The auction transitions to ENDED unsold, and bidders are notified 'reserve not met' without revealing the reserve value"
+      - "The auction transitions to CANCELLED and the seller is penalized"
+      - "The end time auto-extends until someone meets the reserve"
+    answer: 1
+    explanation: |
+      Reserve-not-met is a normal unsold ending: ENDED with no winner. It is not a
+      cancellation (the auction ran legitimately), payment can't start without a winner,
+      and auto-extending indefinitely would trap the item. The message says only that the
+      reserve wasn't met — never the number.
+    ref: "concepts.md#anti-sniping-and-auction-close"
+
+  - id: design-auction-system-018
+    difficulty: intermediate
+    tags: [state-machine, payments]
+    question: |
+      Why does the design include a distinct PAYMENT_PENDING state between ENDED and
+      COMPLETED instead of jumping straight to COMPLETED when a winner is determined?
+    options:
+      - "The State pattern requires a minimum of six states"
+      - "COMPLETED auctions cannot fire Observer notifications"
+      - "Payment gateways require a state named PAYMENT_PENDING"
+      - "The winner may fail to pay; a distinct state gives a timeout hook to offer the runner-up a second chance or relist"
+    answer: 3
+    explanation: |
+      Winning and paying are separate events separated by time, and non-payment is a real
+      outcome that needs handling (second-chance offer, relist). Collapsing them would
+      mark unpaid auctions complete. States exist to model genuinely distinct behavior,
+      not to satisfy pattern or gateway conventions.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-019
+    difficulty: intermediate
+    tags: [concurrency, locking]
+    question: |
+      Two bids for the same auction arrive on different threads at the same instant. With
+      the per-auction synchronized lock design, what happens?
+    options:
+      - "Both bids are accepted and the higher one is picked lazily at close"
+      - "One thread acquires the lock and its bid becomes highest; the second then validates against the NEW highest and is rejected unless it still clears highest + increment"
+      - "Both bids are rejected and the bidders are asked to retry"
+      - "The JVM merges the two bids into one with the larger amount"
+    answer: 1
+    explanation: |
+      The lock serializes the two placements: the loser of the race re-validates against
+      updated state, which is exactly the correct domain outcome (you were beaten to it).
+      Accepting both defers the conflict to close, where the "current highest" shown to
+      users mid-auction would have been wrong. Rejecting both punishes a valid bid.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-020
+    difficulty: advanced
+    tags: [concurrency, optimistic-locking]
+    question: |
+      When auction state lives in a database rather than in memory, which concurrency
+      approach replaces the in-process synchronized block?
+    options:
+      - "A Thread.sleep before each write to space out updates"
+      - "Reading the auction twice and comparing the results"
+      - "Marking every entity field volatile"
+      - "Optimistic locking: carry a version column, update WHERE version = expected, and on conflict re-read and re-validate the bid (retry)"
+    answer: 3
+    explanation: |
+      A JVM monitor can't protect rows read by multiple processes. The optimistic pattern
+      — version check in the UPDATE's WHERE clause, retry on zero rows — is the standard
+      DB analogue and works well here because per-auction contention is human-scale.
+      volatile is a JVM visibility construct; sleeping and double-reads fix nothing.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-021
+    difficulty: intermediate
+    tags: [concurrency, observer-pattern]
+    question: |
+      Inside placeBid, observers are notified that the previous bidder was outbid. Why
+      must each observer call be isolated (try/catch per observer, or async dispatch)?
+    options:
+      - "One failing notifier (e.g., email service down) must not roll back or block a valid bid — notification is a side effect, not part of the bid's invariants"
+      - "Java requires exception handlers around all interface calls"
+      - "Observers can only be invoked from a try block if the list is a CopyOnWriteArrayList"
+      - "Async dispatch guarantees notifications arrive in bid order"
+    answer: 0
+    explanation: |
+      The bid's validity is fully determined by domain rules; a crashing observer must not
+      undo committed state or hold the auction lock hostage. Isolating (or async-ing)
+      observer calls keeps the domain transaction independent of delivery failures.
+      CopyOnWriteArrayList addresses concurrent list mutation, not observer exceptions,
+      and async dispatch typically weakens ordering, not strengthens it.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-022
+    difficulty: intermediate
+    tags: [extensibility, proxy-bidding, observer-pattern]
+    question: |
+      The interviewer asks for auto-bidding: "bid on my behalf up to $500". What is the
+      most elegant addition to the existing design?
+    options:
+      - "Add a maxAutoBid field to Bid and let the strategy auto-raise it"
+      - "Add an autoBid flag to placeBid that bypasses validation"
+      - "An AutoBidder that implements AuctionObserver: on onOutbid it places the minimum winning bid (highest + increment) capped at the user's max — no changes to Auction or the strategies"
+      - "A background thread that polls every auction each second and re-bids"
+    answer: 2
+    explanation: |
+      Proxy bidding is a reaction to being outbid — precisely the event the Observer seam
+      already publishes. Implementing it as an observing client reuses the entire public
+      API and validation path unchanged. Mutating Bid breaks its immutability, a bypass
+      flag defeats invariants, and polling is wasteful and racy compared to event-driven.
+    ref: "concepts.md#extensibility"
+
+  - id: design-auction-system-023
+    difficulty: advanced
+    tags: [proxy-bidding, edge-cases]
+    question: |
+      Two users both enable auto-bidding on the same auction with caps of $300 and $500.
+      In the Observer-based AutoBidder design, how does the competition resolve?
+    options:
+      - "Deadlock: each AutoBidder waits for the other to bid first"
+      - "The system detects both agents and directly sets the price to $300 plus one increment without recording bids"
+      - "Both agents bid their full caps immediately, so the price jumps straight to $500"
+      - "They alternate onOutbid reactions in an escalation loop that terminates once the next required bid exceeds the $300 cap, leaving the $500 agent winning at roughly $300 + increment"
+    answer: 3
+    explanation: |
+      Each outbid event triggers the other agent's minimal counter-bid, so the loop climbs
+      by increments and provably terminates at the lower cap — mirroring how eBay proxy
+      bidding lands the winner one increment above the runner-up's max. Agents bid
+      minimally (not their caps), events (not waiting) drive the loop so no deadlock, and
+      skipping recorded bids would corrupt the audit history.
+    ref: "concepts.md#extensibility"
+
+  - id: design-auction-system-024
+    difficulty: intermediate
+    tags: [extensibility, buy-it-now]
+    question: |
+      Where does "Buy It Now" (fixed price that instantly ends an ACTIVE auction) belong
+      in the design?
+    options:
+      - "A new operation on Auction, guarded by state and strategy rules, transitioning directly to PAYMENT_PENDING"
+      - "A subclass BuyItNowAuction overriding close()"
+      - "A special Bid with amount = Integer.MAX_VALUE"
+      - "A new terminal value in the AuctionStatus enum called BOUGHT_NOW"
+    answer: 0
+    explanation: |
+      Buy-it-now is an additional operation on the same lifecycle — it needs state
+      checking (only while ACTIVE, often only before bidding passes a threshold) and ends
+      in the existing PAYMENT_PENDING state. A subclass forks the hierarchy for one
+      feature; a sentinel-amount bid corrupts price semantics; PAYMENT_PENDING already
+      models "winner must pay" regardless of how they won.
+    ref: "concepts.md#extensibility"
+
+  - id: design-auction-system-025
+    difficulty: beginner
+    tags: [api-design, facade]
+    question: |
+      What role does AuctionService play relative to Auction in this design?
+    options:
+      - "It inherits from Auction to add service methods"
+      - "It replaces Auction entirely; auctions are just rows the service manipulates"
+      - "It duplicates Auction's validation as a safety net"
+      - "It is the facade/entry point: owns the auction registry and scheduler, resolves IDs to objects, and delegates domain rules to each Auction"
+    answer: 3
+    explanation: |
+      The service handles orchestration concerns — lookup by ID, scheduling closes,
+      wiring observers — while every invariant stays inside the Auction aggregate.
+      Duplicating validation in the service creates two sources of truth that drift;
+      treating auctions as passive rows produces an anemic domain model where rules
+      scatter across services.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-auction-system-026
+    difficulty: intermediate
+    tags: [api-design, idempotency]
+    question: |
+      Why should closeAuction be idempotent (closing an already-ENDED auction is a no-op)?
+    options:
+      - "Idempotency makes the method run faster"
+      - "Schedulers and retries can fire the close more than once (e.g., a stale timer after an anti-sniping extension); a second invocation must not re-pick a winner or double-notify"
+      - "The State pattern forbids methods that change state twice"
+      - "REST APIs require all POST endpoints to be idempotent"
+    answer: 1
+    explanation: |
+      Timer-driven operations in the real world fire twice: rescheduling, restarts,
+      retries. Guarding with "if not ACTIVE, return current result" makes duplicate
+      firings harmless. It's a correctness property, not a performance one, and neither
+      the State pattern nor REST mandates it — the domain does.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-auction-system-027
+    difficulty: intermediate
+    tags: [testing, clock-injection]
+    question: |
+      The code skeleton passes a Clock into placeBid and close rather than calling
+      Instant.now() internally. Why?
+    options:
+      - "Instant.now() is not thread-safe"
+      - "Clock objects are cheaper to allocate than Instants"
+      - "Time-dependent rules (bid within window, soft-close extension, deadline checks) become deterministic to test, and the server — not the client — is the time authority"
+      - "The Java compiler inlines injected clocks for speed"
+    answer: 2
+    explanation: |
+      Auctions are time-driven; hard-coding the system clock makes "bid at T-1 second
+      extends the auction" untestable without real waiting. Injecting Clock lets tests
+      control time precisely, and centralizing on a server clock prevents clients from
+      gaming timestamps. The other claims are false — Instant.now() is thread-safe.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-028
+    difficulty: intermediate
+    tags: [tie-breaking, edge-cases]
+    question: |
+      Two sealed bids have the exact same highest amount. What does the reference design
+      do, and why must you state it explicitly?
+    options:
+      - "The earlier-timestamped bid wins; unstated tie rules produce nondeterministic winners, which is indefensible when money is involved"
+      - "Both bidders split the item's cost"
+      - "The auction voids and restarts automatically"
+      - "The seller privately picks a winner"
+    answer: 0
+    explanation: |
+      First-committed wins is the standard, defensible rule — the winner-determination
+      comparator sorts by amount then earliest timestamp. Leaving ties to iteration order
+      of a collection means the "winner" depends on implementation details. Splitting,
+      voiding, or seller discretion all create worse incentive and fairness problems.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-029
+    difficulty: intermediate
+    tags: [state-machine, cancellation]
+    question: |
+      A seller tries to cancel an auction that already has bids. What should the design do?
+    options:
+      - "Allow it silently — sellers own their auctions"
+      - "Allow it but automatically charge bidders a convenience fee"
+      - "Disallow it (or require no-bids / admin override), because bidders have committed to the listing and acted on it"
+      - "Convert the auction to a Dutch auction instead"
+    answer: 2
+    explanation: |
+      Bids are commitments made in reliance on the listing; free cancellation enables
+      seller manipulation (cancel when the price disappoints, relist). Most real
+      marketplaces restrict cancellation once bids exist. Encode this as a state +
+      precondition check in cancel(), and mention the admin-override escape hatch.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-030
+    difficulty: beginner
+    tags: [strategy-pattern, dutch-auction]
+    question: |
+      How does a Dutch auction differ structurally from an English auction in this design?
+    options:
+      - "Dutch auctions cannot have a reserve price"
+      - "The price descends on a schedule and the FIRST bid at (or above) the current price wins immediately — the strategy triggers close on acceptance rather than waiting for a timer"
+      - "Dutch auctions need a different Bid class with a negative amount"
+      - "Dutch auctions require at least two bidders before starting"
+    answer: 1
+    explanation: |
+      The Dutch strategy inverts the close trigger: acceptance ends the auction, not the
+      clock. That's exactly the kind of behavioral variation BiddingStrategy encapsulates
+      — validate() accepts the first at-price bid and the flow transitions to close.
+      Bids stay immutable and positive; reserve (a floor price) still applies as the
+      price descends.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-031
+    difficulty: intermediate
+    tags: [sealed-bid, encapsulation]
+    question: |
+      For a sealed-bid auction, getBidHistory must not reveal amounts while the auction
+      is ACTIVE. Where should this visibility rule live?
+    options:
+      - "In the database, by encrypting the amounts column"
+      - "In the UI layer, by hiding the amounts on screen"
+      - "Nowhere — sealed-bid secrecy is only a social convention"
+      - "In the domain: the strategy (or auction) governs what bid data is exposed per type and status, so no code path can leak amounts mid-auction"
+    answer: 3
+    explanation: |
+      Secrecy is a domain rule of the sealed-bid type, so it belongs where the type's
+      other rules live — enforced at the model boundary, not by trusting every UI to
+      hide fields. UI-level hiding leaks through any other client or log; encryption
+      addresses storage, not the API returning amounts to a bidder's client.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-032
+    difficulty: beginner
+    tags: [bid-validation, shilling]
+    question: |
+      Why does placeBid reject bids where the bidder equals the seller?
+    options:
+      - "Self-bidding (shill bidding) lets a seller artificially inflate the price with no intent to buy"
+      - "Sellers do not have bidder accounts in the schema"
+      - "Java's equals() cannot compare a user to itself"
+      - "It prevents the seller from receiving their own notifications"
+    answer: 0
+    explanation: |
+      A seller bidding on their own item drives up what real buyers must pay — a classic
+      fraud called shilling, banned on every real marketplace. It's a one-line invariant
+      inside placeBid, but naming the fraud it prevents shows domain awareness. The other
+      options are technical non-reasons.
+    ref: "concepts.md#bid-validation"
+
+  - id: design-auction-system-033
+    difficulty: intermediate
+    tags: [payments, srp, boundaries]
+    question: |
+      How should payment processing be integrated into the auction design?
+    options:
+      - "Auction calls the credit-card gateway SDK directly inside close()"
+      - "The winning Bid object charges the card in a callback"
+      - "A Payment entity records the obligation, a PaymentService interface hides the gateway, and the auction transitions state on payment events — the domain never talks to a gateway"
+      - "Payments are omitted because they are always out of scope in LLD"
+    answer: 2
+    explanation: |
+      The auction needs to know THAT payment succeeded, not HOW. An interface boundary
+      keeps gateway SDKs, retries, and webhooks out of the domain model (Dependency
+      Inversion), and a Payment entity gives the obligation identity and status. Calling
+      a gateway inside close() would couple lifecycle transitions to network I/O under a
+      lock — a serious design smell.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-auction-system-034
+    difficulty: advanced
+    tags: [concurrency, locking, granularity]
+    question: |
+      Why does the design use one lock per Auction rather than one global lock in
+      AuctionService for all bidding?
+    options:
+      - "Global locks are deprecated in modern Java"
+      - "Per-auction locks are required by the Strategy pattern"
+      - "A global lock would deadlock with the Observer notifications"
+      - "Bids on different auctions have no shared invariants, so a global lock would serialize independent operations; per-auction locking bounds contention to bidders of the same item"
+    answer: 3
+    explanation: |
+      Lock granularity should match invariant scope: the invariant "highest + increment"
+      is per-auction, so that's the unit of mutual exclusion. A global lock makes a hot
+      auction throttle every other auction on the platform. No pattern mandates lock
+      choice, and deadlock depends on lock ordering, not count.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-035
+    difficulty: intermediate
+    tags: [solid, ocp, anti-pattern]
+    question: |
+      A candidate writes placeBid with: if (type == ENGLISH) {...} else if (type == DUTCH)
+      {...} else if (type == SEALED) {...}. Which SOLID principle does this primarily
+      violate, and what is the fix?
+    options:
+      - "Liskov Substitution — fix by making all auctions substitutable for Bid"
+      - "Open/Closed — every new auction type forces modification of placeBid; fix by extracting the per-type rules into BiddingStrategy implementations"
+      - "Interface Segregation — fix by splitting placeBid into three methods"
+      - "Dependency Inversion — fix by injecting the enum instead of hard-coding it"
+    answer: 1
+    explanation: |
+      Type-switching on an enum inside a core method means the class must be reopened for
+      every new variant — the definitional OCP violation. Polymorphism via Strategy moves
+      each branch into its own class, so extension is addition. LSP concerns substitution
+      correctness, ISP concerns fat interfaces, and injecting the enum still leaves the
+      switch in place.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-036
+    difficulty: intermediate
+    tags: [inheritance, composition]
+    question: |
+      Why is "composition over inheritance" the right call for auction types, concretely
+      in THIS problem?
+    options:
+      - "Inheritance is slower due to virtual dispatch"
+      - "Composition uses less memory per auction instance"
+      - "Auction type is data known at creation and could combine with other variations (buy-it-now, reserve, soft-close); subclassing would need a class per combination, while composed strategies mix freely"
+      - "Java records cannot be extended, and Auction should be a record"
+    answer: 2
+    explanation: |
+      The combinatorial argument is the concrete one: EnglishAuction, EnglishWithBuyItNow,
+      DutchWithSoftClose... subclass count explodes multiplicatively per feature axis.
+      Composed behaviors (strategy + optional policies) combine additively and can even be
+      chosen from config at runtime. Performance and memory differences are negligible
+      and not the design driver.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-037
+    difficulty: beginner
+    tags: [entities, enums]
+    question: |
+      What is the role of the AuctionStatus enum in this design?
+    options:
+      - "It distinguishes English from Dutch from sealed-bid auctions"
+      - "It backs the lifecycle state machine (CREATED, ACTIVE, ENDED, CANCELLED, PAYMENT_PENDING, COMPLETED) whose transitions Auction validates internally"
+      - "It stores the notification channels enabled for the auction"
+      - "It records whether the reserve price was met"
+    answer: 1
+    explanation: |
+      Status models WHERE the auction is in its life, orthogonal to WHAT KIND of auction
+      it is (that's AuctionType / the strategy). Conflating type with status is a common
+      candidate error — you'd need ACTIVE_DUTCH, ACTIVE_ENGLISH, etc. Reserve outcome is
+      derivable at close; channels belong to observer registration.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-auction-system-038
+    difficulty: advanced
+    tags: [state-machine, payments, edge-cases]
+    question: |
+      The winner in PAYMENT_PENDING never pays. Which design element makes a
+      "second-chance offer" to the runner-up possible?
+    options:
+      - "The Singleton pattern on PaymentService"
+      - "The volatile keyword on endTime"
+      - "Re-running the auction from CREATED with the same item"
+      - "The immutable, complete bid history retained on the auction — the runner-up and their amount are still recorded, so a timeout handler can offer at their last bid"
+    answer: 3
+    explanation: |
+      Because bids are append-only and never deleted, the full ordering of losing bids
+      survives the close. A PAYMENT_PENDING timeout can walk down that history. If the
+      design had kept only "current highest", second-chance offers (and dispute audits)
+      would be impossible. Relisting from scratch loses the committed bidders.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-039
+    difficulty: intermediate
+    tags: [observer-pattern, interface-design]
+    question: |
+      The AuctionObserver interface defines onOutbid, onAuctionEndingSoon, onAuctionWon,
+      and onAuctionEnded. A PushNotifier only cares about onOutbid. What is the pragmatic
+      interview-grade resolution?
+    options:
+      - "Provide default (no-op) methods on the interface — or split into narrower interfaces if the interviewer probes Interface Segregation"
+      - "Force PushNotifier to throw UnsupportedOperationException for the others"
+      - "Make onOutbid static so PushNotifier can call it directly"
+      - "Merge all four callbacks into a single onEvent(Object) method with instanceof checks"
+    answer: 0
+    explanation: |
+      Java default methods (or empty base-class implementations) let observers subscribe
+      to what they care about — a proportionate answer at interview scale, with ISP-style
+      interface splitting as the named escalation. Throwing from unused callbacks turns
+      dead code into runtime bombs; a single Object-typed event loses type safety and
+      invites instanceof chains.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-040
+    difficulty: beginner
+    tags: [requirements, scoping]
+    question: |
+      Which of these should you explicitly scope OUT in the first five minutes of this
+      LLD interview?
+    options:
+      - "The minimum bid increment rule"
+      - "The auction lifecycle states"
+      - "Fraud detection, escrow, shipping, and multi-region scaling"
+      - "What happens when two bids tie"
+    answer: 2
+    explanation: |
+      Fraud ML, escrow, and shipping are separate systems; multi-region scale is HLD.
+      Explicitly parking them shows scope discipline and buys time for what the round
+      grades: entities, patterns, invariants, and concurrency. Increment rules, lifecycle,
+      and tie-breaking are core LLD content you must NOT skip.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-auction-system-041
+    difficulty: intermediate
+    tags: [srp, anemic-model]
+    question: |
+      A candidate puts ALL validation in AuctionService and leaves Auction as a bag of
+      getters and setters. Why do interviewers flag this?
+    options:
+      - "Services are not allowed to contain if statements"
+      - "It is an anemic domain model: invariants live away from the state they protect, so any other code path (a second service, a test, a batch job) can drive an Auction into an invalid state via setters"
+      - "Getters and setters are slower than public fields"
+      - "AuctionService would need to be declared abstract"
+    answer: 1
+    explanation: |
+      Encapsulation means the object that owns the state guards the state. With public
+      setters, "status can only move ACTIVE to ENDED" is enforced nowhere reliable —
+      it's a convention, not an invariant. Keeping placeBid/close/cancel ON Auction makes
+      invalid states unrepresentable through the public API.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-auction-system-042
+    difficulty: advanced
+    tags: [concurrency, lock-scope]
+    question: |
+      Why must anti-sniping's endTime extension execute inside the SAME lock that guards
+      placeBid, rather than under its own separate lock?
+    options:
+      - "Two locks would double the memory footprint of Auction"
+      - "The extension decision reads bid state and the close decision reads endTime — with separate locks, a close could interleave between a bid's acceptance and its extension, ending an auction a valid last-second bid should have extended"
+      - "Java synchronized blocks cannot be nested"
+      - "endTime is volatile, and volatile fields cannot be written under a lock"
+    answer: 1
+    explanation: |
+      Bid acceptance and its resulting extension must be atomic with respect to closing.
+      Split locks create a window: bid accepted, close fires and transitions to ENDED,
+      then the extension writes a now-meaningless endTime. Same-lock coverage of the
+      three operations (bid, extend, close) makes the interleaving impossible.
+      The other options misstate Java semantics.
+    ref: "concepts.md#anti-sniping-and-auction-close"
+
+  - id: design-auction-system-043
+    difficulty: beginner
+    tags: [class-diagram, uml]
+    question: |
+      In the class diagram, Auction points to BiddingStrategy with a plain association
+      ("delegates rules") while EnglishBiddingStrategy connects to BiddingStrategy with a
+      realization arrow. What do these two connectors mean?
+    options:
+      - "Both mean inheritance between concrete classes"
+      - "Auction owns EnglishBiddingStrategy by composition and copies its methods"
+      - "The realization arrow means EnglishBiddingStrategy observes the interface for changes"
+      - "Auction HAS a strategy it delegates to (composition of behavior); EnglishBiddingStrategy IMPLEMENTS the interface (realization) — the has-a vs. is-a distinction the pattern rests on"
+    answer: 3
+    explanation: |
+      Reading UML connectors correctly is table stakes: dashed-triangle realization means
+      "implements", plain association means "holds a reference and delegates". Together
+      they express Strategy: Auction depends only on the abstraction while concrete rule
+      sets are substitutable behind it.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-auction-system-044
+    difficulty: intermediate
+    tags: [notifications, decoupling]
+    question: |
+      Where should the knowledge "outbid alerts go via push, win alerts via email AND
+      push" live?
+    options:
+      - "In observer registration/configuration — which notifier implementations subscribe (and to which events), keeping Auction ignorant of channels entirely"
+      - "As channel enums stored on each Bid"
+      - "Inside Auction.close(), which formats and sends both messages"
+      - "In the User class, as sendEmail() and sendPush() methods"
+    answer: 0
+    explanation: |
+      Channel routing is a configuration of the observer wiring, not domain logic. The
+      auction publishes semantic events; which notifiers are subscribed (and each
+      notifier's own preference filtering) decides delivery. Putting sends in close()
+      couples the domain to channels; User owning transport methods violates SRP.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-045
+    difficulty: intermediate
+    tags: [dutch-auction, state]
+    question: |
+      In the Dutch auction, the "current price" descends on a schedule. Which statement
+      about modeling it is most defensible?
+    options:
+      - "The descending price must be stored in each Bid object"
+      - "Every price drop should create a new Auction object"
+      - "The current price is derivable state governed by the DutchBiddingStrategy (from start price, decrement schedule, and elapsed time) — validate() compares an incoming bid against it"
+      - "The seller manually lowers the price by calling placeBid with smaller amounts"
+    answer: 2
+    explanation: |
+      Current price = f(startPrice, schedule, now) — computed, not duplicated into other
+      entities. Keeping it in the Dutch strategy localizes the type-specific rule exactly
+      where Strategy intends. Storing it on bids inverts ownership, new objects per tick
+      is churn, and sellers placing bids would trip the self-bidding invariant.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-auction-system-046
+    difficulty: advanced
+    tags: [trade-offs, anti-sniping]
+    question: |
+      The interviewer asks: "eBay uses a hard close; many auction houses use soft close.
+      What's the actual trade-off?" Which answer is correct?
+    options:
+      - "Hard close is cheaper to implement but soft close needs machine learning"
+      - "Soft close removes the incentive to snipe (late bids always allow responses) at the cost of unpredictable end times and mutable endTime state; hard close keeps ends predictable but rewards last-second bidding"
+      - "Soft close is strictly better; eBay keeps hard close only for legacy reasons"
+      - "Hard close prevents shill bidding while soft close enables it"
+    answer: 1
+    explanation: |
+      Both models are legitimate; the question tests whether you argue trade-offs rather
+      than declare winners. Soft close changes bidder behavior (no point sniping) but
+      complicates scheduling and UX around "when does it actually end". Neither model
+      relates to shilling, and no ML is involved.
+    ref: "concepts.md#anti-sniping-and-auction-close"
+
+  - id: design-auction-system-047
+    difficulty: intermediate
+    tags: [api-design, boundaries]
+    question: |
+      Why does the AuctionService API accept IDs (auctionId, bidderId) rather than
+      Auction and User object references?
+    options:
+      - "Passing objects would trigger deep copies in Java"
+      - "IDs make the method signatures shorter to type"
+      - "Object references cannot be null-checked"
+      - "The service boundary is where external callers (controllers, tests, CLIs) enter; they hold identifiers, and the service resolves them from its registry — handing out live aggregate references would let callers bypass placeBid and mutate state directly"
+    answer: 3
+    explanation: |
+      ID-based boundaries protect encapsulation: the aggregate stays inside, invariants
+      stay enforced, and lookups/validation happen in one place. Java passes references
+      (no deep copies), and brevity or null-checking are not design rationales.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-auction-system-048
+    difficulty: expert
+    tags: [concurrency, notifications, lock-scope]
+    question: |
+      In the skeleton, placeBid notifies the outbid observer while still holding the
+      auction lock. An interviewer flags this. What is the sharpest analysis?
+    options:
+      - "Holding a lock during observer callbacks risks latency and deadlock (a callback that re-enters the auction or blocks on I/O stalls all bidding) — collect events under the lock, dispatch after release or async, accepting slightly stale event data"
+      - "It is fine because synchronized blocks release automatically during method calls"
+      - "The fix is to remove the lock entirely since notifications are read-only"
+      - "Observers should acquire their own copy of the lock before running"
+    answer: 0
+    explanation: |
+      Calling foreign code under a lock is a classic hazard: an AutoBidder observer that
+      synchronously calls placeBid re-enters the same monitor (reentrancy hides the bug
+      until it's a different lock), and a slow email API blocks every bidder. The standard
+      remedy is collect-then-dispatch outside the critical section. Locks don't release
+      during calls, and the lock still protects bid state regardless of notifications.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-auction-system-049
+    difficulty: intermediate
+    tags: [winner-determination, comparator]
+    question: |
+      The English strategy determines the winner with max(comparing(Bid::amount)
+      .thenComparing(Bid::placedAt, reverseOrder())). What does the reversed timestamp
+      comparison accomplish?
+    options:
+      - "It sorts the bid history newest-first for display"
+      - "Under max(), ties on amount resolve to the EARLIER bid — reversing makes the earlier timestamp compare as 'greater', encoding first-committed-wins"
+      - "It protects against clock skew between bidders"
+      - "It ensures the comparator is consistent with equals()"
+    answer: 1
+    explanation: |
+      max() picks the element that compares greatest; with a natural timestamp order,
+      equal amounts would hand the win to the LATER bid. Reversing the secondary key
+      flips that, implementing the stated tie-break (earlier bid wins). It's a two-line
+      detail that demonstrates you actually reason about comparator semantics.
+    ref: "concepts.md#code-skeleton"
+
+  - id: design-auction-system-050
+    difficulty: beginner
+    tags: [patterns, cross-reference]
+    question: |
+      Match the three core patterns in this design to their jobs.
+    options:
+      - "Strategy: notification fan-out; Observer: bidding rules; State: payment routing"
+      - "Strategy: object creation; Observer: lifecycle legality; State: winner selection"
+      - "Strategy: per-type bidding rules and winner determination; Observer: decoupled event notifications (outbid, ending, won); State: which operations are legal in each lifecycle stage"
+      - "Strategy: locking policy; Observer: bid validation; State: currency conversion"
+    answer: 2
+    explanation: |
+      This is the topic's one-line summary: Strategy encapsulates HOW bidding works per
+      auction type, Observer decouples WHO hears about domain events, and State (enum or
+      objects) governs WHAT is legal WHEN. Being able to recite the mapping — and justify
+      each in a sentence — is the fastest way to anchor the whole design in an interview.
+    ref: "concepts.md#key-design-decisions"

@@ -1,0 +1,919 @@
+topic: "Design Splitwise / Expense Sharing"
+domain: lld-and-ood
+topic_slug: design-splitwise
+version: 1
+questions:
+  - id: design-splitwise-001
+    difficulty: beginner
+    tags: [requirements, scoping]
+    question: |
+      In the first five minutes of a "Design Splitwise" interview, which clarifying
+      question most directly shapes the class structure you will draw?
+    options:
+      - "Which cloud provider will host the service?"
+      - "Should receipts be scanned with OCR?"
+      - "Which split types must be supported (equal, exact, percent), and should new ones be easy to add?"
+      - "What color scheme should the mobile app use?"
+    answer: 2
+    explanation: |
+      The set of split types — and the requirement that new ones be addable — is what
+      drives the central design decision (a Strategy hierarchy for split computation).
+      Hosting, OCR, and UI are out of scope for an LLD round; asking about them wastes
+      your five minutes on things that don't change the class diagram.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-splitwise-002
+    difficulty: beginner
+    tags: [money, correctness]
+    question: |
+      Why should expense amounts be modeled as integer cents (or BigDecimal) rather
+      than double in a Splitwise design?
+    options:
+      - "Binary floating point cannot represent many decimal fractions exactly, so split sums drift and the splits-must-equal-total invariant silently breaks"
+      - "double is slower than long on modern CPUs"
+      - "double cannot store values larger than one million"
+      - "YAML files cannot serialize doubles"
+    answer: 0
+    explanation: |
+      Values like 100.00/3 have no exact binary representation, so repeated arithmetic
+      accumulates error and a validation like "sum of splits == total" fails
+      nondeterministically. Integer cents make the invariant exact and checkable with ==.
+      Performance and serialization are not the real concerns.
+    ref: "concepts.md#requirements-clarification"
+
+  - id: design-splitwise-003
+    difficulty: beginner
+    tags: [entities, srp]
+    question: |
+      In the entity model, why should the User class NOT hold balance data such as
+      "totalOwed" fields?
+    options:
+      - "User objects must remain immutable for hashing"
+      - "Balances are relationships between pairs of users, so they belong in a ledger (BalanceSheet), keeping User a pure identity object with one responsibility"
+      - "Java forbids numeric fields on entity classes"
+      - "Balances change too often to store anywhere"
+    answer: 1
+    explanation: |
+      A balance is inherently pairwise — "B owes A 100" involves two users — so storing
+      it on either one duplicates state and invites inconsistency. Putting the ledger in
+      a dedicated BalanceSheet keeps User single-responsibility (identity/profile) and
+      makes ledger invariants testable in one place.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-splitwise-004
+    difficulty: intermediate
+    tags: [strategy-pattern, design-decision]
+    question: |
+      Equal, exact-amount, and percentage splits differ only in how per-user amounts are
+      computed and validated. Which pattern fits this variation best?
+    options:
+      - "Singleton — one global split calculator"
+      - "Decorator — wrap Expense with split behavior"
+      - "Template Method — subclass ExpenseService per split type"
+      - "Strategy — a SplitStrategy interface with one implementation per split type"
+    answer: 3
+    explanation: |
+      Interchangeable algorithms behind a common interface is the textbook Strategy use
+      case: EqualSplitStrategy, ExactSplitStrategy, PercentSplitStrategy all implement
+      validate() and computeAmounts(). Subclassing the service per split type would
+      explode the hierarchy; Decorator adds layered behavior, not alternative algorithms.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-splitwise-005
+    difficulty: intermediate
+    tags: [ocp, if-else, trade-offs]
+    question: |
+      What is the main design cost of computing splits with a switch(splitType) block
+      inside ExpenseService instead of a Strategy hierarchy?
+    options:
+      - "switch statements are slower than virtual dispatch"
+      - "Every new split type forces you to reopen, modify, and re-test ExpenseService — an Open/Closed Principle violation"
+      - "switch cannot handle more than four cases"
+      - "The code will not compile without a default branch"
+    answer: 1
+    explanation: |
+      With a switch, adding shares-based splitting means editing the service that also
+      orchestrates ledger updates and notifications — risking regressions in unrelated
+      logic. With Strategy, a new split type is a new class plus a factory registration;
+      existing tested code is untouched. Performance is negligible either way.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-splitwise-006
+    difficulty: intermediate
+    tags: [factory-pattern, design-decision]
+    question: |
+      What is the role of SplitStrategyFactory in this design?
+    options:
+      - "It computes the split amounts itself"
+      - "It creates a new Expense object for every request"
+      - "It centralizes the SplitType-to-strategy mapping so clients never instantiate concrete strategies directly"
+      - "It persists strategies to the database"
+    answer: 2
+    explanation: |
+      The factory owns the enum-to-implementation lookup (EQUAL -> EqualSplitStrategy,
+      etc.). Callers depend only on the SplitStrategy interface, and because strategies
+      are stateless the factory can hand out shared singleton instances. It doesn't
+      compute splits or build expenses — those are the strategy's and service's jobs.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-splitwise-007
+    difficulty: beginner
+    tags: [balance-sheet, data-model]
+    question: |
+      With the convention balances[A][B] = +150, meaning "B owes A 150", what must the
+      mirror entry balances[B][A] hold for the ledger to stay consistent?
+    options:
+      - "-150"
+      - "+150"
+      - "0"
+      - "The entry must be absent"
+    answer: 0
+    explanation: |
+      The pairwise ledger stores each relationship from both users' perspectives, so the
+      two cells must always be exact negatives: if B owes A 150, then from B's row A is
+      at -150. Maintaining this mirror invariant in a single update() method is what
+      keeps both users seeing the same truth.
+    ref: "concepts.md#balance-sheet-model"
+
+  - id: design-splitwise-008
+    difficulty: beginner
+    tags: [balance-sheet, expense-application]
+    question: |
+      A pays 300 for A, B, and C split equally. After applying this expense to an empty
+      balance sheet, what does the ledger show?
+    options:
+      - "A owes B 100 and A owes C 100"
+      - "B owes A 150 and C owes A 150"
+      - "B owes A 300 and C owes A 300"
+      - "B owes A 100 and C owes A 100"
+    answer: 3
+    explanation: |
+      Each participant's share is 100. A paid, so A's own 100 is skipped (no self-debt);
+      B and C each owe A their 100 shares. A common error is dividing by two instead of
+      three (forgetting the payer is also a participant) which gives the wrong 150 figure.
+    ref: "concepts.md#balance-sheet-model"
+
+  - id: design-splitwise-009
+    difficulty: intermediate
+    tags: [balance-sheet, netting]
+    question: |
+      B already owes A 100. A new expense is applied where A owes B 40. What should the
+      pairwise ledger show afterward, and why?
+    options:
+      - "Two separate IOUs: B->A 100 and A->B 40"
+      - "B owes A 140"
+      - "B owes A 60, because pairwise balances are netted into a single signed amount per pair"
+      - "The ledger rejects the second expense as conflicting"
+    answer: 2
+    explanation: |
+      The ledger stores one net number per user pair, updated with +=. Opposite-direction
+      debts cancel: 100 - 40 = 60. Keeping a list of individual IOUs instead would make
+      every balance query a scan and is not how Splitwise presents balances. The expense
+      history still exists separately — only the ledger is netted.
+    ref: "concepts.md#balance-sheet-model"
+
+  - id: design-splitwise-010
+    difficulty: intermediate
+    tags: [validation, strategy-pattern, srp]
+    question: |
+      Where should the rule "percentages must sum to 100" be enforced, and why?
+    options:
+      - "In ExpenseService, since it orchestrates expense creation"
+      - "In PercentSplitStrategy.validate(), because the rule is knowledge specific to percentage splitting"
+      - "In the User class, since users enter the percentages"
+      - "In BalanceSheet, as a final consistency check"
+    answer: 1
+    explanation: |
+      Each split type owns its own validation rules: exact splits check sum==total,
+      percent splits check sum==100, equal splits check a non-empty participant list.
+      Putting these rules in the service would force it to know every type's internals —
+      exactly the coupling Strategy exists to remove. BalanceSheet should be able to
+      assume expenses arriving at it are already valid.
+    ref: "concepts.md#split-types-and-validation"
+
+  - id: design-splitwise-011
+    difficulty: intermediate
+    tags: [rounding, correctness]
+    question: |
+      100.00 (10000 cents) is split equally among 3 people. Which handling of the
+      leftover cent is acceptable in an interview?
+    options:
+      - "Deterministically assign the remainder cents to the first participants in a stable order, so all splits sum exactly to 10000"
+      - "Switch to double so each person gets 3333.33 cents"
+      - "Round each share to 3333 and let the total be 9999"
+      - "Reject equal splits whenever the total is not divisible by the group size"
+    answer: 0
+    explanation: |
+      10000/3 = 3333 remainder 1; a deterministic rule (first remainder-count users get
+      one extra cent, or the last absorbs the difference) preserves the invariant that
+      splits sum to the total. Losing a cent breaks the ledger's books; doubles reintroduce
+      representation error; rejecting non-divisible totals is unusable as a product.
+    ref: "concepts.md#split-types-and-validation"
+
+  - id: design-splitwise-012
+    difficulty: advanced
+    tags: [debt-simplification, algorithms]
+    question: |
+      What is the core insight that makes debt simplification (minimizing settlement
+      transactions) possible at all?
+    options:
+      - "All debts can be forgiven if the group agrees"
+      - "Debts can always be paid through the group admin"
+      - "Interest does not accrue on group debts"
+      - "Only each user's net position must be honored — individual debts need not be repaid along their original edges"
+    answer: 3
+    explanation: |
+      If X owes A 100 and C owes X 100, X nets to zero and can drop out entirely, with C
+      paying A directly. Because money is fungible, the settlement plan only has to
+      produce the correct net inflow/outflow per person, which is why the problem reduces
+      to matching creditors with debtors rather than repaying each original IOU.
+    ref: "concepts.md#debt-simplification"
+
+  - id: design-splitwise-013
+    difficulty: advanced
+    tags: [debt-simplification, algorithms, greedy]
+    question: |
+      In the greedy min-cash-flow algorithm, what happens at each step?
+    options:
+      - "Every debtor pays every creditor proportionally to their debt"
+      - "The largest creditor and largest debtor are matched; the debtor pays min(credit, debt), fully settling at least one of them"
+      - "Debts are settled in the chronological order the expenses were created"
+      - "A random creditor-debtor pair is matched to avoid bias"
+    answer: 1
+    explanation: |
+      Pairing the extremes and transferring min(credit, |debt|) zeroes out at least one
+      participant per step, which bounds the plan at n-1 transactions for n non-zero
+      users and runs in O(n log n) with two max-heaps. Proportional or chronological
+      settlement produces far more transactions.
+    ref: "concepts.md#debt-simplification"
+
+  - id: design-splitwise-014
+    difficulty: expert
+    tags: [debt-simplification, complexity, np-hard]
+    question: |
+      The interviewer asks: "Is your greedy simplification optimal?" What is the correct
+      senior-level answer?
+    options:
+      - "Yes — greedy always finds the minimum number of transactions"
+      - "No, and no polynomial algorithm can do better than n^2 transactions"
+      - "No — greedy guarantees at most n-1 transactions, but finding the true minimum is NP-hard (it reduces to finding disjoint zero-sum subsets), so greedy is the accepted trade-off"
+      - "The question is meaningless because all plans have the same transaction count"
+    answer: 2
+    explanation: |
+      The true optimum is n minus the maximum number of disjoint subsets that each sum to
+      zero, and finding those subsets is NP-hard via subset-sum. Greedy's n-1 bound with
+      O(n log n) runtime is the standard engineering answer — and knowing precisely why
+      you can't cheaply do better is the senior signal the question probes for.
+    ref: "concepts.md#debt-simplification"
+
+  - id: design-splitwise-015
+    difficulty: intermediate
+    tags: [observer-pattern, design-decision]
+    question: |
+      "Notify all group members when an expense is added" should be implemented how?
+    options:
+      - "Call emailService.send() directly inside ExpenseService.addExpense()"
+      - "Have BalanceSheet send notifications after updating balances"
+      - "Make each User poll the service for new expenses"
+      - "Register ExpenseObserver implementations with the service and fire onExpenseAdded(expense) after the expense is committed"
+    answer: 3
+    explanation: |
+      Observer decouples the core flow from notification channels: email, push, SMS, or
+      an audit log are just additional observers, added without touching addExpense().
+      Hard-coding email in the service violates OCP and SRP; BalanceSheet is a pure
+      ledger and must not know about messaging; polling wastes work and adds latency.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-splitwise-016
+    difficulty: intermediate
+    tags: [composition, inheritance, expense-hierarchy]
+    question: |
+      Many tutorials subclass Expense into EqualExpense, ExactExpense, and
+      PercentExpense. What is the strongest argument for preferring composition (an
+      Expense with a SplitType, computed by a SplitStrategy) instead?
+    options:
+      - "Only the split computation varies — behavior, not identity — so a strategy captures the variation without a parallel class hierarchy and leaves Expense a stable data holder"
+      - "Inheritance is deprecated in modern Java"
+      - "Subclasses cannot be stored in the same List"
+      - "Composition uses less memory per expense object"
+    answer: 0
+    explanation: |
+      An equal-split expense and a percent-split expense are the same kind of thing — a
+      spend event — differing only in one algorithm. Strategy isolates that algorithm;
+      subclassing couples the type system to it and doubles the surface to change when
+      adding a split type. Either can pass an interview, but you must articulate why —
+      "composition over inheritance" is the phrase to say.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-splitwise-017
+    difficulty: beginner
+    tags: [uml, relationships]
+    question: |
+      In the class diagram, Expense-to-Split is composition (filled diamond) while
+      Group-to-User is aggregation (open diamond). What justifies the difference?
+    options:
+      - "Composition is used whenever a class holds a List"
+      - "Splits are meaningless outside their expense and die with it, while users exist independently of any group"
+      - "Aggregation is required for many-to-many relationships"
+      - "UML mandates composition for financial data"
+    answer: 1
+    explanation: |
+      Composition means owned lifecycle: deleting an expense deletes its splits — a split
+      has no identity on its own. Users, by contrast, outlive groups and belong to many.
+      Choosing the arrowheads deliberately (and being able to defend them) is a small but
+      real scoring point in an LLD round.
+    ref: "concepts.md#class-diagram"
+
+  - id: design-splitwise-018
+    difficulty: intermediate
+    tags: [srp, balance-sheet]
+    question: |
+      Why should BalanceSheet be its own class rather than a Map field inside
+      ExpenseService?
+    options:
+      - "Java maps cannot be nested two levels deep"
+      - "A service class may not contain collections"
+      - "The ledger has real behavior and invariants (mirror symmetry, netting, zero-cleanup); embedding it gives the service two reasons to change and makes the ledger untestable in isolation"
+      - "Maps inside services cannot be made thread-safe"
+    answer: 2
+    explanation: |
+      Single Responsibility: ExpenseService orchestrates (validate, create, notify);
+      BalanceSheet owns pairwise-ledger arithmetic. Separated, you can unit-test netting
+      and mirror invariants with no service scaffolding, and a change to ledger storage
+      never risks orchestration regressions.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-splitwise-019
+    difficulty: intermediate
+    tags: [settle-up, modeling]
+    question: |
+      How should "B pays A 60 to settle up" be modeled?
+    options:
+      - "As an EqualExpense of 60 with A as the only participant"
+      - "As a direct ledger mutation (applySettlement) that reduces the pairwise balance — not as a fake expense"
+      - "By deleting the original expenses between A and B"
+      - "As a negative-amount expense paid by A"
+    answer: 1
+    explanation: |
+      A repayment is a balance event, not a spend event. Modeling it as a pseudo-expense
+      with inverted splits corrupts expense history, reports, and totals ("you spent 60"
+      when you repaid a debt). Deleting original expenses destroys the audit trail. A
+      dedicated settleUp path keeps both the ledger and the history truthful.
+    ref: "concepts.md#extensibility"
+
+  - id: design-splitwise-020
+    difficulty: advanced
+    tags: [concurrency, locking]
+    question: |
+      Two threads add expenses concurrently: one touching users (A,B), the other (B,A).
+      With per-pair locks, what prevents deadlock?
+    options:
+      - "Acquire pair locks in a canonical order — e.g., sort the two user ids and always lock the lower id first"
+      - "Use Thread.sleep between lock acquisitions"
+      - "Give the ledger thread priority over expense threads"
+      - "Retry the whole expense whenever any lock is contended"
+    answer: 0
+    explanation: |
+      Deadlock needs a cycle in lock-acquisition order. Sorting participants and locking
+      in that canonical order makes cycles impossible: both threads request the (A,B)
+      pair's locks in the same sequence. Sleeps and priorities don't remove the cycle;
+      blanket retry (livelock-prone) is a heavier hammer than ordered acquisition.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-splitwise-021
+    difficulty: advanced
+    tags: [concurrency, atomicity]
+    question: |
+      Why is replacing the ledger's HashMap with ConcurrentHashMap insufficient to make
+      applyExpense thread-safe?
+    options:
+      - "ConcurrentHashMap does not allow Long values"
+      - "ConcurrentHashMap is slower than synchronized blocks in all cases"
+      - "ConcurrentHashMap cannot be nested inside another map"
+      - "One expense updates multiple cells (a debit and its mirror, for several pairs); per-cell thread-safety cannot make the multi-cell update atomic, so readers can observe a half-applied expense"
+    answer: 3
+    explanation: |
+      ConcurrentHashMap guarantees each individual operation is safe, not that a sequence
+      of operations is atomic. An expense for three participants writes several cells; a
+      concurrent balance read between those writes sees an inconsistent ledger (mirror
+      invariant broken). You need a lock (coarse or per-pair) around the whole update.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-splitwise-022
+    difficulty: intermediate
+    tags: [edge-cases, expense-application]
+    question: |
+      A pays 200 for an expense whose participants are only B and C (A is not a
+      participant). How should applyExpense handle this?
+    options:
+      - "Reject the expense — the payer must always be a participant"
+      - "It is legal: B and C each owe A 100, and there is simply no self-share to skip"
+      - "Add A automatically as a fourth participant"
+      - "Split the amount among B, C, and A anyway"
+    answer: 1
+    explanation: |
+      "I paid for their dinner" is a normal use case: the payer gets credit for the full
+      amount and owes nothing. The self-share-skip logic in applyExpense is conditional
+      (skip a split only if its user equals the payer), so a payer-not-participant
+      expense flows through naturally. Forcing the payer into the split changes amounts
+      the user never asked for.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-splitwise-023
+    difficulty: beginner
+    tags: [api-design, service]
+    question: |
+      Which class should expose addExpense, settleUp, getBalances, and simplifyDebts as
+      the system's public API?
+    options:
+      - "ExpenseService — the facade that orchestrates validation, ledger updates, and notifications"
+      - "BalanceSheet — since it stores the balances"
+      - "User — since users initiate all actions"
+      - "SplitStrategyFactory — since it knows all split types"
+    answer: 0
+    explanation: |
+      The service is the orchestration boundary: it coordinates the strategy (validate,
+      compute), the ledger (apply), and observers (notify). Exposing BalanceSheet
+      directly would let callers bypass validation; putting operations on User scatters
+      orchestration across entities; the factory only maps types to strategies.
+    ref: "concepts.md#api-and-method-signatures"
+
+  - id: design-splitwise-024
+    difficulty: intermediate
+    tags: [extensibility, ocp, strategy-pattern]
+    question: |
+      The interviewer says: "Now add split-by-shares (A:B:C = 2:1:1)." In the Strategy
+      design, what changes are required?
+    options:
+      - "Modify ExpenseService to add a shares branch, and update BalanceSheet"
+      - "Rewrite all existing strategies to accept a shares parameter"
+      - "Change the Split base class to carry a shares field for everyone"
+      - "Add a ShareSplit subtype, a ShareSplitStrategy, a SHARES enum value, and one factory registration — no existing class changes"
+    answer: 3
+    explanation: |
+      This is the Open/Closed payoff the whole design was built for: the new type carries
+      its input (share count) in its own Split subtype, its math lives in its own
+      strategy, and the factory line wires it up. ExpenseService, BalanceSheet, and the
+      existing strategies remain untouched and un-retested.
+    ref: "concepts.md#extensibility"
+
+  - id: design-splitwise-025
+    difficulty: advanced
+    tags: [extensibility, multi-currency]
+    question: |
+      To extend the design to multi-currency, which refactor is most fundamental?
+    options:
+      - "Store all amounts in USD and convert in the UI"
+      - "Add a currency column to the User class"
+      - "Replace bare long amounts with a Money value object (amount + Currency), making balances per-currency or converting at entry via an injected ExchangeRateProvider interface"
+      - "Create one ExpenseService instance per currency"
+    answer: 2
+    explanation: |
+      The primitive-obsession shortcut (long everywhere) is exactly what multi-currency
+      punishes: 100 INR + 100 USD must not add. A Money type makes mixed-currency
+      arithmetic a compile-time/domain error, and injecting a rate provider interface
+      keeps the external dependency (rates) mockable. Currency is a property of amounts,
+      not of users.
+    ref: "concepts.md#extensibility"
+
+  - id: design-splitwise-026
+    difficulty: intermediate
+    tags: [edge-cases, expense-edit]
+    question: |
+      How should editing an existing expense update the balance sheet?
+    options:
+      - "Recompute the entire balance sheet from all expenses on every edit"
+      - "Apply the reversal of the old expense's splits, then apply the new version"
+      - "Forbid edits — expenses are immutable in all designs"
+      - "Apply only the delta on the payer's row and leave other rows unchanged"
+    answer: 1
+    explanation: |
+      Reverse-then-apply is O(participants) per edit and keeps the ledger incremental. A
+      full rebuild on every edit is O(all expenses) — though rebuilding from the expense
+      log is a good offline consistency check (an event-sourcing idea worth mentioning).
+      Patching only the payer's row breaks the mirror invariant for the other users.
+    ref: "concepts.md#extensibility"
+
+  - id: design-splitwise-027
+    difficulty: beginner
+    tags: [strategy-pattern, validation]
+    question: |
+      In ExactSplitStrategy, what must validate() check?
+    options:
+      - "That all participants belong to the same group"
+      - "That each amount is an even number of cents"
+      - "That every participant provides an amount at most equal to the total"
+      - "That the provided per-user amounts sum exactly to the expense total"
+    answer: 3
+    explanation: |
+      The defining rule of an exact split is conservation: user-entered amounts must add
+      up to what was paid, in integer cents. Group membership is a service-level concern,
+      and per-amount caps or evenness are not requirements — one person legitimately
+      might owe the entire bill.
+    ref: "concepts.md#split-types-and-validation"
+
+  - id: design-splitwise-028
+    difficulty: intermediate
+    tags: [data-model, trade-offs]
+    question: |
+      What do you lose by storing only net balance per user (Map<UserId, Long>) instead
+      of the pairwise map?
+    options:
+      - "The ability to answer 'what does B owe A specifically' — Splitwise's main screen — because per-user nets erase who-owes-whom"
+      - "The ability to compute debt simplification"
+      - "Support for groups with more than two members"
+      - "The ability to record settlements"
+    answer: 0
+    explanation: |
+      Per-user nets are exactly what simplification needs (so option two is backwards),
+      but they cannot be decomposed back into pairwise debts — many pairwise
+      configurations produce identical nets. Since the product's core query is pairwise,
+      keep the pairwise map as the source of truth and derive nets when simplifying.
+    ref: "concepts.md#balance-sheet-model"
+
+  - id: design-splitwise-029
+    difficulty: intermediate
+    tags: [observer-pattern, extensibility]
+    question: |
+      A month after launch, the team must add an audit log recording every expense for
+      compliance. In the Observer-based design, what does this require?
+    options:
+      - "Adding an auditLog.write() call inside ExpenseService.addExpense"
+      - "Subclassing ExpenseService into AuditedExpenseService"
+      - "Registering a new AuditLogObserver — no changes to ExpenseService or existing observers"
+      - "Adding an audit flag parameter to addExpense"
+    answer: 2
+    explanation: |
+      This is precisely the scenario Observer buys you: cross-cutting reactions to domain
+      events are plug-in classes. Editing the service or subclassing it for each new
+      concern reintroduces the coupling the pattern removed, and a boolean flag parameter
+      is a design smell (control coupling) that grows with each new concern.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-splitwise-030
+    difficulty: beginner
+    tags: [scoping, hld-boundary]
+    question: |
+      The interviewer asks, "How would this handle 50 million users?" What is the right
+      move in an LLD round?
+    options:
+      - "Redesign the classes around a distributed hash table"
+      - "Acknowledge it is a system-design (HLD) concern — partitioning the ledger, async materialization — and keep this round's design single-node OO"
+      - "Add caching annotations to every getter"
+      - "Refuse to answer since scale was scoped out"
+    answer: 1
+    explanation: |
+      Machine-coding rounds evaluate class design, not infrastructure. The strong answer
+      names the HLD shape in one or two sentences (shard by user, event log plus
+      materialized balances) and explicitly returns to the OO design. Flat refusal loses
+      points; pivoting the whole design to distributed concerns loses the round's actual
+      objective.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: design-splitwise-031
+    difficulty: intermediate
+    tags: [edge-cases, settlement]
+    question: |
+      B owes A 50, but B records a settlement payment of 80 to A. What is a defensible
+      handling, matching real Splitwise behavior?
+    options:
+      - "Allow it and let the pairwise balance flip direction — A now owes B 30"
+      - "Silently cap the settlement at 50"
+      - "Split the extra 30 among the group"
+      - "Crash with an unchecked exception"
+    answer: 0
+    explanation: |
+      Overpayment legitimately flips the relationship (B prepaid future expenses), and
+      the signed pairwise model handles it with the same += arithmetic — no special case.
+      Rejecting is also defensible if you state it as a product rule, but silently
+      altering the user's number or distributing it to others invents money movements
+      nobody authorized.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-splitwise-032
+    difficulty: advanced
+    tags: [idempotency, concurrency]
+    question: |
+      A mobile client times out and retries addExpense with the same data. How does the
+      design prevent the group being charged twice?
+    options:
+      - "Rely on TCP to deduplicate the retried request"
+      - "Lock the whole service during any network operation"
+      - "Compare the new expense's amount with the previous one and skip if equal"
+      - "Require a client-generated expense id and reject (or return the existing result for) duplicates — making addExpense idempotent"
+    answer: 3
+    explanation: |
+      Idempotency keys are the standard fix: the client mints the id, so a retry carries
+      the same id and the service recognizes it. Amount comparison misfires on two real
+      identical expenses (two 300 dinners). TCP retransmission operates below the
+      request level and cannot deduplicate application retries.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-splitwise-033
+    difficulty: intermediate
+    tags: [debt-simplification, api-design]
+    question: |
+      Why should simplifyDebts return a List<Transaction> plan rather than directly
+      rewriting the balance sheet?
+    options:
+      - "Returning values is faster than mutating maps"
+      - "Rewriting creditors without consent confuses users — Splitwise makes simplification an opt-in group setting — and a pure function over net balances is trivially testable"
+      - "The balance sheet cannot be modified after creation"
+      - "Transactions must be stored in a queue for legal reasons"
+    answer: 1
+    explanation: |
+      Simplification changes WHO you owe, not how much you owe overall; users who owed a
+      friend suddenly owe a stranger in the group. Real Splitwise gates this behind a
+      group setting. Design-wise, a side-effect-free DebtSimplifier (net balances in,
+      plan out) separates the algorithm from the decision to apply it.
+    ref: "concepts.md#debt-simplification"
+
+  - id: design-splitwise-034
+    difficulty: beginner
+    tags: [entities, group]
+    question: |
+      What is the Group class's responsibility in this design?
+    options:
+      - "Storing each member's net balance"
+      - "Computing splits for group expenses"
+      - "Scoping — a named membership list that expenses and balance views can be filtered by; balances themselves remain pairwise between users"
+      - "Owning the lifecycle of its Users, deleting them when the group is deleted"
+    answer: 2
+    explanation: |
+      A group is a convenience scope (trip, flat), not a financial entity: the ledger
+      stays user-pair based so ad hoc non-group expenses work with the same machinery.
+      Groups aggregate users (open diamond — users outlive groups), and split math
+      belongs to strategies, not to Group.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-splitwise-035
+    difficulty: advanced
+    tags: [debt-simplification, complexity]
+    question: |
+      For n users with non-zero net balances, what does the greedy min-cash-flow
+      algorithm guarantee about the settlement plan size and runtime?
+    options:
+      - "At most n-1 transactions, in O(n log n) time using two max-heaps"
+      - "Exactly n/2 transactions, in O(n) time"
+      - "At most n-1 transactions, but requires O(2^n) time"
+      - "At most log n transactions, in O(n^2) time"
+    answer: 0
+    explanation: |
+      Each greedy step fully settles at least one user (the smaller of the matched pair),
+      so at most n-1 steps occur; each step is two heap pops and at most one push, giving
+      O(n log n). The exponential cost belongs to the OPTIMAL solution (NP-hard), not to
+      greedy — mixing those up is a common interview stumble.
+    ref: "concepts.md#debt-simplification"
+
+  - id: design-splitwise-036
+    difficulty: intermediate
+    tags: [code-structure, strategy-pattern]
+    question: |
+      In the code skeleton, ExactSplit carries inputAmountCents and PercentSplit carries
+      percent, while base Split carries the computed amountCents. What design idea is
+      this?
+    options:
+      - "The Flyweight pattern, sharing split objects between expenses"
+      - "Defensive copying to protect against mutation"
+      - "Premature optimization that should be removed"
+      - "Each subtype carries the input data its matching strategy needs, while the base class holds the uniform output every consumer (ledger, UI) reads"
+    answer: 3
+    explanation: |
+      The Split hierarchy is a data-carrier hierarchy: the polymorphism is in the INPUT
+      shape (exact amount vs percent vs nothing for equal), and each strategy downcasts
+      to its expected subtype. Downstream code — BalanceSheet, display — only ever reads
+      the computed amountCents on the base type and stays split-type agnostic.
+    ref: "concepts.md#code-skeleton"
+
+  - id: design-splitwise-037
+    difficulty: intermediate
+    tags: [edge-cases, validation]
+    question: |
+      Which of these inputs should strategy validation REJECT?
+    options:
+      - "A payer who is not among the participants"
+      - "An exact split where the amounts sum to the total"
+      - "An expense whose only participant is the payer"
+      - "A percent split of 40 plus 30 plus 20 (summing to 90)"
+    answer: 3
+    explanation: |
+      Percents must sum to 100 — 90 leaves 10 percent of the money unassigned and breaks
+      the conservation invariant. The other three are all legal: payer-not-participant
+      ("I paid for them") and payer-only ("logged for my records, no debts") are real use
+      cases, and an exact split summing to the total is precisely the valid case.
+    ref: "concepts.md#split-types-and-validation"
+
+  - id: design-splitwise-038
+    difficulty: advanced
+    tags: [extensibility, multi-payer]
+    question: |
+      To support multiple payers ("A paid 200, B paid 100 of a 300 bill"), what is the
+      key structural change?
+    options:
+      - "Create two separate expenses, one per payer, each with full splits"
+      - "Generalize Expense's paidBy field to Map<User, Long> with a sum-equals-total validation, and have applyExpense work off each user's net (paid minus owed) position"
+      - "Add a co-payer observer that adjusts balances after the fact"
+      - "Store the second payer as a negative split"
+    answer: 1
+    explanation: |
+      Multi-payer is a structural change to Expense (which is why it's worth asking about
+      in requirements). The clean ledger update computes each user's net position: paid
+      amount minus owed share, then matches negatives to positives. Two separate
+      expenses distort history and double the description; negative splits abuse the
+      split abstraction into meaning two different things.
+    ref: "concepts.md#extensibility"
+
+  - id: design-splitwise-039
+    difficulty: beginner
+    tags: [balance-sheet, queries]
+    question: |
+      With the pairwise map balances[creditor][debtor], what is the complexity of
+      answering "how much does B owe A"?
+    options:
+      - "O(1) — one nested map lookup"
+      - "O(number of expenses) — must replay history"
+      - "O(n^2) — must scan all pairs"
+      - "O(n log n) — requires sorting balances first"
+    answer: 0
+    explanation: |
+      The pairwise ledger is a materialized view precisely so the product's hottest query
+      is a hash lookup: balances[A][B] answers it directly. Replaying expenses would be
+      the cost if you stored only the event log — a fine source of truth, but you'd
+      materialize this map from it for exactly this reason.
+    ref: "concepts.md#balance-sheet-model"
+
+  - id: design-splitwise-040
+    difficulty: intermediate
+    tags: [srp, expense-service]
+    question: |
+      Which responsibility does ExpenseService correctly OWN (rather than delegate)?
+    options:
+      - "Computing each participant's split amount"
+      - "Maintaining the mirror-entry invariant in the ledger"
+      - "Orchestration — sequencing validate, compute, ledger apply, and observer notification for each operation"
+      - "Deciding how the leftover cent is distributed in an equal split"
+    answer: 2
+    explanation: |
+      The service is a facade/orchestrator: its single reason to change is the workflow
+      itself. Split math and rounding policy belong to strategies; the mirror invariant
+      belongs to BalanceSheet.update(). If you find arithmetic inside the service, a
+      responsibility has leaked.
+    ref: "concepts.md#core-objects-and-entities"
+
+  - id: design-splitwise-041
+    difficulty: intermediate
+    tags: [rounding, determinism]
+    question: |
+      When distributing remainder cents in an equal split, why sort participants by a
+      stable key (like user id) before assigning the extra cents?
+    options:
+      - "Sorting makes the split computation faster"
+      - "So the computation is deterministic — replays, retries, and cross-node recomputation assign the extra cents to the same users every time"
+      - "Alphabetical fairness is legally required for shared expenses"
+      - "HashMap ordering is guaranteed stable so sorting is redundant"
+    answer: 1
+    explanation: |
+      If the extra cent lands on whoever iteration order happens to produce, a retried or
+      recomputed expense can yield different splits — a reconciliation nightmare. Stable
+      ordering makes computeAmounts a pure function of its inputs. HashMap iteration
+      order is explicitly NOT guaranteed, which is the trap the distractor tempts.
+    ref: "concepts.md#split-types-and-validation"
+
+  - id: design-splitwise-042
+    difficulty: advanced
+    tags: [event-sourcing, consistency]
+    question: |
+      Keeping the full expense log alongside the materialized balance sheet enables
+      which valuable capability?
+    options:
+      - "Rebuilding the entire ledger from scratch as a consistency check (and recovering from ledger corruption) — an event-sourcing style benefit"
+      - "Avoiding the need for any validation in strategies"
+      - "Making balance queries O(1) instead of O(n)"
+      - "Eliminating the need for locks in concurrent updates"
+    answer: 0
+    explanation: |
+      The expense log is the source of truth; the pairwise ledger is a derived
+      materialized view. If a bug (like a missed mirror update) corrupts the ledger, you
+      can replay the log to rebuild it, and periodic replay-and-compare catches drift.
+      It doesn't remove the need for validation or synchronization, and the O(1) query
+      speed comes from the materialized map itself.
+    ref: "concepts.md#extensibility"
+
+  - id: design-splitwise-043
+    difficulty: beginner
+    tags: [patterns, recognition]
+    question: |
+      Which three patterns form the standard backbone of a Splitwise LLD answer?
+    options:
+      - "Singleton, Prototype, and Bridge"
+      - "State, Memento, and Visitor"
+      - "Strategy (split computation), Observer (expense notifications), and Factory (strategy creation)"
+      - "Adapter, Proxy, and Flyweight"
+    answer: 2
+    explanation: |
+      Strategy handles the interchangeable split algorithms, Observer decouples
+      notifications from the core flow, and a simple Factory maps SplitType to its
+      strategy. State/Memento/Visitor fit state-machine problems like elevators or
+      vending machines — a different problem family — and the structural patterns in the
+      other options have no varying-algorithm or event need to serve here.
+    ref: "concepts.md#key-design-decisions"
+
+  - id: design-splitwise-044
+    difficulty: intermediate
+    tags: [group, edge-cases]
+    question: |
+      A user tries to leave a group while owing another member 500. Why does the
+      pairwise balance model make this a PRODUCT decision rather than a data-model
+      problem?
+    options:
+      - "Groups store no balances, so leaving cannot affect data"
+      - "The debt is automatically forgiven by the aggregation relationship"
+      - "The group admin inherits the departing user's debts"
+      - "Balances live between user pairs, not inside the group, so the 500 debt survives departure intact — the only question is whether the product blocks leaving until settled"
+    answer: 3
+    explanation: |
+      Because the ledger is keyed by user pairs (the group is just a filter/scope),
+      membership changes cannot orphan or corrupt balances. That turns "can they leave?"
+      into pure policy: block until settled, or allow and keep showing the pair balance
+      outside the group. A group-owned ledger would have made this a genuinely hard
+      migration problem — a reason to prefer the pairwise model.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-splitwise-045
+    difficulty: intermediate
+    tags: [recurring-expenses, extensibility]
+    question: |
+      For recurring expenses (monthly rent split among flatmates), what is the cleanest
+      extension?
+    options:
+      - "Add isRecurring and cadence fields directly to Expense"
+      - "A separate RecurringExpenseSchedule (template plus cadence) that a scheduler uses to CREATE ordinary Expense instances on each due date"
+      - "Re-apply the same Expense object to the ledger every month"
+      - "Ask users to duplicate the expense manually each month"
+    answer: 1
+    explanation: |
+      A schedule is a factory-like generator of expenses, not a kind of expense: keeping
+      it separate leaves Expense immutable and simple, and every generated instance flows
+      through the normal validate/apply/notify pipeline. Flags on Expense bloat every
+      expense with fields most never use, and re-applying one object double-counts
+      history and breaks idempotency.
+    ref: "concepts.md#extensibility"
+
+  - id: design-splitwise-046
+    difficulty: beginner
+    tags: [expense-application, correctness]
+    question: |
+      In BalanceSheet.applyExpense, why is the payer's own split skipped?
+    options:
+      - "Skipping it halves the number of map writes"
+      - "The payer's split always has a zero amount"
+      - "A user cannot owe themselves — recording a self-edge would inflate the ledger with meaningless A-owes-A entries"
+      - "The strategy already removed the payer from the splits list"
+    answer: 2
+    explanation: |
+      The payer's share of their own expense is money they spent on themselves — there is
+      no debt to record. Strategies compute a split for every participant including the
+      payer (correctly, for validation and display), so applyExpense must skip the split
+      whose user equals the payer. Graders specifically look for this line.
+    ref: "concepts.md#code-skeleton"
+
+  - id: design-splitwise-047
+    difficulty: advanced
+    tags: [trade-offs, locking]
+    question: |
+      When would you choose coarse-grained locking (synchronizing all BalanceSheet
+      methods) over per-pair locks in this design?
+    options:
+      - "When maximum write throughput across many concurrent groups is the top priority"
+      - "In the interview's single-node design, where correctness and simplicity beat throughput and contention is low — offering per-pair locking as the scaling refinement"
+      - "Never — fine-grained locking is always superior"
+      - "Only when the ledger is stored in a database"
+    answer: 1
+    explanation: |
+      Coarse locking is trivially correct (whole expense atomic, mirror invariant safe)
+      and its cost is invisible at interview-problem scale. Per-pair locks buy
+      concurrency at the price of ordered-acquisition complexity and deadlock risk if
+      done wrong. Leading with the simple-correct option and naming the refinement is
+      stronger than premature fine-graining — trade-off articulation is the real test.
+    ref: "concepts.md#concurrency-and-edge-cases"
+
+  - id: design-splitwise-048
+    difficulty: intermediate
+    tags: [api-design, dependencies]
+    question: |
+      In the class diagram, ExpenseService has a dashed-arrow dependency on
+      SplitStrategyFactory and DebtSimplifier but a solid association to BalanceSheet.
+      What does this distinction convey?
+    options:
+      - "Dashed arrows indicate deprecated classes"
+      - "The factory and simplifier are interfaces while BalanceSheet is concrete"
+      - "BalanceSheet is optional while the factory is mandatory"
+      - "The service holds the BalanceSheet as long-lived owned state, while it merely USES the factory and simplifier transiently during a method call"
+    answer: 3
+    explanation: |
+      UML dependency (dashed) means "uses temporarily" — a parameter, local variable, or
+      static call — while association (solid) means a structural field relationship. The
+      ledger is the service's persistent collaborator; the factory lookup and the
+      stateless simplification are per-call utilities. Reading and drawing this
+      distinction correctly signals UML fluency under time pressure.
+    ref: "concepts.md#class-diagram"
