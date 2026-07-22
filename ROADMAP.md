@@ -88,7 +88,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 21 ✅ (Pass 1, 1,065 MCQs) |
 | [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 18 ✅ (Pass 1, 868 MCQs) |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
-| [gRPC](topics/grpc/README.md) | 16 | 0 (coming soon) |
+| [gRPC](topics/grpc/README.md) | 16 | 16 ✅ (Pass 1, 806 MCQs) |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 15 ✅ (Pass 1, 815 MCQs) |
 | [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (all tiers, 1,291 MCQs) |
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
@@ -102,6 +102,22 @@ and 5 new domains added; counts below reflect the current READMEs.
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
+
+- **Session 41 (2026-07-23):** **gRPC Pass 1** (NEW authored domain, was coming-soon) — 16 topics,
+  **806 MCQs**, 51 Mermaid (all render clean). High-performance RPC with Protocol Buffers over HTTP/2,
+  at the mechanism/protocol level. Topics: fundamentals, Protocol Buffers (proto3/wire-encoding/presence),
+  service/message definition, the 4 RPC/streaming types, HTTP/2 foundations, channels/stubs/lifecycle,
+  deadlines/cancellation, metadata/interceptors, status/error model, schema evolution, security/mTLS,
+  load balancing & service discovery, retries/resiliency, observability, gRPC-Web/gateways, gRPC-vs-
+  REST-vs-GraphQL. Emphasizes wire truth: status in HTTP/2 trailers, 5-byte framing, proto3 field-number
+  contract, 17 status codes + retryability, absolute deadlines + propagation, why L7/client-side LB is
+  required, gRPC-Web needs a proxy, gRFC A6 retry. BOUNDARIES cross-ref networking (HTTP/2, TLS),
+  rest-api-design (REST/GraphQL), reliability-ops (resilience theory), observability, system-design
+  (mesh). Built via `grpc-authoring.js` (author→verify, 32 agents, 0 errors); verify fixed answer-key
+  clustering + confirmed specs vs grpc.io/protobuf.dev. Moved grpc coming-soon → authored (19 authored
+  domains, 1 coming-soon: apache-tomcat). Commit e263818. Also this session (earlier): catalog/domain
+  UI polish (card redesign → orange badges → topics-only mono; card titles shortened to avoid truncation;
+  domain-hero descriptions via shared src/lib/domain-blurbs.ts; landing "The Library" reframed).
 
 - **Session 40 (2026-07-22):** **Hibernate/JPA Pass 2 + Cloud Computing Patterns group + deploy-URL.**
   (1) **Hibernate & JPA Pass 2 (deepen)** — research→deepen→verify (54 agents, 0 errors); grew
