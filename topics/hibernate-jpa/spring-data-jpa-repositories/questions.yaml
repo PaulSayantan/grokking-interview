@@ -194,9 +194,9 @@ questions:
   options:
   - It always returns true and lets the caller discover the end
   - It reads the table's row-count statistics
-  - It requests one more row than the page size and checks if it came back
   - It runs the data query twice
-  answer: 2
+  - It requests one more row than the page size and checks if it came back
+  answer: 3
   explanation: |
     Spring asks the database for `pageSize + 1` rows. If the extra row is present, there
     is a next page (`hasNext()` true) and the extra row is trimmed off; otherwise this is
@@ -553,10 +553,10 @@ questions:
     firing 1 + N queries. Which is the correct repository-level fix?
   options:
   - Change @OneToMany books to FetchType.EAGER
-  - Add @EntityGraph(attributePaths = "books") or a JOIN FETCH @Query
-  - Wrap each access in a new transaction
   - Enable Open-Session-In-View
-  answer: 1
+  - Wrap each access in a new transaction
+  - Add @EntityGraph(attributePaths = "books") or a JOIN FETCH @Query
+  answer: 3
   explanation: |
     Fetch what the use case needs per query: `@EntityGraph(attributePaths="books")` or a
     `JOIN FETCH` `@Query`. Switching to global EAGER causes N+1/Cartesian products
@@ -595,10 +595,10 @@ questions:
     `MultipleBagFetchException`?
   options:
   - Lists are not supported by JPA
-  - Two bag collections joined together create a Cartesian product Hibernate refuses
   - The second-level cache cannot hold two bags
   - JOIN FETCH only works with @ManyToOne
-  answer: 1
+  - Two bag collections joined together create a Cartesian product Hibernate refuses
+  answer: 3
   explanation: |
     Fetching two bag (unordered `List`) collections simultaneously multiplies rows into a
     Cartesian product, which Hibernate rejects with `MultipleBagFetchException`. Fetch one
@@ -654,10 +654,10 @@ questions:
     do?
   options:
   - Opens a new transaction for every lazy load
-  - Keeps the persistence context open for the whole web request, including view/serialization
   - Disables the first-level cache during rendering
   - Forces all associations to EAGER
-  answer: 1
+  - Keeps the persistence context open for the whole web request, including view/serialization
+  answer: 3
   explanation: |
     OSIV binds the `EntityManager`/persistence context to the whole request thread, so
     lazy associations touched during view rendering or JSON serialization can still
@@ -675,10 +675,10 @@ questions:
     LazyInitializationException?
   options:
   - It disables the second-level cache
-  - It hides view-layer N+1, holds DB connections longer, and runs queries outside the tx boundary
   - It makes derived queries fail at startup
   - It forces every query to be native
-  answer: 1
+  - It hides view-layer N+1, holds DB connections longer, and runs queries outside the tx boundary
+  answer: 3
   explanation: |
     OSIV lets lazy loads fire silently during serialization (view-layer N+1, each in
     auto-commit), can hold the DB connection for the entire request (hurting pool
@@ -716,10 +716,10 @@ questions:
     Which derived-query prefix limits results to the first 3 rows?
   options:
   - findLimit3By...
-  - findTop3By... (or findFirst3By...)
   - find3By...
   - findMax3By...
-  answer: 1
+  - findTop3By... (or findFirst3By...)
+  answer: 3
   explanation: |
     `findTop3By...` and `findFirst3By...` (equivalently `Top`/`First` with a number) limit
     the result set. Without a number, `findTop`/`findFirst` return a single result. There
@@ -776,10 +776,10 @@ questions:
     `PagingAndSortingRepository`?
   options:
   - It was removed entirely
-  - It no longer extends CrudRepository; it is a standalone add-on interface
   - It now requires native queries
   - It merged into Repository
-  answer: 1
+  - It no longer extends CrudRepository; it is a standalone add-on interface
+  answer: 3
   explanation: |
     In Spring Data 3.x `PagingAndSortingRepository` no longer extends `CrudRepository` —
     it is a standalone interface providing only the paging/sorting `findAll` overloads.
@@ -854,10 +854,10 @@ questions:
     mechanism owned?
   options:
   - It does not degrade; OFFSET is O(1)
-  - The DB still scans and discards the skipped rows; keyset pagination is covered in messaging-databases
   - Because Spring re-runs the COUNT for every page
   - Because Hibernate caches every prior page in memory
-  answer: 1
+  - The DB still scans and discards the skipped rows; keyset pagination is covered in messaging-databases
+  answer: 3
   explanation: |
     With `OFFSET`, the database still reads and discards all skipped rows, so deep pages
     get progressively slower. Keyset/seek pagination avoids this. The DB-level mechanics
@@ -923,3 +923,644 @@ questions:
     context (no per-entity load, no cascade/callbacks). `deleteAll()` loads each entity and
     calls `remove`, honoring cascades and lifecycle callbacks but at higher cost.
   ref: concepts.md#the-repository-interface-hierarchy
+- id: spring-data-jpa-repositories-047
+  difficulty: expert
+  tags:
+  - scroll-api
+  - keyset
+  - window
+  - pagination
+  question: |
+    An interviewer asks how to paginate a 50-million-row table in Spring Data JPA without
+    the deep-`OFFSET` slowdown and without dropping to raw SQL. Which modern feature answers
+    this directly?
+  options:
+  - Return Page<T> with a large page size so fewer COUNT queries run
+  - Return Slice<T> with a very small page size
+  - Wrap findAll in a @Transactional(readOnly=true) loop
+  - Return a Window<T> using ScrollPosition.keyset() (Scroll API, Spring Data 3.1+)
+  answer: 3
+  explanation: |
+    The Scroll API (Spring Data 3.1+) returns `Window<T>` and, with
+    `ScrollPosition.keyset()`, rewrites the query into a seek predicate
+    (`WHERE id > ? ORDER BY id LIMIT n+1`). It uses the index directly — no OFFSET scan and
+    no COUNT — so any page is equally cheap. `Page`/`Slice` still use LIMIT/OFFSET.
+  ref: concepts.md#scroll-api-window-and-keyset-pagination
+- id: spring-data-jpa-repositories-048
+  difficulty: advanced
+  tags:
+  - scroll-api
+  - offset
+  - keyset
+  question: |
+    What is the practical difference between `ScrollPosition.offset()` and
+    `ScrollPosition.keyset()` in the Scroll API?
+  options:
+  - offset() emits LIMIT/OFFSET (deep pages still scan skipped rows); keyset() emits a seek predicate on the sort keys
+  - offset() is for ascending sorts, keyset() for descending
+  - keyset() runs a COUNT query while offset() does not
+  - They are aliases; the runtime picks one automatically
+  answer: 0
+  explanation: |
+    `offset()` scrolling still generates `LIMIT ... OFFSET ...`, so it does not fix deep-page
+    degradation (it behaves like a `Slice`). `keyset()` scrolling emits a seek predicate
+    (`WHERE (keys) > (?)`) against the sort columns, using the index and avoiding both the
+    skipped-row scan and any COUNT.
+  ref: concepts.md#scroll-api-window-and-keyset-pagination
+- id: spring-data-jpa-repositories-049
+  difficulty: advanced
+  tags:
+  - scroll-api
+  - window
+  - iteration
+  question: |
+    Given a `Window<User> window` from a keyset scroll, how do you obtain the position to
+    fetch the next window, and how does the window know there is more data?
+  options:
+  - Call window.nextPageable(); it runs a COUNT to know the total
+  - Call window.positionAt(window.size() - 1) for the next ScrollPosition; hasNext() uses a size+1 probe
+  - Increment the page number manually; hasNext() reads table statistics
+  - There is no next-position API; you must re-run with a larger limit
+  answer: 1
+  explanation: |
+    `window.positionAt(index)` (or `positionAt(entity)`) yields the `ScrollPosition` to resume
+    from — the keyset of that row. Like a `Slice`, the window fetches `size + 1` rows and
+    `hasNext()` is true if the extra row came back. No COUNT is involved.
+  ref: concepts.md#scroll-api-window-and-keyset-pagination
+- id: spring-data-jpa-repositories-050
+  difficulty: expert
+  tags:
+  - query-by-example
+  - qbe
+  - limitations
+  question: |
+    A teammate wants to build a filter with `age > 30` using Query By Example (QBE). Why
+    won't it work, and what should they use instead?
+  options:
+  - QBE needs a native query; add nativeQuery=true
+  - QBE only supports equality and string LIKE matching — no ranges/inequalities; use Specifications or QueryDSL
+  - QBE requires the probe to be a managed entity; detach it first
+  - QBE works only on numeric primary keys, not on age
+  answer: 1
+  explanation: |
+    QBE derives predicates from a probe's non-null fields using only `=` and (for strings)
+    `LIKE`. It has no `<`, `>`, `BETWEEN`, `IN`, or nested OR. A range like `age > 30` cannot
+    be expressed — switch to Specifications or QueryDSL, which support operators.
+  ref: concepts.md#query-by-example-qbe
+- id: spring-data-jpa-repositories-051
+  difficulty: advanced
+  tags:
+  - query-by-example
+  - qbe
+  - primitive
+  - gotcha
+  question: |
+    You build a QBE probe for a `User` whose `boolean active` field defaults to `false` and
+    you never set it. Unexpectedly, every result has `active = false`. Why?
+  options:
+  - QBE ignores boolean fields entirely
+  - A primitive boolean cannot be null, so it always contributes `active = false` unless the path is ignored
+  - QBE inverts unset booleans to false as a default filter
+  - The matcher defaulted to matchingAny(), flipping the value
+  answer: 1
+  explanation: |
+    QBE ignores `null` fields, but a primitive `boolean` can never be null — its default
+    `false` is a real value, so it becomes an `active = false` predicate. Exclude it with
+    `ExampleMatcher.matching().withIgnorePaths("active")`, or use a boxed `Boolean`.
+  ref: concepts.md#query-by-example-qbe
+- id: spring-data-jpa-repositories-052
+  difficulty: intermediate
+  tags:
+  - query-by-example
+  - qbe
+  - matcher
+  question: |
+    In QBE, what does `ExampleMatcher.matchingAny()` change versus the default
+    `matchingAll()`?
+  options:
+  - It combines the probe's field predicates with OR instead of AND
+  - It makes all string matches case-insensitive
+  - It ignores null fields (the default already does the opposite)
+  - It switches the query to a native SQL query
+  answer: 0
+  explanation: |
+    `matchingAll()` (the default) ANDs the probe's non-null field predicates; `matchingAny()`
+    ORs them. Case handling (`withIgnoreCase`) and string matching mode (`withStringMatcher`)
+    are configured separately.
+  ref: concepts.md#query-by-example-qbe
+- id: spring-data-jpa-repositories-053
+  difficulty: advanced
+  tags:
+  - native-query
+  - sql-result-set-mapping
+  - constructor-result
+  question: |
+    You need a native SQL join mapped into a DTO with a constructor. Which JPA construct maps
+    the result set columns to the DTO constructor arguments?
+  options:
+  - '@SqlResultSetMapping with @ConstructorResult (columns matched by position)'
+  - '@EntityGraph on the DTO'
+  - '@Embeddable on the DTO'
+  - A closed interface projection is the only option for native queries
+  answer: 0
+  explanation: |
+    `@SqlResultSetMapping` with `@ConstructorResult` (listing `@ColumnResult`s) maps a native
+    result set into a DTO by invoking its constructor; the `@ColumnResult` order must match
+    the constructor parameter order. A `@NamedNativeQuery` references the mapping by name.
+  ref: concepts.md#native-query-result-mapping
+- id: spring-data-jpa-repositories-054
+  difficulty: expert
+  tags:
+  - native-query
+  - interface-projection
+  - alias
+  - gotcha
+  question: |
+    An interface projection over a native query has `Long getBookCount()`, and the SQL is
+    `SELECT ..., count(b.id) FROM ...`. The value comes back null. What is the fix?
+  options:
+  - Add nativeQuery=false to force JPQL
+  - 'Alias the column to match the getter: count(b.id) AS bookCount'
+  - Rename the getter to getCount()
+  - Interface projections cannot use aggregate functions; use a DTO
+  answer: 1
+  explanation: |
+    Spring binds native result-set columns to interface getters by matching the column
+    **alias** to the getter name. An unaliased/snake_case column (`book_count`) won't bind to
+    `getBookCount()`. Alias every column to match the getter (`AS bookCount`) so the
+    projection populates correctly.
+  ref: concepts.md#native-query-result-mapping
+- id: spring-data-jpa-repositories-055
+  difficulty: advanced
+  tags:
+  - get-reference
+  - find-by-id
+  - lazy-proxy
+  question: |
+    What SQL does `repo.getReferenceById(42L)` execute at the moment it is called (row 42
+    exists)?
+  options:
+  - A SELECT loading all columns immediately, like findById
+  - None — it returns an uninitialized proxy; the SELECT fires only when a non-id property is accessed
+  - A SELECT of just the id column to verify existence
+  - A SELECT ... FOR UPDATE to lock the row
+  answer: 1
+  explanation: |
+    `getReferenceById` wraps `EntityManager.getReference` and returns a lazy proxy with **no**
+    SQL. The `SELECT` is deferred until the first non-id property is touched. `findById`, by
+    contrast, loads the full row immediately and returns an `Optional`.
+  ref: concepts.md#getreferencebyid-lazy-proxy-semantics
+- id: spring-data-jpa-repositories-056
+  difficulty: expert
+  tags:
+  - get-reference
+  - foreign-key
+  - insert
+  - optimization
+  question: |
+    You are inserting a `Book` and only need to set its `@ManyToOne Author` FK by id. Which
+    approach avoids an extra SELECT on the author table?
+  options:
+  - findById(authorId).get() then setAuthor(...)
+  - book.setAuthor(repo.getReferenceById(authorId)) then save
+  - Load the author with an @EntityGraph then attach it
+  - Use a native INSERT bypassing JPA entirely
+  answer: 1
+  explanation: |
+    `getReferenceById` returns an uninitialized proxy holding only the id. Assigning it as the
+    FK lets Hibernate write `author_id` on the `INSERT` without ever loading the parent row —
+    `findById` would fire a needless `SELECT`. This is the idiomatic FK-setting optimization.
+  ref: concepts.md#getreferencebyid-lazy-proxy-semantics
+- id: spring-data-jpa-repositories-057
+  difficulty: expert
+  tags:
+  - get-reference
+  - entity-not-found
+  - osiv
+  - gotcha
+  question: |
+    You call `getReferenceById(999L)` where row 999 does not exist, then return the proxy from
+    a controller so Jackson serializes it. When and where does the failure surface?
+  options:
+  - Immediately at getReferenceById, as EmptyResultDataAccessException
+  - At transaction commit, as OptimisticLockException
+  - Lazily during serialization when a property is read, as EntityNotFoundException (often outside the tx under OSIV)
+  - Never — Jackson serializes an empty object
+  answer: 2
+  explanation: |
+    The proxy is created without checking existence. `EntityNotFoundException` is thrown
+    lazily on the first non-id property access — here during Jackson serialization, which
+    (under OSIV) runs after the transaction, producing a confusing stack trace far from the
+    call site.
+  ref: concepts.md#getreferencebyid-lazy-proxy-semantics
+- id: spring-data-jpa-repositories-058
+  difficulty: advanced
+  tags:
+  - delete
+  - delete-in-batch
+  - cascade
+  - gotcha
+  question: |
+    A cleanup job calls `repo.deleteAll(fiveThousandEntities)` and the logs show 5,000
+    individual DELETE statements plus SELECTs. Why, and how do you make it a single statement?
+  options:
+  - deleteAll is buggy; upgrade Spring Data
+  - deleteAll loads then removes each entity (per-entity DELETE, cascades/@PreRemove fire); use deleteAllInBatch for one bulk DELETE
+  - The DELETEs are batched by default; enable batch_size to reduce them
+  - Wrap it in @Modifying to collapse into one statement
+  answer: 1
+  explanation: |
+    `deleteAll(entities)` removes each entity through the persistence context — one DELETE per
+    row, honoring `@OneToMany(cascade=REMOVE)` and `@PreRemove`. `deleteAllInBatch()` /
+    `deleteAllByIdInBatch(ids)` issue a single `DELETE ... WHERE id IN (...)`, bypassing
+    cascade and callbacks.
+  ref: concepts.md#derived-deletes-vs-batch-deletes
+- id: spring-data-jpa-repositories-059
+  difficulty: expert
+  tags:
+  - derived-delete
+  - modifying
+  - mechanism
+  - subtle-distinction
+  question: |
+    What is the behavioral difference between a derived `deleteByStatus("OLD")` and
+    `@Modifying @Query("DELETE FROM Item i WHERE i.status = 'OLD'")`?
+  options:
+  - They are identical; both issue one bulk DELETE
+  - Derived deleteBy SELECTs matching rows then deletes each (cascade/callbacks fire); the @Modifying query is one bulk DELETE bypassing them
+  - The @Modifying query loads entities; the derived delete does not
+  - Derived deleteBy requires @Transactional; the @Modifying one does not
+  answer: 1
+  explanation: |
+    Derived `deleteBy...` first runs a `SELECT` to load matching entities, then deletes each
+    via the persistence context — so cascades, `@PreRemove`, and `@Version` apply. The
+    `@Modifying @Query DELETE` is a single bulk statement that bypasses the context, cascades,
+    and callbacks. They are different mechanisms.
+  ref: concepts.md#derived-deletes-vs-batch-deletes
+- id: spring-data-jpa-repositories-060
+  difficulty: intermediate
+  tags:
+  - delete-by-id
+  - no-op
+  question: |
+    What happens when you call `repo.deleteById(id)` for an id that does not exist in current
+    Spring Data JPA?
+  options:
+  - It is a no-op (internally findById().ifPresent), no exception
+  - It always throws EmptyResultDataAccessException
+  - It inserts a tombstone row
+  - It throws EntityNotFoundException
+  answer: 0
+  explanation: |
+    `deleteById` internally loads via `findById` and only removes if present, so a missing id
+    is a silent no-op. (The older `delete(entity)` path could raise
+    `EmptyResultDataAccessException` when the row is already gone.)
+  ref: concepts.md#derived-deletes-vs-batch-deletes
+- id: spring-data-jpa-repositories-061
+  difficulty: advanced
+  tags:
+  - batching
+  - save-all
+  - performance
+  question: |
+    You call `repo.saveAll(tenThousandEntities)` and see 10,000 separate INSERT round-trips.
+    What is the most likely cause?
+  options:
+  - saveAll never batches; you must call save() in a loop
+  - JDBC batching is off by default; hibernate.jdbc.batch_size is unset
+  - The entities are detached, forcing merge
+  - The transaction isolation level is too high
+  answer: 1
+  explanation: |
+    Hibernate does not batch JDBC statements unless `hibernate.jdbc.batch_size` is set.
+    Without it, `saveAll` issues one INSERT per entity. Set `batch_size` (and
+    `order_inserts`) to group them into `executeBatch()` calls.
+  ref: concepts.md#jdbc-batching-for-saveall-and-bulk-inserts
+- id: spring-data-jpa-repositories-062
+  difficulty: expert
+  tags:
+  - batching
+  - identity
+  - sequence
+  - id-generation
+  question: |
+    Even after setting `hibernate.jdbc.batch_size=50`, batch INSERTs still don't happen for a
+    given entity. Its id uses `GenerationType.IDENTITY`. Why, and what is the fix?
+  options:
+  - IDENTITY requires a separate connection; switch pools
+  - IDENTITY forces Hibernate to execute each INSERT immediately to read back the generated key, disabling insert batching; use SEQUENCE
+  - batch_size only affects UPDATEs, never INSERTs
+  - You must also set order_updates=true for INSERT batching
+  answer: 1
+  explanation: |
+    With `IDENTITY`, the DB assigns the key during the INSERT, so Hibernate must run each
+    INSERT immediately to retrieve it — it cannot buffer a batch. Switch to `SEQUENCE` (ideally
+    with a `pooled` optimizer) to enable true batch inserts.
+  ref: concepts.md#jdbc-batching-for-saveall-and-bulk-inserts
+- id: spring-data-jpa-repositories-063
+  difficulty: expert
+  tags:
+  - save-all
+  - assigned-id
+  - merge
+  - batching
+  - gotcha
+  question: |
+    `saveAll(newEntities)` where each entity has an application-assigned UUID id fires a SELECT
+    before every INSERT. Why, and how do you fix it?
+  options:
+  - Assigned ids require refresh(); call it once
+  - Default isNew sees a non-null id, so save takes the merge path (SELECT-then-INSERT); implement Persistable or add a @Version field
+  - UUIDs are not indexed; add an index
+  - saveAll always SELECTs first; use save() in a loop instead
+  answer: 1
+  explanation: |
+    With an assigned non-null id, default `isNew` decides the entity is not new, so `save`
+    calls `merge`, which SELECTs the (nonexistent) row before inserting — N SELECTs + N
+    INSERTs, and merge also breaks insert batching. Implement `Persistable<ID>` (or use an
+    object `@Version`) so `isNew` returns true and `persist` is used.
+  ref: concepts.md#jdbc-batching-for-saveall-and-bulk-inserts
+- id: spring-data-jpa-repositories-064
+  difficulty: expert
+  tags:
+  - transactional
+  - read-only
+  - flush-mode
+  question: |
+    At the Hibernate level, what is the primary effect of `@Transactional(readOnly = true)` on
+    a method that loads and (accidentally) mutates a managed entity?
+  options:
+  - It throws an exception the moment the entity is mutated
+  - Flush mode becomes MANUAL/NEVER, so no dirty-check flush runs at commit and the UPDATE is never issued
+  - It commits the UPDATE but rolls back at the end
+  - It has no effect; readOnly is pure documentation
+  answer: 1
+  explanation: |
+    `readOnly = true` sets the Hibernate flush mode to MANUAL/NEVER, so the automatic
+    dirty-check flush at commit is skipped and no `UPDATE` is generated — a perf win and a
+    guard against accidental writes. It is not merely advisory.
+  ref: concepts.md#transactionalreadonly--true-at-the-orm-layer
+- id: spring-data-jpa-repositories-065
+  difficulty: advanced
+  tags:
+  - transactional
+  - read-only
+  - snapshot
+  - memory
+  question: |
+    Besides changing flush behavior, how does `readOnly = true` reduce memory/CPU when loading
+    a large read result set?
+  options:
+  - It streams rows instead of buffering them
+  - Entities load read-only (Session.setDefaultReadOnly), so Hibernate skips the dehydrated dirty-checking snapshot
+  - It enables the second-level cache automatically
+  - It compresses entities in the persistence context
+  answer: 1
+  explanation: |
+    `readOnly = true` propagates `Session.setDefaultReadOnly(true)`, so loaded entities are
+    read-only and Hibernate skips taking the snapshot it would otherwise keep for dirty
+    checking — saving memory and CPU on large read result sets.
+  ref: concepts.md#transactionalreadonly--true-at-the-orm-layer
+- id: spring-data-jpa-repositories-066
+  difficulty: advanced
+  tags:
+  - return-type
+  - single-result
+  - exception
+  question: |
+    A derived method `Optional<User> findByEmail(String email)` matches two rows because the
+    data isn't actually unique. What happens?
+  options:
+  - It returns the first row silently
+  - It returns Optional.empty()
+  - Spring throws IncorrectResultSizeDataAccessException (translating NonUniqueResultException)
+  - It returns Optional of a merged entity
+  answer: 2
+  explanation: |
+    A single-result query that matches more than one row throws Hibernate's
+    `NonUniqueResultException`, which Spring translates to
+    `IncorrectResultSizeDataAccessException`. Fix with a unique predicate,
+    `findFirstBy`/`findTopBy`, or a `List` return type.
+  ref: concepts.md#single-result-return-contract
+- id: spring-data-jpa-repositories-067
+  difficulty: expert
+  tags:
+  - page
+  - join-fetch
+  - count-query
+  - gotcha
+  question: |
+    A `@Query` with `JOIN FETCH a.books` returns `Page<Author>` and Hibernate throws
+    `QueryException: query specified join fetching, but the owner ... was not present`. What is
+    the fix?
+  options:
+  - Remove JOIN FETCH; you cannot fetch and paginate at all
+  - Supply an explicit countQuery that uses a plain JOIN (or no join) instead of JOIN FETCH
+  - Switch the return type to Slice
+  - Add clearAutomatically=true
+  answer: 1
+  explanation: |
+    Spring auto-derives the count query by rewriting the select, keeping the `join fetch`,
+    which Hibernate rejects in a count. Provide an explicit `countQuery` without the fetch
+    join (e.g. `SELECT count(a) FROM Author a WHERE ...`). This is distinct from the
+    collection-fetch + Pageable in-memory pagination (HHH000104) issue.
+  ref: concepts.md#count-queries-and-the-page--join-fetch-footgun
+- id: spring-data-jpa-repositories-068
+  difficulty: expert
+  tags:
+  - page
+  - count
+  - optimization
+  question: |
+    Does a repository method returning `Page<T>` always execute a separate COUNT query?
+  options:
+  - Yes, always, on every page
+  - No — Spring skips COUNT when it can infer the total, e.g. the first page returns fewer rows than the page size
+  - No — COUNT only runs for native queries
+  - Yes, but only when Sort is present
+  answer: 1
+  explanation: |
+    Spring optimizes the COUNT away when the total is inferable from the returned window —
+    for example, on the first page when the content size is less than the page size (total =
+    offset + content size), or when a page comes back empty. So `Page` does not always fire
+    COUNT.
+  ref: concepts.md#count-queries-and-the-page--join-fetch-footgun
+- id: spring-data-jpa-repositories-069
+  difficulty: advanced
+  tags:
+  - sort
+  - jpa-sort
+  - expression
+  question: |
+    You need to sort a `Pageable` query by `LENGTH(name)`. `Sort.by("LENGTH(name)")` throws.
+    What works?
+  options:
+  - JpaSort.unsafe("LENGTH(name)")
+  - Sort.by("name").ascending() only
+  - Passing the expression as a @Param
+  - Sorting is impossible on functions; sort in Java
+  answer: 0
+  explanation: |
+    Plain `Sort` validates against entity properties and rejects expressions as an
+    injection-safety measure. `JpaSort.unsafe("LENGTH(name)")` bypasses that check so the
+    expression is used in `ORDER BY`. Never build the unsafe fragment from untrusted input.
+  ref: concepts.md#sort-safety-and-sorting-by-expressions
+- id: spring-data-jpa-repositories-070
+  difficulty: intermediate
+  tags:
+  - sort
+  - property-reference
+  - startup
+  question: |
+    A `Sort.by("emailAddres")` (typo) is passed to a repository query. What happens?
+  options:
+  - It is silently ignored
+  - A PropertyReferenceException is thrown because the property can't be resolved on the entity
+  - The results come back unsorted with a warning
+  - It sorts by the id instead
+  answer: 1
+  explanation: |
+    `Sort` paths are validated against the entity metamodel; an unresolvable property throws
+    `PropertyReferenceException` when the query is built. This catches typos rather than
+    silently ignoring them.
+  ref: concepts.md#sort-safety-and-sorting-by-expressions
+- id: spring-data-jpa-repositories-071
+  difficulty: advanced
+  tags:
+  - lock
+  - pessimistic
+  - select-for-update
+  question: |
+    How do you make a repository `findById` acquire a `SELECT ... FOR UPDATE` row lock?
+  options:
+  - Annotate the method with @Lock(LockModeType.PESSIMISTIC_WRITE)
+  - Set @Transactional(readOnly=false) only
+  - Add @Modifying to findById
+  - Use @QueryHints(@QueryHint(name="lock", value="true"))
+  answer: 0
+  explanation: |
+    `@Lock(LockModeType.PESSIMISTIC_WRITE)` on the repository method makes Hibernate emit
+    `SELECT ... FOR UPDATE`. `PESSIMISTIC_READ` takes a shared lock; the optimistic modes use
+    the `@Version` column. A companion `jakarta.persistence.lock.timeout` hint controls
+    NOWAIT/skip-locked behavior.
+  ref: concepts.md#locking-and-query-hints
+- id: spring-data-jpa-repositories-072
+  difficulty: advanced
+  tags:
+  - query-hints
+  - jakarta
+  - timeout
+  question: |
+    Which is the correct hint name to set a per-query timeout on a Jakarta Persistence 3.x
+    repository method via `@QueryHints`?
+  options:
+  - javax.persistence.query.timeout
+  - jakarta.persistence.query.timeout
+  - org.hibernate.query.maxTime
+  - spring.jpa.query.timeout
+  answer: 1
+  explanation: |
+    On Jakarta Persistence 3.x the namespace is `jakarta.persistence.*`, so the query-timeout
+    hint is `jakarta.persistence.query.timeout` (milliseconds). The legacy `javax.*` keys are
+    from the old namespace and no longer apply.
+  ref: concepts.md#locking-and-query-hints
+- id: spring-data-jpa-repositories-073
+  difficulty: expert
+  tags:
+  - stream
+  - resource-leak
+  - transaction
+  question: |
+    A repository method returns `Stream<Author>`. What two conditions must hold to consume it
+    safely?
+  options:
+  - It must be called outside any transaction and cached
+  - It must run within an open transaction AND be closed (try-with-resources), or it leaks the ResultSet/connection
+  - It must return fewer than 1000 rows
+  - It must be annotated @Modifying
+  answer: 1
+  explanation: |
+    A `Stream` holds an open cursor (ResultSet + connection), so it must be consumed inside an
+    open transaction/`EntityManager` and closed via try-with-resources or `.close()`.
+    Forgetting to close it leaks the connection.
+  ref: concepts.md#streaming-large-result-sets
+- id: spring-data-jpa-repositories-074
+  difficulty: expert
+  tags:
+  - stream
+  - fetch-size
+  - mysql
+  question: |
+    Your `Stream<T>` repository query still loads the entire result into memory before
+    processing. What is typically missing (and what is the MySQL-specific quirk)?
+  options:
+  - A @Modifying annotation
+  - A fetch-size hint (org.hibernate.fetchSize) with a forward-only cursor; MySQL streams only with fetchSize = Integer.MIN_VALUE
+  - A larger heap; streaming always buffers first
+  - A @Transactional(readOnly=false)
+  answer: 1
+  explanation: |
+    Without a fetch-size hint the driver may buffer the whole result. Set
+    `org.hibernate.fetchSize` (forward-only cursor) so rows are streamed. MySQL's driver is a
+    special case: it streams row-by-row only when the fetch size is `Integer.MIN_VALUE`.
+  ref: concepts.md#streaming-large-result-sets
+- id: spring-data-jpa-repositories-075
+  difficulty: advanced
+  tags:
+  - no-repository-bean
+  - base-interface
+  question: |
+    Why do you annotate a shared intermediate repository interface (e.g.
+    `BaseRepository<T,ID> extends JpaRepository<T,ID>`) with `@NoRepositoryBean`?
+  options:
+  - To make it read-only
+  - So Spring does NOT create a proxy/bean for the generic base interface itself (it has no concrete domain type)
+  - To enable second-level caching for all subtypes
+  - To force all subtypes to use native queries
+  answer: 1
+  explanation: |
+    `@NoRepositoryBean` tells Spring Data not to instantiate a repository proxy for that
+    intermediate interface — it has no concrete entity type. Concrete repositories extend it
+    and inherit its methods, while only they become beans.
+  ref: concepts.md#customizing-all-repositories-base-class-and-norepositorybean
+- id: spring-data-jpa-repositories-076
+  difficulty: expert
+  tags:
+  - repository-base-class
+  - customization
+  - enable-jpa-repositories
+  question: |
+    You want `findByIdOrThrow` available on EVERY repository without adding a fragment to each
+    one. What is the idiomatic mechanism?
+  options:
+  - Add a default method to JpaRepository via a bytecode agent
+  - Subclass SimpleJpaRepository and register it with @EnableJpaRepositories(repositoryBaseClass=...)
+  - Put the method in a @NoRepositoryBean interface and instantiate it directly
+  - Use an aspect around every repository call
+  answer: 1
+  explanation: |
+    Extend `SimpleJpaRepository` in a custom base class implementing the new method, then set
+    `@EnableJpaRepositories(repositoryBaseClass = CustomBaseRepositoryImpl.class)`. Spring uses
+    it as the base implementation for all repositories, so the method is available everywhere.
+  ref: concepts.md#customizing-all-repositories-base-class-and-norepositorybean
+- id: spring-data-jpa-repositories-077
+  difficulty: advanced
+  tags:
+  - exists-by-id
+  - find-by-id
+  - efficiency
+  question: |
+    You only need to know whether a row exists before proceeding. Why prefer `existsById(id)`
+    (or a derived `existsBy...`) over `findById(id).isPresent()`?
+  options:
+  - findById caches results; existsById does not
+  - existsById issues a lightweight existence/count query, while findById hydrates the full entity into the context
+  - They compile to identical SQL, so it is purely stylistic
+  - existsById bypasses the transaction, making it faster
+  answer: 1
+  explanation: |
+    `existsById`/`existsBy` run a cheap existence check (e.g. `SELECT 1`/count) and return a
+    boolean, whereas `findById(...).isPresent()` selects and hydrates the whole entity into
+    the persistence context just to throw it away. Prefer the existence query when you only
+    need a yes/no.
+  ref: concepts.md#single-result-return-contract

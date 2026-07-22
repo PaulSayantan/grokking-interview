@@ -443,6 +443,301 @@ everything is one table. The deep treatment of N+1, `JOIN FETCH`, entity graphs,
 `@BatchSize` lives in `fetching-lazy-eager-n-plus-one` — cross-reference it; don't
 re-derive it here.
 
+## JOINED Polymorphic SQL and Write Path
+
+A subtlety that trips up seniors: **Hibernate does not add a discriminator column to
+`JOINED` by default.** Instead, for a polymorphic `select p from Payment p` it emits an
+inner join to the root plus a `left join` to *every* subclass table, and synthesizes a
+**`case when ... end as clazz_`** expression to decide each row's concrete type from which
+subclass row was non-null:
+
+```sql
+select p.id, p.amount,
+       c.card_number, b.bank_iban,
+       case
+         when c.payment_id is not null then 1   -- CardPayment
+         when b.payment_id is not null then 2   -- BankTransfer
+         when p.id         is not null then 0   -- (abstract root -> usually impossible)
+       end as clazz_
+from payment p
+left join card_payment c on p.id = c.payment_id
+left join bank_transfer b on p.id = b.payment_id;
+```
+
+You *may* still declare `@DiscriminatorColumn` on a `JOINED` root and Hibernate will honor
+it, but it is optional — the `case when` derivation is the default.
+
+**Write path (ordered inserts):** persisting a `CardPayment` runs **the root INSERT first**
+(so the generated id is available) **then the subclass INSERT** with that id as its PK/FK:
+
+```sql
+insert into payment (amount, id) values (?, ?);
+insert into card_payment (card_number, payment_id) values (?, ?);
+```
+
+A `DELETE` cascades in the opposite order (subclass row, then root), and whether the DB
+also removes the child automatically depends on the FK's `ON DELETE` clause — by default
+Hibernate issues both DELETEs itself.
+
+## Discriminator Advanced Options
+
+Beyond `@DiscriminatorColumn`/`@DiscriminatorValue`, several less-known knobs matter for
+legacy schemas and defensive mapping:
+
+- **`@DiscriminatorValue("null")`** maps rows whose discriminator column *is NULL* to that
+  subclass. **`@DiscriminatorValue("not null")`** is a catch-all: any discriminator value
+  not explicitly matched by another subclass maps here. Useful when a legacy table has
+  dirty or unmapped type codes.
+- **`@DiscriminatorOptions(force = true, insert = false)`** (Hibernate extension):
+  - `force = true` adds the discriminator predicate **even to the root polymorphic query**,
+    so rogue rows carrying an unmapped discriminator value are silently excluded rather than
+    blowing up instantiation. This is how you defend a shared table against unexpected
+    `DTYPE` values.
+  - `insert = false` tells Hibernate *not* to write the discriminator on INSERT — used when
+    the column is derived/computed by the DB or maintained by legacy code.
+- **Defaults precision:** `@DiscriminatorColumn` default name is `DTYPE`, type
+  `DiscriminatorType.STRING`, default length **31**. Per the Jakarta Persistence spec, a
+  missing `@DiscriminatorValue` **defaults to the entity name when the discriminator type is
+  `STRING`**; for non-`STRING` types the generated value is provider-specific. Either way,
+  set it explicitly for stable, portable data.
+
+## Enforcing NOT NULL Under SINGLE_TABLE
+
+`SINGLE_TABLE` cannot put a plain `NOT NULL` on a subclass column (sibling rows leave it
+NULL), but a senior candidate knows the standard mitigations:
+
+- **Discriminator-conditioned CHECK constraint** — enforce the rule only for the relevant
+  subtype: `CHECK (DTYPE <> 'Post' OR content IS NOT NULL)`. In Hibernate you can attach it
+  with `@Check(constraints = "...")` on the entity or via a DDL script.
+- **Bean Validation** `@NotNull` on the subclass field — enforced at the application layer
+  before flush (not a DB constraint, but travels with the entity).
+- **A JPA lifecycle callback** (`@PrePersist`/`@PreUpdate`) that throws if the mandatory
+  field is null.
+
+None of these give you the airtight DB guarantee that `JOINED` does with a real column-level
+`NOT NULL`; that gap is precisely why teams switch to `JOINED` when subclass mandatoriness
+is a hard requirement.
+
+## Implicit vs Explicit Polymorphism
+
+Hibernate supports **implicit polymorphism**: a query against an unmapped superclass or an
+interface (e.g. `from java.lang.Object` or a shared interface) can return all entities that
+happen to implement it — even without `@Inheritance`. You control this with the Hibernate
+`@Polymorphism` annotation.
+
+- Hibernate 5 used `@Polymorphism(type = PolymorphismType.EXPLICIT)` in
+  `org.hibernate.annotations` to *opt an entity out* of being returned by such implicit
+  (non-mapped-superclass) polymorphic queries.
+- In **Hibernate 6+** `@Polymorphism` moved/changed (still under `org.hibernate.annotations`,
+  with `PolymorphismType.IMPLICIT`/`EXPLICIT`); it is a niche feature and its status has
+  shifted across 6.x — do not assume the HB5 API. This is distinct from JPA `@Inheritance`,
+  which governs *mapped* polymorphism over an entity hierarchy.
+
+The interview point: a `@MappedSuperclass` is **never** queryable polymorphically, whereas
+implicit polymorphism is a Hibernate-specific behavior over concrete entities sharing a
+supertype/interface — two different mechanisms people conflate.
+
+## Mixing Strategies and Boot-Time Failures
+
+- **You cannot mix strategies within one hierarchy.** `@Inheritance(strategy = ...)` is
+  declared **only on the root**; subclasses inherit it. You cannot switch, say, from
+  `JOINED` to `SINGLE_TABLE` partway down. (You can only get "mixed" layouts by having
+  entirely separate hierarchies.)
+- **`TABLE_PER_CLASS` + `GenerationType.IDENTITY` fails at boot.** Because ids must be unique
+  across all sibling concrete tables for polymorphic references to work, Hibernate rejects
+  IDENTITY (each table's IDENTITY sequence is independent and would collide). You must use a
+  **shared `SEQUENCE` or `TABLE` generator** across the whole hierarchy. The failure is a
+  mapping/bootstrap exception, not a runtime error.
+- **Abstract root as association target under `TABLE_PER_CLASS`.** A `@ManyToOne Payment`
+  where `Payment` is abstract and mapped `TABLE_PER_CLASS` cannot be a plain FK — there is no
+  parent table to reference. Hibernate must resolve the target via a `UNION` subquery (or the
+  mapping is rejected), which is a big reason `TABLE_PER_CLASS` is avoided when the base type
+  is an association target.
+
+## Embeddable Null Semantics
+
+A classic production bug: **if every column of an `@Embedded` value maps to NULL in the row,
+Hibernate returns `null` for the embedded field — not an empty `Address` instance.**
+
+```java
+@Embedded Address address;   // row has street=NULL, city=NULL, zip=NULL
+// after load: customer.getAddress() == null   (NOT new Address())
+```
+
+So `customer.getAddress().getCity()` throws `NullPointerException` even though "there is an
+address column set." Guard for null, or use `@AttributeOverride` on a non-null column, or
+keep at least one column mandatory. This is one of the most-asked "why is my `@Embedded`
+field null" questions and it is **expected behavior**, not a bug.
+
+## Immutable Embeddables Records and EmbeddableInstantiator
+
+By default Hibernate instantiates an embeddable via its **no-arg constructor** and sets
+fields reflectively — which fails for immutable value objects (Java `record`s, or classes
+with only an all-args constructor).
+
+- **Hibernate 6.2+ supports Java `record`s as `@Embeddable`** directly.
+- For any immutable embeddable (record or not) that lacks a no-arg constructor, use
+  **`@EmbeddableInstantiator`** (Hibernate 6) pointing at a class implementing
+  `EmbeddableInstantiator`, or annotate the canonical constructor/factory with
+  `@Instantiator`. Hibernate then builds instances through that path instead of the default
+  reflective bean approach.
+
+```java
+@Embeddable
+@EmbeddableInstantiator(MonetaryAmountInstantiator.class)
+public record MonetaryAmount(BigDecimal amount, String currency) {}
+```
+
+This is the modern answer to "how do you map an immutable value object / record with no
+default constructor as an embeddable."
+
+## Aggregate Embeddables with @Struct
+
+Normally an embeddable's fields are **flattened** into individual columns on the owner table.
+Hibernate 6.2+ can instead map an embeddable to a **single structured/composite DB column**
+(Postgres composite type, Oracle `OBJECT`, etc.) via **`@Struct`** on the embeddable or
+**`@JdbcTypeCode(SqlTypes.STRUCT)`** on the embedded attribute:
+
+```java
+@Embeddable
+@Struct(name = "address_type")   // maps to a DB composite type, one column
+public record Address(String street, String city, String zip) {}
+```
+
+This keeps the value object as one atomic column instead of three, which is a staff-level
+differentiator when the schema uses native composite types.
+
+## Nested Embeddables and Dotted-Path Overrides
+
+Embeddables can nest (an `Address` containing a `GeoCoordinates`). To override a column of a
+**nested** attribute you use a **dotted path** in `@AttributeOverride`:
+
+```java
+@Embedded
+@AttributeOverride(name = "coordinates.lat", column = @Column(name = "ship_lat"))
+@AttributeOverride(name = "coordinates.lng", column = @Column(name = "ship_lng"))
+Address shipping;
+```
+
+- `@AssociationOverride` does the same for an association *inside* an embeddable.
+- Since Hibernate 6 / JPA 3, `@AttributeOverride` is **repeatable**, so you no longer need
+  to wrap several of them in `@AttributeOverrides` (though the wrapper still works).
+
+## Embeddable Collections and Value Equality
+
+An embeddable used inside a `Set<@Embeddable>` `@ElementCollection`, or as a `Map` key, **must
+implement `equals`/`hashCode` correctly over all its fields** — Hibernate uses value equality
+to track membership and detect changes. An embeddable may itself contain an
+`@ElementCollection`. Because element rows have no surrogate PK, Hibernate treats **all the
+embeddable's columns as the composite "key"** for a `Set`; there is no targeted single-column
+UPDATE — a change still generally means delete-and-reinsert (see below).
+
+## IdClass Field-Type Matching and Serializable
+
+For `@IdClass(OrderId.class)` to boot, the id class must mirror the entity's `@Id` fields
+**by name and type exactly**:
+
+- The **field names** in the id class must match the entity's `@Id` field names.
+- The **field types** must match. For a **derived identity** where one key part is a
+  `@ManyToOne` (e.g. `@Id @ManyToOne Order order`), the id-class field's type is the **type
+  of the parent's primary key** (e.g. `Long orderId`), **not** the association type
+  (`Order`). Getting this wrong is a very common "why won't this `@IdClass` boot" failure.
+- **Both `@IdClass` and `@EmbeddedId` classes must implement `Serializable`.** This is a real
+  spec requirement (detached-entity id passing, second-level cache keys). Omitting it is a
+  boot/validation failure.
+- **A composite/embedded key cannot use `@GeneratedValue`** — composite keys are always
+  **application-assigned**. There is no auto-generation of a multi-column key.
+
+## Composite Keys That Contain a Foreign Key
+
+The hardest composite-key scenario: a key where one component is itself a foreign key. Model
+it with `@EmbeddedId` + `@MapsId` — and crucially **do not set the FK key field yourself**:
+
+```java
+@Embeddable
+public class LineItemId implements Serializable {
+    Long orderId;      // populated from the @MapsId association, not by hand
+    Long productId;
+    // equals + hashCode over both
+}
+
+@Entity
+public class LineItem {
+    @EmbeddedId
+    LineItemId id;
+
+    @ManyToOne
+    @MapsId("orderId")                 // fills id.orderId from this association's PK
+    @JoinColumn(name = "order_id")
+    Order order;
+
+    // productId you set on the embedded id directly
+}
+```
+
+Usage: instantiate the embedded id, set only the non-derived part (`productId`), set the
+`order` association, and Hibernate derives `id.orderId` from `order`. The `@JoinColumn` here
+doubles as part of the PK; Hibernate manages the `insertable`/`updatable` interplay so the
+shared column is written once. Manually assigning `id.orderId` and also setting `order` is
+the usual source of "detached entity" / mismatched-key surprises.
+
+## Entity Identity Approaches and the Lombok Anti-Pattern
+
+There are **three** viable approaches to entity `equals`/`hashCode`, in rough order of
+preference:
+
+1. **Immutable natural/business key** (e.g. ISBN, email) — cleanest when one exists.
+2. **Assigned business UUID generated in the constructor** (Vlad's preferred modern default)
+   — the entity has a **stable identity before persist**, so it behaves correctly in a `Set`
+   throughout its lifecycle, without depending on a DB round trip.
+3. **Constant `hashCode()` + id-based `equals` with a null guard** — stable but degrades
+   `HashSet`/`HashMap` to O(n) buckets; acceptable for small collections.
+
+The anti-pattern to flag in code review: **Lombok `@Data` / `@EqualsAndHashCode` (and
+`@ToString`) on an entity.** They include *all* fields by default, which (a) pulls a
+generated id into the hash (bucket instability), (b) touches lazy associations, triggering
+extra queries or `LazyInitializationException`, and (c) can break `HashCode` on proxies.
+`@Data` also generates a public setter for everything, undermining encapsulation. Prefer
+hand-written identity methods or `@EqualsAndHashCode(onlyExplicitlyIncluded = true)` on a
+business key.
+
+## Inheritance Proxies and the instanceof Gotcha
+
+Under lazy loading, a `@ManyToOne Payment` may actually be a **`HibernateProxy`** subclass,
+not the real `CardPayment`. Consequences that cause real bugs:
+
+```java
+if (payment instanceof CardPayment) { ... }   // FALSE for a lazy proxy!
+payment.getClass();                            // returns Payment$HibernateProxy$xxx
+```
+
+Because the proxy extends the *root* type (or an interface), an `instanceof` against a
+concrete subtype fails and `getClass()` returns the proxy class. Fixes:
+
+- `Payment real = Hibernate.unproxy(payment);` then `instanceof`/`getClass` work.
+- `Class<?> type = Hibernate.getClass(payment);` returns the true entity class.
+- Trigger initialization first, or use `@ManyToOne(fetch = EAGER)` if the subtype must be
+  known immediately (rarely worth it).
+
+This is one of the most common inheritance + lazy-loading production bugs, and interviewers
+use "why does `entity instanceof SubType` return false?" as a discriminator.
+
+## OrderColumn vs OrderBy and Element-Collection Internals
+
+Deepening the `@ElementCollection` delete-and-reinsert behavior:
+
+- The full delete-all-then-reinsert happens for a `List`/`Collection` **without** an
+  `@OrderColumn` (and without a targetable key). Adding **`@OrderColumn`** materializes the
+  list index as a real column, so Hibernate can do **positional UPDATEs** for many changes
+  instead of wiping the collection.
+- A `Set<@Embeddable>` still cannot do a targeted single-column UPDATE — it uses all columns
+  as the identity, so a change is delete + reinsert of the affected rows.
+- **`@OrderColumn` vs `@OrderBy`**: `@OrderColumn` **persists a physical position column** and
+  Hibernate maintains order in the DB. `@OrderBy` adds an `ORDER BY` clause to the load query
+  based on element/property values and stores **no** ordering column. They solve different
+  problems; `@OrderBy` gives sorted reads, `@OrderColumn` gives a stable stored sequence and
+  cheaper incremental updates.
+
 ## Common Interview Follow-ups
 
 - **"Default inheritance strategy if I only write `@Inheritance` with no strategy?"**
@@ -464,6 +759,22 @@ re-derive it here.
   often deletes-all-and-reinserts on change; use a real child entity for large collections.
 - **"How do I avoid a `HashSet` bug with entity identity?"** Stable `hashCode` (constant or
   natural key), never a mutable field or a raw generated id.
+- **"Does `JOINED` have a discriminator column by default?"** No — Hibernate synthesizes a
+  `case when subclass_fk is not null then N end as clazz_` in the polymorphic SELECT.
+- **"Why is my `@Embedded Address` null after loading?"** Expected — an all-NULL embeddable
+  is returned as `null`, not an empty instance.
+- **"Why does `payment instanceof CardPayment` return false?"** It's a lazy `HibernateProxy`
+  of the root type; use `Hibernate.unproxy()` / `Hibernate.getClass()`.
+- **"Map a Java record with no no-arg constructor as an embeddable?"** HB6.2+ record support,
+  or `@EmbeddableInstantiator` / `@Instantiator`.
+- **"Store an embeddable as one Postgres composite-type column?"** `@Struct` /
+  `@JdbcTypeCode(SqlTypes.STRUCT)` (HB6.2+).
+- **"For a derived-identity `@ManyToOne` key part, what type is the `@IdClass` field?"** The
+  parent's PK type (e.g. `Long`), not the association type.
+- **"Add a NOT NULL rule to a SINGLE_TABLE subclass column?"** Discriminator-conditioned
+  CHECK constraint, Bean Validation `@NotNull`, or a `@PrePersist` guard.
+- **"Is Lombok `@Data` fine on an entity?"** No — it hashes all fields (id instability),
+  touches lazy associations, and can break proxies.
 
 ## References
 

@@ -27,11 +27,11 @@ questions:
       You want to set `createdAt` automatically when an entity is first inserted. Which
       callback should populate it?
     options:
-      - "@PostRemove"
       - "@PrePersist"
+      - "@PostRemove"
       - "@PostLoad"
       - "@PreUpdate"
-    answer: 1
+    answer: 0
     explanation: |
       @PrePersist fires when persist() is called, before the INSERT is scheduled — the right
       place to stamp a creation timestamp.
@@ -316,10 +316,10 @@ questions:
       Why can touching a LAZY association inside a @PostLoad callback be dangerous?
     options:
       - "It permanently marks the entity dirty"
-      - "It forces an extra SELECT, or a LazyInitializationException if the session later closes"
       - "It skips the second-level cache"
       - "It is illegal and fails to compile"
-    answer: 1
+      - "It forces an extra SELECT, or a LazyInitializationException if the session later closes"
+    answer: 3
     explanation: |
       @PostLoad runs when the entity is materialized; touching a lazy field triggers
       initialization (an extra query) and can throw LazyInitializationException once the
@@ -798,3 +798,506 @@ questions:
       @EnableJpaAuditing(dateTimeProviderRef=...) points auditing at a custom DateTimeProvider,
       letting tests inject a fixed Clock for deterministic timestamps.
     ref: "concepts.md#spring-data-jpa-auditing"
+
+  - id: lifecycle-callbacks-auditing-interceptors-048
+    difficulty: expert
+    tags: [callback-ordering, default-listeners, spec]
+    question: |
+      An entity extends a @MappedSuperclass that carries @EntityListeners(AuditListener.class),
+      the entity itself declares @EntityListeners({A.class, B.class}) and a @PrePersist method,
+      and orm.xml declares a <default-entity-listeners> class D. On persist, what is the exact
+      invocation order?
+    options:
+      - "A, B, AuditListener, D, entity method"
+      - "D, AuditListener, A, B, entity method"
+      - "entity method, A, B, AuditListener, D"
+      - "AuditListener, D, A, B, entity method"
+    answer: 1
+    explanation: |
+      Spec order: default listeners (D) first, then superclass-hierarchy listeners (top-down,
+      so AuditListener on the mapped superclass), then the entity's own @EntityListeners in
+      array order (A then B), and finally the entity's own annotated callback method.
+    ref: "concepts.md#callback-ordering-default-listeners-and-exclusions"
+
+  - id: lifecycle-callbacks-auditing-interceptors-049
+    difficulty: advanced
+    tags: [exclusions, exclude-default-listeners, spec]
+    question: |
+      What is the effect of placing @ExcludeDefaultListeners on an entity?
+    options:
+      - "It removes the entity's own @EntityListeners"
+      - "It disables all lifecycle callbacks for the entity"
+      - "It suppresses the orm.xml <default-entity-listeners> for that class (and its subclasses)"
+      - "It stops listeners inherited from mapped superclasses"
+    answer: 2
+    explanation: |
+      @ExcludeDefaultListeners suppresses the default listeners declared in orm.xml. Suppressing
+      listeners inherited from superclasses is a different annotation, @ExcludeSuperclassListeners;
+      neither disables the entity's own declared listeners or callbacks.
+    ref: "concepts.md#callback-ordering-default-listeners-and-exclusions"
+
+  - id: lifecycle-callbacks-auditing-interceptors-050
+    difficulty: advanced
+    tags: [auditing, silent-bug, entitylisteners]
+    question: |
+      @EnableJpaAuditing is on your @Configuration class and the entity has @CreatedDate /
+      @LastModifiedDate fields, but the fields stay null on every save with no error. What is
+      the most likely cause?
+    options:
+      - "The entity is missing @EntityListeners(AuditingEntityListener.class) and no default listener is registered"
+      - "AuditorAware is not defined"
+      - "@CreatedDate must be a java.util.Date, not Instant"
+      - "@EnableJpaAuditing must be on the main application class only"
+    answer: 0
+    explanation: |
+      Auditing rides on the AuditingEntityListener. Without attaching it to the entity (directly,
+      via a @MappedSuperclass, or as an orm.xml default listener) nothing populates the fields —
+      and no exception is thrown, so it fails silently.
+    ref: "concepts.md#callback-ordering-default-listeners-and-exclusions"
+
+  - id: lifecycle-callbacks-auditing-interceptors-051
+    difficulty: expert
+    tags: [dynamic-update, sql, mechanism]
+    question: |
+      Without @DynamicUpdate, you change one field of a 40-column entity and flush. What SQL
+      does Hibernate emit, and why?
+    options:
+      - "An UPDATE touching only the one changed column, rebuilt each flush"
+      - "No UPDATE — single-column changes are batched separately"
+      - "An UPDATE setting all 40 columns, using a statement string built once and cached per entity"
+      - "A DELETE followed by an INSERT"
+    answer: 2
+    explanation: |
+      By default Hibernate generates one static UPDATE that sets every column, and caches that
+      SQL string per entity type for reuse. @DynamicUpdate is what makes it regenerate SQL per
+      flush to include only the dirty columns.
+    ref: "concepts.md#dynamicupdate-dynamicinsert-and-callback-interplay"
+
+  - id: lifecycle-callbacks-auditing-interceptors-052
+    difficulty: expert
+    tags: [dynamic-update, preupdate, interplay]
+    question: |
+      An entity has @DynamicUpdate and a @PreUpdate that sets `updatedAt = Instant.now()`. You
+      change only `status` and flush. Which columns appear in the dynamic UPDATE's SET clause?
+    options:
+      - "Only status — @PreUpdate runs after the SQL is built"
+      - "All columns, because @PreUpdate defeats dynamic update"
+      - "Only updatedAt, because the callback overrides the dirty set"
+      - "Both status and updatedAt — @PreUpdate runs before the SQL is built and dirty state is re-derived"
+    answer: 3
+    explanation: |
+      @PreUpdate runs before Hibernate builds the UPDATE SQL, so the updatedAt mutation is part
+      of the dirty set. With @DynamicUpdate the SET clause contains exactly the dirty columns:
+      status and updatedAt.
+    ref: "concepts.md#dynamicupdate-dynamicinsert-and-callback-interplay"
+
+  - id: lifecycle-callbacks-auditing-interceptors-053
+    difficulty: advanced
+    tags: [dynamic-update, tradeoff, performance]
+    question: |
+      What is the primary cost of enabling @DynamicUpdate on a frequently-updated entity?
+    options:
+      - "It forces EAGER loading of all associations"
+      - "The UPDATE SQL is no longer cached and is regenerated on every flush"
+      - "It disables dirty checking"
+      - "It prevents @PreUpdate from firing"
+    answer: 1
+    explanation: |
+      Because the SET clause varies with the dirty column set, Hibernate cannot cache one
+      prepared statement string; it builds new SQL each flush, costing CPU/allocation. It does
+      not change whether callbacks fire or how dirty checking works.
+    ref: "concepts.md#dynamicupdate-dynamicinsert-and-callback-interplay"
+
+  - id: lifecycle-callbacks-auditing-interceptors-054
+    difficulty: intermediate
+    tags: [creation-timestamp, hibernate-native, no-spring]
+    question: |
+      You want automatic createdAt/updatedAt but the project does not use Spring Data (no
+      @EnableJpaAuditing). Which Hibernate-native annotations achieve this with no listener?
+    options:
+      - "@CreatedDate / @LastModifiedDate"
+      - "@Temporal / @Version"
+      - "@CreationTimestamp / @UpdateTimestamp"
+      - "@PrePersist only"
+    answer: 2
+    explanation: |
+      Hibernate's @CreationTimestamp (set at insert) and @UpdateTimestamp (refreshed on update)
+      populate timestamps with no AuditingEntityListener or Spring wiring. @CreatedDate/
+      @LastModifiedDate are the Spring Data equivalents that require @EnableJpaAuditing.
+    ref: "concepts.md#hibernate-native-timestamps-creationtimestamp-updatetimestamp-currenttimestamp"
+
+  - id: lifecycle-callbacks-auditing-interceptors-055
+    difficulty: advanced
+    tags: [current-timestamp, source-db-vm, clock]
+    question: |
+      Your app servers occasionally have clock skew and you want timestamps to come from a
+      single authoritative source. Which Hibernate 6 option uses the database clock?
+    options:
+      - "@CreationTimestamp (it always uses the DB clock)"
+      - "@CurrentTimestamp(source = SourceType.DB), which generates current_timestamp in SQL"
+      - "@LastModifiedDate with a DateTimeProvider"
+      - "There is no way; JPA always uses the JVM clock"
+    answer: 1
+    explanation: |
+      @CurrentTimestamp(source = SourceType.DB) emits current_timestamp so the database supplies
+      the time. SourceType.VM (the default, and what @CreationTimestamp/@UpdateTimestamp use)
+      relies on the JVM clock.
+    ref: "concepts.md#hibernate-native-timestamps-creationtimestamp-updatetimestamp-currenttimestamp"
+
+  - id: lifecycle-callbacks-auditing-interceptors-056
+    difficulty: expert
+    tags: [soft-delete, defaults, sql]
+    question: |
+      You annotate an entity with a bare `@SoftDelete` (no attributes). What column and
+      semantics does Hibernate 6.4+ use by default?
+    options:
+      - "A column named `active` with ACTIVE semantics"
+      - "A column named `deleted` (boolean) with DELETED semantics"
+      - "A column named `is_deleted` with a timestamp"
+      - "No column; it uses a separate audit table"
+    answer: 1
+    explanation: |
+      Default strategy is SoftDeleteType.DELETED and the default column is a boolean `deleted`.
+      With strategy = ACTIVE the convention flips to an `active` column with inverted meaning.
+    ref: "concepts.md#softdelete-internals-defaults-converters-and-generated-sql"
+
+  - id: lifecycle-callbacks-auditing-interceptors-057
+    difficulty: expert
+    tags: [soft-delete, generated-sql, code-reading]
+    question: |
+      For a default @SoftDelete entity, what UPDATE does `em.remove(account)` generate at flush?
+    options:
+      - "delete from Account where id=?"
+      - "update Account set deleted=true where id=?"
+      - "update Account set deleted=true where id=? and deleted=false"
+      - "update Account set active=false where id=?"
+    answer: 2
+    explanation: |
+      @SoftDelete rewrites the delete to a guarded UPDATE that also asserts the row was not
+      already deleted: `update Account set deleted=true where id=? and deleted=false`. The same
+      predicate is appended to selects, including primary-key fetches.
+    ref: "concepts.md#softdelete-internals-defaults-converters-and-generated-sql"
+
+  - id: lifecycle-callbacks-auditing-interceptors-058
+    difficulty: advanced
+    tags: [soft-delete, converter, legacy-schema]
+    question: |
+      A legacy table stores its soft-delete flag as a CHAR 'Y'/'N' rather than a boolean. How do
+      you map it with @SoftDelete?
+    options:
+      - "@SoftDelete(converter = YesNoConverter.class)"
+      - "@SoftDelete(columnType = CHAR)"
+      - "You cannot; @SoftDelete only supports boolean columns"
+      - "@SoftDelete(strategy = SoftDeleteType.CHAR)"
+    answer: 0
+    explanation: |
+      The indicator's Java type is Boolean, but a converter maps it to the physical column.
+      Hibernate ships YesNoConverter ('Y'/'N') and NumericBooleanConverter (1/0) for legacy
+      schemas; the generated SQL then uses those literals.
+    ref: "concepts.md#softdelete-internals-defaults-converters-and-generated-sql"
+
+  - id: lifecycle-callbacks-auditing-interceptors-059
+    difficulty: expert
+    tags: [soft-delete, jpql, hard-delete, judgment]
+    question: |
+      An entity uses @SoftDelete. A developer runs a JPQL `DELETE FROM Account a WHERE a.id = 1`.
+      What happens to the row?
+    options:
+      - "It is soft-deleted (deleted=true) like em.remove()"
+      - "The statement is rejected at parse time"
+      - "It is physically hard-deleted — bulk JPQL bypasses the soft-delete rewrite"
+      - "Both a soft-delete UPDATE and a DELETE run"
+    answer: 2
+    explanation: |
+      Like @SQLDelete, @SoftDelete only intercepts entity-level remove(). Bulk JPQL/native DELETE
+      operates directly on the table and hard-deletes the row, bypassing the indicator rewrite.
+    ref: "concepts.md#softdelete-internals-defaults-converters-and-generated-sql"
+
+  - id: lifecycle-callbacks-auditing-interceptors-060
+    difficulty: advanced
+    tags: [soft-delete, in-memory-state, sqldelete, distinction]
+    question: |
+      With the classic @SQLDelete + @SQLRestriction pattern, after `em.remove(order)` the managed
+      `order.deleted` field is still false in memory. Why, and what is the clean fix?
+    options:
+      - "Hibernate does not parse your native @SQLDelete SQL, so it can't update the field; add a @PreRemove to set deleted=true (or migrate to @SoftDelete)"
+      - "Hibernate cached the entity; call em.refresh() — no other fix exists"
+      - "It is a bug with no workaround"
+      - "The field updates only after commit; nothing to fix"
+    answer: 0
+    explanation: |
+      Hibernate treats the @SQLDelete SQL as opaque native text and does not reflect it back onto
+      the managed instance, so the in-memory flag goes stale. Add a @PreRemove that sets the flag,
+      or use @SoftDelete which manages the in-session state automatically.
+    ref: "concepts.md#sqldelete-gotchas-loader-sqldeleteall-and-stale-in-memory-state"
+
+  - id: lifecycle-callbacks-auditing-interceptors-061
+    difficulty: expert
+    tags: [sqldelete, where, loader, findById]
+    question: |
+      Using @SQLDelete + @Where("deleted=false") (Hibernate 5.2+), a bug report says
+      `findById(deletedId)` still returns the deleted row. Why historically, and what was the fix?
+    options:
+      - "@Where only filters query/collection loads, not direct PK fetch; a custom @Loader was needed to filter direct fetches too"
+      - "findById never applies @Where or @SQLRestriction under any version"
+      - "The row was cached in the second-level cache; disable 2LC"
+      - "@Where must be spelled @SQLRestriction to work at all"
+    answer: 0
+    explanation: |
+      Historically @Where/@SQLRestriction applied to queries and collections but not to a direct
+      em.find() by primary key, so a custom @Loader(namedQuery=...) was required to filter direct
+      fetches. @SoftDelete filters PK fetches automatically, removing the need for @Loader.
+    ref: "concepts.md#sqldelete-gotchas-loader-sqldeleteall-and-stale-in-memory-state"
+
+  - id: lifecycle-callbacks-auditing-interceptors-062
+    difficulty: advanced
+    tags: [sqldelete, sqldeleteall, collections]
+    question: |
+      You added @SQLDelete to soft-delete an entity, but clearing a @ManyToMany collection still
+      hard-deletes the join-table rows. What did you miss?
+    options:
+      - "@SQLRestriction on the collection"
+      - "@SQLDeleteAll to override the bulk collection remove"
+      - "orphanRemoval = false"
+      - "@Filter on the join table"
+    answer: 1
+    explanation: |
+      @SQLDelete overrides the per-row delete; the bulk remove issued when a collection is
+      cleared/replaced is overridden by @SQLDeleteAll. Without it the collection DML still runs a
+      hard DELETE on the join rows.
+    ref: "concepts.md#sqldelete-gotchas-loader-sqldeleteall-and-stale-in-memory-state"
+
+  - id: lifecycle-callbacks-auditing-interceptors-063
+    difficulty: expert
+    tags: [envers, auditquery, as-of, code-reading]
+    question: |
+      You must answer "which orders had total over $100 as the database stood at revision 500?"
+      Which Envers AuditQuery form is correct?
+    options:
+      - "reader.getRevisions(Order.class, id)"
+      - "reader.createQuery().forRevisionsOfEntity(Order.class, false, true)"
+      - "reader.find(Order.class, id, 500)"
+      - "reader.createQuery().forEntitiesAtRevision(Order.class, 500).add(AuditEntity.property(\"total\").gt(100))"
+    answer: 3
+    explanation: |
+      forEntitiesAtRevision(type, rev) reconstructs the DB state of that type at a revision
+      (horizontal query), and AuditEntity.property("total").gt(100) filters it. forRevisionsOfEntity
+      is the vertical "all revisions of one entity" query; find() and getRevisions() target a
+      single id.
+    ref: "concepts.md#envers-deep-dive-auditquery-revisionlistener-and-configuration"
+
+  - id: lifecycle-callbacks-auditing-interceptors-064
+    difficulty: expert
+    tags: [envers, revision-listener, acting-user, distinction]
+    question: |
+      How does Envers record *who* performed each change, and how does that differ structurally
+      from Spring Data's @CreatedBy?
+    options:
+      - "It reads AuditorAware directly; there is no structural difference"
+      - "A RevisionListener.newRevision() stamps the user into REVINFO — one row per transaction — vs @CreatedBy stamping per changed row"
+      - "It stores the user in a thread-local read at query time"
+      - "Envers cannot capture the user; only timestamps"
+    answer: 1
+    explanation: |
+      A custom @RevisionEntity + RevisionListener.newRevision() writes the acting user into the
+      shared REVINFO revision (one row per transaction). Spring's @CreatedBy/@LastModifiedBy write
+      the user onto each entity row via AuditorAware.
+    ref: "concepts.md#envers-deep-dive-auditquery-revisionlistener-and-configuration"
+
+  - id: lifecycle-callbacks-auditing-interceptors-065
+    difficulty: expert
+    tags: [envers, store-data-at-delete, null-row]
+    question: |
+      `reader.find(Order.class, 42L, delRev)` for the revision that deleted the entity returns
+      null/all-null fields. Why, and how do you keep the last state?
+    options:
+      - "The revision number is wrong; there is no fix"
+      - "By default a DEL row stores only the id with other columns NULL; set org.hibernate.envers.store_data_at_delete=true (or query with selectDeletedEntities=true)"
+      - "Envers purged the row; restore from backup"
+      - "find() never returns deleted revisions; use getRevisions()"
+    answer: 1
+    explanation: |
+      Envers' DEL (REVTYPE=2) rows store only the id with the rest NULL by default. Enable
+      store_data_at_delete=true to snapshot the last state into the delete revision, or query
+      forRevisionsOfEntity(..., selectDeletedEntities=true).
+    ref: "concepts.md#envers-deep-dive-auditquery-revisionlistener-and-configuration"
+
+  - id: lifecycle-callbacks-auditing-interceptors-066
+    difficulty: advanced
+    tags: [envers, revtype, audit-table-reading]
+    question: |
+      Reading a raw _AUD table, you see a REVTYPE column with values 0, 1, and 2. What do they
+      mean?
+    options:
+      - "0=DEL, 1=ADD, 2=MOD"
+      - "0=ADD, 1=MOD, 2=DEL"
+      - "0=MOD, 1=DEL, 2=ADD"
+      - "They are revision numbers, not types"
+    answer: 1
+    explanation: |
+      RevisionType is stored as an integer: 0=ADD (insert), 1=MOD (update), 2=DEL (delete).
+      Knowing this lets you interpret audit tables directly in SQL.
+    ref: "concepts.md#envers-deep-dive-auditquery-revisionlistener-and-configuration"
+
+  - id: lifecycle-callbacks-auditing-interceptors-067
+    difficulty: expert
+    tags: [second-level-cache, soft-delete, leak, judgment]
+    question: |
+      A soft-deleted (via @SQLRestriction) row keeps appearing when navigated through a cached
+      @ManyToOne association or via em.getReference(). Why?
+    options:
+      - "@SQLRestriction is buggy for associations"
+      - "The predicate is applied to generated SQL only; the 2LC/getReference serve the entity without re-running that SQL, so the filter isn't re-checked"
+      - "getReference always bypasses soft delete by design and cannot be fixed"
+      - "The row was never actually soft-deleted"
+    answer: 1
+    explanation: |
+      @SQLRestriction/@Filter/@SoftDelete are query-time SQL predicates. When an entity is served
+      from the second-level cache or via getReference (no SELECT executed), the predicate isn't
+      re-evaluated in memory, so filtered/soft-deleted rows can leak. Treat filters as query-time,
+      not entity-state, invariants.
+    ref: "concepts.md#second-level-cache-filters-and-soft-delete-leaks"
+
+  - id: lifecycle-callbacks-auditing-interceptors-068
+    difficulty: expert
+    tags: [statement-inspector, interceptor, distinction]
+    question: |
+      You need to rewrite/annotate the raw SQL string Hibernate sends (e.g. add a query tag
+      comment) just before execution. Which hook is designed for that?
+    options:
+      - "Interceptor.onFlushDirty"
+      - "A @PostLoad callback"
+      - "StatementInspector"
+      - "A PRE_INSERT event listener"
+    answer: 2
+    explanation: |
+      StatementInspector is the SPI for inspecting/rewriting the SQL text before execution.
+      Interceptor works at the entity-state level and never sees SQL text; event listeners hook
+      entity operations, not the SQL string.
+    ref: "concepts.md#statementinspector-veto-and-post-commit-listeners"
+
+  - id: lifecycle-callbacks-auditing-interceptors-069
+    difficulty: expert
+    tags: [event-listener, veto, pre-update]
+    question: |
+      What capability does a Hibernate PRE_UPDATE (or PRE_INSERT/PRE_DELETE) event listener have
+      that a JPA @PreUpdate callback does not?
+    options:
+      - "It can veto the operation by returning true, cancelling the SQL"
+      - "It can set the created timestamp"
+      - "It runs after commit"
+      - "It can modify the entity's scalar fields"
+    answer: 0
+    explanation: |
+      Pre-event listeners can return true to veto (cancel) the operation. A JPA @PreUpdate cannot
+      cancel the UPDATE; it can only mutate the entity's own non-relationship fields and throw to
+      trigger rollback.
+    ref: "concepts.md#statementinspector-veto-and-post-commit-listeners"
+
+  - id: lifecycle-callbacks-auditing-interceptors-070
+    difficulty: expert
+    tags: [interceptor, preupdate, event-listener, distinction]
+    question: |
+      Which statement best distinguishes Interceptor.onFlushDirty from a @PreUpdate callback?
+    options:
+      - "They are identical; onFlushDirty is just the older name"
+      - "@PreUpdate can veto the UPDATE; onFlushDirty cannot"
+      - "onFlushDirty can mutate the currentState[] array (changing the SQL directly) and is Hibernate-only; @PreUpdate is portable JPA and only mutates the entity's own fields"
+      - "onFlushDirty runs after commit; @PreUpdate runs before flush"
+    answer: 2
+    explanation: |
+      onFlushDirty receives and can mutate the currentState[] snapshot array (changing what the
+      UPDATE writes) and is a Hibernate-specific SessionFactory/session hook. @PreUpdate is
+      portable JPA, per-entity, and can only modify the entity's own non-relationship fields.
+    ref: "concepts.md#statementinspector-veto-and-post-commit-listeners"
+
+  - id: lifecycle-callbacks-auditing-interceptors-071
+    difficulty: advanced
+    tags: [postload, second-level-cache, timing]
+    question: |
+      Does @PostLoad fire for an entity that is served from the second-level cache (no SQL SELECT
+      executed)?
+    options:
+      - "No — @PostLoad only fires after an actual SELECT"
+      - "Yes — @PostLoad fires when the entity is materialized into the context, including from the 2LC"
+      - "Only if you call em.refresh()"
+      - "Only for EAGER associations"
+    answer: 1
+    explanation: |
+      @PostLoad is about materialization into the persistence context, not about SQL. It fires on
+      find, JPQL load, refresh, lazy-proxy initialization, and even for entities assembled from the
+      second-level cache with no SELECT.
+    ref: "concepts.md#callback-rules-and-gotchas"
+
+  - id: lifecycle-callbacks-auditing-interceptors-072
+    difficulty: advanced
+    tags: [preupdate, autoflush, timing, gotcha]
+    question: |
+      You run a JPQL SELECT while a dirty managed entity sits in the persistence context. You are
+      surprised to see @PreUpdate fire mid-method. Why?
+    options:
+      - "JPQL SELECTs always modify entities"
+      - "Auto-flush before the query flushes pending changes, triggering the dirty entity's UPDATE and its @PreUpdate"
+      - "@PreUpdate fires on every query regardless of state"
+      - "The entity was reloaded, calling @PreUpdate"
+    answer: 1
+    explanation: |
+      To keep query results consistent, Hibernate auto-flushes pending changes before executing a
+      query that touches the affected tables. That flush emits the UPDATE for the dirty entity, so
+      @PreUpdate fires at a surprising point mid-method.
+    ref: "concepts.md#why-preupdate-only-fires-on-a-real-dirty-update"
+
+  - id: lifecycle-callbacks-auditing-interceptors-073
+    difficulty: advanced
+    tags: [auditing, modifyOnCreate, spring-data]
+    question: |
+      By default with Spring Data auditing, is @LastModifiedDate also set at insert time (not just
+      on updates)?
+    options:
+      - "No — @LastModifiedDate is only ever set on updates"
+      - "Only if the entity has no @CreatedDate"
+      - "It is set on insert only for new-style Instant fields"
+      - "Yes by default; @EnableJpaAuditing(modifyOnCreate=false) can suppress setting it on insert"
+    answer: 3
+    explanation: |
+      By default @LastModifiedDate is populated on insert as well as update (so created and
+      modified match initially). @EnableJpaAuditing(modifyOnCreate=false) tells the handler not to
+      set the modified fields during the initial insert.
+    ref: "concepts.md#spring-data-jpa-auditing"
+
+  - id: lifecycle-callbacks-auditing-interceptors-074
+    difficulty: expert
+    tags: [auditing, internals, objectfactory, autowiring]
+    question: |
+      Why can Spring's AuditingEntityListener resolve an AuditorAware bean while a plain
+      @EntityListeners class cannot @Autowired anything?
+    options:
+      - "AuditingEntityListener is a Spring @Component scanned normally"
+      - "@EnableJpaAuditing registers a BeanFactory-backed bridge (a lazily-injected ObjectFactory<AuditingHandler>) that the listener resolves through, since JPA instantiates listeners reflectively"
+      - "Plain listeners can also @Autowired; the question is wrong"
+      - "AuditingEntityListener uses a database trigger to fetch collaborators"
+    answer: 1
+    explanation: |
+      The JPA provider constructs listener instances reflectively, outside the Spring container, so
+      normal @Autowired is null. @EnableJpaAuditing installs a static BeanFactory-backed bridge
+      (an ObjectFactory<AuditingHandler>) that AuditingEntityListener uses to obtain its
+      collaborators lazily.
+    ref: "concepts.md#entitylisteners-and-external-listener-classes"
+
+  - id: lifecycle-callbacks-auditing-interceptors-075
+    difficulty: intermediate
+    tags: [tenant-id, multi-tenancy, hibernate-6]
+    question: |
+      In Hibernate 6, what is the modern declarative way to stamp and filter by a tenant
+      discriminator, rather than hand-rolling a @PrePersist tenant setter?
+    options:
+      - "@TenantId with a CurrentTenantIdentifierResolver"
+      - "@CreatedBy on a tenant field"
+      - "@SQLRestriction(\"tenant_id = ?\")"
+      - "A @PostLoad that checks the tenant"
+    answer: 0
+    explanation: |
+      Hibernate 6's @TenantId, combined with a CurrentTenantIdentifierResolver, declaratively sets
+      the tenant on insert and filters reads by it — the current answer for discriminator-based
+      multi-tenancy, superseding manual @PrePersist stamping.
+    ref: "concepts.md#hibernate-native-timestamps-creationtimestamp-updatetimestamp-currenttimestamp"

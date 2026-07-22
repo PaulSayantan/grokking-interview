@@ -936,3 +936,628 @@ questions:
       spring-data-jpa-repositories, which itself defers container and @Transactional proxy
       mechanics to the spring-* domains.
     ref: "concepts.md#references"
+
+  - id: value-mapping-converters-enums-types-053
+    difficulty: expert
+    tags: [enum, ddl, hibernate6, check-constraint]
+    question: |
+      In Hibernate 6, you map `@Enumerated(EnumType.STRING)` on
+      `enum Status { NEW, PAID, SHIPPED }` and let Hibernate export the schema on
+      PostgreSQL. What DDL does it generate for the column?
+    options:
+      - "A plain `varchar(255)` with no constraint (same as Hibernate 5)"
+      - "`varchar(255)` plus a `CHECK (status in ('NEW','PAID','SHIPPED'))` constraint"
+      - "A native PostgreSQL `CREATE TYPE ... AS ENUM` column by default"
+      - "An `integer` column storing the ordinal"
+    answer: 1
+    explanation: |
+      Hibernate 6 improved the DDL: STRING enums export as `varchar` plus a CHECK constraint
+      listing the allowed names (native `enum(...)` on MySQL). It does NOT use a Postgres
+      native enum type by default — that is opt-in via @JdbcTypeCode(SqlTypes.NAMED_ENUM).
+    ref: "concepts.md#hb6-enum-ddl-check-constraints-and-native-enums"
+
+  - id: value-mapping-converters-enums-types-054
+    difficulty: expert
+    tags: [enum, ddl, ordinal, hibernate6]
+    question: |
+      For `@Enumerated(EnumType.ORDINAL)` on a 4-constant enum, what column type and
+      constraint does Hibernate 6 generate (schema export)?
+    options:
+      - "`INTEGER` with no constraint"
+      - "`SMALLINT` with a NOT NULL constraint only"
+      - "`TINYINT` plus a `CHECK (col between 0 and 3)` constraint"
+      - "`VARCHAR` storing the stringified ordinal"
+    answer: 2
+    explanation: |
+      HB6 maps ORDINAL to TINYINT (not plain INTEGER as in HB5) and adds a CHECK constraint
+      bounding the ordinal range to the number of constants. The CHECK rejects out-of-range
+      integers at the DB level.
+    ref: "concepts.md#hb6-enum-ddl-check-constraints-and-native-enums"
+
+  - id: value-mapping-converters-enums-types-055
+    difficulty: expert
+    tags: [enum, native-enum, postgresql, jdbctypecode]
+    question: |
+      You want a PostgreSQL column backed by a native `CREATE TYPE status_enum AS ENUM (...)`
+      type rather than the default. Which annotation opts in?
+    options:
+      - "@JdbcTypeCode(SqlTypes.NAMED_ENUM)"
+      - "@Enumerated(EnumType.NATIVE)"
+      - "@JdbcTypeCode(SqlTypes.VARCHAR)"
+      - "@Convert(converter = EnumConverter.class)"
+    answer: 0
+    explanation: |
+      SqlTypes.NAMED_ENUM generates a named Postgres enum type (`CREATE TYPE ... AS ENUM`).
+      SqlTypes.ENUM produces the inline MySQL-style `enum(...)`. There is no EnumType.NATIVE.
+      HB6 avoids native Postgres enums by default because the JDBC driver requires explicit
+      casts.
+    ref: "concepts.md#hb6-enum-ddl-check-constraints-and-native-enums"
+
+  - id: value-mapping-converters-enums-types-056
+    difficulty: advanced
+    tags: [enum, migration, ordinal, runbook]
+    question: |
+      Production data was corrupted because someone reordered an ORDINAL enum. You must move
+      to STRING safely. Which migration sequence is correct?
+    options:
+      - "Just change the annotation to STRING and redeploy; Hibernate rewrites the column"
+      - "Delete all rows and re-insert them from the application"
+      - "Add a new varchar column, backfill it from the old ordinal via `UPDATE ... CASE ordinal WHEN 0 THEN 'NEW' ...`, then switch the mapping to the new column and drop the old one"
+      - "Set hbm2ddl=update in production so the column auto-converts"
+    answer: 2
+    explanation: |
+      There is no automatic conversion. The safe runbook: add a new STRING column, backfill
+      by mapping each known ordinal to its name (CASE using the ORIGINAL declaration order),
+      verify, then swap the mapping and drop the old column. hbm2ddl=update in prod is unsafe
+      and won't translate values.
+    ref: "concepts.md#hb6-enum-ddl-check-constraints-and-native-enums"
+
+  - id: value-mapping-converters-enums-types-057
+    difficulty: expert
+    tags: [timezone, offsetdatetime, default-storage]
+    question: |
+      What is the actual default of `hibernate.timezone.default_storage` (since Hibernate
+      6.2), and what does it resolve to?
+    options:
+      - "NATIVE always, failing on dialects without TIMESTAMP WITH TIME ZONE"
+      - "NORMALIZE, always dropping the zone to the JVM default"
+      - "COLUMN, always storing the offset in a companion column"
+      - "DEFAULT — which resolves to NATIVE where the dialect supports TIMESTAMP WITH TIME ZONE, else NORMALIZE_UTC"
+    answer: 3
+    explanation: |
+      The default is the TimeZoneStorageType.DEFAULT constant: NATIVE when the dialect has a
+      `with time zone` type, otherwise NORMALIZE_UTC. It preserves the instant but does not
+      promise the original offset/zone survives a round trip.
+    ref: "concepts.md#time-zone-storage-for-instant-and-offsetdatetime"
+
+  - id: value-mapping-converters-enums-types-058
+    difficulty: expert
+    tags: [timezone, offsetdatetime, postgresql, round-trip]
+    question: |
+      You persist an `OffsetDateTime` of `2026-01-01T10:00+05:30` on PostgreSQL with the
+      default timezone storage (column type `timestamptz`). What reads back?
+    options:
+      - "The exact same value including the `+05:30` offset"
+      - "The correct instant, but normalized to UTC (offset `+00:00`) — the original +05:30 is lost"
+      - "A LocalDateTime with the time components truncated"
+      - "An error, because Postgres cannot store offsets"
+    answer: 1
+    explanation: |
+      Postgres `timestamptz` stores UTC. Under DEFAULT/NATIVE the instant is preserved but the
+      original offset is normalized to UTC, so you read back the equivalent instant at +00:00.
+      To retain the exact original offset use @TimeZoneStorage(COLUMN) with @TimeZoneColumn (or AUTO).
+    ref: "concepts.md#time-zone-storage-for-instant-and-offsetdatetime"
+
+  - id: value-mapping-converters-enums-types-059
+    difficulty: expert
+    tags: [timezone, column, timezonecolumn, preserve-offset]
+    question: |
+      A regulatory requirement says you must persist and later reproduce the EXACT original
+      UTC offset a client submitted with an `OffsetDateTime`. Which storage strategy
+      guarantees both the instant and the original offset survive on any dialect?
+    options:
+      - "TimeZoneStorageType.NORMALIZE_UTC"
+      - "TimeZoneStorageType.NATIVE"
+      - "TimeZoneStorageType.COLUMN (or AUTO), using @TimeZoneColumn for the companion offset column"
+      - "Mapping the field as LocalDateTime"
+    answer: 2
+    explanation: |
+      COLUMN stores the offset in a separate companion column (@TimeZoneColumn), preserving
+      both instant and offset regardless of dialect. AUTO uses NATIVE where available else
+      COLUMN. NATIVE alone fails/normalizes on dialects without true offset support, and
+      NORMALIZE_UTC discards the offset entirely.
+    ref: "concepts.md#time-zone-storage-for-instant-and-offsetdatetime"
+
+  - id: value-mapping-converters-enums-types-060
+    difficulty: advanced
+    tags: [timezone, jdbc-time-zone, configuration]
+    question: |
+      What does the `hibernate.jdbc.time_zone` property (e.g. set to `UTC`) control?
+    options:
+      - "The zone the JDBC driver normalizes to when binding/reading timestamps, giving reproducible values across JVMs in different regions"
+      - "The default @Temporal type for all date fields"
+      - "The enum ordinal offset applied to all enums"
+      - "Whether Hibernate uses jsonb or json for JSON columns"
+    answer: 0
+    explanation: |
+      hibernate.jdbc.time_zone tells Hibernate which zone the JDBC driver should normalize to
+      on read/write of Timestamp values. Setting it to UTC makes timestamp binding reproducible
+      regardless of the JVM's default zone. It is unrelated to enums or JSON.
+    ref: "concepts.md#time-zone-storage-for-instant-and-offsetdatetime"
+
+  - id: value-mapping-converters-enums-types-061
+    difficulty: expert
+    tags: [hibernate6, uuid, default-mapping, postgresql]
+    question: |
+      With no override annotation, how does Hibernate 6 map a `UUID` attribute on
+      PostgreSQL by default?
+    options:
+      - "As `char(36)` textual form"
+      - "As the native `uuid` column type (SqlTypes.UUID), falling back to `binary(16)` where unsupported"
+      - "As `varchar(255)`"
+      - "As a BLOB of serialized bytes"
+    answer: 1
+    explanation: |
+      HB6's default type code for UUID is SqlTypes.UUID → native `uuid` on Postgres, with a
+      `binary(16)` fallback on dialects lacking native UUID. Override with @JdbcTypeCode(SqlTypes.CHAR)
+      for char(36) or SqlTypes.BINARY/VARBINARY for binary(16).
+    ref: "concepts.md#hb6-default-type-code-mappings-instant-duration-uuid"
+
+  - id: value-mapping-converters-enums-types-062
+    difficulty: advanced
+    tags: [hibernate6, duration, instant, default-mapping]
+    question: |
+      Per the Hibernate 6.0 migration guide, what are the default JDBC type codes for
+      `Instant` and `Duration`?
+    options:
+      - "Instant → VARCHAR; Duration → VARCHAR"
+      - "Instant → TIMESTAMP_UTC (fallback timestamp); Duration → INTERVAL_SECOND (fallback numeric(21))"
+      - "Instant → BIGINT epoch millis; Duration → BIGINT nanos"
+      - "Both map to BLOB by default"
+    answer: 1
+    explanation: |
+      HB6 defaults: Instant → SqlTypes.TIMESTAMP_UTC (fallback plain `timestamp`), Duration →
+      SqlTypes.INTERVAL_SECOND (fallback `numeric(21)`). These are common HB5→6 DDL surprises.
+    ref: "concepts.md#hb6-default-type-code-mappings-instant-duration-uuid"
+
+  - id: value-mapping-converters-enums-types-063
+    difficulty: advanced
+    tags: [uuid, char, binary, index, judgment]
+    question: |
+      You must store a UUID as `char(36)` (a legacy schema requires the textual form) on a
+      HB6 Postgres app. Which annotation, and what is the index-size trade-off vs native uuid?
+    options:
+      - "@JdbcTypeCode(SqlTypes.CHAR); char(36) is 36 bytes vs native uuid's 16, so indexes are larger/less dense"
+      - "@Enumerated(EnumType.STRING); no size difference"
+      - "@Lob; smaller than native uuid"
+      - "No annotation needed; HB6 defaults to char(36) anyway"
+    answer: 0
+    explanation: |
+      Override the default (native uuid) with @JdbcTypeCode(SqlTypes.CHAR) to force char(36).
+      The trade-off: 36 textual bytes vs 16 binary bytes, so char(36) indexes are larger and
+      less dense. HB6 does NOT default to char(36) — it defaults to native uuid.
+    ref: "concepts.md#hb6-default-type-code-mappings-instant-duration-uuid"
+
+  - id: value-mapping-converters-enums-types-064
+    difficulty: advanced
+    tags: [nationalized, sqlserver, unicode]
+    question: |
+      A SQL Server app stores non-ASCII customer names in a `varchar` column and sees data
+      corruption. What is the correct fix at the mapping layer?
+    options:
+      - "Annotate the String with @Lob"
+      - "Use @Nationalized on the field (or set hibernate.use_nationalized_character_data=true) so it maps to nvarchar"
+      - "Switch the field to byte[]"
+      - "Add @Enumerated(EnumType.STRING)"
+    answer: 1
+    explanation: |
+      SQL Server `varchar` is collation-bound single-byte; Unicode data needs `nvarchar`.
+      @Nationalized maps a String/CLOB to the national-character type (nvarchar/nclob), or set
+      hibernate.use_nationalized_character_data=true to apply it globally.
+    ref: "concepts.md#nationalized-character-data-nationalized"
+
+  - id: value-mapping-converters-enums-types-065
+    difficulty: expert
+    tags: [converter, collection, map, attributename]
+    question: |
+      You need to apply an `AttributeConverter` only to the VALUES of a
+      `Map<String,City> attributes` element collection. Which annotation form targets that?
+    options:
+      - "@Convert on the field applies to keys and values equally"
+      - "@Convert(converter = CityConverter.class, attributeName = \"value\")"
+      - "You cannot convert map values; only scalar fields"
+      - "@Enumerated(EnumType.STRING) on the map"
+    answer: 1
+    explanation: |
+      @Convert(attributeName = "value") targets a Map's values (and "key" targets keys);
+      attributeName also names sub-attributes inside an @Embeddable path. A bare @Convert on a
+      Map field is ambiguous — you use attributeName to pick key vs value.
+    ref: "concepts.md#converters-on-collections-and-map-keysvalues"
+
+  - id: value-mapping-converters-enums-types-066
+    difficulty: advanced
+    tags: [converter, autoapply, disableconversion]
+    question: |
+      A `Boolean` converter is registered with `@Converter(autoApply = true)`, but one
+      specific Boolean field must be stored as the raw boolean, NOT converted. What do you use?
+    options:
+      - "@Convert(disableConversion = true) on that field"
+      - "Nothing can override an autoApply converter"
+      - "@Transient on the field"
+      - "@Enumerated(EnumType.ORDINAL)"
+    answer: 0
+    explanation: |
+      @Convert(disableConversion = true) switches off an autoApply converter for a specific
+      attribute, letting Hibernate use the default mapping for that field. @Transient would
+      stop persisting it entirely, which is not what's wanted.
+    ref: "concepts.md#converters-on-collections-and-map-keysvalues"
+
+  - id: value-mapping-converters-enums-types-067
+    difficulty: intermediate
+    tags: [converter, enumerated, mutually-exclusive]
+    question: |
+      Can you put both `@Enumerated(EnumType.STRING)` and `@Convert(converter=...)` on the
+      same enum attribute?
+    options:
+      - "Yes, the converter runs after @Enumerated"
+      - "No — a converter and @Enumerated are mutually exclusive on one attribute; choose one mapping strategy"
+      - "Yes, but only if the converter is autoApply"
+      - "Only on @Id attributes"
+    answer: 1
+    explanation: |
+      An attribute uses exactly one basic-mapping strategy. A converter and @Enumerated (also
+      @Temporal) are mutually exclusive on the same field — pick the converter OR @Enumerated,
+      not both.
+    ref: "concepts.md#converters-on-collections-and-map-keysvalues"
+
+  - id: value-mapping-converters-enums-types-068
+    difficulty: expert
+    tags: [usertype, hibernate6, custom-type]
+    question: |
+      In Hibernate 6, which method of the generic `UserType<T>` interface tells Hibernate the
+      JDBC type code for the mapped column?
+    options:
+      - "returnedClass()"
+      - "sqlTypes() returning an int[] (the Hibernate 5 signature)"
+      - "getSqlType() returning a single SqlTypes/java.sql.Types int"
+      - "nullSafeGet()"
+    answer: 2
+    explanation: |
+      HB6's UserType<T> exposes int getSqlType() returning a single JDBC type code (e.g.
+      SqlTypes.DECIMAL). The HB5 raw UserType used int[] sqlTypes(); the HB6 interface is
+      generic and single-column oriented (multi-column uses CompositeUserType).
+    ref: "concepts.md#writing-a-custom-usertype-in-hibernate-6"
+
+  - id: value-mapping-converters-enums-types-069
+    difficulty: expert
+    tags: [usertype, hibernate6, type-annotation]
+    question: |
+      How do you attach a Hibernate 6 `UserType` implementation to an entity attribute?
+    options:
+      - "@Type(\"myUserType\") using a registered string name"
+      - "@Type(MyUserType.class) — passing the UserType Class (not a string)"
+      - "@Convert(converter = MyUserType.class)"
+      - "@JdbcTypeCode(MyUserType.class)"
+    answer: 1
+    explanation: |
+      HB6's @org.hibernate.annotations.Type takes a Class (the UserType implementation), not a
+      string type name — string-based @Type was removed. A UserType is not an AttributeConverter,
+      so @Convert doesn't apply.
+    ref: "concepts.md#writing-a-custom-usertype-in-hibernate-6"
+
+  - id: value-mapping-converters-enums-types-070
+    difficulty: expert
+    tags: [usertype, mutability, dirty-checking]
+    question: |
+      In a HB6 `UserType<T>` for a MUTABLE value object, which pair of methods most directly
+      governs correct dirty checking of in-place changes?
+    options:
+      - "getSqlType() and returnedClass()"
+      - "assemble() and disassemble()"
+      - "isMutable() returning true and deepCopy() returning a real defensive copy"
+      - "nullSafeGet() and nullSafeSet()"
+    answer: 2
+    explanation: |
+      For mutable values, isMutable() must return true and deepCopy() must return a genuine
+      copy so Hibernate can snapshot the loaded state and later detect in-place mutation. If
+      isMutable() is false, in-place changes are missed. get/set handle binding, not change
+      detection.
+    ref: "concepts.md#writing-a-custom-usertype-in-hibernate-6"
+
+  - id: value-mapping-converters-enums-types-071
+    difficulty: advanced
+    tags: [struct, embeddable, hibernate6]
+    question: |
+      What does mapping an `@Embeddable` with `@Struct(name = "address_type")` do on a
+      database that supports composite/UDT types?
+    options:
+      - "Flattens the embeddable's fields into columns of the parent table"
+      - "Stores the embeddable as a JSON blob"
+      - "Maps it to a single column of a DB composite/UDT type (e.g. Postgres `CREATE TYPE ... AS (...)`) instead of flattening its fields"
+      - "Serializes it as Java bytes into a BLOB"
+    answer: 2
+    explanation: |
+      @Struct / SqlTypes.STRUCT maps an embeddable to a native composite/UDT type as a single
+      structured column, preserving DB-native composite semantics — rather than the default of
+      flattening each field into its own column of the owning table.
+    ref: "concepts.md#struct-and-array-mappings"
+
+  - id: value-mapping-converters-enums-types-072
+    difficulty: advanced
+    tags: [array, hibernate6, postgresql, collection]
+    question: |
+      You annotate `String[] tags` with `@Array(length = 10)` on PostgreSQL (HB 6.1+). How is
+      it stored?
+    options:
+      - "In a native SQL array column (e.g. `text[]`), not a separate collection table"
+      - "In a separate join table like @ElementCollection"
+      - "As a comma-joined VARCHAR"
+      - "As a JSON array in a jsonb column"
+    answer: 0
+    explanation: |
+      @Array / SqlTypes.ARRAY maps a List/array to a native SQL array column (text[], integer[]
+      on Postgres), preserving array operators — distinct from @ElementCollection (join table),
+      a converter (delimited string), or JSON.
+    ref: "concepts.md#struct-and-array-mappings"
+
+  - id: value-mapping-converters-enums-types-073
+    difficulty: expert
+    tags: [columntransformer, encryption, query, judgment]
+    question: |
+      You must encrypt a `ssn` column at rest but STILL let the DB filter/index it via SQL.
+      Compared with an encrypting AttributeConverter, why is `@ColumnTransformer` the better
+      fit?
+    options:
+      - "@ColumnTransformer runs the crypto in Java, exactly like a converter"
+      - "@ColumnTransformer injects read/write SQL expressions so the transform runs in the DB, keeping the data expressible in predicates (and functional-index-able); a converter hands the DB only opaque ciphertext"
+      - "@ColumnTransformer disables encryption entirely"
+      - "A converter keeps the column indexable while @ColumnTransformer does not"
+    answer: 1
+    explanation: |
+      @ColumnTransformer wraps read/write SQL expressions (e.g. pgp_sym_encrypt/decrypt) around
+      the column, so the transform is in SQL and predicates/functional indexes can reference it.
+      An encrypting converter transforms in Java, so the DB only ever sees ciphertext and can't
+      apply plaintext predicates.
+    ref: "concepts.md#columntransformer-db-side-readwrite-transforms"
+
+  - id: value-mapping-converters-enums-types-074
+    difficulty: advanced
+    tags: [columntransformer, write, placeholder]
+    question: |
+      What is the requirement on the `write` expression of a `@ColumnTransformer`?
+    options:
+      - "It must contain exactly one `?` placeholder for the bound value"
+      - "It must return a boolean"
+      - "It cannot reference SQL functions"
+      - "It must be identical to the read expression"
+    answer: 0
+    explanation: |
+      The write expression must include exactly one `?` placeholder where Hibernate binds the
+      value (e.g. `pgp_sym_encrypt(?, :key)`). The read expression, inlined into SELECTs, has no
+      placeholder and can defeat plain indexes unless a matching functional index exists.
+    ref: "concepts.md#columntransformer-db-side-readwrite-transforms"
+
+  - id: value-mapping-converters-enums-types-075
+    difficulty: intermediate
+    tags: [temporal, creationtimestamp, updatetimestamp]
+    question: |
+      Which Hibernate annotations auto-populate temporal fields on insert and on every update
+      respectively?
+    options:
+      - "@Temporal on insert, @Convert on update"
+      - "@CreationTimestamp (set on INSERT) and @UpdateTimestamp (refreshed on INSERT and UPDATE)"
+      - "@Generated for both"
+      - "@Basic(optional=false) handles it automatically"
+    answer: 1
+    explanation: |
+      @CreationTimestamp sets the value once at insert; @UpdateTimestamp refreshes it on every
+      insert and update. Both support java.time types and default to the JVM clock. The
+      JPA-standard equivalent is a manual @PrePersist/@PreUpdate callback.
+    ref: "concepts.md#auto-populated-temporal-values"
+
+  - id: value-mapping-converters-enums-types-076
+    difficulty: expert
+    tags: [temporal, creationtimestamp, jvm-clock, gotcha]
+    question: |
+      An entity uses `@CreationTimestamp Instant createdAt` and `@UpdateTimestamp Instant
+      updatedAt` (both default source). Right after the INSERT, why can `createdAt` and
+      `updatedAt` differ by microseconds?
+    options:
+      - "Because @UpdateTimestamp always adds one second"
+      - "Because they are populated by two separate JVM-clock reads (Instant.now()) at insert time, not a single shared timestamp"
+      - "Because @CreationTimestamp uses the DB clock and @UpdateTimestamp uses the JVM clock"
+      - "They can never differ; Hibernate forces them equal on insert"
+    answer: 1
+    explanation: |
+      With the default source, both pull from the JVM clock via separate now() reads during the
+      insert, so they can differ by microseconds. To force equality or use DB time you'd use a
+      DB-sourced @CurrentTimestamp or set both from one value in a callback.
+    ref: "concepts.md#auto-populated-temporal-values"
+
+  - id: value-mapping-converters-enums-types-077
+    difficulty: expert
+    tags: [json, dirty-checking, immutable, gotcha]
+    question: |
+      A `Map<String,Object>` mapped with `@JdbcTypeCode(SqlTypes.JSON)` is ALSO annotated
+      `@Immutable`. Code mutates the map in place and commits, but no UPDATE fires. Why, and
+      what is the fix?
+    options:
+      - "JSON columns are read-only; remove @JdbcTypeCode"
+      - "@Immutable opts the attribute out of dirty checking, so in-place mutation is never detected; reassign a new Map instance (or drop @Immutable) to trigger the UPDATE"
+      - "Hibernate always ignores Map changes; switch to @ElementCollection"
+      - "The commit failed silently; add flush()"
+    answer: 1
+    explanation: |
+      @Immutable tells Hibernate the value never changes in place, so it skips dirty checking
+      for that attribute — mutating the map is invisible. Fixes: remove @Immutable (letting the
+      mutability plan deep-compare), or reassign a fresh Map reference so the change is caught.
+    ref: "concepts.md#dirty-checking-of-mutable-basic-values"
+
+  - id: value-mapping-converters-enums-types-078
+    difficulty: expert
+    tags: [dirty-checking, mutability-plan, converter, gotcha]
+    question: |
+      An `AttributeConverter<List<String>,String>` stores a comma-joined list. A developer
+      does `entity.getTags().add("x")` and commits; the change is not persisted. What is the
+      most likely mechanism, and the robust fix?
+    options:
+      - "Converters never persist changes; use a UserType"
+      - "The attribute's mutability plan treats the converted value as immutable, so in-place list mutation isn't detected; reassign a new List (setTags(newList)) to flip the reference"
+      - "Hibernate persists it on the next query automatically"
+      - "The list must be a Set for dirty checking to work"
+    answer: 1
+    explanation: |
+      Change detection on a converted basic depends on the type's mutability plan / deep
+      comparison. If it's treated as immutable, mutating the List in place sets no dirty flag.
+      Reassigning a new List instance always flips the reference and triggers the UPDATE.
+    ref: "concepts.md#dirty-checking-of-mutable-basic-values"
+
+  - id: value-mapping-converters-enums-types-079
+    difficulty: advanced
+    tags: [lob, postgresql, oid, gotcha, fix]
+    question: |
+      On PostgreSQL, `@Lob String bigText` throws "Large Objects may not be used in
+      auto-commit mode" / LargeObject errors. What is the accurate cause and modern fix?
+    options:
+      - "Postgres doesn't support large text; store it elsewhere"
+      - "@Lob String maps to the `oid` large-object API (needs the LO API and an open tx); drop @Lob and use @JdbcTypeCode(SqlTypes.LONGVARCHAR) or columnDefinition=\"text\""
+      - "Add @Nationalized to fix it"
+      - "Switch the field to byte[] and it works"
+    answer: 1
+    explanation: |
+      On Postgres @Lob String maps to the `oid` large-object mechanism, which requires the LO
+      API and an open transaction (fails in auto-commit). The modern fix is to drop @Lob and map
+      a plain String to `text` via @JdbcTypeCode(SqlTypes.LONGVARCHAR) or columnDefinition="text".
+    ref: "concepts.md#lob-for-clob-and-blob"
+
+  - id: value-mapping-converters-enums-types-080
+    difficulty: expert
+    tags: [lob, clob, streaming, locator, transaction]
+    question: |
+      Two entities map long text differently: A as `String` (materialized), B as
+      `java.sql.Clob`. After the transaction commits, reading each outside the tx behaves
+      differently. Why?
+    options:
+      - "Both fail equally; LOBs can never be read after commit"
+      - "The materialized String was fully read into memory and is safe; the java.sql.Clob is a locator valid only while the connection/tx is open, so reading it post-commit throws"
+      - "The Clob is safe and the String throws"
+      - "Neither is affected by transaction boundaries"
+    answer: 1
+    explanation: |
+      A String/byte[] is fully materialized into memory at load, so it's usable anywhere. A
+      java.sql.Clob/Blob is a streaming locator tied to the live connection/transaction; reading
+      it after commit throws (a cousin of LazyInitializationException). Prefer materialized types
+      unless you need streaming within the tx.
+    ref: "concepts.md#lob-for-clob-and-blob"
+
+  - id: value-mapping-converters-enums-types-081
+    difficulty: expert
+    tags: [json, jdbctypecode, convert, indexing, judgment]
+    question: |
+      For a Postgres app that must run GIN-indexed JSON-path queries against a document
+      column, which mapping should you choose and why?
+    options:
+      - "@JdbcTypeCode(SqlTypes.JSON) → native jsonb, keeping DB-side JSON operators and GIN indexing"
+      - "An AttributeConverter<Doc,String> → stores plain text, but keeps native jsonb operators"
+      - "@Lob → enables JSON-path indexing"
+      - "Either is identical; JSON operators work on plain text columns too"
+    answer: 0
+    explanation: |
+      @JdbcTypeCode(SqlTypes.JSON) maps to native jsonb, preserving JSON operators and GIN
+      indexing. A converter stores plain varchar/text, losing native JSON querying/indexing —
+      portable but wrong when you need DB-side JSON-path predicates.
+    ref: "concepts.md#mapping-json-columns"
+
+  - id: value-mapping-converters-enums-types-082
+    difficulty: advanced
+    tags: [migration, hibernate6, type, jsonb]
+    question: |
+      Migrating a Hibernate 5 app that used the hibernate-types library with
+      `@Type(type = "jsonb")`, what is the correct HB6 replacement?
+    options:
+      - "Keep @Type(type=\"jsonb\") — string @Type still works in HB6"
+      - "Replace it with @JdbcTypeCode(SqlTypes.JSON); string @Type/@TypeDef/@TypeDefs were removed in HB6"
+      - "Replace it with @Enumerated(EnumType.STRING)"
+      - "Move the mapping to persistence.xml"
+    answer: 1
+    explanation: |
+      HB6 removed string-based @Type and @TypeDef/@TypeDefs. Native JSON support means the
+      hibernate-types @Type("jsonb") is replaced by @JdbcTypeCode(SqlTypes.JSON) (dialect picks
+      jsonb/json/text).
+    ref: "concepts.md#hibernate-6-revamped-type-system-javatype-jdbctype-jdbctypecode"
+
+  - id: value-mapping-converters-enums-types-083
+    difficulty: advanced
+    tags: [converter, list, delimited, design-smell, judgment]
+    question: |
+      A teammate proposes an `AttributeConverter<List<String>,String>` to store roles as a
+      comma-joined string in one column. What is the best senior assessment?
+    options:
+      - "It's the ideal normalized design; always prefer it"
+      - "It works (mind null/empty handling), but it violates 1NF and blocks indexed/relational querying of individual roles — a real @ElementCollection or child table is usually better"
+      - "It's impossible to write such a converter"
+      - "Comma-joining is faster than any normalized alternative in all cases"
+    answer: 1
+    explanation: |
+      The converter is technically fine (watch null vs empty-list handling), but a delimited
+      column violates first normal form and prevents indexing/joining/querying individual
+      elements. For anything you query by element, prefer @ElementCollection or a child table;
+      the delimited form is usually a design smell.
+    ref: "concepts.md#converters-on-collections-and-map-keysvalues"
+
+  - id: value-mapping-converters-enums-types-084
+    difficulty: expert
+    tags: [money, precision, scale, rounding, correctness]
+    question: |
+      A `BigDecimal amount` is mapped `@Column(precision=19, scale=2)` but the application
+      computes a value with 5 decimal places before persist. What governs the stored result?
+    options:
+      - "Hibernate always rounds to scale automatically with HALF_UP before binding"
+      - "Hibernate binds the BigDecimal as-is; the DB then rounds or rejects per its rules — so the application should apply the intended scale/RoundingMode BEFORE persist"
+      - "The value is silently truncated to an integer"
+      - "precision/scale force the JVM to round at construction time"
+    answer: 1
+    explanation: |
+      @Column(precision,scale) only drives DDL; Hibernate binds the BigDecimal unchanged. The
+      DB may round or reject an over-scaled value (dialect-dependent). Correctness requires the
+      application to setScale with an explicit RoundingMode before persisting money.
+    ref: "concepts.md#column-precision-and-scale-for-bigdecimal-money"
+
+  - id: value-mapping-converters-enums-types-085
+    difficulty: advanced
+    tags: [basic, optional, nullable, fetch-optimization]
+    question: |
+      Beyond DDL, what additional effect can `@Basic(optional = false)` have that
+      `@Column(nullable = false)` does not?
+    options:
+      - "It generates the NOT NULL constraint while @Column does not"
+      - "It informs Hibernate the value is always present, which can influence secondary-table/join and eager-fetch optimizations; @Column(nullable=false) only drives the NOT NULL DDL"
+      - "It encrypts the column"
+      - "It makes the attribute lazy by default"
+    answer: 1
+    explanation: |
+      @Basic(optional=false) is object-model metadata telling Hibernate the value is non-null,
+      which can affect inner-vs-outer join decisions for secondary tables and fetch
+      optimizations. @Column(nullable=false) only emits the NOT NULL DDL constraint. They live
+      at different layers.
+    ref: "concepts.md#basic-optional-and-null-handling"
+
+  - id: value-mapping-converters-enums-types-086
+    difficulty: expert
+    tags: [basic, lazy, bytecode, lazygroup]
+    question: |
+      An entity has three `@Basic(fetch=LAZY)` columns (one @Lob, two others) and bytecode
+      enhancement IS enabled. Accessing one lazy field triggers loading of all three in a
+      single select. How do you make the @Lob load independently?
+    options:
+      - "Lazy basics always load one-at-a-time; nothing to do"
+      - "All lazy basics form one fetch group by default; separate them with @LazyGroup(...) so the @Lob is its own group"
+      - "Disable bytecode enhancement"
+      - "Add @Convert to the @Lob"
+    answer: 1
+    explanation: |
+      With enhancement, all lazy basic attributes load together as a single fetch group unless
+      you assign @LazyGroup names. Putting the @Lob in its own @LazyGroup makes it load
+      separately from the other lazy columns. Without enhancement the LAZY hint is ignored
+      entirely.
+    ref: "concepts.md#basic-optional-and-null-handling"

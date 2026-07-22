@@ -436,6 +436,374 @@ cache and will be included in dirty checking on flush — mutate one and it sile
 `UPDATE`s on commit. If it returns **scalars/DTOs**, they're detached values you can throw
 around freely. For read-only work, project to DTOs to keep the persistence context lean.
 
+## Aggregates, GROUP BY & HAVING
+
+Reporting queries are the most common *real* JPQL, so interviewers probe the aggregate
+rules precisely.
+
+- **Aggregate functions:** `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, plus `COUNT(DISTINCT x)`.
+- **Return types matter:** `COUNT(...)` returns **`Long`**; `AVG(...)` returns
+  **`Double`**; `SUM` returns `Long`/`Double`/`BigDecimal`/`BigInteger` depending on the
+  operand type; `MIN`/`MAX` return the operand's type. Casting `count(...)` to `int` in a
+  constructor DTO is a classic `ClassCastException`/mapping error.
+- **`GROUP BY` rule:** every non-aggregated item in the `SELECT` list must appear in
+  `GROUP BY`. `HAVING` filters **groups** (post-aggregation), whereas `WHERE` filters
+  **rows** (pre-aggregation) — a distinction candidates routinely blur.
+
+```java
+List<Object[]> rows = em.createQuery(
+    "SELECT a.name, COUNT(b), AVG(b.price) " +
+    "FROM Author a LEFT JOIN a.books b " +
+    "GROUP BY a.name " +
+    "HAVING COUNT(b) > 5", Object[].class)
+  .getResultList();   // Object[]{String, Long, Double}
+```
+
+```sql
+select a.name, count(b.id), avg(b.price)
+from author a left join book b on b.author_id = a.id
+group by a.name
+having count(b.id) > 5
+```
+
+> [!KEY-TAKEAWAY]
+> `WHERE` filters rows *before* grouping; `HAVING` filters aggregated groups *after*.
+> `COUNT` → `Long`, `AVG` → `Double` — get the DTO constructor argument types right or the
+> projection blows up at runtime.
+
+## Subqueries, EXISTS & Quantifiers
+
+Standard JPQL allows subqueries **only in `WHERE` and `HAVING`**. Hibernate 6 relaxes
+this — subqueries are legal in the `SELECT` list and in `FROM` (including **lateral**
+joins) in HQL. Interview-relevant forms:
+
+- **`EXISTS` / `NOT EXISTS`** — usually **correlated** (the subquery references the outer
+  row):
+
+  ```java
+  "SELECT a FROM Author a WHERE EXISTS " +
+  "(SELECT b FROM Book b WHERE b.author = a AND b.price > 100)"
+  ```
+
+- **`IN (subquery)`** — uncorrelated set membership:
+  `WHERE a.id IN (SELECT b.author.id FROM Book b WHERE b.price > 100)`.
+- **`ALL` / `ANY` / `SOME`** quantifiers: `WHERE a.royalty > ALL (SELECT ...)` (greater
+  than every value), `ANY`/`SOME` (greater than at least one).
+- **`MEMBER OF`** tests membership in a *collection association*:
+  `WHERE :book MEMBER OF a.books` — this is about the mapped collection, not a subquery
+  result. Its opposite is `NOT MEMBER OF`; `IS EMPTY` / `IS NOT EMPTY` test collection
+  emptiness.
+
+> [!TIP]
+> **`EXISTS` (correlated) vs `IN (subquery)` (uncorrelated)** is a frequent whiteboard
+> ask. `EXISTS` short-circuits on the first matching child row and often out-performs an
+> `IN` that materializes the whole subquery set — but let the DB optimizer decide; both
+> are portable JPQL.
+
+## TREAT, CASE & JPQL Functions
+
+**`TREAT` — polymorphic downcasting.** In an inheritance hierarchy, `TREAT(p AS
+CreditCardPayment)` narrows a supertype reference to a subtype so you can reference
+subtype-only fields in `FROM`, `WHERE`, or `SELECT`:
+
+```java
+"SELECT p FROM Payment p WHERE TREAT(p AS CreditCardPayment).cardNumber LIKE '4%'"
+```
+
+It generates a join (JOINED strategy) or a discriminator filter (SINGLE_TABLE). A
+notorious Hibernate 5.1-era bug restricted `TREAT` to `WHERE` and lower-cased names; this
+is fixed in Hibernate 6, where `TREAT` works in `SELECT`/`FROM`/`WHERE`.
+
+**`CASE` expressions** — both simple and searched forms, usable in `SELECT`, `WHERE`, and
+`ORDER BY` (e.g. sort by a computed priority):
+
+```java
+"SELECT a.name, CASE WHEN a.royalty > 1000 THEN 'HIGH' ELSE 'LOW' END FROM Author a"
+"... ORDER BY CASE WHEN a.tier = 'GOLD' THEN 0 ELSE 1 END, a.name"
+```
+
+**Standard JPQL functions:** `CONCAT`, `SUBSTRING`, `TRIM(LEADING|TRAILING|BOTH ...)`,
+`LOWER`/`UPPER`, `LENGTH`, `LOCATE`, `ABS`/`MOD`/`SQRT`, `COALESCE`, `NULLIF`, `CAST`,
+`CURRENT_DATE`/`CURRENT_TIME`/`CURRENT_TIMESTAMP`, and `EXTRACT(YEAR FROM ...)`.
+
+**The `FUNCTION()` escape hatch** (JPA 2.1+) calls a database function from *portable*
+JPQL without dropping to native SQL:
+
+```java
+"SELECT a FROM Author a WHERE FUNCTION('date_part', 'year', a.createdAt) = 2025"
+```
+
+This is the senior answer to "call a Postgres/Oracle function without going native" — you
+keep managed-entity results and the persistence context while reaching a vendor function.
+
+> [!KEY-TAKEAWAY]
+> `FUNCTION('native_fn', args)` is the portable bridge to a DB function; `TREAT` downcasts
+> in inheritance queries; `CASE` computes values inline (great in `ORDER BY`). Reaching for
+> native SQL just to call one function is usually unnecessary.
+
+## Collection & Map Operators: SIZE, KEY, VALUE, ENTRY, INDEX
+
+- **`SIZE(a.books)`** returns the collection size and generates a **correlated subquery**
+  (`(select count(*) from book b where b.author_id = a.id)`), *not* a join — so using it in
+  a `SELECT` list can fire an extra correlated subselect per row. Contrast with an explicit
+  `JOIN ... GROUP BY ... COUNT`, which is a single grouped query.
+- **Map associations** (`@ElementCollection Map` / `@MapKey`): `KEY(m)` yields the map key,
+  `VALUE(m)` the value, `ENTRY(m)` a `Map.Entry`. You can also filter on them:
+  `WHERE KEY(phones) = 'work'`.
+- **`INDEX(b)`** returns the position of an element in an **ordered `List`** mapped with
+  `@OrderColumn`.
+
+```java
+"SELECT KEY(p), VALUE(p) FROM Person person JOIN person.phones p WHERE KEY(p) = 'MOBILE'"
+```
+
+## getSingleResult, getSingleResultOrNull & Result Streaming
+
+**`getSingleResult()` has a sharp exception contract:**
+
+- **0 rows → `NoResultException`**
+- **>1 row → `NonUniqueResultException`**
+
+Both are **unchecked** `PersistenceException` subtypes, and (per spec) a thrown
+`PersistenceException` **marks the transaction for rollback** — so using try/catch around
+`getSingleResult()` for control flow can leave you with a rollback-only transaction. **JPA
+3.2 / Hibernate 6 add `getSingleResultOrNull()`**, which returns `null` for zero rows (and
+still throws for >1), eliminating the try/catch-for-control-flow anti-pattern.
+
+```java
+// Anti-pattern (may mark tx rollback-only):
+try { return q.getSingleResult(); } catch (NoResultException e) { return null; }
+// Preferred (JPA 3.2 / HB6+):
+return q.getSingleResultOrNull();
+```
+
+**Streaming / scrolling large result sets.** `getResultList()` materializes *all* rows in
+memory — an OOM waiting to happen on millions of rows. Alternatives:
+
+- **`getResultStream()`** (JPA 2.2) — a `Stream<T>` backed by a JDBC cursor (forward-only
+  fetch), so rows are pulled as consumed.
+- **Hibernate `Query.scroll()`** → `ScrollableResults` for bidirectional cursor access.
+
+Both **must be closed** (use try-with-resources) and **run inside an open
+transaction/session** — using the stream/cursor after the session closes throws
+`LazyInitializationException`/a closed-cursor error. For large batch reads, combine with
+`StatelessSession` or periodic `flush()`+`clear()` to keep the persistence context from
+growing unbounded.
+
+```java
+try (Stream<Author> s = em.createQuery("SELECT a FROM Author a", Author.class)
+        .setHint("org.hibernate.fetchSize", 200)
+        .getResultStream()) {
+    s.forEach(this::process);   // rows streamed via cursor, not all loaded at once
+}
+```
+
+> [!WARNING]
+> A `getResultStream()`/`scroll()` cursor is only valid **while the session/transaction is
+> open**. Returning a live stream from a `@Transactional` method and consuming it after the
+> method returns throws on the closed cursor.
+
+## Stored Procedures
+
+For legacy/enterprise databases you call stored procedures through
+`StoredProcedureQuery`:
+
+```java
+StoredProcedureQuery q = em.createStoredProcedureQuery("count_books_by_author")
+    .registerStoredProcedureParameter("authorId", Long.class, ParameterMode.IN)
+    .registerStoredProcedureParameter("total",    Long.class, ParameterMode.OUT)
+    .setParameter("authorId", 42L);
+q.execute();
+Long total = (Long) q.getOutputParameterValue("total");
+```
+
+Or declaratively with `@NamedStoredProcedureQuery` + `@StoredProcedureParameter`.
+Parameter modes are `IN`, `OUT`, `INOUT`, and `REF_CURSOR` (for procedures that return a
+cursor/result set, common on Oracle/PostgreSQL). `.execute()` runs it; OUT params are
+read afterward via `getOutputParameterValue(...)`.
+
+## Query Plan Cache & IN-clause Parameter Padding
+
+Every JPQL/HQL/Criteria query is parsed to an **SQM/AST** that Hibernate caches so
+repeated executions skip re-parsing. Two settings govern it:
+
+- **`hibernate.query.plan_cache_max_size`** — max cached query plans (**default 2048**).
+- **`hibernate.query.plan_parameter_metadata_max_size`** — cached parameter metadata for
+  native queries (**default 128**); native queries cache only param metadata, not a full
+  semantic plan.
+
+If code generates a **different query string every call** (e.g. string-concatenated
+dynamic filters, or variable-length `IN` lists), the plan cache **thrashes** — constant
+recompilation drives CPU up under load. This is the root cause behind "why is CPU high
+with dynamic queries?"
+
+**`hibernate.query.in_clause_parameter_padding=true`** pads the bind-parameter count of an
+`IN` list up to the next power of two, so `IN (?,?,?)` and `IN (?,?,?,?)` both become
+`IN (?,?,?,?)` (padding by repeating the last value). This collapses many distinct query
+shapes into a few, dramatically shrinking plan-cache entries **and** the DB's own
+execution-plan cache footprint for variable-length `IN` queries.
+
+> [!KEY-TAKEAWAY]
+> Dynamic queries that produce unique SQL text each call thrash the query plan cache
+> (default size 2048) and the DB plan cache → high CPU. Build them with
+> Criteria/parameters (stable text) and enable `in_clause_parameter_padding` for
+> variable-length `IN` lists.
+
+## Set Operations (UNION, INTERSECT, EXCEPT)
+
+HQL in Hibernate 6 makes **`UNION [ALL]`, `INTERSECT [ALL]`, and `EXCEPT [ALL]`**
+first-class:
+
+```java
+"SELECT a.name FROM Author a WHERE a.active = true " +
+"UNION " +
+"SELECT p.name FROM Publisher p WHERE p.active = true"
+```
+
+Standard JPQL historically lacked these (JPA 3.2 begins adding some). This is a clean
+answer to "what can HQL do that spec JPQL can't."
+
+## Keyset (Seek) Pagination
+
+Offset pagination (`setFirstResult`) degrades on deep pages: the DB must **scan and
+discard** all `OFFSET n` rows before returning the page, so `OFFSET 500000` reads half a
+million rows to return ten. It is also **unstable** under concurrent inserts (rows shift
+between pages). **Keyset (seek) pagination** instead filters on the last-seen sort key:
+
+```sql
+-- offset (slow on deep pages): scans + discards 500000 rows
+... ORDER BY created_at, id LIMIT 10 OFFSET 500000
+-- keyset (uses the index, constant cost): seeks directly
+... WHERE (created_at, id) > (?, ?) ORDER BY created_at, id LIMIT 10
+```
+
+Hibernate 6.5+ exposes this as a first-class API:
+
+```java
+Order<Author> order = Order.asc(Author_.name);
+KeyedPage<Author> page = Page.first(10).keyedBy(List.of(order));
+KeyedResultList<Author> results = session
+    .createSelectionQuery("from Author", Author.class)
+    .getKeyedResultList(page);
+List<Author> authors = results.getResultList();
+KeyedPage<Author> next = results.getNextPage();   // carries the last key forward
+```
+
+The sort key **must be stable and unique** (append the PK as a tiebreaker) and ideally
+**indexed** — the index-scan and offset-cost reasoning lives in
+`messaging-databases/indexing`. This is the standard answer to "your `OFFSET 100000` page
+is slow — fix it."
+
+> [!KEY-TAKEAWAY]
+> Offset pagination scans and throws away `OFFSET n` rows (O(n)) and is unstable under
+> inserts; keyset/seek pagination filters `WHERE (sortcols) > (lastSeen)` on an indexed,
+> unique-tiebroken order for constant-cost deep paging.
+
+## Building Dynamic Queries: Criteria Alternatives
+
+Raw JPA Criteria is type-safe but famously verbose. Real teams reach for higher-level
+builders — a common follow-up to the Criteria question:
+
+| Approach | What it is | Notes |
+|---|---|---|
+| **JPA Criteria** | Spec `CriteriaBuilder`/`Root`/`Predicate` tree | Type-safe, verbose |
+| **Spring Data `Specification<T>`** | `toPredicate(root, query, cb)` composed with `.and()/.or()/.where()`, run via `JpaSpecificationExecutor` | Thin wrapper over Criteria; the Spring-idiomatic dynamic-query tool (see `spring-data-jpa-repositories`) |
+| **QueryDSL** | Fluent DSL over generated `Q`-types (`QAuthor.author.name.like(...)`) | Needs an APT processor + extra dependency; very readable |
+| **Blaze-Persistence** | Advanced query builder on top of Criteria | Adds CTEs, set operations, and keyset pagination |
+
+Note the version gotcha: **the legacy `org.hibernate.Criteria` interface was REMOVED in
+Hibernate 6** — people still reference `session.createCriteria(...)` from old tutorials,
+but it no longer exists; use JPA `CriteriaBuilder` instead.
+
+**Never** build dynamic queries by string concatenation: it invites injection *and*
+thrashes the query plan cache (unique SQL text every call).
+
+## Static Metamodel Generation Mechanics
+
+The `Author_` metamodel classes are produced by **`hibernate-jpamodelgen`, an annotation
+processor** wired on the compiler's `annotationProcessor`/`-processor` path. It generates
+`Author_` with `public static volatile SingularAttribute<Author, String> name;` (and
+`ListAttribute`/`SetAttribute`/`MapAttribute` for collections) into a
+`generated-sources` directory. It **re-runs on entity changes** during compilation. The
+classic setup gotcha — *"cannot resolve `Author_`"* in the IDE — means annotation
+processing isn't enabled or the generated-sources folder isn't marked as a source root.
+
+## Native Query Flush Scope & Column-Alias Mapping
+
+Two native-SQL depth points beyond the basics:
+
+- **Flush scope (query spaces).** Because Hibernate can't parse native SQL, it doesn't know
+  the *query spaces* (tables) it touches, so under `FlushModeType.AUTO` it **flushes the
+  entire persistence context before every native query** — a perf hit and a source of
+  surprising ordering. Scope it by declaring synchronized tables/classes:
+
+  ```java
+  query.unwrap(org.hibernate.query.SynchronizeableQuery.class)
+       .addSynchronizedEntityClass(Author.class);
+  ```
+
+  Then only pending changes to `Author` force a flush, and 2LC invalidation is likewise
+  scoped. `@NamedNativeQuery` synchronization does the same declaratively.
+- **Column-alias requirement.** Mapping a native result to an entity requires **every
+  mapped column present with the aliases the entity expects**. Missing columns → a mapping
+  failure; `SELECT *` is fragile across schema changes. Use `@FieldResult` inside
+  `@EntityResult` to remap aliases, or `addScalar()`/`addEntity()` on the unwrapped
+  `NativeQuery` to declare scalar types explicitly.
+
+## DISTINCT Semantics & the MultipleBagFetchException Fix
+
+**DISTINCT means two different things:**
+
+- For a **scalar** query (`SELECT DISTINCT a.name ...`), `DISTINCT` is passed to SQL for
+  real database-level de-duplication.
+- For an **entity `JOIN FETCH`** query, `DISTINCT` only de-duplicates the **Java parent
+  references** — pushing it to SQL would add a useless (and expensive) sort.
+
+Version behavior to state authoritatively:
+
+- **Hibernate 5** wrongly pushed `DISTINCT` through to SQL for fetch joins (adding a
+  needless sort); the fix was the query hint `hibernate.query.passDistinctThrough=false`
+  (HB5-only).
+- **Hibernate 6 removed that hint** and **never** pushes `DISTINCT` to SQL for entity fetch
+  joins — so in HB6 you can *drop `DISTINCT` entirely* and still get de-duplicated parents.
+  (Keeping it is harmless for fetch joins but signals HB5-era habits.)
+
+**Fixing `MultipleBagFetchException` (not just the ban).** The full exception is
+`org.hibernate.loader.MultipleBagFetchException: cannot simultaneously fetch multiple
+bags`. It fires because two `List`-mapped collections are **bags** (unordered, allow
+duplicates). The *fix* is to make them not-bags — change the `List`s to **`Set`** (or add
+`@OrderColumn` to make them ordered lists). Then two collections *can* be fetched — **but
+the result is still a Cartesian product** (rows = books × awards), so `@BatchSize` or two
+separate queries is usually the better answer even when it compiles.
+
+## SQM Pipeline & Bulk DML Version/Cascade Edge Cases
+
+**The SQM pipeline.** In Hibernate 6/7, HQL, JPQL, *and* Criteria all translate through the
+same two-phase pipeline: source → **SQM (Semantic Query Model, a semantic AST)** → **SQL
+AST** → dialect SQL. Criteria is **not** stringified to JPQL first — it builds SQM
+directly, so Criteria and JPQL share the same plan cache and optimizer. HB6 also introduced
+the `JavaType`/`JdbcType` type system that governs how literals and parameters bind.
+
+**Bulk DML + `@Version`.** A bulk `UPDATE` does **not** touch the optimistic-lock column, so
+concurrent optimistic locking silently breaks unless you bump it yourself:
+
+```java
+"UPDATE Author a SET a.active = false, a.version = a.version + 1 WHERE ..."
+```
+
+(The Spring Data equivalent is `@Modifying(clearAutomatically = true, flushAutomatically =
+true)` — see `spring-data-jpa-repositories`.)
+
+**Bulk `DELETE` + cascades.** A bulk `DELETE` ignores `cascade = REMOVE` and
+`orphanRemoval`; it issues one `DELETE` and will hit a **foreign-key constraint violation**
+if child rows exist. Delete children first, or rely on a database `ON DELETE CASCADE`
+constraint.
+
+**Count query for pagination.** A paginated screen needs a **separate `SELECT COUNT`**
+query, and that count query **must drop any `JOIN FETCH`** (you can't fetch a collection in
+a scalar count, and the fetch inflates the count). Spring Data does this automatically via
+its derived/`countQuery` support.
+
 ## Choosing the Right Query Approach
 
 | Need | Reach for |
@@ -471,7 +839,29 @@ around freely. For read-only work, project to DTOs to keep the persistence conte
 - **"How do you avoid loading entities you'll only read?"** Constructor-expression DTO
   projection — unmanaged, minimal columns, no dirty-check overhead.
 - **"Why can't you `JOIN FETCH` two collections?"** Cartesian product / `MultipleBagFetchException`;
-  fetch one collection per query, batch the rest.
+  fetch one collection per query, batch the rest. Fix by switching `List`→`Set`, but batching
+  is usually still better because the Cartesian product remains.
+- **"`getSingleResult()` vs `getSingleResultOrNull()`?"** The former throws
+  `NoResultException` (0 rows) / `NonUniqueResultException` (>1); JPA 3.2 / HB6 added
+  `getSingleResultOrNull()` returning null for zero rows (avoids try/catch control flow that
+  can mark the tx rollback-only).
+- **"Your `OFFSET 500000` page is slow — fix it."** Keyset/seek pagination on a stable,
+  unique, indexed sort key (`WHERE (cols) > (lastSeen) ... LIMIT n`); offset scans and
+  discards n rows and is unstable under inserts. HB6.5+ has `Order`/`Page`/`KeyedPage`/
+  `getKeyedResultList`.
+- **"Process 10M rows without OOM."** `getResultStream()`/`scroll()` over a JDBC cursor,
+  closed in try-with-resources inside an open tx, with `StatelessSession` or periodic
+  `flush()`+`clear()` — not `getResultList()`.
+- **"CPU is high under load with dynamic queries — why?"** Unique SQL text per call thrashes
+  the query plan cache (default 2048); use parameters/Criteria and
+  `in_clause_parameter_padding` for variable-length `IN` lists.
+- **"Bulk UPDATE and optimistic locking?"** Bulk DML doesn't touch `@Version`; bump it in the
+  `SET` clause (`a.version = a.version + 1`) or optimistic locking silently breaks.
+- **"`EXISTS` vs `IN (subquery)`?"** `EXISTS` is typically correlated and short-circuits;
+  `IN` materializes the subquery set. Both are portable JPQL; subqueries are spec-legal only
+  in `WHERE`/`HAVING` (HB6 relaxes to `SELECT`/`FROM`/lateral).
+- **"Call a Postgres function without native SQL?"** `FUNCTION('fn', args)` — the portable
+  JPQL escape hatch that keeps managed results.
 
 ## References
 

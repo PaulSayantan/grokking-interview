@@ -422,6 +422,348 @@ List<PostSummary> rows = em.createQuery("""
 > need and avoid the whole lazy/eager question; for writes I load managed entities with
 > a fetch plan tailored to the operation."
 
+## The FetchMode triad: SELECT, JOIN, SUBSELECT
+
+`FetchType` (JPA) decides *when* an association loads. Hibernate's own
+`@Fetch(FetchMode.…)` decides *how* it loads. There are **three** modes, not just the
+SUBSELECT covered above:
+
+| `@Fetch` mode | What Hibernate does | Query count for N parents |
+|---|---|---|
+| **`SELECT`** (default) | One secondary `SELECT` per association, lazily on access | 1 + N — **this is the N+1 generator** |
+| **`JOIN`** | Eager outer join folded into the *owner's* `SELECT` | 1 (but forces eager) |
+| **`SUBSELECT`** | One second query using the original query as an `IN (subselect)` | 2 |
+
+`FetchMode.SELECT` is the implicit default and is exactly the mechanism behind classic
+N+1. `FetchMode.JOIN` makes the association eager via a LEFT OUTER JOIN in the same
+statement.
+
+> [!WARNING]
+> **`@Fetch(FetchMode.JOIN)` is silently ignored for JPQL/HQL and Criteria queries.**
+> It only takes effect for `EntityManager.find()` and `getReference()`. So a developer
+> annotates `Comment.post` with `@Fetch(FetchMode.JOIN)`, expecting their
+> `findAll()`-style JPQL to avoid N+1 — but the repository's `select c from Comment c`
+> still fires N secondary SELECTs, because JPQL builds its own fetch plan and disregards
+> `FetchMode.JOIN`. To eager-join inside a JPQL query you must write an explicit
+> `join fetch` or use an entity graph. This "why is my `@Fetch(JOIN)` not working" bug is
+> a very common senior gotcha.
+
+```java
+@ManyToOne(fetch = FetchType.LAZY)
+@Fetch(FetchMode.JOIN)     // honored by find()/getReference() ONLY, not JPQL/Criteria
+Post post;
+```
+
+## Proxy identity gotchas
+
+A LAZY to-one proxy is a **ByteBuddy-generated subclass** of your entity. That runtime
+subclass leaks in several ways senior candidates are expected to know:
+
+- **`entity.getClass()` returns `Post$HibernateProxy$xxxx`, NOT `Post.class`.** Any
+  `getClass() == Post.class` comparison fails; `instanceof` against a *subtype* of the
+  entity (in an inheritance hierarchy) is unreliable because the proxy extends the base
+  type, not the concrete subclass.
+- **Field access does NOT initialize the proxy — only getter/method calls do.** So an
+  `equals()`/`hashCode()` that reads fields *directly* (`this.name`) instead of via
+  getters sees `null` on a proxy, silently breaking equality. Always call getters inside
+  `equals`/`hashCode`, and prefer a stable **business key** over generated `@Id`.
+- **`WrongClassException` / `ClassCastException`** on polymorphic associations: if
+  `payment` is a proxied `Payment` and the real row is a `CreditCardPayment`, the proxy is
+  of the *base* type `Payment`, so `(CreditCardPayment) order.getPayment()` throws
+  `ClassCastException`. Downcasting a proxy is a trap.
+
+Escapes:
+
+```java
+// Get the REAL, initialized entity out of a proxy (Hibernate 5.2.10+):
+Post real = Hibernate.unproxy(proxy, Post.class);
+// Get the real class regardless of proxying:
+Class<?> type = Hibernate.getClass(entity);   // -> Post.class, not the $Proxy subclass
+```
+
+> [!TIP]
+> A subtle interview puzzle: load `a` via `em.find(Post.class, 1L)` (real instance) and
+> `b` via `em.getReference(Post.class, 1L)` (proxy) in the same context. `a.getClass()`
+> is `Post`, `b.getClass()` is `Post$HibernateProxy$…`, so `a.getClass() == b.getClass()`
+> is **false** — yet they represent the same row. Use `Hibernate.getClass()` (or getters
+> in a properly written `equals`) to compare correctly.
+
+## More anti-patterns: enable_lazy_load_no_trans and Jackson
+
+The LIE anti-pattern trio has a third leg beyond EAGER and OSIV:
+
+- **`hibernate.enable_lazy_load_no_trans=true`** — makes lazy access "work" outside a
+  transaction by opening a **temporary Session + transaction for each lazy load**
+  (auto-commit). It masks `LazyInitializationException` but inflates connection and
+  transaction count (one round trip per lazy access) and gives **inconsistent reads**
+  across a single logical operation (each lazy load sees a different snapshot). It is a
+  worse-than-OSIV trap answer.
+- **`jackson-datatype-hibernate` (`Hibernate6Module`)** — teaches Jackson to serialize
+  uninitialized proxies as `null`/omit them instead of throwing. Like OSIV it *masks* the
+  problem rather than solving it; the right answer for a serialization boundary is a DTO.
+
+Ranking the three bad fixes when asked "why is each bad":
+
+1. **EAGER** — worst: pollutes *every* query, unfixable per use case, causes N+1 /
+   Cartesian products.
+2. **`enable_lazy_load_no_trans`** — hidden per-access transactions, connection churn,
+   inconsistent reads.
+3. **OSIV** — holds the connection for the whole request and fires N+1 from the view
+   layer, but at least reuses one Session/transaction. Still a smell.
+
+The right fix is always: fetch what the use case needs, in the query, in the transaction
+(JOIN FETCH / entity graph / DTO).
+
+## Paginating a parent with its children (two-query recipe)
+
+Because a collection `join fetch` cannot be paginated in SQL (`HHH000104`, in-memory
+paging, OOM risk), the production-grade recipe is **two queries: fetch a page of IDs,
+then fetch the entities with their collection**.
+
+```java
+// Query 1: page a set of parent IDs. No collection here, so SQL LIMIT is legal.
+List<Long> ids = em.createQuery(
+        "select p.id from Post p order by p.createdAt desc", Long.class)
+    .setFirstResult(pageOffset)
+    .setMaxResults(pageSize)
+    .getResultList();
+
+// Query 2: fetch those parents + their comments in one join. IN-list, no LIMIT.
+List<Post> page = em.createQuery("""
+        select distinct p from Post p
+        left join fetch p.comments
+        where p.id in :ids
+        order by p.createdAt desc
+        """, Post.class)
+    .setParameter("ids", ids)
+    .getResultList();
+```
+
+> [!WARNING]
+> **You must re-apply the `order by` in query 2.** The `IN (:ids)` clause does not
+> preserve the order from query 1, so without an explicit `order by` in the second query
+> the page rows can come back in arbitrary order.
+
+Alternatives: a **window-function** query (`DENSE_RANK()`/`ROW_NUMBER()` over the parent)
+to page in one statement, or **Blaze-Persistence** which implements keyset/offset
+pagination with collection fetches correctly. Note this ID-then-entities pattern is also
+exactly how Spring Data JPA (post-2.x) handles a paginated method annotated with
+`@EntityGraph` on a collection.
+
+## Filtering a fetch-joined collection (destructive fetch)
+
+A dangerous, data-losing trap: putting a `WHERE` predicate on a **fetch-joined
+collection**.
+
+```java
+// DANGER: filters the fetched collection itself
+List<Post> posts = em.createQuery("""
+        select p from Post p
+        join fetch p.comments c
+        where c.status = 'APPROVED'
+        """, Post.class).getResultList();
+```
+
+The returned managed `Post.comments` collection now contains **only the APPROVED
+comments** — Hibernate hydrated a *partial* collection but marked it initialized. If that
+`Post` is then dirty-checked and flushed, Hibernate compares the in-memory (partial)
+collection against the DB and can **delete the "missing" rows** (for owned collections /
+orphan removal) or otherwise persist a corrupted collection.
+
+> [!KEY-TAKEAWAY]
+> **Never put a `WHERE` filter on a fetch-joined collection.** If you need only some
+> children, either filter in a DTO/projection query (read-only, not managed), use
+> `@Filter`/`@Where` (mapping-level, applied consistently), or fetch the full collection
+> and filter in memory. A filtered fetch join corrupts the managed collection.
+
+## Second-level cache can cause N+1
+
+Counter-intuitively, caching can *introduce* N+1. The **query cache stores only entity
+IDs**, not the entities themselves. When a cached query is replayed, Hibernate resolves
+each ID against the second-level cache — and if the entity regions aren't cached (or were
+evicted), it fires **one `SELECT`-by-id per row** to rehydrate them. Result: a cache
+"hit" that produces N SELECTs.
+
+> [!WARNING]
+> Enabling the query cache without also caching the entity regions it references can make
+> a query *slower* than no cache at all. Cache both the query and the entities it returns.
+> See `hibernate-jpa/caching-first-second-level` for cache region and concurrency
+> strategy details.
+
+## Read-only reads: readOnly and query hints
+
+On pure read paths, tell Hibernate not to track changes. A read-only entity is loaded
+**without a dirty-checking snapshot** (Hibernate skips the detached-state copy it
+normally keeps to diff at flush), cutting memory and CPU:
+
+```java
+@Transactional(readOnly = true)                 // Spring: sets FlushMode + read-only hint
+public List<Post> report() { ... }
+
+// Or per-query:
+query.setHint(org.hibernate.jpa.QueryHints.HINT_READONLY, true);   // "org.hibernate.readOnly"
+```
+
+This pairs with DTO projections as the "read model" strategy: DTOs skip entities
+entirely; `readOnly` keeps entities but drops the write-side bookkeeping. See
+`hibernate-jpa/transactions-dirty-checking-flushing` for how the snapshot/dirty check
+works.
+
+## Entity graphs: types, named graphs, subgraphs
+
+Beyond ad-hoc `attributePaths`, the JPA `EntityGraph` API has more surface area:
+
+- **Graph type** decides how unlisted attributes behave — `@EntityGraph(type = …)` in
+  Spring Data, or the hint key at the EntityManager level:
+  - `EntityGraphType.FETCH` → hint `jakarta.persistence.fetchgraph`: listed = EAGER,
+    everything else **LAZY**.
+  - `EntityGraphType.LOAD` → hint `jakarta.persistence.loadgraph`: listed = EAGER,
+    everything else keeps its **mapping default**.
+- **Named graph** — declare once on the entity, reference by name:
+
+```java
+@Entity
+@NamedEntityGraph(
+    name = "Post.withComments",
+    attributeNodes = @NamedAttributeNode("comments"))
+class Post { ... }
+
+// Spring Data: reference the named graph
+@EntityGraph(value = "Post.withComments", type = EntityGraphType.LOAD)
+Optional<Post> findById(Long id);
+
+// EntityManager: pass the graph as a hint to find()
+EntityGraph<Post> g = em.getEntityGraph("Post.withComments");
+Post p = em.find(Post.class, id, Map.of("jakarta.persistence.loadgraph", g));
+// JPA 3.1 adds a typed find(Class, Object, FindOption...) overload too.
+```
+
+- **Nested subgraphs** for multi-level plans (Post → comments → author):
+
+```java
+@NamedEntityGraph(
+    name = "Post.deep",
+    attributeNodes = @NamedAttributeNode(value = "comments", subgraph = "commentWithAuthor"),
+    subgraphs = @NamedSubgraph(
+        name = "commentWithAuthor",
+        attributeNodes = @NamedAttributeNode("author")))
+
+// Programmatic equivalent:
+EntityGraph<Post> g = em.createEntityGraph(Post.class);
+g.addSubgraph("comments").addAttributeNodes("author");
+```
+
+> [!WARNING]
+> A subtle spec-vs-implementation nuance: even with a **fetch graph** that omits a
+> `@ManyToOne(EAGER)` attribute, Hibernate has historically **not reliably demoted a
+> mapped-EAGER to-one to lazy** — the association may still load eagerly. The spec says
+> unlisted attributes in a fetch graph are LAZY; Hibernate's honoring of that for
+> mapped-EAGER to-one associations has been inconsistent across versions. Don't rely on a
+> fetch graph to *turn off* a mapped EAGER; fix the mapping instead.
+
+## Bytecode enhancement setup and @LazyGroup
+
+Attribute-level lazy loading and no-proxy lazy to-one require the **build-time bytecode
+enhancer** to be enabled — otherwise those mappings are **silently EAGER**.
+
+```groovy
+// Gradle
+plugins { id 'org.hibernate.orm' version '6.x' }
+hibernate {
+    enhancement {
+        enableLazyInitialization = true      // lazy @Basic / no-proxy lazy to-one
+        enableDirtyTracking = true           // in-place dirty tracking (skip full snapshot)
+        enableAssociationManagement = true   // auto-manage bidirectional sides
+    }
+}
+```
+
+```xml
+<!-- Maven -->
+<plugin>
+  <groupId>org.hibernate.orm.tooling</groupId>
+  <artifactId>hibernate-enhance-maven-plugin</artifactId>
+  <configuration><enableLazyInitialization>true</enableLazyInitialization></configuration>
+</plugin>
+```
+
+With enhancement on:
+
+- `@Basic(fetch = FetchType.LAZY)` on a column (e.g. a big `@Lob`) actually defers loading
+  it. **Without enhancement this attribute is loaded eagerly** — the annotation is ignored.
+- Each lazy basic attribute is loaded by its **own** secondary SELECT. **`@LazyGroup`**
+  batches several lazy attributes into a single secondary SELECT:
+
+```java
+@Basic(fetch = FetchType.LAZY)
+@LazyGroup("heavy")
+@Lob String content;
+
+@Basic(fetch = FetchType.LAZY)
+@LazyGroup("heavy")     // loaded together with `content` in ONE extra SELECT
+byte[] thumbnail;
+```
+
+## Why an inverse LAZY @OneToOne is really EAGER
+
+Deepening the earlier note: on the **owning** side of a `@OneToOne`, the FK column lives
+in that table, so Hibernate can build a proxy from the FK value it already has → LAZY
+works with a plain proxy. On the **inverse** (`mappedBy`) side, there is **no FK column**
+in the parent's row, so Hibernate cannot tell whether the child exists (it might be
+`null`) without running a query — and it can't return a proxy for "maybe null". So it
+issues an **eager SELECT** regardless of `fetch = LAZY`.
+
+Escapes:
+
+- Enable **bytecode enhancement** (no-proxy lazy loading resolves the null question lazily).
+- Use **`@MapsId` / a shared primary key** so the child shares the parent's PK; then the
+  child's existence is tied to the parent id and the association can be lazy.
+
+## Hibernate 6/7 fetching behavior changes
+
+Version-precise facts a senior is expected to state correctly:
+
+- **`hibernate.query.passDistinctThrough` was removed in Hibernate 6.** JPQL `distinct` on
+  an entity fetch-join query no longer emits SQL `DISTINCT`; Hibernate always
+  de-duplicates the entity result list **in memory** and passes the query through without
+  `DISTINCT`. (In HB5 you set `passDistinctThrough=false` to get this; in HB6 it is the
+  only behavior for entity queries — `distinct` on scalar/DTO queries still emits SQL
+  `DISTINCT`.)
+- **`hibernate.default_batch_fetch_size` defaults to `-1` (disabled).** You must set a
+  positive value to get global batch fetching.
+- **In-clause padding (HB6+).** Batch fetching rounds the `IN (…)` list **up to the next
+  power of two** (2, 4, 8, 16, …) to maximize prepared-statement / execution-plan cache
+  reuse — fewer distinct SQL strings. A 3-element batch is padded to 4 by repeating a
+  bind value:
+
+```sql
+-- batch of 3 ids, padded to IN with 4 binds (last id duplicated)
+select c.post_id, c.id, c.body
+from comment c
+where c.post_id in (?, ?, ?, ?);   -- binds: 10, 11, 12, 12
+```
+
+## Asserting query counts in tests
+
+The senior way to prevent N+1 regressions is to **assert the SQL statement count in CI**,
+not to eyeball logs:
+
+- **Hypersistence Utils** — `SQLStatementCountValidator`:
+
+```java
+SQLStatementCountValidator.reset();
+postService.loadDashboard();
+SQLStatementCountValidator.assertSelectCount(2);   // fails if an N+1 sneaks in
+```
+
+- **Hibernate `Statistics`** — `hibernate.generate_statistics=true`, then
+  `sessionFactory.getStatistics().getPrepareStatementCount()`.
+- **datasource-proxy** and **p6spy** — JDBC proxies that log/count every statement and can
+  assert counts, independent of Hibernate.
+
+Wiring one of these into a test around each read path turns N+1 from a lurking production
+surprise into a failing build.
+
 ## Common Interview Follow-ups
 
 - **What are the default fetch types for each association?** to-one (`@ManyToOne`,
@@ -445,6 +787,20 @@ List<PostSummary> rows = em.createQuery("""
   everything else LAZY. Load graph: listed = EAGER, everything else keeps its default.
 - **Is `spring.jpa.open-in-view` good?** It's Spring's default but a smell — it hides
   N+1 and holds connections; senior teams disable it.
+- **Why doesn't my `@Fetch(FetchMode.JOIN)` stop N+1 in a repository query?** It's
+  ignored for JPQL/HQL/Criteria — it only applies to `find()`/`getReference()`. Use
+  `join fetch` or an entity graph in the query instead.
+- **Why does `proxy.getClass()` not equal `Post.class`?** The proxy is a ByteBuddy
+  subclass; use `Hibernate.getClass()` / `Hibernate.unproxy()`, and getters (not fields)
+  in `equals`/`hashCode`.
+- **How do you paginate parents with their children without OOM?** Two queries: page a
+  list of parent IDs (LIMIT is legal, no collection), then `left join fetch` those IDs —
+  re-applying the `order by` in the second query.
+- **Why is filtering a fetch-joined collection dangerous?** The managed collection is
+  hydrated partially but marked initialized; a flush can delete the "missing" rows.
+- **Rank EAGER vs `enable_lazy_load_no_trans` vs OSIV as bad fixes.** EAGER is worst
+  (unfixable per query), then `enable_lazy_load_no_trans` (per-access transactions,
+  inconsistent reads), then OSIV (one Session but view-layer N+1).
 
 ## References
 

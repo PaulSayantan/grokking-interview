@@ -351,20 +351,21 @@ questions:
 
   - id: primary-keys-and-id-generation-020
     difficulty: advanced
-    tags: [uuid-generator, style, ordering, hibernate]
+    tags: [uuid-generator, style, versions, hibernate]
     question: |
-      Which Hibernate @UuidGenerator style produces time-ordered UUIDs with better index
-      locality?
+      Which Hibernate @UuidGenerator style produces a time-based value rather than a random
+      one, and which RFC 4122 version is that value?
     options:
-      - "Style.RANDOM"
-      - "Style.HASH"
-      - "Style.SECURE"
-      - "Style.TIME"
-    answer: 3
+      - "Style.RANDOM — an RFC 4122 v4 value"
+      - "Style.TIME — an RFC 4122 version-1-style value (NOT v7, and not guaranteed monotonic)"
+      - "Style.ORDERED — a monotonic UUIDv7"
+      - "Style.SEQUENTIAL — a right-edge-ordered v7"
+    answer: 1
     explanation: |
-      @UuidGenerator(style = Style.TIME) produces time-based, ordered UUIDs so inserts stay
-      monotonic in the PK index. Style.RANDOM (the default) produces UUIDv4, which scatters
-      inserts. Style.AUTO chooses based on the member type.
+      @UuidGenerator ships exactly two styles: RANDOM (default, RFC 4122 v4) and TIME, an
+      RFC 4122 version-1-style time value using Hibernate's own layout (IP instead of MAC).
+      TIME is NOT UUIDv7 and does not guarantee monotonic right-edge index locality. There is
+      no built-in ORDERED/SEQUENTIAL/v7 style — for true v7 supply a custom algorithm/library.
     ref: "concepts.md#uuid-generation"
 
   - id: primary-keys-and-id-generation-021
@@ -521,13 +522,14 @@ questions:
       - "IDENTITY on each server"
       - "TABLE with a large allocationSize"
       - "SEQUENCE with hi-lo"
-      - "UUIDv7 / @UuidGenerator(style = TIME)"
+      - "A client-side UUIDv7 (via a v7 library/custom algorithm) or a TSID"
     answer: 3
     explanation: |
-      Offline/distributed generation rules out DB-dependent IDENTITY/SEQUENCE/TABLE. UUID
-      generation is client-side and globally unique; choosing the time-ordered UUIDv7 (or
-      Hibernate Style.TIME) also preserves monotonic insert locality, avoiding the page-split
-      penalty of random v4.
+      Offline/distributed generation rules out DB-dependent IDENTITY/SEQUENCE/TABLE. A
+      client-side, globally-unique, time-ordered id (true UUIDv7 or a TSID) preserves monotonic
+      right-edge insert locality, avoiding the page-split penalty of random v4. Note Hibernate's
+      built-in @UuidGenerator(style = TIME) is v1-style, NOT v7, so it does not give this
+      locality — supply a v7 algorithm/library or a TSID.
     ref: "concepts.md#id-generation-strategy-comparison"
 
   - id: primary-keys-and-id-generation-030
@@ -868,3 +870,559 @@ questions:
       join condition, bloating indexes and complicating queries. A narrow surrogate PK keeps FKs
       compact and joins cheap; enforce the natural key with a unique constraint instead.
     ref: "concepts.md#surrogate-vs-natural-keys"
+
+  - id: primary-keys-and-id-generation-049
+    difficulty: expert
+    tags: [uuid-generator, style-time, uuidv7, correction]
+    question: |
+      A candidate claims "@UuidGenerator(style = Style.TIME) gives you UUIDv7, so you get
+      right-edge index locality for free." What is the accurate correction?
+    options:
+      - "Style.TIME produces a version-1-style time-based UUID with Hibernate's own layout (low timestamp bits first); it is NOT UUIDv7 and is not guaranteed monotonic"
+      - "Correct — Style.TIME is Hibernate's implementation of UUIDv7"
+      - "Style.TIME actually produces v4; only Style.ORDERED gives v7"
+      - "Style.TIME gives v7 but only on PostgreSQL"
+    answer: 0
+    explanation: |
+      Hibernate ships v4 (RANDOM, default) and a v1-style time value (TIME). Style.TIME uses
+      Hibernate's own layout that places the low bits of the timestamp first, so it does not
+      append at the right edge the way UUIDv7's Unix-millis prefix does. For true v7 you supply
+      a custom UuidValueGenerator via @UuidGenerator(algorithm = ...), use a library, or a TSID.
+    ref: "concepts.md#uuid-generation"
+
+  - id: primary-keys-and-id-generation-050
+    difficulty: advanced
+    tags: [uuid-generator, style, defaults]
+    question: |
+      What does @UuidGenerator(style = Style.AUTO) produce?
+    options:
+      - "A version-1 time-based UUID"
+      - "A UUIDv7"
+      - "The same as Style.RANDOM — an RFC 4122 v4 (random) UUID"
+      - "It chooses v7 on databases with clustered indexes, v4 otherwise"
+    answer: 2
+    explanation: |
+      In Hibernate's @UuidGenerator, AUTO is equivalent to RANDOM, producing an RFC 4122
+      version 4 (random) UUID. Only Style.TIME departs from random, producing a v1-style
+      time-based value (not v7).
+    ref: "concepts.md#uuid-generation"
+
+  - id: primary-keys-and-id-generation-051
+    difficulty: advanced
+    tags: [uuid, generation-type, uuid-generator, distinction]
+    question: |
+      When should you prefer @GeneratedValue(strategy = GenerationType.UUID) over Hibernate's
+      @UuidGenerator?
+    options:
+      - "When you want provider-portable UUID generation and are fine with random v4"
+      - "When you need the TIME style layout"
+      - "When you need to plug in a custom v7 algorithm"
+      - "Never — GenerationType.UUID is deprecated"
+    answer: 0
+    explanation: |
+      GenerationType.UUID is the JPA 3.1 spec-portable option; in Hibernate it yields a random
+      v4 and offers no customization. Use @UuidGenerator when you specifically need Hibernate's
+      TIME layout or a custom algorithm (e.g. a v7 generator). GenerationType.UUID is not
+      deprecated.
+    ref: "concepts.md#uuid-generation"
+
+  - id: primary-keys-and-id-generation-052
+    difficulty: expert
+    tags: [spring-data, save, merge, persistable, scenario]
+    question: |
+      You switch to UUID PKs assigned in the entity constructor and Spring Data repository
+      save() now emits a SELECT before every INSERT, halving insert throughput. Why?
+    options:
+      - "The pre-assigned id makes isNew() return false, so save() routes to merge(), which SELECTs to check for an existing row before writing"
+      - "Hibernate always selects before inserting UUID entities"
+      - "UUID columns require a uniqueness pre-check by the JDBC driver"
+      - "The second-level cache forces a read-through on every save"
+    answer: 0
+    explanation: |
+      SimpleJpaRepository.save() calls persist() only when isNew() is true (default: id is
+      null). An assigned UUID is never null, so isNew() is false, save() calls merge(), and
+      merge() must SELECT to decide INSERT vs UPDATE. This is the #1 UUID-PK prod bug.
+    ref: "concepts.md#spring-data-save-with-assigned-or-uuid-ids-the-select-before-insert-trap"
+
+  - id: primary-keys-and-id-generation-053
+    difficulty: expert
+    tags: [spring-data, persistable, isnew, fix]
+    question: |
+      What is the idiomatic fix for the SELECT-before-INSERT problem when using
+      application-assigned ids with Spring Data JPA?
+    options:
+      - "Set spring.jpa.hibernate.ddl-auto=create"
+      - "Switch all ids back to IDENTITY"
+      - "Implement Persistable<ID> with a custom isNew() (e.g. backed by a transient flag reset in @PostPersist/@PostLoad, or a null @Version check), or call persist() directly"
+      - "Annotate the repository method with @Modifying"
+    answer: 2
+    explanation: |
+      Overriding isNew() lets Spring Data route new entities to persist() instead of merge().
+      A common approach is a transient boolean flag flipped to false in @PostPersist/@PostLoad,
+      or checking whether an auto-managed @Version/@CreatedDate is still null. Alternatively,
+      bypass save() and call entityManager.persist() for known-new entities.
+    ref: "concepts.md#spring-data-save-with-assigned-or-uuid-ids-the-select-before-insert-trap"
+
+  - id: primary-keys-and-id-generation-054
+    difficulty: expert
+    tags: [persist, merge, state, mechanism]
+    question: |
+      You call merge(detachedEntity) and keep using the original reference. Why do your later
+      changes to that reference not get persisted?
+    options:
+      - "merge() throws if the argument is detached"
+      - "merge() makes the argument managed, so the changes should persist — this is a bug"
+      - "merge() copies state onto a DIFFERENT managed instance and returns it; the argument stays detached, so changes to it are not tracked"
+      - "merge() only works inside a new transaction"
+    answer: 2
+    explanation: |
+      Unlike persist() (which makes the passed object managed), merge() returns a new managed
+      copy and leaves the argument detached. You must use the returned instance. This is a
+      classic source of "my update silently disappeared" bugs.
+    ref: "concepts.md#persist-vs-merge-vs-legacy-save-and-id-state"
+
+  - id: primary-keys-and-id-generation-055
+    difficulty: expert
+    tags: [hibernate-7, mapsid, cascade, transient, migration]
+    question: |
+      After upgrading to Hibernate 7, persisting a child that shares its PK with a parent via
+      @MapsId now throws TransientObjectException, though it worked on Hibernate 6. Why?
+    options:
+      - "@MapsId was removed in Hibernate 7"
+      - "Hibernate 7 requires @GeneratedValue on the child id"
+      - "TransientObjectException is a false positive that can be ignored"
+      - "Hibernate 7 no longer auto-enables cascade=PERSIST on @Id/@MapsId associations, so you must add cascade=PERSIST or persist the parent first"
+    answer: 3
+    explanation: |
+      HB6 and earlier implicitly cascaded PERSIST through the derived-id association. HB7
+      dropped that convenience, so an unsaved parent referenced by a @MapsId child triggers
+      TransientObjectException unless you add cascade=PERSIST (or persist the parent first).
+    ref: "concepts.md#derived-identity-mapsid-and-shared-primary-keys"
+
+  - id: primary-keys-and-id-generation-056
+    difficulty: advanced
+    tags: [mapsid, one-to-one, shared-pk, mechanism]
+    question: |
+      What does @MapsId achieve on a @OneToOne child entity's association field?
+    options:
+      - "It generates a new sequence for the child"
+      - "It makes the child's primary key column also serve as the foreign key to the parent, reusing the parent's id (a shared/derived PK)"
+      - "It marks the association as read-only"
+      - "It forces EAGER fetching of the parent"
+    answer: 1
+    explanation: |
+      @MapsId tells JPA the child's identifier is derived from the associated parent's id. The
+      single column is both PK and FK, guaranteeing a 1:1 relationship without a separate FK
+      column. The child's @Id must NOT carry @GeneratedValue in this case.
+    ref: "concepts.md#derived-identity-mapsid-and-shared-primary-keys"
+
+  - id: primary-keys-and-id-generation-057
+    difficulty: expert
+    tags: [hibernate-7, validation, sequence, table, boot-failure]
+    question: |
+      On Hibernate 7 an app that booted fine on Hibernate 5 now fails at startup with a
+      mapping like @GeneratedValue(strategy = SEQUENCE) paired with @TableGenerator. Why?
+    options:
+      - "Hibernate 7 dropped support for SEQUENCE entirely"
+      - "@TableGenerator was renamed in Hibernate 7"
+      - "Hibernate 7 added strict validation: SEQUENCE must pair with @SequenceGenerator and TABLE with @TableGenerator; the mismatch now errors at boot"
+      - "The sequence must be created manually first"
+    answer: 2
+    explanation: |
+      HB7 validates the strategy/generator pairing that earlier versions silently tolerated. A
+      SEQUENCE strategy must reference a @SequenceGenerator; TABLE must reference a
+      @TableGenerator. A cross-paired mapping now fails fast at boot instead of behaving
+      unexpectedly.
+    ref: "concepts.md#custom-generators-the-hibernate-6-and-7-generator-spi"
+
+  - id: primary-keys-and-id-generation-058
+    difficulty: expert
+    tags: [generator-spi, before-execution, on-execution, hibernate-6]
+    question: |
+      In Hibernate 6's generator SPI, what distinguishes a BeforeExecutionGenerator from an
+      OnExecutionGenerator, and why does it matter for batching?
+    options:
+      - "BeforeExecutionGenerator runs on a background thread; OnExecutionGenerator runs inline"
+      - "They are aliases for the same interface"
+      - "BeforeExecutionGenerator computes the value before the INSERT (batchable); OnExecutionGenerator has the DB produce it during INSERT/UPDATE (needs read-back, forces immediate execution)"
+      - "OnExecutionGenerator is only for UPDATE, never INSERT"
+    answer: 2
+    explanation: |
+      The split is exactly the mechanical root of the batching story. BeforeExecutionGenerator
+      (sequence, UUID, app logic) yields the id up front so inserts can be buffered and
+      batched. OnExecutionGenerator (IDENTITY, DB defaults, computed columns) needs a read-back
+      after execution, forcing each statement to run immediately.
+    ref: "concepts.md#custom-generators-the-hibernate-6-and-7-generator-spi"
+
+  - id: primary-keys-and-id-generation-059
+    difficulty: advanced
+    tags: [id-generator-type, custom-generator, generic-generator, hibernate-6]
+    question: |
+      What is the modern (Hibernate 6+) recommended way to bind a custom id generator to an
+      entity, replacing the deprecated string-based @GenericGenerator?
+    options:
+      - "@GeneratedValue(generator = \"com.example.MyGen\")"
+      - "The @IdGeneratorType meta-annotation on a self-describing custom annotation that points at the Generator class"
+      - "Registering the class in persistence.xml only"
+      - "Implementing IdentifierGenerator.configure(Type, Properties, ServiceRegistry)"
+    answer: 1
+    explanation: |
+      @IdGeneratorType is a meta-annotation you place on your own annotation (e.g. @TsidId) that
+      references the Generator implementation. It replaces the fragile
+      @GenericGenerator(strategy = "fqcn", parameters = ...) string approach, which is
+      deprecated in HB6+. The legacy configure(Type, Properties, ServiceRegistry) signature is
+      also legacy.
+    ref: "concepts.md#custom-generators-the-hibernate-6-and-7-generator-spi"
+
+  - id: primary-keys-and-id-generation-060
+    difficulty: expert
+    tags: [hibernate-7, configurable, generator-creation-context, migration]
+    question: |
+      A custom generator written for Hibernate 5 implements
+      configure(Type, Properties, ServiceRegistry). What must change to work on Hibernate 7?
+    options:
+      - "Nothing; the signature is unchanged"
+      - "It must be rewritten in Kotlin"
+      - "configure() must return the generated id directly"
+      - "Configurable#configure now receives a GeneratorCreationContext instead of a ServiceRegistry (old signature deprecated-for-removal); ideally migrate to the new Generator SPI / @IdGeneratorType"
+    answer: 3
+    explanation: |
+      In HB7 the Configurable#configure signature changed from taking a ServiceRegistry to the
+      new GeneratorCreationContext. The old form is deprecated-for-removal. Hibernate recommends
+      porting to the Generator SPI and binding via @IdGeneratorType. @GeneratorType and
+      GenerationTime were also removed in HB7.
+    ref: "concepts.md#custom-generators-the-hibernate-6-and-7-generator-spi"
+
+  - id: primary-keys-and-id-generation-061
+    difficulty: expert
+    tags: [pooled, increment-by, allocation-size, outage, scenario]
+    question: |
+      A DBA created the sequence as INCREMENT BY 1 but the entity maps allocationSize = 50 with
+      the pooled optimizer. Under concurrent inserts you see duplicate-key violations. Why?
+    options:
+      - "allocationSize only affects readability, so this is unrelated"
+      - "INCREMENT BY 1 disables batching, causing races"
+      - "The pooled optimizer treats each nextval as the boundary of a 50-wide block and hands out 49 ids that were never reserved by the sequence; the next nextval falls inside that range, so two rows get the same id"
+      - "Duplicate keys mean the PK index is corrupt"
+    answer: 2
+    explanation: |
+      pooled/pooled-lo assume the sequence's INCREMENT BY equals allocationSize. With
+      INCREMENT BY 1 but allocationSize 50, the optimizer reserves phantom ranges the sequence
+      never skipped, so subsequent nextval values collide with already-issued ids. The rule:
+      allocationSize MUST equal the live sequence's INCREMENT BY.
+    ref: "concepts.md#allocationsize-and-the-pooled-optimizers"
+
+  - id: primary-keys-and-id-generation-062
+    difficulty: expert
+    tags: [pooled, sql, boundary-math, code-reading]
+    question: |
+      With the pooled optimizer and allocationSize = 50 on a fresh sequence, the first
+      "select nextval('book_seq')" returns 50. Which id range does that call reserve?
+    options:
+      - "50 through 99"
+      - "1 through 50 (the returned value is the TOP of the block; ids are handed out below it)"
+      - "51 through 100"
+      - "Only id 50"
+    answer: 1
+    explanation: |
+      pooled interprets the returned value as the top of the current block, so returning 50
+      reserves ids 1..50. The next nextval returns 100, reserving 51..100. (pooled-lo returns
+      the bottom instead: 1 reserves 1..50, then 51 reserves 51..100.)
+    ref: "concepts.md#allocationsize-and-the-pooled-optimizers"
+
+  - id: primary-keys-and-id-generation-063
+    difficulty: advanced
+    tags: [multi-node, sequence, pooled, gaps]
+    question: |
+      Two application nodes share one database sequence with the pooled optimizer. Are the
+      generated ids safe, and what should you expect?
+    options:
+      - "Unsafe — the nodes will generate colliding ids"
+      - "Safe — the real boundary lives in the DB sequence, so each node reserves a disjoint block; gaps between blocks are expected and harmless"
+      - "Safe only if both nodes use allocationSize = 1"
+      - "Safe only with hi-lo"
+    answer: 1
+    explanation: |
+      Because pooled/pooled-lo persist the true boundary in the sequence itself, each node's
+      nextval hands back a disjoint block (e.g. node A 1..50, node B 51..100). Ids stay unique;
+      the only visible effect is non-contiguous gaps, which are fine. hi-lo would be unsafe here.
+    ref: "concepts.md#allocationsize-and-the-pooled-optimizers"
+
+  - id: primary-keys-and-id-generation-064
+    difficulty: expert
+    tags: [hilo, collision, interoperability, mechanism]
+    question: |
+      A legacy entity uses hi-lo with allocationSize = 1000 and nextval returns 5. An ETL job
+      later does a manual INSERT using the raw sequence value 6. What goes wrong?
+    options:
+      - "Nothing — hi-lo reserves the value 6 for the ETL job"
+      - "The ETL insert is silently rejected"
+      - "hi-lo automatically switches to pooled to avoid the collision"
+      - "hi-lo interprets 5 as a bucket multiplier and claims ids 5000..5999, so the ETL's manual id 6 will eventually collide with hi-lo-generated ids in an unrelated range"
+    answer: 3
+    explanation: |
+      hi-lo treats the sequence value as a hi bucket: value 5 with size 1000 owns 5000..5999.
+      It assumes it owns the whole id space, so any external writer using raw sequence values
+      collides. This non-interoperability is why pooled replaced hi-lo (via
+      hibernate.id.new_generator_mappings); hi-lo is discouraged in modern Hibernate.
+    ref: "concepts.md#allocationsize-and-the-pooled-optimizers"
+
+  - id: primary-keys-and-id-generation-065
+    difficulty: expert
+    tags: [postgres, serial, sequence, identity, batching, scenario]
+    question: |
+      A 1M-row batch insert into a PostgreSQL table with a SERIAL / GENERATED AS IDENTITY
+      column is slow because the entity maps the column as GenerationType.IDENTITY. What is the
+      senior "gotcha reversal" fix that regains JDBC batching?
+    options:
+      - "Increase hibernate.jdbc.batch_size only"
+      - "Drop the identity column and use a client-side counter"
+      - "Map the column as GenerationType.SEQUENCE pointing at the column's backing sequence, so Hibernate knows the id up front and can batch"
+      - "Wrap each insert in REQUIRES_NEW"
+    answer: 2
+    explanation: |
+      Postgres SERIAL / GENERATED AS IDENTITY columns are backed by a real sequence. Mapping
+      the column as IDENTITY inherits the no-batching penalty; mapping the SAME column as
+      SEQUENCE (nextval on the backing sequence) lets Hibernate obtain ids before insert and
+      batch them. batch_size alone cannot help IDENTITY.
+    ref: "concepts.md#identity-strategy"
+
+  - id: primary-keys-and-id-generation-066
+    difficulty: advanced
+    tags: [identity, order-inserts, batching, mechanism]
+    question: |
+      Why does enabling hibernate.order_inserts NOT restore batching for an IDENTITY-mapped
+      entity?
+    options:
+      - "order_inserts only works with UUIDs"
+      - "IDENTITY executes each INSERT immediately on persist() to read the generated key, so there is never a buffer of statements to reorder or batch"
+      - "order_inserts requires a second-level cache"
+      - "It does restore batching; the premise is wrong"
+    answer: 1
+    explanation: |
+      Insert ordering groups buffered same-table statements so a batch can form. IDENTITY never
+      buffers — each persist() fires its INSERT at once to obtain the id via getGeneratedKeys().
+      With nothing buffered, there is nothing for order_inserts to reorder.
+    ref: "concepts.md#identity-strategy"
+
+  - id: primary-keys-and-id-generation-067
+    difficulty: advanced
+    tags: [natural-id, api, cache, hibernate]
+    question: |
+      Which Hibernate Session API loads an entity by its @NaturalId, potentially resolving the
+      id from the natural-id cache without querying the table?
+    options:
+      - "session.get(Book.class, isbn)"
+      - "session.find(Book.class, isbn)"
+      - "session.byNaturalId(Book.class).using(\"isbn\", value).load() (or bySimpleNaturalId(...).load(value))"
+      - "session.createQuery(...).setNaturalId(...)"
+    answer: 2
+    explanation: |
+      byNaturalId(...)/bySimpleNaturalId(...) are the dedicated natural-id lookup APIs.
+      Hibernate maintains a natural-id resolution cache (natural-id to PK), so with an immutable
+      @NaturalId the lookup can behave like a PK lookup. session.get/find take the primary key,
+      not the natural id.
+    ref: "concepts.md#enforcing-business-keys-with-naturalid"
+
+  - id: primary-keys-and-id-generation-068
+    difficulty: advanced
+    tags: [natural-id, unique-constraint, design]
+    question: |
+      Does annotating a field with @NaturalId remove the need for a database unique constraint
+      on that column?
+    options:
+      - "Yes — @NaturalId adds a unique constraint automatically and enforces it in the DB"
+      - "Yes, but only with mutable = false"
+      - "No — @NaturalId forbids unique constraints"
+      - "No — @NaturalId enables the natural-id API and cache but does not itself guarantee DB-level uniqueness; you should still declare a unique constraint"
+    answer: 3
+    explanation: |
+      @NaturalId marks the business key for Hibernate's lookup API and caching. It does not
+      substitute for database-enforced integrity, so you still declare @Column(unique = true)
+      / a unique constraint. Declare both: the constraint for correctness, @NaturalId for the API.
+    ref: "concepts.md#enforcing-business-keys-with-naturalid"
+
+  - id: primary-keys-and-id-generation-069
+    difficulty: expert
+    tags: [uuid, storage, jdbc-type, hibernate-6]
+    question: |
+      On PostgreSQL with default settings in Hibernate 6, how is a java.util.UUID @Id column
+      stored, and how can you force a human-readable 36-char form for one specific column?
+    options:
+      - "Stored as varchar(36) by default; use @JdbcTypeCode(SqlTypes.BINARY) to shrink it"
+      - "Always stored as BINARY(16) on every dialect, with no override available"
+      - "Stored as the native uuid type by default; use @JdbcTypeCode(SqlTypes.CHAR) on that field to force char(36)"
+      - "Stored as two BIGINTs; use @Convert to change it"
+    answer: 2
+    explanation: |
+      Hibernate 6 maps UUID to the dialect's native uuid type where available (Postgres uuid),
+      else BINARY(16). The global default is controlled by
+      hibernate.type.preferred_uuid_jdbc_type (default BINARY); a per-field override uses
+      @JdbcTypeCode(SqlTypes.CHAR) (or VARBINARY/BINARY) via the JavaType/JdbcType system.
+    ref: "concepts.md#uuid-storage-and-jdbc-type-mapping"
+
+  - id: primary-keys-and-id-generation-070
+    difficulty: advanced
+    tags: [uuid, preferred-jdbc-type, config]
+    question: |
+      Which Hibernate property globally controls how UUID attributes are mapped to a JDBC type,
+      and what is its default?
+    options:
+      - "hibernate.type.uuid_storage, default CHAR"
+      - "hibernate.type.preferred_uuid_jdbc_type, default BINARY (can be set to CHAR or VARCHAR)"
+      - "hibernate.uuid.format, default UUID"
+      - "hibernate.dialect.uuid_type, default VARCHAR"
+    answer: 1
+    explanation: |
+      hibernate.type.preferred_uuid_jdbc_type sets the global preference for UUID storage. Its
+      default is BINARY (16-byte binary), with CHAR and VARCHAR as alternatives. Per-attribute
+      overrides use @JdbcTypeCode.
+    ref: "concepts.md#uuid-storage-and-jdbc-type-mapping"
+
+  - id: primary-keys-and-id-generation-071
+    difficulty: advanced
+    tags: [tsid, snowflake, alternatives, design]
+    question: |
+      A team rejects UUIDs to keep the PK narrow but still wants distributed, time-sorted ids.
+      What is the common modern choice and its key property?
+    options:
+      - "A TSID / Snowflake-style 64-bit id (fits BIGINT, timestamp + node/random bits, time-ordered like v7 but half a UUID's width)"
+      - "A 256-bit hash of the row contents"
+      - "IDENTITY on every node"
+      - "A varchar(36) UUIDv4"
+    answer: 0
+    explanation: |
+      TSIDs / Snowflake ids pack a millisecond timestamp with a node/random component into 64
+      bits, fitting a BIGINT (8 bytes vs a UUID's 16) while staying time-sorted for good index
+      locality. The trade-off is a smaller random component, so schemes usually reserve node-id
+      bits to avoid cross-node collisions.
+    ref: "concepts.md#uuid-generation"
+
+  - id: primary-keys-and-id-generation-072
+    difficulty: expert
+    tags: [equals, proxy, getclass, instanceof, lazy]
+    question: |
+      Why can an entity equals() written with "getClass() == o.getClass()" wrongly return false
+      when comparing a lazily-loaded reference to a fully-loaded entity for the same row?
+    options:
+      - "getClass() is not allowed in equals()"
+      - "Lazy references always have a null id"
+      - "Hibernate returns a runtime proxy subclass for lazy references, so its getClass() is not the entity class; use instanceof (or Hibernate.getClass(o)) instead"
+      - "The two objects are in different persistence contexts"
+    answer: 2
+    explanation: |
+      A lazy/getReference() association is a proxy subclass (e.g. Book$HibernateProxy$xyz), so
+      proxy.getClass() != Book.class. A getClass()-equality check then fails against a real
+      instance of the same row. The instanceof pattern tolerates proxies; Hibernate.getClass(o)
+      unwraps the proxy to the real class if you need it.
+    ref: "concepts.md#equals-and-hashcode-with-generated-ids"
+
+  - id: primary-keys-and-id-generation-073
+    difficulty: advanced
+    tags: [equals, natural-id, hashcode, best-practice]
+    question: |
+      For an entity with a stable, immutable @NaturalId (e.g. isbn), why is basing
+      equals/hashCode on the natural id often preferable to the constant-hashCode trick?
+    options:
+      - "It lets you skip equals() entirely"
+      - "It makes the entity immutable"
+      - "It removes the need for a primary key"
+      - "The natural id is stable from construction AND gives a real hash distribution, avoiding piling every instance into one HashSet bucket"
+    answer: 3
+    explanation: |
+      A constant hashCode is stable but degenerate — all instances share one bucket, degrading
+      HashSet/HashMap to O(n). An immutable natural id is equally stable across persistence yet
+      distributes hashes properly, so it is the better choice when such a key exists.
+    ref: "concepts.md#equals-and-hashcode-with-generated-ids"
+
+  - id: primary-keys-and-id-generation-074
+    difficulty: advanced
+    tags: [generated, on-execution, non-id, boundary]
+    question: |
+      Which mechanism populates a NON-id column from a database default/trigger and, like
+      IDENTITY, requires Hibernate to read the value back after execution?
+    options:
+      - "@GeneratedValue(strategy = SEQUENCE)"
+      - "@Generated / @GeneratedColumn (the OnExecutionGenerator path), which needs a read-back after INSERT/UPDATE"
+      - "@Version"
+      - "@NaturalId"
+    answer: 1
+    explanation: |
+      @Generated / @GeneratedColumn (and @ColumnDefault with insertable/updatable=false) let
+      the DB compute a non-id column during execution, so Hibernate must read it back — the
+      OnExecutionGenerator path, the same family as IDENTITY. This is distinct from
+      @GeneratedValue, which populates the identifier.
+    ref: "concepts.md#database-generated-non-id-values-boundary-note"
+
+  - id: primary-keys-and-id-generation-075
+    difficulty: expert
+    tags: [sequence, sql, allocation-size, code-reading]
+    question: |
+      An entity uses @SequenceGenerator(allocationSize = 50). In one transaction you call
+      persist() three times. How many "select nextval" statements does Hibernate issue?
+    options:
+      - "Three — one per persist()"
+      - "One — it reserves a block of 50 and serves all three ids from memory"
+      - "Zero — ids are computed purely client-side"
+      - "Fifty"
+    answer: 1
+    explanation: |
+      The pooled optimizer (used because allocationSize > 1) fetches one block of 50 with a
+      single nextval and hands out the three ids from memory. If allocationSize were 1, the
+      none optimizer would fire one nextval per row (three calls).
+    ref: "concepts.md#sequence-strategy"
+
+  - id: primary-keys-and-id-generation-076
+    difficulty: advanced
+    tags: [allocation-size, optimizer, none, mechanism]
+    question: |
+      What optimizer does Hibernate use when allocationSize = 1, and what is the effect?
+    options:
+      - "pooled — it still reserves blocks"
+      - "hi-lo by default"
+      - "The none optimizer — one nextval per inserted row, no in-memory block (losing the round-trip amortization)"
+      - "It refuses to boot"
+    answer: 2
+    explanation: |
+      With allocationSize = 1 Hibernate selects the none optimizer, calling nextval once per
+      row. That is safe and interoperable but forfeits the batching-amortization benefit of
+      pooled allocation, adding a round-trip per insert.
+    ref: "concepts.md#allocationsize-and-the-pooled-optimizers"
+
+  - id: primary-keys-and-id-generation-077
+    difficulty: advanced
+    tags: [hibernate-5, shared-sequence, migration, contention]
+    question: |
+      Hibernate 5 defaulted unnamed sequence-based ids to a single shared "hibernate_sequence".
+      Besides the naming change to per-entity "<entity>_seq" in Hibernate 6, what problem did
+      the shared sequence cause?
+    options:
+      - "It made ids non-unique across entities"
+      - "It disabled the pooled optimizer"
+      - "Cross-entity contention on one hot counter (and trouble with clustered MySQL/Galera setups) since all entities drew from the same sequence"
+      - "It forced every id to be a UUID"
+    answer: 2
+    explanation: |
+      A single shared sequence is a global bottleneck: every entity's inserts serialize on the
+      same counter, and it interacts badly with multi-primary clustered databases. Hibernate 6's
+      per-entity <entity>_seq removes that shared hotspot in addition to changing the name.
+    ref: "concepts.md#sequence-strategy"
+
+  - id: primary-keys-and-id-generation-078
+    difficulty: expert
+    tags: [uuidv4, write-latency, index, scenario, cross-ref]
+    question: |
+      Production write latency on a large, growing table degrades over time; the PK is a random
+      UUIDv4 stored as char(36). What two-part fix best addresses both symptoms?
+    options:
+      - "Add more RAM and keep everything as-is"
+      - "Rebuild the index nightly and keep UUIDv4"
+      - "Change isolation level to READ UNCOMMITTED"
+      - "Switch the id to a time-ordered id (UUIDv7 or a BIGINT sequence/TSID) to restore right-edge insert locality, and store it as binary(16)/uuid instead of char(36) to cut index size ~2-3x"
+    answer: 3
+    explanation: |
+      Random v4 scatters inserts across the B-tree (page splits, buffer-pool churn) and char(36)
+      roughly triples index size vs binary. A time-ordered id (v7/TSID/BIGINT sequence) restores
+      monotonic right-edge inserts, and binary(16)/native uuid shrinks the PK and every FK index.
+      See messaging-databases/indexing-b-tree-lsm for the B-tree mechanics.
+    ref: "concepts.md#uuid-generation"

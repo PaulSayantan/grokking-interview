@@ -326,9 +326,10 @@ Spring Data — a frequent source of confusion.
 Key points for interviews:
 
 - **Hibernate 6/7 deprecated `save`, `update`, `saveOrUpdate`, `saveOrUpdateCopy`, and
-  `Session.load`** in favor of the JPA-standard `persist`, `merge`, `find`, `getReference`,
-  and the newer `Session.upsert`/`getReference`/`find` APIs. Modern code should prefer the
-  JPA operations. (See `hibernate-6-7-and-jakarta-migration`.)
+  `Session.load`** in favor of the JPA-standard `persist`, `merge`, `find`, and
+  `getReference`. (Note: `upsert` is a `StatelessSession` method, added in 6.3 — it is
+  **not** on the regular `Session`.) Modern code should prefer the JPA operations.
+  (See `hibernate-6-7-and-jakarta-migration`.)
 - **Spring Data `save(entity)` is `merge` in disguise for existing entities.** Its
   `SimpleJpaRepository.save` calls `em.persist` when the entity `isNew()`, else
   `em.merge` — and it **returns** the saved instance. So, exactly like `merge`, you must
@@ -388,6 +389,209 @@ Guidance (widely recommended by the Hibernate team):
 > transient→managed transition and can trigger `LazyInitializationException` or infinite
 > recursion on bidirectional links.
 
+## NonUniqueObjectException and re-attachment collisions
+
+The most notorious re-attachment failure is not about a missing row — it is about **two
+Java objects claiming the same identity in one context**. If the persistence context
+already holds a managed instance of `Order#1` and you then try to *re-attach a second,
+different* `Order#1` object (typically via the legacy `session.update(detached)` or
+`saveOrUpdate(detached)`), Hibernate throws:
+
+```
+org.hibernate.NonUniqueObjectException: A different object with the same identifier
+value was already associated with the session : [com.acme.Order#1]
+```
+
+The context guarantees a single managed instance per type+id (the first-level-cache
+identity rule). `update`/`saveOrUpdate` try to make the *passed* object the managed one,
+but that slot is already taken — collision.
+
+```java
+Order managed = em.find(Order.class, 1L);   // context now holds THE Order#1
+Order detached = deserializeFromRequest();   // a different Order#1 object
+session.update(detached);                     // NonUniqueObjectException!
+```
+
+**`merge` is the fix.** Merge does not try to attach the passed object; it *copies* the
+detached state field-by-field into the already-managed instance and returns that instance.
+No second object is ever attached, so no collision. This is the deeper reason the JPA spec
+standardized on `merge` and Hibernate deprecated `update`/`saveOrUpdate`.
+
+> [!INTERVIEW]
+> "Why does `session.update(detached)` throw `NonUniqueObjectException` here but `merge`
+> doesn't?" — Because the context already manages an instance with that id. `update`
+> tries to attach a *second* instance of the same identity (illegal); `merge` copies state
+> into the existing managed instance instead.
+
+## Optimistic locking when merging a stale @Version
+
+`merge` is where stale-data conflicts surface. If the entity has a `@Version` field and the
+detached copy's version is older than the current DB row (someone else updated it while you
+held the detached object), the flush-time UPDATE is guarded by the version:
+
+```sql
+-- versioned UPDATE emitted at flush after merge
+update orders set total=?, version=? where id=? and version=?
+--                                                    ^ the OLD version you carried
+```
+
+If another transaction already bumped `version`, the `where ... and version=?` matches
+**zero rows**. Hibernate detects `rowCount == 0` and throws
+`OptimisticLockException` (JPA) / `StaleObjectStateException` (Hibernate native) — no data
+is silently overwritten. This is optimistic concurrency control implemented purely in the
+`WHERE` clause; there is no DB row lock held (contrast pessimistic locking — see
+`messaging-databases`).
+
+```java
+Order detached = /* loaded earlier, version=3 */;
+detached.setTotal(new BigDecimal("500"));
+// meanwhile another tx updated the row -> DB version is now 4
+Order managed = em.merge(detached);   // SELECT loads version=4 into managed instance...
+// ...but merge copies detached fields; at flush the UPDATE ... where version=3 hits 0 rows
+// -> OptimisticLockException
+```
+
+> [!TIP]
+> Use a **wrapper** `@Version` type (`Long`, not `long`). A `null` version is Hibernate's
+> unambiguous "this instance is transient/new" signal; a primitive `long` defaults to `0`,
+> which is a *valid* version and defeats the new-vs-detached heuristic that `merge` and
+> Spring Data's `isNew()` rely on.
+
+## StatelessSession: a no-lifecycle API
+
+`StatelessSession` is Hibernate's deliberate escape hatch from the whole lifecycle model —
+worth knowing because it clarifies *what the persistence context actually does* by removing
+it. A `StatelessSession` has:
+
+- **No persistence context / no first-level cache** — no identity guarantee, no dedup of
+  rows by id.
+- **No dirty checking** — you must explicitly call `update(...)`; nothing auto-flushes.
+- **No cascades** — associations are not traversed; you persist each entity yourself.
+- **No lifecycle callbacks** (`@PrePersist` etc.) and **no interceptors/events**.
+- **Ignores collections** — mapped collections are not managed.
+- Its entities are effectively **always detached** — every operation is immediate SQL.
+
+```java
+StatelessSession ss = sessionFactory.openStatelessSession();
+ss.insert(order);   // immediate INSERT
+ss.update(order);   // immediate UPDATE — ALWAYS fires, no dirty check
+ss.delete(order);   // immediate DELETE
+Order o = ss.get(Order.class, 1L);   // fresh SELECT every time (no L1 cache)
+ss.upsert(order);   // @Incubating (6.3+): emits SQL MERGE INTO; TransientObjectException if no id
+```
+
+Because there is no L1 cache to bound, `StatelessSession` is a first-class tool for
+**streaming bulk work** (import/export of millions of rows) with constant memory — an
+alternative to the `flush()`+`clear()`-every-N pattern on a regular session. The trade-off
+is "data aliasing": without identity dedup, two `get` calls for the same id return two
+different objects, so you lose the safety of shared state.
+
+## Predicting the generated SQL for each transition
+
+Senior interviews often ask you to *predict the SQL*. The shapes:
+
+| Operation | SQL emitted | When |
+|---|---|---|
+| `persist` (IDENTITY) | `insert into orders (...) values (...)` | **Immediately** (needs the generated key; unbatchable) |
+| `persist` (SEQUENCE) | `select nextval('order_seq')` / `call next value for order_seq` then `insert ...` | id fetched now; INSERT deferred/batched to flush |
+| managed field change | `update orders set col=? where id=?` | at flush (dirty check) |
+| `merge` (uncached id) | `select ... from orders where id=?` then `update ...` | SELECT during merge, UPDATE at flush |
+| versioned `merge` | `update orders set ..., version=? where id=? and version=?` | at flush; 0 rows → `OptimisticLockException` |
+| `remove` | `delete from orders where id=?` | at flush |
+| `refresh` | `select ... from orders where id=?` | immediately (discards in-memory edits) |
+| `upsert` (6.3+) | `merge into orders ...` (or insert-or-update) | immediately |
+
+The IDENTITY-vs-SEQUENCE split is a real production bug source: **IDENTITY disables JDBC
+batch inserts**, so a loop of `persist` on an IDENTITY entity runs N separate round-trips
+even with `hibernate.jdbc.batch_size` set. SEQUENCE/TABLE pre-allocate ids (often
+`pooled`/`pooled-lo` optimizers grabbing a block at a time), letting Hibernate batch the
+INSERTs. "Why is my batch insert slow?" is almost always an IDENTITY key.
+
+## Deprecated Session methods and their modern replacements
+
+Hibernate 6/7 deprecated the mutable-state legacy methods; the 1:1 replacement mapping the
+Javadoc prescribes:
+
+| Deprecated (legacy `Session`) | Modern replacement | Note |
+|---|---|---|
+| `save(entity)` | `persist(entity)` | `save` returned the id; `persist` returns void |
+| `update(entity)` | `merge(entity)` | avoids `NonUniqueObjectException`; copies state |
+| `saveOrUpdate(entity)` | `merge` (or `persist` if you know it is new) | picks by id/version otherwise |
+| `saveOrUpdateCopy(entity)` | `merge(entity)` | |
+| `load(Class, id)` | `getReference(Class, id)` | lazy proxy |
+| `load(Class, id, LockMode/LockOptions)` | `get(...)` / `find(..., LockModeType)` | the locking overloads map to `get`, not `getReference` |
+| `load(Object, id)` (read state into a given instance) | **not deprecated** | still valid |
+| `refresh(String, Object)` | `refresh(Object)` | entity-name overloads deprecated |
+| `replicate(...)` | **no direct replacement** | removed capability |
+
+Two subtle behavior notes for interviews:
+
+- **`Session.update` forces an `UPDATE` at flush even if nothing changed** — it re-attaches
+  and marks the entity dirty wholesale, *bypassing* the field-level dirty check. That is
+  why legacy code sometimes issues UPDATEs for untouched rows.
+- **`@org.hibernate.annotations.SelectBeforeUpdate`** adds a `SELECT` before the update so
+  Hibernate can compare and *skip* the UPDATE when a re-attached detached entity is
+  actually unchanged — trading a read to avoid a needless write.
+
+## Cascade types keyed to lifecycle operations
+
+Cascades exist precisely to **propagate lifecycle transitions across associations**. The
+full JPA set maps 1:1 to the operations in this note:
+
+- `CascadeType.PERSIST` → `persist` cascades transient→managed to children.
+- `CascadeType.MERGE` → `merge` cascades the detached-state copy into the child graph.
+- `CascadeType.REMOVE` → `remove` schedules DELETE of the children too.
+- `CascadeType.REFRESH` → `refresh` re-reads the children from the DB.
+- `CascadeType.DETACH` → `detach` evicts the children from the context as well.
+- `CascadeType.ALL` = all five above.
+
+Hibernate adds native cascade styles beyond JPA — notably `LOCK` and `REPLICATE` (and the
+legacy `SAVE_UPDATE`). Fetch type (LAZY/EAGER) is **orthogonal** to cascade: an EAGER
+association is not automatically cascaded, and a cascaded association is not automatically
+eager. (Deep dive incl. `orphanRemoval` vs `CascadeType.REMOVE`:
+`cascade-types-orphan-removal`.)
+
+## Merging an entity graph and the merge N+1 trap
+
+`merge` is recursive along `CascadeType.MERGE`/`ALL` associations, and each child raises its
+own `MergeEvent`. For a child that is **not** already in the context, Hibernate must load it
+by id to obtain a managed instance to copy into — one `SELECT` per uncached child:
+
+```java
+// parent has @OneToMany(cascade = MERGE) List<LineItem> items  (100 detached items)
+order = em.merge(detachedOrder);
+// -> SELECT order#id, then up to 100 SELECT lineitem#id  (the "merge N+1")
+// -> then UPDATEs at flush
+```
+
+So merging a graph of 1 parent + 100 children can cost **101 SELECTs** before any UPDATE.
+Contrast with children that are **transient** (no id): those are treated like `persist` and
+get `INSERT`ed — no pre-SELECT. Mixed graphs (some children with ids, some without) produce
+a mix of SELECT+UPDATE and INSERT. The fix for the read storm is to load the managed graph
+first (with a `JOIN FETCH`) and mutate it, rather than merging a large detached graph.
+
+## Hibernate 6 and 7 lifecycle API changes
+
+Version-specific facts that make good fresh interview fodder:
+
+- **`javax.persistence.*` → `jakarta.persistence.*`**: the Jakarta EE 9+ package rename.
+  Hibernate 6+ targets `jakarta.*`; every annotation in modern examples is `jakarta.*`.
+- **Hibernate 6.3+ added `StatelessSession.upsert(...)`** (`@Incubating`): an
+  insert-or-update that emits SQL `MERGE INTO`. It throws `TransientObjectException` if the
+  entity has no id (upsert must know the row's identity). Note: `upsert` is a
+  `StatelessSession` method — the regular `Session` interface has **no** `upsert`.
+- **`StatelessSession.get`** gained an `EntityGraph` + `GraphSemantic` overload in 6.x for
+  eager sub-graph loading without a persistence context.
+- **Jakarta Persistence 3.2 / Hibernate 7** add option-style overloads:
+  `find(Class, Object, FindOption...)`, `refresh(Object, RefreshOption...)`, a
+  `getReference(entity)` overload, and `EntityManagerFactory.runInTransaction` /
+  `callInTransaction` helpers. (Confirm exact 3.2 signatures against the spec when relied
+  upon.)
+- **Bytecode enhancement** changes the *mechanism* of the managed state: with
+  `enableDirtyTracking`, managed entities self-track modified fields instead of Hibernate
+  diffing a load-time snapshot at flush — cheaper dirty checking for wide tables. (Detail:
+  `transactions-dirty-checking-flushing`.)
+
 ## Common Interview Follow-ups
 
 - **"Name the four states and how you move between them."** Transient → Managed
@@ -412,6 +616,18 @@ Guidance (widely recommended by the Hibernate team):
   has no DB row and (usually) no id; detached has both a row and a PK, it's just untracked.
 - **"Is `save`/`saveOrUpdate` still recommended?"** No — deprecated in Hibernate 6/7; use
   the JPA `persist`/`merge`.
+- **"Why `NonUniqueObjectException` on `update` but not `merge`?"** The context already
+  holds a managed instance with that id; `update` tries to attach a second one, `merge`
+  copies state into the existing instance.
+- **"I merged a detached entity with an old `@Version` — predict the SQL and exception."**
+  `SELECT` to load, then `UPDATE ... where id=? and version=?`; 0 rows matched →
+  `OptimisticLockException`.
+- **"How do you bulk-insert 1M rows without OOM?"** `StatelessSession` (no L1 cache, no
+  dirty check, no cascade) or `flush()`+`clear()` every N on a regular session.
+- **"Is a `getReference` result managed, and what breaks if the row is missing?"** Yes —
+  a managed proxy; first access to a non-id property throws `EntityNotFoundException`.
+- **"How many SELECTs does merging 1 parent + 100 children cost?"** Up to 101 — the merge
+  N+1: one load per uncached child before the UPDATEs.
 
 ## References
 
@@ -419,8 +635,13 @@ Guidance (widely recommended by the Hibernate team):
   `EntityManager` method contracts (`persist`, `merge`, `remove`, `find`, `getReference`,
   `refresh`, `detach`, `clear`).
 - Hibernate ORM 6.x/7.x User Guide — "Persistence Context," "Making entities persistent,"
-  "Modifying managed entities," "Merging detached entities," deprecation of
-  `save`/`update`/`saveOrUpdate`.
+  "Modifying managed entities," "Merging detached entities," "Cascading" (§ cascade types),
+  deprecation of `save`/`update`/`saveOrUpdate`.
+- Hibernate ORM 6.4 Javadoc — `org.hibernate.Session` (deprecations, `upsert`) and
+  `org.hibernate.StatelessSession` (`insert`/`update`/`delete`/`upsert`, no persistence
+  context).
+- Hibernate ORM User Guide — optimistic locking (`@Version`, `OptimisticLockException`,
+  `StaleObjectStateException`) and `@SelectBeforeUpdate`.
 - Jakarta Persistence API Javadoc — `jakarta.persistence.EntityManager`.
 - Spring Data JPA reference — `SimpleJpaRepository.save`, `Persistable#isNew`.
 - Sibling topics: `session-entitymanager-persistence-context`,

@@ -379,6 +379,291 @@ private BigDecimal amount;
 
 ---
 
+## HB6 Enum DDL: CHECK Constraints and Native Enums
+
+The "ORDINAL → plain INTEGER, STRING → plain VARCHAR" story above is the Hibernate-5 era
+behavior. **Hibernate 6 changed the generated DDL** and picks a *better* default than the
+JPA spec would:
+
+- `@Enumerated(EnumType.STRING)` → `varchar(255)` **plus a `CHECK` constraint** listing the
+  allowed constant names (on MySQL, a native `enum(...)` column instead).
+- `@Enumerated(EnumType.ORDINAL)` → **`TINYINT`** (not `INTEGER`) **plus a `CHECK`
+  constraint** bounding the ordinal range.
+
+```sql
+-- HB6 DDL for @Enumerated(STRING) on Status { NEW, PAID, SHIPPED, CANCELLED }
+status varchar(255) check (status in ('NEW','PAID','SHIPPED','CANCELLED'))
+-- HB6 DDL for @Enumerated(ORDINAL)
+status tinyint check (status between 0 and 3)
+```
+
+The Hibernate Introduction guide bluntly notes that "JPA picks the wrong default here"
+(ORDINAL) and that Hibernate auto-generates the CHECK constraint so illegal values are
+rejected at the DB level. The CHECK is regenerated on schema export whenever you add a
+constant — but on an **existing** schema (`hbm2ddl` not altering) the old CHECK persists and
+can reject a newly-added constant until you migrate it.
+
+**Native Postgres enums.** Hibernate 6 does **not** use PostgreSQL native enum types by
+default (the JDBC driver support is awkward — you must cast text to the enum type in SQL).
+You opt in explicitly:
+
+- `@JdbcTypeCode(SqlTypes.NAMED_ENUM)` → generates `CREATE TYPE ... AS ENUM (...)` and a
+  column of that named type on Postgres.
+- `@JdbcTypeCode(SqlTypes.ENUM)` → the MySQL-style inline `enum(...)` column.
+
+```java
+@JdbcTypeCode(SqlTypes.NAMED_ENUM)   // Postgres: CREATE TYPE status_enum AS ENUM (...)
+@Enumerated(EnumType.STRING)
+private Status status;
+```
+
+> [!KEY-TAKEAWAY]
+> "Predict the DDL for `@Enumerated(STRING)` in HB6" → `varchar` **with a CHECK constraint**
+> (or native `enum` on MySQL), and ORDINAL → `TINYINT` with a CHECK. Native Postgres
+> `CREATE TYPE ... AS ENUM` is opt-in via `@JdbcTypeCode(SqlTypes.NAMED_ENUM)`, never the
+> default.
+
+---
+
+## Time-Zone Storage for Instant and OffsetDateTime
+
+Whether the **offset survives a round trip** for `OffsetDateTime`/`ZonedDateTime` is a
+classic senior trap. It is governed by `hibernate.timezone.default_storage` (a
+`TimeZoneStorageType`), overridable per attribute with `@TimeZoneStorage(...)`.
+
+| `TimeZoneStorageType` | Behavior |
+|---|---|
+| `DEFAULT` (the actual default since 6.2) | Resolves to `NATIVE` where the dialect has `TIMESTAMP WITH TIME ZONE`, else `NORMALIZE_UTC`. Preserves the **instant**, but does **not** promise the original offset/zone survives. |
+| `NATIVE` | Uses a `with time zone` column; **errors** if the dialect has no native support. |
+| `NORMALIZE` | Drops the zone, normalizing to `hibernate.jdbc.time_zone` (or the JVM default). Legacy/back-compat. |
+| `NORMALIZE_UTC` | Normalizes to UTC; no zone stored. |
+| `COLUMN` | Stores the offset in a **separate companion column** named by `@TimeZoneColumn`. |
+| `AUTO` | `NATIVE` if the dialect supports it, else `COLUMN` — preserves **both** the instant **and** the original offset. |
+
+```java
+@TimeZoneStorage(TimeZoneStorageType.COLUMN)
+@TimeZoneColumn(name = "created_at_offset")   // companion column holds the offset
+private OffsetDateTime createdAt;
+```
+
+Key facts:
+
+- On PostgreSQL, `timestamptz` stores UTC, so under `DEFAULT`/`NATIVE` the **instant is
+  preserved but the original offset is normalized to UTC** — a client's `+05:30` reads back
+  as the equivalent UTC instant, not `+05:30`. To keep the *exact* original offset, use
+  `COLUMN` (or `AUTO`, which chooses `COLUMN` when native offset support is absent).
+- `hibernate.jdbc.time_zone` (e.g. set to `UTC`) controls the zone the JDBC driver
+  normalizes to on read/write — important for reproducible `Timestamp` binding across JVMs
+  in different regions.
+- `LocalDateTime` has no zone at all; it never participates in this machinery. Use `Instant`
+  when only the moment matters and you don't care about the original offset.
+
+> [!WARNING]
+> The earlier `java.time` table showing `OffsetDateTime → TIMESTAMP WITH TIME ZONE` is only
+> true under `NATIVE`/`AUTO`. Under the real default (`DEFAULT`) on most dialects the value
+> is normalized and the **offset is not preserved** — only the instant is. If an interviewer
+> asks "does the offset survive?", the answer is "only with `COLUMN` or a dialect with true
+> offset support."
+
+---
+
+## HB6 Default Type-Code Mappings (Instant, Duration, UUID)
+
+The Hibernate 6.0 migration guide changed several default JDBC type codes. These are prime
+"predict the DDL / spot the HB5→6 surprise" material:
+
+| Java type | HB6 default `SqlTypes` code | Fallback when unsupported |
+|---|---|---|
+| `Instant` | `TIMESTAMP_UTC` | `timestamp` |
+| `Duration` | `INTERVAL_SECOND` | `numeric(21)` |
+| `UUID` | `UUID` | `binary(16)` |
+
+So on PostgreSQL a `UUID` field maps to the **native `uuid`** column by default (not
+`char(36)` or `bytea`). To override:
+
+- `@JdbcTypeCode(SqlTypes.CHAR)` → `char(36)` textual form.
+- `@JdbcTypeCode(SqlTypes.VARBINARY)` / `SqlTypes.BINARY` → `binary(16)`.
+
+The index-size/performance angle: native `uuid` (16 bytes) beats `char(36)` (36 bytes) for
+index density; random UUIDv4 still fragments B-tree inserts (see `messaging-databases`).
+
+---
+
+## Nationalized Character Data (@Nationalized)
+
+On SQL Server (and a few others), `char`/`varchar` are single-byte/collation-bound while
+`nchar`/`nvarchar` store Unicode. `@Nationalized` on a `String`/`char[]`/CLOB attribute
+forces the national-character SQL type (`NVARCHAR`, `NCLOB`):
+
+```java
+@Nationalized
+private String customerName;   // -> nvarchar on SQL Server
+```
+
+To flip the whole persistence unit, set `hibernate.use_nationalized_character_data=true` so
+every string maps to the nationalized type without per-field annotations. This is a common
+real-world SQL Server gotcha when non-ASCII data is silently mangled in a `varchar`.
+
+---
+
+## Converters on Collections and Map Keys/Values
+
+`AttributeConverter` isn't limited to a single scalar field. Via `@Convert(attributeName=...)`
+you can target the elements or keys of a collection/embeddable path:
+
+```java
+@ElementCollection
+@Convert(converter = CityConverter.class, attributeName = "value")   // Map value
+@Convert(converter = ..., attributeName = "key")                     // Map key
+private Map<City, Instant> visitLog;
+```
+
+`@Convert(attributeName = "...")` names the sub-attribute inside an `@Embeddable` or the
+`key`/`value` of a `Map`. To **turn off** an `autoApply` converter on a specific attribute,
+use `@Convert(disableConversion = true)`. A converter and `@Enumerated`/`@Temporal` are
+**mutually exclusive** on the same attribute — pick one; you can't stack them.
+
+---
+
+## Writing a Custom UserType in Hibernate 6
+
+The HB6 `UserType<T>` interface is **generic** (unlike the raw HB5 version) and is wired with
+`@Type(MyUserType.class)` — a **Class**, never a string. Reach for it when a value spans
+logic a single-column `AttributeConverter` can't express (custom dirty-checking, mutability,
+or non-trivial binding). Minimal HB6 skeleton:
+
+```java
+public class MonetaryAmountUserType implements UserType<MonetaryAmount> {
+    @Override public int getSqlType() { return SqlTypes.DECIMAL; }   // JDBC type code
+    @Override public Class<MonetaryAmount> returnedClass() { return MonetaryAmount.class; }
+
+    @Override public boolean equals(MonetaryAmount a, MonetaryAmount b) { return Objects.equals(a, b); }
+    @Override public int hashCode(MonetaryAmount x) { return Objects.hashCode(x); }
+
+    @Override public MonetaryAmount nullSafeGet(ResultSet rs, int pos,
+            SharedSessionContractImplementor s, Object owner) throws SQLException {
+        BigDecimal v = rs.getBigDecimal(pos);
+        return v == null ? null : MonetaryAmount.of(v);
+    }
+    @Override public void nullSafeSet(PreparedStatement st, MonetaryAmount value, int idx,
+            SharedSessionContractImplementor s) throws SQLException {
+        if (value == null) st.setNull(idx, getSqlType());
+        else st.setBigDecimal(idx, value.amount());
+    }
+    @Override public MonetaryAmount deepCopy(MonetaryAmount value) { return value; } // immutable
+    @Override public boolean isMutable() { return false; }
+    @Override public Serializable disassemble(MonetaryAmount v) { return v; }
+    @Override public MonetaryAmount assemble(Serializable s, Object owner) { return (MonetaryAmount) s; }
+}
+```
+
+For a **multi-column** value use `CompositeUserType<T>` instead. `isMutable()` and
+`deepCopy()` drive dirty-checking: return `true`/a real copy for mutable values so Hibernate
+snapshots them correctly.
+
+---
+
+## Struct and Array Mappings
+
+Two modern HB6 mapping features seniors are increasingly expected to *know exist*:
+
+- **`@Struct` / `SqlTypes.STRUCT`** — maps an `@Embeddable` to a DB composite/UDT type
+  (Oracle object type, Postgres composite type) instead of flattening its fields into
+  columns of the parent table.
+
+  ```java
+  @Struct(name = "address_type")     // Postgres CREATE TYPE address_type AS (...)
+  @Embeddable
+  public record Address(String street, String city, String zip) {}
+  ```
+
+- **`@Array` / `SqlTypes.ARRAY`** (HB 6.1+) — maps a `List<T>`/`T[]` to a **native SQL array
+  column** (`integer[]`, `text[]` on Postgres) rather than a separate collection table.
+
+  ```java
+  @Array(length = 10)
+  @Column(name = "tags")
+  private String[] tags;   // -> text[] on PostgreSQL
+  ```
+
+These preserve DB-native semantics (array operators, composite comparison) that an
+`@ElementCollection` join table or a JSON blob would lose.
+
+---
+
+## @ColumnTransformer: DB-Side Read/Write Transforms
+
+`@ColumnTransformer(read=..., write=...)` injects SQL expressions Hibernate wraps around the
+column on **read** and **write**. Unlike a converter (which transforms in Java, so the DB
+only sees the opaque stored form), the transform runs *in SQL*, so the underlying data stays
+**indexable and queryable** by the DB.
+
+```java
+@ColumnTransformer(
+    read  = "pgp_sym_decrypt(ssn, current_setting('app.key'))",
+    write = "pgp_sym_encrypt(?, current_setting('app.key'))")
+@Column(name = "ssn")
+private String ssn;
+
+// unit conversion example
+@ColumnTransformer(read = "weight_grams / 1000.0", write = "? * 1000.0")
+private double weightKg;
+```
+
+The senior contrast: an **encrypting `AttributeConverter`** breaks range/`LIKE`/index use
+because the DB sees ciphertext; `@ColumnTransformer` keeps the crypto in SQL (still limited
+for range, but deterministic and expressible in predicates). The `write` expression must
+contain exactly one `?` placeholder. Because the read expression is inlined into every
+`SELECT`, it can defeat index usage on that column unless a functional index matches it.
+
+---
+
+## Auto-Populated Temporal Values
+
+Temporal mapping in practice almost always involves auto-population. Hibernate-native
+annotations:
+
+- `@CreationTimestamp` — set once on INSERT.
+- `@UpdateTimestamp` — refreshed on every INSERT and UPDATE.
+- `@CurrentTimestamp` (HB6) — configurable via a `source` (in-VM clock vs DB `current_timestamp`).
+- `@Generated` — marks a value the DB computes (default/trigger); Hibernate re-reads it after write.
+
+```java
+@CreationTimestamp private Instant createdAt;   // JVM clock, java.time supported
+@UpdateTimestamp   private Instant updatedAt;
+```
+
+These support `java.time` types and pull from the JVM clock by default, so at insert time
+`createdAt` and `updatedAt` can differ by microseconds (two `Instant.now()` calls). The
+**JPA-standard** equivalent is manual: an `@PrePersist`/`@PreUpdate` lifecycle callback that
+sets the field yourself — JPA has no portable auto-timestamp annotation.
+
+---
+
+## Dirty Checking of Mutable Basic Values
+
+Hibernate flushes an UPDATE only when it detects a change. For a mutable **basic** value —
+a `Map`/POJO mapped to JSON, a comma-joined `List<String>` via a converter, an array — the
+change is detected only through the type's **`MutabilityPlan`** (deep comparison of the
+serialized/copied form against the loaded snapshot). Consequences:
+
+- If the type is treated as **immutable** (e.g. annotated `@Immutable`, or a converter whose
+  return type Hibernate assumes immutable), mutating the object **in place** is **not**
+  detected — "my JSON update didn't persist." The fix is to **reassign** a new instance
+  (`entity.setAttrs(newMap)`), which flips the reference and is always caught.
+- Built-in JSON/array support *does* deep-compare, so in-place mutation usually works — but
+  at the cost of serializing + comparing large blobs on every flush.
+- `@Immutable` on a converter or type **opts out** of dirty checking for that attribute,
+  trading correctness-on-mutation for flush performance when the value truly never changes
+  in place.
+
+> [!WARNING]
+> "Why wasn't my in-place `Map` mutation on a JSON column persisted?" — the type's mutability
+> plan treated it as immutable (or you marked it `@Immutable`), so no dirty flag was set.
+> Reassign the field reference to force detection.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"What's the default for `@Enumerated`?"** `EnumType.ORDINAL`. Explain why that's a
@@ -401,6 +686,24 @@ private BigDecimal amount;
   = Hibernate-specific, multi-column or custom semantics.
 - **"Where does the converter run in the lifecycle?"** On every bind (insert/update flush)
   and every read/query materialization; see `hibernate-jpa/transactions-dirty-checking-flushing`.
+- **"Predict the DDL for `@Enumerated(STRING)` in HB6."** `varchar(255)` with a `CHECK`
+  constraint listing the names (native `enum` on MySQL); ORDINAL → `TINYINT` + CHECK.
+- **"Does the offset survive for `OffsetDateTime`?"** Only with `COLUMN`/`@TimeZoneColumn`
+  or `AUTO` (or a dialect with true offset support). Under the default (`DEFAULT`) on Postgres
+  `timestamptz` only the instant survives; the offset is normalized to UTC.
+- **"How do you get a native Postgres `uuid` / `CREATE TYPE ... AS ENUM`?"** UUID is the HB6
+  default (`SqlTypes.UUID`); native enum is opt-in via `@JdbcTypeCode(SqlTypes.NAMED_ENUM)`.
+- **"Why didn't my in-place JSON `Map` mutation persist?"** The type's mutability plan
+  treated it as immutable (or `@Immutable`); reassign the reference to trigger dirty checking.
+- **"Encrypt a column but keep it queryable by equality?"** `@ColumnTransformer` pushes the
+  crypto into SQL (indexable/expressible in predicates); an encrypting converter only ever
+  supports equality via deterministic ciphertext and defeats range/LIKE/indexes.
+- **"Auto-populate created/updated timestamps?"** Hibernate `@CreationTimestamp`/
+  `@UpdateTimestamp`/`@CurrentTimestamp`; JPA-standard is a manual `@PrePersist`/`@PreUpdate`.
+- **"@Convert vs @JdbcTypeCode for JSON?"** Converter = portable plain text, loses native
+  operators/GIN indexing; `@JdbcTypeCode(SqlTypes.JSON)` = dialect-native `jsonb`/`json`.
+- **"Migrate a HB5 `@Type("jsonb")` app?"** Replace with `@JdbcTypeCode(SqlTypes.JSON)`;
+  string `@Type`, `@TypeDef`, `@TypeDefs` are removed in HB6.
 
 ## References
 
@@ -409,6 +712,14 @@ private BigDecimal amount;
 - Hibernate ORM 6.x/7.x User Guide — "Basic Types", "Mapping enums", "AttributeConverter",
   "Mapping date/time values", "Mapping LOBs", "JSON mapping", and the `JavaType`/`JdbcType`
   type-system chapters.
+- Hibernate ORM 6.0 Migration Guide (default type-code changes: `Instant`→`TIMESTAMP_UTC`,
+  `Duration`→`INTERVAL_SECOND`, `UUID`→`UUID`; removal of string `@Type`/`@TypeDef`) and the
+  Hibernate 6 Introduction (enum CHECK-constraint DDL, "JPA picks the wrong default").
+- `TimeZoneStorageType` Javadoc (Hibernate 6.6) — `DEFAULT`/`NATIVE`/`NORMALIZE`/
+  `NORMALIZE_UTC`/`COLUMN`/`AUTO` semantics and `hibernate.timezone.default_storage`.
+- Hibernate annotations: `@JdbcTypeCode(SqlTypes.NAMED_ENUM/ENUM/JSON)`, `@Struct`, `@Array`,
+  `@ColumnTransformer`, `@Nationalized`, `@CreationTimestamp`/`@UpdateTimestamp`/
+  `@CurrentTimestamp`/`@Generated`, `@TimeZoneStorage`/`@TimeZoneColumn`, `UserType<T>`.
 - Cross-references in this library: `hibernate-jpa/fetching-lazy-eager-n-plus-one`
   (lazy basics/LOBs), `hibernate-jpa/transactions-dirty-checking-flushing` (when converters
   run), `hibernate-jpa/inheritance-embeddables-composite-keys` (embedded values),

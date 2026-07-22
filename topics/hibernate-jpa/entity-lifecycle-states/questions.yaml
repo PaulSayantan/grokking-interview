@@ -607,10 +607,10 @@ questions:
       about object identity?
     options:
       - "managed == detached"
-      - "managed != detached — they are different object references"
-      - "detached becomes null"
       - "Both point to a proxy of each other"
-    answer: 1
+      - "detached becomes null"
+      - "managed != detached — they are different object references"
+    answer: 3
     explanation: |
       In the detached case merge returns a different managed instance, so managed !=
       detached. Only if the detached instance happened to already be the managed one in the
@@ -931,3 +931,497 @@ questions:
       merge does NOT make the argument managed — it returns a separate managed copy. The
       other three statements are true and are the crux of the lifecycle model.
     ref: "concepts.md#persist-vs-merge-vs-save-and-spring-data-save"
+
+  - id: entity-lifecycle-states-054
+    difficulty: expert
+    tags: [nonuniqueobjectexception, update, merge, re-attachment]
+    question: |
+      The context already holds a managed `Order#1` (from an earlier `find`). You then call
+      the legacy `session.update(detachedOrder1)` on a DIFFERENT object with the same id.
+      What happens, and why does `merge` avoid it?
+    options:
+      - "NonUniqueObjectException — update tries to attach a second instance of that identity, while merge copies state into the existing managed instance"
+      - "Nothing — update silently replaces the managed instance"
+      - "OptimisticLockException, because two objects have the same version"
+      - "The second object is inserted as a new row"
+    answer: 0
+    explanation: |
+      The context guarantees one managed instance per type+id. update/saveOrUpdate try to
+      make the passed object THE managed one, but that slot is taken -> NonUniqueObjectException.
+      merge never attaches the passed object; it copies its state into the already-managed
+      instance, so there is no collision.
+    ref: "concepts.md#nonuniqueobjectexception-and-re-attachment-collisions"
+
+  - id: entity-lifecycle-states-055
+    difficulty: expert
+    tags: [optimistic-lock, version, merge, sql]
+    question: |
+      You merge a detached entity carrying `@Version` = 3, but another transaction already
+      bumped the DB row to version 4. Predict the flush SQL and the outcome.
+    options:
+      - "UPDATE ... where id=? (no version clause); the change silently overwrites version 4"
+      - "A SELECT ... FOR UPDATE that blocks until the other tx releases the lock"
+      - "UPDATE ... where id=? and version=3 matches 0 rows -> OptimisticLockException"
+      - "No SQL — merge detects the mismatch and returns the DB copy unchanged"
+    answer: 2
+    explanation: |
+      Versioned updates are guarded by `where id=? and version=?` using the stale version you
+      carried. Since the DB is now version 4, zero rows match; Hibernate sees rowCount==0 and
+      throws OptimisticLockException / StaleObjectStateException. No row lock is held — the
+      check lives entirely in the WHERE clause.
+    ref: "concepts.md#optimistic-locking-when-merging-a-stale-version"
+
+  - id: entity-lifecycle-states-056
+    difficulty: advanced
+    tags: [version, wrapper, isnew, mechanism]
+    question: |
+      Why do Hibernate experts recommend a `Long` (wrapper) `@Version` field rather than a
+      primitive `long`?
+    options:
+      - "Primitive long cannot be mapped to a SQL column"
+      - "A null Long is an unambiguous 'transient/new' signal; a primitive long defaults to 0, a valid version that defeats the new-vs-detached heuristic"
+      - "Wrapper versions are incremented atomically while primitives are not"
+      - "Primitive versions disable optimistic locking entirely"
+    answer: 1
+    explanation: |
+      merge and Spring Data isNew() use a null version to mean 'this instance is new'. A
+      primitive long defaults to 0 — a legitimate version value — so a genuinely new entity
+      looks like an existing detached one, causing a wasteful pre-SELECT/merge path.
+    ref: "concepts.md#optimistic-locking-when-merging-a-stale-version"
+
+  - id: entity-lifecycle-states-057
+    difficulty: expert
+    tags: [statelesssession, dirty-checking, bulk]
+    question: |
+      Which statement about Hibernate's `StatelessSession` is correct?
+    options:
+      - "It shares the same first-level cache as the regular Session"
+      - "It dirty-checks entities and auto-flushes on commit"
+      - "It automatically cascades persist/merge to associations"
+      - "It has no persistence context, no dirty checking, and no cascades — you must call update() explicitly and it fires immediate SQL"
+    answer: 3
+    explanation: |
+      StatelessSession deliberately drops the lifecycle machinery: no L1 cache/identity, no
+      dirty checking, no cascades, no lifecycle callbacks/interceptors, ignores collections.
+      Its entities are effectively always detached and each operation is immediate SQL — ideal
+      for constant-memory bulk streaming.
+    ref: "concepts.md#statelesssession-a-no-lifecycle-api"
+
+  - id: entity-lifecycle-states-058
+    difficulty: expert
+    tags: [statelesssession, update, mechanism]
+    question: |
+      With a `StatelessSession`, you load an entity via `ss.get(...)`, change a field, and
+      commit WITHOUT calling `ss.update(...)`. What is persisted?
+    options:
+      - "Nothing — StatelessSession has no dirty checking, so the change is never written"
+      - "The change, via automatic dirty checking at commit"
+      - "The change, but only after an em.flush()"
+      - "A NonUniqueObjectException is thrown at commit"
+    answer: 0
+    explanation: |
+      StatelessSession does not track or dirty-check entities. Without an explicit ss.update()
+      the modification is silently lost. (And ss.update() ALWAYS issues an UPDATE, since there
+      is no snapshot to compare against.)
+    ref: "concepts.md#statelesssession-a-no-lifecycle-api"
+
+  - id: entity-lifecycle-states-059
+    difficulty: expert
+    tags: [bulk-insert, statelesssession, flush-clear, judgment]
+    question: |
+      You must import 1,000,000 rows in one job without exhausting heap. Which two
+      approaches are the standard, correct choices?
+    options:
+      - "Load everything into the persistence context first, then commit once"
+      - "Use a StatelessSession, OR use a regular session and flush()+clear() every N rows"
+      - "Set the second-level cache to unlimited and rely on eviction"
+      - "Use em.merge() in a tight loop with EAGER fetching"
+    answer: 1
+    explanation: |
+      Both bound memory. StatelessSession has no L1 cache to grow. On a regular session,
+      flush()+clear() every N writes the batch then detaches it, keeping the context small so
+      dirty checking stays cheap. Accumulating a million managed entities OOMs and slows dirty
+      checking to a crawl.
+    ref: "concepts.md#statelesssession-a-no-lifecycle-api"
+
+  - id: entity-lifecycle-states-060
+    difficulty: expert
+    tags: [upsert, hibernate63, sql, incubating]
+    question: |
+      Hibernate 6.3+ adds `StatelessSession.upsert(entity)`. What does it do, and what
+      happens if the entity has no id?
+    options:
+      - "It always INSERTs; a missing id is auto-generated"
+      - "It emits a SQL MERGE INTO (insert-or-update); with no id it throws TransientObjectException"
+      - "It behaves exactly like persist and ignores existing rows"
+      - "It deletes then re-inserts the row"
+    answer: 1
+    explanation: |
+      upsert (@Incubating since 6.3) maps to a SQL MERGE INTO / insert-or-update keyed on the
+      identity. Because it must know which row to target, it throws TransientObjectException
+      when the entity carries no id. Note: upsert is a StatelessSession method — the regular
+      Session interface has no upsert.
+    ref: "concepts.md#hibernate-6-and-7-lifecycle-api-changes"
+
+  - id: entity-lifecycle-states-061
+    difficulty: advanced
+    tags: [deprecation, update, merge, mapping]
+    question: |
+      Per the Hibernate 6 Session Javadoc, what is the recommended 1:1 replacement for the
+      deprecated `session.update(entity)`?
+    options:
+      - "persist(entity)"
+      - "refresh(entity)"
+      - "merge(entity)"
+      - "getReference(entity.getClass(), entity.getId())"
+    answer: 2
+    explanation: |
+      update -> merge. merge re-associates a detached entity by copying its state into a
+      managed instance, avoiding NonUniqueObjectException. (save -> persist; saveOrUpdate ->
+      merge-or-persist; load(Class,id) -> getReference.)
+    ref: "concepts.md#deprecated-session-methods-and-their-modern-replacements"
+
+  - id: entity-lifecycle-states-062
+    difficulty: expert
+    tags: [update, dirty-checking, selectbeforeupdate, behavior]
+    question: |
+      A legacy code path calls `session.update(detached)` on an entity whose fields were
+      never changed. Absent `@SelectBeforeUpdate`, what SQL runs at flush?
+    options:
+      - "No SQL — Hibernate dirty-checks and sees nothing changed"
+      - "A full UPDATE of all columns, because update re-attaches and marks the entity dirty wholesale, bypassing the field-level dirty check"
+      - "Only a SELECT to verify the row still exists"
+      - "A DELETE followed by an INSERT"
+    answer: 1
+    explanation: |
+      Session.update forces an UPDATE even for unchanged entities — it bypasses snapshot dirty
+      checking. Adding @SelectBeforeUpdate makes Hibernate SELECT first and compare so it can
+      SKIP the UPDATE when nothing actually changed (trading a read to avoid a needless write).
+    ref: "concepts.md#deprecated-session-methods-and-their-modern-replacements"
+
+  - id: entity-lifecycle-states-063
+    difficulty: advanced
+    tags: [load, getreference, deprecation, nuance]
+    question: |
+      Regarding Hibernate 6 deprecations of `Session.load(...)`, which statement is accurate?
+    options:
+      - "All load overloads are deprecated with no replacement"
+      - "load(Class, id) maps to getReference; the LockMode/LockOptions overloads map to get(...); load(Object, id) that reads state into a supplied instance is NOT deprecated"
+      - "load(Class, id) maps to find, and the locking overloads map to getReference"
+      - "load is renamed to fetch in Hibernate 6"
+    answer: 1
+    explanation: |
+      The id-only load(Class,id) -> getReference (lazy proxy). The locking overloads
+      (LockMode/LockOptions) -> get(...). The form that reads state into a caller-supplied
+      transient instance, load(Object,id), is not deprecated.
+    ref: "concepts.md#deprecated-session-methods-and-their-modern-replacements"
+
+  - id: entity-lifecycle-states-064
+    difficulty: advanced
+    tags: [replicate, deprecation]
+    question: |
+      Which deprecated Hibernate operation has NO direct modern replacement among the JPA
+      lifecycle methods?
+    options:
+      - "save"
+      - "update"
+      - "saveOrUpdate"
+      - "replicate"
+    answer: 3
+    explanation: |
+      save->persist, update->merge, saveOrUpdate->merge/persist all have replacements.
+      replicate (copying a detached graph into another datastore/session with a replication
+      mode) has no equivalent JPA operation — its capability was simply removed.
+    ref: "concepts.md#deprecated-session-methods-and-their-modern-replacements"
+
+  - id: entity-lifecycle-states-065
+    difficulty: advanced
+    tags: [cascade, lifecycle, mapping]
+    question: |
+      Which set of `CascadeType` values corresponds exactly to the JPA lifecycle operations
+      (i.e. equals `CascadeType.ALL`)?
+    options:
+      - "PERSIST, MERGE, REMOVE, REFRESH, DETACH"
+      - "PERSIST, MERGE, SAVE, UPDATE, DELETE"
+      - "INSERT, UPDATE, DELETE, SELECT, LOCK"
+      - "PERSIST, MERGE, REMOVE, LOAD, EVICT"
+    answer: 0
+    explanation: |
+      The five JPA cascade types map 1:1 to the lifecycle ops: PERSIST, MERGE, REMOVE,
+      REFRESH, DETACH; CascadeType.ALL = all five. LOCK and REPLICATE are Hibernate-native
+      extras, not part of the JPA set.
+    ref: "concepts.md#cascade-types-keyed-to-lifecycle-operations"
+
+  - id: entity-lifecycle-states-066
+    difficulty: advanced
+    tags: [cascade, refresh, detach]
+    question: |
+      A parent's `@OneToMany` is mapped `cascade = {REFRESH, DETACH}`. You call
+      `em.detach(parent)`. What happens to the children?
+    options:
+      - "Nothing — detach never cascades"
+      - "The children are detached from the context too, because CascadeType.DETACH propagates the detach"
+      - "The children are deleted"
+      - "The children are refreshed from the DB"
+    answer: 1
+    explanation: |
+      CascadeType.DETACH propagates detach across the association, so the children are evicted
+      from the context as well. CascadeType.REFRESH would similarly propagate a refresh. Each
+      cascade type mirrors its lifecycle operation.
+    ref: "concepts.md#cascade-types-keyed-to-lifecycle-operations"
+
+  - id: entity-lifecycle-states-067
+    difficulty: intermediate
+    tags: [cascade, fetch, orthogonal]
+    question: |
+      True or false: marking an association `fetch = EAGER` also causes `persist`/`merge` to
+      cascade to it.
+    options:
+      - "True — EAGER implies full cascade"
+      - "False — fetch type (LAZY/EAGER) is orthogonal to cascade; you must declare CascadeType explicitly"
+      - "True, but only for @OneToMany"
+      - "False — EAGER disables all cascading"
+    answer: 1
+    explanation: |
+      Fetching controls WHEN associated data is loaded; cascading controls WHICH lifecycle
+      operations propagate. They are independent: an EAGER association is not auto-cascaded,
+      and a cascaded association need not be eager.
+    ref: "concepts.md#cascade-types-keyed-to-lifecycle-operations"
+
+  - id: entity-lifecycle-states-068
+    difficulty: expert
+    tags: [merge, n-plus-one, graph, sql]
+    question: |
+      A detached `Order` with `@OneToMany(cascade = MERGE)` holds 100 detached line items,
+      none currently in the context. How many SELECTs does `em.merge(order)` trigger before
+      any UPDATE, and why?
+    options:
+      - "1 — merge reads only the parent"
+      - "0 — merge never reads"
+      - "Up to 101 — one load-by-id per uncached entity (parent + each child) to obtain managed instances to copy into"
+      - "200 — two reads per child"
+    answer: 2
+    explanation: |
+      merge cascades recursively; each uncached child must be loaded by id to get a managed
+      instance to copy the detached state into. That is 1 (parent) + 100 (children) = up to
+      101 SELECTs — the merge N+1. Loading the managed graph via JOIN FETCH and mutating it
+      avoids the storm.
+    ref: "concepts.md#merging-an-entity-graph-and-the-merge-n1-trap"
+
+  - id: entity-lifecycle-states-069
+    difficulty: expert
+    tags: [merge, transient-children, graph, sql]
+    question: |
+      You merge a detached parent whose cascaded child collection mixes children WITH ids and
+      children with NO id (transient). What SQL does each kind produce?
+    options:
+      - "Both kinds produce an UPDATE"
+      - "Children with ids get a load-SELECT then UPDATE; id-less (transient) children are treated like persist and get INSERTed"
+      - "Both kinds get INSERTed"
+      - "The transient children throw because merge requires an id"
+    answer: 1
+    explanation: |
+      merge on a child with an id loads it (SELECT) and copies state (UPDATE at flush). A
+      child with no id is transient, so merge behaves like persist and INSERTs it. Mixed graphs
+      therefore emit a mix of SELECT+UPDATE and INSERT.
+    ref: "concepts.md#merging-an-entity-graph-and-the-merge-n1-trap"
+
+  - id: entity-lifecycle-states-070
+    difficulty: advanced
+    tags: [identity-generation, batch, sql, performance]
+    question: |
+      A team sets `hibernate.jdbc.batch_size=50` but inserts of an IDENTITY-keyed entity are
+      still one round-trip each. What is the cause?
+    options:
+      - "batch_size only applies to updates"
+      - "IDENTITY generation forces an immediate INSERT to read the generated key, which disables JDBC insert batching; SEQUENCE/TABLE pre-allocate ids and can batch"
+      - "The entity is missing @DynamicInsert"
+      - "Batching requires a StatelessSession"
+    answer: 1
+    explanation: |
+      IDENTITY yields the key only as a side-effect of the INSERT, so Hibernate must execute
+      each INSERT immediately and cannot batch them. Switch to a SEQUENCE (ideally pooled) so
+      ids are pre-allocated and INSERTs batch at flush.
+    ref: "concepts.md#predicting-the-generated-sql-for-each-transition"
+
+  - id: entity-lifecycle-states-071
+    difficulty: intermediate
+    tags: [refresh, merge, direction, judgment]
+    question: |
+      Both `refresh` and `merge` re-synchronize an object with the database. What is the
+      DIRECTION of data flow in each?
+    options:
+      - "Both push object state to the DB"
+      - "refresh pulls DB -> object (discarding in-memory edits); merge pushes object -> DB (copying your state onto a managed instance)"
+      - "Both pull DB -> object"
+      - "refresh pushes object -> DB; merge pulls DB -> object"
+    answer: 1
+    explanation: |
+      refresh overwrites the in-memory object with current DB values, throwing away unflushed
+      edits (DB -> object). merge takes your (detached) object's state and copies it onto a
+      managed instance so it is written back (object -> DB). Opposite directions.
+    ref: "concepts.md#predicting-the-generated-sql-for-each-transition"
+
+  - id: entity-lifecycle-states-072
+    difficulty: expert
+    tags: [getreference, proxy, equals, identity]
+    question: |
+      `em.getReference(Order.class, 1L)` returns a proxy. Which subtlety about that proxy is
+      correct?
+    options:
+      - "The proxy's runtime class is a Hibernate-generated subclass, so `x.getClass() == Order.class` is false and naive getClass-based equals can misbehave; use instanceof or Hibernate.unproxy"
+      - "The proxy is detached, not managed"
+      - "The proxy triggers a SELECT at getReference time"
+      - "The proxy can never be used to set a foreign key"
+    answer: 0
+    explanation: |
+      getReference returns a MANAGED lazy proxy whose class is a generated subclass of Order.
+      So getClass() != Order.class, which can break getClass-based equals/instanceof checks.
+      Use instanceof and Hibernate.unproxy()/Hibernate.isInitialized() when comparing. It is
+      ideal for setting an FK without loading the row.
+    ref: "concepts.md#hibernate-6-and-7-lifecycle-api-changes"
+
+  - id: entity-lifecycle-states-073
+    difficulty: advanced
+    tags: [spring-data, getreferencebyid, lazy, gotcha]
+    question: |
+      In current Spring Data JPA, `getReferenceById(id)` (formerly `getOne`) returns a lazy
+      proxy. What is the common 2024/2025 gotcha?
+    options:
+      - "It always issues an eager SELECT"
+      - "It returns null for missing rows"
+      - "Accessing its properties outside an open transaction/session throws LazyInitializationException (and EntityNotFoundException if the row is missing)"
+      - "It is deprecated with no replacement"
+    answer: 2
+    explanation: |
+      getReferenceById returns an uninitialized proxy. If you touch a non-id property after the
+      transaction has closed, there is no session to run the deferred SELECT ->
+      LazyInitializationException; and if the row does not exist, EntityNotFoundException on
+      first access. Use findById when you need the loaded state.
+    ref: "concepts.md#persist-vs-merge-vs-save-and-spring-data-save"
+
+  - id: entity-lifecycle-states-074
+    difficulty: advanced
+    tags: [spring-data, saveandflush, version, isnew]
+    question: |
+      For a VERSIONED entity, how does a well-configured Spring Data `isNew()` decide
+      new-vs-existing more robustly than the default id-null check?
+    options:
+      - "It queries the DB on every save"
+      - "It inspects whether the @Version field is null (unset) — more reliable than id, especially with assigned ids"
+      - "It checks whether the entity implements Serializable"
+      - "It always treats the entity as new"
+    answer: 1
+    explanation: |
+      Spring Data's JpaEntityInformation can use a null @Version as the isNew signal, which is
+      more robust than 'id is null' when ids are application-assigned. saveAndFlush additionally
+      forces an immediate flush rather than deferring to transaction commit.
+    ref: "concepts.md#persist-vs-merge-vs-save-and-spring-data-save"
+
+  - id: entity-lifecycle-states-075
+    difficulty: expert
+    tags: [detach, unflushed, flush, gotcha]
+    question: |
+      You change two fields on a managed entity and then call `em.detach(entity)` before any
+      flush. What is the effect on those pending changes?
+    options:
+      - "detach flushes them first, then detaches"
+      - "The changes are silently lost — detach does NOT flush; the entity leaves the context untracked with its edits unpersisted"
+      - "The changes are queued and applied at the next transaction"
+      - "detach throws because the entity is dirty"
+    answer: 1
+    explanation: |
+      detach removes the entity from the context without flushing. Any unflushed field changes
+      are discarded (never written). If you need them persisted, call em.flush() BEFORE detach.
+    ref: "concepts.md#remove-detach-clear-refresh-and-close"
+
+  - id: entity-lifecycle-states-076
+    difficulty: expert
+    tags: [persist, detached, exception, timing]
+    question: |
+      You call `em.persist(order)` on an object that already carries an id from a previous
+      session (i.e. it is detached). Per typical Hibernate behavior, what happens?
+    options:
+      - "It is treated as an update and succeeds silently"
+      - "It becomes managed with no error"
+      - "A PersistenceException / EntityExistsException is raised — possibly not until flush/commit rather than at the persist call"
+      - "It is converted to a transient entity"
+    answer: 2
+    explanation: |
+      persist is for transient entities. On a detached instance the provider MAY throw
+      EntityExistsException immediately OR defer detection to flush/commit (Hibernate often
+      surfaces a PersistenceException/EntityExistsException at flush). Use merge for detached
+      objects.
+    ref: "concepts.md#persist-transient-to-managed"
+
+  - id: entity-lifecycle-states-077
+    difficulty: expert
+    tags: [merge, return-value, argument-state, code-reading]
+    question: |
+      Given `Order result = em.merge(input);` where `input` is detached with id 1 and no
+      Order#1 is yet in the context — after the call, which is true about `result` and `input`?
+    options:
+      - "result is managed (a freshly loaded-then-updated instance); input remains detached and untracked; result != input"
+      - "Both result and input are managed and identical references"
+      - "input is now managed; result is a copy that can be discarded"
+      - "result is detached; input is managed"
+    answer: 0
+    explanation: |
+      merge loads Order#1 (SELECT) into a managed instance, copies input's fields onto it, and
+      RETURNS that managed instance. input is never attached — it stays detached. So result is
+      managed, input is not, and result != input. Always keep the return value.
+    ref: "concepts.md#merge-detached-to-a-managed-copy"
+
+  - id: entity-lifecycle-states-078
+    difficulty: advanced
+    tags: [namespace, jakarta, upsert, versions]
+    question: |
+      Which pairing of Hibernate/Jakarta version detail is correct?
+    options:
+      - "javax.persistence is the current namespace in Hibernate 6+"
+      - "jakarta.persistence.* is the Jakarta EE 9+ namespace targeted by Hibernate 6+, and StatelessSession.upsert was added (as @Incubating) in Hibernate 6.3+"
+      - "upsert has existed since Hibernate 4 and is stable"
+      - "Hibernate 7 reverted to javax.persistence"
+    answer: 1
+    explanation: |
+      The javax.persistence -> jakarta.persistence rename landed with Jakarta EE 9; Hibernate 6+
+      targets jakarta.*. upsert (SQL MERGE INTO) was introduced as @Incubating in 6.3 on
+      StatelessSession (the regular Session interface has no upsert).
+    ref: "concepts.md#hibernate-6-and-7-lifecycle-api-changes"
+
+  - id: entity-lifecycle-states-079
+    difficulty: expert
+    tags: [bytecode-enhancement, dirty-tracking, managed, mechanism]
+    question: |
+      With Hibernate bytecode enhancement and dirty tracking enabled, how does the mechanism
+      of the MANAGED state's dirty checking change?
+    options:
+      - "Dirty checking is disabled entirely"
+      - "Entities self-track which fields were modified (instrumented setters) instead of Hibernate diffing a load-time snapshot at flush — cheaper for wide tables"
+      - "Every flush issues a SELECT to compare against the DB"
+      - "Managed entities become immutable"
+    answer: 1
+    explanation: |
+      Default dirty checking diffs each managed entity's current state against a load-time
+      snapshot at flush. Bytecode enhancement instruments setters so the entity records its own
+      dirty fields, avoiding the snapshot diff — a meaningful win for entities with many columns.
+    ref: "concepts.md#hibernate-6-and-7-lifecycle-api-changes"
+
+  - id: entity-lifecycle-states-080
+    difficulty: expert
+    tags: [statelesssession, get, identity, aliasing]
+    question: |
+      Using a `StatelessSession`, you call `ss.get(Order.class, 1L)` twice. What is the
+      relationship between the two returned objects, and what risk does this create?
+    options:
+      - "Same reference (==), guaranteed by the L1 cache"
+      - "Two distinct objects each from a fresh SELECT — there is no persistence context, so no identity guarantee; this 'data aliasing' means edits to one are invisible to the other"
+      - "The second call throws NonUniqueObjectException"
+      - "The second call returns a detached proxy of the first"
+    answer: 1
+    explanation: |
+      StatelessSession has no first-level cache, so each get issues a fresh SELECT and returns a
+      new object. Without identity dedup you can hold two independent instances of the same row
+      (data aliasing), so mutating one does not reflect in the other — a correctness hazard the
+      normal Session's identity guarantee prevents.
+    ref: "concepts.md#statelesssession-a-no-lifecycle-api"

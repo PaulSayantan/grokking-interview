@@ -381,6 +381,323 @@ sit on top of, see `messaging-databases/sql-query-language-advanced-queries` and
 
 ---
 
+## The spec lineage: JSRs, the JCP-to-Jakarta handoff, and version-by-version changes
+
+"Trace JPA's history" is a classic seniority calibrator. Naming the **JSR numbers** and the
+**governance shift** is the signal that separates someone who has read the spec from someone
+who has only used `@Entity`.
+
+While JPA lived under the **Java Community Process (JCP)**, each version was a **JSR**:
+
+| JSR | Version | Year | Headline additions |
+|---|---|---|---|
+| **JSR 220** | JPA 1.0 (part of EJB 3.0) | 2006 | The API itself: `@Entity`, `EntityManager`, JPQL — extracted from EJB CMP |
+| **JSR 317** | JPA 2.0 | 2009 | Criteria API, `@ElementCollection`, the L2 cache SPI, `orphanRemoval`, pessimistic locking |
+| **JSR 338** | JPA 2.1 (2013) → 2.2 (2017) | 2013/17 | 2.1: converters, `@NamedEntityGraph`, stored procedures, schema-gen. 2.2: `java.time`, `@Repeatable`, `Stream`. **The last `javax` JSRs.** |
+
+Then Oracle donated Java EE to the **Eclipse Foundation**. Because the JCP could no longer
+govern it, the spec moved to the **Jakarta EE Specification Process (JESP)** — **there are no
+more JSRs**. Jakarta Persistence 3.0 (2020) onward is a JESP specification, not a JCP JSR.
+
+- **3.0** (2020) — the big-bang `javax.persistence.*` → `jakarta.persistence.*` rename. **No new features.**
+- **3.1** (2022) — `GenerationType.UUID`, plus math/date JPQL functions (`ceiling`, `floor`, `power`, `round`, `sign`, `extract`, `local date/time`).
+- **3.2** (2024) — `AutoCloseable`, records, options-based `find`/`refresh`/`lock`, `PersistenceConfiguration`, `getSingleResultOrNull` (see below).
+- **4.0** — the next major, **in development**, targeted by **Hibernate 8**. Do not present it as stable.
+
+> [!INTERVIEW]
+> If asked "what changed at 3.0 vs 3.1 vs 3.2?": **3.0 = rename only**, **3.1 = UUID + JPQL
+> functions**, **3.2 = AutoCloseable / records / options-based API**, **4.0 = next major (in dev)**.
+> Bonus: JPA was born in **JSR 220 (EJB 3.0)** and stopped being a JSR when it left the JCP.
+
+---
+
+## How JPA finds Hibernate: the persistence-provider SPI
+
+"How does `Persistence.createEntityManagerFactory(...)` find Hibernate at runtime?" separates
+people who understand the plug-in architecture from those who think it's magic. It is the
+**Java `ServiceLoader` mechanism**, not a hard-coded dependency.
+
+- The spec defines `jakarta.persistence.spi.PersistenceProvider`. Every provider ships an
+  implementation — Hibernate's is `org.hibernate.jpa.HibernatePersistenceProvider`.
+- Each provider jar declares itself in
+  `META-INF/services/jakarta.persistence.spi.PersistenceProvider` (a `ServiceLoader` file
+  whose single line names the impl class).
+- `Persistence.createEntityManagerFactory("unit")` asks the
+  `PersistenceProviderResolver` for all providers on the classpath, then hands each the
+  persistence-unit name; the **first provider that recognizes the unit** (or that matches the
+  `jakarta.persistence.provider` property in `persistence.xml`) builds and returns the EMF.
+
+```xml
+<!-- persistence.xml: pin the provider explicitly when more than one is on the classpath -->
+<persistence-unit name="my-unit">
+  <provider>org.hibernate.jpa.HibernatePersistenceProvider</provider>
+  ...
+</persistence-unit>
+```
+
+> [!KEY-TAKEAWAY]
+> JPA finds Hibernate by **service discovery**: the provider jar advertises a
+> `PersistenceProvider` under `META-INF/services`, and `Persistence` delegates unit creation
+> to it. That is why adding the Hibernate jar to the classpath is enough — and why two
+> providers on the classpath forces you to name one with `<provider>` or the `jakarta.persistence.provider` property.
+
+---
+
+## Hibernate bootstrap internals: ServiceRegistry, Metadata, SessionFactory
+
+The JPA `Persistence.createEntityManagerFactory` path is a thin façade
+(`EntityManagerFactoryBuilderImpl`) that sits **on top of** Hibernate's native bootstrap. A
+senior candidate can describe what actually happens when the `SessionFactory` is built —
+service resolution, dialect detection, metadata binding:
+
+```java
+// Hibernate native bootstrap (what the JPA path drives underneath)
+StandardServiceRegistry registry = new StandardServiceRegistryBuilder()
+        .configure("hibernate.cfg.xml")   // or applySetting(...)
+        .build();
+Metadata metadata = new MetadataSources(registry)
+        .addAnnotatedClass(Book.class)
+        .buildMetadata();                 // binds entities -> relational mapping model
+SessionFactory sf = metadata.buildSessionFactory();
+```
+
+The three layers, in order:
+
+1. **`BootstrapServiceRegistry`** — the lowest tier: classloading, integrator discovery
+   (`ServiceLoader` for `Integrator`), and the `StrategySelector`.
+2. **`StandardServiceRegistry`** — the configurable services: `ConnectionProvider`
+   (Agroal/Hikari pool), `JdbcServices` (dialect resolution — Hibernate probes the JDBC
+   `DatabaseMetaData` to pick the `Dialect` unless you set one), transaction coordinator, etc.
+   Services are resolved lazily and cached here.
+3. **`Metadata`** — the fully bound domain model: `MetadataSources` collects mapping inputs
+   (annotated classes, `orm.xml`, `hbm.xml`), and `buildMetadata()` produces the immutable
+   mapping model from which `buildSessionFactory()` creates the (expensive, thread-safe,
+   one-per-app) `SessionFactory`.
+
+```mermaid
+flowchart LR
+  BSR["BootstrapServiceRegistry<br/>classloading, integrators"] --> SSR["StandardServiceRegistry<br/>ConnectionProvider, Dialect, JDBC services"]
+  SSR --> MS["MetadataSources<br/>annotated classes, orm.xml"]
+  MS --> MD["Metadata<br/>bound mapping model"]
+  MD --> SF["SessionFactory<br/>expensive, thread-safe"]
+  JPA["Persistence.createEntityManagerFactory<br/>(EntityManagerFactoryBuilderImpl)"] -. drives .-> BSR
+```
+
+---
+
+## The Hibernate 6 type system: JavaType, JdbcType, and @JdbcTypeCode
+
+The single biggest "what actually changed in Hibernate 6?" answer, and the mechanism behind
+every JSON / enum / UUID mapping question.
+
+**Hibernate 5** used one monolithic `org.hibernate.type.Type` hierarchy (`BasicType`,
+`UserType`), where a single object mixed the Java-side and JDBC-side concerns. **Hibernate 6
+split this into two composable descriptors**:
+
+- **`JavaType<T>`** (`org.hibernate.type.descriptor.java`) — describes the **Java side**: how
+  to instantiate, compare, copy, and wrap/unwrap a `T` (e.g. `StringJavaType`, `UUIDJavaType`).
+- **`JdbcType`** (`org.hibernate.type.descriptor.jdbc`) — describes the **JDBC/SQL side**: how
+  to bind to a `PreparedStatement` and extract from a `ResultSet`, tied to a JDBC type code
+  (`SqlTypes.VARCHAR`, `SqlTypes.JSON`, `SqlTypes.UUID`).
+
+A `BasicType` is the **composition** of one `JavaType` + one `JdbcType`. You steer the mapping
+with annotations rather than a custom `UserType`:
+
+```java
+@Entity
+class Product {
+    // Store a Java UUID as the DB's native uuid/binary type
+    @JdbcTypeCode(SqlTypes.VARCHAR)          // override the SQL side
+    UUID sku;
+
+    // Map a POJO to a JSON column (Postgres jsonb, etc.)
+    @JdbcTypeCode(SqlTypes.JSON)
+    Map<String, Object> attributes;
+
+    @Enumerated(EnumType.STRING)             // JPA-standard enum mapping still works
+    Status status;
+}
+```
+
+> [!TIP]
+> In **Hibernate 7**, prefer **`@JdbcTypeCode(SqlTypes.X)`** over the lower-level
+> `@JdbcType(SomeJdbcType.class)`: several built-in `JdbcType` classes moved to internal
+> packages, so referencing them directly is fragile. `@JavaType` / `@JdbcType` remain for
+> genuinely custom descriptors.
+
+---
+
+## SQM: the Semantic Query Model query pipeline
+
+"Why did they rewrite the query engine in Hibernate 6?" HQL, JPQL, and the Criteria API do
+**not** each have their own translator anymore — they all produce a single intermediate
+representation:
+
+1. **Parse** HQL/JPQL (or build Criteria) into an **SQM** — a *typed* semantic AST validated
+   **against the domain model** (entity names, attribute types, association metadata). Illegal
+   references and type mismatches are caught here, not at SQL time.
+2. **Lower** the SQM into a **SQL AST** (an abstract relational tree).
+3. **Render** the SQL AST to vendor SQL via the `Dialect`.
+
+Contrast with Hibernate 5's older Antlr-based HQL walker, which was less type-aware and
+generated SQL more directly. SQM is why HB6+ has far better type safety, tuple/DTO
+projections, set operations, and consistent behavior across HQL and Criteria — they share the
+same back half of the pipeline.
+
+```mermaid
+flowchart LR
+  HQL[HQL / JPQL] --> SQM["SQM<br/>typed semantic AST"]
+  CRIT[Criteria API] --> SQM
+  SQM --> SQLAST["SQL AST"]
+  SQLAST -->|Dialect| SQL[(vendor SQL)]
+```
+
+---
+
+## Hibernate 7.0: breaking changes and new defaults
+
+Hibernate ORM **7.0 went GA in 2025** (baseline **Java 17**; 7.x also runs on 21/25) and
+targets **Jakarta Persistence 3.2**. "Have you moved to Hibernate 7 / what breaks?" is the
+current-events question for 2025/26 loops. This section is a **summary**; deep migration steps
+live in `hibernate-6-7-and-jakarta-migration`.
+
+**Renamed annotations** (the old ones are removed, not deprecated):
+
+| Removed (HB ≤6) | Replacement (HB7) |
+|---|---|
+| `@Where` | `@SQLRestriction` |
+| `@WhereJoinTable` | `@SQLJoinTableRestriction` |
+| `@OrderBy` (Hibernate's) | `@SQLOrder` (or JPA `@OrderBy`) |
+| `@Target` | `@TargetEmbeddable` |
+
+**Removed native `Session` methods** (they predated JPA and duplicated it) — use the JPA verbs:
+
+| Removed | Use instead |
+|---|---|
+| `save` | `persist` |
+| `update` / `saveOrUpdate` | `merge` (detached) / `persist` (transient) |
+| `delete` | `remove` |
+| `load` | `getReference` |
+| `get` (deprecated) | `find` |
+
+Also removed: **`@Proxy`, `@LazyToOne`, `@LazyCollection`, `@Persister`, `@Loader`,
+`@SelectBeforeUpdate`**; `CascadeType.SAVE_UPDATE` and `CascadeType.DELETE` (use
+`PERSIST`/`MERGE`/`REMOVE`).
+
+**New defaults / behavior changes**:
+
+- **`StatelessSession` now uses the L2 cache by default** — call `setCacheMode(CacheMode.IGNORE)`
+  to opt out. (This makes the older "StatelessSession never touches the cache" statement stale for 7.x.)
+- Bulk `update`/`delete` on an **`@Immutable`** entity now **throws** (was a warning).
+- `refresh`/`lock` on a **detached** entity now throws `IllegalArgumentException` (aligns with
+  JPA; the `hibernate.allow_refresh_detached_entity` escape hatch was removed).
+- Implicit-`SELECT` queries with no declared result type are rejected; native-query temporal
+  types default to `java.time`; `LockOptions` deprecated in favor of passing
+  `LockMode`/`Timeout`/`PessimisticLockScope`.
+- **Hibernate Models** replaces **HCANN** for reading annotations/domain metadata.
+- Classpath entity scanning needs the new **`hibernate-scan-jandex`** module; the built-in
+  Vibur/Proxool/UCP connection pools were dropped (use **Agroal or Hikari**).
+- Hibernate is now **Apache License 2.0** (was LGPL) as of 7.0.
+
+---
+
+## Jakarta Persistence 3.2: developer-facing changes
+
+3.2 is the version Hibernate 7 targets, so "what's new in the latest JPA?" maps here.
+
+- **`EntityManagerFactory` and `EntityManager` are now `AutoCloseable`** — usable in
+  try-with-resources.
+- **Records** are usable as embeddables (and for DTO projections / `@IdClass`-style keys).
+- **Options-based overloads**: `find(Class, Object, FindOption...)`, plus `refresh`/`lock`
+  taking `RefreshOption`/`LockOption` — `LockModeType`, `Timeout`, `PessimisticLockScope`,
+  and `CacheStoreMode`/`CacheRetrieveMode` are now passed as options instead of property maps.
+- **`getSingleResultOrNull()`** on `Query`/`TypedQuery`/`StoredProcedureQuery` — returns `null`
+  instead of throwing `NoResultException` (and still throws `NonUniqueResultException` for >1).
+- **`PersistenceConfiguration`** — a programmatic bootstrap API, an alternative to
+  `persistence.xml`.
+- New JPQL: `id()`, `version()`, `cast`, `left`/`right`, `replace`, the `||` concatenation
+  operator, and set operations (`union`/`intersect`/`except`).
+- `runInTransaction`/`callInTransaction` on the EMF and `runWithConnection`/`callWithConnection`
+  on the EM for lambda-style unit-of-work code.
+
+> [!NOTE]
+> Under the Jakarta model there is no single JCP-style *mandated* RI: the spec lists
+> **compatible implementations** (EclipseLink and Hibernate both certify against the TCK).
+> EclipseLink remains the **historical/official RI** and Hibernate is the de-facto standard —
+> so "which is the RI?" still answers **EclipseLink**, but be ready for the nuance follow-up.
+
+---
+
+## Jakarta Data 1.0 and Hibernate Data Repositories
+
+The newest thing in the ecosystem, and a 2025 differentiator: **"how does Jakarta Data relate
+to Spring Data JPA?"**
+
+**Jakarta Data 1.0** (part of **Jakarta EE 11**) standardizes the **repository abstraction**
+that Spring Data popularized — but as a *spec*, not a framework. It introduces `@Repository`,
+built-in `CrudRepository`/`BasicRepository`, annotation-driven query methods (`@Find`,
+`@Query`, `@Insert`/`@Update`/`@Delete`), and pagination/sort types (`Order`, `Sort`,
+`Page`/`PageRequest`, `CursoredPage`). **Hibernate 7 ships an implementation** (Hibernate Data
+Repositories / HR) that generates repository implementations at build time.
+
+In one line: **Jakarta Data is a Jakarta-standardized, vendor-portable answer to Spring Data
+JPA.** Deep repository coverage (derived queries, projections, `Page` vs `Slice`) belongs to
+`spring-data-jpa-repositories`; here just place it in the landscape.
+
+---
+
+## Hibernate-native features beyond the spec
+
+"Name Hibernate features JPA doesn't have" is a standard prompt; each maps to a real production
+use case. All are in `org.hibernate.annotations.*` and couple you to Hibernate.
+
+| Feature | What it does | Typical use |
+|---|---|---|
+| `@Formula("sql")` | Read-only computed column from a SQL fragment | Derived `fullName`, `reviewCount` without a real column |
+| `@SQLRestriction("...")` (HB6.3+, replaces `@Where`) | Always-on entity-level filter | Soft delete: `deleted = false` |
+| `@Filter` / `@FilterDef` | **Parameterized**, per-session filter enabled via `session.enableFilter(...)` | Multi-tenant row filtering, effective-dated data |
+| `@NaturalId` + `session.byNaturalId(...)` / `bySimpleNaturalId(...)` | Business-key lookup with its own cache | Load `User` by email / `Book` by ISBN |
+| `@DynamicUpdate` / `@DynamicInsert` | Generate SQL touching only changed / non-null columns | Wide tables; optimistic-lock on many columns (trade-off: no cached prepared statement) |
+| `@Immutable` | Read-only entity/collection; skips dirty checking | Reference data, audit rows |
+| `@SoftDelete` (HB6.4+) | First-class soft-delete, replacing hand-rolled `@SQLDelete` + `@SQLRestriction` | Logical deletes |
+| `@SQLInsert` / `@SQLUpdate` / `@SQLDelete` | Override generated DML with custom SQL | Stored-proc-backed writes, DB-specific syntax |
+| **Multi-tenancy** (`MultiTenantConnectionProvider`, `CurrentTenantIdentifierResolver`) | SCHEMA / DATABASE / DISCRIMINATOR (discriminator added HB6.3) strategies | SaaS tenant isolation |
+| **Envers** (`@Audited`, `_AUD` tables, `AuditReader`) | Automatic entity revision history | Audit trails, temporal queries |
+
+---
+
+## Bulk operations and why entity-by-entity is slow
+
+Deepening "when NOT to use an ORM": the *mechanism* behind the slowness matters in interviews.
+
+Loading N rows as managed entities holds **every row in the persistence context** — that costs
+memory *and* an **O(n) dirty-check** at each flush (Hibernate snapshots and diffs every managed
+entity). For large mutations, bypass that:
+
+- **Set-based JPQL/HQL `UPDATE`/`DELETE`** — one SQL statement, no entities loaded. **But** it
+  **bypasses the persistence context and L1 cache**: already-managed entities keep their stale
+  in-memory values, and it does **NOT cascade** or fire `@PreUpdate`/`@PreRemove` callbacks.
+
+  ```java
+  em.createQuery("update Account a set a.status = :s where a.region = :r")
+    .setParameter("s", Status.CLOSED).setParameter("r", region)
+    .executeUpdate();      // 1 UPDATE; managed Account instances still show the OLD status
+  ```
+
+- **JDBC batching** — `hibernate.jdbc.batch_size`, plus `order_inserts` / `order_updates` so
+  Hibernate can group statements by table into batched `PreparedStatement`s.
+- **`StatelessSession`** — no persistence context to grow, direct `insert`/`update`/`delete`.
+  In **HB7** its batch tuning changed: `hibernate.jdbc.batch_size` no longer affects it — call
+  `setJdbcBatchSize()` or use the new `insertMultiple()`/`updateMultiple()`/`deleteMultiple()`.
+
+> [!WARNING]
+> The classic gotcha: *"I ran a bulk JPQL `UPDATE` and my in-memory entity still shows the old
+> value."* Bulk DML goes straight to the database and does not touch the persistence context —
+> `em.refresh(entity)` (or `clear()` before re-reading) to resync. Same reason bulk DML skips
+> cascades and lifecycle callbacks.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"Are JPA and Hibernate the same thing?"** No. JPA is a specification (interfaces +
@@ -406,6 +723,26 @@ sit on top of, see `messaging-databases/sql-query-language-advanced-queries` and
 - **"Can you swap Hibernate for EclipseLink without code changes?"** Only if you coded
   strictly against `jakarta.persistence.*` and used no native features; in practice most
   apps use provider-specific features and don't migrate.
+- **"How does `Persistence.createEntityManagerFactory` find Hibernate?"** The
+  `ServiceLoader` SPI: Hibernate advertises `HibernatePersistenceProvider` under
+  `META-INF/services/jakarta.persistence.spi.PersistenceProvider`; `Persistence` asks each
+  provider to build the named unit.
+- **"What actually changed between Hibernate 5, 6, and 7?"** HB5: `javax`, Java 8, monolithic
+  `Type` system, Antlr HQL. HB6: `jakarta`, Java 11+, **SQM** engine, `JavaType`/`JdbcType` +
+  `@JdbcTypeCode`, `@SQLRestriction`/`@SoftDelete`. HB7: Java 17+, Jakarta Persistence 3.2,
+  legacy `Session.save/update/delete/load` and `@Proxy`/`@Where` removed, Hibernate Models,
+  StatelessSession L2-by-default, Apache license.
+- **"What actually changed in Hibernate 6's type system?"** The single `Type`/`UserType` was
+  split into a `JavaType<T>` (Java side) + `JdbcType` (SQL side) composed into a `BasicType`;
+  you steer it with `@JdbcTypeCode(SqlTypes.JSON/UUID/...)`.
+- **"Is Hibernate's `Session` thread-safe since it extends `EntityManager`?"** No — same rule
+  as `EntityManager`. Only `SessionFactory`/`EntityManagerFactory` are thread-safe.
+- **"How does Jakarta Data relate to Spring Data JPA?"** Jakarta Data 1.0 (Jakarta EE 11)
+  standardizes the repository abstraction as a spec; Hibernate 7 ships an implementation. It's
+  a vendor-portable answer to Spring Data JPA.
+- **"I ran a bulk JPQL update but my entity still shows the old value — why?"** Bulk DML
+  bypasses the persistence context and L1 cache (and cascades/callbacks); `em.refresh()` or
+  `clear()` to resync.
 
 ## References
 
@@ -413,6 +750,9 @@ sit on top of, see `messaging-databases/sql-query-language-advanced-queries` and
 - Jakarta Persistence 3.1 Specification — jakarta.ee/specifications/persistence/3.1/
 - Hibernate ORM 6/7 User Guide — docs.jboss.org/hibernate/orm/current/userguide/html_single/
 - Hibernate ORM Migration Guide (5→6, javax→jakarta) — docs.jboss.org/hibernate/orm/6.0/migration-guide/
+- Hibernate ORM 7.0 Migration Guide (annotation/method removals, new defaults) — docs.hibernate.org/orm/7.0/migration-guide/
+- Jakarta Data 1.0 Specification — jakarta.ee/specifications/data/1.0/
+- JSR 220 / 317 / 338 (JPA 1.0 / 2.0 / 2.1–2.2) — jcp.org; Jakarta EE Specification Process (JESP)
 - *Java Persistence with Hibernate* (Bauer, King, Gregory) — impedance mismatch chapter
 - EclipseLink (official JPA RI) — eclipse.dev/eclipselink/
 - Vlad Mihalcea, *High-Performance Java Persistence* — ORM vs JDBC trade-offs, N+1

@@ -835,3 +835,536 @@ questions:
       so results are consistent; otherwise it can skip the flush. This is why AUTO
       is smarter (and cheaper) than ALWAYS.
     ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"
+
+  - id: transactions-dirty-checking-flushing-046
+    difficulty: expert
+    tags: [connection-handling, lazy-acquisition, pool]
+    question: |
+      Using the default resource-local connection handling
+      (DELAYED_ACQUISITION_AND_RELEASE_AFTER_TRANSACTION), at what point does a
+      Spring @Transactional method first check out a JDBC connection from the pool?
+    options:
+      - "The moment the transaction begins, before any method code runs"
+      - "When the EntityManager/Session is created, regardless of what the method does"
+      - "Lazily, at the first SQL statement (first query or the flush) that needs the connection"
+      - "Only at commit time"
+    answer: 2
+    explanation: |
+      Under DELAYED_ACQUISITION Hibernate does not grab a Connection at tx begin
+      or session open; it defers until the first statement actually needs it (a
+      query, or the flush). A compute-only read-only method that never issues a
+      statement can avoid touching the pool entirely.
+    ref: "concepts.md#when-a-transaction-actually-acquires-a-jdbc-connection"
+
+  - id: transactions-dirty-checking-flushing-047
+    difficulty: expert
+    tags: [connection-handling, jta, resource-local, defaults]
+    question: |
+      How does the default PhysicalConnectionHandlingMode differ between a JTA
+      environment and a resource-local one?
+    options:
+      - "JTA holds the connection from session open; resource-local acquires it lazily"
+      - "Both release only at session close"
+      - "Resource-local never acquires a connection; JTA always does immediately"
+      - "JTA releases the connection after each statement; resource-local releases it after the transaction ends"
+    answer: 3
+    explanation: |
+      Both delay acquisition to the first statement, but the release policy
+      differs: JTA defaults to RELEASE_AFTER_STATEMENT (aggressive release so the
+      JTA coordinator can manage enlistment), while resource-local defaults to
+      RELEASE_AFTER_TRANSACTION (hold until the tx ends).
+    ref: "concepts.md#when-a-transaction-actually-acquires-a-jdbc-connection"
+
+  - id: transactions-dirty-checking-flushing-048
+    difficulty: advanced
+    tags: [lazy-connection, spring, replica-routing]
+    question: |
+      What does wrapping the DataSource in Spring's LazyConnectionDataSourceProxy
+      add on top of Hibernate's own delayed connection acquisition?
+    options:
+      - "It forces IMMEDIATE_ACQUISITION so connections are grabbed at tx begin"
+      - "It disables connection pooling entirely"
+      - "It defers physical acquisition to the first real statement through the proxy and enables read/write datasource routing (e.g. route reads to a replica, promote to primary on first write)"
+      - "It converts all transactions to read-only"
+    answer: 2
+    explanation: |
+      LazyConnectionDataSourceProxy hands out a proxy connection and only opens a
+      real one on first use, which lets routing logic pick a datasource (read
+      replica vs primary) based on readOnly flag / first-write, reducing pool
+      pressure for compute-only or read-only work.
+    ref: "concepts.md#when-a-transaction-actually-acquires-a-jdbc-connection"
+
+  - id: transactions-dirty-checking-flushing-049
+    difficulty: expert
+    tags: [version, optimistic-lock, generated-sql]
+    question: |
+      An Account has an @Version int field. You load it, change balance, and flush.
+      Which UPDATE does Hibernate emit?
+    options:
+      - "update account set balance=?, version=? where id=? and version=?"
+      - "update account set balance=? where id=?"
+      - "update account set balance=? where id=? and balance=?"
+      - "update account set balance=?, version=version+1 where id=? for update"
+    answer: 0
+    explanation: |
+      A versioned UPDATE sets the new balance and the incremented version, and
+      constrains WHERE id=? AND version=? (the loaded version). If no row matches
+      that version, someone else changed it concurrently and Hibernate throws
+      OptimisticLockException / StaleObjectStateException.
+    ref: "concepts.md#optimistic-locking-at-flush-version-and-the-where-predicate"
+
+  - id: transactions-dirty-checking-flushing-050
+    difficulty: expert
+    tags: [version, row-count, stale-detection]
+    question: |
+      How does Hibernate detect a stale write for a @Version entity at flush?
+    options:
+      - "It re-SELECTs the row and compares every column"
+      - "It acquires a pessimistic lock before the UPDATE"
+      - "It inspects the JDBC UPDATE row count; if 0 rows matched (id AND version), it throws OptimisticLockException"
+      - "It relies on a database trigger to reject the change"
+    answer: 2
+    explanation: |
+      The versioned UPDATE's WHERE clause includes the expected version. If the
+      affected row count comes back 0, the version no longer matches (a concurrent
+      commit moved it), so Hibernate raises OptimisticLockException /
+      StaleObjectStateException. No extra SELECT is needed.
+    ref: "concepts.md#optimistic-locking-at-flush-version-and-the-where-predicate"
+
+  - id: transactions-dirty-checking-flushing-051
+    difficulty: expert
+    tags: [batch-versioned-data, success-no-info, driver]
+    question: |
+      Why is batching of @Version entities gated behind
+      hibernate.batch_versioned_data, and what driver behavior can still defeat it?
+    options:
+      - "Versioned rows cannot be batched by the SQL standard"
+      - "The version column must be a Timestamp to be batched"
+      - "executeBatch() must return per-row update counts to detect a stale row; some drivers return Statement.SUCCESS_NO_INFO (-2), which hides the 0-count and defeats stale detection"
+      - "Batching versioned data disables the second-level cache"
+    answer: 2
+    explanation: |
+      Optimistic-lock detection needs the exact affected-row count per statement.
+      JDBC executeBatch() may return SUCCESS_NO_INFO (-2) for some drivers, so
+      Hibernate cannot tell a stale (0-row) update apart from a successful one.
+      That is why versioned batching is opt-in and only safe when the driver
+      reports real counts.
+    ref: "concepts.md#optimistic-locking-at-flush-version-and-the-where-predicate"
+
+  - id: transactions-dirty-checking-flushing-052
+    difficulty: advanced
+    tags: [version, increment-timing]
+    question: |
+      When is a @Version field's value actually incremented?
+    options:
+      - "On each setter call to any field"
+      - "At flush, when the versioned UPDATE (or a forced increment) is executed"
+      - "When the entity is loaded"
+      - "Immediately when em.persist() is called"
+    answer: 1
+    explanation: |
+      The version increments as part of the flush-time UPDATE, not per setter.
+      Reading entity.getVersion() after mutating but before flush shows the old
+      value; the new value is visible only after the flush executes.
+    ref: "concepts.md#optimistic-locking-at-flush-version-and-the-where-predicate"
+
+  - id: transactions-dirty-checking-flushing-053
+    difficulty: expert
+    tags: [versionless, optimistic-locking-dirty, dynamic-update]
+    question: |
+      An entity is mapped @OptimisticLocking(type = OptimisticLockType.DIRTY) with
+      @DynamicUpdate. You change only its `name`. What WHERE clause guards the
+      UPDATE?
+    options:
+      - "where id=? (no optimistic predicate)"
+      - "where id=? and version=?"
+      - "where id=? and name=? (the previously loaded name value)"
+      - "where id=? and <every column>=<old value>"
+    answer: 2
+    explanation: |
+      OptimisticLockType.DIRTY builds the WHERE clause from the changed columns'
+      previously loaded values, so it becomes WHERE id=? AND name=<old name>. It
+      requires @DynamicUpdate because only the dirty columns are known at flush.
+      ALL would use every column; VERSION would use a @Version column.
+    ref: "concepts.md#versionless-implicit-optimistic-locking"
+
+  - id: transactions-dirty-checking-flushing-054
+    difficulty: expert
+    tags: [versionless, read-only, snapshot]
+    question: |
+      Why does loading an entity in read-only mode disable versionless
+      (OptimisticLockType.DIRTY/ALL) optimistic locking?
+    options:
+      - "Read-only entities are stored only in the second-level cache"
+      - "Read-only mode skips the loaded-state snapshot, so there are no old column values to place in the WHERE clause"
+      - "Versionless locking requires FlushMode.ALWAYS, which read-only forbids"
+      - "Read-only mode converts the entity to a native query result"
+    answer: 1
+    explanation: |
+      Versionless locking builds its WHERE predicate from the loaded-state
+      snapshot (getLoadedState()). Read-only mode does not keep that snapshot, so
+      there are no expected old values to compare — the mechanism cannot operate.
+      A dedicated @Version column does not depend on the snapshot.
+    ref: "concepts.md#versionless-implicit-optimistic-locking"
+
+  - id: transactions-dirty-checking-flushing-055
+    difficulty: advanced
+    tags: [optimistic-lock-excluded, version]
+    question: |
+      A Product has a `viewCount` column that changes constantly. You annotate it
+      @OptimisticLock(excluded = true). What is the effect?
+    options:
+      - "viewCount is never persisted"
+      - "viewCount becomes read-only"
+      - "Changes to viewCount neither bump the @Version nor appear in the optimistic-lock WHERE predicate, so they don't cause spurious conflicts"
+      - "It forces a pessimistic lock on the row"
+    answer: 2
+    explanation: |
+      @OptimisticLock(excluded = true) removes a field from optimistic-lock
+      accounting: mutating it does not increment the version or add to the
+      versionless WHERE clause. This avoids treating a high-churn counter as a
+      concurrency conflict.
+    ref: "concepts.md#versionless-implicit-optimistic-locking"
+
+  - id: transactions-dirty-checking-flushing-056
+    difficulty: expert
+    tags: [lock-mode, force-increment, aggregate-root]
+    question: |
+      Only a child (PostComment) is inserted, but you need to lock its parent
+      (Post) so two concurrent comment inserts serialize on the aggregate root.
+      Which lock mode achieves this?
+    options:
+      - "LockModeType.OPTIMISTIC on the child"
+      - "LockModeType.PESSIMISTIC_READ on the child"
+      - "LockModeType.OPTIMISTIC_FORCE_INCREMENT on the parent"
+      - "LockModeType.NONE — dirty checking handles it"
+    answer: 2
+    explanation: |
+      Inserting a child does not dirty the parent, so no version bump would occur.
+      OPTIMISTIC_FORCE_INCREMENT on the parent forces an UPDATE ... version=version+1
+      at flush, serializing concurrent child changes against the aggregate root's
+      version. Plain OPTIMISTIC only checks, and would not bump without a change.
+    ref: "concepts.md#lockmodetypeoptimistic-vs-optimistic_force_increment"
+
+  - id: transactions-dirty-checking-flushing-057
+    difficulty: expert
+    tags: [lock-mode, optimistic, version-check]
+    question: |
+      You em.find(Post.class, id, LockModeType.OPTIMISTIC) and only READ the
+      entity (no changes). What does Hibernate do at flush?
+    options:
+      - "Nothing — no statement is emitted for an unmodified entity"
+      - "Schedules a version check at flush to verify the entity wasn't concurrently modified, even though you only read it"
+      - "Increments the version"
+      - "Acquires a database row lock immediately at find()"
+    answer: 1
+    explanation: |
+      LockModeType.OPTIMISTIC (a.k.a. READ) requests a version *check* at flush
+      even for entities you only read, ensuring the data you based decisions on
+      was not changed concurrently. It does not bump the version (that is
+      OPTIMISTIC_FORCE_INCREMENT) and does not take a DB lock at find.
+    ref: "concepts.md#lockmodetypeoptimistic-vs-optimistic_force_increment"
+
+  - id: transactions-dirty-checking-flushing-058
+    difficulty: expert
+    tags: [custom-dirtiness, interceptor, override]
+    question: |
+      A staff engineer wants to replace Hibernate's field-by-field snapshot diff
+      with a domain-specific "isChanged" flag. Which extension point is designed
+      for this?
+    options:
+      - "Override equals()/hashCode() on the entity"
+      - "Annotate the entity with @DynamicUpdate"
+      - "Set FlushMode.MANUAL"
+      - "Register a CustomEntityDirtinessStrategy via hibernate.entity_dirtiness_strategy (or implement Interceptor.findDirty)"
+    answer: 3
+    explanation: |
+      CustomEntityDirtinessStrategy (configured through
+      hibernate.entity_dirtiness_strategy) lets you supply your own isDirty/findDirty
+      logic; alternatively Interceptor.findDirty(...) can return the dirty-property
+      indices. Both confirm the snapshot comparison is a pluggable default, not
+      the only option.
+    ref: "concepts.md#customizing-dirty-detection-interceptor-and-strategy-hooks"
+
+  - id: transactions-dirty-checking-flushing-059
+    difficulty: advanced
+    tags: [dynamic-insert, db-default, generated-sql]
+    question: |
+      An entity is annotated @DynamicInsert and has columns with DB DEFAULT values.
+      You persist an instance leaving those fields null. What happens?
+    options:
+      - "The INSERT omits the null columns, so the database applies its DEFAULT values"
+      - "Hibernate inserts explicit NULLs, overriding the DB defaults"
+      - "Persist throws because non-null DB defaults require values"
+      - "Hibernate reads the defaults first with a SELECT, then inserts them"
+    answer: 0
+    explanation: |
+      @DynamicInsert generates the INSERT with only the non-null columns, so the
+      omitted columns fall through to their DB DEFAULT. The trade-off is that
+      Hibernate can no longer reuse one cached INSERT statement per entity type.
+    ref: "concepts.md#dynamicinsert-and-dynamicupdate"
+
+  - id: transactions-dirty-checking-flushing-060
+    difficulty: advanced
+    tags: [dynamic-update, dynamic-insert, tradeoff]
+    question: |
+      What is the shared cost of using @DynamicInsert and @DynamicUpdate?
+    options:
+      - "They disable dirty checking"
+      - "They require FlushMode.ALWAYS"
+      - "Hibernate can no longer reuse a single pre-generated cached SQL statement per entity type — it builds SQL per operation based on participating columns"
+      - "They force EAGER loading of all associations"
+    answer: 2
+    explanation: |
+      Both trade the cached, all-column pre-generated statement for per-operation
+      SQL built from whichever columns participate (non-null for insert, changed
+      for update). That reduces prepared-statement/cache reuse and adds CPU, so
+      they are opt-in for wide tables, DB defaults, or column triggers.
+    ref: "concepts.md#dynamicinsert-and-dynamicupdate"
+
+  - id: transactions-dirty-checking-flushing-061
+    difficulty: expert
+    tags: [native-query, auto-flush, synchronized-space]
+    question: |
+      A native SQL SELECT returns stale data despite pending changes to Task in
+      the same transaction under AUTO mode. Besides calling flush(), what is the
+      idiomatic fix?
+    options:
+      - "Switch the entity to @DynamicUpdate"
+      - "Set FlushModeType.COMMIT on the query"
+      - "Clear the persistence context before the query"
+      - "Call query.addSynchronizedEntityClass(Task.class) (or addSynchronizedQuerySpace/EntityName) so AUTO knows the query touches Task's table and flushes first"
+    answer: 3
+    explanation: |
+      AUTO can't infer a native query's tables. Declaring them via
+      addSynchronizedEntityClass / addSynchronizedEntityName / addSynchronizedQuerySpace
+      tells Hibernate which query spaces the native query touches, so it auto-flushes
+      overlapping pending changes (and scopes 2nd-level cache invalidation). An
+      explicit flush() is the blunt alternative.
+    ref: "concepts.md#making-auto-flush-work-for-native-queries"
+
+  - id: transactions-dirty-checking-flushing-062
+    difficulty: advanced
+    tags: [native-query, query-space, cache-invalidation]
+    question: |
+      Beyond triggering AUTO flush, what else does declaring synchronized query
+      spaces on a native query affect?
+    options:
+      - "It changes the transaction isolation level"
+      - "It scopes which second-level cache regions get invalidated by the native statement"
+      - "It converts the native query to JPQL"
+      - "It enables optimistic locking on the result rows"
+    answer: 1
+    explanation: |
+      The synchronized query spaces tell Hibernate which tables the native query
+      touches, which is used both to decide AUTO flushing and to invalidate the
+      matching second-level cache regions after a native DML/read, keeping the
+      cache consistent.
+    ref: "concepts.md#making-auto-flush-work-for-native-queries"
+
+  - id: transactions-dirty-checking-flushing-063
+    difficulty: expert
+    tags: [hb7, query-flush-mode, api]
+    question: |
+      In Hibernate 7 / Jakarta Persistence 3.2, which per-query flush API is
+      current, and which is deprecated?
+    options:
+      - "setQueryFlushMode(QueryFlushMode) is current; setFlushMode(FlushModeType) on the query is deprecated"
+      - "setFlushMode(FlushModeType) is current; setQueryFlushMode is removed"
+      - "Both are removed; you must use session-level flush mode only"
+      - "flush(boolean) is the new per-query API"
+    answer: 0
+    explanation: |
+      HB7 deprecates CommonQueryContract.setFlushMode(FlushModeType) in favor of
+      setQueryFlushMode(QueryFlushMode) (values like FLUSH / NO_FLUSH). Citing the
+      old query.setFlushMode(...) signals HB5-era knowledge.
+    ref: "concepts.md#queryflushmode-the-hb7--jpa-32-api-shift"
+
+  - id: transactions-dirty-checking-flushing-064
+    difficulty: expert
+    tags: [stateless-session, dirty-checking, update]
+    question: |
+      Using a StatelessSession, you load an entity, mutate a field, and commit
+      without calling anything else. What is written?
+    options:
+      - "An UPDATE, via dirty checking as in a normal Session"
+      - "An INSERT, because the entity is treated as transient"
+      - "A merge is performed automatically at commit"
+      - "Nothing — StatelessSession has no persistence context or dirty checking; you must call session.update() explicitly"
+    answer: 3
+    explanation: |
+      StatelessSession has no persistence context, no first-level cache, and no
+      dirty checking. Entities are detached; a mutation is invisible unless you
+      call update() explicitly. It also does no cascade or automatic @Version
+      increment.
+    ref: "concepts.md#statelesssession-the-batchetl-tool-and-hb7-changes"
+
+  - id: transactions-dirty-checking-flushing-065
+    difficulty: expert
+    tags: [hb7, stateless-session, batch-size]
+    question: |
+      After upgrading to Hibernate 7, StatelessSession batch inserts stopped
+      batching even though hibernate.jdbc.batch_size=50 is configured. Why, and
+      what is the fix?
+    options:
+      - "HB7 removed batching; there is no fix"
+      - "In HB7 the global hibernate.jdbc.batch_size no longer applies to StatelessSession; set it per-session with statelessSession.setJdbcBatchSize(50)"
+      - "You must annotate the entity @DynamicInsert"
+      - "batch_size only works with IDENTITY ids in HB7"
+    answer: 1
+    explanation: |
+      HB7 decoupled StatelessSession from the global hibernate.jdbc.batch_size
+      property; you now configure it explicitly via setJdbcBatchSize(int) on the
+      stateless session. This is a common post-upgrade surprise.
+    ref: "concepts.md#statelesssession-the-batchetl-tool-and-hb7-changes"
+
+  - id: transactions-dirty-checking-flushing-066
+    difficulty: advanced
+    tags: [hb7, stateless-session, second-level-cache]
+    question: |
+      In Hibernate 7, how does StatelessSession interact with the second-level
+      cache by default, and how do you opt out?
+    options:
+      - "It never uses the second-level cache; there is no way to enable it"
+      - "It always evicts the entire cache on commit"
+      - "It uses the second-level cache by default; set CacheMode.IGNORE to keep ETL traffic out of the cache"
+      - "It requires @Cacheable on every entity to use the cache"
+    answer: 2
+    explanation: |
+      A HB7 change: StatelessSession now uses the second-level cache by default.
+      For bulk/ETL jobs where you don't want to pollute the cache, set
+      CacheMode.IGNORE. Earlier versions bypassed the L2 cache in stateless mode.
+    ref: "concepts.md#statelesssession-the-batchetl-tool-and-hb7-changes"
+
+  - id: transactions-dirty-checking-flushing-067
+    difficulty: expert
+    tags: [batch-job, stateless-vs-flush-clear, tradeoff]
+    question: |
+      For a 1M-row job, what is the key trade-off between StatelessSession and a
+      stateful Session with periodic flush()+clear()?
+    options:
+      - "StatelessSession is always slower and should be avoided"
+      - "StatelessSession avoids snapshot growth and per-entity dirty checks but gives up cascade, versioning, and dirty checking (you manage everything); flush()+clear() keeps those features but you must size batches and clear to bound memory"
+      - "flush()+clear() commits after each batch, StatelessSession does not"
+      - "There is no difference; both keep a full persistence context"
+    answer: 1
+    explanation: |
+      StatelessSession has no persistence context, so no snapshot accumulation or
+      dirty-check cost — but you forgo cascade, automatic versioning, and dirty
+      checking. A stateful session with flush()+clear() retains those ORM features
+      while requiring you to periodically clear to prevent unbounded context growth.
+    ref: "concepts.md#statelesssession-the-batchetl-tool-and-hb7-changes"
+
+  - id: transactions-dirty-checking-flushing-068
+    difficulty: advanced
+    tags: [exception-mapping, constraint-violation, spring]
+    question: |
+      A unique-constraint violation occurs during the commit-time flush in a
+      Spring app. Which describes the typical exception wrapping chain?
+    options:
+      - "The raw SQLException propagates unchanged to the controller"
+      - "SQLIntegrityConstraintViolationException → Hibernate ConstraintViolationException → JPA RollbackException/PersistenceException → Spring DataIntegrityViolationException"
+      - "It is silently swallowed and the row is skipped"
+      - "It surfaces as a LazyInitializationException"
+    answer: 1
+    explanation: |
+      The driver's SQLIntegrityConstraintViolationException is wrapped by
+      Hibernate's ConstraintViolationException, surfaced at commit as a JPA
+      RollbackException/PersistenceException, and translated by Spring into a
+      DataIntegrityViolationException. Because it fires at commit, it can appear
+      far from the offending line — a reason to flush() early while debugging.
+    ref: "concepts.md#flush-time-failure-modes-and-exception-mapping"
+
+  - id: transactions-dirty-checking-flushing-069
+    difficulty: expert
+    tags: [hb7, cascade, detached, entity-exists]
+    question: |
+      In Hibernate 7 / JPA 3.2, you flush a managed entity whose CascadeType.PERSIST
+      association points at a DETACHED instance. What now happens, and how do you
+      fix it?
+    options:
+      - "It silently persists a duplicate; no fix needed"
+      - "It throws EntityExistsException at flush; fix by merge()-ing the association or using em.getReference(...) instead of a detached object"
+      - "It re-attaches the detached instance automatically"
+      - "It ignores the association entirely"
+    answer: 1
+    explanation: |
+      HB7/JPA 3.2 tightened this case: cascading PERSIST/ALL to a detached
+      instance now throws EntityExistsException at flush rather than silently
+      handling it. Use merge() to bring the association into the context, or set
+      the association via em.getReference(id) to reference the existing row.
+    ref: "concepts.md#flush-time-failure-modes-and-exception-mapping"
+
+  - id: transactions-dirty-checking-flushing-070
+    difficulty: advanced
+    tags: [hb7, cascade-removed, save-update]
+    question: |
+      Which cascade type was removed in Hibernate 7, and what should replace it?
+    options:
+      - "CascadeType.REMOVE — replace with orphanRemoval"
+      - "CascadeType.PERSIST — replace with MERGE"
+      - "CascadeType.SAVE_UPDATE (a legacy Hibernate-only cascade) — replace with PERSIST/MERGE"
+      - "CascadeType.ALL — replace with explicit lists"
+    answer: 2
+    explanation: |
+      The legacy Hibernate-specific CascadeType.SAVE_UPDATE was removed in HB7.
+      Use the standard JPA cascades PERSIST and MERGE to cover the same intent.
+    ref: "concepts.md#flush-time-failure-modes-and-exception-mapping"
+
+  - id: transactions-dirty-checking-flushing-071
+    difficulty: intermediate
+    tags: [version-vs-versionless, distinction]
+    question: |
+      What is the key difference between a dedicated @Version column and versionless
+      @OptimisticLocking(type=DIRTY)?
+    options:
+      - "@Version works within a single tx only; versionless works across detach/merge"
+      - "They are identical in behavior"
+      - "@Version uses a dedicated version column checked in the WHERE clause and survives detach/merge across transactions; versionless builds the WHERE from the loaded-state snapshot and only guards within the loaded-to-flush window"
+      - "Versionless locking is a database feature, not a Hibernate one"
+    answer: 2
+    explanation: |
+      @Version stores an explicit version and can detect conflicts even across
+      detach/merge and separate transactions. Versionless (DIRTY/ALL) relies on
+      the in-memory loaded-state snapshot for old values, so it only works while
+      that snapshot exists (loaded-to-flush) and breaks under read-only mode.
+    ref: "concepts.md#versionless-implicit-optimistic-locking"
+
+  - id: transactions-dirty-checking-flushing-072
+    difficulty: intermediate
+    tags: [read-only, version-check, gotcha]
+    question: |
+      "Why does readOnly=true silently swallow my mutation, and does it also skip
+      the @Version check?" Which is the most accurate answer?
+    options:
+      - "It swallows the mutation because there's no snapshot/flush; a dedicated @Version column still guards concurrent updates on writes that DO flush, but versionless (snapshot-based) locking is disabled with no snapshot"
+      - "It swallows the mutation and disables all optimistic locking including @Version permanently"
+      - "It does not swallow mutations; readOnly only affects the second-level cache"
+      - "It throws an exception on any mutation"
+    answer: 0
+    explanation: |
+      Read-only mode skips the dirty-check snapshot and auto-flush, so an
+      in-place mutation is never written. Versionless locking, which needs the
+      snapshot's old values, is therefore disabled; a dedicated @Version column
+      does not depend on the snapshot and still applies to writes that are flushed.
+    ref: "concepts.md#read-only-transactions-and-optimization"
+
+  - id: transactions-dirty-checking-flushing-073
+    difficulty: expert
+    tags: [connection-handling, immediate-acquisition, legacy]
+    question: |
+      Which hibernate.connection.handling_mode value reproduces the legacy
+      behavior of grabbing a connection at session open and holding it until the
+      session closes?
+    options:
+      - "DELAYED_ACQUISITION_AND_RELEASE_AFTER_TRANSACTION"
+      - "DELAYED_ACQUISITION_AND_RELEASE_AFTER_STATEMENT"
+      - "IMMEDIATE_ACQUISITION_AND_HOLD"
+      - "DELAYED_ACQUISITION_AND_HOLD"
+    answer: 2
+    explanation: |
+      IMMEDIATE_ACQUISITION_AND_HOLD acquires the connection eagerly at session
+      open and holds it for the whole session — the legacy pre-delayed behavior.
+      The modern defaults (DELAYED_*) defer acquisition to the first statement,
+      which is what enables connection-frugal read-only/compute methods.
+    ref: "concepts.md#when-a-transaction-actually-acquires-a-jdbc-connection"

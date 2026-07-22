@@ -421,6 +421,290 @@ interchangeable — a frequent point of confusion.
 
 ---
 
+## Versionless Optimistic Locking with @OptimisticLocking
+
+What if you inherit a legacy table you're **not allowed to alter** — no room to add
+a `version` column? Hibernate offers a native alternative to `@Version`:
+`@OptimisticLocking(type = OptimisticLockType.…)` on the entity class.
+
+| `OptimisticLockType` | Conflict-detection strategy | Emitted `WHERE` |
+|---|---|---|
+| `VERSION` (**default**) | Compare a dedicated `@Version` column. | `WHERE id=? AND version=?` |
+| `ALL` | Compare **every** column against the loaded snapshot. | `WHERE id=? AND col1=? AND col2=? AND …` |
+| `DIRTY` | Compare **only the modified** columns. | `WHERE id=? AND <changed-cols>=?` |
+| `NONE` | No optimistic check at all. | `WHERE id=?` |
+
+```java
+@Entity
+@OptimisticLocking(type = OptimisticLockType.DIRTY)
+@DynamicUpdate                       // REQUIRED for DIRTY (and used by ALL)
+public class Product { /* no @Version field */ }
+```
+
+Generated SQL for a price change:
+
+```sql
+-- OptimisticLockType.ALL: guard on the full loaded snapshot
+UPDATE product SET price=? WHERE id=? AND name=? AND price=? AND sku=?
+-- OptimisticLockType.DIRTY: guard only on columns you changed
+UPDATE product SET price=? WHERE id=? AND price=?
+```
+
+Key rules and limits, expected in a senior answer:
+
+- **`DIRTY` (and to be useful, `ALL`) requires `@DynamicUpdate`** — Hibernate must
+  generate the `UPDATE` per-flush from the actual dirty columns rather than using a
+  static, all-columns UPDATE cached at boot.
+- **It does NOT work for detached entities.** `ALL`/`DIRTY` compare against the
+  *loaded snapshot* Hibernate kept in the persistence context; a detached entity has
+  lost that snapshot, so there is nothing to build the `WHERE` predicate from. Only
+  `@Version` survives detachment (the version value rides along on the entity/DTO).
+- **`DIRTY` can't detect conflicts on columns you didn't touch** — if you change
+  `price` and another tx changed `name`, `DIRTY` won't notice. `ALL` will (at the
+  cost of a wide `WHERE` that can't use just the PK index efficiently).
+
+> [!INTERVIEW]
+> "How do you add optimistic locking to a legacy table you can't add a column to?"
+> — `@OptimisticLocking(type = ALL or DIRTY)` plus `@DynamicUpdate`; state the
+> caveat that it only works for entities that stay managed (no detached-conversation
+> support) and that `DIRTY` misses conflicts on untouched columns.
+
+---
+
+## Where the Version Bump Happens: Owning vs Inverse Side
+
+A subtle but frequently-tested rule: **only a change that dirties the entity's own
+mapped state bumps that entity's `@Version`.** Consider a bidirectional
+`Order` (one) ↔ `LineItem` (many) association where `LineItem` owns the FK:
+
+- Adding/removing an element in the **inverse (`mappedBy`) collection** on `Order`
+  does **not** dirty `Order` and does **not** bump `Order.version` — the change is
+  physically an `INSERT`/`DELETE`/FK-update on the `LineItem` table.
+- Changing the **owning side** — setting `lineItem.setOrder(other)` (the FK column
+  lives on `LineItem`) — dirties `LineItem` and bumps **`LineItem.version`**, not
+  the parent's.
+
+This is *exactly* why aggregate consistency needs `OPTIMISTIC_FORCE_INCREMENT` (or
+`PESSIMISTIC_FORCE_INCREMENT`) on the root: the root's columns never change when you
+mutate its children, so its version would otherwise sit still while the invariant it
+guards is being violated by concurrent child edits. (See the associations topic for
+owning-vs-inverse mechanics in depth.)
+
+---
+
+## Force-Increment Timing: OPTIMISTIC vs PESSIMISTIC
+
+Both `*_FORCE_INCREMENT` modes bump the version without a column change, but **when**
+they do it differs — a favorite subtle-distinction question:
+
+- **`OPTIMISTIC_FORCE_INCREMENT`** — defers the bump to **flush/commit**. Hibernate
+  emits one combined check-and-increment statement at the end:
+  `UPDATE order SET version=? WHERE id=? AND version=?`. If two threads both took
+  this mode on the same parent and each added a different child, both queue the same
+  conditional UPDATE; the first to flush wins, the second matches **0 rows** and
+  throws `StaleObjectStateException` (wrapped as `OptimisticLockException`).
+- **`PESSIMISTIC_FORCE_INCREMENT`** — takes the exclusive DB lock **and increments
+  the version immediately at lock acquisition**, *before* you mutate anything
+  (`SELECT … FOR UPDATE`, then `UPDATE … SET version=version+1`). Because it holds a
+  real lock, the second thread blocks rather than failing at commit.
+
+So: optimistic force-increment = *detect at commit*; pessimistic force-increment =
+*block at acquire*. The version moves early in one and late in the other.
+
+---
+
+## Merging a Detached Entity: The Version Check
+
+This is the *mechanism* behind "the version travels across HTTP requests." When you
+`merge()` a detached entity, Hibernate does **not** blindly UPDATE — it:
+
+1. Issues a `SELECT` to load the current managed row (and its current version).
+2. Copies the detached entity's state onto that managed copy.
+3. At flush, emits `UPDATE … WHERE id=? AND version=<detached-version>`.
+
+```java
+// detachedProduct came back from an HTTP form with version = 5
+Product managed = em.merge(detachedProduct);   // SELECT loads current row (version 6)
+// flush -> UPDATE ... WHERE id=? AND version=5  -> 0 rows -> OptimisticLockException
+```
+
+If another user committed in the meantime (current version 6), the flush UPDATE keyed
+on the stale version 5 matches nothing and throws `OptimisticLockException`. The
+practical requirement: the `@Version` value **must be round-tripped** in the DTO or a
+hidden form field so it comes back with the edit — otherwise the detached instance
+carries a fresh/zero version and the check is defeated.
+
+---
+
+## The Locking Exception Taxonomy
+
+The exact type thrown depends on the path, and it changed in Hibernate 7. Know the
+hierarchy so you catch the right thing:
+
+- **Optimistic failures.** JPA `jakarta.persistence.OptimisticLockException` wraps
+  Hibernate's `StaleObjectStateException` (which extends `StaleStateException`). The
+  generic *batched* path can surface a bare `StaleStateException`. Note
+  `OptimisticLockException.getEntity()` may be **null** on batched paths, so retry
+  logic must reload rather than trust the attached instance.
+- **Pessimistic failures.** A timeout to acquire → `LockTimeoutException`; a
+  DB-detected deadlock → `PessimisticLockException`. In **Hibernate 7**,
+  `org.hibernate.exception.LockAcquisitionException` now **extends
+  `PessimisticLockException`** (a changed hierarchy from HB6 — relevant if you had
+  `catch` blocks ordered on the old shape).
+- **Spring translation.** `OptimisticLockException` →
+  `ObjectOptimisticLockingFailureException`; `PessimisticLockException` /
+  `LockTimeoutException` → `PessimisticLockingFailureException` /
+  `CannotAcquireLockException`.
+
+---
+
+## LockMode (Hibernate) vs LockModeType (JPA)
+
+The doc above uses the JPA `jakarta.persistence.LockModeType` enum. Hibernate also
+has a native `org.hibernate.LockMode` — an **expanded superset** with modes JPA
+doesn't expose. They map one-to-one for the JPA values, plus extras:
+
+| `LockModeType` (JPA) | `LockMode` (Hibernate) | Legacy `LockMode` alias |
+|---|---|---|
+| `NONE` | `NONE` | — |
+| `OPTIMISTIC` | `OPTIMISTIC` | `READ` |
+| `OPTIMISTIC_FORCE_INCREMENT` | `OPTIMISTIC_FORCE_INCREMENT` | `WRITE` |
+| `PESSIMISTIC_READ` | `PESSIMISTIC_READ` | — |
+| `PESSIMISTIC_WRITE` | `PESSIMISTIC_WRITE` | `UPGRADE` |
+| `PESSIMISTIC_FORCE_INCREMENT` | `PESSIMISTIC_FORCE_INCREMENT` | `FORCE` |
+| *(no JPA equivalent)* | `UPGRADE_NOWAIT` | — |
+| *(no JPA equivalent)* | `UPGRADE_SKIPLOCKED` | — |
+
+The native-only `UPGRADE_NOWAIT` / `UPGRADE_SKIPLOCKED` bake the `NOWAIT` /
+`SKIP LOCKED` behavior into the mode itself rather than into a separate timeout hint.
+
+---
+
+## PessimisticLockScope: NORMAL vs EXTENDED
+
+A pessimistic lock's *reach* is controlled by `jakarta.persistence.lock.scope`
+(`PessimisticLockScope`):
+
+- **`NORMAL`** (default) — locks the entity's own table row(s), including rows of a
+  joined-inheritance or secondary table that make up the entity itself.
+- **`EXTENDED`** — additionally locks rows in **join tables and `@ElementCollection`
+  tables** owned by the entity.
+
+```java
+em.find(Order.class, id, LockModeType.PESSIMISTIC_WRITE,
+        Map.of("jakarta.persistence.lock.scope", PessimisticLockScope.EXTENDED));
+```
+
+> [!INTERVIEW]
+> "Does `PESSIMISTIC_WRITE` on an `Order` also lock its `@ElementCollection` line
+> items?" — No, not with the default `NORMAL` scope; you must request
+> `PessimisticLockScope.EXTENDED` to also lock the element-collection / join-table
+> rows.
+
+---
+
+## Follow-on Locking
+
+A classic performance trap. When a query pairs a lock mode with **pagination
+(`setMaxResults`), `DISTINCT`, or certain joins** that the dialect **cannot combine
+with `FOR UPDATE`** (e.g. you can't `FOR UPDATE` a query with `DISTINCT` on some
+databases), Hibernate can't put the lock in the main SQL. Instead it falls back to
+**follow-on locking**: it runs the SELECT unlocked, then issues a **separate
+`SELECT … FOR UPDATE` per returned row** — turning one query into N+1 locking round
+trips.
+
+```java
+query.setLockMode(LockModeType.PESSIMISTIC_WRITE)
+     .setMaxResults(50)                     // pagination -> follow-on locking
+     .setHint("hibernate.query.followOnLocking", false); // or setFollowOnLocking(false)
+```
+
+Setting `setFollowOnLocking(false)` **force-disables** the behavior — Hibernate will
+then either apply the lock in the main statement or throw if it can't, instead of
+silently firing per-row locks.
+
+> [!INTERVIEW]
+> "You paginated a `@Lock(PESSIMISTIC_WRITE)` query and saw 50 extra SELECTs — why?"
+> — Follow-on locking: pagination/`DISTINCT` prevented a single `FOR UPDATE`, so
+> Hibernate locked each row with its own `SELECT … FOR UPDATE`.
+
+---
+
+## Batching, Versioned Updates, and Silent Conflict Loss
+
+The optimistic check depends on the JDBC **update count** of each UPDATE. When you
+enable JDBC batching (`hibernate.jdbc.batch_size`), versioned UPDATEs get batched —
+and some older drivers return `Statement.SUCCESS_NO_INFO` (−2) from
+`executeBatch()` **instead of a real per-row count**, so Hibernate can't tell a
+0-row (conflict) apart from a 1-row (success) and the optimistic failure is
+**silently swallowed**.
+
+The fix is `hibernate.jdbc.batch_versioned_data=true`, which tells Hibernate the
+driver returns accurate batched counts so it can still enforce the version check.
+It defaults to `true` on modern Hibernate/dialects but was historically `false` on
+drivers (e.g. older Oracle) that returned `SUCCESS_NO_INFO`.
+
+> [!WARNING]
+> Turning on JDBC batching without `batch_versioned_data=true` on a driver that
+> returns `SUCCESS_NO_INFO` can **mask optimistic lock failures** — a lost update
+> slips through despite `@Version`. Verify the flag when you enable batching. See
+> `transactions-dirty-checking-flushing` for flush/batch mechanics.
+
+---
+
+## Timestamp Versions and DB-Generated Values
+
+If you must use a timestamp `@Version` (legacy `last_modified` column), the biggest
+hazard is **multi-node clock skew**: two app servers with slightly different clocks
+can generate versions that misorder. Hibernate lets the **database** generate the
+timestamp instead of the JVM:
+
+- Legacy: `@Version @Source(SourceType.DB)` — Hibernate calls the DB clock
+  (`select current_timestamp`) rather than `new Date()`.
+- Hibernate 6+: `@CurrentTimestamp` for DB/VM-generated temporal values.
+
+JPA 3.1+ officially permits `java.time.Instant` and `LocalDateTime` as `@Version`
+types (beyond the legacy `java.sql.Timestamp`). Even so, a numeric counter remains
+the recommended default — it has no resolution or skew failure mode.
+
+---
+
+## Hibernate 7 and JPA 3.2 Locking API Changes
+
+Hibernate 7 (aligned with Jakarta Persistence 3.2) modernized the locking API — a
+migration-question favorite:
+
+- **`LockOptions` is deprecated** ("obsolete as an API, moving to SPI"), and
+  `Session.buildLockRequest(...)` / the `LockRequest` inner type were **removed**.
+- New **typesafe option objects** — `FindOption`, `LockOption`, `RefreshOption` —
+  are passed **directly as varargs** to `find()`, `lock()`, and `refresh()`. You now
+  pass `LockMode`/`LockModeType`, the new `Timeout` type, and `PessimisticLockScope`
+  inline:
+
+  ```java
+  session.find(Book.class, 1,
+      LockMode.PESSIMISTIC_WRITE,
+      Timeouts.NO_WAIT,
+      new EnabledFetchProfile("with-authors"));
+  ```
+
+- **`org.hibernate.Timeouts`** provides named constants — `NO_WAIT`, `SKIP_LOCKED`,
+  `WAIT_FOREVER` — replacing the old magic integers `0` (no-wait), `-2`
+  (skip-locked), and `-1` (wait-forever).
+- **Locking a detached entity is no longer allowed** — `lock()`/`refresh()` on a
+  detached instance now throws `IllegalArgumentException` (aligning with the JPA
+  spec); the `hibernate.allow_refresh_detached_entity` setting was removed.
+- **`LockAcquisitionException` now extends `PessimisticLockException`** (changed
+  exception hierarchy vs HB6).
+
+> [!INTERVIEW]
+> "My HB6 code calls `session.buildLockRequest(...)` / builds a `LockOptions` — it
+> won't compile on HB7. What replaced it?" — The typesafe `FindOption`/`LockOption`/
+> `RefreshOption` varargs passed straight to `find`/`lock`/`refresh`, with
+> `org.hibernate.Timeouts.NO_WAIT` / `SKIP_LOCKED` / `WAIT_FOREVER` for timeouts.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"Walk me through the exact SQL Hibernate emits when I update a `@Version`ed
@@ -451,6 +735,15 @@ interchangeable — a frequent point of confusion.
 - **"How does the lock timeout property behave?"** —
   `jakarta.persistence.lock.timeout` (ms); `0` = NOWAIT where supported; behavior
   is dialect-dependent and throws `LockTimeoutException` on failure.
+- **"Add optimistic locking to a table you can't alter?"** —
+  `@OptimisticLocking(type = ALL or DIRTY)` + `@DynamicUpdate`; caveat: no detached
+  support, and `DIRTY` misses conflicts on untouched columns.
+- **"Why did batching hide a lost update despite `@Version`?"** —
+  `hibernate.jdbc.batch_versioned_data=false` on a driver returning
+  `SUCCESS_NO_INFO`, so the 0-row count can't be seen. Set it to `true`.
+- **"HB6 `buildLockRequest`/`LockOptions` won't compile on HB7 — what replaced it?"**
+  — typesafe `FindOption`/`LockOption`/`RefreshOption` varargs to
+  `find`/`lock`/`refresh`, with `org.hibernate.Timeouts` constants.
 
 ## References
 
@@ -459,7 +752,13 @@ interchangeable — a frequent point of confusion.
   `PessimisticLockException`, `LockTimeoutException`, and the
   `jakarta.persistence.lock.timeout` hint.
 - Hibernate ORM 6.x/7.x User Guide — "Locking" chapter (`@Version`, optimistic and
-  pessimistic lock modes, dialect lock support, `StaleObjectStateException`).
+  pessimistic lock modes, dialect lock support, `StaleObjectStateException`,
+  `@OptimisticLocking`/`OptimisticLockType`, `@DynamicUpdate`, follow-on locking,
+  `@Source`/`@CurrentTimestamp`, `hibernate.jdbc.batch_versioned_data`).
+- Hibernate ORM 7.0 Migration Guide & What's New — `LockOptions` deprecation and
+  `buildLockRequest`/`LockRequest` removal; `FindOption`/`LockOption`/`RefreshOption`
+  varargs; `org.hibernate.Timeouts` (`NO_WAIT`/`SKIP_LOCKED`/`WAIT_FOREVER`);
+  detached-entity lock ban; `LockAcquisitionException extends PessimisticLockException`.
 - Spring Data JPA Reference — `@Lock`, `@QueryHints`, and Spring's persistence
   exception translation (`ObjectOptimisticLockingFailureException`,
   `PessimisticLockingFailureException`, `CannotAcquireLockException`).

@@ -348,6 +348,278 @@ The upgrade is rarely just a package rename. The senior-level checklist:
 > type. On a brownfield DB, always compare Hibernate 6's generated/expected column types
 > against the live schema (`hbm2ddl` in `validate` mode) before deploying.
 
+## Hibernate 6 default mapping changes: enum, Duration, Instant, UUID
+
+The migration-gotchas checklist above says "basic-type defaults shifted" — a senior
+interview wants the **exact** version-pinned changes and, critically, the **revert
+property** for each. These are the "predict the DDL / why does `SchemaValidator` fail"
+questions. Each row below is a real Hibernate 6 default change against a Hibernate 5 schema.
+
+| Java type / mapping | Hibernate 5 default | Hibernate 6 default | Revert property |
+|---|---|---|---|
+| `@Enumerated(ORDINAL)` | `INTEGER` | `TINYINT` (6.1); 6.2: `TINYINT` if ≤128 constants else `SMALLINT`; **native `ENUM` on MySQL** | (map explicitly, e.g. `@JdbcTypeCode(SqlTypes.INTEGER)`) |
+| `Duration` | `BIGINT` (nanoseconds) | `SqlTypes.INTERVAL_SECOND` → DDL `interval second` (fallback `numeric(21)`) | `hibernate.type.preferred_duration_jdbc_type=BIGINT` |
+| `Instant` | `TIMESTAMP` | `SqlTypes.TIMESTAMP_UTC` → `timestamp with time zone` | `hibernate.type.preferred_instant_jdbc_type=TIMESTAMP` |
+| `UUID` | often `VARBINARY`/`binary(16)` | proper `UUID` `JavaType`; 6.2 MariaDB→`uuid`, SQL Server→`uniqueidentifier` | `hibernate.type.preferred_uuid_jdbc_type=BINARY` |
+| `JSON` DDL type | `clob` (H2) | 6.2: Oracle 21+→`json`, H2→`json` | `@Column(columnDefinition="clob")` |
+
+Two more subtle behavior changes that throw at *runtime*, not DDL time:
+
+- **Native `count()` returns `Long`, not `BigInteger`.** Hibernate 5's native queries
+  returned `java.math.BigInteger` for a `count(*)`; Hibernate 6 returns `java.lang.Long`.
+  Existing code doing `(BigInteger) q.getSingleResult()` throws **`ClassCastException`**
+  after the upgrade — a classic "why does this throw" item.
+- **`boolean` converters are now standard.** The legacy `@Type(type="yes_no")` is replaced
+  by JPA `AttributeConverter`s that Hibernate ships: `YesNoConverter` (`'Y'/'N'`),
+  `TrueFalseConverter` (`'T'/'F'`), and `NumericBooleanConverter` (`1/0`), applied via
+  `@Convert(converter = YesNoConverter.class)`. Hibernate 6 also **generates check
+  constraints** for boolean and enum columns by default.
+
+```java
+@Entity
+class LegacyRow {
+    @Id Long id;
+
+    // Existing CHAR(1) 'Y'/'N' column — pin it with the shipped converter:
+    @Convert(converter = org.hibernate.type.YesNoConverter.class)
+    boolean active;
+
+    // Keep an existing INTEGER-backed ordinal enum column working on HB6.2:
+    @Enumerated(EnumType.ORDINAL)
+    @JdbcTypeCode(SqlTypes.INTEGER)
+    Status status;
+}
+```
+
+> [!WARNING]
+> The dangerous ones are silent against a *brownfield* schema: `Duration` on an existing
+> `numeric(21)`/`bigint` column, `Instant` on a plain `timestamp`, and an ordinal enum on
+> an `integer` column all fail `hbm2ddl` **validate** on Hibernate 6.2 because the expected
+> column type changed. Name the revert property or the explicit `@JdbcTypeCode` — do not
+> let the schema auto-migrate.
+
+## Timezone and temporal storage with @TimeZoneStorage
+
+A whole subtopic that is high-value and easy to miss: **how `OffsetDateTime` /
+`ZonedDateTime` are stored changed** in Hibernate 6. Hibernate 5 normalized offset/zoned
+values to the single JDBC timezone configured by `hibernate.jdbc.time_zone` (usually the
+JVM default), silently discarding the original offset. Hibernate 6's default
+(`hibernate.timezone.default_storage=DEFAULT`) stores them as `timestamp with time zone`
+on databases that support it, preserving the offset — and only normalizes to UTC where the
+DB has no offset-aware type.
+
+`@TimeZoneStorage(TimeZoneStorageType.…)` (per-attribute) and the global
+`hibernate.timezone.default_storage` property select the strategy:
+
+| Strategy | Behavior |
+|---|---|
+| `NATIVE` | Use the DB's `timestamp with time zone` column (offset preserved) |
+| `NORMALIZE` | Normalize to `hibernate.jdbc.time_zone` (the Hibernate 5 behavior) |
+| `NORMALIZE_UTC` | Normalize the instant to UTC, store in a plain `timestamp` |
+| `COLUMN` | Store the offset in a **separate companion column** (`@TimeZoneColumn`) |
+| `AUTO` | `NATIVE` if the DB supports it, else `COLUMN` |
+| `DEFAULT` | `NATIVE` where supported, else `NORMALIZE_UTC` (the HB6 default) |
+
+`OffsetTime` similarly now uses `TIME_WITH_TIMEZONE` on capable databases.
+
+> [!TIP]
+> This is one of the most common *silent* behavior changes for apps with offset/zoned
+> timestamps: a value written under Hibernate 5 (normalized to the JVM zone) read back
+> under Hibernate 6 (`timestamp with time zone`) can differ. If you need the old behavior
+> exactly, set `hibernate.timezone.default_storage=NORMALIZE`.
+
+## Dialect changes: hibernate-community-dialects and version bumps
+
+The migration-gotchas section notes dialect auto-detection; the sharper failure mode is a
+**`ClassNotFoundException` on boot**, not merely a deprecation warning. In Hibernate 6:
+
+- **Version-specific and legacy dialects moved to a separate artifact,
+  `hibernate-community-dialects`**, and to a new package
+  `org.hibernate.community.dialect` (e.g. `PostgreSQL81Dialect`, `MariaDB102Dialect`,
+  `MySQL55Dialect`). If your config still references `org.hibernate.dialect.PostgreSQL95Dialect`
+  and you have not added that artifact, the class is simply not on the classpath →
+  `ClassNotFoundException`.
+- The **core dialect is now a single, version-parameterized class** (`PostgreSQLDialect`,
+  `MySQLDialect`, `OracleDialect`) that takes the actual DB *version* at runtime rather
+  than one class per DB version.
+- **Minimum DB versions were bumped**: e.g. PostgreSQL 10, MySQL 5.7, Oracle 11.2,
+  SQL Server 2008-era baselines. Older servers may be unsupported by the core dialect.
+
+The idiomatic fix is to **remove `hibernate.dialect` entirely** and let Hibernate
+auto-detect from the JDBC connection metadata; only pin it (to the new versioned class or
+a `hibernate-community-dialects` class) when auto-detection cannot reach the DB at boot.
+
+## Byte and wrapper-array handling: WRAPPER_ARRAY_HANDLING
+
+A sharp "why won't the app even start on 6.2" question. Hibernate 6.2 changed the default
+of `hibernate.type.wrapper_array_handling` to **`DISALLOW`**, which means mapping a
+`Byte[]` or `Character[]` attribute now **throws an error at boot** rather than silently
+treating it as a binary/character array (the ambiguous Hibernate 5 behavior — was it a
+`varbinary` or an array of nullable bytes?).
+
+| Value | Behavior |
+|---|---|
+| `DISALLOW` | **6.2 default** — `Byte[]`/`Character[]` mappings raise an error |
+| `ALLOW` | Map them as `SqlTypes.VARBINARY` / `VARCHAR` |
+| `LEGACY` | Hibernate 5 behavior (nullable-element binary/char array) |
+
+Fixes: switch to the **primitive** `byte[]` / `char[]` (almost always what you actually
+want), or keep the wrapper array and pin the descriptor with
+`@JavaType(ByteArrayJavaType.class)`, or set `wrapper_array_handling=ALLOW`/`LEGACY` as a
+temporary bridge.
+
+## Hibernate 7: removed Session methods, annotations, and license change
+
+The existing checklist says several `Session` methods are "deprecated/legacy" — in
+**Hibernate 7 they are actually removed**, so real code fails to *compile*, not just warn:
+
+- **Removed `Session` methods:** `save`, `update`, `saveOrUpdate`, `load`, `delete`. Use
+  `persist`, `merge`, `getReference`/`find`, and `remove`. `get(...)` is deprecated in
+  favor of `find(...)`.
+- **Removed cascade types:** `CascadeType.SAVE_UPDATE` and `CascadeType.DELETE`
+  (Hibernate-native) are gone; use the JPA `PERSIST`/`MERGE`/`REMOVE` set.
+- **Removed Hibernate annotations** (real code that won't compile):
+  `@Where`/`@WhereJoinTable` → **`@SQLRestriction`**; `@Proxy`, `@LazyCollection`,
+  `@LazyToOne`, `@Persister`, `@SelectBeforeUpdate`, `@Loader`, the Hibernate `@Table`,
+  `@ForeignKey`, `@Index`, `@Target`, `@GeneratorType`.
+- **Bootstrap/packaging changes:** `hibernate-models` replaces HCANN (the
+  annotation/reflection metadata layer), and classpath entity **scanning now requires the
+  opt-in `hibernate-scan-jandex` module** — a boot-time surprise if you relied on
+  auto-scan.
+- **License change to Apache License 2.0** (from LGPL, as of 7.0.0.Beta5). This forced
+  dropping `hibernate-ucp` (Oracle UCP connection pool) and the `TeradataDialect`, whose
+  licenses were incompatible.
+
+Other Hibernate 7 default changes worth naming:
+
+- Bulk `update`/`delete` on an `@Immutable` entity now **throws** (was a warning).
+- `char`/`Character` DDL → `varchar(1)` (was `char(1)`); Oracle timestamp precision 9;
+  Oracle `float`/`double` → `binary_float`/`binary_double`.
+- **Native queries return `java.time` temporals** (`LocalDate`, etc.) instead of
+  `java.sql.Date`/`Time`/`Timestamp`. Revert with
+  `hibernate.query.native.prefer_jdbc_datetime_types=true`.
+
+## New query and session APIs: Restriction, Range, and JSON functions
+
+"What's new in the query API" is a currency check. Hibernate 6.3+/7 added incremental,
+typesafe query building and rich DB-function support:
+
+- **`QuerySpecification` / `SelectionSpecification` / `MutationSpecification` +
+  `Restriction` + `Range`** — build up a query in typesafe, composable pieces
+  (`Restriction.greaterThan(...)`, `Range.closed(lo, hi)`). `Query#setOrder(...)` was
+  removed in favor of `SelectionSpecification`.
+- **`findMultiple()` / `getMultiple()`** — batch load several entities by id in one call.
+- **Typesafe option objects** passed to `find`/`lock`/`refresh`: `FindOption`,
+  `LockOption`, `RefreshOption`, `ReadOnlyMode`, `EnabledFetchProfile`, `BatchSize`,
+  `Timeout` (replacing untyped `Map<String,Object>` hints in many places).
+- **Programmatic and richer entity graphs**: `@org.hibernate.annotations.NamedEntityGraph`
+  (string DSL) parsed by `GraphParser`, plus more strongly typed `EntityGraph` building —
+  useful for fetch-plan / N+1 control (see `fetching-strategies-n-plus-1`).
+- **JSON/XML HQL functions**: `json_object()`, `json_array()`, `json_value()`,
+  `json_table()`, `xmlelement()`, `xmlagg()`, `xmltable()`; and **set-returning functions**
+  in the from-clause: `unnest()`, `generate_series()`.
+- **`hibernate-vector` module** — vector/embedding column support (e.g. pgvector) for
+  AI/similarity-search workloads.
+
+## SoftDelete, Struct, and native database enum types
+
+Native features frequently asked as "how do you do X now, without a custom UserType":
+
+- **`@SoftDelete`** (Hibernate 6.4): annotate an entity (or collection) and Hibernate
+  turns `DELETE` into an `UPDATE ... SET deleted = true` and appends `WHERE deleted = false`
+  to every read. Configure the semantics with
+  `@SoftDelete(strategy = SoftDeleteType.DELETED /* or ACTIVE */, converter = …)`.
+  Hibernate 7 adds **soft-delete timestamp tracking** (record *when* the row was deleted).
+
+  ```java
+  @Entity
+  @SoftDelete(strategy = SoftDeleteType.DELETED)
+  class Account { @Id Long id; String name; }
+  // em.remove(account) →  update account set deleted=true where id=? and deleted=false
+  // repository read     →  select ... from account where ... and deleted=false
+  ```
+
+- **`@Struct`** (Hibernate 6.2): map an `@Embeddable` to a SQL **structured / user-defined
+  type** — an Oracle `OBJECT` type or a PostgreSQL composite type — instead of flattening
+  its fields into the parent table. Pairs with the JSON embeddable story
+  (`@JdbcTypeCode(SqlTypes.JSON)` on an embeddable).
+- **PostgreSQL named enum types**: `SqlTypes.NAMED_ENUM` (by name) and
+  `SqlTypes.NAMED_ORDINAL_ENUM` (by position) make Hibernate create and use a real
+  PostgreSQL `ENUM` type via DDL, rather than a `varchar`/`int` column.
+
+## SQM gotchas: eager literal type-checking and native-query aliases
+
+The SQM section explains the pipeline; here are the concrete "worked on 5, throws on 6"
+breakages a migrator hits:
+
+- **Eager literal type-checking.** SQM validates types at parse time, so comparing a
+  temporal path to a *string* literal now fails:
+  `where e.createdOn > '2024-01-01'` throws — use a **typed literal**
+  `where e.createdOn > date '2024-01-01'` (or a bind parameter). Hibernate 5's looser
+  translator accepted the string.
+- **Native queries with joins need unique column aliases.** Because Hibernate 6 reads
+  results **by position**, a native `SELECT *` / `p.*` across joined tables that produces
+  **duplicate column names** now raises a duplicate-column error; you must alias the
+  columns uniquely or use an explicit `@SqlResultSetMapping`.
+- **Batch fetching is skipped under a lock stronger than `READ`.** With
+  `LockMode > READ` (pessimistic), proxies are **not** batch-initialized and stay
+  uninitialized — a subtle behavior change from Hibernate 5.
+- **`ResultTransformer` was split/renamed** into `TupleTransformer` and
+  `ResultListTransformer` (the old single-interface `ResultTransformer` is
+  deprecated/removed).
+
+## Bytecode enhancement: always-on lazy init and dirty tracking
+
+Bytecode enhancement (build-time or runtime instrumentation of entity classes) is a common
+deep-dive. As of Hibernate 6.2:
+
+- `hibernate.enhancer.enableLazyInitialization` and
+  `hibernate.enhancer.enableDirtyTracking` both **default to `true` and are deprecated for
+  removal** — i.e. lazy attribute loading and enhanced dirty tracking are becoming
+  *always-on* and can no longer be turned off.
+- `hibernate.bytecode.use_reflection_optimizer` also defaults to `true`.
+
+The interview angle: this makes **lazy loading of individual basic attributes**
+(`@Basic(fetch = LAZY)`, e.g. a large `@Lob`) and precise field-level dirty tracking
+standard, and shifts the choice toward **build-time enhancement** (Gradle/Maven plugin) vs
+runtime enhancement for startup cost. See `fetching-strategies-n-plus-1` for lazy-loading
+mechanics.
+
+## StatelessSession in Hibernate 7: second-level cache and batching
+
+The StatelessSession table above describes the classic (Hibernate 5-era) semantics — no
+first-level cache, no dirty checking, no cascade, no lazy loading. **Hibernate 7 changed
+two of the surrounding behaviors** that trip up upgraders:
+
+- **`StatelessSession` now uses the second-level cache by default.** Previously it never
+  touched the L2 cache; in Hibernate 7 it reads/writes it. If you see **stale data** after
+  upgrading a batch job, disable it with `session.setCacheMode(CacheMode.IGNORE)`.
+- **`hibernate.jdbc.batch_size` no longer affects `StatelessSession`.** To batch JDBC
+  statements you must call `setJdbcBatchSize(n)` on the stateless session, or use the
+  explicit batch operations **`insertMultiple()` / `updateMultiple()` / `deleteMultiple()`**
+  that Hibernate 7 added. (The classic table's "no batching machinery" framing is
+  therefore outdated for HB7.)
+
+## Jakarta migration mechanics: bytecode transformation and persistence.xml
+
+Concrete breakage detail behind the namespace narrative:
+
+- **Bytecode transformation, not just source.** Third-party jars you cannot recompile are
+  rewritten by the **Eclipse Transformer** (which Spring Boot's migration tooling wraps),
+  which rewrites `javax.*` → `jakarta.*` **inside compiled bytecode**. For your own source,
+  the alternative is the **OpenRewrite recipe**
+  `org.openrewrite.java.migrate.jakarta.JavaxMigrationToJakarta`.
+- **`persistence.xml` version must match the runtime.** Use `version="3.0"` (pure rename),
+  `"3.1"` (Hibernate 6), or `"3.2"` (Hibernate 7) with schema
+  `https://jakarta.ee/xml/ns/persistence`. A stale `version="2.2"` or the old
+  `http://xmlns.jcp.org/...` namespace **fails XML parsing** at bootstrap.
+- **Hibernate 5.6 bridge detail.** The Jakarta variant of Hibernate 5.6 was published as a
+  **separate artifact / classifier** (the `hibernate-core:5.6.x:jakarta` era), letting a
+  team flip the namespace *before* the Hibernate 6 jump.
+- **The rename is ecosystem-wide.** `javax.servlet` → `jakarta.servlet`,
+  `javax.validation` → `jakarta.validation`, plus `javax.annotation` and
+  `javax.transaction` all move in lockstep — see `apache-tomcat/*` for the servlet side.
+
 ## Common Interview Follow-ups
 
 - **"Is the `javax`→`jakarta` change just a version bump?"** No — it's a breaking *package*

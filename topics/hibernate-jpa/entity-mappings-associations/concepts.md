@@ -479,6 +479,338 @@ create the N+1 in the first place.
 
 ---
 
+## @Enumerated and the ORDINAL trap
+
+Mapping a Java `enum` to a column is one of the most-asked gotchas because the
+JPA **default is the dangerous one**.
+
+- `@Enumerated(EnumType.ORDINAL)` — **the default** (used even with no
+  annotation). Stores the enum constant's *position* (`0, 1, 2, …`).
+- `@Enumerated(EnumType.STRING)` — stores the constant's `name()`.
+
+```java
+public enum Status { NEW, PAID, SHIPPED }          // stored as 0,1,2 by default
+
+@Enumerated(EnumType.STRING)                        // <- safe: stores 'NEW','PAID',...
+private Status status;
+```
+
+> [!WARNING]
+> **ORDINAL silently corrupts data on reordering.** If someone inserts a new
+> constant in the middle (`NEW, PENDING, PAID, SHIPPED`), every existing row's
+> integer now means a *different* constant — no exception, just wrong data.
+> `EnumType.STRING` is resilient to reordering (only renaming a constant breaks
+> it). Prefer `STRING` (or an `AttributeConverter` mapping to explicit codes) for
+> anything persisted long-term.
+
+Hibernate 6 specifics:
+
+- Ordinal enums now map to a **small integer type** (`TINYINT`/`SMALLINT`, chosen
+  from the constant count) rather than plain `INTEGER` as in HB5.
+- `@JdbcTypeCode(SqlTypes.NAMED_ENUM)` maps to a **native database `ENUM`** type
+  on PostgreSQL/MySQL instead of a string/int column.
+- The spec **forbids combining `@Enumerated` with an `AttributeConverter`** on
+  the same attribute — pick one mechanism.
+
+---
+
+## @Convert and AttributeConverter
+
+`AttributeConverter<X, Y>` is the **portable JPA** way (spec, not Hibernate-only)
+to map an arbitrary Java value type `X` to a JDBC-friendly column type `Y`. It is
+the standard alternative to a Hibernate `UserType`.
+
+```java
+@Converter(autoApply = true)                        // applies to every Boolean field
+public class YesNoConverter implements AttributeConverter<Boolean, String> {
+    public String convertToDatabaseColumn(Boolean b) { return b != null && b ? "Y" : "N"; }
+    public Boolean convertToEntityAttribute(String s) { return "Y".equals(s); }
+}
+
+@Convert(converter = YesNoConverter.class)          // or rely on autoApply
+private boolean active;
+```
+
+- `autoApply = true` applies the converter to **all** attributes of type `X`
+  automatically; otherwise attach it per-field with `@Convert`.
+- Use it for enums-as-codes, `boolean`↔`'Y'/'N'`, small value objects
+  (`Money`, `PhoneNumber`), etc.
+- A converter **cannot** be applied to `@Id`, `@Version`, relationship
+  attributes, or an attribute also marked `@Enumerated`.
+
+> [!TIP]
+> `@Convert` distinguishes "knows the JPA spec" from "knows only Hibernate."
+> Prefer it over a Hibernate `UserType` for simple value conversions — it is
+> provider-portable.
+
+---
+
+## Hibernate 6 type system and @JdbcTypeCode
+
+The biggest HB5→6 mapping change is a **rebuilt type system**. The old
+`BasicType`/`JavaTypeDescriptor`/`SqlTypeDescriptor` model split into two clean
+contracts:
+
+- **`JavaType<T>`** (was `JavaTypeDescriptor`) — how the value behaves in Java
+  (comparison, mutability via `MutabilityPlan`, conversion).
+- **`JdbcType`** (was `SqlTypeDescriptor`) — how it is read/written through JDBC,
+  keyed by a **`SqlTypes`** code (an extension of `java.sql.Types`).
+
+New declarative annotations replace the removed HB5 string-based mechanisms:
+
+| HB6 annotation | Purpose |
+|---|---|
+| `@JdbcTypeCode(SqlTypes.JSON)` | override the JDBC type by `SqlTypes` code (JSON, `NAMED_ENUM`, `UUID`, …) |
+| `@JdbcType(...)` / `@JavaType(...)` | plug in a specific descriptor class |
+| `@Type(MyUserType.class)` | the *new* home for a Hibernate `UserType` (class ref, not a string) |
+
+```java
+@JdbcTypeCode(SqlTypes.JSON)                 // HB6 way to map a JSON column
+private Map<String, Object> attributes;
+```
+
+> [!WARNING]
+> **Removed in HB6:** `@TypeDef`, `@TypeDefs`, `@AnyMetaDef`, and the
+> **string-based `@Type("json")` / `@Type("yes_no")`** form. Basic types are no
+> longer configured via `BasicType`. The modern answer to "how do you map JSON /
+> a Postgres native enum / a custom type in Hibernate 6" is **`@JdbcTypeCode`**
+> (or a `UserType` referenced by class via `@Type(X.class)`), **not** the legacy
+> `@Type("...")` string. Quoting the HB5 form in a 2025 interview signals stale
+> knowledge.
+
+---
+
+## @ElementCollection and @Embeddable value types
+
+Not every collection or nested object is an entity. **Value types** have no
+identity of their own and live inside the owner's lifecycle.
+
+- **`@Embeddable` + `@Embedded`** compose a value object's columns *into the
+  owning entity's table* (no separate row, no FK). Contrast with `@Entity` (own
+  table, own id, independently persistable).
+- **`@ElementCollection`** maps a collection of **basics or `@Embeddable`s**
+  (not entities) to a separate **`@CollectionTable`**, keyed by the owner's FK.
+
+```java
+@Embeddable
+public class Address { String street; String city; String zip; }
+
+@Entity
+public class Company {
+    @Embedded
+    @AttributeOverride(name = "zip", column = @Column(name = "postal_code"))
+    private Address hq;                                    // columns inlined into company
+
+    @ElementCollection
+    @CollectionTable(name = "company_phone",
+                     joinColumns = @JoinColumn(name = "company_id"))
+    @Column(name = "phone")
+    private Set<String> phones = new HashSet<>();          // value collection, not entities
+}
+```
+
+- `@AttributeOverride` / `@AttributeOverrides` remap an embeddable's column names
+  (needed when the same `@Embeddable` is embedded twice, e.g. `billing` +
+  `shipping` addresses).
+- An `@ElementCollection` deletes its elements when the owner is deleted — no
+  cascade needed; the elements have no life outside the owner.
+
+> [!WARNING]
+> **`@ElementCollection` suffers the same delete-all-reinsert as a `List` bag.**
+> Modifying one element of a `List`-based element collection makes Hibernate
+> `DELETE` every row for that owner and re-`INSERT` the survivors. Use a `Set`,
+> add an `@OrderColumn`, or promote to an entity if the churn matters. Do **not**
+> confuse `@ElementCollection` (values) with `@OneToMany` (entities) — a very
+> common conflation.
+
+---
+
+## @OrderColumn vs @OrderBy and Map collections
+
+Two different ways to order a collection — frequently confused:
+
+| | `@OrderColumn` | `@OrderBy` |
+|---|---|---|
+| Mechanism | Hibernate maintains a **persisted index column** | Adds an `ORDER BY` to the **load query** only |
+| Storage | Extra integer column in the table | Nothing stored |
+| Cost | Reorder/insert-in-middle rewrites subsequent indexes (extra UPDATEs) | Free at write time; order recomputed each load |
+| Order source | Physical list position | Any entity attribute(s), e.g. `@OrderBy("createdOn DESC")` |
+
+```java
+@OneToMany(mappedBy = "post") @OrderColumn(name = "position")  // durable list order
+private List<Comment> comments = new ArrayList<>();
+
+@OneToMany(mappedBy = "post") @OrderBy("createdOn DESC")       // sort at load time only
+private List<Comment> commentsByDate = new ArrayList<>();
+```
+
+**Map-valued associations.** JPA can map a `Map<K, V>`:
+
+- `@MapKeyColumn` — key is a basic column in the collection/join table.
+- `@MapKey(name = "…")` — key is an attribute of the *value* entity.
+- `@MapKeyEnumerated` / `@MapKeyTemporal` — key conversion for enum/date keys.
+- `@MapKeyJoinColumn` — key is itself an **entity** (FK).
+- HB6 adds `@MapKeyJavaType` / `@MapKeyJdbcType` for the new type system.
+
+```java
+@OneToMany @MapKeyColumn(name = "phone_type")
+private Map<String, Phone> phones = new HashMap<>();     // keyed by a String column
+```
+
+---
+
+## Computed and DB-generated columns
+
+Not every column is a plain writable field. Hibernate maps several read-only /
+DB-driven shapes:
+
+- **`@Formula("...")`** (Hibernate-only) — a **read-only computed value from
+  native SQL**, evaluated in the SELECT (can include subqueries). No column
+  stored; great for a derived value without a DB view.
+  ```java
+  @Formula("(select avg(r.score) from review r where r.book_id = id)")
+  private Double averageScore;
+  ```
+- **`@ColumnDefault("...")`** — emits a `DEFAULT` in generated DDL.
+- **`@Generated(event = {INSERT, UPDATE})`** / **`@GeneratedColumn`** — the value
+  is produced **by the database** (trigger, default, computed column). After the
+  write, Hibernate issues a **re-SELECT** to read the generated value back into
+  the entity, so your in-memory object stays consistent.
+- **`@Column(insertable = false, updatable = false)`** — a **read-only mapping**:
+  Hibernate never writes the column (it's owned by a DB default/trigger, or by
+  another mapping of the same column — see the FK trick below).
+- **`@org.hibernate.annotations.Immutable`** — marks an entity or collection as
+  read-only; Hibernate **skips dirty checking** for it (perf win for reference
+  data / lookup tables that never change after load).
+
+> [!TIP]
+> "How do you map a derived column without a DB view?" → `@Formula`. "The DB sets
+> a default/`created_at` we don't control from Java?" → `@Generated` +
+> `@ColumnDefault` (Hibernate re-SELECTs it). "Read-only reference data?" →
+> `@Immutable` to skip dirty checking.
+
+---
+
+## @NaturalId
+
+Hibernate's `@NaturalId` is a first-class mapping for a **business key** — the
+immutable, unique, real-world identifier (ISBN, SKU, email, ISO country code) as
+opposed to the surrogate `@Id`.
+
+```java
+@Entity
+public class Book {
+    @Id @GeneratedValue Long id;            // surrogate PK
+    @NaturalId(mutable = false) String isbn; // business key
+}
+```
+
+- Load by it with `session.byNaturalId(Book.class).using("isbn", x).load()` or
+  `bySimpleNaturalId(...)` for a single-attribute key.
+- Add `@NaturalIdCache` (with the second-level cache) so lookups by business key
+  resolve to a PK from cache, then hit the entity cache — two cache hits, zero
+  SQL.
+- This is the natural completion of the `equals`/`hashCode` advice: a true
+  `@NaturalId` is exactly the stable key you should base entity equality on.
+
+> [!KEY-TAKEAWAY]
+> `@Id` is the surrogate/technical identity Hibernate uses for the persistence
+> context; `@NaturalId` is the domain/business identity. Use `@NaturalId` +
+> `byNaturalId()` for cache-friendly business-key lookups and as the basis for
+> `equals`/`hashCode`.
+
+---
+
+## @JoinColumn deep dive
+
+`@JoinColumn` has more knobs than just `name`, and they matter for legacy-schema
+integration and performance:
+
+- **`referencedColumnName`** — point the FK at a **non-PK unique column** of the
+  target (legacy schemas whose FK references, say, a `code` column, not the id).
+- **`foreignKey = @ForeignKey(...)`** — name the FK constraint, or
+  `@ForeignKey(ConstraintMode.NO_CONSTRAINT)` to tell Hibernate **not** to
+  generate the FK constraint in DDL.
+- **`nullable`** — whether the FK column allows NULL.
+- **`insertable = false, updatable = false`** — a **read-only** join mapping.
+  The classic use: map the **same FK column twice** — once as the `@ManyToOne`
+  association and once as a plain `@Column` id — so you can read the FK value
+  *without loading the association* (dodging a fetch). One of the two mappings
+  **must** be read-only or Hibernate complains the column is mapped twice.
+
+```java
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "customer_id")
+private Customer customer;
+
+@Column(name = "customer_id", insertable = false, updatable = false)
+private Long customerId;                    // read the FK without touching the proxy
+```
+
+**The `optional` attribute + INNER vs LEFT join.** On `@ManyToOne`/`@OneToOne`,
+`optional` (default `true`) tells Hibernate whether the association may be
+absent:
+
+- `optional = false` → Hibernate knows a row always exists, so it can use an
+  **INNER JOIN** and reliably build a **lazy proxy** on the owning side.
+- `optional = true` (default) → the row might be missing, forcing a **LEFT
+  JOIN**; for a nullable owning `@OneToOne` this pushes Hibernate toward eager
+  loading because it must check existence to decide null-vs-proxy.
+
+**Composite / shared-PK variants:**
+
+- **`@JoinColumns`** maps a **multi-column (composite) FK**.
+- **`@PrimaryKeyJoinColumn`** maps a shared-PK `@OneToOne` where the child's PK
+  *is* the FK to the parent (the annotation-driven cousin of `@MapsId`).
+
+---
+
+## targetEntity
+
+When a field's declared type is an **interface or a raw type**, JPA cannot infer
+the associated entity class from generics. The `targetEntity` attribute names it
+explicitly:
+
+```java
+@OneToMany(mappedBy = "customer", targetEntity = OrderImpl.class)
+private List<Order> orders;                 // Order is an interface; map to OrderImpl
+```
+
+Rarely needed with normal generic collections (the type argument is enough), but
+essential when you program to interfaces or use non-parameterized collection
+fields.
+
+---
+
+## What changed HB5 → 6 → 7
+
+A top senior "what's new" question. Concrete deltas (not just "6.x/7.x"):
+
+- **Laziness is now respected for `find()`/`get()`.** In HB5, `@Fetch(JOIN)` (or
+  eager mapping) effectively forced eager loading even on `find()`. HB6+ honors
+  the fetch/lazy semantics more consistently.
+- **Implicit DISTINCT filtering.** HB6 automatically de-duplicates parent rows
+  produced by a join-fetched collection **in memory**, without adding
+  `DISTINCT` to the SQL. The old `HINT_PASS_DISTINCT_THROUGH` hint is gone /
+  unnecessary — `JOIN FETCH` a collection no longer returns duplicate parents.
+- **Rebuilt type system** — `JavaType`/`JdbcType` split, `@JdbcTypeCode`, and the
+  removal of `@TypeDef`/string `@Type` (see the type-system section above).
+- **Enum default storage** — ordinal enums now map to a small integer
+  (`TINYINT`/`SMALLINT`) instead of `INTEGER`.
+- **New SQM query engine** — queries are parsed into a Semantic Query Model and
+  translated per-dialect, replacing the old HQL AST translator.
+- **HB7** completes the move to the **`jakarta.*`** namespace (drops the
+  `javax.*` transitional support), aligns with Jakarta Persistence 3.2, and
+  continues on the SQM engine.
+
+> [!KEY-TAKEAWAY]
+> If asked "what changed in Hibernate 6/7," name specifics: the `JdbcType`/
+> `JavaType` type system + `@JdbcTypeCode`, implicit collection DISTINCT (no more
+> `PASS_DISTINCT_THROUGH`), `find()` respecting laziness, small-int ordinal
+> enums, the SQM engine, and HB7's full `jakarta.*` cutover.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"What are the default fetch types for each association?"** `@ManyToOne` and
@@ -504,13 +836,36 @@ create the N+1 in the first place.
 - **"Where should cascade go, and why not on `@ManyToOne`?"** On the aggregate
   root's owning collection pointing down at exclusively-owned children; on a
   `@ManyToOne` to a shared parent it would cascade-delete the shared parent.
+- **"What's the default for `@Enumerated` and why is it dangerous?"** ORDINAL
+  (stores position); reordering constants silently corrupts data. Use `STRING`.
+- **"How do you map JSON / a custom type in Hibernate 6?"** `@JdbcTypeCode`
+  (e.g. `SqlTypes.JSON`, `SqlTypes.NAMED_ENUM`), *not* the removed string
+  `@Type("json")`. Portable value conversion → `@Convert` + `AttributeConverter`.
+- **"`@ElementCollection` vs `@OneToMany`?"** Element collection maps basics/
+  embeddables (value types, no identity) into a collection table; `@OneToMany`
+  maps entities. Element collections share the `List`-bag delete-all-reinsert.
+- **"`@OrderColumn` vs `@OrderBy`?"** `@OrderColumn` persists an index column
+  (durable order, extra UPDATEs on reorder); `@OrderBy` only adds ORDER BY at
+  load time.
+- **"How do you map a derived column without a DB view?"** `@Formula`
+  (read-only native SQL); DB-generated defaults → `@Generated`/`@ColumnDefault`
+  with a re-SELECT.
+- **"FK references a non-PK column — how?"** `@JoinColumn(referencedColumnName=)`.
+- **"Read the FK id without loading the association?"** Map the FK column twice —
+  the `@ManyToOne` plus a `@Column(insertable=false, updatable=false)` id field.
+- **"What changed in Hibernate 6/7?"** New `JavaType`/`JdbcType` type system +
+  `@JdbcTypeCode`; implicit collection DISTINCT (no `PASS_DISTINCT_THROUGH`);
+  `find()` respecting laziness; small-int ordinal enums; SQM engine; HB7 full
+  `jakarta.*`.
 
 ## References
 
 - Jakarta Persistence 3.1 / 3.2 Specification — Chapter "Entity" and
   "Relationship Mapping" (`jakarta.persistence.*`).
 - Hibernate ORM 6.x/7.x User Guide — "Associations", "Collections",
-  "Fetching", "Flushing".
+  "Fetching", "Flushing", "Basic Types" (`@JdbcTypeCode`/`JavaType`/`JdbcType`),
+  "Natural Ids", "Generated Properties", "`@Formula`", and the 6.0 Migration
+  Guide (removed `@TypeDef`; implicit DISTINCT; small-int ordinal enums).
 - Vlad Mihalcea, *High-Performance Java Persistence* — owning side, best `List`
   vs `Set` practices, `@ManyToMany` pitfalls, entity `equals`/`hashCode`.
 - Cross-references: `hibernate-jpa/fetching-lazy-eager-n-plus-one`,

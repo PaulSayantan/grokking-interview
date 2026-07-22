@@ -735,21 +735,23 @@ questions:
 
   - id: caching-first-second-level-042
     difficulty: intermediate
-    tags: [l2-cache, api, evict]
+    tags: [l1-cache, l2-cache, api, evict]
     question: |
-      After a bulk update bypasses L2, which JPA API lets you explicitly evict cached
-      data?
+      What is the difference between `em.clear()` and
+      `em.getEntityManagerFactory().getCache().evict(Product.class)`?
     options:
-      - "EntityManager.flush()"
-      - "EntityManager.clear()"
-      - "Session.refresh(entity)"
-      - "EntityManagerFactory.getCache().evict(...)"
-    answer: 3
+      - "clear() empties the L1 persistence context; getCache().evict() removes entries from the shared L2 cache"
+      - "They are identical — both clear L1 and L2"
+      - "clear() removes L2 entries; getCache().evict() empties the L1 persistence context"
+      - "Both operate only on the query cache"
+    answer: 0
     explanation: |
-      The JPA Cache API is reached via EntityManagerFactory.getCache(), whose evict
-      methods remove entries from L2. flush()/clear() affect L1 only; refresh() reloads
-      one entity but does not manage the shared L2 region generally.
-    ref: "concepts.md#l2-concurrency-strategies"
+      clear() detaches all managed entities from the Session-local L1 persistence
+      context and does not touch L2. EntityManagerFactory.getCache().evict(...) removes
+      entries from the shared, SessionFactory-scoped L2 cache. They act on different
+      caches — clear() before a bulk operation frees L1 memory, whereas evict() is what
+      fixes L2 staleness after a bypassing write.
+    ref: "concepts.md#managing-the-cache-programmatically"
 
   - id: caching-first-second-level-043
     difficulty: beginner
@@ -822,3 +824,538 @@ questions:
       unacceptable for this update frequency, switch to READ_WRITE (soft locks) — at
       higher cost — or reconsider whether the entity belongs in L2 at all.
     ref: "concepts.md#l2-concurrency-strategies"
+
+  - id: caching-first-second-level-047
+    difficulty: expert
+    tags: [read-write, soft-lock, internals, mechanism]
+    question: |
+      Under the READ_WRITE strategy, what does Hibernate place in the cache region for a
+      key *during* an update transaction, before the DB commit?
+    options:
+      - "The new (post-update) dehydrated state, marked dirty"
+      - "A non-readable Lock (soft-lock) placeholder; the real value is written only after commit"
+      - "Nothing — the entry is deleted immediately and re-added on commit"
+      - "The old value with an incremented @Version so readers can detect staleness"
+    answer: 1
+    explanation: |
+      READ_WRITE is asynchronous: the synchronous update() call installs a Lock (soft-lock)
+      placeholder that is never readable. Only after the DB transaction commits does the
+      afterUpdate callback replace the Lock with a real Item holding the freshly disassembled
+      state.
+    ref: "concepts.md#read_write-internals-soft-locks-and-async-refresh"
+
+  - id: caching-first-second-level-048
+    difficulty: expert
+    tags: [read-write, soft-lock, consistency]
+    question: |
+      While a READ_WRITE cache entry holds a soft Lock, a concurrent transaction looks up
+      that key. What does it get, and why does this prevent stale reads?
+    options:
+      - "It reads the Lock's stored value, which is guaranteed fresh"
+      - "It blocks until the writing transaction commits"
+      - "A cache miss (the Lock is not readable), so it falls through to the DB"
+      - "An OptimisticLockException"
+    answer: 2
+    explanation: |
+      A Lock reports isReadable() == false, so any concurrent lookup during the write window
+      is a cache miss and falls through to the database. Because neither a pre- nor
+      post-commit value is served from the cache during that window, no stale value can be
+      read — that is exactly how READ_WRITE preserves consistency.
+    ref: "concepts.md#read_write-internals-soft-locks-and-async-refresh"
+
+  - id: caching-first-second-level-049
+    difficulty: expert
+    tags: [read-write, identity-generator, insert, gotcha]
+    question: |
+      An entity uses `@GeneratedValue(strategy = IDENTITY)` and is `@Cacheable` with
+      READ_WRITE. After `persist()` + commit, the very next request in a new Session is a
+      cache miss and hits the DB. Why?
+    options:
+      - "IDENTITY-generated entities are NOT put into L2 on insert; only SEQUENCE/TABLE cache on insert"
+      - "A configuration bug — @Cacheable was ignored"
+      - "READ_WRITE never caches newly inserted rows, regardless of generator"
+      - "The soft lock from the insert has not yet timed out"
+    answer: 0
+    explanation: |
+      IDENTITY forces the INSERT to execute immediately to obtain the generated key, which
+      breaks Hibernate's transactional write-behind design, so the afterInsert cache put is
+      skipped. Generators whose id is known before flush (SEQUENCE, TABLE, UUID) do cache the
+      entity on insert.
+    ref: "concepts.md#read_write-internals-soft-locks-and-async-refresh"
+
+  - id: caching-first-second-level-050
+    difficulty: expert
+    tags: [read-write, soft-lock, timeout, rollback]
+    question: |
+      A READ_WRITE-cached entity's update transaction rolls back. For roughly the next 60
+      seconds, reads of that entity miss L2 and hit the DB. What is happening?
+    options:
+      - "The query cache was invalidated and rebuilds over 60 seconds"
+      - "The entry is stuck as a soft Lock (never replaced); it clears at the ~60s DEFAULT_CACHE_LOCK_TIMEOUT"
+      - "Hibernate retries the failed transaction every 60 seconds"
+      - "The L1 cache is being flushed on a 60-second interval"
+    answer: 1
+    explanation: |
+      When the write fails/rolls back, the afterUpdate callback that would replace the Lock
+      with a real value does not install a readable value, so the entry stays a non-readable
+      Lock. Reads fall through to the DB until the soft lock times out — the default
+      DEFAULT_CACHE_LOCK_TIMEOUT is 60000 ms.
+    ref: "concepts.md#read_write-internals-soft-locks-and-async-refresh"
+
+  - id: caching-first-second-level-051
+    difficulty: advanced
+    tags: [read-write, nonstrict, contrast]
+    question: |
+      Which best contrasts READ_WRITE with NONSTRICT_READ_WRITE on an update?
+    options:
+      - "Both acquire exclusive locks; READ_WRITE simply holds them longer"
+      - "READ_WRITE evicts the entry; NONSTRICT_READ_WRITE refreshes it in place"
+      - "READ_WRITE refreshes the entry via a two-phase soft lock; NONSTRICT_READ_WRITE just evicts and can briefly serve stale data"
+      - "Neither writes to the cache on update; both only read"
+    answer: 2
+    explanation: |
+      READ_WRITE is write-through/refresh: soft-lock before commit, install dehydrated state
+      after commit. NONSTRICT_READ_WRITE is read-through/invalidate: it evicts on write with
+      no locking, and because eviction is not atomic with the commit there is a brief window
+      where a stale value can be read.
+    ref: "concepts.md#read_write-internals-soft-locks-and-async-refresh"
+
+  - id: caching-first-second-level-052
+    difficulty: advanced
+    tags: [cache-store-mode, refresh, jpa]
+    question: |
+      You want a specific `find` to force-reload an entity from the DB and overwrite its L2
+      entry (not just read the cached copy). Which JPA-standard setting does this?
+    options:
+      - "jakarta.persistence.cache.retrieveMode = USE"
+      - "jakarta.persistence.cache.retrieveMode = BYPASS"
+      - "jakarta.persistence.cache.storeMode = BYPASS"
+      - "jakarta.persistence.cache.storeMode = REFRESH"
+    answer: 3
+    explanation: |
+      storeMode = REFRESH forces Hibernate to reload from the database and refresh the L2
+      entry. retrieveMode controls whether L2 is consulted on read; BYPASS storeMode would
+      instead prevent writing to L2; USE is the default (read from L2 if present).
+    ref: "concepts.md#forcing-refresh-and-bypass-cachemode-cachestoremode-cacheretrievemode"
+
+  - id: caching-first-second-level-053
+    difficulty: advanced
+    tags: [cache-retrieve-mode, bypass, jpa]
+    question: |
+      Which setting makes a query or `find` ignore any L2 entry and read straight from the
+      database, while still allowing the fresh result to be stored back into L2?
+    options:
+      - "retrieveMode = BYPASS (with storeMode left at USE)"
+      - "storeMode = BYPASS"
+      - "CacheMode.IGNORE"
+      - "shared-cache-mode = NONE"
+    answer: 0
+    explanation: |
+      retrieveMode = BYPASS ignores L2 on the read path; leaving storeMode at its USE default
+      still lets the fresh result be written back. storeMode = BYPASS would do the opposite
+      (read L2, don't write); CacheMode.IGNORE neither reads nor writes; shared-cache-mode is
+      a global setting, not per-operation.
+    ref: "concepts.md#forcing-refresh-and-bypass-cachemode-cachestoremode-cacheretrievemode"
+
+  - id: caching-first-second-level-054
+    difficulty: expert
+    tags: [cache-mode, warm-cache, hibernate]
+    question: |
+      You want to pre-warm the L2 cache by loading entities without ever *reading* existing
+      cached entries (so a batch job populates fresh state). Which Hibernate `CacheMode`?
+    options:
+      - "CacheMode.GET"
+      - "CacheMode.NORMAL"
+      - "CacheMode.PUT"
+      - "CacheMode.IGNORE"
+    answer: 2
+    explanation: |
+      CacheMode.PUT writes to L2 but never reads from it — ideal for warming the cache. GET
+      is read-only (never writes), NORMAL reads and writes, and IGNORE does neither.
+    ref: "concepts.md#forcing-refresh-and-bypass-cachemode-cachestoremode-cacheretrievemode"
+
+  - id: caching-first-second-level-055
+    difficulty: expert
+    tags: [cache-mode, mapping, jpa]
+    question: |
+      Hibernate's `CacheMode.GET` is equivalent to which combination of the two JPA-standard
+      modes?
+    options:
+      - "retrieveMode = USE, storeMode = BYPASS"
+      - "retrieveMode = BYPASS, storeMode = USE"
+      - "retrieveMode = USE, storeMode = REFRESH"
+      - "retrieveMode = BYPASS, storeMode = BYPASS"
+    answer: 0
+    explanation: |
+      CacheMode is the product of the two JPA modes. GET means read from L2 but never write:
+      retrieveMode = USE, storeMode = BYPASS. (PUT is BYPASS×USE, NORMAL is USE×USE, IGNORE is
+      BYPASS×BYPASS, REFRESH is BYPASS×REFRESH.)
+    ref: "concepts.md#forcing-refresh-and-bypass-cachemode-cachestoremode-cacheretrievemode"
+
+  - id: caching-first-second-level-056
+    difficulty: advanced
+    tags: [natural-id, natural-id-cache, lookup]
+    question: |
+      With `@NaturalId` on `sku` and `@NaturalIdCache` on the entity,
+      `session.byNaturalId(Product.class).using("sku", "ABC").load()` performs which lookup
+      sequence?
+    options:
+      - "Resolves the primary key from the natural-id cache, then loads the entity from the L2 entity cache by that id"
+      - "Runs a JPQL query cached in the query cache"
+      - "Scans the entire entity cache region for a matching sku"
+      - "Always issues a SELECT ... WHERE sku = ? ignoring any cache"
+    answer: 0
+    explanation: |
+      The natural-id cache stores a natural-id -> primary-key mapping. byNaturalId().load()
+      first resolves the PK from that region, then loads the entity from the L2 entity cache
+      by id. This is why the entity itself must also be L2-cached.
+    ref: "concepts.md#natural-id-cache"
+
+  - id: caching-first-second-level-057
+    difficulty: intermediate
+    tags: [natural-id, natural-id-cache, requirement]
+    question: |
+      You added `@NaturalIdCache` but the entity is not `@Cache`-annotated. What is the
+      result of a `byNaturalId(...).load()`?
+    options:
+      - "It fails to compile"
+      - "The entity is cached automatically because @NaturalIdCache implies @Cache"
+      - "The natural-id cache is ignored entirely"
+      - "The natural-id cache resolves the id, but a SELECT still loads the entity because it is not L2-cached"
+    answer: 3
+    explanation: |
+      The natural-id cache only stores the id mapping. If the entity itself is not L2-cached,
+      resolving the id saves the WHERE-clause lookup but the entity load still hits the DB.
+      To get a full cache hit you must @Cache the entity too.
+    ref: "concepts.md#natural-id-cache"
+
+  - id: caching-first-second-level-058
+    difficulty: expert
+    tags: [query-cache, cache-layout, version]
+    question: |
+      On Hibernate 6.5+, a cacheable query returns entities that are NOT in the L2 entity
+      cache, yet a query-cache hit materializes results with no per-id SELECTs. Which
+      configuration explains this?
+    options:
+      - "The query cache always stored full entities"
+      - "shared-cache-mode = ALL forces full result caching"
+      - "@QueryCacheLayout(FULL) (or AUTO resolving to FULL), which stores full state, not just ids"
+      - "CacheMode.REFRESH stores full rows"
+    answer: 2
+    explanation: |
+      Since Hibernate 6.5 the CacheLayout is configurable. FULL (or AUTO when the entity is
+      not L2-cacheable) stores the full entity/DTO state in the query cache, so a hit needs no
+      per-id refetch. SHALLOW (the classic behavior) stores only ids.
+    ref: "concepts.md#query-cache-layout-hibernate-65"
+
+  - id: caching-first-second-level-059
+    difficulty: expert
+    tags: [query-cache, cache-layout, auto]
+    question: |
+      What does `CacheLayout.AUTO` (Hibernate 6.5+) do?
+    options:
+      - "Disables the query cache when the table is write-heavy"
+      - "Stores ids if the entity is L2-cacheable, otherwise stores full state"
+      - "Always stores full entity state"
+      - "Picks SHALLOW_WITH_DISCRIMINATOR for every query"
+    answer: 1
+    explanation: |
+      AUTO chooses SHALLOW (ids only) when the returned entity is itself L2-cacheable — so ids
+      resolve cheaply from the entity cache — and FULL otherwise, so the query cache can stand
+      alone without fanning out into N SELECTs.
+    ref: "concepts.md#query-cache-layout-hibernate-65"
+
+  - id: caching-first-second-level-060
+    difficulty: advanced
+    tags: [query-cache, version, cache-layout]
+    question: |
+      A teammate insists "the query cache can only ever store primary keys." When is that
+      claim correct?
+    options:
+      - "Only on Hibernate 6.4 and earlier; since 6.5 CacheLayout (SHALLOW/FULL/AUTO) is configurable"
+      - "Always — the query cache has no other layout"
+      - "Only when the query cache is disabled"
+      - "Only for native SQL queries"
+    answer: 0
+    explanation: |
+      Through Hibernate 6.4 the query cache stored ids only. Hibernate 6.5 introduced the
+      configurable CacheLayout (@QueryCacheLayout / hibernate.cache.query_cache_layout) with
+      SHALLOW, FULL, SHALLOW_WITH_DISCRIMINATOR, and AUTO — so the old blanket claim is now
+      version-dependent.
+    ref: "concepts.md#query-cache-layout-hibernate-65"
+
+  - id: caching-first-second-level-061
+    difficulty: expert
+    tags: [tuning, collection-cache, auto-evict, gotcha]
+    question: |
+      `Author` and its `@OneToMany books` collection are both L2-cached. You add a new `Book`
+      through the association and commit, but the parent's cached `books` still shows the old
+      list. What is the likely cause?
+    options:
+      - "The collection cache never reflects changes and must be manually rebuilt every time"
+      - "READ_ONLY was used on the collection"
+      - "The query cache is overriding the collection cache"
+      - "hibernate.cache.auto_evict_collection_cache defaults to false, so the collection region was not auto-evicted"
+    answer: 3
+    explanation: |
+      auto_evict_collection_cache defaults to false: mutating one side of an association does
+      NOT automatically evict the collection cache region unless you enable it. Otherwise you
+      must evict the collection region explicitly.
+    ref: "concepts.md#cache-tuning-properties"
+
+  - id: caching-first-second-level-062
+    difficulty: expert
+    tags: [tuning, reference-entries, dehydration]
+    question: |
+      You set `hibernate.cache.use_reference_entries = true` hoping to skip dehydration and
+      store entities by reference. For which entities does this actually take effect?
+    options:
+      - "All entities marked @Cacheable"
+      - "Only immutable entities with no to-one associations; otherwise it is silently ignored"
+      - "Only entities using READ_WRITE"
+      - "Only entities with an @Version field"
+    answer: 1
+    explanation: |
+      use_reference_entries stores entities by reference (no disassembly) only when they are
+      immutable and have no to-one associations — sharing a mutable/associated instance across
+      threads would be unsafe, so those cases silently fall back to normal dehydration.
+    ref: "concepts.md#cache-tuning-properties"
+
+  - id: caching-first-second-level-063
+    difficulty: advanced
+    tags: [tuning, missing-cache-strategy, config]
+    question: |
+      An entity references a cache region that is not defined in the provider's
+      configuration. Which `hibernate.cache.missing_cache_strategy` value makes Hibernate
+      throw at startup so you catch the typo, rather than silently auto-creating it?
+    options:
+      - "create"
+      - "create-warn"
+      - "fail"
+      - "ignore"
+    answer: 2
+    explanation: |
+      missing_cache_strategy = fail throws when a referenced region is undefined — safest for
+      production so a mis-named region is caught. create auto-creates silently; create-warn
+      auto-creates and logs a warning.
+    ref: "concepts.md#cache-tuning-properties"
+
+  - id: caching-first-second-level-064
+    difficulty: advanced
+    tags: [tuning, minimal-puts, clustered]
+    question: |
+      What does `hibernate.cache.use_minimal_puts` do, and why is it defaulted on for
+      clustered providers?
+    options:
+      - "Batches all cache puts into one network call"
+      - "Limits each region to a minimal number of entries"
+      - "Writes only the primary key instead of full state"
+      - "Skips a put when the entry is already present, avoiding redundant (network) writes"
+    answer: 3
+    explanation: |
+      use_minimal_puts skips a cache put when the value is already cached, avoiding redundant
+      writes. For clustered/distributed providers a put crosses the network, so avoiding
+      unnecessary puts is a real win — hence the default-true for those providers.
+    ref: "concepts.md#cache-tuning-properties"
+
+  - id: caching-first-second-level-065
+    difficulty: intermediate
+    tags: [tuning, default-strategy, config]
+    question: |
+      Which property lets you set the L2 concurrency strategy globally so you can omit
+      `usage` on each `@Cache`?
+    options:
+      - "hibernate.cache.default_cache_concurrency_strategy"
+      - "hibernate.cache.region_prefix"
+      - "hibernate.cache.use_structured_entries"
+      - "jakarta.persistence.sharedCache.mode"
+    answer: 0
+    explanation: |
+      default_cache_concurrency_strategy sets the strategy applied when @Cache does not
+      specify usage. region_prefix names regions, use_structured_entries changes storage
+      format, and sharedCache.mode selects which entities are cached, not the strategy.
+    ref: "concepts.md#cache-tuning-properties"
+
+  - id: caching-first-second-level-066
+    difficulty: advanced
+    tags: [eviction, bulk-update, api]
+    question: |
+      After a bulk JPQL `UPDATE` on `Product` (which bypasses L2), which call correctly drops
+      all stale `Product` entries from the second-level cache using the JPA-standard API?
+    options:
+      - "em.clear()"
+      - "em.getEntityManagerFactory().getCache().evict(Product.class)"
+      - "em.flush()"
+      - "session.refresh(product)"
+    answer: 1
+    explanation: |
+      The JPA Cache API is reached via EntityManagerFactory.getCache(); evict(Product.class)
+      removes all Product entries from L2. clear()/flush() affect only the L1 persistence
+      context, and refresh() reloads a single managed instance, not the whole region.
+    ref: "concepts.md#managing-the-cache-programmatically"
+
+  - id: caching-first-second-level-067
+    difficulty: advanced
+    tags: [eviction, query-cache, api, hibernate]
+    question: |
+      After the same bulk update, cached *query* results over `Product` are also stale. Which
+      Hibernate-native call clears them?
+    options:
+      - "sessionFactory.getCache().evictQueryRegions()"
+      - "sessionFactory.getCache().evictEntityData(Product.class)"
+      - "em.getCache().evict(Product.class)"
+      - "sessionFactory.close()"
+    answer: 0
+    explanation: |
+      evictQueryRegions() on org.hibernate.Cache clears cached query results. evictEntityData
+      clears the entity region (not query results), the JPA evict handles entities, and
+      closing the SessionFactory is not an eviction mechanism.
+    ref: "concepts.md#managing-the-cache-programmatically"
+
+  - id: caching-first-second-level-068
+    difficulty: intermediate
+    tags: [api, contains, introspection]
+    question: |
+      Which JPA `Cache` method tells you whether a given entity id currently sits in the L2
+      cache?
+    options:
+      - "getCache().contains(Product.class, 42L)"
+      - "getCache().evict(Product.class, 42L)"
+      - "em.contains(product)"
+      - "getCache().getHitCount()"
+    answer: 0
+    explanation: |
+      jakarta.persistence.Cache.contains(Class, id) reports whether that entity is in L2.
+      evict removes it; em.contains checks the L1 persistence context (managed state), not L2;
+      getHitCount is not part of the standard Cache API.
+    ref: "concepts.md#managing-the-cache-programmatically"
+
+  - id: caching-first-second-level-069
+    difficulty: expert
+    tags: [region-factory, hibernate6, providers, version]
+    question: |
+      Migrating to Hibernate 6, your config referencing the native `EhCacheRegionFactory`
+      from the ORM jar fails. What is the correct current approach for a local L2 cache?
+    options:
+      - "Downgrade Ehcache to version 2"
+      - "Use hibernate-jcache (JCacheRegionFactory) backed by Ehcache 3 or Caffeine"
+      - "Native region factories are the only supported option in HB6"
+      - "Use the query cache instead of an entity cache"
+    answer: 1
+    explanation: |
+      Hibernate 6 removed the native Ehcache/Infinispan region factories. For a local cache
+      you now use hibernate-jcache (JSR-107, JCacheRegionFactory) backed by Ehcache 3 or
+      Caffeine; for clustered caches you use infinispan-hibernate-cache-v60.
+    ref: "concepts.md#region-factories-in-hibernate-67"
+
+  - id: caching-first-second-level-070
+    difficulty: expert
+    tags: [clustered, infinispan, invalidation-mode]
+    question: |
+      For a clustered Hibernate L2 with Infinispan, which cache mode is typically recommended
+      because only eviction messages cross the network (each node keeps its own copy)?
+    options:
+      - "Replication mode"
+      - "Distributed mode"
+      - "Invalidation mode"
+      - "Local mode"
+    answer: 2
+    explanation: |
+      Invalidation mode is the common L2 recommendation: each node holds its own copy and only
+      invalidation messages propagate on writes. Replication copies full state to every node
+      (chatty); distributed shards data across owners; local has no cross-node coherence.
+    ref: "concepts.md#region-factories-in-hibernate-67"
+
+  - id: caching-first-second-level-071
+    difficulty: expert
+    tags: [cache-annotation, include, lazy]
+    question: |
+      What does the `include = "non-lazy"` attribute on Hibernate's `@Cache` do?
+    options:
+      - "Caches only entities that have no lazy associations"
+      - "Excludes lazy-loaded properties from the cached state"
+      - "Forces all properties to be fetched eagerly"
+      - "Disables the collection cache for the entity"
+    answer: 1
+    explanation: |
+      @Cache(include = ...) defaults to "all"; setting it to "non-lazy" excludes lazy
+      properties from the entity's cached (dehydrated) state, so those properties are loaded
+      separately rather than cached.
+    ref: "concepts.md#cacheable-vs-cache-precision"
+
+  - id: caching-first-second-level-072
+    difficulty: advanced
+    tags: [cache-annotation, region, defaults]
+    question: |
+      If you cache `com.example.Author` and its `@OneToMany books` collection without naming
+      regions explicitly, what are the default region names?
+    options:
+      - "author and author_books"
+      - "Both share one region named com.example.Author"
+      - "com.example.Author for the entity and com.example.Author.books for the collection"
+      - "A single auto-generated UUID per region"
+    answer: 2
+    explanation: |
+      By default an entity's region is its fully-qualified class name (com.example.Author),
+      and a collection's region is OwnerEntity.collectionField (com.example.Author.books). You
+      can override with @Cache(region = ...).
+    ref: "concepts.md#cacheable-vs-cache-precision"
+
+  - id: caching-first-second-level-073
+    difficulty: advanced
+    tags: [cacheable, cache-annotation, shared-cache-mode]
+    question: |
+      Under `shared-cache-mode = ENABLE_SELECTIVE`, which annotation is required for an entity
+      to be L2-cached, and what does the other add?
+    options:
+      - "@Cache is required; @Cacheable adds the concurrency strategy"
+      - "Neither is needed; ENABLE_SELECTIVE caches everything"
+      - "Both are aliases; either one alone caches nothing"
+      - "@Cacheable (JPA) marks eligibility; @Cache (Hibernate) adds usage/region/include"
+    answer: 3
+    explanation: |
+      Under ENABLE_SELECTIVE, JPA needs @Cacheable(true) to opt an entity in. Hibernate's
+      @Cache is the richer annotation that sets the concurrency strategy (usage), region name,
+      and include policy. @Cacheable is a boolean marker only.
+    ref: "concepts.md#cacheable-vs-cache-precision"
+
+  - id: caching-first-second-level-074
+    difficulty: expert
+    tags: [nonstrict, read-write, contrast, judgment]
+    question: |
+      For an entity that is read constantly but updated a few times per hour, and where a
+      sub-second stale read right after an edit is acceptable, which strategy is the leanest
+      correct choice — and why not the other?
+    options:
+      - "READ_ONLY, because updates are rare"
+      - "NONSTRICT_READ_WRITE, because it avoids soft-lock overhead and the brief stale window is tolerated"
+      - "TRANSACTIONAL, because it is the only consistent option"
+      - "READ_WRITE, because NONSTRICT_READ_WRITE cannot cache mutable entities"
+    answer: 1
+    explanation: |
+      NONSTRICT_READ_WRITE just evicts on write (no soft-lock overhead) and is designed for
+      read-heavy data that tolerates a brief stale window. READ_ONLY is wrong because the
+      entity IS updated (updates would throw); TRANSACTIONAL adds JTA overhead unnecessarily;
+      READ_WRITE's soft-lock cost is not needed when the stale window is acceptable.
+    ref: "concepts.md#read_write-internals-soft-locks-and-async-refresh"
+
+  - id: caching-first-second-level-075
+    difficulty: expert
+    tags: [scenario, bulk-update, predict-sql, eviction]
+    question: |
+      Product is `@Cacheable` (READ_WRITE) and L2 is warm. In one flow you: (1) `find(Product,
+      5L)` in Tx-A, (2) `find(Product, 5L)` again in a later Tx-B, (3) run
+      `UPDATE Product p SET p.price = p.price * 1.1` as a bulk JPQL, then (4) `find(Product,
+      5L)` in Tx-C — all with no explicit eviction. Which describes the result?
+    options:
+      - "Steps 1 and 4 SELECT; steps 2 and 3 are cache hits"
+      - "Step 1 SELECTs (warms L2); step 2 is an L2 hit; step 4 returns the STALE cached price because bulk JPQL bypassed L2 invalidation"
+      - "All four steps SELECT, since bulk updates flush the entire cache"
+      - "Step 4 SELECTs fresh data because bulk JPQL auto-evicts affected entities"
+    answer: 1
+    explanation: |
+      Step 1 loads from L2 (or DB) and step 2 is a straightforward L2 hit. The bulk JPQL
+      UPDATE writes rows directly without going through the per-entity lifecycle, so L2 is not
+      invalidated; step 4 therefore returns the stale cached price. The fix is an explicit
+      getCache().evict(Product.class) (or a targeted evict) after the bulk operation.
+    ref: "concepts.md#managing-the-cache-programmatically"

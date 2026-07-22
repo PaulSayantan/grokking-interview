@@ -461,6 +461,244 @@ A rapid-fire senior review checklist — each maps to a section above:
 - **Loading entities for bulk update/delete**: use bulk JPQL / native SQL.
 - **Manually setting `@Version`** or swallowing `OptimisticLockException`.
 
+## Read-Only Optimization and the Dirty-Check Snapshot
+
+The cheapest, highest-leverage win on read paths is telling Hibernate you will not
+modify the entities. To understand *why* it is fast you must understand the
+**dehydrated (loaded) state snapshot**: when a managed entity is loaded, Hibernate keeps
+a second copy of its attribute values (the *loaded state* / hydrated array) so that at
+flush time it can compare the current state field-by-field (automatic dirty checking).
+That snapshot roughly **doubles the per-entity memory** and the flush cost is O(entities
+× fields).
+
+Two distinct switches:
+
+- **`@Transactional(readOnly = true)`** — a Spring concern that sets the Hibernate
+  `FlushMode` to `MANUAL`, so **auto-flush before queries never fires** and there is no
+  implicit flush at commit. It does *not* by itself stop the snapshot from being taken.
+- **The Hibernate `readOnly` hint** — `Session.setDefaultReadOnly(true)`, or per-query
+  `query.setHint(HibernateHints.HINT_READ_ONLY, true)` (Hibernate 6 constant
+  `org.hibernate.jpa.HibernateHints.HINT_READ_ONLY`, value `"org.hibernate.readOnly"`;
+  the Hibernate 5 constant was `QueryHints.HINT_READONLY`). This tells Hibernate **not to
+  take the loaded-state snapshot at all** — no dirty checking, ~half the memory per
+  managed entity.
+
+```java
+List<Post> posts = em.createQuery("select p from Post p", Post.class)
+    .setHint(HibernateHints.HINT_READ_ONLY, true)   // no dehydrated snapshot
+    .getResultList();
+```
+
+> [!KEY-TAKEAWAY]
+> A read endpoint that uses ~2× the memory of the equivalent write path is usually
+> holding managed entities with their dirty-check snapshots. Fix = the `readOnly` hint
+> (skip the snapshot) or, better, a **DTO projection** (never select the columns at
+> all). Benchmarks (Vlad Mihalcea, Thorben Janssen) show the read-only hint helps most
+> on large managed graphs you keep around; for a pure read a DTO beats it because it
+> avoids hydration entirely.
+
+## Query Plan Cache and IN-Clause Parameter Padding
+
+Before Hibernate can run HQL/JPQL or a Criteria query it must **compile** it: parse to
+the SQM (Semantic Query Model) tree and translate to SQL. That compilation is cached in
+the **query plan cache**, keyed by the query string/Criteria structure:
+
+- `hibernate.query.plan_cache_max_size` — bounded LRU, **default 2048** entries.
+- `hibernate.query.plan_parameter_metadata_max_size` — a secondary parameter-metadata
+  cache (**default 128** in Hibernate 5; deprecated / no longer used in Hibernate 6.6+).
+
+The senior "predict the slowdown" trap: **dynamically built JPQL/Criteria** and, above
+all, **variable-length `IN` lists** produce a *different query string per parameter
+count*. `where id in (?)`, `in (?,?)`, `in (?,?,?)` … are three distinct cache keys.
+A hot endpoint that builds `IN` lists of wildly varying size thrashes the plan cache →
+constant recompilation on the critical path, plus it defeats the **database's own
+execution-plan cache** (Oracle cursor cache, SQL Server plan cache).
+
+**`hibernate.query.in_clause_parameter_padding`** (available since Hibernate 5.2.18)
+mitigates this: it pads the bind count up to the next power of two, so 3 or 4 ids both
+become `in (?,?,?,?)` (the extra slot repeats the last value), and 5–8 ids all become an
+8-parameter `IN`. That collapses many distinct SQL strings into a handful → far better
+reuse of both the Hibernate plan cache and the DB plan cache.
+
+> [!WARNING]
+> `in_clause_parameter_padding` is **`false` by default in plain Hibernate**, and Spring
+> Boot does **not** turn it on for you (it is a widely repeated myth that it does — Boot
+> only defaults naming strategies and `ddl-auto`). Enable it explicitly via
+> `spring.jpa.properties.hibernate.query.in_clause_parameter_padding=true`. Classic
+> symptom it fixes: "the same query is fast, then suddenly slow after a deploy that
+> switched a fixed filter to a variable `IN` list."
+
+## Bytecode Enhancement and Lazy Attributes
+
+Standard lazy loading uses **runtime proxies** (a generated subclass for `@ManyToOne`,
+`PersistentBag`/`PersistentSet` for collections). Two things proxies *cannot* do: make a
+scalar column (`@Basic`) lazy, and lazy-load a `@ManyToOne` without substituting a proxy
+object. **Bytecode enhancement** — applied at build time by the
+`hibernate-enhance-maven-plugin` / Gradle plugin (or a load-time weaver) — rewrites the
+entity class itself and unlocks:
+
+- **`enableLazyInitialization`** — lazy `@Basic(fetch = LAZY)` attributes (e.g. a large
+  LOB column you rarely read) and lazy `@ManyToOne` **without a proxy** (the field is
+  intercepted directly, so `instanceof`/`getClass()` behave normally).
+- **`@LazyGroup("name")`** — group several lazy attributes so they load together in one
+  select instead of one-per-attribute.
+- **`enableDirtyTracking`** — the entity tracks its own modified fields, so flush no
+  longer needs the full O(fields) snapshot comparison; it asks the entity what changed.
+  This is the enhancement-based alternative to `@DynamicUpdate` for reducing dirty-check
+  cost (though it does not by itself narrow the UPDATE column list).
+
+> [!KEY-TAKEAWAY]
+> If a senior candidate claims "`@Basic(fetch = LAZY)` makes my column lazy," probe
+> whether bytecode enhancement is enabled — **without enhancement the hint on a basic
+> attribute is silently ignored** and the column is fetched eagerly. Lazy scalar columns
+> and no-proxy lazy to-ones essentially require enhancement.
+
+## @Immutable, @DynamicUpdate, and @DynamicInsert Trade-offs
+
+Three annotations change how Hibernate generates DML — each with a real trade-off:
+
+- **`@Immutable`** (on an entity or collection) — Hibernate skips dirty checking for it
+  entirely (no snapshot comparison, no UPDATE ever generated). Ideal for reference data
+  you only read. Attempting to modify it is silently ignored.
+- **`@DynamicUpdate`** — instead of one static UPDATE touching all columns, Hibernate
+  generates an UPDATE containing **only the changed columns** at flush time. Helps wide
+  tables and avoids rewriting large LOB columns you did not touch (and reduces
+  write-amplification / lock footprint).
+- **`@DynamicInsert`** — omits columns that are null at insert, letting DB defaults apply.
+
+The senior trade-off to state out loud: **`@DynamicUpdate`/`@DynamicInsert` generate a
+different SQL string per changed-column combination**, which (a) creates many entries in
+the query plan cache and (b) **breaks JDBC batching**, because batching requires
+consecutive *identical* SQL. So the "helpful" dynamic UPDATE can quietly turn a batched
+write path into per-row round-trips. Reach for it only on genuinely wide tables where the
+column-narrowing win outweighs the lost batching, and measure.
+
+## Entity Proxies in equals() and hashCode()
+
+The main `equals`/`hashCode` section covers the null-id-in-a-`Set` bug. The **proxy
+half** is just as important and more subtle. With a lazy `@ManyToOne`, Hibernate hands
+you a **proxy subclass** (`Post$HibernateProxy$xyz`), not a `Post`. Two failures follow:
+
+1. **`getClass()` comparison breaks.** `this.getClass() == other.getClass()` returns
+   `false` when comparing a proxy to a real instance (or two proxies of different init
+   state). Use `instanceof` in `equals` (it is true for subclasses), or unproxy with
+   `Hibernate.getClass(o)` on both sides.
+2. **Field access inside `equals` reads the proxy's *uninitialized* field.** `other.id`
+   (direct field access on a proxy) is `null` because the state lives in the target, not
+   the proxy shell. You must call the **getter** `other.getId()`, which the proxy's
+   interceptor routes to the initialized target.
+
+```java
+@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Customer)) return false;           // instanceof, not getClass()
+    Customer other = (Customer) o;
+    return id != null && id.equals(other.getId());          // getter, not other.id
+}
+@Override
+public int hashCode() {
+    return getClass().hashCode();   // constant per class — stable across id assignment
+}
+```
+
+> [!KEY-TAKEAWAY]
+> Hibernate's own recommended canonical form: `hashCode()` returns a **constant**
+> (`getClass().hashCode()`) so it never changes when the id is assigned; `equals()`
+> compares the id **only when non-null**, uses `instanceof` (or `Hibernate.getClass`),
+> and reaches the other object's id via its **getter** so a proxy initializes correctly.
+
+## Detecting N+1 in Tests and CI
+
+"How do you stop N+1 from regressing?" has concrete, name-the-library answers beyond a
+generic assertion:
+
+- **Hypersistence Utils** (the library formerly called `db-util`) —
+  `SQLStatementCountValidator.reset()` before the code under test, then
+  `assertSelectCount(1)` / `assertInsertCount(n)` / `assertUpdateCount(n)` after; a
+  mismatch throws `SQLStatementCountMismatchException` and fails the build. The artifact
+  is version-matched to your Hibernate line (e.g. `hypersistence-utils-hibernate-63`).
+- **datasource-proxy** — wrap the `DataSource` with `ProxyDataSourceBuilder` and attach a
+  `DataSourceQueryCountListener`; assert on the captured `QueryCount`. Framework-agnostic.
+- **p6spy** — a JDBC proxy driver that logs every real statement with timing; the
+  logging-based alternative for spotting N+1 in local runs.
+- **`hibernate.generate_statistics`** — assert on
+  `Statistics.getPrepareStatementCount()` when you do not want an extra dependency.
+
+```java
+SQLStatementCountValidator.reset();
+service.loadDashboard();            // must be a single query
+SQLStatementCountValidator.assertSelectCount(1);   // fails the test if N+1 sneaks in
+```
+
+## Batching Gotchas Beyond IDENTITY
+
+`IDENTITY` disabling insert batching is the famous one, but "why won't this batch?" has
+several other answers a senior should list:
+
+- **`@DynamicUpdate`/`@DynamicInsert`** — per-row SQL differs by changed-column set, so
+  consecutive statements are not identical and cannot batch (see the section above).
+- **`hibernate.jdbc.batch_versioned_data`** — must be effectively `true` for `@Version`
+  UPDATEs to batch. In Hibernate 6 the default is **generally `true` (dialect-dependent)**;
+  on older versions or dialects lacking reliable batched-update row counts it defaulted
+  to `false` and versioned updates fell back to per-row execution.
+- **Interleaved entity types** — inserting `Post`, `Comment`, `Post`, `Comment` … breaks
+  batches at every type switch; `hibernate.order_inserts=true` (and `order_updates`)
+  regroups them. Cascade-driven persistence is the usual source of interleaving.
+- **Per-session override** — Hibernate 6 lets you set the batch size for one unit of work
+  via `session.setJdbcBatchSize(int)` (a `Session`/`StatelessSession` method), overriding
+  the global `hibernate.jdbc.batch_size`.
+- **PostgreSQL multi-row inserts** — even with Hibernate batching on, the pgJDBC driver
+  only rewrites batched inserts into a true multi-values statement when the JDBC URL has
+  **`reWriteBatchedInserts=true`**. Without it you still get one round-trip per row at the
+  wire level for inserts. A real prod tuning knob.
+
+> [!WARNING]
+> `StatelessSession` still performs JDBC batching, but it does **not** cascade, fire
+> events, or touch L1/L2 — so cascade-triggered child inserts simply do not happen. In
+> Hibernate 6 it also gained `upsert()` (insert-or-update) alongside `insert`/`update`/
+> `delete`.
+
+## Session Operation Cheat-Sheet: flush vs commit, clear vs detach
+
+Subtle-distinction questions cluster around these pairs:
+
+| Operation | What it does | What it does NOT do |
+|---|---|---|
+| `flush()` | Synchronizes pending SQL (INSERT/UPDATE/DELETE) to the DB | Does **not** commit — a rollback still undoes it; keeps entities managed |
+| `commit()` | Flushes (if needed) **and** commits the transaction | — |
+| `clear()` | Detaches **all** managed entities, empties the persistence context | Does not flush first — pending changes not yet flushed are **lost** |
+| `detach(e)` | Detaches **one** entity (and cascades per `CascadeType.DETACH`) | Leaves the rest of the context managed |
+
+`StatelessSession` vs a flush/clear loop: use **flush/clear** when you still need cascade,
+lifecycle callbacks, dirty checking, or the L2 cache during the bulk work; use
+**`StatelessSession`** for pure ETL where none of that applies and you want flat memory
+with zero snapshot overhead.
+
+## Connection Pool Sizing and OSIV Under Load
+
+OSIV's cost is not only hidden N+1 — it is **connection-hold time**. With
+`open-in-view=true` the `EntityManager` (and thus a pooled DB connection, once the first
+query runs) is held for the **entire HTTP request including view/JSON rendering and
+serialization**. Under load with a small HikariCP pool this causes **connection
+starvation**: requests queue for a connection while slow serialization holds them.
+
+A useful pool-sizing heuristic (see `messaging-databases`, `reliability-ops` for the full
+math) is roughly **connections ≈ cores × 2** — small pools usually *outperform* large
+ones because the DB is the bottleneck, not the app. OSIV fights this by inflating
+hold-time per request.
+
+A concrete detail the OSIV table omits: after the service transaction commits, OSIV keeps
+the session open and any further statements (e.g. a lazy load during rendering) run in
+**autocommit mode** — each is its own tiny transaction with its own commit/log flush,
+adding round-trips and WAL/redo pressure.
+
+> [!INTERVIEW]
+> "Your read endpoint uses 2× memory of the write path" → managed entities keep the
+> dirty-check snapshot; use the read-only hint or a DTO. "Latency spikes under load with
+> a tiny pool" → OSIV holding connections through rendering; disable it and size the pool
+> to ~cores × 2. Tie both back to *mechanism*, not folklore.
+
 ## Common Interview Follow-ups
 
 - *"Walk me through diagnosing a slow endpoint that got worse as data grew."* — Enable
@@ -482,6 +720,20 @@ A rapid-fire senior review checklist — each maps to a section above:
 - *"When would you drop out of the ORM entirely?"* — Bulk update/delete, complex
   reporting/analytics, and high-volume ETL — use bulk JPQL, native SQL/jOOQ, or a
   `StatelessSession`.
+- *"The same query is fast then suddenly slow after a deploy — why?"* — A fixed filter
+  became a variable-length `IN` list, so each parameter count is a new plan-cache key
+  (recompilation + cold DB plan). Enable `in_clause_parameter_padding`.
+- *"How does the read-only hint make reads faster?"* — It skips the dehydrated
+  loaded-state snapshot, halving per-entity memory and removing the flush-time dirty
+  check. A DTO is faster still (no columns fetched).
+- *"Why does my `equals` break when comparing a lazy proxy?"* — `getClass()` sees the
+  proxy subclass and field access reads the uninitialized proxy shell; use `instanceof`
+  and the id **getter**, with a constant `hashCode()`.
+- *"Why won't my UPDATEs batch?"* — `@DynamicUpdate` (per-row SQL differs),
+  `batch_versioned_data` off for `@Version` rows, interleaved entity types, or IDENTITY
+  (for inserts).
+- *"How do you keep N+1 from regressing in CI?"* — Assert statement counts with
+  Hypersistence Utils `SQLStatementCountValidator` or datasource-proxy in a test.
 
 ## References
 
@@ -491,7 +743,13 @@ A rapid-fire senior review checklist — each maps to a section above:
   fetch profiles, statistics), Batching chapter (`jdbc.batch_size`, `order_inserts`),
   `StatelessSession`, and the Caching chapter.
 - Vlad Mihalcea, *High-Performance Java Persistence* — the definitive treatment of N+1,
-  batching, IDENTITY vs SEQUENCE, and entity `equals`/`hashCode`.
+  batching, IDENTITY vs SEQUENCE, and entity `equals`/`hashCode`; plus his articles on
+  the read-only query hint, `IN`-clause parameter padding, and the query plan cache.
+- Hibernate ORM User Guide — Bytecode Enhancement chapter (`enableLazyInitialization`,
+  `@LazyGroup`, `enableDirtyTracking`), `@DynamicUpdate`/`@DynamicInsert`/`@Immutable`,
+  and `HibernateHints.HINT_READ_ONLY`.
+- Hypersistence Utils (`SQLStatementCountValidator`) and datasource-proxy — statement-
+  count assertions for catching N+1 in tests.
 - Sibling topics: `hibernate-jpa/fetching-lazy-eager-n-plus-one`,
   `hibernate-jpa/transactions-dirty-checking-flushing`,
   `hibernate-jpa/primary-keys-and-id-generation`,
