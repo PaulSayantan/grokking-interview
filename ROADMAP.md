@@ -96,12 +96,27 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Interview Craft](topics/interview-craft/README.md) | 16 | 16 ✅ (Pass 1, 793 MCQs) |
 | [DSA & Coding Interviews](topics/dsa-coding/README.md) | 20 | 20 ✅ (Pass 1, 456 MCQs + 350 LeetCode links) |
 | [Low-Level Design & OOD](topics/lld-and-ood/README.md) | 33 | 33 ✅ (1,671 MCQs) |
-| [Reliability Engineering & Operations](topics/reliability-ops/README.md) | 16 | 16 ✅ (Pass 1, 796 MCQs) |
+| [Reliability Engineering & Operations](topics/reliability-ops/README.md) | 16 | 16 ✅ (all tiers, 1,279 MCQs) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
 
+- **Session 38 (2026-07-22):** **Reliability-Ops Pass 2 (deepen)** — research→deepen→verify pipeline
+  (48 agents, 0 errors, high effort) over all 16 topics. Grew **796 → 1,279 MCQs (+483)**; every topic
+  now 74-88 (from 45-58), heavily advanced/expert (37-56 adv+exp per topic). Additive concept
+  enrichment + hard senior/staff MCQs: correlated/common-cause failure & k-of-n quorum math, multi-burn-
+  rate & error-budget-policy governance, jitter formulas/retry-budgets/deadline-propagation/hedged
+  requests (gRPC A6), Resilience4j/Hystrix exact config defaults + decorator order + adaptive concurrency,
+  CoDel/LIFO-under-overload/criticality-tiers, static stability & fail-open-vs-closed, split-brain/quorum/
+  fencing & the deep-health-check death spiral, metastable failure + hysteresis & cache-stampede fixes &
+  Nygard's anti-patterns, ICS roles & Just Culture substitution test & Safety-II, Swiss cheese & "How
+  Complex Systems Fail" & golden-signals/RED/USE, principlesofchaos.org loop + Simian Army + ChAP +
+  blast-radius, AWS DR cost/RTO curve + sync=RPO0 + test-restores, queueing theory (M/M/1 knee) +
+  coordinated omission + autoscale lag, toil 6-part definition + automation hierarchy + self-healing
+  guardrails. 4 new Mermaid (47 total, all render clean). Validator clean; answer indices balanced
+  (max 34%). Verify caught a burn-rate option contradicting its own math (fixed). Commit d0c5581.
+  Same 3-stage deepen pattern as rest-api/networking/security. NEXT: performance-engineering.
 - **Session 37 (2026-07-22):** **Reliability Engineering & Operations Pass 1** (NEW domain, sequence)
   — 16 topics, **796 MCQs**, 43 Mermaid diagrams (all render 0-error, headless sweep). Grounded in the
   Google SRE books, Nygard's *Release It!*, and the AWS Well-Architected Reliability pillar. Three
