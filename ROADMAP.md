@@ -96,10 +96,26 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Interview Craft](topics/interview-craft/README.md) | 16 | 16 ✅ (Pass 1, 793 MCQs) |
 | [DSA & Coding Interviews](topics/dsa-coding/README.md) | 20 | 20 ✅ (Pass 1, 456 MCQs + 350 LeetCode links) |
 | [Low-Level Design & OOD](topics/lld-and-ood/README.md) | 33 | 33 ✅ (1,671 MCQs) |
+| [Reliability Engineering & Operations](topics/reliability-ops/README.md) | 16 | 16 ✅ (Pass 1, 796 MCQs) |
 
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
+
+- **Session 37 (2026-07-22):** **Reliability Engineering & Operations Pass 1** (NEW domain, sequence)
+  — 16 topics, **796 MCQs**, 43 Mermaid diagrams (all render 0-error, headless sweep). Grounded in the
+  Google SRE books, Nygard's *Release It!*, and the AWS Well-Architected Reliability pillar. Three
+  clusters: foundations & SLOs (availability/nines math, error-budgets & velocity tradeoff); resilience
+  patterns (retries/timeouts/backoff, circuit breakers & bulkheads, load shedding & backpressure,
+  graceful degradation, redundancy/failover/health checks, cascading failures & anti-patterns);
+  operations (incident response & command, on-call/runbooks, blameless postmortems, RCA, chaos
+  engineering, DR RPO/RTO, capacity planning, toil). BOUNDARIES: cross-references (does not duplicate)
+  observability (telemetry + SLO alerting mechanics), devops-cicd (pipeline/deploy + SRE-culture +
+  its light incident topic), system-design (failure theory), security (rate-limit-as-abuse). Built via
+  `reliability-ops-authoring.js` (author→verify, 32 agents, 0 errors — a clean run for once). Verify
+  caught real fixes: a mixed 30-day/avg month convention in the nines table, an 85%-index-1 answer
+  clustering (rebalanced to even), and the Resilience4j `waitDurationInOpenState` default (60s not 5s).
+  Validator clean; answer indices balanced (max 31%). Commit 1092b99. NEXT: performance-engineering.
 
 - **Session 36 (2026-07-22):** **LLD & OOD expansion** — grew the domain 18 → **33 topics**,
   919 → **1,671 MCQs**, driven by a deep-research workflow (99 agents, cross-referenced across
