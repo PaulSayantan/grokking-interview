@@ -1,0 +1,858 @@
+topic: "Session, EntityManager & Persistence Context"
+domain: hibernate-jpa
+topic_slug: session-entitymanager-persistence-context
+version: 1
+questions:
+  - id: session-entitymanager-persistence-context-001
+    difficulty: beginner
+    tags: [persistence-context, l1-cache, definition]
+    question: |
+      What best describes the JPA/Hibernate persistence context?
+    options:
+      - "A shared cache visible to all EntityManagers across the whole application"
+      - "A first-level cache plus a unit of work that tracks managed entities"
+      - "A connection pool that hands out JDBC connections to threads"
+      - "A read-only snapshot of the database taken at transaction start"
+    answer: 1
+    explanation: |
+      The persistence context is both the mandatory first-level (L1) cache — a map of
+      entity-key to instance — and a unit of work that records loaded state so it can
+      dirty-check and flush SQL. It is per-context, not shared (that is the second-level
+      cache), and it is not a connection pool.
+    ref: "concepts.md#what-the-persistence-context-is"
+
+  - id: session-entitymanager-persistence-context-002
+    difficulty: beginner
+    tags: [namespace, jakarta, imports]
+    question: |
+      In Hibernate ORM 6/7, which package should the EntityManager type be imported from?
+    options:
+      - "javax.persistence"
+      - "org.hibernate.jpa"
+      - "jakarta.persistence"
+      - "java.persistence"
+    answer: 2
+    explanation: |
+      Hibernate 6/7 targets Jakarta Persistence 3.1/3.2, which uses the
+      jakarta.persistence.* namespace. The legacy javax.persistence.* packages (JPA <=2.2)
+      were dropped in Jakarta EE 9+ and are not supported.
+    ref: "concepts.md#entitymanager-and-session-as-the-interface"
+
+  - id: session-entitymanager-persistence-context-003
+    difficulty: beginner
+    tags: [thread-safety, factory]
+    question: |
+      Which statement about thread-safety is correct?
+    options:
+      - "Both EntityManagerFactory and EntityManager are thread-safe"
+      - "EntityManager is thread-safe; EntityManagerFactory is not"
+      - "Neither is thread-safe; both need external synchronization"
+      - "EntityManagerFactory is thread-safe; EntityManager is not"
+    answer: 3
+    explanation: |
+      The EntityManagerFactory/SessionFactory is an expensive, thread-safe, application-wide
+      singleton. The EntityManager/Session is cheap, holds the mutable first-level cache,
+      and is NOT thread-safe — use one per request/transaction.
+    ref: "concepts.md#factory-vs-context-entitymanagerfactory-and-sessionfactory"
+
+  - id: session-entitymanager-persistence-context-004
+    difficulty: intermediate
+    tags: [object-identity, l1-cache, find]
+    question: |
+      Within a single persistence context you call em.find(Author.class, 1L) twice and
+      assign the results to a1 and a2. What is guaranteed?
+    options:
+      - "a1 and a2 are distinct instances with equal field values"
+      - "a1 == a2 (the exact same object instance is returned)"
+      - "a2 reflects the latest DB row even if the row changed after a1 loaded"
+      - "The second find always issues a fresh SELECT to re-read the row"
+    answer: 1
+    explanation: |
+      The persistence context guarantees object identity within its scope: the same PK
+      returns the same instance. The second find is served from the L1 cache with no SQL,
+      so a1 == a2 by reference. It does NOT re-read a changed row within the same context.
+    ref: "concepts.md#the-first-level-cache-and-object-identity"
+
+  - id: session-entitymanager-persistence-context-005
+    difficulty: intermediate
+    tags: [dirty-checking, flush, update]
+    question: |
+      A managed Employee is loaded, then you call e.setSalary(6000) and never call any
+      EntityManager method. At commit, what happens?
+    options:
+      - "Hibernate dirty-checks the entity and issues an UPDATE automatically"
+      - "Nothing — you must call em.merge(e) or em.persist(e) to save the change"
+      - "A LazyInitializationException is thrown because the entity was mutated"
+      - "The change is silently discarded because setters are not tracked"
+    answer: 0
+    explanation: |
+      Managed entities are dirty-checked: Hibernate compares current field values to the
+      loaded-state snapshot at flush and emits an UPDATE for any that differ. No explicit
+      save/merge call is needed for a managed entity.
+    ref: "concepts.md#dirty-checking-and-automatic-flush"
+
+  - id: session-entitymanager-persistence-context-006
+    difficulty: intermediate
+    tags: [lazy-init-exception, scope, transaction]
+    question: |
+      A transaction-scoped EntityManager loads an Order (with a LAZY lineItems collection),
+      the @Transactional method returns, and later the controller calls
+      order.getLineItems().size(). What is the most likely result?
+    options:
+      - "The collection loads fine because entities stay managed after commit"
+      - "An empty list, since lazy collections default to empty when detached"
+      - "A fresh SELECT via a new persistence context created on demand"
+      - "A LazyInitializationException because the persistence context is closed"
+    answer: 3
+    explanation: |
+      With a transaction-scoped PC, the context closes at commit and the returned Order is
+      detached. Touching an uninitialized lazy collection outside its context throws
+      LazyInitializationException. Fix by fetching in-tx (JOIN FETCH / entity graph / DTO),
+      not by enabling Open Session In View.
+    ref: "concepts.md#persistence-context-scope-transaction-scoped-vs-extended"
+
+  - id: session-entitymanager-persistence-context-007
+    difficulty: intermediate
+    tags: [merge, detached, gotcha]
+    question: |
+      You have a detached Order o. Which snippet correctly applies a status change and
+      persists it?
+    options:
+      - "em.merge(o); o.setStatus(SHIPPED);"
+      - "o.setStatus(SHIPPED); em.persist(o);"
+      - "Order m = em.merge(o); m.setStatus(SHIPPED);"
+      - "em.detach(o); o.setStatus(SHIPPED);"
+    answer: 2
+    explanation: |
+      merge does not make its argument managed — it returns a separate managed copy. You
+      must mutate the RETURN value. Calling persist on a detached entity risks
+      EntityExistsException, and mutating o after merge changes only the still-detached o.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-008
+    difficulty: intermediate
+    tags: [getReference, proxy, find]
+    question: |
+      What is the key difference between em.getReference(Class, id) and em.find(Class, id)?
+    options:
+      - "getReference returns a lazy proxy without hitting the DB; find loads eagerly now"
+      - "getReference always issues a SELECT; find never does"
+      - "getReference returns null if absent; find throws an exception"
+      - "There is no difference; getReference is just an alias for find"
+    answer: 0
+    explanation: |
+      getReference returns a lazy proxy and defers the SELECT until a non-id property is
+      accessed (throwing EntityNotFoundException then if the row is missing). find loads
+      immediately and returns null when the row does not exist.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-009
+    difficulty: beginner
+    tags: [operations, clear]
+    question: |
+      What does EntityManager.clear() do?
+    options:
+      - "Detaches all entities, emptying the persistence context"
+      - "Flushes all pending SQL to the database"
+      - "Rolls back the current transaction"
+      - "Deletes all managed entities from the database"
+    answer: 0
+    explanation: |
+      clear() evicts every managed entity, emptying the first-level cache. All previously
+      managed entities become detached. It does not flush, commit, or delete rows.
+    ref: "concepts.md#contains-detach-and-clear"
+
+  - id: session-entitymanager-persistence-context-010
+    difficulty: advanced
+    tags: [batch, flush, clear, memory]
+    question: |
+      When bulk-inserting a million rows through the EntityManager, why do you periodically
+      call flush() then clear() inside the loop?
+    options:
+      - "To commit each batch so a failure doesn't roll back everything"
+      - "To force Hibernate to switch from IDENTITY to SEQUENCE id generation"
+      - "To push pending INSERTs and empty the L1 cache so memory stays bounded"
+      - "To disable dirty checking for the remaining iterations"
+    answer: 2
+    explanation: |
+      flush() sends the accumulated INSERTs to the DB; clear() empties the L1 cache so it
+      does not grow unbounded (which would exhaust memory and slow dirty checking as it
+      scans every managed entity). flush/clear does not commit — the transaction still
+      commits at the end.
+    ref: "concepts.md#contains-detach-and-clear"
+
+  - id: session-entitymanager-persistence-context-011
+    difficulty: beginner
+    tags: [factory, lifecycle, cost]
+    question: |
+      How many EntityManagerFactory instances should a typical application create per
+      persistence unit?
+    options:
+      - "One per thread"
+      - "One per transaction"
+      - "One for the whole application"
+      - "One per EntityManager"
+    answer: 2
+    explanation: |
+      The EntityManagerFactory is expensive to build (parses mappings, builds the
+      metamodel, opens the connection pool) and is thread-safe, so you create exactly one
+      per persistence unit for the application's lifetime and share it.
+    ref: "concepts.md#factory-vs-context-entitymanagerfactory-and-sessionfactory"
+
+  - id: session-entitymanager-persistence-context-012
+    difficulty: intermediate
+    tags: [session, hibernate, unwrap]
+    question: |
+      In a Hibernate ORM 6/7 application, how do the Session and EntityManager types
+      relate?
+    options:
+      - "They are unrelated APIs that cannot be converted between each other"
+      - "EntityManager extends Session, so every EntityManager is a Session subclass"
+      - "Session was removed in Hibernate 6 in favor of EntityManager only"
+      - "Session extends EntityManager, and you can em.unwrap(Session.class)"
+    answer: 3
+    explanation: |
+      In Hibernate 6/7 the Hibernate Session interface extends the Jakarta
+      EntityManager. A JPA EntityManager backed by Hibernate can be unwrapped to a Session
+      via em.unwrap(Session.class) to access Hibernate-specific features.
+    ref: "concepts.md#entitymanager-and-session-as-the-interface"
+
+  - id: session-entitymanager-persistence-context-013
+    difficulty: intermediate
+    tags: [extended, scope, stateful]
+    question: |
+      What characterizes an EXTENDED persistence context
+      (@PersistenceContext(type = EXTENDED))?
+    options:
+      - "It shares the L1 cache across multiple threads safely"
+      - "Its entities are detached immediately after each method returns"
+      - "It spans multiple transactions, keeping entities managed between them"
+      - "It disables the first-level cache to reduce memory usage"
+    answer: 2
+    explanation: |
+      An extended persistence context lives as long as the owning stateful bean and spans
+      multiple transactions, keeping entities managed across them — useful for multi-step
+      conversations. A transaction-scoped PC (the default) detaches entities at commit.
+    ref: "concepts.md#persistence-context-scope-transaction-scoped-vs-extended"
+
+  - id: session-entitymanager-persistence-context-014
+    difficulty: beginner
+    tags: [l1-cache, mandatory]
+    question: |
+      Can the first-level (L1) cache be disabled?
+    options:
+      - "Yes, via hibernate.cache.use_first_level_cache=false"
+      - "Only in Hibernate 7; it was mandatory in earlier versions"
+      - "No — it is mandatory and inherent to every persistence context"
+      - "Yes, but only for entities annotated with @Cacheable(false)"
+    answer: 2
+    explanation: |
+      The first-level cache IS the persistence context; it is mandatory and cannot be
+      turned off. Only the optional second-level cache (shared across contexts) can be
+      enabled/disabled per entity.
+    ref: "concepts.md#the-first-level-cache-and-object-identity"
+
+  - id: session-entitymanager-persistence-context-015
+    difficulty: intermediate
+    tags: [dirty-checking, snapshot, mechanism]
+    question: |
+      How does Hibernate know a managed entity is dirty at flush time?
+    options:
+      - "It registers JVM field-change listeners on every setter"
+      - "It compares current field values to a loaded-state snapshot taken at load time"
+      - "It re-reads the row from the DB and diffs it against the entity"
+      - "It requires you to call em.markDirty(entity) before flush"
+    answer: 1
+    explanation: |
+      At load time Hibernate snapshots the entity's property values into the PC. At flush
+      it compares current values against that snapshot; differing entities are dirty and
+      get an UPDATE. It does not use JVM listeners, re-read the row, or need a manual mark.
+    ref: "concepts.md#dirty-checking-and-automatic-flush"
+
+  - id: session-entitymanager-persistence-context-016
+    difficulty: advanced
+    tags: [dynamic-update, columns, update-sql]
+    question: |
+      By default, when a managed entity with 10 columns has one field changed, what UPDATE
+      does Hibernate generate at flush?
+    options:
+      - "An UPDATE touching only the single changed column"
+      - "No UPDATE — Hibernate merges the change into the next INSERT"
+      - "One UPDATE per column, batched together"
+      - "An UPDATE listing all columns, so a cached prepared statement can be reused"
+    answer: 3
+    explanation: |
+      By default Hibernate UPDATEs all columns so it can reuse one cached prepared
+      statement per entity type. @DynamicUpdate makes it generate SQL for only the dirty
+      columns, at the cost of statement-cache churn. See transactions-dirty-checking-flushing.
+    ref: "concepts.md#dirty-checking-and-automatic-flush"
+
+  - id: session-entitymanager-persistence-context-017
+    difficulty: intermediate
+    tags: [contains, managed, detached]
+    question: |
+      What does em.contains(entity) return?
+    options:
+      - "true if the entity exists as a row in the database"
+      - "true if the entity has any dirty (unflushed) changes"
+      - "true if the entity is present in the second-level cache"
+      - "true if the entity is currently managed by this persistence context"
+    answer: 3
+    explanation: |
+      contains reports whether the given instance is currently managed by THIS persistence
+      context. It says nothing about DB existence, dirtiness, or the second-level cache.
+    ref: "concepts.md#contains-detach-and-clear"
+
+  - id: session-entitymanager-persistence-context-018
+    difficulty: intermediate
+    tags: [persist, merge, semantics]
+    question: |
+      When should you prefer persist over merge?
+    options:
+      - "For a brand-new entity created inside the current transaction"
+      - "When reattaching a detached entity edited across web requests"
+      - "When you want a separate managed copy returned"
+      - "When the entity already exists in the database"
+    answer: 0
+    explanation: |
+      persist is for new (transient) entities inside the current transaction; it keeps YOUR
+      reference managed and can throw EntityExistsException if the id already exists. merge
+      is for reattaching detached state and returns a separate managed copy.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-019
+    difficulty: advanced
+    tags: [object-identity, jpql, l1-cache]
+    question: |
+      An entity with id=5 is already managed in the context (loaded earlier). A JPQL query
+      then returns the row for id=5, whose salary was changed in the DB meanwhile. What
+      instance/value do you get?
+    options:
+      - "A new instance reflecting the changed salary from the DB"
+      - "The already-managed instance; its entity identity wins over the query row"
+      - "A LazyInitializationException because two versions conflict"
+      - "The managed instance but with salary refreshed to the DB value"
+    answer: 1
+    explanation: |
+      For entity identity, the L1 cache wins: a JPQL query returning an already-managed
+      entity yields the cached instance, not a fresh copy, even if the DB row changed. To
+      get DB values you would need refresh() or a new context. This is guaranteed object
+      identity within a context.
+    ref: "concepts.md#the-first-level-cache-and-object-identity"
+
+  - id: session-entitymanager-persistence-context-020
+    difficulty: intermediate
+    tags: [flush, sql, mechanism]
+    question: |
+      What does em.flush() do?
+    options:
+      - "Commits the current transaction"
+      - "Clears the first-level cache"
+      - "Closes the EntityManager and releases the connection"
+      - "Synchronizes the persistence context to the DB by running pending SQL now"
+    answer: 3
+    explanation: |
+      flush synchronizes in-memory changes to the database by executing pending INSERT /
+      UPDATE / DELETE statements immediately. It does not commit (the tx still needs to
+      commit), does not clear the cache, and does not close the EntityManager.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-021
+    difficulty: advanced
+    tags: [detach, dirty-checking, gotcha]
+    question: |
+      After em.detach(order), you call order.setTotal(999). At commit, what happens to the
+      DB?
+    options:
+      - "The total column is updated to 999 via dirty checking"
+      - "Nothing — a detached entity is no longer dirty-checked"
+      - "A LazyInitializationException is thrown"
+      - "The entire order row is deleted because it left the context"
+    answer: 1
+    explanation: |
+      Dirty checking only applies to managed entities. Once detached, the entity's setters
+      no longer reach the DB; you would have to merge it back to persist the change.
+    ref: "concepts.md#dirty-checking-and-automatic-flush"
+
+  - id: session-entitymanager-persistence-context-022
+    difficulty: advanced
+    tags: [equals-hashcode, id, set]
+    question: |
+      Why is using a DB-generated @Id (GenerationType.IDENTITY) inside equals/hashCode
+      dangerous for an entity stored in a HashSet?
+    options:
+      - "The id column is not indexed, so hashing is slow"
+      - "Hibernate forbids overriding equals on entities entirely"
+      - "The id is null before persist and gets assigned at flush, changing the hashCode"
+      - "IDENTITY ids are Strings, which cannot be hashed reliably"
+    answer: 2
+    explanation: |
+      A transient entity has id == null; persist/flush later assigns the id, mutating the
+      hashCode. If the entity was already in a HashSet, it becomes unfindable. Prefer a
+      stable business key or a pre-assigned UUID. See entity-mappings-associations.
+    ref: "concepts.md#equals-and-hashcode-gotchas"
+
+  - id: session-entitymanager-persistence-context-023
+    difficulty: beginner
+    tags: [lifecycle, states, managed]
+    question: |
+      Which lifecycle state means the entity is tracked by the persistence context and its
+      changes are auto-flushed?
+    options:
+      - "Managed"
+      - "Detached"
+      - "Transient"
+      - "Removed"
+    answer: 0
+    explanation: |
+      Managed (a.k.a. persistent) entities live in the persistence context, are
+      dirty-checked, and their changes are flushed automatically. Transient is unknown to
+      any context; Detached was managed but no longer is; Removed is scheduled for DELETE.
+    ref: "concepts.md#entity-lifecycle-at-a-glance"
+
+  - id: session-entitymanager-persistence-context-024
+    difficulty: intermediate
+    tags: [remove, lifecycle]
+    question: |
+      What does em.remove(entity) do to a managed entity?
+    options:
+      - "Immediately issues a DELETE and closes the connection"
+      - "Detaches it from the persistence context without touching the DB"
+      - "Transitions it to the Removed state, scheduling a DELETE at flush"
+      - "Throws unless the entity has no child associations"
+    answer: 2
+    explanation: |
+      remove transitions a managed entity to the Removed state; the actual DELETE is issued
+      at flush (typically before commit). It does not detach it or necessarily run SQL
+      immediately.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-025
+    difficulty: advanced
+    tags: [spring, thread-bound, proxy]
+    question: |
+      In Spring, an @PersistenceContext EntityManager field appears usable from many
+      concurrent requests. Why is this safe despite EntityManager not being thread-safe?
+    options:
+      - "Spring makes the real EntityManager thread-safe via synchronization"
+      - "Spring creates a single shared EntityManager guarded by a global lock"
+      - "The injected EntityManager is a thread-bound proxy routing each thread to its own context"
+      - "EntityManager became thread-safe in Jakarta Persistence 3.1"
+    answer: 2
+    explanation: |
+      Spring injects a shared proxy that delegates to the current thread's/transaction's
+      actual EntityManager, so each thread gets its own persistence context. The underlying
+      EntityManager remains non-thread-safe. Container/tx proxying details belong to
+      spring-core/spring-boot.
+    ref: "concepts.md#factory-vs-context-entitymanagerfactory-and-sessionfactory"
+
+  - id: session-entitymanager-persistence-context-026
+    difficulty: intermediate
+    tags: [find, l1-cache, sql-count]
+    question: |
+      Within one transaction you call em.find(Author.class, 1L) three times. How many
+      SELECTs for author id=1 does Hibernate normally issue?
+    options:
+      - "Three — one per find call"
+      - "Zero — find never issues SQL"
+      - "Two — the first and last, skipping the middle"
+      - "One — subsequent calls hit the first-level cache"
+    answer: 3
+    explanation: |
+      The first find issues a SELECT and stores the entity in the L1 cache; the next two
+      calls return the cached instance with no SQL. This is the repeatable-read-within-a-
+      context behavior of the persistence context.
+    ref: "concepts.md#the-first-level-cache-and-object-identity"
+
+  - id: session-entitymanager-persistence-context-027
+    difficulty: intermediate
+    tags: [refresh, mechanism]
+    question: |
+      What is the effect of em.refresh(entity)?
+    options:
+      - "Detaches the entity and reloads it into a new context"
+      - "Flushes only that entity's pending changes"
+      - "Adds the entity to the second-level cache"
+      - "Overwrites the in-memory entity state with the current values from the DB"
+    answer: 3
+    explanation: |
+      refresh re-reads the row and overwrites the managed instance's state with the DB
+      values, discarding unflushed in-memory changes to that entity. It issues a SELECT.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-028
+    difficulty: advanced
+    tags: [open-session-in-view, lazy, anti-pattern]
+    question: |
+      A team turns on spring.jpa.open-in-view=true to stop LazyInitializationExceptions.
+      What is the main downside senior reviewers point out?
+    options:
+      - "It disables the first-level cache during rendering"
+      - "It forces every association to EAGER, breaking lazy loading"
+      - "It keeps the persistence context open into the view layer, masking N+1 queries"
+      - "It makes the EntityManager thread-safe, hurting performance"
+    answer: 2
+    explanation: |
+      Open Session In View holds the PC open through view rendering so lazy access no
+      longer fails, but it hides the underlying fetch design — lazy associations trigger
+      extra queries during rendering (N+1). Prefer fetching what you need in-tx via JOIN
+      FETCH / entity graphs / DTOs. See fetching-lazy-eager-n-plus-one.
+    ref: "concepts.md#persistence-context-scope-transaction-scoped-vs-extended"
+
+  - id: session-entitymanager-persistence-context-029
+    difficulty: beginner
+    tags: [persist, insert, timing]
+    question: |
+      For an entity using GenerationType.IDENTITY, when is the INSERT typically issued
+      relative to em.persist()?
+    options:
+      - "Never — IDENTITY entities are inserted only at commit via a batch"
+      - "Only when the entity is first read back with find"
+      - "Immediately during persist, because the DB must generate the id"
+      - "At clear(), when the context is emptied"
+    answer: 2
+    explanation: |
+      With IDENTITY, Hibernate must run the INSERT during persist to obtain the
+      DB-generated key, which also disables JDBC batching for that entity. Other strategies
+      (SEQUENCE/TABLE) can defer the INSERT to flush. See primary-keys-and-id-generation.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-030
+    difficulty: intermediate
+    tags: [l1-cache, scope, sharing]
+    question: |
+      Is the first-level cache shared between two different EntityManagers?
+    options:
+      - "Yes, all EntityManagers from the same factory share one L1 cache"
+      - "Only if both are in the same transaction"
+      - "Only for entities marked @Cacheable"
+      - "No, each persistence context has its own private L1 cache"
+    answer: 3
+    explanation: |
+      The L1 cache is per-persistence-context and private to one EntityManager/Session. A
+      cache shared across contexts is the second-level cache (see caching-first-second-level),
+      which is a separate, optional feature.
+    ref: "concepts.md#the-first-level-cache-and-object-identity"
+
+  - id: session-entitymanager-persistence-context-031
+    difficulty: advanced
+    tags: [getReference, proxy, exception]
+    question: |
+      You call em.getReference(Order.class, 999L) for a row that does not exist, then later
+      access order.getTotal(). What happens?
+    options:
+      - "EntityNotFoundException is thrown when the proxy is first accessed"
+      - "getTotal returns 0 because the proxy is uninitialized"
+      - "getReference returns null immediately"
+      - "A new empty Order row with id=999 is inserted"
+    answer: 0
+    explanation: |
+      getReference returns a proxy without checking existence. The SELECT fires on first
+      access to a non-id property; if the row is missing, Hibernate throws
+      EntityNotFoundException at that point. (find, by contrast, returns null up front.)
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-032
+    difficulty: intermediate
+    tags: [factory, cost, startup]
+    question: |
+      Why is creating an EntityManagerFactory expensive?
+    options:
+      - "It opens a new TCP connection for every entity type"
+      - "It loads the entire database into memory as the second-level cache"
+      - "It parses mappings, builds the metamodel, and initializes the connection pool"
+      - "It compiles all JPQL queries in the application ahead of time"
+    answer: 2
+    explanation: |
+      Building the factory involves scanning/parsing entity mappings, constructing the JPA
+      metamodel, wiring the second-level cache, and starting the connection pool — heavy
+      one-time work. That is why it is created once and shared for the app's lifetime.
+    ref: "concepts.md#factory-vs-context-entitymanagerfactory-and-sessionfactory"
+
+  - id: session-entitymanager-persistence-context-033
+    difficulty: intermediate
+    tags: [detach, single-entity]
+    question: |
+      What is the difference between em.detach(e) and em.clear()?
+    options:
+      - "detach flushes first; clear does not"
+      - "detach evicts one entity; clear evicts all entities from the context"
+      - "detach deletes the row; clear only removes it from cache"
+      - "There is no difference; detach is an alias for clear"
+    answer: 1
+    explanation: |
+      detach removes a single entity from the persistence context (making it detached),
+      while clear evicts every managed entity, emptying the whole context. Neither issues
+      SQL or deletes rows.
+    ref: "concepts.md#contains-detach-and-clear"
+
+  - id: session-entitymanager-persistence-context-034
+    difficulty: advanced
+    tags: [dirty-checking, performance, scaling]
+    question: |
+      A read-mostly transaction loads 50,000 entities into one context and changes two of
+      them. Why can flush still be slow?
+    options:
+      - "Because flush re-reads all 50,000 rows from the DB to compare them"
+      - "Because each managed entity opens its own JDBC connection"
+      - "Because the L1 cache is written to disk on every flush"
+      - "Because dirty checking scans every managed entity's fields against its snapshot"
+    answer: 3
+    explanation: |
+      Default dirty checking compares each managed entity's current state to its snapshot,
+      so cost scales with the number of managed entities x fields — not just the changed
+      ones. Loading huge graphs into one context is a known pitfall; use read-only queries,
+      projections, or clear(). See performance-tuning-pitfalls.
+    ref: "concepts.md#dirty-checking-and-automatic-flush"
+
+  - id: session-entitymanager-persistence-context-035
+    difficulty: beginner
+    tags: [lifecycle, transient]
+    question: |
+      A newly created object via new Order() that has never been passed to any
+      EntityManager is in which state?
+    options:
+      - "Managed"
+      - "Detached"
+      - "Transient"
+      - "Removed"
+    answer: 2
+    explanation: |
+      A plain new object unknown to any persistence context and with no DB row is transient.
+      persist() would make it managed. See entity-lifecycle-states.
+    ref: "concepts.md#entity-lifecycle-at-a-glance"
+
+  - id: session-entitymanager-persistence-context-036
+    difficulty: intermediate
+    tags: [transaction-scoped, default, spring]
+    question: |
+      In a typical Spring @Transactional service method, what is the scope of the
+      persistence context by default?
+    options:
+      - "Extended — entities remain managed after the method returns"
+      - "Application-scoped — one context shared by all requests"
+      - "Transaction-scoped — created at tx start, closed at commit, entities then detached"
+      - "Thread-scoped but never closed until the thread dies"
+    answer: 2
+    explanation: |
+      The default is transaction-scoped: the PC is created when the transaction begins and
+      closed when it commits, detaching any returned entities. Extended contexts must be
+      explicitly requested and are used for stateful conversations.
+    ref: "concepts.md#persistence-context-scope-transaction-scoped-vs-extended"
+
+  - id: session-entitymanager-persistence-context-037
+    difficulty: advanced
+    tags: [merge, sql, mechanism]
+    question: |
+      When you merge a detached entity whose id is not currently in the persistence context
+      or second-level cache, what does Hibernate typically do first?
+    options:
+      - "Issues an INSERT immediately for the detached entity"
+      - "Throws EntityExistsException"
+      - "Reuses your detached instance directly as the managed entity"
+      - "Issues a SELECT to load the current managed state before copying your changes onto it"
+    answer: 3
+    explanation: |
+      merge loads the current managed instance (a SELECT if not already cached), copies the
+      detached entity's state onto it, and returns the managed copy; the UPDATE is emitted
+      at flush. It does not reuse your detached instance as the managed one.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-038
+    difficulty: intermediate
+    tags: [equals-hashcode, business-key]
+    question: |
+      What is the generally recommended basis for an entity's equals/hashCode to remain
+      stable across persistence contexts?
+    options:
+      - "The DB-generated surrogate id, always"
+      - "Object.hashCode() identity (do not override)"
+      - "A stable business/natural key, or a UUID assigned before persist"
+      - "The entity's @Version field"
+    answer: 2
+    explanation: |
+      Because object identity is only guaranteed within one context, cross-context equality
+      needs a value that is stable from creation — a natural/business key or a
+      pre-assigned UUID — rather than a surrogate id that is null until flush.
+    ref: "concepts.md#equals-and-hashcode-gotchas"
+
+  - id: session-entitymanager-persistence-context-039
+    difficulty: advanced
+    tags: [identity, cross-context]
+    question: |
+      An entity loaded in context A and the same-PK entity loaded in context B are compared
+      with ==. What is true?
+    options:
+      - "They are always ==, since identity is global per SessionFactory"
+      - "The comparison throws because entities cannot cross contexts"
+      - "They may be different instances; == identity is only guaranteed within one context"
+      - "They are == only if the second-level cache is disabled"
+    answer: 2
+    explanation: |
+      Guaranteed object identity is scoped to a single persistence context. Two different
+      contexts can hold distinct instances for the same PK, so == is unreliable across
+      contexts — which is exactly why entities need a proper equals/hashCode.
+    ref: "concepts.md#the-first-level-cache-and-object-identity"
+
+  - id: session-entitymanager-persistence-context-040
+    difficulty: beginner
+    tags: [operations, persist-vs-save]
+    question: |
+      In JPA, which method makes a transient entity managed and schedules it for insertion?
+    options:
+      - "em.save(entity)"
+      - "em.persist(entity)"
+      - "em.store(entity)"
+      - "em.insert(entity)"
+    answer: 1
+    explanation: |
+      persist is the JPA method to make a transient entity managed. save is a
+      Hibernate-native Session method (and Spring Data's repository method), not part of the
+      Jakarta EntityManager API; store/insert do not exist.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-041
+    difficulty: advanced
+    tags: [clear, lazy, gotcha]
+    question: |
+      Inside a transaction you load an Order, then call em.clear(), then access
+      order.getLineItems() (a LAZY collection not yet initialized). What happens?
+    options:
+      - "The collection loads normally since the transaction is still open"
+      - "LazyInitializationException — clear() detached the Order"
+      - "An empty collection is returned"
+      - "clear() eagerly initializes all lazy collections before evicting"
+    answer: 1
+    explanation: |
+      clear() detaches every managed entity, including the Order. Even though the
+      transaction is still active, the Order is no longer associated with a context, so
+      touching an uninitialized lazy collection throws LazyInitializationException.
+    ref: "concepts.md#contains-detach-and-clear"
+
+  - id: session-entitymanager-persistence-context-042
+    difficulty: intermediate
+    tags: [unit-of-work, write-behind]
+    question: |
+      Why is the persistence context often described as a "write-behind" cache?
+    options:
+      - "It writes each change to a log file before the DB"
+      - "It writes to the second-level cache before the first-level cache"
+      - "It only supports writes, never reads"
+      - "It defers SQL, accumulating changes and flushing them together (usually before commit)"
+    answer: 3
+    explanation: |
+      Rather than issuing SQL on every setter, the PC accumulates changes and flushes them
+      as a batch, typically just before commit. This write-behind behavior enables batching,
+      SQL statement reuse, and ordering of statements at flush.
+    ref: "concepts.md#what-the-persistence-context-is"
+
+  - id: session-entitymanager-persistence-context-043
+    difficulty: advanced
+    tags: [fix, lazy, join-fetch]
+    question: |
+      What is the preferred fix for a LazyInitializationException when a controller needs an
+      Order's lineItems after the service transaction ends?
+    options:
+      - "Mark the association EAGER globally so it is always loaded"
+      - "Fetch lineItems inside the transaction (JOIN FETCH or an entity graph) and return a fully-loaded result"
+      - "Catch the exception and return an empty list"
+      - "Make the EntityManager extended for all services"
+    answer: 1
+    explanation: |
+      The robust fix is to initialize exactly what the caller needs while the context is
+      open — via JOIN FETCH, an EntityGraph, or a DTO projection. Blanket EAGER causes its
+      own over-fetching/N+1 issues, and swallowing the exception hides bugs. See
+      fetching-lazy-eager-n-plus-one.
+    ref: "concepts.md#persistence-context-scope-transaction-scoped-vs-extended"
+
+  - id: session-entitymanager-persistence-context-044
+    difficulty: intermediate
+    tags: [second-level, factory, ownership]
+    question: |
+      Which component owns/holds the second-level cache, the metamodel, and the connection
+      pool?
+    options:
+      - "The EntityManager / Session"
+      - "Each individual managed entity"
+      - "The JTA transaction manager"
+      - "The EntityManagerFactory / SessionFactory"
+    answer: 3
+    explanation: |
+      The factory (EntityManagerFactory/SessionFactory) is the long-lived, thread-safe
+      singleton that holds the metamodel, connection pool, and shared second-level cache.
+      The EntityManager only holds the first-level cache (the persistence context).
+    ref: "concepts.md#factory-vs-context-entitymanagerfactory-and-sessionfactory"
+
+  - id: session-entitymanager-persistence-context-045
+    difficulty: expert
+    tags: [merge, lost-update, gotcha]
+    question: |
+      A developer writes: em.merge(order); return order; and the caller reads
+      order.getStatus(), expecting the merged/managed status. What is the subtle bug?
+    options:
+      - "merge mutates order in place, so this is actually correct"
+      - "The returned order is still the detached instance; the managed copy (merge's return value) was discarded"
+      - "merge throws because order is detached"
+      - "getStatus triggers LazyInitializationException on the managed copy"
+    answer: 1
+    explanation: |
+      merge returns a distinct managed instance and does NOT make the argument managed. By
+      ignoring the return value and returning the original detached order, the code hands
+      back stale/detached state. Capture and use the returned managed instance.
+    ref: "concepts.md#core-operations"
+
+  - id: session-entitymanager-persistence-context-046
+    difficulty: intermediate
+    tags: [lifecycle, detach-triggers]
+    question: |
+      Which of the following does NOT cause a managed entity to become detached?
+    options:
+      - "The EntityManager is closed"
+      - "em.clear() is called"
+      - "The entity's setter is invoked to change a field"
+      - "The transaction-scoped context's transaction commits"
+    answer: 2
+    explanation: |
+      Closing the EntityManager, clear(), and end of the transaction-scoped context all
+      detach entities. Calling a setter simply mutates a still-managed entity (which will be
+      dirty-checked) — it does not detach it.
+    ref: "concepts.md#entity-lifecycle-at-a-glance"
+
+  - id: session-entitymanager-persistence-context-047
+    difficulty: expert
+    tags: [flush-mode, query, auto]
+    question: |
+      With the default FlushModeType.AUTO, when might Hibernate flush pending changes before
+      you explicitly ask?
+    options:
+      - "Never — AUTO means flush only happens at commit"
+      - "Before executing a query whose results could be affected by unflushed changes"
+      - "After every single setter call"
+      - "Only when clear() is invoked"
+    answer: 1
+    explanation: |
+      Under FlushModeType.AUTO, Hibernate flushes before commit and before executing a
+      query that could be affected by pending changes, so the query sees consistent data.
+      It does not flush on every setter. Flush ordering/modes are detailed in
+      transactions-dirty-checking-flushing.
+    ref: "concepts.md#dirty-checking-and-automatic-flush"
+
+  - id: session-entitymanager-persistence-context-048
+    difficulty: intermediate
+    tags: [scope, detached, return-dto]
+    question: |
+      A service returns managed entities from a @Transactional method to a web layer that
+      serializes them, occasionally hitting lazy associations. Which approach most cleanly
+      avoids both LazyInitializationException and leaking the entity model?
+    options:
+      - "Return the entities and enable Open Session In View"
+      - "Map to DTOs inside the transaction, projecting only the needed fields"
+      - "Make every association EAGER"
+      - "Switch all services to an extended persistence context"
+    answer: 1
+    explanation: |
+      Building DTOs inside the transaction fetches exactly what is needed while the context
+      is open and decouples the API from the entity graph, avoiding both the exception and
+      accidental lazy triggering during serialization. OSIV and blanket EAGER trade one
+      problem for another. See spring-data-jpa-repositories and fetching-lazy-eager-n-plus-one.
+    ref: "concepts.md#persistence-context-scope-transaction-scoped-vs-extended"

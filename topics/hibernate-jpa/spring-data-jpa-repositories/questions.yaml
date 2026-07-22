@@ -1,0 +1,925 @@
+topic: Spring Data JPA & Repository Abstraction
+domain: hibernate-jpa
+topic_slug: spring-data-jpa-repositories
+version: 1
+questions:
+- id: spring-data-jpa-repositories-001
+  difficulty: beginner
+  tags:
+  - hierarchy
+  - jpa-repository
+  - crud-repository
+  question: |
+    In the Spring Data repository hierarchy, which interface adds JPA-specific
+    operations like `flush()`, `saveAndFlush()`, and `deleteAllInBatch()`?
+  options:
+  - CrudRepository
+  - Repository
+  - PagingAndSortingRepository
+  - JpaRepository
+  answer: 3
+  explanation: |
+    `JpaRepository<T, ID>` is the JPA-specialized interface. It extends the CRUD and
+    paging interfaces and adds `flush()`, `saveAndFlush()`, `deleteAllInBatch()`,
+    `getReferenceById()`, and overrides `findAll`/`saveAll` to return `List`.
+    `CrudRepository` and `PagingAndSortingRepository` are technology-neutral.
+  ref: concepts.md#the-repository-interface-hierarchy
+- id: spring-data-jpa-repositories-002
+  difficulty: beginner
+  tags:
+  - hierarchy
+  - marker-interface
+  question: |
+    What methods does the base `Repository<T, ID>` interface declare?
+  options:
+  - None — it is an empty marker interface
+  - save and findById only
+  - All CRUD methods
+  - Only findAll and count
+  answer: 0
+  explanation: |
+    `Repository<T, ID>` is a pure marker (no methods). Extending it registers the type
+    as a Spring Data managed repository and lets you selectively expose methods without
+    inheriting the whole CRUD surface.
+  ref: concepts.md#the-repository-interface-hierarchy
+- id: spring-data-jpa-repositories-003
+  difficulty: beginner
+  tags:
+  - derived-query
+  - method-name
+  question: |
+    What JPQL does the derived method `findByLastNameAndAgeGreaterThan(String ln, int age)`
+    produce?
+  options:
+  - SELECT a FROM Author a WHERE a.lastName = ?1 OR a.age > ?2
+  - SELECT a FROM Author a WHERE a.lastName = ?1 AND a.age > ?2
+  - SELECT a FROM Author a WHERE a.lastName LIKE ?1 AND a.age >= ?2
+  - SELECT a FROM Author a WHERE a.lastName = ?1 AND a.age < ?2
+  answer: 1
+  explanation: |
+    The predicate after `By` is parsed into `WHERE lastName = ?1 AND age > ?2`. `And`
+    joins the conditions and `GreaterThan` maps to a strict `>` on `age`, bound to the
+    arguments in declaration order.
+  ref: concepts.md#derived-query-methods
+- id: spring-data-jpa-repositories-004
+  difficulty: intermediate
+  tags:
+  - derived-query
+  - startup-validation
+  question: |
+    A derived query method references a property name that does not exist on the entity.
+    When does Spring Data report the error?
+  options:
+  - At application/context startup, when building the repository proxy
+  - The first time the method is invoked at runtime
+  - Only when the generated SQL fails at the database
+  - Never — the property is silently ignored
+  answer: 0
+  explanation: |
+    Spring validates derived query method names when it builds the repository proxy at
+    startup, failing fast if a property expression cannot be resolved against the entity
+    metamodel. This surfaces typos immediately rather than at request time.
+  ref: concepts.md#derived-query-methods
+- id: spring-data-jpa-repositories-005
+  difficulty: intermediate
+  tags:
+  - save
+  - persist
+  - merge
+  question: |
+    For a detached entity (has a non-null id but is not in the persistence context),
+    what does `SimpleJpaRepository.save(entity)` call internally?
+  options:
+  - entityManager.persist(entity)
+  - entityManager.refresh(entity)
+  - entityManager.merge(entity)
+  - entityManager.lock(entity)
+  answer: 2
+  explanation: |
+    `save` checks `isNew`. A detached entity is not new, so `save` calls
+    `entityManager.merge(entity)`, which copies its state onto a managed instance
+    (loading it first if needed) and returns that managed copy. `persist` is used only
+    for new entities.
+  ref: concepts.md#how-save-works-persist-vs-merge--isnew-detection
+- id: spring-data-jpa-repositories-006
+  difficulty: advanced
+  tags:
+  - save
+  - merge
+  - gotcha
+  question: |
+    You call `Author saved = repo.save(detachedAuthor)` and then keep mutating
+    `detachedAuthor`. Why do those later mutations not get persisted?
+  options:
+  - merge returns a new managed instance; detachedAuthor stays detached, so only `saved` is tracked
+  - save() only works on new entities, so it did nothing
+  - You must call flush() before any mutation is tracked
+  - Mutations after save are always ignored by dirty checking
+  answer: 0
+  explanation: |
+    For a detached entity, `save` delegates to `merge`, which returns a *different*
+    managed copy. The original argument remains detached and outside the persistence
+    context, so its mutations aren't dirty-checked. Always use the returned instance.
+  ref: concepts.md#how-save-works-persist-vs-merge--isnew-detection
+- id: spring-data-jpa-repositories-007
+  difficulty: advanced
+  tags:
+  - isnew
+  - persistable
+  - version
+  question: |
+    Absent a `Persistable` implementation and a `@Version` field, how does Spring Data's
+    default `isNew` decide whether an entity is new?
+  options:
+  - It always returns true so save always calls persist
+  - It queries the database with existsById
+  - The entity is new if its @Id is null (or zero for a primitive id type)
+  - The entity is new if it was created in the current transaction
+  answer: 2
+  explanation: |
+    The default `JpaMetamodelEntityInformation` checks `Persistable.isNew()` first, then
+    a null object-typed `@Version`, then falls back to the `@Id`: new when the id is null
+    (object type) or zero (primitive type). No database query is involved in this branch.
+  ref: concepts.md#how-save-works-persist-vs-merge--isnew-detection
+- id: spring-data-jpa-repositories-008
+  difficulty: advanced
+  tags:
+  - isnew
+  - assigned-id
+  - persistable
+  - gotcha
+  question: |
+    An entity uses an application-assigned id (e.g. a UUID set in the constructor). What
+    goes wrong when you `save()` a brand-new instance, and what is the fix?
+  options:
+  - save sees a non-null id, treats it as not-new, calls merge (extra SELECT); fix by implementing Persistable
+  - Nothing goes wrong; persist is always used for assigned ids
+  - save throws because assigned ids are not allowed with Spring Data
+  - save inserts twice; fix by disabling dirty checking
+  answer: 0
+  explanation: |
+    With an assigned non-null id, default `isNew` concludes the entity is not new, so
+    `save` calls `merge`, which issues a wasteful `SELECT` (and copies state) before the
+    insert. Implement `Persistable<ID>` with a transient `isNew` flag (managed via
+    lifecycle callbacks) to force `persist`.
+  ref: concepts.md#how-save-works-persist-vs-merge--isnew-detection
+- id: spring-data-jpa-repositories-009
+  difficulty: intermediate
+  tags:
+  - pagination
+  - page
+  - slice
+  - count
+  question: |
+    What extra work does returning `Page<T>` do that returning `Slice<T>` does not?
+  options:
+  - It runs a separate COUNT query to compute total elements and pages
+  - It caches the results in the second-level cache
+  - It eagerly fetches all lazy associations
+  - It opens a new transaction per page
+  answer: 0
+  explanation: |
+    `Page` executes an additional `COUNT(*)` query so it can report total elements and
+    total pages. `Slice` avoids the count: it fetches `size + 1` rows and infers
+    `hasNext()` from whether the extra row exists.
+  ref: concepts.md#pagination--sorting-page-vs-slice
+- id: spring-data-jpa-repositories-010
+  difficulty: intermediate
+  tags:
+  - pagination
+  - slice
+  - mechanism
+  question: |
+    How does a `Slice<T>` determine `hasNext()` without a COUNT query?
+  options:
+  - It always returns true and lets the caller discover the end
+  - It reads the table's row-count statistics
+  - It requests one more row than the page size and checks if it came back
+  - It runs the data query twice
+  answer: 2
+  explanation: |
+    Spring asks the database for `pageSize + 1` rows. If the extra row is present, there
+    is a next page (`hasNext()` true) and the extra row is trimmed off; otherwise this is
+    the last slice. No `COUNT` is needed, which is why `Slice` suits infinite scroll.
+  ref: concepts.md#pagination--sorting-page-vs-slice
+- id: spring-data-jpa-repositories-011
+  difficulty: intermediate
+  tags:
+  - modifying
+  - transactional
+  - return-type
+  question: |
+    Which annotations must accompany a bulk JPQL `UPDATE` in a repository method?
+  options:
+  - '@Query and @Modifying, plus a write transaction (@Transactional)'
+  - '@Query alone is enough'
+  - '@Modifying alone; transactions are automatic'
+  - '@BulkUpdate and @ReadOnly'
+  answer: 0
+  explanation: |
+    An `UPDATE`/`DELETE` `@Query` needs `@Modifying` so Spring calls `executeUpdate()`
+    instead of `getResultList()`, and it needs a writable transaction (repository query
+    methods default to `readOnly`), so `@Transactional` on the method or a service.
+  ref: concepts.md#modifying-queries-modifying-bulk-update--delete
+- id: spring-data-jpa-repositories-012
+  difficulty: advanced
+  tags:
+  - modifying
+  - persistence-context
+  - stale
+  - gotcha
+  question: |
+    After a `@Modifying` bulk `UPDATE` sets `active = false`, you re-read the same entity
+    in the same transaction and still see `active = true`. Why?
+  options:
+  - The update was rolled back
+  - JPQL updates are asynchronous
+  - Bulk DML bypasses the persistence context/L1 cache, which still holds the stale entity
+  - The entity was detached by the update
+  answer: 2
+  explanation: |
+    A bulk `UPDATE` runs as a single SQL statement directly against the DB, bypassing the
+    persistence context and first-level cache. Any already-managed entity keeps its old
+    in-memory state. Use `clearAutomatically = true` (or clear the context) so subsequent
+    reads re-fetch fresh state.
+  ref: concepts.md#modifying-queries-modifying-bulk-update--delete
+- id: spring-data-jpa-repositories-013
+  difficulty: advanced
+  tags:
+  - modifying
+  - clear-automatically
+  - flush-automatically
+  question: |
+    What does `@Modifying(clearAutomatically = true)` do?
+  options:
+  - Flushes pending changes before the bulk statement
+  - Rolls back the transaction if no rows match
+  - Clears the persistence context after the statement so later reads re-fetch fresh state
+  - Deletes all cached query results globally
+  answer: 2
+  explanation: |
+    `clearAutomatically = true` clears the persistence context *after* the bulk
+    statement, detaching managed entities so subsequent reads reload current DB state
+    (avoiding stale reads). `flushAutomatically = true` handles the *before* side —
+    flushing pending changes first. Note clearing also discards unflushed changes.
+  ref: concepts.md#modifying-queries-modifying-bulk-update--delete
+- id: spring-data-jpa-repositories-014
+  difficulty: advanced
+  tags:
+  - modifying
+  - callbacks
+  - version
+  - cascade
+  question: |
+    Which is TRUE of a bulk `@Modifying` JPQL `UPDATE`?
+  options:
+  - It triggers @PreUpdate callbacks and increments @Version
+  - It cascades to associated entities automatically
+  - It does NOT fire lifecycle callbacks, cascade, or increment @Version
+  - It loads each matched entity into the persistence context first
+  answer: 2
+  explanation: |
+    Bulk update/delete operate at the SQL level and skip the object layer: no
+    `@PrePersist`/`@PreUpdate` callbacks, no cascading, and no automatic `@Version`
+    increment. That is the trade-off for efficiency — use load-modify-flush (dirty
+    checking) when you need those behaviors.
+  ref: concepts.md#modifying-queries-modifying-bulk-update--delete
+- id: spring-data-jpa-repositories-015
+  difficulty: intermediate
+  tags:
+  - query
+  - jpql
+  - native
+  question: |
+    How do you make a `@Query` execute raw SQL against real table/column names instead
+    of JPQL?
+  options:
+  - Set nativeQuery = true on the @Query
+  - 'Prefix the query with NATIVE:'
+  - Use @NativeQuery instead of @Query
+  - Set jpql = false on the @Query
+  answer: 0
+  explanation: |
+    `@Query(value = "...", nativeQuery = true)` runs the string as native SQL, referencing
+    real tables/columns and using DB-specific features. Without it, the string is treated
+    as JPQL over entity/field names and Hibernate emits dialect SQL.
+  ref: concepts.md#query-jpql-and-native-sql
+- id: spring-data-jpa-repositories-016
+  difficulty: advanced
+  tags:
+  - query
+  - native
+  - sort
+  - gotcha
+  question: |
+    You pass a `Pageable` with a `Sort` to a repository method backed by a native
+    `@Query`. What happens to the sort?
+  options:
+  - Hibernate rewrites the SQL to add ORDER BY
+  - The method throws UnsupportedOperationException
+  - It is silently not applied — you must put ORDER BY in the SQL yourself
+  - The results are sorted in Java memory automatically
+  answer: 2
+  explanation: |
+    Spring cannot safely inject `ORDER BY` into arbitrary native SQL, so `Sort` from a
+    `Pageable` is not applied to native queries (silently ignored in current versions).
+    Put the `ORDER BY` in the SQL, or use JPQL where the `Sort` is translated properly.
+  ref: concepts.md#query-jpql-and-native-sql
+- id: spring-data-jpa-repositories-017
+  difficulty: advanced
+  tags:
+  - query
+  - native
+  - pagination
+  - count-query
+  question: |
+    For a paginated native `@Query` returning `Page<T>`, what must you typically supply?
+  options:
+  - Nothing extra; Spring derives the count automatically for native queries
+  - A manual COUNT executed in a custom impl only
+  - A @Count annotation on the method
+  - A separate countQuery attribute on the @Query
+  answer: 3
+  explanation: |
+    For native `Page` queries Spring often cannot derive the count SQL from the data SQL,
+    so you provide `countQuery = "SELECT count(*) ..."` on the `@Query`. JPQL queries, by
+    contrast, get an auto-derived count.
+  ref: concepts.md#query-jpql-and-native-sql
+- id: spring-data-jpa-repositories-018
+  difficulty: beginner
+  tags:
+  - query
+  - param
+  - named-parameters
+  question: |
+    In `@Query("SELECT a FROM Author a WHERE a.age > :age")`, how is the method argument
+    bound to `:age`?
+  options:
+  - By annotating the argument with @Param("age")
+  - By declaring @Bind("age")
+  - By naming the argument exactly age with no annotation ever required
+  - By its position only
+  answer: 0
+  explanation: |
+    Named parameters (`:age`) are bound with `@Param("age")` on the corresponding method
+    argument. (With `-parameters` compilation the annotation can sometimes be inferred,
+    but including `@Param` is the robust, recommended practice.) Positional binding uses
+    `?1`, `?2` instead.
+  ref: concepts.md#named-parameters-positional-params--spel
+- id: spring-data-jpa-repositories-019
+  difficulty: advanced
+  tags:
+  - query
+  - spel
+  - entity-name
+  question: |
+    What is the most common use of SpEL inside `@Query`, e.g. `#{#entityName}`?
+  options:
+  - To concatenate user input directly into the SQL string
+  - To force a native query
+  - To disable parameter binding for performance
+  - To write generic base-repository queries that resolve the managed entity's name
+  answer: 3
+  explanation: |
+    `#{#entityName}` expands to the current repository's domain type name, letting you
+    author generic base repositories (e.g. `SELECT e FROM #{#entityName} e ...`) reused
+    across entities. SpEL expressions are still bound as parameters, not string-injected
+    raw SQL.
+  ref: concepts.md#named-parameters-positional-params--spel
+- id: spring-data-jpa-repositories-020
+  difficulty: intermediate
+  tags:
+  - projection
+  - closed-interface
+  question: |
+    A closed interface projection declares only `getFirstName()` and `getLastName()`.
+    What does Hibernate select?
+  options:
+  - The whole entity, then Spring copies two fields
+  - Nothing until each getter is called (lazy per-column)
+  - Only the first_name and last_name columns
+  - All columns plus a discriminator
+  answer: 2
+  explanation: |
+    A closed projection (getters matching properties exactly) lets Hibernate restrict the
+    SELECT to just those columns (`SELECT a.first_name, a.last_name ...`). Spring returns
+    a proxy implementing the interface — no full entity is hydrated.
+  ref: concepts.md#projections-interface-dto--dynamic
+- id: spring-data-jpa-repositories-021
+  difficulty: advanced
+  tags:
+  - projection
+  - open-interface
+  - spel
+  - gotcha
+  question: |
+    Why can an OPEN interface projection (a getter annotated with `@Value` using SpEL
+    like `#{target.firstName + ' ' + target.lastName}`) NOT prune columns?
+  options:
+  - SpEL is disabled for projections
+  - Column pruning only works for DTO classes, never interfaces
+  - Open projections always run native SQL
+  - Spring must load the whole entity so the SpEL can access target's fields
+  answer: 3
+  explanation: |
+    An open projection's SpEL references `target`, the backing entity, so Spring must
+    materialize the entire entity to evaluate the expression. That defeats the
+    column-selection optimization that closed projections enjoy.
+  ref: concepts.md#projections-interface-dto--dynamic
+- id: spring-data-jpa-repositories-022
+  difficulty: intermediate
+  tags:
+  - projection
+  - dto
+  - constructor-expression
+  question: |
+    Which JPQL feature backs a class/record DTO projection so only the needed columns are
+    selected?
+  options:
+  - 'A constructor expression: SELECT new com.example.AuthorDto(a.firstName, a.lastName)'
+  - Second-level cache regions
+  - A @SqlResultSetMapping requirement for all DTOs
+  - A discriminator column
+  answer: 0
+  explanation: |
+    Class-based DTO projections use a JPQL constructor expression
+    (`SELECT new ...Dto(a.firstName, a.lastName)`), so Hibernate selects only those
+    columns and instantiates the DTO. Derived queries returning the DTO build the same
+    constructor call. The DTOs are detached, non-managed objects.
+  ref: concepts.md#projections-interface-dto--dynamic
+- id: spring-data-jpa-repositories-023
+  difficulty: advanced
+  tags:
+  - projection
+  - dynamic
+  question: |
+    What does a dynamic projection method signature like
+    `<T> List<T> findByLastName(String ln, Class<T> type)` enable?
+  options:
+  - The caller chooses the projection/entity shape at call time by passing a Class
+  - It runs the query asynchronously
+  - It projects into a Map keyed by column name
+  - It forces a native query for every call
+  answer: 0
+  explanation: |
+    A dynamic projection lets one method serve multiple result shapes: the caller passes
+    the target type (`repo.findByLastName("Bloch", AuthorDto.class)` or `Author.class`)
+    and Spring produces that projection, avoiding a separate method per shape.
+  ref: concepts.md#projections-interface-dto--dynamic
+- id: spring-data-jpa-repositories-024
+  difficulty: intermediate
+  tags:
+  - projection
+  - dto
+  - lazy-init
+  question: |
+    Why do DTO projections sidestep `LazyInitializationException`?
+  options:
+  - They keep the session open forever
+  - They run inside the view layer transaction
+  - They force EAGER fetching on all associations
+  - They return detached plain objects with no lazy proxies to initialize
+  answer: 3
+  explanation: |
+    A DTO holds only the scalar values selected by the query — plain detached objects with
+    no managed entity or lazy proxy. There is nothing to lazily initialize later, so the
+    exception cannot occur. This makes DTOs ideal for read-only endpoints.
+  ref: concepts.md#projections-interface-dto--dynamic
+- id: spring-data-jpa-repositories-025
+  difficulty: intermediate
+  tags:
+  - specifications
+  - jpa-specification-executor
+  - criteria
+  question: |
+    To use `Specification<T>` for dynamic Criteria-based queries, what must the repository
+    interface do?
+  options:
+  - Extend QuerydslPredicateExecutor
+  - Implement Specification<T> directly
+  - Add @EnableSpecifications
+  - Extend JpaSpecificationExecutor<T>
+  answer: 3
+  explanation: |
+    Mixing in `JpaSpecificationExecutor<T>` adds `findAll(Specification)`,
+    `count(Specification)`, etc. A `Specification` is a lambda that builds a Criteria
+    `Predicate` from `(root, query, criteriaBuilder)`, and they compose with `and`/`or`.
+  ref: concepts.md#specifications--querydsl-dynamic-queries
+- id: spring-data-jpa-repositories-026
+  difficulty: advanced
+  tags:
+  - specifications
+  - querydsl
+  - criteria
+  question: |
+    What do both Specifications and QueryDSL predicates ultimately compile down to?
+  options:
+  - Raw native SQL strings
+  - Named queries in orm.xml
+  - The JPA Criteria API (then JPQL/SQL)
+  - Stored procedures
+  answer: 2
+  explanation: |
+    Both are type-safe builders over the JPA Criteria API, which Hibernate translates to
+    JPQL/SQL. Specifications are built into Spring Data (no codegen); QueryDSL needs an
+    annotation processor to generate `Q`-classes but reads more fluently.
+  ref: concepts.md#specifications--querydsl-dynamic-queries
+- id: spring-data-jpa-repositories-027
+  difficulty: intermediate
+  tags:
+  - entity-graph
+  - n-plus-one
+  question: |
+    What does `@EntityGraph(attributePaths = {"books"})` on a repository method do?
+  options:
+  - Permanently changes the association's fetch type to EAGER on the entity
+  - Creates a database view called books
+  - Adds a second-level cache region for books
+  - Fetches the `books` association in the same query for that method only
+  answer: 3
+  explanation: |
+    `@EntityGraph` tells Hibernate to fetch the listed associations join-eagerly for that
+    specific query, without altering the entity's default fetch type elsewhere. It emits
+    a single query with joins, eliminating N+1 for that method.
+  ref: concepts.md#fixing-n1-at-the-repository-entitygraph--fetch-joins
+- id: spring-data-jpa-repositories-028
+  difficulty: advanced
+  tags:
+  - n-plus-one
+  - join-fetch
+  - entity-graph
+  question: |
+    A method returns `List<Author>` and callers iterate `author.getBooks()` (LAZY),
+    firing 1 + N queries. Which is the correct repository-level fix?
+  options:
+  - Change @OneToMany books to FetchType.EAGER
+  - Add @EntityGraph(attributePaths = "books") or a JOIN FETCH @Query
+  - Wrap each access in a new transaction
+  - Enable Open-Session-In-View
+  answer: 1
+  explanation: |
+    Fetch what the use case needs per query: `@EntityGraph(attributePaths="books")` or a
+    `JOIN FETCH` `@Query`. Switching to global EAGER causes N+1/Cartesian products
+    elsewhere, and OSIV merely hides the N+1 in the view layer rather than fixing it.
+  ref: concepts.md#fixing-n1-at-the-repository-entitygraph--fetch-joins
+- id: spring-data-jpa-repositories-029
+  difficulty: expert
+  tags:
+  - join-fetch
+  - pagination
+  - in-memory
+  - gotcha
+  question: |
+    What is the danger of combining `JOIN FETCH` of a collection with a `Pageable`
+    (`firstResult`/`maxResults`)?
+  options:
+  - Hibernate throws MultipleBagFetchException
+  - The COUNT query is skipped silently
+  - Hibernate warns HHH000104 and paginates in memory after loading all rows
+  - Pagination is applied but sorting is dropped
+  answer: 2
+  explanation: |
+    With a collection fetch join, `LIMIT`/`OFFSET` cannot be applied at the SQL level
+    (rows are multiplied by the join), so Hibernate loads the full result set and
+    paginates in memory — logging `HHH000104`. On large data this is a severe footgun;
+    fetch the collection in a second query or use batch fetching.
+  ref: concepts.md#fixing-n1-at-the-repository-entitygraph--fetch-joins
+- id: spring-data-jpa-repositories-030
+  difficulty: expert
+  tags:
+  - join-fetch
+  - multiple-bag-fetch
+  - collections
+  question: |
+    Why does fetch-joining two `List`-typed `@OneToMany` collections in one query throw
+    `MultipleBagFetchException`?
+  options:
+  - Lists are not supported by JPA
+  - Two bag collections joined together create a Cartesian product Hibernate refuses
+  - The second-level cache cannot hold two bags
+  - JOIN FETCH only works with @ManyToOne
+  answer: 1
+  explanation: |
+    Fetching two bag (unordered `List`) collections simultaneously multiplies rows into a
+    Cartesian product, which Hibernate rejects with `MultipleBagFetchException`. Fetch one
+    collection per query, switch a collection to `Set`, or use `@BatchSize`.
+  ref: concepts.md#fixing-n1-at-the-repository-entitygraph--fetch-joins
+- id: spring-data-jpa-repositories-031
+  difficulty: intermediate
+  tags:
+  - custom-repository
+  - fragment
+  - naming
+  question: |
+    You add a custom fragment interface `AuthorRepositoryCustom`. What must the
+    implementation class be named (default postfix)?
+  options:
+  - AuthorRepositoryCustomImpl
+  - AuthorRepositoryCustomDefault
+  - DefaultAuthorRepositoryCustom
+  - AuthorRepositoryCustomBean
+  answer: 0
+  explanation: |
+    Spring detects the impl by the fragment interface name plus the configured postfix,
+    which defaults to `Impl` — so `AuthorRepositoryCustomImpl`. It is stitched into the
+    generated proxy when the main repository composes the fragment interface.
+  ref: concepts.md#custom-repository-implementations
+- id: spring-data-jpa-repositories-032
+  difficulty: advanced
+  tags:
+  - custom-repository
+  - entity-manager
+  question: |
+    Inside a custom repository implementation, how do you get access to the
+    `EntityManager` to build a `CriteriaQuery` or call `createQuery`?
+  options:
+  - Autowire the JpaRepository and call getEntityManager()
+  - Inject it with @PersistenceContext EntityManager em
+  - Use a static EntityManagerHolder
+  - It is not possible; custom impls cannot use the EntityManager
+  answer: 1
+  explanation: |
+    A custom fragment impl is a Spring bean, so you inject the container-managed
+    `EntityManager` with `@PersistenceContext`. This is how you drop to raw JPA (Criteria,
+    native, stored procs) where derived/`@Query` methods can't reach.
+  ref: concepts.md#custom-repository-implementations
+- id: spring-data-jpa-repositories-033
+  difficulty: advanced
+  tags:
+  - osiv
+  - lazy-init
+  - default
+  question: |
+    In a default Spring Boot app, what does Open-Session-In-View (`spring.jpa.open-in-view=true`)
+    do?
+  options:
+  - Opens a new transaction for every lazy load
+  - Keeps the persistence context open for the whole web request, including view/serialization
+  - Disables the first-level cache during rendering
+  - Forces all associations to EAGER
+  answer: 1
+  explanation: |
+    OSIV binds the `EntityManager`/persistence context to the whole request thread, so
+    lazy associations touched during view rendering or JSON serialization can still
+    initialize after the transactional service returned — preventing
+    `LazyInitializationException` at the cost of hidden behavior.
+  ref: concepts.md#open-session-in-view-osiv
+- id: spring-data-jpa-repositories-034
+  difficulty: advanced
+  tags:
+  - osiv
+  - n-plus-one
+  - connection-pool
+  question: |
+    Why do many senior engineers argue for disabling OSIV despite it preventing
+    LazyInitializationException?
+  options:
+  - It disables the second-level cache
+  - It hides view-layer N+1, holds DB connections longer, and runs queries outside the tx boundary
+  - It makes derived queries fail at startup
+  - It forces every query to be native
+  answer: 1
+  explanation: |
+    OSIV lets lazy loads fire silently during serialization (view-layer N+1, each in
+    auto-commit), can hold the DB connection for the entire request (hurting pool
+    throughput), and scatters queries outside the explicit transaction. Disabling it turns
+    a missing fetch into a loud, early exception.
+  ref: concepts.md#open-session-in-view-osiv
+- id: spring-data-jpa-repositories-035
+  difficulty: expert
+  tags:
+  - osiv
+  - lazy-load
+  - auto-commit
+  question: |
+    With OSIV enabled, a Jackson serializer touches a lazy collection after the service's
+    transaction has committed. In what mode does that lazy SELECT run?
+  options:
+  - In the original committed transaction, reopened
+  - In a new REQUIRES_NEW transaction
+  - In auto-commit, as a separate DB round-trip outside any explicit transaction
+  - It does not run; a cached value is returned
+  answer: 2
+  explanation: |
+    After the service transaction commits, OSIV keeps the session open but there is no
+    active transaction, so each lazy initialization triggers its own auto-commit SELECT —
+    a separate round-trip per association. This is exactly the silent view-layer N+1 that
+    makes OSIV controversial.
+  ref: concepts.md#open-session-in-view-osiv
+- id: spring-data-jpa-repositories-036
+  difficulty: intermediate
+  tags:
+  - derived-query
+  - limiting
+  - keywords
+  question: |
+    Which derived-query prefix limits results to the first 3 rows?
+  options:
+  - findLimit3By...
+  - findTop3By... (or findFirst3By...)
+  - find3By...
+  - findMax3By...
+  answer: 1
+  explanation: |
+    `findTop3By...` and `findFirst3By...` (equivalently `Top`/`First` with a number) limit
+    the result set. Without a number, `findTop`/`findFirst` return a single result. There
+    is no `Limit`/`Max` keyword in derived method names.
+  ref: concepts.md#derived-query-methods
+- id: spring-data-jpa-repositories-037
+  difficulty: advanced
+  tags:
+  - derived-query
+  - limits
+  - judgment
+  question: |
+    Which requirement CANNOT be expressed by a derived query method name and forces you to
+    use @Query, Specifications, or QueryDSL?
+  options:
+  - A simple equality on one property
+  - Ordering by a field ascending
+  - A subquery / GROUP BY / JOIN FETCH with conditions on both sides
+  - Limiting to the first N results
+  answer: 2
+  explanation: |
+    Derived names handle equality, ordering, and result-limiting, but cannot express
+    subqueries, `GROUP BY`, arbitrary joins with conditions on both sides, or `JOIN FETCH`.
+    Those need `@Query`, Specifications, or QueryDSL.
+  ref: concepts.md#derived-query-methods
+- id: spring-data-jpa-repositories-038
+  difficulty: intermediate
+  tags:
+  - get-reference
+  - getone
+  - deprecation
+  question: |
+    In current Spring Data JPA, which `JpaRepository` method returns a lazy reference proxy
+    via `EntityManager.getReference`, replacing the deprecated `getOne`?
+  options:
+  - findById
+  - getReferenceById
+  - loadById
+  - referenceOf
+  answer: 1
+  explanation: |
+    `getReferenceById(id)` wraps `EntityManager.getReference`, returning a lazy proxy
+    without hitting the DB until a non-id property is accessed (throwing
+    `EntityNotFoundException` then if the row is missing). It replaced the deprecated
+    `getOne`. `findById` returns an `Optional` and eagerly loads.
+  ref: concepts.md#the-repository-interface-hierarchy
+- id: spring-data-jpa-repositories-039
+  difficulty: intermediate
+  tags:
+  - paging-sorting-repository
+  - spring-data-3
+  question: |
+    In Spring Data 3.x (Spring Boot 3), what changed about
+    `PagingAndSortingRepository`?
+  options:
+  - It was removed entirely
+  - It no longer extends CrudRepository; it is a standalone add-on interface
+  - It now requires native queries
+  - It merged into Repository
+  answer: 1
+  explanation: |
+    In Spring Data 3.x `PagingAndSortingRepository` no longer extends `CrudRepository` —
+    it is a standalone interface providing only the paging/sorting `findAll` overloads.
+    `JpaRepository` composes both `CrudRepository` and `PagingAndSortingRepository`.
+  ref: concepts.md#the-repository-interface-hierarchy
+- id: spring-data-jpa-repositories-040
+  difficulty: advanced
+  tags:
+  - simple-jpa-repository
+  - transactional
+  - read-only
+  question: |
+    Why are plain repository read methods executed with a read-only transaction by default?
+  options:
+  - SimpleJpaRepository is annotated @Transactional(readOnly = true) at class level, with writes overriding
+  - The database enforces it
+  - Spring opens no transaction at all for reads
+  - Because JpaRepository forbids writes
+  answer: 0
+  explanation: |
+    The default implementation `SimpleJpaRepository` is annotated
+    `@Transactional(readOnly = true)` at the class level; mutating methods like `save` and
+    `delete` override with a read-write `@Transactional`. This is also why a bulk
+    `@Modifying` method needs its own write transaction.
+  ref: concepts.md#the-repository-interface-hierarchy
+- id: spring-data-jpa-repositories-041
+  difficulty: beginner
+  tags:
+  - derived-query
+  - return-types
+  question: |
+    Which return type is appropriate for a derived `existsBy...` method?
+  options:
+  - boolean
+  - Page<T>
+  - List<T>
+  - Optional<T>
+  answer: 0
+  explanation: |
+    `existsBy...` maps to an existence check and returns `boolean`. `countBy...` returns
+    `long`. `find...` methods return entities/optionals/collections/`Page`/`Slice`
+    depending on the shape you declare.
+  ref: concepts.md#derived-query-methods
+- id: spring-data-jpa-repositories-042
+  difficulty: advanced
+  tags:
+  - merge
+  - persistence-context
+  - mechanism
+  question: |
+    What exactly does `entityManager.merge(detached)` return?
+  options:
+  - The same detached instance, now managed
+  - void
+  - A managed copy of the entity (loaded/created in the context) — not the argument
+  - A proxy that throws on access
+  answer: 2
+  explanation: |
+    `merge` copies the detached state onto a managed instance (fetching or creating it in
+    the persistence context) and returns *that* managed instance. The passed argument
+    stays detached. This is why `save()` on detached entities must be used via its return
+    value.
+  ref: concepts.md#how-save-works-persist-vs-merge--isnew-detection
+- id: spring-data-jpa-repositories-043
+  difficulty: intermediate
+  tags:
+  - pagination
+  - offset
+  - deep-page
+  question: |
+    Why does `LIMIT`/`OFFSET` pagination degrade on deep pages, and where is that DB
+    mechanism owned?
+  options:
+  - It does not degrade; OFFSET is O(1)
+  - The DB still scans and discards the skipped rows; keyset pagination is covered in messaging-databases
+  - Because Spring re-runs the COUNT for every page
+  - Because Hibernate caches every prior page in memory
+  answer: 1
+  explanation: |
+    With `OFFSET`, the database still reads and discards all skipped rows, so deep pages
+    get progressively slower. Keyset/seek pagination avoids this. The DB-level mechanics
+    live in `messaging-databases/pagination`; here we stay at the ORM/repository altitude.
+  ref: concepts.md#pagination--sorting-page-vs-slice
+- id: spring-data-jpa-repositories-044
+  difficulty: advanced
+  tags:
+  - query
+  - param
+  - in-clause
+  question: |
+    How do you bind an `IN` clause parameter such as `WHERE a.id IN :ids` in a `@Query`?
+  options:
+  - Pass a comma-separated String
+  - Pass a Collection (e.g. List<Long>) bound to :ids
+  - Use one @Param per element
+  - IN clauses are unsupported in @Query
+  answer: 1
+  explanation: |
+    Bind a `Collection` (e.g. `List<Long> ids`) to the `IN` parameter; JPA expands it into
+    the placeholder list. A comma-separated string would be treated as a single value, not
+    a list.
+  ref: concepts.md#named-parameters-positional-params--spel
+- id: spring-data-jpa-repositories-045
+  difficulty: advanced
+  tags:
+  - judgment
+  - dto
+  - read-endpoint
+  - n-plus-one
+  question: |
+    For a read-only REST endpoint returning a flat list of a few fields, which approach
+    best avoids both N+1 and LazyInitializationException while minimizing data loaded?
+  options:
+  - Return managed entities and rely on OSIV
+  - Return a DTO/closed projection via a query that selects only the needed columns
+  - Set every association to EAGER
+  - Fetch-join all collections with a Pageable
+  answer: 1
+  explanation: |
+    A DTO or closed interface projection selects only the needed columns, returns detached
+    objects (no lazy proxies, so no `LazyInitializationException`), and issues a single
+    query (no N+1). Relying on OSIV or global EAGER reintroduces hidden N+1; collection
+    fetch-join with paging causes in-memory pagination.
+  ref: concepts.md#projections-interface-dto--dynamic
+- id: spring-data-jpa-repositories-046
+  difficulty: intermediate
+  tags:
+  - delete-in-batch
+  - mechanism
+  question: |
+    How does `JpaRepository.deleteAllInBatch()` differ from `CrudRepository.deleteAll()`?
+  options:
+  - deleteAllInBatch issues a single bulk DELETE without loading entities; deleteAll loads and removes
+    them one by one
+  - They are identical
+  - deleteAllInBatch is asynchronous
+  - deleteAll uses native SQL while deleteAllInBatch uses JPQL SELECT
+  answer: 0
+  explanation: |
+    `deleteAllInBatch()` runs a single bulk `DELETE` statement, bypassing the persistence
+    context (no per-entity load, no cascade/callbacks). `deleteAll()` loads each entity and
+    calls `remove`, honoring cascades and lifecycle callbacks but at higher cost.
+  ref: concepts.md#the-repository-interface-hierarchy

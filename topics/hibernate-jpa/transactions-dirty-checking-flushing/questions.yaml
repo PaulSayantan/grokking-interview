@@ -1,0 +1,837 @@
+topic: "Transactions, Dirty Checking & Flushing"
+domain: hibernate-jpa
+topic_slug: transactions-dirty-checking-flushing
+version: 1
+questions:
+  - id: transactions-dirty-checking-flushing-001
+    difficulty: beginner
+    tags: [dirty-checking, managed-entity, update]
+    question: |
+      You load an entity with em.find(), change one of its fields, and never
+      call any save/merge/persist method. The transaction then commits. What
+      happens to the change?
+    options:
+      - "Nothing — JPA only persists changes made through explicit save() calls"
+      - "It throws a TransientObjectException because the entity was never persisted"
+      - "Hibernate detects the change via dirty checking and issues an UPDATE at flush/commit"
+      - "The change is written only if you also call em.refresh()"
+    answer: 2
+    explanation: |
+      The entity returned by find() is managed. Hibernate keeps a snapshot of
+      its loaded state and, at flush (which happens at commit), compares the
+      live object to the snapshot; a difference triggers an auto-generated
+      UPDATE. This is dirty checking — the reason you rarely call save() on
+      loaded entities.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-002
+    difficulty: beginner
+    tags: [flush, commit, definitions]
+    question: |
+      What is the difference between a flush and a commit in JPA/Hibernate?
+    options:
+      - "Flush writes pending SQL within the current transaction; commit ends the transaction and makes changes durable/visible to others"
+      - "They are synonyms — both end the transaction"
+      - "Flush ends the transaction; commit only writes SQL"
+      - "Flush clears the persistence context; commit reloads it"
+    answer: 0
+    explanation: |
+      Flush synchronizes the persistence context to the DB by executing queued
+      INSERT/UPDATE/DELETE within the current transaction — the data is not yet
+      committed and a rollback would undo it. Commit ends the DB transaction.
+      Flush != commit.
+    ref: "concepts.md#flush-is-not-commit-and-transaction-boundaries"
+
+  - id: transactions-dirty-checking-flushing-003
+    difficulty: beginner
+    tags: [flushmode, auto, default]
+    question: |
+      What is the default FlushModeType for a JPA EntityManager?
+    options:
+      - "COMMIT"
+      - "AUTO"
+      - "MANUAL"
+      - "ALWAYS"
+    answer: 1
+    explanation: |
+      AUTO is the JPA default: Hibernate flushes at commit and also before
+      executing a query whose results could be affected by pending changes, so
+      queries observe your own unflushed writes.
+    ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"
+
+  - id: transactions-dirty-checking-flushing-004
+    difficulty: intermediate
+    tags: [dirty-checking, snapshot, mechanism]
+    question: |
+      With Hibernate's default dirty-checking strategy, how does it decide which
+      managed entities need an UPDATE at flush?
+    options:
+      - "It listens to every setter call at runtime via reflection interceptors"
+      - "It asks the database which rows changed using a checksum column"
+      - "It marks an entity dirty only when you call em.merge() on it"
+      - "It compares each entity's current property values against a snapshot of its loaded state taken when it became managed"
+    answer: 3
+    explanation: |
+      The default strategy is state-snapshot comparison: Hibernate stores the
+      loaded state when the entity enters the context and, at flush, diffs the
+      live object field-by-field against that snapshot. Differences schedule an
+      UPDATE.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-005
+    difficulty: intermediate
+    tags: [dirty-update, columns, all-columns]
+    question: |
+      By default, when Hibernate issues an UPDATE for a dirty entity, which
+      columns appear in the SET clause?
+    options:
+      - "Only the columns whose values actually changed"
+      - "Only the primary key column"
+      - "All updatable columns of the entity, regardless of which changed"
+      - "A random subset chosen by the JDBC driver"
+    answer: 2
+    explanation: |
+      By default Hibernate pre-generates one parameterized UPDATE per entity
+      type that sets all updatable columns, so the statement can be cached and
+      reused. @DynamicUpdate switches to generating SQL that touches only the
+      changed columns, at the cost of statement-cache reuse.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-006
+    difficulty: intermediate
+    tags: [dynamic-update, annotation]
+    question: |
+      What does the Hibernate @DynamicUpdate annotation change?
+    options:
+      - "It makes UPDATE statements include only the columns whose values changed"
+      - "It forces an immediate flush after every setter"
+      - "It switches the entity to a second-level cache region"
+      - "It disables dirty checking for that entity"
+    answer: 0
+    explanation: |
+      @DynamicUpdate makes Hibernate generate the UPDATE at flush time to
+      include only the changed columns. It sacrifices reuse of a single cached
+      UPDATE statement, but is useful for very wide tables or when column-level
+      triggers/constraints matter.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-007
+    difficulty: intermediate
+    tags: [detached, dirty-checking, lifecycle]
+    question: |
+      A method loads an entity in transaction A (which then closes). Later, in
+      transaction B, code mutates that now-detached object. Nothing else is
+      called. What is persisted?
+    options:
+      - "The change is persisted at B's commit via dirty checking"
+      - "Nothing — a detached entity is not tracked; you must merge it back into a context to persist changes"
+      - "A LazyInitializationException is thrown when the field is set"
+      - "Hibernate re-attaches it automatically on any field access"
+    answer: 1
+    explanation: |
+      Dirty checking only applies to managed entities. A detached entity has no
+      active persistence context tracking it, so mutating it does nothing to the
+      DB until you merge() it back (which copies state into a managed instance).
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-008
+    difficulty: advanced
+    tags: [flush-order, constraint, unique]
+    question: |
+      In one transaction you set a soft flag on and em.remove() an existing User
+      that owns a unique email, then em.persist() a new User with that same
+      email. At commit you get a unique-constraint violation. Why?
+    options:
+      - "merge() should have been used instead of persist()"
+      - "Unique constraints are not supported when orphanRemoval is off"
+      - "Hibernate executes all INSERTs before all DELETEs in a flush, so the new row is inserted while the old one still exists"
+      - "The persistence context caches the email string and reuses it"
+    answer: 2
+    explanation: |
+      A flush runs statements in a fixed action order: inserts precede deletes.
+      So the INSERT of the new row executes while the old row still holds the
+      email, violating the unique constraint. Fix by calling em.flush() between
+      the remove and the persist, or use a deferrable constraint.
+    ref: "concepts.md#flush-order-and-the-constraint-violation-gotcha"
+
+  - id: transactions-dirty-checking-flushing-009
+    difficulty: advanced
+    tags: [flush-order, fix, explicit-flush]
+    question: |
+      Given the delete-then-insert unique-constraint problem, which fix forces
+      the DELETE to run before the conflicting INSERT?
+    options:
+      - "Annotate the entity with @DynamicUpdate"
+      - "Switch FlushModeType to COMMIT"
+      - "Call em.clear() before the persist()"
+      - "Call em.flush() after the remove() and before the persist()"
+    answer: 3
+    explanation: |
+      An explicit em.flush() after the remove pushes the DELETE to the DB before
+      the new INSERT is queued, so ordering is respected. (A deferrable DB
+      constraint is an alternative.) COMMIT mode and @DynamicUpdate do not change
+      intra-flush action ordering; clear() would detach queued work.
+    ref: "concepts.md#when-you-need-an-explicit-flush"
+
+  - id: transactions-dirty-checking-flushing-010
+    difficulty: intermediate
+    tags: [write-behind, persistence-context, why]
+    question: |
+      Why does Hibernate defer SQL to flush time (write-behind) rather than
+      executing it immediately when you call persist() or mutate a field?
+    options:
+      - "To enable JDBC batching, dirty checking, and statement reordering to satisfy constraints"
+      - "To hide SQL from the developer for security"
+      - "Because JDBC does not support immediate execution"
+      - "To keep the transaction open indefinitely"
+    answer: 0
+    explanation: |
+      Write-behind lets Hibernate batch statements (fewer round trips), compute
+      net changes via dirty checking, and reorder statements (inserts, updates,
+      deletes) so foreign-key/constraint ordering works.
+    ref: "concepts.md#the-persistence-context-as-a-write-behind-cache"
+
+  - id: transactions-dirty-checking-flushing-011
+    difficulty: intermediate
+    tags: [flushmode, commit, stale-read]
+    question: |
+      A transaction uses FlushModeType.COMMIT. It persists a new Order, then runs
+      a JPQL "select count(o) from Order o". What is the risk?
+    options:
+      - "The count query flushes first and includes the new order"
+      - "The count may exclude the just-persisted order because no flush occurs before the query"
+      - "The persist is rolled back automatically"
+      - "COMMIT mode is illegal with JPQL queries"
+    answer: 1
+    explanation: |
+      With COMMIT mode Hibernate flushes only at commit, not before queries. So a
+      query executed before commit may not see unflushed changes, returning a
+      stale count. AUTO would flush before this overlapping query.
+    ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"
+
+  - id: transactions-dirty-checking-flushing-012
+    difficulty: advanced
+    tags: [flushmode, auto, native-query]
+    question: |
+      Under FlushModeType.AUTO, which situation is NOT reliably guaranteed to
+      trigger an automatic flush before execution?
+    options:
+      - "A JPQL query over an entity that has pending changes"
+      - "A Criteria query over an entity that has pending changes"
+      - "Transaction commit"
+      - "A native SQL query that reads a table with pending changes"
+    answer: 3
+    explanation: |
+      AUTO flushes before JPQL/HQL/Criteria queries that overlap pending changes
+      and at commit. But Hibernate cannot reliably determine the tables a native
+      SQL query touches, so it may not auto-flush before native queries; call
+      em.flush() first if the native query must see pending writes.
+    ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"
+
+  - id: transactions-dirty-checking-flushing-013
+    difficulty: intermediate
+    tags: [first-level-cache, identity-map]
+    question: |
+      Calling em.find(User.class, 1L) twice within one persistence context
+      results in how many SELECT statements (assuming no eviction)?
+    options:
+      - "Two — every find hits the database"
+      - "Zero — find never queries the database"
+      - "One — the second find returns the same instance from the first-level cache"
+      - "One per field of the entity"
+    answer: 2
+    explanation: |
+      The persistence context is an identity map (first-level cache). The first
+      find issues a SELECT and caches the instance; the second find returns the
+      same object without another query. See caching-first-second-level for depth.
+    ref: "concepts.md#the-persistence-context-as-a-write-behind-cache"
+
+  - id: transactions-dirty-checking-flushing-014
+    difficulty: advanced
+    tags: [bytecode-enhancement, dirty-tracking]
+    question: |
+      What advantage does Hibernate bytecode enhancement provide for dirty
+      tracking compared to the default snapshot strategy?
+    options:
+      - "Instrumented setters flag changed attributes eagerly, so flush need not diff every field against a snapshot"
+      - "It removes the need for a transaction"
+      - "It makes all associations EAGER"
+      - "It disables the first-level cache to save memory"
+    answer: 0
+    explanation: |
+      With enhancement, entity setters are instrumented to record which
+      attributes changed (self dirty tracking), so at flush Hibernate asks each
+      entity what is dirty rather than diffing all fields against a stored
+      snapshot — cheaper for large contexts and wide entities. It also enables
+      lazy basic attributes.
+    ref: "concepts.md#bytecode-enhancement-for-dirty-tracking"
+
+  - id: transactions-dirty-checking-flushing-015
+    difficulty: intermediate
+    tags: [flush, rollback, semantics]
+    question: |
+      After you call em.flush() (statements now sent to the DB), the transaction
+      then rolls back. What is the state of the flushed changes?
+    options:
+      - "They are permanently committed because flush wrote them"
+      - "Only INSERTs survive, UPDATEs are reverted"
+      - "Hibernate throws because you cannot roll back after a flush"
+      - "They are undone — a rollback reverts the transaction regardless of prior flush"
+    answer: 3
+    explanation: |
+      Flush executes SQL within the transaction but does not commit. A rollback
+      reverts everything the transaction did, including flushed statements. Flush
+      changes when SQL runs, not whether it is durable.
+    ref: "concepts.md#flush-is-not-commit-and-transaction-boundaries"
+
+  - id: transactions-dirty-checking-flushing-016
+    difficulty: intermediate
+    tags: [batch-loop, flush, clear, memory]
+    question: |
+      When inserting 100,000 rows in a loop, why should you periodically call
+      em.flush() AND em.clear()?
+    options:
+      - "flush() commits and clear() opens a new transaction"
+      - "flush() pushes the batch to the DB and clear() detaches entities so the persistence context (and its snapshots) does not grow unbounded"
+      - "clear() is required to enable dirty checking"
+      - "They convert IDENTITY ids to SEQUENCE ids"
+    answer: 1
+    explanation: |
+      flush() executes the queued batch; clear() detaches all managed entities so
+      their snapshots are released. Without clear(), the context grows unbounded,
+      slowing dirty checks and risking OutOfMemoryError. A StatelessSession avoids
+      the context entirely.
+    ref: "concepts.md#when-you-need-an-explicit-flush"
+
+  - id: transactions-dirty-checking-flushing-017
+    difficulty: advanced
+    tags: [batching, identity, sequence]
+    question: |
+      Why does GenerationType.IDENTITY prevent Hibernate from batching INSERT
+      statements?
+    options:
+      - "IDENTITY columns cannot be part of a batch by SQL standard"
+      - "IDENTITY forces FlushModeType.COMMIT"
+      - "Hibernate must retrieve each generated key with a round trip per row, so it cannot defer/batch the inserts"
+      - "IDENTITY disables the persistence context"
+    answer: 2
+    explanation: |
+      To batch inserts Hibernate needs the entity identifiers before executing.
+      IDENTITY generates the key on insert, requiring a round trip per row to read
+      it, so Hibernate disables insert batching for IDENTITY-keyed entities. Use
+      SEQUENCE (with pooled/hi-lo) for batchable inserts.
+    ref: "concepts.md#batching-inserts-and-ordered-statements"
+
+  - id: transactions-dirty-checking-flushing-018
+    difficulty: intermediate
+    tags: [batching, config, order-inserts]
+    question: |
+      You set hibernate.jdbc.batch_size=50 but batching seems ineffective when
+      inserting mixed entity types interleaved. Which additional settings help?
+    options:
+      - "hibernate.show_sql and hibernate.format_sql"
+      - "hibernate.enable_lazy_load_no_trans=true"
+      - "hibernate.flushMode=ALWAYS"
+      - "hibernate.order_inserts=true and hibernate.order_updates=true"
+    answer: 3
+    explanation: |
+      JDBC batches only same-shape statements. Interleaved INSERT A, INSERT B,
+      INSERT A breaks the batch at each type change. order_inserts/order_updates
+      group statements by table so the driver can batch them together.
+    ref: "concepts.md#batching-inserts-and-ordered-statements"
+
+  - id: transactions-dirty-checking-flushing-019
+    difficulty: advanced
+    tags: [read-only, flushmode, optimization]
+    question: |
+      Under Spring, what does @Transactional(readOnly = true) do at the Hibernate
+      level?
+    options:
+      - "It sets the Hibernate FlushMode to MANUAL (no auto-flush) and lets Hibernate skip dirty-check snapshots"
+      - "It acquires a database-level shared lock on all read rows"
+      - "It converts all queries to native SQL"
+      - "It forces a second-level cache miss"
+    answer: 0
+    explanation: |
+      Spring sets the session's FlushMode to MANUAL so no automatic flush occurs,
+      and read-only entities need no dirty-check snapshot, saving memory and flush
+      CPU on large result sets. It is a Hibernate optimization/hint, not by itself
+      a DB-level lock.
+    ref: "concepts.md#read-only-transactions-and-optimization"
+
+  - id: transactions-dirty-checking-flushing-020
+    difficulty: advanced
+    tags: [read-only, mutation, gotcha]
+    question: |
+      Inside a @Transactional(readOnly = true) method you load an entity and
+      change a field. What happens at method return?
+    options:
+      - "An UPDATE is issued because dirty checking always runs"
+      - "The change is not persisted — no snapshot/flush occurs for read-only entities"
+      - "A ReadOnlyModificationException is thrown"
+      - "The change is queued and applied in the next transaction"
+    answer: 1
+    explanation: |
+      Read-only mode skips dirty-check snapshots and auto-flush, so mutating a
+      read-only entity silently does not persist. This is a common gotcha: people
+      expect the change to be written.
+    ref: "concepts.md#read-only-transactions-and-optimization"
+
+  - id: transactions-dirty-checking-flushing-021
+    difficulty: beginner
+    tags: [flush, definition, sql]
+    question: |
+      What does "flushing the persistence context" mean?
+    options:
+      - "Discarding all managed entities"
+      - "Committing and closing the transaction"
+      - "Writing all pending INSERT/UPDATE/DELETE statements to the database within the current transaction"
+      - "Refreshing entities from the database"
+    answer: 2
+    explanation: |
+      Flushing synchronizes in-memory state to the DB by executing queued SQL
+      within the transaction. It is not a commit and it does not clear the context
+      (that is clear()).
+    ref: "concepts.md#flush-synchronizing-the-persistence-context-to-the-database"
+
+  - id: transactions-dirty-checking-flushing-022
+    difficulty: advanced
+    tags: [flush-order, actions]
+    question: |
+      Within a single flush, in which relative order does Hibernate execute
+      entity inserts, entity updates, and entity deletes?
+    options:
+      - "Inserts, then updates, then deletes"
+      - "Deletes, then updates, then inserts"
+      - "In the exact order the persist/merge/remove calls were made"
+      - "Updates, then inserts, then deletes"
+    answer: 0
+    explanation: |
+      Hibernate uses a fixed action order: orphan removals, entity inserts,
+      entity updates, collection operations, then entity deletes. Inserts precede
+      deletes, which causes the classic delete-then-reinsert unique-constraint
+      failure.
+    ref: "concepts.md#flush-order-and-the-constraint-violation-gotcha"
+
+  - id: transactions-dirty-checking-flushing-023
+    difficulty: intermediate
+    tags: [explicit-flush, insert-timing]
+    question: |
+      With a SEQUENCE-generated id, why might you call em.flush() right after
+      em.persist(newEntity) even though commit would flush anyway?
+    options:
+      - "To roll back the persist"
+      - "To force the entity's generated id to be assigned, which persist has not yet done"
+      - "To move the entity to the second-level cache"
+      - "To force the deferred INSERT to hit the DB now, e.g. so a DB trigger/default runs or a later native query sees the row"
+    answer: 3
+    explanation: |
+      With a SEQUENCE generator, persist already assigns the id (it calls the
+      sequence) but defers the INSERT until flush. If you need the row to
+      physically exist before commit — a DB trigger/default must populate a column,
+      or a native query must read it — an explicit flush forces the INSERT now. The
+      id itself does not require a flush.
+    ref: "concepts.md#when-you-need-an-explicit-flush"
+
+  - id: transactions-dirty-checking-flushing-024
+    difficulty: advanced
+    tags: [bulk-jpql, dirty-checking, stale-cache]
+    question: |
+      You run em.createQuery("update Employee e set e.active=false").executeUpdate()
+      while some Employee entities are already loaded in the persistence context.
+      What is the concern?
+    options:
+      - "Bulk JPQL update triggers dirty checking on every loaded entity"
+      - "The bulk update bypasses the persistence context, so already-loaded entities may hold stale state in the first-level cache"
+      - "Bulk update automatically clears the context"
+      - "Bulk update requires FlushModeType.COMMIT"
+    answer: 1
+    explanation: |
+      Bulk JPQL update/delete goes straight to SQL, bypassing dirty checking and
+      the first-level cache. Entities already loaded are not updated in memory, so
+      they can be stale. Flush before and clear after bulk operations to avoid
+      inconsistency.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-025
+    difficulty: intermediate
+    tags: [transaction-boundary, spring, commit]
+    question: |
+      In a Spring @Transactional method backed by JpaTransactionManager
+      (resource-local), what triggers the flush and commit?
+    options:
+      - "Every setter call inside the method"
+      - "The database on a timer"
+      - "The transactional proxy at method return triggers flush then commit (or rollback on a runtime exception)"
+      - "Only an explicit em.getTransaction().commit() call"
+    answer: 2
+    explanation: |
+      The @Transactional proxy begins the tx on entry and, on normal return,
+      flushes and commits; on an unchecked exception it rolls back. Propagation
+      and proxy self-invocation limits belong to spring-core/spring-boot; here the
+      point is the boundary drives flush+commit.
+    ref: "concepts.md#flush-is-not-commit-and-transaction-boundaries"
+
+  - id: transactions-dirty-checking-flushing-026
+    difficulty: advanced
+    tags: [jta, resource-local, choice]
+    question: |
+      When would you choose JTA (Jakarta Transactions) over a resource-local
+      transaction for Hibernate?
+    options:
+      - "When a single transaction must span multiple resources (e.g. two databases or a DB plus JMS) requiring a global/XA coordinator"
+      - "When using a single datasource and wanting the simplest setup"
+      - "When you want faster dirty checking"
+      - "JTA is required for any use of @Transactional"
+    answer: 0
+    explanation: |
+      JTA provides a global transaction manager that can coordinate multiple
+      resources (two-phase commit / XA). For a single datasource, resource-local
+      is simpler and sufficient. Hibernate enlists as a Synchronization under JTA
+      and flushes on beforeCompletion.
+    ref: "concepts.md#flush-is-not-commit-and-transaction-boundaries"
+
+  - id: transactions-dirty-checking-flushing-027
+    difficulty: intermediate
+    tags: [debugging, flush, error-location]
+    question: |
+      Why can inserting an explicit em.flush() help when debugging a persistence
+      exception that otherwise appears "at commit"?
+    options:
+      - "flush() disables exceptions"
+      - "flush() surfaces the SQL error at the line that caused it rather than at the end of the method when commit flushes"
+      - "flush() converts exceptions to warnings"
+      - "flush() retries the failed statement"
+    answer: 1
+    explanation: |
+      Because auto-flush at commit runs at method end, a constraint error can
+      surface far from the offending code. An explicit flush executes the SQL at
+      that point, so the exception is thrown at the responsible line — a valuable
+      debugging technique.
+    ref: "concepts.md#flush-is-not-commit-and-transaction-boundaries"
+
+  - id: transactions-dirty-checking-flushing-028
+    difficulty: expert
+    tags: [stateless-session, dirty-checking]
+    question: |
+      Which statement about Hibernate's StatelessSession is correct?
+    options:
+      - "It provides dirty checking but not caching"
+      - "It is identical to a normal Session but faster"
+      - "It automatically batches IDENTITY inserts"
+      - "It has no persistence context: no dirty checking, no first-level cache, and no cascade — you must issue insert/update/delete explicitly"
+    answer: 3
+    explanation: |
+      StatelessSession bypasses the persistence context entirely: no first-level
+      cache, no automatic dirty checking, no cascading, no automatic flush. You
+      call insert/update/delete directly. It is ideal for bulk/ETL work where the
+      overhead of a managed context is unwanted.
+    ref: "concepts.md#when-you-need-an-explicit-flush"
+
+  - id: transactions-dirty-checking-flushing-029
+    difficulty: intermediate
+    tags: [flushmode, manual, hibernate]
+    question: |
+      Which flush mode is Hibernate-specific (not part of the JPA FlushModeType
+      enum) and means "never auto-flush, you must call flush() yourself"?
+    options:
+      - "AUTO"
+      - "COMMIT"
+      - "MANUAL"
+      - "IMMEDIATE"
+    answer: 2
+    explanation: |
+      JPA defines only AUTO and COMMIT. Hibernate's FlushMode adds MANUAL (never
+      auto-flush; explicit flush required) and ALWAYS (flush before every query).
+      There is no IMMEDIATE mode.
+    ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"
+
+  - id: transactions-dirty-checking-flushing-030
+    difficulty: advanced
+    tags: [flushmode, always, cost]
+    question: |
+      What does Hibernate's FlushMode.ALWAYS do, and why is it rarely used?
+    options:
+      - "Flushes only at commit; rarely used because it is too lazy"
+      - "Flushes before every query — even non-overlapping ones — which is expensive and usually unnecessary"
+      - "Disables flushing entirely"
+      - "Flushes each entity on a background thread"
+    answer: 1
+    explanation: |
+      ALWAYS forces a flush before every query regardless of whether the query
+      overlaps pending changes. This adds needless overhead compared to AUTO's
+      overlap-aware flushing, so it is rarely appropriate.
+    ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"
+
+  - id: transactions-dirty-checking-flushing-031
+    difficulty: intermediate
+    tags: [snapshot, memory, anti-pattern]
+    question: |
+      Loading 100,000 rows into one persistence context just to update 3 of them
+      is discouraged primarily because:
+    options:
+      - "JPQL cannot express such a query"
+      - "The database will lock all 100,000 rows"
+      - "Dirty checking does not work above 10,000 entities"
+      - "Hibernate must snapshot and dirty-check all 100,000 managed entities, costing memory and flush CPU"
+    answer: 3
+    explanation: |
+      Every managed entity gets a snapshot and is dirty-checked at flush, so the
+      cost scales with the number of managed entities times their fields. For a
+      few targeted changes, a bulk JPQL update or a narrower query is far cheaper.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-032
+    difficulty: beginner
+    tags: [persistence-context, roles]
+    question: |
+      The persistence context (first-level cache) plays which two roles?
+    options:
+      - "An identity-map read cache and a write-behind buffer for pending changes"
+      - "A connection pool and a thread pool"
+      - "A query parser and a SQL formatter"
+      - "A second-level cache and a query cache"
+    answer: 0
+    explanation: |
+      It is both an identity map (same id returns the same instance, avoiding
+      repeat SELECTs) and a write-behind buffer where mutations accumulate until
+      flush. See session-entitymanager-persistence-context for lifecycle depth.
+    ref: "concepts.md#the-persistence-context-as-a-write-behind-cache"
+
+  - id: transactions-dirty-checking-flushing-033
+    difficulty: advanced
+    tags: [batch-versioned-data, optimistic-lock]
+    question: |
+      Why might you set hibernate.batch_versioned_data=true?
+    options:
+      - "To disable optimistic locking"
+      - "To store version numbers in the second-level cache"
+      - "To allow batching of UPDATE/DELETE on entities that carry a @Version column when the JDBC driver reports batch row counts correctly"
+      - "To force pessimistic locking"
+    answer: 2
+    explanation: |
+      Versioned (optimistic-lock) rows need accurate per-row affected counts to
+      detect stale updates. Historically some drivers did not report batch counts
+      reliably, so Hibernate did not batch versioned data by default. Enabling this
+      allows batching when the driver behaves correctly. See
+      concurrency-optimistic-pessimistic-locking.
+    ref: "concepts.md#batching-inserts-and-ordered-statements"
+
+  - id: transactions-dirty-checking-flushing-034
+    difficulty: intermediate
+    tags: [transient, persist, lifecycle]
+    question: |
+      A brand-new (transient) object that you never persist and never associate
+      with a managed entity is mutated inside a transaction. At commit:
+    options:
+      - "It is inserted via dirty checking"
+      - "Nothing is written — transient objects are not tracked until persist() (or a cascade) makes them managed"
+      - "A TransientPropertyValueException is always thrown"
+      - "It is inserted only if it has an @Id"
+    answer: 1
+    explanation: |
+      Dirty checking and flush only act on managed entities. A transient object is
+      invisible to the persistence context until persist() (or cascade from a
+      managed parent) makes it managed. See entity-lifecycle-states.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-035
+    difficulty: advanced
+    tags: [flush-visibility, isolation, cross-ref]
+    question: |
+      After you flush (but before commit) in transaction T1, can another
+      transaction T2 read the flushed-but-uncommitted rows?
+    options:
+      - "It depends on the database isolation level; under typical READ COMMITTED, T2 does not see uncommitted rows"
+      - "Always yes — flush makes rows globally visible"
+      - "Never — flushed rows are always private forever"
+      - "Only if T2 uses the same EntityManager"
+    answer: 0
+    explanation: |
+      Flush writes within T1's transaction; visibility to other transactions is
+      governed by the database's isolation level and locking, not by Hibernate.
+      Under READ COMMITTED, T2 will not see T1's uncommitted rows. Isolation
+      semantics are owned by messaging-databases.
+    ref: "concepts.md#flush-is-not-commit-and-transaction-boundaries"
+
+  - id: transactions-dirty-checking-flushing-036
+    difficulty: intermediate
+    tags: [merge, detached, dirty-checking]
+    question: |
+      To persist changes made to a detached entity, what is the correct approach?
+    options:
+      - "Call em.persist(detached) — it re-attaches and updates"
+      - "Just mutate it again inside a transaction; dirty checking will pick it up"
+      - "Call em.refresh(detached)"
+      - "Call em.merge(detached), which copies its state into a managed instance that is then dirty-checked/updated"
+    answer: 3
+    explanation: |
+      merge() copies the detached entity's state onto a managed instance (loading
+      or using the cached one), returning the managed copy; that managed instance
+      is then dirty-checked and updated at flush. persist() on a detached entity
+      with an existing id typically throws; refresh() overwrites from the DB.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-037
+    difficulty: advanced
+    tags: [read-only, second-level-cache, immutable]
+    question: |
+      Why are read-only entities also cheaper for the second-level cache?
+    options:
+      - "They are never cached"
+      - "They bypass the query cache"
+      - "Having no dirty-check snapshot, they are effectively immutable and simpler/cheaper to store and reuse"
+      - "They force eviction of the first-level cache"
+    answer: 2
+    explanation: |
+      Read-only entities carry no mutable snapshot state to track, so they are
+      treated as immutable — cheaper to hold and reuse. See
+      caching-first-second-level for cache-region concurrency strategies.
+    ref: "concepts.md#read-only-transactions-and-optimization"
+
+  - id: transactions-dirty-checking-flushing-038
+    difficulty: expert
+    tags: [flush-order, orphan-removal, collections]
+    question: |
+      In Hibernate's flush action order, orphan-removal deletions and
+      collection-recreate operations occur relative to entity inserts as follows:
+    options:
+      - "All collection operations run before any entity insert"
+      - "Orphan removals run first; collection recreate runs after entity updates but before entity deletes"
+      - "Orphan removals run last, after entity deletes"
+      - "Collection recreate runs before orphan removals"
+    answer: 1
+    explanation: |
+      The action order is: orphan removals, entity inserts, entity updates,
+      collection remove, collection update, collection recreate, then entity
+      deletes. So orphan removals precede inserts, and collection recreate falls
+      after entity updates but before entity deletes. See
+      cascade-types-orphan-removal.
+    ref: "concepts.md#flush-order-and-the-constraint-violation-gotcha"
+
+  - id: transactions-dirty-checking-flushing-039
+    difficulty: intermediate
+    tags: [read-your-writes, auto, jpql]
+    question: |
+      The main reason FlushModeType.AUTO flushes before an overlapping JPQL query
+      is to guarantee:
+    options:
+      - "Read-your-writes consistency — the query sees the transaction's own pending changes"
+      - "The query runs faster"
+      - "The second-level cache is populated"
+      - "The transaction commits sooner"
+    answer: 0
+    explanation: |
+      AUTO's pre-query flush ensures a query observes the transaction's uncommitted
+      changes to the entity types (tables) it touches, giving intuitive
+      read-your-writes behavior within the transaction.
+    ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"
+
+  - id: transactions-dirty-checking-flushing-040
+    difficulty: advanced
+    tags: [read-only-hint, query-hint]
+    question: |
+      Which is a valid way to obtain read-only entities from a Hibernate query
+      for a large result set?
+    options:
+      - "Annotate the entity with @DynamicUpdate"
+      - "Set FlushMode.ALWAYS"
+      - "Call em.clear() before the query"
+      - "Set the query hint org.hibernate.readOnly = true"
+    answer: 3
+    explanation: |
+      The org.hibernate.readOnly query hint (or session.setDefaultReadOnly(true),
+      or Spring's @Transactional(readOnly=true)) yields read-only entities with no
+      dirty-check snapshot, saving memory and flush cost on large reads.
+    ref: "concepts.md#read-only-transactions-and-optimization"
+
+  - id: transactions-dirty-checking-flushing-041
+    difficulty: beginner
+    tags: [managed, mutate, no-save]
+    question: |
+      Which statement best captures the "senior aha" about managed entities?
+    options:
+      - "You must always call repository.save() after changing any field"
+      - "Managed entities cannot be modified"
+      - "Mutating a managed entity's fields is enough — Hibernate generates the UPDATE at flush without any save() call"
+      - "Every field change immediately hits the database"
+    answer: 2
+    explanation: |
+      Because a managed entity is dirty-checked, simply mutating its fields causes
+      an UPDATE at flush/commit; no explicit save() is needed. Juniors reflexively
+      call save(); seniors understand dirty checking.
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-042
+    difficulty: advanced
+    tags: [flush, clear, difference]
+    question: |
+      What is the difference between em.flush() and em.clear()?
+    options:
+      - "flush() writes pending SQL to the DB; clear() detaches all managed entities, emptying the persistence context"
+      - "flush() detaches entities; clear() writes SQL"
+      - "They are the same operation"
+      - "flush() commits; clear() rolls back"
+    answer: 0
+    explanation: |
+      flush() synchronizes pending changes to the DB (still within the tx);
+      clear() discards the persistence context, detaching every managed entity
+      (discarding un-flushed changes for those entities and dropping the identity
+      map). Batch loops use both together.
+    ref: "concepts.md#when-you-need-an-explicit-flush"
+
+  - id: transactions-dirty-checking-flushing-043
+    difficulty: intermediate
+    tags: [flush, commit-always-flushes]
+    question: |
+      Regardless of the flush mode, when must Hibernate flush?
+    options:
+      - "Never automatically"
+      - "Before the database COMMIT at the end of the transaction"
+      - "Only when show_sql is enabled"
+      - "Only for entities annotated @DynamicUpdate"
+    answer: 1
+    explanation: |
+      Even in COMMIT mode, Hibernate flushes before the actual COMMIT so the
+      transaction's changes are written. (MANUAL requires explicit flush during
+      the tx.) A commit that failed to flush pending writes would lose them.
+    ref: "concepts.md#flush-synchronizing-the-persistence-context-to-the-database"
+
+  - id: transactions-dirty-checking-flushing-044
+    difficulty: advanced
+    tags: [dirty-check, mutable-type, collection]
+    question: |
+      Why can a mutable field like a java.util.Date or an @ElementCollection List
+      be dirty-checked correctly even without calling a setter?
+    options:
+      - "Hibernate polls the field every millisecond"
+      - "Mutable fields are never dirty-checked"
+      - "Only immutable fields can be dirty-checked"
+      - "The snapshot holds a deep-enough copy of the value at load time, so at flush the current value is compared against that stored snapshot"
+    answer: 3
+    explanation: |
+      Snapshot-based dirty checking compares current state to the stored loaded
+      state at flush, so even in-place mutations of a value (a Date, a collection)
+      are detected by comparison — no setter interception needed. (Bytecode
+      enhancement, by contrast, relies on setter instrumentation and needs care
+      with in-place mutation.)
+    ref: "concepts.md#dirty-checking-how-hibernate-auto-generates-updates"
+
+  - id: transactions-dirty-checking-flushing-045
+    difficulty: expert
+    tags: [flush, query-space, overlap]
+    question: |
+      Under AUTO mode, how does Hibernate decide whether to auto-flush before a
+      given JPQL query?
+    options:
+      - "It always flushes before every JPQL query"
+      - "It flushes only if the query is a SELECT COUNT"
+      - "It compares the query's referenced tables (query spaces) against the tables that have pending changes, flushing only if they overlap"
+      - "It flushes based on the number of managed entities"
+    answer: 2
+    explanation: |
+      AUTO uses query-space (table) overlap: if the JPQL query reads entity
+      types/tables that have pending INSERT/UPDATE/DELETE, Hibernate flushes first
+      so results are consistent; otherwise it can skip the flush. This is why AUTO
+      is smarter (and cheaper) than ALWAYS.
+    ref: "concepts.md#flushmodetype-auto-vs-commit-and-hibernate-manualalways"

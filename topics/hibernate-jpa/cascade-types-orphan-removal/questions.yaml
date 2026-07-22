@@ -1,0 +1,842 @@
+topic: "Cascade Types & Orphan Removal"
+domain: hibernate-jpa
+topic_slug: cascade-types-orphan-removal
+version: 1
+questions:
+  - id: cascade-types-orphan-removal-001
+    difficulty: beginner
+    tags: [cascade, basics, persist]
+    question: |
+      What does "cascading" a persistence operation mean in JPA?
+    options:
+      - "It configures a database ON DELETE CASCADE foreign-key constraint"
+      - "It propagates an EntityManager operation from a parent entity to its associated entities"
+      - "It automatically fetches associations eagerly to avoid N+1 queries"
+      - "It merges the first-level and second-level caches on flush"
+    answer: 1
+    explanation: |
+      Cascading tells the provider to walk an association and apply the same
+      EntityManager operation (persist, merge, remove, refresh, detach) to the
+      associated entities. It is an in-memory graph traversal, not a DB constraint
+      and unrelated to fetching or caching.
+    ref: "concepts.md#what-cascading-is-and-how-hibernate-applies-it"
+
+  - id: cascade-types-orphan-removal-002
+    difficulty: beginner
+    tags: [cascade, defaults]
+    question: |
+      By default, if you declare `@OneToMany List<OrderLine> lines;` with no
+      `cascade` attribute, which operations are cascaded to the lines?
+    options:
+      - "PERSIST and MERGE only"
+      - "REMOVE only"
+      - "ALL operations"
+      - "None — nothing is cascaded unless you specify it"
+    answer: 3
+    explanation: |
+      There is no default cascade in JPA. An association with no `cascade` attribute
+      propagates nothing; you must persist/remove children yourself. (Don't confuse
+      this with the fetch default, which is LAZY for @OneToMany.)
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-003
+    difficulty: intermediate
+    tags: [orphan-removal, remove, key-distinction]
+    question: |
+      You have `@OneToMany(cascade = CascadeType.REMOVE)` (orphanRemoval NOT set).
+      You do `order.getLines().remove(line)` but never call `em.remove(line)` and
+      the FK column is nullable. What happens on flush?
+    options:
+      - "Hibernate issues `UPDATE OrderLine SET order_id = NULL` — the row survives as an orphan"
+      - "Hibernate issues `DELETE FROM OrderLine` for that line"
+      - "Nothing changes until the parent Order is removed"
+      - "A dereferenced-collection exception is thrown"
+    answer: 0
+    explanation: |
+      CascadeType.REMOVE only reacts to an explicit `em.remove(parent)`, not to
+      dereferencing a child from the collection. Without orphanRemoval, dropping the
+      line just nulls its FK (or violates a NOT NULL constraint); the row is not
+      deleted.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-004
+    difficulty: intermediate
+    tags: [orphan-removal, key-distinction]
+    question: |
+      Same mapping but now `@OneToMany(orphanRemoval = true)`. You do
+      `order.getLines().remove(line)` and flush, without calling `em.remove(line)`.
+      What SQL runs?
+    options:
+      - "`UPDATE OrderLine SET order_id = NULL`"
+      - "No SQL — orphanRemoval only fires when the parent is removed"
+      - "`DELETE FROM \"Order\"` cascading down"
+      - "`DELETE FROM OrderLine WHERE id = ?` for the removed line"
+    answer: 3
+    explanation: |
+      orphanRemoval reacts to dereferencing: when a child is removed from the managed
+      collection, Hibernate schedules a DELETE for that row on flush, even though the
+      parent is still alive and em.remove was never called.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-005
+    difficulty: beginner
+    tags: [orphan-removal, cascade-type]
+    question: |
+      Is `orphanRemoval` one of the values of `jakarta.persistence.CascadeType`?
+    options:
+      - "No — it is a separate boolean attribute on @OneToOne/@OneToMany"
+      - "Yes — it is `CascadeType.ORPHAN`"
+      - "Yes — it is included inside `CascadeType.ALL`"
+      - "No — it only exists as a Hibernate-native cascade style"
+    answer: 0
+    explanation: |
+      orphanRemoval is a distinct boolean element of @OneToOne and @OneToMany, not a
+      CascadeType. CascadeType.ALL (PERSIST, MERGE, REMOVE, REFRESH, DETACH) does not
+      include orphan removal.
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-006
+    difficulty: intermediate
+    tags: [cascade-type, all]
+    question: |
+      Which set of operations does `CascadeType.ALL` expand to in Jakarta
+      Persistence?
+    options:
+      - "PERSIST, MERGE, REMOVE, REFRESH, DETACH"
+      - "PERSIST, MERGE, REMOVE, REFRESH, DETACH, and orphanRemoval"
+      - "SAVE_UPDATE, REPLICATE, LOCK, PERSIST, REMOVE"
+      - "PERSIST, MERGE, REMOVE only"
+    answer: 0
+    explanation: |
+      CascadeType.ALL is shorthand for the five spec cascade types: PERSIST, MERGE,
+      REMOVE, REFRESH, DETACH. orphanRemoval is separate; SAVE_UPDATE/REPLICATE/LOCK
+      are Hibernate-native, not JPA.
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-007
+    difficulty: intermediate
+    tags: [shared-reference, remove, judgment]
+    question: |
+      Many `Employee` entities reference one shared `Department` via `@ManyToOne`.
+      Why is putting `cascade = CascadeType.REMOVE` on that association dangerous?
+    options:
+      - "It causes a LazyInitializationException when loading employees"
+      - "Removing one employee would delete the shared Department other employees still reference"
+      - "It forces the Department association to become EAGER"
+      - "It prevents the Employee row from ever being deleted"
+    answer: 1
+    explanation: |
+      Cascading REMOVE across a shared reference means em.remove(employee) tries to
+      delete the Department too — but that Department is shared by other employees,
+      causing FK violations or silent data loss. Only cascade REMOVE for exclusive
+      ownership.
+    ref: "concepts.md#when-to-cascade-vs-when-not-to"
+
+  - id: cascade-types-orphan-removal-008
+    difficulty: intermediate
+    tags: [judgment, composition, aggregate]
+    question: |
+      Which relationship is the BEST candidate for `cascade = ALL` +
+      `orphanRemoval = true`?
+    options:
+      - "Employee → Department (many employees per department)"
+      - "Order → OrderLine (a line exists only within its order)"
+      - "Book → Author in a @ManyToMany"
+      - "Product → Category (a shared lookup category)"
+    answer: 1
+    explanation: |
+      Order→OrderLine is true composition: the line has no independent existence and
+      is not shared, so its whole lifecycle should flow through the aggregate root.
+      The others are shared/reference associations where cascading REMOVE would
+      delete data still in use.
+    ref: "concepts.md#modeling-a-true-parent-child-aggregate"
+
+  - id: cascade-types-orphan-removal-009
+    difficulty: advanced
+    tags: [orphan-removal, mechanism, dirty-checking]
+    question: |
+      How does Hibernate detect that a child has become an orphan when
+      `orphanRemoval = true`?
+    options:
+      - "It compares the managed persistent collection against its snapshot during dirty checking at flush"
+      - "It relies on a database trigger installed by schema generation"
+      - "It polls the database for rows whose FK no longer matches any parent"
+      - "It marks orphans immediately when remove() is called, before any flush"
+    answer: 0
+    explanation: |
+      Loaded collections are wrapped in a persistent collection that records contents.
+      At flush, dirty checking diffs the current collection against the snapshot; any
+      element present before but absent now is an orphan and is scheduled for DELETE.
+    ref: "concepts.md#orphanremoval-mechanism-and-generated-sql"
+
+  - id: cascade-types-orphan-removal-010
+    difficulty: intermediate
+    tags: [orphan-removal, clear]
+    question: |
+      With `orphanRemoval = true` on `Order.lines`, what does
+      `order.getLines().clear()` followed by a flush do?
+    options:
+      - "Nulls the FK of every line but keeps all rows"
+      - "Issues a DELETE for every line that was in the collection"
+      - "Only detaches the lines from the persistence context"
+      - "Throws because you cannot clear an orphan-removal collection"
+    answer: 1
+    explanation: |
+      clear() dereferences every element. With orphanRemoval=true each becomes an
+      orphan and is scheduled for DELETE on flush, removing all child rows.
+    ref: "concepts.md#orphanremoval-mechanism-and-generated-sql"
+
+  - id: cascade-types-orphan-removal-011
+    difficulty: advanced
+    tags: [orphan-removal, gotcha, reassign-collection]
+    question: |
+      With `orphanRemoval = true`, a developer writes
+      `order.setLines(new ArrayList<>(newLines))` to swap in a fresh list. What is
+      the likely result?
+    options:
+      - "A HibernateException: 'A collection with orphan deletion was no longer referenced by the owning entity instance'"
+      - "The new list is silently ignored"
+      - "It works fine and orphans the old elements cleanly"
+      - "All new lines are deleted instead of inserted"
+    answer: 0
+    explanation: |
+      Hibernate manages the original persistent collection instance. Reassigning the
+      field to a brand-new List can trigger the 'dereferenced collection with orphan
+      deletion' exception. The correct idiom is to mutate the existing collection
+      (clear() + addAll()).
+    ref: "concepts.md#gotchas-reassigning-collections-and-reattachment"
+
+  - id: cascade-types-orphan-removal-012
+    difficulty: intermediate
+    tags: [orphan-removal, validity, mapping]
+    question: |
+      On which association types is `orphanRemoval = true` valid?
+    options:
+      - "@ManyToOne and @ManyToMany"
+      - "Any association type"
+      - "Only @OneToMany"
+      - "@OneToOne and @OneToMany"
+    answer: 3
+    explanation: |
+      orphanRemoval expresses private ownership of the target, so it is only valid on
+      @OneToOne and @OneToMany. It is illegal on @ManyToOne/@ManyToMany, where the
+      target is inherently shared.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-013
+    difficulty: intermediate
+    tags: [cascade, persist, transient]
+    question: |
+      You call `em.persist(order)` where `order.lines` holds new transient OrderLine
+      objects, and the @OneToMany has NO cascade. What is the likely outcome on
+      flush?
+    options:
+      - "All lines are inserted automatically because persist is always transitive"
+      - "Only the Order is inserted; the transient lines cause an error or stay unsaved"
+      - "Hibernate silently ignores the Order and inserts only the lines"
+      - "The lines are inserted lazily on the next query"
+    answer: 1
+    explanation: |
+      persist is not transitive without cascade=PERSIST. Hibernate inserts the Order;
+      the references to transient lines cause a TransientObjectException/
+      PropertyValueException on flush or leave the children unsaved.
+    ref: "concepts.md#what-cascading-is-and-how-hibernate-applies-it"
+
+  - id: cascade-types-orphan-removal-014
+    difficulty: intermediate
+    tags: [cascade, direction, gotcha]
+    question: |
+      A developer puts `cascade = CascadeType.REMOVE` on the CHILD side
+      (`OrderLine.order` @ManyToOne). What is the consequence of
+      `em.remove(someLine)`?
+    options:
+      - "Only that line is removed, as expected"
+      - "Nothing — cascade on @ManyToOne is ignored"
+      - "It tries to delete the parent Order (and possibly its other lines)"
+      - "It nulls the order_id of every line in the order"
+    answer: 2
+    explanation: |
+      Cascade is directional and fires toward the target of the annotated
+      association. REMOVE on OrderLine.order means removing a line cascades to delete
+      the whole Order — and if the Order cascades REMOVE to its lines, every sibling
+      line too. This is a classic destructive mistake.
+    ref: "concepts.md#where-cascade-is-declared-and-direction"
+
+  - id: cascade-types-orphan-removal-015
+    difficulty: advanced
+    tags: [cascade, merge, orphan-removal, gotcha]
+    question: |
+      You load an Order with 3 lines, detach it, remove one line from the detached
+      list (now 2 lines), then `em.merge(order)`. The mapping has
+      `orphanRemoval = true`. What happens to the third line in the DB?
+    options:
+      - "It is kept — merge never deletes rows"
+      - "It is deleted, because the merged collection is missing it and orphanRemoval fires"
+      - "It causes an OptimisticLockException"
+      - "It is duplicated"
+    answer: 1
+    explanation: |
+      On merge, Hibernate reconciles the collection; the element present in the DB but
+      absent from the merged graph is treated as an orphan and deleted. This surprises
+      developers who merge partial graphs.
+    ref: "concepts.md#gotchas-reassigning-collections-and-reattachment"
+
+  - id: cascade-types-orphan-removal-016
+    difficulty: beginner
+    tags: [cascade-type, mapping]
+    question: |
+      Where is the `cascade` attribute specified?
+    options:
+      - "On the association mapping annotation (e.g. @OneToMany(cascade = ...))"
+      - "In persistence.xml as a global setting"
+      - "On the @Entity annotation of the parent class"
+      - "On the @Id field of the child entity"
+    answer: 0
+    explanation: |
+      Cascade is a property of a single association, set as an attribute of the
+      relationship annotation (@OneToMany, @ManyToOne, @OneToOne, @ManyToMany).
+    ref: "concepts.md#where-cascade-is-declared-and-direction"
+
+  - id: cascade-types-orphan-removal-017
+    difficulty: intermediate
+    tags: [cascade, bidirectional, direction]
+    question: |
+      In a bidirectional relationship, if `Order.lines` has `cascade = ALL`, what
+      cascade does `OrderLine.order` have?
+    options:
+      - "It automatically inherits cascade = ALL"
+      - "Whatever is declared on its own @ManyToOne — cascade is per-association"
+      - "It is forced to have no cascade"
+      - "It inherits only PERSIST and MERGE"
+    answer: 1
+    explanation: |
+      Cascade is a property of each individual association. The two sides of a
+      bidirectional relationship have independent cascade settings; declaring cascade
+      on one side says nothing about the other.
+    ref: "concepts.md#where-cascade-is-declared-and-direction"
+
+  - id: cascade-types-orphan-removal-018
+    difficulty: advanced
+    tags: [hibernate-native, save-update, replicate]
+    question: |
+      Which of these is a Hibernate-NATIVE cascade style that has no direct equivalent
+      in `jakarta.persistence.CascadeType`?
+    options:
+      - "PERSIST"
+      - "REMOVE"
+      - "SAVE_UPDATE (and REPLICATE / LOCK)"
+      - "DETACH"
+    answer: 2
+    explanation: |
+      SAVE_UPDATE, REPLICATE, and LOCK are Hibernate-native styles tied to legacy
+      Session methods (saveOrUpdate, replicate, lock). PERSIST, REMOVE, and DETACH are
+      standard JPA cascade types.
+    ref: "concepts.md#hibernate-native-cascade-types"
+
+  - id: cascade-types-orphan-removal-019
+    difficulty: intermediate
+    tags: [cascade-type, refresh]
+    question: |
+      What does `CascadeType.REFRESH` cause?
+    options:
+      - "It flushes pending changes to children before a query"
+      - "It reloads the second-level cache for the entity"
+      - "It re-reads the parent and its associated children from the database when em.refresh(parent) is called"
+      - "It reattaches detached children to the persistence context"
+    answer: 2
+    explanation: |
+      REFRESH propagates em.refresh(parent) to associated entities, overwriting their
+      in-memory state with the current database values. It is not about flushing,
+      caching, or reattachment.
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-020
+    difficulty: intermediate
+    tags: [cascade-type, detach]
+    question: |
+      What does `CascadeType.DETACH` do when `em.detach(parent)` is called?
+    options:
+      - "Deletes the children from the database"
+      - "Evicts the associated children from the persistence context along with the parent"
+      - "Marks the children as read-only"
+      - "Refreshes children from the DB before detaching"
+    answer: 1
+    explanation: |
+      DETACH cascades em.detach(parent) so associated entities are also evicted from
+      the persistence context, becoming detached. No SQL runs; it only changes managed
+      state.
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-021
+    difficulty: advanced
+    tags: [cascade, back-reference, gotcha]
+    question: |
+      You cascade PERSIST correctly and call `em.persist(order)`, but you forgot to
+      call `line.setOrder(order)`. The @ManyToOne owns the FK. What is the likely
+      result?
+    options:
+      - "The line is inserted with order_id = NULL (or a NOT NULL constraint fails)"
+      - "The line is not inserted at all"
+      - "Hibernate infers the FK automatically from the collection"
+      - "An OptimisticLockException is thrown"
+    answer: 0
+    explanation: |
+      Cascade propagates the operation, not the link. The owning @ManyToOne side sets
+      the FK; if you never set line.setOrder(order), the order_id is null (or violates
+      NOT NULL). Use an addLine() helper that sets both sides.
+    ref: "concepts.md#gotchas-reassigning-collections-and-reattachment"
+
+  - id: cascade-types-orphan-removal-022
+    difficulty: advanced
+    tags: [cascade, db-cascade, comparison]
+    question: |
+      What is a key difference between `CascadeType.REMOVE` and a database
+      `ON DELETE CASCADE` constraint?
+    options:
+      - "They are identical; JPA just generates the DDL constraint"
+      - "CascadeType.REMOVE runs in the persistence context (issuing child DELETEs and firing callbacks); ON DELETE CASCADE is enforced by the DB and bypasses Hibernate"
+      - "ON DELETE CASCADE fires JPA lifecycle callbacks; CascadeType.REMOVE does not"
+      - "CascadeType.REMOVE only works on @ManyToMany associations"
+    answer: 1
+    explanation: |
+      CascadeType.REMOVE is an application-level, in-context operation: Hibernate loads
+      and deletes children and fires @PreRemove/@PostRemove callbacks. A DB
+      ON DELETE CASCADE is enforced by the database itself and bypasses Hibernate
+      entirely (no callbacks, no context updates).
+    ref: "concepts.md#what-cascading-is-and-how-hibernate-applies-it"
+
+  - id: cascade-types-orphan-removal-023
+    difficulty: intermediate
+    tags: [shared-reference, judgment, safe-cascade]
+    question: |
+      For a shared reference where you want to save a new object graph in one call but
+      must never delete the shared target, which cascade setting is safest?
+    options:
+      - "cascade = ALL"
+      - "cascade = REMOVE only"
+      - "orphanRemoval = true"
+      - "cascade = {PERSIST, MERGE} (never REMOVE)"
+    answer: 3
+    explanation: |
+      Cascading only PERSIST and MERGE lets you save/merge the graph conveniently while
+      never propagating a delete to the shared target. Cascading REMOVE (or ALL, or
+      orphanRemoval) risks deleting shared data.
+    ref: "concepts.md#when-to-cascade-vs-when-not-to"
+
+  - id: cascade-types-orphan-removal-024
+    difficulty: intermediate
+    tags: [many-to-many, remove, judgment]
+    question: |
+      For a `@ManyToMany` between Book and Author, why is cascading REMOVE almost
+      always wrong?
+    options:
+      - "@ManyToMany does not support the cascade attribute"
+      - "Deleting one Book could delete Authors referenced by other Books"
+      - "It would only delete the join-table rows, which is never useful"
+      - "REMOVE is not a valid cascade type for collections"
+    answer: 1
+    explanation: |
+      In @ManyToMany the targets are shared by definition. Cascading REMOVE means
+      deleting one Book tries to delete its Authors, who are still referenced by other
+      Books — data loss. Removing the association should only affect the join table,
+      which is handled by mutating the collection, not by cascade REMOVE.
+    ref: "concepts.md#when-to-cascade-vs-when-not-to"
+
+  - id: cascade-types-orphan-removal-025
+    difficulty: advanced
+    tags: [aggregate, both-features, judgment]
+    question: |
+      Why does modeling a private parent-child aggregate need BOTH `cascade = ALL`
+      AND `orphanRemoval = true`, rather than either alone?
+    options:
+      - "cascade=ALL handles persist/merge/refresh/detach and parent-remove; orphanRemoval adds delete-on-dereference which cascade does not cover"
+      - "They are redundant; either one alone gives full aggregate behavior"
+      - "cascade=ALL only inserts, orphanRemoval only updates"
+      - "orphanRemoval propagates persist while cascade=ALL handles deletes"
+    answer: 0
+    explanation: |
+      cascade=ALL alone won't delete a child you merely drop from the collection;
+      orphanRemoval alone won't propagate persist/merge/refresh/detach. Combined, the
+      children are fully subordinate to the root.
+    ref: "concepts.md#modeling-a-true-parent-child-aggregate"
+
+  - id: cascade-types-orphan-removal-026
+    difficulty: advanced
+    tags: [orphan-removal, notnull, sql]
+    question: |
+      Mapping has `cascade = REMOVE` only (no orphanRemoval) and the child FK is
+      `NOT NULL`. You remove a child from the collection and flush. What happens?
+    options:
+      - "The child is silently deleted"
+      - "The removal is queued until the parent is removed"
+      - "Hibernate skips the flush with a warning"
+      - "Hibernate tries UPDATE ... SET order_id = NULL and the DB rejects it with a NOT NULL constraint violation"
+    answer: 3
+    explanation: |
+      Without orphanRemoval, dereferencing a child makes Hibernate try to null its FK.
+      With a NOT NULL column the database rejects the UPDATE, producing a constraint
+      violation. Orphan removal (which deletes instead) avoids this.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-027
+    difficulty: beginner
+    tags: [cascade-type, persist]
+    question: |
+      Which EntityManager call is propagated by `CascadeType.PERSIST`?
+    options:
+      - "em.merge()"
+      - "em.persist()"
+      - "em.remove()"
+      - "em.refresh()"
+    answer: 1
+    explanation: |
+      Each CascadeType maps to the matching EntityManager method. PERSIST propagates
+      em.persist(parent) so new children reachable through the association are also
+      inserted.
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-028
+    difficulty: intermediate
+    tags: [orphan-removal, when-fires, flush]
+    question: |
+      At what point does the DELETE for an orphaned child actually execute?
+    options:
+      - "Immediately when remove() is called on the collection"
+      - "Only when the transaction is rolled back"
+      - "At flush time, within the transaction, during dirty checking"
+      - "At the next em.find() on the child"
+    answer: 2
+    explanation: |
+      Removing an element from the collection only changes in-memory state. The DELETE
+      is scheduled and issued at flush, when Hibernate dirty-checks the collection and
+      writes changes in flush order.
+    ref: "concepts.md#orphanremoval-mechanism-and-generated-sql"
+
+  - id: cascade-types-orphan-removal-029
+    difficulty: advanced
+    tags: [orphan-removal, batching, performance]
+    question: |
+      With `orphanRemoval = true` and 500 children cleared from a collection, why
+      might you see 500 individual DELETE statements, and how do you improve it?
+    options:
+      - "Hibernate always uses one bulk DELETE; 500 statements indicate a bug"
+      - "Each orphan is a separate DELETE unless JDBC batching (hibernate.jdbc.batch_size) is enabled"
+      - "You must switch to CascadeType.REMOVE to get a single DELETE"
+      - "Orphan removal cannot be batched under any configuration"
+    answer: 1
+    explanation: |
+      Orphan removal issues per-row DELETEs by default. Enabling
+      hibernate.jdbc.batch_size lets Hibernate batch them into fewer round trips. This
+      is a performance-tuning concern (see performance-tuning-pitfalls).
+    ref: "concepts.md#orphanremoval-mechanism-and-generated-sql"
+
+  - id: cascade-types-orphan-removal-030
+    difficulty: intermediate
+    tags: [cascade, persist, sql, scenario]
+    question: |
+      With `cascade = ALL` on Order.lines, you build a new Order with two new lines
+      (FKs set) and call `em.persist(order)`. How many INSERTs run on flush?
+    options:
+      - "One INSERT (only the Order)"
+      - "Two INSERTs (only the lines)"
+      - "Three INSERTs (one Order + one per line)"
+      - "None until you also call em.persist on each line"
+    answer: 2
+    explanation: |
+      cascade=ALL includes PERSIST, so persisting the order cascades to both lines:
+      one INSERT for the Order and one INSERT per line = three total.
+    ref: "concepts.md#what-cascading-is-and-how-hibernate-applies-it"
+
+  - id: cascade-types-orphan-removal-031
+    difficulty: advanced
+    tags: [orphan-removal, clear-addall, identity, gotcha]
+    question: |
+      A developer replaces a collection's contents with `clear()` then `addAll(...)`,
+      including some of the same logical rows. With orphanRemoval on, what is the risk?
+    options:
+      - "Nothing — Hibernate reuses the existing rows by natural key"
+      - "It throws a dereferenced-collection exception"
+      - "The addAll is ignored because the rows already exist"
+      - "clear() orphans and DELETEs all rows, then addAll re-INSERTs them, losing row identity/history"
+    answer: 3
+    explanation: |
+      clear() dereferences every element (DELETE via orphan removal) and addAll inserts
+      fresh rows. Even 'unchanged' rows get new identities, losing PK stability, audit
+      history, and any FKs pointing at them. Prefer surgical add/remove.
+    ref: "concepts.md#gotchas-reassigning-collections-and-reattachment"
+
+  - id: cascade-types-orphan-removal-032
+    difficulty: intermediate
+    tags: [cascade, remove, detached, gotcha]
+    question: |
+      Cascading REMOVE through a detached object graph via `em.remove(detachedParent)`
+      often throws which exception, and what is the fix?
+    options:
+      - "IllegalArgumentException (remove requires a managed instance); merge first, then remove"
+      - "LazyInitializationException; enable eager fetching"
+      - "OptimisticLockException; retry the transaction"
+      - "TransientObjectException; call persist first"
+    answer: 0
+    explanation: |
+      em.remove requires a managed entity. Removing a detached instance throws
+      IllegalArgumentException. Merge the graph into the context first, then remove the
+      managed result so cascade REMOVE can traverse managed children.
+    ref: "concepts.md#gotchas-reassigning-collections-and-reattachment"
+
+  - id: cascade-types-orphan-removal-033
+    difficulty: beginner
+    tags: [cascade-type, merge]
+    question: |
+      `CascadeType.MERGE` propagates which operation?
+    options:
+      - "em.merge(parent) — merging a detached parent also merges its children"
+      - "em.persist(parent)"
+      - "em.detach(parent)"
+      - "em.flush()"
+    answer: 0
+    explanation: |
+      MERGE cascades em.merge(parent): the detached state of the parent and its
+      associated (merge-cascaded) children is copied back into managed instances.
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-034
+    difficulty: advanced
+    tags: [aggregate, ddd, references, judgment]
+    question: |
+      In a well-modeled aggregate (Order root, OrderLine internal), how should
+      OTHER entities in the system reference the order's data?
+    options:
+      - "Hold direct references to individual OrderLine instances for efficiency"
+      - "Reference both the Order and each OrderLine to keep FKs consistent"
+      - "Reference the aggregate root (Order) and never hold their own references to internal OrderLines"
+      - "Reference OrderLines only, since the root is just a container"
+    answer: 2
+    explanation: |
+      Aggregate rules say external entities reference the root only; internal children
+      (OrderLine) are reached through the root. This keeps orphanRemoval + cascade safe
+      because nothing outside shares the children. See system-design/ddd-aggregates.
+    ref: "concepts.md#modeling-a-true-parent-child-aggregate"
+
+  - id: cascade-types-orphan-removal-035
+    difficulty: intermediate
+    tags: [cascade, in-memory, mechanism]
+    question: |
+      When you call `em.persist(parent)` with cascade=PERSIST, when is the actual
+      INSERT SQL for the children emitted?
+    options:
+      - "Immediately during the persist() call"
+      - "As soon as the child object is constructed"
+      - "Only after the transaction commits successfully"
+      - "Later, when the persistence context flushes (before commit or a triggering query)"
+    answer: 3
+    explanation: |
+      Cascading schedules the operation in the persistence context in memory. The SQL
+      is emitted later at flush time, in dependency order. See
+      transactions-dirty-checking-flushing.
+    ref: "concepts.md#what-cascading-is-and-how-hibernate-applies-it"
+
+  - id: cascade-types-orphan-removal-036
+    difficulty: expert
+    tags: [orphan-removal, one-to-one, scenario]
+    question: |
+      An `@OneToOne(orphanRemoval = true)` maps Person → Address. You do
+      `person.setAddress(newAddress)`, replacing the previous managed Address, then
+      flush. What happens to the OLD address row?
+    options:
+      - "It is kept and simply unlinked"
+      - "Both old and new addresses coexist"
+      - "It is deleted, because the previously-owned Address was dereferenced"
+      - "A unique-constraint violation is thrown"
+    answer: 2
+    explanation: |
+      orphanRemoval on @OneToOne means replacing the owned target dereferences the old
+      one, marking it an orphan. On flush Hibernate DELETEs the old Address (after
+      wiring the new one). This is the single-valued analogue of removing from a
+      collection.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-037
+    difficulty: intermediate
+    tags: [cascade, remove, parent, scenario]
+    question: |
+      With `cascade = REMOVE` on Order.lines, what does `em.remove(order)` do?
+    options:
+      - "Removes only the Order row, leaving orphaned lines"
+      - "Throws because you must remove lines first"
+      - "Nulls the order_id on all lines but keeps them"
+      - "Removes the Order and cascades DELETE to all its lines"
+    answer: 3
+    explanation: |
+      A removed parent orphans all children, and cascade REMOVE propagates the delete:
+      Hibernate deletes the lines then the order (in FK-safe order) on flush.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-038
+    difficulty: expert
+    tags: [orphan-removal, cascade-remove, parent-delete, subtlety]
+    question: |
+      When the parent is deleted via `em.remove(parent)`, both `cascade=REMOVE` and
+      `orphanRemoval=true` result in the children being deleted. So what is the ONLY
+      scenario where their behavior actually diverges?
+    options:
+      - "When persisting a brand-new parent"
+      - "When refreshing the parent from the database"
+      - "When a child is removed from the collection while the parent stays managed (dereferencing)"
+      - "When the parent is detached"
+    answer: 2
+    explanation: |
+      For an explicit parent remove, both delete the children. They diverge only on
+      dereferencing: dropping a child from the collection while keeping the parent
+      triggers a DELETE under orphanRemoval but only a FK-null UPDATE under
+      cascade=REMOVE.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-039
+    difficulty: advanced
+    tags: [hibernate-native, save-update, modern]
+    question: |
+      What is required to use Hibernate-native cascade styles like `SAVE_UPDATE`, and
+      why are they discouraged in Hibernate 6/7?
+    options:
+      - "Nothing special; they are part of jakarta.persistence and fully recommended"
+      - "They require enabling a persistence.xml flag and are the recommended default"
+      - "The native @org.hibernate.annotations.Cascade annotation is required, and they are discouraged because Hibernate 6/7 aligns on the JPA/EntityManager API"
+      - "They only work with XML mappings and are mandatory for @OneToMany"
+    answer: 2
+    explanation: |
+      Native styles need @org.hibernate.annotations.Cascade and tie to legacy Session
+      methods (saveOrUpdate, replicate, lock). Modern Hibernate standardizes on the JPA
+      EntityManager API, so prefer the JPA cascade attribute unless you truly need those
+      legacy operations.
+    ref: "concepts.md#hibernate-native-cascade-types"
+
+  - id: cascade-types-orphan-removal-040
+    difficulty: intermediate
+    tags: [helper-method, both-sides, best-practice]
+    question: |
+      Why is an `addLine(OrderLine l) { lines.add(l); l.setOrder(this); }` helper
+      recommended on a bidirectional aggregate?
+    options:
+      - "It enables second-level caching of the lines"
+      - "It replaces the need for cascade = PERSIST"
+      - "It forces eager loading of the collection"
+      - "It keeps both sides of the association in sync so the FK is set and the managed collection is correct"
+    answer: 3
+    explanation: |
+      Cascade propagates operations, not the link. A helper that sets both the
+      collection and the owning @ManyToOne keeps object state consistent, avoiding null
+      FKs and dirty-checking surprises.
+    ref: "concepts.md#gotchas-reassigning-collections-and-reattachment"
+
+  - id: cascade-types-orphan-removal-041
+    difficulty: expert
+    tags: [orphan-removal, persistent-collection, mechanism]
+    question: |
+      Why must a collection be LOADED (initialized) for orphan-removal dirty checking
+      to detect a removed element?
+    options:
+      - "Because orphan removal is disabled on lazy collections"
+      - "Because uninitialized collections are always treated as empty and everything is deleted"
+      - "Because Hibernate diffs the current contents against the snapshot it captured when the persistent collection was initialized"
+      - "Because dirty checking runs only on EAGER associations"
+    answer: 2
+    explanation: |
+      Orphan detection compares the live persistent collection against the snapshot
+      taken at initialization. Hibernate needs that baseline to know which elements
+      disappeared. (This does not require making the association EAGER; it just must be
+      initialized before you mutate and flush.)
+    ref: "concepts.md#orphanremoval-mechanism-and-generated-sql"
+
+  - id: cascade-types-orphan-removal-042
+    difficulty: intermediate
+    tags: [cascade-type, judgment, precision]
+    question: |
+      Which statement about cascade types is CORRECT?
+    options:
+      - "There is a CascadeType.FLUSH that propagates em.flush()"
+      - "There is no default cascade; you must opt in per association"
+      - "CascadeType.ALL automatically enables orphanRemoval"
+      - "@ManyToOne cascades REMOVE by default"
+    answer: 1
+    explanation: |
+      No cascade happens unless declared. There is no CascadeType.FLUSH (flush walks
+      the whole context anyway), ALL does not enable orphanRemoval, and @ManyToOne
+      cascades nothing by default.
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-043
+    difficulty: advanced
+    tags: [callbacks, cascade-remove, db-cascade, scenario]
+    question: |
+      Your OrderLine has a `@PreRemove` callback that must run for auditing. You need
+      children deleted when the order is deleted. Which approach guarantees the
+      callback fires?
+    options:
+      - "A database ON DELETE CASCADE constraint"
+      - "A native SQL bulk DELETE via em.createNativeQuery"
+      - "cascade = REMOVE (or orphanRemoval) so Hibernate deletes each child and fires @PreRemove"
+      - "Truncating the table on schema regeneration"
+    answer: 2
+    explanation: |
+      JPA lifecycle callbacks fire only when Hibernate performs the delete per entity.
+      cascade=REMOVE/orphanRemoval load and delete each child through the context,
+      firing @PreRemove. DB-level cascade and bulk/native DELETEs bypass Hibernate and
+      skip callbacks.
+    ref: "concepts.md#what-cascading-is-and-how-hibernate-applies-it"
+
+  - id: cascade-types-orphan-removal-044
+    difficulty: intermediate
+    tags: [orphan-removal, vs-remove, summary]
+    question: |
+      In one phrase, what extra behavior does `orphanRemoval = true` add that
+      `CascadeType.REMOVE` does NOT provide?
+    options:
+      - "It cascades persist to new children"
+      - "It makes the association eager"
+      - "It adds a database ON DELETE CASCADE constraint"
+      - "It deletes a child when it is dereferenced/removed from the collection, even if the parent is not removed"
+    answer: 3
+    explanation: |
+      The defining extra of orphan removal is delete-on-dereference: a child dropped
+      from the collection is deleted even though the parent stays alive. CascadeType
+      .REMOVE only reacts to an explicit parent remove.
+    ref: "concepts.md#orphanremoval-vs-cascadetyperemove"
+
+  - id: cascade-types-orphan-removal-045
+    difficulty: advanced
+    tags: [namespace, jakarta, version]
+    question: |
+      In Jakarta Persistence 3.x with Hibernate 6/7, which import is correct for the
+      cascade enum?
+    options:
+      - "javax.persistence.CascadeType"
+      - "org.hibernate.CascadeType (only)"
+      - "jakarta.orm.CascadeType"
+      - "jakarta.persistence.CascadeType"
+    answer: 3
+    explanation: |
+      Jakarta EE 9+ moved the namespace from javax.persistence to jakarta.persistence,
+      and Hibernate 6/7 use it. The standard cascade enum is
+      jakarta.persistence.CascadeType (Hibernate's native one is
+      org.hibernate.annotations.CascadeType).
+    ref: "concepts.md#the-jpa-cascadetype-values"
+
+  - id: cascade-types-orphan-removal-046
+    difficulty: expert
+    tags: [scenario, blog, comments, judgment]
+    question: |
+      A blog Post has Comments (`@OneToMany`). Comments should disappear if removed
+      from a post's list AND if the post is deleted, and comments are never shared
+      across posts. Which mapping best expresses this?
+    options:
+      - "@OneToMany(cascade = PERSIST) with no orphanRemoval"
+      - "@OneToMany with a database ON DELETE CASCADE only, no JPA cascade"
+      - "@ManyToMany(cascade = REMOVE)"
+      - "@OneToMany(cascade = ALL, orphanRemoval = true)"
+    answer: 3
+    explanation: |
+      Comments are privately owned by the post: they should be inserted/updated/deleted
+      through the post (cascade=ALL) and deleted when removed from the list
+      (orphanRemoval=true). That is the canonical aggregate mapping. @ManyToMany is
+      wrong (comments aren't shared) and PERSIST-only won't delete them.
+    ref: "concepts.md#modeling-a-true-parent-child-aggregate"

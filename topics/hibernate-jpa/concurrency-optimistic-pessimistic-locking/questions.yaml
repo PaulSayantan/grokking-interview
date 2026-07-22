@@ -1,0 +1,911 @@
+topic: "Concurrency Control: Optimistic vs Pessimistic Locking"
+domain: hibernate-jpa
+topic_slug: concurrency-optimistic-pessimistic-locking
+version: 1
+questions:
+  - id: concurrency-optimistic-pessimistic-locking-001
+    difficulty: beginner
+    tags: [lost-update, concurrency, definition]
+    question: |
+      Two transactions both read a product's price of 10, each compute a new
+      price from it, and both commit. The second write silently overwrites the
+      first. What is this called?
+    options:
+      - "A phantom read"
+      - "A lost update"
+      - "A dirty read"
+      - "A deadlock"
+    answer: 1
+    explanation: |
+      A lost update occurs when two transactions read the same value, both derive
+      a new value from it, and both write back — the later commit clobbers the
+      earlier one, which is silently lost. Optimistic (@Version) or pessimistic
+      locking is the fix.
+    ref: "concepts.md#the-lost-update-problem"
+
+  - id: concurrency-optimistic-pessimistic-locking-002
+    difficulty: intermediate
+    tags: [optimistic, version, generated-sql]
+    question: |
+      An entity with a @Version field was loaded with version = 7 and one column
+      was changed. What UPDATE does Hibernate emit at flush?
+    options:
+      - "UPDATE t SET col = ? WHERE id = ?"
+      - "UPDATE t SET col = ? WHERE id = ? AND col = ?"
+      - "UPDATE t SET col = ?, version = version WHERE id = ?"
+      - "UPDATE t SET col = ?, version = 8 WHERE id = ? AND version = 7"
+    answer: 3
+    explanation: |
+      For a versioned entity Hibernate adds the loaded version to the WHERE clause
+      and increments it in the SET clause. If another transaction already bumped
+      the version, WHERE version = 7 matches 0 rows and Hibernate throws
+      OptimisticLockException.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-003
+    difficulty: intermediate
+    tags: [optimistic, update-count, exception]
+    question: |
+      How does Hibernate decide that an optimistic-locked UPDATE has failed?
+    options:
+      - "The JDBC update count is 0, meaning no row matched the version predicate"
+      - "The database returns a SQL error code"
+      - "A trigger fires on the version column"
+      - "It compares timestamps in Java before sending the UPDATE"
+    answer: 0
+    explanation: |
+      Hibernate inspects the JDBC update count after the conditional UPDATE. A
+      count of 1 means success; 0 means the WHERE ... AND version = ? matched
+      nothing (someone else committed a change), so it raises
+      OptimisticLockException / StaleObjectStateException.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-004
+    difficulty: beginner
+    tags: [pessimistic, for-update, definition]
+    question: |
+      Which LockModeType causes Hibernate to emit SELECT ... FOR UPDATE?
+    options:
+      - "OPTIMISTIC"
+      - "OPTIMISTIC_FORCE_INCREMENT"
+      - "PESSIMISTIC_WRITE"
+      - "NONE"
+    answer: 2
+    explanation: |
+      PESSIMISTIC_WRITE takes an exclusive database row lock, which Hibernate
+      renders as SELECT ... FOR UPDATE (dialect-dependent). No other transaction
+      can write or read-for-update the row until the locking transaction commits.
+    ref: "concepts.md#pessimistic-locking-pessimistic_read-pessimistic_write-pessimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-005
+    difficulty: intermediate
+    tags: [isolation, lost-update, judgment]
+    question: |
+      A web app loads an entity in HTTP request 1 and saves the edit in HTTP
+      request 2. Why does raising isolation to REPEATABLE READ NOT prevent the
+      lost update here?
+    options:
+      - "REPEATABLE READ is not supported by most databases"
+      - "The read and the write are in different transactions, so single-transaction isolation cannot span the gap"
+      - "REPEATABLE READ only affects INSERT statements"
+      - "Hibernate ignores the isolation level for versioned entities"
+    answer: 1
+    explanation: |
+      Isolation governs what one transaction sees of others. Here the load and the
+      save live in separate DB transactions separated by user think-time, so each
+      write is individually valid and no anomaly is detected. You need optimistic
+      or pessimistic locking, which the ORM manages across that gap.
+    ref: "concepts.md#the-lost-update-problem"
+
+  - id: concurrency-optimistic-pessimistic-locking-006
+    difficulty: intermediate
+    tags: [optimistic, first-commit-wins]
+    question: |
+      With optimistic locking via @Version, which transaction wins when two
+      concurrently modify the same row?
+    options:
+      - "The last one to commit (last-write-wins)"
+      - "The first one to commit; the second fails its version check (first-commit-wins)"
+      - "Whichever holds the lock longest"
+      - "Both succeed and the values are merged"
+    answer: 1
+    explanation: |
+      Optimistic locking is first-commit-wins: the first committer advances the
+      version, so the second committer's UPDATE ... WHERE version = old matches 0
+      rows and throws OptimisticLockException. This is the opposite of the naive
+      last-write-wins that causes lost updates.
+    ref: "concepts.md#detecting-conflicts-optimisticlockexception--first-commit-wins"
+
+  - id: concurrency-optimistic-pessimistic-locking-007
+    difficulty: advanced
+    tags: [optimistic-force-increment, aggregate, judgment]
+    question: |
+      Adding a LineItem to an Order changes no column on the Order row, yet you
+      need concurrent additions to conflict so an invariant on the aggregate
+      holds. Which lock mode on the Order achieves this?
+    options:
+      - "PESSIMISTIC_READ"
+      - "OPTIMISTIC"
+      - "OPTIMISTIC_FORCE_INCREMENT"
+      - "NONE"
+    answer: 2
+    explanation: |
+      OPTIMISTIC_FORCE_INCREMENT forcibly bumps the aggregate root's @Version even
+      though its own columns are unchanged, so two transactions each adding a child
+      based on the same Order will collide and one must retry. This is the standard
+      version-the-aggregate-root pattern.
+    ref: "concepts.md#optimistic-lock-modes-optimistic-vs-optimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-008
+    difficulty: intermediate
+    tags: [pessimistic-read, shared-lock, exclusive-lock]
+    question: |
+      What is the difference between PESSIMISTIC_READ and PESSIMISTIC_WRITE?
+    options:
+      - "READ locks the whole table, WRITE locks one row"
+      - "READ is optimistic; WRITE is pessimistic"
+      - "They are identical aliases"
+      - "READ is a shared lock (others may also read-lock); WRITE is an exclusive lock (no other lockers/writers)"
+    answer: 3
+    explanation: |
+      PESSIMISTIC_READ acquires a shared lock — concurrent readers may also take a
+      shared lock but no one can write. PESSIMISTIC_WRITE acquires an exclusive lock
+      (SELECT ... FOR UPDATE) that blocks other lockers and writers entirely.
+    ref: "concepts.md#pessimistic-locking-pessimistic_read-pessimistic_write-pessimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-009
+    difficulty: advanced
+    tags: [optimistic, exception-timing, spring, gotcha]
+    question: |
+      In a Spring @Transactional service method, you mutate a versioned entity and
+      wrap only that line in a try/catch for OptimisticLockException. It never
+      catches. Why?
+    options:
+      - "The version check runs at flush/commit — after the method body — so the exception fires at the transaction boundary, not at the mutation line"
+      - "Spring disables optimistic locking inside @Transactional"
+      - "OptimisticLockException is a checked exception that must be declared"
+      - "The catch block needs to also catch NullPointerException"
+    answer: 0
+    explanation: |
+      The conditional UPDATE and its version check happen at flush, which for a
+      @Transactional method is typically at commit — after your method returns. So
+      the exception surfaces at the transaction boundary. Handle it outside the
+      transaction, or call flush() explicitly to react earlier.
+    ref: "concepts.md#detecting-conflicts-optimisticlockexception--first-commit-wins"
+
+  - id: concurrency-optimistic-pessimistic-locking-010
+    difficulty: intermediate
+    tags: [optimistic, no-locks, throughput]
+    question: |
+      Which statement about optimistic locking's runtime behavior is correct?
+    options:
+      - "It holds a row lock from load until commit"
+      - "It escalates to a table lock under contention"
+      - "It requires SERIALIZABLE isolation to function"
+      - "It holds no database locks; conflicts are detected at write time via the version predicate"
+    answer: 3
+    explanation: |
+      Optimistic locking holds zero DB locks between read and write. It relies
+      purely on the version column and the conditional UPDATE ... WHERE version = ?
+      to detect a concurrent change, which is why it scales well for read-heavy,
+      low-contention workloads and works at any isolation level.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-011
+    difficulty: intermediate
+    tags: [version, types, timestamp, judgment]
+    question: |
+      Why are numeric @Version types (int/long) generally preferred over a
+      timestamp version?
+    options:
+      - "Timestamps use more disk space"
+      - "JPA does not allow timestamp versions at all"
+      - "Numeric versions avoid the need for a WHERE clause"
+      - "A monotonic integer counter is unambiguous, while timestamps risk clock-resolution and clock-skew collisions that can miss a conflict"
+    answer: 3
+    explanation: |
+      Two updates within the same millisecond can share a timestamp, causing a
+      conflict to be missed, and clock skew across nodes compounds this. A
+      monotonically incremented integer is unambiguous. Timestamp versions exist
+      mainly for legacy schemas with an existing last_modified column.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-012
+    difficulty: advanced
+    tags: [retry, transaction, gotcha]
+    question: |
+      When retrying after an OptimisticLockException, why must the retry run in a
+      NEW transaction rather than reusing the failed one?
+    options:
+      - "After rollback the EntityManager/persistence context is in an undefined state and must be discarded; a fresh transaction re-reads current state and version"
+      - "The database blacklists the connection"
+      - "Optimistic locking only works on the first attempt"
+      - "The version column is locked until the JVM restarts"
+    answer: 0
+    explanation: |
+      A version-check failure rolls back the transaction, leaving the
+      EntityManager unusable. A correct retry discards it, opens a new transaction,
+      re-reads the fresh row (and its new version), re-applies the change, and
+      commits — ideally with jittered backoff and a max-attempts cap.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-013
+    difficulty: beginner
+    tags: [version, annotation, basics]
+    question: |
+      How do you enable optimistic locking on a JPA entity?
+    options:
+      - "Annotate the entity class with @Optimistic"
+      - "Set spring.jpa.optimistic=true"
+      - "Call em.lock() on every load"
+      - "Add a property annotated with @Version (e.g. a long version field)"
+    answer: 3
+    explanation: |
+      Optimistic locking is enabled by adding a @Version property (int, long,
+      short, their wrappers, or a timestamp type). Hibernate then manages the
+      version column automatically — you never set it yourself — adding it to the
+      UPDATE's WHERE clause and incrementing it.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-014
+    difficulty: advanced
+    tags: [optimistic, read-verify, non-repeatable-read]
+    question: |
+      You read entity B to make a decision, then modify entity A (which has
+      @Version). Plain optimistic locking protects A. What does requesting
+      LockModeType.OPTIMISTIC on B add?
+    options:
+      - "It takes a FOR UPDATE lock on B"
+      - "It increments B's version immediately"
+      - "It re-verifies B's version at commit and fails if B changed underneath you, protecting the decision you based on B"
+      - "It caches B in the second-level cache"
+    answer: 2
+    explanation: |
+      LockModeType.OPTIMISTIC extends the version check to an entity you only read,
+      re-checking its version at commit. If B changed between your read and commit,
+      the transaction fails — guarding against a stale read that influenced your
+      decision. No DB lock is taken.
+    ref: "concepts.md#optimistic-lock-modes-optimistic-vs-optimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-015
+    difficulty: intermediate
+    tags: [lock-timeout, hint, nowait]
+    question: |
+      Which query/find hint sets a pessimistic lock acquisition timeout in Jakarta
+      Persistence, and what does a value of 0 request?
+    options:
+      - "hibernate.lock.wait; 0 means wait forever"
+      - "spring.jpa.lock.timeout; 0 disables locking"
+      - "javax.persistence.query.timeout; 0 means default"
+      - "jakarta.persistence.lock.timeout (ms); 0 requests NOWAIT (fail immediately) where the database supports it"
+    answer: 3
+    explanation: |
+      The hint jakarta.persistence.lock.timeout takes milliseconds; a value of 0
+      requests NOWAIT semantics (fail immediately if the row is locked) on
+      databases that support it. Behavior is dialect-dependent, and failure throws
+      LockTimeoutException.
+    ref: "concepts.md#lock-timeouts--deadlock-handling"
+
+  - id: concurrency-optimistic-pessimistic-locking-016
+    difficulty: advanced
+    tags: [em-lock, refresh, stale, gotcha]
+    question: |
+      You call em.find(A.class, id) with no lock, then later em.lock(a,
+      PESSIMISTIC_WRITE). What is the subtle risk?
+    options:
+      - "The lock is never acquired"
+      - "em.lock takes the DB lock but does not refresh the entity's fields, so you may hold a lock over a stale in-memory copy"
+      - "em.lock throws because the entity is already managed"
+      - "The version column is reset to zero"
+    answer: 1
+    explanation: |
+      em.lock acquires the row lock but does not re-read the row. If the row
+      changed between the initial unlocked read and the lock, your in-memory state
+      is stale. Use em.refresh(a, lockMode) or re-find to read fresh data under the
+      lock.
+    ref: "concepts.md#acquiring-locks-find-lock-refresh-query-hints--spring-lock"
+
+  - id: concurrency-optimistic-pessimistic-locking-017
+    difficulty: intermediate
+    tags: [spring-data, lock-annotation, repository]
+    question: |
+      In Spring Data JPA, how do you make a repository query acquire a pessimistic
+      write lock?
+    options:
+      - "Annotate the query method with @Lock(LockModeType.PESSIMISTIC_WRITE)"
+      - "Annotate the method with @Transactional(readOnly = false)"
+      - "Return a locked Stream from the method"
+      - "Prefix the method name with lockedFindBy"
+    answer: 0
+    explanation: |
+      Spring Data's @Lock annotation on a repository method (derived, @Query, or an
+      overridden findById) sets the LockModeType. Combined with @QueryHints for the
+      timeout, it makes the generated SELECT use FOR UPDATE. See
+      spring-data-jpa-repositories.
+    ref: "concepts.md#acquiring-locks-find-lock-refresh-query-hints--spring-lock"
+
+  - id: concurrency-optimistic-pessimistic-locking-018
+    difficulty: advanced
+    tags: [pessimistic, transaction-scope, conversation]
+    question: |
+      Why can optimistic locking span a multi-request conversation but pessimistic
+      locking cannot?
+    options:
+      - "Optimistic locks are stored in HTTP session"
+      - "The version travels with the detached entity/DTO, while a pessimistic lock lives only inside one DB transaction and releases at commit"
+      - "Pessimistic locks are stored on disk and survive restarts"
+      - "Optimistic locking uses a distributed lock manager"
+    answer: 1
+    explanation: |
+      Optimistic versioning needs no live DB connection between read and write —
+      the version value travels with the detached entity and is checked when you
+      finally UPDATE. A pessimistic DB lock exists only within one transaction and
+      is released at commit/rollback, so it cannot be held across HTTP requests.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-019
+    difficulty: intermediate
+    tags: [exception, spring, translation]
+    question: |
+      A JPA OptimisticLockException propagates through a Spring Data repository.
+      Into which Spring exception is it typically translated?
+    options:
+      - "DataIntegrityViolationException"
+      - "CannotAcquireLockException"
+      - "ObjectOptimisticLockingFailureException"
+      - "TransientDataAccessResourceException"
+    answer: 2
+    explanation: |
+      Spring's persistence exception translation maps JPA's OptimisticLockException
+      to ObjectOptimisticLockingFailureException (a subclass of
+      OptimisticLockingFailureException). That is what you typically catch or
+      declare in @Retryable to drive a retry.
+    ref: "concepts.md#detecting-conflicts-optimisticlockexception--first-commit-wins"
+
+  - id: concurrency-optimistic-pessimistic-locking-020
+    difficulty: advanced
+    tags: [deadlock, ordering, judgment]
+    question: |
+      Two transactions using PESSIMISTIC_WRITE lock rows in opposite orders (A
+      then B vs B then A). What is the ORM-level mitigation for the resulting
+      deadlocks?
+    options:
+      - "Increase the JVM heap"
+      - "Switch every entity to EAGER fetching"
+      - "Disable the second-level cache"
+      - "Acquire locks in a consistent global order, keep the locked transaction short, and retry on CannotAcquireLockException"
+    answer: 3
+    explanation: |
+      Deadlock is a database phenomenon (see messaging-databases). The ORM-level
+      mitigations are consistent lock ordering, short-lived locking transactions,
+      NOWAIT/SKIP LOCKED for queue access, and retrying the transaction when the
+      driver reports a deadlock (CannotAcquireLockException).
+    ref: "concepts.md#lock-timeouts--deadlock-handling"
+
+  - id: concurrency-optimistic-pessimistic-locking-021
+    difficulty: intermediate
+    tags: [choosing, read-heavy, judgment]
+    question: |
+      For a read-heavy catalog service where write conflicts on the same row are
+      rare, which concurrency strategy is the sensible default?
+    options:
+      - "Pessimistic PESSIMISTIC_WRITE on every read"
+      - "SERIALIZABLE isolation on all transactions"
+      - "Optimistic locking with @Version, retrying the rare conflict"
+      - "No concurrency control at all"
+    answer: 2
+    explanation: |
+      Optimistic locking imposes no locking cost and only fails on the rare actual
+      conflict, which you retry. Pessimistic locking would needlessly serialize a
+      low-contention, read-heavy workload and hurt throughput. Default to
+      optimistic and reserve pessimistic for genuinely high contention.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-022
+    difficulty: expert
+    tags: [bulk-update, jpql, versioning, gotcha]
+    question: |
+      You run a bulk JPQL statement: UPDATE Product p SET p.price = p.price * 1.1.
+      What happens to the @Version columns of the affected rows?
+    options:
+      - "Versions are NOT automatically bumped by bulk updates; you must set p.version = p.version + 1 in the statement yourself"
+      - "Hibernate increments every version automatically"
+      - "The bulk update fails because versioned entities cannot be bulk-updated"
+      - "All versions reset to zero"
+    answer: 0
+    explanation: |
+      Optimistic versioning is driven by dirty-check-generated UPDATEs on managed
+      entities. A bulk JPQL/HQL UPDATE bypasses that mechanism (and the persistence
+      context), so it does not touch the version unless you explicitly add
+      p.version = p.version + 1 to the SET clause.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-023
+    difficulty: intermediate
+    tags: [pessimistic, transaction-required]
+    question: |
+      What is required for a PESSIMISTIC_WRITE lock to be meaningful?
+    options:
+      - "An active database transaction, since the lock is scoped to it and releases at commit/rollback"
+      - "A @Version column on the entity"
+      - "SERIALIZABLE isolation"
+      - "The second-level cache to be disabled"
+    answer: 0
+    explanation: |
+      A pessimistic lock is a database lock held for the duration of the current
+      transaction and released at commit or rollback. It therefore requires an
+      active transaction and cannot be held across a detached conversation. A
+      @Version column is not required for pessimistic locking.
+    ref: "concepts.md#pessimistic-locking-pessimistic_read-pessimistic_write-pessimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-024
+    difficulty: advanced
+    tags: [isolation, portability, judgment]
+    question: |
+      Why is optimistic @Version often preferred over simply raising the isolation
+      level to SERIALIZABLE to prevent lost updates?
+    options:
+      - "SERIALIZABLE is not part of the SQL standard"
+      - "@Version detects the conflict at any isolation level, works across HTTP-request conversations, and avoids serializing the whole workload"
+      - "SERIALIZABLE cannot be set from JPA"
+      - "@Version makes reads faster than SERIALIZABLE"
+    answer: 1
+    explanation: |
+      Optimistic versioning converts a lost update into a detectable conflict
+      regardless of isolation level, and the version can travel across multiple
+      transactions/HTTP requests that a single DB transaction cannot span.
+      SERIALIZABLE is a blunt, throughput-killing instrument by comparison.
+    ref: "concepts.md#isolation-level-interplay"
+
+  - id: concurrency-optimistic-pessimistic-locking-025
+    difficulty: intermediate
+    tags: [force-increment, pessimistic, version]
+    question: |
+      What does PESSIMISTIC_FORCE_INCREMENT do that plain PESSIMISTIC_WRITE does
+      not?
+    options:
+      - "It takes the exclusive lock AND increments the entity's @Version column even without other changes (requires a @Version field)"
+      - "It takes a shared lock instead of exclusive"
+      - "It skips locked rows"
+      - "It downgrades to optimistic locking"
+    answer: 0
+    explanation: |
+      PESSIMISTIC_FORCE_INCREMENT combines an exclusive lock with a forced version
+      increment, so the row's @Version advances even if no other column changed. It
+      requires a @Version field; it is used to signal a version change to other
+      optimistic readers while holding the exclusive lock.
+    ref: "concepts.md#pessimistic-locking-pessimistic_read-pessimistic_write-pessimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-026
+    difficulty: expert
+    tags: [inventory, contention, judgment, scenario]
+    question: |
+      During a flash sale, thousands of requests decrement stock on a few hot SKUs.
+      Which statement best captures the trade-off?
+    options:
+      - "Optimistic locking is always best because it holds no locks"
+      - "Only SERIALIZABLE isolation can decrement stock safely"
+      - "Under extreme contention on a hot row, optimistic retries thrash, so PESSIMISTIC_WRITE or an atomic UPDATE ... WHERE qty > 0 serializes cleaner; low-contention SKUs stay optimistic"
+      - "You must disable dirty checking to decrement stock"
+    answer: 2
+    explanation: |
+      On a highly contended row, optimistic locking causes repeated version-check
+      failures and wasteful retries (near-livelock). Pessimistic locking or a
+      single atomic conditional UPDATE serializes access without retry churn. For
+      the long tail of low-contention SKUs, optimistic remains cheaper — a senior
+      answer names the contention trade-off.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-027
+    difficulty: intermediate
+    tags: [query, lock-mode, api]
+    question: |
+      Which API call requests a pessimistic write lock on a JPQL query result?
+    options:
+      - "query.setHint(\"lock\", \"write\")"
+      - "query.setFlushMode(FlushModeType.COMMIT)"
+      - "query.setFirstResult(0)"
+      - "query.setLockMode(LockModeType.PESSIMISTIC_WRITE)"
+    answer: 3
+    explanation: |
+      Query.setLockMode(LockModeType.PESSIMISTIC_WRITE) makes Hibernate append the
+      dialect's FOR UPDATE clause to the generated SELECT. em.find and em.refresh
+      accept a LockModeType parameter for the same purpose.
+    ref: "concepts.md#acquiring-locks-find-lock-refresh-query-hints--spring-lock"
+
+  - id: concurrency-optimistic-pessimistic-locking-028
+    difficulty: advanced
+    tags: [lock-timeout, exception, deadlock]
+    question: |
+      A pessimistic lock cannot be acquired within jakarta.persistence.lock.timeout.
+      Which exception is thrown, versus a true DB-detected deadlock?
+    options:
+      - "Timeout -> LockTimeoutException; a DB-detected deadlock -> PessimisticLockException"
+      - "Both throw OptimisticLockException"
+      - "Timeout -> RollbackException; deadlock -> EntityNotFoundException"
+      - "Neither throws; the call just returns null"
+    answer: 0
+    explanation: |
+      Failing to acquire within the timeout throws
+      jakarta.persistence.LockTimeoutException, while a deadlock the database
+      detects and aborts surfaces as jakarta.persistence.PessimisticLockException.
+      In Spring these translate to CannotAcquireLockException /
+      PessimisticLockingFailureException.
+    ref: "concepts.md#lock-timeouts--deadlock-handling"
+
+  - id: concurrency-optimistic-pessimistic-locking-029
+    difficulty: beginner
+    tags: [optimistic, exception, class-name]
+    question: |
+      Which exception does JPA throw when an optimistic version check finds 0 rows
+      matched?
+    options:
+      - "jakarta.persistence.OptimisticLockException"
+      - "java.util.ConcurrentModificationException"
+      - "jakarta.persistence.EntityExistsException"
+      - "java.sql.SQLException"
+    answer: 0
+    explanation: |
+      The standard JPA exception is jakarta.persistence.OptimisticLockException
+      (Hibernate's native equivalent is StaleObjectStateException). It signals that
+      another transaction changed the row since it was loaded.
+    ref: "concepts.md#detecting-conflicts-optimisticlockexception--first-commit-wins"
+
+  - id: concurrency-optimistic-pessimistic-locking-030
+    difficulty: expert
+    tags: [mvcc, pessimistic, isolation, cross-ref]
+    question: |
+      On PostgreSQL/InnoDB, a plain SELECT uses a non-locking MVCC snapshot. Why is
+      SELECT ... FOR UPDATE the way to make a read authoritative for a following
+      write?
+    options:
+      - "FOR UPDATE disables MVCC globally"
+      - "FOR UPDATE converts the transaction to READ UNCOMMITTED"
+      - "FOR UPDATE caches the row in the second-level cache"
+      - "FOR UPDATE reads and locks the latest committed row (not your possibly-older snapshot), so the value you then write from is current and protected"
+    answer: 3
+    explanation: |
+      Under MVCC a non-locking SELECT may see an older snapshot; SELECT ... FOR
+      UPDATE reads the latest committed version and locks it, guaranteeing that the
+      value your subsequent UPDATE is based on stays valid and no one else can
+      change it meanwhile. DB mechanics live in messaging-databases.
+    ref: "concepts.md#isolation-level-interplay"
+
+  - id: concurrency-optimistic-pessimistic-locking-031
+    difficulty: intermediate
+    tags: [version, null, gotcha]
+    question: |
+      What is a correct concern about a nullable @Version column?
+    options:
+      - "A NULL version is treated as new/unversioned, so give the column a NOT NULL default or let Hibernate initialize it on persist"
+      - "It doubles the row size"
+      - "Nullable versions force EAGER loading"
+      - "Nullable versions disable dirty checking"
+    answer: 0
+    explanation: |
+      Hibernate treats a NULL version specially (as an uninitialized/new value),
+      which can undermine the conflict check. Make the version column NOT NULL with
+      a default, or ensure Hibernate initializes it when the entity is persisted.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-032
+    difficulty: advanced
+    tags: [retry, spring-retry, backoff, scenario]
+    question: |
+      Which retry design for optimistic lock failures is correct and robust?
+    options:
+      - "Catch the exception inside the same @Transactional method and loop without re-reading"
+      - "Retry indefinitely with no delay until it succeeds"
+      - "Retry in a fresh transaction that re-reads current state, with jittered exponential backoff and a small max-attempts cap"
+      - "Swallow the exception and return success"
+    answer: 2
+    explanation: |
+      A correct retry opens a new transaction each attempt, re-reads the fresh row
+      and its current version, re-applies the intent, and commits. Jittered
+      backoff plus a max-attempts cap prevents a hot row from turning retries into
+      a livelock. Retrying in the failed transaction is undefined behavior.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-033
+    difficulty: beginner
+    tags: [pessimistic, definition, blocking]
+    question: |
+      In one sentence, how does pessimistic locking prevent lost updates?
+    options:
+      - "By detecting a conflict after the write and retrying"
+      - "By taking a real DB lock at read time so no one else can modify the row until you commit"
+      - "By comparing a version column in the WHERE clause"
+      - "By raising isolation to READ UNCOMMITTED"
+    answer: 1
+    explanation: |
+      Pessimistic locking prevents rather than detects: it acquires a database lock
+      (e.g. FOR UPDATE) when you read, serializing access so a concurrent writer
+      blocks until your transaction ends. Contrast optimistic locking, which
+      detects the conflict at write time via a version predicate.
+    ref: "concepts.md#pessimistic-locking-pessimistic_read-pessimistic_write-pessimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-034
+    difficulty: advanced
+    tags: [optimistic, force-increment, distinction]
+    question: |
+      Which pair correctly distinguishes OPTIMISTIC from OPTIMISTIC_FORCE_INCREMENT?
+    options:
+      - "OPTIMISTIC locks the row; FORCE_INCREMENT does not"
+      - "OPTIMISTIC increments the version; FORCE_INCREMENT only reads it"
+      - "OPTIMISTIC only verifies a read entity's version at commit; FORCE_INCREMENT also increments the version even when the entity's own columns are unchanged"
+      - "They differ only in exception type thrown"
+    answer: 2
+    explanation: |
+      OPTIMISTIC re-verifies the version of an entity you read (no version bump).
+      OPTIMISTIC_FORCE_INCREMENT does the same verification and forces a version
+      increment, which is how you make an aggregate root guard changes to its
+      children that don't touch its own columns.
+    ref: "concepts.md#optimistic-lock-modes-optimistic-vs-optimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-035
+    difficulty: intermediate
+    tags: [pessimistic-read, dialect, fallback]
+    question: |
+      On a dialect that has no shared-lock syntax, what may Hibernate do for
+      PESSIMISTIC_READ?
+    options:
+      - "Throw UnsupportedOperationException"
+      - "Fall back to an exclusive FOR UPDATE lock"
+      - "Silently take no lock"
+      - "Switch to optimistic locking"
+    answer: 1
+    explanation: |
+      Some databases lack a shared read-lock syntax (like FOR SHARE / LOCK IN SHARE
+      MODE). In that case Hibernate's dialect may render PESSIMISTIC_READ as a
+      stronger exclusive FOR UPDATE lock, since exact lock semantics are the
+      database's, not the ORM's.
+    ref: "concepts.md#pessimistic-locking-pessimistic_read-pessimistic_write-pessimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-036
+    difficulty: expert
+    tags: [aggregate, write-skew, force-increment, scenario]
+    question: |
+      Two threads each add a LineItem to the same Order, each checking "total <=
+      credit limit" against the same starting total. Both individually pass and
+      commit, breaking the invariant. Nothing on the Order row changed. Best fix?
+    options:
+      - "Raise isolation to READ COMMITTED"
+      - "Add @Version to LineItem only"
+      - "Lock the Order with OPTIMISTIC_FORCE_INCREMENT (or PESSIMISTIC_WRITE) so the aggregate root's version guards concurrent child additions"
+      - "Fetch the collection EAGERly"
+    answer: 2
+    explanation: |
+      This is a write-skew-style aggregate invariant violation. Bumping the Order's
+      version on every child change (OPTIMISTIC_FORCE_INCREMENT) makes the two
+      transactions conflict so only one commits; PESSIMISTIC_WRITE on the Order
+      serializes them. Versioning only the child does not protect the aggregate
+      invariant.
+    ref: "concepts.md#optimistic-lock-modes-optimistic-vs-optimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-037
+    difficulty: intermediate
+    tags: [refresh, lock, api]
+    question: |
+      Which single call both re-reads a managed entity from the DB and acquires a
+      pessimistic lock on it?
+    options:
+      - "em.merge(entity)"
+      - "em.detach(entity)"
+      - "em.contains(entity)"
+      - "em.refresh(entity, LockModeType.PESSIMISTIC_WRITE)"
+    answer: 3
+    explanation: |
+      em.refresh(entity, LockModeType.PESSIMISTIC_WRITE) discards the in-memory
+      state, re-reads the current row from the database, and takes the lock in one
+      step — avoiding the stale-copy risk of em.lock on an already-loaded entity.
+    ref: "concepts.md#acquiring-locks-find-lock-refresh-query-hints--spring-lock"
+
+  - id: concurrency-optimistic-pessimistic-locking-038
+    difficulty: advanced
+    tags: [choosing, non-retryable, judgment]
+    question: |
+      For an operation with an irreversible side effect (e.g. calling an external
+      payment API) that must not be retried, which locking approach is more
+      appropriate?
+    options:
+      - "Optimistic locking, so it can retry on conflict"
+      - "Pessimistic locking, to serialize access and avoid the conflict entirely since a retry is unsafe"
+      - "No locking; rely on the external API's idempotency only"
+      - "SERIALIZABLE isolation with automatic retry"
+    answer: 1
+    explanation: |
+      Optimistic locking assumes conflicts are recoverable via retry. When the
+      operation cannot be safely retried (irreversible external side effect),
+      pessimistic locking is preferable because it prevents the conflict by
+      serializing access rather than detecting it after the fact.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-039
+    difficulty: intermediate
+    tags: [version, managed-by-hibernate, gotcha]
+    question: |
+      Should application code manually set the @Version field when saving?
+    options:
+      - "Yes, always increment it before calling save"
+      - "No — Hibernate manages the version column entirely; setting it manually can corrupt conflict detection"
+      - "Only on the first insert"
+      - "Only when using timestamp versions"
+    answer: 1
+    explanation: |
+      The @Version value is owned by Hibernate: it reads it at load, checks it in
+      the UPDATE's WHERE clause, and increments it. Manually assigning it breaks
+      the invariant the conflict check relies on. Treat it as read-only from
+      application code.
+    ref: "concepts.md#optimistic-locking-with-version"
+
+  - id: concurrency-optimistic-pessimistic-locking-040
+    difficulty: expert
+    tags: [flush, version-check, timing, cross-ref]
+    question: |
+      At what point does Hibernate actually perform the optimistic version check
+      for a dirty entity?
+    options:
+      - "The moment you call setter on the entity"
+      - "When the EntityManager is created"
+      - "At flush, when the queued UPDATE is executed and its update count inspected — flush is triggered before queries and at commit"
+      - "Only if you call em.lock explicitly"
+    answer: 2
+    explanation: |
+      The version check is embedded in the flush-time UPDATE: Hibernate defers the
+      SQL (write-behind) and, at flush (before a query or at commit), executes
+      UPDATE ... WHERE version = ? and inspects the update count. See
+      transactions-dirty-checking-flushing for flush timing.
+    ref: "concepts.md#detecting-conflicts-optimisticlockexception--first-commit-wins"
+
+  - id: concurrency-optimistic-pessimistic-locking-041
+    difficulty: beginner
+    tags: [choosing, comparison]
+    question: |
+      Which phrase best summarizes the core contrast between the two strategies?
+    options:
+      - "Optimistic blocks; pessimistic retries"
+      - "Both hold locks; they differ only in duration"
+      - "Optimistic detects conflicts and retries; pessimistic blocks/serializes to prevent them"
+      - "Optimistic requires SERIALIZABLE; pessimistic requires READ COMMITTED"
+    answer: 2
+    explanation: |
+      Optimistic = detect a conflict at write time (via @Version) and retry, no
+      locks held. Pessimistic = take a real DB lock to block others and prevent the
+      conflict. This detect-and-retry versus block-and-serialize framing is the
+      heart of the topic.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-042
+    difficulty: advanced
+    tags: [isolation, read-committed, optimistic, judgment]
+    question: |
+      Your database runs at READ COMMITTED. Can optimistic @Version locking still
+      reliably catch lost updates?
+    options:
+      - "Yes — optimistic locking relies on the conditional UPDATE ... WHERE version = ?, not on the isolation level, so it works at any level"
+      - "No — it needs at least REPEATABLE READ"
+      - "Only if you also add PESSIMISTIC_WRITE"
+      - "No — @Version is ignored below SERIALIZABLE"
+    answer: 0
+    explanation: |
+      Optimistic locking does not depend on the DB's read-consistency guarantees;
+      the version predicate in the UPDATE detects a concurrent change regardless of
+      isolation level. This isolation-independence is a key reason to prefer it over
+      cranking up isolation.
+    ref: "concepts.md#isolation-level-interplay"
+
+  - id: concurrency-optimistic-pessimistic-locking-043
+    difficulty: intermediate
+    tags: [find, lock-mode, api, best-practice]
+    question: |
+      What is the cleanest way to load an entity AND lock it for a subsequent
+      update in the same read?
+    options:
+      - "em.find(Entity.class, id) then em.lock later"
+      - "em.getReference(Entity.class, id)"
+      - "em.find(Entity.class, id, LockModeType.PESSIMISTIC_WRITE)"
+      - "em.persist(new Entity())"
+    answer: 2
+    explanation: |
+      Passing the LockModeType directly to em.find loads and locks in a single
+      round trip, avoiding the stale-copy pitfall of finding first and locking an
+      already-managed entity later. It emits SELECT ... FOR UPDATE for
+      PESSIMISTIC_WRITE.
+    ref: "concepts.md#acquiring-locks-find-lock-refresh-query-hints--spring-lock"
+
+  - id: concurrency-optimistic-pessimistic-locking-044
+    difficulty: expert
+    tags: [lock-timeout, portability, gotcha]
+    question: |
+      Why should you NOT rely on jakarta.persistence.lock.timeout for correctness
+      by itself?
+    options:
+      - "It only accepts seconds, not milliseconds"
+      - "It permanently changes the connection's isolation level"
+      - "It disables the version check"
+      - "Timeout support is database- and dialect-dependent; some databases ignore the hint entirely"
+    answer: 3
+    explanation: |
+      The lock-timeout hint maps to different (or no) database features depending
+      on the dialect — some ignore it. Treat it as best-effort tuning, and design
+      for correctness with consistent lock ordering, short transactions, and retry
+      logic rather than trusting the timeout alone.
+    ref: "concepts.md#lock-timeouts--deadlock-handling"
+
+  - id: concurrency-optimistic-pessimistic-locking-045
+    difficulty: advanced
+    tags: [detached, merge, version, scenario]
+    question: |
+      A detached entity carrying version = 5 is edited on a web form and merged
+      back. Meanwhile another user committed a change (version now 6). What happens
+      on merge/flush?
+    options:
+      - "The merge silently overwrites the newer data"
+      - "The UPDATE ... WHERE version = 5 matches 0 rows, so OptimisticLockException is thrown — the stale edit is rejected"
+      - "Hibernate auto-merges both versions"
+      - "The entity is re-inserted as a new row"
+    answer: 1
+    explanation: |
+      The version value travels with the detached entity, which is exactly how
+      optimistic locking spans an HTTP conversation. On flush the conditional
+      UPDATE uses the stale version 5, matches no row (current is 6), and throws
+      OptimisticLockException — preventing the lost update.
+    ref: "concepts.md#detecting-conflicts-optimisticlockexception--first-commit-wins"
+
+  - id: concurrency-optimistic-pessimistic-locking-046
+    difficulty: intermediate
+    tags: [pessimistic, throughput, tradeoff]
+    question: |
+      Which is a genuine downside of defaulting to pessimistic locking everywhere?
+    options:
+      - "It cannot detect lost updates"
+      - "It reduces throughput by serializing access and invites deadlocks and lock-wait timeouts"
+      - "It requires a @Version column on every entity"
+      - "It only works at READ UNCOMMITTED"
+    answer: 1
+    explanation: |
+      Holding real DB locks serializes concurrent access to the same rows, lowering
+      throughput, and lock ordering across transactions can deadlock. That is why
+      pessimistic locking is reserved for high-contention or non-retryable
+      operations rather than used as a blanket default.
+    ref: "concepts.md#choosing-optimistic-vs-pessimistic-and-retry-strategy"
+
+  - id: concurrency-optimistic-pessimistic-locking-047
+    difficulty: beginner
+    tags: [namespace, jakarta, versions]
+    question: |
+      In Jakarta Persistence 3.x (Hibernate 6/7), which package is LockModeType
+      imported from?
+    options:
+      - "javax.persistence.LockModeType"
+      - "org.hibernate.LockMode only"
+      - "org.springframework.data.LockModeType"
+      - "jakarta.persistence.LockModeType"
+    answer: 3
+    explanation: |
+      Jakarta EE 9+ renamed the namespace from javax.persistence.* to
+      jakarta.persistence.*, and Hibernate 6/7 adopt it. So LockModeType is
+      jakarta.persistence.LockModeType. Hibernate also has a native
+      org.hibernate.LockMode, but the JPA-standard type is in jakarta.persistence.
+    ref: "concepts.md#optimistic-lock-modes-optimistic-vs-optimistic_force_increment"
+
+  - id: concurrency-optimistic-pessimistic-locking-048
+    difficulty: expert
+    tags: [optimistic, dirty-check, no-version, scenario]
+    question: |
+      An entity has NO @Version field. Two transactions load it, each change a
+      DIFFERENT column, and both commit. What is the default outcome with plain
+      dirty-checking UPDATEs?
+    options:
+      - "Both updates succeed (last-writer's full-row/changed-column write wins per column); no conflict is detected because there is no version predicate"
+      - "OptimisticLockException is thrown on the second commit"
+      - "The database deadlocks"
+      - "Hibernate refuses to flush without a version column"
+    answer: 0
+    explanation: |
+      Without @Version there is no version predicate, so Hibernate's UPDATE has no
+      way to detect a concurrent change — both commit and the second silently
+      overwrites (a potential lost update). This is precisely why adding @Version to
+      mutable entities is recommended. (Hibernate can also use OptimisticLockType.
+      ALL/DIRTY to compare columns, but that is not the default.)
+    ref: "concepts.md#the-lost-update-problem"

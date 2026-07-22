@@ -1,0 +1,705 @@
+topic: "Fetching Strategies: Lazy vs Eager & the N+1 Problem"
+domain: hibernate-jpa
+topic_slug: fetching-lazy-eager-n-plus-one
+version: 1
+questions:
+  - id: fetching-lazy-eager-n-plus-one-001
+    difficulty: beginner
+    tags: [fetch-type, defaults, many-to-one]
+    question: |
+      What is the JPA-spec default fetch type of a plain `@ManyToOne` association?
+    options: ["LAZY", "It has no default; you must specify one", "EAGER", "SUBSELECT"]
+    answer: 2
+    explanation: |
+      Per the Jakarta Persistence spec, to-one associations (`@ManyToOne`,
+      `@OneToOne`) default to EAGER. To-many associations (`@OneToMany`,
+      `@ManyToMany`) default to LAZY. The mnemonic: to-one is EAGER, to-many is LAZY.
+    ref: "concepts.md#fetchtype-lazy-vs-eager"
+
+  - id: fetching-lazy-eager-n-plus-one-002
+    difficulty: beginner
+    tags: [fetch-type, defaults, one-to-many]
+    question: |
+      What is the default fetch type of `@OneToMany` and `@ManyToMany`?
+    options: ["LAZY", "EAGER", "SELECT", "JOIN"]
+    answer: 0
+    explanation: |
+      Collection (to-many) associations default to LAZY. This is deliberate: a
+      collection could contain thousands of rows, so loading it eagerly on every
+      parent load would be catastrophic.
+    ref: "concepts.md#fetchtype-lazy-vs-eager"
+
+  - id: fetching-lazy-eager-n-plus-one-003
+    difficulty: beginner
+    tags: [fetch-type, semantics]
+    question: |
+      According to the JPA specification, what is the difference in guarantee between
+      LAZY and EAGER?
+    options: ["Both are strict requirements the provider must honor exactly", "EAGER is a hint the provider may ignore; LAZY is a strict requirement", "Both are only hints with no binding meaning", "LAZY is a hint the provider may ignore; EAGER is a requirement the provider must honor"]
+    answer: 3
+    explanation: |
+      The spec says LAZY is a *hint* — the provider is permitted to fetch eagerly
+      anyway. EAGER is a *requirement* — the association must be loaded when the owner
+      is loaded. In practice Hibernate honors LAZY for collections and proxied to-ones.
+    ref: "concepts.md#fetchtype-lazy-vs-eager"
+
+  - id: fetching-lazy-eager-n-plus-one-004
+    difficulty: intermediate
+    tags: [eager, code-smell, best-practice]
+    question: |
+      Why do senior developers recommend making even `@ManyToOne` associations
+      `fetch = FetchType.LAZY`, despite EAGER being the spec default?
+    options: ["LAZY associations use less disk space in the database", "EAGER associations are not supported in Hibernate 6", "EAGER cannot be easily overridden per-query, forcing joins/extra selects on every load path, whereas LAZY can be upgraded to eager per query", "LAZY automatically enables second-level caching"]
+    answer: 2
+    explanation: |
+      EAGER is baked into the mapping and applies to every query and `find()` — you
+      cannot cheaply make it lazy for one query. LAZY is the flexible default: keep it
+      lazy, then fetch eagerly per use case with JOIN FETCH or an entity graph.
+    ref: "concepts.md#why-eager-is-a-code-smell"
+
+  - id: fetching-lazy-eager-n-plus-one-005
+    difficulty: intermediate
+    tags: [proxy, mechanism, to-one]
+    question: |
+      How does Hibernate implement a LAZY `@ManyToOne` association at runtime (without
+      bytecode enhancement)?
+    options: ["It returns a runtime-generated proxy subclass holding only the foreign-key id; the first non-id method call fires a SELECT to initialize it", "It returns null until the association is accessed", "It stores the association as a JSON string and parses it on access", "It eagerly loads the row but marks it hidden"]
+    answer: 0
+    explanation: |
+      For a lazy to-one, Hibernate hands you a proxy — a ByteBuddy-generated subclass
+      of the entity that knows only the id. Calling any real method triggers
+      initialization: a SELECT hydrates the actual state. `getReference()` returns
+      exactly such an uninitialized proxy.
+    ref: "concepts.md#how-lazy-works-proxies-and-bytecode-enhancement"
+
+  - id: fetching-lazy-eager-n-plus-one-006
+    difficulty: intermediate
+    tags: [collection, mechanism, persistent-collection]
+    question: |
+      How does Hibernate defer loading of a LAZY `@OneToMany` collection?
+    options: ["It keeps the collection null until commit", "It loads the first element only and streams the rest", "It caches the whole collection in the second-level cache immediately", "It replaces your List/Set with a persistent-collection wrapper (e.g. PersistentBag) that fires its SELECT only when first accessed"]
+    answer: 3
+    explanation: |
+      Hibernate substitutes its own persistent-collection type (PersistentBag,
+      PersistentSet, etc.) for your field. The collection stays uninitialized until you
+      call size(), iterate, etc., at which point the SELECT for its rows runs.
+    ref: "concepts.md#how-lazy-works-proxies-and-bytecode-enhancement"
+
+  - id: fetching-lazy-eager-n-plus-one-007
+    difficulty: advanced
+    tags: [one-to-one, proxy, gotcha]
+    question: |
+      Why can an *optional* `@OneToOne` on the non-owning (`mappedBy`) side not be made
+      truly LAZY with a plain proxy?
+    options: ["Because @OneToOne never supports LAZY under any circumstances", "Because Hibernate must run a query to know whether the association is null, so it can't hand back a lazy proxy without bytecode enhancement", "Because the owning side always overrides the fetch type", "Because optional relationships are stored in a separate table"]
+    answer: 1
+    explanation: |
+      To decide whether to hand back a proxy or null, Hibernate must know if the row
+      exists — which requires a query. So an optional inverse `@OneToOne` is effectively
+      EAGER unless build-time bytecode enhancement is enabled.
+    ref: "concepts.md#why-eager-is-a-code-smell"
+
+  - id: fetching-lazy-eager-n-plus-one-008
+    difficulty: intermediate
+    tags: [lazy-initialization-exception, session, classic]
+    question: |
+      What condition throws `LazyInitializationException`?
+    options: ["Accessing an uninitialized lazy association/collection after the Session (persistence context) that owned it has been closed", "Accessing any lazy association inside an open transaction", "Calling save() twice on the same entity", "Mapping a @ManyToOne as EAGER"]
+    answer: 0
+    explanation: |
+      A lazy proxy/collection needs an open Session to run its initializing SELECT. If
+      the persistence context is already closed (e.g., transaction committed, then the
+      view layer touches the collection), there is "no Session" and the exception fires.
+    ref: "concepts.md#lazyinitializationexception"
+
+  - id: fetching-lazy-eager-n-plus-one-009
+    difficulty: intermediate
+    tags: [lazy-initialization-exception, osiv, anti-pattern]
+    question: |
+      A service returns an entity with a lazy collection; the JSON serializer then hits
+      `LazyInitializationException`. Which is the RIGHT fix at senior level?
+    options: ["Change the collection mapping to EAGER", "Enable Open Session In View so the Session stays open during serialization", "Fetch the collection inside the transaction in the query (JOIN FETCH / entity graph) or return a DTO that already contains the data", "Catch and ignore the exception"]
+    answer: 2
+    explanation: |
+      The proper fix keeps the mapping LAZY and eagerly initializes only what the use
+      case needs, in the query, before the Session closes — via JOIN FETCH, an entity
+      graph, or a DTO projection. EAGER and OSIV are the well-known wrong "fixes" that
+      hide the design flaw and reintroduce N+1.
+    ref: "concepts.md#lazyinitializationexception"
+
+  - id: fetching-lazy-eager-n-plus-one-010
+    difficulty: intermediate
+    tags: [n-plus-one, definition]
+    question: |
+      What exactly is the "N+1 problem"?
+    options: ["N inserts require N+1 flushes", "1 query loads N parents, then N additional queries fire — one per parent — to load each parent's lazy association", "A query returns N+1 duplicate rows due to a bad join", "The first-level cache holds N+1 stale copies of an entity"]
+    answer: 1
+    explanation: |
+      You pay 1 query for the parents plus N more (one per parent) to satisfy each
+      parent's lazy association, for N+1 round trips total. It is the most common
+      Hibernate performance defect.
+    ref: "concepts.md#the-n1-problem"
+
+  - id: fetching-lazy-eager-n-plus-one-011
+    difficulty: advanced
+    tags: [n-plus-one, eager, mechanism]
+    question: |
+      You run `select c from Comment c` where `Comment.post` is `@ManyToOne(EAGER)`.
+      What SQL pattern is Hibernate most likely to produce, and why is it a problem?
+    options: ["A single join — EAGER always folds into the main query with no downside", "No SQL at all until the post is accessed", "A Cartesian product across all posts and comments", "1 query for the comments, then one extra SELECT per distinct post to satisfy the EAGER contract — an N+1 you cannot turn off for that query"]
+    answer: 3
+    explanation: |
+      When a JPQL query returns rows with an EAGER association that Hibernate doesn't
+      fold into the select, it fires a secondary SELECT per distinct associated row.
+      This is EAGER-induced N+1, and because EAGER is in the mapping you can't scope it
+      away for this query.
+    ref: "concepts.md#the-n1-problem"
+
+  - id: fetching-lazy-eager-n-plus-one-012
+    difficulty: intermediate
+    tags: [n-plus-one, detection, logging]
+    question: |
+      Which is the most reliable way to *detect* an N+1 problem during development?
+    options: ["Enable SQL logging (org.hibernate.SQL at DEBUG) or assert a query count in tests, and look for the same parameterized SELECT firing repeatedly in a loop", "Watch heap usage in a profiler", "Check the size of the second-level cache", "Count the number of @Entity classes"]
+    answer: 0
+    explanation: |
+      N+1 shows up as the identical parameterized SELECT executing many times. SQL
+      logging, Hibernate `Statistics` query counts, or a test that asserts an expected
+      query count (datasource-proxy / QuickPerf) all surface it directly.
+    ref: "concepts.md#detecting-n1"
+
+  - id: fetching-lazy-eager-n-plus-one-013
+    difficulty: intermediate
+    tags: [join-fetch, jpql, fix]
+    question: |
+      Which JPQL query loads all posts and their comments in a single SQL statement?
+    options: ["select p from Post p", "select p from Post p where p.comments is not null", "select p from Post p join fetch p.comments", "select p, c from Post p, Comment c"]
+    answer: 2
+    explanation: |
+      `join fetch` tells Hibernate to load the association in the same SQL join,
+      eliminating the per-parent SELECTs. It overrides the LAZY mapping for that query.
+    ref: "concepts.md#fix-join-fetch"
+
+  - id: fetching-lazy-eager-n-plus-one-014
+    difficulty: advanced
+    tags: [join-fetch, distinct, duplicates]
+    question: |
+      A collection `join fetch` returns duplicate parent references (one per child row).
+      How do you get distinct parents, and what does Hibernate 6 do about the SQL?
+    options: ["Add `group by p.id`; Hibernate always emits SQL DISTINCT", "There is no way to de-duplicate a fetch join", "Use `setMaxResults(1)`", "Use `select distinct p ...`; in Hibernate 6 `distinct` de-duplicates the Java list by default without adding a needless SQL DISTINCT for entity queries"]
+    answer: 3
+    explanation: |
+      `select distinct p` removes the duplicate Java references. In Hibernate 6 the
+      former `hibernate.query.passDistinctThrough=false` behavior is the default, so it
+      de-duplicates in memory without pushing a superfluous SQL `DISTINCT` to the DB.
+    ref: "concepts.md#fix-join-fetch"
+
+  - id: fetching-lazy-eager-n-plus-one-015
+    difficulty: advanced
+    tags: [join-fetch, pagination, gotcha, oom]
+    question: |
+      You add `setMaxResults(20)` to a JPQL query that does `join fetch p.comments`.
+      What happens?
+    options: ["The DB applies LIMIT 20 to the joined result correctly", "Hibernate warns (HHH000104) and paginates in memory after fetching everything — a silent OOM risk", "It throws MultipleBagFetchException", "Only 20 comments are loaded across all posts"]
+    answer: 1
+    explanation: |
+      A collection fetch multiplies rows, so a SQL LIMIT cannot page parents correctly.
+      Hibernate loads the entire result set and paginates in application memory, logging
+      `HHH000104: firstResult/maxResults specified with collection fetch; applying in
+      memory`. Use batch fetching or a two-query approach for pagination + collections.
+    ref: "concepts.md#fix-join-fetch"
+
+  - id: fetching-lazy-eager-n-plus-one-016
+    difficulty: intermediate
+    tags: [join-fetch, inner-vs-left]
+    question: |
+      Using an inner `join fetch p.comments`, posts with no comments disappear from the
+      result. How do you keep them?
+    options: ["Use `left join fetch p.comments`", "Add `select distinct`", "Switch the collection to EAGER", "Add `where p.comments is empty`"]
+    answer: 0
+    explanation: |
+      An inner join drops parents whose collection is empty. `left join fetch` performs
+      an outer join so parents with no children are still returned (with an empty
+      collection).
+    ref: "concepts.md#fix-join-fetch"
+
+  - id: fetching-lazy-eager-n-plus-one-017
+    difficulty: intermediate
+    tags: [entity-graph, jpa, fix]
+    question: |
+      What is the primary advantage of `@EntityGraph` over hardcoding `join fetch` in
+      every query?
+    options: ["It generates a Cartesian-product-free query using IN clauses", "It caches results in the second-level cache automatically", "It is a declarative, reusable, JPA-standard fetch plan that overrides mapping fetch types per query and integrates with Spring Data methods", "It is the only way to avoid LazyInitializationException"]
+    answer: 2
+    explanation: |
+      An entity graph is the JPA-standard, declarative fetch plan. Hibernate implements
+      it as a single join query (like JOIN FETCH), but it is reusable and works
+      cleanly on Spring Data repository methods via `@EntityGraph(attributePaths=...)`.
+    ref: "concepts.md#fix-entitygraph"
+
+  - id: fetching-lazy-eager-n-plus-one-018
+    difficulty: advanced
+    tags: [entity-graph, fetch-graph, load-graph]
+    question: |
+      What is the difference between a JPA *fetch graph* and a *load graph*?
+    options: ["Fetch graph is for reads; load graph is for writes", "They are identical aliases", "A load graph ignores the mapping entirely; a fetch graph respects it", "In a fetch graph, listed attributes are EAGER and everything else is LAZY; in a load graph, listed attributes are EAGER and everything else keeps its mapping default"]
+    answer: 3
+    explanation: |
+      Fetch graph (`jakarta.persistence.fetchgraph`): attributes in the graph are EAGER,
+      everything else becomes LAZY (even if mapped EAGER). Load graph
+      (`jakarta.persistence.loadgraph`): listed attributes are EAGER, unlisted attributes
+      keep their mapping default.
+    ref: "concepts.md#fix-entitygraph"
+
+  - id: fetching-lazy-eager-n-plus-one-019
+    difficulty: advanced
+    tags: [batch-size, in-clause, fix]
+    question: |
+      With `@BatchSize(size = 10)` on a lazy collection, roughly how many queries load
+      N parents' collections, and what SQL does Hibernate use?
+    options: ["Always exactly 2 queries, using a subselect", "About 1 + ceil(N/10) queries, initializing collections in batches via an IN (...) clause", "Exactly 1 query, using a fetch join", "N queries — @BatchSize only affects inserts"]
+    answer: 1
+    explanation: |
+      Batch fetching keeps laziness but initializes up to `size` collections/proxies at
+      once with a `WHERE post_id IN (?, ?, ...)`, turning N+1 into roughly
+      1 + ⌈N/size⌉ queries.
+    ref: "concepts.md#fix-batch-fetching-batchsize"
+
+  - id: fetching-lazy-eager-n-plus-one-020
+    difficulty: intermediate
+    tags: [batch-size, global-config, best-practice]
+    question: |
+      Which Hibernate property sets a global default batch fetch size as an N+1 safety
+      net?
+    options: ["hibernate.default_batch_fetch_size", "hibernate.jdbc.fetch_size", "hibernate.max_fetch_depth", "hibernate.batch_versioned_data"]
+    answer: 0
+    explanation: |
+      `hibernate.default_batch_fetch_size` (in Spring Boot,
+      `spring.jpa.properties.hibernate.default_batch_fetch_size`) applies batch fetching
+      globally without per-association `@BatchSize`. `hibernate.jdbc.fetch_size` is the
+      unrelated JDBC row-prefetch hint.
+    ref: "concepts.md#fix-batch-fetching-batchsize"
+
+  - id: fetching-lazy-eager-n-plus-one-021
+    difficulty: advanced
+    tags: [batch-size, trade-offs, pagination]
+    question: |
+      Why is batch fetching often the best *general-purpose* N+1 defense?
+    options: ["It always uses exactly one query", "It eliminates the need for a database entirely", "It disables lazy loading globally", "It works for both collections and to-one proxies, produces no Cartesian product, and is compatible with pagination"]
+    answer: 3
+    explanation: |
+      Unlike JOIN FETCH, batch fetching avoids Cartesian products and works with
+      pagination; unlike subselect it can batch by size; and it applies to both
+      collections and to-one proxies. That is why many teams enable
+      `default_batch_fetch_size` as a safety net.
+    ref: "concepts.md#fix-batch-fetching-batchsize"
+
+  - id: fetching-lazy-eager-n-plus-one-022
+    difficulty: advanced
+    tags: [subselect, fetch-mode]
+    question: |
+      What does `@Fetch(FetchMode.SUBSELECT)` do?
+    options: ["Loads each collection with a separate query per parent", "Initializes all lazy collections of the original query's parents with one second query that re-runs the original query as a subselect in an IN clause", "Forces an inner join in the primary query", "Disables the collection entirely"]
+    answer: 1
+    explanation: |
+      SUBSELECT fetching runs two queries total: the original one, then a single query
+      loading all children `WHERE parent_id IN (subselect of the original query)`. The
+      downside is it re-executes the original query and always loads everything.
+    ref: "concepts.md#fix-subselect-fetching-fetchsubselect"
+
+  - id: fetching-lazy-eager-n-plus-one-023
+    difficulty: expert
+    tags: [multiple-bag, cartesian, gotcha]
+    question: |
+      A query does `join fetch p.comments join fetch p.tags` where both are `List`s
+      mapped without `@OrderColumn`. What happens?
+    options: ["MultipleBagFetchException is thrown, because Hibernate cannot simultaneously fetch two bags", "It works but returns sorted results", "A silent Cartesian product with no error", "It falls back to batch fetching automatically"]
+    answer: 0
+    explanation: |
+      A `List` without `@OrderColumn` is a *bag*. Hibernate cannot de-duplicate two
+      unordered bags in one query, so it throws
+      `MultipleBagFetchException: cannot simultaneously fetch multiple bags`.
+    ref: "concepts.md#multiplebagfetchexception--cartesian-products"
+
+  - id: fetching-lazy-eager-n-plus-one-024
+    difficulty: expert
+    tags: [multiple-bag, set, cartesian, judgment]
+    question: |
+      Changing both collections from `List` to `Set` makes the two-collection JOIN FETCH
+      *compile and run*. Why is it still usually the wrong choice?
+    options: ["Sets are not supported by JPA", "Sets cannot be lazily loaded", "You still get a Cartesian product (comments x tags rows), which grows multiplicatively and ships duplicated data over the wire", "It forces EAGER on both collections permanently"]
+    answer: 2
+    explanation: |
+      `Set` avoids `MultipleBagFetchException`, but joining two collections still
+      multiplies rows (M x K). The right approach is to fetch at most one collection per
+      query and get the others via batch or subselect fetching, or a second query.
+    ref: "concepts.md#multiplebagfetchexception--cartesian-products"
+
+  - id: fetching-lazy-eager-n-plus-one-025
+    difficulty: advanced
+    tags: [dto, projection, read-model, fix]
+    question: |
+      For a read-only list/reporting endpoint that only needs a few columns, what is the
+      cleanest way to avoid both N+1 and LazyInitializationException?
+    options: ["Make every association EAGER", "Enable OSIV globally", "Detach every entity before returning", "Project directly into a DTO (e.g. a JPQL constructor expression) so no lazy associations exist and only needed columns are fetched"]
+    answer: 3
+    explanation: |
+      A DTO has no managed associations, so there is nothing to lazily initialize and no
+      N+1. Constructor expressions (`select new ...`) or Spring Data projections fetch
+      exactly the columns needed. Entities are for the write model, DTOs for the read
+      model.
+    ref: "concepts.md#dto-projections"
+
+  - id: fetching-lazy-eager-n-plus-one-026
+    difficulty: intermediate
+    tags: [dto, jpql, constructor-expression]
+    question: |
+      Which JPQL feature maps query rows directly into a DTO type?
+    options: ["A constructor expression: `select new com.example.PostSummary(p.id, p.title) from Post p`", "The `fetch` keyword", "The `@EntityGraph` annotation", "The `distinct` keyword"]
+    answer: 0
+    explanation: |
+      JPQL constructor expressions (`select new FQCN(...)`) instantiate a DTO per row
+      using a matching constructor. This projects only the selected columns, bypassing
+      entity loading entirely.
+    ref: "concepts.md#dto-projections"
+
+  - id: fetching-lazy-eager-n-plus-one-027
+    difficulty: intermediate
+    tags: [get-reference, proxy, mechanism]
+    question: |
+      What does `entityManager.getReference(Post.class, 1L)` return, and when is a SELECT
+      issued?
+    options: ["A fully loaded Post immediately", "An uninitialized proxy holding only the id; a SELECT fires on first access of a non-id property (while the Session is open)", "null if the row is not yet cached", "A detached copy that never triggers SQL"]
+    answer: 1
+    explanation: |
+      `getReference` deliberately returns a lazy proxy without hitting the DB — ideal for
+      setting a foreign key without a SELECT. Accessing a non-id property later triggers
+      initialization (or throws EntityNotFoundException if the row is gone).
+    ref: "concepts.md#how-lazy-works-proxies-and-bytecode-enhancement"
+
+  - id: fetching-lazy-eager-n-plus-one-028
+    difficulty: intermediate
+    tags: [initialize, api, session]
+    question: |
+      Which call forces initialization of a lazy proxy or collection while the Session is
+      still open?
+    options: ["Hibernate.detach(proxy)", "proxy.getClass()", "entityManager.clear()", "Hibernate.initialize(proxy)"]
+    answer: 3
+    explanation: |
+      `Hibernate.initialize(proxy)` forces the load, and `Hibernate.isInitialized(proxy)`
+      checks state. Note `getClass()` returns the proxy subclass and does NOT initialize;
+      `clear()` detaches everything, making later lazy access throw.
+    ref: "concepts.md#how-lazy-works-proxies-and-bytecode-enhancement"
+
+  - id: fetching-lazy-eager-n-plus-one-029
+    difficulty: advanced
+    tags: [osiv, spring-boot, anti-pattern]
+    question: |
+      In Spring Boot, what is the default value of `spring.jpa.open-in-view`, and why is
+      turning it off often recommended?
+    options: ["false; turning it on is recommended for performance", "true; it should always stay on", "true; disabling it avoids masking N+1 and holding DB connections open during view rendering", "It has no default and must be set explicitly"]
+    answer: 2
+    explanation: |
+      Spring Boot defaults OSIV to true (and logs a warning). Leaving the Session open
+      for the whole request lets lazy loads succeed in the view layer — but that hides
+      N+1 and keeps connections held during rendering. Senior teams commonly set it to
+      false. See spring-boot for request-scope mechanics.
+    ref: "concepts.md#lazyinitializationexception"
+
+  - id: fetching-lazy-eager-n-plus-one-030
+    difficulty: beginner
+    tags: [fetch-type, syntax]
+    question: |
+      Which annotation attribute overrides the default fetch behavior of an association?
+    options: ["fetch", "cascade", "mappedBy", "optional"]
+    answer: 0
+    explanation: |
+      The `fetch` attribute (e.g. `@ManyToOne(fetch = FetchType.LAZY)`) sets FetchType.
+      `cascade` controls cascading operations, `mappedBy` marks the inverse side, and
+      `optional` controls nullability.
+    ref: "concepts.md#fetchtype-lazy-vs-eager"
+
+  - id: fetching-lazy-eager-n-plus-one-031
+    difficulty: advanced
+    tags: [bytecode-enhancement, mechanism]
+    question: |
+      What capability does Hibernate build-time bytecode enhancement add beyond runtime
+      proxies?
+    options: ["It removes the need for a database connection", "Attribute-level lazy loading (e.g. lazy @Lob columns) and no-proxy lazy to-one associations, including the optional inverse @OneToOne case", "It converts all associations to EAGER", "It replaces JPQL with native SQL"]
+    answer: 1
+    explanation: |
+      The enhancer weaves lazy-loading logic into the entity class itself, enabling
+      per-attribute laziness (big columns) and lazy to-one loading without a separate
+      proxy object — solving the optional inverse `@OneToOne` problem.
+    ref: "concepts.md#how-lazy-works-proxies-and-bytecode-enhancement"
+
+  - id: fetching-lazy-eager-n-plus-one-032
+    difficulty: advanced
+    tags: [judgment, scenario, pagination, batch]
+    question: |
+      You must return a *paginated* list of posts, each with its comments, without N+1.
+      Which approach is appropriate?
+    options: ["JOIN FETCH the comments and add setMaxResults() — it pages correctly", "Make comments EAGER", "Use two JOIN FETCH collections at once", "Page the posts normally, and initialize comments via @BatchSize / default_batch_fetch_size (or a second query on the page's ids)"]
+    answer: 3
+    explanation: |
+      Collection JOIN FETCH breaks pagination (in-memory paging / OOM). The correct
+      pattern: paginate parents with LIMIT, then initialize the collections for that page
+      via batch fetching or a targeted second query using the page's parent ids.
+    ref: "concepts.md#fix-batch-fetching-batchsize"
+
+  - id: fetching-lazy-eager-n-plus-one-033
+    difficulty: intermediate
+    tags: [scenario, join-fetch, judgment]
+    question: |
+      Given `Order` (many) -> `Customer` (one, LAZY) and you need order id + customer
+      name for 500 orders in a report, which single query best avoids N+1?
+    options: ["select o from Order o  (then access o.getCustomer().getName() in a loop)", "select o from Order o where o.customer is not null", "select o from Order o join fetch o.customer  (or a DTO projecting o.id, o.customer.name)", "Set Order.customer to EAGER and query normally"]
+    answer: 2
+    explanation: |
+      Fetching the customer in the same query (JOIN FETCH) — or better, projecting the
+      two needed columns into a DTO — loads everything in one round trip. The naive loop
+      causes N+1; EAGER solves this one query but pollutes every other query.
+    ref: "concepts.md#fix-join-fetch"
+
+  - id: fetching-lazy-eager-n-plus-one-034
+    difficulty: expert
+    tags: [scenario, multiple-collections, judgment]
+    question: |
+      You need a `Post` with both its `comments` and `tags` collections initialized, no
+      N+1, no MultipleBagFetchException, no Cartesian product. Best strategy?
+    options: ["Fetch one collection with JOIN FETCH (or entity graph) and load the other via @BatchSize / subselect — or run two separate fetch queries", "JOIN FETCH both collections in one query", "Make both collections EAGER", "Convert both to @ManyToOne"]
+    answer: 0
+    explanation: |
+      Fetch at most one collection per query. Get the second collection through batch or
+      subselect fetching (no Cartesian product) or a separate query. Fetching two
+      collections at once causes MultipleBagFetchException (bags) or a Cartesian product
+      (sets).
+    ref: "concepts.md#multiplebagfetchexception--cartesian-products"
+
+  - id: fetching-lazy-eager-n-plus-one-035
+    difficulty: intermediate
+    tags: [namespace, jakarta, fetch-type]
+    question: |
+      In Jakarta Persistence 3.x / Hibernate 6+, which package declares `FetchType`?
+    options: ["javax.persistence", "jakarta.persistence", "org.hibernate.annotations", "java.persistence"]
+    answer: 1
+    explanation: |
+      Since Jakarta EE 9 the namespace moved from `javax.persistence.*` to
+      `jakarta.persistence.*`, and Hibernate 6/7 use `jakarta.persistence.FetchType`. The
+      legacy `javax.persistence` package is no longer used. See
+      hibernate-6-7-and-jakarta-migration.
+    ref: "concepts.md#fetchtype-lazy-vs-eager"
+
+  - id: fetching-lazy-eager-n-plus-one-036
+    difficulty: advanced
+    tags: [scenario, eager, cartesian]
+    question: |
+      An entity has two `@OneToMany` collections both mapped EAGER. What is the likely
+      symptom when you load it?
+    options: ["A single small query", "A MultipleBagFetchException at startup only", "No SQL until access", "A Cartesian product multiplying the two collections' rows (plus the inability to disable it per query)"]
+    answer: 3
+    explanation: |
+      Two EAGER collections force Hibernate to join both, producing a Cartesian product
+      (rows = |coll1| x |coll2|) on every load, and you cannot scope it away per query.
+      This is a strong reason to keep collections LAZY.
+    ref: "concepts.md#why-eager-is-a-code-smell"
+
+  - id: fetching-lazy-eager-n-plus-one-037
+    difficulty: intermediate
+    tags: [is-initialized, api, mechanism]
+    question: |
+      Does calling `proxy.getClass()` on an uninitialized lazy proxy trigger a SELECT?
+    options: ["No — getClass() returns the proxy subclass and does not initialize it; use Hibernate.initialize() or access a real property instead", "Yes, it always initializes the proxy", "Yes, but only for collections", "No, because proxies never hit the database"]
+    answer: 0
+    explanation: |
+      `getClass()` is not overridden to initialize; it returns the runtime proxy class
+      (e.g. `Post$HibernateProxy$xxx`). This is also why `instanceof`/`getClass()`
+      comparisons and naive equals on proxies are error-prone. To force loading use
+      `Hibernate.initialize()` or access a mapped property.
+    ref: "concepts.md#how-lazy-works-proxies-and-bytecode-enhancement"
+
+  - id: fetching-lazy-eager-n-plus-one-038
+    difficulty: expert
+    tags: [subselect, vs-batch, trade-offs]
+    question: |
+      Compared to `@BatchSize`, what is a downside of `@Fetch(FetchMode.SUBSELECT)`?
+    options: ["It causes MultipleBagFetchException", "It requires EAGER on the collection", "It re-executes the (possibly expensive) original query as a subselect and always loads all children with no batching granularity", "It only works for @ManyToOne"]
+    answer: 2
+    explanation: |
+      SUBSELECT runs the whole original query again inside an IN subquery, which can be
+      costly, and it loads every child at once (no size control). Batch fetching uses a
+      simple IN list of ids and lets you tune the batch size.
+    ref: "concepts.md#fix-subselect-fetching-fetchsubselect"
+
+  - id: fetching-lazy-eager-n-plus-one-039
+    difficulty: beginner
+    tags: [best-practice, lazy, default]
+    question: |
+      What is the recommended professional default for association fetch types?
+    options: ["Make everything EAGER for simplicity", "Make all associations LAZY (including @ManyToOne/@OneToOne) and fetch eagerly per use case in the query", "Use EAGER for collections and LAZY for to-ones", "Never specify fetch and rely on OSIV"]
+    answer: 1
+    explanation: |
+      The professional default is LAZY everywhere, then upgrade to eager per-query with
+      JOIN FETCH / entity graphs / DTOs. This gives per-use-case control and avoids
+      surprise joins and N+1.
+    ref: "concepts.md#why-eager-is-a-code-smell"
+
+  - id: fetching-lazy-eager-n-plus-one-040
+    difficulty: advanced
+    tags: [statistics, detection, testing]
+    question: |
+      Which Hibernate API lets a test assert how many SQL statements a code path issued
+      (to catch N+1 regressions)?
+    options: ["SessionFactory.getCache()", "EntityManager.getMetamodel()", "Session.getFlushMode()", "sessionFactory.getStatistics().getPrepareStatementCount()"]
+    answer: 3
+    explanation: |
+      Enabling `hibernate.generate_statistics` and reading
+      `Statistics.getPrepareStatementCount()` (or query-execution counts) lets a test pin
+      the expected number of statements, failing if an N+1 regression sneaks in.
+      datasource-proxy / QuickPerf offer similar assertions.
+    ref: "concepts.md#detecting-n1"
+
+  - id: fetching-lazy-eager-n-plus-one-041
+    difficulty: intermediate
+    tags: [entity-graph, spring-data, api]
+    question: |
+      In Spring Data JPA, how do you apply an ad-hoc entity graph to a repository method
+      to fetch an association and avoid N+1?
+    options: ["@Fetch(\"comments\") on the method", "@Query(fetch = \"comments\")", "@EntityGraph(attributePaths = {\"comments\"}) on the repository method", "@Transactional(readOnly = true)"]
+    answer: 2
+    explanation: |
+      `@EntityGraph(attributePaths = {...})` on a Spring Data method declares an ad-hoc
+      fetch graph, so Hibernate fetches those paths in one join query. The repository
+      abstraction itself is covered in spring-data-jpa-repositories.
+    ref: "concepts.md#fix-entitygraph"
+
+  - id: fetching-lazy-eager-n-plus-one-042
+    difficulty: advanced
+    tags: [scenario, dto, write-vs-read]
+    question: |
+      Which statement best captures when to use entities vs DTOs regarding fetching?
+    options: ["Use managed entities for the write model (dirty checking, cascades) with a tailored fetch plan; use DTO projections for read-heavy list/reporting endpoints", "Always use entities; DTOs are legacy", "Always use DTOs; entities cause N+1 by definition", "Use EAGER entities for reads and DTOs for writes"]
+    answer: 0
+    explanation: |
+      Entities shine for writes because Hibernate tracks changes and cascades
+      (see transactions-dirty-checking-flushing). For reads, especially lists, DTOs load
+      only needed columns and sidestep lazy/eager and N+1 concerns entirely.
+    ref: "concepts.md#dto-projections"
+
+  - id: fetching-lazy-eager-n-plus-one-043
+    difficulty: expert
+    tags: [scenario, eager, find, mechanism]
+    question: |
+      With `Comment.post` mapped `@ManyToOne(fetch = EAGER)`, what happens on
+      `em.find(Comment.class, 5L)`?
+    options: ["Only the comment row is loaded; the post loads on access", "It throws LazyInitializationException", "Nothing loads until commit", "Hibernate loads the comment and its post together, typically in one join (EAGER is honored for find())"]
+    answer: 3
+    explanation: |
+      For a direct `find()`, Hibernate can satisfy an EAGER to-one with a single join,
+      loading the post alongside the comment. (The N+1 danger with EAGER surfaces more on
+      multi-row JPQL/HQL queries than on single-entity find().)
+    ref: "concepts.md#why-eager-is-a-code-smell"
+
+  - id: fetching-lazy-eager-n-plus-one-044
+    difficulty: intermediate
+    tags: [bag, order-column, list]
+    question: |
+      By default, how does Hibernate treat a `@OneToMany List<...>` with no
+      `@OrderColumn`?
+    options: ["As an ordered indexed list", "As a bag (unordered, allowing duplicates) — which is why two such lists can't be fetch-joined together", "As a Set with uniqueness enforced", "As a Map keyed by id"]
+    answer: 1
+    explanation: |
+      A `List` without `@OrderColumn` is a *bag*: unordered, no index column. Two bags
+      can't be fetch-joined simultaneously (MultipleBagFetchException). Adding
+      `@OrderColumn` makes it a true ordered list (with an index column).
+    ref: "concepts.md#multiplebagfetchexception--cartesian-products"
+
+  - id: fetching-lazy-eager-n-plus-one-045
+    difficulty: advanced
+    tags: [scenario, lazy-init, transaction-boundary]
+    question: |
+      Your controller calls a `@Transactional` service that returns a `Post`; the
+      controller then reads `post.getComments()` and gets LazyInitializationException,
+      even though OSIV is disabled. What is the cleanest fix?
+    options: ["Add @Transactional to the controller too", "Re-enable OSIV", "Have the service initialize/return the needed data inside its transaction — e.g. JOIN FETCH the comments, use an @EntityGraph, or return a DTO", "Call Hibernate.initialize() in the controller"]
+    answer: 2
+    explanation: |
+      With OSIV off, the Session closes when the service transaction commits, so the
+      controller can't lazily load. The fix is to fetch what the caller needs while the
+      transaction is open (JOIN FETCH / entity graph) or return a fully-populated DTO —
+      not to widen the transaction or re-enable OSIV.
+    ref: "concepts.md#lazyinitializationexception"
+
+  - id: fetching-lazy-eager-n-plus-one-046
+    difficulty: intermediate
+    tags: [comparison, techniques, judgment]
+    question: |
+      Which N+1 fix runs in a *single* SQL statement but risks a Cartesian product when
+      applied to two collections?
+    options: ["JOIN FETCH / @EntityGraph", "@BatchSize", "@Fetch(SUBSELECT)", "DTO projection with grouping"]
+    answer: 0
+    explanation: |
+      JOIN FETCH and entity graphs collapse the load into one join query, but joining
+      two collections multiplies rows (Cartesian product) and can trip
+      MultipleBagFetchException. Batch and subselect fetching avoid the Cartesian product
+      by using separate queries with IN clauses.
+    ref: "concepts.md#fix-join-fetch"
+
+  - id: fetching-lazy-eager-n-plus-one-047
+    difficulty: expert
+    tags: [scenario, eager-n-plus-one, root-cause]
+    question: |
+      A dashboard endpoint suddenly fires hundreds of tiny identical SELECTs after a
+      teammate added `@ManyToOne(fetch = EAGER)` to a widely-queried entity. What is the
+      root cause and the correct remedy?
+    options: ["Second-level cache miss; enable the query cache", "Missing database index; add one", "Connection pool too small; increase it", "EAGER-induced N+1: revert the association to LAZY and fetch it per-query where actually needed (JOIN FETCH / entity graph)"]
+    answer: 3
+    explanation: |
+      Making a frequently-queried to-one EAGER forces a secondary SELECT per row across
+      every query that returns that entity — classic EAGER N+1. The fix is to restore
+      LAZY and fetch the association explicitly only where the use case needs it.
+      (Index/pool tuning would only mask the symptom; see messaging-databases for DB-side
+      concerns.)
+    ref: "concepts.md#the-n1-problem"
+
+  - id: fetching-lazy-eager-n-plus-one-048
+    difficulty: beginner
+    tags: [lazy-init, message, recognition]
+    question: |
+      "failed to lazily initialize a collection of role ... could not initialize proxy -
+      no Session" is the message of which exception?
+    options: ["MultipleBagFetchException", "LazyInitializationException", "EntityNotFoundException", "TransientObjectException"]
+    answer: 1
+    explanation: |
+      That message is the signature of `LazyInitializationException` — a lazy
+      collection/proxy was accessed with no open Session to run its initializing query.
+    ref: "concepts.md#lazyinitializationexception"
+
+  - id: fetching-lazy-eager-n-plus-one-049
+    difficulty: advanced
+    tags: [entity-graph, subgraph, deep-fetch]
+    question: |
+      To fetch a nested path like Post -> comments -> author in one plan, what does an
+      entity graph use?
+    options: ["Multiple @BatchSize annotations", "The SUBSELECT fetch mode", "A subgraph (e.g. @NamedSubgraph or nested attributePaths) describing the nested attributes to fetch", "A native SQL query only"]
+    answer: 2
+    explanation: |
+      Entity graphs support subgraphs to describe nested fetch plans (comments, and
+      within each comment, its author). Programmatic graphs use `addSubgraph`, named
+      graphs use `@NamedSubgraph`. This keeps the whole plan in one join query.
+    ref: "concepts.md#fix-entitygraph"
+
+  - id: fetching-lazy-eager-n-plus-one-050
+    difficulty: intermediate
+    tags: [scenario, judgment, single-parent]
+    question: |
+      You load ONE post by id and then read its comments once, inside the same
+      transaction. Is this an N+1 problem?
+    options: ["Yes — any lazy access is N+1", "Yes, unless OSIV is enabled", "Only if the collection is EAGER", "No — with a single parent it is just 2 queries (1 parent + 1 collection); N+1 refers to the fan-out when iterating N parents"]
+    answer: 3
+    explanation: |
+      N+1 is specifically the fan-out of N extra queries when you process N parents. A
+      single parent plus one lazy collection load is just two queries — usually fine. The
+      problem scales with the number of parents in a loop.
+    ref: "concepts.md#the-n1-problem"
+
