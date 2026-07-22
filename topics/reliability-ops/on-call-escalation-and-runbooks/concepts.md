@@ -365,6 +365,286 @@ automation/pipeline mechanics).
 
 ---
 
+## Team-Size Math and the 25% On-Call Sub-Cap
+
+The headline 50 % ops cap has a finer-grained partner that actually drives *minimum team
+size*. Google SRE (Ch. 11) splits the ≤ 50 % operational budget: **no more than 25 % of
+an SRE's time on on-call**, with up to another 25 % on other operational non-project work.
+The 25 % on-call sub-cap is the arithmetic behind the rotation-size rule.
+
+**Deriving the numbers.** 24/7 coverage needs a *primary* on-call at all times, and best
+practice adds a *secondary* — so two people are "on the hook" continuously. If each
+engineer may spend at most ~25 % of their time on-call, and shifts are a week long
+(primary or secondary), then each engineer is on-call roughly **one week per month**. To
+staff both a primary and a secondary week every week of the month you need about
+**8 engineers at a single site**. The *SRE Workbook* (Ch. 8) states it concretely:
+
+- **Single-site:** minimum **8** engineers for bare 24/7 primary+secondary coverage;
+  **add a +1 buffer → 9** to absorb vacation, sickness, and attrition without breaching
+  the 25 % cap.
+- **Multi-site (two-site follow-the-sun):** minimum **5 per site**; **+1 buffer → 6 per
+  site**. Two sites need fewer people each because neither covers nights.
+
+> [!KEY-TAKEAWAY]
+> The 25 % on-call sub-cap (inside the 50 % ops cap) is *why* the magic numbers are
+> **8→9 single-site** and **5→6 multi-site**. If your rotation is smaller, someone is
+> breaching 25 % — the fix is to grow the rotation, merge with another team, or reduce
+> paging load, not to run people hot.
+
+---
+
+## Paging Response-Time SLOs and Alert-to-Incident Ratio
+
+On-call has its *own* SLO: how fast a responder must **begin** responding to a page. Google
+uses two standard tiers:
+
+- **5 minutes** for time-critical, user-facing services. A 5-minute response target
+  effectively **tethers the responder to a laptop and connectivity** — they cannot be
+  driving or shopping. It is what a high availability target demands: **99.99 %** leaves
+  only **~13 minutes of error budget per quarter**, so even minutes of delayed response
+  can blow the budget.
+- **30 minutes** for less time-sensitive services. A 30-minute target is far more humane —
+  the responder can run a short errand as long as they can get to a laptop within the
+  window.
+
+Pick the tier from **user impact + availability target + how tethered you can reasonably
+ask someone to be**. Availability reference points to have ready: **99.99 % ≈ 13 min/qtr**,
+**99.98 % ≈ 26 min/qtr**, **99.999 % ≈ 80 seconds/qtr** (five-nines is essentially
+un-responder-able by a human — it forces automated mitigation).
+
+**The 1:1 alert-to-incident target.** Google's explicit goal is a **1:1 ratio of alerts to
+incidents**: one underlying problem should generate one page's worth of work, regardless of
+how many raw signals fired. If a single outage trips 40 correlated alerts, that is **one
+incident, not 40** — and it counts as **one** against the ~2-incidents-per-shift cap. The
+mechanism to achieve 1:1 is **deduplication and grouping** (correlating related alerts into
+a single incident), which lives on the observability/alerting side; here the point is
+conceptual — *measure incident load, not raw alert volume*.
+
+> [!INTERVIEW]
+> "Forty alerts fired for one outage — does that blow your 2-incidents-per-shift cap?"
+> No. It's **one** incident (one problem). Drive toward a 1:1 alert:incident ratio via
+> dedup/grouping so alert volume never masquerades as incident load.
+
+---
+
+## Onboarding, Shadowing, and Operational Underload
+
+**Onboarding timeline.** New hires are typically **not ready to hold the pager for 3–9
+months** — they need time to learn the systems, tooling, and failure modes. The ramp
+mechanism is **shadowing**: a new member receives *all* the alerts a real on-caller does
+but **does not own** the response; an experienced engineer holds primary. Reverse-shadowing
+(newbie leads, veteran backs them up) follows. Google's Mountain View example had a junior
+team go primary at **3 months** with a remote site as backstop.
+
+**Operational underload — the "treacherous enemy."** Too *few* incidents is also a failure
+mode. Skills atrophy, confidence outruns competence, and knowledge gaps stay hidden until a
+real outage exposes them at the worst moment. Remedies keep responders sharp:
+
+- **Wheel of Misfortune** — role-played disaster scenarios where an engineer works a
+  simulated outage against a game master, using real tools and runbooks.
+- **DiRT (Disaster Recovery Training)** — Google's company-wide game-day/chaos exercises
+  that inject real faults to test both systems and humans (cross-ref `principlesofchaos.org`
+  and chaos engineering).
+- Ensure each engineer is on-call **at least once or twice per quarter** so the muscle
+  never fully atrophies.
+
+> [!INTERVIEW]
+> "On-call has been dead quiet for months — is that good?" It's a trap. Quiet is the goal,
+> but *operational underload* rots skills. Counter it with Wheel of Misfortune, DiRT/game
+> days, and a minimum on-call frequency (≥ 1–2×/quarter). "Boring" must not become
+> "unpracticed."
+
+---
+
+## Human Factors: Cognitive Load Under Pressure
+
+Runbooks, escalation paths, and blameless culture aren't just process hygiene — they exist
+because of how humans actually think under stress.
+
+**System 1 vs System 2 (Kahneman).** Under acute stress people default to **System 1**
+(fast, intuitive, heuristic) thinking and lose access to **System 2** (slow, deliberate,
+analytical) reasoning. **Stress hormones (cortisol, CRH)** measurably degrade deliberate
+reasoning and amplify **confirmation bias** — a stressed responder latches onto the first
+plausible cause and stops looking. This is precisely when a novel outage most needs careful
+analysis.
+
+**The three resources for an on-call engineer** (Google SRE) counteract this: **clear
+procedures (runbooks)** to fall back on so no improvisation is required, **escalation paths**
+so no one is stuck alone, and a **blameless culture** so fear doesn't further degrade
+judgment. This is the deeper reason a good runbook yields ~3× MTTR improvement — it isn't
+merely documentation, it *substitutes a validated System 2 procedure for impaired System 1
+improvisation* at 3 a.m.
+
+> [!KEY-TAKEAWAY]
+> Under stress, cortisol pushes responders into fast, biased System 1 thinking. Runbooks,
+> escalation, and blamelessness are the reliability countermeasures — they remove the need
+> to reason from scratch when the brain is least able to.
+
+---
+
+## Who Runs It: "You Build It, You Run It" vs the SRE Model
+
+Two canonical models answer *who holds the pager*.
+
+**"You build it, you run it" (Werner Vogels, ACM Queue, 2006).** Amazon's model: the team
+that writes the software also operates it. Vogels: *"You build it, you run it. This brings
+developers into contact with the day-to-day operation of their software... also into
+day-to-day contact with the customer... a significant improvement in the quality."* The
+feedback loop is the point — operational pain and customer impact land directly on the
+people who can change the code, driving quality up.
+
+**The Google SRE model.** A **separate SRE team** operates the service, held in balance with
+dev by the **error budget** and the **50 % ops cap**. The key enforcement lever is **"give
+back the pager"**: if operational load or the error-budget policy is breached, SRE can hand
+on-call responsibility *back to the developers* until the service is made operable again.
+This is a deliberate **balance-of-powers** — SRE isn't an unlimited ops sink; the standard
+protects them and forces devs to invest in reliability.
+
+**Trade-off.** YBIYRI maximizes the build/run feedback loop and customer empathy but spreads
+operational expertise thin and can burn out feature teams. Dedicated SRE gives deep
+operational specialization and the error-budget balance-of-powers, at the cost of a
+handoff/interface between build and run and the risk of a "throw it over the wall" culture
+if the standards aren't enforced.
+
+---
+
+## ChatOps and Incident Tooling
+
+**ChatOps** is conducting operations *inside a chat channel*, with bots executing commands
+and surfacing state — the term traces to GitHub's **Hubot**. During an incident it delivers
+concrete reliability value:
+
+- **Shared real-time context** — everyone sees the same channel; new responders self-onboard
+  by scrolling up instead of asking for a recap.
+- **An automatic audit trail / timeline** — the chat log *is* the incident timeline, feeding
+  the postmortem with accurate timestamps and who-did-what.
+- **Runbook commands run from the channel** — bots can execute (or gate) documented
+  mitigations, so the action and its output are captured inline.
+- **Lower onboarding barrier** — juniors learn by watching commands and outcomes in the open.
+
+ChatOps is the bridge from on-call into incident-response tooling (declaring incidents,
+paging via slash-commands, spinning up bridges). The detailed incident-command roles live in
+`reliability-ops/incident-response-and-command`.
+
+---
+
+## Diagnosing and Reducing Pager Load
+
+When "we page too much" is the problem, senior responders use a **structured diagnosis**,
+not vibes.
+
+**Three sources of pager load** (SRE Workbook): (1) **production bugs / real defects**,
+(2) **alerting configuration** (thresholds too tight, non-actionable alerts, missing
+dedup), and (3) **human processes** (manual steps that could be automated, capacity work
+done by hand). **Three fix types** map onto them: a **point fix** (patch this one bug), a
+**systemic fix** (remove the whole class of failure), or a **monitoring/prevention fix**
+(retune or delete the alert, add prevention so it never fires).
+
+**The break-even formula.** Quantify whether a fix project is worth it. If a page costs
+**~4 hours** of end-to-end human time and a durable fix costs **~120 hours** of engineering,
+break-even is at **120 / 4 = 30 pages**. If the alert fires more than ~30 times before you'd
+otherwise fix it, the automation pays for itself. This is the defensible, numeric version of
+"prioritize by frequency × toil."
+
+**Instruments for the data:**
+- Track a **21-day trailing average of pager load** and review it at production/ops-review
+  meetings — a moving average smooths spikes and shows trend.
+- File a **placeholder bug per paging alert** so every page produces structured, queryable
+  data (who, when, why, how long).
+- Use **warning-threshold ticket alerts** (not pages) for slow-burning issues.
+
+> [!INTERVIEW]
+> "Your team pages 15 times a shift — walk me through fixing it." Classify each page across
+> the three sources (bug / alert config / human process); apply point vs systemic vs
+> prevention fixes; justify investment with the 30-page break-even; and if load exceeds the
+> 50 % cap, invoke "give back the pager" to force the fix.
+
+---
+
+## Operational Readiness Reviews and the Runbook/Playbook Split
+
+**Operational Readiness Review (ORR).** AWS Well-Architected defines the ORR as a
+**checklist-based go/no-go gate** run before a service goes to production (and periodically
+afterward). Each checklist item codifies a lesson from a past incident into a repeatable
+question ("do you have a runbook for dependency failover? is auto-scaling tested? are alarms
+wired to the on-call?"). The ORR is how on-call *readiness* becomes a launch gate rather than
+an afterthought — you don't take the pager for a service that can't pass its ORR.
+
+**Runbook vs playbook — the sharp AWS (REL 12) distinction.** Beyond the loose
+"interchangeable" usage, AWS Well-Architected draws a precise line:
+
+- **Runbook = a documented procedure for a KNOWN outcome** — a scripted, deterministic
+  operation you already understand: fail over, scale up, deploy, roll back.
+- **Playbook = a procedure to INVESTIGATE an unknown / unexpected issue** — a diagnostic
+  guide for a situation whose outcome you don't yet know.
+
+The interview trap is the candidate who says "same thing." The clean answer: *runbook =
+known outcome (do this), playbook = investigate the unknown (find out what's wrong)*.
+
+**Limoncelli's 7 runbook sections** (a concrete template): **Service Overview, Build/Deploy
+Info, Deployment, Common Tasks, Pager Playbook (every alert → its response), DR Plans, and
+SLA.** The **Pager Playbook** section — one entry per alert mapping the page to its response
+— is the part that most directly serves on-call.
+
+**Runbook automation maturity tiers.** Runbooks mature along three named tiers:
+**manual → semi-automated (human runs a script) → fully automated (system self-executes)**.
+This maps directly onto the alert→runbook→automate→eliminate ladder above.
+
+---
+
+## Escalation Mechanics: Ack Timeouts, Layering, and DND Bypass
+
+Concrete defaults and rotation styles behind the escalation-policy concept.
+
+**The 5-minute ack default.** The common industry standard (e.g. PagerDuty) is a
+**5-minute acknowledgement timeout per escalation level**. *Within* a level, the
+notification itself escalates: push + email first, then phone/SMS repeated (often every
+minute), typically escalating to the next level after ~3 unanswered calls. Anchor on 5
+minutes as the norm (the earlier "5–15 min" range is the tuning envelope).
+
+**Do Not Disturb bypass.** A paging app **must override the phone's Do Not Disturb / silent
+mode** — otherwise a correctly-configured escalation still fails at the last inch because the
+phone was silenced overnight. This is a non-negotiable configuration item.
+
+**Layered vs round-robin (take a position).** PagerDuty explicitly recommends **layered
+escalation** — primary → backup → whole team — over pure round-robin. Layering means a
+page climbs to more people/authority when unhandled; reaching the team level "should
+hopefully never happen." Round-robin merely rotates *who's first* and doesn't provide the
+fallback depth an outage needs.
+
+**Managers in the rotation.** Beyond being an authority backstop, managers **can and should
+take normal-rotation shifts** for visibility — feeling the pager keeps them honest about
+on-call health.
+
+**Backup-shift timing.** Schedule a **backup (secondary) shift directly after** an
+engineer's primary shift, so context carries over and there's no incentive to "leave it for
+the next shift."
+
+**Cultural norms.** "**On-call is never alone**" and "**never hesitate to escalate**" are
+named psychological-safety practices — escalating early is *good* judgment, not failure.
+Pair with "measure twice, cut once" and deferring to SMEs; these are the cultural
+counter-practices to the hero anti-pattern.
+
+---
+
+## Scheduling and On-Call Flexibility
+
+Scheduling systems must balance *fairness* with *stability*.
+
+- **Auto-scheduling** rebalances load and fairness across the rotation — but a good scheduler
+  **never mutates an already-generated/published schedule**. People plan their lives around
+  the posted rotation; silently reshuffling it is a betrayal of trust.
+- **Short-term swaps** should be **peer-reviewed** (both parties confirm) so a swap can't
+  silently leave a gap.
+- **Part-time / reduced-load models** let people on parental leave, reduced hours, or ramp-up
+  participate at a lower share without being excluded from the rotation entirely.
+
+> [!TIP]
+> The golden rule of on-call scheduling: **optimize the future, never rewrite the past.**
+> Rebalance upcoming rotations for fairness, but treat a published schedule as a commitment.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"How do you keep on-call sustainable?"** Cite the caps: ≤ 2 incidents/shift, ≤ 50 %
@@ -404,5 +684,13 @@ automation/pipeline mechanics).
 - PagerDuty, *Ops Guide* and *Incident Response* documentation — on-call, escalation
   policies, and alerting best practices (response.pagerduty.com).
 - Atlassian, *Incident Management Handbook* — on-call and escalation practices.
-- AWS Well-Architected Framework, *Reliability Pillar* and *Operational Excellence Pillar*
-  — operational readiness and runbooks/playbooks.
+- AWS Well-Architected Framework, *Reliability Pillar* (REL 12: runbook vs playbook, game
+  days) and *Operational Excellence Pillar* — Operational Readiness Reviews (ORR),
+  runbooks/playbooks.
+- Werner Vogels, "A Conversation with Werner Vogels," *ACM Queue*, 2006 — "you build it,
+  you run it."
+- Thomas A. Limoncelli et al., *The Practice of Cloud System Administration* — runbook
+  structure (7 sections) and automation maturity tiers; PagerDuty, *What Is a Runbook?*.
+- Daniel Kahneman, *Thinking, Fast and Slow* — System 1 / System 2 under stress (human
+  factors rationale for runbooks and blameless culture).
+- principlesofchaos.org — chaos engineering / game-day practice (DiRT, Wheel of Misfortune).

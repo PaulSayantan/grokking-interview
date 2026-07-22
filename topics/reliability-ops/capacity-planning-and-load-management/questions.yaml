@@ -807,3 +807,458 @@ questions:
       load. A slow-to-scale, latency-sensitive revenue service wants generous headroom; a batch
       pipeline tolerates high utilization.
     ref: "concepts.md#overprovisioning-cost-vs-risk"
+
+  - id: capacity-planning-and-load-management-059
+    difficulty: expert
+    tags: [usl, horizontal-scaling, coherency]
+    question: |
+      You double a stateful cluster from 20 to 40 nodes and aggregate throughput actually
+      DROPS. Using the Universal Scalability Law, what is the most likely cause?
+    options: ["The coherency term (beta) dominates — per-node coordination/crosstalk grows as N(N-1), so past N_max adding nodes costs more in coordination than it adds in work (retrograde scaling)", "CPU on each node is simply too slow", "The contention term (alpha) is exactly zero", "Little's Law was applied incorrectly to the arrival rate"]
+    answer: 0
+    explanation: |
+      A throughput DECLINE (not just a plateau) is the USL coherency term beta at work: keeping N
+      nodes consistent costs O(N^2) crosstalk, so beyond N_max = sqrt((1-alpha)/beta) each new
+      node subtracts net capacity. A mere plateau would be the contention term alpha (Amdahl). The
+      fix is to bound coordination (partition/cellularize), not to add hardware.
+    ref: "concepts.md#universal-scalability-law-why-adding-nodes-can-backfire"
+
+  - id: capacity-planning-and-load-management-060
+    difficulty: expert
+    tags: [usl, contention, coherency]
+    question: |
+      In the Universal Scalability Law, what distinguishes the contention term (alpha) from the
+      coherency term (beta)?
+    options: ["Alpha applies only to CPU, beta only to memory", "They are two names for the same effect", "Alpha is serialization/queueing for a shared resource (the Amdahl term, causing a throughput plateau); beta is the cost of keeping nodes consistent (crosstalk, growing as N(N-1), causing retrograde decline)", "Alpha grows as N-squared and beta grows linearly"]
+    answer: 2
+    explanation: |
+      Alpha (contention) is serialization on a shared resource — a lock, a single writer — and is
+      exactly Amdahl's Law; it makes throughput plateau. Beta (coherency) is the crosstalk of
+      keeping N nodes mutually consistent, grows as N(N-1) = O(N^2), and can drive throughput
+      backward. Amdahl's Law is the special case beta = 0.
+    ref: "concepts.md#universal-scalability-law-why-adding-nodes-can-backfire"
+
+  - id: capacity-planning-and-load-management-061
+    difficulty: advanced
+    tags: [usl, formula, scaling-ceiling]
+    question: |
+      The Universal Scalability Law peaks at N_max = sqrt((1 - alpha) / beta). What does this
+      value tell a capacity planner?
+    options: ["The minimum number of nodes required to start the service", "The node count at which throughput is maximized — beyond it, adding nodes REDUCES throughput, so it is a ceiling you must not exceed", "The utilization at which latency doubles", "The number of AZs needed for N+1 redundancy"]
+    answer: 1
+    explanation: |
+      N_max is the fleet size at which the USL curve peaks. Past it the O(N^2) coherency cost
+      outweighs added work and throughput goes retrograde, so it is a hard horizontal-scaling
+      ceiling. If your workload has a non-trivial beta, scaling out past N_max makes things worse,
+      not better — you must reduce coordination instead.
+    ref: "concepts.md#universal-scalability-law-why-adding-nodes-can-backfire"
+
+  - id: capacity-planning-and-load-management-062
+    difficulty: advanced
+    tags: [amdahl, usl, contention]
+    question: |
+      How does Amdahl's Law relate to the Universal Scalability Law?
+    options: ["Amdahl's Law is unrelated to scalability", "Amdahl's Law is the special case of the USL where the coherency term beta = 0 (only contention/serialization limits scaling, so throughput plateaus but never goes retrograde)", "Amdahl's Law predicts linear scaling forever", "The USL is the special case of Amdahl's Law where alpha = 0"]
+    answer: 1
+    explanation: |
+      Amdahl's Law captures only the serial-fraction (contention) limit: with beta = 0 the USL
+      reduces to Amdahl, giving a throughput plateau at 1/alpha. The USL generalizes it by adding
+      the coherency term beta, which explains the retrograde region Amdahl cannot — throughput
+      actually falling as nodes are added.
+    ref: "concepts.md#universal-scalability-law-why-adding-nodes-can-backfire"
+
+  - id: capacity-planning-and-load-management-063
+    difficulty: expert
+    tags: [kinesis, scenario, resource-limit]
+    question: |
+      In the 2020 AWS Kinesis outage, operators ADDED front-end servers and the fleet got WORSE.
+      Each front-end server spawned OS threads for every other server in the fleet. What is the
+      capacity lesson?
+    options: ["Adding capacity can REDUCE capacity when per-node cost grows with fleet size — the binding limit was an OS thread-count ceiling (an O(N^2)-ish coordination cost), not CPU/RAM", "CPU was the binding constraint all along", "The servers ran out of disk space", "The load balancer was misconfigured"]
+    answer: 0
+    explanation: |
+      Because thread count per server scaled with fleet size, adding servers pushed every server
+      past its OS thread limit, so none could build a correct shard-map. The lesson: adding
+      capacity can reduce capacity when coordination cost grows with N (a USL-beta effect made
+      physical), and the true ceiling is often an invisible config limit — threads, FDs, ports —
+      not the resource on your dashboard.
+    ref: "concepts.md#when-adding-capacity-reduces-capacity-the-kinesis-lesson"
+
+  - id: capacity-planning-and-load-management-064
+    difficulty: advanced
+    tags: [cell-based, blast-radius, isolation]
+    question: |
+      A service partitions its fleet into 10 independent, capped cells, each a full copy of the
+      stack, with requests routed to exactly one cell. What is the primary capacity/reliability
+      benefit?
+    options: ["It removes the need for any headroom", "It guarantees linear scaling to infinity", "It lets every cell run at 100% utilization safely", "Bounded blast radius and bounded coordination cost — a single cell's overload or poison-pill affects only ~1/10 of traffic, and nodes coordinate only within a small cell (keeping USL beta in check)"]
+    answer: 3
+    explanation: |
+      Cells cap both failure impact and coordination cost: a poison-pill or overload is contained
+      to one cell (~1/C of traffic), and because nodes coordinate only inside a small cell, the
+      O(N^2) coherency term never runs away. The trade-off is slightly lower efficiency — each
+      cell needs its own headroom, so you can't pool as tightly.
+    ref: "concepts.md#cell-based-architecture--blast-radius-isolation"
+
+  - id: capacity-planning-and-load-management-065
+    difficulty: advanced
+    tags: [shuffle-sharding, isolation, blast-radius]
+    question: |
+      How does shuffle sharding reduce the blast radius of a noisy or poison-pill tenant beyond
+      plain cell partitioning?
+    options: ["It gives every tenant its own dedicated cell", "It routes all tenants to the least-loaded cell", "It disables cells that receive too much traffic", "It assigns each tenant a random COMBINATION of cells, so two tenants rarely share the exact same set — a single overloaded/failing shard affects only the small fraction of tenants mapped to that combination"]
+    answer: 3
+    explanation: |
+      Shuffle sharding assigns each customer a random subset (combination) of nodes/cells. Because
+      the number of distinct combinations is large, two customers rarely share the same full set,
+      so a poison-pill or overload confined to one shard impacts only the tiny fraction of tenants
+      whose combination overlaps it — far better isolation than simple partitioning.
+    ref: "concepts.md#cell-based-architecture--blast-radius-isolation"
+
+  - id: capacity-planning-and-load-management-066
+    difficulty: advanced
+    tags: [use-method, saturation]
+    question: |
+      In Brendan Gregg's USE method, which of Utilization, Saturation, and Errors is the LEADING
+      capacity signal, and why?
+    options: ["Utilization, because it is easiest to graph", "Errors, because they always precede saturation", "Saturation — the degree of queued work beyond what the resource can service (run-queue length, pool wait-queue) — because it climbs before utilization pins at 100% and is what actually breaks SLO", "All three are identical measurements"]
+    answer: 2
+    explanation: |
+      Utilization (percent busy) can read comfortably while a resource is already backlogged for
+      bursty work. Saturation measures the queued excess directly, so it rises before utilization
+      saturates and correlates with SLO breach. USE says check all three per resource, but
+      saturation is the capacity-relevant leading indicator you provision against.
+    ref: "concepts.md#finding-the-binding-constraint-use-method--golden-signals"
+
+  - id: capacity-planning-and-load-management-067
+    difficulty: expert
+    tags: [saturation, utilization, distinction]
+    question: |
+      A resource dashboard shows a worker pool at 70% utilization, yet requests are timing out
+      waiting for a worker. How is this possible?
+    options: ["Utilization must be misreported; 70% can never cause timeouts", "Bursty arrivals create a deep wait-queue (high SATURATION) even when average utilization is only 70% — utilization is a time-average that hides the queue that actually breaks SLO", "The pool is leaking memory", "The CPU is throttled by the hypervisor"]
+    answer: 1
+    explanation: |
+      Utilization is an average of percent-busy over time; it says nothing about the instantaneous
+      queue. Bursty arrivals can build a long wait-queue (saturation) while the time-averaged
+      utilization stays moderate. This is exactly why the USE method separates saturation from
+      utilization — the queue, not the average, is what times out requests.
+    ref: "concepts.md#finding-the-binding-constraint-use-method--golden-signals"
+
+  - id: capacity-planning-and-load-management-068
+    difficulty: expert
+    tags: [open-model, closed-model, load-testing]
+    question: |
+      What fundamentally distinguishes an OPEN workload model from a CLOSED workload model in
+      load generation?
+    options: ["In an open model arrivals are independent of responses (new requests keep coming on schedule regardless of system speed, so a stall builds a backlog); in a closed model a fixed pool of virtual users loops send-wait-think, so the arrival rate self-throttles when the system slows", "Open uses HTTP, closed uses gRPC", "Open models are always single-threaded", "Closed models cannot measure latency"]
+    answer: 0
+    explanation: |
+      Open workloads model real internet traffic — arrivals don't wait for you, so a stall causes
+      a growing backlog and exposes overload. Closed workloads have N looping users whose next
+      request waits for the previous response, so the offered rate drops when the system slows.
+      That self-throttling is why closed models cannot overload past N and cause coordinated
+      omission.
+    ref: "concepts.md#open-vs-closed-load-models"
+
+  - id: capacity-planning-and-load-management-069
+    difficulty: expert
+    tags: [closed-model, load-testing, trap]
+    question: |
+      A colleague load-tests with 500 virtual users in a tight loop (send, wait for response, send
+      again) and reports excellent p99 at "the target rate." Why is this test untrustworthy for
+      capacity planning?
+    options: ["500 users is too few to matter", "Virtual users always overstate errors", "It is a closed model: it self-throttles, so it can never drive the system past 500 in-flight requests, it hides the queue an open arrival process would build (coordinated omission), and it cannot find the true overload point", "It measures throughput but not latency"]
+    answer: 2
+    explanation: |
+      A closed loop caps in-flight work at the user count and slows its own send rate whenever the
+      system slows, so it structurally cannot overload the service and omits the backlog an open
+      arrival process would create. The great-looking p99 is coordinated omission. Use an
+      open-model / constant-arrival-rate generator (wrk2, k6 arrival-rate executor, Vegeta,
+      Gatling open profile).
+    ref: "concepts.md#open-vs-closed-load-models"
+
+  - id: capacity-planning-and-load-management-070
+    difficulty: advanced
+    tags: [erlang, offered-load, littles-law]
+    question: |
+      A service sees 500 requests/sec with a mean service (holding) time of 40 ms. What is the
+      offered load in erlangs, and what does it represent?
+    options: ["20 erlangs — the average number of servers busy simultaneously (equal to Little's Law L)", "500 erlangs — the arrival rate", "40 erlangs — the service time in ms", "12,500 erlangs — rate divided by service time"]
+    answer: 0
+    explanation: |
+      Offered load E = lambda * h = 500 * 0.04 s = 20 erlangs. One erlang is one server-hour of
+      work per hour, so 20 erlangs means 20 servers are busy on average — exactly Little's Law's L.
+      It's the baseline you must staff before adding any safety margin.
+    ref: "concepts.md#sizing-to-a-wait-target-erlang-c--square-root-staffing"
+
+  - id: capacity-planning-and-load-management-071
+    difficulty: expert
+    tags: [square-root-staffing, headroom, economies-of-scale]
+    question: |
+      By the square-root staffing rule (servers ~ E + c*sqrt(E)), why do large services need
+      proportionally LESS headroom than small ones for the same service level?
+    options: ["Large services have faster CPUs", "The safety term grows as sqrt(E), so as offered load E grows, the safety margin shrinks as a FRACTION of load — e.g. ~45% extra at 20 erlangs but only ~4.5% extra at 2000 erlangs", "Large services never experience spikes", "Headroom is a fixed percentage regardless of size"]
+    answer: 1
+    explanation: |
+      The safety term c*sqrt(E) grows only with the square root of load, while E grows linearly.
+      So the ratio sqrt(E)/E = 1/sqrt(E) falls as E rises: a 20-erlang service needs ~29 servers
+      (~45% headroom) but a 2000-erlang service needs ~2089 (~4.5%). This is the economies-of-scale
+      argument for pooling and why small services must run structurally cooler.
+    ref: "concepts.md#sizing-to-a-wait-target-erlang-c--square-root-staffing"
+
+  - id: capacity-planning-and-load-management-072
+    difficulty: expert
+    tags: [tail-latency, fan-out, provisioning]
+    question: |
+      A request fans out to 100 leaf servers and must wait for the SLOWEST to return. Each leaf
+      independently exceeds its own p99 (is "slow") with probability 1%. Roughly what fraction of
+      parent requests experience at least one slow leaf?
+    options: ["About 1%", "About 10%", "About 63%", "About 100%"]
+    answer: 2
+    explanation: |
+      P(at least one slow) = 1 - 0.99^100 ~= 0.63. So a leaf-level p99 becomes roughly the
+      request-level MEDIAN — the tail-at-scale effect (Dean & Barroso). A fan-out service must be
+      provisioned and tuned against the TAIL latency of its leaves, not their mean, or stragglers
+      dominate the aggregate latency.
+    ref: "concepts.md#tail-driven-capacity-provision-for-the-tail-not-the-mean"
+
+  - id: capacity-planning-and-load-management-073
+    difficulty: advanced
+    tags: [tail-latency, percentiles, provisioning]
+    question: |
+      Why should you provision capacity against the p99 (peak-of-peaks) of demand rather than the
+      mean?
+    options: ["The mean is harder to compute", "p99 is always exactly double the mean", "Regulators mandate p99 sizing", "Averages smooth away the bursts that actually saturate the system; sizing to the mean puts you over the utilization cliff during the peaks that matter"]
+    answer: 3
+    explanation: |
+      Capacity is broken by peaks, not averages. A mean hides the bursty moments where offered
+      load spikes above the knee; provisioning to it guarantees you fall over during those peaks.
+      Sizing so even the p99 of demand stays left of the knee is what keeps tail latency bounded
+      when it counts.
+    ref: "concepts.md#tail-driven-capacity-provision-for-the-tail-not-the-mean"
+
+  - id: capacity-planning-and-load-management-074
+    difficulty: advanced
+    tags: [analytical-model, gray-box, nalsd]
+    question: |
+      Instead of only black-box load testing, an engineer builds a capacity model: measure the
+      cost of one request in the currency of the bottleneck, then multiply by forecast rate. What
+      is the correct "currency" to measure?
+    options: ["The per-request cost of the BINDING resource — CPU-ms, disk IOPS, bytes, DB rows read/written, or lock-hold time — whichever resource saturates first", "Always CPU percentage", "Wall-clock latency of the request", "The number of lines of code executed"]
+    answer: 0
+    explanation: |
+      A gray-box / NALSD model sizes capacity as forecast_rate * per-request cost of the binding
+      resource. You must express cost in the units of whatever saturates first (CPU-ms, IOPS,
+      bytes, DB rows, lock time), then validate against a load test. Modeling in the wrong currency
+      (e.g. CPU when the DB is the limit) sizes the wrong thing.
+    ref: "concepts.md#analytical-capacity-models-gray-box--nalsd"
+
+  - id: capacity-planning-and-load-management-075
+    difficulty: expert
+    tags: [forecasting, per-resource, scenario]
+    question: |
+      A new feature is forecast to 2x request volume. The team doubles the app fleet, but the
+      launch still falls over. Post-mortem shows the feature issues 5 DB writes per request
+      instead of 1. What planning mistake was made?
+    options: ["They should have tripled the app fleet", "They forecast on a single aggregate metric (requests) instead of PER RESOURCE — the feature 2x'd requests but 10x'd DB writes, so the database (not the app tier) was the binding constraint", "The DB was simply too slow", "Autoscaling cooldown was too long"]
+    answer: 1
+    explanation: |
+      Capacity must be modeled per resource. A 2x request forecast can mean 10x on a specific
+      resource (2 requests/1 * 5 writes/1 = 10x writes). Sizing only the app tier on "requests"
+      missed that the database write path was the actual bottleneck. Forecast each binding resource
+      separately, because a launch rarely scales all of them by the same factor.
+    ref: "concepts.md#analytical-capacity-models-gray-box--nalsd"
+
+  - id: capacity-planning-and-load-management-076
+    difficulty: advanced
+    tags: [retry-amplification, retry-storm]
+    question: |
+      A service slows down and its clients retry once on timeout. What is the capacity-side danger
+      of this behavior?
+    options: ["Retry amplification: retries roughly 2-3x the offered load exactly when the service has the least spare capacity, deepening the overload into a self-sustaining retry storm", "Retries reduce total load by deduplicating", "Retries only affect the client, never the server", "Retries improve tail latency"]
+    answer: 0
+    explanation: |
+      Client retries multiply offered load precisely during a slowdown, when you can least afford
+      it — a naive single retry can 2-3x load, and retries-of-retries compound into a storm. You
+      must provision for, or shed, this surge. Mitigations: exponential backoff with full jitter,
+      retry budgets/token buckets (cap retries to ~10%), and circuit breakers.
+    ref: "concepts.md#retry-amplification-thundering-herd--correlated-demand"
+
+  - id: capacity-planning-and-load-management-077
+    difficulty: expert
+    tags: [backoff, jitter, thundering-herd]
+    question: |
+      A team adds exponential backoff to client retries but omits jitter. Why can the retry storm
+      still recur?
+    options: ["Exponential backoff without jitter simply moves the whole herd to a later instant — clients that failed together retry together at the same backed-off time, re-synchronizing the spike", "Backoff always makes retries worse", "Jitter only affects logging, not timing", "Backoff without jitter disables retries entirely"]
+    answer: 0
+    explanation: |
+      Backoff spaces retries in time, but if all clients failed at the same moment they compute the
+      same backoff and retry in unison — the herd just hits later, still synchronized. Full jitter
+      randomizes each client's wait, spreading retries across the interval so they de-correlate.
+      That's why AWS guidance is backoff WITH full jitter, not backoff alone.
+    ref: "concepts.md#retry-amplification-thundering-herd--correlated-demand"
+
+  - id: capacity-planning-and-load-management-078
+    difficulty: intermediate
+    tags: [retry-budget, token-bucket]
+    question: |
+      What does a retry budget (or retry token bucket) accomplish?
+    options: ["It guarantees every request eventually succeeds", "It increases retries during outages to push through", "It replaces the need for timeouts", "It caps retries to a small fraction of requests (e.g. <=10%); when the budget is exhausted the client fails fast instead of retrying, preventing a retry storm from amplifying an overload"]
+    answer: 3
+    explanation: |
+      A retry budget limits aggregate retries to a fraction of total requests. Under widespread
+      failure the budget drains and further retries are suppressed, so the client fails fast rather
+      than multiplying load on an already-overloaded dependency. It's the guardrail that stops
+      retries from turning a slowdown into a storm.
+    ref: "concepts.md#retry-amplification-thundering-herd--correlated-demand"
+
+  - id: capacity-planning-and-load-management-079
+    difficulty: advanced
+    tags: [thundering-herd, cache-stampede]
+    question: |
+      A popular cache entry expires and thousands of requests simultaneously miss and hit the
+      origin database, overwhelming it. Which mitigation directly addresses this?
+    options: ["Increase the database connection timeout", "Disable caching entirely", "Add more retries on the origin call", "Request coalescing / single-flight (only one request recomputes the value while others wait) plus jittered TTLs so entries don't all expire at once"]
+    answer: 3
+    explanation: |
+      A cache stampede is a thundering herd on expiry. Single-flight/request coalescing lets one
+      request refill the entry while the rest wait for its result, and jittering TTLs prevents many
+      keys from expiring simultaneously. Bigger timeouts or more retries would make the origin
+      overload worse, not better.
+    ref: "concepts.md#retry-amplification-thundering-herd--correlated-demand"
+
+  - id: capacity-planning-and-load-management-080
+    difficulty: expert
+    tags: [statistical-multiplexing, correlated-demand]
+    question: |
+      Bin-packing many services onto shared capacity relies on "aggregate peak < sum of individual
+      peaks." When does this statistical-multiplexing assumption break?
+    options: ["When services use different programming languages", "When demand becomes CORRELATED — synchronized retries, cache stampedes, cron jobs firing at :00, reconnect storms, or a shared same-timezone diurnal peak line the peaks up in time, so the aggregate peak approaches the sum of peaks", "When each service has its own database", "When utilization is below 50%"]
+    answer: 1
+    explanation: |
+      Statistical multiplexing works only if peaks are uncorrelated so they don't coincide. Once
+      demand synchronizes — retry storms, cache expiry, cron at :00, reconnect storms, same-timezone
+      diurnal peaks — the peaks stack and your pooled headroom evaporates. De-correlate with jitter
+      and coalescing, or provision for the correlated worst case.
+    ref: "concepts.md#retry-amplification-thundering-herd--correlated-demand"
+
+  - id: capacity-planning-and-load-management-081
+    difficulty: advanced
+    tags: [quotas, service-limits]
+    question: |
+      A service tier has ample CPU and memory headroom but starts failing under load. What
+      NON-hardware capacity ceiling should you suspect first?
+    options: ["The color scheme of the dashboard", "A soft/hard account or service quota — API rate limits, Lambda concurrency, ENIs/EIPs, connection limits, or ephemeral-port/conntrack ceilings — which you hit long before CPU", "The version of the operating system", "The number of git branches"]
+    answer: 1
+    explanation: |
+      Real ceilings are frequently account/service quotas rather than hardware: API rate limits,
+      Lambda concurrency, ENIs/EIPs, connection limits, ephemeral ports, conntrack table size. The
+      Kinesis OS-thread limit is the archetype. Track quota headroom as a first-class metric — CPU
+      being fine does not mean you have capacity.
+    ref: "concepts.md#provisioning-against-quotas-and-limits"
+
+  - id: capacity-planning-and-load-management-082
+    difficulty: intermediate
+    tags: [quotas, launch-planning]
+    question: |
+      Why must service-quota increases be requested well AHEAD of a forecast peak or launch?
+    options: ["Quotas are free only on weekends", "Quotas automatically scale with CPU", "Many quota increases take days to approve and cannot be granted during an incident — provisioning compute but forgetting the downstream API/concurrency quota means you fail at the quota, not the CPU", "Requesting early lowers the cost of the quota"]
+    answer: 2
+    explanation: |
+      Quota increases often require provider review that takes days, so you cannot raise them
+      reactively mid-incident. A launch plan that scales compute but leaves a downstream API rate
+      limit or Lambda concurrency limit unchanged will hit the quota wall first. File increases
+      ahead of the forecast as part of capacity prep.
+    ref: "concepts.md#provisioning-against-quotas-and-limits"
+
+  - id: capacity-planning-and-load-management-083
+    difficulty: intermediate
+    tags: [demand-shifting, batch]
+    question: |
+      How can deferrable batch work (ML training, backfills, report generation) act as a capacity
+      shock absorber for latency-sensitive traffic?
+    options: ["By running at the same time as peak user traffic to share resources", "By scheduling it into demand troughs and preempting/pausing it during peaks (ideally on spot/preemptible instances), freeing its capacity for the serving path when demand surges", "By permanently reserving dedicated capacity that is never touched", "By converting it into synchronous request handling"]
+    answer: 1
+    explanation: |
+      Deferrable work can be shifted in TIME: run it overnight in troughs and preempt it during
+      peaks, handing its capacity to latency-sensitive traffic. Running it on spot/preemptible
+      instances makes it both cheap and naturally interruptible. This complements shed/queue/
+      rate-limit — you pause background work instead of degrading user requests.
+    ref: "concepts.md#demand-shifting-batch-as-a-shock-absorber"
+
+  - id: capacity-planning-and-load-management-084
+    difficulty: expert
+    tags: [load-balancer, imbalance, hot-node, scenario]
+    question: |
+      Fleet-average CPU sits at 60% and dashboards look healthy, yet users report elevated p99 and
+      some requests time out. Sticky sessions route heavy users unevenly. What is the likely cause?
+    options: ["Load-balancer imbalance — one or a few hot instances are near their own wall while the average stays at 60%, and fleet p99 is driven by the hottest node, not the mean", "The fleet average is simply wrong", "The SLO is set too tight", "The CPUs are being throttled uniformly"]
+    answer: 0
+    explanation: |
+      M/M/c math assumes perfect load balancing. With sticky sessions, hot shards, or uneven
+      hashing, one instance can be over its knee while the fleet average looks fine — and tail
+      latency is set by the hottest node. Always watch PER-INSTANCE saturation, not just the fleet
+      average, or you will "have headroom" on a dashboard while a hot node is already over the cliff.
+    ref: "concepts.md#autoscaling-config-in-practice-numbers--defaults"
+
+  - id: capacity-planning-and-load-management-085
+    difficulty: expert
+    tags: [target-tracking, oscillation, control-theory]
+    question: |
+      A target-tracking autoscaler set to a noisy metric keeps rapidly scaling out then in
+      (oscillating). What is the control-theory explanation and the right fix?
+    options: ["The cloud provider is rate-limiting scaling; there is no fix", "Target tracking never oscillates; the metric is fine", "The feedback loop overshoots/undershoots because the tracked metric is noisy and interacts with provisioning lag; fix it with a stabilization window/cooldown and by tracking a smoother, more causal metric", "Raise the target to 100% to stop scaling"]
+    answer: 2
+    explanation: |
+      A control loop reacting to a noisy signal, combined with the delay of provisioning lag,
+      overshoots and then over-corrects — classic oscillation. Damp it with a stabilization window/
+      cooldown, smooth the metric, and track a more causal, less jittery signal (e.g. RPS/target or
+      backlog) rather than raw noisy CPU.
+    ref: "concepts.md#autoscaling-config-in-practice-numbers--defaults"
+
+  - id: capacity-planning-and-load-management-086
+    difficulty: advanced
+    tags: [keda, queue-depth, event-driven]
+    question: |
+      For a Kubernetes event-consumer whose true bottleneck is message backlog (not CPU), which
+      scaling approach fits best?
+    options: ["HPA on CPU utilization only", "Fixed-size static fleet sized for peak", "Vertical scaling of a single consumer", "KEDA scaling on the queue's ApproximateNumberOfMessages / ApproximateAgeOfOldestMessage (or Kafka consumer lag), which can also scale to zero when idle"]
+    answer: 3
+    explanation: |
+      When backlog is the causal signal, scale on backlog. KEDA drives scaling from event sources
+      like SQS ApproximateNumberOfMessages / ApproximateAgeOfOldestMessage or Kafka consumer lag,
+      and supports scale-to-zero when idle. CPU-only HPA misses backlog growth when the work is
+      I/O-bound or the bottleneck is downstream.
+    ref: "concepts.md#autoscaling-config-in-practice-numbers--defaults"
+
+  - id: capacity-planning-and-load-management-087
+    difficulty: advanced
+    tags: [triangle, utilization, throughput, latency]
+    question: |
+      Why can't a system simultaneously maximize throughput, minimize latency, AND maximize
+      utilization?
+    options: ["Because the 1/(1-rho) wall means pushing utilization toward 1.0 to maximize throughput destroys tail latency — so utilization is the dial that TRADES throughput against latency; you pick at most two corners", "Because CPUs can't run above 100%", "Because latency and throughput are unrelated", "Because utilization only matters for batch jobs"]
+    answer: 0
+    explanation: |
+      The three are locked by queueing theory. Driving utilization high to squeeze out throughput
+      forces response time up the 1/(1-rho) curve, wrecking latency. So you choose a latency SLO OR
+      a throughput target and let utilization trade between them: latency-sensitive services run
+      cool (~50-70%), batch systems run hot (80-90%) to maximize throughput per dollar.
+    ref: "concepts.md#the-utilization-throughput-and-latency-triangle"
+
+  - id: capacity-planning-and-load-management-088
+    difficulty: expert
+    tags: [service-time, response-time, distinction]
+    question: |
+      In latency measurement, what is the difference between service time and response time, and
+      why does it matter for capacity?
+    options: ["They are the same measurement", "Response time excludes network, service time includes it", "Service time is always larger than response time", "Service time is the time actually spent serving a request; response time is service time PLUS queue wait. Coordinated omission and moderate-utilization overload inflate the queue-wait component, so measuring only service time hides the capacity problem"]
+    answer: 3
+    explanation: |
+      Response time = queue wait + service time. Near the knee (and under coordinated omission),
+      it's the queue-wait component that explodes while raw service time barely changes. A benchmark
+      that reports only service time looks fine even as customers experience huge response times, so
+      you must measure end-to-end response time (now minus intended send time) to see the real tail.
+    ref: "concepts.md#open-vs-closed-load-models"

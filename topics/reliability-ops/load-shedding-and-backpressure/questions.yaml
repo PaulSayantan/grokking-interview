@@ -679,3 +679,432 @@ questions:
       falling off the cliff into congestive collapse. Capacity planning is still required (see
       capacity-planning-and-load-management).
     ref: "concepts.md#why-shed-load-goodput-vs-throughput"
+
+  - id: load-shedding-and-backpressure-049
+    difficulty: expert
+    tags: [metastable-failure, feedback-loop, theory]
+    question: |
+      Per Bronson et al. (HotOS 2021), what defines a "metastable failure" in a distributed system?
+    options: ["Any failure that requires a full restart to recover from", "A trigger pushes the system into a bad state that persists via a positive-feedback loop even after the trigger is removed", "A failure caused by a single hardware component wearing out over time", "A partial outage affecting only one availability zone"]
+    answer: 1
+    explanation: |
+      A metastable failure is an open system with an uncontrolled load source where a trigger tips
+      it into a bad state that self-sustains through a positive-feedback loop (retries, cold caches,
+      GC), so it stays "down but up" even after the trigger disappears. The persistence-after-trigger
+      and the feedback loop are the defining traits.
+    ref: "concepts.md#metastable-failures-trigger-vs-sustaining-loop"
+
+  - id: load-shedding-and-backpressure-050
+    difficulty: expert
+    tags: [metastable-failure, root-cause, judgment]
+    question: |
+      An outage began with a 20-second network blip that has long since cleared, yet the service is
+      still stuck at a 55% error rate. Where is the true root cause most likely to lie?
+    options: ["In the network blip, which must still be intermittently recurring", "In a DNS misconfiguration unrelated to the blip", "In insufficient hardware that only more servers can fix", "In a self-sustaining feedback loop (e.g. retries, cold caches) that the blip triggered but that now sustains itself"]
+    answer: 3
+    explanation: |
+      In a metastable failure the trigger and the root cause are different things. The blip was only
+      the trigger; the system stays down because of a sustaining positive-feedback loop. Many
+      different triggers reach the same bad state, so fixing "what caused it" is the wrong focus —
+      you must break the loop (shed hard, disable retries, warm caches).
+    ref: "concepts.md#metastable-failures-trigger-vs-sustaining-loop"
+
+  - id: load-shedding-and-backpressure-051
+    difficulty: expert
+    tags: [dynamodb, control-plane, incident]
+    question: |
+      During the Sept 2015 DynamoDB outage, the metadata service was so overloaded that even
+      administrative requests couldn't get through, and adding storage capacity made things worse.
+      What action actually broke the spiral?
+    options: ["Pausing/shedding requests to the metadata service to reduce demand so it could drain and become reachable, then scaling", "Doubling the number of storage servers immediately", "Failing over the entire region to a standby", "Increasing the client retry count to push requests through"]
+    answer: 0
+    explanation: |
+      The metadata (control-plane) service was in a death spiral; adding storage servers increased
+      the membership data it had to serve, worsening it. Recovery required reducing demand — pausing
+      requests so the service could drain and become reachable — then raising timeouts and capacity.
+      The lesson: under a death spiral you reduce demand, not add supply, and the control plane must
+      stay reachable.
+    ref: "concepts.md#canonical-incident-the-dynamodb-sept-20-2015-outage"
+
+  - id: load-shedding-and-backpressure-052
+    difficulty: expert
+    tags: [recovery, crash-loop, cold-cache, judgment]
+    question: |
+      A fleet has fully collapsed and is crash-looping. You've already stopped new deploys. Which
+      recovery approach is most likely to succeed?
+    options: ["Restart every instance simultaneously so they all come back fresh at once", "Add a large batch of new capacity and route full traffic to it immediately", "Drop inbound traffic to roughly 1%, disable client retries, kill queries-of-death and batch load, warm caches, then ramp slowly", "Raise all timeouts so slow requests eventually complete"]
+    answer: 2
+    explanation: |
+      A collapsed fleet is metastable: full traffic (plus cold caches and retries) re-collapses it
+      instantly. You break the loop by cutting demand hard (~1%), disabling retries, removing
+      queries-of-death and batch load, warming capacity caches, then ramping. Simultaneous restart
+      or full traffic to fresh-but-cold capacity just re-triggers the collapse; bigger timeouts
+      worsen thread exhaustion.
+    ref: "concepts.md#recovering-an-already-collapsed--crash-looping-fleet"
+
+  - id: load-shedding-and-backpressure-053
+    difficulty: advanced
+    tags: [gc-death-spiral, resource-exhaustion, memory]
+    question: |
+      What is the "GC death spiral" that can turn a memory-pressured JVM service into an outage?
+    options: ["Garbage collection is disabled, so memory leaks until OOM", "More in-flight requests hold more objects -> heap fills -> the runtime spends ever more time in GC -> less time serving -> requests pile up -> more memory pressure", "The GC runs on a schedule that conflicts with deploys", "Threads block on GC locks and deadlock permanently"]
+    answer: 1
+    explanation: |
+      Under overload, growing in-flight work retains more live objects, filling the heap. The
+      collector then consumes an ever-larger fraction of CPU, leaving less for request processing,
+      so work backs up and memory pressure rises further — a positive-feedback loop where the box
+      does little useful work despite pegged CPU. Adding capacity often can't help while a node is
+      in this state.
+    ref: "concepts.md#how-overload-actually-kills-a-box-resource-exhaustion-modes"
+
+  - id: load-shedding-and-backpressure-054
+    difficulty: advanced
+    tags: [golden-signals, saturation, signals]
+    question: |
+      Among the four golden signals (latency, traffic, errors, saturation), why is saturation often
+      the best signal to trigger load shedding?
+    options: ["It is the only signal that can be measured cheaply", "It directly counts successful requests", "It is unaffected by request mix, unlike the others", "It is typically a leading indicator — the most-constrained resource fills up before latency and errors visibly move"]
+    answer: 3
+    explanation: |
+      Saturation ("how full the most-constrained resource is") usually rises before latency climbs
+      or errors appear, so acting on it lets you shed before goodput collapses. Latency and error
+      spikes are often lagging — by the time they move, a queue is already forming. (Measuring and
+      alarming on saturation is covered in observability.)
+    ref: "concepts.md#how-overload-actually-kills-a-box-resource-exhaustion-modes"
+
+  - id: load-shedding-and-backpressure-055
+    difficulty: advanced
+    tags: [deadline-propagation, rpc, numbers]
+    question: |
+      A request enters with a 30s deadline. The first hop spends 7s, then calls a downstream service.
+      What deadline should it propagate, and what should the downstream do on receipt?
+    options: ["A fresh 30s deadline, so the downstream has full time to work", "23s remaining, and start work regardless of how long each subsequent hop takes", "23s remaining, and each hop should check the remaining budget before starting and fail fast if there isn't enough time to finish usefully", "No deadline; let each hop use its own local timeout"]
+    answer: 2
+    explanation: |
+      One absolute deadline is decremented by time spent: 30s - 7s = 23s propagated downstream. Each
+      hop checks the remaining budget before working and fails fast if it can't plausibly finish in
+      time ("no credit for late assignments"). A fresh per-hop timeout lets a deep chain run far past
+      the client's patience, wasting goodput.
+    ref: "concepts.md#deadline--cancellation-propagation"
+
+  - id: load-shedding-and-backpressure-056
+    difficulty: intermediate
+    tags: [cancellation-propagation, hedging]
+    question: |
+      Why should cancellation be propagated down a call graph when a parent request is abandoned
+      (e.g. the client disconnected or a hedged request's faster copy already returned)?
+    options: ["So downstream hops stop the now-superfluous work instead of burning capacity on a result nobody will use", "So the request can be retried automatically at each hop", "To increase the timeout on the remaining hops", "To log the cancellation for billing purposes"]
+    answer: 0
+    explanation: |
+      Without cancellation propagation, downstream services keep processing work whose answer has
+      already been discarded — pure wasted capacity that can push a loaded system over the edge.
+      Propagating the cancel reclaims that capacity. It's especially important with hedged requests,
+      where a second copy is deliberately fired and one is meant to be abandoned.
+    ref: "concepts.md#deadline--cancellation-propagation"
+
+  - id: load-shedding-and-backpressure-057
+    difficulty: expert
+    tags: [thread-exhaustion, bimodal-latency, numbers, scenario]
+    question: |
+      A fleet has 10 servers x 100 threads = 1000 request threads, normally handling 1000 QPS at
+      100ms (100 threads in use). A degraded dependency now makes 5% of requests stall ~100s behind a
+      generous 100s deadline. What is the likely outcome and best fix?
+    options: ["No impact, because 95% of requests are still fast", "Only latency rises slightly; capacity is unaffected", "CPU saturates first, so adding CPU fixes it", "The 50 QPS of slow requests need ~5000 threads and pin the pool; ~80% of requests error though CPU is idle — fix with fail-fast, per-client thread caps (~25%), and tighter deadlines"]
+    answer: 3
+    explanation: |
+      Slow requests each hold a thread for 100s: 50 QPS x 100s = 5000 threads needed vs 1000
+      available. The pool is starved by a handful of stalls, so most of the fast majority can't get
+      a thread and error — despite idle CPU (thread exhaustion, not CPU). Fail fast, cap any client's
+      thread share, and don't set deadlines orders of magnitude above the mean.
+    ref: "concepts.md#worked-example-bimodal-latency-and-thread-exhaustion"
+
+  - id: load-shedding-and-backpressure-058
+    difficulty: advanced
+    tags: [queue-sizing, littles-law, numbers]
+    question: |
+      You want to size a bounded queue so no request waits more than 200ms, and arrivals are 500
+      req/s. Using Little's Law in the queue-sizing direction, what maximum depth does that imply?
+    options: ["About 2500 items", "About 100 items (D = lambda x W_tolerable = 500 x 0.2)", "About 500 items", "As deep as memory allows, since deeper is always safer"]
+    answer: 1
+    explanation: |
+      Sizing a queue by tolerable wait: D = lambda x W_tolerable = 500 req/s x 0.2 s = 100 items.
+      Beyond that depth, a queued request would wait longer than the 200ms budget. Queue depth is
+      chosen from the latency budget, not maximized — a deeper queue only adds delay before the
+      inevitable shed.
+    ref: "concepts.md#sizing-a-bounded-queue-with-littles-law"
+
+  - id: load-shedding-and-backpressure-059
+    difficulty: advanced
+    tags: [queue-sizing, queueless, latency]
+    question: |
+      For a latency-sensitive service under potential sustained overload, why can a very shallow or
+      "queueless" server be preferable to one with a deep queue?
+    options: ["A shallow queue uses less CPU per request", "Deep queues are impossible to implement correctly", "An overloaded shallow/queueless server rejects immediately (letting fast retries hit a less-loaded server) instead of holding requests that will time out; a deep queue just adds delay before the inevitable shed", "Shallow queues guarantee no request is ever dropped"]
+    answer: 2
+    explanation: |
+      A queue only helps for brief, bursty overload; under sustained overload it becomes a latency
+      generator (a queue 10x the pool at 100ms/request adds ~1s of pure wait). Queueless servers
+      reject immediately, so the client can retry against a less-loaded server rather than wait for
+      a doomed slot. Google cites near-queueless designs for latency-critical paths like Gmail.
+    ref: "concepts.md#sizing-a-bounded-queue-with-littles-law"
+
+  - id: load-shedding-and-backpressure-060
+    difficulty: expert
+    tags: [rate-limiting, load-shedding, backpressure, distinction]
+    question: |
+      A per-client rate limiter reports the client is at 50% of its quota, yet the server box is
+      melting (CPU pegged, queues growing). Which mechanism is designed to fire in this situation?
+    options: ["Load shedding — it reacts to real-time saturation, not to whether a policy quota was exceeded", "The rate limiter — quotas always fire under high CPU", "Neither; if the client is under quota the server is by definition fine", "Backpressure only, since shedding requires the quota to be exceeded first"]
+    answer: 0
+    explanation: |
+      Rate limiting enforces a static policy/quota and won't fire while the client is under quota,
+      regardless of actual load. Load shedding is dynamic — it reacts to saturation symptoms
+      (CPU, queue depth, latency) — so it fires precisely when the box is melting even though no
+      quota was breached. They are complementary, not substitutes.
+    ref: "concepts.md#load-shedding-vs-backpressure-vs-rate-limiting"
+
+  - id: load-shedding-and-backpressure-061
+    difficulty: expert
+    tags: [work-conserving, scheduling, theory]
+    question: |
+      Load shedding and rate limiting are described as intentionally "non-work-conserving." What
+      does that mean, and why is it desirable under overload?
+    options: ["They only run when the CPU is idle, conserving energy", "They process work in batches to conserve I/O", "They guarantee every unit of work is eventually done, conserving all work", "They deliberately hold back work they could run; under overload that protects latency/goodput, whereas a work-conserving policy chasing 100% utilization is what tips a vulnerable system into collapse"]
+    answer: 3
+    explanation: |
+      A work-conserving scheduler never idles while work waits (maximizes utilization). A
+      non-work-conserving one deliberately declines available work — exactly what admission control
+      and rate pacing do — to protect latency, fairness, and goodput. Under overload you want this:
+      running everything you can (work-conserving) is what pushes a vulnerable system into metastable
+      collapse.
+    ref: "concepts.md#load-shedding-vs-backpressure-vs-rate-limiting"
+
+  - id: load-shedding-and-backpressure-062
+    difficulty: intermediate
+    tags: [graceful-shedding, hard-shedding, escalation]
+    question: |
+      What distinguishes "graceful" from "hard" load shedding?
+    options: ["Graceful shedding only drops reads; hard shedding drops writes", "Graceful shedding degrades/brownouts and rejects cheaply with 503/429 + Retry-After while still serving the critical core; hard shedding abruptly drops connections or 503s everyone as a last resort", "Graceful shedding is automatic; hard shedding requires a human", "There is no real difference; the terms are interchangeable"]
+    answer: 1
+    explanation: |
+      Graceful shedding preserves the critical core: degrade optional work, reject sheddable classes
+      cheaply with Retry-After, keep serving what matters. Hard shedding is the blunt last resort —
+      close listeners / 503 everyone — used only when graceful measures can't keep the system
+      standing.
+    ref: "concepts.md#load-shedding-vs-backpressure-vs-rate-limiting"
+
+  - id: load-shedding-and-backpressure-063
+    difficulty: expert
+    tags: [codel, standing-queue, aqm]
+    question: |
+      CoDel tracks the MINIMUM sojourn time over a sliding window (target ~5ms, interval ~100ms)
+      rather than the average or maximum. Why the minimum specifically?
+    options: ["The minimum is cheaper to compute than an average", "It makes CoDel behave exactly like tail-drop", "A low minimum sojourn means the queue drained recently (a transient burst, leave it alone); only a persistently high minimum reveals a bad standing queue worth dropping from", "The minimum prevents any packet from ever being dropped"]
+    answer: 2
+    explanation: |
+      If the fastest item in the window still waited a long time, the queue never drained — a
+      standing queue (bufferbloat) that adds latency without absorbing bursts. A low minimum means
+      the queue emptied recently, so the backlog is just a transient burst to tolerate. Using the
+      minimum is exactly what lets CoDel distinguish good burst-absorbing queues from bad standing
+      ones.
+    ref: "concepts.md#active-queue-management-codel-redwred-pie-ecn"
+
+  - id: load-shedding-and-backpressure-064
+    difficulty: advanced
+    tags: [aqm, tail-drop, red, codel]
+    question: |
+      How does RED (Random Early Detection) differ from naive tail-drop queue management?
+    options: ["RED drops (or ECN-marks) packets probabilistically as average queue length grows, before the buffer is full, avoiding the global synchronization and standing queues that tail-drop causes", "RED never drops any packets, only reorders them", "RED requires a fixed queue depth of exactly 5ms", "RED is identical to tail-drop but with a larger buffer"]
+    answer: 0
+    explanation: |
+      Tail-drop accepts until full then drops arrivals, causing many flows to back off in lockstep
+      (global synchronization) and letting a standing queue persist. RED probabilistically drops or
+      marks packets early as the average queue grows, desynchronizing backoff and keeping the queue
+      shallow. CoDel and PIE are latency-targeting members of the same AQM family.
+    ref: "concepts.md#active-queue-management-codel-redwred-pie-ecn"
+
+  - id: load-shedding-and-backpressure-065
+    difficulty: advanced
+    tags: [adaptive-lifo, codel, facebook]
+    question: |
+      Facebook's "Fail at Scale" combines adaptive LIFO with CoDel. How do the two roles divide?
+    options: ["CoDel picks which request to serve; LIFO decides whether to shed", "Both make the identical drop decision, providing redundancy", "LIFO is used at low load and CoDel replaces it at high load", "CoDel decides WHETHER to shed (detecting a standing queue); under overload the server serves LIFO to decide WHICH to serve — newest first, while CoDel expires the stale bottom"]
+    answer: 3
+    explanation: |
+      The two compose orthogonally: CoDel's standing-queue detection controls whether/when to expire
+      queued work, and switching the discipline to LIFO controls which requests to serve — the
+      freshest, most likely still-awaited ones skip the line while CoDel drops the stale items at the
+      bottom. Together they maximize goodput under overload.
+    ref: "concepts.md#active-queue-management-codel-redwred-pie-ecn"
+
+  - id: load-shedding-and-backpressure-066
+    difficulty: expert
+    tags: [netflix, concurrency-limits, gradient, formula]
+    question: |
+      In Netflix's gradient concurrency limiter, the limit updates toward
+      newLimit = currentLimit x gradient + queueSize, where gradient = RTT_noload / RTT_actual.
+      What is the default queueSize allowance, and why that choice?
+    options: ["A fixed constant of 100, regardless of limit", "sqrt(currentLimit) — generous at small limits so the limit can grow, tight at large limits for stability", "Equal to currentLimit, doubling the limit each round", "Zero, so the limit only ever shrinks"]
+    answer: 1
+    explanation: |
+      The queue allowance defaults to the square root of the current limit: at small limits sqrt is
+      relatively large (lets the limit ramp up), while at large limits it's a small fraction (damps
+      oscillation for stability). gradient = RTT_noload/RTT_actual is <= 1 and shrinks as latency
+      inflates, so a growing standing queue pulls the limit down. It runs per-server with no
+      coordination and sheds in sub-millisecond time.
+    ref: "concepts.md#mechanism-internals-numbers-worth-memorizing"
+
+  - id: load-shedding-and-backpressure-067
+    difficulty: expert
+    tags: [adaptive-throttling, google-sre, formula]
+    question: |
+      Google's client-side adaptive throttling rejects requests locally with probability
+      max(0, (requests - K x accepts) / (requests + 1)) over a 2-minute window. With the default
+      K = 2, what behavior does that produce?
+    options: ["Clients reject everything once any request fails", "Clients never throttle until the server returns 503", "Clients only start dropping locally once their attempts exceed ~2x the accepted rate, letting enough traffic through for backend state to propagate and recovery to be visible", "K = 2 makes throttling twice as aggressive as K = 1"]
+    answer: 2
+    explanation: |
+      With K = 2, the probability stays 0 until requests exceed 2x accepts, so clients only
+      self-throttle once they're sending well beyond what the backend accepts. Keeping the multiplier
+      at 2 (rather than, say, 1.1) deliberately lets more traffic reach the backend so its recovering
+      state propagates back to clients; lowering K throttles more aggressively.
+    ref: "concepts.md#mechanism-internals-numbers-worth-memorizing"
+
+  - id: load-shedding-and-backpressure-068
+    difficulty: expert
+    tags: [retry-amplification, layers, numbers]
+    question: |
+      Google SRE advises retrying "only at the layer immediately above the rejecting layer." If
+      instead each of 3 stacked layers independently retries up to 3 attempts, what is the worst-case
+      load amplification at the bottom?
+    options: ["3^3 = 27x — retries multiply across layers, turning a small failure into a cascade", "3x — retries add linearly across layers", "9x — only the top two layers multiply", "1.1x — retry budgets cap it automatically"]
+    answer: 0
+    explanation: |
+      Independent retries compound multiplicatively: 3 x 3 x 3 = 27x load at the bottom layer, a
+      classic cascade cause. Retrying only at the layer directly above the rejecting one avoids the
+      multiplication, and a per-client retry budget (~10% of requests) further caps amplification to
+      ~1.1x. This is why retry policy must be coordinated across the stack.
+    ref: "concepts.md#mechanism-internals-numbers-worth-memorizing"
+
+  - id: load-shedding-and-backpressure-069
+    difficulty: advanced
+    tags: [backoff, jitter, formula]
+    question: |
+      Per the AWS Builders' Library, which expression implements "full jitter" exponential backoff,
+      the recommended default for spreading out retries?
+    options: ["sleep = base x 2^attempt (no randomization)", "sleep = cap always, ignoring the attempt number", "sleep = base + attempt (linear)", "sleep = random(0, min(cap, base x 2^attempt))"]
+    answer: 3
+    explanation: |
+      Full jitter picks a uniformly random delay between 0 and the capped exponential value:
+      random(0, min(cap, base x 2^attempt)). Randomizing the whole interval desynchronizes clients
+      that failed together, which Brooker's simulations show drastically cuts contention and total
+      work versus plain exponential backoff (where clients retry in lockstep).
+    ref: "concepts.md#mechanism-internals-numbers-worth-memorizing"
+
+  - id: load-shedding-and-backpressure-070
+    difficulty: advanced
+    tags: [capacity, n-plus-2, testing, numbers]
+    question: |
+      A cluster is load-tested to break at 5000 QPS. Peak demand is 19,000 QPS. Using N+2
+      provisioning, how many clusters should you run?
+    options: ["4 clusters (just enough to serve peak)", "6 clusters (ceil(19000/5000) = 4 to serve peak, plus 2 for redundancy)", "3 clusters, relying on shedding for the rest", "19 clusters, one per 1000 QPS"]
+    answer: 1
+    explanation: |
+      Serving 19,000 QPS at 5000 QPS/cluster needs ceil(19000/5000) = 4 clusters (N). N+2 adds two
+      more for redundancy (one can fail, one can be in maintenance), giving 6. Load-testing to the
+      actual breaking point is what makes N meaningful — and the shed/failover paths must be
+      exercised regularly or they won't work when needed.
+    ref: "concepts.md#mechanism-internals-numbers-worth-memorizing"
+
+  - id: load-shedding-and-backpressure-071
+    difficulty: expert
+    tags: [kafka, max-poll-interval, rebalance, backpressure]
+    question: |
+      A Kafka consumer's per-batch processing slows down under load and starts exceeding
+      max.poll.interval.ms. What failure does this cause, and why is it self-defeating?
+    options: ["The broker deletes the topic's data to free space", "Producers automatically pause, fixing the problem", "The broker considers the consumer dead and triggers a rebalance, removing processing capacity exactly when the group is already behind — deepening the backlog", "The consumer silently commits offsets it never processed"]
+    answer: 2
+    explanation: |
+      Exceeding max.poll.interval.ms makes the broker assume the consumer has failed and evict it,
+      triggering a rebalance. That removes a worker precisely when the group is falling behind, so
+      the remaining consumers get more load — a self-inflicted backpressure cascade. Fix by lowering
+      max.poll.records (smaller batches) or raising the interval so slow processing pauses intake
+      rather than losing the member.
+    ref: "concepts.md#streaming--protocol-backpressure-internals"
+
+  - id: load-shedding-and-backpressure-072
+    difficulty: intermediate
+    tags: [kafka, pause-resume, backpressure]
+    question: |
+      A Kafka consumer's downstream sink (a database) is temporarily full. What is the cleanest way
+      to apply backpressure without risking a consumer-group rebalance?
+    options: ["Call pause() on the affected partitions to stop fetching, and resume() when the sink drains", "Close the consumer entirely and recreate it later", "Increase max.poll.records so more records buffer in memory", "Commit offsets for the unprocessed records to skip past them"]
+    answer: 0
+    explanation: |
+      pause()/resume() on specific partitions stops fetching from them while continuing to poll (so
+      the member stays alive and no rebalance fires), then resumes when the sink drains — explicit,
+      targeted backpressure. Buffering more in memory risks OOM and slow processing risks the poll
+      interval; committing unprocessed offsets would drop data.
+    ref: "concepts.md#streaming--protocol-backpressure-internals"
+
+  - id: load-shedding-and-backpressure-073
+    difficulty: advanced
+    tags: [http2, flow-control, window-update]
+    question: |
+      HTTP/2 flow control uses per-stream (and per-connection) windows with a default 64 KB initial
+      window. What must a sender do when it exhausts a stream's window, and how does it get to send
+      more?
+    options: ["Open a new TCP connection for the remaining data", "Downgrade to HTTP/1.1 for that stream", "Retransmit the last frame until acknowledged", "Stop sending on that stream until the receiver issues a WINDOW_UPDATE frame granting more credit"]
+    answer: 3
+    explanation: |
+      When a sender uses up the stream's flow-control window it must stop and wait; the receiver
+      sends WINDOW_UPDATE frames to grant additional credit as it consumes buffered data. This is
+      exactly TCP's receive-window (zero-window) backpressure one layer up — credit-based flow
+      control per stream, with BDP-based auto-tuning in modern stacks.
+    ref: "concepts.md#streaming--protocol-backpressure-internals"
+
+  - id: load-shedding-and-backpressure-074
+    difficulty: intermediate
+    tags: [testing, shed-path, reliability]
+    question: |
+      Why do SRE practices insist on regularly exercising a service's load-shedding and degraded-mode
+      code paths, not just its normal path?
+    options: ["To keep the shed path warm in the CPU instruction cache", "Because a code path that only runs during a real incident is untested and is likely to fail exactly when it's needed most", "Because shedding is illegal unless tested weekly", "To generate more log data for capacity planning"]
+    answer: 1
+    explanation: |
+      "The code path you never use is the one that doesn't work." Shedding, brownout, and failover
+      logic that only executes during a rare incident tends to have latent bugs (bad configs,
+      stale assumptions) that surface at the worst moment. Regularly exercising them — via load tests
+      or chaos experiments — keeps them trustworthy.
+    ref: "concepts.md#mechanism-internals-numbers-worth-memorizing"
+
+  - id: load-shedding-and-backpressure-075
+    difficulty: advanced
+    tags: [health-check, liveness, readiness, recovery]
+    question: |
+      During overload, why can conflating process health (liveness) with serving capacity
+      (readiness) in one health check make a cascade worse?
+    options: ["Liveness checks are slower than readiness checks", "Readiness checks require a database connection and liveness does not", "An overloaded-but-alive task fails the combined check, so the orchestrator kills/restarts it, removing capacity and increasing load on the survivors — feeding the death spiral", "Combined checks are not supported by most orchestrators"]
+    answer: 2
+    explanation: |
+      If a single deep health check fails whenever the task is merely overloaded (not dead), the
+      orchestrator restarts it, removing a working process and shifting its load onto the rest —
+      accelerating the cascade. Separating liveness ("am I alive?") from readiness ("can I serve
+      right now?") lets an overloaded task shed via readiness while staying alive, avoiding
+      self-inflicted capacity loss.
+    ref: "concepts.md#recovering-an-already-collapsed--crash-looping-fleet"
+
+  - id: load-shedding-and-backpressure-076
+    difficulty: expert
+    tags: [cold-cache, capacity-cache, recovery]
+    question: |
+      During recovery, why is distinguishing a "capacity cache" from a "latency cache" critical?
+    options: ["A capacity cache is one the system cannot survive with cold — a cold restart sends full traffic to backends and re-triggers collapse — whereas a latency cache only affects speed, so the system still works when it's cold", "Capacity caches store more data than latency caches", "Latency caches must be replicated across regions but capacity caches need not be", "There is no operational difference; both just speed things up"]
+    answer: 0
+    explanation: |
+      A latency cache improves speed but the system functions (slower) when it's cold. A capacity
+      cache is load-bearing: the high hit rate is what keeps backends within capacity, so a cold
+      restart dumps 100% of traffic onto backends and re-collapses the system. That's why recovering
+      such a service requires warming the cache or ramping traffic slowly rather than flipping full
+      traffic to a cold fleet.
+    ref: "concepts.md#recovering-an-already-collapsed--crash-looping-fleet"

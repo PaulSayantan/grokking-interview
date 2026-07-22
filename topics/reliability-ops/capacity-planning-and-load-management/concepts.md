@@ -403,6 +403,314 @@ For *how you measure* saturation and queue depth to trigger these, see `observab
 
 ---
 
+## Universal Scalability Law: Why Adding Nodes Can Backfire
+
+Little's Law and the M/M/1 wall explain the *single-node* ceiling. The **Universal Scalability
+Law (USL, Neil Gunther)** explains the *horizontal* ceiling — why adding nodes stops helping and
+can even make throughput *fall*. Relative capacity as a function of node count `N`:
+
+```
+X(N) = γN / [ 1 + α(N − 1) + βN(N − 1) ]
+```
+
+- **γ** (gamma) — ideal per-node throughput (the linear-scaling slope).
+- **α** (alpha) — **contention**: serialization / queueing for a shared resource (a lock, a
+  single writer, a shared DB). This is the **Amdahl's Law** term — Amdahl is the special case
+  `β = 0`. Contention makes throughput *plateau*.
+- **β** (beta) — **coherency**: the crosstalk cost of keeping N nodes *consistent* with each
+  other (cache-coherency traffic, gossip, cross-node coordination). It grows as **N(N−1)** —
+  O(N²) — so beyond a point adding a node costs more in coordination than it adds in work, and
+  throughput goes **retrograde** (actually declines).
+
+The peak is at:
+
+```
+N_max = √( (1 − α) / β )
+```
+
+Past `N_max`, more nodes = *less* throughput. This is the crisp answer to **"we doubled the
+fleet and throughput barely moved — or got *worse* — why?"**: a plateau is α/contention
+(Amdahl); a *decline* is β/coherency. The fix for α is to remove the serialization point; the
+fix for β is to **stop making every node talk to every other node** — partition the fleet so
+coordination is bounded (see cell-based architecture below).
+
+> [!KEY-TAKEAWAY]
+> Horizontal scaling is not free and not unbounded. Contention (α) caps throughput; coherency
+> (β) can *reverse* it. Capacity planning for a distributed fleet must ask "does per-node
+> coordination cost grow with fleet size?" — if yes, there is an `N_max` you must not blow past.
+
+---
+
+## When Adding Capacity Reduces Capacity: The Kinesis Lesson
+
+The **AWS Kinesis outage (us-east-1, 25 Nov 2020)** is the canonical real-world USL-β story and
+the textbook case of a capacity limit that was **not** CPU or RAM. Operators added a modest
+number of servers to the front-end fleet. Each front-end server creates **OS threads for every
+*other* server in the fleet** to build its shard-map — so thread count per server scales with
+**fleet size** (O(N) per node, O(N²) fleet-wide). The capacity *addition* pushed every server
+past the **OS thread-count limit**; servers could no longer build a correct shard-map and
+couldn't route requests. Recovery was slow and deliberate — capacity had to be added back at
+"a few hundred servers per hour" to avoid re-tripping the limit.
+
+Lessons that show up directly in interviews:
+
+- **Adding capacity can *reduce* capacity** when per-node cost grows with fleet size (the β
+  term made physical).
+- **The binding constraint is often an invisible config ceiling** — a thread limit nobody was
+  graphing — not the resource on your dashboard.
+- The fix was **larger/fewer boxes** (fewer nodes → less coordination) plus **cellularization**.
+
+> [!WARNING]
+> The real capacity limit is frequently *not* CPU/RAM. Watch for **thread counts, file
+> descriptors, ephemeral ports, connection-tracking (conntrack) table size, ARP tables, ENIs,
+> connection-pool slots, a single global lock, and API/service quotas**. Use the USE method
+> (below) to find *which* resource saturates first, and graph it.
+
+---
+
+## Cell-Based Architecture & Blast-Radius Isolation
+
+Once fleet-wide coordination cost (USL β) or a shared poison-pill dominates, the modern answer
+is **cell-based architecture**: partition the fleet into many independent **cells**, each a
+complete, self-contained copy of the stack sized and *capped* so its capacity — and its failure
+— is bounded. A request is routed to exactly one cell; a cell's overload, bad deploy, or
+poison-pill request is contained to that cell instead of taking down the whole service.
+
+- **Bounded coordination.** Nodes only coordinate *within* a cell, so N per cell is small and β
+  never runs away — this is precisely the Kinesis fix.
+- **Shuffle sharding** (AWS Builders' Library, "Workload isolation using shuffle-sharding")
+  assigns each customer a *random combination* of cells, so two noisy tenants rarely share the
+  same full set — dramatically shrinking the fraction of customers any single overloaded cell
+  can affect.
+- **Blast-radius math:** with C cells, a single-cell failure impacts ~`1/C` of traffic instead
+  of 100%. This turns a total outage into a partial, survivable degradation.
+
+> [!KEY-TAKEAWAY]
+> Cells trade a little efficiency (each cell needs its own headroom, so you can't pool as
+> tightly) for **bounded blast radius and bounded coordination cost** — the way to scale past
+> the point where fleet-wide coordination or correlated failure dominates.
+
+---
+
+## Finding the Binding Constraint: USE Method & Golden Signals
+
+To size capacity you must find the resource that saturates *first*. Two complementary
+checklists (measurement mechanics live in `observability/*`; here they are *capacity* tools):
+
+**USE method (Brendan Gregg)** — for **every resource** (CPU, memory, disk, network,
+connection pools, threads), check:
+
+| | Meaning | Why it's the capacity signal |
+|---|---|---|
+| **U — Utilization** | % of time the resource was busy. | Where you are on the hockey stick. |
+| **S — Saturation** | Degree of *queued* work beyond what the resource can service (run-queue length, pool wait-queue, backlog). | **The leading capacity signal** — saturation climbs *before* utilization pins at 100%, and it's what actually breaks SLO. |
+| **E — Errors** | Error events for the resource. | Often the first sign of a hit ceiling (pool timeouts, FD-exhaustion errors). |
+
+Utilization alone lies: a resource can read "90% utilized" and be fine, or "70% utilized" with a
+deep run-queue (already saturated for bursty work). **Saturation** — not %busy — is what you
+provision against.
+
+**Four Golden Signals (Google SRE):** latency, traffic, errors, **saturation**. The capacity
+framing: *saturation is the fullness of your most-constrained resource — the thing you scale
+on.* **RED** (Rate, Errors, Duration) is the request-driven complement. The vocabulary matters
+in interviews: you scale on *saturation of the binding resource*, not on CPU by default.
+
+---
+
+## Open vs Closed Load Models
+
+The coordinated-omission trap has precise vocabulary worth naming explicitly:
+
+| Model | Arrival process | Behavior under stress | Real-world analogue |
+|---|---|---|---|
+| **Open workload** | Arrivals are **independent of responses** — new requests keep coming on a schedule (Poisson / constant rate) no matter how slow the system is. | A stall causes a **backlog** — queue and latency blow up, just like production. | Real internet traffic; users/other services don't wait for you. |
+| **Closed workload** | A **fixed population of N virtual users**, each looping: send → wait for response → think-time → send again. Arrival rate is *throttled by the system's own latency*. | **Structurally cannot overload** past N in flight — when the system slows, the generator slows with it. Root cause of **coordinated omission**. | A fixed set of internal batch clients — rarely models a public endpoint. |
+
+**Interview trap:** "your load test ran 500 VUs in a loop and reported great p99 — what's
+wrong?" Answer: it's a *closed* model; it self-throttles and omits the queue that an open
+arrival process would build, so it hides the tail and *cannot* find your true overload point.
+Use **open-model / constant-arrival-rate** generators: `wrk2`, **k6** (constant-arrival-rate
+executor), **Gatling** (open injection profile), **Vegeta**. JMeter's default thread-group is
+*closed*. To reason about the true tail you must also separate **service time** (time actually
+serving) from **response time** (service + queue wait) — coordinated omission hides the queue-wait
+component.
+
+---
+
+## The Utilization, Throughput, and Latency Triangle
+
+Three quantities are locked in a trade-off; you can favor **at most two**:
+
+- **Throughput** (how much work per second),
+- **Latency** (how fast each request completes, especially the tail),
+- **Utilization** (how full the resource runs — i.e. cost efficiency).
+
+You **cannot** simultaneously maximize throughput, minimize latency, *and* maximize utilization —
+the `1/(1−ρ)` wall guarantees that pushing utilization toward 1.0 to maximize throughput destroys
+latency. So capacity planning is choosing a corner: pick a **latency SLO** *or* a **throughput
+target**, and **utilization is the dial that trades one for the other**. Latency-sensitive
+services deliberately give up utilization (run cool, ~50–70%) to protect the tail; batch systems
+give up latency to run hot (80–90%) and maximize throughput per dollar.
+
+---
+
+## Sizing to a Wait Target: Erlang C & Square-Root Staffing
+
+Little's Law gives you the *mean* in-flight count; sometimes you must size to a **probability of
+waiting** target (e.g. "≤1% of requests queue"). Queueing theory formalizes this.
+
+- **Offered load** in **erlangs**: `E = λ · h` (arrival rate × mean holding/service time). This
+  is exactly Little's Law's `L` — the average number of servers busy. 500 rps × 40 ms = 20
+  erlangs = 20 servers just to keep up on average.
+- **Erlang C** gives the probability an arrival must wait given `c` servers and offered load `E`.
+- **Square-root staffing rule** (Halfin–Whitt regime): to hit a good service level,
+
+```
+servers ≈ E + c·√E          (c set by the target wait probability, typically ~1–2)
+```
+
+The key senior insight: the **safety term is √E, so required headroom grows only as the
+*square root* of load** — meaning headroom *as a fraction* of load **shrinks as you get bigger**.
+A 20-erlang service might need `20 + 2·√20 ≈ 29` servers (~45% headroom); a 2,000-erlang service
+needs `2000 + 2·√2000 ≈ 2089` (~4.5% headroom). **Big fleets enjoy economies of scale in
+reserve capacity; small services must run structurally cooler.** This is the quantitative answer
+that beats hand-wavy "keep 30–50% headroom."
+
+---
+
+## Tail-Driven Capacity: Provision for the Tail, Not the Mean
+
+Averages hide the requests that actually saturate you, so you size to **peak-of-peaks and to tail
+latency**, not the mean. The sharpest case is **fan-out tail amplification** (Dean & Barroso,
+*The Tail at Scale*): a request that fans out to many leaves and waits for the **slowest** one
+sees the leaves' *tail*, not their median. If each of 100 leaves independently exceeds its p99
+with probability 1%, the chance that *at least one* is slow is `1 − 0.99¹⁰⁰ ≈ 63%` — so a leaf's
+p99 becomes roughly the **request-level median**. Consequences:
+
+- A fan-out service must be provisioned against the **tail latency of its leaves**, not their
+  mean — otherwise the aggregate request latency is dominated by stragglers.
+- Mitigations (hedged/tied requests, more replicas so the tail shrinks) are *capacity* decisions:
+  they cost extra headroom to buy tail predictability.
+
+Provision so that even the **p99 of demand** stays left of the knee — sizing to the mean puts you
+over the cliff during the bursts that averages smooth away.
+
+---
+
+## Analytical Capacity Models: Gray-Box & NALSD
+
+Pure black-box load testing is slow and can't cover every future scenario. A **gray-box /
+analytical model** builds capacity from a **per-request resource budget**:
+
+```
+required_capacity = forecast_request_rate × per-request cost of the BINDING resource
+```
+
+Measure the cost of one request in the currency of the bottleneck — **CPU-ms, disk IOPS, bytes
+of network, DB rows read/written, lock-hold time** — then multiply by the forecast rate to size
+the fleet, and **validate the model against a load test**. This is Google's **NALSD (Non-Abstract
+Large System Design)**: back-of-the-envelope sizing ("this needs X CPU-seconds and Y GB/s, which
+is Z machines") is the expected whiteboard technique in a design interview.
+
+Crucially, model **per resource**: a launch might 2× requests but **5× DB writes** or 10× cache
+memory. Sizing on "requests" alone misses the resource that actually binds. The loop is
+**forecast → model/provision → load-test to validate → measure error → refine**, and you must
+forecast **far enough ahead to cover the capacity lead time** (procurement, reserved-capacity
+purchase, or scale-up latency).
+
+---
+
+## Retry Amplification, Thundering Herd & Correlated Demand
+
+Two forces defeat the comfortable assumptions of headroom planning and statistical multiplexing.
+
+**Retry amplification / retry storms.** When a service slows, clients retry — multiplying offered
+load *exactly when you have the least capacity to serve it*, a self-inflicted spike. Naive retry
+(1 retry) can **instantly ~2–3× load**; retries of retries compound. This is a *capacity
+multiplier* you must either provision for or shed. Mitigations:
+
+- **Exponential backoff with full jitter** — spread retries in time so they don't synchronize
+  (AWS Builders' Library, "Timeouts, retries, and backoff with jitter"). Backoff *without* jitter
+  just moves the herd to a later instant.
+- **Retry budgets / token buckets** — cap retries to a small fraction (e.g. ≤10%) of requests;
+  when the budget is exhausted, fail fast instead of retrying.
+- **Circuit breakers** — stop hammering a failing dependency entirely (see
+  `reliability-ops/circuit-breakers-and-bulkheads`).
+
+**Thundering herd / correlated demand.** Statistical multiplexing ("aggregate peak < sum of
+peaks") assumes demand is *uncorrelated*. It breaks when demand **synchronizes**: a cache entry
+expires and every client stampedes the origin at once; all cron jobs fire at `:00`; every client
+reconnects simultaneously after a network blip; a shared dependency or same-timezone diurnal peak
+lines everyone up. When demand correlates, your bin-packing headroom **evaporates**. Mitigations:
+**jittered TTLs, request coalescing / single-flight, jittered cron schedules**, and staggered
+reconnect backoff.
+
+> [!INTERVIEW]
+> "Your bin-packing plan assumes uncorrelated demand — when does that break?" → thundering herd,
+> synchronized retries, shared dependencies, same-timezone diurnal peaks. The mitigation theme is
+> always the same: **add jitter and coalesce** to *de*-correlate.
+
+---
+
+## Provisioning Against Quotas and Limits
+
+Real capacity ceilings are frequently **account/service quotas**, not hardware you can just add
+(AWS Well-Architected Reliability, "Manage service quotas and constraints"). You can hit these
+long before CPU: **API rate limits, Lambda concurrency limits, ENIs/EIPs per account,
+connection limits, ephemeral-port and conntrack ceilings, per-partition throughput caps**. The
+Kinesis OS-thread limit is the archetype.
+
+Practices: **track quota headroom as a first-class metric**, and **request limit increases ahead
+of the forecast** — many increases take days to approve and cannot be granted during an incident.
+A launch plan that provisions compute but forgets to raise the downstream API quota or Lambda
+concurrency will fail at the quota, not the CPU. Model *soft* and *hard* limits alongside
+hardware in your capacity plan.
+
+---
+
+## Demand Shifting: Batch as a Shock Absorber
+
+Beyond shed/queue/rate-limit on the *serving* path, deferrable work is a capacity lever: **shift
+demand in time**. Interruptible/deferrable jobs — batch, ML training, backfills, report
+generation — can be **scheduled into troughs** (overnight) or **preempted during peaks** to free
+capacity for latency-sensitive traffic. Running them on **spot/preemptible instances** makes them
+cheap *and* naturally interruptible. This complements the demand-shaping levers: instead of
+shedding user traffic, you pause background work and hand its capacity to the serving path when
+demand surges, then resume in the trough.
+
+---
+
+## Autoscaling Config in Practice: Numbers & Defaults
+
+Concrete defaults interviewers expect you to reason about (verify current values against vendor
+docs — they drift):
+
+- **EC2 target-tracking** — you set a target (e.g. 50% CPU or a per-instance RPS target); default
+  **scale-out is aggressive, scale-in has a longer cooldown** (classic-policy cooldown historically
+  ~**300 s**). **Step scaling** adds capacity in tiers by breach magnitude; **target tracking** is
+  simpler but can **oscillate** if the tracked metric is noisy or if the target interacts badly
+  with provisioning lag (a control-theory instability — the loop over/under-shoots).
+- **Predictive scaling** — needs history (roughly **24 h to 14 days**) and forecasts ~**48 h**
+  ahead; pairs with dynamic scaling as the reactive backstop.
+- **Warm pools** — keep instances pre-initialized (stopped/hibernated) to cut launch lag; trade
+  standby cost for faster launch.
+- **Kubernetes HPA** — default sync ~**15 s**, **tolerance ~10%** (won't act on small deltas),
+  **scale-down stabilization window default 300 s**, scale-up more immediate; scales on
+  CPU/memory or custom/external metrics.
+- **Cluster Autoscaler / Karpenter** — add *node* provisioning lag on top of pod scheduling;
+  HPA can want pods the cluster can't yet place.
+- **KEDA** — event-driven scaling on queue depth / lag (e.g. SQS `ApproximateNumberOfMessages`
+  or `ApproximateAgeOfOldestMessage`, Kafka consumer lag), including **scale-to-zero** — the right
+  tool when the causal signal is backlog, not CPU.
+
+**Load-balancer imbalance is a hidden capacity loss.** M/M/c math assumes *perfect* load
+balancing. With hot shards, sticky sessions, or uneven hashing, **one instance hits its wall
+while the fleet average looks fine at 60%** — and fleet p99 is driven by the hottest instance.
+Always check per-instance saturation, not just the fleet average, or you'll "have headroom" on a
+dashboard while a hot node is already over the cliff.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"Why can't we run servers at 100% utilization?"** — Little's Law + `W = S/(1−ρ)`: near full
@@ -425,6 +733,26 @@ For *how you measure* saturation and queue depth to trigger these, see `observab
   *sustained* overload into unbounded latency/memory. Use bounded queues + shedding/backpressure.
 - **"Provisioned vs usable capacity?"** — Raw purchased capacity ≠ what you can serve at SLO;
   subtract utilization ceiling, overhead, and failure/spike headroom.
+- **"We doubled the fleet and throughput went *down* — why?"** — USL β/coherency: per-node
+  coordination cost grows O(N²), so past `N_max = √((1−α)/β)` more nodes subtract capacity. A
+  mere *plateau* (not decline) is α/contention (Amdahl). Fix β by partitioning/cellularization;
+  fix α by removing the serialization point. The Kinesis thread-limit outage is the archetype.
+- **"The load test hit 50k rps at 20 ms p99, but prod fell over at 30k — reconcile."** —
+  Closed-model generator (coordinated omission) + all-cache-hit synthetic data + no dependency
+  load + LB imbalance hiding a hot node. Re-test open-model with realistic mix and per-instance
+  saturation.
+- **"How much headroom, quantitatively?"** — Square-root staffing: `servers ≈ E + c·√E`, so
+  headroom grows as √load and *shrinks as a fraction* as you scale — big fleets run hotter, small
+  services must run cooler.
+- **"What's the real limit if it's not CPU?"** — Threads, FDs, ephemeral ports, conntrack, ENIs,
+  connection-pool slots, a single lock, or an API/service quota. Use USE-method *saturation* per
+  resource to find it, and track quota headroom ahead of the forecast.
+- **"When does statistical multiplexing (aggregate peak < sum of peaks) break?"** — Correlated
+  demand: thundering herd on cache expiry, synchronized retries, cron at `:00`, reconnect storms,
+  same-timezone diurnal. De-correlate with jitter and request coalescing.
+- **"Bigger queue, more retries, or shed under sustained overload?"** — Shed / backpressure.
+  Unbounded queue = unbounded W (OOM); naive retries = amplification. Bounded queue + shed-on-full
+  is correct.
 
 ## References
 
@@ -441,4 +769,23 @@ For *how you measure* saturation and queue depth to trigger these, see `observab
   response-time results (standard queueing theory).
 - AWS Auto Scaling docs — target tracking, scheduled scaling, and **predictive scaling**;
   warm pools.
-- Brendan Gregg, *Systems Performance* — the USE method and saturation/knee analysis.
+- Brendan Gregg, *Systems Performance* — the USE method (Utilization/Saturation/Errors) and
+  saturation/knee analysis.
+- Neil J. Gunther, *Guerrilla Capacity Planning* — the **Universal Scalability Law**
+  `X(N)=γN/[1+α(N−1)+βN(N−1)]`, contention (α) vs coherency (β), `N_max=√((1−α)/β)`, and
+  retrograde scaling; Amdahl's Law as the `β=0` special case.
+- AWS post-event summary, **Kinesis us-east-1 (25 Nov 2020)** — OS thread-count limit scaling
+  with fleet size; adding capacity reducing capacity; cellularization fix.
+- AWS Builders' Library — "**Workload isolation using shuffle-sharding**" (cell-based
+  architecture, blast-radius reduction) and "**Timeouts, retries, and backoff with jitter**"
+  (retry storms, full jitter, retry budgets/token buckets).
+- Jeffrey Dean & Luiz André Barroso, "**The Tail at Scale**" (CACM 2013) — fan-out tail
+  amplification and tail-tolerant techniques (hedged/tied requests).
+- Erlang C / offered load (erlangs, `E = λh`) and the **square-root staffing rule**
+  (`servers ≈ E + c√E`, Halfin–Whitt regime) — any standard queueing-theory text
+  (e.g. Harchol-Balter, *Performance Modeling and Design of Computer Systems*).
+- AWS Well-Architected **Reliability Pillar** — "Manage service quotas and constraints"; AWS
+  Auto Scaling, EC2 target-tracking/step/predictive scaling and warm pools; Kubernetes HPA /
+  Cluster Autoscaler / Karpenter / KEDA documentation.
+- Google, "**Non-Abstract Large System Design**" (*The Site Reliability Workbook*, ch. 12) —
+  back-of-envelope analytical capacity modeling.

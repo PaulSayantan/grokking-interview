@@ -390,6 +390,325 @@ The mental model: **metrics tell you *that* and *when*; traces tell you *where*;
 
 ---
 
+## Kepner-Tregoe: IS and IS-NOT
+
+**Kepner-Tregoe (KT)** is the formal, evidence-first cousin of differential diagnosis — a
+structured method for finding *probable cause* by specifying a problem precisely before
+theorizing. KT defines four **rational processes**: **Situation Appraisal** (what's going on,
+what to work on first), **Problem Analysis** (find the cause of a deviation), **Decision
+Analysis** (choose among options), and **Potential Problem Analysis** (anticipate what could go
+wrong with a plan). Problem Analysis is the RCA-relevant one.
+
+Its engine is the **IS / IS-NOT specification** across four dimensions. For each, you write what
+the problem **IS** and what it plausibly *could be but* **IS-NOT** — the boundary matters as much
+as the fact:
+
+| Dimension | IS (what we observe) | IS-NOT (what we'd expect but don't see) |
+|---|---|---|
+| **What** — object & defect | Checkout API returns 500s | Cart, search, and login are fine |
+| **Where** — geographic / on the object | eu-west-1 only; only the `/pay` path | us-east-1 fine; `/pay/status` fine |
+| **When** — timing / lifecycle | Started 14:32 UTC; only during peak | Not overnight; not before 14:32 |
+| **Extent** — how many / how big / trend | ~8% of eu-west requests, rising | Not 100%; not shrinking |
+
+Cause is found by examining the **distinctions** (what is *different* about the IS versus the
+IS-NOT — what's special about eu-west-1, about `/pay`, about 14:32) and the **changes** in or
+around those distinctions (a config only eu-west-1 uses, a cert that expired at 14:32). A
+candidate cause must **explain the IS *and* the IS-NOT** — if a theory would also break
+us-east-1, it's wrong. This "must explain both sides" test is what makes KT more rigorous than
+grab-the-first-hypothesis. It maps directly onto the *what-changed axes* (where/who/what/when)
+already covered — KT is the named, disciplined version.
+
+---
+
+## Apollo RCA and causal-factor trees
+
+Dean Gano's **Apollo RCA** (RealityCharting) is the explicit antidote to 5 Whys' linearity. Its
+core principle: **every effect has at least two causes — an *action* cause and a *condition*
+cause.** A fire needs the *action* (a spark) *and* the *condition* (fuel + oxygen present). So
+causes **branch** into a **cause-and-effect chart (Realitychart)**, not a single chain: for each
+node you ask "caused by?" and must attach **evidence** for every cause, continuing until you run
+out of evidence or reach a useful action. It produces a graph of interacting causes — matching
+the multi-causal reality of complex failures.
+
+This forces a crisp vocabulary that interviewers probe. Learn the trio as distinct categories:
+
+- **Causal factor** — an event or condition that *directly* produced the outcome (the deploy
+  shipped a query with no index → DB CPU saturated). Remove it and this specific failure doesn't
+  happen this way.
+- **Root cause** — the *deepest correctable systemic* cause; fixing it prevents this *class* of
+  failure (no review rule or test forbidding un-indexed hot-path queries).
+- **Contributing factor** — raised the *likelihood or severity* but wasn't sufficient alone (peak
+  traffic; an alert threshold set too high so detection was slow). It didn't cause the outage but
+  made it worse or more likely.
+
+The **causal-factor tree / contributing-factor tree** is the output artifact that separates these
+so action items target the right layer (fix the causal factor to stop *this*, the root cause to
+stop the *class*, the contributing factors to reduce blast radius / speed detection).
+
+---
+
+## The new view of human error
+
+Table-stakes at senior level and a frequent probe. The doc's earlier line "human error is never a
+root cause" is correct but shallow; the modern framing (Dekker, Woods, Allspaw, and the *Learning
+From Incidents* movement) goes deeper:
+
+- **Old view (bad-apple theory):** human error is *the cause*; find the careless person, retrain
+  or discipline, and the system is safe again. This is comforting and almost always wrong.
+- **New view:** human error is a **symptom** of deeper systemic trouble — a *starting point for
+  investigation, not a conclusion*. Ask *why did that action make sense to a competent person at
+  the time?*
+- **Local rationality:** people's actions were reasonable given **what they knew, saw, and were
+  under pressure to do at that moment**. Nobody comes to work to cause an outage. Reconstruct
+  their view of the world, not yours after the fact.
+- **The counterfactual trap:** "they should have checked X / noticed Y" describes a world that
+  didn't exist — it is **hindsight, not analysis** (Cook #8: hindsight bias is the primary
+  obstacle to investigation). Counterfactuals feel like findings but explain nothing.
+- **"Root cause" is a construct, a socially chosen stopping point** (Cook #7), not something you
+  *discover* out in the system.
+- Culturally this is why postmortems moved from **blame** to **blameless** (some now say
+  **blame-aware**): the goal is to treat incidents as **learning opportunities** (see
+  blameless-postmortems for the write-up discipline).
+
+**Above and below the line of representation** (Woods/Allspaw, STELLA report): engineers never
+touch the real system directly — they operate on **mental models, dashboards, and tooling (above
+the line)**; the messy real system lives **below the line**. Incidents erupt when the mental model
+**diverges from reality** — which is exactly why *unknown-unknowns* and *dark debt* bite even
+careful teams. RCA is partly the work of repairing that divergence.
+
+---
+
+## Latent vs active failures and dark debt
+
+James Reason's Swiss-cheese layers have two failure ingredients, and naming them precisely is a
+common follow-up:
+
+- **Active failure** — the sharp-end act that *directly* breaches a layer, visible and close in
+  time to the accident: the bad deploy, the fat-fingered command, the flag flip. Committed by the
+  people at the "sharp end."
+- **Latent condition** — a dormant systemic weakness planted long before, lying in wait as a
+  "**resident pathogen**": a missing timeout, an unbounded queue, a bad default, an alert
+  threshold set too high, an under-provisioned pool. Latent conditions don't cause harm until an
+  active failure (or a change, or load) lines the holes up. Cook #4: complex systems *always*
+  contain these latent failures.
+
+**Dark debt** (from the STELLA report) is the most insidious latent condition: failure modes that
+arise from **unforeseen interactions between components**. Unlike ordinary technical debt, dark
+debt is **invisible to inspection** — you can't find it by reading code or a checklist, because no
+single component is "wrong"; the hazard lives in the *emergent interaction*. It reveals itself
+only when it produces an anomaly (Roblox 2021's Consul/BoltDB interaction is the canonical
+example). Dark debt is *why* Cook #4 is true and why staff engineers treat "we reviewed it, it's
+fine" as insufficient assurance for complex-system safety.
+
+---
+
+## How Complex Systems Fail: the load-bearing points
+
+Richard Cook's 18 short theses are frequently name-checked ("cite a point from *How Complex
+Systems Fail*"). The ones that carry interview weight:
+
+- **#3 — Catastrophe requires multiple failures.** Single-point failures are *not* enough; the
+  system's defenses mean it takes a *combination*. (This is the Swiss-cheese claim in one line.)
+- **#4 — Complex systems contain changing mixtures of latent failures.** They're always present;
+  the ones that matter change over time. Eradicating all of them is economically impossible.
+- **#5 — Complex systems run in degraded mode.** The system works *as* a collection of flaws; it's
+  never fully "healthy." So "it was broken before the incident too" is normal, not damning.
+- **#7 — There is no single root cause.** Post-accident attribution of "*the* cause" is
+  fundamentally a **social and blame** choice, not a technical discovery.
+- **#8 — Hindsight biases post-accident assessment.** Knowing the outcome makes the path look
+  obvious and makes operators look negligent; it is the *primary obstacle* to real learning.
+- **#14 — Change introduces new forms of failure.** Low failure rates *encourage* changes; each
+  change plants new, low-probability but high-consequence failure pathways.
+- **#15 — "Human error"-based fixes often add complexity.** Post-accident remedies (more steps,
+  more approvals, more automation) frequently *increase* coupling and create the next accident.
+- **#17 — People continuously create safety.** The absence of accidents is the *product* of
+  practitioners actively adapting and catching problems, not the absence of hazard. Safety is a
+  verb.
+
+---
+
+## Cognitive biases and the heisenbug
+
+Metacognition under pressure is a senior differentiator: knowing *how your own reasoning fails*
+during an incident.
+
+**Named cognitive traps:**
+
+- **Anchoring** — fixating on the first hypothesis; every later observation gets bent to fit it.
+- **Confirmation bias** — seeking graphs that *agree* (the "it's always the network" reflex —
+  something is always slightly elevated, so you can always "confirm").
+- **Availability bias** — blaming the most recent or most memorable incident ("last time it was
+  the cache").
+- **Premature closure** — declaring the cause found and stopping the search too early.
+- **Sunk-cost** — staying on a dead hypothesis because you've already spent an hour on it.
+
+The countermeasure is to **actively try to *dis*confirm** your leading hypothesis (state the
+observation that would prove you wrong, then look for it), and to **hand off / bring fresh eyes**
+when you notice you're anchored — a rested engineer with no prior often solves it in minutes. This
+is also why incident command separates the *commander* from the *investigator* (see
+incident-response-and-command).
+
+**Heisenbugs and irreproducibility.** A classic practical question is *"how do you debug something
+you can't reproduce?"* Know the bug taxonomy:
+
+- **Bohrbug** — deterministic and reproducible (a solid, "classical" bug). The easy case.
+- **Heisenbug** — *changes or vanishes when you try to observe it*: attaching a debugger, adding a
+  log line, or enabling `-O0` alters timing, memory layout, or optimization, so the race/UB
+  disappears. Named after the observer effect.
+- **Mandelbug** — causes so complex the behavior looks chaotic/non-deterministic (emergent, often
+  environmental).
+- **Schrödinbug** — code that "worked" until someone reads it and realizes it *never should have*,
+  whereupon it starts failing.
+- **Hindenbug** — a bug with catastrophic, hard-to-contain blast radius.
+
+*Why observation changes behavior:* the probe perturbs the system — single-stepping serializes
+threads so a data race can't manifest; a debug build spills registers to memory and shifts
+addresses so uninitialized-memory bugs move; a log line adds latency that closes a timing window.
+The right answer to "can't reproduce" is therefore **capture more telemetry / record-and-replay
+rather than live-poke** (turn up structured logging and tracing, snapshot state, look for
+environmental differences — load, data shape, timing, one bad host), and **never trust that it's
+"gone"** just because it stopped under observation.
+
+---
+
+## Named diagnostic heuristics
+
+Memorable, quotable heuristics that appear verbatim in the SRE literature and separate practiced
+responders:
+
+- **"When you hear hoofbeats, think horses, not zebras."** Favor the *probable* (base-rate)
+  explanation before the exotic one — the medical version of the change-first heuristic. A recent
+  deploy is a horse; a cosmic-ray bit-flip is a zebra.
+- **Occam's razor** — prefer the hypothesis requiring the fewest assumptions. Useful, but with a
+  caveat during incidents.
+- **Hickam's dictum** — the counterweight: "*a patient can have as many diseases as they please.*"
+  Sometimes the evidence really is **several small independent problems**, not one grand unifying
+  cause. When Occam's single story won't fit all the observations, stop force-fitting it — this is
+  the Swiss-cheese/multi-causal reality in a one-liner.
+
+**Google SRE's named techniques** (from *Effective Troubleshooting*), worth citing by name:
+
+- **"What touched it last?"** — annotate dashboards with deploy/config start-and-end times so the
+  change timeline sits *on* the graph. The change-first heuristic, operationalized.
+- **"Simplify and reduce."** — black-box a component: feed it known inputs at a clean interface and
+  check the output, cutting the system into testable pieces (a form of bisection).
+- **"Negative results are magic."** — a *failed* experiment is **conclusive**, not a waste: it
+  removes a region of the search space with certainty. Record negative results; they're as valuable
+  as positive ones and prevent re-testing the same dead ends.
+- **Hypothetico-deductive method** — the formal name for the observe → hypothesize → test-to-
+  disconfirm → repeat loop.
+
+---
+
+## RED vs USE vs golden signals: which to reach for
+
+The signals overlap, so the senior distinction is *which lens for which question*:
+
+- **RED (Rate, Errors, Duration)** — reach for it for a **request-driven, stateless service you
+  own the endpoint of**. It's the caller's-eye view: is *this API* healthy? Ideal for per-endpoint
+  SLIs.
+- **USE (Utilization, Saturation, Errors)** — reach for it for a **resource**: "is *this* CPU /
+  disk / NIC / connection pool the bottleneck?" It's the mechanic's view of a box or pool.
+- **Four golden signals (Latency, Traffic, Errors, Saturation)** — the **superset for a service
+  SLO**; think of it as RED (Duration≈Latency, Rate≈Traffic, Errors) *plus* Saturation from USE.
+
+Rule of thumb: symptom-side, user-facing → RED/golden; resource-side, "what's full" → USE. The
+one signal common to the resource views and the golden set is **Saturation**, and it's the
+**leading indicator** — it climbs *before* errors and severe latency, so it predicts the cliff.
+This ties to **Little's Law** (L = λW): as utilization → 1, queue length and wait time → ∞, so a
+saturating resource forecasts the latency blow-up before it happens (cross-ref cascading-failures;
+the Little's-Law mechanism is worked in the golden-signals section above).
+
+---
+
+## Change analysis and barrier analysis
+
+Two named formal RCA techniques that give crisp method-names to intuitions already in this topic:
+
+- **Change analysis** — the *formal version of the change-first heuristic*. Systematically compare
+  the failure scenario against a **known-good baseline** and list **every difference** (config,
+  version, data, load, environment, time), then test each difference as a candidate cause. It
+  turns "what changed?" into a disciplined, exhaustive comparison rather than a memory jog.
+- **Barrier analysis** — the *formal version of Swiss cheese*. Identify the **barriers / controls**
+  that *should* have stopped the hazard (review, tests, canary, rate limit, timeout, alert), then
+  determine **which barrier failed or was missing and why**. Its output maps straight onto layered
+  action items — restore or add the barriers that were absent or holed.
+
+| Technique | Formalizes | Direction | Output |
+|---|---|---|---|
+| **Change analysis** | Change-first heuristic | Compare to baseline | List of differences → candidate causes |
+| **Barrier analysis** | Swiss-cheese defenses | Trace the hazard's path | Which controls failed/were missing → barriers to add |
+| **KT Problem Analysis** | Differential diagnosis | IS / IS-NOT boundary | Distinctions + changes → probable cause |
+
+These sit alongside 5 Whys / fishbone / FTA in the standard RCA toolkit (ASQ).
+
+---
+
+## Detection, mitigation, and the MTT* family
+
+A mature RCA doesn't only ask *why did it break?* — it asks *why was it slow to detect* and *slow
+to recover?* Google's postmortem template has explicit **Detection** and **Resolution** sections
+for exactly this. The temporal metrics RCA feeds:
+
+- **MTTD — Mean Time To Detect.** From onset to *anyone/anything noticing*. A large MTTD is a
+  monitoring/alerting gap (a top action-item source).
+- **MTTA — Mean Time To Acknowledge.** From alert fired to a human owning it (paging/on-call
+  health).
+- **MTTM / MTTR — Mean Time To Mitigate / Recover / Repair / Restore / Respond.** ⚠️ **The "R" is
+  ambiguous** — it variously means *repair*, *recover*, *restore*, or *respond*, and *mitigate*
+  (stop user pain) is distinct from *repair* (fix the underlying fault). Always **define which R
+  you mean**; "MTTR improved" is meaningless without it.
+- **MTBF — Mean Time Between Failures.** Reliability of the component over its lifetime;
+  Availability ≈ MTBF / (MTBF + MTTR), so cutting MTTR raises availability even if failures
+  can't be prevented (cross-ref: nines math in slos-error-budgets).
+
+The senior move on "how would you cut MTTD/MTTR for this class of incident?": attack **detection**
+(better SLI-based alerting so you find it in minutes not hours — see observability), **diagnosis**
+(tracing, change annotations, runbooks), and **mitigation** (fast rollback, feature flags,
+one-click failover) *separately* — they're different bottlenecks with different fixes. Reducing
+the *break* rate and reducing the *recovery* time are independent levers on availability.
+
+---
+
+## Canonical incident stories
+
+Concrete stories separate memorable senior answers. Each maps cleanly onto a concept above.
+
+- **AWS S3 us-east-1, Feb 2017** — an engineer running an approved playbook to remove a *few*
+  billing-subsystem servers **fat-fingered the command** and removed too many, taking out index
+  and placement subsystems that required a **full restart** (which hadn't been done at scale in
+  years). *Maps to:* "the wrong command" is not a root cause (new view) — the interesting causes
+  are the missing guardrail on blast radius (Cook #15) and the slow, untested restart path.
+- **Cloudflare, Jul 2019** — a WAF regex with **catastrophic backtracking** pegged CPU across the
+  fleet, causing ~27 minutes of global 502s. *Maps to:* a change (rule push) as trigger; an
+  unbounded resource (CPU) with no safety limit as the latent condition.
+- **Knight Capital, Aug 2012** — a **partial deploy** left old code on one of eight servers, and a
+  **repurposed feature flag** reactivated dormant code; the firm lost **~$460M in ~45 minutes**.
+  *Maps to:* change-first (deploy) + the deploy-hygiene cautionary tale (verify all hosts; don't
+  reuse flags).
+- **AWS Kinesis us-east-1, Nov 2020** — a routine capacity add pushed the front-end fleet past the
+  **OS thread limit** per server, breaking the fleet's internal state. *Maps to:* a **saturation /
+  hard-limit** story — the resource that ran out was threads, not CPU/RAM.
+- **Meta/Facebook BGP, Oct 2021** — a config change **withdrew the BGP routes** to Facebook's DNS,
+  taking the whole platform off the internet — *and disabled the very tools and badge access
+  needed to recover*. *Maps to:* "you broke your own recovery path" — Cook #15 (fixes/automation
+  add coupling) and the importance of out-of-band recovery.
+- **GitLab.com, Jan 2017** — a tired engineer, fighting a replication issue late at night, ran a
+  destructive command against the **primary** instead of the replica, and then found **five backup
+  methods had all silently failed**. *Maps to:* human-factors/fatigue (new view) + "**an untested
+  backup is not a backup**" (barrier analysis: the backup barriers were all holed).
+- **Roblox, Oct 2021** — a **~73-hour** outage from an **emergent interaction** between Consul's
+  new streaming feature and BoltDB write contention under load — invisible to inspection. *Maps
+  to:* the textbook **dark-debt / unknown-unknowns** case, and why single-cause thinking fails.
+
+> [!TIP]
+> Interview move: when asked "give an example," pick the story that matches the *concept* being
+> tested — Knight Capital for change/deploy hygiene, Roblox for dark debt, GitLab for
+> untested-backups/human-factors, Meta for "don't break your own recovery tools," S3 for blast-
+> radius guardrails. Naming the mechanism, not just the headline, is what lands.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"A service just started returning 5xx. Walk me through your first five minutes."** — Assess
@@ -418,17 +737,54 @@ The mental model: **metrics tell you *that* and *when*; traces tell you *where*;
 - **"When would you NOT roll back first?"** — When the change also carried a data migration that
   can't be reversed, when rollback is slower than a forward fix, or when the change is provably
   unrelated to the onset. Otherwise, fast rollback is usually the safest mitigation.
+- **"How do you debug something you can't reproduce?"** — Suspect a heisenbug/race; don't live-poke
+  (observation moves it). Capture more telemetry (turn up structured logging/tracing, snapshot
+  state), use record-and-replay, hunt environmental differences (load, data shape, timing, one bad
+  host), and never trust that it's "gone" because it stopped under a debugger.
+- **"You've been convinced it's the DB for 30 minutes. Now what?"** — Anchoring check: state your
+  hypothesis *and the observation that would disconfirm it*, then go look for that; re-read the
+  change log; hand off to fresh eyes. Metacognition beats stubbornness.
+- **"Errors started at 14:32 but the only deploy was 09:00 — now what?"** — Change-first still
+  applies, just widen "change": a dependency deploy, a config/flag store flip, a cert/TTL expiry, a
+  cron, a data threshold crossed, a traffic-shape change, or a slow resource leak finally hitting a
+  limit at 14:32. "We didn't deploy" ≠ "nothing changed."
+- **"Is 'the engineer ran the wrong command' a root cause?"** — No (new view). Ask why one command
+  had that blast radius, why there was no guardrail/confirmation, and why recovery was slow (e.g.
+  AWS S3 2017). The person is the starting point, not the conclusion.
+- **"Occam says one cause but you see three weird things — reconcile."** — Hickam's dictum: a system
+  can have several independent problems at once (multi-causal Swiss cheese). Don't force-fit one
+  story if it can't explain all the observations.
+- **"RED or USE — which do you reach for?"** — RED for a request-driven service you own the
+  endpoint of; USE for "which resource is the bottleneck?"; golden signals as the SLO superset.
+  Saturation is the leading indicator common to both.
+- **"How would you cut MTTD/MTTR for this class of incident?"** — Attack detection (SLI alerting),
+  diagnosis (tracing, change annotations, runbooks), and mitigation (fast rollback, flags,
+  failover) *separately*; define which "R" you mean. Reducing break-rate and recovery-time are
+  independent levers on availability.
+- **"Name a point from *How Complex Systems Fail*."** — e.g. #7 (no single root cause; attribution
+  is a social choice), #4 (latent failures always present), #14 (change adds new failure modes),
+  or #17 (people continuously create safety).
 
 ## References
 
 - Google, *Site Reliability Engineering*, ch. "Effective Troubleshooting" and "Managing Incidents";
   *The SRE Workbook* — https://sre.google/books/
 - Michael T. Nygard, *Release It!* (2nd ed.) — stability patterns and failure analysis.
-- Richard I. Cook, *How Complex Systems Fail* (1998/2000) — the multi-cause view.
+- Richard I. Cook, *How Complex Systems Fail* (1998/2000) — the 18 theses; the multi-cause view.
 - James Reason, *Human Error* / *Managing the Risks of Organizational Accidents* — the Swiss-cheese
-  model of layered defenses.
+  model of layered defenses; active failures vs latent conditions.
+- Sidney Dekker, *The Field Guide to Understanding 'Human Error'* — old view vs new view, local
+  rationality, the counterfactual/hindsight traps.
+- John Allspaw & David Woods et al., *STELLA Report* (SNAFUcatchers, 2017) — above/below the line
+  of representation, dark debt; the Learning From Incidents movement.
+- Charles Kepner & Benjamin Tregoe, *The New Rational Manager* — KT IS/IS-NOT problem analysis.
+- Dean L. Gano, *Apollo Root Cause Analysis* — action+condition causes, RealityCharting.
 - Kaoru Ishikawa — cause-and-effect (fishbone) diagrams; Toyota Production System — 5 Whys.
+- ASQ, "Root Cause Analysis" toolkit — change analysis and barrier analysis.
 - NUREG-0492, *Fault Tree Handbook* (U.S. NRC) — canonical FTA reference.
+- Incident writeups: AWS S3 (2017), AWS Kinesis (2020), Cloudflare (Jul 2019), Knight Capital
+  (SEC filing, 2012), Meta/Facebook BGP (2021), GitLab.com (2017), Roblox (2021) — collected at
+  danluu.com/postmortem-lessons and each vendor's public postmortem.
 - Brendan Gregg, "The USE Method"; Tom Wilkie, "The RED Method"; Google SRE, "The Four Golden
   Signals" — cross-ref observability for telemetry/alerting mechanics.
 - Related topics in this domain: `observability/*` (telemetry, tracing, SLO alerting),

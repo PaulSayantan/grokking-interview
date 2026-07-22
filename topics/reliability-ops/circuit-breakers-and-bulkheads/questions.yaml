@@ -1012,3 +1012,563 @@ questions:
       resource budget any single dependency can consume. Together they cover slow, bad, and
       resource-hogging failure modes.
     ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-055
+    difficulty: expert
+    tags: [resilience4j, defaults, slow-call, gotcha]
+    question: |
+      A team adds a Resilience4j breaker with all defaults, expecting it to protect
+      against a dependency whose latency has crept to p99 = 30 s (still returning 200s).
+      The breaker never trips on slowness. Why?
+    options:
+      - "The default slowCallRateThreshold is 100% and slowCallDurationThreshold is 60 s, so slow-call tripping is effectively off until tuned"
+      - "Resilience4j cannot detect slow calls at all"
+      - "The default failureRateThreshold of 50% already covers slow calls"
+      - "Slow-call detection requires a ThreadPoolBulkhead to be enabled"
+    answer: 0
+    explanation: |
+      Out of the box, slowCallRateThreshold defaults to 100% (essentially disabled) and
+      slowCallDurationThreshold defaults to 60 s. Calls at p99=30 s are under the 60 s bar and
+      never counted "slow," and even if they were, you'd need ~100% of them slow to trip. You
+      must lower both (e.g. 80% / 2 s) to enforce slow-call tripping.
+    ref: "concepts.md#resilience4j-configuration-defaults-reference"
+
+  - id: circuit-breakers-and-bulkheads-056
+    difficulty: expert
+    tags: [resilience4j, auto-transition, incident, half-open]
+    question: |
+      A breaker tripped OPEN during an incident. The dependency fully recovered an hour
+      ago, but the breaker is still OPEN and failing every call, even though traffic is
+      very low. Using Resilience4j defaults, what is the most likely cause?
+    options:
+      - "waitDurationInOpenState defaults to 0, so it can never leave OPEN"
+      - "automaticTransitionFromOpenToHalfOpenEnabled defaults to false, so with almost no traffic nothing fires the lazy OPEN to HALF-OPEN check"
+      - "The sliding window filled with stale 5xx that never expire"
+      - "permittedNumberOfCallsInHalfOpenState defaults to 0"
+    answer: 1
+    explanation: |
+      By default Resilience4j has NO background thread moving OPEN to HALF-OPEN; the
+      transition is evaluated lazily on the next incoming call. With near-zero traffic there
+      is no next call to trigger it, so the breaker sits OPEN indefinitely. Fix: enable
+      automaticTransitionFromOpenToHalfOpenEnabled (spawns a scheduler) or send probe traffic.
+    ref: "concepts.md#resilience4j-configuration-defaults-reference"
+
+  - id: circuit-breakers-and-bulkheads-057
+    difficulty: advanced
+    tags: [resilience4j, semaphore-bulkhead, defaults]
+    question: |
+      What is the default maxConcurrentCalls for a Resilience4j SemaphoreBulkhead, and
+      what does its default maxWaitDuration of 0 mean?
+    options:
+      - "Default 100; maxWaitDuration 0 means calls block forever until a permit frees"
+      - "Default 10; maxWaitDuration 0 means it disables the bulkhead"
+      - "Default 25; maxWaitDuration 0 means a call is rejected immediately when no permit is free rather than waiting"
+      - "Default 50; maxWaitDuration 0 means it queues indefinitely"
+    answer: 2
+    explanation: |
+      The SemaphoreBulkhead defaults to maxConcurrentCalls = 25. maxWaitDuration = 0 means a
+      call that finds no free permit fails fast (BulkheadFullException) instead of blocking,
+      which is usually what you want — you don't turn a concurrency cap into a new source of
+      thread parking.
+    ref: "concepts.md#resilience4j-configuration-defaults-reference"
+
+  - id: circuit-breakers-and-bulkheads-058
+    difficulty: expert
+    tags: [littles-law, sizing, bulkhead, numbers]
+    question: |
+      A downstream serves 800 req/s at an average latency of 250 ms. Using Little's Law,
+      what is the minimum bulkhead/thread-pool concurrency you must provision to avoid
+      rejecting healthy traffic?
+    options:
+      - "About 200"
+      - "About 20"
+      - "About 3200"
+      - "About 800"
+    answer: 0
+    explanation: |
+      Little's Law: L = lambda x W = 800 /s x 0.25 s = 200 concurrent in-flight calls. If the
+      pool is smaller than ~200 you'll queue and eventually reject even when the dependency is
+      perfectly healthy. Sizing bulkheads is arithmetic, not a guess.
+    ref: "concepts.md#littles-law-and-sizing-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-059
+    difficulty: expert
+    tags: [littles-law, cascading-failure, numbers, threads]
+    question: |
+      Service A has 300 request threads and a 30 s timeout on calls to B. B hangs
+      completely. Approximately what steady request rate to B is enough to park ALL of
+      A's threads?
+    options:
+      - "About 10 req/s"
+      - "About 300 req/s"
+      - "About 90 req/s"
+      - "About 1 req/s"
+    answer: 0
+    explanation: |
+      By Little's Law the saturating rate is lambda = L / W = 300 / 30 = 10 req/s. Just ~10
+      requests per second to a hung B parks all 300 threads, after which A can serve nothing —
+      including endpoints that never touch B. An OPEN breaker collapses W to microseconds,
+      freeing threads almost instantly.
+    ref: "concepts.md#littles-law-and-sizing-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-060
+    difficulty: expert
+    tags: [adaptive-concurrency, netflix, tcp, dynamic-bulkhead]
+    question: |
+      Netflix's concurrency-limits library replaces static thread-pool bulkheads with an
+      adaptive limit. What is the core analogy and why is it preferred in autoscaling
+      systems?
+    options:
+      - "It mimics a leaky-bucket rate limiter; preferred because it caps requests per second"
+      - "It uses a fixed limit equal to CPU count; preferred for simplicity"
+      - "It disables concurrency limits entirely and relies on timeouts"
+      - "It behaves like TCP congestion control (limit ~ congestion window), probing up when latency is healthy and backing off when latency rises; a static pool quickly goes out of date"
+    answer: 3
+    explanation: |
+      The adaptive limit is analogous to the TCP congestion window: it increases while latency
+      stays healthy and decreases when latency rises (a queue is forming), converging on
+      Little's Law (limit ~ RPS x latency). A static bulkhead is a fixed guess that goes stale
+      as load, instance size, and dependency latency change — the reason Netflix moved off it.
+    ref: "concepts.md#adaptive-concurrency-limits-the-dynamic-bulkhead"
+
+  - id: circuit-breakers-and-bulkheads-061
+    difficulty: expert
+    tags: [adaptive-concurrency, vegas, gradient2, aimd]
+    question: |
+      In Netflix's concurrency-limits, which algorithm is delay-based (estimating queue
+      from RTT inflation) and recommended for SERVER-side limiting?
+    options:
+      - "AIMD, because it reacts to loss"
+      - "Gradient2, because it uses a single latency sample"
+      - "Vegas, using queue = limit x (1 - minRTT/sampleRTT) to increment/decrement the limit"
+      - "A fixed limit, because servers cannot measure RTT"
+    answer: 2
+    explanation: |
+      Vegas is delay-based: it estimates the queue as limit x (1 - minRTT/sampleRTT),
+      incrementing the limit when the queue is below a small alpha (~2-3) and decrementing when
+      above beta (~4-6). Because it reacts to latency before driving errors, it's recommended
+      server-side; AIMD (loss-based) is recommended client-side.
+    ref: "concepts.md#adaptive-concurrency-limits-the-dynamic-bulkhead"
+
+  - id: circuit-breakers-and-bulkheads-062
+    difficulty: expert
+    tags: [adaptive-concurrency, robustness, gc-pause, smoothing]
+    question: |
+      An adaptive concurrency limiter collapses its limit during a brief GC pause on the
+      dependency — the latency spike was noise, not real congestion. Which mitigations
+      best keep the limiter robust?
+    options:
+      - "Remove the limiter and rely on a fixed pool"
+      - "Set the minimum limit to 0 so it can fully close"
+      - "Use dual-EWMA smoothing (Gradient2), a minimum-limit floor, and periodic minRTT recalibration"
+      - "Trip a circuit breaker on the first slow call"
+    answer: 2
+    explanation: |
+      A transient spike shouldn't be treated as sustained congestion. EWMA smoothing (as in
+      Gradient2's short-vs-long latency ratio) damps the noise, a minimum-limit floor prevents
+      the limit from collapsing to a level that can't make progress, and periodic minRTT
+      recalibration keeps the healthy baseline from drifting.
+    ref: "concepts.md#adaptive-concurrency-limits-the-dynamic-bulkhead"
+
+  - id: circuit-breakers-and-bulkheads-063
+    difficulty: expert
+    tags: [aws, token-bucket, breaker, bimodal, tradeoff]
+    question: |
+      The AWS Builders' Library is skeptical of client-side circuit breakers. What is its
+      main objection, and what does it prefer instead?
+    options:
+      - "Breakers are too slow; it prefers longer timeouts"
+      - "Breakers require a service mesh; it prefers Hystrix"
+      - "A breaker adds a mode that only activates under failure (bimodal, hard to test); it prefers stateless self-limiting like a retry token bucket plus server-side load shedding"
+      - "Breakers cannot detect slow calls; it prefers unbounded retries"
+    answer: 2
+    explanation: |
+      AWS's concern is bimodal behavior: the breaker introduces a failure-only mode that is
+      exercised precisely when you can least test it. It prefers stateless mechanisms — a retry
+      token bucket that self-limits retries as a fraction of traffic, backoff+jitter, and
+      server-side load shedding — over stateful client breakers and rarely-exercised fallbacks.
+    ref: "concepts.md#awss-contrarian-view-token-buckets-over-stateful-breakers"
+
+  - id: circuit-breakers-and-bulkheads-064
+    difficulty: expert
+    tags: [aws, token-bucket, retry-storm, stateless]
+    question: |
+      How does a retry token bucket limit retry amplification WITHOUT a stateful circuit
+      breaker?
+    options:
+      - "It blocks all retries once any error occurs"
+      - "It opens a global mode that rejects all traffic"
+      - "It doubles the timeout on each retry"
+      - "Each retry costs a token and successes slowly refill the bucket, so broad failure drains the bucket and retries self-limit as a fraction of traffic"
+    answer: 3
+    explanation: |
+      The client holds a bucket of retry tokens; each retry spends one and successes refill
+      slowly. When a dependency is broadly failing, the bucket drains and retries stop
+      amplifying load — bounding retries to a fraction of traffic. It's stateless and unimodal
+      (no global failure mode flip), which is why AWS favors it over a stateful breaker.
+    ref: "concepts.md#awss-contrarian-view-token-buckets-over-stateful-breakers"
+
+  - id: circuit-breakers-and-bulkheads-065
+    difficulty: advanced
+    tags: [metastable-failure, retry-storm, incident]
+    question: |
+      An outage's original trigger cleared 20 minutes ago, yet the system stays down —
+      client retries keep the dependency saturated. What is this failure class called,
+      and what actually ends it?
+    options:
+      - "A metastable failure; ending it requires REDUCING load (shed/break/drain retries), because adding capacity just feeds the sustaining loop"
+      - "A split-brain failure; ending it requires a leader election"
+      - "A cold-start failure; ending it requires a cache warm-up"
+      - "A capacity failure; ending it requires adding more instances"
+    answer: 0
+    explanation: |
+      This is a metastable failure (Bronson et al., HotOS 2021): a sustaining feedback loop
+      (retries) keeps the system down after the trigger clears. Adding capacity often feeds the
+      loop; the fix is reducing load — shed inbound, trip breakers, or drain the retry storm
+      (token bucket). The DynamoDB us-east-1 2015 event is a canonical example.
+    ref: "concepts.md#awss-contrarian-view-token-buckets-over-stateful-breakers"
+
+  - id: circuit-breakers-and-bulkheads-066
+    difficulty: advanced
+    tags: [resilience4j, states, forced-open, incident]
+    question: |
+      During an incident you know a specific dependency is broken and want to stop ALL
+      calls to it immediately, regardless of its measured failure rate. Which Resilience4j
+      state is the right manual lever?
+    options:
+      - "DISABLED"
+      - "METRICS_ONLY"
+      - "FORCED_OPEN"
+      - "HALF_OPEN"
+    answer: 2
+    explanation: |
+      FORCED_OPEN is the manual kill-switch: it always rejects and records nothing, so you
+      cut traffic to a known-bad dependency without waiting for the rate threshold. DISABLED is
+      the opposite (always allow / bypass), and METRICS_ONLY observes without tripping.
+    ref: "concepts.md#the-full-resilience4j-state-set"
+
+  - id: circuit-breakers-and-bulkheads-067
+    difficulty: expert
+    tags: [resilience4j, metrics-only, rollout, shadow-mode]
+    question: |
+      You want to introduce a circuit breaker on a critical path but are unsure your
+      thresholds are correct and don't want to risk tripping in production yet. What is
+      the safest rollout using Resilience4j's states?
+    options:
+      - "Start in FORCED_OPEN, then flip to CLOSED"
+      - "Start in DISABLED forever so it never trips"
+      - "Start in METRICS_ONLY to observe what WOULD trip, tune thresholds, then flip to the enforcing CLOSED state"
+      - "Start with permittedNumberOfCallsInHalfOpenState = 0"
+    answer: 2
+    explanation: |
+      METRICS_ONLY records outcomes and computes the failure/slow rates but never trips —
+      shadow mode. You watch what the breaker WOULD have done against real traffic, tune
+      thresholds accordingly, then switch to the enforcing CLOSED state. This avoids a
+      mis-tuned breaker causing a self-inflicted outage on day one.
+    ref: "concepts.md#the-full-resilience4j-state-set"
+
+  - id: circuit-breakers-and-bulkheads-068
+    difficulty: expert
+    tags: [ordering, resilience4j, decorators, spring-boot]
+    question: |
+      What is the canonical Resilience4j Spring Boot aspect order (outermost to innermost),
+      and why is Bulkhead innermost?
+    options:
+      - "Bulkhead, TimeLimiter, RateLimiter, CircuitBreaker, Retry — Bulkhead innermost so retries are cheapest"
+      - "Retry, CircuitBreaker, RateLimiter, TimeLimiter, Bulkhead — Bulkhead innermost so it sits closest to the resource it protects"
+      - "CircuitBreaker, Retry, Bulkhead, TimeLimiter, RateLimiter — Bulkhead innermost to share permits with the breaker"
+      - "TimeLimiter, Bulkhead, Retry, CircuitBreaker, RateLimiter — order is arbitrary"
+    answer: 1
+    explanation: |
+      The default order is Retry > CircuitBreaker > RateLimiter > TimeLimiter > Bulkhead > call.
+      Retry outermost so each retry re-evaluates the breaker; the breaker short-circuits before
+      spending a rate-limiter permit or bulkhead slot; the TimeLimiter bounds the call; and the
+      Bulkhead sits innermost, closest to the actual resource whose concurrency it caps.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-069
+    difficulty: expert
+    tags: [granularity, partial-degradation, outlier-detection, flapping]
+    question: |
+      A dependency has 8 shards; 4 are unhealthy. A single logical breaker for the whole
+      dependency flaps OPEN and HALF-OPEN as it sees ~50% failures. What granularity change
+      most directly fixes this?
+    options:
+      - "One global breaker across all dependencies"
+      - "A per-tenant breaker keyed by request"
+      - "Per-host/per-upstream outlier detection (as in Envoy) that ejects only the bad shards, leaving the healthy ones serving"
+      - "Lower the minimumNumberOfCalls to 1 so it trips faster"
+    answer: 2
+    explanation: |
+      A single logical breaker can only see the aggregate ~50% rate, so it oscillates and cuts
+      off the healthy shards too. Per-host outlier detection (Envoy) ejects just the 4 bad
+      hosts from the load-balancing pool while the 4 healthy ones keep serving — the right
+      granularity for partial degradation. A per-key breaker would explode cardinality.
+    ref: "concepts.md#breaker-granularity-and-cluster-coordination"
+
+  - id: circuit-breakers-and-bulkheads-070
+    difficulty: expert
+    tags: [granularity, cardinality, minimum-volume]
+    question: |
+      An engineer proposes a separate circuit breaker per (customer-id) key to maximize
+      isolation. What is the main failure mode of this extreme granularity?
+    options:
+      - "Breakers per key are impossible to implement"
+      - "Each per-key breaker sees so few calls it rarely reaches minimumNumberOfCalls, so it can't compute a meaningful rate or trip"
+      - "Per-key breakers automatically share state and defeat isolation"
+      - "Per-key breakers trip too aggressively on the aggregate rate"
+    answer: 1
+    explanation: |
+      Too-fine granularity explodes cardinality: each key's breaker sees a trickle of calls and
+      never accumulates the minimum volume needed to evaluate the rate, so it effectively never
+      trips. Granularity is a trade-off — too coarse hides bad shards, too fine starves each
+      breaker of the sample it needs.
+    ref: "concepts.md#breaker-granularity-and-cluster-coordination"
+
+  - id: circuit-breakers-and-bulkheads-071
+    difficulty: expert
+    tags: [cluster, shared-state, recovery, thundering-herd]
+    question: |
+      500 instances each run an in-memory breaker for the same dependency. The dependency
+      recovers. What problem arises, and what is the pragmatic mitigation?
+    options:
+      - "Nothing — per-instance breakers coordinate automatically"
+      - "The breakers deadlock waiting for each other"
+      - "The dependency must expose a distributed lock to all 500"
+      - "All 500 probe the recovering dependency at nearly the same moment (N x probe traffic / recovery-time retry storm); mitigate with jittered sleep windows and/or mesh-level host ejection"
+    answer: 3
+    explanation: |
+      Independent per-instance breakers each transition to HALF-OPEN around the same time and
+      collectively slam the recovering dependency with N times the probe traffic. Jittered
+      sleep windows spread the re-probes in time; mesh-level host ejection coordinates at the
+      proxy. A shared/distributed breaker would coordinate but adds a dependency and latency.
+    ref: "concepts.md#breaker-granularity-and-cluster-coordination"
+
+  - id: circuit-breakers-and-bulkheads-072
+    difficulty: advanced
+    tags: [half-open, thundering-herd, high-load]
+    question: |
+      A very high-QPS breaker transitions to HALF-OPEN. What is the risk to the still-
+      fragile dependency, and how do you mitigate it?
+    options:
+      - "No risk — HALF-OPEN blocks all traffic"
+      - "The breaker will skip HALF-OPEN under high load automatically"
+      - "The risk is only memory; increase heap"
+      - "Many threads race to fill the trial slots and a burst can hit the fragile dependency; keep permittedNumberOfCallsInHalfOpenState small (~10) and re-probe with a trickle, jittered across instances"
+    answer: 3
+    explanation: |
+      Under high load, many threads compete for the limited HALF-OPEN trial slots, and an
+      unguarded auto-transition can send a burst at a dependency that hasn't fully recovered.
+      Keeping the permitted count small and re-probing with a trickle (plus jitter across
+      instances) validates recovery gently instead of re-triggering the outage.
+    ref: "concepts.md#breaker-granularity-and-cluster-coordination"
+
+  - id: circuit-breakers-and-bulkheads-073
+    difficulty: advanced
+    tags: [sliding-window, staleness, low-traffic]
+    question: |
+      A count-based sliding window of the last 100 calls is used on a LOW-traffic
+      dependency (a few calls per minute). What subtle problem does this create?
+    options:
+      - "The window uses O(n^2) memory"
+      - "The 100 outcomes can span many minutes, so the failure rate reflects stale data and the breaker reacts slowly to current conditions"
+      - "The window ignores slow calls entirely"
+      - "It trips instantly on the first failure"
+    answer: 1
+    explanation: |
+      At low QPS, 100 calls might cover several minutes, so the computed rate mixes in old
+      outcomes and lags reality — the breaker is stale. A time-based window (last N seconds)
+      bounds staleness to N seconds regardless of rate, which is why it's often preferred for
+      variable traffic (its own weakness is over-weighting a recent burst).
+    ref: "concepts.md#sliding-window-internals"
+
+  - id: circuit-breakers-and-bulkheads-074
+    difficulty: advanced
+    tags: [sliding-window, internals, memory]
+    question: |
+      How does a count-based sliding window typically achieve an O(1) health snapshot?
+    options:
+      - "It recomputes the rate over all N entries on every call (O(n) each time)"
+      - "It stores only the last outcome and extrapolates"
+      - "It keeps a running total updated by add-on-record and subtract-on-evict over a circular buffer of N outcomes"
+      - "It samples 10% of calls to estimate the rate"
+    answer: 2
+    explanation: |
+      A circular array holds the last N outcomes and a running aggregate (failures, slow,
+      total) is incremented when an outcome is recorded and decremented when the oldest is
+      evicted. The snapshot is then O(1) at O(N) memory — no full rescan per call.
+    ref: "concepts.md#sliding-window-internals"
+
+  - id: circuit-breakers-and-bulkheads-075
+    difficulty: advanced
+    tags: [brownout, graceful-degradation, static-stability]
+    question: |
+      Instead of a binary breaker that hard-trips OPEN, a service under stress drops
+      personalization and serves cheaper approximate results while keeping checkout
+      working. What is this approach called?
+    options:
+      - "A retry storm"
+      - "A brownout / graceful degradation — shedding optional work first so the service degrades continuously rather than flipping to fail-fast"
+      - "A bulkhead"
+      - "A distributed transaction"
+    answer: 1
+    explanation: |
+      A brownout sheds optional work (non-critical features, fidelity, personalization) first,
+      so the service degrades continuously and preserves the critical path — as opposed to a
+      breaker's discontinuous flip to fail-fast. It aligns with static stability: keep serving
+      the core function even when a dependency is degraded.
+    ref: "concepts.md#brownout-and-graceful-degradation"
+
+  - id: circuit-breakers-and-bulkheads-076
+    difficulty: intermediate
+    tags: [fail-fast, fail-silent, fallback, distinction]
+    question: |
+      A bare circuit breaker with no fallback is best described as doing which of the
+      following to a request when the dependency hangs?
+    options:
+      - "Converting a hang into a fast error (fail-fast), without by itself producing a usable degraded response"
+      - "Returning cached data automatically"
+      - "Silently returning an empty default (fail-silent)"
+      - "Blocking until the dependency recovers"
+    answer: 0
+    explanation: |
+      A breaker on its own only converts a hang into a fast error — fail-fast. Producing a
+      usable degraded answer requires pairing it with a fallback: fail-silent (empty/default) or
+      fail-fast-with-fallback (cache/alternate source). The breaker protects your threads; the
+      fallback protects the user experience.
+    ref: "concepts.md#fail-fast-fail-silent-and-fallback-modes"
+
+  - id: circuit-breakers-and-bulkheads-077
+    difficulty: advanced
+    tags: [hystrix, defaults, migration]
+    question: |
+      Which set correctly gives Hystrix's default circuit-breaker configuration?
+    options:
+      - "requestVolumeThreshold=100, errorThresholdPercentage=80, sleepWindow=60000 ms"
+      - "requestVolumeThreshold=20, errorThresholdPercentage=50, sleepWindow=5000 ms, rolling window 10000 ms / 10 buckets"
+      - "requestVolumeThreshold=1, errorThresholdPercentage=10, sleepWindow=1000 ms"
+      - "requestVolumeThreshold=50, errorThresholdPercentage=50, sleepWindow=30000 ms"
+    answer: 1
+    explanation: |
+      Hystrix defaulted to requestVolumeThreshold=20, errorThresholdPercentage=50,
+      sleepWindowInMilliseconds=5000, over a rolling stats window of 10000 ms split into 10
+      buckets. Its fixed 5 s sleep window with no adaptive backoff caused synchronized fleet
+      re-probing (flapping), one motivation for Resilience4j-style jittered/adaptive windows.
+    ref: "concepts.md#resilience4j-and-hystrix"
+
+  - id: circuit-breakers-and-bulkheads-078
+    difficulty: expert
+    tags: [scenario, add-capacity, cascade, counter-intuition]
+    question: |
+      During a cascade caused by a sick dependency, an operator doubles the caller's
+      thread pool to "absorb the load." Recovery gets WORSE. Why?
+    options:
+      - "More threads reduce CPU cache locality"
+      - "The extra threads deadlock on the connection pool"
+      - "More threads means more concurrent requests hitting the sick dependency, increasing its load and slowing its recovery — the fix is LESS load (shed/break), not more capacity"
+      - "Doubling threads always halves throughput"
+    answer: 2
+    explanation: |
+      A struggling dependency recovers by getting a REST. Adding caller threads just pushes more
+      concurrent work onto it, deepening its overload — a classic staff-level counter-intuition.
+      The correct move is to reduce offered load: trip breakers, shed inbound, or drain retries,
+      so the dependency can catch up.
+    ref: "concepts.md#littles-law-and-sizing-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-079
+    difficulty: advanced
+    tags: [distinction, breaker, bulkhead, rate-limiter, load-shedder]
+    question: |
+      Circuit breaker, bulkhead, rate limiter, and load shedder are often confused. Which
+      mapping is correct?
+    options:
+      - "All four drop inbound traffic to protect the server"
+      - "Breaker caps rate; bulkhead drops inbound; rate limiter stops downstream calls; load shedder isolates pools"
+      - "They are four names for load shedding"
+      - "Breaker = stop calling a bad downstream (temporal); bulkhead = cap my resources per dependency (spatial); rate limiter = cap the rate (contractual/fairness); load shedder = drop inbound to protect myself"
+    answer: 3
+    explanation: |
+      Each faces a different direction/axis: a breaker stops calling a bad DOWNSTREAM (temporal),
+      a bulkhead caps how much of MY resources one dependency can hold (spatial), a rate limiter
+      enforces a rate contract/fairness, and a load shedder drops INBOUND work to protect the
+      server itself. Who decides and where the drop happens is the discriminator.
+    ref: "concepts.md#fail-fast-fail-silent-and-fallback-modes"
+
+  - id: circuit-breakers-and-bulkheads-080
+    difficulty: expert
+    tags: [half-open, minimum-volume, evaluation, gotcha]
+    question: |
+      In HALF-OPEN with permittedNumberOfCallsInHalfOpenState=10, a subtle question:
+      against what is the trial outcome evaluated, and what can wedge the decision under
+      Resilience4j defaults?
+    options:
+      - "It's evaluated the instant the first trial succeeds; nothing can wedge it"
+      - "The rate is computed over the permitted trial calls once enough complete; with maxWaitDurationInHalfOpenState=0 a hung probe (and no TimeLimiter) can leave HALF-OPEN waiting indefinitely for trials to complete"
+      - "It's evaluated against the CLOSED-state window of 100 calls"
+      - "The breaker always closes after the sleep window regardless of trial outcomes"
+    answer: 1
+    explanation: |
+      The recovery decision uses the failure/slow rate over the permitted trial calls, and it
+      needs those calls to actually complete. maxWaitDurationInHalfOpenState defaults to 0 =
+      "wait infinitely until all permitted trial calls complete," so a hung probe with no
+      TimeLimiter can stall the HALF-OPEN evaluation. Pair it with a time limiter.
+    ref: "concepts.md#resilience4j-configuration-defaults-reference"
+
+  - id: circuit-breakers-and-bulkheads-081
+    difficulty: advanced
+    tags: [threadpool-bulkhead, resilience4j, defaults]
+    question: |
+      What are the Resilience4j ThreadPoolBulkhead defaults for maxThreadPoolSize,
+      coreThreadPoolSize, and queueCapacity?
+    options:
+      - "maxThreadPoolSize=25, coreThreadPoolSize=25, queueCapacity=0"
+      - "maxThreadPoolSize=availableProcessors(), coreThreadPoolSize=availableProcessors()-1, queueCapacity=100"
+      - "maxThreadPoolSize=200, coreThreadPoolSize=100, queueCapacity=unbounded"
+      - "maxThreadPoolSize=10, coreThreadPoolSize=10, queueCapacity=1000"
+    answer: 1
+    explanation: |
+      The ThreadPoolBulkhead defaults tie the pool to CPU count: maxThreadPoolSize =
+      Runtime.availableProcessors(), coreThreadPoolSize = availableProcessors() - 1, with a
+      queueCapacity of 100 and a keepAliveDuration of 20 ms. Knowing these defaults matters
+      because they may be far too small (or wrong-shaped) for an I/O-bound remote call.
+    ref: "concepts.md#resilience4j-configuration-defaults-reference"
+
+  - id: circuit-breakers-and-bulkheads-082
+    difficulty: advanced
+    tags: [nygard, release-it, integration-point, story]
+    question: |
+      Nygard's Release It! opens with an airline outage: a single hung SQL socket (no
+      timeout) exhausted a connection pool and cascaded into a system-wide failure. What
+      principle does this canonical story anchor?
+    options:
+      - "Encryption at rest prevents outages"
+      - "Slow is worse than down — an unbounded/hung integration point holds a scarce resource and cascades; timeouts and resource limits are essential"
+      - "More database replicas always prevent cascades"
+      - "Retries should be unbounded for reliability"
+    answer: 1
+    explanation: |
+      The hung socket had no timeout, so it held a connection-pool resource indefinitely,
+      exhausting the pool and cascading outward — the origin story for the whole stability-
+      patterns catalog. It concretely illustrates "slow is worse than down" and why every
+      integration point needs timeouts, bulkheads, and breakers.
+    ref: "concepts.md#why-fail-fast-the-cascading-failure-problem"
+
+  - id: circuit-breakers-and-bulkheads-083
+    difficulty: expert
+    tags: [scenario, error-only-breaker, latency-creep, judgment]
+    question: |
+      A dependency returns HTTP 200 for every call, but p99 latency has crept from 50 ms
+      to 8 s and callers' pools are filling. An error-rate-only breaker never trips. What
+      is the correct mitigation?
+    options:
+      - "Raise the failure-rate threshold so the breaker is more sensitive"
+      - "Add more retries to get a faster response"
+      - "Switch from a breaker to an unbounded queue"
+      - "Enable a slow-call-rate threshold with a sensible slowCallDurationThreshold, plus a tight timeout so slow-but-successful calls are caught"
+    answer: 3
+    explanation: |
+      Error-only breakers are blind to latency creep — the dependency is "up" but degrading the
+      caller. Configure a slow-call-rate threshold (calls over slowCallDurationThreshold count as
+      slow) so the breaker reacts to slowness, and enforce a tight timeout to free threads. This
+      is the "slow is worse than down" enforcement mechanism.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"

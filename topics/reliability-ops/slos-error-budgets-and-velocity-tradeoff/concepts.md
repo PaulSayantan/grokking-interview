@@ -365,6 +365,353 @@ sensitive and precise without alert fatigue.
 > 6 h), recording rules, and alert tuning — belong to
 > `observability/slo-based-alerting-and-error-budgets`. Don't reinvent them here; point to them.
 
+## SLI specification vs implementation
+
+A subtle but *senior-defining* distinction from the SRE Workbook (Ch. 2): an SLI has a
+**specification** and an **implementation**, and they are not the same thing.
+
+- **SLI specification** — the *user-facing outcome* you care about, stated independently of how
+  you measure it. Example: *"the proportion of home-page requests served in under 100 ms."*
+- **SLI implementation** — the specification **plus a concrete measurement source**. The *same*
+  spec has *many* implementations, each producing a **different number**.
+
+Example implementations of that one spec:
+
+- Parse **application-server logs** for requests to `/` and their served latency.
+- Read a **load-balancer** metric for the same route.
+- Fire **synthetic/black-box probes** from outside.
+- Instrument the **browser (RUM)** to capture what the user's device actually saw.
+
+> [!KEY-TAKEAWAY]
+> One SLI *specification* → many *implementations* that trade off **quality, coverage, and
+> cost**. This is why "measure close to the user" is not a slogan: the LB, app-server, and client
+> report *different* availability for the *same* SLO. Interviewers use this to separate people who
+> memorized "good/valid" from people who understand *why the number changes with the source*.
+
+### The measurement-source ladder — quality vs coverage vs cost
+
+Sources, ordered by increasing **user-fidelity (quality)**:
+
+| Source | Quality (user-fidelity) | Coverage | Cost / attribution difficulty |
+|---|---|---|---|
+| App-server logs / metrics | Lowest — misses everything before the app | Only requests that *reached* you | Cheap, easy to attribute |
+| Load-balancer metrics | Higher — catches some pre-app errors | Requests that reached the LB | Cheap, moderate attribution |
+| Black-box / synthetic probes | Higher — exercises the real path | Only the paths you script | Moderate; not real user traffic |
+| Client-side / RUM | Highest — what the user's device saw | All real users, all paths | Costly, hardest to attribute (client bugs, ad-blockers, offline) |
+
+Each rung moves *closer to the user* (higher quality) but is harder to attribute a failure to
+your service and more expensive to run. There is no free lunch — pick the rung that best balances
+fidelity against cost for the decision the SLO drives.
+
+## The SLI menu — request, pipeline, and storage archetypes
+
+The Workbook keys the menu of SLI types to **three component archetypes**. Knowing which
+archetype a component is tells you which SLIs are even *relevant*.
+
+| Archetype | Relevant SLIs | Meaning |
+|---|---|---|
+| **Request-driven** (serves requests) | **Availability**, **latency**, **quality** | Did it respond, was it fast, was the response full-fidelity (not degraded)? |
+| **Pipeline** (processes data → output) | **Freshness**, **correctness**, **coverage** | Is output recent enough, is it right, and did we process *all* the input we should have? |
+| **Storage** | **Durability** | Do stored objects survive over time? |
+
+Two archetype-specific SLIs the earlier table under-named:
+
+- **Correctness** (pipeline) — the fraction of records that produced the *right* answer. Distinct
+  from freshness (recent) and coverage (complete).
+- **Coverage** (pipeline) — the fraction of *valid input* that was actually processed. A pipeline
+  can be fresh and correct on the 80% it processed while silently dropping 20% — coverage is the
+  SLI that catches that.
+
+> [!TIP]
+> The Workbook's rule of thumb: **choose five or fewer SLI types** that cover the component's
+> critical functionality. More than that dilutes attention and creates conflicting signals (this
+> reinforces "have few SLOs" from the choosing-good-SLIs section).
+
+## Request-based vs windows-based SLOs
+
+"Request-based vs time-based" is often stated imprecisely. The real distinction the Workbook and
+cloud providers draw:
+
+- **Request-based SLO** — count *individual* good and valid events: `good_requests / valid_requests`.
+  Every request is weighted by the fact that it happened.
+- **Windows-based SLO** — slice time into fixed windows (e.g. 1-minute), label *each window*
+  "good" or "bad" by an in-window threshold, then compute **good windows / total windows**. AWS's
+  published availability is exactly this: availability is measured over one- or five-minute
+  periods, and **a period with no requests is counted as 100% available**.
+
+> [!WARNING]
+> **Windows-based SLOs mislead at low traffic.** In a 1-minute window with only 2 requests, a
+> single failure flips the window from 100% to 50% — if your in-window threshold is 99%, that
+> whole minute is "bad", massively over-penalizing 1 error. Request-based counting weights by
+> actual volume and doesn't have this failure mode. Conversely, windows-based is convenient when
+> "up/down" is easier to observe than per-request success (e.g. a health signal), and it's how
+> most contractual SLAs are written.
+
+## Aggregation pitfalls — you cannot average percentiles
+
+Two mathematical traps that make a dashboard *lie* while looking healthy.
+
+### Pitfall 1 — averaging percentiles is meaningless
+
+A percentile is a **rank statistic**, not a linear one, so averaging p90s (across instances,
+shards, or time buckets) is mathematically invalid. Concrete example:
+
+- Instance A: 10,000 requests, p90 = 100 ms.
+- Instance B: 10 requests, p90 = 500 ms.
+- Naive average of the two p90s → **300 ms**. But the *true* fleet p90 ≈ **100 ms**, because A
+  dominates the combined distribution.
+
+The correct method: **sum the histogram buckets across sources first, then compute the quantile
+from the merged histogram.** This is precisely why Prometheus **histograms** aggregate correctly
+(you add bucket counts, then `histogram_quantile`) while **summaries** (which pre-compute
+quantiles per instance) **cannot** be aggregated. The *query* mechanics live in observability; the
+*principle* — never average a percentile — is a reliability/SLO-design rule and belongs here.
+
+> [!KEY-TAKEAWAY]
+> This is *also* the argument for expressing latency SLOs as a **distribution cut** — "99% of
+> requests < 900 ms" (a good/valid ratio you *can* aggregate) — rather than "p99 ≤ 900 ms" (a
+> quantile you *cannot* aggregate). The ratio form composes across instances and time; the
+> quantile form does not.
+
+### Pitfall 2 — Simpson's paradox across endpoints
+
+A single fleet-wide availability SLI can read 99.95% and "healthy" while a critical low-volume
+endpoint (checkout) is at 98% and on fire. The reason: high-volume cheap endpoints (health
+checks, static assets, autocomplete) **dominate the ratio** and drown out the endpoint that
+matters. The fix is **per-critical-journey SLIs** — weight by *importance*, not by raw request
+volume — which is exactly why user-journey SLOs exist.
+
+## Dependency availability math — hard vs soft, ceilings, and redundancy
+
+The user-journey section gives the serial `a^N` rule; here is the full operational math from the
+AWS Well-Architected Reliability pillar.
+
+### Hard vs soft dependencies (and the availability ceiling)
+
+- **Hard dependency** — if it fails, *your request fails*. Hard dependencies **in series
+  multiply**: `A_workload = ∏ A_dependency`. Three hard deps at 99.99% → `0.9999³ ≈ 99.97%`.
+- **Soft dependency** — a failure is *compensated* (cached value, fallback, graceful degradation,
+  default), so it does **not** multiply into your availability.
+
+> [!KEY-TAKEAWAY]
+> **You cannot set your SLO higher than the product of your hard dependencies' availabilities —
+> that product is your ceiling.** The classic senior trap: *"your SLO is 99.99% but your primary
+> datastore's SLA is 99.95% and every request hits it — what's wrong?"* → Your ceiling is
+> **99.95%** (or lower after compounding), so 99.99% is unachievable. Fixes: **soften** the
+> dependency (cache/fallback so it stops multiplying in), add **redundancy**, or **lower your
+> SLO** to what the chain supports.
+
+### Redundancy math (parallel components)
+
+For **independent** redundant components, availability = `1 − ∏(1 − A_i)` — you only fail if *all*
+copies fail. Two components at 99.9% → `1 − (0.001)² = 99.9999%` (**six nines**).
+
+> [!TIP]
+> **Shortcut:** for pure-nines components in redundancy, *add the nines*. Two 3-nines components in
+> parallel → 6 nines. Two 2-nines → 4 nines.
+
+### Why naive redundancy math overstates reality
+
+The Workbook cautions: deploying a 99.9% single-zone service across two zones does **not**
+reliably yield six nines, because the independence assumption breaks down —
+**shared fate, common dependencies, common failure domains, and global control planes** create
+**correlated failure**. The multiplication only holds if failures are truly independent, and in
+practice they rarely are. This is the sophisticated follow-up that catches candidates who "just
+multiply."
+
+### Estimating availability from MTBF/MTTR
+
+When a dependency publishes no SLO, estimate availability from its failure history:
+
+```
+Availability_EST = MTBF / (MTBF + MTTR)
+```
+
+Worked: MTBF = 150 days, MTTR = 1 hour → `3600 h / (3600 h + 1 h) ≈ 99.97%`. Another: MTBF 30
+days, MTTR 2 hours → `720 / (720 + 2) ≈ 99.72%`. (MTBF/MTTR/MTTF definitions and the incident
+lifecycle live in `reliability-ops/reliability-fundamentals-and-availability-math`; here it's the
+availability-estimation use.)
+
+## Achievable vs aspirational SLOs
+
+When you want a *tighter* target than you can currently hit, do **not** just set the tight number
+and live in permanent-emergency mode. The Workbook's practice is a **dual SLO**:
+
+- **Achievable SLO** — the target your system can actually meet today; this one drives the
+  error-budget policy and paging.
+- **Aspirational SLO** — the target you're working *toward*; tracked and reported **alongside**,
+  but **explicitly marked in the error-budget policy as NOT requiring action** when missed.
+
+> [!WARNING]
+> If you make an aspirational target *enforceable* before you can hit it, the budget is always
+> burned, the freeze is always on, and the team stops trusting the whole system. Aspirational
+> targets are legitimate — but only when the policy explicitly exempts them from action. (This is
+> distinct from the anti-pattern of setting an aspirational number with *no* achievable target at
+> all.)
+
+## The error-budget policy document — governance specifics
+
+The generic tiered table earlier says *what* changes; the Workbook (Ch. 4 + Appendix B template)
+names the concrete governance artifacts a senior interviewer expects you to cite.
+
+**Document header / governance:**
+- Named **author, reviewers, and approvers**, an **approval date**, and a **revisit date** (review
+  at least annually — SLOs drift as the system and traffic change).
+- **Escalation arbiter:** disputes over the budget calculation or the required action escalate to a
+  **single named executive** — the Workbook template says the **CTO**. This is what "executive
+  buy-in" concretely means: one person breaks ties so the policy can't be quietly ignored.
+- **Goals vs non-goals:** the goal is to *shield users from repeated misses* and *incentivize a
+  balance* of reliability and features. An explicit **non-goal: the policy is not punitive** — it
+  "gives teams permission to focus on reliability," it does not exist to blame.
+
+**The 20% thresholds (concrete triggers):**
+- A **single incident** consuming **> 20% of the 4-week budget** → **mandatory postmortem with at
+  least one P0 action item**.
+- A **single class of outage** consuming **> 20% of the budget over a quarter** → a **P0 item in
+  quarterly planning**.
+
+**"Must fix reliability" vs "may keep shipping" (attribution):**
+
+| Team **MUST** stop and fix when… | Team **MAY** keep shipping when… |
+|---|---|
+| A code or procedural **bug** caused the miss | Cause was a **company-wide network** issue outside the team |
+| A postmortem shows a way to **soften a hard dependency** | The burn came from **another team's frozen dependency** |
+| **Miscategorized** errors hid real budget burn | **Out-of-scope traffic** (load tests, pen tests) caused it |
+| | Errors **hit no users** |
+
+> [!INTERVIEW]
+> *"The budget was burned by a company-wide network outage you didn't cause — freeze or ship?"*
+> Per policy this is a **MAY keep shipping** case. But name the **counter-school**: some teams
+> **freeze anyway** because a freeze *makes users happier* regardless of fault. The real point:
+> **the policy decides this in advance**, so it isn't argued during the incident.
+
+**Why the budget throttles *releases* specifically:** the Workbook's policy chapter states that
+changes account for **roughly 70% of outages**. That is the citable justification for why the
+lever is a *change/deploy freeze* and not something else — you throttle the dominant source of
+risk.
+
+## The economics of a nine
+
+The reliability target is ultimately a **business calculation**, not an engineering preference.
+From "Embracing Risk", the value of a reliability increment is:
+
+```
+value of an availability increment ≈ revenue × Δavailability
+```
+
+Worked: improving 99.9% → 99.99% on **$1M** of revenue riding on that availability is worth
+`$1,000,000 × (0.9999 − 0.999) = $1,000,000 × 0.0009 = $900`. **If buying that nine costs more
+than $900, don't buy it.** This turns "reliable enough" from a slogan into a number, and it pairs
+with the ~**10× cost per nine** rule: at some point the next nine costs far more than the revenue
+it protects. The staff-level framing: **"reliable enough, and no more."**
+
+## Choosing the window — rolling vs calendar and multi-timescale
+
+Deepening the window discussion:
+
+- **Rolling windows are aligned with the user experience** — "how has it felt for the last four
+  weeks" is what a user perceives.
+- **Calendar windows are aligned with business/planning** — you literally cannot know the remaining
+  quarter's traffic mid-quarter, so calendar windows suit *reporting and planning*, not real-time
+  budget management.
+- **Use multiple timescales at once:** a **4-week rolling window** for the live SLO/budget,
+  **weekly summaries** for task prioritization, and **quarterly reports** for project planning.
+- **Use an integral number of weeks.** A 30-day window contains *four or five* weekends depending
+  on where it starts, skewing the traffic mix; 28 days (4 weeks) holds the day-of-week
+  distribution constant.
+
+### Starter-SLO heuristics (how to pick the first number)
+
+- **Round availability to two significant figures** (99.9%, not 99.913%) — false precision invites
+  arguments over noise.
+- **Round latency thresholds to the nearest 50 ms** — users generally can't perceive a change
+  smaller than ~50 ms, so finer thresholds are noise.
+- **Start from historical performance, then iterate.** Measure what you actually do, set the SLO at
+  a level users are happy with, and tighten or loosen as you learn.
+
+## Worked example — from SLI to budget to incident sizing
+
+A concrete Workbook-style walkthrough that ties the whole chain together. Suppose you measure a
+real API over 4 weeks and observe **p90 = 432 ms, p99 = 891 ms, 97.123% success** over **3.66M**
+requests. You set:
+
+- **Availability SLO:** 97% success (rounded down from measured 97.123%).
+- **Latency SLOs (distribution cuts):** 90% of requests < **450 ms**, 99% of requests < **900 ms**
+  (rounded to the nearest 50 ms).
+
+**Error budget:** at 97% over 3.66M requests, allowed failures = `0.03 × 3.66M ≈ 109,897`.
+
+**Now size incidents against that budget:**
+
+- A bad release throwing a NullPointerException produces ~**14,066** errors → `14,066 / 109,897 ≈
+  13%` of the 4-week budget spent on one release.
+- A **20-hour** partial DB outage produces ~**72,000** errors → `≈ 65%` of the budget in a single
+  incident.
+
+This is the payoff of the model: you can look at a proposed risky change or a past incident and
+say *exactly* what fraction of the budget it costs — turning "was that bad?" into arithmetic.
+
+## Burn-rate math and time-to-exhaustion
+
+Deepening the burn-rate concept with the Workbook's formulas.
+
+**Time until the budget is exhausted at a given burn rate:**
+
+```
+time_to_exhaustion = window / burn_rate
+```
+
+**Budget consumed by the time an alert fires** (alert looks back over a short window/period):
+
+```
+budget_consumed = burn_rate × (alert_window / SLO_window)
+```
+
+So a 1-hour alert window on a 30-day SLO firing at 14.4× consumes `14.4 × (1h / 720h) = 2%` of the
+budget; at 36× it's `36 × (1/720) = 5%`. That is the *reverse* mapping interviewers ask: **"2% of
+a 30-day budget burned in 1 hour is what burn rate?"** → `0.02 / (1/720) = 14.4×`.
+
+Canonical **time-to-exhaustion table** for a 99.9% / 30-day SLO:
+
+| Burn rate | Budget lasts |
+|---|---|
+| 1× (on pace) | 30 days |
+| 2× | 15 days |
+| 10× | 3 days |
+| 1000× | ~43 minutes |
+
+(The specific multi-window alert *rules* — 14.4×/1h + 6×/6h pairs, recording rules — remain
+observability's; the burn-rate → budget-consumed formula and this table are reliability concepts.)
+
+## Tiered (silver/gold) SLOs and SLA service credits
+
+### Silver/gold tiers
+
+You can offer **different reliability tiers to different customer or traffic classes** — e.g.
+**gold** (paid, interactive) at 99.99% and **silver** (free, batch) at 99.9%, each with its own SLO
+and budget. This lets you **shed the low tier first** under stress (protect gold traffic, degrade
+or reject silver) and price reliability appropriately. Interactive vs batch, paid vs free, and
+first-party vs third-party callers are common tier boundaries.
+
+### SLA service credits — the contract side
+
+SLAs monetize misses through **tiered service credits** that deepen as the miss worsens, e.g.:
+
+| Monthly availability | Service credit |
+|---|---|
+| below 99.9% | 10% of the bill |
+| below 99.0% | 25% |
+| below 95.0% | 100% |
+
+Key contractual realities a senior candidate should name:
+
+- Credits are usually **capped** (you can't profit), the **customer must claim** them (they're not
+  automatic), and they **exclude scheduled maintenance, force majeure, and customer-caused errors**.
+- SLAs are frequently measured by **calendar month**, even when the internal SLO uses a **rolling**
+  window — so the SLA and SLO can disagree on "the number" for the same month. That mismatch is
+  intentional and a common interview probe: the SLA is a *billing/legal* instrument (calendar,
+  windowed, conservative), the SLO is an *engineering* instrument (rolling, request-based, tighter).
+
 ## Common Interview Follow-ups
 
 - **"Difference between SLI, SLO, and SLA in one sentence each?"** SLI = the *measurement*, SLO =
@@ -392,6 +739,26 @@ sensitive and precise without alert fatigue.
   reliability / under-shipping. Ship faster or lower the SLO to reclaim the budget.
 - **"Where does alerting on all this live?"** Observability (`slo-based-alerting-and-error-budgets`)
   — multi-burn-rate alerts. Here we only own the concepts and the velocity decision.
+- **"SLI specification vs implementation?"** Spec = the user-facing outcome ("home-page requests
+  < 100 ms"); implementation = spec + a measurement source (app log vs LB vs client). One spec,
+  many implementations, trading quality/coverage/cost — which is why the number changes with the
+  source.
+- **"Ops averages per-instance p99s for the fleet dashboard — why is that wrong?"** You can't
+  average percentiles (rank statistics); sum histogram buckets across instances first, then
+  compute the quantile. It's also why latency SLOs use a distribution cut ("99% < 900 ms"), which
+  aggregates, not "p99 ≤ 900 ms", which doesn't.
+- **"Fleet availability reads 99.95% but checkout is at 98% — how did the dashboard hide it?"**
+  Simpson's paradox: high-volume cheap endpoints dominate the ratio. Use per-critical-journey SLIs.
+- **"Two redundant AZs each at 99.9% — effective availability, and why won't you get it?"**
+  `1 − (0.001)² =` six nines *in theory*; in practice shared fate / common dependencies / global
+  control planes create correlated failure, so independence doesn't hold.
+- **"MTBF 30 days, MTTR 2 hours — availability?"** `720/(720+2) ≈ 99.72%`.
+- **"You want 99.99% but run 99.9% today — how do you set the SLO without permanent emergency?"**
+  Track an aspirational SLO alongside the achievable one, explicitly exempt from policy action.
+- **"A single deploy burned 25% of the 4-week budget — what does the policy require?"** > 20% → a
+  mandatory postmortem with at least one P0 action item.
+- **"Is it worth buying the next nine?"** Compare `revenue × Δavailability` (e.g. $900 for
+  99.9%→99.99% on $1M) against the cost of the nine. Reliable enough, no more.
 
 ## References
 
@@ -404,8 +771,11 @@ sensitive and precise without alert fatigue.
   sre.google.
 - Nygard, *Release It!* (2nd ed.) — stability patterns underpinning the reliability half of the
   velocity tradeoff.
-- AWS Well-Architected Framework, **Reliability Pillar** — workload availability targets and
-  design goals.
+- AWS Well-Architected Framework, **Reliability Pillar** — "Availability" (availability-tier table,
+  availability = product of hard dependencies, `1 − ∏(1−a)` for redundancy + nines-summing
+  shortcut, `MTBF/(MTBF+MTTR)`, request-based windowed availability, exclude-scheduled-maintenance).
+- robustperception.io — why averaging percentiles is invalid and why histogram buckets must be
+  summed before computing a quantile (Prometheus histograms aggregate, summaries don't).
 - Cross-references: `observability/slo-based-alerting-and-error-budgets` (measuring + alerting,
   multi-burn-rate), `devops-cicd/sre-sla-slo-sli` (DevOps-culture framing),
   `reliability-ops/reliability-fundamentals-and-availability-math` (nines math foundations),

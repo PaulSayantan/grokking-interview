@@ -425,6 +425,357 @@ Pitfalls interviewers look for:
 
 ---
 
+## Gray failure and differential observability
+
+The health-check patterns above assume failures are **fail-stop**: a component is either up or
+down, and a check can tell which. Real production failures are usually **gray** — a component is
+*partially* degraded (elevated latency, 1–5% packet loss, intermittent timeouts, a slow disk,
+one bad NIC) while its **own health check still reports healthy**. The process is "up," answers
+`/healthz` in a millisecond, yet clients are getting errors and timeouts. This is the single
+most common senior-level "why didn't the health check catch it?" scenario.
+
+The concept (Huang et al., "Gray Failure: The Achilles' Heel of Cloud-Scale Systems", MSR;
+AWS Well-Architected) is **differential observability** — three observers disagree:
+
+- **The system itself** (self-health-check): "I'm healthy." It only tests the cheap local path.
+- **The control plane / monitoring** (aggregate metrics): "Fleet averages look fine." The
+  degraded node's pain is diluted across the fleet or hidden below alarm thresholds.
+- **The clients**: "I'm getting errors and p99 timeouts." They experience the real path,
+  including the slow dependency, the lossy link, the one bad instance.
+
+Gray failure is precisely the *gap* between these views. A self-report can never catch it,
+because the failing component's own perspective is the one that says "fine." The operational
+rules:
+
+- **Trust client-side signals over server self-report.** Instrument success rate and latency
+  *as the caller sees them* (client-side SLIs, canaries that exercise the full path), and alarm
+  on those, not just on the server's `/healthz`.
+- **Evacuate, don't diagnose.** When one fault domain (an AZ, a cell) shows client-observed
+  degradation, shift traffic *away from it* first and root-cause afterward. A gray-failing AZ
+  can take longer to diagnose than to evacuate — and evacuation is reversible.
+- **Detect asymmetry.** Compare each node/AZ against its peers (outlier detection); a node that
+  is 10× slower than its siblings is gray-failing even if it's above zero.
+
+> [!WARNING]
+> "The dashboards were green but customers were down" is the signature of gray failure. Any
+> monitoring built *only* on component self-reports is blind to it. This is why AWS built
+> **zonal shift** (evacuate an AZ with one action) rather than relying on per-instance health
+> checks to catch a degraded zone.
+
+---
+
+## Fencing tokens vs STONITH
+
+STONITH fences at the **node** level (kill the box). **Fencing tokens** fence at the
+**resource** level (make the shared resource reject stale writers), and they defend against a
+failure mode STONITH and leases alone cannot: the **paused-process-wakes-up** problem.
+
+The canonical story (Kleppmann, "How to do distributed locking"): a client acquires a lease on
+a lock, then suffers a **long GC pause** (or is descheduled, or its VM is paused for live
+migration) that lasts *longer than the lease TTL*. The lock service, seeing the lease expire,
+grants the lock to a second client. Then the first client wakes up — still believing it holds
+the lock — and issues a write. Two clients now "hold" the lock; the write corrupts data. **A
+lease timeout is just a guess** that the holder is dead; a paused process violates that guess.
+
+The fix is a **fencing token**: the lock service issues a **strictly monotonically increasing**
+number with every lock grant. The client must attach its token to every write. The **storage /
+resource server** remembers the highest token it has seen and **rejects any write carrying a
+lower token**. When the paused client wakes up and tries to write with its old (now smaller)
+token, the resource rejects it — even though the client still "thinks" it holds the lock. The
+resource, not the lock, is the final arbiter.
+
+```
+Client 1 gets lock, token = 33  → GC pause (lease expires) ...
+Client 2 gets lock, token = 34  → writes with token 34 (accepted, 34 ≥ max)
+Client 1 wakes, writes token 33 → REJECTED (33 < 34 already seen)
+```
+
+- **STONITH / node fencing**: prevents a *node* from acting by killing it. Good for HA pairs
+  and shared-storage clusters; requires out-of-band power/IPMI control.
+- **Fencing token / resource fencing**: prevents a stale *write* from landing, by having the
+  downstream reject old tokens. Works even when you can't kill the sender.
+- **Redlock's flaw:** Redis's Redlock algorithm provides mutual exclusion but issues **no
+  fencing token**, so it cannot defend against the GC-pause/clock-skew case — Kleppmann's
+  central critique. Correctness that depends on timing assumptions is not safe.
+
+> [!INTERVIEW]
+> "A distributed lock protected the write, but the data still got corrupted. How?" The answer
+> is a GC pause (or VM migration) outlasting the lease: the lock service handed the lock to a
+> second holder, then the first woke up and wrote. The lock alone is insufficient — you need a
+> **monotonic fencing token** that the storage layer enforces so stale writers are rejected.
+
+---
+
+## Static stability
+
+**Static stability** (AWS Builders' Library; Well-Architected Reliability pillar) is the
+property that a system **keeps working during a failure without having to make any changes** —
+no scaling up, no launching instances, no calls to the control plane, no config edits.
+Everything needed to survive the failure is *already provisioned and running* before it happens.
+
+Why it matters: **the control plane is often impaired during the exact event you're trying to
+survive**, and it's usually less reliable than the data plane. If your AZ-failure plan is "when
+an AZ dies, auto-scale the survivors to cover the load," you're depending on the scaling control
+plane (launch APIs, capacity availability, warm-up time) at the worst possible moment — during
+a large correlated event when everyone else is scaling too. That dependency can turn a survivable
+AZ loss into a full outage.
+
+Statically stable design ties directly to the redundancy-headroom math (the `(N−k)/N` rule):
+
+- **Pre-provision the survivors.** For a 3-AZ deployment that must survive losing one AZ,
+  run each AZ at ≤ **2/3** (~67%) utilization so the remaining two absorb 100% *with capacity
+  they already have* — no scaling required.
+- The cost is **idle capacity in steady state** (you're paying for headroom you don't use until
+  a failure). That's the deliberate trade: pay for static stability instead of betting on the
+  control plane mid-incident.
+- Applies beyond compute: pre-create the failover DNS records, pre-warm caches, pre-establish
+  connections, so failover is a *data-plane* action, not a control-plane provisioning action.
+
+> [!WARNING]
+> "Our failover plan scales up the surviving AZs when one dies" is a classic staff-interview
+> trap. Scaling depends on the control plane, which is frequently degraded during the failure
+> and slow when capacity is contended. **Pre-provision for the failed state; don't rely on
+> reacting to it.**
+
+---
+
+## Cell-based architecture and shuffle sharding
+
+AZ/region redundancy limits the blast radius of *infrastructure* failures. It does nothing for
+**poison-pill / logical** failures — a bad request, a corrupt item, a customer whose workload
+triggers a bug — which replicate to *every* redundant copy and take down the whole fleet.
+**Cell-based architecture** and **shuffle sharding** (AWS Builders' Library, "Workload isolation
+using shuffle sharding") limit *that* blast radius.
+
+**Cell-based architecture:** partition the service into independent **cells**, each a
+fully-isolated, complete stack (its own compute, storage, queues) serving a *subset* of
+customers/partitions. A cell failure — including a poison-pill bug — affects only that cell's
+customers. A thin routing layer maps each customer to a cell. Blast radius = 1 cell = `1/(#cells)`
+of customers instead of 100%. Cells should be size-capped and tested at max size (so you never
+discover a scaling cliff during an incident).
+
+**Shuffle sharding** limits blast radius *within* a shared fleet without full cells. Instead of
+assigning each customer to one node (or one shard of contiguous nodes), assign each customer a
+**random combination** of nodes. A poison-pill request from customer A only hits A's specific
+combination; customer B, with a *different* combination, is almost entirely unaffected because
+their shards barely overlap.
+
+The combinatorics are the point:
+
+- 8 nodes, shard size 2 → `C(8,2) = 28` possible shards. Two customers colliding is unlikely.
+- The canonical figure: **100 nodes, shard size 5 → `C(100,5) ≈ 75 million` combinations.** The
+  probability that two customers land on the *exact same* 5 nodes is ~1 in 75 million, and even
+  a partial overlap that would let one customer's poison pill fully take out another is
+  vanishingly rare. With request-level retries hedging across the shard, one bad customer can
+  degrade at most a small fraction of others.
+
+```
+overlap of 2 customers' shards ≈ how much collateral damage a poison pill does
+100 nodes / shard 5 → ~75M combos → any two customers share ≤ a node or two → near-total isolation
+```
+
+> [!INTERVIEW]
+> "How do you keep one bad customer or one poison-pill request from taking down everyone?" Name
+> **cell-based architecture** (isolated stacks, blast radius = one cell) and **shuffle sharding**
+> (random per-customer node combinations; 100 nodes / shard 5 ≈ 75M combinations, so overlap
+> between any two customers is minuscule). AZ redundancy alone doesn't help here — the bad input
+> replicates to every AZ. (Consensus/partitioning internals are owned by `system-design`; here
+> it's the operational blast-radius practice.)
+
+---
+
+## SWIM gossip-based failure detection
+
+All-to-all heartbeating (every node pings every other) costs `O(n²)` messages and collapses at
+scale. **SWIM** (Das, Gupta, Motwani — "Scalable Weakly-consistent Infection-style process group
+Membership") is how large clusters (Consul, Serf, HashiCorp memberlist, and similar systems)
+detect failures at `O(1)` probes/node. Two ideas make it work:
+
+1. **Separate detection from dissemination.** SWIM's *failure detector* only decides "is node X
+   alive?"; a separate gossip (infection-style) layer *spreads* membership changes. Older systems
+   coupled these (heartbeat also disseminates), which is what caused the `O(n²)` blowup.
+
+2. **Randomized direct + indirect probing.** Each period, a node picks one random peer and sends
+   a **direct ping**. If no ack arrives, it doesn't immediately declare death (a single dropped
+   packet or one bad network path would be a false positive). Instead it asks **k random helper
+   nodes** to each send an **indirect ping-req** to the target on its behalf. Only if *all* paths
+   fail — direct and all `k` indirect — does it move the target to **suspect**. This guards
+   against a single bad link causing false positives.
+
+State machine and refutation:
+
+- **Alive → Suspect → Confirm (dead).** A node isn't ejected instantly; it's *suspected* first,
+  and the suspicion is gossiped. This gives the target a chance to **refute**.
+- **Incarnation number.** Each node carries a monotonically increasing incarnation counter. If a
+  node hears itself gossiped as "suspect," it re-broadcasts "alive" with a **higher incarnation
+  number**, which overrides the stale suspicion everywhere. This lets a wrongly-suspected node
+  clear its name and prevents flapping ejections from transient blips.
+
+The result: constant per-node message load regardless of cluster size, bounded and predictable
+detection time, and resilience to single-path false positives — the "how does failure detection
+scale to 10,000 nodes?" answer. (Phi-accrual, above, tunes *when* to suspect on one link; SWIM
+tackles *how to scale* detection across a whole membership.)
+
+---
+
+## DNS-based failover and TTL traps
+
+DNS is a common failover mechanism (point a name at a healthy endpoint; on failure, rewrite the
+record) — and a common **hidden SPOF and a slow, unreliable failover path**. The trap is that
+**DNS failover latency ≈ record TTL + how badly clients and resolvers honor it**, and in practice
+they honor it badly.
+
+- **TTL is a hint, not a contract.** You set a 60s TTL expecting failover in ~1 minute, but ISP
+  resolvers, corporate resolvers, and client-side/JVM DNS caches routinely **cache longer than
+  the TTL** (some JVMs historically cached forever). Some clients pin a resolved IP for the life
+  of a connection pool. So real failover can take many minutes to hours for a long tail of
+  clients.
+- **Negative caching** delays *recovery* too: a resolver that cached "no answer" or the old
+  answer keeps serving it after you've fixed things.
+- **Low TTLs cost you** — more DNS queries, more resolver load — and still don't guarantee fast
+  propagation because the slow resolvers are the ones ignoring your TTL.
+- Route 53 **health checks** can automate record-level failover (drop the unhealthy endpoint from
+  the answer), but the propagation delay above still applies to when clients *see* it.
+
+Faster/more-reliable alternatives that don't depend on TTL:
+
+- **Load-balancer-level failover** — the LB VIP stays constant; the LB reroutes to healthy
+  backends in seconds. Clients never re-resolve.
+- **Anycast** — the same IP is announced from many locations; BGP reconverges to a healthy site
+  without any DNS change or client cache dependency.
+- **Zonal shift / traffic management** (below) for AZ-level evacuation.
+
+> [!INTERVIEW]
+> "You need to fail traffic away from a bad AZ in 60 seconds — DNS or something else?" DNS is the
+> wrong tool: TTL + resolver/client caching make it too slow and unreliable to hit a 60s target.
+> Use **LB-level rerouting, anycast, or zonal shift** — mechanisms that don't wait on DNS caches
+> to expire. DNS failover is for coarse, minutes-to-hours granularity, not tight RTOs.
+
+---
+
+## Zonal shift and evacuating an impaired AZ
+
+**Zonal shift** (AWS Route 53 Application Recovery Controller) is the concrete modern mechanism
+for acting on **gray failure** without root-causing it: a **single action** that pulls traffic
+**away from one impaired AZ** and onto the healthy AZs, at the load-balancer level.
+
+- `start-zonal-shift --away-from <az>` tells the LB to stop routing to the targets in that AZ.
+  Traffic shifts to the other AZs in seconds — *no scaling, no DNS change, no code deploy*.
+- **Zonal autoshift** lets AWS trigger the shift automatically based on its internal telemetry
+  when it detects an AZ is impaired, without waiting for you to notice.
+- It only works if you're **statically stable** across AZs: the surviving AZs must already have
+  the capacity to absorb the evacuated AZ's load (the `(N−k)/N` headroom rule). Zonal shift is
+  the *action*; static stability is the *precondition* that makes the action safe.
+
+This is the operational counter to "why didn't the per-instance health check catch the gray
+failure?": you don't try to health-check your way to identifying the one bad zone — you
+**evacuate the whole zone** on the first sign of client-observed degradation, then investigate
+at leisure. Evacuation is fast and reversible; diagnosis is slow.
+
+---
+
+## Load balancer health-check defaults and the detection-time budget
+
+Interviewers probe whether you know the *concrete knobs* behind the death-spiral and hysteresis
+concepts above. The AWS Application Load Balancer **target-group health-check defaults** are the
+canonical reference numbers:
+
+| Setting | ALB default | What it controls |
+|---|---|---|
+| `HealthCheckIntervalSeconds` | **30s** | How often the LB probes each target |
+| `HealthCheckTimeoutSeconds` | **5s** | How long one probe waits before counting as a fail |
+| `UnhealthyThresholdCount` | **2** | Consecutive fails before target marked unhealthy |
+| `HealthyThresholdCount` | **5** | Consecutive passes before an unhealthy target rejoins |
+| Success matcher | **200** | HTTP code(s) that count as healthy |
+| `deregistration_delay.timeout_seconds` | **300s** | Connection-draining window on deregister |
+
+Two consequences worth stating:
+
+- **Detection time ≈ interval × unhealthy-threshold + timeout.** With defaults, a dead target is
+  detected in roughly `30 × 2 + 5 ≈ 65s`. To fail *faster*, lower the interval/threshold; to
+  avoid *false* removals of busy-but-alive nodes, raise the timeout and/or unhealthy-threshold so
+  a transient stall doesn't evict a healthy node. This is the concrete tuning behind the
+  false-positive-vs-detection-latency trade-off. **Tune the threshold above your worst-case GC
+  pause / p99 stall** so a slow-but-alive node isn't killed.
+- **ALB fails open by design.** The docs state it explicitly: *if all targets fail health checks
+  at the same time in all enabled AZs, the load balancer fails open* and routes to all targets.
+  This is the death-spiral defense from the earlier section, built into the product — mass
+  simultaneous "unhealthy" is treated as "the check is wrong," not "everything died."
+
+**preStop sizing (graceful shutdown, revisited):** the `preStop` sleep should be **≥ LB
+health-check-interval × unhealthy-threshold** so the LB observes the target as unready *before*
+the process closes its listener. For a 5s-interval × 3-threshold check, sleep ~15–20s. Also
+watch the **PID-1 signal-forwarding trap**: if a shell (`sh -c "app"`) is PID 1, it may not
+forward SIGTERM to the child, so the app never drains and always gets SIGKILLed — use an init
+that forwards signals (`exec`, `tini`, `dumb-init`) instead.
+
+---
+
+## Lease-based leader election and clock skew
+
+Most real systems don't run a fresh Raft/Paxos election on every write; they elect a leader once
+and protect it with a **time-bounded lease** (Chubby, ZooKeeper, etcd leases; consensus internals
+are owned by `system-design`). A lease is "you are the leader **until time T**, renew before then
+or lose it." It's the practical primitive under primary election, and its edges are all about
+**time and fencing**:
+
+- **Renewal timing.** The leader must renew *well before* the lease expires (accounting for
+  network round-trips), or it risks two nodes both believing they're leader in the gap. Lease
+  duration trades failover speed (short lease = fast detection of a dead leader) against renewal
+  overhead and sensitivity to blips.
+- **Clock skew is the enemy.** If the leader's clock and the lease service's clock disagree, the
+  leader may think its lease is still valid after the service has already expired it and elected a
+  successor — a two-leader window. Leases should rely on **bounded clock drift** assumptions and,
+  ideally, **monotonic clocks** for measuring elapsed time, not wall-clock time (which can jump
+  on NTP correction).
+- **Lease + fencing token together.** A lease bounds *when* you're leader; a **fencing token**
+  (above) makes the *resource* reject a stale ex-leader that overshot its lease due to a GC pause
+  or clock skew. Neither alone is sufficient for a data-bearing leader — you want both.
+
+> [!KEY-TAKEAWAY]
+> A lease is a *timeout on leadership*, and like every timeout it's a guess that can be wrong
+> under GC pauses and clock skew. Pair the lease (bounds normal handoff) with a monotonic
+> **fencing token** enforced at the resource (defends against the abnormal wake-up) — belt and
+> suspenders for safe single-writer semantics.
+
+---
+
+## Two-node clusters and quorum edge cases
+
+The "odd number of nodes" rule has sharp corners that make great trap questions.
+
+**Why 2-node clusters are dangerous.** Two nodes have **no possible majority** — a partition
+splits them 1–1, and neither side holds `⌊2/2⌋+1 = 2` votes. You're forced to pick a poison:
+
+- **Allow either node to act alone** on partition → **split-brain** (both promote, data diverges).
+- **Require both to agree** → you **lose availability the moment one node dies** (the survivor
+  can't tell "my peer crashed" from "we're partitioned," so it must refuse to act).
+
+So a 2-node cluster gives you *neither* safe failover *nor* high availability. **The minimum safe
+voting membership is 3** — which is why you add a lightweight **witness/tiebreaker** to a 2-node
+pair (making it effectively 3 votes).
+
+**Quorum edge cases:**
+
+- **Even clusters waste a node.** A 4-node quorum needs 3 to form a majority, so it tolerates only
+  **1** failure — the *same* as a 3-node cluster, at higher cost. Going from 3→4 buys nothing;
+  you must go to 5 to tolerate 2. Always use odd counts.
+- **Put the tiebreaker in a *third* failure domain.** For a 2-AZ deployment, place the witness in
+  a **third AZ (or region)** so losing *either* data AZ still leaves a majority (data-AZ + witness).
+  A witness co-located with one of the two AZs doesn't help if that AZ is the one that fails.
+- **Quorum-for-membership vs quorum-for-writes are different questions.** Majority quorum (who is
+  leader / is the cluster live) is about *membership*; the Dynamo-style `W + R > N` rule is about
+  *read/write* consistency on replicated data. A system can use both, for different purposes.
+  (The `W + R > N` consistency math is owned by `system-design`; state the operational rule here.)
+
+> [!INTERVIEW]
+> "2-node or 3-node cluster for a primary — which and why?" **Three.** Two nodes have no majority,
+> so a partition forces a choice between split-brain and unavailability — you get neither safety
+> nor HA. Three (or a 2-node pair plus a witness in a third failure domain) always leaves a
+> decisive majority on one side of any single partition.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"You have three DB replicas across two AZs. Where's the risk?"** Two share an AZ — an AZ
@@ -455,6 +806,29 @@ Pitfalls interviewers look for:
   gracefully; you fail readiness and pause so the LB drains you before you stop accepting
   connections, avoiding connection-refused errors during deploys; SIGKILL follows if you don't
   exit by the grace period (K8s default 30s).
+- **"Your health check passes but customers get errors — what's happening?"** Gray failure:
+  the component's *self*-report only tests the cheap local path, so it says "healthy" while
+  clients hit a degraded dependency/link. Detect with client-side SLIs and outlier comparison
+  against peers; act by **evacuating the fault domain** (e.g. zonal shift) rather than trying
+  to diagnose the exact bad instance in real time.
+- **"A distributed lock protected the write, but data still corrupted — how?"** A GC pause (or
+  VM migration) outlasted the lease; the lock service handed the lock to a second holder, then
+  the first woke up and wrote. Fix with a **monotonic fencing token** enforced at the storage
+  layer, which rejects the stale writer's lower token. (Redlock lacks this.)
+- **"Your failover plan scales up the survivors when an AZ dies — what's wrong?"** It depends
+  on the control plane (launch APIs, capacity) at the moment it's most likely impaired and
+  contended. Design for **static stability**: pre-provision the survivors to `(N−k)/N` headroom
+  so no scaling is needed to absorb the failed AZ.
+- **"How do you stop one bad customer/request from taking everyone down?"** Cell-based
+  architecture (isolated stacks, blast radius = one cell) and **shuffle sharding** (random
+  per-customer node combinations — 100 nodes / shard 5 ≈ 75M combinations, so any two customers
+  barely overlap). AZ redundancy doesn't help; the bad input replicates everywhere.
+- **"2-node vs 3-node cluster — which and why?"** Three. Two nodes have no possible majority,
+  so a partition forces a choice between split-brain and losing availability. Add a witness in a
+  third failure domain if you only have two data nodes.
+- **"Heartbeat every 2s, mark dead after 3 misses, but GC pauses hit 4s — what breaks?"** The
+  4s pause looks like death (6s detection budget is close), risking a **false-positive failover**
+  during GC. Raise the threshold above worst-case pause, or use phi-accrual/adaptive detection.
 
 ## References
 
@@ -470,6 +844,17 @@ Pitfalls interviewers look for:
 - AWS Builders' Library — "Implementing health checks" (Colm MacCárthaigh) — shallow vs deep
   checks, fail-open, and health-check death spirals.
 - Hayashibara et al., "The φ Accrual Failure Detector" (2004) — adaptive failure detection.
+- Das, Gupta, Motwani, "SWIM: Scalable Weakly-consistent Infection-style Process Group
+  Membership Protocol" (2002) — ping/ping-req, suspect/confirm, incarnation numbers.
+- Huang et al., "Gray Failure: The Achilles' Heel of Cloud-Scale Systems" (Microsoft Research)
+  — differential observability, the three-observer model.
+- Martin Kleppmann, "How to do distributed locking" (2016) — fencing tokens, the GC-pause/lease
+  problem, and the Redlock critique.
+- AWS Builders' Library — "Static stability using Availability Zones" (Becker/MacCárthaigh) and
+  "Workload isolation using shuffle sharding" (the ~75M-combinations figure).
+- AWS documentation — Route 53 Application Recovery Controller **zonal shift / zonal autoshift**;
+  Application Load Balancer target-group health-check settings and fail-open behavior; Route 53
+  health checks and DNS failover.
 - Kubernetes documentation — liveness, readiness, and startup probes; `terminationGracePeriodSeconds`,
   `preStop` hooks (see `kubernetes` topic).
 - Cross-references: `reliability-ops/disaster-recovery-rpo-rto-strategies` (RPO/RTO tiers),

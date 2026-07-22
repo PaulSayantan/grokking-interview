@@ -915,3 +915,684 @@ questions:
       scarce capacity goes to what matters most. This requires tagging requests with a
       criticality class. See load-shedding-and-backpressure.
     ref: "concepts.md#anti-pattern-overload-from-a-client-bug-self-inflicted-load"
+
+  - id: cascading-failures-and-antipatterns-049
+    difficulty: expert
+    tags: [goodput, throughput, metrics, judgment]
+    question: |
+      During an incident, a dashboard shows throughput pegged at its all-time high and CPU
+      at 100%, yet customers report near-total failure. Why can both be true at once, and
+      which metric would have told the real story?
+    options:
+      - "The dashboard is wrong; high throughput at 100% CPU means the system is healthy"
+      - "Throughput counts all processed requests including ones completed after the client's deadline; goodput (success-within-deadline) is what collapsed"
+      - "CPU is a lagging metric; only memory reflects real capacity"
+      - "Customers are wrong; retries mean the requests eventually succeed"
+    answer: 1
+    explanation: |
+      Throughput counts requests processed per second regardless of whether anyone still
+      wants the result. In a cascade the system stays maximally busy producing responses
+      that arrive after every client has timed out and retried, so throughput looks great
+      while goodput — useful work completed before the deadline — falls toward zero. Alert
+      on goodput / success-within-deadline, not raw throughput.
+    ref: "concepts.md#goodput-vs-throughput-and-dropping-doomed-work"
+
+  - id: cascading-failures-and-antipatterns-050
+    difficulty: advanced
+    tags: [goodput, deadline, doomed-work, sre]
+    question: |
+      The SRE rule "don't get credit for late assignments" recommends what concrete server
+      behaviour?
+    options:
+      - "Extend every request's deadline so more work completes"
+      - "Always process the oldest request first to be fair"
+      - "Retry any request that misses its deadline"
+      - "Before each stage of work, check whether the request's deadline has already passed and drop it if so"
+    answer: 3
+    explanation: |
+      A request whose deadline has already expired is doomed — completing it is pure waste
+      that steals capacity from requests that could still be served in time. The server
+      should check the remaining deadline before starting each stage of work and abandon
+      expired requests. This complements LIFO/deadline-aware dequeuing by actively dropping
+      stale work rather than merely reordering it.
+    ref: "concepts.md#goodput-vs-throughput-and-dropping-doomed-work"
+
+  - id: cascading-failures-and-antipatterns-051
+    difficulty: expert
+    tags: [bimodal-latency, threads, deadline, sre-example]
+    question: |
+      A fleet of 10 servers x 100 threads (1000 threads) normally serves 1000 QPS at 0.1 s
+      latency (~100 threads busy). Now 5% of requests hang and hit a 100 s deadline. Roughly
+      what happens to the fleet-wide error rate?
+    options:
+      - "Nothing significant; only 5% of requests are affected"
+      - "About a 5% error rate, matching the fraction of slow requests"
+      - "The slow 5% demands ~5000 threads (1000 x 0.05 x 100) against only 1000 available, saturating the fleet so roughly 80% of requests error"
+      - "Latency doubles but throughput is unaffected"
+    answer: 2
+    explanation: |
+      The slow tail consumes 1000 QPS x 5% x 100 s = 5000 thread-seconds of demand against
+      only 1000 threads, so the hung 5% hoards the entire pool and the fast 95% can't get
+      threads either — the fleet serves only a small fraction and roughly 80% of requests
+      error out. A tiny defect plus a generous deadline destroys the fleet; cap in-flight
+      requests per client class (e.g. no class holds more than ~25% of threads).
+    ref: "concepts.md#bimodal-latency-and-the-fleet-wide-error-explosion"
+
+  - id: cascading-failures-and-antipatterns-052
+    difficulty: advanced
+    tags: [bimodal-latency, deadline, mitigation]
+    question: |
+      In the bimodal-latency scenario where a slow 5% of requests consumes the whole thread
+      pool, which factor most amplifies the damage, and what is the targeted mitigation?
+    options:
+      - "The generous 100 s deadline lets slow requests hoard threads; cap concurrent in-flight requests per client/class (e.g. <=25% of threads)"
+      - "Insufficient logging; add more log statements"
+      - "The request rate is too high; the only fix is to rate-limit all traffic equally"
+      - "The threads are too fast; slow them down to balance load"
+    answer: 0
+    explanation: |
+      The long deadline is the weapon: it lets the hung 5% hold threads for up to 100 s,
+      hoarding the pool. The targeted fix is a concurrency cap per client or criticality
+      class so no single class can consume the whole pool (a bulkhead applied to concurrency
+      budget), plus tighter deadlines. Rate-limiting all traffic equally would also throttle
+      the healthy majority.
+    ref: "concepts.md#bimodal-latency-and-the-fleet-wide-error-explosion"
+
+  - id: cascading-failures-and-antipatterns-053
+    difficulty: expert
+    tags: [resource-exhaustion, taxonomy, memory, cache]
+    question: |
+      Beyond threads, memory exhaustion is called out as an especially insidious cascade
+      driver. What second-order amplifier does memory pressure specifically create?
+    options:
+      - "It increases network bandwidth linearly"
+      - "It forces the CPU into a lower clock speed"
+      - "It evicts cache objects, lowering the cache hit rate, which increases downstream RPCs and thus load"
+      - "It causes file descriptors to leak"
+    answer: 2
+    explanation: |
+      Under memory pressure the process evicts cached objects, so the cache hit rate drops,
+      so more requests fall through to backends as RPCs, so load rises — a hidden amplifier
+      on top of the direct OOM-kill risk. This is why memory is dangerous: the visible
+      symptom (more backend load) is downstream of the real shortage.
+    ref: "concepts.md#the-full-resource-exhaustion-taxonomy"
+
+  - id: cascading-failures-and-antipatterns-054
+    difficulty: advanced
+    tags: [resource-exhaustion, file-descriptors, dependencies-among-resources]
+    question: |
+      An SRE notes that the "dependencies among resources" category is the trickiest in the
+      resource-exhaustion taxonomy. Why?
+    options:
+      - "Because file descriptors are unlimited on modern systems"
+      - "Because CPU and memory never interact"
+      - "Because it only occurs in single-threaded systems"
+      - "Because running low on one resource manifests as another running low, so the reported bottleneck may be a symptom, not the cause"
+    answer: 3
+    explanation: |
+      Resources depend on each other, so a shortage in one shows up as a shortage in another
+      — e.g. memory pressure surfacing as high CPU from garbage collection. Fixing the
+      visible bottleneck (add CPU) does nothing if the primary shortage is memory. Always
+      identify which resource is primary rather than treating the loudest symptom.
+    ref: "concepts.md#the-full-resource-exhaustion-taxonomy"
+
+  - id: cascading-failures-and-antipatterns-055
+    difficulty: expert
+    tags: [hysteresis, metastable, recovery-threshold, sre-number]
+    question: |
+      A server is healthy at 10,000 QPS but crash-loops at 11,000 QPS. During the crash loop
+      only ~10% of servers are healthy at any moment. You drop offered load to 9,000 QPS.
+      Does it recover, and what does this illustrate?
+    options:
+      - "Yes, 9,000 is below the 10,000 healthy level so it recovers immediately"
+      - "Yes, but only if you also double the retry count"
+      - "No, the servers are permanently damaged and must be replaced"
+      - "No — because of hysteresis the recovery threshold is far below the trigger; you may need to drop to ~1,000 QPS before the fleet climbs out"
+    answer: 3
+    explanation: |
+      The load that triggers collapse and the load required to recover are very different
+      (hysteresis). With only ~10% of servers healthy during the crash loop, the surviving
+      capacity is tiny, so you may have to drop to ~1,000 QPS to let the fleet recover, then
+      ramp back up. Recovery load is far below trigger load — dropping just under the
+      trigger is not enough.
+    ref: "concepts.md#hysteresis-why-recovery-load-is-far-below-the-trigger-load"
+
+  - id: cascading-failures-and-antipatterns-056
+    difficulty: expert
+    tags: [metastable, root-cause, trigger, sustaining-loop]
+    question: |
+      The metastable-failures research argues you should focus less on "what triggered the
+      incident" and more on the sustaining loop. What is the core reasoning?
+    options:
+      - "Triggers are impossible to identify after the fact"
+      - "The sustaining loop is always a hardware fault"
+      - "Many different triggers lead to the same collapsed state via the same sustaining loop, so weakening the loop prevents a whole class of incidents"
+      - "Triggers only matter for security incidents, not reliability"
+    answer: 2
+    explanation: |
+      A deploy, a spike, or a slow dependency can each tip the system into the same
+      metastable state through the same amplifying loop (retries, cache-miss amplification,
+      GC). Chasing the specific trigger fixes one incident; identifying and weakening the
+      sustaining loop prevents every incident that would have reached the same state. The
+      loop, not the trigger, is the true root cause.
+    ref: "concepts.md#hysteresis-why-recovery-load-is-far-below-the-trigger-load"
+
+  - id: cascading-failures-and-antipatterns-057
+    difficulty: expert
+    tags: [metastable, common-case-optimization, headroom, retries]
+    question: |
+      Why can adding client retries to lower your steady-state error metric paradoxically
+      make the system less reliable?
+    options:
+      - "Retries always increase latency, which counts as errors"
+      - "Retries consume disk space that would otherwise buffer requests"
+      - "It has no effect; retries are purely beneficial"
+      - "It improves the common-case number while adding the exact amplifier that sustains a metastable collapse, so the system runs closer to the vulnerable edge"
+    answer: 3
+    explanation: |
+      Optimizing only for the common case lets you run at a higher multiple of the vulnerable
+      threshold for the same cost, silently eroding headroom. Retries specifically improve
+      the steady-state error rate while introducing work amplification — the mechanism that
+      keeps a metastable failure alive. So the metric looks better while vulnerability to
+      self-sustaining collapse goes up.
+    ref: "concepts.md#hysteresis-why-recovery-load-is-far-below-the-trigger-load"
+
+  - id: cascading-failures-and-antipatterns-058
+    difficulty: expert
+    tags: [characteristic-metrics, metastable, observability, detection]
+    question: |
+      Brooker argues the most useful mitigation for metastable failures is to measure the
+      "state of the feedback loop itself." Which metric best embodies this?
+    options:
+      - "Total requests served since process start"
+      - "Retry rate as a fraction of requests (and queue-time distribution / cache-miss rate)"
+      - "Average CPU temperature across the fleet"
+      - "Number of deploys per week"
+    answer: 1
+    explanation: |
+      Characteristic metrics track the sustaining loop directly — e.g. retries as a fraction
+      of requests, queue sojourn-time distribution, cache-miss rate — so you can watch the
+      loop wind up before it tips the system over and apply control (shed, cap retries).
+      Alerting on the sustaining variable beats alerting on the downstream symptom.
+    ref: "concepts.md#hysteresis-why-recovery-load-is-far-below-the-trigger-load"
+
+  - id: cascading-failures-and-antipatterns-059
+    difficulty: advanced
+    tags: [congestion-collapse, retry-storm, definition]
+    question: |
+      What is "congestion collapse," and what is the canonical negative-feedback solution it
+      is contrasted with?
+    options:
+      - "A database deadlock; solved by lock ordering"
+      - "The state where offered load keeps rising while goodput falls toward zero as capacity is consumed by retransmissions/retries; TCP congestion control is the canonical negative-feedback fix"
+      - "A memory leak; solved by garbage collection"
+      - "A DNS misconfiguration; solved by shorter TTLs"
+    answer: 1
+    explanation: |
+      Congestion collapse (first seen on 1980s NSFNET) is precisely the retry-storm end
+      state: load climbs while goodput crashes because capacity goes to retransmitting work
+      that never completes. TCP congestion control (slow start, AIMD, backoff on loss) is
+      the textbook negative-feedback governor — senders reduce their rate on a congestion
+      signal. The app-layer analogue is capped/jittered retries, retry budgets, and adaptive
+      concurrency limits.
+    ref: "concepts.md#congestion-collapse-and-tcps-negative-feedback-lesson"
+
+  - id: cascading-failures-and-antipatterns-060
+    difficulty: expert
+    tags: [gray-failure, differential-observability, detection]
+    question: |
+      Monitoring shows every host green, but customers report widespread errors. What class
+      of failure is this, and what is its defining property?
+    options:
+      - "A total outage; the property is that everything is down"
+      - "A thundering herd; the property is synchronized retries"
+      - "A configuration drift; the property is version mismatch"
+      - "Gray failure; the defining property is differential observability — the component looks healthy to the monitoring system but unhealthy to the clients using it"
+    answer: 3
+    explanation: |
+      Gray failure is defined by differential observability: the system's self-reported
+      health and the client's experience disagree. A shallow self-check (process responds,
+      local heartbeat "works for me") passes while real client RPCs fail — e.g. partial
+      packet loss, a slow disk, or a process that can't reach dependencies. "All green but
+      customers erroring" is gray failure until proven otherwise.
+    ref: "concepts.md#gray-failure--differential-observability"
+
+  - id: cascading-failures-and-antipatterns-061
+    difficulty: expert
+    tags: [gray-failure, health-check, fail-stop, cascade]
+    question: |
+      Why does gray failure drive cascades even when health checking is in place?
+    options:
+      - "Health checks are too slow to run frequently"
+      - "Health checks always remove too many nodes"
+      - "Gray failure only affects databases, which have no health checks"
+      - "Health checks assume fail-stop, so a degraded-but-responsive node stays in rotation, keeps taking traffic it can't serve well, and drags peers down"
+    answer: 3
+    explanation: |
+      Most health checks assume fail-stop (a node is either up or down). A gray-failing node
+      answers the shallow check while serving clients badly, so it keeps receiving traffic it
+      mishandles; requests pile up, time out, and retry, dragging peers into the same state.
+      Detection needs client-observed SLIs and multi-vantage-point checking, not shallow
+      self-reports.
+    ref: "concepts.md#gray-failure--differential-observability"
+
+  - id: cascading-failures-and-antipatterns-062
+    difficulty: advanced
+    tags: [gray-failure, progression, latent-fault]
+    question: |
+      The gray-failure paper describes a progression model. What is the correct order?
+    options:
+      - "fail-stop -> gray failure -> latent fault"
+      - "gray failure -> latent fault -> fail-stop"
+      - "latent fault -> gray failure -> fail-stop"
+      - "fail-stop -> latent fault -> gray failure"
+    answer: 2
+    explanation: |
+      A fault first exists but is masked (latent fault), then becomes felt by clients while
+      monitoring still misses it (gray failure), and may eventually degrade into an obvious
+      crash (fail-stop). The danger is the middle stage: by the time it becomes fail-stop it
+      has often already seeded a cascade because the degraded node kept taking traffic.
+    ref: "concepts.md#gray-failure--differential-observability"
+
+  - id: cascading-failures-and-antipatterns-063
+    difficulty: expert
+    tags: [correlated-failure, redundancy, deploy]
+    question: |
+      You run 5 "independent" replicas and reason that with per-replica failure probability
+      p, the chance all fail is p^5. Which real-world event most directly invalidates that
+      math?
+    options:
+      - "A single replica running slightly hot"
+      - "One replica being in a different rack"
+      - "A gradual memory leak on one replica"
+      - "A bad deploy or config push applied identically to all 5 replicas, so they fail together for the same reason (correlated failure)"
+    answer: 3
+    explanation: |
+      The p^5 math assumes independent failures. A bad deploy or config push carries the same
+      defect to every replica, so they fail simultaneously — the redundancy collapses to N=1.
+      Correlated failure (shared deploy/config, a shared dependency blip, time correlation,
+      or a query of death) is why redundancy alone doesn't buy availability; you must break
+      the correlation with canaries, jitter, and cell isolation.
+    ref: "concepts.md#correlated-failures-when-redundancy-fails-as-one"
+
+  - id: cascading-failures-and-antipatterns-064
+    difficulty: advanced
+    tags: [correlated-failure, defenses, canary, jitter]
+    question: |
+      Which set of practices most directly reduces *correlated* failure (as opposed to
+      simply adding more replicas)?
+    options:
+      - "Staged/canary rollouts, jitter on scheduled work, cell isolation, and not sharing the one dependency everyone reads on the hot path"
+      - "Increasing the replica count and sharing one config service for consistency"
+      - "Running all replicas on identical hardware in one rack for uniformity"
+      - "Deploying to 100% of the fleet at once to minimize version skew"
+    answer: 0
+    explanation: |
+      Redundancy only helps when failures are truly independent. Canary/staged rollouts stop
+      a bad deploy from hitting everyone at once, jitter de-synchronizes scheduled work, cell
+      isolation lets config be rolled per-cell, and avoiding a single shared hot-path
+      dependency removes a common cause. Adding replicas or sharing a config service does the
+      opposite — it preserves or increases correlation.
+    ref: "concepts.md#correlated-failures-when-redundancy-fails-as-one"
+
+  - id: cascading-failures-and-antipatterns-065
+    difficulty: expert
+    tags: [latency-knee, load-shedding, admission-control, http-503]
+    question: |
+      Why does effective load shedding reject requests *before* the system reaches its
+      capacity "knee," and what is the standard HTTP shed signal?
+    options:
+      - "Because past the knee latency rises non-linearly toward infinity, so admitted work becomes zero-goodput; reject early (cheaply) and signal with HTTP 503"
+      - "Because CPU is cheapest to measure at low load; signal with HTTP 200"
+      - "Because the knee is where memory frees up; signal with HTTP 404"
+      - "There is no benefit to rejecting early; signal with HTTP 500"
+    answer: 0
+    explanation: |
+      Latency rises non-linearly past the knee, so requests admitted beyond it complete too
+      late to be useful (zero goodput) while consuming capacity. Rejecting before the knee is
+      cheap and keeps served requests fast. The web shed signal is HTTP 503 (Service
+      Unavailable), ideally with a Retry-After header.
+    ref: "concepts.md#load-shedding-brownout-and-the-latency-knee"
+
+  - id: cascading-failures-and-antipatterns-066
+    difficulty: expert
+    tags: [codel, adaptive-lifo, queue-management]
+    question: |
+      Which pair correctly describes CoDel and adaptive LIFO as overload queue-management
+      techniques?
+    options:
+      - "CoDel caps total queue length at a fixed number; adaptive LIFO always serves oldest-first"
+      - "CoDel encrypts queued requests; adaptive LIFO compresses them"
+      - "Both simply enlarge the queue to absorb more bursts"
+      - "CoDel drops requests that have sat in the queue too long (bounding queue time); adaptive LIFO serves FIFO normally but switches to LIFO under overload to favor the freshest requests"
+    answer: 3
+    explanation: |
+      CoDel (Controlled Delay) tracks the minimum queue sojourn time and drops requests that
+      have waited too long, bounding queue *time* rather than length — attacking
+      doomed-work-in-queue. Adaptive LIFO serves FIFO when healthy (fair) but flips to LIFO
+      under overload so the freshest, least-likely-timed-out requests go first and the stale
+      head is dropped. They are often paired (Facebook).
+    ref: "concepts.md#load-shedding-brownout-and-the-latency-knee"
+
+  - id: cascading-failures-and-antipatterns-067
+    difficulty: advanced
+    tags: [queue-sizing, thread-pool, sre-number]
+    question: |
+      What is the Google SRE guideline for sizing a thread-pool work queue relative to the
+      pool for steady traffic?
+    options:
+      - "Make the queue at least 10x the pool size to absorb any burst"
+      - "Match the queue exactly to the request rate in QPS"
+      - "The queue should be unbounded so no request is ever rejected"
+      - "Keep the queue small — target roughly <=50% of the thread-pool size (some systems go queueless and rely on failover)"
+    answer: 3
+    explanation: |
+      SRE recommends keeping the queue small relative to the pool — around 50% of thread-pool
+      size or less for steady traffic — because a large queue under sustained overload just
+      stores doomed work and adds latency. Some systems (e.g. Gmail) run queueless and rely
+      on failover instead. Unbounded queues hide overload until collapse.
+    ref: "concepts.md#load-shedding-brownout-and-the-latency-knee"
+
+  - id: cascading-failures-and-antipatterns-068
+    difficulty: advanced
+    tags: [degradation, shed-path, testing, exercise]
+    question: |
+      A team has a well-designed brownout/degradation path but it fails when finally needed
+      in an incident. What is the most likely reason and the fix?
+    options:
+      - "The path was too fast; slow it down"
+      - "Degradation paths cannot be tested at all"
+      - "The path needed more replicas"
+      - "Degradation and shed code paths are rarely exercised so they rot; regularly run some servers near overload and keep a fast, tested feature-flag off-switch"
+    answer: 3
+    explanation: |
+      Shed and degradation paths run only during rare overload, so they bit-rot and break
+      exactly when needed. Keep them alive by regularly running some servers near overload so
+      the path executes in production, and by exposing a fast, well-tested off-switch/feature
+      flag so you can degrade in seconds during an incident.
+    ref: "concepts.md#load-shedding-brownout-and-the-latency-knee"
+
+  - id: cascading-failures-and-antipatterns-069
+    difficulty: expert
+    tags: [release-it, slow-responses, fail-fast, anti-pattern]
+    question: |
+      Nygard argues one stability anti-pattern is "worse than outright failure." Which one,
+      and why?
+    options:
+      - "Slow Responses, because a slow response holds the caller's thread (Little's Law) whereas a fast rejection frees it — so design to fail fast rather than respond slowly"
+      - "Unbounded Result Sets, because they use disk"
+      - "Integration Points, because they require network cables"
+      - "Users, because they file support tickets"
+    answer: 0
+    explanation: |
+      A slow response is worse than a fast failure: it holds the caller's worker thread for
+      its full duration (the same Little's Law mechanism that exhausts pools), whereas a quick
+      rejection frees the thread immediately and can be handled with a fallback or capped
+      retry. Hence the Fail Fast pattern — reject early when you know you'll fail rather than
+      responding slowly.
+    ref: "concepts.md#the-full-release-it-anti-pattern-catalog"
+
+  - id: cascading-failures-and-antipatterns-070
+    difficulty: advanced
+    tags: [release-it, unbalanced-capacities, scaling-effects, design]
+    question: |
+      A front-end tier is autoscaled for peak traffic while the back-end it calls is sized
+      for average traffic. Which Release It! anti-pattern is this, and why is it a
+      design-time cascade seed?
+    options:
+      - "Unbalanced Capacities — the front-end can generate more load than the back-end can serve, so a front-end surge overruns the back-end"
+      - "Steady State — the back-end accumulates data forever"
+      - "Let It Crash — the back-end restarts too often"
+      - "Test Harness — the systems were never tested"
+    answer: 0
+    explanation: |
+      Unbalanced Capacities: when the calling tier can produce more load than the receiving
+      tier can absorb, a front-end scale-up (or spike) simply overruns the back-end,
+      triggering a cascade. It's seeded at design time by scaling tiers for different load
+      profiles. The fix is to verify the capacity ratio and add back-pressure/shedding at the
+      boundary.
+    ref: "concepts.md#the-full-release-it-anti-pattern-catalog"
+
+  - id: cascading-failures-and-antipatterns-071
+    difficulty: advanced
+    tags: [release-it, unbounded-result-set, untrusted-input]
+    question: |
+      Why does Nygard treat a database result-set size as "untrusted input," and what is the
+      Unbounded Result Sets anti-pattern?
+    options:
+      - "Result sets can contain SQL injection; validate every row"
+      - "A query assumed to return a few rows can return millions (e.g. after data growth), OOMing the client; always LIMIT and treat result size as untrusted"
+      - "Result sets are always encrypted and must be decrypted"
+      - "The database chooses the row order randomly"
+    answer: 1
+    explanation: |
+      Code often assumes a query returns a handful of rows, but data grows or a filter breaks
+      and it returns millions, exhausting client memory and causing a crash. Treat result-set
+      size as untrusted input: always paginate/LIMIT and cap what you will load, just as you
+      bound any external input.
+    ref: "concepts.md#the-full-release-it-anti-pattern-catalog"
+
+  - id: cascading-failures-and-antipatterns-072
+    difficulty: expert
+    tags: [governor, force-multiplier, automation, judgment]
+    question: |
+      Post-incident reviews of large auto-scaling-triggered outages recommend the "Governor"
+      pattern. What does it do and where is it applied?
+    options:
+      - "It rate-limits automated actuators (scaling policies, remediation bots, control-plane automation) so an automation bug can't act at machine speed and amplify a mistake"
+      - "It doubles automation speed to resolve incidents faster"
+      - "It disables all automation permanently"
+      - "It adds retries to every automated action"
+    answer: 0
+    explanation: |
+      A Governor rate-limits the *actuators* — the things that take action (scaling policies,
+      auto-remediation, control-plane loops) — so that if the automation is wrong it can only
+      do bounded damage per unit time, giving humans a chance to intervene. It directly
+      counters the Force Multiplier anti-pattern, where automation amplifies a mistake at
+      machine speed (a recurring theme in modern auto-scaling-triggered outages).
+    ref: "concepts.md#the-full-release-it-anti-pattern-catalog"
+
+  - id: cascading-failures-and-antipatterns-073
+    difficulty: expert
+    tags: [architecture, intra-layer, distributed-deadlock, call-graph]
+    question: |
+      SRE Ch. 22 recommends "always call downward in the stack" and avoiding intra-layer
+      (peer-to-peer within a tier) communication. Which risks does peer-to-peer intra-tier
+      calling specifically invite?
+    options:
+      - "Distributed deadlock, load-triggered O(n^2) spikes among peers, and bootstrapping problems where the tier can't start because it needs itself"
+      - "Higher code readability and easier deploys"
+      - "Reduced network latency and lower cost"
+      - "Stronger consistency guarantees"
+    answer: 0
+    explanation: |
+      When servers in the same tier call each other, you risk distributed deadlock (A waits
+      on B waits on A), load-triggered spikes where a small event makes every peer talk to
+      every peer (O(n^2)), and bootstrapping problems (the tier can't come up because it
+      depends on itself). Downward-only call graphs can't form intra-tier loops; if a request
+      hit the wrong backend, prefer telling the frontend to retry the right one.
+    ref: "concepts.md#architecture-rules-call-downward-cancel-doomed-work"
+
+  - id: cascading-failures-and-antipatterns-074
+    difficulty: expert
+    tags: [hedging, cancellation-propagation, tail-latency]
+    question: |
+      A team adds hedged requests (send a duplicate of a slow request to cut tail latency)
+      but omits cancellation. What is the danger, and what makes hedging safe?
+    options:
+      - "No danger; hedging is always free"
+      - "Without cancelling the loser, hedging can nearly double downstream load and, under stress, act as a retry-storm-shaped amplifier; make it safe by capping hedges and actively cancelling the outstanding calls once one wins"
+      - "Hedging corrupts data unless it uses two-phase commit"
+      - "Hedging only works with UDP"
+    answer: 1
+    explanation: |
+      Hedging without cancellation leaves the losing duplicate running, so under load it can
+      nearly double downstream work and behave like an amplifier feeding a cascade. Safe
+      hedging caps how many duplicates you send and, when one wins (or the client
+      disconnects/deadline passes), actively cancels the outstanding downstream calls so they
+      stop consuming resources on doomed work — cancellation propagation.
+    ref: "concepts.md#architecture-rules-call-downward-cancel-doomed-work"
+
+  - id: cascading-failures-and-antipatterns-075
+    difficulty: advanced
+    tags: [fail-open, fail-closed, auth, judgment]
+    question: |
+      An authentication service outage forces a decision: should the calling service fail
+      open or fail closed? What is the correct framing?
+    options:
+      - "Always fail open, since availability matters most"
+      - "Always fail closed, since security matters most"
+      - "It's a deliberate per-dependency trade-off: auth is the hard case (fail open risks serving unauthorized requests; fail closed turns an auth blip into a total outage) — decide explicitly and keep the fallback bounded/static"
+      - "It doesn't matter; the outcome is identical either way"
+    answer: 2
+    explanation: |
+      Fail-open vs fail-closed is a deliberate choice per dependency based on what it
+      protects. Recommendations should fail open (degrade), payments usually fail closed.
+      Auth is genuinely hard: failing open can serve unauthorized requests (a security
+      incident) while failing closed converts an auth outage into a total outage. There is no
+      universal answer — decide explicitly, document it, and make the fail-open path a
+      bounded/static fallback, not an unbounded retry against the dead dependency.
+    ref: "concepts.md#fail-open-vs-fail-closed"
+
+  - id: cascading-failures-and-antipatterns-076
+    difficulty: advanced
+    tags: [recovery, sre-playbook, one-percent, ramp]
+    question: |
+      In Google SRE's ordered recovery steps for an active cascade, what is the "drop
+      traffic" step and why is it framed with a specific number?
+    options:
+      - "Drop exactly 50% of traffic and hold it there permanently"
+      - "Allow only ~1% of traffic through, let servers fully recover, then ramp back gradually — forcing load below the recovery threshold despite hysteresis"
+      - "Block all traffic for exactly one hour"
+      - "Drop traffic only from the largest client"
+    answer: 1
+    explanation: |
+      Because of hysteresis, the recovery threshold is far below the trigger, so a small cut
+      isn't enough. The step is to admit only ~1% of traffic, let servers climb fully back to
+      health, then ramp gradually while watching for re-collapse. It is the concrete
+      expression of "force load below the recovery threshold long enough to drain the
+      backlog."
+    ref: "concepts.md#the-sre-recovery-playbook-in-order"
+
+  - id: cascading-failures-and-antipatterns-077
+    difficulty: expert
+    tags: [incident, aws-2021, trigger-vs-loop, congestion-collapse]
+    question: |
+      In the AWS US-EAST-1 December 2021 event, an automated scaling activity surged internal
+      network connections and a latent bug prevented clients from backing off. Which framing
+      best captures why it was so hard to resolve?
+    options:
+      - "The scaling activity kept running the whole time, so stopping it fixed everything instantly"
+      - "The scaling trigger was over quickly, but the no-backoff bug made the congestion self-sustaining (congestion collapse); monitoring rode the same congested network and was blinded, and downstream backlogs drained for hours after the network healed"
+      - "It was purely a hardware failure in a single rack"
+      - "Customers caused it with a DDoS attack"
+    answer: 1
+    explanation: |
+      The scaling event was the trigger, but the sustaining loop — retries with a broken
+      back-off — turned it into self-sustaining congestion collapse that outlived the
+      trigger. Monitoring shared fate with the congested network (blinded, gray-failure-
+      shaped) and deployment tooling degraded, slowing recovery. Even after the network
+      healed, downstream backlogs (STS, API Gateway server recycling, EventBridge events)
+      took hours to drain — "root cause fixed" did not mean "recovered."
+    ref: "concepts.md#canonical-incident-stories"
+
+  - id: cascading-failures-and-antipatterns-078
+    difficulty: advanced
+    tags: [incident, google-shakespeare, restart-into-storm]
+    question: |
+      In the Google "Shakespeare" cascade, a traffic spike coincided with a cluster update.
+      What detail makes it a canonical "restart-into-storm" story?
+    options:
+      - "Adding retries alone fully resolved it"
+      - "Borg-driven task restarts reduced the number of working tasks at the worst moment, so recovery came from adding tasks and letting load settle rather than restarting"
+      - "The database was deleted and restored from backup"
+      - "The spike was caused by an internal deploy, not external traffic"
+    answer: 1
+    explanation: |
+      During the overload, task restarts (via Borg) removed working capacity exactly when it
+      was scarcest — the classic restart-into-storm trap. Graceful degradation and selective
+      retries helped, but the real recovery was adding tasks and letting load settle, not
+      restarting. Lesson: restarts during active overload subtract capacity; sometimes you
+      must add capacity, not churn it.
+    ref: "concepts.md#canonical-incident-stories"
+
+  - id: cascading-failures-and-antipatterns-079
+    difficulty: expert
+    tags: [capacity-cache, cold-start, re-collapse, scenario]
+    question: |
+      After a full outage you bring the fleet back up and it immediately collapses again
+      under normal traffic, even though that traffic level was fine before the outage. What
+      is the most likely explanation?
+    options:
+      - "The traffic is secretly higher than before"
+      - "The system depends on a capacity cache: with caches cold the empty-cache state cannot serve nominal load, so full traffic on a cold fleet instantly re-collapses it"
+      - "The hardware degraded during the outage"
+      - "DNS is returning stale records"
+    answer: 1
+    explanation: |
+      A capacity cache is one the system requires to handle its load at all (as opposed to a
+      latency cache that merely speeds things up). After a full outage the cache is empty, so
+      every request is a miss and backend RPC volume is a large multiple of steady state — the
+      cold system is below capacity and re-collapses under normal load. Fixes: warm caches
+      before taking traffic, ramp load slowly (the ~1% step), and ideally avoid depending on a
+      capacity cache at all.
+    ref: "concepts.md#slow-startup-cold-caches-and-the-capacity-cache"
+
+  - id: cascading-failures-and-antipatterns-080
+    difficulty: intermediate
+    tags: [capacity-cache, latency-cache, distinction]
+    question: |
+      What is the difference between a "latency cache" and a "capacity cache"?
+    options:
+      - "A latency cache stores latency numbers; a capacity cache stores capacity numbers"
+      - "A latency cache only lowers latency (the system can still serve nominal load with it empty); a capacity cache is required to handle the load at all, so an empty one cannot serve nominal traffic"
+      - "They are two names for the same thing"
+      - "A capacity cache is always smaller than a latency cache"
+    answer: 1
+    explanation: |
+      A latency cache is an optimization — with it empty the system just runs slower but can
+      still serve nominal load. A capacity cache is load-bearing: the empty-cache state cannot
+      serve nominal traffic, so losing it (or cold-starting) means instant overload. Depending
+      on a capacity cache turns the cache into a hidden single point of failure; size the
+      backend to survive a cold cache.
+    ref: "concepts.md#slow-startup-cold-caches-and-the-capacity-cache"
+
+  - id: cascading-failures-and-antipatterns-081
+    difficulty: expert
+    tags: [scenario, backpressure, load-shedding, queue, judgment]
+    question: |
+      A service is overloaded (sustained arrival rate above service rate). An engineer
+      proposes adding a large queue in front of it "to smooth things out." Per "Queues Don't
+      Fix Overload," what is the correct critique?
+    options:
+      - "A queue converts sustained overload into stored doomed work and added latency; it only helps for short bursts. You need backpressure (bounded queue signalling upstream) or load-shedding, not a bigger buffer"
+      - "The queue will automatically add processing capacity"
+      - "Queues are always wrong and should never be used"
+      - "The queue will reduce the arrival rate"
+    answer: 0
+    explanation: |
+      A queue absorbs transient bursts, but under a sustained arrival>service gap it just
+      accumulates work that will time out before it's served — deeper latency, more wasted
+      capacity, eventual collapse. The real fixes are backpressure (a bounded queue that
+      signals fullness upstream so producers slow down) or load-shedding (reject early). The
+      bottleneck's service rate, not buffer size, is what matters.
+    ref: "concepts.md#load-shedding-brownout-and-the-latency-knee"
+
+  - id: cascading-failures-and-antipatterns-082
+    difficulty: intermediate
+    tags: [release-it, self-denial, thundering-herd]
+    question: |
+      Marketing sends a push notification to 10 million users at once, all of whom open the
+      app simultaneously and crash the backend. Which Release It! anti-pattern is this?
+    options:
+      - "Steady State"
+      - "Self-Denial Attack — you cause your own synchronized traffic spike"
+      - "Let It Crash"
+      - "Circuit Breaker"
+    answer: 1
+    explanation: |
+      A Self-Denial Attack is a self-inflicted, synchronized demand spike — a marketing blast,
+      a homepage promo, or a deploy that makes all clients act at once. It's the
+      thundering-herd/Dogpile pattern that you cause yourself. Defences: stagger/jitter the
+      trigger, pre-scale, load-shed, and treat known upcoming events as planned capacity work.
+    ref: "concepts.md#the-full-release-it-anti-pattern-catalog"

@@ -350,6 +350,366 @@ Why it matters operationally:
 > failure is the visible consequence.** Not every fault becomes an error; not every
 > error becomes a failure (a tolerant system catches it first).
 
+## Quorum and k-of-n redundancy math
+
+The parallel formula `1-(1-a)^n` answers "succeeds if **any one** of n is up." Many
+real systems are stricter: they need **at least k of n** healthy — quorum writes
+(`N/2+1`), consensus (Raft/Paxos majorities), or capacity-constrained fleets where
+you need k nodes' worth of throughput to serve load. For independent components each
+at availability `a`, the probability that **at least k of n** are up is the upper tail
+of a binomial:
+
+```
+A(k of n) = Σ_{i=k}^{n} C(n,i) · a^i · (1-a)^(n-i)
+```
+
+Worked: 5 nodes, each 99% (`a=0.99`), need **3 for quorum**. Compute
+`P(≥3 up) = P(3)+P(4)+P(5)`:
+
+```
+P(5) = 0.99^5                     ≈ 0.95099
+P(4) = C(5,4)·0.99^4·0.01         ≈ 0.04803
+P(3) = C(5,3)·0.99^3·0.01^2       ≈ 0.00097
+A(≥3 of 5)                         ≈ 0.99999  (five nines)
+```
+
+Note the two edge cases of the same formula: `k=1` reduces to `1-(1-a)^n` (any-one),
+and `k=n` reduces to `a^n` (all must be up = series). Interviewers use "5 nodes,
+need 3, each 99%" precisely to catch candidates who reflexively answer `1-(1-a)^n`;
+that formula over-counts because it credits states where only 1 or 2 nodes survive,
+which a quorum system treats as **down**.
+
+> [!WARNING]
+> For a majority quorum, adding nodes past the sweet spot can *lower* availability if
+> per-node availability is poor, because you also raise the number you must keep alive
+> (`⌊n/2⌋+1`). Quorum size is a trade-off, not "more is always better."
+
+## Failure rate, the exponential model, and the bathtub curve
+
+The nines table and `A = MTBF/(MTBF+MTTR)` are steady-state (long-run) numbers.
+**Reliability** `R(t)` is an *interval* quantity — the probability of surviving
+failure-free for a duration `t`. In the **constant-failure-rate** regime the standard
+model is the exponential distribution:
+
+```
+R(t) = e^(−λt)         λ = failure rate = 1/MTBF   (constant-hazard region)
+```
+
+So `R(MTBF) = e^(−1) ≈ 0.368` — a component is **only ~37% likely** to survive a full
+MTBF failure-free; MTBF is a mean, not a guarantee. The exponential is **memoryless**:
+`P(survive t more | already survived s) = P(survive t)`. A component in its
+constant-hazard region does not "age" — a 3-year-old disk and a new one have the same
+instantaneous failure probability. This is *why* constant-λ math is valid, and why
+you cannot extend life by preventive replacement in that region.
+
+The **bathtub curve** describes the hazard rate `λ(t)` over a component's life:
+
+```mermaid
+flowchart LR
+  A["Infant mortality<br/>decreasing λ<br/>(burn-in / canary weeds out)"] --> B["Useful life<br/>constant λ (random)<br/>MTBF and e^(−λt) valid here"]
+  B --> C["Wear-out<br/>increasing λ<br/>(aging fleet, proactive replace)"]
+```
+
+- **Infant mortality** — high but *decreasing* hazard (manufacturing defects, bad
+  config, undiscovered bugs). Burn-in, canarying, and staged rollouts exist to catch
+  these before broad exposure.
+- **Useful life** — flat, low, *random* hazard. This is the **only** region where
+  `A = MTBF/(MTBF+MTTR)` and `R(t)=e^(−λt)` hold.
+- **Wear-out** — *increasing* hazard (mechanical wear, capacity/log/handle exhaustion,
+  cert expiry). Aging fleets need proactive replacement; this is why "just leave it
+  running" eventually bites.
+
+Failure rates of independent components in series **add**: `λ_total = Σ λ_i`, which is
+the continuous-time analog of serial availabilities multiplying.
+
+## Annualized failure rate and how durability is composed
+
+Vendor MTBF numbers are enormous and easy to misread. The planning quantity is the
+**Annualized Failure Rate (AFR)** — the probability a unit fails within a year
+(8760 h):
+
+```
+AFR = 1 − e^(−8760/MTBF) ≈ 8760/MTBF   (for large MTBF)
+```
+
+Worked: a disk rated **MTBF = 1.2 M hours** → `AFR ≈ 8760/1,200,000 ≈ 0.73%/year`. In
+a **10,000-drive fleet** you should therefore plan for **~73 drive failures per year**
+— roughly one every five days. (Backblaze's public Drive Stats are the canonical
+real-world AFR dataset; observed AFRs vary widely by model, unlike the single spec
+number.) The lesson: MTBF-the-spec is not "it lasts 137 years"; it's a fleet-level
+rate you turn into AFR to size spares, rebuild capacity, and on-call load.
+
+**How "eleven nines" of durability is built.** S3's 99.999999999% is not a single
+device property — it's a *composed* number from three ingredients:
+
+1. **Redundancy across independent fault domains** — replication (`1-(1-d)^n` across n
+   copies) or, more efficiently, **erasure coding** (split an object into data +
+   parity shards so it reconstructs from any **k of n** shards, tolerating `n−k`
+   losses at a fraction of 3× replication's storage cost).
+2. **Fault-domain independence** — spreading shards across devices, racks, and AZs so
+   losses are not correlated (correlation is what actually threatens the number).
+3. **Fast repair (low rebuild MTTR)** — durability depends on repairing lost
+   redundancy *before* enough additional independent failures overlap to cause loss;
+   the shorter the rebuild window, the smaller the chance of an overlapping second/
+   third failure.
+
+Framed as expected loss: 11 nines means if you store **10 million objects** you'd
+expect to lose one roughly every **10,000 years**. Durability ≠ availability: the same
+object can be perfectly durable yet briefly unreachable (S3 availability SLA is far
+lower, ~99.9%).
+
+## Correlated and common-cause failures
+
+Both `A_serial = Π a_i` and `A_parallel = 1-(1-a)^n` assume **statistically
+independent** failures. That assumption is the single biggest source of "the math said
+six nines, why did we have a full outage?" surprises. Vocabulary:
+
+- **Independent failures** — one component failing tells you nothing about another.
+- **Correlated failures** — failures cluster: one event downs many components at once.
+- **Common-cause failure (CCF)** — a *single* root cause hits multiple redundant units
+  simultaneously: a bad config pushed fleet-wide, a poison-pill request, a shared
+  power/network/AZ event, a leap-second bug, an expired cert used everywhere, a bad
+  deploy on all replicas.
+- **Shared fate** — components share a resource or dependency (same LB, same AZ, same
+  control plane, same feature flag) so they rise and fall together.
+
+**Beta-factor model.** A standard reliability engineering technique splits a
+component's failures into an independent fraction and a common-cause fraction β
+(0–1): a share `β` of failures are common-cause and hit *all* redundant units at once.
+The key result: **even a tiny β dominates** the combined failure probability of a
+redundant group. Independent failures shrink as `(1-a)^n`, but common-cause failures
+shrink only linearly, so they quickly become the floor:
+
+```
+P(group down) ≈ (1-a)^n     [independent part, vanishes fast]
+              + β·(1-a)      [common-cause part, does NOT shrink with n]
+```
+
+Adding a 4th or 5th replica drives the first term toward zero but does **nothing** to
+the β term — redundancy cannot beat correlation. This is why `1-(1-a)^n` is an
+**optimistic upper bound**, and why with meaningful correlation the effective
+availability of a redundant group collapses toward that of a *single* component.
+
+**Diminishing returns of redundancy, quantified.** Each added independent copy
+multiplies the *remaining* unavailability by `(1-a)` again, so the nines gained per
+copy shrink while cost grows **linearly (N×)**. Worse, the coordination mechanism
+(load balancer, health check, leader election, failover controller) is itself a new
+**shared** dependency with its own availability that *caps* the achievable gain and
+adds correlation. So "just add another replica" hits a correlation floor and a
+coordinator ceiling — usually the better spend is a new **independent fault domain**
+(another AZ/region/cell) and reducing shared fate (stagger deploys, cell-based
+isolation, config canaries).
+
+> [!INTERVIEW]
+> "Your redundancy math predicts six nines but you had a full outage — explain."
+> Independence was violated: a common-cause event (bad deploy/config, shared AZ or
+> control plane) took all replicas at once. The fix isn't more replicas — it's
+> fault-domain isolation, staggered/canaried rollout, and removing shared fate.
+
+## Series-parallel systems and deriving the nines table
+
+Real request paths are neither pure-serial nor pure-parallel: they're **redundant
+tiers chained in series** (a reliability block diagram). Reduce it bottom-up — collapse
+each parallel tier with `1-(1-a)^n`, then multiply the tiers:
+
+Worked: two tiers in series, each with **3 redundant nodes at 99.9%**:
+
+```
+Per-tier (parallel):  1 - (1 - 0.999)^3 = 1 - (0.001)^3 = 1 - 1e-9 ≈ 0.999999999 (nine nines)
+End-to-end (series):  0.999999999 × 0.999999999 ≈ 0.999999998  (≈ eight–nine nines, if independent)
+```
+
+Redundancy inside a tier buys enormous headroom; chaining tiers in series erodes it
+only slightly (product of two near-1 numbers). The realistic ceiling, of course, is
+set by correlation (previous section), not this arithmetic.
+
+**Deriving the nines table** (so you can reconstruct it, not just recall it). A year is
+`365 × 24 × 60 = 525,600 minutes`. Allowed downtime = `(1 − A) × 525,600`:
+
+```
+99.9%   → 0.001   × 525,600 = 525.6 min  = 8.76 h
+99.99%  → 0.0001  × 525,600 = 52.56 min
+99.999% → 0.00001 × 525,600 = 5.256 min
+```
+
+Per-month/week/day just scale the minutes-in-period. This is the arithmetic behind the
+table earlier in this doc.
+
+## Little's Law: concurrency, latency, and pool sizing
+
+**Little's Law** is a queueing-theory identity that ties reliability to capacity:
+
+```
+L = λ × W
+concurrency (in-flight requests) = arrival_rate × average_latency
+```
+
+Worked: **5,000 rps** at **200 ms** average latency →
+`L = 5000 × 0.2 = 1000` concurrent requests in flight. That is the number of
+threads/connections/slots you must provision (plus headroom) to keep up. The
+reliability punchline is the **feedback trap**: if latency `W` doubles (a slow
+dependency, GC pause, lock contention), concurrency `L` **doubles at the same arrival
+rate** — silently, with no change in traffic. If your thread pool or connection pool
+was sized for 1000, it now needs 2000 and **exhausts**, requests queue, and you tip
+into load-based failure. This is the quantitative core of why bounded pools + timeouts
++ load shedding matter, and why rising latency is an early cascade signal
+(see `reliability-ops/cascading-failures-and-antipatterns`).
+
+Corollary: a **bounded** pool is a feature — it converts "unbounded latency growth"
+into "fast rejection" (fail fast / shed load) instead of a slow, total collapse.
+
+## Metastable failures
+
+A **metastable failure** is a system stuck in a bad, low-**goodput** state that
+*persists even after the original trigger is gone*, sustained by an internal feedback
+loop (Bronson et al., *Metastable Failures in Distributed Systems*, HotOS 2021; Marc
+Brooker). Two ingredients:
+
+- **Trigger** — the initial perturbation (a load spike, a deploy, a dependency blip, a
+  cache flush).
+- **Sustaining feedback loop** — **work amplification** that feeds itself: retries
+  generate more load → more overload → more timeouts → more retries; or a cache-miss
+  storm → DB overload → slower fills → more misses; or connection churn → handshake
+  storms.
+
+The signature symptom: **"we rolled back the bad deploy / the load spike ended, but
+the site stayed down."** Goodput (useful work completed) stays pinned near zero while
+the system is saturated doing amplified, wasted work. Recovery requires **breaking the
+loop**, not just removing the trigger:
+
+- **Shed load below the sustaining threshold** (drop enough traffic that the system
+  can drain).
+- **Disable or throttle retries** (retries are the most common amplifier) and add
+  jittered backoff + retry budgets.
+- **Drain queues / flush backlogs** so the system isn't chasing stale work.
+- **Warm caches** before restoring full traffic.
+
+> [!KEY-TAKEAWAY]
+> A metastable system has two stable states (healthy and collapsed). Once in the
+> collapsed state, capacity that was sufficient before is no longer enough to escape,
+> because amplification raises the effective load. You must shed below the *sustaining*
+> threshold (lower than the triggering threshold) to recover — a hysteresis effect.
+
+## Tail-tolerant vs fail-fast
+
+At scale, **tail latency dominates aggregate latency** (Dean & Barroso, *The Tail at
+Scale*, CACM 2013). A request that **fans out to N servers** and must wait for **all**
+of them is as slow as its *slowest* responder — so rare per-server slowness becomes
+common at the aggregator. If just **1% of responses exceed 1 s**, a fan-out to **100**
+servers has `1 − 0.99^100 ≈ 63%` of requests seeing at least one >1 s response.
+**Tail-latency amplification** is why p99 (not the mean) is what users feel, and why
+leaf availability ≠ aggregator availability.
+
+Two complementary responses:
+
+- **Tail-tolerant techniques** (mask the tail): **hedged requests** (send to a second
+  replica if the first is slow past a threshold, take the first to answer),
+  **tied requests** (send to two, each cancels the other's twin when it starts),
+  request cancellation, and micro-partitioning for faster rebalancing.
+- **Fail-fast** (bound the tail): aggressive **timeouts**, **deadline propagation**
+  (pass the remaining budget down the call chain so downstreams don't work on a
+  request the caller already abandoned), and load shedding. Nygard's *Release It!*
+  argues fail-fast is essential — a slow failure ties up resources and spreads.
+
+The two combine: fail-fast caps how bad the tail can get; tail-tolerance hides the
+rest. Never do neither (unbounded waits are how one slow dependency stalls a whole
+fleet).
+
+## Measuring availability: server-side vs client-side and the nine fallacy
+
+*Where you measure* changes the number. **Server-side availability**
+(`successful_responses / valid_requests`, measured at your LB or service) misses
+everything between the user and your edge: DNS resolution, TLS handshakes, CDN, the
+client's network, and requests that **never arrived**. AWS explicitly notes a subtlety:
+a minute with **no traffic** counts as 100% server-side, which can *inflate* a quiet
+service's number. **Client-side / user-perceived availability** (RUM, synthetic
+probes) captures the full path the user experiences — and is often *lower*.
+
+The **"nine fallacy"** — ways an availability number lies while looking fine:
+
+- **Averaging over a long window** hides bad days (a great year masks a terrible week).
+- **The mean hides the tail** — "5% of requests are 20× slower" is invisible in an
+  average; report percentiles.
+- **Server vantage hides client pain** — your dashboard is green, DNS/CDN/TLS is on
+  fire, users see errors.
+- **Empty minutes counted as 100%** inflate the number for low-traffic services.
+- **Excluding "scheduled maintenance"** from Total Time — AWS advises *against* this;
+  users don't experience maintenance windows as "up."
+
+> [!INTERVIEW]
+> "The dashboard says 99.99% but customers are reporting errors — reconcile that."
+> Name the vantage gap: server-side success rate excludes DNS/TLS/CDN/client-network
+> failures and requests that never landed; empty minutes read as 100%; the mean hides
+> the p99 tail. Add client-side/synthetic/RUM measurement to see real user experience
+> (see `observability/*`).
+
+## 100% is the wrong target: the marginal utility of a nine
+
+Google SRE's core stance: **100% is the wrong reliability target for basically
+everything.** Reasons, with numbers:
+
+- **Users can't perceive it.** The **background error rate** of the Internet/ISP path
+  is roughly **0.01%–1%**. A user on a device/connection that's 99% reliable cannot
+  distinguish a 99.99% service from a 99.999% one — the extra reliability is *below the
+  noise floor* and is wasted spend.
+- **An SLO is a minimum AND a maximum.** Consistently *over*-achieving is a signal
+  you've over-invested (and you're training users to depend on reliability you didn't
+  promise). Google deliberately spends error budget — e.g., planned Chubby outages — so
+  dependents don't assume 100%.
+- **Marginal utility falls, cost rises.** Google's worked example: going 99.9% →
+  99.99% adds only **+0.09%** availability; on **$1M** of revenue riding on it, that's
+  worth ~**$900**, so you should invest at most ~$900 to get it. Rule of thumb: **each
+  additional nine can cost ~100× the previous one.** AWS frames the cost differently:
+  higher nines progressively **shrink your menu of usable dependencies** toward
+  purpose-built, expensive services.
+
+The senior signal is treating reliability as a **cost/utility optimization**, not a
+maximization — "is the extra nine worth it *for this system*?" usually answers *no*.
+
+**The critical-dependency rule of thumb** (SRE Workbook): a service's **hard/critical
+dependencies should each target roughly one nine *better*** than the service's own SLO.
+Because their errors consume your budget and there are usually several of them, if they
+were merely *equal* to your SLO you'd have nothing left for your own faults. (This is
+the memorable form of the `target^(1/n)` budgeting math earlier: for a 99.99% service,
+critical deps aim for ~99.999%, or get demoted to soft.)
+
+## Static stability
+
+**Static stability** is the property that a system keeps operating correctly **during a
+dependency or control-plane failure using only pre-existing (cached/provisioned)
+state**, adding *no new hard dependency in the failure path*. It's AWS's headline
+reliability pattern (Builders' Library). The classic answer to "how do you stay up when
+your config/discovery service is down?": keep serving with the **last-known-good** data
+you already have, and design so that the *recovery/steady-state path does not itself
+depend on the thing that's failing*.
+
+Examples: an AZ stays up using capacity already provisioned rather than needing to
+launch new instances (which requires the control plane); a load balancer keeps routing
+to last-known-healthy targets when the health-check control plane is unreachable; a
+service serves cached config when the config store is down. The anti-pattern is a
+"recovery" that needs the control plane to be healthy exactly when it isn't — a
+**circular/meta dependency** that turns a partial failure into a total one. Related to
+turning hard dependencies soft (cache/last-known-good) and to avoiding shared fate;
+cross-ref `reliability-ops/graceful-degradation-and-fallbacks` and
+`system-design/*` for multi-AZ/region architecture.
+
+## AWS availability design-goal tiers
+
+AWS's Reliability Pillar maps availability tiers to workload categories — a defensible
+answer to "what target for what system?":
+
+| Design goal | Downtime/year | Typical application category |
+|---|---|---|
+| 99% | 3.65 days | Batch/ETL, background data processing, internal non-critical tools |
+| 99.9% | 8.76 h | Internal tools, knowledge/collaboration, less-critical services |
+| 99.95% | 4.38 h | Online commerce, point-of-sale, revenue-bearing but tolerant |
+| 99.99% | 52.6 min | Video streaming / broadcast, high-traffic customer-facing apps |
+| 99.999% | 5.26 min | ATM/banking transaction processing, telecom/emergency systems |
+
+Higher tiers demand multi-AZ then multi-region, automated failover, static stability,
+and shrink the set of dependencies you can afford to rely on. Match the tier to
+business impact, not aspiration.
+
 ## Common Interview Follow-ups
 
 - **"How much downtime does three/four/five nines allow per year?"** — 8.76 h,
@@ -375,6 +735,26 @@ Why it matters operationally:
   hard→soft dependencies.
 - **"Difference between a fault, an error, and a failure?"** — Cause → wrong internal
   state → observable break.
+- **"5 nodes, need 3 for quorum, each 99% — availability?"** — Binomial tail
+  `P(≥3 of 5) ≈ 99.999%`, not `1-(1-a)^n`. Quorum ≠ any-one.
+- **"Disk MTBF is 1.2 M hours — how many fail per year in a 10,000-drive fleet?"** —
+  `AFR ≈ 8760/1.2M ≈ 0.73%` → ~73 drives/year.
+- **"5k rps at 200 ms — how many concurrent requests / threads?"** — Little's Law
+  `L = λW = 5000 × 0.2 = 1000`; double the latency and concurrency doubles → pool
+  exhaustion.
+- **"We rolled back the bad deploy but the site stayed down — why?"** — Metastable
+  failure; a retry/work-amplification loop sustains it. Shed load below the sustaining
+  threshold, disable retries, drain queues, warm caches.
+- **"Is going from four to five nines worth it?"** — Usually no: background error rate
+  is 0.01–1%, users can't perceive it, and each nine costs ~100× the previous.
+- **"Dashboard says 99.99% but customers report errors — reconcile."** — Server-side
+  vantage misses DNS/TLS/CDN/client-network; empty minutes read as 100%; mean hides
+  the p99 tail. Measure client-side (RUM/synthetic).
+- **"How available must each hard dep be if I promise 99.99%?"** — Rule of thumb: about
+  one nine better (~99.999%) each, or demote to soft.
+- **"How do you stay up when your config/control-plane service is down?"** — Static
+  stability: serve last-known-good/provisioned state, add no new hard dependency in the
+  failure path.
 
 ## References
 
@@ -390,6 +770,20 @@ Why it matters operationally:
   tiers).
 - Avižienis, Laprie, Randell, Landwehr — "Basic Concepts and Taxonomy of Dependable
   and Secure Computing" (fault/error/failure taxonomy).
+- Bronson, Aghayev, Charapko, Zhu — "Metastable Failures in Distributed Systems"
+  (HotOS 2021); Marc Brooker's writing on trigger/sustaining loops, goodput, and work
+  amplification.
+- Dean & Barroso — "The Tail at Scale" (CACM 2013): tail-latency amplification, hedged
+  and tied requests.
+- AWS Builders' Library — "Static stability using Availability Zones" and
+  "Availability and Beyond" (empirical vs design-goal availability, fault isolation,
+  measurement vantage).
+- Google *SRE Book* — "Embracing Risk" (100%-is-wrong-target, background error rate,
+  marginal-utility/$900 example) and *SRE Workbook* — "Implementing SLOs"
+  (critical-dependency one-more-nine rule of thumb).
+- Reliability engineering fundamentals — exponential/constant-hazard model (`R(t)=e^(−λt)`,
+  memorylessness), the bathtub curve, AFR (`≈ 8760/MTBF`); Backblaze Drive Stats as a
+  public AFR reference. Little's Law (`L = λW`) from queueing theory.
 - Cross-references: `system-design/*` (CAP and theoretical availability trade-offs),
   `observability/*` (measuring SLIs, detection/MTTD, alerting),
   `reliability-ops/slos-error-budgets-and-velocity-tradeoff`,

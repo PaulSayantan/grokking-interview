@@ -977,3 +977,726 @@ questions:
     the blast radius and/or automate the experiment to run continuously, so silent resilience
     regressions from future changes are caught — not to declare victory and stop.
   ref: concepts.md#blast-radius-and-guardrails
+- id: chaos-engineering-and-fault-injection-051
+  difficulty: advanced
+  tags:
+  - blast-radius
+  - magnitude
+  - distinction
+  question: |
+    In chaos engineering, how do "blast radius" and "magnitude" differ as dimensions of an
+    experiment?
+  options:
+  - Blast radius is the scope (how many hosts/requests/users are affected); magnitude is the intensity
+    of the fault (e.g. 50 ms vs 5 s of latency, 10% vs 100% packet loss)
+  - They are synonyms for the same concept
+  - Blast radius is intensity; magnitude is the number of engineers watching
+  - Magnitude applies only to network faults; blast radius only to instance kills
+  answer: 0
+  explanation: |
+    Blast radius = breadth (how many things can be affected); magnitude = depth/intensity (how
+    severe the fault is per affected unit). They are independent dials you minimize and ramp
+    separately, so that when a divergence appears you know which dimension caused it.
+  ref: concepts.md#blast-radius-vs-magnitude-two-independent-dials
+- id: chaos-engineering-and-fault-injection-052
+  difficulty: advanced
+  tags:
+  - magnitude
+  - ramp
+  - method
+  question: |
+    Why is it recommended to ramp blast radius and magnitude one dimension at a time rather
+    than increasing both together?
+  options:
+  - It makes the experiment finish faster
+  - Ramping both at once is required to get any signal
+  - So that when a divergence appears you can attribute it to a specific dial; changing both simultaneously
+    loses diagnostic clarity and risks overshooting into an incident
+  - Because magnitude cannot be changed once an experiment starts
+  answer: 2
+  explanation: |
+    Holding one dimension fixed while ramping the other preserves cause-and-effect clarity: a
+    divergence is attributable to the dial you changed. Ramping both at once conflates them and
+    can overshoot into real customer impact.
+  ref: concepts.md#blast-radius-vs-magnitude-two-independent-dials
+- id: chaos-engineering-and-fault-injection-053
+  difficulty: expert
+  tags:
+  - littles-law
+  - cascading
+  - numbers
+  question: |
+    A service calls a dependency at 200 req/s. Normally the dependency responds in 50 ms, so
+    ~10 requests are in flight concurrently. The dependency degrades to a 5 s response time (it
+    is slow, not down) while arrival rate stays 200 req/s. Using Little's Law, roughly how many
+    requests are now concurrently in flight, and what is the consequence for a 200-thread pool?
+  options:
+  - "~10 in flight; no change, the pool is fine"
+  - "~40 in flight; the pool absorbs it comfortably"
+  - "~1000 in flight; concurrency exceeds the 200-thread pool, threads block and the pool exhausts, cascading
+    backpressure upstream"
+  - "~200 in flight; exactly at capacity with no risk"
+  answer: 2
+  explanation: |
+    Little's Law L = λ × W = 200 × 5 = 1000 concurrent requests, versus 200 × 0.05 = 10
+    normally — a 100× increase. That far exceeds a 200-thread pool, so threads block waiting,
+    the pool saturates, and backpressure cascades to callers that never touched the slow dep.
+  ref: concepts.md#latency-and-cascading-failure-the-littles-law-mechanism
+- id: chaos-engineering-and-fault-injection-054
+  difficulty: expert
+  tags:
+  - littles-law
+  - slow-vs-down
+  - mechanism
+  question: |
+    Why does a *slow* dependency typically cause more damage than a *completely down* one, in
+    terms of resource consumption?
+  options:
+  - A slow dependency holds the caller's thread/connection for the full timeout, exhausting the pool; a
+    down one fails fast and frees the resource immediately
+  - A down dependency consumes more CPU on the caller
+  - A slow dependency uses more network bandwidth than a down one
+  - There is no difference; both consume identical resources
+  answer: 0
+  explanation: |
+    A dead dependency returns an error (or connection-refused) in milliseconds, freeing the
+    thread and bounding concurrency. A slow one holds each thread/connection for the whole
+    timeout window, silently exhausting the pool — which is exactly why latency injection is the
+    highest-value fault and why tight timeouts + circuit breakers matter.
+  ref: concepts.md#latency-and-cascading-failure-the-littles-law-mechanism
+- id: chaos-engineering-and-fault-injection-055
+  difficulty: advanced
+  tags:
+  - littles-law
+  - timeout
+  - fix
+  question: |
+    Given the slow-dependency cascade mechanism (Little's Law), which pair of mechanisms most
+    directly bounds in-flight concurrency and stops it?
+  options:
+  - Larger thread pool plus unbounded retries
+  - Increasing the arrival rate to flush the queue
+  - Disabling health checks so nodes stay in rotation
+  - A tight timeout (bounds W, the time each request is held) plus a circuit breaker (stops sending to
+    the slow dependency)
+  answer: 3
+  explanation: |
+    Since L = λ × W, capping W with a tight timeout directly bounds concurrency, and a circuit
+    breaker stops feeding the failing dependency once it trips. Growing the pool or retrying
+    unboundedly makes cascades worse; those are the wrong-in-practice distractors.
+  ref: concepts.md#latency-and-cascading-failure-the-littles-law-mechanism
+- id: chaos-engineering-and-fault-injection-056
+  difficulty: advanced
+  tags:
+  - fit
+  - netflix
+  - blast-radius
+  question: |
+    How does Netflix FIT (Failure Injection Testing) scope blast radius differently from Chaos
+    Monkey?
+  options:
+  - FIT scopes by host (kills an instance) just like Chaos Monkey
+  - FIT can only inject faults in staging
+  - FIT scopes by request/user/device — you choose which requests experience the failure — whereas Chaos
+    Monkey scopes by host
+  - FIT scopes by AWS region only
+  answer: 2
+  explanation: |
+    Chaos Monkey picks a host to kill (affecting whoever it served). FIT works on an orthogonal
+    axis: it decorates specific requests with a failure context, so you can target, say, 1% of
+    requests from one device type — precision by request rather than by host.
+  ref: concepts.md#netflix-fit-request-level-fault-injection
+- id: chaos-engineering-and-fault-injection-057
+  difficulty: expert
+  tags:
+  - fit
+  - mechanism
+  - zuul
+  question: |
+    In Netflix FIT, how does a chosen failure actually get applied across a request's call
+    graph?
+  options:
+  - The FIT service directly kills the target microservice instances
+  - FIT reconfigures every service's load balancer before the test
+  - FIT pushes failure metadata to Zuul, which decorates matching requests with a failure context that
+    propagates downstream; injection points (Hystrix, Ribbon, EVCache, Astyanax) inspect it and simulate
+    the fault
+  - Faults are applied only at the database layer
+  answer: 2
+  explanation: |
+    FIT pushes scenario metadata to Zuul (the edge). Zuul tags matching requests with a failure
+    context that propagates to every downstream service; each injection point (Hystrix, Ribbon,
+    EVCache, Astyanax) checks the context and, if it matches, sleeps, returns a 500, or throws.
+  ref: concepts.md#netflix-fit-request-level-fault-injection
+- id: chaos-engineering-and-fault-injection-058
+  difficulty: advanced
+  tags:
+  - fit
+  - latency-monkey
+  - contrast
+  question: |
+    Contrast FIT request-level injection with server-side Latency Monkey. What is the key
+    difference in who is affected?
+  options:
+  - Latency Monkey lets each caller opt in specific requests; FIT affects everyone
+  - FIT lets a caller opt specific requests into the failure; server-side Latency Monkey impacts all callers
+    of that service whether they want it or not
+  - Both affect exactly the same requests
+  - Neither can control which requests are affected
+  answer: 1
+  explanation: |
+    Server-side latency injection (Latency Monkey) degrades the service for all callers
+    indiscriminately. FIT's request-scoped context lets you opt specific requests in, giving a
+    much finer, safer blast radius — the reason it bridges isolated tests and large-scale chaos.
+  ref: concepts.md#netflix-fit-request-level-fault-injection
+- id: chaos-engineering-and-fault-injection-059
+  difficulty: expert
+  tags:
+  - aws-fis
+  - template
+  - anatomy
+  question: |
+    An AWS FIS experiment template is composed of which three core elements?
+  options:
+  - Regions, subnets, and security groups
+  - Alarms, dashboards, and log groups
+  - Actions (the faults), targets (which resources, by ID/tag/state), and stop conditions (CloudWatch alarms
+    that auto-halt and roll back)
+  - Users, roles, and policies
+  answer: 2
+  explanation: |
+    A FIS experiment template = actions + targets + stop conditions. Actions run sequentially
+    or in parallel for a duration; targets are selected by resource ID, tags, or state; stop
+    conditions are CloudWatch alarms that automatically halt and roll back the experiment.
+  ref: concepts.md#aws-fis-experiment-template-anatomy
+- id: chaos-engineering-and-fault-injection-060
+  difficulty: expert
+  tags:
+  - aws-fis
+  - stop-condition
+  - guardrail
+  question: |
+    In AWS FIS, what concretely implements the "automated halt condition" guardrail?
+  options:
+  - A manual approval step in a pipeline
+  - A CloudWatch alarm configured as the experiment's stop condition — if it enters ALARM, FIS auto-halts
+    and rolls back
+  - An IAM policy that denies the action
+  - A Lambda that must be invoked by hand
+  answer: 1
+  explanation: |
+    FIS stop conditions ARE CloudWatch alarms. Wire an alarm on your steady-state metric (e.g.
+    checkout success rate below threshold); if it fires during the experiment, FIS immediately
+    stops the actions and rolls back — the cloud-native form of a kill switch on steady state.
+  ref: concepts.md#aws-fis-experiment-template-anatomy
+- id: chaos-engineering-and-fault-injection-061
+  difficulty: expert
+  tags:
+  - aws-fis
+  - scenario
+  - design
+  question: |
+    You must design a *first* production chaos experiment on AWS FIS for a checkout service.
+    Which template is the safest, most defensible choice?
+  options:
+  - Terminate 100% of checkout instances across all regions with no stop condition, at 3am
+  - Target 1% of instances by tag in one AZ, inject ~200 ms latency for 5 minutes, stop condition = CloudWatch
+    alarm on checkout success rate, run in staffed hours, after validating in staging
+  - Fill the disk on the primary database with no backup, during peak traffic
+  - Corrupt writes to the orders table to see if anyone notices
+  answer: 1
+  explanation: |
+    Small on both dials (1% by tag, 200 ms magnitude, 5-min duration), an automated stop
+    condition on the business metric, staffed hours, and prior staging validation — this is the
+    textbook safe first experiment. The distractors are wide-radius, guardrail-less, or use
+    irreversible faults in prod.
+  ref: concepts.md#aws-fis-experiment-template-anatomy
+- id: chaos-engineering-and-fault-injection-062
+  difficulty: advanced
+  tags:
+  - dirt
+  - governance
+  - google
+  question: |
+    Google's DiRT (Disaster Recovery Testing) program includes which governance requirement for
+    a high-production-risk test?
+  options:
+  - No approvals are needed; any engineer may run any test
+  - Tests must run only on weekends with no observers
+  - The test must intentionally have no rollback plan to force learning
+  - Every test must have a revert/rollback plan, be reviewed by a cross-functional team separate from the
+    coordinators, and high-prod-risk tests require VP-level sign-off
+  answer: 3
+  explanation: |
+    DiRT emphasizes governance: a mandatory revert plan, declared prod impact, cross-functional
+    review separate from the coordinators, and VP sign-off for high-prod-risk tests. Real
+    emergencies always preempt DiRT. This is the approval layer staff interviews probe.
+  ref: concepts.md#google-dirt-and-the-wheel-of-misfortune
+- id: chaos-engineering-and-fault-injection-063
+  difficulty: expert
+  tags:
+  - dirt
+  - scoping
+  - precision
+  question: |
+    A DiRT test aims to validate resilience to DNS loss. Why is "bring down DNS" a poorly
+    scoped test, and what is the better-scoped version?
+  options:
+  - It is perfectly scoped as written
+  - Bringing down all DNS is too blunt; the scoped version (shut down all primary DNS servers in North
+    America but not the forwarding servers) is better because forwarders would otherwise mask the outage
+    and invalidate the test
+  - The better version is to disable DNS globally to be thorough
+  - DNS should never be included in any disaster test
+  answer: 1
+  explanation: |
+    Scoping precision matters: if you leave forwarding/caching resolvers running, they mask the
+    outage and the test proves nothing. The realistic scoped test disables the primaries but
+    accounts for the forwarders — mirroring how the real failure would (and wouldn't) propagate.
+  ref: concepts.md#google-dirt-and-the-wheel-of-misfortune
+- id: chaos-engineering-and-fault-injection-064
+  difficulty: advanced
+  tags:
+  - dirt
+  - human-spof
+  question: |
+    DiRT deliberately "disables" a person with undocumented knowledge or removes a doc/comms
+    channel during an exercise. What is this testing?
+  options:
+  - Whether the person deserves a promotion
+  - Human and process resilience — exposing human single points of failure and gaps in documentation/process
+  - Network partition tolerance
+  - Database backup integrity
+  answer: 1
+  explanation: |
+    Chaos extends beyond machines. Removing a key person or a doc/process/comms channel surfaces
+    human SPOFs and process gaps — knowledge concentrated in one head, or a runbook that only
+    works if a specific person is reachable. A distinguishing senior insight.
+  ref: concepts.md#google-dirt-and-the-wheel-of-misfortune
+- id: chaos-engineering-and-fault-injection-065
+  difficulty: advanced
+  tags:
+  - wheel-of-misfortune
+  - gameday
+  - distinction
+  question: |
+    How does a Google "Wheel of Misfortune" exercise differ from a live GameDay?
+  options:
+  - The Wheel of Misfortune injects larger real faults than a GameDay
+  - They are identical
+  - The Wheel of Misfortune is a tabletop role-play of a past incident with zero blast radius; a GameDay
+    injects a real fault into a live system
+  - A GameDay has no blast radius while the Wheel of Misfortune takes down production
+  answer: 2
+  explanation: |
+    The Wheel of Misfortune is a low-risk, zero-blast-radius tabletop: on-callers role-play
+    responding to a past incident, exercising runbooks and instincts without touching prod. A
+    GameDay injects a real fault into a live (usually team-scoped) system.
+  ref: concepts.md#google-dirt-and-the-wheel-of-misfortune
+- id: chaos-engineering-and-fault-injection-066
+  difficulty: expert
+  tags:
+  - knowns-unknowns
+  - ordering
+  - method
+  question: |
+    Using the knowns/unknowns matrix to order chaos experiments, where should a team start, and
+    why?
+  options:
+  - At unknown-unknowns, because they are the most valuable to find
+  - At known-knowns — verify what you think you already understand (e.g. "a killed instance is replaced
+    in ~90 s"), because those assumptions are surprisingly often wrong
+  - At known-unknowns exclusively, skipping everything else
+  - Ordering does not matter; pick randomly
+  answer: 1
+  explanation: |
+    Start at known-knowns: run experiments that confirm assumptions you believe are true (the
+    replacement really happens in 90 s?). These frequently turn out wrong and give high early
+    value. You then move outward; the discipline's ultimate prize is converting unknown-unknowns
+    into knowns, but you don't start there.
+  ref: concepts.md#choosing-what-to-test-first-the-knownsunknowns-matrix
+- id: chaos-engineering-and-fault-injection-067
+  difficulty: intermediate
+  tags:
+  - knowns-unknowns
+  - definition
+  question: |
+    In the knowns/unknowns framing, which category best describes the emergent, surprising
+    failures that chaos engineering ultimately exists to surface?
+  options:
+  - Known-knowns
+  - Known-unknowns
+  - Unknown-unknowns — behavior we neither understand nor anticipate
+  - Unknown-knowns
+  answer: 2
+  explanation: |
+    Unknown-unknowns are emergent behaviors we neither understand nor are aware of — the
+    cascading failures and hidden correlated dependencies that only real faults on the real
+    system reveal. Converting them to knowns before a real outage does is chaos's core purpose.
+  ref: concepts.md#choosing-what-to-test-first-the-knownsunknowns-matrix
+- id: chaos-engineering-and-fault-injection-068
+  difficulty: expert
+  tags:
+  - error-budget
+  - numbers
+  - when
+  question: |
+    Your team has already consumed this month's error budget (you are at/over your allowed
+    downtime for a 99.9% SLO). A wide, risky production chaos experiment is scheduled. What is
+    the SRE-aligned decision?
+  options:
+  - Pause the risky/wide experiment (you can't afford the downside), while still allowing tiny, automated,
+    well-guarded regression checks whose worst case is negligible
+  - Run it anyway; chaos is exempt from error-budget policy
+  - Cancel all reliability work for the month
+  - Double the blast radius to learn faster before the month ends
+  answer: 0
+  explanation: |
+    A chaos experiment spends from the error budget like a real incident. With the budget
+    exhausted, freeze risky/wide experiments (and risky launches) until it recovers, but keep
+    negligible-risk automated checks. The budget gates chaos aggressiveness exactly as it gates
+    launches.
+  ref: concepts.md#chaos-and-the-error-budget-when-to-run
+- id: chaos-engineering-and-fault-injection-069
+  difficulty: advanced
+  tags:
+  - error-budget
+  - availability
+  - numbers
+  question: |
+    Roughly how much monthly downtime does a 99.9% availability SLO permit, and how does that
+    relate to running chaos?
+  options:
+  - About 43.8 minutes per month; that error budget is what a risky chaos experiment spends from, so a
+    depleted budget argues for pausing risky experiments
+  - About 4.38 seconds per month; chaos never affects it
+  - Exactly zero downtime; chaos is therefore forbidden always
+  - About 8 hours per month; unlimited chaos is fine
+  answer: 0
+  explanation: |
+    99.9% ≈ 43.8 min/month of allowed downtime (99.99% ≈ 4.38 min; 99.999% ≈ 26 s). A chaos
+    experiment that causes impact draws from that same budget, so whether you can afford a risky
+    experiment depends on how much budget remains.
+  ref: concepts.md#chaos-and-the-error-budget-when-to-run
+- id: chaos-engineering-and-fault-injection-070
+  difficulty: advanced
+  tags:
+  - continuous-verification
+  - ci
+  - vocabulary
+  question: |
+    What does the term "Continuous Verification (CV)" denote in modern chaos engineering?
+  options:
+  - Manually verifying each deploy by hand
+  - Automated chaos experiments gated into the deploy pipeline, so a resilience regression fails a build
+    like a broken unit test — "chaos as CI"
+  - Continuously polling a health-check endpoint
+  - Verifying user identities continuously for security
+  answer: 1
+  explanation: |
+    Continuous Verification is the named 2024/2025 evolution of "chaos as CI": automated
+    experiments integrated into the pipeline so resilience is continuously re-verified and a
+    regression blocks the build — the logical endpoint of "automate experiments to run
+    continuously."
+  ref: concepts.md#continuous-verification-and-security-chaos-engineering
+- id: chaos-engineering-and-fault-injection-071
+  difficulty: expert
+  tags:
+  - security-chaos
+  - sce
+  - scenario
+  question: |
+    Which experiment best exemplifies Security Chaos Engineering (SCE)?
+  options:
+  - Terminate an instance and verify autoscaling replaces it
+  - Add 500 ms of latency and verify the circuit breaker trips
+  - Deliberately open a security-group port (or drop an IAM permission) and verify the SIEM alerts and auto-remediation
+    reverts it within the target SLA
+  - Fill the disk and verify log rotation works
+  answer: 2
+  explanation: |
+    SCE applies hypothesis-driven fault injection to security controls: inject a
+    misconfiguration and verify the detection/response pipeline (alerting + auto-remediation)
+    actually fires within SLA. The other options test availability mechanisms, not detective
+    controls.
+  ref: concepts.md#continuous-verification-and-security-chaos-engineering
+- id: chaos-engineering-and-fault-injection-072
+  difficulty: advanced
+  tags:
+  - security-chaos
+  - detection
+  - insight
+  question: |
+    What is the core senior insight behind Security Chaos Engineering?
+  options:
+  - Security controls never need testing once configured
+  - SCE replaces penetration testing entirely
+  - Security faults should only be tested by real attackers
+  - Run chaos against detective and responsive controls, not just availability mechanisms — an alert that
+    never fires is a security control that effectively does not exist
+  answer: 3
+  explanation: |
+    SCE's insight is that detection/response controls are otherwise only "tested" by real
+    attackers. Proactively injecting security faults verifies that alerts and auto-remediation
+    fire — because an alert that silently never fires provides no protection.
+  ref: concepts.md#continuous-verification-and-security-chaos-engineering
+- id: chaos-engineering-and-fault-injection-073
+  difficulty: expert
+  tags:
+  - reversibility
+  - abort
+  - edge-case
+  question: |
+    The prerequisite "you must be able to abort instantly" is oversimplified. Which fault is
+    NOT cleanly reversible by hitting the abort button?
+  options:
+  - Injected network latency
+  - A blackhole/packet-drop rule
+  - A paused process
+  - Terminating an instance that held in-flight state (or a corrupted write) — aborting the injection does
+    not undo the lost/corrupted state
+  answer: 3
+  explanation: |
+    Latency, blackhole, and process-pause are reversible — remove the fault and the system
+    recovers. Terminating a stateful instance or corrupting a write leaves a consequence that
+    aborting the injection cannot undo. Irreversible faults demand staging/shadow, verified
+    backups, and targeting replicas — not just a red button.
+  ref: concepts.md#reversibility-not-every-fault-can-be-aborted
+- id: chaos-engineering-and-fault-injection-074
+  difficulty: expert
+  tags:
+  - reversibility
+  - stateful
+  - judgment
+  question: |
+    How should you handle a chaos experiment involving an irreversible fault such as data
+    corruption or disk-fill on a stateful primary?
+  options:
+  - Run it directly in production during peak hours for maximum realism
+  - Treat it with far more caution by preferring staging or a shadow environment, ensuring verified backups,
+    and targeting replicas rather than primaries
+  - Skip backups since the abort button will restore everything
+  - Only run it if you disable monitoring first
+  answer: 1
+  explanation: |
+    Irreversible faults sit at the dangerous end of the reversibility spectrum. Mature practice
+    uses staging/shadow, verifies backups beforehand, and targets replicas — never casually
+    corrupting a production primary, because the abort button cannot undo the consequence.
+  ref: concepts.md#reversibility-not-every-fault-can-be-aborted
+- id: chaos-engineering-and-fault-injection-075
+  difficulty: expert
+  tags:
+  - steady-state
+  - laggy-kpi
+  - proxy
+  question: |
+    Your ideal business KPI is revenue-per-minute, but it only moves minutes after checkout and
+    payment settle — too slow to abort on. What is the correct steady-state design?
+  options:
+  - Abort directly on revenue-per-minute anyway and accept the delay
+  - Abandon guardrails since no fast metric exists
+  - Trip the automated halt on a fast proxy (successful-request rate or p99 latency) that moves in seconds,
+    and grade the experiment afterward on the revenue KPI
+  - Use CPU utilization as the halt trigger
+  answer: 2
+  explanation: |
+    A halt signal must react faster than the damage. Use a fast, well-correlated proxy (success
+    rate, p99 latency) as the trip wire and reserve the laggy business KPI for post-hoc grading.
+    This is exactly why Netflix uses SPS — it moves in seconds. CPU is a poor customer-impact
+    proxy.
+  ref: concepts.md#steady-state-metric-selection-fast-proxy-vs-laggy-kpi
+- id: chaos-engineering-and-fault-injection-076
+  difficulty: expert
+  tags:
+  - chap
+  - statistics
+  - rigor
+  question: |
+    In ChAP, how do you know an observed KPI divergence between the experiment and control
+    clusters is real and not noise?
+  options:
+  - An engineer eyeballs the dashboard and decides
+  - It assumes any dip is significant and always aborts
+  - ChAP routes tiny, statistically comparable control and experiment populations and runs an automated
+    statistical significance test (Kayenta / Automated Canary Analysis) on the KPI difference
+  - It waits a week and compares to last month
+  answer: 2
+  explanation: |
+    At small blast radius the sample is noisy, so naive "the line dipped" reads cause false
+    positives and negatives. ChAP allocates comparable control/experiment clusters and applies
+    automated statistical significance testing (Kayenta/ACA) — the same rigor as canary analysis
+    — to trust the result.
+  ref: concepts.md#statistical-rigor-control-vs-experiment-group-internals
+- id: chaos-engineering-and-fault-injection-077
+  difficulty: advanced
+  tags:
+  - tools
+  - kubernetes
+  - selection
+  question: |
+    A team runs everything on Kubernetes and wants native, CRD-based fault injection (PodChaos,
+    NetworkChaos, StressChaos, etc.). Which tools are the natural fit?
+  options:
+  - Prometheus or Grafana
+  - Terraform or CloudFormation
+  - Jenkins or GitHub Actions
+  - Chaos Mesh or LitmusChaos (CNCF, Kubernetes-native via CRDs)
+  answer: 3
+  explanation: |
+    Chaos Mesh and LitmusChaos are CNCF, Kubernetes-native tools that express faults as CRDs
+    (PodChaos, NetworkChaos, StressChaos, IOChaos, TimeChaos, DNSChaos). AWS FIS suits AWS,
+    Chaos Toolkit is vendor-neutral experiment-as-code, and Gremlin is a SaaS option.
+  ref: concepts.md#tool-landscape-and-kubernetes-native-faults
+- id: chaos-engineering-and-fault-injection-078
+  difficulty: advanced
+  tags:
+  - kubernetes
+  - dns-chaos
+  - fault-type
+  question: |
+    Which Kubernetes-native chaos fault directly exercises resilience to a CoreDNS failure — a
+    common real-world outage cause — by returning errors or wrong answers for in-cluster name
+    resolution?
+  options:
+  - PodChaos (pod-kill)
+  - StressChaos (CPU/memory pressure)
+  - DNSChaos
+  - TimeChaos (clock skew)
+  answer: 2
+  explanation: |
+    DNSChaos injects DNS errors or incorrect responses for in-cluster resolution (CoreDNS),
+    testing how services behave when name resolution fails — a frequent cause of real outages.
+    Pod-kill, stress, and clock-skew test different failure modes.
+  ref: concepts.md#tool-landscape-and-kubernetes-native-faults
+- id: chaos-engineering-and-fault-injection-079
+  difficulty: advanced
+  tags:
+  - tools
+  - vendor-neutral
+  - selection
+  question: |
+    You want portable, vendor-neutral "experiment-as-code" definitions (JSON/YAML) that are not
+    tied to one cloud or platform. Which tool is designed for that?
+  options:
+  - Chaos Toolkit
+  - AWS Fault Injection Service
+  - Azure Chaos Studio
+  - Netflix Chaos Monkey
+  answer: 0
+  explanation: |
+    Chaos Toolkit is the open-source, vendor-neutral standard for declaring experiments as
+    JSON/YAML that run against many providers. FIS and Azure Chaos Studio are cloud-specific;
+    Chaos Monkey narrowly kills instances.
+  ref: concepts.md#tool-landscape-and-kubernetes-native-faults
+- id: chaos-engineering-and-fault-injection-080
+  difficulty: expert
+  tags:
+  - scenario
+  - circuit-breaker
+  - which-mitigation
+  question: |
+    During a latency-injection experiment, your circuit breaker correctly tripped, yet customers
+    still saw errors instead of the intended degraded experience. What is the most likely
+    root cause?
+  options:
+  - The circuit breaker should never trip during an experiment
+  - Latency injection cannot trigger a circuit breaker
+  - The fallback path itself was unhealthy or depended on the failed service (or the breaker's timeout/threshold
+    was mistuned), so tripping produced errors rather than a graceful fallback
+  - The experiment proves the system is fully resilient
+  answer: 2
+  explanation: |
+    A tripped breaker only helps if the fallback it routes to is healthy and independent. If the
+    fallback secretly depends on the failed service, or the breaker's thresholds/timeouts are
+    mistuned, customers still get errors. This is the classic "the safety mechanism didn't
+    actually protect us" finding.
+  ref: concepts.md#latency-and-cascading-failure-the-littles-law-mechanism
+- id: chaos-engineering-and-fault-injection-081
+  difficulty: intermediate
+  tags:
+  - fit
+  - failure-scenario
+  - concept
+  question: |
+    In Netflix FIT, what is a "failure scenario" such as the critical-services scenario?
+  options:
+  - A curated, reusable set of injection points that codifies what must (or must not) survive — e.g. the
+    minimum set of services required to stream
+  - A postmortem template for a past outage
+  - A dashboard showing current error rates
+  - A schedule of when Chaos Monkey runs
+  answer: 0
+  explanation: |
+    A failure scenario is a curated set of injection points that encodes "what must keep
+    working," such as the minimum services required to stream video. Mature programs turn
+    "what must survive" into reusable, versioned experiments rather than ad-hoc one-offs.
+  ref: concepts.md#netflix-fit-request-level-fault-injection
+- id: chaos-engineering-and-fault-injection-082
+  difficulty: expert
+  tags:
+  - chaos-monkey
+  - fit
+  - chap
+  - distinction
+  question: |
+    When would you reach for Chaos Monkey vs FIT vs ChAP?
+  options:
+  - They are interchangeable; pick whichever is installed
+  - Chaos Monkey for coarse always-on host-random kills; FIT for request-level precision (choose who/what
+    fails, ramp the %); ChAP for FIT-style precision PLUS automatic control/experiment groups and a statistical
+    significance test
+  - Chaos Monkey for region failover, FIT for disk fills, ChAP for clock skew
+  - ChAP is only for staging, FIT only for production, Chaos Monkey only for databases
+  answer: 1
+  explanation: |
+    The progression is coarse → precise → precise-and-automatically-graded. Chaos Monkey kills
+    random hosts continuously; FIT injects faults at the request level so you choose who is
+    affected and ramp the percentage; ChAP adds automatic control/experiment groups plus
+    automated canary/significance analysis of the KPI.
+  ref: concepts.md#netflix-fit-request-level-fault-injection
+- id: chaos-engineering-and-fault-injection-083
+  difficulty: advanced
+  tags:
+  - definitions
+  - fault-injection
+  - load-test
+  - distinction
+  question: |
+    How do fault injection, chaos engineering, and a load/stress test relate?
+  options:
+  - They are three names for the same activity
+  - Fault injection is the mechanism (introducing a failure); chaos engineering is the hypothesis-driven
+    discipline that uses it; a load test measures capacity under volume (a chaos experiment may use load
+    as one of its faults)
+  - Chaos engineering is a subtype of load testing
+  - Load testing is the mechanism and chaos engineering is a monitoring tool
+  answer: 1
+  explanation: |
+    Fault injection is the technique of introducing a failure condition. Chaos engineering is
+    the scientific discipline (hypothesis, steady state, blast radius) that employs it. A load
+    test specifically measures behavior under volume; a chaos experiment may incorporate load as
+    one fault but is defined by the hypothesis-driven method, not by volume.
+  ref: concepts.md#latency-and-cascading-failure-the-littles-law-mechanism
+- id: chaos-engineering-and-fault-injection-084
+  difficulty: expert
+  tags:
+  - scenario
+  - judgment
+  - governance
+  question: |
+    A skeptical VP argues that running chaos in production is reckless and everything should be
+    tested in staging. What is the strongest justification for controlled production chaos?
+  options:
+  - Production is cheaper to break than staging
+  - Staging cannot reproduce prod's real scale, traffic mix, config, and dependency topology, so the highest-value
+    emergent failures only appear in prod; the risk is bounded by blast radius + magnitude + guardrails
+    (as Google's DiRT bounds it with revert plans and VP-approved scope), not by avoiding prod
+  - Staging has no monitoring so testing there is pointless
+  - Chaos in production requires no guardrails because it is bounded by definition
+  answer: 1
+  explanation: |
+    Staging is an approximation; emergent, scale-dependent failures surface only under real prod
+    conditions. You de-risk with small blast radius and magnitude, automated halt conditions, and
+    governance (DiRT-style revert plans and approvals) — not by refusing to test where the real
+    risk lives.
+  ref: concepts.md#google-dirt-and-the-wheel-of-misfortune

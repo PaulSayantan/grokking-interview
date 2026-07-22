@@ -368,6 +368,335 @@ same decision as everywhere else.
 
 ---
 
+## Metastable Failures: Trigger vs. Sustaining Loop
+
+The senior-level frame that ties every topic here together comes from Bronson et al.,
+**"Metastable Failures in Distributed Systems"** (HotOS 2021). A **metastable failure** is:
+*an open system with an uncontrolled load source in which a **trigger** pushes the system into
+a bad state that **persists even after the trigger is removed**, sustained by a
+**positive-feedback loop**.*
+
+Three states:
+- **Stable (up):** serving normally, feedback loops damped.
+- **Vulnerable:** still up and meeting SLO, but load/config is close enough to the edge that a
+  shock could tip it. You cannot see this state from success metrics alone.
+- **Metastable (stable down):** the system is *up* — processes running, CPU busy — but doing
+  **little or no useful work**, and it *stays* there on its own.
+
+The crucial teaching point is the **trigger vs. sustaining-effect distinction**:
+
+| | **Trigger** | **Sustaining effect (the real root cause)** |
+|---|---|---|
+| What it is | the shock that tips a vulnerable system over | the positive-feedback loop that keeps it down |
+| Examples | a network blip, a deploy, a cache flush, a brief latency spike | retry amplification, cold caches, slow/expensive error paths, lock convoys, GC death spiral |
+| Lifetime | transient — often gone in seconds | self-sustaining — outlives the trigger indefinitely |
+| Fix | (already gone; fixing it does nothing) | **break the loop**: shed load, drop traffic to ~1%, disable retries, warm caches |
+
+> [!KEY-TAKEAWAY]
+> In a metastable outage, **removing the trigger does not recover the system** — many different
+> triggers reach the same bad state, so chasing "what caused it" misleads. The root cause is the
+> **sustaining loop**, and the fix is to **reduce demand hard enough to break the loop**, not to
+> add capacity. This reframes retry storms and congestive collapse as instances of one
+> phenomenon.
+
+---
+
+## Canonical Incident: The DynamoDB Sept 20 2015 Outage
+
+The textbook metastable/shedding case study (AWS postmortem, aws.amazon.com/message/5467D2).
+
+- **Trigger:** a brief network disruption. Storage servers had to re-request their **membership /
+  partition-assignment metadata** from the metadata service. A recent feature (GSIs) had made those
+  membership responses much larger, so the processing time crept up and **crossed the retrieval
+  timeout**.
+- **Sustaining loop:** servers that timed out treated themselves as unhealthy and **retried**,
+  adding load to the metadata service; meanwhile *healthy* servers doing routine membership
+  renewals now also timed out. Error rates climbed to roughly **55%** and the state
+  **self-sustained** — a classic positive-feedback loop.
+- **Why recovery was hard:** the operators **could not simply add capacity** — the metadata
+  service (a control-plane component) was itself so overloaded that even administrative/config
+  requests couldn't get through. Adding servers made it *worse* (more members to serve metadata to).
+- **The fix:** they **paused / shed the metadata requests** (reduced demand) to let the service
+  drain and become reachable, *then* increased capacity and raised the timeouts, then re-admitted
+  traffic.
+
+Two durable lessons: **(1) under a death spiral you recover by reducing demand, not adding
+supply** ("do less work"); **(2) the control plane must stay reachable under overload** — if the
+mechanism you'd use to fix the system needs the system to be healthy, you have a metastable trap.
+
+---
+
+## Recovering an Already-Collapsed / Crash-Looping Fleet
+
+Prevention (shed early) and **recovery** (get a service that has *already* collapsed back up) are
+different skills. Once a fleet is metastable, restarting it usually just re-collapses. Google SRE
+Ch. 22 ("Addressing Cascading Failures") gives the recovery ladder:
+
+1. **Break the feedback loop by dropping demand hard.** Return traffic to a crash-looping fleet
+   to roughly **1%** and ramp slowly; block batch/best-effort load and kill any **"queries of
+   death"** (requests that crash the process). Adding capacity first often fails because a **cold
+   fleet's caches are empty** (see below) and it re-collapses instantly.
+2. **Stop health-check-driven deaths.** Distinguish **process health** ("am I alive?", liveness)
+   from **service health** ("can I serve?", readiness). If an overloaded task fails its *service*
+   health check, the orchestrator kills it, removing capacity and deepening the loop — so under
+   overload you may want liveness to stay green while readiness sheds.
+3. **Cold-cache / thundering herd on recovery.** Distinguish a **latency cache** (improves
+   latency; system still *works* when it's cold) from a **capacity cache** (the system *cannot
+   survive* with it cold — hit rate must stay high or backends collapse). A cold restart of a
+   capacity-cache-dependent service sends 100% of traffic to backends and re-triggers collapse;
+   you must warm caches or ramp traffic gradually.
+4. **Then, and only then, add capacity** and re-admit traffic in stages.
+
+> [!INTERVIEW]
+> "You've shed load and returned 503s, but the fleet still won't recover — why, and what now?"
+> Strong answer: it's **metastable** — retries + cold caches sustain the loop after the trigger is
+> gone. **Drop inbound traffic to ~1%, disable client retries, warm capacity caches, then ramp
+> slowly.** Adding capacity may not help (GC death spiral, control-plane starvation). Distinguish
+> liveness from readiness so the orchestrator doesn't kill tasks you're trying to save.
+
+---
+
+## How Overload Actually Kills a Box: Resource-Exhaustion Modes
+
+Interviewers ask "what runs out *first*, and how does that turn into an outage?" Google SRE
+Ch. 22 enumerates the concrete death modes — each is a feedback loop of its own:
+
+- **CPU:** the direct one. More in-flight requests → more context-switching and cache-locality
+  loss → each request slower → more in-flight (Little's Law), missed RPC deadlines, thread
+  starvation. A death spiral without a single "out of X" event.
+- **Memory → the "GC death spiral."** More in-flight requests hold more objects → heap fills →
+  the JVM/runtime spends an ever-larger fraction of time in **garbage collection** → less time
+  serving → requests pile up → more memory pressure. CPU vanishes into GC and the box does no
+  useful work. Task eviction and lower cache hit rates (→ more backend RPCs) compound it.
+- **Threads:** thread-per-request pools exhaust; new work (including **health-check handlers**)
+  can't get a thread, so health checks fail and the task is killed. PID/thread limits hit.
+- **File descriptors:** run out → new connections (and health checks) fail to establish.
+- **Dependencies among resources:** exhausting one often exhausts the next (memory pressure →
+  more GC CPU → missed deadlines → more retries → more memory). This is why "just add a bit of
+  headroom" on one dimension rarely saves you.
+
+> [!TIP]
+> **Saturation is the leading indicator.** Of the four golden signals (latency, traffic, errors,
+> **saturation**; Google SRE Ch. 6), *saturation* — "how full the most-constrained resource is" —
+> usually moves **before** latency and errors do, which makes it the load-shed trigger of choice.
+> (How you *measure and alarm* on it lives in `observability/*`; here it's the signal you act on.)
+
+---
+
+## Deadline & Cancellation Propagation
+
+The current LIFO section mentions deadline propagation in one line; it deserves its own treatment
+because "shed by deadline, not just by saturation" is a distinct discipline (Google SRE Ch. 22).
+
+**Propagate one absolute deadline down the RPC tree, decrementing spent time.** A request enters
+with a **30 s** budget; after 7 s of work at the first hop, it calls downstream with **23 s**
+remaining; that hop spends 4 s and calls further with **19 s**, and so on. At each hop, **check
+the remaining budget *before* starting work** — if there isn't enough time to plausibly finish,
+**fail fast now** rather than do work whose result will arrive after the client has given up.
+*"You don't get credit for late assignments."*
+
+Two anti-patterns this fixes:
+- **Fresh timeout per hop.** If every hop independently starts a 30 s timer, a 5-deep chain can
+  legitimately take 150 s while the top-level client left after 30 s — pure wasted goodput.
+- **No cancellation.** When a parent abandons a request (client disconnected, hedged request's
+  faster copy already returned), **propagate the cancellation** so downstream hops stop the now-
+  superfluous work instead of burning capacity for a discarded answer.
+
+> [!KEY-TAKEAWAY]
+> Deadline propagation is **client-driven shedding**: the request carries the client's remaining
+> patience through the whole call graph, so any hop can drop dead-on-arrival work early. Combine
+> with cancellation propagation so abandoned/hedged work is reclaimed, not orphaned.
+
+---
+
+## Worked Example: Bimodal Latency and Thread Exhaustion
+
+A killer numeric scenario (Google SRE Ch. 22) for "a few slow requests + a generous timeout
+collapse a healthy fleet."
+
+Setup: **10 servers × 100 threads = 1000** request threads. Normal request latency is **100 ms**.
+At **1000 QPS**, Little's Law says in-flight = `1000 × 0.1 s = 100` threads — comfortably within
+1000. Healthy.
+
+Now suppose **5%** of requests hit a slow path that **stalls for ~100 s** (e.g. behind a generous
+100 s deadline on a degraded dependency). Those 50 QPS of slow requests each occupy a thread for
+100 s → `50 × 100 = 5000` threads needed just for them — but only **1000** exist. The pool is
+pinned by a handful of slow requests; the fast **95%** can't get a thread. Result: roughly
+**~80% of requests error** even though the box has plenty of CPU — it's **thread-starved**, not
+CPU-bound.
+
+Fixes:
+- **Fail fast** — don't let requests sit; reject when the pool is saturated.
+- **Cap any single client's share** of the pool (e.g. ~**25%**) so one caller/one slow dependency
+  can't monopolize all threads (a bulkhead — see `circuit-breakers-and-bulkheads`).
+- **Don't set deadlines orders of magnitude above the mean.** A 100 s deadline on a 100 ms service
+  is the real bug; a tight deadline turns the stall into a fast, cheap failure.
+
+---
+
+## Sizing a Bounded Queue with Little's Law
+
+Little's Law also sizes the **queue** (not just the thread pool), in the direction
+`D = λ × W_tolerable`: given arrival rate λ and the **maximum wait you can tolerate** `W_tolerable`,
+the deepest the queue should ever be is their product.
+
+- Rearranged from `W ≈ D / μ` (a queue of depth D at service rate μ adds up to `D/μ` of wait), you
+  pick D from the latency budget, **not** from "how much RAM do I have."
+- **Rule of thumb (Google SRE):** keep the queue **≤ ~50% of the thread-pool size**. Worked
+  example: a pool serving each request in **100 ms** with a queue **10× the pool** means a full
+  queue adds `10 × 0.1 s = 1 s` of pure wait, so a request spends **~1.1 s** total, "mostly
+  waiting" — the queue has become a latency generator.
+- **Queueless (or near-queueless)** servers are preferable for **latency-sensitive** paths (Gmail
+  is cited): with almost no queue, an overloaded server *rejects immediately* (feeding fast retries
+  to a less-loaded server) instead of holding requests that will time out. A queue only helps when
+  the overload is **brief and bursty**; for sustained overload it just adds delay before the
+  inevitable shed.
+
+> [!TIP]
+> Two Little's-Law questions to keep straight: **"how many threads?"** → `L = λ × W_service`;
+> **"how deep a queue?"** → `D = λ × W_tolerable`, capped at ~50% of the pool. Deeper is not safer.
+
+---
+
+## Load Shedding vs. Backpressure vs. Rate Limiting
+
+These three are routinely conflated. The clean separation:
+
+| | **Load shedding** | **Backpressure** | **Rate limiting** |
+|---|---|---|---|
+| What it does | **rejects** work at the door | tells the **upstream to slow down** | enforces a **policy/quota** |
+| Triggered by | **real-time saturation** (dynamic) | a downstream consumer filling up | a **fixed contractual limit** (static) |
+| Fires when box is melting but under quota? | **yes** — reacts to actual load | yes, if the queue is filling | **no** — quota not yet hit |
+| Fires when box is idle but over quota? | no — there's capacity | no | **yes** — quota is the point |
+| Primary goal | protect **goodput** now | bound resource use end-to-end | **fairness / cost / contract** enforcement |
+| Owner in this repo | reliability (here) | reliability (here) | abuse-prevention → `security/*`; algorithm → `system-design/design-rate-limiter` |
+
+The subtle exam probe: *"a limiter says the client is at 50% of its quota, but the box is
+melting — which mechanism fires?"* → **rate limiting won't** (quota not exceeded); **load
+shedding will** (it reacts to saturation, not policy). They are complementary, not substitutes.
+
+**Graceful vs. hard shedding** — the escalation within shedding itself:
+- **Graceful:** degrade/brownout, reject *cheaply* with `503`/`429` + `Retry-After` while still
+  serving the critical core (prioritized). Preferred.
+- **Hard:** abruptly drop connections / return `503` to everyone / close listeners — a
+  last-resort circuit-breaker for the whole front door when graceful measures can't keep up.
+
+### Work-conserving vs. non-work-conserving schedulers
+
+A **work-conserving** scheduler *never idles while there is work to do* — it maximizes utilization
+(default FIFO/threadpool behavior). A **non-work-conserving** scheduler **deliberately holds work
+back** even when it *could* run it — to protect latency, fairness, or a downstream. **Rate
+limiting, token-bucket pacing, and admission-control load shedding are intentionally
+non-work-conserving:** they choose *not* to do available work now because doing it would harm
+goodput or violate a limit. Recognizing that "under overload you *want* a non-work-conserving
+policy" is a precise senior-level distinction: chasing 100% utilization (work-conserving) is
+exactly what tips a vulnerable system into metastable collapse.
+
+---
+
+## Active Queue Management: CoDel, RED/WRED, PIE, ECN
+
+The load-shedding-mechanics section introduced CoDel; here is the **AQM family** it belongs to and
+the mechanism detail interviewers probe.
+
+- **Tail-drop** (naive): accept until the buffer is full, then drop new arrivals. Causes **global
+  synchronization** (many flows back off in lockstep) and lets a **standing queue** persist —
+  bufferbloat.
+- **RED / WRED (Random Early Detection):** drop (or mark) packets *probabilistically* as average
+  queue length grows, *before* the buffer is full, so flows back off early and desynchronized.
+  WRED weights the probability by class/priority. Requires tuning min/max thresholds.
+- **CoDel (Controlled Delay):** **parameterless, latency-targeting.** It measures the **minimum
+  sojourn time** (how long the *fastest* item waited) over a sliding **interval = 100 ms**; the
+  target sojourn is **5 ms**. The dual-timeout logic that makes it correct: if the queue was
+  **empty within the last interval** (a transient burst), use the generous timeout; only once a
+  **standing queue** has persisted above target for a full interval does it switch to the
+  aggressive **5 ms** timeout and start expiring queued items. Using the *minimum* (not average)
+  sojourn is what lets it tell a **good burst-absorbing queue** from a **bad standing queue**.
+- **PIE (Proportional Integral controller Enhanced, RFC 8033):** another latency-target AQM;
+  a PI controller adjusts drop probability to hold queueing delay near a reference. An
+  alternative to CoDel with similar goals, common in DOCSIS/cable.
+- **ECN (Explicit Congestion Notification):** **mark** instead of drop — set a bit so the sender
+  slows without a packet loss. Composes with the above.
+
+**Adaptive LIFO ⊕ CoDel (Facebook, "Fail at Scale," ACM Queue 2015).** These compose: **CoDel
+decides *whether* to shed** (is there a standing queue?), and under overload the server switches
+the queue discipline to **LIFO** to decide *which* to serve — newest-first, so the freshest
+requests skip the line while CoDel expires the stale items at the bottom. Facebook's Thrift
+servers use exactly this pairing.
+
+---
+
+## Mechanism Internals: Numbers Worth Memorizing
+
+Concrete, testable defaults from the primary sources — the depth senior loops reward.
+
+**Netflix `concurrency-limits` (gradient algorithm).** Latency-based, TCP-congestion-control
+lineage (Vegas-style). Per hop it computes `gradient = RTT_noload / RTT_actual` (≤ 1; the more
+latency has inflated over the no-load minimum, the smaller it is) and updates the concurrency
+limit toward `newLimit = currentLimit × gradient + queueSize`, where the **queue allowance
+defaults to `√(currentLimit)`** — generous at small limits (lets the limit grow) and tight at
+large limits (stability). It runs **per-server with no coordination** and sheds in
+**sub-millisecond** time (no extra RTT). (Newer `Gradient2` compares a short vs. long latency
+average instead of a fixed no-load RTT.)
+
+**Google client-side adaptive throttling (SRE Ch. 21).** A client rejects requests *locally* with
+probability `max(0, (requests − K × accepts) / (requests + 1))`, measured over the **last 2
+minutes**, with **K = 2** by default. K = 2 lets ~2× the accepted rate still reach the backend
+(so state propagates and recovery is visible); lowering K (e.g. 1.1) throttles more aggressively.
+
+**Retry amplification math (Google SRE).** Per-request cap = **3 attempts**; per-client **retry
+budget = 10%** of the request rate. Unbounded retries can triple load (**3×**); the 10% budget
+caps amplification to **~1.1×**. **Retry only at the layer immediately above the rejecting layer** —
+if each of 3 layers independently retries 3×, amplification is **3³ = 27×** (Google's example
+frames it as up to ~**64×** for higher fan-out); retrying at every layer is a classic cascade
+cause. Servers should signal an **"overloaded; do not retry"** bit (vs. a retriable "task
+overloaded elsewhere") so clients know when a retry is pointless. Facebook's variant caps retries
+**server-wide at 60 per minute per process**.
+
+**Backoff + jitter formulas (AWS Builders' Library — Marc Brooker).** Plain exponential backoff:
+`sleep = min(cap, base × 2^attempt)`. But synchronized clients then retry in lockstep, so add
+**jitter**:
+- **Full jitter:** `sleep = random(0, min(cap, base × 2^attempt))` — the recommended default;
+  Brooker's simulations show it drastically cuts contention and total work.
+- **Equal jitter:** `sleep = (min(cap, base × 2^attempt) / 2) + random(0, that/2)`.
+- **Decorrelated jitter:** `sleep = min(cap, random(base, prev_sleep × 3))`.
+
+**N+2 capacity & breaking-point testing (Google SRE Ch. 22).** Load-test to the **breaking
+point** (e.g. a cluster fails at **5000 QPS**), then provision **N+2**: for a peak of 19,000 QPS
+you need ⌈19000 / 5000⌉ = 4 clusters, +2 for redundancy = **6**. And "the code path you never use
+is the one that doesn't work" — **regularly exercise** the degraded/shed/failover paths, because a
+shed path that only runs during a real incident will itself be the thing that fails. (Deep
+treatment of headroom in `capacity-planning-and-load-management`.)
+
+---
+
+## Streaming & Protocol Backpressure Internals
+
+Deeper than the earlier "lag / pause" mention — the concrete knobs and their failure modes.
+
+**Kafka.** Consumers pull; the durable log buffers; **consumer lag** is the SLI. But two knobs
+turn a slow sink into a backpressure *failure*:
+- **`max.poll.records`** bounds how many records one `poll()` returns — the fetch-size lever that
+  keeps a batch's processing time bounded.
+- **`max.poll.interval.ms`** is the trap: if processing a batch takes **longer** than this, the
+  broker assumes the consumer is dead, **evicts it, and triggers a rebalance** — which *removes*
+  processing capacity precisely when the consumer is already behind, a self-inflicted backpressure
+  cascade. Fix by lowering `max.poll.records` or raising the interval so slow processing pauses
+  intake rather than losing the member.
+- **`pause()` / `resume()`** on specific partitions: when the downstream sink is full, explicitly
+  **pause** those partitions (stop fetching) and **resume** when it drains — clean, explicit
+  backpressure without risking the poll-interval eviction. RabbitMQ's analog is **`prefetch` /
+  `basic.qos`**; below all of it sits **TCP-level** pushback.
+
+**gRPC / HTTP-2 flow control.** Beyond "it has windows": HTTP-2 has **per-stream** *and*
+**per-connection** flow-control windows, with a default **initial window of 64 KB** per stream.
+The receiver sends **`WINDOW_UPDATE`** frames to grant more credit as it consumes data; a sender
+that exhausts the window **must stop** until an update arrives — exactly TCP's zero-window
+behavior, one layer up. Modern stacks add **BDP-based auto-tuning** to size the window to the
+bandwidth-delay product. This is the precise mechanism behind the "credit = window" analogy.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"Why is it better to serve 90% of requests well than 100% badly?"** Past capacity, extra
@@ -395,6 +724,28 @@ same decision as everywhere else.
 - **"Static vs adaptive concurrency limits?"** Static thresholds are brittle across request
   mixes and deploys; adaptive limiters (Little's-Law/latency-based like Netflix
   concurrency-limits, or CoDel) discover the ceiling from observed latency/queue delay.
+- **"Distinguish the trigger from the root cause of this outage."** The trigger (a network blip,
+  a deploy) tips a *vulnerable* system over; the root cause is the **sustaining positive-feedback
+  loop** (retries, cold caches, GC death spiral). Removing the trigger doesn't recover a
+  metastable system — you must break the loop.
+- **"Your control-plane/metadata service is overloaded and you can't push a scale-up config."**
+  DynamoDB-2015 lesson: **shed demand first** so the control plane becomes reachable, *then* scale.
+  Adding capacity to a saturated metadata service can make it worse.
+- **"5% of requests are slow behind a 30s deadline on a 100ms service — predict the outcome."**
+  Thread-pool exhaustion: a few long-held threads pin the pool, ~80% of the fast majority error.
+  Fix: fail fast, cap per-client thread share (~25%), and tighten the deadline.
+- **"Rate limiting vs. load shedding vs. backpressure?"** Rate limiting = static **policy/quota**;
+  load shedding = dynamic reaction to **saturation**; backpressure = **slow the upstream**. A
+  limiter under quota won't fire while the box melts — shedding will.
+- **"Is your scheduler work-conserving, and should it be under overload?"** Work-conserving never
+  idles while work waits (max utilization); under overload you *want* **non-work-conserving**
+  admission control that deliberately holds work back to protect goodput.
+- **"Write the jitter / adaptive-throttle / gradient formulas."** Full jitter
+  `random(0, min(cap, base·2^n))`; client throttle `max(0, (req − 2·acc)/(req+1))`;
+  gradient limit `limit·(RTT_noload/RTT_actual) + √limit`.
+- **"How do you recover an already-collapsed, crash-looping fleet?"** Drop traffic to ~1% and ramp
+  slowly, disable retries, kill queries-of-death and batch load, warm capacity caches, separate
+  liveness from readiness; add capacity only after the loop is broken.
 
 ## References
 
@@ -415,6 +766,21 @@ same decision as everywhere else.
   Project Reactor `onBackpressure*` operators.
 - RFC 9293 (TCP) — receive window / flow control (distinct from congestion control).
 - AWS Well-Architected Framework, Reliability pillar — throttling and load-shedding guidance.
+- Bronson, Aghayev, Charapko, Zhu, "Metastable Failures in Distributed Systems," **HotOS 2021**;
+  Marc Brooker's metastability commentary (brooker.co.za, 2021) — trigger vs. sustaining loop.
+- AWS, "Summary of the Amazon DynamoDB Service Disruption... Sept 20 2015"
+  (aws.amazon.com/message/5467D2) — metastable/shedding + control-plane-starvation case study.
+- Ben Maurer, "Fail at Scale," **ACM Queue / Comm. ACM 2015** — CoDel (5 ms target / 100 ms
+  interval, M/N dual timeout) and adaptive LIFO ⊕ CoDel.
+- Google, *Site Reliability Engineering*, Ch. 6 "Monitoring Distributed Systems" (four golden
+  signals incl. saturation) and Ch. 22 "Addressing Cascading Failures" (resource-exhaustion modes,
+  GC death spiral, deadline/cancellation propagation, bimodal thread-exhaustion example, queue
+  sizing, cold caches, N+2, 1%-ramp recovery, 60-retries/min).
+- AWS Builders' Library: "Timeouts, retries, and backoff with jitter" (Marc Brooker) — full /
+  equal / decorrelated jitter formulas and retry token bucket.
+- RFC 8033 (PIE), RED/WRED and ECN (RFC 3168) — the AQM family; RFC 7540 (HTTP/2 flow-control
+  windows, `WINDOW_UPDATE`, 64 KB initial window).
+- Apache Kafka docs — `max.poll.records`, `max.poll.interval.ms`, consumer `pause()`/`resume()`.
 - Cross-references: `reliability-ops/retries-timeouts-and-backoff`,
   `reliability-ops/circuit-breakers-and-bulkheads`,
   `reliability-ops/graceful-degradation-and-fallbacks`,

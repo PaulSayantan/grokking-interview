@@ -941,3 +941,597 @@ questions:
       single active primary writes, giving simpler consistency at the cost of idle
       standby capacity.
     ref: "concepts.md#active-active-vs-active-passive-standby-models"
+
+  - id: redundancy-failover-and-health-checks-051
+    difficulty: expert
+    tags: [gray-failure, differential-observability, scenario]
+    question: |
+      A single instance has a failing NIC dropping ~5% of packets. Its /healthz probe
+      returns 200 in under a millisecond and fleet-average metrics look normal, yet a
+      subset of clients see timeouts and elevated errors. What is this, and why did the
+      health check miss it?
+    options:
+      - "Gray failure: the instance's self-report only tests the cheap local path, so it reports healthy while clients experience the degraded path"
+      - "A deep-check cascade; the health check was too shallow to detect the DB"
+      - "Split-brain; two instances are both serving the same partition"
+      - "A death spiral; the LB removed too many nodes at once"
+    answer: 0
+    explanation: |
+      This is gray failure — a partial degradation that the component's own health
+      check cannot see because its self-view says "fine." Differential observability
+      captures it: the system says healthy, aggregate metrics dilute the pain, but
+      clients see errors. Self-report probes are structurally blind to gray failure.
+    ref: "concepts.md#gray-failure-and-differential-observability"
+
+  - id: redundancy-failover-and-health-checks-052
+    difficulty: expert
+    tags: [gray-failure, evacuation, judgment]
+    question: |
+      One AZ is showing client-observed latency and error degradation, but you can't
+      yet pinpoint which component is at fault. What is the best first action?
+    options:
+      - "Deploy a more aggressive deep health check to every instance in that AZ"
+      - "Wait until monitoring identifies the exact failing instance before acting"
+      - "Restart every instance in the AZ to clear the condition"
+      - "Evacuate traffic away from the AZ first (e.g. zonal shift), then root-cause at leisure"
+    answer: 3
+    explanation: |
+      For gray failure the rule is "evacuate, don't diagnose." Shifting traffic away
+      from the impaired fault domain is fast and reversible, whereas pinpointing the
+      exact degraded component can take far longer than the outage should. Diagnose
+      after you've stopped the customer pain — this is exactly what zonal shift is for.
+    ref: "concepts.md#gray-failure-and-differential-observability"
+
+  - id: redundancy-failover-and-health-checks-053
+    difficulty: advanced
+    tags: [gray-failure, observability, sli]
+    question: |
+      Which monitoring signal is MOST likely to catch a gray failure that per-instance
+      self-health-checks miss?
+    options:
+      - "Client-observed success rate and latency (client-side SLIs / full-path canaries)"
+      - "The instance's own /healthz endpoint polled more frequently"
+      - "CPU utilization averaged across the whole fleet"
+      - "The count of running processes on each host"
+    answer: 0
+    explanation: |
+      Gray failure lives in the gap between what a component says about itself and what
+      clients actually experience. Instrumenting success/latency from the caller's
+      perspective (and comparing each node against its peers for outliers) surfaces the
+      degradation that any self-report — however frequent — will keep reporting as healthy.
+    ref: "concepts.md#gray-failure-and-differential-observability"
+
+  - id: redundancy-failover-and-health-checks-054
+    difficulty: expert
+    tags: [fencing-token, distributed-lock, gc-pause]
+    question: |
+      A client acquires a lock lease, then suffers a GC pause longer than the lease TTL.
+      The lock service grants the lock to a second client. The first client wakes up and
+      writes, corrupting data despite "holding" the lock. What mechanism prevents this?
+    options:
+      - "A monotonic fencing token attached to every write, which the storage layer rejects if lower than the highest token already seen"
+      - "A shorter lease TTL so the pause never exceeds it"
+      - "STONITH power-cycling the paused client"
+      - "Retrying the write with exponential backoff"
+    answer: 0
+    explanation: |
+      A lease is just a timeout guess; a long GC pause violates it, producing two lock
+      holders. The fix is a strictly-increasing fencing token issued per grant. The
+      storage server remembers the highest token and rejects the woken-up client's stale
+      (lower) token — the resource, not the lock, is the final arbiter. Shortening the
+      TTL only makes the race MORE likely.
+    ref: "concepts.md#fencing-tokens-vs-stonith"
+
+  - id: redundancy-failover-and-health-checks-055
+    difficulty: advanced
+    tags: [fencing-token, stonith, distinction]
+    question: |
+      What is the key difference between STONITH and a fencing token?
+    options:
+      - "They are two names for the same technique"
+      - "STONITH fences at the node level (kill/power-off the box); a fencing token fences at the resource level (the downstream rejects stale writers)"
+      - "STONITH is for stateless services; fencing tokens are for load balancers"
+      - "A fencing token restarts the old primary while STONITH promotes the new one"
+    answer: 1
+    explanation: |
+      STONITH prevents a NODE from acting by forcibly killing it (needs out-of-band
+      power/IPMI). A fencing token prevents a stale WRITE from landing by having the
+      resource server reject old tokens — it works even when you can't kill the sender.
+      They are complementary: node-level vs resource-level fencing.
+    ref: "concepts.md#fencing-tokens-vs-stonith"
+
+  - id: redundancy-failover-and-health-checks-056
+    difficulty: expert
+    tags: [redlock, fencing-token, distributed-lock]
+    question: |
+      Kleppmann's central critique of the Redlock algorithm for correctness-critical
+      locking is that it:
+    options:
+      - "Uses too many Redis nodes, increasing cost"
+      - "Cannot be used with more than one client"
+      - "Requires synchronized atomic clocks on every node"
+      - "Provides mutual exclusion but issues no fencing token, so it cannot defend against GC pauses or clock skew that outlast a lease"
+    answer: 3
+    explanation: |
+      Redlock gives mutual exclusion under timing assumptions but hands out no monotonic
+      fencing token, so it has no defense against a paused/skewed client that wakes up
+      and writes after its lease expired. Correctness that depends on timing guarantees
+      isn't safe; you need a token the storage layer enforces.
+    ref: "concepts.md#fencing-tokens-vs-stonith"
+
+  - id: redundancy-failover-and-health-checks-057
+    difficulty: expert
+    tags: [static-stability, control-plane, scenario]
+    question: |
+      Your AZ-failure runbook says "when an AZ fails, auto-scale the surviving AZs to
+      cover the load." Why is this fragile at staff level?
+    options:
+      - "Auto-scaling is cheaper than pre-provisioning, so it wastes no money"
+      - "Auto-scaling cannot cross AZ boundaries"
+      - "It depends on the control plane (launch APIs, spare capacity, warm-up) exactly when that control plane is most likely impaired and capacity is contended"
+      - "Health checks stop working during scaling events"
+    answer: 2
+    explanation: |
+      Reacting to a failure by scaling puts a control-plane dependency on your critical
+      recovery path at the worst moment — during a large correlated event when launch
+      APIs may be degraded and everyone is contending for capacity. Static stability
+      says pre-provision the survivors so failover is a data-plane action needing no
+      changes.
+    ref: "concepts.md#static-stability"
+
+  - id: redundancy-failover-and-health-checks-058
+    difficulty: advanced
+    tags: [static-stability, headroom, capacity]
+    question: |
+      To be statically stable across 3 AZs (survive losing any one AZ with no scaling),
+      at roughly what per-AZ utilization should you run in steady state?
+    options:
+      - "100% — the other AZs will scale up automatically"
+      - "≤ ~33% (1/3)"
+      - "~90%, leaving a small buffer"
+      - "≤ ~67% (2/3), so the two surviving AZs already have capacity for the full load"
+    answer: 3
+    explanation: |
+      Losing 1 of 3 AZs leaves 2 to carry 100%, so each AZ must run at ≤ (N−k)/N = 2/3
+      ≈ 67% to absorb the failed AZ using capacity it already has — no control-plane
+      scaling required. The deliberate cost is idle headroom in steady state.
+    ref: "concepts.md#static-stability"
+
+  - id: redundancy-failover-and-health-checks-059
+    difficulty: intermediate
+    tags: [static-stability, definition]
+    question: |
+      What does "static stability" mean for a resilient system?
+    options:
+      - "The system keeps working during a failure without needing to make any changes — no scaling, no control-plane calls — because the needed capacity is already provisioned"
+      - "The system never changes its configuration in production"
+      - "The system uses static IP addresses instead of DNS"
+      - "The system runs at a fixed, unchanging request rate"
+    answer: 0
+    explanation: |
+      Static stability is the property of surviving a failure with no reactive changes:
+      everything required to absorb the failure is already running before it happens.
+      It matters because the control plane is often impaired during the very event you're
+      trying to survive, so depending on it for recovery is risky.
+    ref: "concepts.md#static-stability"
+
+  - id: redundancy-failover-and-health-checks-060
+    difficulty: expert
+    tags: [shuffle-sharding, blast-radius, combinatorics]
+    question: |
+      With shuffle sharding across 100 nodes and a shard size of 5, roughly how many
+      distinct node combinations are possible, and why does that number matter?
+    options:
+      - "500 combinations — enough to give each customer a unique pair"
+      - "~75 million combinations — so any two customers overlap on very few nodes, near-totally isolating a poison-pill request to one customer's shard"
+      - "100 combinations — one per node"
+      - "5 combinations — one per shard slot"
+    answer: 1
+    explanation: |
+      C(100,5) ≈ 75 million. Because each customer gets a random combination, the chance
+      two customers share the exact same 5 nodes is ~1 in 75M, and meaningful overlap is
+      vanishingly rare. A poison-pill request therefore damages at most a small fraction
+      of other customers instead of the whole fleet.
+    ref: "concepts.md#cell-based-architecture-and-shuffle-sharding"
+
+  - id: redundancy-failover-and-health-checks-061
+    difficulty: expert
+    tags: [cell-based, shuffle-sharding, poison-pill, judgment]
+    question: |
+      Your service is fully replicated across 3 AZs, yet a single malformed "poison-pill"
+      request from one customer crashes every instance that handles it. Why doesn't AZ
+      redundancy help, and what does?
+    options:
+      - "AZ redundancy handles logical failures too; just add a 4th AZ"
+      - "Switch to a single AZ so the crash is contained"
+      - "Increase the health-check frequency so crashed instances are removed faster"
+      - "AZ redundancy only isolates infrastructure failures — the bad request replicates to every AZ. Cell-based architecture and shuffle sharding limit the logical blast radius"
+    answer: 3
+    explanation: |
+      AZ/region redundancy isolates infrastructure faults, but a poison-pill/logical fault
+      travels with the request to every redundant copy. Cells (isolated stacks per customer
+      subset) cap blast radius to one cell; shuffle sharding gives each customer a random
+      node combination so the bad request only hits that combination.
+    ref: "concepts.md#cell-based-architecture-and-shuffle-sharding"
+
+  - id: redundancy-failover-and-health-checks-062
+    difficulty: advanced
+    tags: [cell-based, blast-radius, isolation]
+    question: |
+      In cell-based architecture, what is a "cell" and what does it bound?
+    options:
+      - "A single database row locked during a transaction"
+      - "A cache entry that expires after a fixed TTL"
+      - "A fully-isolated complete stack serving a subset of customers, bounding blast radius to that cell's customers instead of the whole fleet"
+      - "A network subnet shared by all services in a region"
+    answer: 2
+    explanation: |
+      A cell is an independent, complete stack (its own compute/storage/queues) serving a
+      partition of customers, with a thin routing layer mapping customers to cells. A cell
+      failure — including a poison-pill bug — affects only that cell's customers, so blast
+      radius is 1/(number of cells). Cells are size-capped and tested at max size.
+    ref: "concepts.md#cell-based-architecture-and-shuffle-sharding"
+
+  - id: redundancy-failover-and-health-checks-063
+    difficulty: expert
+    tags: [swim, failure-detection, indirect-ping]
+    question: |
+      In SWIM, when a node's direct ping to a target gets no ack, it does NOT immediately
+      declare the target dead. What does it do instead, and why?
+    options:
+      - "It immediately gossips the target as confirmed dead"
+      - "It asks k random helper nodes to each send an indirect ping-req to the target, so a single bad network path doesn't cause a false positive"
+      - "It waits one full second and retries the same direct ping"
+      - "It floods every node in the cluster with a ping to the target"
+    answer: 1
+    explanation: |
+      A single dropped packet or one bad path between two nodes shouldn't mean "dead."
+      SWIM asks k random helpers to each ping-req the target on its behalf; only if the
+      direct ping AND all k indirect paths fail does it move the target to "suspect." This
+      guards against false positives from a single degraded link.
+    ref: "concepts.md#swim-gossip-based-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-064
+    difficulty: expert
+    tags: [swim, incarnation-number, refutation]
+    question: |
+      In SWIM, what is the purpose of a node's monotonically increasing "incarnation
+      number"?
+    options:
+      - "It counts how many times the node has restarted for billing"
+      - "It orders writes for consistency across replicas"
+      - "It is the node's position in the consistent-hash ring"
+      - "It lets a wrongly-suspected node refute the suspicion by re-broadcasting 'alive' with a higher incarnation, which overrides the stale 'suspect' everywhere"
+    answer: 3
+    explanation: |
+      SWIM ejects nodes via alive → suspect → confirm, gossiping the suspicion first so
+      the target can defend itself. A node that hears itself suspected re-broadcasts
+      "alive" with a higher incarnation number; since higher incarnations win, this clears
+      the stale suspicion cluster-wide and prevents transient blips from flapping nodes out.
+    ref: "concepts.md#swim-gossip-based-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-065
+    difficulty: advanced
+    tags: [swim, scalability, gossip]
+    question: |
+      Why does SWIM scale failure detection to very large clusters where all-to-all
+      heartbeating does not?
+    options:
+      - "It separates detection from dissemination and uses randomized probing, giving O(1) probes per node instead of O(n²) messages"
+      - "It uses TCP instead of UDP, which never drops packets"
+      - "It requires every node to ping every other node twice per second"
+      - "It disables failure detection above 1,000 nodes"
+    answer: 0
+    explanation: |
+      All-to-all heartbeating is O(n²) and collapses at scale. SWIM decouples the failure
+      detector (decides "is X alive?") from the gossip layer (spreads membership changes),
+      and each node probes only one random peer per period (plus k helpers on failure), so
+      per-node load stays constant regardless of cluster size.
+    ref: "concepts.md#swim-gossip-based-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-066
+    difficulty: expert
+    tags: [dns-failover, ttl, scenario]
+    question: |
+      You must fail traffic away from a bad AZ within 60 seconds. Why is DNS-based
+      failover (with a 60s TTL) a poor choice, and what fits better?
+    options:
+      - "DNS is fine — a 60s TTL guarantees 60s failover"
+      - "ISP/corporate resolvers and client-side caches routinely ignore low TTLs, so real failover lags to minutes/hours; use LB-level rerouting, anycast, or zonal shift instead"
+      - "DNS can't return more than one IP address"
+      - "DNS failover requires a full application redeploy"
+    answer: 1
+    explanation: |
+      DNS TTL is a hint, not a contract: resolvers and client/JVM caches frequently honor
+      it poorly (some pin IPs for a connection's life), so a long tail of clients takes
+      minutes to hours to fail over — nowhere near 60s. LB VIP rerouting, anycast (BGP
+      reconvergence), and zonal shift don't depend on DNS caches expiring.
+    ref: "concepts.md#dns-based-failover-and-ttl-traps"
+
+  - id: redundancy-failover-and-health-checks-067
+    difficulty: advanced
+    tags: [dns-failover, negative-caching, recovery]
+    question: |
+      Beyond delaying failover, how does DNS caching also hurt RECOVERY after you've
+      fixed an endpoint?
+    options:
+      - "It permanently deletes the old record"
+      - "It doubles the TTL automatically on recovery"
+      - "Negative caching (and cached old answers) means resolvers keep serving the stale/absent answer after the fix, so recovery also lags"
+      - "It forces all clients to re-resolve instantly"
+    answer: 2
+    explanation: |
+      Caching cuts both ways: a resolver that cached "no answer" or the old IP keeps
+      serving it even after you've restored the endpoint, so clients see the fixed state
+      later than you'd expect. The same TTL/resolver behavior that slows failover also
+      slows failback/recovery.
+    ref: "concepts.md#dns-based-failover-and-ttl-traps"
+
+  - id: redundancy-failover-and-health-checks-068
+    difficulty: advanced
+    tags: [anycast, dns-failover, alternatives]
+    question: |
+      Why can anycast reroute traffic away from a failed site WITHOUT depending on DNS
+      TTLs or client caches?
+    options:
+      - "Anycast changes the DNS record faster than unicast"
+      - "Anycast disables client-side DNS caching globally"
+      - "Anycast uses a separate TTL that is always 1 second"
+      - "The same IP is announced from many locations, so BGP reconverges to a healthy site with no DNS change and no client re-resolution needed"
+    answer: 3
+    explanation: |
+      With anycast the destination IP is constant and advertised from multiple sites; when
+      one site fails, BGP routing simply reconverges to another site announcing that IP.
+      Clients never need to re-resolve the name, so no DNS cache or TTL sits on the
+      critical path — a key advantage over DNS-based failover.
+    ref: "concepts.md#dns-based-failover-and-ttl-traps"
+
+  - id: redundancy-failover-and-health-checks-069
+    difficulty: advanced
+    tags: [zonal-shift, evacuation, static-stability]
+    question: |
+      Zonal shift lets you evacuate an impaired AZ with one action. What precondition
+      must hold for it to be SAFE?
+    options:
+      - "You must be statically stable across AZs — the surviving AZs already have the capacity to absorb the evacuated AZ's load"
+      - "The impaired AZ must first be fully diagnosed"
+      - "The service must run in exactly two AZs"
+      - "DNS TTLs must be set to zero"
+    answer: 0
+    explanation: |
+      Zonal shift is only the action of moving traffic off an AZ; it's safe only if the
+      remaining AZs can already carry the full load without scaling (the (N−k)/N headroom
+      rule). Static stability is the precondition; zonal shift is the mechanism that acts
+      on it — and it doesn't require diagnosing the impaired AZ first.
+    ref: "concepts.md#zonal-shift-and-evacuating-an-impaired-az"
+
+  - id: redundancy-failover-and-health-checks-070
+    difficulty: intermediate
+    tags: [zonal-shift, autoshift, mechanism]
+    question: |
+      What does "zonal autoshift" add beyond a manually triggered zonal shift?
+    options:
+      - "It automatically scales up every AZ during normal operation"
+      - "It lets the cloud provider trigger the AZ evacuation automatically based on its internal telemetry, without waiting for you to notice"
+      - "It permanently removes an AZ from your account"
+      - "It replaces the need for multiple AZs entirely"
+    answer: 1
+    explanation: |
+      A manual zonal shift is you issuing start-zonal-shift --away-from. Autoshift delegates
+      the trigger to the provider, which shifts traffic off an AZ automatically when its
+      internal signals indicate impairment — catching gray-failing zones faster than a human
+      reacting to client complaints.
+    ref: "concepts.md#zonal-shift-and-evacuating-an-impaired-az"
+
+  - id: redundancy-failover-and-health-checks-071
+    difficulty: expert
+    tags: [alb, health-check-defaults, detection-time]
+    question: |
+      Using ALB target-group defaults (interval 30s, timeout 5s, unhealthy threshold 2),
+      roughly how long until a dead target is marked unhealthy, and how do you make a
+      busy-but-alive node LESS likely to be wrongly evicted?
+    options:
+      - "~5s; lower the interval to 1s"
+      - "~2s; disable the health check"
+      - "~65s (30×2 + 5); raise the timeout and/or unhealthy threshold above your worst-case GC pause / p99 stall"
+      - "~300s; shorten the deregistration delay"
+    answer: 2
+    explanation: |
+      Detection ≈ interval × unhealthy-threshold + timeout ≈ 30×2 + 5 ≈ 65s. To avoid
+      evicting a slow-but-alive node, widen the timeout and/or require more consecutive
+      failures so a transient stall (GC pause, p99 spike) doesn't trip removal. This is the
+      concrete knob behind the false-positive vs detection-latency trade-off.
+    ref: "concepts.md#load-balancer-health-check-defaults-and-the-detection-time-budget"
+
+  - id: redundancy-failover-and-health-checks-072
+    difficulty: advanced
+    tags: [alb, fail-open, death-spiral]
+    question: |
+      The ALB documentation states what specific fail-open behavior?
+    options:
+      - "If a target fails one health check, the LB immediately opens a new target"
+      - "The LB opens additional listener ports when overloaded"
+      - "The LB opens the security group to all inbound traffic on failure"
+      - "If all targets fail health checks at the same time in all enabled AZs, the load balancer fails open and routes to all targets"
+    answer: 3
+    explanation: |
+      ALB's documented fail-open: when every target across all enabled AZs is failing
+      simultaneously, the LB treats that as "the check is wrong, not the whole fleet
+      dead" and routes to all targets. This is the death-spiral defense built into the
+      product — mass simultaneous unhealthy almost always means overload/check error.
+    ref: "concepts.md#load-balancer-health-check-defaults-and-the-detection-time-budget"
+
+  - id: redundancy-failover-and-health-checks-073
+    difficulty: expert
+    tags: [prestop, graceful-shutdown, sizing]
+    question: |
+      To eliminate connection-refused errors during rolling deploys, how should you size
+      the preStop sleep relative to the LB's health-check timing?
+    options:
+      - "preStop sleep should be as short as possible, ideally 0s"
+      - "preStop sleep should equal the terminationGracePeriodSeconds exactly"
+      - "preStop sleep should be ≥ LB health-check-interval × unhealthy-threshold, so the LB observes the target as unready before the process closes its listener"
+      - "preStop timing is irrelevant if SIGTERM is handled"
+    answer: 2
+    explanation: |
+      The LB needs interval × unhealthy-threshold to notice the target went unready. If the
+      process closes its socket before that, in-flight/new requests get refused. Sizing the
+      preStop sleep to at least that window (e.g. ~15–20s for a 5s×3 check) lets the LB drain
+      the target first — the highest-value fix for deploy-time 5xx spikes.
+    ref: "concepts.md#load-balancer-health-check-defaults-and-the-detection-time-budget"
+
+  - id: redundancy-failover-and-health-checks-074
+    difficulty: expert
+    tags: [lease, leader-election, clock-skew]
+    question: |
+      A lease-based leader believes its lease is still valid and keeps writing, but the
+      lease service already expired it and elected a successor. What is the usual root
+      cause, and what defends the data?
+    options:
+      - "The lease was too long; only shortening it can help"
+      - "The successor was elected by a minority partition; add more replicas"
+      - "The load balancer routed to both leaders; fix the LB"
+      - "Clock skew (or a GC pause) between leader and lease service creates a two-leader window; a monotonic fencing token enforced at the resource rejects the stale ex-leader's writes"
+    answer: 3
+    explanation: |
+      If the leader's clock runs behind the lease service (or a GC pause delays its renewal
+      check), it can think it still holds a lease that has actually expired — a two-leader
+      window. A lease bounds normal handoff but can't cover this; a fencing token that the
+      storage layer enforces rejects the stale leader's writes. Use monotonic clocks for
+      elapsed-time and pair lease + token.
+    ref: "concepts.md#lease-based-leader-election-and-clock-skew"
+
+  - id: redundancy-failover-and-health-checks-075
+    difficulty: advanced
+    tags: [lease, leader-election, renewal]
+    question: |
+      Why must a lease-holding leader renew its lease well BEFORE the lease's expiry time
+      rather than right at it?
+    options:
+      - "To account for network round-trip time, so there's no window where the lease expires and a successor is elected while the old leader still thinks it leads"
+      - "To reduce CPU usage on the leader"
+      - "Because leases cannot be renewed after 50% of their duration"
+      - "To keep the lease duration secret from other nodes"
+    answer: 0
+    explanation: |
+      Renewal isn't instant — the request takes a round trip. If the leader waits until the
+      exact expiry to renew, network delay can push the lease past expiry before the renewal
+      lands, letting the service elect a successor while the old leader still believes it
+      leads. Renewing early leaves margin so leadership never gaps.
+    ref: "concepts.md#lease-based-leader-election-and-clock-skew"
+
+  - id: redundancy-failover-and-health-checks-076
+    difficulty: expert
+    tags: [two-node, quorum, split-brain, judgment]
+    question: |
+      A colleague proposes a 2-node cluster for a stateful primary "because two is
+      redundant." What is the precise problem?
+    options:
+      - "Two nodes cost more than three, so it's just wasteful"
+      - "Two nodes have no possible majority, so a partition forces a choice between split-brain (both act) and losing availability (neither can act) — you get neither safety nor HA"
+      - "Two nodes can't replicate data between each other"
+      - "Two nodes require synchronous replication which is too slow"
+    answer: 1
+    explanation: |
+      With 2 nodes, a 1–1 partition leaves no side with ⌊2/2⌋+1 = 2 votes. Either you let a
+      lone node act (split-brain risk) or require both to agree (the survivor can't act when
+      its peer dies). Minimum safe voting membership is 3; a 2-node pair needs a witness in a
+      third failure domain.
+    ref: "concepts.md#two-node-clusters-and-quorum-edge-cases"
+
+  - id: redundancy-failover-and-health-checks-077
+    difficulty: expert
+    tags: [quorum, even-cluster, fault-tolerance]
+    question: |
+      Compared to a 3-node quorum cluster, how many MORE node failures can a 4-node quorum
+      cluster tolerate?
+    options:
+      - "One more (2 instead of 1)"
+      - "Zero more — a 4-node cluster needs 3 for majority, so it still tolerates only 1 failure, just like 3 nodes"
+      - "Two more (3 instead of 1)"
+      - "It tolerates fewer failures than 3 nodes"
+    answer: 1
+    explanation: |
+      Majority of 4 is 3, so a 4-node cluster tolerates only ⌊(4−1)/2⌋ = 1 failure — the
+      same as 3 nodes, at higher cost. Even counts waste a node; you must go to 5 to tolerate
+      2. This is why quorum clusters always use odd counts.
+    ref: "concepts.md#two-node-clusters-and-quorum-edge-cases"
+
+  - id: redundancy-failover-and-health-checks-078
+    difficulty: expert
+    tags: [quorum, witness, failure-domain, scenario]
+    question: |
+      You run a database across two data AZs and add a witness for quorum. Where should
+      the witness go so that losing EITHER data AZ keeps the cluster available?
+    options:
+      - "In the same AZ as the primary, for lowest latency"
+      - "On the same host as one of the data nodes"
+      - "It doesn't matter where the witness runs"
+      - "In a third AZ (or region), so a surviving data AZ plus the witness always forms a majority regardless of which data AZ fails"
+    answer: 3
+    explanation: |
+      A witness co-located with one data AZ provides no majority if that AZ is the one that
+      fails. Placing it in a third failure domain means the surviving data AZ + witness = 2
+      of 3 votes no matter which data AZ dies, preserving availability. Tiebreakers must live
+      in an independent failure domain.
+    ref: "concepts.md#two-node-clusters-and-quorum-edge-cases"
+
+  - id: redundancy-failover-and-health-checks-079
+    difficulty: expert
+    tags: [failure-detection, gc-pause, false-positive, numbers]
+    question: |
+      A detector heartbeats every 2s and marks a node dead after 3 missed beats (~6s
+      budget). In production, stop-the-world GC pauses reach 4s. What is the risk and the
+      fix?
+    options:
+      - "No risk; 6s comfortably exceeds a 4s pause"
+      - "The node will never be detected as dead; shorten the interval to 0.5s"
+      - "A 4s pause eats most of the 6s budget, risking false-positive failover during GC — raise the threshold above worst-case pause or use phi-accrual/adaptive detection"
+      - "GC pauses cannot affect heartbeats because they run in a separate thread"
+    answer: 2
+    explanation: |
+      A stop-the-world GC pause freezes heartbeat sending too, so a 4s pause consumes most
+      of the 6s budget and a slightly longer one triggers a needless failover of a healthy
+      node. Set the detection threshold safely above worst-case pause/p99 stall, or use an
+      adaptive detector (phi-accrual) that widens slack when the link is jittery.
+    ref: "concepts.md#heartbeats-and-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-080
+    difficulty: advanced
+    tags: [failback, reconciliation, split-brain]
+    question: |
+      After a split-brain incident where two primaries accepted divergent writes, what is
+      the realistic cost of reconciliation, and what does it imply for design?
+    options:
+      - "Reconciliation is automatic and free, so split-brain is harmless"
+      - "You simply restart both nodes and the data self-heals"
+      - "Divergent writes need last-writer-wins, vector clocks, or manual merge — and some systems can't reconcile at all — so it's better to FENCE to prevent split-brain than to repair it"
+      - "The load balancer merges the datasets during failback"
+    answer: 2
+    explanation: |
+      Reconciling conflicting writes is expensive and lossy: last-writer-wins drops data,
+      vector clocks need app-level merge logic, and some data can't be merged at all. Because
+      repair is so costly (or impossible), the design principle is to PREVENT split-brain via
+      quorum + fencing rather than plan to reconcile after it — and never auto-failback into
+      a possibly-diverged node.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-081
+    difficulty: advanced
+    tags: [health-check-taxonomy, dependency-check, best-practice]
+    question: |
+      Using the AWS Builders' Library health-check layers (liveness, local, dependency,
+      deep/anomaly), which layer should drive the LOAD BALANCER's remove-from-pool
+      decision, and which belongs to out-of-band monitoring?
+    options:
+      - "Dependency checks drive the LB; liveness goes to monitoring"
+      - "Deep/anomaly checks drive the LB; everything else is ignored"
+      - "Local/liveness checks drive the LB (so a shared-dependency blip can't empty the pool); dependency and deep/anomaly checks belong to out-of-band monitoring"
+      - "All four layers should be wired directly into the LB"
+    answer: 2
+    explanation: |
+      The LB check should test only local health (things a restart or pool-removal actually
+      fixes), so a shared-dependency blip doesn't fail every node at once. Dependency and
+      deep/anomaly checks — which compare against downstreams or the fleet — belong to
+      out-of-band monitoring and slow controllers, not the instant traffic-routing decision.
+    ref: "concepts.md#shallow-vs-deep-health-checks-the-deep-check-anti-pattern"

@@ -225,9 +225,14 @@ flowchart TD
 > [!WARNING]
 > **Ordering is a real decision.** Retry *outside* the breaker means each retry is a fresh
 > breaker-evaluated call — good, retries feed the breaker. Retry *inside* a per-call timeout
-> can blow your latency budget (N retries × timeout). A common safe stack in Resilience4j is
-> `Retry(CircuitBreaker(TimeLimiter(Bulkhead(call))))`, with the total retry budget capped so
-> worst-case latency stays bounded.
+> can blow your latency budget (N retries × timeout). The **canonical Resilience4j Spring Boot
+> aspect order** (outermost → innermost) is
+> **`Retry ▸ CircuitBreaker ▸ RateLimiter ▸ TimeLimiter ▸ Bulkhead ▸ call`**. The reasoning:
+> **Retry outermost** so each retry re-evaluates the breaker; **CircuitBreaker** next so it
+> short-circuits before you spend a rate-limiter permit or a bulkhead slot; **RateLimiter**
+> between breaker and timeout to shape throughput; **TimeLimiter** to bound the call's
+> duration; **Bulkhead innermost** so it sits closest to the resource it protects. Always cap
+> the total retry budget so worst-case latency stays bounded.
 
 ## Resilience4j and Hystrix
 
@@ -264,6 +269,19 @@ Equivalents exist across ecosystems: **Polly** (.NET), **gobreaker** / **sony/go
 (`outlierDetection` ejects unhealthy hosts — a breaker at the L7 proxy layer, applied per
 *upstream host* rather than per logical dependency).
 
+**Hystrix deprecation specifics & migration.** Hystrix has been in **maintenance mode since
+November 2018**. Its defaults were `circuitBreaker.requestVolumeThreshold = 20`,
+`circuitBreaker.errorThresholdPercentage = 50`, `circuitBreaker.sleepWindowInMilliseconds =
+5000`, over a rolling stats window `metrics.rollingStats.timeInMilliseconds = 10000` split
+into **10 buckets**. Two reasons it fell out of favor: (1) its **fixed 5 s sleep window with
+no adaptive backoff** meant a fleet would synchronize and re-probe a recovering dependency in
+lockstep, causing flapping — motivating jittered/adaptive windows; (2) the **thread-pool-per-
+command** isolation model is heavyweight versus Resilience4j's functional decorators, and
+Netflix concluded static thread-pool bulkheads went stale in an autoscaling world (hence
+their move to adaptive concurrency-limits). **Migration mapping:** `HystrixCommand` →
+`@CircuitBreaker` + `@Bulkhead` annotations (or the functional decorators); thread-pool
+isolation → `ThreadPoolBulkhead`, or better, an adaptive concurrency limiter.
+
 > [!INTERVIEW]
 > If asked "how would you add resilience to a service that fans out to five downstreams?":
 > a strong answer is **per-dependency bulkheads** (one slow dep can't starve the others) +
@@ -271,6 +289,239 @@ Equivalents exist across ecosystems: **Polly** (.NET), **gobreaker** / **sony/go
 > dep's p99** + **retries with backoff & jitter only on idempotent calls** + **fallbacks**
 > for the non-critical ones. Then mention you'd put breaker-trip and bulkhead-rejection on
 > a dashboard (observability) and load-test the failure modes with chaos injection.
+
+## Resilience4j Configuration Defaults (Reference)
+
+Interviewers probe whether you know the *actual* defaults — several are counter-intuitive
+and are the source of real production gotchas. The code sample above uses *tuned* values
+(2 s slow-call threshold, 5 s wait-in-open) that differ from the library defaults. The real
+Resilience4j defaults:
+
+| Parameter | Default | Note |
+|---|---|---|
+| `failureRateThreshold` | **50%** | Trip when ≥50% of calls in the window fail. |
+| `slowCallRateThreshold` | **100%** | Effectively *off* by default — you must lower it (e.g. 80) to enforce slow-call tripping. |
+| `slowCallDurationThreshold` | **60000 ms (60 s)** | A call slower than this counts as "slow"; the default is very lax and almost always needs tuning down. |
+| `minimumNumberOfCalls` | **100** | No rate is evaluated until 100 calls are recorded. |
+| `slidingWindowType` / `slidingWindowSize` | **COUNT_BASED / 100** | Last 100 outcomes. |
+| `permittedNumberOfCallsInHalfOpenState` | **10** | Trial calls admitted in HALF-OPEN. |
+| `waitDurationInOpenState` | **60 s** | Sleep window before HALF-OPEN. The `5 s` in the earlier snippet is a *tuned* value, not the default. |
+| `maxWaitDurationInHalfOpenState` | **0** | "Wait infinitely until all permitted trial calls complete." If a probe hangs and there is no time limiter, HALF-OPEN can get stuck. |
+| `automaticTransitionFromOpenToHalfOpenEnabled` | **false** | **Big gotcha:** by default there is *no* background thread moving OPEN → HALF-OPEN. The transition is evaluated *lazily on the next call*. If no traffic arrives, the breaker stays OPEN indefinitely even after the dependency heals. |
+
+Bulkhead defaults:
+
+| Bulkhead | Parameter | Default |
+|---|---|---|
+| **SemaphoreBulkhead** | `maxConcurrentCalls` | **25** |
+| | `maxWaitDuration` | **0** (reject immediately when full, don't block) |
+| **ThreadPoolBulkhead** | `maxThreadPoolSize` | **`Runtime.availableProcessors()`** |
+| | `coreThreadPoolSize` | **`availableProcessors() - 1`** |
+| | `queueCapacity` | **100** |
+| | `keepAliveDuration` | **20 ms** |
+
+> [!WARNING]
+> The `automaticTransitionFromOpenToHalfOpenEnabled = false` default explains a classic
+> incident: **"the breaker went OPEN and never recovered even though the dependency
+> healed."** With auto-transition off and near-zero traffic, nothing triggers the
+> OPEN → HALF-OPEN check, so the breaker sits OPEN forever. Fix: enable auto-transition
+> (spawns a scheduler thread) *or* ensure a steady trickle of probe traffic (e.g. a synthetic
+> health call) so the lazy transition fires.
+
+## The Full Resilience4j State Set
+
+The three-state CLOSED/OPEN/HALF-OPEN machine is the automatic core, but Resilience4j
+actually exposes **six** states — the extra three are manual/operational levers that matter
+for incident response and safe rollout:
+
+- **DISABLED** — the breaker always allows calls and records nothing (metrics off, tripping
+  off). A hard *bypass*: use when you must force traffic through regardless of health.
+- **FORCED_OPEN** — always rejects, records nothing. A manual **kill-switch**: during an
+  incident you can force-open the breaker to a known-bad dependency without waiting for the
+  rate threshold to trip it.
+- **METRICS_ONLY** — records outcomes and computes the failure/slow rates **but never
+  trips**. This is *shadow mode*: run it in production to observe what *would* happen and
+  tune your thresholds before you let the breaker actually enforce them.
+
+> [!TIP]
+> "How do you roll out a breaker safely on a critical path?" → start in **METRICS_ONLY** to
+> validate thresholds against real traffic, then flip to the enforcing CLOSED state once the
+> rates look sane. FORCED_OPEN is the incident-time manual trip; DISABLED is the emergency
+> bypass. Knowing these levers is a staff-level signal.
+
+## Little's Law and Sizing Bulkheads
+
+Bulkhead and thread-pool sizing is not guesswork — it is governed by **Little's Law**:
+
+```
+L = λ × W       concurrency = arrival-rate × latency
+```
+
+`L` is the average number of in-flight requests, `λ` the arrival rate, `W` the average
+time each request spends in the system. This is the quantitative backbone linking
+bulkhead size, thread-pool size, and adaptive concurrency limits.
+
+**Worked sizing example.** A dependency serves **500 req/s** at an average latency of
+**100 ms (0.1 s)**. Then `L = 500 × 0.1 = 50` concurrent calls. Your bulkhead / thread pool
+for this dependency must be **≥ 50** or you will queue and eventually reject healthy traffic
+even when the dependency is fine.
+
+**Worked cascading-failure example.** Service A has **200 request threads** and a **30 s**
+timeout on calls to B. If B hangs, each request to B parks a thread for 30 s. By Little's
+Law, the arrival rate that fully saturates the pool is `λ = L / W = 200 / 30 ≈ 6.7 req/s`.
+So **just ~7 req/s** to a hung B exhausts *all* 200 threads — and then A can serve *nothing*,
+including endpoints that never touch B. Contrast with **fail-fast**: an OPEN breaker returns
+in microseconds, so a thread is freed almost instantly and the effective `W` collapses,
+letting the same 200 threads absorb orders of magnitude more traffic. This is why the fix
+for a cascade is *less load* (shed / break), not *more capacity* — adding threads just feeds
+more concurrent load onto the sick dependency and slows its recovery.
+
+## Adaptive Concurrency Limits: The Dynamic Bulkhead
+
+A static thread-pool/semaphore bulkhead has a real weakness: the "right" size changes with
+load, instance size, and dependency latency, so **a static limit quickly goes out of date**
+in an autoscaling system. The modern successor — pioneered by Netflix's
+[`concurrency-limits`](https://github.com/Netflix/concurrency-limits) library — is a
+**self-tuning concurrency limit** that behaves like **TCP congestion control**: the
+concurrency limit is analogous to the TCP *congestion window*, probed upward when latency is
+healthy and pulled back when latency rises (the signal that a queue is forming).
+
+The theoretical target is again **Little's Law** (`limit ≈ avg RPS × avg latency`); the
+algorithms differ in how they detect congestion:
+
+- **Vegas** (delay-based, recommended server-side) — estimates the queue from RTT inflation:
+  `queue = limit × (1 − minRTT / sampleRTT)`. If the estimated queue is below a small `alpha`
+  (~2–3) it *increments* the limit; above `beta` (~4–6) it *decrements*. Delay-based, so it
+  reacts *before* it drives errors.
+- **Gradient2** — tracks the ratio of a short-window vs long-window latency EWMA; when short
+  latency diverges above long latency it multiplicatively decreases the limit (aggressive).
+  The dual-EWMA smoothing resists transient spikes (e.g. a single GC pause).
+- **AIMD** (loss-based, recommended client-side) — additive-increase / multiplicative-decrease
+  on errors/timeouts, mirroring classic TCP.
+
+Netflix's recommendation: **Vegas on the server** (it sees true queueing), **AIMD or a
+combined limiter on the client**. Robustness caveat: a latency spike from a GC pause or cold
+start is *noise*, not real congestion — mitigate with EWMA smoothing (Gradient2), a
+**minimum-limit floor**, and periodic **minRTT recalibration** so the baseline doesn't drift.
+
+> [!KEY-TAKEAWAY]
+> Netflix's own migration from **Hystrix (static thread-pool bulkheads) → adaptive
+> concurrency-limits** is the industry's most-cited "we outgrew static breakers/bulkheads"
+> story. A static pool is a fixed guess; an adaptive limit continuously re-derives the right
+> concurrency from live latency.
+
+## AWS's Contrarian View: Token Buckets over Stateful Breakers
+
+A senior candidate must be able to **argue both sides**. The AWS Builders' Library
+("Timeouts, retries, and backoff with jitter" and "Avoiding fallback in distributed
+systems") is notably **skeptical of client-side circuit breakers**. The core objection:
+a breaker adds a **mode that only activates under failure** — precisely the condition that
+is hardest to test — so it introduces **bimodal behavior** that can surprise you in the
+outage it was meant to handle. Fallbacks draw the same criticism: the fallback path is
+rarely exercised, so it may be broken or under-capacity exactly when you need it.
+
+AWS's preferred alternatives are **stateless** and self-limiting:
+
+- **Retry token bucket** — the client holds a bucket of retry tokens; each retry costs a
+  token and successes refill it slowly. When a dependency is broadly failing, the bucket
+  drains and retries *self-limit* — capping the retry amplification **without any stateful
+  breaker**. It bounds retries as a *fraction* of traffic rather than flipping a global mode.
+- **Retry with exponential backoff + jitter** — spreads retries in time so a fleet doesn't
+  synchronize into a retry storm.
+- **Server-side load shedding** — the server protects itself by rejecting excess work early,
+  rather than relying on every client to behave.
+
+The key contrast: **breaker = stateful, client-side, bimodal**; **token bucket = stateless,
+self-limiting, unimodal**. Both are legitimate; the interview signal is being able to defend
+either and to name *why* AWS leans away from stateful client breakers.
+
+> [!TIP]
+> The academic framing of the failure a breaker/token-bucket prevents is a **metastable
+> failure** (Bronson et al., HotOS 2021): a system that stays down via a sustaining feedback
+> loop (retries) *even after the original trigger has cleared*. The **DynamoDB / us-east-1
+> 2015** event is a canonical retry-storm cascade. This is why "remove the retries / add a
+> token bucket" can end an outage that "add capacity" cannot.
+
+## Brownout and Graceful Degradation
+
+A circuit breaker is **binary** — it either passes traffic or fails fast. A softer
+alternative is a **brownout**: instead of flipping to a hard OPEN, the service **sheds
+optional work first** so it degrades *continuously* rather than discontinuously. Under load
+it drops non-critical features, reduces fidelity (smaller result sets, cheaper ranking,
+skipping personalization), or serves cached/approximate answers — preserving the critical
+path while trimming the expensive parts.
+
+This connects to **static stability** (AWS): design so the system keeps serving its core
+function even when a dependency is unavailable, rather than having a single hard failure mode.
+Nygard frames graceful degradation as the complement to fail-fast: fail-fast stops the
+*bleeding*, brownout keeps the *core* alive. See
+`reliability-ops/graceful-degradation-and-fallbacks`.
+
+## Fail-Fast, Fail-Silent, and Fallback Modes
+
+"Failing fast" is not one behavior — name the distinction precisely:
+
+- **Fail-fast** — throw/reject *immediately* (an OPEN breaker). Converts a *hang* into a
+  fast *error*. Good for the caller's threads; bad for the end user unless paired with more.
+- **Fail-silent** — return an empty/default value silently instead of an error (e.g. an empty
+  recommendations list). The user sees a degraded-but-working experience.
+- **Fail-fast with fallback** — fail the primary path fast, then run an alternative (cache,
+  secondary region, default). This is the full graceful-degradation form.
+
+A bare breaker only converts **hang → error**; it does *not* by itself produce a good user
+experience. The fallback (silent default or alternate source) is what turns a fast failure
+into a *usable* degraded response. Choose fail-silent for non-critical enrichments, fail-fast
+(surface the error) for operations where a wrong/empty answer would be dangerous.
+
+## Sliding Window Internals
+
+The window that measures the failure/slow rate has real implementation trade-offs:
+
+- **Count-based (last N calls)** — a circular array of N outcomes with a *running total*
+  updated by "add-on-record, subtract-on-evict," giving an **O(1) snapshot** at **O(N)
+  memory**. Weakness: under **low traffic**, those N outcomes may span *minutes* — the rate
+  can reflect stale data from long ago and react slowly.
+- **Time-based (last N seconds)** — N per-second buckets, each aggregating
+  `(failed, slow, total, totalDuration)`; near-constant memory regardless of throughput.
+  Weakness: bounds staleness to N seconds, but a sudden **traffic spike over-weights the most
+  recent seconds**, so the rate can swing on a short burst.
+
+So the deeper trade-off is **staleness vs recency-bias**: count-based can be stale at low
+QPS; time-based bounds staleness but a spike dominates the recent buckets. Time-based is
+generally more predictable when traffic is highly variable, which is why it's often preferred
+for user-facing services.
+
+## Breaker Granularity and Cluster Coordination
+
+**Granularity / cardinality** is a design decision that interviewers push on:
+
+- **Per logical dependency** (one breaker for "service B") — simple, but too *coarse*: a
+  single bad *shard* or host inside B may not move the aggregate rate enough to trip, so the
+  breaker stays blind to partial degradation.
+- **Per endpoint/method** — finer; isolates a slow operation from a fast one on the same dep.
+- **Per instance/host of the dependency** — Envoy's `outlierDetection` works here, **ejecting
+  individual unhealthy upstream hosts** from the load-balancing pool. This beats a single
+  logical breaker when only *some* of B's hosts are bad (the "50% of shards degraded" case
+  that makes a logical breaker *flap* OPEN↔HALF-OPEN).
+- **Per key/tenant** — maximum isolation but explodes cardinality: each breaker sees so few
+  calls it never reaches `minimumNumberOfCalls`, so it can't trip meaningfully.
+
+**Shared vs isolated state across a cluster.** In-memory per-instance breakers mean **N
+instances each independently learn a dependency is bad** — and during recovery, all N probe
+it at roughly the same time, producing **N× the probe traffic** (a recovery-time retry storm).
+A shared/distributed (e.g. Redis-backed) breaker coordinates state but adds a dependency,
+latency, and its own failure mode on the resilience path. Most systems accept **per-instance
+breakers + mesh-level host ejection**, and stagger recovery with **jittered sleep windows** so
+500 instances don't all re-probe a recovering dependency in the same instant.
+
+**The HALF-OPEN thundering herd.** When a high-QPS breaker transitions to HALF-OPEN, many
+threads race to be among the `permittedNumberOfCallsInHalfOpenState`; and if
+`automaticTransitionFromOpenToHalfOpenEnabled` fires with no request-gating, a burst can hit a
+still-fragile dependency all at once. Mitigation: keep the permitted count small (~10) and
+re-probe with a *trickle*, plus jitter across instances. Note also: the recovery decision in
+HALF-OPEN is evaluated against `minimumNumberOfCalls` too — if fewer trial calls complete than
+the minimum, the rate isn't computed and the breaker won't decide, another reason a hung probe
+under `maxWaitDurationInHalfOpenState = 0` can wedge it.
 
 ## Common Anti-Patterns
 
@@ -311,6 +562,21 @@ Equivalents exist across ecosystems: **Polly** (.NET), **gobreaker** / **sony/go
 - *Is the breaker state shared across instances?* Usually per-instance (in-memory). A
   distributed/shared breaker is possible but adds a dependency and latency; most systems
   accept per-instance breakers plus mesh-level outlier detection for host ejection.
+- *Why does AWS lean away from client-side circuit breakers?* They add bimodal behavior — a
+  mode that only activates under failure and is therefore hard to test; AWS prefers stateless
+  self-limiting (retry token bucket + backoff/jitter) plus server-side load shedding. Be able
+  to defend both positions.
+- *The breaker went OPEN and never recovered though the dep healed — why?* Likely
+  `automaticTransitionFromOpenToHalfOpenEnabled = false` (the default) plus little/no traffic:
+  nothing fires the lazy OPEN → HALF-OPEN check. Enable auto-transition or send probe traffic.
+- *A dependency returns HTTP 200 but p99 latency crept from 50 ms to 8 s — an error-only
+  breaker never trips. Fix?* Add a slow-call-rate threshold + a tight timeout; an error-rate
+  breaker is blind to latency creep.
+- *At what request rate does a hung dep exhaust the pool?* By Little's Law with 200 threads
+  and a 30 s timeout, `λ = 200 / 30 ≈ 7 req/s` saturates everything. Size bulkheads the same
+  way: `limit = RPS × latency`.
+- *Adding capacity made the cascade worse — why?* More threads = more concurrent load on the
+  sick dependency = slower recovery. The fix is *less* load (shed/break), not more capacity.
 
 ## References
 
@@ -325,3 +591,9 @@ Equivalents exist across ecosystems: **Polly** (.NET), **gobreaker** / **sony/go
 - Envoy / Istio documentation — Circuit Breaking and Outlier Detection.
 - AWS Well-Architected Framework, Reliability Pillar — "Throttling requests" and
   "Fail fast and limit queues".
+- AWS Builders' Library — "Timeouts, retries, and backoff with jitter" (retry token bucket)
+  and "Avoiding fallback in distributed systems" (skepticism of stateful client breakers).
+- Netflix `concurrency-limits` — README on adaptive limits (Vegas, Gradient2, AIMD), the
+  TCP-congestion-window analogy, and Little's Law (github.com/Netflix/concurrency-limits).
+- Bronson et al., "Metastable Failures in Distributed Systems", HotOS 2021 — the academic
+  framing of retry-storm cascades that sustain an outage after the trigger clears.

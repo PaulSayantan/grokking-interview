@@ -149,6 +149,24 @@ Price price = Try.ofSupplier(decorated)
   the same database, network path, or auth service will fail at the same time
   (correlated failure) and provide no real protection.
 
+**Circuit-breaker ↔ fallback integration (mechanism detail).** The breaker and the
+fallback are two halves of one mechanism, and how they interact matters:
+- **Open state returns the fallback, it does not have to throw.** A breaker in the open
+  state can *directly return* a cached or default value with no attempt on the dependency
+  at all — this is the fast, cheap path that protects both caller and callee. (Azure's
+  Circuit Breaker guidance calls this returning a default/stale value from the open state.)
+- **Half-open must limit trial requests.** When the breaker probes recovery, it lets only
+  a small number of trial calls through. Without this cap, a recovering dependency gets
+  flooded the instant it comes back and trips the breaker straight open again — a
+  "recovery oscillation."
+- **Writes use journaling/replay, not a fabricated success.** The correct write-side
+  analogue of a fallback is to **record the write request while the breaker is open and
+  replay it on recovery** (a durable outbox/journal), preserving the state change instead
+  of pretending it happened.
+- **Accelerated circuit breaking.** If a response carries an explicit overload signal —
+  an HTTP `429`/`503` with a `Retry-After` header — trip *immediately* rather than waiting
+  for the normal error-count threshold, and honour the `Retry-After` as the open duration.
+
 ---
 
 ## The Risks of Fallbacks
@@ -195,6 +213,22 @@ see the next section.
 | Load amplification | Fallback calls origin → herd | Cache-only fallback; jittered refresh; request coalescing |
 | Wrong fail direction | Fail-open on authz = security hole | Choose fail-closed for security (next section) |
 
+**"How much fallback is too much?" — making fallback a first-class SLI.** Sharpen "alert
+on fallback rate" into two distinct alarms:
+- **Fallback activation rate** — treat it as an SLI in its own right and alert on it
+  crossing a *low* threshold, not a high one. A baseline of ~0.1% jumping to a few percent
+  already means a dependency is degraded even though end-user errors are still zero. The
+  threshold is deliberately sensitive because the whole point is to see what the error rate
+  hides.
+- **Cache-staleness age** — a *separate* alarm. A serve-stale fallback that is now serving
+  hours-old data is a different failure from the fallback merely firing: the fallback rate
+  can be flat while the age of what you're serving climbs unbounded. Alert on the age of
+  the last-known-good value independently.
+
+The **burn-rate mechanics** for these alerts (multi-window multi-burn-rate rules) belong to
+`observability`; the reliability requirement is *deciding that fallback activation and
+staleness age are things you must measure and page on.*
+
 ---
 
 ## Static Stability (AWS)
@@ -232,6 +266,29 @@ being unable to *change* things during a failure in exchange for continuing to *
 > recovery path. A "dynamically stable" design scales on demand, which is cheaper but bets
 > that the control plane and capacity are available exactly when the system is already
 > unhealthy — often a bad bet.
+
+**The concrete numbers (active-active across AZs).** The Builders' Library ("Static
+stability using Availability Zones," Becky Weiss) gives the canonical sizing: run the
+fleet across **≥3 Availability Zones and overprovision by 50%**, so each AZ normally runs
+at **~66% (2/3) of its load-tested capacity**. If one AZ is lost, its share redistributes
+to the two survivors, pushing each to ~100% — the fleet absorbs a full AZ failure **with
+zero control-plane scaling actions**. That is what "statically stable" buys you: the
+recovery is *already provisioned*, not requested mid-incident.
+
+**Why AZ-local (zonal) dependencies beat regional ones — the (2/3)^N argument.** Each
+network hop that fans out *regionally* has an independent chance of touching the impaired
+AZ. A request that makes **N** regional calls has only a **(2/3)^N** chance of dodging the
+bad AZ on every hop — at N=2 that is already **4/9 (~44%)**, worse than a coin flip, and it
+degrades fast as N grows. A **zonal design (zone-local calls staying inside one AZ)** keeps
+the odds at **2/3** regardless of N, because a request pinned to a healthy AZ never crosses
+into the impaired one. This is the architectural argument for AZ-affinity / cell-based,
+zone-local dependency graphs.
+
+**Active-standby static stability.** The active-active math above is one form; the other is
+**failing over to a *pre-existing* warm standby** — or **electing a new leader from members
+that already exist** — never "launch a replacement just in time." Provisioning the standby
+is a steady-state action; the failover itself must be a data-plane flip, not a
+control-plane build-out.
 
 Static stability is the *why* behind serving stale cache during a DB outage: it's not
 just a fallback, it's a deliberate posture where steady-state serving does not depend on
@@ -373,6 +430,226 @@ Design implications:
 
 ---
 
+## Constant Work and Bimodal Behavior
+
+**Bimodal (or multimodal) behavior is a named anti-pattern.** A system is *bimodal* when
+it has one behavior in steady state and a **different, more expensive behavior under
+stress or failure** — fast and cheap at 1x load, slow and resource-hungry at 2x. The
+danger is structural: the expensive second mode appears **precisely during an incident**
+and is the mode you exercise least, so it is the least trusted code exactly when you depend
+on it. The interviewer's tell for this is "your service is fine at 1x and falls over at
+2x — what property is missing?" The answer is *bimodality*: you have a second mode, and
+the fixes (constant work, static stability) exist to **eliminate the second mode**, not to
+make it faster.
+
+**The constant-work pattern.** The antidote to bimodal behavior is to **do the same amount
+of work regardless of input, load, or system state** — so behavior never changes between
+steady state and failure because there is no "failure mode" that costs more. When the
+worst case *is* the normal case, there is nothing to degrade to.
+
+**Canonical example — Amazon Route 53 health checking** (Builders' Library, "Reliability
+and constant work"). Route 53 aggregates *all* health-check states into a **fixed-size
+configuration** and **pushes the entire table to the data plane on a fixed cadence,
+regardless of how many health checks actually flipped.** Whether zero checks changed or
+ten thousand flipped simultaneously in a mass-failure event, the pushed payload and the
+work done are *identical*. The result: a large correlated failure produces **no extra
+control-plane work** — there is no load spike on the control plane at the exact moment the
+fleet is most stressed. Contrast the naive design ("push only the deltas"), which is cheap
+normally but generates a work avalanche precisely during a mass event — textbook bimodal
+behavior.
+
+**Why this is the deepest idea here.** Constant work is *degradation you never have to
+trigger*: the system already pays the worst-case cost continuously, so there is no
+mode-switch to get wrong, no cold path to exercise, and no thundering herd of "recompute
+everything now." It trades higher steady-state cost for the elimination of a failure mode.
+
+```mermaid
+flowchart TD
+    subgraph Bimodal["Bimodal (delta push)"]
+        E1[Few checks flip] --> W1[Small update]
+        E2[Mass failure event] --> W2[Huge update spike]
+    end
+    subgraph Constant["Constant work (full-table push)"]
+        E3[Few checks flip] --> W3[Full-table push]
+        E4[Mass failure event] --> W4[Full-table push - same size]
+    end
+```
+
+---
+
+## Avoiding Fallback: the Contrarian Thesis
+
+AWS's Builders' Library article **"Avoiding fallback in distributed systems" (Jacob
+Gabrielson)** argues something that sounds contradictory next to everything above: **you
+should usually try *not* to have a fallback at all.** A sharp interviewer will press this:
+*"AWS says avoid fallback, yet you just designed a fallback chain — reconcile that."*
+
+**The core argument.** A fallback is, by definition, a **cold, rarely-exercised code
+path**. It runs only when the primary has already failed — i.e. under the worst, most
+chaotic conditions, and almost never in testing or normal operation. So fallbacks
+routinely **do not work when finally called**: stale credentials, drifted schemas,
+untested capacity, latent bugs. The canonical Amazon retail story: a service kept a
+fallback to a *secondary* datastore for when the primary was unavailable. The fallback had
+never actually run under real load; when the primary genuinely failed, the untested
+fallback **also failed / behaved non-deterministically**, turning a partial outage into a
+worse one. A fallback is a bet that your least-tested code will perform flawlessly during
+your worst hour.
+
+**The recommended alternatives — prefer designs that don't *need* fallback:**
+1. **Improve the primary** so it doesn't fail in the first place (more availability, better
+   retries/timeouts) rather than papering over failure with a second path.
+2. **Fail fast and let the caller decide.** A clean, fast, typed error propagated to a
+   caller who has context is often better than a guessed value manufactured deep in the
+   stack. (Nygard's *Fail Fast* pattern.)
+3. **Push the risky work off the critical path** — pre-compute or make it asynchronous so a
+   failure there never blocks the live request.
+4. **Exercise the fallback in steady state so it is never cold** — the constant-work idea
+   again: if the "fallback" runs continuously (e.g. you always serve from a cache that is
+   always populated), it isn't a cold path and the objection evaporates.
+
+**The reconciliation (the answer that scores).** Prefer architectures that **don't need**
+fallback; treat every fallback as a liability to be justified. *If* a fallback is genuinely
+unavoidable, make it **hot** (exercised continuously in production, not cold), **tested**
+(chaos/fault-injection proves it), and **independent** (no shared infra with the primary).
+The fallback chains earlier in this doc are acceptable precisely because they satisfy those
+constraints — the serve-from-cache floor is hot and I/O-free, not a dusty secondary that
+wakes up once a year.
+
+---
+
+## Cache-as-Fallback: HTTP Staleness Semantics
+
+Serving stale cache is the workhorse fallback, and the HTTP standards name the exact
+behaviors — worth knowing precisely for CDN/edge questions.
+
+- **`stale-if-error`** (RFC 5861) — an explicit licence to **serve a stale cached response
+  when the origin returns an error (500/502/503/504) or is unreachable**, for a bounded
+  extra window. This *is* cache-as-fallback expressed as an HTTP directive: the CDN keeps
+  answering from its last-known-good copy while the origin is down.
+- **`stale-while-revalidate`** (RFC 5861) — serve the stale copy **immediately** to the
+  client and **refresh it in the background** for the next request. This is a *latency*
+  optimization for expired-but-usable content, distinct from `stale-if-error` (which is a
+  *failure* fallback). They compose: `Cache-Control: max-age=60, stale-while-revalidate=30, stale-if-error=86400`.
+- **`must-revalidate`** — the **opposite** directive: it *forbids* serving stale content;
+  once fresh lifetime expires the cache **must** revalidate with the origin and, if the
+  origin is unreachable, **return a 504** rather than a stale body. Use it for data where a
+  stale answer is worse than an error (correctness-critical), and be aware it removes your
+  serve-stale fallback by design.
+
+**Negative caching.** Cache the **absence or error** result — an NXDOMAIN, a 404, an empty
+result set — for a **short** TTL. This stops a *miss storm* (many clients repeatedly asking
+for something that isn't there, or retrying against an error) from hammering an
+already-struggling origin. The critical tuning: **keep negative TTLs short.** A long
+negative TTL will *pin a transient failure* — if you cache "not found / error" for an hour,
+you keep serving that failure for an hour after the origin recovered. Negative caching
+protects the origin; short TTLs stop it from prolonging the outage.
+
+---
+
+## Feature Flags and Kill Switches: the Degradation Control Surface
+
+Degradation is only useful if an operator can *actually trigger it in 30 seconds during an
+incident.* Feature flags and kill switches are that control surface.
+
+- **Kill switch** — a coarse, instant off-switch for a whole feature or dependency, flipped
+  **without a deploy**. It is the operator-driven way to shed an entire feature ("turn off
+  personalization now") when a dependency is melting down.
+- **Feature flag** — finer-grained and often *gradual* (percentage rollout, per-segment),
+  used both for release control and for dialing degradation up and down.
+
+**Requirements that make flags safe as a reliability tool:**
+- **Flags must fail to a safe last-known-good default.** Cache flag values locally so the
+  flag system being down does not disable your features; **new/risky features default
+  *off*** so a flag-read failure can never silently switch on untested behavior.
+- **Flag evaluation must be local and I/O-free on the hot path.** If reading a flag adds a
+  network call to *every* request, you have added a new dependency (and a new failure mode)
+  to the critical path — the opposite of resilience. Evaluate against a locally cached
+  ruleset.
+- **Flips must be fast, auditable, and reversible.** You need to flip in seconds, see *who*
+  changed *what* (audit trail for the incident timeline), and roll back instantly.
+
+Kill-switch **game days** — deliberately exercising the switches in production drills — are
+how you find out *before* the incident that the switch actually works. (Flag/deploy
+*tooling* lives in `devops-cicd`; here the concern is the *reliability* contract the flag
+system must meet.)
+
+---
+
+## Criticality: Google's Model and Propagation
+
+The T1/T2/T3 tiers above map onto Google's concrete **criticality** taxonomy (SRE Book,
+"Handling Overload"), which is worth naming precisely. Google defines four values, in
+decreasing order of protection:
+
+| Google value | Meaning | Rough tier here |
+|---|---|---|
+| **`CRITICAL_PLUS`** | Most protected; shedding causes serious user-visible impact | T1 |
+| **`CRITICAL`** | Default for production request traffic; shedding causes some user impact | T1/T2 |
+| **`SHEDDABLE_PLUS`** | Default for batch; tolerates minutes of unavailability | T2/T3 |
+| **`SHEDDABLE`** | Fully tolerant of frequent unavailability / partial results | T3 |
+
+Two subtleties that separate a senior answer from "we have three tiers":
+- **Criticality propagates automatically down the RPC chain.** A request carries its
+  criticality, and downstream calls it makes **inherit the caller's criticality by
+  default** (unless deliberately overridden). So a `CRITICAL_PLUS` user request keeps its
+  protection all the way down a 4-hop call chain — a middle-tier service does not need to
+  re-derive it, and load-shedding at hop 4 respects the priority set at hop 1. This is what
+  makes criticality-based shedding coherent across a distributed call graph.
+- **Criticality is orthogonal to latency sensitivity.** They are two independent axes.
+  *Search-as-you-type* is **highly sheddable** (dropping a keystroke's suggestions is
+  harmless) yet **extremely latency-critical** (a 300 ms suggestion is useless). Conversely
+  a nightly billing batch is `CRITICAL`-ish for correctness but latency-insensitive. Don't
+  conflate "can I drop it?" with "must it be fast?"
+
+---
+
+## Default-Value Traps
+
+A fallback default is a **semantic** decision, not just an availability one — the value you
+substitute is *interpreted* by downstream code, and a careless default can be catastrophic
+even though the request "succeeded":
+
+- **Empty list as "delete everything."** A fallback that returns an **empty entitlements /
+  permissions / cart list** can be read downstream as "the user has *no* entitlements" —
+  i.e. revoke everything, log everyone out, empty every cart. The famous incident shape:
+  *"the fallback returned an empty entitlement set and logged all users out."*
+- **Price or quantity of 0.** A default **price of 0** can trigger a free checkout; a
+  default **quantity/stock of 0** can flip everything to "out of stock." Zero is rarely an
+  inert default for money or inventory.
+- **Default "allow" on a permissions cache** is a fail-open breach (ties directly to
+  fail-closed for security).
+
+**Safe practice:**
+- Defaults should be **conservative and inert** — chosen so that if downstream
+  misinterprets them, the blast radius is minimal (e.g. "unknown / not-determined" rather
+  than "empty," a sentinel price that blocks checkout rather than 0).
+- **Tag the response as degraded.** Return an explicit marker ("this value is a fallback /
+  stale / degraded") so downstream code can distinguish **"known-empty"** from **"we don't
+  know"** and refuse to take destructive action on a guessed value. The distinction between
+  *absence of data* and *data confirming absence* is the whole game.
+
+---
+
+## Keeping the Degraded Path Warm
+
+"The code path you never use is the code path that doesn't work" (SRE Book, "Addressing
+Cascading Failures"). Degraded/shedding logic is by construction a cold path, so it must be
+*deliberately* exercised or it will be broken when you finally need it:
+
+- **Run a small subset of servers near overload continuously.** Intentionally keep a few
+  hosts operating close to their shedding threshold in normal times so the load-shedding /
+  degraded code path is warm and proven, rather than a path that only ever runs during the
+  incident.
+- **Chaos experiments in production** that kill T2/T3 dependencies to prove the core
+  survives with the optional pieces gone.
+- **Kill-switch game days** to prove the operator control surface works.
+
+All three are the same principle as constant work and hot fallbacks: **eliminate cold paths
+by exercising them as part of steady-state operation.** (Mechanics of fault injection live
+in `reliability-ops/chaos-engineering-and-fault-injection`.)
+
+---
+
 ## Common Interview Follow-ups
 
 - **"Difference between graceful degradation and a fallback?"** Degradation is the
@@ -403,6 +680,33 @@ Design implications:
   bound total chain latency.
 - **"Brownout vs load shedding?"** Shedding rejects whole requests to cap total work;
   brownout makes each accepted request cheaper by dropping optional parts. Use both.
+- **"AWS says avoid fallback — but you designed a fallback chain. Reconcile."** Prefer
+  designs that don't *need* fallback (improve the primary, fail fast, move risk off the
+  critical path). Fallbacks are cold code that often fails when finally called; if a
+  fallback is unavoidable make it **hot, tested, and independent** so the objection no
+  longer applies.
+- **"Fine at 1x, collapses at 2x — what property is missing?"** Bimodal behavior: a second,
+  more-expensive mode that only appears under stress. Fix with constant work / static
+  stability to eliminate the second mode, not to speed it up.
+- **"Explain constant work with a real example and the failure it prevents."** Route 53
+  pushes the entire fixed-size health table on a fixed cadence regardless of how many
+  checks flipped, so a mass-failure event creates no control-plane spike. It prevents a
+  control-plane thundering herd at the worst moment.
+- **"Origin is down — serve stale safely."** `stale-if-error` to serve last-known-good on
+  5xx (vs `stale-while-revalidate` for latency, vs `must-revalidate` which forbids stale);
+  alarm on cache-staleness *age*; negative-cache misses with a *short* TTL so a struggling
+  origin isn't hammered but a transient failure isn't pinned.
+- **"Fallback returned an empty list and downstream revoked everything — what went wrong?"**
+  A default is a semantic decision: "empty" was read as "delete all." Use conservative/inert
+  defaults and **tag responses as degraded** so downstream distinguishes "known-empty" from
+  "we don't know."
+- **"Map your tiers to Google's criticality model and explain a 4-hop chain."**
+  `CRITICAL_PLUS` / `CRITICAL` / `SHEDDABLE_PLUS` / `SHEDDABLE`; criticality **propagates
+  down the RPC chain by default**, and it's **orthogonal to latency** (search-as-you-type
+  is highly sheddable but latency-critical).
+- **"How do you prove the degraded mode works before the incident?"** Keep it warm: run a
+  subset of hosts near overload continuously, chaos-kill T2/T3 deps in prod, and run
+  kill-switch game days — the code path you never use is the one that doesn't work.
 
 ## References
 
@@ -414,8 +718,17 @@ Design implications:
   Slow Responses).
 - AWS Well-Architected Framework, **Reliability Pillar** — static stability, data plane
   vs control plane, using availability zones.
-- Amazon Builders' Library — "Static stability using Availability Zones" (Becky Weiss)
-  and "Avoiding fallback in distributed systems" (Jacob Gabrielson).
+- Amazon Builders' Library — "Static stability using Availability Zones" (Becky Weiss;
+  3 AZs / 50% overprovision / ~66% per AZ / (2/3)^N), "Avoiding fallback in distributed
+  systems" (Jacob Gabrielson), and "Reliability, constant work, and a good cup of coffee"
+  (Colm MacCárthaigh; Route 53 constant-work example).
+- Google, *Site Reliability Engineering* — "Handling Overload" (the four criticality
+  values `CRITICAL_PLUS`/`CRITICAL`/`SHEDDABLE_PLUS`/`SHEDDABLE`, criticality propagation,
+  adaptive throttling, retry budgets) and "Addressing Cascading Failures" (degraded-mode
+  cold-path warning, running servers near overload).
+- RFC 5861 — HTTP Cache-Control extensions `stale-while-revalidate` and `stale-if-error`.
+- Microsoft Azure Architecture Center — Circuit Breaker pattern (open-state default value,
+  half-open trial-request limiting, failed-request journaling/replay, accelerated breaking).
 - Resilience4j documentation — `CircuitBreaker`, `TimeLimiter`, and fallback via
   `Try.recover` / `@CircuitBreaker(fallbackMethod=...)`.
 - Cross-references in this library: `reliability-ops/circuit-breakers-and-bulkheads`,

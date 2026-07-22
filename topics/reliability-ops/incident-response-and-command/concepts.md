@@ -436,6 +436,315 @@ Incidents that outlast one person's shift or attention span need explicit **hand
 
 ---
 
+## The 3 C's and IMAG
+
+Google's *SRE Workbook* (Ch. 9) names its incident-management program **IMAG — Incident
+Management At Google** — an adaptation of the emergency-services **ICS** for production
+outages. (The Workbook dates ICS to **1968**, when it was created by firefighters; the
+"1970s California wildfire" framing above refers to its formalization. Both dates appear
+in the literature — the takeaway is the same: it predates and is far more battle-tested
+than any software-specific scheme.)
+
+IMAG is built on **three pillars, the "3 C's"**:
+
+| C | Meaning | Primary owner |
+|---|---|---|
+| **Coordinate** | Organize the response — who is doing what, sequencing work, planning, handoffs | Operations / Planning lead, orchestrated by the IC |
+| **Communicate** | Keep stakeholders and the public informed; keep the internal record | Communications Lead |
+| **Control** | Hold overall authority and direction; delegate; decide | Incident Commander |
+
+The Workbook's diagnostic heuristic: **"when something goes wrong with incident response,
+the culprit is likely in one of these three areas."** A useful interview move is to
+triage a broken response by asking *which C failed* — no single decider (Control), the
+site is silent to customers (Communicate), or two people are unknowingly redoing each
+other's work (Coordinate).
+
+The Workbook also lists **four foundational best practices**, the fourth of which is
+easy to forget: **(1)** maintain a clear line of command; **(2)** designate clearly
+defined roles; **(3)** keep a working record of debugging and mitigation as you go; and
+**(4) declare incidents early and often.** Pre-agreeing on **incident criteria** —
+"establish, in advance, the criteria for what counts as an incident, derived from past
+outages" — is itself a named practice, not just an in-the-moment judgment call.
+
+---
+
+## The Full Role Roster (Deputy, Liaisons, SME) and the CAN Report
+
+The four canonical roles above are the core, but PagerDuty's widely-cited roster names
+**six roles**. Senior interviews expect you to know the extras:
+
+| Role | What it adds beyond the core four |
+|---|---|
+| **Deputy** | A **hot-standby IC** — trained as an IC, can take command instantly. Watches for what the IC misses (timers started, roll-call items not circled back to), and manages the call itself (removing/muting people when the IC directs). Frees the IC to think. Essential on long or high-severity incidents. |
+| **Customer Liaison** | External-facing half of comms: drafts and posts **public** status-page updates, tracks the count of affected customers, fields the support/customer-success channel. |
+| **Internal Liaison** | Internal-facing half of comms: pages **SMEs**, notifies internal stakeholders (Finance, Legal, Marketing, execs). PagerDuty splits comms into these two liaisons where Google collapses them into one "Communications" role. |
+| **Subject-Matter Expert (SME) / Resolver** | The domain specialist pulled in on demand to investigate a specific subsystem; reports back to the IC. |
+
+> [!TIP]
+> The **CAN report** is the crisp status format an SME/resolver gives the IC when asked
+> "where are we?": **C**ondition (current state of the service — healthy or not),
+> **A**ctions (what's being done / needs doing), **N**eeds (what support the resolver
+> needs to act). Naming CAN is a strong senior signal — it turns rambling status into
+> three structured lines.
+
+Roles are still **scale-to-fit**: one person can wear several hats in a small incident;
+you split them out (Deputy first, then liaisons, then per-workstream Ops sub-leads) as
+span of control is exceeded.
+
+---
+
+## The Live Incident State Document
+
+Distinct from the Scribe's chronological *timeline*, the **Live Incident State Document**
+(a.k.a. the working/state doc) is a **living snapshot of the present**: current status,
+active theories, **causes already eliminated**, the running action-item list, and key
+metrics/links. The Google *SRE* book is emphatic: **"The incident commander's most
+important responsibility is to keep a living incident document."**
+
+Properties that matter:
+
+- **Concurrently editable** — Google uses Google Docs precisely so multiple responders
+  update it live; a wiki page you edit-lock defeats the purpose.
+- **Templated, with critical info at the top** — a joiner should get oriented in seconds.
+- **Used once ~3+ people are involved** — below that, overhead exceeds value.
+- **Retained for the postmortem** — it seeds the writeup and preserves what you *thought*
+  at each point, which is gold for a blameless review.
+
+Timeline vs state doc, in one line: the **Scribe's timeline** answers *"what happened and
+when?"* (append-only history); the **state doc** answers *"where are we right now, and
+what have we ruled out?"* (mutable present). Long incidents keep both.
+
+---
+
+## Generic Mitigations
+
+The Workbook's GKE **"Cache Me If You Can"** case study crystallizes mitigate-before-
+diagnose into a principle: **"To mitigate an incident, you don't have to fully understand
+the details — you only need to know the location of the root cause."** Location, not
+cause.
+
+**Generic mitigations** are actions that stop impact *without* knowing the specific bug,
+because they operate on *where* the problem is:
+
+- **Roll back** the recent release/config (return to known-good).
+- **Drain / redirect** traffic away from the bad task, cell, or region.
+- **Fail over** to a healthy replica/region.
+- **Shed load** / throttle to protect the core.
+
+Contrast with **targeted / forward fixes** (a code patch, a config tweak to "correct" the
+value) — these *require* understanding the cause and are riskier under pressure. The
+senior instinct: **reach for a generic mitigation first**; forward-fix only when no
+generic lever applies or after impact has stopped. The GKE post-incident lesson was
+literally that the team **lacked a generic rollback path** for a corrupt image, so a
+6h40m outage dragged while they diagnosed — the mitigation gap, not the bug, was the
+failure.
+
+---
+
+## Severity Definitions and the Major-Incident Rule
+
+The generic 5-level table above is fine for orientation, but strong candidates cite
+**named definitions and the rules that couple severity to response**. PagerDuty's
+concrete defs:
+
+- **SEV-1** — "warrants public notification and liaison with executive teams." Typical
+  triggers: an **SLA breach** or **security/data exposure**.
+- **SEV-2** — "critically impacting many customers' ability to use the product."
+- **SEV-3** — "stability or minor customer-impacting… requires immediate attention."
+
+Three rules interviewers probe:
+
+1. **Anything above SEV-3 is a major incident.**
+2. **All SEV-2s are major incidents, but not all major incidents are SEV-2s** — the "major
+   incident" flag (which pulls in a **Major Incident Manager**, exec comms, the full
+   roster) is a *separate axis* from the numeric severity. A SEV-1 is also major; a
+   security SEV can be major regardless of user count.
+3. **If you're unsure between two levels, treat it as the higher one** — the same
+   "round up under uncertainty" bias as *declare early*.
+
+This is why "SEV-2 vs major incident" is a favorite subtle-distinction question: severity
+sizes the *technical* impact; "major" is an *organizational activation* threshold.
+
+---
+
+## Incident vs Problem vs Change Management (ITIL)
+
+SRE and ITIL describe the same operational reality with different vocabularies; senior
+interviews (especially in enterprise/ITSM shops) expect the mapping:
+
+| ITIL term | Definition | SRE analogue |
+|---|---|---|
+| **Incident** | An **unplanned interruption or degradation** of a service. Goal: **restore service fast** (may use a workaround). | An incident — mitigation-first response |
+| **Problem** | The **underlying cause** of one or more incidents. Goal: **eliminate recurrence.** | The postmortem's root cause + action items |
+| **Known error** | A problem with a **documented root cause and a workaround** logged for reuse. | A known-issue runbook entry |
+| **Major incident** | High-impact incident invoking a **Major Incident Manager (MIM)** and heightened process. | A SEV-1 / "major incident" activation |
+| **Change management** | Controlled process for making changes (to reduce change-induced incidents). | Progressive delivery / deploy safety — see `devops-cicd/deployment-strategies` |
+
+The load-bearing distinction: **incident management restores service now; problem
+management stops it happening again.** A mitigation (rollback, failover) lives in
+*incident* management; identifying the defect, filing the fix, and recording the
+known-error/workaround live in *problem* management. Mapping SRE onto ITIL: **incident
+response ≈ incident + major-incident management; the blameless postmortem and its action
+items ≈ problem management.** See `reliability-ops/blameless-postmortems-and-learning`.
+
+---
+
+## The Single-Writer Principle
+
+The most dangerous coordination failure is **uncoordinated parallel change** — two
+responders each applying a different fix, so the system's state becomes unknowable and
+one change masks or amplifies the other. The Google *SRE* book states the rule verbatim:
+**"The operations team should be the only group modifying the system during an
+incident."**
+
+This is the **single-writer principle**: at any moment, **one owner (the Ops lead / the
+person the IC has designated) mutates the system**, and every change is announced in the
+channel so the timeline and state doc stay accurate. The SRE narrative's cautionary
+character, "Malcolm," makes an *uncoordinated* change that makes things worse — the named
+hazard is **freelancing**: well-meaning responders poking at production outside the
+command structure.
+
+How ICS enforces it:
+- The **IC arbitrates** when two engineers propose conflicting fixes (see decision
+  authority) — the disagreement resolves in seconds, not by committee.
+- Changes route through the **Ops lead**; others propose, the designated writer executes.
+- Every mutation is **narrated** ("rolling back web tier to build 1234 now") so no two
+  people act blind.
+
+> [!WARNING]
+> "Too many cooks" in production during an incident is how a recoverable outage becomes a
+> **compound** one. If you can't say who currently has write access to the system, you've
+> lost Coordinate and Control at once.
+
+---
+
+## Incident Automation and Tooling
+
+A hot 2024–2025 topic: **what should fire automatically the instant you declare?** Mature
+tooling collapses minutes of manual setup into one command/click. On declaration, the
+platform typically **auto-creates the incident channel** (e.g. `#incident-<id>`), **spins
+up the bridge** (Zoom/Meet), **opens the state doc from a template**, **pages the on-call
+plus an IC**, **posts an initial status-page entry**, and **starts recording** the call —
+so responders spend attention on the incident, not on logistics.
+
+Representative platforms (vendor-agnostic — name a couple, don't over-index on one):
+**PagerDuty, incident.io, FireHydrant, Rootly, Atlassian Opsgenie/Jira SM**, plus
+**Slack/Teams workflow bots** that wire the above together.
+
+The maturity signal isn't "we have a tool" — it's **which manual steps have been
+automated away** and whether the tooling **degrades gracefully when the platform itself
+is affected** (see the out-of-band lesson below). Auto-timelining (bot captures declared
+actions and status changes) also feeds the Scribe and the postmortem.
+
+---
+
+## Out-of-Band Comms and Break-Glass Access
+
+A subtle failure mode senior interviewers love: **your incident tooling depends on the
+thing that's down.** The canonical public example is the **2021 Facebook/Meta BGP
+outage** — a config change withdrew the BGP routes to Meta's DNS, and because internal
+tools, badge access, and comms all rode the same network, **responders were partially
+locked out of the systems needed to fix it.**
+
+Design principles that fall out of this:
+
+- **Out-of-band communications** — a fallback channel (external Slack workspace, phone
+  bridge, SMS tree, a status page hosted on infrastructure *independent* of production)
+  so you can coordinate when the primary channel is part of the blast radius.
+- **Break-glass access** — pre-provisioned emergency credentials/paths that don't depend
+  on the failing control plane, exercised in advance so they actually work under stress.
+- **Don't couple incident tooling to the failing system** — hosting your status page or
+  paging on the same region/provider as the service it monitors is a single point of
+  failure for the *response itself*.
+
+This connects to **generic mitigations** (the failover target must be truly independent)
+and to `system-design` multi-region architecture, but the *operational* lesson lives
+here: rehearse the case where the response infrastructure is itself impaired.
+
+---
+
+## Practicing Incident Response (Drills and Game Days)
+
+Command is a skill built by **repetition, not by reading** — "you want to practice when
+the world is not on fire." This is distinct from **chaos engineering**, which injects
+faults to test the *system*; here the goal is training the *humans and the process* (IC
+muscle memory, role clarity, comms cadence). Cross-reference
+`reliability-ops/chaos-engineering-and-resilience-testing` for the fault-injection
+mechanics.
+
+Named practices from the literature:
+
+- **Wheel of Misfortune** (Google) — a role-play RPG where the team re-enacts a past
+  outage; one person plays "the incident," others practice IC/Ops/Comms live.
+- **DiRT — Disaster Recovery Testing** (Google) — company-wide exercises that deliberately
+  break things (and the response) to expose gaps.
+- **Failure Friday** (PagerDuty) — regular scheduled fault-injection + response drills.
+- **Tabletop exercises / game days** — walk through a scenario verbally, no production
+  impact, to pressure-test runbooks and role assignments.
+- Even communication-under-pressure games (the Workbook cites *Keep Talking and Nobody
+  Explodes*) are used to train the Comms/coordination reflex.
+
+> [!INTERVIEW]
+> "How do you exercise incident response without a real outage?" — name **Wheel of
+> Misfortune / DiRT / game days / tabletops**, and draw the line: chaos engineering tests
+> the *system's* resilience; these drills test the *response process*. The payoff is
+> lower MTTR because responders aren't learning the runbook for the first time at 3 a.m.
+
+---
+
+## On-Call Load, Role Rotation, and the MTTR-of-Familiarity
+
+Numbers that ground the fatigue and preparedness arguments (from Google *SRE*, Appendix B
+/ Ch. 11 and the Workbook's case studies):
+
+- **~6 hours of engineer time is the budgeted average cost per on-call incident** (the
+  handling itself plus follow-up). This is the unit that makes MTTR reduction such a good
+  investment — every incident you shorten or prevent buys back real hours.
+- **A cap of ~2 incidents per 12-hour on-call shift** is Google's guideline — beyond that,
+  responders can't do each incident (and its follow-up) justice, and quality degrades.
+- **Rotate roles roughly every ~4 hours on a long incident.** The Workbook's PagerDuty NTP
+  case (a 10+ hour event) rotated the IC and other roles to fight fatigue; a fatigued
+  responder causes *secondary* incidents.
+- **Runbooks/familiarity cut MTTR substantially.** Google *SRE* reports that having a
+  well-thought-out, documented playbook produced a **roughly 3× improvement in MTTR** for
+  on-call responders versus improvising — the single strongest argument for maintaining
+  runbooks (own the mechanics in `reliability-ops/on-call-escalation-and-runbooks`).
+- **A ~1:1 alert-to-incident ratio** is the declaration-hygiene target: most pages should
+  correspond to a real, actionable incident (alert *tuning* is an observability concern —
+  see `observability/on-call-alert-fatigue-and-actionable-signals`).
+
+> [!INTERVIEW]
+> Numbers probes to have ready: *"How many incidents per shift is sustainable?"* → about
+> **two per 12-hour shift, ~6h each.** *"How often do you rotate roles on a multi-hour
+> incident?"* → roughly **every 4 hours.** *"Why keep runbooks current?"* → **~3× MTTR
+> improvement** from having a playbook.
+
+---
+
+## Canonical Incident Stories
+
+Short vignettes give interview answers texture and show you've read the source material:
+
+- **GKE "Cache Me If You Can" (SRE Workbook)** — a corrupt DockerHub image caused a
+  ~**6h40m** EU outage. Lesson: the team **lacked a generic rollback mitigation**, so they
+  were forced to diagnose before they could recover — the *mitigation gap* was the real
+  failure, not the bad image.
+- **Belgium lightning strike (SRE Workbook)** — **four** strikes in ~2 minutes hit a data
+  center's power. Held up as a *well-run* incident: early declaration and disciplined
+  command meant only **~0.000001%** of persistent disk was permanently lost. Preparation
+  turned a catastrophe into a footnote.
+- **Google Home / Chromecast v1.88 (SRE Workbook)** — a client bug fetched files ~**50×**
+  too often, overloading backends. Lesson: **failure to declare early** — the team leaned
+  on weekend heroics instead of standing up command, and it dragged.
+- **AWS S3 us-east-1 (Feb 2017)** — an engineer's typo in a debugging command removed too
+  many capacity servers, taking down S3 in a core region and cascading to services across
+  the internet. Lesson: guardrails on operational tooling, and the blast radius of a
+  single control action.
+- **Facebook/Meta BGP (Oct 2021)** — see *Out-of-Band Comms and Break-Glass Access* above:
+  the response was hampered because the tooling depended on the failing network.
+
+---
+
 ## Common Interview Follow-ups
 
 - **"Walk me through what happens from the moment an alert fires."** Detect → on-call acks
@@ -461,6 +770,22 @@ Incidents that outlast one person's shift or attention span need explicit **hand
   limits.
 - **"Where does root-cause analysis happen?"** In the postmortem, *after* mitigation — not
   during the incident.
+- **"What are the 3 C's of incident management?"** Coordinate, Communicate, Control (IMAG,
+  SRE Workbook). Map: Control→IC, Communicate→Comms lead, Coordinate→Ops/Planning. When
+  response breaks, one of the three has failed.
+- **"What's the difference between an incident and a problem (ITIL)?"** Incident = restore
+  service now (may use a workaround); problem = eliminate the recurrence. Mitigation lives
+  in incident mgmt; the fix + known-error/workaround live in problem mgmt.
+- **"SEV-2 vs major incident?"** Severity sizes technical impact; "major" is an
+  org-activation threshold. All SEV-2s are major, but not all majors are SEV-2s.
+- **"What fires automatically when you declare?"** Channel, bridge, state doc, pages to
+  on-call + IC, status-page entry, call recording — the tooling-maturity signal.
+- **"Your incident tooling itself is down (Meta-2021 style) — now what?"** Out-of-band
+  comms + break-glass access; never couple the response infra to the failing system.
+- **"How do you practice incident response?"** Wheel of Misfortune / DiRT / game days /
+  tabletops — train the process, distinct from chaos engineering testing the system.
+- **"How many incidents per shift, and how often rotate roles?"** ~2 per 12h shift (~6h
+  each); rotate roles ~every 4h on long incidents; a runbook is ~3× MTTR.
 
 ---
 
@@ -470,8 +795,14 @@ Incidents that outlast one person's shift or attention span need explicit **hand
   2016) — Ch. 14 "Managing Incidents."
 - Beyer et al., *The Site Reliability Workbook* (Google, O'Reilly 2018) — Ch. 9 "Incident
   Response."
-- PagerDuty, *Incident Response Documentation* — response.pagerduty.com (IC, roles,
-  severity, comms).
+- PagerDuty, *Incident Response Documentation* — response.pagerduty.com (six roles incl.
+  Deputy and Customer/Internal Liaison, CAN report, SEV-1/2/3 definitions, major-incident
+  rules, Failure Friday).
+- ITIL 4 / ITIL v3 Service Operation — incident, problem, known-error, and change
+  management definitions.
+- Google *SRE* Appendix B ("A Collection of Best Practices for Production Services") and
+  Ch. 11 ("Being On-Call") — on-call load (~2 incidents/12h shift, ~6h/incident) and the
+  ~3× MTTR benefit of playbooks.
 - Atlassian, *Incident Management Handbook* and incident severity/lifecycle guides.
 - FEMA / NIMS, *Incident Command System (ICS)* — the emergency-management origin.
 - Michael T. Nygard, *Release It!*, 2nd ed. (Pragmatic Bookshelf, 2018) — stability
