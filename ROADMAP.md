@@ -86,8 +86,9 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Docker](topics/docker/README.md) | 16 | 16 ✅ (Pass 1, 794 MCQs) |
 | [Kubernetes](topics/kubernetes/README.md) | 19 | 19 ✅ (Pass 1, 981 MCQs) |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 21 ✅ (Pass 1, 1,065 MCQs) |
-| [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 0 |
+| [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 18 ✅ (Pass 1, 868 MCQs) |
 | [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
+| [gRPC](topics/grpc/README.md) | 16 | 0 (coming soon) |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 15 ✅ (Pass 1, 815 MCQs) |
 | [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (all tiers, 1,291 MCQs) |
 | [Networking & Protocols](topics/networking/README.md) | 16 | 16 ✅ (all tiers, 1,372 MCQs) |
@@ -101,6 +102,23 @@ and 5 new domains added; counts below reflect the current READMEs.
 <!-- CONTENT-PROGRESS-END -->
 
 ## Session log
+
+- **Session 39 (2026-07-22):** **Rebrand + Hibernate/JPA Pass 1 + gRPC coming-soon.**
+  (1) Renamed the site LoopReady → **Grokking Interview** (siteName in BaseLayout drives wordmark/
+  title/footer; landing title; robots comment). Deploy URL unchanged (loopready.io as SITE_URL
+  default — no new domain provided). (2) Removed the landing-page footer (activeNav="home") per
+  request — still shown on all other pages. (3) Added **gRPC** as a coming-soon domain
+  (topics/grpc/README.md, 16-topic taxonomy; in COMING_SOON_DOMAINS). (4) **Hibernate & JPA Pass 1**
+  (NEW authored domain) — 18 topics, **868 MCQs**, 34 Mermaid (all render clean). Current Jakarta
+  Persistence 3.1/3.2 (jakarta.* namespace) + Hibernate 6/7 + Spring Data JPA. Senior mechanism depth:
+  persistence context/identity, dirty checking, flush order, lazy proxies + LazyInitializationException,
+  the N+1 problem + full fix menu, cascade vs orphanRemoval, @Version optimistic locking, entity
+  equals/hashCode pitfalls. Boundaries cross-ref messaging-databases (SQL/ACID)/spring-* (@Transactional)/
+  system-design, not duplicated. Built via `hibernate-jpa-authoring.js` (author→verify, 36 agents,
+  0 errors). Verify caught a 60%-index-1 clustering (rebalanced) + Mermaid `\n`→`<br/>`; I fixed one
+  unquoted rhombus label with parens post-sweep (Q{isNew(entity)?}→Q{"..."}). Moved hibernate-jpa
+  coming-soon → authored (18 authored domains, 2 coming-soon: apache-tomcat, grpc). Commits d81ada0
+  (web/rename/grpc/footer), 46befd5 (hibernate content). NEXT: performance-engineering (or apache-tomcat/gRPC).
 
 - **Session 38 (2026-07-22):** **Reliability-Ops Pass 2 (deepen)** — research→deepen→verify pipeline
   (48 agents, 0 errors, high effort) over all 16 topics. Grew **796 → 1,279 MCQs (+483)**; every topic
