@@ -95,6 +95,29 @@ elsewhere cross-reference it rather than duplicate. **325 MCQs**, mixed difficul
 | UI / Presentation (MVC, MVP, MVVM) | `arch-ui-presentation` | high | intermediate | ✅ (50 MCQs) |
 | Specialized (Blackboard, Primary-Replica, Broker) | `arch-specialized` | medium | advanced | ✅ (48 MCQs) |
 
+## Cloud Computing Patterns (8 topics)
+
+Vendor-neutral cloud pattern language from Fehling, Leymann, Retter et al.,
+*Cloud Computing Patterns* (Springer, 2014) — https://www.cloudcomputingpatterns.org/.
+The classic abstract solutions (workload types, IaaS/PaaS/SaaS, elasticity, loosely
+coupled distributed components, hybrid architectures) that underpin how cloud-native
+systems are designed regardless of provider. Overlaps with existing core/AWS topics are
+CROSS-REFERENCED (workload types → capacity-modeling; consistency → cap-theorem; messaging
+→ message-queues; elasticity → scalability; hybrid → aws-migration), not re-taught.
+
+| Topic | Slug | Freq | Difficulty | Status |
+|---|---|---|---|---|
+| Cloud Computing Fundamentals: Workloads & Service/Deployment Models | `ccp-fundamentals-workloads-models` | high | beginner | ☐ |
+| Cloud Offerings: Compute, Elasticity & Processing | `ccp-offerings-compute-elasticity` | high | intermediate | ☐ |
+| Cloud Offerings: Storage, Data & Communication | `ccp-offerings-storage-data-communication` | high | intermediate | ☐ |
+| Application Architectures: Components & Coupling | `ccp-architecture-components-coupling` | high | intermediate | ☐ |
+| Application Architectures: State, Multi-Tenancy & Integration | `ccp-architecture-state-tenancy-integration` | high | advanced | ☐ |
+| Cloud Application Management: Elasticity & Resiliency Processes | `ccp-management-elasticity-resiliency` | medium | advanced | ☐ |
+| Composite Cloud Applications: Tiers & CDN | `ccp-composite-tiers-cdn` | medium | intermediate | ☐ |
+| Composite Cloud Applications: Hybrid Cloud Architectures | `ccp-composite-hybrid` | high | advanced | ☐ |
+
+Status: ☐ not started · ◐ concepts done · ● concepts+MCQs · ✅ validated
+
 ## AWS System Design (26 topics)
 
 Designing microservices and large-scale systems with AWS primitives (SQS, DynamoDB,
