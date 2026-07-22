@@ -1,0 +1,681 @@
+topic: "Load Shedding & Backpressure"
+domain: reliability-ops
+topic_slug: load-shedding-and-backpressure
+version: 1
+questions:
+  - id: load-shedding-and-backpressure-001
+    difficulty: beginner
+    tags: [load-shedding, fundamentals]
+    question: |
+      What is load shedding in the context of an overloaded service?
+    options: ["Automatically adding more replicas when CPU is high", "Deliberately rejecting some requests quickly so the accepted requests stay healthy", "Compressing responses to save bandwidth", "Retrying failed requests on a secondary region"]
+    answer: 1
+    explanation: |
+      Load shedding is admission control: near capacity you deliberately reject a fraction of
+      requests fast (e.g. 503/429) so the requests you accept can be served within SLO. Serving
+      90% of traffic well beats serving 100% badly and collapsing.
+    ref: "concepts.md#why-shed-load-goodput-vs-throughput"
+
+  - id: load-shedding-and-backpressure-002
+    difficulty: beginner
+    tags: [goodput, throughput]
+    question: |
+      An overloaded server keeps accepting every request, its CPU is pegged at 100%, yet the
+      number of requests completed successfully within their deadline keeps dropping. Which term
+      names the quantity that is collapsing?
+    options: ["Throughput", "Utilization", "Saturation", "Goodput"]
+    answer: 3
+    explanation: |
+      Goodput is requests completed successfully within their deadline — the only work that helps
+      clients. Under overload the server burns resources on doomed requests, so utilization stays
+      high but goodput falls. That gap is exactly why shedding is needed.
+    ref: "concepts.md#why-shed-load-goodput-vs-throughput"
+
+  - id: load-shedding-and-backpressure-003
+    difficulty: intermediate
+    tags: [goodput, capacity]
+    question: |
+      Why does accepting requests beyond a server's capacity typically DECREASE useful work
+      rather than just leaving it flat?
+    options: ["Each excess request still consumes CPU, memory, and threads to be partially processed and then fail or time out", "The load balancer stops routing traffic once capacity is reached", "TCP automatically throttles new connections at capacity", "Garbage collection is disabled under high load"]
+    answer: 0
+    explanation: |
+      Past capacity every additional request still consumes resources (threads, memory, CPU,
+      cache) to be partially handled before failing or timing out. That stolen capacity is taken
+      from requests that would otherwise have succeeded, so goodput falls off a cliff.
+    ref: "concepts.md#why-shed-load-goodput-vs-throughput"
+
+  - id: load-shedding-and-backpressure-004
+    difficulty: intermediate
+    tags: [backpressure, fundamentals]
+    question: |
+      What is backpressure?
+    options: ["Retrying a request against a backup service", "Pre-warming caches before a traffic spike", "A feedback signal propagated upstream telling producers to slow down because a downstream consumer cannot keep up", "Increasing the timeout so slow requests eventually succeed"]
+    answer: 2
+    explanation: |
+      Backpressure is a feedback signal flowing from a saturated consumer back toward the
+      producer, causing the producer to slow or stop until the consumer catches up. Where
+      shedding drops work, backpressure paces it.
+    ref: "concepts.md#backpressure-signaling-upstream-to-slow-down"
+
+  - id: load-shedding-and-backpressure-005
+    difficulty: intermediate
+    tags: [anti-pattern, queues, oom]
+    question: |
+      Why is an unbounded in-memory queue in front of a slower consumer considered an
+      anti-pattern under sustained overload?
+    options: ["It always reduces throughput even at low load", "It grows without limit, eventually causing OOM and unbounded latency for work whose clients have already timed out", "It forces every request to be processed twice", "It requires disabling TCP flow control"]
+    answer: 1
+    explanation: |
+      If arrival rate exceeds service rate persistently, an unbounded queue grows without limit:
+      it eventually exhausts memory (OOM) and, before that, items wait so long that clients time
+      out — so you do work nobody wants. A bound makes overload visible and forces a shed/block
+      decision early.
+    ref: "concepts.md#bounded-vs-unbounded-queues-the-buffering-anti-pattern"
+
+  - id: load-shedding-and-backpressure-006
+    difficulty: intermediate
+    tags: [lifo, fifo, overload]
+    question: |
+      Under heavy overload with a deep request queue, why can LIFO (last-in-first-out) preserve
+      more goodput than FIFO?
+    options: ["LIFO processes requests in parallel while FIFO is serial", "LIFO serves the newest requests, which are most likely to still have a client waiting within its deadline, while the old FIFO-front items have often already timed out", "LIFO uses less memory per item", "FIFO cannot be combined with a bounded queue"]
+    answer: 1
+    explanation: |
+      Under overload the oldest items (FIFO front) have waited longest and their clients have
+      often already timed out — serving them wastes capacity. LIFO serves the freshest requests,
+      which are most likely still awaited, maximizing usefully-served work. Under normal load the
+      two are identical.
+    ref: "concepts.md#lifo-vs-fifo-under-overload"
+
+  - id: load-shedding-and-backpressure-007
+    difficulty: intermediate
+    tags: [littles-law, capacity]
+    question: |
+      Using Little's Law, roughly how many concurrent workers are needed to serve 2000 req/s
+      when each request spends 50 ms in the system?
+    options: ["About 10", "About 40", "About 100", "About 1000"]
+    answer: 2
+    explanation: |
+      Little's Law: L = lambda x W = 2000 req/s x 0.05 s = 100 requests in flight, so you need
+      about 100 concurrent workers/threads/connections. This is the standard way to size a pool.
+    ref: "concepts.md#littles-law-the-capacitylatency-intuition"
+
+  - id: load-shedding-and-backpressure-008
+    difficulty: beginner
+    tags: [status-codes, shedding]
+    question: |
+      A server is overloaded fleet-wide and wants clients to back off and retry later. Which HTTP
+      status is the most appropriate to return?
+    options: ["500 Internal Server Error", "400 Bad Request", "404 Not Found", "503 Service Unavailable (ideally with Retry-After)"]
+    answer: 3
+    explanation: |
+      503 Service Unavailable signals a temporary server-side overload/unavailability and is
+      retryable; pairing it with Retry-After shapes when clients come back. 500 implies an
+      internal bug, and 4xx codes here are client-error semantics that mislead callers.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-009
+    difficulty: intermediate
+    tags: [status-codes, rate-limit]
+    question: |
+      What is the key semantic difference between returning 429 and 503 when shedding load?
+    options: ["429 means this specific client exceeded a rate/quota (client-scoped); 503 means the server as a whole is overloaded (server-scoped)", "429 is retryable and 503 is not", "503 is only for TLS errors", "There is no difference; they are interchangeable"]
+    answer: 0
+    explanation: |
+      429 Too Many Requests is client-scoped: a particular client exceeded its rate limit/quota.
+      503 is server-scoped: the service is overloaded/unavailable. Both are retryable, which is
+      why both should carry Retry-After and require client backoff.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-010
+    difficulty: advanced
+    tags: [retry-storm, anti-pattern, shedding]
+    question: |
+      A fleet at 100% capacity starts shedding with 503s. Clients immediately retry each failure
+      up to 3 times with no backoff. What is the most likely result?
+    options: ["Load drops because retries are cheaper than original requests", "The load balancer automatically deduplicates the retries", "Goodput returns to normal within one second", "A retry storm: shedding multiplies incoming traffic 2-4x, deepening the collapse it was meant to prevent"]
+    answer: 3
+    explanation: |
+      Naive immediate retries amplify traffic: each shed request becomes several more, so a
+      saturated fleet sees 2-4x load — a retry storm. Shedding and retry policy must be
+      co-designed: exponential backoff + jitter, bounded retries, retry budgets, and circuit
+      breakers.
+    ref: "concepts.md#prioritized--criticality-based-shedding"
+
+  - id: load-shedding-and-backpressure-011
+    difficulty: advanced
+    tags: [prioritized-shedding, criticality]
+    question: |
+      Your service is running at 120% of capacity. Which shedding strategy best preserves the
+      value delivered per unit of remaining capacity?
+    options: ["Reject a uniformly random 20% of all requests", "Reject the requests with the smallest payloads", "Queue everything and process in FIFO order", "Shed by criticality first (best-effort/background before user-facing), then by cost, then by tenant tier, rejecting as early as possible"]
+    answer: 3
+    explanation: |
+      Prioritized shedding sheds the cheapest-to-lose work first: best-effort/background before
+      critical user-facing traffic, expensive queries next, lower tiers next. Rejecting early
+      (edge) keeps rejections cheap. Uniform random shedding throws away valuable work alongside
+      worthless work.
+    ref: "concepts.md#prioritized--criticality-based-shedding"
+
+  - id: load-shedding-and-backpressure-012
+    difficulty: advanced
+    tags: [pull, push, backpressure, kafka]
+    question: |
+      Why is a pull-based (consumer-driven) consumption model naturally backpressured compared to
+      a push-based one?
+    options: ["The consumer only fetches what it can handle, so it can never be flooded faster than it can process", "Pull uses UDP, which drops excess packets automatically", "Pull models never accumulate any backlog anywhere", "Push models are always faster and so never overload"]
+    answer: 0
+    explanation: |
+      In a pull model the consumer sets the rate by fetching only what it can process (e.g. Kafka
+      poll()), so it cannot be flooded. In push, the producer sets the rate and can overrun a slow
+      consumer unless explicit credits/acks/bounded buffers are added.
+    ref: "concepts.md#push-vs-pull-why-pull-is-naturally-backpressured"
+
+  - id: load-shedding-and-backpressure-013
+    difficulty: advanced
+    tags: [kafka, consumer-lag, backpressure]
+    question: |
+      In a Kafka pipeline, which signal most directly indicates that consumers cannot keep up with
+      producers (i.e. backpressure is building)?
+    options: ["Broker disk temperature", "The number of topics in the cluster", "Producer acknowledgment mode (acks=all)", "Consumer lag: the gap between the log-end offset and the consumer's committed offset"]
+    answer: 3
+    explanation: |
+      Consumer lag (log-end-offset minus committed-offset) measures how far behind consumers are.
+      Rising lag is the backpressure indicator; you respond by scaling consumers (up to partition
+      count), speeding processing, or accepting bounded lag. The durable log absorbs the imbalance
+      without flooding anyone.
+    ref: "concepts.md#push-vs-pull-why-pull-is-naturally-backpressured"
+
+  - id: load-shedding-and-backpressure-014
+    difficulty: advanced
+    tags: [reactive-streams, backpressure, credits]
+    question: |
+      In Reactive Streams, how does a Subscriber apply backpressure to a Publisher?
+    options: ["By throwing an exception on every extra item", "By closing the TCP socket after each item", "By calling subscription.request(n) to grant demand; the Publisher must never emit more than the outstanding demand", "By increasing its thread pool size"]
+    answer: 2
+    explanation: |
+      Reactive Streams is credit-based: the Subscriber calls request(n) to signal it can handle n
+      more items, and the Publisher must not emit beyond outstanding demand. This keeps the
+      pipeline non-blocking yet bounded — the same idea as TCP's receive window.
+    ref: "concepts.md#backpressure-protocols-reactive-streams--tcp-flow-control"
+
+  - id: load-shedding-and-backpressure-015
+    difficulty: intermediate
+    tags: [tcp, flow-control, backpressure]
+    question: |
+      TCP flow control is often cited as the classic analogy for backpressure. What does a
+      receiver do when its receive buffer fills up?
+    options: ["It resets the connection immediately", "It switches to UDP", "It increases the congestion window", "It advertises a receive window of 0, forcing the sender to stop sending until space frees up"]
+    answer: 3
+    explanation: |
+      The receiver advertises a receive window (rwnd) equal to its free buffer space; the sender
+      may have at most that many unacknowledged bytes in flight. When the buffer is full it
+      advertises window 0 and the sender pauses. This is credit-based backpressure in the
+      transport (distinct from congestion control, which reacts to the network path).
+    ref: "concepts.md#backpressure-protocols-reactive-streams--tcp-flow-control"
+
+  - id: load-shedding-and-backpressure-016
+    difficulty: intermediate
+    tags: [brownout, degradation, shedding]
+    question: |
+      What is a "brownout" as a reliability technique?
+    options: ["Shutting the whole service down to protect the database", "Partial, per-request shedding: dropping optional work (e.g. recommendations, fresh reads) to cut the cost per request and stay within capacity", "Rejecting all write requests but allowing reads", "Randomly restarting instances to clear memory"]
+    answer: 1
+    explanation: |
+      Brownout (from the electrical term for a voltage reduction that avoids a full blackout) sheds
+      along the quality axis: keep serving requests but drop optional work to reduce cost per
+      request. It is the middle option between serving fully and rejecting whole requests.
+    ref: "concepts.md#brownout--graceful-degradation-as-shedding"
+
+  - id: load-shedding-and-backpressure-017
+    difficulty: advanced
+    tags: [adaptive-concurrency, netflix, littles-law]
+    question: |
+      Adaptive concurrency limiters (e.g. Netflix concurrency-limits) infer the right in-flight
+      limit primarily from what observation?
+    options: ["Observed latency: when latency rises above the no-load minimum, a queue is forming, so the limit is lowered", "The wall-clock time of day", "The number of open file descriptors only", "A fixed value set at deploy time"]
+    answer: 0
+    explanation: |
+      TCP-Vegas/Little's-Law-style limiters watch latency relative to the no-load minimum. Rising
+      latency means a standing queue is forming, so they reduce the concurrency limit. This adapts
+      to changing request mixes and hardware, unlike brittle static thresholds.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-018
+    difficulty: advanced
+    tags: [codel, queue-management]
+    question: |
+      What does the CoDel (Controlled Delay) algorithm track to decide when to start dropping from
+      a queue?
+    options: ["The maximum queue length ever seen", "The minimum sojourn (wait) time over a sliding window; if it stays above a small target for an interval, it starts dropping", "The average CPU temperature", "The total number of connections opened since startup"]
+    answer: 1
+    explanation: |
+      CoDel targets standing queues (bufferbloat): it tracks the minimum time items spend in the
+      queue over a window; if that minimum stays above a target (~5 ms) for an interval (~100 ms),
+      it begins dropping. Using the minimum lets it tolerate transient bursts while punishing
+      persistent backlog.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-019
+    difficulty: intermediate
+    tags: [bounded-queue, thread-pool, java]
+    question: |
+      A Java service uses Executors.newFixedThreadPool(20) and tasks pile up invisibly until the
+      JVM OOMs under load. What is the root cause?
+    options: ["Fixed thread pools spawn unlimited threads", "20 threads is too few to ever cause a problem", "newFixedThreadPool uses an unbounded LinkedBlockingQueue, so excess tasks accumulate without limit instead of being rejected", "The GC is misconfigured"]
+    answer: 2
+    explanation: |
+      Executors.newFixedThreadPool backs the pool with an unbounded LinkedBlockingQueue, so when
+      submissions outpace the 20 workers the queue grows without bound until OOM. Use a bounded
+      queue with an explicit rejection policy so overload becomes visible and is shed early.
+    ref: "concepts.md#bounded-vs-unbounded-queues-the-buffering-anti-pattern"
+
+  - id: load-shedding-and-backpressure-020
+    difficulty: intermediate
+    tags: [queue-sizing, latency]
+    question: |
+      What does making a queue deeper actually buy you?
+    options: ["More processing capacity (higher service rate)", "Lower memory usage", "Automatic backpressure", "More tolerance for bursts, at the cost of higher worst-case latency — it adds delay, not capacity"]
+    answer: 3
+    explanation: |
+      A queue does not raise the service rate; it only stores work. A deeper queue absorbs larger
+      bursts but increases worst-case wait (up to depth/service-rate seconds). Sizing a queue is
+      really choosing the maximum latency you can tolerate, not maximizing depth.
+    ref: "concepts.md#bounded-vs-unbounded-queues-the-buffering-anti-pattern"
+
+  - id: load-shedding-and-backpressure-021
+    difficulty: advanced
+    tags: [littles-law, latency, overload]
+    question: |
+      Traffic to a service is steady, yet latency suddenly climbs. Using Little's Law (L = lambda x W),
+      what does this most likely indicate?
+    options: ["Lambda increased, so W increased", "Little's Law does not apply to steady traffic", "A downstream slowdown raised W, so in-flight count L rose until it hit a limit — a queue is forming", "The server has too much free memory"]
+    answer: 2
+    explanation: |
+      With lambda fixed, L and W move together. If latency (W) rises without more traffic, some
+      stage slowed down, so in-flight requests (L) accumulate — a queue is forming somewhere. This
+      is the fingerprint of a downstream bottleneck or forming backlog.
+    ref: "concepts.md#littles-law-the-capacitylatency-intuition"
+
+  - id: load-shedding-and-backpressure-022
+    difficulty: intermediate
+    tags: [where-to-shed, edge]
+    question: |
+      Where is it generally best to reject shed requests, and why?
+    options: ["As early/shallow as possible (load balancer, gateway, mesh sidecar) so rejected requests are cheap and don't consume the capacity you're protecting", "As deep in the application as possible, after auth and DB lookups, for accurate accounting", "Only in the database layer", "It doesn't matter where you reject"]
+    answer: 0
+    explanation: |
+      A rejection must be far cheaper than serving the request. Rejecting early — at the edge, LB,
+      gateway, or mesh — means the expensive request path never runs. Rejecting deep (after auth,
+      DB calls) wastes the very resources shedding is meant to preserve and can worsen collapse.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-023
+    difficulty: advanced
+    tags: [criticality, propagation, sre]
+    question: |
+      Google SRE recommends propagating a request's criticality (e.g. CRITICAL vs SHEDDABLE)
+      through the call graph. Why?
+    options: ["So a deep downstream service can shed a low-value request without needing to understand the top-level business context", "So billing can charge more for critical requests", "To encrypt critical requests differently", "To route critical requests over a faster network"]
+    answer: 0
+    explanation: |
+      By inheriting the originating request's criticality, every downstream call knows whether it
+      is sheddable. A deep service can then shed SHEDDABLE work first during overload without
+      re-deriving business meaning, keeping prioritized shedding consistent across the whole call
+      graph.
+    ref: "concepts.md#prioritized--criticality-based-shedding"
+
+  - id: load-shedding-and-backpressure-024
+    difficulty: advanced
+    tags: [deadline-propagation, shedding]
+    question: |
+      How does deadline propagation help shed useless work in a deep call chain?
+    options: ["It cancels all requests after a fixed 30-second timeout", "Each hop receives the remaining time budget and can drop a request early if there's no time left to serve it usefully", "It doubles the timeout at each hop for safety", "It stores deadlines in the database for auditing"]
+    answer: 1
+    explanation: |
+      Passing the remaining time budget down the call graph lets each service check whether there
+      is still time to produce a useful answer. If not, it drops the request immediately (dead on
+      arrival) instead of doing work whose result will arrive after the client has given up — a
+      form of client-deadline-driven shedding.
+    ref: "concepts.md#lifo-vs-fifo-under-overload"
+
+  - id: load-shedding-and-backpressure-025
+    difficulty: intermediate
+    tags: [backpressure, block-vs-reject]
+    question: |
+      When a bounded queue between a producer and consumer becomes full, what are the two principled
+      responses?
+    options: ["Block the producer (backpressure) or reject/fail-fast (shed) — both are better than unbounded accumulation", "Silently drop the oldest and log nothing", "Double the queue size automatically", "Switch to an unbounded queue temporarily"]
+    answer: 0
+    explanation: |
+      A full bounded queue forces an explicit decision: block the producer so it slows down
+      (backpressure) or reject new items (shedding). Both keep resource use bounded and make
+      overload visible immediately, unlike an unbounded queue that hides the problem until OOM.
+    ref: "concepts.md#bounded-vs-unbounded-queues-the-buffering-anti-pattern"
+
+  - id: load-shedding-and-backpressure-026
+    difficulty: intermediate
+    tags: [reactive-streams, overflow-strategy]
+    question: |
+      A price-ticker stream produces updates faster than the UI can render, and only the current
+      price matters. Which reactive backpressure overflow strategy fits best?
+    options: ["buffer (bounded)", "error (fail fast)", "latest (keep only the most recent, drop the rest)", "block the producer thread"]
+    answer: 2
+    explanation: |
+      When only the current state matters and stale intermediate values are useless,
+      onBackpressureLatest keeps just the most recent item and drops the rest. buffer would grow
+      memory for values you don't need, and error/blocking are inappropriate for a lossy,
+      current-state feed.
+    ref: "concepts.md#backpressure-protocols-reactive-streams--tcp-flow-control"
+
+  - id: load-shedding-and-backpressure-027
+    difficulty: advanced
+    tags: [scenario, degradation, order-of-defense]
+    question: |
+      Load is rising fast and autoscaling won't add capacity in time. Which escalation order best
+      protects goodput?
+    options: ["Immediately reject all traffic with 503", "Increase all timeouts and wait", "Turn off health checks so instances aren't removed", "Brownout (drop optional work) -> backpressure/bounded-queue-reject -> prioritized shedding -> broad 503 + Retry-After as last resort"]
+    answer: 3
+    explanation: |
+      A graduated response preserves the most value: first shed optional work per request
+      (brownout), then apply backpressure, then shed sheddable-class requests, and only broadly
+      reject with 503 + Retry-After as a last resort. Raising timeouts or hiding unhealthy hosts
+      makes overload worse.
+    ref: "concepts.md#brownout--graceful-degradation-as-shedding"
+
+  - id: load-shedding-and-backpressure-028
+    difficulty: intermediate
+    tags: [reject-cost, anti-pattern]
+    question: |
+      Why can a load shedder that runs expensive logic (auth, DB lookups) on its rejection path
+      fail to prevent collapse?
+    options: ["Because if rejecting costs nearly as much as serving, shedding doesn't free enough capacity and the server still thrashes", "Because 503 responses are larger than 200 responses", "Because clients ignore expensive rejections", "Because the load balancer caches rejections"]
+    answer: 0
+    explanation: |
+      Shedding only helps if a rejection is much cheaper than serving. If the reject path itself
+      does auth, DB calls, or deep stack work, you spend nearly full cost to say no and reclaim
+      little capacity — so the server can still collapse. Reject early and shallow.
+    ref: "concepts.md#why-shed-load-goodput-vs-throughput"
+
+  - id: load-shedding-and-backpressure-029
+    difficulty: beginner
+    tags: [littles-law, formula]
+    question: |
+      Little's Law states L = lambda x W. What does L represent?
+    options: ["The average number of requests in the system (in service plus waiting)", "The maximum latency allowed", "The number of CPU cores", "The loss rate of requests"]
+    answer: 0
+    explanation: |
+      L is the average number of items in the system (being served plus queued), lambda is the
+      arrival/throughput rate, and W is the average time in the system. The relation holds for any
+      stable queueing system regardless of arrival distribution.
+    ref: "concepts.md#littles-law-the-capacitylatency-intuition"
+
+  - id: load-shedding-and-backpressure-030
+    difficulty: advanced
+    tags: [rabbitmq, push, prefetch]
+    question: |
+      RabbitMQ pushes messages to consumers by default. Without which setting can a slow consumer
+      get buried under a flood of pushed messages?
+    options: ["A dead-letter exchange", "A larger disk", "Message TTL", "A prefetch (QoS) limit that caps how many unacknowledged messages a consumer holds at once"]
+    answer: 3
+    explanation: |
+      With default push delivery, RabbitMQ will keep sending until the consumer is overwhelmed.
+      Setting a prefetch/QoS limit caps outstanding unacked messages per consumer, effectively
+      adding credit-based backpressure to an otherwise push model.
+    ref: "concepts.md#push-vs-pull-why-pull-is-naturally-backpressured"
+
+  - id: load-shedding-and-backpressure-031
+    difficulty: intermediate
+    tags: [shed-vs-backpressure, concept]
+    question: |
+      What is the essential relationship between load shedding and backpressure?
+    options: ["They are the same idea at different distances: shedding rejects here, backpressure tells the upstream to send less — robust systems do both", "They are opposites and cannot be used together", "Backpressure only works for reads and shedding only for writes", "Shedding is for networks, backpressure is for CPUs"]
+    answer: 0
+    explanation: |
+      Both keep resource use bounded under overload. Backpressure says "send me less" to the
+      upstream while you still can; shedding says "I reject this" when you must. A resilient system
+      applies backpressure as long as possible and sheds when backpressure isn't enough.
+    ref: "concepts.md#backpressure-signaling-upstream-to-slow-down"
+
+  - id: load-shedding-and-backpressure-032
+    difficulty: advanced
+    tags: [scenario, retry-vs-shed, judgment]
+    question: |
+      A critical downstream dependency has become slow and is near its own capacity limit. Your
+      service currently retries failed calls to it aggressively. What is the better reliability move?
+    options: ["Increase the retry count to push more requests through", "Remove all timeouts so requests eventually complete", "Stop hammering it: use a circuit breaker plus backoff, and shed/degrade the dependent feature, so the downstream can recover", "Switch the queue in front of it to unbounded"]
+    answer: 2
+    explanation: |
+      Retrying into a saturated dependency amplifies its overload and delays recovery. A circuit
+      breaker stops sending doomed traffic, backoff spaces out probes, and shedding/degrading the
+      dependent feature protects your own goodput while the downstream recovers. See
+      circuit-breakers-and-bulkheads and retries-timeouts-and-backoff.
+    ref: "concepts.md#prioritized--criticality-based-shedding"
+
+  - id: load-shedding-and-backpressure-033
+    difficulty: intermediate
+    tags: [retry-after, clients]
+    question: |
+      Why is the Retry-After header valuable when shedding load with 503/429?
+    options: ["It encrypts the response", "It tells the client when to retry, letting the server shape retry timing and reduce synchronized retry spikes", "It guarantees the retry will succeed", "It disables client-side caching"]
+    answer: 1
+    explanation: |
+      Retry-After communicates when the client should come back, so the server can spread retries
+      out instead of receiving them all at once. Combined with client-side jitter it reduces the
+      thundering-herd effect that naive immediate retries create.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-034
+    difficulty: advanced
+    tags: [littles-law, thread-pool, sizing]
+    question: |
+      A service handles 500 req/s and each request takes 40 ms end to end. Ignoring headroom, about
+      how many concurrent worker threads does Little's Law suggest?
+    options: ["About 5", "About 200", "About 20", "About 500"]
+    answer: 2
+    explanation: |
+      L = lambda x W = 500 x 0.04 = 20 concurrent requests, so roughly 20 worker threads are needed
+      (add headroom for variance in practice). This is the direct application of Little's Law to
+      pool sizing.
+    ref: "concepts.md#littles-law-the-capacitylatency-intuition"
+
+  - id: load-shedding-and-backpressure-035
+    difficulty: advanced
+    tags: [lifo, starvation, deadline]
+    question: |
+      A concern with pure LIFO scheduling is that old items can be starved. How is this typically
+      resolved while keeping LIFO's overload benefit?
+    options: ["Switch permanently to FIFO", "Attach a deadline/TTL to queued work and drop items past their deadline instead of processing them", "Use an unbounded queue so nothing is ever dropped", "Process items in random order"]
+    answer: 1
+    explanation: |
+      Pairing LIFO with per-item deadlines/TTLs means stale old items are discarded (dead on
+      arrival) rather than starved indefinitely — they were going to time out anyway. You keep
+      LIFO's benefit of serving fresh, still-awaited requests without unbounded unfairness.
+    ref: "concepts.md#lifo-vs-fifo-under-overload"
+
+  - id: load-shedding-and-backpressure-036
+    difficulty: intermediate
+    tags: [backpressure, blocking, danger]
+    question: |
+      Using a blocking bounded queue to apply backpressure by stalling the producer is fine for a
+      producer you control, but why is it dangerous on request-serving threads?
+    options: ["Blocking is not supported in modern languages", "It automatically returns 500 to clients", "A blocked request-serving thread is a tied-up resource; enough blocked threads exhausts the pool and stalls the whole service", "It disables garbage collection"]
+    answer: 2
+    explanation: |
+      Blocking to create backpressure ties up whatever thread is blocked. On request-serving
+      threads that resource is scarce; enough blocked threads exhaust the pool and the service
+      stops accepting anything. Rejection (fail-fast) is usually safer for inbound request paths.
+    ref: "concepts.md#backpressure-signaling-upstream-to-slow-down"
+
+  - id: load-shedding-and-backpressure-037
+    difficulty: beginner
+    tags: [congestive-collapse, fundamentals]
+    question: |
+      What is "congestive collapse" in an overloaded service?
+    options: ["The database running out of connections only", "A planned maintenance shutdown", "The CPU dropping to idle under load", "Accepting all requests while queues grow unbounded, latency explodes, everything times out, and goodput falls toward zero despite the machine being fully busy"]
+    answer: 3
+    explanation: |
+      Congestive collapse is the naive-overload outcome: everything is accepted, queues grow,
+      latency blows up, timeouts cascade, retries pile on, and useful work (goodput) crashes toward
+      zero even at 100% utilization. Shedding and backpressure exist to prevent it.
+    ref: "concepts.md#why-shed-load-goodput-vs-throughput"
+
+  - id: load-shedding-and-backpressure-038
+    difficulty: advanced
+    tags: [server-side-throttling, sre, clients]
+    question: |
+      Google SRE describes client-side adaptive throttling, where a client throttles based on the
+      ratio of accepted to attempted requests. What problem does this specifically address?
+    options: ["It compresses request bodies", "It shares shedding responsibility with clients so they stop sending doomed requests to an overloaded server, reducing wasted reject cost", "It replaces the need for load balancers", "It guarantees exactly-once delivery"]
+    answer: 1
+    explanation: |
+      When a server is rejecting most requests, having clients keep sending them wastes the
+      server's reject capacity. Client-side adaptive throttling makes clients pre-emptively drop a
+      fraction of their own requests based on the accept/attempt ratio, spreading shedding across
+      the fleet and reducing load on the struggling server.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-039
+    difficulty: intermediate
+    tags: [tenant-tier, fairness, shedding]
+    question: |
+      Why is per-tenant (per-client) fairness an important dimension of prioritized shedding in a
+      multi-tenant service?
+    options: ["It lets you bill tenants more accurately", "Without it, a single abusive or bursting tenant can consume all capacity and starve every other tenant", "It makes all tenants equally slow", "It is required by HTTP"]
+    answer: 1
+    explanation: |
+      Fairness across tenants prevents one heavy or misbehaving tenant from monopolizing shared
+      capacity. Shedding by tenant tier/quota isolates the blast radius so one tenant's overload
+      doesn't degrade everyone else — a reliability goal, complementary to bulkheads.
+    ref: "concepts.md#prioritized--criticality-based-shedding"
+
+  - id: load-shedding-and-backpressure-040
+    difficulty: advanced
+    tags: [scenario, unbounded, kafka, judgment]
+    question: |
+      An ingestion service accepts events over HTTP and pushes them onto an in-memory list that a
+      background thread drains into a slow database. During a spike the service OOMs. Which redesign
+      most directly fixes the overload behavior?
+    options: ["Increase the JVM heap size and hope the spike is short", "Add more log statements around the list", "Bound the buffer and, when full, either return 429/503 (shed) or block the intake (backpressure) — better yet, put a durable pull-based log (e.g. Kafka) between intake and the DB writer", "Remove the background thread and write synchronously with no limit"]
+    answer: 2
+    explanation: |
+      The unbounded in-memory list is the OOM cause. Bounding it forces a shed-or-backpressure
+      decision at intake. A durable pull-based log decouples fast intake from the slow DB writer:
+      the writer pulls at its own rate (natural backpressure) and the log absorbs bursts without
+      exhausting memory. Bigger heap only delays the OOM.
+    ref: "concepts.md#bounded-vs-unbounded-queues-the-buffering-anti-pattern"
+
+  - id: load-shedding-and-backpressure-041
+    difficulty: intermediate
+    tags: [static-vs-adaptive, limits]
+    question: |
+      Why are static concurrency/rate thresholds considered brittle for load shedding?
+    options: ["They are illegal in most frameworks", "They require a database to store the number", "Real capacity varies with request mix, deploys, and noisy neighbors, so a fixed number is often wrong — too low wastes capacity, too high lets overload through", "They can only be set to powers of two"]
+    answer: 2
+    explanation: |
+      A single hard-coded limit cannot track a capacity that shifts with request composition,
+      hardware, co-tenants, and code changes. Set too low it sheds prematurely; too high it admits
+      overload. Adaptive limiters that infer the limit from latency/queue delay handle this much
+      better.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-042
+    difficulty: intermediate
+    tags: [cost-based-shedding, judgment]
+    question: |
+      When shedding to reclaim the most capacity per rejection, which requests are often best to
+      shed first (all else equal)?
+    options: ["The most expensive-to-serve requests, because dropping each frees the most capacity", "The cheapest requests, since there are more of them", "Requests from the newest clients", "Requests with the shortest URLs"]
+    answer: 0
+    explanation: |
+      Cost-based shedding drops expensive requests first so each rejection reclaims the most
+      capacity. This is one axis of prioritization; in practice you combine it with criticality and
+      tenant tier (don't shed a critical cheap request before a sheddable expensive one).
+    ref: "concepts.md#prioritized--criticality-based-shedding"
+
+  - id: load-shedding-and-backpressure-043
+    difficulty: advanced
+    tags: [degradation, stale-cache, brownout]
+    question: |
+      Under load, a product page skips its live inventory-count call and serves a slightly stale
+      cached value instead. Which technique is this?
+    options: ["A retry storm", "A bulkhead", "Brownout / graceful degradation — trading response fidelity to cut per-request cost and stay within capacity", "TCP flow control"]
+    answer: 2
+    explanation: |
+      Serving a stale cached value instead of a fresh, expensive read reduces the cost of the
+      request while keeping the page available — brownout along the quality axis. The deeper
+      treatment of fallbacks and cached defaults lives in graceful-degradation-and-fallbacks.
+    ref: "concepts.md#brownout--graceful-degradation-as-shedding"
+
+  - id: load-shedding-and-backpressure-044
+    difficulty: intermediate
+    tags: [saturation, signals, observability]
+    question: |
+      Which of these is a good SATURATION signal to trigger load shedding, rather than a raw
+      traffic count?
+    options: ["Total requests served since startup", "Number of deployed instances", "The service's uptime in days", "Queue wait time / in-flight concurrency / thread-pool saturation crossing a threshold"]
+    answer: 3
+    explanation: |
+      Shedding should react to symptoms of saturation — queue depth/wait, in-flight concurrency,
+      thread-pool or CPU saturation, or p99 latency breaching SLO — not to raw request counts,
+      which don't tell you whether you're actually overloaded. How you measure/alarm on these is
+      covered in observability.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-045
+    difficulty: advanced
+    tags: [scenario, fifo, deadline, goodput]
+    question: |
+      A queue-backed worker processes in strict FIFO. During overload, clients have a 2s timeout but
+      queue wait has grown to 8s. Almost every completed job is discarded by the client. What change
+      most improves useful throughput?
+    options: ["Increase the client timeout to 10s", "Switch to LIFO and drop queued items already past their deadline, so workers spend time on jobs whose clients are still waiting", "Make the queue unbounded so nothing is lost", "Add more logging to the workers"]
+    answer: 1
+    explanation: |
+      In FIFO under overload, workers process the oldest (already-timed-out) jobs first, so results
+      are useless. Serving newest-first (LIFO) and dropping past-deadline items ensures workers
+      spend capacity on jobs whose clients are still waiting, raising goodput. Bigger timeouts or
+      unbounded queues make it worse.
+    ref: "concepts.md#lifo-vs-fifo-under-overload"
+
+  - id: load-shedding-and-backpressure-046
+    difficulty: intermediate
+    tags: [http2, grpc, flow-control]
+    question: |
+      gRPC and HTTP/2 provide flow-control windows per stream. How do these relate to backpressure?
+    options: ["They are only for TLS negotiation", "They are credit-based windows: a receiver won't accept more data than its window allows, so a slow reader naturally slows a fast sender", "They disable multiplexing under load", "They increase the sending rate automatically when the receiver is slow"]
+    answer: 1
+    explanation: |
+      HTTP/2 and gRPC flow-control windows are per-stream credits, the same pattern as TCP's
+      receive window and Reactive Streams request(n): the receiver advertises how much it can take,
+      and the sender must not exceed it. A slow consumer shrinks its window and paces the producer.
+    ref: "concepts.md#backpressure-protocols-reactive-streams--tcp-flow-control"
+
+  - id: load-shedding-and-backpressure-047
+    difficulty: beginner
+    tags: [cross-reference, rate-limiting]
+    question: |
+      In this reliability context, load-shedding-style rate limiting is framed primarily as a
+      mechanism to do what?
+    options: ["Prevent fraud and account takeover", "Reduce cloud storage costs", "Improve SEO ranking", "Protect the system from overload so it stays healthy for the requests it accepts"]
+    answer: 3
+    explanation: |
+      Here, rate limiting/shedding is a reliability mechanism: shed load to keep the system healthy.
+      Rate limiting as abuse/fraud prevention is owned by security, and the limiter algorithm/design
+      by system-design/design-rate-limiter — cross-reference, don't conflate the intents.
+    ref: "concepts.md#load-shedding-mechanics-admission-control"
+
+  - id: load-shedding-and-backpressure-048
+    difficulty: advanced
+    tags: [goodput, capacity-curve, judgment]
+    question: |
+      What is the goal of load shedding in terms of the goodput-vs-load curve?
+    options: ["To turn the post-capacity cliff into a plateau — hold goodput at capacity by cheaply refusing the excess", "To raise the peak goodput above hardware capacity", "To make latency zero at all load levels", "To eliminate the need for capacity planning"]
+    answer: 0
+    explanation: |
+      Shedding cannot raise a machine's peak capacity. Its aim is to prevent the collapse past
+      capacity: by cheaply refusing excess requests, goodput holds at the plateau instead of
+      falling off the cliff into congestive collapse. Capacity planning is still required (see
+      capacity-planning-and-load-management).
+    ref: "concepts.md#why-shed-load-goodput-vs-throughput"

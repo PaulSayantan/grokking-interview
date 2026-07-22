@@ -1,0 +1,917 @@
+topic: "Cascading Failures & Resilience Anti-Patterns"
+domain: reliability-ops
+topic_slug: cascading-failures-and-antipatterns
+version: 1
+questions:
+  - id: cascading-failures-and-antipatterns-001
+    difficulty: beginner
+    tags: [cascading-failure, definition]
+    question: |
+      What most precisely distinguishes a cascading failure from an ordinary,
+      localized component outage?
+    options:
+      - "It involves a hardware fault rather than a software bug"
+      - "A self-reinforcing feedback loop spreads the failure across components"
+      - "It always originates in the database tier"
+      - "It can only happen in microservice architectures"
+    answer: 1
+    explanation: |
+      A cascading failure is a self-reinforcing loss of serving capacity that spreads
+      across components over time. The defining ingredient beyond a plain outage is a
+      positive feedback loop (retries, health-check removal, queue growth) that
+      amplifies the problem each round instead of letting it stay bounded.
+    ref: "concepts.md#what-a-cascading-failure-is"
+
+  - id: cascading-failures-and-antipatterns-002
+    difficulty: intermediate
+    tags: [thread-pool, littles-law, mechanism]
+    question: |
+      A synchronous service normally sees 500 req/s at 20 ms latency and runs a
+      200-thread pool. A dependency slows so request latency becomes 2 s while the
+      request rate stays at 500 req/s. Roughly how many threads are now needed to keep
+      up, and what happens?
+    options:
+      - "About 10 threads; no impact"
+      - "About 200 threads; the pool is exactly saturated but stable"
+      - "About 1000 threads; the pool is exhausted ~5x over and the service stalls"
+      - "About 500 threads; latency doubles but the pool copes"
+    answer: 2
+    explanation: |
+      By Little's Law, concurrency = arrival_rate x latency = 500 x 2 = 1000 busy
+      threads. The 200-thread pool is exhausted about 5x over, so new requests queue or
+      are rejected and every endpoint stalls — even ones that don't touch the slow
+      dependency — because they can't get a thread.
+    ref: "concepts.md#the-thread-pool--resource-exhaustion-mechanism"
+
+  - id: cascading-failures-and-antipatterns-003
+    difficulty: intermediate
+    tags: [slow-vs-dead, timeouts, mechanism]
+    question: |
+      Why is a dependency that is *slow* often more dangerous to a synchronous caller
+      than a dependency that is completely *dead*?
+    options:
+      - "A slow dependency holds worker threads for its full duration, while a dead one fails fast and frees the thread"
+      - "A dead dependency corrupts data while a slow one does not"
+      - "A slow dependency triggers more alerts, overwhelming on-call"
+      - "There is no difference; both take equal capacity"
+    answer: 0
+    explanation: |
+      A dependency that fails fast (e.g. connection refused in ~1 ms) releases the
+      thread immediately, containing the damage. A merely slow dependency holds every
+      thread hostage for seconds, exhausting the pool. This is why aggressive timeouts —
+      which convert 'slow' into 'fast failure' — are the first line of defence.
+    ref: "concepts.md#the-thread-pool--resource-exhaustion-mechanism"
+
+  - id: cascading-failures-and-antipatterns-004
+    difficulty: intermediate
+    tags: [feedback-loop, root-cause]
+    question: |
+      In control-systems terms, what is the fundamental root cause of a cascade, as
+      opposed to a bounded outage?
+    options:
+      - "Negative feedback that over-corrects"
+      - "Insufficient logging"
+      - "A single point of failure with no replicas"
+      - "A positive (reinforcing) feedback loop that amplifies load or errors"
+    answer: 3
+    explanation: |
+      A cascade is a control-systems failure in which a loop that should be stabilizing
+      (or neutral) becomes reinforcing: getting worse feeds back as input that makes it
+      worse still. Healthy systems rely on negative feedback (backpressure, shedding,
+      breakers) that pushes load down as the system sickens.
+    ref: "concepts.md#positive-feedback-loops-as-the-root-cause"
+
+  - id: cascading-failures-and-antipatterns-005
+    difficulty: advanced
+    tags: [metastable, definition]
+    question: |
+      What is the defining characteristic of a *metastable* failure?
+    options:
+      - "It only occurs during deployments"
+      - "It resolves itself within seconds without intervention"
+      - "It persists even after the original trigger is removed, because a sustaining feedback loop holds the system in the bad state"
+      - "It is caused exclusively by hardware degradation"
+    answer: 2
+    explanation: |
+      A metastable failure keeps the system broken after the trigger is gone because a
+      sustaining loop (typically retries of failing work) now generates enough load to
+      keep the system pinned in the bad state. It requires a manual push — shed load,
+      disable retries, drain — to fall back into the healthy basin.
+    ref: "concepts.md#metastable-failures"
+
+  - id: cascading-failures-and-antipatterns-006
+    difficulty: advanced
+    tags: [metastable, retries, goodput]
+    question: |
+      A service was pushed into a broken state by a brief traffic spike. The spike ended
+      five minutes ago, but the system is still at 100% CPU with near-zero goodput.
+      Retries are enabled. What is the most likely explanation?
+    options:
+      - "It is a metastable failure: retries of still-failing work keep offered load above capacity, sustaining the outage"
+      - "The metrics pipeline is lagging; the system has actually recovered"
+      - "The spike permanently damaged the hardware"
+      - "The load balancer is stuck and needs a DNS change"
+    answer: 0
+    explanation: |
+      This is textbook metastability. The trigger (spike) is gone, but work
+      amplification from retries turned each failed request into several, so offered
+      load stays above capacity and the system feeds itself. Goodput stays near zero
+      while the system is maximally busy doing failing/retried work. The fix is a manual
+      load reduction, not patience.
+    ref: "concepts.md#metastable-failures"
+
+  - id: cascading-failures-and-antipatterns-007
+    difficulty: advanced
+    tags: [metastable, recovery, load-shedding]
+    question: |
+      To pull a system out of a metastable failure state, what must you do?
+    options:
+      - "Wait, since the trigger is gone the system will recover on its own"
+      - "Increase the retry count so requests eventually succeed"
+      - "Enlarge all queues to buffer the backlog"
+      - "Externally reduce offered load below capacity long enough for the backlog to drain"
+    answer: 3
+    explanation: |
+      Because the sustaining loop keeps load above capacity, the only escape is to force
+      load below the capacity threshold long enough for the backlog to drain — shed
+      load, disable/pause retries, drain queues, or temporarily add capacity so
+      offered-load-including-retries fits. A brief dip below threshold lets the system
+      fall back into the healthy basin.
+    ref: "concepts.md#metastable-failures"
+
+  - id: cascading-failures-and-antipatterns-008
+    difficulty: advanced
+    tags: [metastable, design, headroom]
+    question: |
+      Which design practice most directly reduces the risk of metastable failures?
+    options:
+      - "Running each service at 95%+ utilization to save cost"
+      - "Keeping utilization headroom and gating retries behind a retry budget"
+      - "Removing all timeouts so requests always complete"
+      - "Using unbounded queues to absorb any backlog"
+    answer: 1
+    explanation: |
+      Metastability needs thin headroom plus an amplifying loop. Keeping capacity
+      headroom (not running at 95%), capping retries and gating them behind a retry
+      budget / token bucket, using circuit breakers, and making work idempotent so
+      retries don't multiply distinct work all reduce the chance a trigger tips the
+      system into a self-sustaining bad state.
+    ref: "concepts.md#metastable-failures"
+
+  - id: cascading-failures-and-antipatterns-009
+    difficulty: intermediate
+    tags: [retry-storm, amplification, layers]
+    question: |
+      Every tier in a chain (client, gateway, service, DB) independently retries a failed
+      call up to 3 times. In the worst case, how many requests can a single user request
+      generate at the database, and what is the lesson?
+    options:
+      - "3 requests; retry at every layer for safety"
+      - "9 requests; retries are always harmless"
+      - "27 requests; retry at only one layer to avoid multiplicative amplification"
+      - "12 requests; the DB should just scale up"
+    answer: 2
+    explanation: |
+      Layered retries multiply: 3 x 3 x 3 = 27 requests can hit the DB from one user
+      request. The lesson is to retry at only one layer (usually the one closest to and
+      best-informed about the failure) and never re-retry an error a lower layer already
+      exhausted its retries on.
+    ref: "concepts.md#anti-pattern-retry-storms-retry-amplification"
+
+  - id: cascading-failures-and-antipatterns-010
+    difficulty: advanced
+    tags: [retry-budget, sre, overload]
+    question: |
+      The Google SRE book recommends bounding client retries with a 'retry budget.' What
+      does this mean in practice?
+    options:
+      - "Limit retries to a small fraction of the request rate (on the order of ~10%) so a broken dependency can't be hammered"
+      - "Allow unlimited retries but log each one"
+      - "Retry only during business hours"
+      - "Double the retry count each time a dependency fails"
+    answer: 0
+    explanation: |
+      A retry budget caps aggregate retries at a small percentage of the request rate
+      (Google SRE suggests on the order of 10%). Once the budget is exhausted, further
+      retries are dropped. This prevents retries from multiplying load on an already-sick
+      dependency and driving a retry storm.
+    ref: "concepts.md#anti-pattern-retry-storms-retry-amplification"
+
+  - id: cascading-failures-and-antipatterns-011
+    difficulty: intermediate
+    tags: [retry-storm, incident, recovery]
+    question: |
+      A service is in an active retry storm caused by a struggling downstream. What is
+      usually the fastest, highest-leverage action?
+    options:
+      - "Add more replicas of the struggling downstream first"
+      - "Increase all timeouts so requests have more time to succeed"
+      - "Restart every instance immediately"
+      - "Turn retries off (via feature flag/config) and/or shed load to cut offered load"
+    answer: 3
+    explanation: |
+      Retries help with independent, transient faults, but during a correlated overload
+      they are pure fuel. Disabling retries directly cuts the offered load the loop is
+      feeding on. Adding capacity first tends to be absorbed by the storm; restarting
+      into the storm drops warm caches and often deepens the outage.
+    ref: "concepts.md#anti-pattern-retry-storms-retry-amplification"
+
+  - id: cascading-failures-and-antipatterns-012
+    difficulty: intermediate
+    tags: [retries, idempotency]
+    question: |
+      Which errors are generally safe to retry without special handling?
+    options:
+      - "Any error, since retries always eventually succeed"
+      - "Only transient/retryable errors (timeouts, 5xx) on idempotent operations"
+      - "4xx client errors like 400 and 404"
+      - "Errors that a lower layer already retried and exhausted"
+    answer: 1
+    explanation: |
+      Retry only transient, retryable errors (timeouts, connection resets, 5xx) and only
+      for idempotent operations, so a duplicate doesn't cause a double side effect.
+      Retrying deterministic 4xx errors just wastes capacity, and re-retrying an error a
+      lower layer already exhausted amplifies load.
+    ref: "concepts.md#anti-pattern-retry-storms-retry-amplification"
+
+  - id: cascading-failures-and-antipatterns-013
+    difficulty: intermediate
+    tags: [thundering-herd, jitter, backoff]
+    question: |
+      Many clients fail at the same instant and all use exponential backoff but with NO
+      jitter. What happens on the next attempt and why?
+    options:
+      - "The load is perfectly smoothed because backoff spreads them out"
+      - "Only one client retries; the rest give up"
+      - "They all wait the same fixed interval and retry at the same moment, recreating the spike (thundering herd)"
+      - "Retries are automatically randomized by TCP"
+    answer: 2
+    explanation: |
+      Backoff fixes the *rate* of retries but not their *synchronization*. Clients that
+      failed together back off by the same amount and fire together, recreating the very
+      spike that caused the failure. Jitter — randomizing the wait — is what desynchronizes
+      them.
+    ref: "concepts.md#anti-pattern-thundering-herd--synchronized-clients-jitter"
+
+  - id: cascading-failures-and-antipatterns-014
+    difficulty: advanced
+    tags: [jitter, backoff, formula, aws]
+    question: |
+      Per the AWS 'Exponential Backoff And Jitter' analysis, which formula describes
+      'full jitter,' the scheme that minimizes contention?
+    options:
+      - "sleep = random_between(0, min(max_backoff, base * 2 ** attempt))"
+      - "sleep = base * 2 ** attempt (no randomization)"
+      - "sleep = max_backoff always"
+      - "sleep = base * attempt (linear, no randomization)"
+    answer: 0
+    explanation: |
+      Full jitter picks the delay uniformly at random in [0, cap], where
+      cap = min(max_backoff, base * 2 ** attempt). Marc Brooker's analysis showed full
+      jitter minimizes contention and total completion time versus fixed backoff or
+      'equal jitter' schemes because it maximally spreads clients out.
+    ref: "concepts.md#anti-pattern-thundering-herd--synchronized-clients-jitter"
+
+  - id: cascading-failures-and-antipatterns-015
+    difficulty: intermediate
+    tags: [thundering-herd, cron, ttl]
+    question: |
+      Besides un-jittered retries, which of these is a classic source of a thundering
+      herd?
+    options:
+      - "Cron jobs, TTLs, or client reconnects that all fire at the same instant"
+      - "Requests arriving at a smooth, uniform rate"
+      - "A load balancer distributing traffic evenly"
+      - "A database with an index on the primary key"
+    answer: 0
+    explanation: |
+      Synchronization is the enemy of smooth load. Cron jobs all firing at :00, TTLs that
+      expire together, a cache flush, a config push, or every client reconnecting to a
+      recovering service at once all create instantaneous spikes far above the average
+      rate. Jitter should be added to anything many clients do on a schedule.
+    ref: "concepts.md#anti-pattern-thundering-herd--synchronized-clients-jitter"
+
+  - id: cascading-failures-and-antipatterns-016
+    difficulty: intermediate
+    tags: [cache-stampede, dogpile, definition]
+    question: |
+      What is a cache stampede (dogpile)?
+    options:
+      - "A cache that grows without bound until it OOMs"
+      - "A cache that returns stale data indefinitely"
+      - "A cache eviction policy that removes the wrong keys"
+      - "A hot key expires and many concurrent requests all miss and recompute it at once, hammering the backend"
+    answer: 3
+    explanation: |
+      A cache stampede occurs when a hot cached item expires and, in the gap before it is
+      repopulated, many concurrent requests all miss and all recompute the same expensive
+      value at once. This can overwhelm the backend and prevent the cache from refilling —
+      a self-sustaining, metastable-flavoured loop.
+    ref: "concepts.md#anti-pattern-cache-stampede--dogpile"
+
+  - id: cascading-failures-and-antipatterns-017
+    difficulty: advanced
+    tags: [cache-stampede, request-coalescing, single-flight]
+    question: |
+      Which technique attacks a cache stampede by having concurrent misses for the same
+      key wait for and share a single recomputation?
+    options:
+      - "Request coalescing / single-flight"
+      - "Increasing the cache TTL to infinity"
+      - "Sharding the cache across more nodes"
+      - "Disabling the cache entirely"
+    answer: 0
+    explanation: |
+      Request coalescing (single-flight) lets the first miss recompute while concurrent
+      misses for the same key wait for and share that one result, via a per-key in-flight
+      lock or promise. It's local, needs no extra infrastructure, and directly attacks the
+      'many identical concurrent recomputes' root cause (Go's singleflight,
+      @Cacheable(sync=true)).
+    ref: "concepts.md#anti-pattern-cache-stampede--dogpile"
+
+  - id: cascading-failures-and-antipatterns-018
+    difficulty: expert
+    tags: [cache-stampede, xfetch, probabilistic-early-expiration]
+    question: |
+      Probabilistic early expiration (XFetch) prevents cache stampedes by doing what?
+    options:
+      - "Never expiring hot keys"
+      - "Locking the entire cache during any recompute"
+      - "Letting each reader volunteer to refresh the key slightly before it expires, with probability rising as expiry nears"
+      - "Serving only stale data and never recomputing"
+    answer: 2
+    explanation: |
+      XFetch has each reader probabilistically refresh the key a little before it actually
+      expires, recomputing if now - delta*beta*ln(rand()) >= expiry. Because the refresh
+      time is randomized and rises toward expiry, refreshes almost never coincide — no
+      thundering herd and no lock — at the cost of storing the compute time (delta) and
+      tuning beta.
+    ref: "concepts.md#anti-pattern-cache-stampede--dogpile"
+
+  - id: cascading-failures-and-antipatterns-019
+    difficulty: intermediate
+    tags: [cache-stampede, stale-while-revalidate]
+    question: |
+      What does 'stale-while-revalidate' do to help with cache misses on hot keys?
+    options:
+      - "Blocks all readers until the fresh value is computed"
+      - "Deletes the key so the next read recomputes"
+      - "Doubles the TTL on every read"
+      - "Serves the stale value immediately while an async job refreshes it, so users never wait on the miss"
+    answer: 3
+    explanation: |
+      Stale-while-revalidate returns the slightly-stale cached value right away and kicks
+      off an asynchronous refresh in the background. Users never block on a recompute, and
+      only one background job refreshes, avoiding the herd of synchronous misses.
+    ref: "concepts.md#anti-pattern-cache-stampede--dogpile"
+
+  - id: cascading-failures-and-antipatterns-020
+    difficulty: intermediate
+    tags: [unbounded-queue, littles-law, latency]
+    question: |
+      Why is an unbounded work queue dangerous under sustained overload?
+    options:
+      - "It uses too little memory"
+      - "It hides overload, blows up latency (Little's Law), causes work to complete after clients have already timed out, and can OOM the process"
+      - "It rejects requests too aggressively"
+      - "It forces retries to stop"
+    answer: 1
+    explanation: |
+      An unbounded queue hides overload until it's catastrophic: wait time = queue length
+      / throughput, so latency grows without limit; once queue latency exceeds the client
+      timeout, completed work is thrown away (the client gave up), wasting capacity; and it
+      can OOM the process. The fix is a bounded queue with a rejection policy (fail fast /
+      shed load).
+    ref: "concepts.md#anti-pattern-unbounded-queues--queue-growth"
+
+  - id: cascading-failures-and-antipatterns-021
+    difficulty: advanced
+    tags: [queue, backpressure, lifo]
+    question: |
+      During overload, why can a LIFO (newest-first) or deadline-aware dequeue policy be
+      better than plain FIFO?
+    options:
+      - "LIFO is always faster than FIFO"
+      - "FIFO uses more memory"
+      - "It works on requests that haven't already exceeded the client timeout and drops the stale head, avoiding wasted work on doomed requests"
+      - "LIFO guarantees fairness across all clients"
+    answer: 2
+    explanation: |
+      Under a growing backlog, the oldest (head) items are the most likely to have already
+      exceeded the client's timeout, so FIFO spends capacity producing responses nobody
+      reads. LIFO / deadline-aware dequeuing prioritizes requests that can still be served
+      within their deadline and drops the stale head, reducing wasted work.
+    ref: "concepts.md#anti-pattern-unbounded-queues--queue-growth"
+
+  - id: cascading-failures-and-antipatterns-022
+    difficulty: intermediate
+    tags: [queue, capacity, misconception]
+    question: |
+      Under a persistent gap where arrival rate exceeds service rate, why is 'just make the
+      queue bigger' the wrong instinct?
+    options:
+      - "A bigger queue only delays and deepens the collapse, adding latency and storing doomed work; queues size for bursts, not a permanent arrival>service gap"
+      - "Bigger queues always reduce latency"
+      - "Bigger queues automatically add processing capacity"
+      - "Queues cannot be resized once created"
+    answer: 0
+    explanation: |
+      Queues absorb *bursts*, not a sustained mismatch. If arrival > service forever, no
+      queue size saves you — a bigger queue just adds latency and stores more doomed work
+      before the inevitable collapse. You must shed load or add real processing capacity.
+    ref: "concepts.md#anti-pattern-unbounded-queues--queue-growth"
+
+  - id: cascading-failures-and-antipatterns-023
+    difficulty: beginner
+    tags: [timeouts, missing-timeout, mechanism]
+    question: |
+      Why is a missing (infinite) timeout on a remote call a cascade enabler?
+    options:
+      - "It makes requests faster on the happy path"
+      - "It reduces network bandwidth usage"
+      - "It prevents retries from ever firing"
+      - "A single hung dependency holds a worker forever, and a trickle of hung calls drains the pool"
+    answer: 3
+    explanation: |
+      With no timeout (the JDK default for many socket/HTTP clients is effectively
+      infinite), one hung dependency holds a worker thread forever. A steady trickle of
+      hung calls steadily drains the pool until the service is unresponsive — the enabling
+      condition for thread-pool-exhaustion cascades. Every remote call needs both a
+      connection and a read timeout.
+    ref: "concepts.md#anti-pattern-missing--unbounded-timeouts"
+
+  - id: cascading-failures-and-antipatterns-024
+    difficulty: advanced
+    tags: [timeouts, slo, latency-budget]
+    question: |
+      How should you generally choose the timeout value for a remote dependency call?
+    options:
+      - "Equal to the dependency's average happy-path latency"
+      - "As long as possible so requests rarely fail"
+      - "From your own SLO / latency budget, often near the dependency's p99.9, but well within your own deadline"
+      - "Exactly 30 seconds for every call"
+    answer: 2
+    explanation: |
+      Set timeouts from your latency budget/SLO, not the dependency's happy-path latency. A
+      good starting point is around the p99.9 of normal latency (so you rarely cut off
+      healthy slow requests) while staying well within your own deadline. Too tight cuts
+      off healthy requests; too loose fails to protect your thread pool.
+    ref: "concepts.md#anti-pattern-missing--unbounded-timeouts"
+
+  - id: cascading-failures-and-antipatterns-025
+    difficulty: advanced
+    tags: [deadline-propagation, timeout-budget]
+    question: |
+      What is 'deadline propagation' (timeout budgets), and why does it matter?
+    options:
+      - "Setting the same timeout on every service in the company"
+      - "Passing the remaining deadline down the call chain so inner calls can't take longer than the outer caller will wait"
+      - "Removing timeouts on inner calls to give them more time"
+      - "Logging the timeout value in every request"
+    answer: 1
+    explanation: |
+      Deadline propagation passes a *remaining* deadline down the chain (as in gRPC
+      deadlines / context propagation), so an inner call is cancelled if its parent has
+      already run out of time. An inner timeout longer than the outer one is useless work —
+      the caller has already given up — so propagating the deadline avoids wasted effort.
+    ref: "concepts.md#anti-pattern-missing--unbounded-timeouts"
+
+  - id: cascading-failures-and-antipatterns-026
+    difficulty: intermediate
+    tags: [shared-fate, bulkhead, isolation]
+    question: |
+      A single thread pool serves all of a service's endpoints. One endpoint calls a slow
+      dependency and exhausts the pool, taking down unrelated endpoints too. Which pattern
+      most directly prevents this?
+    options:
+      - "Increasing the global timeout"
+      - "Adding more retries"
+      - "Merging all endpoints into one handler"
+      - "Bulkheads: separate thread/connection pools per dependency or criticality"
+    answer: 3
+    explanation: |
+      This is shared fate. Bulkheads partition resources — separate thread/connection pools
+      per dependency, per tenant, or per criticality tier — so one slow dependency can only
+      exhaust its own partition, not starve unrelated work. Named for a ship's watertight
+      compartments.
+    ref: "concepts.md#anti-pattern-shared-fate--tight-coupling"
+
+  - id: cascading-failures-and-antipatterns-027
+    difficulty: advanced
+    tags: [shared-fate, cell-based, shuffle-sharding, multi-tenant]
+    question: |
+      In a multi-tenant system, which approach best bounds the blast radius of a single
+      'poison' tenant that consumes disproportionate capacity?
+    options:
+      - "Cell-based architecture / shuffle sharding to isolate tenants into partitions"
+      - "One large shared pool for all tenants for efficiency"
+      - "Removing all rate limits to keep latency low"
+      - "Giving the poison tenant its own retries"
+    answer: 0
+    explanation: |
+      Cell-based architecture and shuffle sharding assign tenants to isolated partitions so
+      one abusive tenant can only degrade its own cell (and the small overlap with others),
+      not the whole fleet. This is the bulkhead idea applied at the tenant level to bound
+      blast radius.
+    ref: "concepts.md#anti-pattern-shared-fate--tight-coupling"
+
+  - id: cascading-failures-and-antipatterns-028
+    difficulty: intermediate
+    tags: [tight-coupling, async, decoupling]
+    question: |
+      Which tactic breaks *synchronous* tight coupling so a slow consumer doesn't block the
+      producer?
+    options:
+      - "Making both components share one database"
+      - "Increasing the producer's thread pool size only"
+      - "Introducing an asynchronous queue between them"
+      - "Calling the consumer twice per request"
+    answer: 2
+    explanation: |
+      Asynchrony via a queue decouples producer and consumer: the producer hands work off
+      and continues, so a slow or down consumer causes backlog rather than blocking the
+      producer's threads. Sharing a database instead increases shared fate, and merely
+      enlarging the pool doesn't remove the coupling.
+    ref: "concepts.md#anti-pattern-shared-fate--tight-coupling"
+
+  - id: cascading-failures-and-antipatterns-029
+    difficulty: advanced
+    tags: [health-check, death-spiral, mechanism]
+    question: |
+      Describe the 'health-check death spiral.'
+    options:
+      - "Health checks run too infrequently to detect failures"
+      - "Overloaded instances fail health checks and are removed, concentrating load on survivors that then also fail, shrinking the healthy pool toward zero"
+      - "Health checks return false positives, keeping dead instances in service"
+      - "Health checks consume all the CPU on healthy nodes"
+    answer: 1
+    explanation: |
+      Under load, an instance slow enough to time out its health check is removed by the
+      load balancer/orchestrator. Its traffic redistributes onto the remaining instances,
+      overloading them so they too fail health checks and are removed — a shrinking healthy
+      pool concentrates load and kills survivors one by one, potentially reaching zero
+      healthy instances that collectively could have served the load.
+    ref: "concepts.md#anti-pattern-the-health-check-death-spiral"
+
+  - id: cascading-failures-and-antipatterns-030
+    difficulty: advanced
+    tags: [liveness, readiness, kubernetes, health-check]
+    question: |
+      In Kubernetes, what is the key difference between a failing liveness probe and a
+      failing readiness probe, and why does it matter for cascades?
+    options:
+      - "Both restart the container; there is no difference"
+      - "A readiness failure restarts the pod; liveness only logs a warning"
+      - "Liveness controls CPU limits; readiness controls memory limits"
+      - "A liveness failure restarts the container, while a readiness failure only removes it from the load-balancer pool (no restart)"
+    answer: 3
+    explanation: |
+      A failing liveness probe *restarts* the container; a failing readiness probe only
+      *depools* it (no restart). During overload, gating liveness on downstream health
+      would restart your whole fleet at once. Liveness should be a cheap local check; deep
+      dependency checks belong at most in readiness.
+    ref: "concepts.md#anti-pattern-the-health-check-death-spiral"
+
+  - id: cascading-failures-and-antipatterns-031
+    difficulty: advanced
+    tags: [static-stability, minimum-healthy, fail-static]
+    question: |
+      A load balancer decides that 100% of instances are 'unhealthy' during a global
+      overload. What behaviour helps avoid making the outage worse?
+    options:
+      - "Enforce a minimum-healthy threshold / fail static: keep serving with what you have rather than routing to nothing"
+      - "Route to none of them and return errors immediately"
+      - "Restart every instance simultaneously"
+      - "Immediately scale the fleet to zero and rebuild"
+    answer: 0
+    explanation: |
+      If *everything* looks unhealthy, it's more likely a check problem or global overload
+      than a genuine total failure. A minimum-healthy floor ('fail static' / static
+      stability) refuses to remove instances below a threshold, so the LB keeps sending
+      traffic to instances that can still do useful work rather than routing to nothing.
+    ref: "concepts.md#anti-pattern-the-health-check-death-spiral"
+
+  - id: cascading-failures-and-antipatterns-032
+    difficulty: intermediate
+    tags: [health-check, deep-check, correlated-failure]
+    question: |
+      Why is it risky to make a service's liveness health check depend on a shared
+      downstream (e.g., ping the database)?
+    options:
+      - "It makes the check slightly slower"
+      - "It improves accuracy too much"
+      - "A single downstream blip would fail every instance's check at once, causing correlated fleet-wide removal/restart"
+      - "Databases cannot respond to health checks"
+    answer: 2
+    explanation: |
+      A deep liveness check tied to a shared dependency creates correlated failure: when
+      that dependency has a brief blip, every instance fails its check simultaneously and
+      the whole fleet is removed or restarted at once — turning a minor downstream hiccup
+      into a total outage. Keep liveness local.
+    ref: "concepts.md#anti-pattern-the-health-check-death-spiral"
+
+  - id: cascading-failures-and-antipatterns-033
+    difficulty: intermediate
+    tags: [client-bug, self-inflicted, overload]
+    question: |
+      Studies and postmortems show a large share of outages are 'self-inflicted.' What does
+      this term describe here?
+    options:
+      - "Failures caused by external DDoS attackers"
+      - "A client or deploy generating far more load than intended (retry bug, tight polling, accidental fan-out), overwhelming the server"
+      - "Hardware failures in the data center"
+      - "Cosmic-ray bit flips in memory"
+    answer: 1
+    explanation: |
+      Self-inflicted overload comes from your own side: a client retry bug, a polling
+      interval that drops from 60 s to 1 s, an accidental N+1 fan-out, or a bad batch
+      parallelism. The server must protect itself against a misbehaving insider, because
+      the client will misbehave sooner or later.
+    ref: "concepts.md#anti-pattern-overload-from-a-client-bug-self-inflicted-load"
+
+  - id: cascading-failures-and-antipatterns-034
+    difficulty: advanced
+    tags: [query-of-death, poison-request]
+    question: |
+      What is a 'query of death' (poison request)?
+    options:
+      - "A query that returns no rows"
+      - "A query that always succeeds but slowly"
+      - "A deliberately malformed TLS handshake"
+      - "A specific input that is disproportionately expensive or crashes the handler, so a client repeating it does outsized damage"
+    answer: 3
+    explanation: |
+      A query of death is an input that is pathologically expensive or crashes/hangs the
+      handler. A client that repeats it (often via retries after the crash) can take down
+      instance after instance. Defences include input validation/limits, isolation, and not
+      blindly retrying requests that just killed a handler.
+    ref: "concepts.md#anti-pattern-overload-from-a-client-bug-self-inflicted-load"
+
+  - id: cascading-failures-and-antipatterns-035
+    difficulty: advanced
+    tags: [admission-control, rate-limiting, self-protection]
+    question: |
+      Which layer must every service have to protect itself even when callers are buggy or
+      retry-happy?
+    options:
+      - "An admission-control layer (rate limits + load shedding) that protects the service regardless of client behaviour"
+      - "A larger connection pool"
+      - "More verbose logging"
+      - "A longer default timeout"
+    answer: 0
+    explanation: |
+      Reliability engineering assumes clients will eventually misbehave. Server-side
+      admission control — per-client rate limits/quotas plus priority-aware load shedding —
+      protects the service even against buggy or malicious callers. It's the same mechanism
+      as abuse-prevention rate limiting (see security / design-rate-limiter) but the motive
+      here is self-protection.
+    ref: "concepts.md#anti-pattern-overload-from-a-client-bug-self-inflicted-load"
+
+  - id: cascading-failures-and-antipatterns-036
+    difficulty: advanced
+    tags: [recovery, ordering, incident]
+    question: |
+      During an active cascade driven by retries, why is 'add more capacity' often the
+      wrong *first* move?
+    options:
+      - "Capacity is free, so it's always the right move"
+      - "Adding capacity always corrupts data"
+      - "New capacity is consumed by the feedback loop as fast as you add it, so you must break the loop (shed load / disable retries) first"
+      - "Capacity changes require a full redeploy that takes days"
+    answer: 2
+    explanation: |
+      While the amplifying loop is active, added capacity is eaten by retries/overload as
+      fast as it appears, and for a stateful bottleneck (single DB, quota) more stateless
+      replicas can even increase pressure. Break the loop first — disable retries, shed
+      load, reduce fan-out — then restore/add capacity, then ramp back slowly.
+    ref: "concepts.md#recovery-breaking-an-active-cascade"
+
+  - id: cascading-failures-and-antipatterns-037
+    difficulty: advanced
+    tags: [recovery, rolling-restart, warm-cache]
+    question: |
+      A rolling restart is a useful recovery tool. What does it fix, and what is the trap?
+    options:
+      - "It fixes ongoing overload; there is no trap"
+      - "It clears stuck state (hung threads, leaks, bad config) — but restarting into an active overload drops warm caches/pools and often deepens the outage"
+      - "It permanently increases capacity"
+      - "It resets the retry budget so retries can resume"
+    answer: 1
+    explanation: |
+      A rolling restart clears stuck in-memory state: hung threads on dead connections,
+      corrupted state, memory leaks, GC death spirals, bad in-flight config. But it does not
+      fix an ongoing overload — restarting into the same load re-collapses and loses warm
+      caches, making things worse. Restart only after demand is under control.
+    ref: "concepts.md#recovery-breaking-an-active-cascade"
+
+  - id: cascading-failures-and-antipatterns-038
+    difficulty: advanced
+    tags: [recovery, cold-cache, ramp, thundering-herd]
+    question: |
+      After a full outage, why should you re-introduce traffic gradually rather than all at
+      once?
+    options:
+      - "Because gradual ramp uses less electricity"
+      - "Because clients need time to update their DNS caches"
+      - "Because logs need to catch up first"
+      - "Everything is cold (empty caches, all clients reconnecting), so a sudden full load is a thundering herd that can immediately re-collapse the system"
+    answer: 3
+    explanation: |
+      Post-outage, caches are empty and every client wants to reconnect at once. Dumping
+      full load onto a cold system is a thundering herd that overwhelms it before caches warm
+      and pools stabilize, causing immediate re-collapse. Ramp traffic slowly while watching
+      for the 'is load going up?' signal.
+    ref: "concepts.md#recovery-breaking-an-active-cascade"
+
+  - id: cascading-failures-and-antipatterns-039
+    difficulty: intermediate
+    tags: [recovery, fan-out, degradation]
+    question: |
+      Reducing fan-out and disabling optional/expensive features during a cascade helps
+      because it does what?
+    options:
+      - "Cuts the per-request cost (and total load), giving the system a chance to catch up"
+      - "Increases the number of downstream calls per request"
+      - "Forces all requests to retry"
+      - "Improves cache hit rate by clearing the cache"
+    answer: 0
+    explanation: |
+      Cutting fan-out (fewer downstream calls per request) and turning off expensive or
+      optional features (graceful degradation) lowers the cost of each request and the total
+      offered load, which — together with shedding and disabling retries — helps demand drop
+      below capacity so the system can recover. See graceful-degradation-and-fallbacks.
+    ref: "concepts.md#recovery-breaking-an-active-cascade"
+
+  - id: cascading-failures-and-antipatterns-040
+    difficulty: intermediate
+    tags: [circuit-breaker, retries, cross-ref]
+    question: |
+      How does an open circuit breaker interact with retries during a downstream outage?
+    options:
+      - "It forces retries to happen faster"
+      - "It ignores retries entirely"
+      - "It stops calls (and thus retries) to the known-sick dependency, failing fast and preventing a retry storm"
+      - "It converts retries into synchronous blocking calls"
+    answer: 2
+    explanation: |
+      When a breaker is open, calls to the failing dependency short-circuit and fail fast,
+      so retries don't get sent to a dependency that's already down. This breaks the retry
+      loop, frees threads immediately, and gives the dependency room to recover. See
+      circuit-breakers-and-bulkheads.
+    ref: "concepts.md#anti-pattern-retry-storms-retry-amplification"
+
+  - id: cascading-failures-and-antipatterns-041
+    difficulty: expert
+    tags: [gc-death-spiral, feedback-loop, jvm]
+    question: |
+      A JVM service under rising load starts spending more and more time in garbage
+      collection, latency climbs, work backs up, and it gets worse still. What kind of
+      failure pattern is this?
+    options:
+      - "A cache stampede"
+      - "A GC/memory death spiral — a positive feedback loop where GC time steals serving time, backing up more work and more allocation"
+      - "A query of death"
+      - "A health-check false positive"
+    answer: 1
+    explanation: |
+      This is a positive feedback loop: higher load means more allocation, which means
+      longer/more frequent GC pauses, which raise latency and back up work, which increases
+      allocation further. Time spent in GC is stolen from serving, reinforcing the spiral.
+      Relief usually requires shedding load and/or restarting to clear heap pressure.
+    ref: "concepts.md#positive-feedback-loops-as-the-root-cause"
+
+  - id: cascading-failures-and-antipatterns-042
+    difficulty: intermediate
+    tags: [diagnostic, feedback-loop, incident]
+    question: |
+      What single diagnostic question best reveals whether you're facing a positive feedback
+      loop (versus a bounded outage)?
+    options:
+      - "Is the CPU above 50%?"
+      - "Is the deploy older than one week?"
+      - "Are there more than three services involved?"
+      - "Is offered load going UP as the system gets sicker?"
+    answer: 3
+    explanation: |
+      If load rises as the system degrades, you almost certainly have a positive feedback
+      loop (retries, health-check churn, queue growth), and adding capacity may not help —
+      you must break the loop first. It's a blunt but powerful triage question in incidents
+      and interviews alike.
+    ref: "concepts.md#positive-feedback-loops-as-the-root-cause"
+
+  - id: cascading-failures-and-antipatterns-043
+    difficulty: advanced
+    tags: [remediation, feedback-loop, judgment]
+    question: |
+      You rolling-restarted an overloaded fleet to 'clear things up,' and the outage got
+      noticeably worse. What most likely happened?
+    options:
+      - "The restart momentarily reduced capacity and dropped warm caches, shifting more load onto the remaining warm instances and reinforcing the overload loop"
+      - "The restart fixed the issue and metrics are just lagging"
+      - "Restarts always fix cascades, so this is impossible"
+      - "The database schema changed during the restart"
+    answer: 0
+    explanation: |
+      Restarting under active overload removes capacity temporarily, drops warm caches/pools
+      (so post-restart instances are slower and hit cold backends), and concentrates load on
+      the shrinking warm set — strengthening the positive feedback loop. Always ask 'what did
+      my action feed back into?' before repeating it.
+    ref: "concepts.md#recovery-breaking-an-active-cascade"
+
+  - id: cascading-failures-and-antipatterns-044
+    difficulty: intermediate
+    tags: [design, prevention, checklist]
+    question: |
+      Which combination best describes designing so a cascade *cannot* form in the first
+      place?
+    options:
+      - "Infinite timeouts, unbounded queues, uncapped retries, 95% utilization"
+      - "Timeouts everywhere + deadline propagation, bounded queues + load shedding, capped/jittered retries + budget, circuit breakers, bulkheads/cells, headroom"
+      - "One shared thread pool, one shared DB, deep liveness checks"
+      - "More retries at every layer plus bigger queues"
+    answer: 1
+    explanation: |
+      Cascade-resistant design layers negative-feedback and isolation mechanisms: timeouts
+      + deadline propagation to bound holding, bounded queues + shedding for admission
+      control, capped + jittered retries + a budget, circuit breakers to stop calling the
+      sick, bulkheads/cells for isolation, graceful degradation, and utilization headroom —
+      proven with chaos testing.
+    ref: "concepts.md#recovery-breaking-an-active-cascade"
+
+  - id: cascading-failures-and-antipatterns-045
+    difficulty: intermediate
+    tags: [ttl, jitter, cache]
+    question: |
+      A batch job writes 10,000 cache entries at the same time, all with a fixed 5-minute
+      TTL. What's the risk and the fix?
+    options:
+      - "No risk; fixed TTLs are always best"
+      - "The keys will corrupt each other; use separate caches"
+      - "All 10,000 keys expire simultaneously, causing a synchronized miss storm; add jitter to the TTLs (e.g. 5 min +/- X%)"
+      - "The cache will never evict them; use a shorter TTL of 1 second"
+    answer: 2
+    explanation: |
+      Keys written together with an identical TTL expire together, producing a synchronized
+      thundering herd of misses that all hit the backend at once. Jittering TTLs (e.g.
+      randomizing by +/- some percentage) spreads expirations over time so they don't
+      coincide.
+    ref: "concepts.md#anti-pattern-thundering-herd--synchronized-clients-jitter"
+
+  - id: cascading-failures-and-antipatterns-046
+    difficulty: advanced
+    tags: [cache-stampede, distributed-lock, trade-off]
+    question: |
+      Using a distributed lock (e.g. Redis SET NX PX) so only one caller recomputes a hot
+      key on a miss carries which important caveat?
+    options:
+      - "The lock never needs a timeout"
+      - "It eliminates the need for any cache"
+      - "It only works for read-only workloads"
+      - "The lock must have a TTL/lease so a crashed lock-holder doesn't leave the key stuck forever"
+    answer: 3
+    explanation: |
+      A recompute lock ensures a single caller regenerates the value while others serve
+      stale or wait briefly, but it introduces a distributed-lock dependency. The lock must
+      carry a TTL/lease (the PX in SET NX PX) so that if the holder crashes mid-recompute,
+      the lock expires and another caller can proceed — otherwise the key is stuck.
+    ref: "concepts.md#anti-pattern-cache-stampede--dogpile"
+
+  - id: cascading-failures-and-antipatterns-047
+    difficulty: expert
+    tags: [scenario, stateful-bottleneck, capacity, judgment]
+    question: |
+      Your stateless API tier is at 100% CPU and errors are climbing, but the single primary
+      database it depends on is also saturated. You autoscale the API tier from 20 to 60
+      instances. What is the likely outcome?
+    options:
+      - "The outage resolves because more API capacity always helps"
+      - "It gets worse or stays broken: more stateless replicas increase pressure on the shared saturated database bottleneck"
+      - "The database automatically shards itself"
+      - "Latency drops to normal instantly"
+    answer: 1
+    explanation: |
+      When the true bottleneck is a stateful, shared resource (one primary DB, a quota),
+      adding stateless replicas doesn't add real capacity — it drives *more* concurrent load
+      at the saturated backend, deepening the problem. The fix is to relieve the actual
+      bottleneck: shed load, reduce fan-out/query cost, add read replicas/caching, or throttle
+      at the edge.
+    ref: "concepts.md#recovery-breaking-an-active-cascade"
+
+  - id: cascading-failures-and-antipatterns-048
+    difficulty: intermediate
+    tags: [load-shedding, priority, criticality]
+    question: |
+      When shedding load to protect a service, what is the preferred order in which to drop
+      traffic?
+    options:
+      - "Randomly drop any request regardless of importance"
+      - "Drop low-priority/best-effort traffic before critical traffic, using request priority/criticality"
+      - "Drop the newest requests only"
+      - "Drop critical traffic first since it's most expensive"
+    answer: 1
+    explanation: |
+      Effective load shedding is priority-aware: shed best-effort/low-criticality traffic
+      (batch, prefetch, non-essential features) before user-facing critical requests, so
+      scarce capacity goes to what matters most. This requires tagging requests with a
+      criticality class. See load-shedding-and-backpressure.
+    ref: "concepts.md#anti-pattern-overload-from-a-client-bug-self-inflicted-load"

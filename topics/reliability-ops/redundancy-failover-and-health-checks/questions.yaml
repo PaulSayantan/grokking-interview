@@ -1,0 +1,943 @@
+topic: "Redundancy, Failover & Health Checks"
+domain: reliability-ops
+topic_slug: redundancy-failover-and-health-checks
+version: 1
+questions:
+  - id: redundancy-failover-and-health-checks-001
+    difficulty: beginner
+    tags: [spof, fundamentals]
+    question: |
+      What is a "single point of failure" (SPOF)?
+    options:
+      - "The first component to be provisioned when building a system"
+      - "A component whose failure takes down the whole system because there is no redundant path around it"
+      - "A component that fails more often than any other in the system"
+      - "A component that can only handle one request at a time"
+    answer: 1
+    explanation: |
+      A SPOF is any component with no redundant peer, so its failure has no
+      fallback path and brings down the whole system. HA design works by asking,
+      for each critical component, "what if exactly this dies?" and ensuring the
+      answer is "traffic continues on a redundant peer."
+    ref: "concepts.md#single-points-of-failure-spof"
+
+  - id: redundancy-failover-and-health-checks-002
+    difficulty: intermediate
+    tags: [availability-math, series]
+    question: |
+      Two components each with 99.9% availability are placed in series (both must
+      work for the system to work). What is the approximate combined availability?
+    options:
+      - "99.95%"
+      - "99.9%"
+      - "99.99%"
+      - "99.8%"
+    answer: 3
+    explanation: |
+      Series availabilities multiply: 0.999 × 0.999 ≈ 0.998 = 99.8%. Chaining
+      dependencies makes the system LESS available than any single component — a
+      key reason to minimize hard (in-series) dependencies.
+    ref: "concepts.md#single-points-of-failure-spof"
+
+  - id: redundancy-failover-and-health-checks-003
+    difficulty: intermediate
+    tags: [availability-math, redundancy, parallel]
+    question: |
+      Two independent nodes each with 99% availability are placed in parallel
+      (either one suffices). What is the combined availability?
+    options:
+      - "99.9%"
+      - "99%"
+      - "98.01%"
+      - "99.99%"
+    answer: 3
+    explanation: |
+      Parallel/redundant availability = 1 − (1−A1)(1−A2) = 1 − (0.01)(0.01) =
+      1 − 0.0001 = 99.99%. Redundancy roughly squares the failure probability
+      (q → q²), which is why two cheap nodes beat one gold-plated node — but only
+      if the failures are independent.
+    ref: "concepts.md#single-points-of-failure-spof"
+
+  - id: redundancy-failover-and-health-checks-004
+    difficulty: advanced
+    tags: [correlated-failure, failure-domains]
+    question: |
+      A team says "we have three replicas, so we tolerate two failures." Under what
+      condition is this claim dangerously wrong?
+    options:
+      - "When all three replicas share a failure domain (same AZ, rack, power, or downstream dependency)"
+      - "When the replicas run different software versions"
+      - "When each replica has its own database connection"
+      - "When the replicas are in three different regions"
+    answer: 0
+    explanation: |
+      The independence assumption behind the q² math breaks if replicas share fate.
+      Three replicas in one AZ die together in an AZ outage; three that all call one
+      downstream service share that dependency SPOF. Redundancy is only as good as
+      the independence of the failure domains — always ask "what is the shared fate?"
+    ref: "concepts.md#single-points-of-failure-spof"
+
+  - id: redundancy-failover-and-health-checks-005
+    difficulty: beginner
+    tags: [redundancy, n-plus-1]
+    question: |
+      If N is the number of units needed to serve peak load, what does an "N+1"
+      redundancy model provide?
+    options:
+      - "Two full duplicate sets of capacity"
+      - "Exactly enough capacity with no spare"
+      - "One spare unit beyond the minimum, tolerating one concurrent failure"
+      - "Enough capacity to serve twice the peak load"
+    answer: 2
+    explanation: |
+      N+1 provisions one spare beyond the N needed for peak, so it tolerates one
+      unit failing — or lets you take one down for maintenance without dropping
+      below N. It is the workhorse model for most production services.
+    ref: "concepts.md#redundancy-n-n1-n2-2n"
+
+  - id: redundancy-failover-and-health-checks-006
+    difficulty: intermediate
+    tags: [redundancy, n-plus-2, maintenance]
+    question: |
+      Why do highly critical systems often provision N+2 rather than N+1?
+    options:
+      - "N+2 eliminates the need for health checks"
+      - "So they can survive a failure even while one unit is already out for maintenance"
+      - "N+2 is cheaper than N+1 at scale"
+      - "Because N+1 cannot serve peak load"
+    answer: 1
+    explanation: |
+      N+1 tolerates one failure, but if a unit is already down for patching, a
+      second failure drops you below N. N+2 keeps N units serving even when one is
+      out for maintenance AND another fails — critical for infrastructure like
+      power and cooling.
+    ref: "concepts.md#redundancy-n-n1-n2-2n"
+
+  - id: redundancy-failover-and-health-checks-007
+    difficulty: intermediate
+    tags: [failure-domains, availability-zone]
+    question: |
+      In cloud architecture, what does an Availability Zone (AZ) primarily represent?
+    options:
+      - "A geographically distant region for disaster recovery"
+      - "A blast-radius boundary with independent power, cooling, and network within a region"
+      - "A logical grouping of user accounts"
+      - "A single physical server rack"
+    answer: 1
+    explanation: |
+      An AZ is the standard fault-isolation boundary in cloud: independent power,
+      cooling, and network inside a region. Spreading replicas across 2–3 AZs
+      tolerates an AZ event. Regions are the next-larger (geographic) domain, used
+      for surviving whole-region outages.
+    ref: "concepts.md#redundancy-n-n1-n2-2n"
+
+  - id: redundancy-failover-and-health-checks-008
+    difficulty: intermediate
+    tags: [active-active, active-passive]
+    question: |
+      What is the key operational difference between active-active and active-passive
+      redundancy?
+    options:
+      - "Active-active requires no data replication"
+      - "Active-active uses only one replica; active-passive uses many"
+      - "Active-passive is always faster to fail over than active-active"
+      - "In active-active all replicas serve traffic simultaneously; in active-passive a standby waits idle and takes over only on failure"
+    answer: 3
+    explanation: |
+      Active-active shares load across all replicas (failover is just
+      rebalancing), while active-passive keeps standbys idle until the primary
+      fails. Active-active gives near-instant failover but needs headroom and
+      write-conflict handling; active-passive is simpler (single writer) but wastes
+      idle capacity and takes time to detect and promote.
+    ref: "concepts.md#active-active-vs-active-passive-standby-models"
+
+  - id: redundancy-failover-and-health-checks-009
+    difficulty: advanced
+    tags: [active-active, capacity, headroom]
+    question: |
+      In a 2-node active-active setup that must survive one node failing, what is the
+      maximum utilization each node can run at?
+    options:
+      - "About 90%"
+      - "100% — both nodes are always available"
+      - "About 75%"
+      - "About 50% — so the survivor can absorb the other's load"
+    answer: 3
+    explanation: |
+      To survive one of two nodes dying, the survivor must carry 100% of load, so
+      each node can run at most ~50% (one of the two must be able to take the full
+      share). Generally for N-node active-active surviving one failure, keep each
+      node below (N−1)/N utilization. Ignoring this is a common way "redundant"
+      systems still fall over.
+    ref: "concepts.md#active-active-vs-active-passive-standby-models"
+
+  - id: redundancy-failover-and-health-checks-010
+    difficulty: intermediate
+    tags: [standby, hot-warm-cold]
+    question: |
+      Ordering standby models from fastest failover (highest cost) to slowest
+      failover (lowest cost), which is correct?
+    options:
+      - "Hot → Warm → Cold"
+      - "Warm → Hot → Cold"
+      - "Cold → Warm → Hot"
+      - "Hot → Cold → Warm"
+    answer: 0
+    explanation: |
+      Hot standby is running with data continuously replicated and ready to serve
+      instantly (seconds, highest cost); warm is running but scaled-down / not
+      serving (seconds to minutes); cold is not running and must be provisioned or
+      restored from backup (minutes to hours, cheapest). The temperature trades cost
+      against failover time (RTO).
+    ref: "concepts.md#active-active-vs-active-passive-standby-models"
+
+  - id: redundancy-failover-and-health-checks-011
+    difficulty: intermediate
+    tags: [standby, cold, rto]
+    question: |
+      A cold standby has the LONGEST failover time of the three temperatures. Why?
+    options:
+      - "It uses synchronous replication which is slow"
+      - "It is not running and must be provisioned or restored from backup before it can serve"
+      - "It serves traffic in parallel with the primary"
+      - "It runs at higher CPU utilization than hot standby"
+    answer: 1
+    explanation: |
+      A cold standby is powered off / not provisioned; failover requires spinning it
+      up and restoring data from backup, taking minutes to hours. That is exactly why
+      it is the cheapest option — you pay almost nothing to keep it "ready."
+    ref: "concepts.md#active-active-vs-active-passive-standby-models"
+
+  - id: redundancy-failover-and-health-checks-012
+    difficulty: beginner
+    tags: [failover, definitions]
+    question: |
+      What is "failover"?
+    options:
+      - "Splitting one database into multiple shards"
+      - "Promoting a standby (or shifting traffic to survivors) when the active component fails"
+      - "The process of scaling a service down to save cost"
+      - "The act of restarting a crashed process in place"
+    answer: 1
+    explanation: |
+      Failover is taking over the failed component's role — promoting a standby or
+      redistributing to surviving active nodes. "Failback" is the later, optional
+      return to the original once it recovers.
+    ref: "concepts.md#failover-automatic-vs-manual-and-failback"
+
+  - id: redundancy-failover-and-health-checks-013
+    difficulty: intermediate
+    tags: [failover, automatic, false-positive]
+    question: |
+      What is the main risk of fully AUTOMATIC failover?
+    options:
+      - "It always takes longer than manual failover"
+      - "It requires no health checks or heartbeats"
+      - "False positives — a transient blip triggers an unnecessary, disruptive failover, and split-brain if the 'failed' primary is actually alive"
+      - "It cannot be used for stateless services"
+    answer: 2
+    explanation: |
+      Automatic failover is fast but risks acting on false positives (network jitter,
+      GC pause) and, worse, split-brain if the old primary is alive but unreachable.
+      That is why automatic failover needs quorum + fencing, and why high-blast-radius
+      data-bearing failovers often keep a human in the loop.
+    ref: "concepts.md#failover-automatic-vs-manual-and-failback"
+
+  - id: redundancy-failover-and-health-checks-014
+    difficulty: advanced
+    tags: [failover, judgment, database]
+    question: |
+      For promoting a database primary across regions, which approach is generally
+      the most defensible?
+    options:
+      - "Manual detection and manual promotion with no automation at all"
+      - "Fully automatic promotion the instant one heartbeat is missed"
+      - "Promote whichever replica has the most free CPU"
+      - "Automatic detection plus quorum and fencing, often with human confirmation before promotion, and never auto-failback"
+    answer: 3
+    explanation: |
+      High-blast-radius, data-bearing failover is where a wrong automatic decision
+      can lose committed writes or cause split-brain. Best practice is automatic
+      detection, quorum + fencing to be safe, and frequently a human confirmation
+      step for promotion; failback should be manual and verified, never automatic.
+    ref: "concepts.md#failover-automatic-vs-manual-and-failback"
+
+  - id: redundancy-failover-and-health-checks-015
+    difficulty: advanced
+    tags: [failover, flapping, hysteresis]
+    question: |
+      A service's failover keeps oscillating: a latency spike triggers failover, the
+      promotion causes a load spike that trips the new primary's health check, and it
+      fails back — repeatedly. What is this and how do you fix it?
+    options:
+      - "Cascading failure; fix by making health checks deeper"
+      - "Split-brain; fix with more replicas"
+      - "A retry storm; fix by removing all timeouts"
+      - "Flapping; add hysteresis (require N consecutive failed checks), a cooldown, and never auto-failback"
+    answer: 3
+    explanation: |
+      This is failover flapping caused by an over-sensitive detector plus automatic
+      failback. Dampen it with hysteresis (require several consecutive failures before
+      failing over), a cooldown period, and by never auto-failing-back — return to the
+      original only after manual verification.
+    ref: "concepts.md#failover-automatic-vs-manual-and-failback"
+
+  - id: redundancy-failover-and-health-checks-016
+    difficulty: intermediate
+    tags: [failback, safety]
+    question: |
+      Why should failback (returning to the original primary after it recovers)
+      generally NOT be automatic?
+    options:
+      - "Automatic failback is always slower than manual"
+      - "It is a second failover event with its own risk — the recovered node may be stale or partially broken, and auto-failback can flap"
+      - "Failback requires taking the whole system offline"
+      - "Failback is impossible once failover has occurred"
+    answer: 1
+    explanation: |
+      Failback is a second promotion with the same risks as the first. The recovered
+      node may still be partially broken or its data stale; auto-failing-back the
+      instant it reappears invites flapping. Prefer manual, verified failback after
+      confirming the node is fully caught up.
+    ref: "concepts.md#failover-automatic-vs-manual-and-failback"
+
+  - id: redundancy-failover-and-health-checks-017
+    difficulty: intermediate
+    tags: [split-brain, definitions]
+    question: |
+      What is "split-brain" in the context of automatic failover?
+    options:
+      - "A load balancer splitting traffic evenly between two healthy nodes"
+      - "A single node using too much memory across two processes"
+      - "A network partition makes the standby promote itself while the original primary is still alive, so two primaries accept conflicting writes"
+      - "A database sharded across two regions"
+    answer: 2
+    explanation: |
+      Split-brain is the catastrophic case where a partition causes a standby to
+      believe the primary is dead and promote itself, but the original primary is
+      still alive and writing. Two primaries then diverge with conflicting writes —
+      corruption that is extremely hard to reconcile.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-018
+    difficulty: advanced
+    tags: [split-brain, detection, partition]
+    question: |
+      Why can't timeouts alone reliably distinguish a dead primary from a live one,
+      making split-brain hard to prevent?
+    options:
+      - "Because 'the primary is dead' and 'I can't reach the primary (a partition)' look identical to a timeout-based detector"
+      - "Because clocks on different nodes are always synchronized"
+      - "Because timeouts are always set too short"
+      - "Because heartbeats are sent over TCP, which never drops packets"
+    answer: 0
+    explanation: |
+      A silence-based detector cannot tell whether the peer crashed or is merely
+      unreachable due to a partition — both produce the same "no heartbeat" signal.
+      That ambiguity is the root cause of split-brain and is why quorum and fencing,
+      not just timeouts, are required.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-019
+    difficulty: intermediate
+    tags: [quorum, majority, odd-nodes]
+    question: |
+      Why do clusters that rely on quorum use an odd number of nodes (3, 5, 7)?
+    options:
+      - "Because consensus protocols cannot count even numbers"
+      - "So a network partition always has a strict majority on one side; an even count can split evenly with no majority"
+      - "To make each node responsible for one shard"
+      - "Odd numbers use less memory"
+    answer: 1
+    explanation: |
+      Quorum requires a strict majority (⌊n/2⌋+1) to act. With an odd count, any
+      partition leaves a decisive majority on one side; an even count can split
+      evenly (e.g. 2–2) leaving neither side able to act. 3 nodes tolerate 1 failure,
+      5 tolerate 2.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-020
+    difficulty: advanced
+    tags: [quorum, fault-tolerance, math]
+    question: |
+      A quorum-based cluster of 5 nodes can tolerate how many node failures while
+      still forming a majority?
+    options:
+      - "1"
+      - "3"
+      - "4"
+      - "2"
+    answer: 3
+    explanation: |
+      Majority of 5 is 3 (⌊5/2⌋+1). Losing 2 leaves 3 — still a majority, so the
+      cluster stays available. Losing 3 leaves only 2, which is a minority. In
+      general a quorum cluster tolerates ⌊(n−1)/2⌋ failures.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-021
+    difficulty: advanced
+    tags: [fencing, stonith]
+    question: |
+      What does STONITH ("Shoot The Other Node In The Head") accomplish?
+    options:
+      - "It forcibly powers off / fences the old primary before promoting a new one, so a still-alive-but-unreachable primary cannot keep writing"
+      - "It restarts the current node to clear memory leaks"
+      - "It shuts down the load balancer during failover"
+      - "It duplicates the primary's data to all replicas"
+    answer: 0
+    explanation: |
+      Fencing/STONITH forcibly cuts off the old primary (power-cycle via IPMI, revoke
+      storage access, block its network) BEFORE the new one takes over. This
+      guarantees the old node is truly gone — not just unreachable — preventing the
+      two-primaries split-brain scenario.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-022
+    difficulty: advanced
+    tags: [split-brain, witness, two-node]
+    question: |
+      You have a 2-node primary/standby pair. What is the simplest way to prevent a
+      1–1 partition from causing split-brain?
+    options:
+      - "Let both nodes promote themselves and reconcile later"
+      - "Add a lightweight third witness (or a shared quorum disk) so a partition always has a majority side"
+      - "Disable failover entirely"
+      - "Shorten both nodes' heartbeat timeouts to 1ms"
+    answer: 1
+    explanation: |
+      With only two nodes a partition splits 1–1 and neither has a majority (or both
+      claim it). Adding a third witness / tie-breaker (or a shared quorum disk) means
+      one side always holds the majority and can safely act while the other stands
+      down.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-023
+    difficulty: beginner
+    tags: [liveness, readiness, definitions]
+    question: |
+      In one sentence, what is the difference between a liveness and a readiness
+      health check?
+    options:
+      - "They are two names for the same check"
+      - "Liveness checks dependencies; readiness checks only CPU"
+      - "Liveness failure means 'stop sending me traffic'; readiness failure means 'restart me'"
+      - "Liveness failure means 'restart me if I'm broken'; readiness failure means 'stop sending me traffic but leave me running'"
+    answer: 3
+    explanation: |
+      A failed liveness probe triggers a restart/replace of the instance; a failed
+      readiness probe removes it from the load-balancer pool without killing it.
+      Liveness answers "is the process dead?"; readiness answers "can I serve traffic
+      right now?"
+    ref: "concepts.md#liveness-vs-readiness-health-checks"
+
+  - id: redundancy-failover-and-health-checks-024
+    difficulty: intermediate
+    tags: [liveness, anti-pattern, dependencies]
+    question: |
+      Why is it a bug to make a LIVENESS probe check a downstream dependency (like the
+      database)?
+    options:
+      - "It makes the readiness probe run slower"
+      - "A dependency blip makes liveness fail, so the orchestrator restarts every pod — but the restart doesn't fix the downstream, causing a fleet-wide crash-loop"
+      - "It doubles the number of health-check requests"
+      - "Liveness probes cannot make network calls"
+    answer: 1
+    explanation: |
+      Liveness failure means "restart me." If liveness depends on a shared downstream,
+      a brief downstream blip trips liveness on every pod, the orchestrator restarts
+      them all, and since restarting doesn't fix the downstream they crash-loop
+      forever. Liveness must check only the process itself.
+    ref: "concepts.md#liveness-vs-readiness-health-checks"
+
+  - id: redundancy-failover-and-health-checks-025
+    difficulty: intermediate
+    tags: [readiness, startup, load-balancer]
+    question: |
+      During slow startup (warming caches, loading a model), which probe should be
+      failing, and why?
+    options:
+      - "Liveness — so the orchestrator restarts it faster"
+      - "Both simultaneously"
+      - "Neither — it should accept traffic immediately"
+      - "Readiness (or a dedicated startup probe) — so the LB doesn't send traffic until the instance is actually ready, without killing it"
+    answer: 3
+    explanation: |
+      During warm-up the instance is alive but not yet able to serve, so readiness
+      should fail (keep it out of the LB pool) while liveness passes. Kubernetes adds
+      a startup probe specifically so a slow boot doesn't trip liveness and cause a
+      crash-loop.
+    ref: "concepts.md#liveness-vs-readiness-health-checks"
+
+  - id: redundancy-failover-and-health-checks-026
+    difficulty: intermediate
+    tags: [liveness, readiness, judgment]
+    question: |
+      When you are unsure whether a failing condition should trip liveness or
+      readiness, which is the safer default and why?
+    options:
+      - "Readiness, because removing from the pool is reversible while restarting is not"
+      - "Liveness, because restarting always fixes problems"
+      - "Neither — leave both passing"
+      - "Whichever has the shorter timeout"
+    answer: 0
+    explanation: |
+      Pulling an instance from the LB pool (readiness) is easily reversible — it
+      rejoins when healthy. Restarting (liveness) throws away in-flight work and can
+      crash-loop. When in doubt, prefer readiness; reserve liveness for genuine
+      "I'm wedged and only a restart fixes it" cases.
+    ref: "concepts.md#liveness-vs-readiness-health-checks"
+
+  - id: redundancy-failover-and-health-checks-027
+    difficulty: beginner
+    tags: [shallow, deep, definitions]
+    question: |
+      What distinguishes a "deep" health check from a "shallow" one?
+    options:
+      - "A shallow check uses HTTPS and a deep check uses HTTP"
+      - "A deep check runs more frequently than a shallow one"
+      - "A deep check also probes the instance's dependencies (DB, cache, downstreams), while a shallow check verifies only the local process responds"
+      - "A deep check runs on a separate port"
+    answer: 2
+    explanation: |
+      A shallow check verifies only that the local process is up (e.g. /healthz
+      returns 200). A deep check additionally verifies dependencies are reachable and
+      reports unhealthy if any are down. Deep checks sound better but carry the
+      cascading-failure anti-pattern.
+    ref: "concepts.md#shallow-vs-deep-health-checks-the-deep-check-anti-pattern"
+
+  - id: redundancy-failover-and-health-checks-028
+    difficulty: advanced
+    tags: [deep-check, anti-pattern, cascading-failure]
+    question: |
+      Every instance runs a DEEP health check against a shared database, wired
+      directly to the load balancer. The DB has a 5-second blip. What happens?
+    options:
+      - "Nothing — deep checks ignore transient blips"
+      - "Every instance reports unhealthy simultaneously, the LB removes all of them, and a minor blip becomes a total correlated outage"
+      - "Only one instance is removed; the rest keep serving"
+      - "The load balancer automatically provisions a new database"
+    answer: 1
+    explanation: |
+      This is the deep-check anti-pattern. Because all instances share the dependency,
+      a single blip fails every instance's check at once; the LB removes the entire
+      fleet and a minor hiccup becomes a full outage. Ironically, without the deep
+      check the blip would have self-recovered. Keep LB checks shallow.
+    ref: "concepts.md#shallow-vs-deep-health-checks-the-deep-check-anti-pattern"
+
+  - id: redundancy-failover-and-health-checks-029
+    difficulty: advanced
+    tags: [deep-check, best-practice, load-balancer]
+    question: |
+      What is the recommended way to still monitor deep dependency health WITHOUT
+      risking the whole fleet being pulled from the pool?
+    options:
+      - "Keep the LB health check shallow, and run deep checks out of band (a separate monitor/alarm) that a human or slow controller reacts to"
+      - "Wire the deep check directly into the LB's remove-from-pool decision"
+      - "Make every instance restart when the dependency is down"
+      - "Run the deep check ten times more often"
+    answer: 0
+    explanation: |
+      Keep the load-balancer check shallow so a shared-dependency blip can't empty the
+      pool. Do deep dependency checks out of band — as monitoring/alarms — decoupled
+      from the LB's traffic-routing decision, so humans or a slow controller respond
+      rather than instant fleet removal.
+    ref: "concepts.md#shallow-vs-deep-health-checks-the-deep-check-anti-pattern"
+
+  - id: redundancy-failover-and-health-checks-030
+    difficulty: intermediate
+    tags: [health-check, load-balancer, mechanism]
+    question: |
+      What does a load balancer do with a backend that fails its health check?
+    options:
+      - "Increases the traffic sent to it to test recovery"
+      - "Restarts the backend process"
+      - "Removes it from the pool and routes traffic only to healthy backends"
+      - "Deletes the backend permanently"
+    answer: 2
+    explanation: |
+      The LB continuously health-checks backends and removes any that fail, routing
+      only to healthy ones. This is the core mechanism that makes redundancy
+      automatic — but it can create a death spiral if it removes healthy-but-busy
+      nodes under load.
+    ref: "concepts.md#health-check-driven-lb-removal-and-the-death-spiral"
+
+  - id: redundancy-failover-and-health-checks-031
+    difficulty: advanced
+    tags: [death-spiral, cascading-failure]
+    question: |
+      Describe the "health-check death spiral" under high load.
+    options:
+      - "Nodes randomly restart because of a bug in the LB firmware"
+      - "Health checks succeed too often, so the LB never removes bad nodes"
+      - "The database rejects health-check queries, causing a deadlock"
+      - "Overload makes health checks time out, the LB removes those nodes, the same load hits fewer nodes, their checks time out too, and the fleet collapses to zero"
+    answer: 3
+    explanation: |
+      Under load, response times rise and health checks (sharing the same overloaded
+      resources) time out. The LB removes those nodes, concentrating the same load on
+      fewer survivors, which pushes them over too — a positive-feedback loop that
+      empties the pool even though the boxes were still serving real traffic.
+    ref: "concepts.md#health-check-driven-lb-removal-and-the-death-spiral"
+
+  - id: redundancy-failover-and-health-checks-032
+    difficulty: advanced
+    tags: [fail-open, death-spiral, best-practice]
+    question: |
+      What is "fail-open" behavior at the load balancer, and why does it help against
+      the death spiral?
+    options:
+      - "The LB opens more connections to each backend"
+      - "The LB opens the firewall to allow external traffic"
+      - "If too many backends report unhealthy at once, the LB stops removing them and routes to all — assuming the health check, not the fleet, is wrong"
+      - "The LB fails the deployment and rolls back"
+    answer: 2
+    explanation: |
+      Fail-open means: when an implausibly large fraction of backends look unhealthy
+      simultaneously, trust the fleet over the health check and keep routing to
+      everyone. This breaks the death-spiral feedback loop because mass simultaneous
+      "unhealthy" almost always indicates a check/overload problem, not that every box
+      truly died. AWS ELB does this.
+    ref: "concepts.md#health-check-driven-lb-removal-and-the-death-spiral"
+
+  - id: redundancy-failover-and-health-checks-033
+    difficulty: advanced
+    tags: [death-spiral, mitigation, resources]
+    question: |
+      Which mitigation does NOT help prevent a health-check death spiral?
+    options:
+      - "Making the health check deeper and more aggressive so it detects overload sooner"
+      - "Giving health checks a separate, reserved resource path and a generous timeout"
+      - "Failing open when too many backends look unhealthy at once"
+      - "Requiring multiple consecutive failures before removal (hysteresis)"
+    answer: 0
+    explanation: |
+      Making the check deeper and more aggressive makes the spiral WORSE — it fails
+      faster under load and removes nodes sooner, accelerating collapse. The real
+      mitigations are reserved resources + generous timeouts, hysteresis, capped
+      removal rate, load shedding, and fail-open.
+    ref: "concepts.md#health-check-driven-lb-removal-and-the-death-spiral"
+
+  - id: redundancy-failover-and-health-checks-034
+    difficulty: beginner
+    tags: [heartbeat, failure-detection]
+    question: |
+      What is a "heartbeat" in failure detection?
+    options:
+      - "A retry sent after a request fails"
+      - "The CPU clock frequency of a server"
+      - "A periodic 'I'm alive' signal a node sends; if none arrives within a timeout, the node is suspected dead"
+      - "A backup taken every second"
+    answer: 2
+    explanation: |
+      A heartbeat is a periodic liveness ping between nodes. If a peer stops receiving
+      heartbeats within a configured timeout, it suspects the sender has failed. It is
+      the universal building block of failure detection that feeds failover decisions.
+    ref: "concepts.md#heartbeats-and-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-035
+    difficulty: intermediate
+    tags: [failure-detection, timeout, tradeoff]
+    question: |
+      With a fixed-timeout failure detector, what is the fundamental trade-off in
+      choosing the timeout value?
+    options:
+      - "Timeouts only affect logging verbosity"
+      - "Longer timeouts use more memory; shorter ones use less"
+      - "A short timeout detects failures fast but produces many false positives; a long timeout is robust but slow to detect real failures"
+      - "There is no trade-off — shorter is always better"
+    answer: 2
+    explanation: |
+      A short timeout reacts quickly but misreads GC pauses and jitter as death
+      (false positives → needless failover); a long timeout avoids false positives
+      but leaves real failures undetected longer (longer outage). A static threshold
+      can't optimize both — you pick one point on the curve.
+    ref: "concepts.md#heartbeats-and-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-036
+    difficulty: advanced
+    tags: [phi-accrual, failure-detection, adaptive]
+    question: |
+      How does a phi-accrual (φ) failure detector differ from a fixed-timeout one?
+    options:
+      - "It outputs a continuous suspicion level computed from the statistical distribution of recent heartbeat arrival times, adapting to actual network conditions"
+      - "It requires GPS-synchronized clocks"
+      - "It never reports a node as dead"
+      - "It uses a fixed 30-second timeout for all nodes"
+    answer: 0
+    explanation: |
+      Phi-accrual (used in Cassandra, Akka) outputs a suspicion value φ derived from
+      the historical distribution of heartbeat inter-arrival times, rather than a
+      boolean. The app picks a φ threshold (e.g. 8 ≈ 10⁻⁸ chance of being wrong). Its
+      strength is adapting to real conditions — a jittery link gets more slack
+      automatically, cutting false positives without hard-coded timeouts.
+    ref: "concepts.md#heartbeats-and-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-037
+    difficulty: intermediate
+    tags: [failure-detection, false-positive, flapping]
+    question: |
+      A too-sensitive failure detector most directly causes which downstream problem?
+    options:
+      - "Larger backups"
+      - "Failover flapping — needless promotions and oscillation triggered by transient blips"
+      - "Reduced network bandwidth"
+      - "Slower CPUs"
+    answer: 1
+    explanation: |
+      Failure detection feeds the inputs to failover. If the detector is too twitchy,
+      it declares healthy nodes dead on brief blips, triggering unnecessary failovers
+      that can oscillate (flap). This is why detection sensitivity and failover
+      hysteresis must be tuned together.
+    ref: "concepts.md#heartbeats-and-failure-detection"
+
+  - id: redundancy-failover-and-health-checks-038
+    difficulty: beginner
+    tags: [graceful-shutdown, sigterm]
+    question: |
+      What signal does an orchestrator like Kubernetes send FIRST to ask a container
+      to shut down gracefully?
+    options:
+      - "SIGTERM"
+      - "SIGHUP"
+      - "SIGSTOP"
+      - "SIGKILL"
+    answer: 0
+    explanation: |
+      SIGTERM is the polite "please stop" signal, giving the app a chance to drain and
+      clean up. SIGKILL (which cannot be caught) is sent only if the app fails to exit
+      within the grace period, forcing it down and dropping in-flight work.
+    ref: "concepts.md#graceful-shutdown-and-connection-draining"
+
+  - id: redundancy-failover-and-health-checks-039
+    difficulty: intermediate
+    tags: [graceful-shutdown, readiness, draining]
+    question: |
+      When an app receives SIGTERM, why should it fail its READINESS check (rather
+      than liveness) as the first step of graceful shutdown?
+    options:
+      - "Failing readiness tells the LB to stop sending new requests while the process keeps running to finish in-flight ones"
+      - "Because failing liveness would drain connections faster"
+      - "Readiness failures automatically extend the grace period"
+      - "It doesn't matter which one it fails"
+    answer: 0
+    explanation: |
+      Readiness governs pool membership. Failing readiness stops NEW traffic while the
+      instance keeps running to complete in-flight requests and clean up. Failing
+      liveness would instead ask for a restart — the opposite of a clean drain.
+    ref: "concepts.md#graceful-shutdown-and-connection-draining"
+
+  - id: redundancy-failover-and-health-checks-040
+    difficulty: advanced
+    tags: [graceful-shutdown, race, prestop]
+    question: |
+      During rolling deploys, clients get connection-refused errors even though the
+      app handles SIGTERM. What is the likely cause and fix?
+    options:
+      - "The database is down; add a deep health check"
+      - "The grace period is too long; shorten it to 1 second"
+      - "A race: the LB still routes to the pod briefly after SIGTERM. Fix by failing readiness and pausing (preStop hook) before closing the listener, so the LB drains it first"
+      - "The app is using SIGKILL instead of SIGTERM"
+    answer: 2
+    explanation: |
+      There is a window after SIGTERM where the LB's health-check cache is stale and
+      it still routes to the pod. If the app closes its listener immediately, those
+      requests get refused. The fix: on SIGTERM, fail readiness and sleep briefly (a
+      preStop hook) so the LB observes "unready" and stops routing before you close
+      the socket.
+    ref: "concepts.md#graceful-shutdown-and-connection-draining"
+
+  - id: redundancy-failover-and-health-checks-041
+    difficulty: intermediate
+    tags: [graceful-shutdown, grace-period, kubernetes]
+    question: |
+      What is the default Kubernetes terminationGracePeriodSeconds, after which a pod
+      that hasn't exited is sent SIGKILL?
+    options:
+      - "5 seconds"
+      - "30 seconds"
+      - "120 seconds"
+      - "600 seconds"
+    answer: 1
+    explanation: |
+      Kubernetes defaults terminationGracePeriodSeconds to 30 seconds. If the app
+      hasn't exited by then it receives SIGKILL and is forced down, losing anything
+      still in flight. Size the grace period to your longest (p99) request duration
+      plus drain time.
+    ref: "concepts.md#graceful-shutdown-and-connection-draining"
+
+  - id: redundancy-failover-and-health-checks-042
+    difficulty: advanced
+    tags: [graceful-shutdown, sigterm, pid1]
+    question: |
+      An app is dropping requests on every deploy and always gets SIGKILLed after the
+      grace period. What is a common root cause?
+    options:
+      - "The grace period is set too high"
+      - "The load balancer is failing open"
+      - "The app ignores SIGTERM (e.g. a shell wrapper or PID 1 that doesn't forward signals), so it never starts draining"
+      - "The app has too many replicas"
+    answer: 2
+    explanation: |
+      If the process never receives/handles SIGTERM — common when a shell script is
+      PID 1 and doesn't forward signals to the child — the app can't begin graceful
+      shutdown, so it runs until the grace period expires and gets SIGKILLed every
+      time, dropping in-flight requests on each deploy.
+    ref: "concepts.md#graceful-shutdown-and-connection-draining"
+
+  - id: redundancy-failover-and-health-checks-043
+    difficulty: intermediate
+    tags: [graceful-shutdown, grace-period, sizing]
+    question: |
+      Why can setting the termination grace period SHORTER than your longest request
+      duration cause problems?
+    options:
+      - "It forces the LB to fail open"
+      - "It makes the pod start slower"
+      - "It disables readiness probes"
+      - "Long-running requests get SIGKILLed mid-flight before they can complete during drain"
+    answer: 3
+    explanation: |
+      Draining lets in-flight requests finish, but only until the grace period
+      expires. If a request takes longer than the grace period, it gets cut off by
+      SIGKILL. Size the grace period to at least your p99 request duration plus drain
+      overhead.
+    ref: "concepts.md#graceful-shutdown-and-connection-draining"
+
+  - id: redundancy-failover-and-health-checks-044
+    difficulty: advanced
+    tags: [scenario, redundancy, failure-domains]
+    question: |
+      You must place 3 database replicas for maximum resilience to an AZ outage in a
+      region with 3 AZs. What is the best placement?
+    options:
+      - "One replica in each of the 3 AZs"
+      - "All 3 in one AZ for lowest latency"
+      - "All 3 in a single rack in one AZ"
+      - "2 in one AZ, 1 in another"
+    answer: 0
+    explanation: |
+      Spreading one replica per AZ means an AZ outage removes at most one replica,
+      leaving a 2-of-3 majority (quorum) intact for continued writes. Concentrating
+      replicas in one or two AZs creates a correlated failure domain that an AZ event
+      can take out entirely.
+    ref: "concepts.md#redundancy-n-n1-n2-2n"
+
+  - id: redundancy-failover-and-health-checks-045
+    difficulty: advanced
+    tags: [scenario, hot-standby, rpo]
+    question: |
+      A payments system requires the smallest possible data loss and fastest failover,
+      cost being secondary. Which standby model fits best?
+    options:
+      - "Warm standby scaled to zero"
+      - "Hot standby with synchronous replication, ready to serve in seconds"
+      - "No standby — rely on retries"
+      - "Cold standby restored from nightly backups"
+    answer: 1
+    explanation: |
+      Minimal data loss + fast failover points to a hot standby with synchronous
+      replication (near-zero RPO, seconds RTO), accepting the higher cost. Cold/warm
+      trade recovery time and data currency for cost, which is wrong when data loss
+      must be minimized. See disaster-recovery-rpo-rto-strategies for the RPO/RTO math.
+    ref: "concepts.md#active-active-vs-active-passive-standby-models"
+
+  - id: redundancy-failover-and-health-checks-046
+    difficulty: advanced
+    tags: [scenario, load-shedding, health-check]
+    question: |
+      Under a traffic surge, a fleet is near capacity and health checks are starting
+      to time out. Beyond fail-open, which action best protects availability?
+    options:
+      - "Shed excess real load (reject/queue low-priority requests) so nodes stay responsive enough to pass health checks and keep serving"
+      - "Make the health checks deeper so they detect the surge sooner"
+      - "Immediately remove all busy nodes from the pool"
+      - "Lower the grace period to force faster restarts"
+    answer: 0
+    explanation: |
+      Load shedding drops or defers excess/low-priority work so the fleet stays within
+      capacity and health checks keep passing — protecting the system rather than
+      letting overload trigger a death spiral. See
+      reliability-ops/load-shedding-and-backpressure and design-rate-limiter for the
+      mechanisms.
+    ref: "concepts.md#health-check-driven-lb-removal-and-the-death-spiral"
+
+  - id: redundancy-failover-and-health-checks-047
+    difficulty: intermediate
+    tags: [hidden-spof, load-balancer]
+    question: |
+      A design has many redundant app servers, all behind a SINGLE load balancer.
+      Where is the SPOF?
+    options:
+      - "The clients"
+      - "There is no SPOF"
+      - "The load balancer itself — it needs a redundant pair or DNS/anycast-level failover"
+      - "The app servers"
+    answer: 2
+    explanation: |
+      Redundant app servers behind one LB just move the SPOF to the LB. If it dies,
+      all traffic stops regardless of how many app servers survive. Fix with a
+      redundant LB pair, anycast, or DNS-level failover. Interviewers love this
+      "hidden SPOF" question.
+    ref: "concepts.md#single-points-of-failure-spof"
+
+  - id: redundancy-failover-and-health-checks-048
+    difficulty: expert
+    tags: [scenario, split-brain, quorum, judgment]
+    question: |
+      A 2-node primary/standby database has NO fencing and NO witness. A network
+      partition isolates the two nodes from each other but both stay up and reachable
+      by different clients. With automatic failover enabled, what is the most likely
+      outcome?
+    options:
+      - "The standby correctly waits and no harm occurs"
+      - "Split-brain: the standby promotes itself while the primary keeps writing, so both accept conflicting writes and data diverges"
+      - "The load balancer merges the two datasets automatically"
+      - "Both nodes shut down safely"
+    answer: 1
+    explanation: |
+      With no quorum majority possible (1–1 split), no witness to break the tie, and
+      no fencing to stop the old primary, automatic failover promotes the standby
+      while the original primary is still serving its side — two primaries, divergent
+      writes, corruption. This is exactly why quorum + fencing + an odd/witness node
+      are mandatory for safe automatic failover.
+    ref: "concepts.md#split-brain-quorum-and-fencingstonith"
+
+  - id: redundancy-failover-and-health-checks-049
+    difficulty: expert
+    tags: [scenario, deep-check, judgment, degradation]
+    question: |
+      Your service can serve mostly-cached responses even when its database is briefly
+      unavailable. How should its health check treat the database dependency?
+    options:
+      - "Make the DB check part of the liveness probe"
+      - "Treat the DB as a non-critical dependency for health purposes and keep serving degraded/cached responses (fail-open) instead of declaring itself dead"
+      - "Report unhealthy whenever the DB is unreachable, so the LB pulls it"
+      - "Restart the pod whenever the DB is unreachable"
+    answer: 1
+    explanation: |
+      Since the service can still do useful work without the DB, a DB blip should not
+      make it declare itself dead — that would trigger the deep-check cascading-failure
+      pattern and pull the whole fleet. Isolate the non-critical dependency from the
+      served-traffic health signal and degrade gracefully. See
+      reliability-ops/graceful-degradation-and-fallbacks.
+    ref: "concepts.md#shallow-vs-deep-health-checks-the-deep-check-anti-pattern"
+
+  - id: redundancy-failover-and-health-checks-050
+    difficulty: intermediate
+    tags: [active-active, write-conflicts]
+    question: |
+      What additional challenge does active-active introduce that active-passive
+      (single-writer) largely avoids?
+    options:
+      - "Longer failover time"
+      - "Higher idle cost"
+      - "Handling concurrent/conflicting writes across replicas (multi-primary conflict resolution, CRDTs, or partitioned ownership)"
+      - "Inability to serve read traffic"
+    answer: 2
+    explanation: |
+      With all replicas serving (including writes), active-active must resolve
+      concurrent conflicting writes — via multi-primary databases, CRDTs, or
+      partitioning write ownership. Active-passive sidesteps this because only the
+      single active primary writes, giving simpler consistency at the cost of idle
+      standby capacity.
+    ref: "concepts.md#active-active-vs-active-passive-standby-models"

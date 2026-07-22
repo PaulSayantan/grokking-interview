@@ -1,0 +1,1014 @@
+topic: "Circuit Breakers & Bulkheads"
+domain: reliability-ops
+topic_slug: circuit-breakers-and-bulkheads
+version: 1
+questions:
+  - id: circuit-breakers-and-bulkheads-001
+    difficulty: beginner
+    tags: [circuit-breaker, states, mechanism]
+    question: |
+      In the circuit-breaker state machine, what does the breaker do while in
+      the OPEN state?
+    options:
+      - "Passes all calls through to the dependency as normal"
+      - "Fails fast immediately without calling the dependency"
+      - "Sends every call but doubles the timeout"
+      - "Queues all calls until the dependency responds"
+    answer: 1
+    explanation: |
+      OPEN means the dependency is presumed unhealthy, so the breaker
+      short-circuits: calls fail fast (throw/fallback in microseconds) without
+      touching the dependency. This frees the caller's threads and gives the
+      dependency time to recover.
+    ref: "concepts.md#the-circuit-breaker-state-machine"
+
+  - id: circuit-breakers-and-bulkheads-002
+    difficulty: beginner
+    tags: [circuit-breaker, half-open, recovery]
+    question: |
+      What happens in the HALF-OPEN state?
+    options:
+      - "The breaker rejects every call until an operator resets it"
+      - "All traffic is immediately restored to full volume"
+      - "The dependency is called but responses are discarded"
+      - "A limited number of trial calls are allowed through to test recovery"
+    answer: 3
+    explanation: |
+      HALF-OPEN is a probing state: after the sleep window, a limited number of
+      trial calls are permitted. If they succeed the breaker closes (recovered);
+      if any fails it re-opens and restarts the sleep window. This re-probes with
+      a trickle rather than slamming full load onto a fragile dependency.
+    ref: "concepts.md#the-circuit-breaker-state-machine"
+
+  - id: circuit-breakers-and-bulkheads-003
+    difficulty: intermediate
+    tags: [cascading-failure, threads, slow-dependency]
+    question: |
+      Why is a slow dependency often MORE dangerous to a synchronous caller than
+      a dependency that is completely down?
+    options:
+      - "A slow dependency returns corrupted data that crashes the caller"
+      - "A down dependency triggers more retries than a slow one"
+      - "A slow dependency bypasses the circuit breaker entirely"
+      - "A slow dependency holds request threads for the full timeout, exhausting the pool"
+    answer: 3
+    explanation: |
+      A dependency that fails instantly (connection refused) frees the thread
+      immediately. A slow one holds each thread for the full timeout; under load
+      every thread ends up parked waiting, so the caller has zero free threads and
+      cannot serve anything — the classic cascading-failure trigger. "Slow is worse
+      than down."
+    ref: "concepts.md#why-fail-fast-the-cascading-failure-problem"
+
+  - id: circuit-breakers-and-bulkheads-004
+    difficulty: beginner
+    tags: [bulkhead, metaphor, isolation]
+    question: |
+      The bulkhead pattern is named after ship hull compartments. What reliability
+      property does that metaphor capture?
+    options:
+      - "Encrypting data so a breach exposes nothing"
+      - "Replicating data across regions for durability"
+      - "Compressing traffic to save bandwidth"
+      - "Isolating resources so one failure can't sink the whole system"
+    answer: 3
+    explanation: |
+      A ship's watertight bulkheads confine a breach to one compartment so the ship
+      stays afloat. Software bulkheads partition finite resources (thread/connection
+      pools) per dependency so a single saturated dependency can only consume its own
+      pool — it can't drain the resources every other part of the app needs.
+    ref: "concepts.md#bulkheads-resource-isolation"
+
+  - id: circuit-breakers-and-bulkheads-005
+    difficulty: intermediate
+    tags: [circuit-breaker, bulkhead, comparison]
+    question: |
+      What is the core difference between a circuit breaker and a bulkhead?
+    options:
+      - "They are two names for the same pattern"
+      - "A bulkhead retries failed calls; a breaker never retries"
+      - "A breaker stops calling a bad dependency; a bulkhead caps the resources one dependency can consume"
+      - "A breaker is for databases; a bulkhead is for HTTP only"
+    answer: 2
+    explanation: |
+      They are complementary. A circuit breaker is temporal — it decides whether to
+      make the call at all and fails fast on a known-bad dependency. A bulkhead is
+      spatial — it isolates resource pools so one dependency's saturation can't starve
+      the others, capping the blast radius. You typically use both.
+    ref: "concepts.md#bulkheads-resource-isolation"
+
+  - id: circuit-breakers-and-bulkheads-006
+    difficulty: intermediate
+    tags: [circuit-breaker, threshold, tuning]
+    question: |
+      Why do circuit breakers use a rate-based failure threshold combined with a
+      minimum-volume gate rather than a raw failure count alone?
+    options:
+      - "To make the breaker trip faster under all conditions"
+      - "Because raw counts are impossible to compute in code"
+      - "So the threshold scales with traffic and doesn't trip on a tiny, unrepresentative sample"
+      - "To avoid ever tripping the breaker during peak load"
+    answer: 2
+    explanation: |
+      A rate (e.g. 50% failures) scales with traffic. The minimum-volume gate
+      (Resilience4j minimumNumberOfCalls=100, Hystrix requestVolumeThreshold=20)
+      ensures the rate is evaluated only on a statistically meaningful sample —
+      otherwise 1 failure out of 2 calls "= 50%" would flap the breaker.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-007
+    difficulty: intermediate
+    tags: [circuit-breaker, errors, 4xx]
+    question: |
+      A service's circuit breaker keeps tripping even though the downstream
+      dependency is healthy. Investigation shows the breaker counts HTTP 404 and
+      400 responses as failures. What is the fix?
+    options:
+      - "Lower the failure-rate threshold"
+      - "Stop counting 4xx client errors toward the breaker's failure rate"
+      - "Increase the sleep window"
+      - "Switch to a semaphore bulkhead"
+    answer: 1
+    explanation: |
+      4xx responses are the caller's fault (bad request / not found), not the
+      dependency being unhealthy. Counting them pollutes the health signal and trips
+      the breaker against a perfectly healthy dependency. Record only real failures
+      (timeouts, connection errors, 5xx) — Resilience4j's ignoreExceptions handles this.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-008
+    difficulty: intermediate
+    tags: [circuit-breaker, sleep-window, tuning]
+    question: |
+      If the circuit breaker's sleep window (wait duration in OPEN) is set far TOO
+      SHORT relative to how long the dependency needs to recover, what happens?
+    options:
+      - "The breaker probes too aggressively and re-opens, adding load during recovery"
+      - "The breaker never leaves the OPEN state"
+      - "The breaker permanently disables the dependency"
+      - "Nothing — a shorter sleep window is always safer"
+    answer: 0
+    explanation: |
+      Too short a sleep window means HALF-OPEN probes fire before the dependency has
+      recovered; the trial calls fail, the breaker re-opens, and the repeated probing
+      piles load onto a dependency that is still trying to come back. The breaker flaps.
+    ref: "concepts.md#open-state-the-sleep-window-and-recovery"
+
+  - id: circuit-breakers-and-bulkheads-009
+    difficulty: intermediate
+    tags: [circuit-breaker, sleep-window, tuning]
+    question: |
+      What is the risk of setting the sleep window TOO LONG?
+    options:
+      - "The breaker trips too easily on small samples"
+      - "The dependency receives too much probing traffic"
+      - "You keep failing fast long after the dependency recovered, extending a self-inflicted outage"
+      - "The breaker can never enter HALF-OPEN"
+    answer: 2
+    explanation: |
+      An over-long sleep window means the dependency recovered but the breaker stays
+      OPEN and keeps failing fast — turning a transient blip into an extended,
+      self-inflicted outage. The sleep window is a genuine trade-off between re-probing
+      too soon and recovering too late.
+    ref: "concepts.md#open-state-the-sleep-window-and-recovery"
+
+  - id: circuit-breakers-and-bulkheads-010
+    difficulty: advanced
+    tags: [bulkhead, thread-pool, semaphore]
+    question: |
+      Which statement best distinguishes a thread-pool bulkhead from a semaphore
+      bulkhead?
+    options:
+      - "Semaphore bulkheads use more threads than thread-pool bulkheads"
+      - "Thread-pool bulkheads run the call on a separate bounded pool and free the caller thread; semaphore bulkheads run on the caller's thread and just cap concurrency"
+      - "Thread-pool bulkheads only work for in-process calls"
+      - "Semaphore bulkheads can enforce timeouts but thread-pool ones cannot"
+    answer: 1
+    explanation: |
+      A thread-pool bulkhead executes the call on a dedicated bounded pool, freeing the
+      caller thread and allowing timeout enforcement — good for unpredictable network
+      latency. A semaphore bulkhead is just an atomic concurrency counter; the call runs
+      on the caller's own thread, so it's cheap but can't free a blocked thread.
+    ref: "concepts.md#thread-pool-vs-semaphore-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-011
+    difficulty: advanced
+    tags: [bulkhead, semaphore, timeout, anti-pattern]
+    question: |
+      An engineer uses a semaphore bulkhead for a remote HTTP call but sets no
+      client-side timeout. The dependency hangs. What still goes wrong?
+    options:
+      - "The semaphore caps concurrency but the blocked calls are still the caller's own threads, so the thread pool can still exhaust"
+      - "Nothing — the semaphore fully protects the caller"
+      - "The semaphore automatically injects a timeout"
+      - "The breaker opens and prevents any thread from blocking"
+    answer: 0
+    explanation: |
+      A semaphore bulkhead runs the call on the caller's own thread and only limits how
+      many can run at once. Without a client timeout, each hung call ties up a request
+      thread for the duration; concurrency is bounded but you can still exhaust the pool.
+      Semaphore isolation must be paired with a strict client-side timeout.
+    ref: "concepts.md#thread-pool-vs-semaphore-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-012
+    difficulty: intermediate
+    tags: [hystrix, resilience4j, tooling]
+    question: |
+      For a new JVM service in 2026, which resilience library should you choose over
+      Netflix Hystrix, and why?
+    options:
+      - "Hystrix, because it is the current industry standard"
+      - "Neither — resilience libraries are obsolete"
+      - "Resilience4j, because Hystrix is in maintenance mode / deprecated since ~2018"
+      - "Hystrix, because Resilience4j lacks a circuit breaker"
+    answer: 2
+    explanation: |
+      Netflix put Hystrix into maintenance mode around 2018 and stopped active
+      development. Resilience4j is the modern, lightweight, modular successor for the
+      JVM (Java 8+), with separate CircuitBreaker/Bulkhead/Retry/TimeLimiter decorators
+      and features Hystrix lacked, like slow-call detection.
+    ref: "concepts.md#resilience4j-and-hystrix"
+
+  - id: circuit-breakers-and-bulkheads-013
+    difficulty: advanced
+    tags: [retry, circuit-breaker, retry-storm, anti-pattern]
+    question: |
+      Why is adding retries to a failing dependency WITHOUT a circuit breaker
+      considered dangerous?
+    options:
+      - "Retries multiply the request rate onto a struggling dependency exactly when it can least handle it (a retry storm)"
+      - "Retries always return stale data"
+      - "Retries disable timeouts automatically"
+      - "Retries only work for idempotent GET requests"
+    answer: 0
+    explanation: |
+      When a dependency is struggling, blind retries amplify the load at the worst
+      possible moment, deepening the outage — a retry storm. A circuit breaker caps this
+      by tripping OPEN so retries stop hammering the dependency. Retries and breakers
+      must be designed together.
+    ref: "concepts.md#why-fail-fast-the-cascading-failure-problem"
+
+  - id: circuit-breakers-and-bulkheads-014
+    difficulty: intermediate
+    tags: [circuit-breaker, fail-fast, benefits]
+    question: |
+      Which of these is NOT a primary benefit of a circuit breaker tripping OPEN?
+    options:
+      - "The dependency's data is automatically repaired"
+      - "The caller fails fast instead of piling up on timeouts"
+      - "The struggling dependency gets a rest and a chance to recover"
+      - "The caller's threads are freed to serve other work"
+    answer: 0
+    explanation: |
+      A breaker doesn't repair a dependency's data — it just stops calling it. Its real
+      benefits are failing fast (no thread pile-up), freeing caller resources, and
+      shedding load off the dependency so it can recover.
+    ref: "concepts.md#why-fail-fast-the-cascading-failure-problem"
+
+  - id: circuit-breakers-and-bulkheads-015
+    difficulty: advanced
+    tags: [bulkhead, thread-pool, use-case]
+    question: |
+      Hystrix defaulted to thread-pool isolation for remote calls. What is the main
+      reason thread-pool isolation is preferred for network dependencies?
+    options:
+      - "Thread pools use less memory than semaphores"
+      - "Semaphores cannot be used across processes"
+      - "Thread pools guarantee ordering of responses"
+      - "Network calls have unpredictable latency, so you want the caller thread freed and a timeout enforceable"
+    answer: 3
+    explanation: |
+      Network calls have unpredictable, potentially unbounded latency. Running them on a
+      dedicated pool frees the caller thread and lets the framework enforce a timeout by
+      abandoning the worker. Semaphore isolation, running on the caller's thread, can't
+      do that — so it's reserved for fast, trusted, high-volume in-process calls.
+    ref: "concepts.md#thread-pool-vs-semaphore-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-016
+    difficulty: intermediate
+    tags: [layering, breaker, bulkhead, timeout]
+    question: |
+      When combining resilience patterns around a remote call, why is a timeout
+      still necessary even with a circuit breaker and bulkhead in place?
+    options:
+      - "A timeout bounds how long any single call may block; the breaker only decides whether to call, the bulkhead only caps concurrency"
+      - "The breaker cannot detect any failures without a timeout"
+      - "Timeouts replace the need for a breaker"
+      - "Bulkheads require timeouts to allocate threads"
+    answer: 0
+    explanation: |
+      They defend different layers. A timeout bounds the duration of one call (protects
+      against slow). The breaker decides whether to make the call at all (protects against
+      known-bad). The bulkhead caps how much resource one dependency can consume. None
+      substitutes for the others — layer all three.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-017
+    difficulty: advanced
+    tags: [circuit-breaker, slow-call, resilience4j]
+    question: |
+      Resilience4j can trip a breaker on slow calls, not just errors. Why is this
+      valuable?
+    options:
+      - "Because slow calls always eventually throw exceptions"
+      - "It reduces the memory footprint of the breaker"
+      - "It catches the 'slow is worse than down' case where calls succeed but degrade the caller by holding resources"
+      - "Slow-call detection replaces the need for timeouts"
+    answer: 2
+    explanation: |
+      A dependency can be technically 'up' (returning 200s) but so slow that it exhausts
+      the caller's threads — the most dangerous failure mode. Tripping on a slowCallRate
+      lets the breaker react to degradation that a pure error-rate threshold would miss.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-018
+    difficulty: intermediate
+    tags: [circuit-breaker, half-open, transitions]
+    question: |
+      From the HALF-OPEN state, what causes the breaker to transition back to OPEN?
+    options:
+      - "The sleep window expiring again"
+      - "A trial (probe) call failing"
+      - "All trial calls succeeding"
+      - "An operator manually closing it"
+    answer: 1
+    explanation: |
+      In HALF-OPEN the breaker admits a few trial calls. If a trial call fails (against
+      the failure threshold), the dependency still looks unhealthy, so the breaker returns
+      to OPEN and restarts the sleep window. Only successful trials move it to CLOSED.
+    ref: "concepts.md#the-circuit-breaker-state-machine"
+
+  - id: circuit-breakers-and-bulkheads-019
+    difficulty: beginner
+    tags: [circuit-breaker, states, closed]
+    question: |
+      What does the CLOSED state of a circuit breaker mean?
+    options:
+      - "Normal operation — calls pass through while the breaker counts outcomes"
+      - "The dependency is blocked and no calls are allowed"
+      - "The breaker is permanently disabled"
+      - "Only trial calls are permitted"
+    answer: 0
+    explanation: |
+      CLOSED is the normal, healthy state: calls flow through to the dependency and the
+      breaker tracks the success/failure rate. If that rate crosses the threshold (over
+      the minimum volume) the breaker trips to OPEN. The 'closed' name mirrors an
+      electrical circuit where a closed circuit conducts current.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-020
+    difficulty: advanced
+    tags: [bulkhead, isolation, blast-radius]
+    question: |
+      A monolith uses a single shared thread pool for all outbound calls to five
+      downstream services. One downstream, an analytics API, becomes very slow.
+      What is the likely blast radius, and what pattern prevents it?
+    options:
+      - "The slow analytics dep can consume the whole shared pool and starve calls to the other four services; per-dependency bulkheads prevent it"
+      - "Only analytics calls slow down; no pattern needed"
+      - "The database automatically absorbs the extra load"
+      - "The circuit breaker alone fully prevents thread exhaustion here"
+    answer: 0
+    explanation: |
+      With one shared pool, the slow analytics dependency parks every thread, starving
+      calls to healthy services too. Per-dependency bulkheads cap analytics to its own
+      pool, so the other four keep serving. A breaker helps by failing fast once analytics
+      is flagged unhealthy, but the isolation guarantee comes from the bulkhead.
+    ref: "concepts.md#bulkheads-resource-isolation"
+
+  - id: circuit-breakers-and-bulkheads-021
+    difficulty: intermediate
+    tags: [circuit-breaker, minimum-volume, anti-pattern]
+    question: |
+      A breaker is configured with a 50% failure-rate threshold but no minimum-volume
+      requirement. What is the most likely symptom?
+    options:
+      - "The breaker flaps open on tiny, unrepresentative samples (e.g. 1 of 2 calls failing)"
+      - "The breaker never trips"
+      - "The breaker stays permanently open"
+      - "The sleep window is ignored"
+    answer: 0
+    explanation: |
+      Without a minimum-volume gate, the rate is computed on whatever few calls exist.
+      One failure out of two calls reads as 50% and trips the breaker even though the
+      dependency may be fine. This flapping is why minimumNumberOfCalls / requestVolumeThreshold
+      exists.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-022
+    difficulty: advanced
+    tags: [layering, retry, latency, ordering]
+    question: |
+      An idempotent call is wrapped as Retry(TimeLimiter(call)) with 3 retries and a
+      10 s per-call timeout, no overall budget. What is the danger?
+    options:
+      - "The retries will never execute"
+      - "Worst-case latency can reach ~30 s (3 x 10 s), blowing the caller's latency budget"
+      - "The timeout disables the retries"
+      - "Retries will bypass the timeout entirely"
+    answer: 1
+    explanation: |
+      Retries multiplied by a per-call timeout stack up: 3 attempts x 10 s = up to 30 s of
+      blocking before giving up. Without an overall retry/time budget the caller's latency
+      SLO is blown and its own threads are held far too long. Cap the total retry budget so
+      worst-case latency stays bounded.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-023
+    difficulty: intermediate
+    tags: [fallback, graceful-degradation, breaker]
+    question: |
+      A circuit breaker that trips OPEN with no fallback simply converts a hang into
+      an error. When would you add a fallback instead?
+    options:
+      - "Never — errors are always preferable"
+      - "Only for write operations"
+      - "When a degraded but useful response (e.g. cached or default data) is better for users than an error"
+      - "Only when the dependency is a database"
+    answer: 2
+    explanation: |
+      Failing fast is good, but for non-critical dependencies a degraded answer (cached
+      value, default, or reduced feature) often serves users better than an outright error.
+      That's graceful degradation — see reliability-ops/graceful-degradation-and-fallbacks.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-024
+    difficulty: advanced
+    tags: [envoy, istio, mesh, outlier-detection]
+    question: |
+      In a service mesh like Envoy/Istio, "outlier detection" acts as a circuit
+      breaker at the proxy layer. What does it eject when a host misbehaves?
+    options:
+      - "The entire upstream service"
+      - "The downstream client's connection"
+      - "The mesh control plane"
+      - "An individual unhealthy upstream host from the load-balancing pool"
+    answer: 3
+    explanation: |
+      Envoy's outlier detection ejects individual unhealthy hosts from the upstream
+      load-balancing pool for a period (then probes them back) — a per-host breaker at
+      L7. This differs from an application breaker, which trips per logical dependency
+      rather than per host.
+    ref: "concepts.md#resilience4j-and-hystrix"
+
+  - id: circuit-breakers-and-bulkheads-025
+    difficulty: beginner
+    tags: [nygard, release-it, stability-patterns]
+    question: |
+      Circuit Breaker and Bulkhead are stability patterns popularized by which book?
+    options:
+      - "Michael Nygard's Release It!"
+      - "The Phoenix Project"
+      - "Designing Data-Intensive Applications"
+      - "The Google SRE Workbook"
+    answer: 0
+    explanation: |
+      Michael Nygard's Release It! introduced the Circuit Breaker, Bulkhead, Timeout, and
+      other stability patterns, along with the integration-point and cascading-failure
+      failure modes they defend against.
+    ref: "concepts.md#circuit-breakers--bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-026
+    difficulty: advanced
+    tags: [distributed, breaker-state, tradeoff]
+    question: |
+      Circuit-breaker state is usually kept per-instance (in-memory) rather than
+      shared across all instances. What is the main trade-off of a shared/distributed
+      breaker?
+    options:
+      - "It is strictly better and always used in practice"
+      - "It cannot represent the OPEN state"
+      - "It adds an external dependency and latency to every call, and can itself become a failure point"
+      - "It removes the need for bulkheads"
+    answer: 2
+    explanation: |
+      A distributed breaker would coordinate state across instances but requires a shared
+      store, adding latency and a new failure mode to the very path meant to be resilient.
+      Most systems accept per-instance breakers, often complemented by mesh-level outlier
+      detection for host ejection.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: circuit-breakers-and-bulkheads-027
+    difficulty: intermediate
+    tags: [tooling, polly, gobreaker, opossum]
+    question: |
+      Which library is a circuit-breaker / resilience implementation for the .NET
+      ecosystem?
+    options:
+      - "opossum"
+      - "gobreaker"
+      - "Resilience4j"
+      - "Polly"
+    answer: 3
+    explanation: |
+      Polly is the resilience/transient-fault-handling library for .NET. opossum is for
+      Node.js, gobreaker for Go, and Resilience4j for the JVM. Knowing the per-ecosystem
+      equivalents is a common interview signal.
+    ref: "concepts.md#resilience4j-and-hystrix"
+
+  - id: circuit-breakers-and-bulkheads-028
+    difficulty: advanced
+    tags: [scenario, fan-out, resilience-design]
+    question: |
+      You're designing resilience for a service that fans out to five downstream
+      dependencies. Which combination best limits blast radius while allowing healthy
+      deps to keep serving?
+    options:
+      - "Per-dependency bulkheads + a breaker per dependency + per-dep timeouts + backoff retries on idempotent calls"
+      - "One shared thread pool + one global breaker for all five"
+      - "Unbounded retries with no breaker"
+      - "A single very large timeout and nothing else"
+    answer: 0
+    explanation: |
+      Per-dependency bulkheads stop one slow dep from starving the others; a breaker per
+      dependency fails fast on a bad one; timeouts tuned to each dep's p99 bound blocking;
+      backoff+jitter retries on idempotent calls handle transient blips. A shared pool or
+      global breaker couples the deps together and defeats isolation.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-029
+    difficulty: intermediate
+    tags: [circuit-breaker, half-open, why]
+    question: |
+      Why do breakers use a HALF-OPEN probe stage instead of jumping straight from
+      OPEN back to CLOSED when the sleep window expires?
+    options:
+      - "To re-probe with a trickle of traffic and avoid slamming full load onto a possibly-still-fragile dependency"
+      - "To slow down recovery for auditing"
+      - "Because CLOSED requires manual approval"
+      - "To reset the metrics counters"
+    answer: 0
+    explanation: |
+      Jumping OPEN to CLOSED on a timer would immediately restore full load, which could
+      re-trigger the outage if the dependency is only partly recovered. HALF-OPEN admits a
+      limited number of trial calls first, so recovery is validated gently before full
+      traffic resumes.
+    ref: "concepts.md#the-circuit-breaker-state-machine"
+
+  - id: circuit-breakers-and-bulkheads-030
+    difficulty: advanced
+    tags: [sleep-window, adaptive, backoff]
+    question: |
+      For a dependency whose outages sometimes last minutes, what refinement to the
+      OPEN-state sleep window helps avoid wasteful probing?
+    options:
+      - "Use an exponential/adaptive sleep window that backs off on repeated HALF-OPEN failures"
+      - "Set the sleep window to zero"
+      - "Disable the HALF-OPEN state"
+      - "Count 4xx errors so it opens sooner"
+    answer: 0
+    explanation: |
+      A fixed short sleep window probes every few seconds throughout a long outage. An
+      exponential/adaptive window (5 s, 10 s, 20 s, ...) backs off after repeated failed
+      probes, so a dependency in an extended outage isn't hammered while recovering, yet a
+      quick blip still recovers fast.
+    ref: "concepts.md#open-state-the-sleep-window-and-recovery"
+
+  - id: circuit-breakers-and-bulkheads-031
+    difficulty: intermediate
+    tags: [layering, ordering, retry, breaker]
+    question: |
+      Placing the retry OUTSIDE the circuit breaker (Retry(CircuitBreaker(call)))
+      has what desirable effect?
+    options:
+      - "Retries bypass the breaker entirely"
+      - "The breaker never opens"
+      - "Timeouts are disabled during retries"
+      - "Each retry is a fresh breaker-evaluated call, so a retry storm feeds and can trip the breaker"
+    answer: 3
+    explanation: |
+      With retry outside the breaker, every retry passes through the breaker and counts
+      toward its accounting. So if retries pile up against a failing dependency, the breaker
+      sees the failures and trips OPEN, cutting off the storm — retries feed the breaker
+      rather than evading it.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-032
+    difficulty: beginner
+    tags: [electrical, metaphor, trip]
+    question: |
+      The circuit-breaker software pattern borrows its name from an electrical
+      breaker. What does "tripping" (opening) the breaker correspond to?
+    options:
+      - "Increasing the current to the dependency"
+      - "Recording metrics about the dependency"
+      - "Retrying the failed operation"
+      - "Cutting the circuit to protect the system when conditions become dangerous"
+    answer: 3
+    explanation: |
+      An electrical breaker trips (opens the circuit) to stop dangerous current and protect
+      wiring. The software breaker trips OPEN when the error rate is dangerous, cutting calls
+      to protect the caller from resource exhaustion — the same protective-cutoff idea.
+    ref: "concepts.md#the-circuit-breaker-state-machine"
+
+  - id: circuit-breakers-and-bulkheads-033
+    difficulty: advanced
+    tags: [scenario, slow-dependency, decision]
+    question: |
+      A downstream is intermittently slow (p99 spikes to 10 s) but not returning
+      errors. Your callers' thread pools are filling up. What's the most effective
+      immediate protection?
+    options:
+      - "Increase the caller's timeout to 30 s so calls have time to finish"
+      - "Add more retries to get a faster response"
+      - "Enforce a tight timeout plus slow-call-based breaker tripping and a bulkhead to cap concurrency"
+      - "Remove the circuit breaker so calls aren't blocked"
+    answer: 2
+    explanation: |
+      The failure mode is thread exhaustion from slow (not errored) calls. A tight timeout
+      frees threads, a slow-call-rate breaker trips on degradation even without errors, and
+      a bulkhead caps how many threads this dep can hold. Raising the timeout or adding
+      retries makes the exhaustion worse.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-034
+    difficulty: intermediate
+    tags: [bulkhead, resources, generalization]
+    question: |
+      Beyond thread pools, which of these is also a valid application of the
+      bulkhead principle?
+    options:
+      - "Encrypting connection strings"
+      - "Compressing HTTP responses"
+      - "Partitioning connection pools, request slots, or host groups/cells per dependency or tenant"
+      - "Caching DNS lookups"
+    answer: 2
+    explanation: |
+      Bulkheading applies to any finite resource: separate connection pools, in-flight
+      request slots, memory, or even separate host groups/cells (cell-based architecture).
+      The unifying idea is capping the blast radius of any single failure or noisy tenant.
+    ref: "concepts.md#bulkheads-resource-isolation"
+
+  - id: circuit-breakers-and-bulkheads-035
+    difficulty: advanced
+    tags: [anti-pattern, timeout, ordering]
+    question: |
+      Why is setting a downstream call's timeout LONGER than the caller's own timeout
+      an anti-pattern?
+    options:
+      - "It makes the breaker trip too early"
+      - "It violates the HTTP spec"
+      - "It disables the bulkhead"
+      - "The call keeps running after the caller already gave up — wasted work with no benefit"
+    answer: 3
+    explanation: |
+      If your call to the downstream runs longer than the client that called YOU is willing
+      to wait, the client has already timed out and abandoned the request. Your call
+      continues consuming resources for a result nobody will use. Timeouts should shrink as
+      you go deeper in the call graph.
+    ref: "concepts.md#common-anti-patterns"
+
+  - id: circuit-breakers-and-bulkheads-036
+    difficulty: intermediate
+    tags: [resilience4j, config, defaults]
+    question: |
+      In Resilience4j, what does the permittedNumberOfCallsInHalfOpenState setting
+      control?
+    options:
+      - "The number of retries per call"
+      - "How many trial calls are allowed through while the breaker is HALF-OPEN"
+      - "The size of the sliding window in CLOSED state"
+      - "The maximum concurrency of the bulkhead"
+    answer: 1
+    explanation: |
+      permittedNumberOfCallsInHalfOpenState (default 10) bounds the trial traffic used to
+      test recovery. Their aggregate success/failure rate against the threshold decides
+      whether the breaker closes or re-opens.
+    ref: "concepts.md#open-state-the-sleep-window-and-recovery"
+
+  - id: circuit-breakers-and-bulkheads-037
+    difficulty: advanced
+    tags: [scenario, bulkhead, tenant-isolation]
+    question: |
+      One noisy tenant's traffic to a shared multi-tenant service is degrading all
+      tenants. Which reliability pattern most directly addresses this?
+    options:
+      - "A global circuit breaker for the whole service"
+      - "Per-tenant bulkheads (isolated resource quotas) so one tenant can't consume everyone's capacity"
+      - "Longer timeouts for all tenants"
+      - "Disabling retries globally"
+    answer: 1
+    explanation: |
+      This is a noisy-neighbor problem. Per-tenant bulkheads (isolated pools/quotas) cap
+      how much of the shared resource any single tenant can consume, so one tenant's spike
+      can't starve the others. A global breaker would just cut everyone off together.
+    ref: "concepts.md#bulkheads-resource-isolation"
+
+  - id: circuit-breakers-and-bulkheads-038
+    difficulty: intermediate
+    tags: [circuit-breaker, observability, cross-ref]
+    question: |
+      A circuit breaker flipping to OPEN is a high-value operational signal. Which
+      domain owns HOW you emit and alert on that signal?
+    options:
+      - "This topic (circuit breakers) owns the alerting mechanics"
+      - "observability owns metric emission and alerting; the breaker just produces the signal"
+      - "security owns breaker alerting"
+      - "No domain — breaker state should never be alerted on"
+    answer: 1
+    explanation: |
+      The breaker produces state and trip events; how you turn those into metrics,
+      dashboards, and alerts is observability's domain. This topic cross-references it
+      rather than duplicating alerting mechanics.
+    ref: "concepts.md#open-state-the-sleep-window-and-recovery"
+
+  - id: circuit-breakers-and-bulkheads-039
+    difficulty: beginner
+    tags: [bulkhead, definition]
+    question: |
+      What does a bulkhead do when its resource pool for a dependency is already
+      full?
+    options:
+      - "It borrows threads from other dependencies' pools"
+      - "It rejects (or queues) the new call rather than letting it consume shared resources"
+      - "It automatically opens the circuit breaker"
+      - "It retries the call immediately"
+    answer: 1
+    explanation: |
+      A bulkhead caps concurrency for its dependency. When the pool/permits are exhausted,
+      new calls are rejected fast (or briefly queued) — crucially, they can't spill over and
+      consume the resources reserved for other dependencies, preserving isolation.
+    ref: "concepts.md#bulkheads-resource-isolation"
+
+  - id: circuit-breakers-and-bulkheads-040
+    difficulty: advanced
+    tags: [scenario, breaker-vs-shed, judgment]
+    question: |
+      Your service is the CALLER and one downstream is failing — you want to protect
+      YOUR service from that bad dependency. Which pattern family is primarily for
+      this direction, versus protecting a service from INBOUND overload?
+    options:
+      - "Circuit breakers/bulkheads protect the caller from a bad downstream; load shedding protects a service from inbound overload"
+      - "Both directions use only load shedding"
+      - "Circuit breakers protect against inbound overload; bulkheads protect downstreams"
+      - "There is no directional distinction"
+    answer: 0
+    explanation: |
+      Circuit breakers and bulkheads defend a CALLER against a misbehaving DOWNSTREAM.
+      Protecting a service from too much INBOUND traffic is load shedding / backpressure —
+      see reliability-ops/load-shedding-and-backpressure. Knowing which direction each
+      pattern faces is a common interview discriminator.
+    ref: "concepts.md#circuit-breakers--bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-041
+    difficulty: intermediate
+    tags: [anti-pattern, list]
+    question: |
+      Which of the following is a recognized circuit-breaker/bulkhead anti-pattern?
+    options:
+      - "Recording only timeouts and 5xx as failures"
+      - "Using one shared thread pool for all downstream dependencies"
+      - "Using a minimum-volume gate before evaluating the failure rate"
+      - "Adding a fallback for a non-critical dependency"
+    answer: 1
+    explanation: |
+      A single shared thread pool for all downstreams defeats the purpose of bulkheads —
+      one slow dependency starves every call. The other three options are good practices:
+      recording real failures only, gating on volume, and providing fallbacks.
+    ref: "concepts.md#common-anti-patterns"
+
+  - id: circuit-breakers-and-bulkheads-042
+    difficulty: advanced
+    tags: [scenario, breaker-tuning, flapping]
+    question: |
+      A breaker on a high-traffic dependency (thousands of calls/min) is
+      occasionally tripping during brief 2-second blips that users don't even
+      notice. You want it to tolerate short blips but still trip on sustained
+      failure. Which adjustment is most appropriate?
+    options:
+      - "Lower the failure-rate threshold to 10%"
+      - "Remove the minimum-volume requirement"
+      - "Set the sleep window to 1 ms"
+      - "Use a larger/time-based sliding window and appropriate volume so momentary blips don't dominate the rate"
+    answer: 3
+    explanation: |
+      A tiny window lets a 2 s blip dominate the computed failure rate. Widening the window
+      (or using a time-based window) with a sensible minimum volume smooths transient blips
+      while still catching sustained failure. Lowering the threshold or removing the volume
+      gate would make flapping worse.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-043
+    difficulty: intermediate
+    tags: [retry, idempotency, breaker]
+    question: |
+      When layering retries with a breaker and timeout, which calls are safe to
+      retry automatically?
+    options:
+      - "All calls, since retries are always safe"
+      - "Only idempotent operations (retrying non-idempotent writes risks duplicates)"
+      - "Only calls that returned 4xx"
+      - "Only calls slower than the timeout"
+    answer: 1
+    explanation: |
+      Retrying a non-idempotent operation (e.g. a payment or a non-idempotent POST) can
+      cause duplicate side effects. Only idempotent calls — or ones made idempotent via
+      idempotency keys — are safe to auto-retry. See reliability-ops/retries-timeouts-and-backoff.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
+
+  - id: circuit-breakers-and-bulkheads-044
+    difficulty: advanced
+    tags: [scenario, cascading, propagation]
+    question: |
+      In a cascading failure, how does the failure typically PROPAGATE through a
+      synchronous call graph starting from one slow leaf service?
+    options:
+      - "Upward: callers' thread pools exhaust waiting on the slow service, then their callers exhaust, and so on"
+      - "Downward: the leaf infects its own dependencies"
+      - "It stays contained to the leaf service automatically"
+      - "Sideways only, never reaching the top"
+    answer: 0
+    explanation: |
+      The slow leaf holds its callers' threads for the full timeout; those callers exhaust
+      their pools and become slow/unresponsive, which then exhausts THEIR callers — the
+      failure climbs UP the call graph. Breakers, bulkheads, and timeouts break this chain.
+    ref: "concepts.md#why-fail-fast-the-cascading-failure-problem"
+
+  - id: circuit-breakers-and-bulkheads-045
+    difficulty: intermediate
+    tags: [resilience4j, sliding-window, config]
+    question: |
+      Resilience4j supports COUNT_BASED and TIME_BASED sliding windows. Why might
+      TIME_BASED be more predictable under highly variable traffic?
+    options:
+      - "It ignores failures entirely"
+      - "It uses less memory in all cases"
+      - "It evaluates over a fixed time span rather than a fixed number of calls, so behavior doesn't shift with request rate"
+      - "It disables the minimum-volume gate"
+    answer: 2
+    explanation: |
+      A count-based window of N calls covers a very different time span at 10 rps vs 10,000
+      rps. A time-based window (last N seconds) always reflects a fixed recent period, giving
+      more predictable tripping behavior when traffic fluctuates.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-046
+    difficulty: beginner
+    tags: [circuit-breaker, fail-fast, latency]
+    question: |
+      Roughly how long does a call take when a circuit breaker is OPEN, compared to
+      waiting on a hung dependency with a 30 s timeout?
+    options:
+      - "About the same, ~30 s"
+      - "Microseconds/milliseconds — it returns immediately without calling the dependency"
+      - "Exactly half the timeout, ~15 s"
+      - "It never returns"
+    answer: 1
+    explanation: |
+      An OPEN breaker short-circuits: it throws or returns a fallback essentially instantly
+      (microseconds) instead of blocking for the full 30 s timeout. That speed is exactly what
+      frees threads and prevents pile-up — the core value of failing fast.
+    ref: "concepts.md#why-fail-fast-the-cascading-failure-problem"
+
+  - id: circuit-breakers-and-bulkheads-047
+    difficulty: advanced
+    tags: [scenario, semaphore, thread-pool, choice]
+    question: |
+      You need to protect a very high-volume (100k rps) call to a trusted in-process
+      cache with sub-millisecond latency. Which bulkhead type is the better fit and why?
+    options:
+      - "Thread-pool bulkhead, because it frees the caller thread"
+      - "No bulkhead is ever appropriate for a cache"
+      - "Thread-pool bulkhead, because semaphores can't limit concurrency"
+      - "Semaphore bulkhead, because thread-pool overhead/context-switching would dominate such a fast, high-volume call"
+    answer: 3
+    explanation: |
+      For a fast, trusted, extremely high-volume in-process call, the per-call cost of
+      handing work to a separate thread pool (context switches, queueing) would dominate.
+      A semaphore bulkhead — a cheap atomic concurrency counter on the caller's thread — is
+      the right fit here.
+    ref: "concepts.md#thread-pool-vs-semaphore-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-048
+    difficulty: intermediate
+    tags: [circuit-breaker, failures-defined]
+    question: |
+      Which set of outcomes should typically COUNT as failures toward a circuit
+      breaker's failure rate?
+    options:
+      - "HTTP 200 responses that are large"
+      - "HTTP 404 and 400 client errors"
+      - "Timeouts, connection errors, and 5xx responses"
+      - "Cache hits"
+    answer: 2
+    explanation: |
+      The breaker's job is to detect an unhealthy DEPENDENCY, so count signals of the
+      dependency failing: timeouts, connection errors, and 5xx. 4xx are caller/business
+      errors and shouldn't trip the breaker; successful responses obviously don't count.
+    ref: "concepts.md#closed-state-and-tripping-thresholds"
+
+  - id: circuit-breakers-and-bulkheads-049
+    difficulty: advanced
+    tags: [load-shedding, rate-limit, cross-ref, reliability]
+    question: |
+      Load shedding and rate limiting can be used as a RELIABILITY mechanism.
+      In that framing, what is their purpose (and which domain owns the
+      abuse-prevention framing)?
+    options:
+      - "To speed up individual requests; observability owns it"
+      - "To shed excess load to protect the system from collapse; security owns the abuse-prevention framing"
+      - "To encrypt requests; security owns it"
+      - "To replace circuit breakers entirely; system-design owns it"
+    answer: 1
+    explanation: |
+      As a reliability mechanism, shedding/rate-limiting drops or throttles excess load so
+      the system stays up rather than collapsing under overload. Rate-limiting as
+      abuse-prevention is security's domain (and see design-rate-limiter); this domain covers
+      the protect-the-system angle — see reliability-ops/load-shedding-and-backpressure.
+    ref: "concepts.md#circuit-breakers--bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-050
+    difficulty: intermediate
+    tags: [state-machine, transitions, summary]
+    question: |
+      Which sequence of state transitions correctly describes a breaker detecting a
+      failure and then recovering?
+    options:
+      - "OPEN -> CLOSED -> HALF-OPEN -> OPEN"
+      - "CLOSED -> OPEN -> HALF-OPEN -> CLOSED"
+      - "HALF-OPEN -> OPEN -> CLOSED -> HALF-OPEN"
+      - "CLOSED -> HALF-OPEN -> OPEN -> CLOSED"
+    answer: 1
+    explanation: |
+      Normal is CLOSED. When failures cross the threshold it trips to OPEN (fail fast).
+      After the sleep window it moves to HALF-OPEN (trial calls). If those succeed it returns
+      to CLOSED. That's the canonical CLOSED -> OPEN -> HALF-OPEN -> CLOSED recovery path.
+    ref: "concepts.md#the-circuit-breaker-state-machine"
+
+  - id: circuit-breakers-and-bulkheads-051
+    difficulty: advanced
+    tags: [scenario, breaker-vs-bulkhead, judgment]
+    question: |
+      A dependency is returning errors quickly (fast failures, not slow). You mainly
+      want to stop wasting calls on it and give it room to recover. Which single
+      pattern most directly addresses this, and is a bulkhead sufficient alone?
+    options:
+      - "A bulkhead alone is sufficient because it limits concurrency"
+      - "Only a longer timeout is needed"
+      - "Only retries are needed"
+      - "A circuit breaker is the direct fix (stop calling, let it recover); a bulkhead alone wouldn't stop the wasted calls"
+    answer: 3
+    explanation: |
+      Fast failures don't exhaust threads (they return quickly), so a bulkhead's concurrency
+      cap doesn't help much here. The direct fix is a circuit breaker: trip OPEN to stop the
+      pointless calls and give the dependency time to recover. This shows the two patterns
+      target different failure modes.
+    ref: "concepts.md#why-fail-fast-the-cascading-failure-problem"
+
+  - id: circuit-breakers-and-bulkheads-052
+    difficulty: intermediate
+    tags: [hystrix, defaults, thread-pool]
+    question: |
+      Hystrix's default isolation strategy for commands was THREAD (thread-pool
+      isolation). What did SEMAPHORE isolation get reserved for?
+    options:
+      - "Any call to a database"
+      - "Calls that must never be timed out"
+      - "Very high-volume calls to trusted, low-latency dependencies where thread overhead wasn't worth it"
+      - "Calls to external third-party APIs"
+    answer: 2
+    explanation: |
+      Hystrix defaulted to THREAD isolation because network calls have unpredictable latency
+      and you want the caller thread freed. SEMAPHORE was reserved for very high-volume calls
+      to trusted, fast dependencies, where spinning up separate threads would add more
+      overhead than benefit.
+    ref: "concepts.md#thread-pool-vs-semaphore-bulkheads"
+
+  - id: circuit-breakers-and-bulkheads-053
+    difficulty: advanced
+    tags: [scenario, no-fallback, degradation]
+    question: |
+      A product page calls a "recommendations" service (non-critical) via a breaker.
+      When the breaker is OPEN it currently returns a 500 and the whole page errors.
+      What is the better design?
+    options:
+      - "Keep returning 500 so users know recommendations are down"
+      - "Remove the breaker so calls always go through"
+      - "Have the breaker's OPEN path return an empty/cached recommendations fallback so the page still renders"
+      - "Retry the recommendations call 10 times before failing"
+    answer: 2
+    explanation: |
+      Recommendations are non-critical, so the page shouldn't fail when they're unavailable.
+      A fallback (empty list or cached recs) on the breaker's OPEN path lets the page render
+      degraded but functional — graceful degradation. Erroring the whole page or removing the
+      breaker are both worse.
+    ref: "concepts.md#common-anti-patterns"
+
+  - id: circuit-breakers-and-bulkheads-054
+    difficulty: beginner
+    tags: [combining, patterns, summary]
+    question: |
+      Which statement best captures why circuit breakers, bulkheads, and timeouts
+      are usually used TOGETHER?
+    options:
+      - "They are interchangeable, so using several adds redundancy"
+      - "Only using all three satisfies compliance rules"
+      - "Timeouts and breakers are the same, so bulkheads finish the set"
+      - "Each defends a different layer: timeout bounds one call's duration, breaker decides whether to call, bulkhead caps resource consumption"
+    answer: 3
+    explanation: |
+      They are not interchangeable. A timeout limits how long one call blocks; a circuit
+      breaker decides whether to make the call at all; a bulkhead limits how much of your
+      resource budget any single dependency can consume. Together they cover slow, bad, and
+      resource-hogging failure modes.
+    ref: "concepts.md#combining-breaker-bulkhead-and-timeout"
