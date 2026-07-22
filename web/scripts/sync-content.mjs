@@ -48,6 +48,7 @@ const AUTHORED_DOMAINS = ["system-design", "spring-boot", "spring-core", "java-j
 const COMING_SOON_DOMAINS = [
   "hibernate-jpa",
   "apache-tomcat",
+  "grpc",
 ];
 
 /** The 8 advanced/expert system-design deep-dive slugs. */
