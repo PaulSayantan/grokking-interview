@@ -140,15 +140,21 @@ function slimQuestion(q) {
 }
 
 /**
- * Write a question pool as both `<baseName>.json` (full) and `<baseName>.slim.json`
- * (no explanation/tags/difficulty — explanations ship separately per domain).
+ * Write a question pool as `<baseName>.slim.json` only (the light payload the
+ * practice island actually fetches: no explanation/tags — explanations ship
+ * separately per domain via `_explanations.json`).
+ *
+ * SECURITY / surface reduction: we deliberately do NOT emit the full
+ * `<baseName>.json` twin any more. Nothing at runtime fetches it — the island
+ * always derives `<pool>.slim.json` from `poolUrl` — so the full pools were pure
+ * dead weight AND the most convenient bulk-scrape target (a single `_all.json`
+ * request returned an entire domain's questions with tags + explanations +
+ * answer keys). Emitting slim-only halves the served `/questions` payload and
+ * removes that one-request annotated-bank download. (The site is static, so the
+ * per-question `answer` index in the slim pool is still reachable — client-side
+ * grading requires it; this is a floor we can't cross without a backend.)
  */
 async function writePoolFiles(dir, baseName, questions) {
-  await writeFile(
-    path.join(dir, `${baseName}.json`),
-    JSON.stringify(questions),
-    "utf8",
-  );
   await writeFile(
     path.join(dir, `${baseName}.slim.json`),
     JSON.stringify(questions.map(slimQuestion)),

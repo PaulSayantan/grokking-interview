@@ -65,4 +65,11 @@ export default defineConfig({
       },
     },
   },
+  // NOTE on Content-Security-Policy: we do NOT use Astro's experimental hash-based
+  // CSP here. It force-hashes every <style> element Astro emits, and per the CSP
+  // spec a hash in `style-src` makes `'unsafe-inline'` be IGNORED — which would
+  // block the many inline style="" design-token attributes across the pages AND
+  // the styles mermaid/Pagefind inject at runtime, visually breaking the site.
+  // Instead the CSP is delivered as a real response header (netlify.toml /
+  // public/vercel.json) where we control every directive precisely. See there.
 });
