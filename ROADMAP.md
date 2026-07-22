@@ -103,6 +103,24 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 40 (2026-07-22):** **Hibernate/JPA Pass 2 + Cloud Computing Patterns group + deploy-URL.**
+  (1) **Hibernate & JPA Pass 2 (deepen)** — research→deepen→verify (54 agents, 0 errors); grew
+  **868 → 1,401 MCQs (+533)**, every topic 78-85, heavily advanced/expert. Deepened the senior classics
+  (N+1 + full fix menu, merge semantics, @Version internals, L2 concurrency strategies, equals/hashCode
+  disaster, bulk-DML bypass, HB6 SQM/@JdbcTypeCode, HB7 Jakarta Persistence 3.2 + Jakarta Data, javax→
+  jakarta). Verify fixed real errors (Session.upsert is StatelessSession-only; @UuidGenerator Style.TIME
+  is v1-style not UUIDv7). Commit 32f2248. (2) **Cloud Computing Patterns group** (NEW ccp- group in
+  system-design) — the vendor-neutral Fehling/Leymann/Retter "Cloud Computing Patterns" (Springer 2014,
+  cloudcomputingpatterns.org): all **74 patterns / 5 categories** in **8 topics, 407 MCQs**, 29 Mermaid.
+  Each pattern intent+context+solution+modern-cross-cloud-equivalent+trade-offs; overlaps cross-referenced
+  not duplicated (workloads→capacity-modeling, consistency→cap-theorem, messaging→message-queues,
+  multi-tenancy→deep dive, hybrid→aws-migration). New "ccp" sync group (label "Cloud Computing Patterns",
+  before aws in SD_GROUP_ORDER). Distinct from the still-planned AWS-specific CDP catalog (clouddesignpattern.org).
+  Completeness gate confirmed all 74 patterns; verify fixed a quorum MCQ. Built via
+  `cloud-computing-patterns-authoring.js` (research→author→verify, 16 agents, 0 errors). Commit a041adf.
+  (3) Deploy URL set to grokking-interview.vercel.app (Vercel free tier, no paid domain — commit 87ef6c5).
+  System-design now 82 topics (6 groups: core/advanced/patterns/architecture/ccp/aws).
+
 - **Session 39 (2026-07-22):** **Rebrand + Hibernate/JPA Pass 1 + gRPC coming-soon.**
   (1) Renamed the site LoopReady → **Grokking Interview** (siteName in BaseLayout drives wordmark/
   title/footer; landing title; robots comment). Deploy URL unchanged (loopready.io as SITE_URL
