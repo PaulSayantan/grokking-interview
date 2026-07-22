@@ -1,0 +1,863 @@
+topic: "Schema Evolution & Backward Compatibility"
+domain: grpc
+topic_slug: schema-evolution-and-compatibility
+version: 1
+questions:
+  - id: schema-evolution-and-compatibility-001
+    difficulty: beginner
+    tags: [field-numbers, wire-identity, fundamentals]
+    question: |
+      In binary protobuf, what identifies a field on the wire — and therefore
+      forms the immutable part of the contract?
+    options:
+      - "The field's name as a UTF-8 string"
+      - "The field's integer field number (inside the tag)"
+      - "The field's declared type name"
+      - "The field's zero-based position in the message"
+    answer: 1
+    explanation: |
+      Each field is written as a tag = (field_number << 3) | wire_type. The decoder
+      matches incoming data to fields by number, never by name. That is why the number
+      is the contract: renaming is wire-safe, renumbering is a breaking change.
+    ref: "concepts.md#field-numbers-are-the-contract"
+
+  - id: schema-evolution-and-compatibility-002
+    difficulty: beginner
+    tags: [rename, wire-compatibility]
+    question: |
+      A team renames the proto3 field `customer_name` to `full_name` but keeps its
+      field number `= 2`. At the binary wire level, what happens?
+    options:
+      - "It is a breaking change; old and new peers can no longer exchange the field"
+      - "protoc refuses to compile because names must be stable"
+      - "The field is silently dropped by old clients"
+      - "Nothing changes on the wire; the bytes are identical because the number is unchanged"
+    answer: 3
+    explanation: |
+      Binary protobuf never transmits names — only field numbers. Keeping number 2 means
+      the wire encoding is unchanged, so a rename is wire-compatible. It does, however,
+      break generated code (source) and JSON/text encodings, which key by name.
+    ref: "concepts.md#field-numbers-are-the-contract"
+
+  - id: schema-evolution-and-compatibility-003
+    difficulty: intermediate
+    tags: [reserved, field-removal, gotcha]
+    question: |
+      Why is `reserved 2, 5;` recommended immediately after deleting the fields that
+      used numbers 2 and 5?
+    options:
+      - "It makes protoc reject any future definition that reuses those numbers, turning silent corruption into a compile error"
+      - "It shrinks the serialized message size"
+      - "It tells old clients to stop sending those fields"
+      - "It is required by proto3 or the file will not compile"
+    answer: 0
+    explanation: |
+      Reserving a deleted number prevents accidental reuse. Without it, a future field
+      could recycle number 2, and a lingering old peer's bytes for old-field-2 would
+      decode into the new field — silent data corruption. `reserved` makes that a
+      compile-time error instead.
+    ref: "concepts.md#reserving-removed-numbers-and-names"
+
+  - id: schema-evolution-and-compatibility-004
+    difficulty: intermediate
+    tags: [forward-backward, direction]
+    question: |
+      "A new server can correctly read requests produced by an old client." Which
+      compatibility direction does this describe?
+    options:
+      - "Forward compatibility"
+      - "Neither; this always breaks"
+      - "Backward compatibility"
+      - "Source compatibility"
+    answer: 2
+    explanation: |
+      Backward compatibility means the new (reader) code can read data produced by old
+      (writer) code. Forward compatibility is the reverse: old code reading data from
+      newer code. Well-behaved proto changes are both simultaneously.
+    ref: "concepts.md#forward-vs-backward-compatibility"
+
+  - id: schema-evolution-and-compatibility-005
+    difficulty: intermediate
+    tags: [unknown-fields, forward-compatibility, proto3]
+    question: |
+      What protobuf behavior is primarily responsible for FORWARD compatibility — an
+      old reader safely handling a message written with a newer schema?
+    options:
+      - "Required fields"
+      - "The decoder skipping or preserving fields whose numbers it does not recognize"
+      - "The zero-value default for scalars"
+      - "The `reserved` keyword"
+    answer: 1
+    explanation: |
+      Forward compatibility comes from unknown-field handling: an old reader that meets an
+      unrecognized field number does not crash — it skips or preserves it. Defaults give
+      backward compatibility (missing field reads as default), a different mechanism.
+    ref: "concepts.md#unknown-field-preservation"
+
+  - id: schema-evolution-and-compatibility-006
+    difficulty: advanced
+    tags: [unknown-fields, proto3, proxies, history]
+    question: |
+      A read-modify-write proxy built on an OLD schema parses a message, edits one known
+      field, and re-serializes it. On modern protobuf (>= 3.5), what happens to fields the
+      proxy's schema does not know about?
+    options:
+      - "They are dropped, because proto3 does not track unknown fields"
+      - "They are preserved and written back out unchanged on re-serialization"
+      - "They cause a parse error"
+      - "They are converted to the field's default value"
+    answer: 1
+    explanation: |
+      Since protobuf 3.5 (2017), proto3 preserves unknown fields by default, matching
+      proto2. The proxy retains the raw bytes and re-emits them, so newer fields survive
+      pass-through. Pre-3.5 proto3 discarded them — a notorious data-loss footgun.
+    ref: "concepts.md#unknown-field-preservation"
+
+  - id: schema-evolution-and-compatibility-007
+    difficulty: advanced
+    tags: [type-change, varint, sint, wire-compatibility]
+    question: |
+      An engineer wants to change a field from `int32` to `sint32` to store negatives more
+      compactly. Is this wire-compatible?
+    options:
+      - "Yes; both are 32-bit integers"
+      - "Yes; both use the varint wire type so it is safe"
+      - "No; sint32 uses zigzag encoding while int32 uses plain varint, so values are silently mangled"
+      - "No; but only because the field number must also change"
+    answer: 2
+    explanation: |
+      Although both are varint (wire type 0), `sint32`/`sint64` use zigzag encoding while
+      `int32`/`int64` use plain two's-complement varints. Swapping them reinterprets the
+      bytes and corrupts values, so int <-> sint is a breaking change.
+    ref: "concepts.md#wire-compatible-type-changes"
+
+  - id: schema-evolution-and-compatibility-008
+    difficulty: intermediate
+    tags: [type-change, varint, wire-compatibility]
+    question: |
+      Which set of scalar types are mutually wire-compatible (freely interchangeable) for a
+      field, because they all encode as plain varints?
+    options:
+      - "string, int64, bytes"
+      - "sint32, sint64, int32"
+      - "float, double, fixed32"
+      - "int32, int64, uint32, uint64, bool, enum"
+    answer: 3
+    explanation: |
+      int32, int64, uint32, uint64, bool, and enum all use the varint wire type with plain
+      two's-complement encoding, so they are mutually compatible (subject to truncation if
+      a value exceeds the new type's range). sint* uses zigzag and is separate.
+    ref: "concepts.md#wire-compatible-type-changes"
+
+  - id: schema-evolution-and-compatibility-009
+    difficulty: intermediate
+    tags: [add-field, safe-changes, additive]
+    question: |
+      What is the safest and most common way to extend a message with new information
+      while keeping full backward and forward compatibility?
+    options:
+      - "Add a new field with a brand-new, previously-unused field number"
+      - "Change an existing field's type to a struct"
+      - "Reuse the number of a recently deleted field"
+      - "Renumber existing fields to make room"
+    answer: 0
+    explanation: |
+      Additive evolution — adding a field with a new number — is the workhorse. Old peers
+      skip/preserve the unknown number; new peers see the default when talking to old
+      peers. It is wire-, source-, and JSON-compatible.
+    ref: "concepts.md#safe-non-breaking-changes"
+
+  - id: schema-evolution-and-compatibility-010
+    difficulty: advanced
+    tags: [three-axes, json, rename]
+    question: |
+      A service exposes its messages both as binary gRPC and as protobuf-JSON via
+      grpc-gateway. A field is renamed (number unchanged). Which consumers break?
+    options:
+      - "Neither; a rename is always safe"
+      - "Only the binary gRPC consumers"
+      - "Both break at the wire level"
+      - "The JSON consumers (JSON keys by name) and code that references the old generated accessor"
+    answer: 3
+    explanation: |
+      Renaming is wire-compatible (number unchanged) so binary gRPC is fine, but JSON keys
+      by field name and generated code references the old accessor. So JSON consumers and
+      source that uses the old name break. This is why the three axes must be considered.
+    ref: "concepts.md#the-three-compatibility-axes"
+
+  - id: schema-evolution-and-compatibility-011
+    difficulty: advanced
+    tags: [three-axes, renumber]
+    question: |
+      Renumbering a field (changing its field number while keeping the name) is safe on
+      which compatibility axis, and breaks which?
+    options:
+      - "Safe on the wire; breaks source and JSON"
+      - "Breaks all three axes"
+      - "Safe on all three axes"
+      - "Safe on source and JSON; breaks the wire"
+    answer: 3
+    explanation: |
+      Source and JSON key by name, which is unchanged, so generated code and JSON keep
+      working. But the wire keys by number, so data lands in the wrong field or becomes
+      unknown — a wire-breaking change. It is the mirror image of a rename.
+    ref: "concepts.md#the-three-compatibility-axes"
+
+  - id: schema-evolution-and-compatibility-012
+    difficulty: intermediate
+    tags: [enums, open-enums, proto3]
+    question: |
+      A proto3 client built on an old schema receives an enum field set to value `7`, which
+      its schema does not define. What happens?
+    options:
+      - "The unknown value is stored as the raw integer (open enum), and preserved"
+      - "The value is coerced to the zero default"
+      - "The message fails to parse"
+      - "The whole enum field is dropped"
+    answer: 0
+    explanation: |
+      proto3 enums are open: an unrecognized value is stored as the raw int (and preserved
+      on re-serialization) rather than causing a failure. This is what makes adding enum
+      values forward-compatible. proto2 enums are closed and move unknowns to unknown fields.
+    ref: "concepts.md#enum-evolution-and-open-enums"
+
+  - id: schema-evolution-and-compatibility-013
+    difficulty: intermediate
+    tags: [enums, zero-value, defaults]
+    question: |
+      Why must the first value of a proto3 enum be `0`, and why is naming it something like
+      `ORDER_STATE_UNSPECIFIED` a best practice?
+    options:
+      - "0 is required and reserved for errors only"
+      - "protoc assigns 0 automatically so the name is irrelevant"
+      - "Because 0 is the smallest varint and saves space"
+      - "The 0 value is the enum's default and is indistinguishable from 'not set', so it should carry no meaningful business value"
+    answer: 3
+    explanation: |
+      proto3 requires the first enum value to be 0, and 0 is the default when the field is
+      unset. Since 'default' and 'not set' are indistinguishable, index 0 should be a
+      neutral UNSPECIFIED sentinel, never a real state.
+    ref: "concepts.md#enum-evolution-and-open-enums"
+
+  - id: schema-evolution-and-compatibility-014
+    difficulty: advanced
+    tags: [enums, gotcha, switch]
+    question: |
+      Adding a new enum value is "safe" in proto3, but which client-side pattern can still
+      break when a newer server sends the new value?
+    options:
+      - "Code that logs the enum as an integer"
+      - "Code that stores the raw integer in a database"
+      - "An exhaustive switch/match with no default branch (or a mapping to a closed downstream enum)"
+      - "Code that ignores the enum field entirely"
+    answer: 2
+    explanation: |
+      Open enums preserve unknown values, but application logic that assumes it has seen all
+      values — an exhaustive switch with no default, or a mapping into a closed downstream
+      enum — will misbehave. Always add a default branch that treats unknown as UNSPECIFIED.
+    ref: "concepts.md#enum-evolution-and-open-enums"
+
+  - id: schema-evolution-and-compatibility-015
+    difficulty: intermediate
+    tags: [required, proto2, proto3]
+    question: |
+      Why does proto3 avoid the single worst schema-evolution trap that proto2 has around
+      field labels?
+    options:
+      - "proto3 forbids nested messages"
+      - "proto3 disallows deleting fields entirely"
+      - "proto3 enforces field ordering"
+      - "proto3 has no `required` label, so a missing field is never a parse error"
+    answer: 3
+    explanation: |
+      In proto2, adding or removing `required` is a hard breaking change because a missing
+      required field is a parse error for a reader that demands it. proto3 removed
+      `required` entirely — everything is effectively optional at the wire level — which
+      is a key reason it is preferred for evolvable APIs.
+    ref: "concepts.md#unsafe-breaking-changes"
+
+  - id: schema-evolution-and-compatibility-016
+    difficulty: advanced
+    tags: [buf, ci, breaking-detection]
+    question: |
+      What is the standard, tooling-based way to PREVENT a teammate from merging a breaking
+      proto change, rather than relying on manual review?
+    options:
+      - "Run `protoc --lint` on every file"
+      - "Run `buf breaking --against` a baseline (e.g. the main branch) in CI"
+      - "Diff the generated code by hand"
+      - "Bump the package version on every change"
+    answer: 1
+    explanation: |
+      `buf breaking --against '.git#branch=main'` compares the working tree against a
+      baseline and fails CI on any incompatible change (renumbering, unreserved deletes,
+      incompatible type changes, oneof moves, etc.). It is the expected answer for enforcing
+      compatibility automatically.
+    ref: "concepts.md#enforcing-compatibility-in-ci-with-buf"
+
+  - id: schema-evolution-and-compatibility-017
+    difficulty: advanced
+    tags: [buf, rule-categories, json]
+    question: |
+      Your messages are consumed both as binary protobuf and as protobuf-JSON. Which `buf`
+      breaking-change rule category should you choose?
+    options:
+      - "WIRE_JSON (catches both wire and JSON incompatibilities)"
+      - "WIRE (binary only)"
+      - "LINT"
+      - "NONE"
+    answer: 0
+    explanation: |
+      WIRE_JSON catches both wire- and JSON-breaking changes, which matters when consumers
+      use protobuf JSON (renames break JSON even though they are wire-safe). WIRE alone
+      would permit renames and miss JSON breakage. `buf lint` is style, not compatibility.
+    ref: "concepts.md#enforcing-compatibility-in-ci-with-buf"
+
+  - id: schema-evolution-and-compatibility-018
+    difficulty: advanced
+    tags: [versioning, package, breaking-redesign]
+    question: |
+      You must make a genuinely incompatible redesign of a service. What is the idiomatic
+      way to do it without breaking existing clients?
+    options:
+      - "Renumber the affected fields and notify clients"
+      - "Create a new major version in the proto package (e.g. acme.orders.v2) and serve it alongside v1"
+      - "Delete v1 and force everyone to upgrade at a cutover date"
+      - "Change the wire types in place and add a version header"
+    answer: 1
+    explanation: |
+      Because the package is part of the fully-qualified name and the gRPC method path
+      (/acme.orders.v2.OrderService/Get), a v2 package is a completely separate service that
+      can run alongside v1. Clients migrate at their own pace; retire v1 when traffic drains.
+    ref: "concepts.md#versioning-strategy-when-you-must-break"
+
+  - id: schema-evolution-and-compatibility-019
+    difficulty: beginner
+    tags: [reserved, names]
+    question: |
+      Besides reserving deleted field NUMBERS, why also reserve the deleted field NAMES?
+    options:
+      - "Names are required on the wire"
+      - "Reserving names shrinks the binary output"
+      - "To prevent JSON/text/source confusion and stop the old name being reintroduced with a new meaning"
+      - "protoc will not compile unless names are reserved"
+    answer: 2
+    explanation: |
+      Reserving names prevents accidental reuse in JSON/text encodings and source, and stops
+      someone re-adding the old name with a different meaning. Reserving numbers protects the
+      wire; reserving names protects the name-keyed encodings. You reserve both.
+    ref: "concepts.md#reserving-removed-numbers-and-names"
+
+  - id: schema-evolution-and-compatibility-020
+    difficulty: advanced
+    tags: [oneof, migration, safe-change]
+    question: |
+      Which of these oneof-related changes is explicitly documented as WIRE-SAFE?
+    options:
+      - "Moving several existing fields into a new oneof at once"
+      - "Deleting a oneof and its fields without reserving"
+      - "Moving a field out of a oneof into a top-level field"
+      - "Moving a single existing field into a new oneof by itself"
+    answer: 3
+    explanation: |
+      Moving one existing field into a new single-field oneof is wire-compatible because the
+      field number and encoding are unchanged. Moving multiple fields in, or moving a field
+      out, changes presence/mutual-exclusion semantics and is unsafe.
+    ref: "concepts.md#optional-and-oneof-migration"
+
+  - id: schema-evolution-and-compatibility-021
+    difficulty: advanced
+    tags: [optional, presence, oneof, wire]
+    question: |
+      In proto3, adding the `optional` keyword to an existing scalar field is implemented
+      under the hood as a single-field oneof. What is the wire-level impact for a value that
+      IS set?
+    options:
+      - "The encoding changes, so it is a breaking change"
+      - "The field number must change when adding optional"
+      - "The encoding of a set value is identical, so it is wire-compatible; only in-code presence tracking changes"
+      - "It forces the field onto the unknown-field set"
+    answer: 2
+    explanation: |
+      `optional` gives explicit presence (a has_field accessor) and is a single-field oneof
+      internally, but a SET value serializes identically to a non-optional field. So adding
+      or removing `optional` on a scalar is wire-compatible; it only changes whether you can
+      distinguish unset from the default in generated code.
+    ref: "concepts.md#optional-and-oneof-migration"
+
+  - id: schema-evolution-and-compatibility-022
+    difficulty: intermediate
+    tags: [add-method, service-evolution]
+    question: |
+      What happens if an old client (built before a new RPC method was added) somehow calls
+      a method the server does not implement, or a new method is called against an old
+      server?
+    options:
+      - "The server returns status UNIMPLEMENTED; adding methods is otherwise a safe change"
+      - "The channel is torn down"
+      - "protoc prevents the mismatch at build time across services"
+      - "The call silently returns an empty response"
+    answer: 0
+    explanation: |
+      Adding new RPC methods is safe: old clients simply never call them, and calling a
+      method an old server lacks returns UNIMPLEMENTED. Just don't reuse a method name with a
+      changed signature.
+    ref: "concepts.md#safe-non-breaking-changes"
+
+  - id: schema-evolution-and-compatibility-023
+    difficulty: intermediate
+    tags: [defaults, backward-compatibility]
+    question: |
+      A new server adds field 7 and reads a request from an old client that never sends
+      field 7. What value does the server observe for field 7?
+    options:
+      - "The type's default value (e.g. 0, empty string, false)"
+      - "A parse error, because the field is missing"
+      - "A random value"
+      - "null, requiring a null check in all languages"
+    answer: 0
+    explanation: |
+      Backward compatibility works because an absent field reads as its type's default —
+      0/empty/false for scalars. The server cannot distinguish 'not sent' from 'sent as
+      default' for an implicit-presence scalar (which is why `optional` exists).
+    ref: "concepts.md#forward-vs-backward-compatibility"
+
+  - id: schema-evolution-and-compatibility-024
+    difficulty: advanced
+    tags: [reuse-number, corruption, gotcha]
+    question: |
+      Why is REUSING a deleted field's number for a different field considered the most
+      dangerous protobuf mistake?
+    options:
+      - "It always throws a loud parse error at startup"
+      - "It usually does NOT error — a lingering old peer's bytes decode into the recycled field, causing silent data corruption"
+      - "It doubles the message size"
+      - "It breaks TLS negotiation"
+    answer: 1
+    explanation: |
+      Reusing a number typically does not fail to parse (especially if the wire types match).
+      An old peer still emitting the old number has its bytes decoded into the new field —
+      silent corruption. That is why you reserve a number the moment its field is deleted.
+    ref: "concepts.md#field-numbers-are-the-contract"
+
+  - id: schema-evolution-and-compatibility-025
+    difficulty: intermediate
+    tags: [message-vs-scalar, type-change, breaking]
+    question: |
+      Changing a field from a scalar `int32` directly to an embedded `message` type is a
+      breaking change primarily because...
+    options:
+      - "the wire type differs — varint for int32 vs length-delimited for a message"
+      - "message types are not allowed in proto3"
+      - "the field number must also increase"
+      - "messages cannot have default values"
+    answer: 0
+    explanation: |
+      int32 uses the varint wire type (0) while an embedded message is length-delimited
+      (wire type 2). The wire types are incompatible, so a decoder cannot reinterpret one as
+      the other. The correct migration is to add a new field with a new number.
+    ref: "concepts.md#unsafe-breaking-changes"
+
+  - id: schema-evolution-and-compatibility-026
+    difficulty: advanced
+    tags: [string-bytes, type-change, wire-compatibility]
+    question: |
+      Which type change is wire-compatible, subject to one content constraint?
+    options:
+      - "int32 to float"
+      - "bool to string"
+      - "string to bytes (safe as long as the string bytes are valid UTF-8)"
+      - "sint64 to uint64"
+    answer: 2
+    explanation: |
+      string and bytes both use the length-delimited wire type, so they are interchangeable —
+      with the caveat that a string must be valid UTF-8. int32<->float differ in wire type;
+      bool<->string differ; sint64<->uint64 differ (zigzag vs plain varint).
+    ref: "concepts.md#wire-compatible-type-changes"
+
+  - id: schema-evolution-and-compatibility-027
+    difficulty: expert
+    tags: [fixed, sfixed, wire-compatibility]
+    question: |
+      Is changing a field from `fixed32` to `sfixed32` safe?
+    options:
+      - "No; they use different wire types"
+      - "Only if the field number changes too"
+      - "No; fixed32 is a varint"
+      - "Yes; both are 32-bit fixed-width (wire type 5) with identical bytes, only the sign interpretation differs"
+    answer: 3
+    explanation: |
+      fixed32 and sfixed32 both use the 32-bit fixed wire type (5); the four bytes are
+      identical and only the signedness of interpretation differs. The same holds for
+      fixed64<->sfixed64 (wire type 1). They are wire-compatible.
+    ref: "concepts.md#wire-compatible-type-changes"
+
+  - id: schema-evolution-and-compatibility-028
+    difficulty: intermediate
+    tags: [full-compat, both-directions, key-takeaway]
+    question: |
+      What is the key mental test for whether a proto change is truly "safe" in a fleet
+      where you cannot control deploy order?
+    options:
+      - "Is it both backward AND forward compatible at the wire level — can old and new read each other's bytes?"
+      - "Does it compile?"
+      - "Does the message size stay the same?"
+      - "Does buf lint pass?"
+    answer: 0
+    explanation: |
+      Because you cannot guarantee whether the writer or reader upgrades first, a safe change
+      must let old and new peers read each other's bytes — both backward and forward
+      compatible at the wire level, simultaneously.
+    ref: "concepts.md#forward-vs-backward-compatibility"
+
+  - id: schema-evolution-and-compatibility-029
+    difficulty: advanced
+    tags: [migration, dual-write, deprecated]
+    question: |
+      You need to replace `int32 amount = 4;` with a richer `Money amount = ...;` structure
+      but cannot break peers. Which migration approach is correct?
+    options:
+      - "Add `Money amount_v2 = 20;`, dual-write both during migration, mark the old field `[deprecated = true]`, then reserve 4 after readers migrate"
+      - "Change field 4's type to Money in place"
+      - "Renumber the old field and add Money at number 4"
+      - "Delete field 4 and immediately add Money at number 4"
+    answer: 0
+    explanation: |
+      You cannot mutate a field's type in place across a wire boundary. Add a new field with a
+      new number, dual-write both values while readers migrate, deprecate the old field, and
+      only then delete + reserve the old number. Reusing number 4 would corrupt old peers.
+    ref: "concepts.md#versioning-strategy-when-you-must-break"
+
+  - id: schema-evolution-and-compatibility-030
+    difficulty: beginner
+    tags: [deprecated, option]
+    question: |
+      What does marking a field with `[deprecated = true]` actually do?
+    options:
+      - "Removes the field from the wire format"
+      - "Automatically reserves the field number"
+      - "Blocks clients from sending the field"
+      - "Emits generated-code warnings when the field is used; it is purely advisory and the field stays on the wire"
+    answer: 3
+    explanation: |
+      `[deprecated = true]` is advisory: it produces warnings in generated code (e.g.
+      @Deprecated in Java) but does not change the wire format or stop the field being sent.
+      Removing the field from the wire requires deleting it and reserving its number.
+    ref: "concepts.md#versioning-strategy-when-you-must-break"
+
+  - id: schema-evolution-and-compatibility-031
+    difficulty: advanced
+    tags: [schema-registry, parallel, messaging]
+    question: |
+      A schema-registry compatibility mode of `FORWARD` (old schema can read data written
+      with the new schema) corresponds to which gRPC/proto scenario?
+    options:
+      - "An old client reading a new server's response"
+      - "A new server reading an old client's request"
+      - "Two servers at the same version"
+      - "A client that ignores all responses"
+    answer: 0
+    explanation: |
+      FORWARD means old (reader) schema can consume data produced by the new (writer) schema —
+      the old-client-reads-new-server-response case. BACKWARD is the reverse; FULL is both.
+      The proto wire format bakes this in via field numbers, defaults, and unknown fields.
+    ref: "concepts.md#parallel-with-schema-registries"
+
+  - id: schema-evolution-and-compatibility-032
+    difficulty: intermediate
+    tags: [field-numbers, ranges]
+    question: |
+      Which statement about protobuf field numbers is correct?
+    options:
+      - "Any 64-bit integer is a valid field number"
+      - "Numbers must be contiguous starting from 0"
+      - "Numbers 1-15 use a single-byte tag, so reserve them for frequently-set fields; 19000-19999 are reserved by protobuf itself"
+      - "Field 0 is the default and always present"
+    answer: 2
+    explanation: |
+      Field numbers 1-15 encode their tag in one byte (a size win for hot fields), 19000-19999
+      are reserved by the implementation, and the valid range is 1 to 2^29-1. Numbers need not
+      be contiguous and cannot be 0.
+    ref: "concepts.md#field-numbers-are-the-contract"
+
+  - id: schema-evolution-and-compatibility-033
+    difficulty: expert
+    tags: [proto2, closed-enum, unknown]
+    question: |
+      How does a proto2 (closed) enum differ from a proto3 (open) enum when it receives an
+      undefined value?
+    options:
+      - "proto2 stores the raw int just like proto3"
+      - "proto2 treats the unknown value as an unknown field (moved to the unknown-field set), so has/switch logic can miss it"
+      - "proto2 rejects the entire message"
+      - "There is no difference"
+    answer: 1
+    explanation: |
+      proto2 enums are closed: an undefined value is not a valid enum member, so it is placed
+      in the unknown-field set rather than surfaced as the enum's value. proto3 enums are open
+      and store the raw int. Edition 2023 lets you choose the behavior explicitly.
+    ref: "concepts.md#enum-evolution-and-open-enums"
+
+  - id: schema-evolution-and-compatibility-034
+    difficulty: advanced
+    tags: [json-name, json-compat]
+    question: |
+      A field must be renamed for code clarity, but it is exposed through protobuf-JSON to
+      external consumers who cannot change quickly. What preserves JSON compatibility?
+    options:
+      - "Nothing; a rename never affects JSON"
+      - "Change the field number instead"
+      - "Set the `json_name` option to keep the old JSON key (or avoid renaming JSON-exposed fields)"
+      - "Add `[deprecated = true]`"
+    answer: 2
+    explanation: |
+      protobuf-JSON keys by field name (or `json_name`). To keep the external JSON key stable
+      while renaming the proto identifier, set `json_name` to the old name — or, better,
+      avoid renaming fields that are exposed via JSON.
+    ref: "concepts.md#the-three-compatibility-axes"
+
+  - id: schema-evolution-and-compatibility-035
+    difficulty: intermediate
+    tags: [safe-changes, nested-messages]
+    question: |
+      Which of the following is a SAFE, non-breaking change?
+    options:
+      - "Reusing field number 3 for a different field after deleting the original"
+      - "Adding a new field to a nested message with an unused number"
+      - "Changing a repeated field to a singular scalar of a different wire type"
+      - "Changing int32 to string on an existing field"
+    answer: 1
+    explanation: |
+      Evolution rules apply recursively, so adding a field with an unused number to a nested
+      message is safe. Reusing a number, incompatible repeated<->singular changes, and
+      int32->string all break the wire contract.
+    ref: "concepts.md#safe-non-breaking-changes"
+
+  - id: schema-evolution-and-compatibility-036
+    difficulty: expert
+    tags: [int-truncation, varint, gotcha]
+    question: |
+      A field defined as `int64` holding the value -1 is read by a peer whose schema declares
+      the field as `int32`. What is the result?
+    options:
+      - "A parse error"
+      - "It reads as a large positive number always"
+      - "It reads as -1; int32 and int64 are varint-compatible and sign is preserved for values in range"
+      - "The field is dropped"
+    answer: 2
+    explanation: |
+      int32 and int64 share the plain-varint wire type and are compatible. A value in the
+      target type's range (like -1) is preserved. Only values that exceed int32's range get
+      truncated/reinterpreted. Note int32 negatives are sign-extended to 10 bytes on the wire.
+    ref: "concepts.md#wire-compatible-type-changes"
+
+  - id: schema-evolution-and-compatibility-037
+    difficulty: intermediate
+    tags: [three-axes, source-compat]
+    question: |
+      "Source compatibility" in protobuf evolution refers to what?
+    options:
+      - "Whether binary bytes decode correctly between versions"
+      - "Whether the message size is unchanged"
+      - "Whether JSON keys map correctly"
+      - "Whether generated code (accessors, types) still compiles for code built against the schema"
+    answer: 3
+    explanation: |
+      Source compatibility is a build-time concern: does generated code still compile for
+      consumers that reference the schema's accessors and types? It is distinct from wire
+      compatibility (binary bytes) and JSON compatibility (named encodings).
+    ref: "concepts.md#the-three-compatibility-axes"
+
+  - id: schema-evolution-and-compatibility-038
+    difficulty: advanced
+    tags: [removal-recipe, ordering, deploy]
+    question: |
+      What is the correct ordering to safely REMOVE a field from a live service?
+    options:
+      - "Delete the field from the proto first, then stop writing it in code"
+      - "Stop setting the field in code and deploy, then delete it from the proto and add it to `reserved`, then regenerate"
+      - "Reserve the number first, then keep setting the field for a while"
+      - "Renumber the field to a high value, then delete it"
+    answer: 1
+    explanation: |
+      Stop writing the field and deploy so no live peer depends on it being sent; then delete
+      it from the .proto and reserve its number/name; then regenerate. Reserving is the net
+      that turns any accidental future reuse into a compile error.
+    ref: "concepts.md#reserving-removed-numbers-and-names"
+
+  - id: schema-evolution-and-compatibility-039
+    difficulty: beginner
+    tags: [forward-backward, definitions]
+    question: |
+      Forward compatibility is best defined as...
+    options:
+      - "New code being able to read data written by old code"
+      - "Old code being able to read data written by new code"
+      - "The message never changing"
+      - "The ability to compile old generated code"
+    answer: 1
+    explanation: |
+      Forward compatibility: an older reader can consume data produced by a newer writer.
+      Backward compatibility is the reverse (new reader, old data). Protobuf aims for both so
+      rollout order does not matter.
+    ref: "concepts.md#forward-vs-backward-compatibility"
+
+  - id: schema-evolution-and-compatibility-040
+    difficulty: advanced
+    tags: [buf, file-category, imports]
+    question: |
+      Which `buf` breaking category is the STRICTEST, flagging even file or package moves that
+      break generated import paths — appropriate when you distribute generated stubs?
+    options:
+      - "WIRE"
+      - "WIRE_JSON"
+      - "FILE"
+      - "LINT"
+    answer: 2
+    explanation: |
+      FILE is the strictest tier, catching file/package-level moves that change generated
+      import paths (a source-distribution concern). WIRE_JSON focuses on wire+JSON; WIRE on
+      binary only. LINT is style, not breaking-change detection.
+    ref: "concepts.md#enforcing-compatibility-in-ci-with-buf"
+
+  - id: schema-evolution-and-compatibility-041
+    difficulty: intermediate
+    tags: [presence, optional, judgment]
+    question: |
+      For which scenario should you declare a proto3 scalar as `optional` rather than a plain
+      scalar?
+    options:
+      - "When the field is always required"
+      - "To make the field smaller on the wire"
+      - "When you must distinguish a meaningful zero/empty value (e.g. price 0.00) from 'not provided'"
+      - "To force the field into a oneof with others"
+    answer: 2
+    explanation: |
+      Plain proto3 scalars cannot distinguish 'set to default' from 'unset'. `optional` adds
+      explicit presence (has_field), which you need when 0/empty is a real value distinct from
+      absence — like a price of 0.00 vs no price. Adding `optional` later is wire-compatible.
+    ref: "concepts.md#optional-and-oneof-migration"
+
+  - id: schema-evolution-and-compatibility-042
+    difficulty: advanced
+    tags: [method-path, package, mechanism]
+    question: |
+      Why does putting a version in the proto package (acme.orders.v2) let a v2 service coexist
+      with v1 on the same server without collisions?
+    options:
+      - "The package is part of the fully-qualified service name and the HTTP/2 method path (/acme.orders.v2.OrderService/Method), so v2 routes are entirely distinct from v1"
+      - "gRPC ignores the package name"
+      - "The server automatically translates v1 calls to v2"
+      - "Only one version can run at a time, so there is no collision"
+    answer: 0
+    explanation: |
+      The gRPC method path is /<package>.<Service>/<Method>. Because v1 and v2 packages produce
+      different fully-qualified paths, they are distinct routes and distinct services that can
+      be registered on the same server. Clients migrate independently.
+    ref: "concepts.md#versioning-strategy-when-you-must-break"
+
+  - id: schema-evolution-and-compatibility-043
+    difficulty: expert
+    tags: [unknown-fields, json-parser, caveat]
+    question: |
+      Which statement about unknown-field handling is the most accurate caveat?
+    options:
+      - "Binary parsers always reject unknown fields"
+      - "Unknown fields are always logged as errors"
+      - "The protobuf JSON parser can be configured to reject or ignore unknown fields, unlike the default binary behavior which preserves them"
+      - "Only proto2 preserves unknown fields"
+    answer: 2
+    explanation: |
+      Modern binary parsers preserve unknown fields by default (proto3 >= 3.5 and proto2). The
+      protobuf JSON parser, however, is configurable — it may reject or ignore unknown members
+      depending on settings. That difference is a real evolution gotcha for JSON consumers.
+    ref: "concepts.md#unknown-field-preservation"
+
+  - id: schema-evolution-and-compatibility-044
+    difficulty: intermediate
+    tags: [breaking, repeated, packed]
+    question: |
+      Which change is UNSAFE (breaking) in general?
+    options:
+      - "Adding a new field with an unused number"
+      - "Renaming a field while keeping its number (for binary-only consumers)"
+      - "Adding a new enum value when all readers have a default branch"
+      - "Changing a field between `repeated` and singular in incompatible ways"
+    answer: 3
+    explanation: |
+      Changing between repeated and singular in incompatible ways breaks the contract (the
+      packed/unpacked encoding and presence semantics differ). Adding fields, renaming for
+      binary consumers, and adding enum values (with tolerant readers) are safe.
+    ref: "concepts.md#unsafe-breaking-changes"
+
+  - id: schema-evolution-and-compatibility-045
+    difficulty: advanced
+    tags: [registry, full-mode, parallel]
+    question: |
+      In a Kafka schema registry, `FULL` compatibility mode is the closest analogue to what
+      kind of protobuf change?
+    options:
+      - "A renumbering"
+      - "A properly additive change that is both backward and forward compatible"
+      - "Deleting a required field"
+      - "Turning off all checks"
+    answer: 1
+    explanation: |
+      FULL mode requires both backward and forward compatibility — exactly what a properly
+      additive protobuf change (new field, new number, tolerant enums) achieves. The mechanism
+      differs (registry gatekeeps by schema ID; protobuf bakes it into the wire format).
+    ref: "concepts.md#parallel-with-schema-registries"
+
+  - id: schema-evolution-and-compatibility-046
+    difficulty: expert
+    tags: [oneof, out-of-oneof, breaking]
+    question: |
+      Moving an existing field OUT of a oneof to become a normal top-level field is generally
+      unsafe because...
+    options:
+      - "the field number must change"
+      - "it changes the generated presence and mutual-exclusion semantics, so peers behave differently even though the number is unchanged"
+      - "oneof fields cannot be top-level"
+      - "the wire type changes from length-delimited to varint"
+    answer: 1
+    explanation: |
+      The field number/wire encoding may be unchanged, but membership in a oneof carries
+      'only one set at a time' presence semantics reflected in generated code. Moving a field
+      out changes that behavior, so it is not a safe evolution (only the single-field move IN
+      is documented as safe).
+    ref: "concepts.md#optional-and-oneof-migration"
+
+  - id: schema-evolution-and-compatibility-047
+    difficulty: beginner
+    tags: [safe-changes, rename-type]
+    question: |
+      Renaming a message or enum TYPE (not a field) is safe on the binary wire because...
+    options:
+      - "type names are transmitted but ignored"
+      - "it is never safe"
+      - "protoc rewrites all references automatically"
+      - "type names are not part of the binary wire encoding (only field numbers/wire types are)"
+    answer: 3
+    explanation: |
+      The binary wire format carries field numbers and wire types, not message/enum type
+      names. So renaming a type is wire-safe. It does break source code and any JSON `Any`
+      type URLs that embed the type name.
+    ref: "concepts.md#safe-non-breaking-changes"
+
+  - id: schema-evolution-and-compatibility-048
+    difficulty: advanced
+    tags: [scenario, deploy-order, judgment]
+    question: |
+      During a rolling deploy, some servers run schema v1 and some run v2 (v2 adds field 10),
+      and clients are mixed too. Assuming only an additive field-10 change, what is the risk?
+    options:
+      - "Essentially none for the wire — v1 peers skip/preserve field 10, v2 peers see the default when it is absent"
+      - "Data corruption, because v1 and v2 cannot coexist"
+      - "All v1 peers will crash on field 10"
+      - "The channel will renegotiate to v1 for everyone"
+    answer: 0
+    explanation: |
+      An additive field with a new number is both backward and forward compatible: v1 peers
+      skip or preserve the unknown field 10, and v2 peers read the default when a v1 peer omits
+      it. That is exactly why additive evolution is safe under uncontrolled deploy order.
+    ref: "concepts.md#forward-vs-backward-compatibility"

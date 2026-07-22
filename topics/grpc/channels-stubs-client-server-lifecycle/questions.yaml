@@ -1,0 +1,903 @@
+topic: "Channels, Stubs & Client/Server Lifecycle"
+domain: grpc
+topic_slug: channels-stubs-client-server-lifecycle
+version: 1
+questions:
+  - id: channels-stubs-client-server-lifecycle-001
+    difficulty: beginner
+    tags: [channel, reuse, anti-pattern]
+    question: |
+      What is the recommended lifecycle for a gRPC channel in a client process?
+    options:
+      - "Create a channel once, share it across stubs and threads, and keep it for the process lifetime"
+      - "Create a new channel for every RPC and close it after the response"
+      - "Create one channel per stub instance"
+      - "Create a channel per thread and never share it"
+    answer: 0
+    explanation: |
+      A channel is an expensive, thread-safe, self-managing object that owns a pool of
+      HTTP/2 connections plus name resolution and load balancing. Create it once, share it
+      across all stubs and threads, and reuse it. Creating a channel per RPC forces a fresh
+      DNS lookup, TCP+TLS handshake, and HTTP/2 setup every call.
+    ref: "concepts.md#the-channel-a-virtual-connection-to-a-logical-endpoint"
+
+  - id: channels-stubs-client-server-lifecycle-002
+    difficulty: beginner
+    tags: [channel, definition]
+    question: |
+      A gRPC channel represents a connection to what?
+    options:
+      - "A single TCP socket to one server IP"
+      - "One HTTP/2 stream"
+      - "A logical endpoint, backed by a managed pool of subchannels/HTTP-2 connections"
+      - "A single request/response pair"
+    answer: 2
+    explanation: |
+      A channel is a *virtual* connection to a logical endpoint identified by a target
+      string. Behind it, the channel manages name resolution, a load-balancing policy, and
+      a pool of subchannels (each wrapping an HTTP/2 connection) — not a single socket.
+    ref: "concepts.md#the-channel-a-virtual-connection-to-a-logical-endpoint"
+
+  - id: channels-stubs-client-server-lifecycle-003
+    difficulty: intermediate
+    tags: [channel, lazy-connect, state]
+    question: |
+      In modern gRPC (e.g. Go's `grpc.NewClient`, Java `ManagedChannel`), what state is a
+      freshly created channel in before any RPC is made?
+    options:
+      - "READY — it connects eagerly at creation"
+      - "CONNECTING — the handshake runs in the background immediately"
+      - "TRANSIENT_FAILURE until proven otherwise"
+      - "IDLE — it connects lazily on the first RPC"
+    answer: 3
+    explanation: |
+      A channel starts IDLE and does not connect until the first RPC (or an explicit
+      Connect/getState(true)). This is why the first RPC on a fresh channel is slower — it
+      pays the DNS + TCP + TLS + HTTP/2 handshake. Go's older Dial+WithBlock was eager, but
+      Dial is deprecated in favor of the lazy NewClient.
+    ref: "concepts.md#the-channel-a-virtual-connection-to-a-logical-endpoint"
+
+  - id: channels-stubs-client-server-lifecycle-004
+    difficulty: intermediate
+    tags: [subchannel, http2, max-concurrent-streams]
+    question: |
+      A single HTTP/2 connection to one backend caps in-flight RPCs at which value?
+    options:
+      - "The TCP receive window size"
+      - "SETTINGS_MAX_CONCURRENT_STREAMS advertised by the peer"
+      - "HPACK dynamic table size"
+      - "The number of CPU cores on the server"
+    answer: 1
+    explanation: |
+      Each HTTP/2 stream is one in-flight RPC, and SETTINGS_MAX_CONCURRENT_STREAMS caps how
+      many streams may be active concurrently on a connection (commonly ~100). Beyond that,
+      new RPCs queue behind the ceiling rather than opening a second connection to the same
+      address on their own.
+    ref: "concepts.md#subchannels-and-the-http2-connection-pool"
+
+  - id: channels-stubs-client-server-lifecycle-005
+    difficulty: advanced
+    tags: [throughput, pooling, diagnosis, scenario]
+    question: |
+      A client sends thousands of concurrent unary RPCs to a single backend. Latency climbs
+      sharply under load while both client and server CPU sit mostly idle. What is the most
+      likely cause?
+    options:
+      - "TLS renegotiation on every RPC"
+      - "The garbage collector pausing the server"
+      - "RPCs queueing because the single HTTP/2 connection hit MAX_CONCURRENT_STREAMS"
+      - "Protobuf serialization is the bottleneck"
+    answer: 2
+    explanation: |
+      One channel to one backend funnels through one HTTP/2 connection capped at
+      MAX_CONCURRENT_STREAMS. Once the ceiling is reached, additional RPCs wait for a stream
+      slot — latency rises while CPU is idle. Fix by pooling channels or spreading across
+      multiple backends with round_robin.
+    ref: "concepts.md#channel-pooling-for-high-throughput"
+
+  - id: channels-stubs-client-server-lifecycle-006
+    difficulty: intermediate
+    tags: [connectivity-state, idle, transient-failure]
+    question: |
+      What is the difference between the IDLE and TRANSIENT_FAILURE connectivity states?
+    options:
+      - "IDLE means a connect attempt failed; TRANSIENT_FAILURE means no attempt is being made"
+      - "They are synonyms for the same underlying state"
+      - "IDLE is terminal; TRANSIENT_FAILURE is recoverable"
+      - "IDLE means no attempt to connect (cheap/intentional); TRANSIENT_FAILURE means the last connect attempt failed and backoff is running"
+    answer: 3
+    explanation: |
+      IDLE means there are no active RPCs and no attempt to connect — it is cheap and
+      intentional. TRANSIENT_FAILURE means the last connection attempt failed and the
+      channel is waiting on a backoff timer before retrying. Neither is terminal; only
+      SHUTDOWN is.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-007
+    difficulty: intermediate
+    tags: [connectivity-state, states-list]
+    question: |
+      Which of the following is the correct full set of gRPC channel connectivity states?
+    options:
+      - "IDLE, CONNECTING, READY, TRANSIENT_FAILURE, SHUTDOWN"
+      - "OPEN, CLOSED, HALF_OPEN, ERROR"
+      - "CONNECTING, ESTABLISHED, DEGRADED, CLOSED"
+      - "IDLE, ACTIVE, RETRYING, FAILED, DONE"
+    answer: 0
+    explanation: |
+      The gRPC connectivity-semantics doc defines exactly five states: IDLE, CONNECTING,
+      READY, TRANSIENT_FAILURE, and SHUTDOWN. SHUTDOWN is the terminal state.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-008
+    difficulty: intermediate
+    tags: [wait-for-ready, default, fail-fast]
+    question: |
+      With wait-for-ready NOT set (the default), what happens to an RPC started while the
+      channel is in TRANSIENT_FAILURE?
+    options:
+      - "It is queued until the channel becomes READY"
+      - "It fails fast immediately, typically with UNAVAILABLE"
+      - "It blocks forever until a deadline"
+      - "It silently retries with no error ever surfaced"
+    answer: 1
+    explanation: |
+      By default (wait-for-ready = false), an RPC that can't get a ready connection fails
+      fast immediately, usually with status UNAVAILABLE. Setting wait-for-ready = true would
+      instead queue it until the channel is READY or the deadline fires.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-009
+    difficulty: advanced
+    tags: [wait-for-ready, deadline, gotcha, scenario]
+    question: |
+      A client sets wait-for-ready = true but no deadline, and the backend never comes up.
+      What is the consequence?
+    options:
+      - "The RPC fails immediately with UNAVAILABLE"
+      - "gRPC applies a default 30s timeout automatically"
+      - "The channel transitions to SHUTDOWN and cancels the RPC"
+      - "The RPC blocks/hangs indefinitely waiting for the channel to become READY"
+    answer: 3
+    explanation: |
+      wait-for-ready = true queues the RPC until the channel becomes READY *or the deadline
+      fires*. With no deadline, there is nothing to time it out, so the call hangs forever.
+      Always pair wait-for-ready with a deadline.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-010
+    difficulty: advanced
+    tags: [backoff, transient-failure, reconnect]
+    question: |
+      When a subchannel enters TRANSIENT_FAILURE, how does gRPC decide when to retry the
+      connection?
+    options:
+      - "It uses exponential backoff with jitter, capped at a maximum, per the connection-backoff spec"
+      - "It reconnects immediately in a tight loop until it succeeds"
+      - "It waits a fixed 1-second interval between every attempt"
+      - "It never retries; the application must recreate the channel"
+    answer: 0
+    explanation: |
+      Per the gRPC connection-backoff spec, reconnect attempts use exponential backoff (a
+      base delay, ~1.6 multiplier, jitter, capped around 120s). This prevents a reconnect
+      storm from hammering a struggling backend.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-011
+    difficulty: intermediate
+    tags: [name-resolution, target, dns]
+    question: |
+      In the target string `dns:///payments.svc:50051`, what does the `dns` portion select?
+    options:
+      - "The TLS certificate authority to trust"
+      - "The load-balancing policy directly"
+      - "The resolver plugin that turns the endpoint name into a set of addresses"
+      - "The compression algorithm"
+    answer: 2
+    explanation: |
+      A target is a URI scheme://authority/endpoint. The scheme (here `dns`) selects a
+      resolver plugin. The DNS resolver looks up the A/AAAA records and produces the address
+      set, which then feeds the load-balancing policy.
+    ref: "concepts.md#name-resolution-dns-and-the-resolver-plugin"
+
+  - id: channels-stubs-client-server-lifecycle-012
+    difficulty: advanced
+    tags: [name-resolution, kubernetes, load-balancing, scenario]
+    question: |
+      A long-lived gRPC channel uses `pick_first` with the default DNS resolver. You scale
+      the backend Deployment from 3 to 9 pods. Traffic keeps hitting only the original pods.
+      Why?
+    options:
+      - "gRPC only load balances over HTTP/3, not HTTP/2"
+      - "The default DNS resolver re-resolves only on reconnect/connection loss, and pick_first sticks to one cached address"
+      - "Kubernetes blocks gRPC from discovering new pods"
+      - "The new pods advertise a lower MAX_CONCURRENT_STREAMS"
+    answer: 1
+    explanation: |
+      The default DNS resolver does not re-resolve on a timer; it re-resolves on
+      disconnect/connection loss, and gRPC caches the set. pick_first keeps using the
+      originally chosen address. Fixes: round_robin + a headless Service so DNS returns all
+      pod IPs, a proxy/mesh, or xds.
+    ref: "concepts.md#name-resolution-dns-and-the-resolver-plugin"
+
+  - id: channels-stubs-client-server-lifecycle-013
+    difficulty: intermediate
+    tags: [name-resolution, target, syntax]
+    question: |
+      Why is the target written as `dns:///host:port` with three slashes?
+    options:
+      - "It denotes an empty authority, i.e. use the default DNS server"
+      - "The extra slash enables TLS"
+      - "It is a typo that gRPC tolerates but ignores"
+      - "It signals round-robin load balancing"
+    answer: 0
+    explanation: |
+      The URI form is scheme://authority/endpoint. `dns:///host:port` has an empty authority
+      (between the second and third slash), meaning use the default DNS server. You could
+      instead write `dns://8.8.8.8/host:port` to name a specific DNS server.
+    ref: "concepts.md#name-resolution-dns-and-the-resolver-plugin"
+
+  - id: channels-stubs-client-server-lifecycle-014
+    difficulty: beginner
+    tags: [stub, definition, generated]
+    question: |
+      What is a gRPC stub (client)?
+    options:
+      - "A mock implementation used only in tests"
+      - "A cached copy of the last server response"
+      - "The generated, type-safe client surface that marshals requests and opens HTTP/2 streams on the channel"
+      - "The server-side handler for a method"
+    answer: 2
+    explanation: |
+      A stub is generated by protoc + the gRPC plugin from each service in the .proto. It
+      serializes your request, opens an HTTP/2 stream on the channel, sends the message, and
+      returns the response(s). Stubs are thin wrappers over the channel — cheap to create.
+    ref: "concepts.md#stubs-and-generated-clients-blocking-async-future"
+
+  - id: channels-stubs-client-server-lifecycle-015
+    difficulty: intermediate
+    tags: [stub, blocking, async, future]
+    question: |
+      In gRPC-Java, which stub flavor is required to perform full-duplex bidirectional
+      streaming?
+    options:
+      - "The blocking stub (newBlockingStub)"
+      - "The future stub (newFutureStub)"
+      - "Any of them; the flavor doesn't matter for bidi"
+      - "The async stub (newStub, callback-based)"
+    answer: 3
+    explanation: |
+      The blocking stub can only handle unary and (as blocking iterators) server-streaming.
+      Client-streaming and bidirectional streaming need the async/callback stub
+      (newStub) because both sides send messages concurrently. The future stub returns a
+      ListenableFuture for unary calls.
+    ref: "concepts.md#stubs-and-generated-clients-blocking-async-future"
+
+  - id: channels-stubs-client-server-lifecycle-016
+    difficulty: intermediate
+    tags: [stub, cost, thread-safety]
+    question: |
+      Which statement about stubs vs channels is correct?
+    options:
+      - "Both stubs and channels are expensive; minimize how many you create"
+      - "Stubs are cheap thin wrappers; the channel is the expensive shared object"
+      - "Stubs are expensive and channels are cheap"
+      - "Neither can be shared across threads"
+    answer: 1
+    explanation: |
+      The channel is the expensive, connection-managing object you share and reuse. Stubs
+      are cheap wrappers over a channel — create as many as you like, and use derived
+      immutable stubs for per-call options.
+    ref: "concepts.md#stubs-and-generated-clients-blocking-async-future"
+
+  - id: channels-stubs-client-server-lifecycle-017
+    difficulty: intermediate
+    tags: [stub, per-call, immutable, java]
+    question: |
+      In gRPC-Java, what does `stub.withDeadlineAfter(200, MILLISECONDS)` return?
+    options:
+      - "void; it mutates the existing stub in place"
+      - "The channel with a new default deadline"
+      - "A new immutable stub with the deadline applied, leaving the original untouched"
+      - "A Future that completes in 200ms"
+    answer: 2
+    explanation: |
+      Java stubs are immutable; withDeadlineAfter/withCompression/etc. return a *new*
+      derived stub with that option set. The original base stub is unchanged, which is why a
+      shared base stub is safe to reuse across threads.
+    ref: "concepts.md#stubs-and-generated-clients-blocking-async-future"
+
+  - id: channels-stubs-client-server-lifecycle-018
+    difficulty: intermediate
+    tags: [server, multiple-services, port, path]
+    question: |
+      How can one gRPC server process host multiple services on the same port?
+    options:
+      - "It can't; each service needs its own port"
+      - "Each service gets a separate TCP connection multiplexed by the OS"
+      - "By running each service in a separate TLS session on the port"
+      - "Services are distinguished by the /package.Service/Method path in the HTTP/2 :path header"
+    answer: 3
+    explanation: |
+      You register multiple service implementations on one server. Each RPC's HTTP/2 :path
+      header carries /package.Service/Method, so the server routes to the right service and
+      method — all over the same bound port.
+    ref: "concepts.md#the-server-registering-service-impls-binding-concurrency"
+
+  - id: channels-stubs-client-server-lifecycle-019
+    difficulty: advanced
+    tags: [server, concurrency, python, thread-pool, scenario]
+    question: |
+      A synchronous Python gRPC server is built with
+      `grpc.server(futures.ThreadPoolExecutor(max_workers=4))`. Under load, RPCs mysteriously
+      queue and time out even though the backend logic is fast. What is the fix to
+      investigate first?
+    options:
+      - "The thread pool size (max_workers) caps concurrent RPCs; raise it or move to grpc.aio"
+      - "Increase MAX_CONCURRENT_STREAMS on the client channel"
+      - "Switch the client to a blocking stub"
+      - "Disable TLS to reduce overhead"
+    answer: 0
+    explanation: |
+      In sync Python, the ThreadPoolExecutor's max_workers caps how many RPCs can run
+      concurrently; a too-small pool silently queues/starves requests. Size the pool for
+      your concurrency, or use the asyncio-based grpc.aio server which runs on an event loop.
+    ref: "concepts.md#the-server-registering-service-impls-binding-concurrency"
+
+  - id: channels-stubs-client-server-lifecycle-020
+    difficulty: intermediate
+    tags: [server, concurrency, go]
+    question: |
+      In gRPC-Go, how is each incoming RPC handled with respect to concurrency?
+    options:
+      - "All RPCs run on a single event-loop thread"
+      - "Each RPC runs in its own goroutine scheduled by the Go runtime"
+      - "RPCs are processed strictly one at a time in FIFO order"
+      - "Each RPC spawns a new OS process"
+    answer: 1
+    explanation: |
+      gRPC-Go runs each RPC in its own goroutine — cheap concurrency handled by the runtime.
+      You still must guard shared state with synchronization. (Java uses an Executor thread
+      pool; sync Python uses a ThreadPoolExecutor.)
+    ref: "concepts.md#the-server-registering-service-impls-binding-concurrency"
+
+  - id: channels-stubs-client-server-lifecycle-021
+    difficulty: intermediate
+    tags: [trailers, status, server]
+    question: |
+      After a server finishes an RPC, where does it convey the final gRPC status
+      (grpc-status / grpc-message)?
+    options:
+      - "In the initial response headers"
+      - "In the body of the last protobuf message"
+      - "In a separate TCP packet outside HTTP/2"
+      - "In the HTTP/2 trailers sent after the message(s)"
+    answer: 3
+    explanation: |
+      gRPC uses HTTP/2 trailers (the trailing HEADERS frame) to carry grpc-status and
+      grpc-message after the response messages. This trailer support is one reason gRPC
+      requires HTTP/2. The wire framing detail lives in the HTTP/2-foundations topic.
+    ref: "concepts.md#the-server-registering-service-impls-binding-concurrency"
+
+  - id: channels-stubs-client-server-lifecycle-022
+    difficulty: advanced
+    tags: [per-channel, per-rpc, options]
+    question: |
+      Which of these options is set PER-CHANNEL (once), not per-RPC?
+    options:
+      - "Transport credentials (TLS/mTLS) and interceptors"
+      - "The request deadline for a specific call"
+      - "Custom metadata headers for a specific call"
+      - "wait-for-ready override on a single call"
+    answer: 0
+    explanation: |
+      Connection-shaping and security — credentials, interceptors, keepalive, the default
+      service config — are per-channel. Request-shaping — deadline, metadata, per-call
+      compression, per-call wait-for-ready overrides — is per-RPC.
+    ref: "concepts.md#per-rpc-vs-per-channel-options"
+
+  - id: channels-stubs-client-server-lifecycle-023
+    difficulty: intermediate
+    tags: [per-rpc, deadline, metadata]
+    question: |
+      Which pair of options is normally set PER-RPC rather than per-channel?
+    options:
+      - "Interceptors and credentials"
+      - "Keepalive interval and TLS certificate"
+      - "Deadline and custom metadata"
+      - "Load-balancing policy and name resolver"
+    answer: 2
+    explanation: |
+      A deadline reflects a specific request's latency budget and is set per call; custom
+      metadata is attached per call. Interceptors, credentials, keepalive, and the resolver/LB
+      policy are channel-wide.
+    ref: "concepts.md#per-rpc-vs-per-channel-options"
+
+  - id: channels-stubs-client-server-lifecycle-024
+    difficulty: advanced
+    tags: [deadline, absolute, propagation, grpc-timeout]
+    question: |
+      Why is an absolute deadline preferable to a per-hop relative timeout in a chain of
+      gRPC calls?
+    options:
+      - "Absolute deadlines are encrypted and relative timeouts are not"
+      - "gRPC transmits the remaining time (grpc-timeout) on the wire, so a deadline naturally shrinks as it propagates downstream"
+      - "Relative timeouts are not supported by the gRPC API at all"
+      - "Absolute deadlines disable retries automatically"
+    answer: 1
+    explanation: |
+      An absolute deadline set at the edge propagates via the grpc-timeout header, so each
+      downstream hop sees the *remaining* budget, which shrinks correctly through the chain.
+      A per-hop relative timeout resets the clock at every hop and can let total latency
+      exceed the edge budget.
+    ref: "concepts.md#per-rpc-vs-per-channel-options"
+
+  - id: channels-stubs-client-server-lifecycle-025
+    difficulty: advanced
+    tags: [pooling, throughput, round-robin]
+    question: |
+      For very high throughput to a set of backends, what is usually the FIRST mitigation to
+      try before building an explicit channel pool?
+    options:
+      - "Use round_robin so RPCs spread across many backend connections, multiplying the stream ceiling"
+      - "Disable HTTP/2 flow control"
+      - "Switch every call to wait-for-ready = true"
+      - "Reduce the number of stubs to one"
+    answer: 0
+    explanation: |
+      If DNS returns N addresses, round_robin spreads RPCs over N connections, multiplying
+      the effective MAX_CONCURRENT_STREAMS by N — often enough on its own. If a single
+      backend is still the target, then pool channels (roughly one channel per ~100
+      concurrent streams).
+    ref: "concepts.md#channel-pooling-for-high-throughput"
+
+  - id: channels-stubs-client-server-lifecycle-026
+    difficulty: advanced
+    tags: [pooling, rule-of-thumb, throughput]
+    question: |
+      Per gRPC performance guidance, roughly how many extra channels should you add when
+      pooling for concurrency?
+    options:
+      - "One channel per RPC"
+      - "One channel per CPU core"
+      - "About one channel per ~100 concurrent streams (in-flight RPCs)"
+      - "Exactly two channels, always"
+    answer: 2
+    explanation: |
+      Because a connection is capped near 100 concurrent streams, the rule of thumb is to
+      add roughly one channel for every ~100 in-flight RPCs you expect. Don't over-pool:
+      each channel is a real connection with keepalive traffic and memory.
+    ref: "concepts.md#channel-pooling-for-high-throughput"
+
+  - id: channels-stubs-client-server-lifecycle-027
+    difficulty: intermediate
+    tags: [interceptors, scope, middleware]
+    question: |
+      At what scope are gRPC interceptors attached?
+    options:
+      - "Per RPC, passed as a call option on each request"
+      - "Per protobuf message field"
+      - "Only at the load balancer, never in application code"
+      - "Once, at the channel (client) or the server, running for every RPC through it"
+    answer: 3
+    explanation: |
+      Interceptors are wired once at the channel (client side) or the server, and run for
+      every RPC. They handle cross-cutting concerns: auth, logging, metrics, tracing,
+      deadline injection. There are unary and stream interceptor variants.
+    ref: "concepts.md#interceptors-attach-at-the-channel-and-the-server"
+
+  - id: channels-stubs-client-server-lifecycle-028
+    difficulty: intermediate
+    tags: [interceptors, unary, stream]
+    question: |
+      Why are there separate unary and stream interceptor types?
+    options:
+      - "Stream interceptors run on the server only, unary on the client only"
+      - "A unary interceptor wraps a single request/response; a stream interceptor wraps the stream object to observe each message"
+      - "Unary interceptors are deprecated in favor of stream interceptors"
+      - "They are identical; the naming is historical"
+    answer: 1
+    explanation: |
+      A unary interceptor wraps one request/response call. A streaming call has no single
+      response, so a stream interceptor instead wraps the stream object, letting it observe
+      or transform each message sent/received over the stream's lifetime.
+    ref: "concepts.md#interceptors-attach-at-the-channel-and-the-server"
+
+  - id: channels-stubs-client-server-lifecycle-029
+    difficulty: intermediate
+    tags: [graceful-shutdown, goaway, drain]
+    question: |
+      During a server graceful shutdown, what does the HTTP/2 GOAWAY frame communicate to
+      clients?
+    options:
+      - "Clients must immediately abort all in-flight RPCs"
+      - "The server has crashed and the connection is invalid"
+      - "Do not start new streams on this connection; in-flight streams may finish"
+      - "Clients should switch to plaintext HTTP/1.1"
+    answer: 2
+    explanation: |
+      GOAWAY tells clients to stop opening new streams on that connection while allowing
+      already-open streams to drain. It carries the last stream ID the server will process,
+      so clients know exactly which in-flight RPCs are safe. Clients then reconnect for new
+      traffic.
+    ref: "concepts.md#client-and-server-lifecycle-end-to-end"
+
+  - id: channels-stubs-client-server-lifecycle-030
+    difficulty: advanced
+    tags: [graceful-shutdown, in-flight, scenario]
+    question: |
+      On a gRPC-Go server, `GracefulStop()` is called. What happens to RPCs that are already
+      in flight?
+    options:
+      - "They are immediately cancelled with UNAVAILABLE"
+      - "They are paused and resumed after restart"
+      - "They are retried automatically on a new server"
+      - "They continue to completion (up to the grace period) while new RPCs are refused; then the server closes"
+    answer: 3
+    explanation: |
+      GracefulStop sends GOAWAY, stops accepting new RPCs, and lets in-flight RPCs drain to
+      completion up to the grace period, then closes. A hard Stop() instead drops in-flight
+      RPCs and errors them out.
+    ref: "concepts.md#client-and-server-lifecycle-end-to-end"
+
+  - id: channels-stubs-client-server-lifecycle-031
+    difficulty: advanced
+    tags: [graceful-shutdown, streaming, gotcha, scenario]
+    question: |
+      A service has long-lived bidirectional streaming RPCs that can stay open for an hour.
+      During a rolling deploy with a 30s drain, what problem arises and how do you avoid it?
+    options:
+      - "Long streams won't drain within the grace period, so graceful shutdown times out and hard-closes them; bound streams with deadlines or app-level reconnect signals"
+      - "Nothing; GOAWAY instantly closes all streams cleanly"
+      - "The client automatically merges the two servers' streams"
+      - "gRPC forbids streaming during deploys, so there is no issue"
+    answer: 0
+    explanation: |
+      GOAWAY stops new streams but doesn't force existing ones to end. A stream open for an
+      hour won't finish inside a 30s drain, so graceful shutdown times out and hard-closes
+      it. Bound long streams with deadlines or an app-level "please reconnect" signal so they
+      end within the grace window.
+    ref: "concepts.md#client-and-server-lifecycle-end-to-end"
+
+  - id: channels-stubs-client-server-lifecycle-032
+    difficulty: intermediate
+    tags: [goaway, client, reconnect]
+    question: |
+      What does a healthy gRPC client typically do upon receiving a GOAWAY from the server?
+    options:
+      - "Permanently stop sending RPCs to that logical endpoint"
+      - "Re-resolve and open a fresh connection so ongoing traffic continues on a new connection"
+      - "Downgrade to HTTP/1.1"
+      - "Fail all future RPCs with UNIMPLEMENTED"
+    answer: 1
+    explanation: |
+      On GOAWAY, the client finishes any safe in-flight RPCs on the old connection and
+      reconnects (re-resolving and establishing a new connection) so new RPCs flow over the
+      fresh connection. This is how rolling deploys avoid dropping requests.
+    ref: "concepts.md#client-and-server-lifecycle-end-to-end"
+
+  - id: channels-stubs-client-server-lifecycle-033
+    difficulty: beginner
+    tags: [channel, thread-safety]
+    question: |
+      Can multiple threads/goroutines safely share and use a single gRPC channel
+      concurrently?
+    options:
+      - "No, each thread needs its own channel"
+      - "Only if you wrap every call in a global lock"
+      - "Only for unary calls, never for streaming"
+      - "Yes, a channel is thread-safe and designed to be shared with concurrent RPCs multiplexed over HTTP/2"
+    answer: 3
+    explanation: |
+      Channels are thread-safe and built to be shared. Many stubs and concurrent RPCs use
+      one channel, and gRPC multiplexes them over the underlying HTTP/2 stream(s). Sharing is
+      exactly the intended pattern.
+    ref: "concepts.md#the-channel-a-virtual-connection-to-a-logical-endpoint"
+
+  - id: channels-stubs-client-server-lifecycle-034
+    difficulty: intermediate
+    tags: [subchannel, definition]
+    question: |
+      What best describes a subchannel?
+    options:
+      - "The channel's handle to one backend address, owning at most one HTTP/2 connection with its own connectivity state"
+      - "A single HTTP/2 stream within a connection"
+      - "A logical grouping of multiple channels"
+      - "The server-side equivalent of a stub"
+    answer: 0
+    explanation: |
+      A subchannel represents a single backend address; it owns (at most) one HTTP/2
+      connection and has its own connectivity state machine. The LB policy operates over the
+      set of subchannels — pick_first uses one, round_robin spreads over all READY ones.
+    ref: "concepts.md#subchannels-and-the-http2-connection-pool"
+
+  - id: channels-stubs-client-server-lifecycle-035
+    difficulty: advanced
+    tags: [first-rpc, latency, handshake, scenario]
+    question: |
+      An engineer reports the very first RPC on a freshly created channel is much slower than
+      subsequent ones. What is the explanation?
+    options:
+      - "The first RPC recompiles the protobuf schema"
+      - "gRPC deliberately throttles the first RPC to warm caches"
+      - "The channel starts IDLE and the first RPC pays for DNS, TCP, TLS, and the HTTP/2 handshake"
+      - "The stub is being generated at runtime on first use"
+    answer: 2
+    explanation: |
+      A channel connects lazily: it starts IDLE and only resolves + connects on the first
+      RPC, which therefore absorbs the full DNS + TCP + TLS + HTTP/2 setup cost. Later RPCs
+      reuse the established connection. Warm the channel at startup if first-call latency
+      matters.
+    ref: "concepts.md#the-channel-a-virtual-connection-to-a-logical-endpoint"
+
+  - id: channels-stubs-client-server-lifecycle-036
+    difficulty: intermediate
+    tags: [load-balancing, resolver, service-config]
+    question: |
+      What feeds the load-balancing policy with the list of backend addresses to balance
+      across?
+    options:
+      - "The stub, per RPC"
+      - "The name resolver plugin selected by the target's scheme"
+      - "The HTTP/2 flow-control window"
+      - "The server's GOAWAY frame"
+    answer: 1
+    explanation: |
+      The resolver (chosen by the target scheme, e.g. dns) resolves the endpoint into an
+      address set and hands it to the LB policy, which maps RPCs onto subchannels. Full
+      resolver + LB detail is in the load-balancing topic.
+    ref: "concepts.md#name-resolution-dns-and-the-resolver-plugin"
+
+  - id: channels-stubs-client-server-lifecycle-037
+    difficulty: advanced
+    tags: [connectivity-state, ready-transitions]
+    question: |
+      Per the gRPC connectivity-semantics spec, a channel in READY suffers a transport
+      failure (its established connection breaks). Which state does it move to?
+    options:
+      - "TRANSIENT_FAILURE, then CONNECTING once the backoff timer elapses"
+      - "SHUTDOWN"
+      - "It stays READY until Close() is called"
+      - "IDLE, and it never attempts to reconnect"
+    answer: 0
+    explanation: |
+      A failure while communicating on an established (READY) connection moves the channel to
+      TRANSIENT_FAILURE; after the exponential-backoff wait it transitions to CONNECTING to
+      re-establish. READY moves to IDLE only on an idle timeout (or a GOAWAY with no pending
+      RPCs), not on a connection failure.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-038
+    difficulty: intermediate
+    tags: [server, registration, binding]
+    question: |
+      What are the essential steps to bring a gRPC server online?
+    options:
+      - "Compile the .proto, then call the server automatically starts"
+      - "Open a channel to yourself and loop"
+      - "Implement the generated service base, register the impl with a server, bind a port with credentials, and start serving"
+      - "Register the service with DNS and wait for callbacks"
+    answer: 2
+    explanation: |
+      Server setup: implement the generated service base class, register the
+      implementation(s) with a server object, bind to a port with credentials, and start
+      (which blocks serving RPCs). Multiple services can register on the same port.
+    ref: "concepts.md#the-server-registering-service-impls-binding-concurrency"
+
+  - id: channels-stubs-client-server-lifecycle-039
+    difficulty: expert
+    tags: [pooling, gotcha, connection-dedup]
+    question: |
+      A team creates a pool of channels all targeting the same `dns:///backend:50051` for
+      throughput, but sees no improvement. What subtle issue should they check?
+    options:
+      - "gRPC caps every process at exactly one channel"
+      - "DNS resolution is disabled when pooling"
+      - "Pools only work with plaintext, not TLS"
+      - "Channels to the identical target may dedupe/behave as one connection; ensure the pool actually yields distinct connections"
+    answer: 3
+    explanation: |
+      Pooling only helps if the channels produce *distinct* HTTP/2 connections. Some stacks
+      may share/dedupe connections for identical targets, so all pooled channels collapse to
+      one connection and the stream ceiling isn't raised. Use pool options or target
+      distinctions that guarantee separate connections.
+    ref: "concepts.md#channel-pooling-for-high-throughput"
+
+  - id: channels-stubs-client-server-lifecycle-040
+    difficulty: intermediate
+    tags: [close, shutdown, terminal]
+    question: |
+      What happens when a client calls `Close()` on a channel?
+    options:
+      - "The channel returns to IDLE and can be reused after"
+      - "The channel transitions to SHUTDOWN (terminal), fails new RPCs, and lets in-flight ones finish or cancels them"
+      - "Only the current RPC is cancelled; the channel stays open"
+      - "The server is also shut down remotely"
+    answer: 1
+    explanation: |
+      Close() moves the channel to SHUTDOWN, the terminal state. New RPCs fail immediately;
+      in-flight RPCs finish or are cancelled depending on the API. A SHUTDOWN channel cannot
+      be reused — create a new one.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-041
+    difficulty: advanced
+    tags: [wait-for-ready, startup, scenario]
+    question: |
+      A service depends on another that is sometimes briefly unavailable right at startup.
+      Which configuration smooths over the blip WITHOUT risking an indefinite hang?
+    options:
+      - "wait-for-ready = true with no deadline"
+      - "wait-for-ready = false and infinite retries"
+      - "wait-for-ready = true with a per-RPC deadline"
+      - "Disable name resolution entirely"
+    answer: 2
+    explanation: |
+      wait-for-ready = true queues the RPC until the channel is READY, absorbing a brief
+      startup blip. Pairing it with a deadline guarantees the call still fails
+      (DEADLINE_EXCEEDED) rather than hanging forever if the dependency never comes up.
+    ref: "concepts.md#channel-connectivity-states-and-wait-for-ready"
+
+  - id: channels-stubs-client-server-lifecycle-042
+    difficulty: beginner
+    tags: [target, scheme, ipv4]
+    question: |
+      Which target string bypasses DNS and uses a fixed, explicit address list?
+    options:
+      - "dns:///host:port"
+      - "xds:///service"
+      - "unix:///tmp/grpc.sock"
+      - "ipv4:10.0.0.1:50051,10.0.0.2:50051"
+    answer: 3
+    explanation: |
+      The `ipv4:` (and `ipv6:`) scheme provides a static, fixed address list with no DNS
+      lookup. `dns:///` uses the DNS resolver, `xds:///` pulls endpoints/config from an xDS
+      control plane, and `unix://` targets a local domain socket.
+    ref: "concepts.md#name-resolution-dns-and-the-resolver-plugin"
+
+  - id: channels-stubs-client-server-lifecycle-043
+    difficulty: expert
+    tags: [max-concurrent-streams, server, tuning]
+    question: |
+      Raising the server's `MAX_CONCURRENT_STREAMS` from 100 to 1000 helps some workloads but
+      is not a complete fix for single-connection throughput. Why?
+    options:
+      - "A single TCP connection can still become a head-of-line / congestion bottleneck even with more allowed streams"
+      - "It only affects server-streaming RPCs"
+      - "Clients ignore the SETTINGS frame entirely"
+      - "It forces every RPC to use TLS 1.3"
+    answer: 0
+    explanation: |
+      More allowed streams lets more RPCs be in flight, but they still share one TCP
+      connection subject to congestion control and potential head-of-line effects. Spreading
+      across multiple connections (round_robin or a channel pool) addresses the underlying
+      single-connection limit more robustly.
+    ref: "concepts.md#channel-pooling-for-high-throughput"
+
+  - id: channels-stubs-client-server-lifecycle-044
+    difficulty: intermediate
+    tags: [interceptors, chain, order]
+    question: |
+      When multiple interceptors are configured with `ChainUnaryInterceptor(a, b)`, how do
+      they execute?
+    options:
+      - "Only the last one (b) runs; earlier ones are ignored"
+      - "They run in the configured order, each wrapping the next in a chain"
+      - "They run in random order per RPC"
+      - "They run in parallel on separate threads"
+    answer: 1
+    explanation: |
+      Chained interceptors execute in the order given, each wrapping the invocation of the
+      next, forming a nested chain around the actual call/handler. This is how you layer
+      auth, logging, metrics, and tracing predictably.
+    ref: "concepts.md#interceptors-attach-at-the-channel-and-the-server"
+
+  - id: channels-stubs-client-server-lifecycle-045
+    difficulty: advanced
+    tags: [deadline, in-flight, cancellation, scenario]
+    question: |
+      A client sets a 200ms deadline and the server hasn't responded by then. What does the
+      client observe, and what is signaled toward the server?
+    options:
+      - "The client waits indefinitely; deadlines are advisory only"
+      - "The client silently retries forever"
+      - "The connection is torn down and the channel goes SHUTDOWN"
+      - "The client's RPC ends with DEADLINE_EXCEEDED, and gRPC cancels the in-flight call so the server can stop work"
+    answer: 3
+    explanation: |
+      When the deadline expires, the client-side RPC returns DEADLINE_EXCEEDED and gRPC
+      cancels the call; a well-behaved server observes the cancellation (via its context) and
+      can abandon the work. Deadline mechanics are detailed in the deadlines/cancellation
+      topic.
+    ref: "concepts.md#per-rpc-vs-per-channel-options"
+
+  - id: channels-stubs-client-server-lifecycle-046
+    difficulty: intermediate
+    tags: [service-config, load-balancing, round-robin]
+    question: |
+      How is the round_robin load-balancing policy typically selected for a channel?
+    options:
+      - "Via the channel's service config, e.g. {\"loadBalancingConfig\":[{\"round_robin\":{}}]}"
+      - "By passing it as metadata on each RPC"
+      - "By opening one channel per backend manually"
+      - "It is the unconditional default and cannot be changed"
+    answer: 0
+    explanation: |
+      The LB policy is a channel-level setting expressed in the service config
+      (loadBalancingConfig). The default is typically pick_first; setting round_robin makes
+      the channel spread RPCs across all READY subchannels. Details in the load-balancing
+      topic.
+    ref: "concepts.md#name-resolution-dns-and-the-resolver-plugin"
+
+  - id: channels-stubs-client-server-lifecycle-047
+    difficulty: advanced
+    tags: [zero-downtime, deploy, deadline, goaway, scenario]
+    question: |
+      What combination lets you scale down / redeploy gRPC servers with zero dropped RPCs?
+    options:
+      - "Hard Stop() plus client retries only"
+      - "Setting wait-for-ready = false everywhere"
+      - "GOAWAY-based graceful drain plus a grace period longer than the RPCs' deadlines, with clients reconnecting"
+      - "Disabling keepalive so connections never close"
+    answer: 2
+    explanation: |
+      Graceful shutdown sends GOAWAY (no new streams), drains in-flight RPCs during a grace
+      period, and clients reconnect for new traffic. As long as requests carry deadlines
+      shorter than the grace period, in-flight work finishes before close — zero dropped RPCs.
+    ref: "concepts.md#client-and-server-lifecycle-end-to-end"
+
+  - id: channels-stubs-client-server-lifecycle-048
+    difficulty: intermediate
+    tags: [http2, streaming, why-http2]
+    question: |
+      Which HTTP/2 capability is most directly why one gRPC channel can carry many concurrent
+      RPCs without opening a new connection per call?
+    options:
+      - "HPACK header compression"
+      - "Stream multiplexing over a single connection"
+      - "Server push"
+      - "Plaintext upgrade from HTTP/1.1"
+    answer: 1
+    explanation: |
+      HTTP/2 multiplexes many independent streams over one connection; each gRPC RPC is a
+      stream, so concurrent RPCs share the channel's connection(s) rather than each needing a
+      new TCP+TLS handshake. (Full HTTP/2 mechanics live in networking/http2.)
+    ref: "concepts.md#subchannels-and-the-http2-connection-pool"
+
+  - id: channels-stubs-client-server-lifecycle-049
+    difficulty: expert
+    tags: [keepalive, grfc-a8, connection-health]
+    question: |
+      A channel behind an idle-timeout load balancer keeps getting its connection silently
+      dropped, surfacing as UNAVAILABLE on the next RPC. Which channel-level mechanism is
+      designed to detect dead connections and keep them alive?
+    options:
+      - "Client-side HTTP/2 keepalive PINGs (gRFC A8)"
+      - "Per-RPC deadlines"
+      - "wait-for-ready = true"
+      - "Increasing MAX_CONCURRENT_STREAMS"
+    answer: 0
+    explanation: |
+      gRPC client-side keepalive (gRFC A8) sends periodic HTTP/2 PING frames to detect broken
+      connections and keep intermediaries from idling them out. It is a per-channel setting.
+      Tune it carefully — overly aggressive PINGs can trip server keepalive-enforcement and
+      earn a GOAWAY with "too_many_pings".
+    ref: "concepts.md#per-rpc-vs-per-channel-options"
+
+  - id: channels-stubs-client-server-lifecycle-050
+    difficulty: intermediate
+    tags: [stub, per-call, immutability, sharing]
+    question: |
+      Why is deriving a new stub for per-call options (rather than mutating a shared stub)
+      important?
+    options:
+      - "Mutation is slower at runtime"
+      - "gRPC forbids more than one stub per channel"
+      - "The base stub can be safely shared across threads because derived stubs are new immutable instances that leave it untouched"
+      - "Derived stubs open a new channel each time"
+    answer: 2
+    explanation: |
+      withDeadlineAfter/withCompression/etc. return new immutable stubs, so applying per-call
+      options never mutates the shared base stub. That immutability is what makes sharing a
+      single base stub across threads safe.
+    ref: "concepts.md#stubs-and-generated-clients-blocking-async-future"

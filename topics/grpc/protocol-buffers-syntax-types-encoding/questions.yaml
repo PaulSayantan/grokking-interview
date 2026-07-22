@@ -1,0 +1,797 @@
+topic: "Protocol Buffers: Syntax, Types & Encoding"
+domain: grpc
+topic_slug: protocol-buffers-syntax-types-encoding
+version: 1
+questions:
+  - id: protocol-buffers-syntax-types-encoding-001
+    difficulty: beginner
+    tags: [syntax, proto3, file-structure]
+    question: |
+      In a proto3 file, where must the `syntax = "proto3";` declaration appear?
+    options:
+      - "As the first non-comment, non-blank line of the file"
+      - "Anywhere in the file, order does not matter"
+      - "Immediately after the `package` statement"
+      - "Only inside the top-level `message` block"
+    answer: 0
+    explanation: |
+      `syntax = "proto3";` must be the first non-comment, non-blank statement in the
+      file. If it is missing, `protoc` assumes proto2, which has different semantics
+      (explicit presence, closed enums, `required`, custom defaults).
+    ref: "concepts.md#proto3-syntax--file-structure"
+
+  - id: protocol-buffers-syntax-types-encoding-002
+    difficulty: beginner
+    tags: [field-numbers, wire-identity]
+    question: |
+      What actually travels on the wire to identify a field in binary protobuf?
+    options:
+      - "The field's name as a UTF-8 string"
+      - "The field's declared type name"
+      - "The field's zero-based declaration order"
+      - "The field's integer field number (inside the tag)"
+    answer: 3
+    explanation: |
+      Binary protobuf never transmits field names. Each field is written with a tag that
+      encodes its integer field number and wire type. This is why renaming a field is
+      wire-safe but renumbering it is a breaking change.
+    ref: "concepts.md#field-numbers-are-the-wire-identity"
+
+  - id: protocol-buffers-syntax-types-encoding-003
+    difficulty: intermediate
+    tags: [field-numbers, evolution, gotcha]
+    question: |
+      A teammate wants to change a field from number 5 to number 7 "to group it with
+      related fields." What is the consequence on the wire?
+    options:
+      - "Nothing; field numbers are cosmetic like names"
+      - "The change is safe as long as the field's type is unchanged"
+      - "It is treated as deleting field 5 and adding a brand-new field 7, so existing serialized data is misread"
+      - "protoc automatically migrates old data to the new number"
+    answer: 2
+    explanation: |
+      Field numbers are the wire identity. Renumbering is indistinguishable from deleting
+      the old field and adding a new one. Any previously serialized data still carries the
+      old number and will no longer populate the field. Never renumber a field in use.
+    ref: "concepts.md#field-numbers-are-the-wire-identity"
+
+  - id: protocol-buffers-syntax-types-encoding-004
+    difficulty: intermediate
+    tags: [reserved, evolution]
+    question: |
+      What is the correct, compiler-enforced way to delete a field so its number is never
+      accidentally reused?
+    options:
+      - "Comment out the field line"
+      - "Remove the field and add its number (and name) to a `reserved` statement"
+      - "Set the field to `deprecated = true`"
+      - "Change the field's type to `bytes`"
+    answer: 1
+    explanation: |
+      Removing the field and adding its number and name to `reserved` makes `protoc` reject
+      any future reuse of that number or name. This is the disciplined way to tombstone a
+      removed field and prevent the classic "reused number decodes garbage" bug.
+    ref: "concepts.md#reserved-fields--numbers"
+
+  - id: protocol-buffers-syntax-types-encoding-005
+    difficulty: intermediate
+    tags: [reserved, syntax]
+    question: |
+      Which `reserved` usage is valid protobuf syntax?
+    options:
+      - "`reserved 2, 5, \"age\";` — numbers and names in one statement"
+      - "`reserved = 2, 5;`"
+      - "`reserved 2, 5, 9 to 11;` and a separate `reserved \"age\";`"
+      - "`reserve 2, 5;`"
+    answer: 2
+    explanation: |
+      You may reserve numbers (including ranges like `9 to 11`) and names, but numbers and
+      names cannot be mixed in a single `reserved` statement — use two separate statements.
+    ref: "concepts.md#reserved-fields--numbers"
+
+  - id: protocol-buffers-syntax-types-encoding-006
+    difficulty: beginner
+    tags: [scalar-types, string, bytes]
+    question: |
+      A field must carry arbitrary binary data (a compressed blob that is not valid
+      UTF-8). Which scalar type is correct?
+    options:
+      - "`bytes`"
+      - "`string`, since it can hold any characters"
+      - "`int64` array"
+      - "`fixed64`"
+    answer: 0
+    explanation: |
+      `string` must be valid UTF-8 (validated on encode and decode); non-UTF-8 data will
+      fail. `bytes` holds an arbitrary sequence of octets and is the correct choice for
+      binary blobs.
+    ref: "concepts.md#scalar-types"
+
+  - id: protocol-buffers-syntax-types-encoding-007
+    difficulty: advanced
+    tags: [scalar-types, integers, encoding]
+    question: |
+      A telemetry field frequently holds negative deltas (e.g. -1, -3, -50). Which type
+      minimizes bytes on the wire?
+    options:
+      - "`int64`"
+      - "`uint64`"
+      - "`sint64`"
+      - "`fixed64`"
+    answer: 2
+    explanation: |
+      Plain `int64` encodes any negative as a full 10-byte two's-complement varint.
+      `sint64` applies zigzag encoding first, mapping small-magnitude negatives to small
+      varints (-1 → 1 byte). For frequently-negative values, `sint32`/`sint64` are the
+      efficient choice.
+    ref: "concepts.md#zigzag-encoding-for-signed-integers-sint"
+
+  - id: protocol-buffers-syntax-types-encoding-008
+    difficulty: advanced
+    tags: [scalar-types, integers, fixed]
+    question: |
+      For a field that holds a random 64-bit hash (values are almost always large), which
+      type is generally most space- and decode-efficient?
+    options:
+      - "`int64`"
+      - "`fixed64`"
+      - "`sint64`"
+      - "`uint32`"
+    answer: 1
+    explanation: |
+      Varint types (`int64`, `sint64`, `uint64`) grow one byte per 7 bits, so large random
+      values take up to 9-10 bytes and cost decode work. `fixed64` is always exactly 8
+      bytes and cheap to decode, making it best for frequently-large or random values.
+    ref: "concepts.md#scalar-types"
+
+  - id: protocol-buffers-syntax-types-encoding-009
+    difficulty: advanced
+    tags: [scalar-types, json, int64]
+    question: |
+      In the canonical protobuf JSON mapping, how is an `int64` field represented?
+    options:
+      - "As a JSON number"
+      - "As a base64-encoded value"
+      - "As an array of two 32-bit numbers"
+      - "As a JSON string"
+    answer: 3
+    explanation: |
+      64-bit integer types (`int64`, `uint64`, `fixed64`, etc.) map to JSON strings in the
+      canonical mapping to avoid the precision loss of JavaScript's 53-bit-safe doubles.
+    ref: "concepts.md#scalar-types"
+
+  - id: protocol-buffers-syntax-types-encoding-010
+    difficulty: intermediate
+    tags: [wire-format, tag]
+    question: |
+      A field's tag is computed as:
+    options:
+      - "`(field_number << 3) | wire_type`"
+      - "`(wire_type << 3) | field_number`"
+      - "`field_number | (wire_type << 5)`"
+      - "`field_number XOR wire_type`"
+    answer: 0
+    explanation: |
+      The tag is `(field_number << 3) | wire_type`, encoded as a varint. The low 3 bits are
+      the wire type; the higher bits hold the field number.
+    ref: "concepts.md#the-wire-format-tlv-tags--wire-types"
+
+  - id: protocol-buffers-syntax-types-encoding-011
+    difficulty: intermediate
+    tags: [wire-format, wire-type]
+    question: |
+      What is the purpose of the 3-bit wire type embedded in every field's tag?
+    options:
+      - "It encodes the field's declared name length"
+      - "It indicates whether the field is required"
+      - "It stores the field's default value"
+      - "It tells the parser how to read the payload and how many bytes it occupies, enabling unknown fields to be skipped"
+    answer: 3
+    explanation: |
+      The wire type (VARINT, I64, LEN, I32, etc.) tells the parser the payload's shape and
+      length. That is what lets a parser skip a field it does not recognize — the basis of
+      forward compatibility.
+    ref: "concepts.md#the-wire-format-tlv-tags--wire-types"
+
+  - id: protocol-buffers-syntax-types-encoding-012
+    difficulty: advanced
+    tags: [wire-format, worked-example]
+    question: |
+      For `message T { int32 a = 1; }` with `a = 150`, the bytes on the wire are
+      `08 96 01`. What does the `08` byte represent?
+    options:
+      - "The value 8"
+      - "The tag: field number 1, wire type 0 (VARINT)"
+      - "The length of the message"
+      - "The wrapper for an optional field"
+    answer: 1
+    explanation: |
+      `08` = `(1 << 3) | 0` = tag for field number 1 with wire type 0 (VARINT). The
+      following `96 01` is the varint encoding of 150.
+    ref: "concepts.md#the-wire-format-tlv-tags--wire-types"
+
+  - id: protocol-buffers-syntax-types-encoding-013
+    difficulty: intermediate
+    tags: [wire-format, wire-type, mapping]
+    question: |
+      Which wire type is used for `string`, `bytes`, embedded messages, and packed
+      repeated fields?
+    options:
+      - "VARINT (0)"
+      - "I64 (1)"
+      - "I32 (5)"
+      - "LEN (2)"
+    answer: 3
+    explanation: |
+      Wire type 2 (LEN, length-delimited) is used for strings, bytes, embedded messages,
+      and packed repeated fields: a tag, a varint length, then that many payload bytes.
+    ref: "concepts.md#length-delimited-encoding-len"
+
+  - id: protocol-buffers-syntax-types-encoding-014
+    difficulty: intermediate
+    tags: [varint, encoding]
+    question: |
+      In varint encoding, what does the most-significant bit (MSB) of each byte signify?
+    options:
+      - "A continuation flag: 1 means more bytes follow, 0 means this is the last byte"
+      - "The sign of the number"
+      - "A parity check bit"
+      - "Whether the field is packed"
+    answer: 0
+    explanation: |
+      Varints store 7 value bits per byte in little-endian order; the MSB is a continuation
+      flag (1 = more bytes follow, 0 = final byte). Small numbers use fewer bytes.
+    ref: "concepts.md#varint-encoding"
+
+  - id: protocol-buffers-syntax-types-encoding-015
+    difficulty: advanced
+    tags: [varint, integers, negatives]
+    question: |
+      How many bytes does a negative value stored in an `int64` field occupy on the wire?
+    options:
+      - "1 byte"
+      - "4 bytes"
+      - "Always 10 bytes"
+      - "Depends on the magnitude, like a positive value"
+    answer: 2
+    explanation: |
+      Negative values in `int32`/`int64` are encoded as their two's-complement in a full
+      64-bit value, so any negative always takes 10 bytes as a varint. This inefficiency is
+      exactly why zigzag-encoded `sint` types exist.
+    ref: "concepts.md#varint-encoding"
+
+  - id: protocol-buffers-syntax-types-encoding-016
+    difficulty: advanced
+    tags: [zigzag, sint, encoding]
+    question: |
+      Using zigzag encoding, the signed value -1 maps to which unsigned value before
+      varint encoding?
+    options:
+      - "0"
+      - "1"
+      - "2"
+      - "4294967295"
+    answer: 1
+    explanation: |
+      Zigzag interleaves positives and negatives: 0→0, -1→1, 1→2, -2→3, 2→4. So -1 becomes
+      1, encoding to a single varint byte instead of 10.
+    ref: "concepts.md#zigzag-encoding-for-signed-integers-sint"
+
+  - id: protocol-buffers-syntax-types-encoding-017
+    difficulty: advanced
+    tags: [compatibility, integers, breaking-change]
+    question: |
+      Which of these type changes to an existing field is a BREAKING wire change?
+    options:
+      - "Renaming the field while keeping its number and type"
+      - "Changing `int32` to `sint32`"
+      - "Adding a new field with a fresh number"
+      - "Adding the `optional` keyword to an existing scalar in proto3"
+    answer: 1
+    explanation: |
+      `int32`, `sint32`, and `fixed32` use different encodings (varint, zigzag-varint,
+      fixed 4 bytes). Switching between these families makes old payloads decode
+      incorrectly. Renaming, adding new-numbered fields are non-breaking on the wire.
+    ref: "concepts.md#zigzag-encoding-for-signed-integers-sint"
+
+  - id: protocol-buffers-syntax-types-encoding-018
+    difficulty: intermediate
+    tags: [length-delimited, nested-messages]
+    question: |
+      How is an embedded (nested) message encoded on the wire?
+    options:
+      - "As a length-delimited (LEN) field whose payload is itself a complete serialized message"
+      - "As a VARINT holding a pointer to the submessage"
+      - "As a sequence of I32 fields, one per subfield"
+      - "As a JSON string"
+    answer: 0
+    explanation: |
+      A nested message is written as a length-delimited field: tag, varint length, then
+      that many bytes which are themselves a fully serialized message. The length prefix
+      lets a parser skip an unknown embedded message whole.
+    ref: "concepts.md#length-delimited-encoding-len"
+
+  - id: protocol-buffers-syntax-types-encoding-019
+    difficulty: intermediate
+    tags: [field-numbers, optimization, tag-size]
+    question: |
+      Why should the most frequently set and repeated fields be assigned field numbers
+      1-15?
+    options:
+      - "protoc processes low numbers faster at compile time"
+      - "Low numbers are validated first during parsing"
+      - "Their tag encodes in a single byte, whereas numbers 16-2047 need two bytes"
+      - "Numbers above 15 are reserved for Google"
+    answer: 2
+    explanation: |
+      Because the tag is `(field_number << 3) | wire_type` as a varint, numbers 1-15 keep
+      the tag ≤ 127 (one byte); 16-2047 need two bytes. On high-cardinality repeated fields,
+      saving one tag byte per element adds up.
+    ref: "concepts.md#why-field-numbers-1-15-are-cheap"
+
+  - id: protocol-buffers-syntax-types-encoding-020
+    difficulty: intermediate
+    tags: [field-numbers, range, limits]
+    question: |
+      Which field numbers are reserved by the protobuf implementation and cannot be used?
+    options:
+      - "1 through 15"
+      - "16 through 2047"
+      - "0 and all negative numbers"
+      - "19000 through 19999"
+    answer: 3
+    explanation: |
+      Field numbers 19000-19999 are reserved for the protobuf implementation. Valid numbers
+      run from 1 to 536,870,911 (2^29 - 1), excluding that reserved range. (0 is simply not a
+      valid field number.)
+    ref: "concepts.md#field-numbers-are-the-wire-identity"
+
+  - id: protocol-buffers-syntax-types-encoding-021
+    difficulty: intermediate
+    tags: [field-presence, proto3, defaults]
+    question: |
+      In proto3, is a plain `int32` field set to `0` serialized on the wire?
+    options:
+      - "Yes, always, as a zero-valued varint"
+      - "Only if the message has a `oneof`"
+      - "Only when using the JSON encoding"
+      - "No — a scalar equal to its default (zero) value is not serialized at all"
+    answer: 3
+    explanation: |
+      proto3 scalars use implicit presence: a field equal to its default (0, false, "",
+      zero enum) produces no bytes. Consequently, on decode, unset and explicitly-zero are
+      indistinguishable for plain scalars.
+    ref: "concepts.md#proto3-field-presence"
+
+  - id: protocol-buffers-syntax-types-encoding-022
+    difficulty: advanced
+    tags: [field-presence, optional, proto3]
+    question: |
+      A partial-update API needs to distinguish "client set active = false" from "client
+      omitted active." Using proto3, what is the correct field declaration?
+    options:
+      - "`optional bool active = 1;`"
+      - "`bool active = 1;`"
+      - "`repeated bool active = 1;`"
+      - "`required bool active = 1;`"
+    answer: 0
+    explanation: |
+      A plain `bool` set to false is not serialized, so the server cannot tell false from
+      unset. The `optional` keyword (proto3.15+) restores explicit presence via a synthetic
+      oneof, generating `has_active()`. (proto3 has no `required`.)
+    ref: "concepts.md#proto3-field-presence"
+
+  - id: protocol-buffers-syntax-types-encoding-023
+    difficulty: advanced
+    tags: [field-presence, optional, internals]
+    question: |
+      How is a proto3 `optional` scalar implemented under the hood?
+    options:
+      - "As a synthetic single-member `oneof` that carries presence"
+      - "As a separate boolean sidecar field named `has_<field>`"
+      - "As a `google.protobuf.Any` wrapper"
+      - "As a `repeated` field limited to one element"
+    answer: 0
+    explanation: |
+      `optional` scalars are compiled to a synthetic single-field `oneof`, which is what
+      tracks presence on the wire and generates the `has*()` accessor.
+    ref: "concepts.md#proto3-field-presence"
+
+  - id: protocol-buffers-syntax-types-encoding-024
+    difficulty: intermediate
+    tags: [field-presence, messages, wrappers]
+    question: |
+      Which of these field kinds ALWAYS has explicit presence (a `hasX()` accessor) in
+      proto3?
+    options:
+      - "A plain `int32` scalar"
+      - "A message-typed (submessage) field"
+      - "A `repeated` field"
+      - "A `map` field"
+    answer: 1
+    explanation: |
+      Message-typed fields always track presence, because "present but empty" and "absent"
+      are distinguishable on the wire. Plain scalars use implicit presence; repeated and map
+      fields treat emptiness as absence (no hasX).
+    ref: "concepts.md#proto3-field-presence"
+
+  - id: protocol-buffers-syntax-types-encoding-025
+    difficulty: intermediate
+    tags: [wrappers, well-known-types, presence]
+    question: |
+      What is the primary purpose of the well-known wrapper types like
+      `google.protobuf.Int32Value` and `BoolValue`?
+    options:
+      - "To compress integers more aggressively"
+      - "To enforce range validation on scalar values"
+      - "To convert scalars to strings automatically"
+      - "To add explicit presence to a scalar by wrapping it in a message"
+    answer: 3
+    explanation: |
+      Wrapper types box a scalar inside a message. Because message fields have presence,
+      wrappers let you distinguish unset from zero — useful across languages and JSON, and
+      pre-dating the `optional` keyword.
+    ref: "concepts.md#well-known-types"
+
+  - id: protocol-buffers-syntax-types-encoding-026
+    difficulty: intermediate
+    tags: [repeated, packed, encoding]
+    question: |
+      In proto3, how is a `repeated int32` field encoded by default?
+    options:
+      - "One tag + payload per element (unpacked)"
+      - "As a `map<int32, int32>`"
+      - "Packed: a single tag and length prefix, then all element payloads concatenated"
+      - "As a length-delimited JSON array"
+    answer: 2
+    explanation: |
+      Repeated scalar numeric fields are packed by default in proto3: one LEN field
+      containing all elements, avoiding a repeated tag per element. This is significantly
+      more compact for large lists.
+    ref: "concepts.md#repeated-fields--packed-encoding"
+
+  - id: protocol-buffers-syntax-types-encoding-027
+    difficulty: advanced
+    tags: [repeated, packed, string]
+    question: |
+      Which repeated field type is NOT eligible for packed encoding?
+    options:
+      - "`repeated int32`"
+      - "`repeated bool`"
+      - "`repeated string`"
+      - "`repeated fixed64`"
+    answer: 2
+    explanation: |
+      Only scalar numeric types are packable. `string`, `bytes`, and embedded messages are
+      already length-delimited, so each element keeps its own tag and cannot be packed.
+    ref: "concepts.md#repeated-fields--packed-encoding"
+
+  - id: protocol-buffers-syntax-types-encoding-028
+    difficulty: advanced
+    tags: [repeated, packed, compatibility]
+    question: |
+      What must a conformant parser do regarding packed vs unpacked encoding of a packable
+      repeated field?
+    options:
+      - "Reject unpacked data if the field is declared packed"
+      - "Accept both packed and unpacked forms, so `[packed=...]` can be toggled without breaking the wire"
+      - "Only accept packed data in proto3"
+      - "Convert unpacked data to a map"
+    answer: 1
+    explanation: |
+      Parsers must accept both the packed and unpacked representations for a packable field.
+      This is what makes toggling `[packed=true/false]` a non-breaking change on the wire.
+    ref: "concepts.md#repeated-fields--packed-encoding"
+
+  - id: protocol-buffers-syntax-types-encoding-029
+    difficulty: intermediate
+    tags: [maps, encoding, sugar]
+    question: |
+      On the wire, a `map<string, int32>` field is encoded as:
+    options:
+      - "A single length-delimited hash table blob"
+      - "Two parallel repeated fields (one for keys, one for values)"
+      - "A `google.protobuf.Struct`"
+      - "A repeated message of key/value entry messages"
+    answer: 3
+    explanation: |
+      `map` is syntactic sugar for a `repeated` message of {key=1, value=2} entries. It has
+      no ordering guarantee, no presence for the map itself, and last-value-wins on
+      duplicate keys.
+    ref: "concepts.md#maps"
+
+  - id: protocol-buffers-syntax-types-encoding-030
+    difficulty: intermediate
+    tags: [maps, keys, rules]
+    question: |
+      Which is a valid key type for a protobuf `map`?
+    options:
+      - "`string`"
+      - "`double`"
+      - "`bytes`"
+      - "An enum type"
+    answer: 0
+    explanation: |
+      Map keys must be integral or string types. Floats, bytes, enums, and message types are
+      not allowed as keys. (Values may be any type except another map.)
+    ref: "concepts.md#maps"
+
+  - id: protocol-buffers-syntax-types-encoding-031
+    difficulty: beginner
+    tags: [enums, default, rules]
+    question: |
+      What is required of the first value in a proto3 enum?
+    options:
+      - "It must be named `DEFAULT`"
+      - "It must be the highest number in the enum"
+      - "It must have the numeric value 0 and serves as the default"
+      - "It must be marked `optional`"
+    answer: 2
+    explanation: |
+      The first enum value must be 0 and is the default (implicit presence — a zero enum is
+      not serialized). Convention is to name it `*_UNSPECIFIED` to make "unset" explicit.
+    ref: "concepts.md#enums"
+
+  - id: protocol-buffers-syntax-types-encoding-032
+    difficulty: advanced
+    tags: [enums, open-closed, evolution]
+    question: |
+      A new server sends an enum value that an old proto3 client's schema does not know.
+      What happens on the client?
+    options:
+      - "The parse fails with an error"
+      - "The unknown numeric value is preserved (proto3 enums are open) and retrievable as the raw integer"
+      - "The value is silently dropped and the field becomes unset"
+      - "The client crashes with an out-of-range exception"
+    answer: 1
+    explanation: |
+      proto3 enums are open: an unrecognized numeric value is preserved and can be read back
+      as its integer, which is essential for rolling upgrades. (proto2 enums are closed —
+      unknown values go to the unknown-field set.)
+    ref: "concepts.md#enums"
+
+  - id: protocol-buffers-syntax-types-encoding-033
+    difficulty: intermediate
+    tags: [enums, encoding]
+    question: |
+      How are enum values encoded on the wire?
+    options:
+      - "As a length-delimited UTF-8 string of the value name"
+      - "As a varint (wire type 0), like an int32"
+      - "As a fixed 4-byte integer"
+      - "As a boolean flag per possible value"
+    answer: 1
+    explanation: |
+      Enums serialize as varints (wire type 0), the same as int32. Because they are bare
+      integers, you can add new values without breaking old readers, but must never renumber
+      or reuse existing values.
+    ref: "concepts.md#enums"
+
+  - id: protocol-buffers-syntax-types-encoding-034
+    difficulty: intermediate
+    tags: [oneof, semantics]
+    question: |
+      What is the defining behavior of a `oneof`?
+    options:
+      - "At most one member may be set at a time; setting one clears the others"
+      - "All member fields are serialized together"
+      - "It guarantees every member is non-default"
+      - "It allows repeated members"
+    answer: 0
+    explanation: |
+      A `oneof` is a tagged union: at most one member is set, and assigning a new member
+      clears any previously set one. Only the currently-set member is serialized, and
+      generated code exposes a discriminator ("which one is set").
+    ref: "concepts.md#oneof"
+
+  - id: protocol-buffers-syntax-types-encoding-035
+    difficulty: advanced
+    tags: [oneof, rules]
+    question: |
+      Which statement about `oneof` is TRUE?
+    options:
+      - "oneof members may be `repeated`"
+      - "A oneof can contain at most three fields"
+      - "Moving a field into or out of a oneof is a wire- and source-breaking change"
+      - "oneof members must all be scalar types"
+    answer: 2
+    explanation: |
+      oneof members cannot be repeated, there is no member-count limit, and members may be
+      any type including messages. Moving fields in or out of a oneof changes the contract
+      and is both wire- and source-breaking.
+    ref: "concepts.md#oneof"
+
+  - id: protocol-buffers-syntax-types-encoding-036
+    difficulty: intermediate
+    tags: [well-known-types, timestamp, duration]
+    question: |
+      Which well-known type is the idiomatic choice for representing a point in time in a
+      proto message?
+    options:
+      - "`google.protobuf.Duration`"
+      - "`google.protobuf.Any`"
+      - "A raw `int64` of milliseconds"
+      - "`google.protobuf.Timestamp`"
+    answer: 3
+    explanation: |
+      `google.protobuf.Timestamp` (seconds + nanos since the Unix epoch, UTC) is the
+      standard for a point in time. `Duration` represents a signed span, not an instant.
+    ref: "concepts.md#well-known-types"
+
+  - id: protocol-buffers-syntax-types-encoding-037
+    difficulty: advanced
+    tags: [well-known-types, field-mask, patch]
+    question: |
+      What is the idiomatic protobuf mechanism for expressing a PATCH-style partial update
+      (which fields to modify)?
+    options:
+      - "`google.protobuf.Struct`"
+      - "`google.protobuf.Empty`"
+      - "A repeated string of field names you define ad hoc"
+      - "`google.protobuf.FieldMask`"
+    answer: 3
+    explanation: |
+      `google.protobuf.FieldMask` carries a set of field paths, the standard way to tell a
+      server exactly which fields to update (or which to read). It pairs naturally with the
+      proto3 presence caveat around partial updates.
+    ref: "concepts.md#well-known-types"
+
+  - id: protocol-buffers-syntax-types-encoding-038
+    difficulty: advanced
+    tags: [well-known-types, any, polymorphism]
+    question: |
+      How does `google.protobuf.Any` allow a receiver to identify the message it wraps?
+    options:
+      - "It carries a type URL (e.g. type.googleapis.com/<fully-qualified-name>) alongside the serialized bytes"
+      - "It includes the sender's IP address"
+      - "It prefixes the payload with the field number"
+      - "It requires the receiver to already know the type out of band"
+    answer: 0
+    explanation: |
+      `Any` stores the serialized message plus a type URL of the form
+      `type.googleapis.com/<fully-qualified-name>`, making it self-describing so the receiver
+      can identify and unpack the embedded message. It underlies typed error details.
+    ref: "concepts.md#well-known-types"
+
+  - id: protocol-buffers-syntax-types-encoding-039
+    difficulty: advanced
+    tags: [proto2-vs-proto3, required]
+    question: |
+      Why did proto3 remove the `required` field label that proto2 had?
+    options:
+      - "It was too slow to validate at runtime"
+      - "It conflicted with the `optional` keyword"
+      - "Because required-ness cannot evolve: you can never safely remove or relax a required field, and a message missing it fails to parse — turning a schema change into an outage"
+      - "It was only ever supported in Java"
+    answer: 2
+    explanation: |
+      `required` is a schema-evolution trap: once a field is required, removing it or making
+      it optional breaks every existing reader, and a missing required field fails parsing.
+      proto3 dropped it so schemas stay evolvable.
+    ref: "concepts.md#proto2-vs-proto3"
+
+  - id: protocol-buffers-syntax-types-encoding-040
+    difficulty: intermediate
+    tags: [proto2-vs-proto3, defaults, enums]
+    question: |
+      Which is a genuine difference between proto2 and proto3?
+    options:
+      - "proto2 uses a different binary wire format than proto3"
+      - "proto2 allows custom field defaults and has closed enums; proto3 has no custom defaults and open enums"
+      - "proto3 does not support nested messages"
+      - "proto2 cannot be used with gRPC"
+    answer: 1
+    explanation: |
+      proto2 supports `[default = ...]` and closed enums; proto3 always uses type zero-values
+      as defaults and has open enums. The binary wire format itself is the same across proto2
+      and proto3 — the differences are language semantics and defaults.
+    ref: "concepts.md#proto2-vs-proto3"
+
+  - id: protocol-buffers-syntax-types-encoding-041
+    difficulty: advanced
+    tags: [determinism, hashing, gotcha]
+    question: |
+      A developer proposes hashing the serialized bytes of a protobuf message to produce a
+      stable signature verifiable in another service written in a different language. Why is
+      this unsafe?
+    options:
+      - "Protobuf serialization is guaranteed canonical, so it would work but is slow"
+      - "Hashing requires the field names, which are stripped"
+      - "gRPC forbids hashing message payloads"
+      - "Protobuf serialization is not canonical — map order is unspecified, unknown fields can be re-emitted differently, and libraries/versions/languages may differ"
+    answer: 3
+    explanation: |
+      Protobuf serialization is explicitly not canonical: map entry order is unspecified,
+      unknown fields are retained and may move, and different library versions or languages
+      may order/pack differently. Even "deterministic" mode is only stable within the same
+      build, not across versions or languages. Never rely on byte-identical output for
+      signatures.
+    ref: "concepts.md#deterministic-serialization-is-not-canonical"
+
+  - id: protocol-buffers-syntax-types-encoding-042
+    difficulty: advanced
+    tags: [evolution, compatibility, judgment]
+    question: |
+      Which change to an existing, deployed message is BACKWARD compatible (old readers keep
+      working)?
+    options:
+      - "Adding a new field with a previously-unused number"
+      - "Reusing the number of a deleted field for a new field"
+      - "Renumbering an existing field"
+      - "Changing a `string` field to `bytes` and expecting old JSON clients to keep parsing"
+    answer: 0
+    explanation: |
+      Adding a new field with a fresh number is safe: old readers ignore the unknown tag
+      (skipping via its wire type). Reusing numbers, renumbering, and type-family changes are
+      breaking.
+    ref: "concepts.md#field-numbers-are-the-wire-identity"
+
+  - id: protocol-buffers-syntax-types-encoding-043
+    difficulty: intermediate
+    tags: [wire-format, unknown-fields, forward-compat]
+    question: |
+      An old parser receives a message containing a field number it does not recognize. What
+      does it do?
+    options:
+      - "Aborts parsing with a fatal error"
+      - "Guesses the type from the field number"
+      - "Uses the wire type in the tag to determine how many bytes to skip, and stores them as unknown fields"
+      - "Requests the schema from the sender"
+    answer: 2
+    explanation: |
+      The tag's wire type tells the parser the payload shape and length, so it can skip the
+      unknown field precisely and retain it as an unknown field (to be re-emitted on
+      serialize). This is the mechanism behind forward compatibility.
+    ref: "concepts.md#the-wire-format-tlv-tags--wire-types"
+
+  - id: protocol-buffers-syntax-types-encoding-044
+    difficulty: beginner
+    tags: [scalar-types, string, utf8]
+    question: |
+      What constraint does the `string` scalar type enforce?
+    options:
+      - "It must be shorter than 256 characters"
+      - "Its contents must be valid UTF-8 (or 7-bit ASCII); invalid UTF-8 is an error"
+      - "It cannot contain digits"
+      - "It is automatically compressed"
+    answer: 1
+    explanation: |
+      `string` values must be valid UTF-8, validated on both encode and decode. For arbitrary
+      or non-UTF-8 binary data, use `bytes` instead, which performs no such validation.
+    ref: "concepts.md#scalar-types"
+
+  - id: protocol-buffers-syntax-types-encoding-045
+    difficulty: advanced
+    tags: [enums, evolution, reserved]
+    question: |
+      Your team removes an enum value `LEGACY_MODE = 3`. What is the safe practice to prevent
+      future misuse of that number?
+    options:
+      - "Nothing special is needed for enums"
+      - "Renumber the remaining values to close the gap"
+      - "Change the enum to a `oneof`"
+      - "Add `reserved 3;` (and reserve the name) to the enum"
+    answer: 3
+    explanation: |
+      Enums follow the same wire-identity rules as fields: never renumber or reuse a removed
+      value's number. Use `reserved` for the removed value's number and name so the compiler
+      guards against reuse. Renumbering remaining values would itself be breaking.
+    ref: "concepts.md#enums"
+
+  - id: protocol-buffers-syntax-types-encoding-046
+    difficulty: advanced
+    tags: [length-delimited, limits, security]
+    question: |
+      Why do protobuf/gRPC parsers impose a maximum message size and recursion depth (e.g.
+      gRPC's default 4 MiB receive limit)?
+    options:
+      - "Because length-delimited, recursively-nested encoding lets a small malicious payload demand huge or unbounded allocation, so parsers cap it"
+      - "To match the HTTP/2 default frame size exactly"
+      - "Because field numbers above 4 million are invalid"
+      - "To keep JSON output under a fixed size"
+    answer: 0
+    explanation: |
+      Messages are length-prefixed and nest recursively, so an adversarial or accidental
+      deeply-nested/huge message could exhaust memory. Parsers enforce size and recursion
+      limits (gRPC defaults to a 4 MiB max receive message size) as a safeguard.
+    ref: "concepts.md#length-delimited-encoding-len"

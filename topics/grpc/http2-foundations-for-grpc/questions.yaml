@@ -1,0 +1,847 @@
+topic: "HTTP/2 Foundations for gRPC"
+domain: grpc
+topic_slug: http2-foundations-for-grpc
+version: 1
+questions:
+  - id: http2-foundations-for-grpc-001
+    difficulty: beginner
+    tags: [http2, mapping, streams]
+    question: |
+      In the gRPC-over-HTTP2 mapping, a single gRPC call corresponds to what?
+    options:
+      - "One HTTP/2 stream"
+      - "One TCP connection"
+      - "One HTTP/2 frame"
+      - "One HTTP/2 connection with server push enabled"
+    answer: 0
+    explanation: |
+      Each gRPC RPC occupies exactly one HTTP/2 stream (identified by a stream ID).
+      Many streams are multiplexed over one connection, which is why a single channel
+      can run many concurrent RPCs.
+    ref: "concepts.md#an-rpc-is-one-http2-stream"
+
+  - id: http2-foundations-for-grpc-002
+    difficulty: beginner
+    tags: [http2, why, multiplexing]
+    question: |
+      What HTTP/2 capability primarily lets a gRPC client run many concurrent RPCs
+      over a single TCP connection without application-layer head-of-line blocking?
+    options:
+      - "Multiplexed streams"
+      - "Server push (PUSH_PROMISE)"
+      - "Stream prioritization trees"
+      - "0-RTT session resumption"
+    answer: 0
+    explanation: |
+      HTTP/2 multiplexes many independent streams over one connection, each carrying its
+      own frames. gRPC puts one RPC per stream, so a slow RPC does not block others at the
+      application layer. (Transport-layer HOL blocking from TCP still exists.)
+    ref: "concepts.md#why-grpc-requires-http2"
+
+  - id: http2-foundations-for-grpc-003
+    difficulty: intermediate
+    tags: [status, trailers, wire]
+    question: |
+      Where in the HTTP/2 response does gRPC deliver the final `grpc-status` code?
+    options:
+      - "In the initial HEADERS frame, as the `:status` pseudo-header"
+      - "In a DATA frame appended after the last message"
+      - "In the trailing HEADERS frame (HTTP/2 trailers)"
+      - "In a dedicated RST_STREAM error code"
+    answer: 2
+    explanation: |
+      gRPC status is carried in HTTP/2 trailers — a HEADERS frame sent after the DATA
+      frames, with END_STREAM. This is required because the outcome of a (possibly
+      streaming) call is only known once all response messages have been produced.
+    ref: "concepts.md#the-response-initial-metadata-data-and-trailers"
+
+  - id: http2-foundations-for-grpc-004
+    difficulty: intermediate
+    tags: [status, trailers, design]
+    question: |
+      Why does gRPC put the status code in trailers rather than in the initial response
+      headers?
+    options:
+      - "Trailers are compressed by HPACK but headers are not"
+      - "HTTP/2 forbids error codes in the HEADERS frame"
+      - "Trailers are encrypted separately from headers"
+      - "The call outcome is only known after all response messages have been sent"
+    answer: 3
+    explanation: |
+      For a server-streaming call the server may emit many messages and only then hit an
+      error. The status cannot go in the initial headers (already sent), so it must be an
+      end-of-stream artifact — HTTP/2 trailers. This is the core reason gRPC needs trailer
+      support.
+    ref: "concepts.md#the-response-initial-metadata-data-and-trailers"
+
+  - id: http2-foundations-for-grpc-005
+    difficulty: intermediate
+    tags: [headers, path, wire]
+    question: |
+      For an RPC `GetFeature` in service `routeguide.RouteGuide`, what is the HTTP/2
+      `:path` pseudo-header?
+    options:
+      - "/routeguide.RouteGuide/GetFeature"
+      - "/routeguide.RouteGuide.GetFeature"
+      - "/routeguide/RouteGuide/GetFeature"
+      - "/GetFeature?service=routeguide.RouteGuide"
+    answer: 0
+    explanation: |
+      The path is `/{fully-qualified-service}/{method}` — here
+      `/routeguide.RouteGuide/GetFeature`. The service segment uses the proto package +
+      service name; the method is the RPC name.
+    ref: "concepts.md#request-framing-the-headers-frame"
+
+  - id: http2-foundations-for-grpc-006
+    difficulty: beginner
+    tags: [headers, method, wire]
+    question: |
+      Which HTTP method does every gRPC request use in its HEADERS frame?
+    options:
+      - "GET for unary, POST for streaming"
+      - "PUT for all calls"
+      - "POST for all calls"
+      - "The method configured per-RPC in the .proto"
+    answer: 2
+    explanation: |
+      gRPC always uses `:method POST`, including unary calls. It never uses GET; the
+      request body carries length-prefixed protobuf messages.
+    ref: "concepts.md#request-framing-the-headers-frame"
+
+  - id: http2-foundations-for-grpc-007
+    difficulty: intermediate
+    tags: [content-type, headers, wire]
+    question: |
+      What `content-type` does a gRPC request carry, and what must a server do if it is
+      absent or different?
+    options:
+      - "`application/grpc`; the server should reject a non-grpc content-type"
+      - "`application/protobuf`; the server should transcode it"
+      - "`application/json`; the server should ignore the header"
+      - "`application/octet-stream`; the server should assume gRPC anyway"
+    answer: 0
+    explanation: |
+      gRPC uses `content-type: application/grpc` (optionally suffixed with the codec, e.g.
+      `+proto`). A compliant server must reject requests that do not carry an
+      `application/grpc` content-type.
+    ref: "concepts.md#request-framing-the-headers-frame"
+
+  - id: http2-foundations-for-grpc-008
+    difficulty: advanced
+    tags: [headers, te, trailers]
+    question: |
+      Why does a gRPC client send the header `te: trailers`?
+    options:
+      - "To request Transfer-Encoding chunked responses"
+      - "To enable Trailer-based HPACK compression"
+      - "To negotiate TLS early data"
+      - "To assert that it understands and will accept HTTP/2 trailers"
+    answer: 3
+    explanation: |
+      `te: trailers` signals that the client supports trailing metadata, which gRPC relies
+      on for delivering `grpc-status`. The wire spec requires it, and a strict server may
+      reject requests missing it.
+    ref: "concepts.md#request-framing-the-headers-frame"
+
+  - id: http2-foundations-for-grpc-009
+    difficulty: intermediate
+    tags: [framing, messages, wire]
+    question: |
+      How is each gRPC message delimited within the HTTP/2 DATA frames of a stream?
+    options:
+      - "A 5-byte prefix: 1 compressed-flag byte + 4 big-endian length bytes"
+      - "By a newline separator between serialized messages"
+      - "One message per DATA frame, using frame boundaries"
+      - "A protobuf field tag that encodes the message length"
+    answer: 0
+    explanation: |
+      Every message gets a 5-byte length prefix — 1 byte for the compressed flag (0/1) and
+      4 big-endian bytes for the message length — followed by the serialized bytes. This is
+      independent of how HTTP/2 chunks DATA frames.
+    ref: "concepts.md#length-prefixed-messages-in-data-frames"
+
+  - id: http2-foundations-for-grpc-010
+    difficulty: advanced
+    tags: [framing, messages, gotcha]
+    question: |
+      A 900 KB gRPC message is sent on a stream. Which statement is correct about how it
+      appears at the HTTP/2 layer?
+    options:
+      - "It must fit in exactly one DATA frame"
+      - "It may span multiple DATA frames; the 5-byte prefix delimits the message, not the frames"
+      - "It is split into one message per DATA frame automatically"
+      - "It is rejected because messages cannot exceed the max frame size"
+    answer: 1
+    explanation: |
+      Message framing (the 5-byte prefix) is independent of HTTP/2 DATA-frame boundaries.
+      A large message spans many DATA frames; several tiny messages may share one frame.
+      Never assume one message equals one frame.
+    ref: "concepts.md#length-prefixed-messages-in-data-frames"
+
+  - id: http2-foundations-for-grpc-011
+    difficulty: intermediate
+    tags: [framing, compression, flag]
+    question: |
+      In the 5-byte gRPC message prefix, what does the first byte indicate?
+    options:
+      - "The message type ID"
+      - "The HTTP/2 stream ID low byte"
+      - "Whether this message is compressed (per the grpc-encoding codec)"
+      - "The number of DATA frames to follow"
+    answer: 2
+    explanation: |
+      The first byte is the compressed flag: 0 = uncompressed, 1 = compressed using the
+      codec named in `grpc-encoding` (e.g. gzip). Values 2–255 are reserved. The next four
+      bytes are the big-endian message length.
+    ref: "concepts.md#length-prefixed-messages-in-data-frames"
+
+  - id: http2-foundations-for-grpc-012
+    difficulty: intermediate
+    tags: [half-close, end-stream, wire]
+    question: |
+      In a unary or client-streaming call, how does the client signal it has finished
+      sending request messages?
+    options:
+      - "It sends an empty trailers frame with grpc-status"
+      - "It sets END_STREAM on its last DATA frame, half-closing the request direction"
+      - "It closes the TCP connection"
+      - "It sends a RST_STREAM frame"
+    answer: 1
+    explanation: |
+      Setting END_STREAM half-closes the request side of the stream. The stream stays open
+      so the server can send its response messages and terminating trailers. Closing the TCP
+      connection or sending RST_STREAM would abort, not complete, the call.
+    ref: "concepts.md#length-prefixed-messages-in-data-frames"
+
+  - id: http2-foundations-for-grpc-013
+    difficulty: advanced
+    tags: [trailers-only, wire, errors]
+    question: |
+      A gRPC method that does not exist is invoked. The server can respond without ever
+      sending an initial HEADERS or any DATA. What is this response shape called?
+    options:
+      - "A GOAWAY response"
+      - "A Trailers-Only response"
+      - "An empty DATA response"
+      - "A RST_STREAM with UNIMPLEMENTED"
+    answer: 1
+    explanation: |
+      The Trailers-Only response is a single HEADERS frame (with END_STREAM) carrying both
+      the HTTP `:status` and the gRPC trailers (grpc-status, grpc-message) together, when the
+      server fails before sending any message. Clients must handle both this and the
+      normal headers+data+trailers shape.
+    ref: "concepts.md#the-response-initial-metadata-data-and-trailers"
+
+  - id: http2-foundations-for-grpc-014
+    difficulty: intermediate
+    tags: [status, http-status, gotcha]
+    question: |
+      An RPC fails with `grpc-status: 7` (PERMISSION_DENIED). What is the HTTP/2
+      `:status` pseudo-header on the response most likely to be?
+    options:
+      - "403"
+      - "200"
+      - "500"
+      - "401"
+    answer: 1
+    explanation: |
+      For gRPC, the HTTP `:status` is essentially always 200 even when the RPC fails; the
+      real RPC outcome is the `grpc-status` trailer. Confusing HTTP status with gRPC status
+      is a classic mistake.
+    ref: "concepts.md#the-grpc-status-model-on-the-wire"
+
+  - id: http2-foundations-for-grpc-015
+    difficulty: beginner
+    tags: [status, ok, codes]
+    question: |
+      What `grpc-status` value indicates a successful RPC?
+    options:
+      - "0"
+      - "1"
+      - "200"
+      - "16"
+    answer: 0
+    explanation: |
+      `grpc-status: 0` is OK (success). A successful call still ends with a trailer
+      containing grpc-status 0. Codes 1–16 are the various error conditions.
+    ref: "concepts.md#the-grpc-status-model-on-the-wire"
+
+  - id: http2-foundations-for-grpc-016
+    difficulty: intermediate
+    tags: [status, message, encoding]
+    question: |
+      What is true about the `grpc-message` trailer?
+    options:
+      - "It is a required machine-readable error enum"
+      - "It is an optional, percent-encoded human-readable description"
+      - "It contains the serialized protobuf error details"
+      - "It duplicates the HTTP :status reason phrase"
+    answer: 1
+    explanation: |
+      `grpc-message` is optional and descriptive only — a percent-encoded UTF-8 string for
+      humans. Clients must not branch on its text; they switch on the numeric `grpc-status`.
+      Rich typed details go in `grpc-status-details-bin`.
+    ref: "concepts.md#the-grpc-status-model-on-the-wire"
+
+  - id: http2-foundations-for-grpc-017
+    difficulty: advanced
+    tags: [status, details, rich-errors]
+    question: |
+      How does gRPC carry rich, typed error details (a serialized `google.rpc.Status`)
+      beyond a flat code and message?
+    options:
+      - "In the grpc-message trailer as JSON"
+      - "In a second DATA frame after the error"
+      - "In the `grpc-status-details-bin` trailer, base64-encoded"
+      - "In an HTTP/2 GOAWAY debug data field"
+    answer: 2
+    explanation: |
+      `grpc-status-details-bin` carries a base64-encoded serialized `google.rpc.Status`
+      protobuf, letting servers attach typed detail messages. Because the key ends in `-bin`,
+      its value is base64 on the wire.
+    ref: "concepts.md#the-grpc-status-model-on-the-wire"
+
+  - id: http2-foundations-for-grpc-018
+    difficulty: intermediate
+    tags: [status, unavailable, retry]
+    question: |
+      Which gRPC status code most cleanly signals a transient failure (connection lost,
+      server not reachable) that is generally the safest to retry?
+    options:
+      - "INVALID_ARGUMENT (3)"
+      - "FAILED_PRECONDITION (9)"
+      - "UNAUTHENTICATED (16)"
+      - "UNAVAILABLE (14)"
+    answer: 3
+    explanation: |
+      UNAVAILABLE (14) denotes a transient condition — the connection dropped or the server
+      is temporarily down — and is the code retry policies most commonly key off. Detailed
+      retry semantics live in the resiliency topic.
+    ref: "concepts.md#the-grpc-status-model-on-the-wire"
+
+  - id: http2-foundations-for-grpc-019
+    difficulty: advanced
+    tags: [status, mapping, intermediary]
+    question: |
+      A non-gRPC HTTP intermediary returns HTTP 503 to a gRPC client. What gRPC status does
+      the client typically synthesize?
+    options:
+      - "INTERNAL"
+      - "UNIMPLEMENTED"
+      - "UNAVAILABLE"
+      - "PERMISSION_DENIED"
+    answer: 2
+    explanation: |
+      When a bare HTTP status arrives (from a proxy/intermediary rather than a gRPC server),
+      gRPC maps it: 502/503/504/429 → UNAVAILABLE, 404 → UNIMPLEMENTED, 401 → UNAUTHENTICATED,
+      403 → PERMISSION_DENIED. HTTP 503 becomes UNAVAILABLE.
+    ref: "concepts.md#the-grpc-status-model-on-the-wire"
+
+  - id: http2-foundations-for-grpc-020
+    difficulty: intermediate
+    tags: [deadline, timeout, header]
+    question: |
+      How is a client's deadline communicated to the server on the wire?
+    options:
+      - "As the `grpc-timeout` request header, e.g. `100m` or `5S`"
+      - "As an HTTP `Cache-Control: max-age` header"
+      - "As a field inside the first protobuf message"
+      - "As an HTTP/2 SETTINGS parameter"
+    answer: 0
+    explanation: |
+      The deadline is serialized into the request HEADERS as `grpc-timeout`, an integer plus
+      a unit suffix (H, M, S, m, u, n). This lets the server know its remaining budget rather
+      than working past the point the client has given up.
+    ref: "concepts.md#deadlines-on-the-wire-the-grpc-timeout-header"
+
+  - id: http2-foundations-for-grpc-021
+    difficulty: intermediate
+    tags: [deadline, units, wire]
+    question: |
+      What does the header `grpc-timeout: 200m` mean?
+    options:
+      - "200 minutes"
+      - "200 microseconds"
+      - "200 megabytes of buffer"
+      - "200 milliseconds"
+    answer: 3
+    explanation: |
+      Lowercase `m` is milliseconds. The unit suffixes are `H` hours, `M` minutes, `S`
+      seconds, `m` milliseconds, `u` microseconds, `n` nanoseconds. So `200m` = 200 ms.
+    ref: "concepts.md#deadlines-on-the-wire-the-grpc-timeout-header"
+
+  - id: http2-foundations-for-grpc-022
+    difficulty: advanced
+    tags: [deadline, propagation, chains]
+    question: |
+      Service A (500 ms deadline) calls B, which calls C. What is the point of
+      deadline propagation here?
+    options:
+      - "B forwards the remaining budget as its own grpc-timeout so C stops when A would give up"
+      - "C restarts a fresh 500 ms timer independent of A"
+      - "Deadlines only apply to the first hop and are dropped afterward"
+      - "Each hop doubles the deadline for safety margin"
+    answer: 0
+    explanation: |
+      Because the deadline is on the wire, B can compute the time left and propagate it in its
+      outgoing `grpc-timeout` to C. The single budget shrinks as it descends, so no downstream
+      keeps working after the top-level caller has abandoned the request.
+    ref: "concepts.md#deadlines-on-the-wire-the-grpc-timeout-header"
+
+  - id: http2-foundations-for-grpc-023
+    difficulty: intermediate
+    tags: [deadline, cancellation, wire]
+    question: |
+      What happens on the wire and to the call when a deadline expires mid-RPC?
+    options:
+      - "The server finishes normally and the result is discarded silently"
+      - "The connection is closed with GOAWAY and all RPCs on it fail"
+      - "The stream is reset (RST_STREAM), work is cancelled, and the call fails with DEADLINE_EXCEEDED"
+      - "The client blocks until the server responds, then ignores it"
+    answer: 2
+    explanation: |
+      On deadline expiry the HTTP/2 stream is reset with RST_STREAM; in-flight work on that
+      stream is cancelled and further DATA is dropped. The call fails immediately with
+      DEADLINE_EXCEEDED (status 4) without waiting for the server.
+    ref: "concepts.md#deadlines-on-the-wire-the-grpc-timeout-header"
+
+  - id: http2-foundations-for-grpc-024
+    difficulty: advanced
+    tags: [deadline, best-practice, judgment]
+    question: |
+      Why are absolute deadlines generally preferred over per-hop duration timeouts in a
+      gRPC call chain?
+    options:
+      - "Deadlines are compressed more efficiently by HPACK"
+      - "Timeouts cannot be represented in the grpc-timeout header"
+      - "Deadlines disable retries automatically"
+      - "A single budget is shared and shrinks as it propagates, instead of each hop restarting a fresh timer"
+    answer: 3
+    explanation: |
+      An absolute deadline represents one shared budget that decreases as it flows downstream.
+      Per-hop timeouts each start over, so the total time can balloon far past what the caller
+      intended. This is why deadline propagation is idiomatic in gRPC.
+    ref: "concepts.md#deadlines-on-the-wire-the-grpc-timeout-header"
+
+  - id: http2-foundations-for-grpc-025
+    difficulty: intermediate
+    tags: [flow-control, backpressure, http2]
+    question: |
+      What is gRPC's backpressure mechanism built on?
+    options:
+      - "HTTP/2 flow control via per-stream and connection-level WINDOW_UPDATE frames"
+      - "Application-level acknowledgement messages in the .proto"
+      - "TCP Nagle's algorithm"
+      - "Rate-limiting headers set per RPC"
+    answer: 0
+    explanation: |
+      gRPC inherits HTTP/2 flow control: each side advertises a window and replenishes it with
+      WINDOW_UPDATE frames as it consumes data. A slow reader drains the window and forces the
+      sender to stop sending DATA — that is the backpressure.
+    ref: "concepts.md#flow-control-and-backpressure"
+
+  - id: http2-foundations-for-grpc-026
+    difficulty: advanced
+    tags: [flow-control, levels, http2]
+    question: |
+      At which levels does HTTP/2 flow control operate for a gRPC connection?
+    options:
+      - "Per-message only"
+      - "Per-stream only"
+      - "Per-stream and connection-level (aggregate)"
+      - "Per-TCP-segment only"
+    answer: 2
+    explanation: |
+      There are two windows: a per-stream window limiting outstanding DATA on one stream, and
+      a connection-level window limiting the aggregate across all streams. Both are governed by
+      WINDOW_UPDATE frames.
+    ref: "concepts.md#flow-control-and-backpressure"
+
+  - id: http2-foundations-for-grpc-027
+    difficulty: advanced
+    tags: [flow-control, streaming, gotcha]
+    question: |
+      A server-streaming service produces messages far faster than a slow client consumes
+      them, and the code treats `Send()` as fire-and-forget. What is the likely consequence?
+    options:
+      - "Messages are silently dropped by HTTP/2 with no effect"
+      - "The connection automatically upgrades to HTTP/3"
+      - "Send() may block or buffers grow unboundedly when the peer's flow-control window is exhausted"
+      - "The client is charged the server's CPU time"
+    answer: 2
+    explanation: |
+      When the peer's flow-control window is exhausted, the transport stops accepting DATA, so
+      Send() blocks or internal buffers grow. Ignoring backpressure leads to memory growth or
+      stalls. Flow control protects you only if you honor it by pacing production to consumption.
+    ref: "concepts.md#flow-control-and-backpressure"
+
+  - id: http2-foundations-for-grpc-028
+    difficulty: intermediate
+    tags: [keepalive, ping, grfc-a8]
+    question: |
+      What HTTP/2 frame does gRPC keepalive (gRFC A8) use to detect dead idle connections?
+    options:
+      - "GOAWAY"
+      - "SETTINGS"
+      - "RST_STREAM"
+      - "PING"
+    answer: 3
+    explanation: |
+      gRPC keepalive sends HTTP/2 PING frames after an idle interval (`keepalive_time`) and
+      expects an ack within `keepalive_timeout`; if none arrives it closes the connection.
+      This detects connections silently dropped by NATs/proxies.
+    ref: "concepts.md#connection-management-and-keepalive-grfc-a8"
+
+  - id: http2-foundations-for-grpc-029
+    difficulty: advanced
+    tags: [keepalive, enhance-your-calm, goaway]
+    question: |
+      A client is configured to ping far more aggressively than the server permits. How does
+      the server typically respond?
+    options:
+      - "It silently drops the pings and continues"
+      - "It upgrades the connection to a dedicated ping channel"
+      - "It sends a GOAWAY with a `too_many_pings` / ENHANCE_YOUR_CALM debug message"
+      - "It returns RESOURCE_EXHAUSTED on the next RPC"
+    answer: 2
+    explanation: |
+      Servers enforce a minimum ping interval to prevent ping-based DoS. A client that pings too
+      often receives a GOAWAY carrying an ENHANCE_YOUR_CALM / `too_many_pings` debug message, and
+      the connection is closed. Misconfigured keepalive is a real production failure mode.
+    ref: "concepts.md#connection-management-and-keepalive-grfc-a8"
+
+  - id: http2-foundations-for-grpc-030
+    difficulty: advanced
+    tags: [goaway, graceful-shutdown, connection]
+    question: |
+      A gRPC server is being drained for a deploy. It sends a GOAWAY frame naming the last
+      stream ID it will process. What should well-behaved clients do?
+    options:
+      - "Immediately fail all RPCs on the connection with CANCELLED"
+      - "Let in-flight RPCs finish and route new RPCs to another connection"
+      - "Retry every RPC on the same connection"
+      - "Downgrade to HTTP/1.1 and reconnect"
+    answer: 1
+    explanation: |
+      GOAWAY signals graceful shutdown: existing streams up to the named ID complete, while new
+      streams are established on other connections (reconnecting/rebalancing). This lets a server
+      drain without abruptly failing in-flight work.
+    ref: "concepts.md#connection-management-and-keepalive-grfc-a8"
+
+  - id: http2-foundations-for-grpc-031
+    difficulty: advanced
+    tags: [max-concurrent-streams, settings, connection]
+    question: |
+      What does the HTTP/2 SETTINGS value MAX_CONCURRENT_STREAMS control for a gRPC
+      connection?
+    options:
+      - "The maximum number of concurrent in-flight RPCs on that connection"
+      - "The maximum size of a single message"
+      - "The maximum number of TCP connections in the pool"
+      - "The keepalive ping interval"
+    answer: 0
+    explanation: |
+      MAX_CONCURRENT_STREAMS caps how many streams (and thus RPCs, since one RPC = one stream)
+      can be active at once on a connection. Exceeding it queues new RPCs or triggers a new
+      connection depending on the client.
+    ref: "concepts.md#connection-management-and-keepalive-grfc-a8"
+
+  - id: http2-foundations-for-grpc-032
+    difficulty: intermediate
+    tags: [load-balancing, l4, l7]
+    question: |
+      Why does a plain L4 (TCP connection) load balancer distribute gRPC traffic poorly?
+    options:
+      - "gRPC uses UDP, which L4 balancers cannot see"
+      - "gRPC opens a new connection per RPC, overwhelming the LB"
+      - "L4 balancers cannot parse the grpc-status trailer"
+      - "All RPCs multiplex over one long-lived connection, so the L4 LB pins them to one backend"
+    answer: 3
+    explanation: |
+      Because a gRPC client sends many RPCs over one persistent HTTP/2 connection, a
+      connection-level balancer sees a single connection and routes all of its RPCs to one
+      backend. New RPCs ride the existing connection rather than being spread out.
+    ref: "concepts.md#why-grpc-needs-l7-load-balancing"
+
+  - id: http2-foundations-for-grpc-033
+    difficulty: advanced
+    tags: [load-balancing, l7, judgment]
+    question: |
+      To balance gRPC load evenly across backends, at what granularity must balancing happen?
+    options:
+      - "Per RPC (per HTTP/2 stream) — i.e. L7"
+      - "Per TCP connection"
+      - "Per byte of DATA"
+      - "Per DNS lookup"
+    answer: 0
+    explanation: |
+      Effective gRPC balancing is per-RPC (L7), achieved by client-side per-RPC policies like
+      round_robin over multiple subchannels, or by a gRPC-aware proxy (Envoy/mesh) that balances
+      individual streams across backends.
+    ref: "concepts.md#why-grpc-needs-l7-load-balancing"
+
+  - id: http2-foundations-for-grpc-034
+    difficulty: advanced
+    tags: [load-balancing, kubernetes, scenario]
+    question: |
+      You run a gRPC service as a headless Kubernetes Service (DNS returns all pod IPs) and
+      want even distribution without adding a proxy hop. Which approach fits best?
+    options:
+      - "A standard L4 ClusterIP service with kube-proxy"
+      - "Sticky sessions keyed on client IP"
+      - "Client-side load balancing: resolve all addresses and use round_robin over subchannels"
+      - "A single shared connection with pick_first"
+    answer: 2
+    explanation: |
+      A headless Service gives the client all backend addresses. Client-side (thick-client) load
+      balancing opens a subchannel per backend and picks one per RPC (round_robin), spreading load
+      without an extra proxy hop. pick_first would pin to one backend.
+    ref: "concepts.md#why-grpc-needs-l7-load-balancing"
+
+  - id: http2-foundations-for-grpc-035
+    difficulty: advanced
+    tags: [load-balancing, proxy, tradeoffs]
+    question: |
+      What is a key trade-off of proxy-based (e.g. Envoy/mesh sidecar) gRPC load balancing
+      versus client-side balancing?
+    options:
+      - "The proxy cannot balance per RPC"
+      - "It requires the client to know every backend address"
+      - "It only works over HTTP/1.1"
+      - "It adds a network hop but centralizes policy, mTLS, and retries"
+    answer: 3
+    explanation: |
+      A gRPC-aware proxy balances per RPC and centralizes policy (mTLS, retries, discovery), at
+      the cost of an extra network hop. Client-side balancing avoids the hop but pushes address
+      discovery and policy into every client.
+    ref: "concepts.md#why-grpc-needs-l7-load-balancing"
+
+  - id: http2-foundations-for-grpc-036
+    difficulty: beginner
+    tags: [rpc-types, streaming, proto]
+    question: |
+      In a `.proto`, `rpc ListFeatures(Rectangle) returns (stream Feature);` declares which
+      call type?
+    options:
+      - "Unary"
+      - "Client streaming"
+      - "Server streaming"
+      - "Bidirectional streaming"
+    answer: 2
+    explanation: |
+      `stream` on the response only means server streaming: the client sends one request and the
+      server returns a stream of messages. All four types are still one HTTP/2 stream each.
+    ref: "concepts.md#the-four-rpc-types-over-one-stream"
+
+  - id: http2-foundations-for-grpc-037
+    difficulty: intermediate
+    tags: [rpc-types, bidi, streaming]
+    question: |
+      What distinguishes a bidirectional-streaming RPC at the HTTP/2 level from a unary one?
+    options:
+      - "Both sides interleave multiple DATA frames with independent half-close, all on one stream"
+      - "It uses a separate connection per direction"
+      - "It uses server push instead of DATA frames"
+      - "It carries grpc-status in the initial headers"
+    answer: 0
+    explanation: |
+      Bidirectional streaming still uses one HTTP/2 stream, but both endpoints send many
+      length-prefixed messages in DATA frames, interleaved, and each half-closes its direction
+      independently. Unary sends exactly one message each way.
+    ref: "concepts.md#the-four-rpc-types-over-one-stream"
+
+  - id: http2-foundations-for-grpc-038
+    difficulty: intermediate
+    tags: [server-push, http2, misconception]
+    question: |
+      Which HTTP/2 feature does gRPC NOT use?
+    options:
+      - "Multiplexed streams"
+      - "HPACK header compression"
+      - "Flow control (WINDOW_UPDATE)"
+      - "Server push (PUSH_PROMISE)"
+    answer: 3
+    explanation: |
+      gRPC does not use HTTP/2 server push. Server streaming is done with DATA frames on the
+      RPC's own stream, not PUSH_PROMISE. Multiplexing, HPACK, and flow control are all used.
+    ref: "concepts.md#why-grpc-requires-http2"
+
+  - id: http2-foundations-for-grpc-039
+    difficulty: advanced
+    tags: [hol-blocking, tcp, http3]
+    question: |
+      HTTP/2 multiplexing removes application-layer head-of-line blocking for gRPC. What kind
+      of HOL blocking does it NOT remove?
+    options:
+      - "HPACK dynamic-table blocking"
+      - "Transport-layer HOL blocking: a lost TCP segment stalls all streams on the connection"
+      - "Deadline-induced blocking"
+      - "TLS record blocking, which never occurs"
+    answer: 1
+    explanation: |
+      All HTTP/2 streams share one TCP byte stream, so a single lost segment blocks every stream
+      until retransmission. Eliminating this transport-layer HOL blocking is what HTTP/3 / QUIC
+      addresses (see networking).
+    ref: "concepts.md#why-grpc-requires-http2"
+
+  - id: http2-foundations-for-grpc-040
+    difficulty: intermediate
+    tags: [metadata, binary, encoding]
+    question: |
+      A gRPC client wants to send a binary token as custom metadata. What must be true of the
+      key, and how is the value carried on the wire?
+    options:
+      - "The key must end in `-bin`, and the value is base64-encoded"
+      - "The key must start with `grpc-`, and the value is sent raw"
+      - "The key must be uppercase, and the value is hex-encoded"
+      - "Binary metadata is not allowed; it must be a protobuf field"
+    answer: 0
+    explanation: |
+      Binary metadata keys must end in `-bin`; the framework base64-encodes their values on the
+      wire. ASCII metadata is sent as-is. Keys starting with `grpc-` are reserved and must not be
+      used for custom metadata.
+    ref: "concepts.md#request-framing-the-headers-frame"
+
+  - id: http2-foundations-for-grpc-041
+    difficulty: advanced
+    tags: [compression, grpc-encoding, framing]
+    question: |
+      How does gRPC per-message compression relate to HTTP/2's framing?
+    options:
+      - "They are the same thing; grpc-encoding sets the HTTP/2 frame compression"
+      - "gRPC forbids compression when using HTTP/2"
+      - "Per-message compression (grpc-encoding, e.g. gzip) is distinct from HTTP/2 framing and applies to individual messages"
+      - "Compression only applies to the HEADERS frame via HPACK"
+    answer: 2
+    explanation: |
+      `grpc-encoding` names a codec (gzip, etc.) applied per message, reflected in the 5-byte
+      prefix compressed flag. This is separate from HPACK header compression and from the HTTP/2
+      framing layer, which just carries the resulting bytes.
+    ref: "concepts.md#length-prefixed-messages-in-data-frames"
+
+  - id: http2-foundations-for-grpc-042
+    difficulty: intermediate
+    tags: [response, initial-metadata, headers]
+    question: |
+      In a normal (non-Trailers-Only) gRPC response, what does the FIRST HEADERS frame from
+      the server contain?
+    options:
+      - "grpc-status and grpc-message"
+      - "The :status (200) and content-type, plus any initial server metadata"
+      - "The serialized response message"
+      - "A WINDOW_UPDATE for flow control"
+    answer: 1
+    explanation: |
+      The initial response HEADERS carry `:status 200`, `content-type: application/grpc`, and any
+      server-set initial metadata. The response messages follow in DATA frames, and grpc-status
+      comes in the trailing HEADERS (trailers).
+    ref: "concepts.md#the-response-initial-metadata-data-and-trailers"
+
+  - id: http2-foundations-for-grpc-043
+    difficulty: expert
+    tags: [cancellation, streaming, scenario]
+    question: |
+      A client is reading a long server-streaming RPC and decides to stop early. What is the
+      cleanest gRPC-level way to make the server stop producing?
+    options:
+      - "Ignore the remaining messages and let the buffer fill"
+      - "Close the entire channel"
+      - "Send a GOAWAY frame from the client"
+      - "Cancel the call, which resets the HTTP/2 stream (RST_STREAM) and signals cancellation server-side"
+    answer: 3
+    explanation: |
+      Cancelling the call resets the stream with RST_STREAM; the server observes cancellation
+      (its context is cancelled) and can stop producing. Closing the channel is heavy-handed and
+      affects other RPCs; GOAWAY is a connection-level, typically server-initiated, mechanism.
+    ref: "concepts.md#deadlines-on-the-wire-the-grpc-timeout-header"
+
+  - id: http2-foundations-for-grpc-044
+    difficulty: expert
+    tags: [http2, connection, subchannel]
+    question: |
+      A team notices that under a single gRPC channel doing heavy load, all traffic still hits
+      one backend behind an L4 LB even after scaling out. Which explanation is correct?
+    options:
+      - "The .proto is missing the `stream` keyword"
+      - "One HTTP/2 connection carries all multiplexed RPCs, so the L4 LB never rebalances new RPCs"
+      - "MAX_CONCURRENT_STREAMS is set too high"
+      - "HPACK is caching the backend address"
+    answer: 1
+    explanation: |
+      This is the canonical gRPC + L4 LB pitfall: the client keeps one persistent connection and
+      multiplexes every RPC over it, so the connection-level balancer never spreads new RPCs to
+      new backends. The fix is L7 (per-RPC) balancing — client-side round_robin or a gRPC-aware
+      proxy.
+    ref: "concepts.md#why-grpc-needs-l7-load-balancing"
+
+  - id: http2-foundations-for-grpc-045
+    difficulty: intermediate
+    tags: [why, trailers, http1]
+    question: |
+      Which limitation of HTTP/1.1 most directly motivated gRPC's choice of HTTP/2 for
+      delivering end-of-call status?
+    options:
+      - "HTTP/1.1 has no reliable trailer support for an end-of-stream status"
+      - "HTTP/1.1 cannot use TLS"
+      - "HTTP/1.1 forbids POST bodies"
+      - "HTTP/1.1 has no status codes"
+    answer: 0
+    explanation: |
+      gRPC needs a status delivered after the (possibly streamed) body — a trailer. HTTP/1.1's
+      chunked trailers are poorly and inconsistently supported, whereas HTTP/2 trailers are
+      first-class, so gRPC relies on HTTP/2 for grpc-status.
+    ref: "concepts.md#why-grpc-requires-http2"
+
+  - id: http2-foundations-for-grpc-046
+    difficulty: expert
+    tags: [keepalive, tuning, scenario]
+    question: |
+      gRPC RPCs intermittently fail with UNAVAILABLE after periods of low traffic through a
+      cloud NAT that silently drops idle connections. Which configuration most directly helps?
+    options:
+      - "Increase MAX_CONCURRENT_STREAMS on the server"
+      - "Switch content-type to application/grpc+json"
+      - "Enable client keepalive PING with an appropriate keepalive_time (and permit_without_calls if needed)"
+      - "Disable HPACK to reduce header state"
+    answer: 2
+    explanation: |
+      Idle-connection drops by NATs/LBs are exactly what keepalive (gRFC A8) addresses: periodic
+      PINGs keep the connection alive and detect death quickly. Tune keepalive_time (and
+      permit_without_calls for idle periods) — but stay within the server's enforced minimum to
+      avoid GOAWAY/too_many_pings.
+    ref: "concepts.md#connection-management-and-keepalive-grfc-a8"
+
+  - id: http2-foundations-for-grpc-047
+    difficulty: intermediate
+    tags: [status, deadline-exceeded, codes]
+    question: |
+      Which gRPC status code corresponds to a call that ran past its deadline?
+    options:
+      - "CANCELLED (1)"
+      - "ABORTED (10)"
+      - "DEADLINE_EXCEEDED (4)"
+      - "RESOURCE_EXHAUSTED (8)"
+    answer: 2
+    explanation: |
+      DEADLINE_EXCEEDED (4) is returned when the deadline elapses before the call completes.
+      CANCELLED (1) is caller-initiated cancellation; they are distinct outcomes even though both
+      terminate the stream.
+    ref: "concepts.md#the-grpc-status-model-on-the-wire"
+
+  - id: http2-foundations-for-grpc-048
+    difficulty: beginner
+    tags: [channel, connection, model]
+    question: |
+      A single gRPC channel doing many concurrent RPCs typically uses how many TCP connections
+      for those RPCs by default?
+    options:
+      - "One connection per RPC"
+      - "One connection, multiplexing all the RPCs as separate streams"
+      - "One connection per message"
+      - "Two connections, one per direction"
+    answer: 1
+    explanation: |
+      A channel is backed by one (or a few) HTTP/2 connections, and RPCs are multiplexed as
+      separate streams over it — not one connection per RPC. This efficiency is exactly why L7
+      (per-RPC) balancing is needed instead of L4.
+    ref: "concepts.md#an-rpc-is-one-http2-stream"

@@ -1,0 +1,1011 @@
+topic: "Load Balancing & Service Discovery"
+domain: grpc
+topic_slug: load-balancing-and-service-discovery
+version: 1
+questions:
+  - id: load-balancing-and-service-discovery-001
+    difficulty: beginner
+    tags: [http2, why-hard, l4-vs-l7]
+    question: |
+      Why does a plain L4 (connection-level) load balancer fail to balance gRPC
+      request load effectively?
+    options:
+      - "gRPC encrypts the payload so the balancer cannot read routing headers"
+      - "gRPC uses UDP, which L4 balancers cannot forward"
+      - "L4 balancers cannot forward binary Protocol Buffers payloads"
+      - "HTTP/2 multiplexes many RPCs over one long-lived connection, so an L4 balancer pins all of a client's RPCs to a single backend"
+    answer: 3
+    explanation: |
+      A gRPC channel keeps one long-lived HTTP/2 connection per backend and multiplexes
+      all its RPCs as streams over it. An L4 balancer distributes connections, not
+      requests, so once the connection lands on a backend every RPC pins there. gRPC
+      needs per-RPC (L7) balancing.
+    ref: "concepts.md#why-load-balancing-grpc-is-hard"
+
+  - id: load-balancing-and-service-discovery-002
+    difficulty: beginner
+    tags: [round-robin, models]
+    question: |
+      What is the default load-balancing policy for a gRPC channel?
+    options:
+      - "round_robin"
+      - "least_request"
+      - "pick_first"
+      - "weighted_round_robin"
+    answer: 2
+    explanation: |
+      The default is pick_first: it tries the resolved addresses in order and sends all
+      RPCs to the first backend that connects. It is the safe default because it does the
+      right thing when an L4 VIP or proxy is already balancing behind the name.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-003
+    difficulty: intermediate
+    tags: [round-robin, service-config]
+    question: |
+      To get real client-side balancing across backends, a team switches the channel to
+      round_robin but still resolves the target to a single ClusterIP VIP. What happens?
+    options:
+      - "round_robin balances across all pods behind the VIP automatically"
+      - "The client still effectively pins traffic, because the resolver returned only one address to rotate over"
+      - "The RPC fails because round_robin requires at least two addresses"
+      - "The VIP transparently rewrites the connection per RPC"
+    answer: 1
+    explanation: |
+      round_robin can only rotate over the addresses the resolver returns. If DNS/resolution
+      yields a single VIP, there is exactly one subchannel and nothing to balance. You must
+      resolve to the actual backend IPs (e.g. a headless Service) for round_robin to help.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-004
+    difficulty: intermediate
+    tags: [kubernetes, clusterip, gotcha]
+    question: |
+      A team scales a Kubernetes gRPC Deployment fronted by a normal ClusterIP Service from
+      3 to 10 pods, but nearly all load stays on the original 3 pods. What is the cause?
+    options:
+      - "The new pods failed their readiness probes"
+      - "ClusterIP is L4/iptables and balances connections; existing long-lived gRPC connections stay pinned to the old pods"
+      - "gRPC caps a channel at 3 subchannels by default"
+      - "HPA has not yet scaled the Service's replica count"
+    answer: 1
+    explanation: |
+      A ClusterIP is an L4 virtual IP; kube-proxy DNATs each connection to a random pod.
+      Because gRPC keeps long-lived connections, the already-established connections stay on
+      the original pods and new pods get no traffic. Use a headless Service + round_robin, or
+      a mesh/xDS.
+    ref: "concepts.md#kubernetes-headless-services-and-the-clusterip-gotcha"
+
+  - id: load-balancing-and-service-discovery-005
+    difficulty: intermediate
+    tags: [kubernetes, headless, dns]
+    question: |
+      Why does making a Kubernetes Service "headless" (clusterIP: None) help gRPC
+      client-side load balancing?
+    options:
+      - "It enables HTTP/3 for the Service"
+      - "It forces every pod to open its own connection to the client"
+      - "It disables kube-proxy for the whole namespace"
+      - "The Service DNS name then resolves to the individual pod IPs (multiple A records) instead of a single VIP, so round_robin can spread RPCs across pods"
+    answer: 3
+    explanation: |
+      A headless Service has no cluster VIP; its DNS name returns the individual pod IPs as
+      multiple A records. gRPC's dns:/// resolver returns all of them, so round_robin creates
+      a subchannel per pod and balances per-RPC.
+    ref: "concepts.md#kubernetes-headless-services-and-the-clusterip-gotcha"
+
+  - id: load-balancing-and-service-discovery-006
+    difficulty: intermediate
+    tags: [models, proxy, lookaside]
+    question: |
+      Which statement best distinguishes proxy LB from lookaside/xDS LB?
+    options:
+      - "Proxy LB requires the client to embed LB logic; lookaside does not resolve names"
+      - "Proxy LB balances in the data path (extra hop); lookaside centralises the policy but the client executes the per-RPC pick and talks to backends directly (no extra hop)"
+      - "Lookaside LB always adds a network hop; proxy LB never does"
+      - "They are the same thing with different names"
+    answer: 1
+    explanation: |
+      In proxy LB the balancer sits in the data path, so every RPC takes an extra hop. In
+      lookaside/xDS the control plane tells the client which backends exist and what policy to
+      use, but the client picks and connects directly, keeping the data path hop-free.
+    ref: "concepts.md#the-three-load-balancing-models"
+
+  - id: load-balancing-and-service-discovery-007
+    difficulty: beginner
+    tags: [proxy, thin-client]
+    question: |
+      What is the main trade-off of using an L7 proxy (e.g. Envoy) to load balance gRPC?
+    options:
+      - "The client must know every backend address"
+      - "It cannot do per-RPC routing"
+      - "It only works with unary RPCs, not streaming"
+      - "It keeps the client thin and centralises policy, but adds a network hop and a component you must scale and keep highly available"
+    answer: 3
+    explanation: |
+      A proxy makes the client trivial (one connection) and centralises balancing, retries,
+      and traffic-splitting. The costs are an extra hop (latency and another failure domain)
+      and the operational burden of scaling/HA for the proxy tier.
+    ref: "concepts.md#proxy-load-balancing-l7"
+
+  - id: load-balancing-and-service-discovery-008
+    difficulty: intermediate
+    tags: [resolver, dns, targets]
+    question: |
+      In a gRPC target like dns:///my-svc.ns.svc.cluster.local:50051, what does the
+      dns resolver return to the LB policy?
+    options:
+      - "All A/AAAA records for the name (plus an optional service config), as separate addresses"
+      - "A single randomly chosen A record"
+      - "Only the SRV record priorities"
+      - "The IP of the nearest DNS server"
+    answer: 0
+    explanation: |
+      The dns resolver queries DNS and hands the LB policy all A/AAAA records as distinct
+      addresses (and can read a service config from a TXT record). Returning all addresses is
+      what lets round_robin balance across them.
+    ref: "concepts.md#name-resolution-and-resolvers"
+
+  - id: load-balancing-and-service-discovery-009
+    difficulty: advanced
+    tags: [xds, cncf, direction]
+    question: |
+      When a gRPC client uses an xds:/// target, how does it learn its backends and policy?
+    options:
+      - "It becomes an xDS client and streams LDS/RDS/CDS/EDS config from a control plane, which pushes endpoint lists, routes and LB policy"
+      - "It broadcasts UDP discovery packets on the local subnet"
+      - "It reads a static config file baked into the image"
+      - "It queries each backend directly for its neighbors"
+    answer: 0
+    explanation: |
+      With xds:/// the client speaks the xDS APIs to a control plane: EDS supplies endpoints
+      (with weights/locality), CDS the cluster + LB policy, RDS routing, LDS the listener.
+      Because it is the same API Envoy uses, one control plane can drive both proxies and
+      proxyless gRPC clients.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-010
+    difficulty: intermediate
+    tags: [pick-first, when-to-use]
+    question: |
+      In which situation is pick_first the correct choice even though it sends all RPCs to
+      one backend?
+    options:
+      - "When you want the client itself to spread load across many pods"
+      - "When something else already balances — e.g. an L7 proxy/VIP or a mesh sidecar in front of the client"
+      - "When there is exactly one backend that must never be balanced"
+      - "When using bidirectional streaming exclusively"
+    answer: 1
+    explanation: |
+      pick_first is right when balancing already happens elsewhere: the client just needs one
+      connection to a proxy/VIP/mesh that redistributes per-RPC. That is exactly why it is the
+      safe default — it never accidentally fans out to a VIP's members.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-011
+    difficulty: advanced
+    tags: [service-config, config, api]
+    question: |
+      What is the current, recommended way to select round_robin on a gRPC channel?
+    options:
+      - "Use the round_robin:// target scheme"
+      - "Call the deprecated grpc.WithBalancerName(\"round_robin\")"
+      - "Set an environment variable GRPC_LB=round_robin"
+      - "Provide service config with loadBalancingConfig: [{round_robin: {}}], via default service config or the resolver"
+    answer: 3
+    explanation: |
+      The LB policy is configured through service config (loadBalancingConfig), delivered as
+      the channel's default service config or by the resolver (DNS TXT/xDS). The old
+      WithBalancerName API and the round_robin:// scheme are deprecated/removed.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-012
+    difficulty: intermediate
+    tags: [subchannel, connectivity-state]
+    question: |
+      A gRPC LB policy's picker will route an RPC to a subchannel only when that subchannel
+      is in which connectivity state?
+    options:
+      - "IDLE"
+      - "CONNECTING"
+      - "READY"
+      - "TRANSIENT_FAILURE"
+    answer: 2
+    explanation: |
+      Subchannels move IDLE -> CONNECTING -> READY -> TRANSIENT_FAILURE. Only READY
+      subchannels have a usable connection, so the picker routes RPCs only to them; on failure
+      the policy stops picking that subchannel and reconnects with backoff.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-013
+    difficulty: advanced
+    tags: [keepalive, gRFC-a8, enhance-your-calm]
+    question: |
+      A client sets aggressive keepalive (Time: 2s, PermitWithoutStream: true) and starts
+      getting disconnected. What is the most likely cause?
+    options:
+      - "The client exhausted its HTTP/2 stream IDs"
+      - "The server enforces a minimum ping interval and sent GOAWAY with ENHANCE_YOUR_CALM (too_many_pings)"
+      - "TLS session tickets expired"
+      - "The deadline propagated to zero"
+    answer: 1
+    explanation: |
+      Servers enforce a minimum keepalive ping interval; clients that ping too often (or ping
+      with no active streams when the server forbids it) get GOAWAY + ENHANCE_YOUR_CALM
+      (too_many_pings). Keep client keepalive at or above the server's enforced minimum.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-014
+    difficulty: advanced
+    tags: [goaway, draining, deploy]
+    question: |
+      How does a gRPC server drain connections during a rolling deploy without dropping
+      in-flight RPCs?
+    options:
+      - "It sends RST_STREAM on every open stream immediately"
+      - "It sets grpc-status: UNAVAILABLE in the initial headers"
+      - "It closes the TCP socket with no notice and relies on client retries"
+      - "It sends an HTTP/2 GOAWAY; clients finish in-flight RPCs on that connection, then reconnect and re-resolve to other backends"
+    answer: 3
+    explanation: |
+      Graceful shutdown uses HTTP/2 GOAWAY: it tells clients no new streams will be accepted
+      but lets existing RPCs complete. Clients then open a fresh connection (re-resolving),
+      which drains the old backend cleanly.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-015
+    difficulty: advanced
+    tags: [weighted, least-request, policies]
+    question: |
+      Backends in a fleet have heterogeneous per-request cost and you want to avoid hot
+      spots better than plain round_robin. Which policy is the best fit?
+    options:
+      - "pick_first"
+      - "ring_hash keyed on a random value"
+      - "dns_failover"
+      - "least_request (e.g. power-of-two-choices, pick the ready backend with fewest outstanding RPCs)"
+    answer: 3
+    explanation: |
+      least_request routes to the ready backend with the fewest outstanding RPCs (often via
+      power-of-two-choices), which smooths uneven request costs better than blind rotation.
+      round_robin assumes homogeneous cost.
+    ref: "concepts.md#weighted-and-least-request-policies"
+
+  - id: load-balancing-and-service-discovery-016
+    difficulty: advanced
+    tags: [orca, weighted, load-aware]
+    question: |
+      What role does ORCA (Open Request Cost Aggregation) play in gRPC load balancing?
+    options:
+      - "It lets backends report their real load (CPU, queue depth, custom metrics) to clients so weighted policies can bias away from overloaded backends"
+      - "It encrypts the load-balancing side channel"
+      - "It is the DNS resolver used by xDS"
+      - "It compresses Protocol Buffers payloads"
+    answer: 0
+    explanation: |
+      ORCA is a mechanism for backends to report load metrics back to clients (per-request
+      and out-of-band). weighted_round_robin uses those signals to shift traffic away from hot
+      pods, turning blind rotation into load-aware balancing.
+    ref: "concepts.md#weighted-and-least-request-policies"
+
+  - id: load-balancing-and-service-discovery-017
+    difficulty: intermediate
+    tags: [xds, eds, locality]
+    question: |
+      In xDS, which resource type carries the actual endpoint addresses along with their
+      weights and locality (region/zone) information?
+    options:
+      - "LDS (Listener)"
+      - "RDS (Route)"
+      - "CDS (Cluster)"
+      - "EDS (Endpoint)"
+    answer: 3
+    explanation: |
+      EDS (Endpoint Discovery Service) supplies the endpoint addresses with per-endpoint
+      weights and locality, enabling locality-aware balancing and priority failover. CDS
+      defines the cluster and its LB policy; RDS routing; LDS the listener.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-018
+    difficulty: intermediate
+    tags: [lookaside, grpc-lb, xds]
+    question: |
+      What is gRPC-LB, and how does it relate to xDS?
+    options:
+      - "gRPC-LB is an L7 proxy; xDS is a client-side policy"
+      - "They are competing DNS resolvers"
+      - "gRPC-LB is the legacy lookaside protocol (a side channel streaming backend lists); xDS is its richer, Envoy-compatible successor and the modern direction"
+      - "gRPC-LB is for streaming RPCs, xDS for unary"
+    answer: 2
+    explanation: |
+      gRPC-LB was the original lookaside design: the client opens a side channel to an external
+      balancer that streams backend addresses. xDS superseded it with a richer, Envoy-compatible
+      API (LDS/RDS/CDS/EDS) that also enables proxyless service mesh.
+    ref: "concepts.md#lookaside-and-external-load-balancing-grpc-lb-xds"
+
+  - id: load-balancing-and-service-discovery-019
+    difficulty: intermediate
+    tags: [proxyless-mesh, xds, envoy]
+    question: |
+      Why can a single control plane (e.g. Istio/Traffic Director) drive both Envoy sidecars
+      and proxyless gRPC clients?
+    options:
+      - "gRPC clients and Envoy both consume the same xDS API surface, so one control plane's config applies to both"
+      - "Both parse the same YAML file from disk"
+      - "gRPC embeds a full Envoy binary"
+      - "They share a Unix socket"
+    answer: 0
+    explanation: |
+      gRPC implemented the xDS APIs that Envoy uses. Because the config protocol is identical,
+      one control plane can configure sidecar proxies and proxyless gRPC clients alike, which is
+      the basis of proxyless service mesh.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-020
+    difficulty: intermediate
+    tags: [dns, staleness, re-resolution]
+    question: |
+      A team relies solely on gRPC's dns:/// resolver against a headless Service with rapid
+      pod churn, and clients keep sending RPCs to pods that no longer exist. Why?
+    options:
+      - "DNS TTLs are ignored entirely by all gRPC libraries"
+      - "gRPC's DNS resolver re-resolves infrequently and mainly re-resolves on connection breaks or LB requests, so fast churn is not picked up promptly"
+      - "Headless Services never update their DNS records"
+      - "round_robin caches the first address forever"
+    answer: 1
+    explanation: |
+      gRPC's DNS resolver re-resolves on a minimum interval and primarily when a connection
+      breaks or the LB policy requests it — not continuously. With rapid churn, stale endpoints
+      linger. Dynamic fleets should use xDS/mesh or a custom watching resolver.
+    ref: "concepts.md#name-resolution-and-resolvers"
+
+  - id: load-balancing-and-service-discovery-021
+    difficulty: beginner
+    tags: [targets, uri, schemes]
+    question: |
+      A gRPC target string is a URI of the form scheme://authority/endpoint. Which of these
+      is a valid built-in resolver scheme?
+    options:
+      - "http"
+      - "dns"
+      - "grpc"
+      - "amqp"
+    answer: 1
+    explanation: |
+      Built-in schemes include dns, ipv4, ipv6, unix, and xds. dns:/// triggers a DNS lookup
+      returning all records; ipv4/ipv6 take literal address lists; unix a socket path; xds the
+      control-plane resolver. Custom schemes can be registered too.
+    ref: "concepts.md#name-resolution-and-resolvers"
+
+  - id: load-balancing-and-service-discovery-022
+    difficulty: advanced
+    tags: [polyglot, model-selection, judgment]
+    question: |
+      For a large, polyglot fleet (services in Go, Java, Python) that needs centralised
+      traffic control without an extra proxy hop, which LB model fits best?
+    options:
+      - "Pure client-side LB where each language embeds identical LB logic"
+      - "A single shared L4 NLB"
+      - "Lookaside/xDS: one control plane pushes endpoints and policy to clients in every language, and the data path stays direct"
+      - "Static IP lists baked into each service"
+    answer: 2
+    explanation: |
+      xDS/lookaside centralises policy in one control plane that all languages consume via the
+      same API, avoiding both a proxy hop and the burden of keeping bespoke LB logic in sync
+      across languages/versions. Pure client-side LB forces every stack to reimplement matching
+      logic.
+    ref: "concepts.md#the-three-load-balancing-models"
+
+  - id: load-balancing-and-service-discovery-023
+    difficulty: intermediate
+    tags: [subchannel, model]
+    question: |
+      In gRPC's channel model, what does a single subchannel correspond to?
+    options:
+      - "One RPC in flight"
+      - "One connection to one backend address"
+      - "One HTTP/2 stream"
+      - "One TLS certificate"
+    answer: 1
+    explanation: |
+      A subchannel owns a single connection to one backend address and tracks its connectivity
+      state. The LB policy creates one subchannel per resolved backend and, per RPC, its picker
+      chooses among the READY subchannels. Individual RPCs are HTTP/2 streams multiplexed over a
+      subchannel's connection.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-024
+    difficulty: advanced
+    tags: [ring-hash, affinity, policies]
+    question: |
+      You need session/cache affinity so requests with the same key consistently hit the
+      same backend, tolerating backend set changes gracefully. Which policy fits?
+    options:
+      - "round_robin"
+      - "ring_hash / consistent hashing on the request key"
+      - "least_request"
+      - "pick_first"
+    answer: 1
+    explanation: |
+      ring_hash (consistent hashing) maps a request key to a backend on a hash ring, giving
+      affinity while minimizing remapping when backends are added/removed. round_robin and
+      least_request spread requests without affinity.
+    ref: "concepts.md#weighted-and-least-request-policies"
+
+  - id: load-balancing-and-service-discovery-025
+    difficulty: beginner
+    tags: [nlb, l4, judgment]
+    question: |
+      An engineer proposes putting a gRPC service directly behind an AWS Network Load
+      Balancer (L4). What is the correct concern to raise?
+    options:
+      - "It is connection-level, so a client's single long-lived HTTP/2 connection pins all its RPCs to one backend; use an L7 balancer, client-side LB, or xDS"
+      - "NLBs cannot forward TLS traffic"
+      - "gRPC requires UDP, which NLBs drop"
+      - "NLBs strip the grpc-status trailer"
+    answer: 0
+    explanation: |
+      An NLB balances connections, and gRPC multiplexes all RPCs on one long-lived connection,
+      so per-RPC balancing does not happen. Use an L7 solution (ALB with HTTP/2, Envoy),
+      client-side round_robin to real backends, or xDS.
+    ref: "concepts.md#common-interview-follow-ups"
+
+  - id: load-balancing-and-service-discovery-026
+    difficulty: intermediate
+    tags: [re-resolution, discovery]
+    question: |
+      How does a client-side-balanced gRPC channel typically discover that a new backend has
+      appeared and start sending it traffic?
+    options:
+      - "It polls each existing backend for its peers"
+      - "The new backend pushes a gratuitous ARP to the client"
+      - "The resolver re-resolves (on connection failure / LB request; DNS also on its min-interval) and gives the updated address list to the LB policy, which creates a new subchannel"
+      - "It never does until the process restarts"
+    answer: 2
+    explanation: |
+      Discovery flows resolver -> LB policy. When the resolver re-resolves (triggered by a
+      connection break or LB request; DNS also honours a min re-resolution interval) it passes
+      the new address list to the policy, which spins up a subchannel for the new backend.
+      xDS/mesh instead push updates proactively.
+    ref: "concepts.md#name-resolution-and-resolvers"
+
+  - id: load-balancing-and-service-discovery-027
+    difficulty: intermediate
+    tags: [resolver, service-config]
+    question: |
+      Besides a list of addresses, what else can a gRPC resolver return to the channel?
+    options:
+      - "The backend's source code"
+      - "The client's own public IP"
+      - "A service config (e.g. LB policy, method configs) — for example via a DNS TXT record"
+      - "A TLS private key"
+    answer: 2
+    explanation: |
+      A resolver returns addresses and optionally a service config, which can carry the
+      loadBalancingConfig, method timeouts, retry policy, etc. The dns resolver can read this
+      config from a TXT record; xDS delivers config from the control plane.
+    ref: "concepts.md#name-resolution-and-resolvers"
+
+  - id: load-balancing-and-service-discovery-028
+    difficulty: advanced
+    tags: [transient-failure, backoff]
+    question: |
+      When a subchannel's connection drops into TRANSIENT_FAILURE, what does the channel do?
+    options:
+      - "Immediately routes RPCs to it anyway"
+      - "Stops picking that subchannel, retries connecting with exponential backoff, and re-resolves the name"
+      - "Shuts down the entire channel"
+      - "Converts all RPCs to pick_first"
+    answer: 1
+    explanation: |
+      The picker excludes non-READY subchannels, so a TRANSIENT_FAILURE subchannel gets no RPCs.
+      The channel reconnects with exponential backoff and re-resolves the target so it can pick
+      up replacement backends.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-029
+    difficulty: intermediate
+    tags: [mesh, sidecar, proxy]
+    question: |
+      How does a service mesh (Istio/Linkerd) load balance gRPC even when services sit behind
+      a normal ClusterIP?
+    options:
+      - "It rewrites DNS so ClusterIP becomes headless"
+      - "It disables HTTP/2 multiplexing"
+      - "A per-pod sidecar proxy (e.g. Envoy) intercepts traffic and does per-RPC L7 balancing, so the L4 ClusterIP pinning no longer matters"
+      - "It converts gRPC to REST"
+    answer: 2
+    explanation: |
+      A mesh injects an L7 sidecar proxy next to each workload. The sidecar terminates and
+      re-balances each RPC, so even with an L4 ClusterIP in front, per-RPC balancing happens at
+      the sidecar. This is proxy LB pushed to the pod edge, usually driven by an xDS control
+      plane.
+    ref: "concepts.md#proxy-load-balancing-l7"
+
+  - id: load-balancing-and-service-discovery-030
+    difficulty: beginner
+    tags: [client-side, fat-client]
+    question: |
+      What is a defining requirement of pure client-side load balancing?
+    options:
+      - "A dedicated proxy tier in front of every service"
+      - "The service must expose a REST endpoint"
+      - "The client must be able to see the full set of backend addresses and embed the LB logic"
+      - "All RPCs must be unary"
+    answer: 2
+    explanation: |
+      Client-side LB makes the client "fat": it needs the complete backend list from the
+      resolver and must implement the LB policy itself. That is the main downside versus proxy
+      or lookaside models, especially across many languages.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-031
+    difficulty: advanced
+    tags: [xds, canary, routing]
+    question: |
+      Which xDS resource carries routing rules such as matching on path/headers and splitting
+      traffic between clusters for a canary?
+    options:
+      - "RDS (Route)"
+      - "EDS (Endpoint)"
+      - "CDS (Cluster)"
+      - "SDS (Secret)"
+    answer: 0
+    explanation: |
+      RDS (Route Discovery Service) carries route matching and traffic-splitting rules
+      (weighted clusters for canary/A-B, per-route timeouts/retries). CDS defines clusters and
+      their LB policy; EDS the endpoints.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-032
+    difficulty: intermediate
+    tags: [keepalive, permit-without-stream]
+    question: |
+      What does the client keepalive option PermitWithoutStream: true do, and why is it risky?
+    options:
+      - "It disables TLS; it is risky because traffic is unencrypted"
+      - "It sends keepalive PINGs even when no RPCs are active; risky because, combined with a short interval, it can trip the server's min-ping enforcement (GOAWAY too_many_pings)"
+      - "It permits unauthenticated RPCs"
+      - "It allows unlimited concurrent streams; risky due to memory use"
+    answer: 1
+    explanation: |
+      PermitWithoutStream lets the client PING on idle connections (no active streams). If the
+      server forbids that or the interval is below its enforced minimum, the server responds
+      with GOAWAY + ENHANCE_YOUR_CALM. Tune client keepalive to respect the server minimum.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-033
+    difficulty: intermediate
+    tags: [models, data-path]
+    question: |
+      Which LB model keeps the data path direct (no extra network hop) AND centralises policy
+      in a control plane?
+    options:
+      - "Client-side LB"
+      - "Lookaside / xDS LB"
+      - "Proxy LB"
+      - "L4 connection balancing"
+    answer: 1
+    explanation: |
+      Lookaside/xDS is the best-of-both: the control plane centralises endpoint discovery and
+      policy, but the client still executes the per-RPC pick and connects to backends directly,
+      so there is no proxy hop. Proxy LB centralises policy but adds a hop; pure client-side LB
+      avoids the hop but decentralises policy.
+    ref: "concepts.md#the-three-load-balancing-models"
+
+  - id: load-balancing-and-service-discovery-034
+    difficulty: advanced
+    tags: [xds-caveats, judgment]
+    question: |
+      What is a realistic caveat to promise carefully about xDS-based gRPC load balancing?
+    options:
+      - "xDS feature coverage varies across gRPC languages/versions, so a feature available in one language may not be implemented in another"
+      - "xDS only works over plaintext"
+      - "xDS cannot do weighted balancing"
+      - "xDS requires rewriting services in Go"
+    answer: 0
+    explanation: |
+      xDS support in gRPC has been rolled out incrementally per language (see the A2x gRFCs), so
+      feature parity differs across languages and versions. Verify a specific feature is
+      implemented in your gRPC stack before committing to it. You also must operate a control
+      plane.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-035
+    difficulty: beginner
+    tags: [headless, config]
+    question: |
+      In a Kubernetes Service spec, which field makes the Service headless so its DNS returns
+      individual pod IPs?
+    options:
+      - "clusterIP: None"
+      - "type: LoadBalancer"
+      - "sessionAffinity: ClientIP"
+      - "externalTrafficPolicy: Local"
+    answer: 0
+    explanation: |
+      Setting clusterIP: None makes the Service headless: it has no virtual IP, and its DNS name
+      resolves to the individual ready pod IPs as multiple A records — exactly what gRPC's dns
+      resolver + round_robin need.
+    ref: "concepts.md#kubernetes-headless-services-and-the-clusterip-gotcha"
+
+  - id: load-balancing-and-service-discovery-036
+    difficulty: intermediate
+    tags: [long-lived-connection, why-hard]
+    question: |
+      Beyond multiplexing, what second property of gRPC connections makes L4 balancing
+      ineffective for it?
+    options:
+      - "Connections are opened fresh for every RPC"
+      - "Connections are UDP-based and stateless"
+      - "Connections are long-lived and reused for the life of the channel, so backends that appear later get no traffic until a reconnect"
+      - "Connections rotate IP addresses every second"
+    answer: 2
+    explanation: |
+      gRPC connections are sticky and reused for the channel's lifetime. Combined with
+      multiplexing, this means an L4-balanced connection never rebalances: new backends get no
+      traffic until the client reconnects/re-resolves.
+    ref: "concepts.md#why-load-balancing-grpc-is-hard"
+
+  - id: load-balancing-and-service-discovery-037
+    difficulty: advanced
+    tags: [comparison, rest-vs-grpc, cross-ref]
+    question: |
+      Why does a plain L4 balancer often "just work" for REST/HTTP-1.1 but not for gRPC?
+    options:
+      - "HTTP/1.1 clients typically use one connection per request (or a pool), so each connection is a fresh L4 balancing decision, whereas gRPC pins many RPCs to one long-lived HTTP/2 connection"
+      - "REST uses UDP and gRPC uses TCP"
+      - "REST payloads are smaller"
+      - "L4 balancers parse JSON but not Protocol Buffers"
+    answer: 0
+    explanation: |
+      Classic HTTP/1.1 usage opens/pools connections per request, so an L4 balancer naturally
+      spreads requests across backends. gRPC over HTTP/2 multiplexes many RPCs on a single
+      long-lived connection, so the L4 decision is made once and pins everything. (REST/HTTP API
+      design is owned by rest-api-design.)
+    ref: "concepts.md#why-load-balancing-grpc-is-hard"
+
+  - id: load-balancing-and-service-discovery-038
+    difficulty: intermediate
+    tags: [ipv4-scheme, resolver]
+    question: |
+      Which target scheme lets you pass a literal, comma-separated list of backend addresses
+      with no DNS lookup?
+    options:
+      - "dns:///"
+      - "xds:///"
+      - "ipv4: (and ipv6:)"
+      - "unix:"
+    answer: 2
+    explanation: |
+      ipv4: and ipv6: take literal comma-separated addresses and skip name resolution entirely —
+      handy for tests or static fleets. dns:/// does a lookup, xds:/// uses the control plane,
+      and unix: addresses a Unix-domain socket.
+    ref: "concepts.md#name-resolution-and-resolvers"
+
+  - id: load-balancing-and-service-discovery-039
+    difficulty: advanced
+    tags: [locality, priority, eds]
+    question: |
+      What capability do EDS endpoint weights and locality metadata enable in xDS-based gRPC
+      balancing?
+    options:
+      - "Automatic TLS certificate rotation"
+      - "Protocol Buffers schema validation"
+      - "Locality-aware balancing and priority failover (prefer same-zone endpoints, fail over to other localities)"
+      - "Compression negotiation"
+    answer: 2
+    explanation: |
+      EDS conveys per-endpoint weights and locality (region/zone). The client can prefer
+      same-locality endpoints to cut cross-zone latency/cost and fail over to other localities by
+      priority when the local ones are unhealthy.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-040
+    difficulty: intermediate
+    tags: [pick-first, round-robin, connections]
+    question: |
+      How many backend connections does round_robin open compared to pick_first, given a
+      resolver that returns N backends?
+    options:
+      - "round_robin opens one per ready backend (up to N); pick_first opens just one (to the first that connects)"
+      - "Both open one connection"
+      - "Both open N connections"
+      - "round_robin opens none; it reuses pick_first's connection"
+    answer: 0
+    explanation: |
+      round_robin connects to all resolved backends (a subchannel each) and rotates RPCs over
+      the READY ones; pick_first connects to a single backend (the first that succeeds) and sends
+      everything there.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-041
+    difficulty: advanced
+    tags: [scenario, mesh-vs-headless, judgment]
+    question: |
+      A team runs gRPC in Kubernetes and wants per-RPC balancing plus centralised canary and
+      retry policy, without rewriting client LB logic per language. Which approach is most
+      appropriate?
+    options:
+      - "A service mesh / xDS control plane (sidecar or proxyless) that pushes routing, retry and traffic-split policy to all clients"
+      - "Headless Service + client-side round_robin only"
+      - "A single ClusterIP with sessionAffinity: ClientIP"
+      - "Round-robin DNS with a 1-second TTL"
+    answer: 0
+    explanation: |
+      Headless + client-side round_robin gives balancing but not centralised canary/retry policy
+      across languages. A mesh/xDS control plane provides per-RPC L7 balancing plus centrally
+      managed routing, traffic-splitting and retries pushed to every client regardless of
+      language.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-042
+    difficulty: intermediate
+    tags: [picker, per-rpc]
+    question: |
+      In gRPC's LB architecture, what component decides which subchannel a given RPC is sent
+      on?
+    options:
+      - "The LB policy's picker, invoked per RPC"
+      - "The resolver"
+      - "The HTTP/2 flow-control window"
+      - "The DNS server"
+    answer: 0
+    explanation: |
+      The LB policy produces a picker; for each RPC the channel calls the picker to select a
+      READY subchannel. The resolver only supplies addresses/config; the picker makes the actual
+      per-RPC routing decision.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-043
+    difficulty: beginner
+    tags: [proxy, extra-hop]
+    question: |
+      What does "extra hop" mean as a downside of proxy load balancing?
+    options:
+      - "The client must resolve DNS twice"
+      - "The proxy duplicates each RPC to two backends"
+      - "The client opens two TLS sessions per RPC"
+      - "Every RPC traverses the proxy before reaching the backend, adding latency and another failure/scaling domain"
+    answer: 3
+    explanation: |
+      With proxy LB the traffic path is client -> proxy -> backend, so each RPC crosses the proxy
+      (extra latency) and the proxy tier itself must be scaled and kept highly available. Client-
+      side and lookaside/xDS keep the data path direct.
+    ref: "concepts.md#proxy-load-balancing-l7"
+
+  - id: load-balancing-and-service-discovery-044
+    difficulty: advanced
+    tags: [scenario, deprecated-api, precision]
+    question: |
+      In a code review, a colleague configures balancing with the round_robin:// scheme and
+      grpc.WithBalancerName. What is the correct feedback?
+    options:
+      - "Looks good, that is the current API"
+      - "Those are deprecated/removed; configure the LB policy via service config (loadBalancingConfig) and resolve to real backend addresses"
+      - "round_robin:// is fine but WithBalancerName should be WithBalancer"
+      - "Switch to pick_first:// for balancing"
+    answer: 1
+    explanation: |
+      The round_robin:// scheme and WithBalancerName API are deprecated/removed. The current
+      approach is to set the LB policy through service config (loadBalancingConfig, e.g. via
+      default service config or the resolver) and ensure the target resolves to the real backend
+      IPs.
+    ref: "concepts.md#client-side-load-balancing-pick_first-vs-round_robin"
+
+  - id: load-balancing-and-service-discovery-045
+    difficulty: intermediate
+    tags: [cross-ref, theory-vs-mechanism]
+    question: |
+      Which of these is a gRPC-specific load-balancing mechanism rather than general LB theory
+      owned by reliability-ops/system-design?
+    options:
+      - "The mathematical properties of consistent hashing"
+      - "The power-of-two-choices algorithm in the abstract"
+      - "The general concept of health checking"
+      - "The channel's resolver + LB-policy + subchannel picker model that selects a backend per RPC"
+    answer: 3
+    explanation: |
+      The resolver/LB-policy/subchannel/picker architecture is gRPC framework mechanism. The
+      underlying algorithms (consistent hashing, P2C) and generic concepts (health checking, the
+      LB taxonomy) are theory owned by reliability-ops/system-design; this topic cross-references
+      them rather than re-teaching them.
+    ref: "concepts.md#the-three-load-balancing-models"
+
+  - id: load-balancing-and-service-discovery-046
+    difficulty: advanced
+    tags: [scenario, drain, goaway, in-flight]
+    question: |
+      During a deploy a backend receives SIGTERM and sends GOAWAY. A client has a long-running
+      server-streaming RPC in flight on that connection. What is the expected behavior?
+    options:
+      - "The stream is aborted immediately with UNAVAILABLE"
+      - "The client silently drops the stream with no error"
+      - "GOAWAY forces an immediate RST_STREAM on the active stream"
+      - "The in-flight stream is allowed to complete on the existing connection; the client opens a new connection (re-resolving) for subsequent RPCs"
+    answer: 3
+    explanation: |
+      GOAWAY signals no new streams will be accepted but permits in-flight streams to finish.
+      The long-running stream completes on the old connection while new RPCs go to a freshly
+      established/re-resolved connection, enabling graceful draining.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-047
+    difficulty: beginner
+    tags: [custom-resolver, discovery]
+    question: |
+      Your service registry is Consul, not DNS. How can gRPC discover backends from it?
+    options:
+      - "It cannot; gRPC only supports DNS"
+      - "Convert Consul to a ClusterIP"
+      - "Use pick_first, which auto-detects Consul"
+      - "Register a custom resolver for a scheme that watches Consul and pushes address updates to the channel"
+    answer: 3
+    explanation: |
+      gRPC's resolver API is pluggable: you register a custom resolver for a scheme (e.g.
+      consul:///) that watches the registry and pushes updated address lists (and service config)
+      to the channel, which the LB policy then balances over.
+    ref: "concepts.md#name-resolution-and-resolvers"
+
+  - id: load-balancing-and-service-discovery-048
+    difficulty: intermediate
+    tags: [weighted-round-robin, capacity]
+    question: |
+      Two backend pools have very different CPU capacity. Which policy naturally lets the
+      larger pool take proportionally more traffic?
+    options:
+      - "weighted_round_robin (rotating proportional to weights, often from backend-reported load)"
+      - "pick_first"
+      - "round_robin"
+      - "ring_hash"
+    answer: 0
+    explanation: |
+      weighted_round_robin distributes proportionally to endpoint weights, which can be static or
+      derived from backend-reported load (ORCA). Plain round_robin ignores capacity and treats
+      all backends equally.
+    ref: "concepts.md#weighted-and-least-request-policies"
+
+  - id: load-balancing-and-service-discovery-049
+    difficulty: advanced
+    tags: [scenario, headless-config, precision]
+    question: |
+      You configured a headless Service and set the channel's default service config to
+      round_robin, but traffic still hits only one pod. Which check is most relevant?
+    options:
+      - "Enable HTTP/3 on the client"
+      - "Increase the client's max message size"
+      - "Switch the service to type: LoadBalancer"
+      - "Verify the target uses dns:/// against the headless name (so DNS returns all pod IPs) and that pods are Ready so their IPs are published"
+    answer: 3
+    explanation: |
+      round_robin only balances over the addresses the resolver returns. If the target is not
+      dns:/// against the headless name, or pods are not Ready (so their IPs are absent from DNS),
+      the resolver yields one/zero usable addresses. Confirm the scheme, the headless name, and
+      pod readiness.
+    ref: "concepts.md#kubernetes-headless-services-and-the-clusterip-gotcha"
+
+  - id: load-balancing-and-service-discovery-050
+    difficulty: intermediate
+    tags: [three-models, summary]
+    question: |
+      Which mapping of model to "where the per-RPC decision is made" is correct?
+    options:
+      - "Client-side = in a proxy; Proxy = in the client; Lookaside = in DNS"
+      - "All three make the decision in the control plane"
+      - "Client-side = in the client's channel; Proxy = in an L7 proxy in the data path; Lookaside/xDS = in the client, but the backend set/policy is supplied by a control plane"
+      - "All three make the decision in the backend"
+    answer: 2
+    explanation: |
+      Client-side LB decides inside the channel; proxy LB decides in an in-path L7 proxy;
+      lookaside/xDS also decides in the client but gets its endpoints and policy from a control
+      plane. This distinction (where the decision runs vs where the policy is defined) is the
+      crux of the comparison.
+    ref: "concepts.md#the-three-load-balancing-models"
+
+  - id: load-balancing-and-service-discovery-051
+    difficulty: advanced
+    tags: [scenario, hot-client, fairness]
+    question: |
+      With pure client-side round_robin, one client generates far more traffic than others and
+      overloads whichever backends it rotates over, while low-traffic clients underuse theirs.
+      What is the underlying limitation?
+    options:
+      - "Each client balances independently over its own view; there is no global/server-side coordination of load across all clients, which load-aware policies (ORCA-driven weighted_round_robin) or a central control plane help address"
+      - "round_robin is broken and should never be used"
+      - "The backends are not Ready"
+      - "DNS TTL is too high"
+    answer: 0
+    explanation: |
+      Client-side LB is per-client: each client evenly spreads its own load but no component
+      coordinates aggregate load across all clients. Load-aware policies fed by backend reports
+      (ORCA/weighted_round_robin) or a central control plane (xDS) mitigate cross-client
+      imbalance.
+    ref: "concepts.md#weighted-and-least-request-policies"
+
+  - id: load-balancing-and-service-discovery-052
+    difficulty: beginner
+    tags: [definitions, lookaside]
+    question: |
+      In lookaside load balancing, where does the RPC data travel?
+    options:
+      - "Through the external balancer / control plane"
+      - "Directly from the client to the chosen backend; the control plane only supplies the backend list and policy out of band"
+      - "Through a DNS proxy"
+      - "Through the Kubernetes API server"
+    answer: 1
+    explanation: |
+      Lookaside separates control from data: the external balancer/control plane tells the client
+      which backends exist and how to balance, but the client sends RPCs directly to backends. The
+      control channel carries metadata, not the RPC payloads.
+    ref: "concepts.md#lookaside-and-external-load-balancing-grpc-lb-xds"
+
+  - id: load-balancing-and-service-discovery-053
+    difficulty: intermediate
+    tags: [cds, cluster, policy]
+    question: |
+      In xDS, which resource defines a logical group of backends together with the LB policy
+      (round_robin, ring_hash, etc.) to use for it?
+    options:
+      - "LDS (Listener)"
+      - "RDS (Route)"
+      - "CDS (Cluster)"
+      - "EDS (Endpoint)"
+    answer: 2
+    explanation: |
+      CDS (Cluster Discovery Service) defines the logical cluster and the LB policy applied to it,
+      plus features like circuit-breaking and outlier detection. EDS then supplies that cluster's
+      actual endpoints.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"
+
+  - id: load-balancing-and-service-discovery-054
+    difficulty: advanced
+    tags: [scenario, dead-connection, keepalive]
+    question: |
+      A network partition silently blackholes a subchannel's connection (no FIN/RST). Without
+      keepalive, what problem occurs for load balancing?
+    options:
+      - "Nothing; gRPC detects it instantly via TCP"
+      - "The channel immediately re-resolves DNS on its own"
+      - "The subchannel appears READY, so the picker keeps routing RPCs to a dead connection until they time out; keepalive PINGs detect the dead peer and tear the subchannel down so the picker stops choosing it"
+      - "All other subchannels also fail"
+    answer: 2
+    explanation: |
+      A blackholed connection can look READY, so the picker keeps sending RPCs into a black hole
+      until deadlines fire. Keepalive PINGs (gRFC A8) detect the unresponsive peer, tear down the
+      subchannel, and let the policy re-pick/re-resolve, restoring correct balancing.
+    ref: "concepts.md#subchannels-connectivity-state-and-keepalive"
+
+  - id: load-balancing-and-service-discovery-055
+    difficulty: intermediate
+    tags: [alb, l7, judgment]
+    question: |
+      Which fronting option can correctly do per-RPC gRPC balancing for a thin client?
+    options:
+      - "An L4 TCP passthrough load balancer"
+      - "Round-robin DNS alone with pick_first"
+      - "A NAT gateway"
+      - "An L7 proxy that speaks HTTP/2 end-to-end (e.g. Envoy, or an ALB configured for gRPC/HTTP2)"
+    answer: 3
+    explanation: |
+      Per-RPC balancing for a thin client requires an HTTP/2-aware L7 proxy that terminates and
+      re-routes each stream (Envoy, or an ALB with gRPC/HTTP2 support). L4 passthrough and plain
+      DNS+pick_first cannot make per-RPC decisions.
+    ref: "concepts.md#proxy-load-balancing-l7"
+
+  - id: load-balancing-and-service-discovery-056
+    difficulty: advanced
+    tags: [scenario, cross-zone, locality]
+    question: |
+      To cut cross-zone data-transfer cost and latency for gRPC in a multi-AZ deployment,
+      which capability should you look for?
+    options:
+      - "Larger HTTP/2 flow-control windows"
+      - "Disabling keepalive"
+      - "Switching all RPCs to unary"
+      - "Locality-aware balancing (e.g. via xDS EDS locality/priority) that prefers same-zone endpoints and fails over across zones only when needed"
+    answer: 3
+    explanation: |
+      Locality-aware balancing (exposed via xDS EDS locality weights and priorities) prefers
+      same-zone endpoints, reducing cross-AZ latency and transfer cost, while still failing over
+      to other zones when local endpoints are unhealthy.
+    ref: "concepts.md#xds-based-load-balancing-the-cncf-direction"

@@ -1,0 +1,787 @@
+topic: "gRPC on the Web & Gateways (gRPC-Web, grpc-gateway)"
+domain: grpc
+topic_slug: grpc-web-and-gateways
+version: 1
+questions:
+- id: grpc-web-and-gateways-001
+  difficulty: beginner
+  tags: [browser-limitation, trailers, fundamentals]
+  question: |
+    What is the single most fundamental reason a browser's fetch/XHR cannot speak
+    native gRPC?
+  options:
+  - "Browsers do not support HTTP/2 at all"
+  - "TLS handshakes are blocked by the browser sandbox"
+  - "JavaScript cannot read HTTP/2 trailers, where the grpc-status result lives"
+  - "Protocol Buffers cannot be parsed in JavaScript"
+  answer: 2
+  explanation: |
+    Every gRPC call's outcome (grpc-status/grpc-message) rides in HTTP/2 trailers.
+    The fetch/XHR APIs expose no way to read trailing HEADERS, so a browser could
+    never observe an RPC's result. Browsers DO use HTTP/2; they just don't expose
+    framing or trailers to JS.
+  ref: "concepts.md#why-browsers-cannot-speak-native-grpc"
+- id: grpc-web-and-gateways-002
+  difficulty: beginner
+  tags: [grpc-web, definition]
+  question: |
+    What is gRPC-Web?
+  options:
+  - "A modified gRPC wire protocol (translatable by a proxy) that browsers can express"
+  - "A browser plugin that adds native HTTP/2 trailer support"
+  - "A WebSocket-based replacement for gRPC"
+  - "A JSON-only API style unrelated to protobuf"
+  answer: 0
+  explanation: |
+    gRPC-Web is a spec-defined variant of the gRPC wire protocol designed so a browser
+    can emit it and a proxy can translate it to/from native gRPC. It keeps protobuf and
+    the length-prefixed framing but changes transport and trailer delivery.
+  ref: "concepts.md#the-grpc-web-protocol"
+- id: grpc-web-and-gateways-003
+  difficulty: intermediate
+  tags: [grpc-web, trailers, wire-format]
+  question: |
+    How does gRPC-Web deliver the final status (grpc-status/grpc-message) to the browser?
+  options:
+  - "In HTTP/2 trailers, exactly like native gRPC"
+  - "In a Set-Cookie header on the response"
+  - "In the HTTP status line only"
+  - "As a trailer frame encoded in the response body, marked by flag bit 0x80"
+  answer: 3
+  explanation: |
+    Because browsers can't read HTTP/2 trailers, gRPC-Web reuses the length-prefixed
+    framing but sets the frame's flag byte MSB (0x80) to mark a trailers frame whose
+    payload is HTTP/1.1-style trailer text (grpc-status: 0, grpc-message: ...). The
+    browser reads the body to the end and parses it there.
+  ref: "concepts.md#the-grpc-web-protocol"
+- id: grpc-web-and-gateways-004
+  difficulty: intermediate
+  tags: [grpc-web, streaming, limits]
+  question: |
+    Which RPC types does the gRPC-Web protocol support?
+  options:
+  - "All four (unary, server-streaming, client-streaming, bidi)"
+  - "Unary and server-streaming only"
+  - "Unary only"
+  - "Client-streaming and bidi only"
+  answer: 1
+  explanation: |
+    gRPC-Web supports unary and server-streaming. Client-streaming and bidirectional
+    streaming require full-duplex request-body streaming, which browsers cannot reliably
+    do, so the spec excludes them.
+  ref: "concepts.md#streaming-support-and-limits-in-grpc-web"
+- id: grpc-web-and-gateways-005
+  difficulty: intermediate
+  tags: [grpc-web, streaming, why]
+  question: |
+    Why does gRPC-Web exclude client-streaming and bidirectional RPCs?
+  options:
+  - "Protobuf cannot encode more than one message per stream"
+  - "HTTP/1.1 forbids POST bodies"
+  - "Browsers cannot reliably stream a request body full-duplex over time"
+  - "The grpc-status trailer can only be sent once"
+  answer: 2
+  explanation: |
+    Client-streaming and bidi need the client to send many messages over time — i.e.
+    stream the request body. Browsers historically can't stream request bodies, and the
+    newer upload streaming is HTTP/2-only, half-duplex, and not broadly supported. So
+    these two call types are excluded.
+  ref: "concepts.md#streaming-support-and-limits-in-grpc-web"
+- id: grpc-web-and-gateways-006
+  difficulty: beginner
+  tags: [grpc-web, proxy, architecture]
+  question: |
+    Can a gRPC-Web browser client talk directly to a stock native gRPC server?
+  options:
+  - "No — a translating proxy must convert gRPC-Web to/from native gRPC"
+  - "Yes, they are wire-identical"
+  - "Yes, if TLS is enabled"
+  - "Only for server-streaming calls"
+  answer: 0
+  explanation: |
+    The native server expects application/grpc with real HTTP/2 trailers; the browser
+    sends application/grpc-web+proto with in-body trailers. A proxy (Envoy grpc_web
+    filter, grpcwebproxy, or in-process wrapper) translates between them.
+  ref: "concepts.md#the-grpc-web-proxy"
+- id: grpc-web-and-gateways-007
+  difficulty: intermediate
+  tags: [envoy, grpc-web, proxy]
+  question: |
+    Which Envoy HTTP filter translates gRPC-Web to native gRPC?
+  options:
+  - "envoy.filters.http.router"
+  - "envoy.filters.http.grpc_json_transcoder"
+  - "envoy.filters.http.cors"
+  - "envoy.filters.http.grpc_web"
+  answer: 3
+  explanation: |
+    The envoy.filters.http.grpc_web filter turns Envoy into a gRPC-Web translator. It's
+    commonly paired with the CORS filter. The grpc_json_transcoder is a different filter
+    for REST/JSON transcoding.
+  ref: "concepts.md#the-grpc-web-proxy"
+- id: grpc-web-and-gateways-008
+  difficulty: intermediate
+  tags: [grpc-web, encodings, base64]
+  question: |
+    What distinguishes the application/grpc-web-text+proto encoding from
+    application/grpc-web+proto?
+  options:
+  - "grpc-web-text uses XML instead of protobuf"
+  - "grpc-web-text base64-encodes the entire body for environments that mangle binary"
+  - "grpc-web-text supports client-streaming"
+  - "grpc-web-text requires HTTP/3"
+  answer: 1
+  explanation: |
+    The -text variant base64-encodes the whole body so it survives transports (old XHR,
+    some proxies) that mangle binary. It's larger/slower and often fully buffered, used
+    as a compatibility fallback. The non-text variant is raw binary framing.
+  ref: "concepts.md#the-grpc-web-protocol"
+- id: grpc-web-and-gateways-009
+  difficulty: advanced
+  tags: [grpc-web, wire-format, framing]
+  question: |
+    In gRPC-Web framing, what does the most-significant bit (0x80) of a frame's flag
+    byte indicate?
+  options:
+  - "The frame is a trailers frame rather than a message frame"
+  - "The frame is compressed"
+  - "The frame is the last DATA frame"
+  - "The payload is base64-encoded"
+  answer: 0
+  explanation: |
+    gRPC-Web reuses <flag><4-byte length><payload> framing. A normal message frame has
+    flag 0x00; setting the MSB (0x80) marks a trailers frame whose payload is the
+    HTTP/1.1-style trailer text carrying grpc-status/grpc-message.
+  ref: "concepts.md#the-grpc-web-protocol"
+- id: grpc-web-and-gateways-010
+  difficulty: intermediate
+  tags: [grpc-web, transport, http-versions]
+  question: |
+    Over which HTTP versions can gRPC-Web run?
+  options:
+  - "HTTP/2 only, like native gRPC"
+  - "HTTP/3 only"
+  - "HTTP/1.1 or HTTP/2"
+  - "HTTP/1.0 only"
+  answer: 2
+  explanation: |
+    A key point of gRPC-Web is that it can run over HTTP/1.1 or HTTP/2, unlike native
+    gRPC which mandates HTTP/2. This is possible because the status no longer depends on
+    HTTP/2 trailers — it's encoded in the body.
+  ref: "concepts.md#the-grpc-web-protocol"
+- id: grpc-web-and-gateways-011
+  difficulty: beginner
+  tags: [codegen, protoc, grpc-web]
+  question: |
+    Which protoc plugin generates the classic browser gRPC-Web client?
+  options:
+  - "protoc-gen-go-grpc"
+  - "protoc-gen-grpc-gateway"
+  - "protoc-gen-validate"
+  - "protoc-gen-grpc-web"
+  answer: 3
+  explanation: |
+    protoc-gen-grpc-web generates the browser client (JS/TS) from the same .proto files,
+    keeping the contract single-sourced. protoc-gen-go-grpc is for Go servers/clients and
+    protoc-gen-grpc-gateway is for REST transcoding.
+  ref: "concepts.md#the-grpc-web-client-and-codegen"
+- id: grpc-web-and-gateways-012
+  difficulty: intermediate
+  tags: [codegen, grpc-web, modes]
+  question: |
+    In protoc-gen-grpc-web, what does mode=grpcwebtext select versus mode=grpcweb?
+  options:
+  - "grpcwebtext emits Go code; grpcweb emits TypeScript"
+  - "grpcwebtext uses base64 grpc-web-text; grpcweb uses binary grpc-web+proto"
+  - "grpcwebtext enables bidi streaming; grpcweb disables it"
+  - "grpcwebtext targets HTTP/3; grpcweb targets HTTP/2"
+  answer: 1
+  explanation: |
+    mode=grpcwebtext produces a client using the base64 application/grpc-web-text+proto
+    encoding (works everywhere, reads server-streaming via XHR progress). mode=grpcweb
+    produces a binary application/grpc-web+proto client (smaller/faster, needs a binary
+    transport).
+  ref: "concepts.md#the-grpc-web-client-and-codegen"
+- id: grpc-web-and-gateways-013
+  difficulty: intermediate
+  tags: [grpc-web, url, architecture]
+  question: |
+    In a gRPC-Web browser deployment, what URL/endpoint should the generated client
+    target?
+  options:
+  - "The translating proxy (e.g. Envoy grpc_web endpoint)"
+  - "The raw gRPC backend's HTTP/2 port directly"
+  - "A GraphQL gateway"
+  - "The database connection string"
+  answer: 0
+  explanation: |
+    The browser client must point at the gRPC-Web proxy, not the native gRPC backend.
+    The proxy translates to real gRPC and forwards to the backend.
+  ref: "concepts.md#the-grpc-web-client-and-codegen"
+- id: grpc-web-and-gateways-014
+  difficulty: beginner
+  tags: [grpc-gateway, definition, rest]
+  question: |
+    What problem does grpc-gateway primarily solve?
+  options:
+  - "It lets browsers use gRPC types via a gRPC-Web proxy"
+  - "It replaces protobuf with JSON on the wire between services"
+  - "It exposes a gRPC service as a RESTful JSON/HTTP API for arbitrary HTTP clients"
+  - "It load-balances HTTP/2 connections at L4"
+  answer: 2
+  explanation: |
+    grpc-gateway generates a reverse proxy from google.api.http annotations that exposes
+    a gRPC service as a plain REST/JSON API, so curl/fetch/partners with no protobuf
+    tooling can call it — while native gRPC still works. It's transcoding, not gRPC-Web.
+  ref: "concepts.md#grpc-gateway-and-restjson-transcoding"
+- id: grpc-web-and-gateways-015
+  difficulty: intermediate
+  tags: [grpc-gateway, annotations, proto]
+  question: |
+    Which proto option does grpc-gateway read to map RPCs to HTTP routes?
+  options:
+  - "option (grpc.web.route)"
+  - "option (google.api.http)"
+  - "option (gateway.rest)"
+  - "option java_package"
+  answer: 1
+  explanation: |
+    google.api.http annotations (from google/api/annotations.proto) declare the HTTP verb,
+    path, and body mapping for each RPC. protoc-gen-grpc-gateway reads them to generate the
+    REST reverse proxy.
+  ref: "concepts.md#http-annotations-and-mapping-rules"
+- id: grpc-web-and-gateways-016
+  difficulty: advanced
+  tags: [grpc-gateway, body-mapping, annotations]
+  question: |
+    In a google.api.http annotation, what does `body: "*"` mean?
+  options:
+  - "The response has no body"
+  - "Only the field named star is mapped to the body"
+  - "The body is wildcard-matched from the URL path"
+  - "The entire request message is mapped to the JSON request body"
+  answer: 3
+  explanation: |
+    body: "*" maps the whole request message to the JSON body. body: "field" maps a single
+    sub-field, and omitting body (common for GET/DELETE) means remaining fields bind from
+    query parameters.
+  ref: "concepts.md#http-annotations-and-mapping-rules"
+- id: grpc-web-and-gateways-017
+  difficulty: advanced
+  tags: [grpc-gateway, path-params, annotations]
+  question: |
+    Given `option (google.api.http) = { get: "/v1/users/{user_id}" }`, where does
+    {user_id} bind?
+  options:
+  - "To the user_id field of the request message"
+  - "To an HTTP header named user_id"
+  - "To a query string parameter only"
+  - "To a randomly generated request id"
+  answer: 0
+  explanation: |
+    Path variables bind to fields of the request message (dotted paths like {user.id}
+    reach nested fields). By default a variable matches one URL segment.
+  ref: "concepts.md#http-annotations-and-mapping-rules"
+- id: grpc-web-and-gateways-018
+  difficulty: intermediate
+  tags: [grpc-gateway, status-mapping, rest]
+  question: |
+    When grpc-gateway transcodes, how does it convey a gRPC NOT_FOUND to a REST client?
+  options:
+  - "It always returns HTTP 200 with an error field"
+  - "It returns the numeric gRPC code 5 as the HTTP status"
+  - "It maps the gRPC status code to an HTTP status code (NOT_FOUND -> 404)"
+  - "It closes the TCP connection with no response"
+  answer: 2
+  explanation: |
+    The gateway maps gRPC status codes to HTTP status codes (e.g. NOT_FOUND->404,
+    INVALID_ARGUMENT->400, UNAUTHENTICATED->401, PERMISSION_DENIED->403, UNAVAILABLE->503)
+    since REST clients can't read gRPC trailers.
+  ref: "concepts.md#grpc-gateway-and-restjson-transcoding"
+- id: grpc-web-and-gateways-019
+  difficulty: intermediate
+  tags: [transcoding, envoy, alternative]
+  question: |
+    How can Envoy provide REST/JSON-to-gRPC transcoding without generated Go code?
+  options:
+  - "Via the envoy.filters.http.grpc_web filter"
+  - "It cannot; only grpc-gateway can transcode"
+  - "By rewriting protobuf to XML"
+  - "Via the envoy.filters.http.grpc_json_transcoder filter using a proto descriptor set"
+  answer: 3
+  explanation: |
+    Envoy's grpc_json_transcoder filter reads a compiled proto descriptor set and performs
+    JSON<->gRPC transcoding at the edge, an alternative to running grpc-gateway's generated
+    Go handler.
+  ref: "concepts.md#grpc-gateway-and-restjson-transcoding"
+- id: grpc-web-and-gateways-020
+  difficulty: advanced
+  tags: [proto3, json-mapping, gotcha]
+  question: |
+    A REST client of a transcoded gRPC API reports that fields set to 0 or empty string
+    are missing from the JSON response. Why?
+  options:
+  - "The gateway is broken and must be patched"
+  - "proto3 JSON mapping omits scalar fields that equal their default value by default"
+  - "int64 fields are dropped from JSON entirely"
+  - "The client is stripping them"
+  answer: 1
+  explanation: |
+    In proto3 JSON, scalar fields equal to their default (0, "", false) are omitted by
+    default. Use proto3 `optional` (explicit presence) or wrapper types
+    (google.protobuf.Int32Value) when a client must distinguish absent from zero.
+  ref: "concepts.md#http-annotations-and-mapping-rules"
+- id: grpc-web-and-gateways-021
+  difficulty: advanced
+  tags: [proto3, json-mapping, int64]
+  question: |
+    How are int64/uint64 fields represented in proto3 JSON (e.g. via transcoding)?
+  options:
+  - "As JSON strings, to avoid JavaScript's 53-bit precision loss"
+  - "As JSON numbers"
+  - "As base64-encoded bytes"
+  - "They are omitted from JSON"
+  answer: 0
+  explanation: |
+    proto3 JSON renders 64-bit integers as strings because JavaScript numbers are IEEE-754
+    doubles that lose precision beyond 2^53. This is a common surprise for REST clients of
+    transcoded APIs.
+  ref: "concepts.md#http-annotations-and-mapping-rules"
+- id: grpc-web-and-gateways-022
+  difficulty: beginner
+  tags: [connect, definition]
+  question: |
+    What is Connect (connectrpc)?
+  options:
+  - "A load balancer for gRPC"
+  - "A replacement for Protocol Buffers"
+  - "A browser extension for reading trailers"
+  - "A protobuf RPC framework that speaks gRPC, gRPC-Web, and its own HTTP/JSON protocol"
+  answer: 3
+  explanation: |
+    Connect is a newer framework whose servers simultaneously speak native gRPC, gRPC-Web,
+    and the Connect protocol (a simple browser-native HTTP protocol supporting JSON), so
+    browsers work without a separate proxy.
+  ref: "concepts.md#connect-connectrpc"
+- id: grpc-web-and-gateways-023
+  difficulty: intermediate
+  tags: [connect, proxy, advantage]
+  question: |
+    What is Connect's headline advantage over gRPC-Web for browser clients?
+  options:
+  - "It enables full bidirectional streaming in all browsers"
+  - "It eliminates the need for Protocol Buffers"
+  - "A Connect server needs no separate translating proxy to serve browsers"
+  - "It runs only over HTTP/3"
+  answer: 2
+  explanation: |
+    Because a Connect server natively answers gRPC-Web and the JSON-friendly Connect
+    protocol, browsers can call it directly — dropping the Envoy grpc_web hop. It does NOT
+    magically enable browser client/bidi streaming; the platform limits still apply.
+  ref: "concepts.md#connect-connectrpc"
+- id: grpc-web-and-gateways-024
+  difficulty: intermediate
+  tags: [connect, curl, protocol]
+  question: |
+    Why is a Connect-protocol unary call debuggable with curl?
+  options:
+  - "A unary call is an ordinary POST with content-type application/json (or proto), no special framing"
+  - "It uses length-prefixed binary framing that curl decodes automatically"
+  - "curl has a built-in gRPC trailer parser"
+  - "Connect exposes a GraphQL endpoint"
+  answer: 0
+  explanation: |
+    A Connect unary call is a plain HTTP POST whose body is JSON or proto with no gRPC-style
+    framing, so `curl -d '{...}'` works and responses/errors are readable in devtools.
+  ref: "concepts.md#connect-connectrpc"
+- id: grpc-web-and-gateways-025
+  difficulty: advanced
+  tags: [connect, streaming, limits]
+  question: |
+    Does adopting Connect let a browser do client-streaming RPCs?
+  options:
+  - "Yes, Connect removes all browser streaming limits"
+  - "No — the browser request-body streaming limitation still applies"
+  - "Only if the server runs HTTP/1.0"
+  - "Only for unary calls"
+  answer: 1
+  explanation: |
+    Connect's win is a unified, proxy-free stack with JSON/curl access, but it cannot
+    overcome the browser's inability to stream request bodies full-duplex. Client/bidi
+    streaming in the browser remains constrained by the platform.
+  ref: "concepts.md#connect-connectrpc"
+- id: grpc-web-and-gateways-026
+  difficulty: advanced
+  tags: [load-balancing, l4-vs-l7, gotcha]
+  question: |
+    Why does putting a plain L4 (connection) load balancer in front of gRPC backends
+    cause hot-spotting?
+  options:
+  - "gRPC uses UDP, which L4 can't split"
+  - "L4 LBs corrupt protobuf payloads"
+  - "gRPC disables keepalive by default"
+  - "gRPC pins long-lived multiplexed HTTP/2 connections, so the L4 LB never sees new connections to rebalance"
+  answer: 3
+  explanation: |
+    gRPC multiplexes many RPCs over a long-lived HTTP/2 connection. An L4 LB balances
+    connections, not requests, so once a connection is pinned to one backend all its
+    streams go there. You need an L7 (gRPC-aware) proxy like Envoy or client-side LB.
+  ref: "concepts.md#envoy-as-the-common-gateway"
+- id: grpc-web-and-gateways-027
+  difficulty: intermediate
+  tags: [load-balancing, envoy, l7]
+  question: |
+    What is the standard way to load-balance gRPC traffic through a gateway?
+  options:
+  - "A round-robin DNS record"
+  - "A plain TCP load balancer"
+  - "An L7 (request/stream-level) gRPC-aware proxy such as Envoy"
+  - "A CDN cache"
+  answer: 2
+  explanation: |
+    An L7 proxy like Envoy balances at the request/stream level, spreading multiplexed
+    gRPC calls across backends. The alternative is client-side/lookaside LB with a headless
+    service and resolver (cross-ref channels/subchannels).
+  ref: "concepts.md#envoy-as-the-common-gateway"
+- id: grpc-web-and-gateways-028
+  difficulty: beginner
+  tags: [envoy, gateway, roles]
+  question: |
+    Which of these is NOT a role Envoy commonly plays as a gRPC edge gateway?
+  options:
+  - "Compiling .proto files into server stubs"
+  - "gRPC-Web translation via the grpc_web filter"
+  - "REST/JSON transcoding via grpc_json_transcoder"
+  - "TLS termination and L7 load balancing"
+  answer: 0
+  explanation: |
+    Envoy translates gRPC-Web, transcodes JSON, terminates TLS/mTLS, and load-balances at
+    L7. It does not compile protobuf definitions — that's protoc/buf codegen at build time.
+  ref: "concepts.md#envoy-as-the-common-gateway"
+- id: grpc-web-and-gateways-029
+  difficulty: intermediate
+  tags: [decision, grpc-web-vs-gateway]
+  question: |
+    A team wants browser clients to use the exact gRPC service contract/types and already
+    runs Envoy at the edge. Which approach fits best?
+  options:
+  - "grpc-gateway REST transcoding"
+  - "A GraphQL gateway"
+  - "Plain WebSockets"
+  - "gRPC-Web with Envoy's grpc_web filter"
+  answer: 3
+  explanation: |
+    When you want the gRPC contract in the browser and already run Envoy, enabling the
+    grpc_web filter gives browser clients gRPC-Web nearly for free (accepting the
+    unary/server-streaming-only limit).
+  ref: "concepts.md#choosing-between-grpc-web-grpc-gateway-and-connect"
+- id: grpc-web-and-gateways-030
+  difficulty: intermediate
+  tags: [decision, rest-compat]
+  question: |
+    A public API must be consumable by arbitrary REST/JSON clients and partners with no
+    protobuf tooling, while services keep using gRPC internally. Best approach?
+  options:
+  - "gRPC-Web only"
+  - "grpc-gateway or Envoy grpc_json_transcoder (REST transcoding)"
+  - "Force all partners to adopt protobuf"
+  - "Expose the raw HTTP/2 gRPC port publicly"
+  answer: 1
+  explanation: |
+    REST/JSON transcoding (grpc-gateway or Envoy's grpc_json_transcoder) exposes the gRPC
+    service as a REST API from the same .proto, serving both gRPC internally and REST
+    externally. gRPC-Web still needs protobuf/gRPC-Web clients, so it doesn't fit arbitrary
+    REST partners.
+  ref: "concepts.md#choosing-between-grpc-web-grpc-gateway-and-connect"
+- id: grpc-web-and-gateways-031
+  difficulty: intermediate
+  tags: [decision, connect, greenfield]
+  question: |
+    For a greenfield stack that wants one server satisfying browsers (JSON + gRPC-Web) and
+    native gRPC clients with no separate proxy, which is the natural choice?
+  options:
+  - "grpc-gateway plus gRPC-Web plus a custom proxy"
+  - "Plain REST with no protobuf"
+  - "Connect (connectrpc)"
+  - "SOAP"
+  answer: 2
+  explanation: |
+    Connect collapses gRPC, gRPC-Web, and a curl-friendly JSON protocol into one runtime,
+    so a greenfield team gets browser + gRPC support without a translating proxy while
+    staying gRPC-wire compatible.
+  ref: "concepts.md#choosing-between-grpc-web-grpc-gateway-and-connect"
+- id: grpc-web-and-gateways-032
+  difficulty: beginner
+  tags: [decision, internal, native-grpc]
+  question: |
+    For purely internal service-to-service traffic, which is usually the right choice?
+  options:
+  - "Native gRPC over HTTP/2 (with an L7 LB), no web gateway"
+  - "gRPC-Web through a proxy"
+  - "REST transcoding via grpc-gateway"
+  - "Connect's JSON protocol only"
+  answer: 0
+  explanation: |
+    Internal service-to-service calls need no browser or REST bridge; use native gRPC over
+    HTTP/2 with an L7 (or client-side) load balancer. Gateways add overhead you don't need
+    there.
+  ref: "concepts.md#choosing-between-grpc-web-grpc-gateway-and-connect"
+- id: grpc-web-and-gateways-033
+  difficulty: advanced
+  tags: [grpc-web, streaming, buffering, gotcha]
+  question: |
+    A developer expects incremental delivery from a server-streaming gRPC-Web call but the
+    browser only gets everything at the end. What is a likely cause?
+  options:
+  - "gRPC-Web doesn't support server-streaming"
+  - "The transport (often the base64 -text mode) buffers the whole response before delivery"
+  - "protobuf can't encode multiple messages"
+  - "The server used a deadline"
+  answer: 1
+  explanation: |
+    Some gRPC-Web transports (especially base64 grpc-web-text) buffer the full response.
+    For true incremental server-streaming, use the binary mode over HTTP/2 with a transport
+    that surfaces chunks as they arrive.
+  ref: "concepts.md#streaming-support-and-limits-in-grpc-web"
+- id: grpc-web-and-gateways-034
+  difficulty: intermediate
+  tags: [grpc-web, cors, gotcha]
+  question: |
+    Besides the grpc_web filter, what must typically be configured for a cross-origin
+    browser gRPC-Web request to succeed through Envoy?
+  options:
+  - "A custom TCP proxy"
+  - "HTTP/3 support"
+  - "A database connection pool"
+  - "CORS (preflight handling and appropriate exposed headers)"
+  answer: 3
+  explanation: |
+    Cross-origin browser requests need CORS: preflight (OPTIONS) handling and exposing the
+    relevant headers. Envoy pairs the grpc_web filter with the CORS filter for this reason.
+  ref: "concepts.md#the-grpc-web-proxy"
+- id: grpc-web-and-gateways-035
+  difficulty: advanced
+  tags: [grpc-web, content-type, wire]
+  question: |
+    What content-type does a native gRPC request use versus a binary gRPC-Web request?
+  options:
+  - "Native: application/grpc ; gRPC-Web binary: application/grpc-web+proto"
+  - "Both use application/grpc"
+  - "Native: application/json ; gRPC-Web: application/grpc"
+  - "Both use application/grpc-web+proto"
+  answer: 0
+  explanation: |
+    Native gRPC uses application/grpc; the binary gRPC-Web variant uses
+    application/grpc-web+proto (and the base64 variant application/grpc-web-text+proto).
+    The proxy rewrites the content-type when translating.
+  ref: "concepts.md#the-grpc-web-protocol"
+- id: grpc-web-and-gateways-036
+  difficulty: intermediate
+  tags: [grpc-web, framing, reuse]
+  question: |
+    Compared with native gRPC, how does gRPC-Web frame individual messages?
+  options:
+  - "It uses a completely different JSON framing"
+  - "It sends one message per HTTP request"
+  - "It uses the same 1-byte-flag + 4-byte-length + payload framing"
+  - "It omits length prefixes entirely"
+  answer: 2
+  explanation: |
+    gRPC-Web keeps the identical length-prefixed message framing (compression flag byte +
+    4-byte big-endian length + payload). Only the trailer delivery (in-body, flag 0x80) and
+    transport/content-type differ.
+  ref: "concepts.md#the-grpc-web-protocol"
+- id: grpc-web-and-gateways-037
+  difficulty: advanced
+  tags: [proxy, translation, trailers]
+  question: |
+    When the gRPC-Web proxy returns a response to the browser, what does it do with the
+    backend's HTTP/2 trailers?
+  options:
+  - "Discards them"
+  - "Forwards them as HTTP/2 trailers unchanged"
+  - "Converts them to cookies"
+  - "Re-encodes them as an in-body trailer frame (flag 0x80), base64-ing if -text mode"
+  answer: 3
+  explanation: |
+    The proxy takes the backend's grpc-status/grpc-message trailers and re-encodes them as
+    the gRPC-Web in-body trailer frame the browser can read, base64-encoding the whole body
+    for the -text encoding.
+  ref: "concepts.md#the-grpc-web-proxy"
+- id: grpc-web-and-gateways-038
+  difficulty: beginner
+  tags: [single-source, proto, contract]
+  question: |
+    A key benefit of grpc-gateway is that from one .proto definition you can serve:
+  options:
+  - "Only REST"
+  - "Both a gRPC API and a REST/JSON API"
+  - "Only gRPC"
+  - "Only GraphQL"
+  answer: 1
+  explanation: |
+    With google.api.http annotations, one .proto yields both a native gRPC API and a REST
+    reverse proxy — 'write once, serve both' — keeping the contract single-sourced.
+  ref: "concepts.md#grpc-gateway-and-restjson-transcoding"
+- id: grpc-web-and-gateways-039
+  difficulty: intermediate
+  tags: [transcoding, tradeoffs, streaming]
+  question: |
+    Which is a real limitation of REST/JSON transcoding via grpc-gateway?
+  options:
+  - "It loses gRPC trailers to the HTTP client and has limited streaming support"
+  - "It cannot map path parameters"
+  - "It requires HTTP/3"
+  - "It only works with proto2"
+  answer: 0
+  explanation: |
+    Transcoding costs a JSON<->protobuf conversion per call, can't surface gRPC trailers to
+    the HTTP client, and has limited streaming semantics. It's a compatibility bridge, not a
+    replacement for native gRPC.
+  ref: "concepts.md#grpc-gateway-and-restjson-transcoding"
+- id: grpc-web-and-gateways-040
+  difficulty: intermediate
+  tags: [connect, errors, model]
+  question: |
+    How does the Connect protocol represent a unary-call error so an HTTP client without
+    protobuf tooling can read it?
+  options:
+  - "In an HTTP/2 trailer"
+  - "In a TCP RST packet"
+  - "As a JSON body with a gRPC status code string, message, and details"
+  - "It always returns HTTP 200 with no error info"
+  answer: 2
+  explanation: |
+    Connect uses the gRPC status-code model but returns unary errors as a JSON body with a
+    code string, message, and details, so a plain HTTP client can read the error without
+    reading protobuf trailers.
+  ref: "concepts.md#connect-connectrpc"
+- id: grpc-web-and-gateways-041
+  difficulty: advanced
+  tags: [architecture, production-shape]
+  question: |
+    Which production topology correctly combines these tools?
+  options:
+  - "REST between all internal services, gRPC only at the edge"
+  - "gRPC-Web between all internal services"
+  - "grpc-gateway installed on every service instance for internal calls"
+  - "Native gRPC between services; Envoy at the edge doing gRPC-Web for the SPA and JSON transcoding for public REST, all from one .proto"
+  answer: 3
+  explanation: |
+    A common shape is native gRPC internally with Envoy at the edge translating gRPC-Web for
+    the browser app and transcoding JSON for public REST clients — all generated from the
+    same .proto. These approaches are complementary, not exclusive.
+  ref: "concepts.md#choosing-between-grpc-web-grpc-gateway-and-connect"
+- id: grpc-web-and-gateways-042
+  difficulty: beginner
+  tags: [misconception, http2, browsers]
+  question: |
+    Which statement about browsers and HTTP/2 is correct?
+  options:
+  - "Browsers do not implement HTTP/2"
+  - "Browsers use HTTP/2 heavily but don't expose framing or trailers to JavaScript"
+  - "Browsers expose full HTTP/2 frame control to fetch"
+  - "HTTP/2 is only used by gRPC servers, never browsers"
+  answer: 1
+  explanation: |
+    Browsers use HTTP/2 (and /3) extensively, but the fetch/XHR APIs abstract HTTP away —
+    JS can't control framing or read trailers. That abstraction, not lack of HTTP/2, is why
+    native gRPC isn't callable from the browser.
+  ref: "concepts.md#why-browsers-cannot-speak-native-grpc"
+- id: grpc-web-and-gateways-043
+  difficulty: advanced
+  tags: [annotations, additional-bindings]
+  question: |
+    In google.api.http, what does `additional_bindings` allow?
+  options:
+  - "Binding the RPC to a database table"
+  - "Adding gRPC interceptors"
+  - "Exposing the same RPC under multiple URL/method shapes"
+  - "Encrypting the request body"
+  answer: 2
+  explanation: |
+    additional_bindings lets one RPC be reachable via several HTTP mappings (e.g. both a
+    RESTful path and a legacy path), useful for API versioning/compat.
+  ref: "concepts.md#http-annotations-and-mapping-rules"
+- id: grpc-web-and-gateways-044
+  difficulty: intermediate
+  tags: [openapi, tooling, grpc-gateway]
+  question: |
+    How can you produce an OpenAPI/Swagger document for a transcoded gRPC API?
+  options:
+  - "Use protoc-gen-openapiv2 to generate it from the same google.api.http annotations"
+  - "It is impossible without hand-writing it"
+  - "Only Envoy can emit OpenAPI"
+  - "Convert the protobuf binary to YAML at runtime"
+  answer: 0
+  explanation: |
+    protoc-gen-openapiv2 (part of the grpc-gateway ecosystem) emits an OpenAPI/Swagger spec
+    from the same annotations, giving REST consumers standard API docs.
+  ref: "concepts.md#http-annotations-and-mapping-rules"
+- id: grpc-web-and-gateways-045
+  difficulty: advanced
+  tags: [scenario, client-streaming, redesign]
+  question: |
+    A web app must send a large file to a gRPC service as a stream of chunks
+    (client-streaming). What is the most appropriate response?
+  options:
+  - "Enable client-streaming in gRPC-Web via a config flag"
+  - "Switch the browser to HTTP/1.0"
+  - "Use bidi streaming instead"
+  - "gRPC-Web has no client-streaming; redesign as server-streaming/unary chunks or use a resumable upload path"
+  answer: 3
+  explanation: |
+    Neither gRPC-Web nor browser platforms reliably support client-streaming. Redesign the
+    flow (repeated unary chunk calls, a resumable/multipart upload endpoint, or
+    server-streaming for progress). Cross-ref rest-api-design for upload patterns.
+  ref: "concepts.md#streaming-support-and-limits-in-grpc-web"
+- id: grpc-web-and-gateways-046
+  difficulty: intermediate
+  tags: [buf, tooling, codegen]
+  question: |
+    Why do modern teams often use `buf` for protobuf codegen instead of hand-rolled protoc
+    commands?
+  options:
+  - "buf replaces the gRPC runtime"
+  - "buf pins plugin versions and enforces lint/breaking-change checks alongside codegen"
+  - "buf is required to read HTTP/2 trailers"
+  - "buf converts protobuf to GraphQL"
+  answer: 1
+  explanation: |
+    buf (buf generate) manages protos reproducibly: pinned plugin versions, linting, and
+    breaking-change detection (cross-ref schema-evolution-and-compatibility), which is why
+    it's preferred over ad-hoc protoc invocations.
+  ref: "concepts.md#the-grpc-web-client-and-codegen"
+- id: grpc-web-and-gateways-047
+  difficulty: advanced
+  tags: [connect, protocols, interop]
+  question: |
+    Which set of protocols does a single Connect server speak?
+  options:
+  - "Only the Connect protocol"
+  - "REST and SOAP"
+  - "gRPC, gRPC-Web, and the Connect protocol"
+  - "GraphQL and gRPC"
+  answer: 2
+  explanation: |
+    A Connect server simultaneously handles native gRPC, gRPC-Web, and the Connect protocol
+    on the same endpoint, so gRPC clients, gRPC-Web browsers, and JSON/curl clients all work
+    without extra infrastructure.
+  ref: "concepts.md#connect-connectrpc"
+- id: grpc-web-and-gateways-048
+  difficulty: intermediate
+  tags: [grpc-web, deployment, in-process]
+  question: |
+    Which option lets a Go gRPC server answer gRPC-Web on the same port without a separate
+    proxy hop?
+  options:
+  - "An in-process wrapper such as improbable-eng/grpc-web WrapServer"
+  - "The grpc_json_transcoder filter"
+  - "protoc-gen-grpc-web"
+  - "A DNS SRV record"
+  answer: 0
+  explanation: |
+    Libraries like improbable-eng/grpc-web's WrapServer let a Go gRPC server also serve
+    gRPC-Web in-process, avoiding a separate Envoy/grpcwebproxy hop (handy for small
+    deployments).
+  ref: "concepts.md#the-grpc-web-proxy"
