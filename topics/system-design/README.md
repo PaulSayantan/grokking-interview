@@ -1,7 +1,7 @@
 # System Design
 
 27 core + 8 advanced/expert deep-dive + 7 design-patterns + 6 architectural-patterns +
-26 AWS System Design topics (74 total).
+31 AWS System Design topics (79 total).
 Study content and MCQs live in per-topic subfolders. See the master taxonomy in
 `../../TOPICS.md`.
 
@@ -118,11 +118,12 @@ CROSS-REFERENCED (workload types → capacity-modeling; consistency → cap-theo
 
 Status: ☐ not started · ◐ concepts done · ● concepts+MCQs · ✅ validated
 
-## AWS System Design (26 topics)
+## AWS System Design (31 topics)
 
 Designing microservices and large-scale systems with AWS primitives (SQS, DynamoDB,
-ECS/EKS, EC2, Lambda, S3, and more). Same depth/trade-off bar as the core topics;
-`aws-` slug prefix. **1,979 MCQs**, all four tiers, service-limit- and trade-off-heavy.
+ECS/EKS, EC2, Lambda, S3, and more), plus a SaaS multi-tenancy architecture cluster.
+Same depth/trade-off bar as the core topics; `aws-` slug prefix. **2,368 MCQs**, all
+four tiers, service-limit- and trade-off-heavy.
 
 | Topic | Slug | Freq | Difficulty | Status |
 |---|---|---|---|---|
@@ -153,7 +154,24 @@ ECS/EKS, EC2, Lambda, S3, and more). Same depth/trade-off bar as the core topics
 | Cost Optimization and Scaling Trade-offs on AWS | `aws-cost-optimization-scaling` | high | advanced | ✅ (74 MCQs · 30 adv/expert) |
 | End-to-End AWS Reference Architectures: Designing Real Systems | `aws-reference-architectures` | very-high | advanced | ✅ (80 MCQs · 34 adv/expert) |
 
-All 26 AWS topics: deep trade-off + service-selection concepts.md with service limits,
-comparison tables, cost reasoning, ASCII diagrams, and end-to-end reference designs;
-validated MCQs across all four tiers (heavy scenario/judgment + AWS-fact style).
+### SaaS and Multi-Tenancy on AWS (5 topics)
+
+AWS-specific companion to the vendor-neutral core `multi-tenancy-and-saas-isolation`
+topic: the tenant-isolation architecture patterns (Organizations/OU governance →
+account → VPC → subnet → container → data-layer), control-plane vs application-plane,
+SaaS identity/routing, data partitioning, and metering/tiering/throttling. Anchored on
+the AWS Well-Architected SaaS Lens + SaaS Factory guidance and the Nagarro six-pattern
+article. **389 MCQs.**
+
+| Topic | Slug | Freq | Difficulty | Status |
+|---|---|---|---|---|
+| AWS SaaS and Multi-Tenancy Foundations | `aws-saas-multitenancy-foundations` | high | beginner | ✅ (81 MCQs · 37 adv/expert) |
+| AWS Tenant Isolation Architecture Patterns | `aws-saas-isolation-patterns` | high | advanced | ✅ (70 MCQs · 32 adv/expert) |
+| AWS SaaS Tenant Identity, Context and Routing | `aws-saas-tenant-identity-and-routing` | high | advanced | ✅ (66 MCQs · 30 adv/expert) |
+| AWS SaaS Data Partitioning and Isolation | `aws-saas-data-partitioning` | high | advanced | ✅ (96 MCQs · 51 adv/expert) |
+| AWS SaaS Metering, Tiering, Throttling and Cost-per-Tenant | `aws-saas-metering-tiering-throttling` | high | advanced | ✅ (76 MCQs · 36 adv/expert) |
+
+All 31 AWS topics: deep trade-off + service-selection concepts.md with service limits,
+comparison tables, cost reasoning, Mermaid/ASCII diagrams, and end-to-end reference
+designs; validated MCQs across all four tiers (heavy scenario/judgment + AWS-fact style).
 

@@ -1,0 +1,1421 @@
+topic: "AWS SaaS Metering, Tiering, Throttling and Cost-per-Tenant"
+domain: system-design
+topic_slug: aws-saas-metering-tiering-throttling
+version: 1
+questions:
+  - id: aws-saas-metering-tiering-throttling-001
+    difficulty: beginner
+    tags: [control-plane, application-plane, saas-fundamentals]
+    question: |
+      In the canonical AWS SaaS mental model, which set of capabilities belongs to
+      the control plane rather than the application plane?
+    options:
+      - "Tenant onboarding, SaaS identity, tiering configuration, metering aggregation, and cost rollups"
+      - "Serving tenant product traffic and enforcing per-layer isolation for each request"
+      - "The pooled compute stack that runs basic-tier business logic"
+      - "The siloed VPC and database that a single enterprise tenant runs in"
+    answer: 0
+    explanation: |
+      The control plane is the shared, multi-tenant management layer: onboarding/provisioning,
+      SaaS identity, tier config, metering aggregation, billing integration, cost rollups, and
+      health dashboards. Serving tenant traffic, the pooled compute stack, and the siloed enterprise
+      VPC/DB all describe the application plane (the running product where isolation is enforced per
+      layer/tenant). Keeping the two planes separate is exactly what interviewers reward.
+    ref: "concepts.md#control-plane-versus-application-plane"
+
+  - id: aws-saas-metering-tiering-throttling-002
+    difficulty: intermediate
+    tags: [control-plane, metering, cost-attribution]
+    question: |
+      An interviewer asks: "Does the metering design change between a siloed
+      (account-per-tenant) and a pooled application plane?" What is the sharpest answer?
+    options:
+      - "Yes — siloed tenants cannot emit usage events, so metering must be rebuilt per account"
+      - "Yes — pooled tenants require synchronous metering while siloed tenants can meter asynchronously"
+      - "No — metering is a control-plane concern and identical in shape; what differs is cost attribution (trivial in silo, apportioned in pool)"
+      - "No — both metering and cost attribution are identical because AWS bills per tenant automatically"
+    answer: 2
+    explanation: |
+      Metering (capturing per-tenant usage events) is a control-plane capability whose shape does
+      not change with the application-plane isolation model. What changes is cost attribution:
+      siloed resources map to an account/VPC billing boundary (trivial), while pooled resources
+      require apportionment. AWS never bills per tenant on a shared resource, and the claims that
+      siloed tenants can't emit events or that pooled metering must be synchronous invert reality.
+    ref: "concepts.md#control-plane-versus-application-plane"
+
+  - id: aws-saas-metering-tiering-throttling-003
+    difficulty: beginner
+    tags: [control-plane, siloed-vs-pooled]
+    question: |
+      Which statement about the SaaS control plane is correct?
+    options:
+      - "There is one control plane per tenant, siloed alongside each tenant's stack"
+      - "The control plane only exists in fully pooled architectures"
+      - "The control plane is the same thing as the API Gateway edge tier"
+      - "The control plane is itself multi-tenant and operates on all tenants at once, regardless of whether the application plane is siloed or pooled"
+    answer: 3
+    explanation: |
+      The control plane is shared across the whole SaaS and is never siloed per tenant; it is the
+      same whether the application plane is siloed or pooled. It is not per-tenant, not pooled-only,
+      and is a management layer distinct from the edge routing tier.
+    ref: "concepts.md#control-plane-versus-application-plane"
+
+  - id: aws-saas-metering-tiering-throttling-004
+    difficulty: intermediate
+    tags: [control-plane, trade-offs, mvp]
+    question: |
+      A founder argues that a single-tenant MVP does not need a control plane and wants to skip
+      building one. What is the strongest architectural counter-argument for a SaaS that intends
+      to grow?
+    options:
+      - "Without it you cannot onboard tenants self-serve, bill on usage, or answer 'which tenant is unprofitable?' — you lose the operational leverage that justified SaaS"
+      - "A control plane is legally required by AWS before you can host more than one tenant"
+      - "The control plane is the only place tenant data can be stored securely"
+      - "A control plane is what physically isolates tenant compute, so skipping it causes cross-tenant leaks"
+    answer: 0
+    explanation: |
+      The control plane is upfront investment an MVP can defer, but it delivers self-serve
+      onboarding, usage billing, and per-tenant cost insight — the leverage that makes SaaS
+      profitable at scale. It is not an AWS legal requirement, not the data store, and not the
+      isolation mechanism (that is the application plane).
+    ref: "concepts.md#control-plane-versus-application-plane"
+
+  - id: aws-saas-metering-tiering-throttling-005
+    difficulty: beginner
+    tags: [tenant-context, jwt, cognito]
+    question: |
+      What is "tenant context" in an AWS SaaS system, and where does it canonically originate?
+    options:
+      - "A client-supplied HTTP header (X-Tenant-Id) trusted by all services"
+      - "An IAM role name that each tenant assumes at login"
+      - "The set of attributes (tenantId, tier, sometimes role) derived from a validated SaaS identity JWT minted at sign-in"
+      - "A DynamoDB partition key generated randomly per request"
+    answer: 2
+    explanation: |
+      Tenant context is the identity attributes (tenantId, tier, role) that say which tenant a
+      request belongs to; the canonical source on AWS is a JWT with custom claims minted at
+      sign-in. A client-supplied header must never be trusted. It is not an IAM role name nor a
+      random key, though the claim later drives IAM scoping and data-access keys.
+    ref: "concepts.md#tenant-context-and-saas-identity-with-cognito-and-jwt-claims"
+
+  - id: aws-saas-metering-tiering-throttling-006
+    difficulty: intermediate
+    tags: [cognito, pre-token-lambda, jwt-claims]
+    question: |
+      In a pooled Cognito identity design, how do custom claims such as custom:tenantId and
+      custom:tier get into the token that downstream services read?
+    options:
+      - "A Pre Token Generation Lambda trigger injects/augments the claims at sign-in so they are baked into the JWT"
+      - "Each service calls the Cognito AdminGetUser API on every request to fetch the tenant"
+      - "The client adds the claims to the token before sending the request"
+      - "API Gateway rewrites the JWT to add tenant claims at the edge"
+    answer: 0
+    explanation: |
+      Cognito's Pre Token Generation Lambda trigger injects or augments custom claims when the
+      token is minted at sign-in. Calling AdminGetUser per request would hit per-category RPS
+      throttles. Clients cannot be trusted to add claims, and API Gateway validates and extracts
+      the JWT but does not mint tenant claims.
+    ref: "concepts.md#tenant-context-and-saas-identity-with-cognito-and-jwt-claims"
+
+  - id: aws-saas-metering-tiering-throttling-007
+    difficulty: advanced
+    tags: [cognito, quotas, throttling, anti-pattern]
+    question: |
+      A service validates the user by calling a Cognito API on every incoming request and starts
+      seeing errors under load. Cognito's UserRead category quota is 120 RPS per account per
+      Region. What is the correct fix?
+    options:
+      - "Request a Cognito pool-per-tenant so each tenant gets its own 120 RPS"
+      - "Move the user pool to a Region with a higher UserRead quota"
+      - "Increase token validity to 3,650 days so tokens never need re-validation"
+      - "Validate the JWT locally at the edge (verify signature/claims) and cache it, instead of calling Cognito per request"
+    answer: 3
+    explanation: |
+      Cognito rate quotas are per-account, per-Region and pooled across pools; you should validate
+      the JWT locally (signature + claims) and cache, not call Cognito each request. A pool per
+      tenant does not raise the shared per-account category quotas and caps at ~1k-10k pools.
+      Region quotas for the category are the same, and extending refresh-token validity does not
+      address per-request server-side calls.
+    ref: "concepts.md#tenant-context-and-saas-identity-with-cognito-and-jwt-claims"
+
+  - id: aws-saas-metering-tiering-throttling-008
+    difficulty: advanced
+    tags: [cognito, service-limits, pool-per-tenant]
+    question: |
+      A team proposes one Cognito user pool per tenant ("siloed identity") for a product expected
+      to onboard 50,000 tenants. Which Cognito limit makes this a poor default?
+    options:
+      - "User pools per Region default 1,000 and max 10,000 — pool-per-tenant cannot scale past ~1k-10k tenants"
+      - "Users per user pool default 40,000,000 — too few users per tenant"
+      - "Groups per pool 10,000 — too few groups for 50,000 tenants"
+      - "Refresh token validity max 3,650 days — tokens expire before all tenants onboard"
+    answer: 0
+    explanation: |
+      User pools per Region default to 1,000 and max out at 10,000, so pool-per-tenant is a hard
+      ceiling well below 50,000 tenants. The 40M users/pool limit actually argues FOR a single
+      pooled pool. Groups-per-pool is irrelevant to the pool-count ceiling, and token validity has
+      nothing to do with tenant scaling.
+    ref: "concepts.md#tenant-context-and-saas-identity-with-cognito-and-jwt-claims"
+
+  - id: aws-saas-metering-tiering-throttling-009
+    difficulty: expert
+    tags: [cognito, custom-attributes, design]
+    question: |
+      Why does AWS guidance warn against storing frequently-changing tenant attributes in Cognito
+      custom attributes and instead recommend an external store like DynamoDB?
+    options:
+      - "Custom attributes are encrypted and cannot be read by application code"
+      - "Cognito custom attributes cost extra per read, unlike DynamoDB"
+      - "Custom-attribute changes are rate-limited and attribute values are baked into tokens at mint time, so they go stale until the token is refreshed"
+      - "DynamoDB is the only store that can be referenced by a Pre Token Generation Lambda"
+    answer: 2
+    explanation: |
+      Custom-attribute writes are rate-limited, and whatever value existed at mint time is frozen
+      into the JWT — a value that changes often will be stale until the next token refresh, so
+      keep such data in an external store (DynamoDB) and look it up. Custom attributes are readable,
+      the concern is not per-read cost, and a Pre-Token Lambda can read many stores.
+    ref: "concepts.md#tenant-context-and-saas-identity-with-cognito-and-jwt-claims"
+
+  - id: aws-saas-metering-tiering-throttling-010
+    difficulty: intermediate
+    tags: [cognito, silo-identity, enterprise, trade-offs]
+    question: |
+      When is siloing identity (a dedicated Cognito user pool per tenant) the right choice despite
+      its scaling ceiling?
+    options:
+      - "For every basic-tier tenant, to minimize the shared auth surface"
+      - "Whenever the product exceeds 40 million total users"
+      - "Only when the application plane is fully pooled"
+      - "For enterprise tenants that need their own IdP/SAML federation and per-tenant blast radius, where tenant counts are low"
+    answer: 3
+    explanation: |
+      Pooled identity is the default (cheap, scales to tens of millions of users). Silo identity is
+      justified for enterprise tenants needing custom IdP/SAML and isolated auth blast radius, where
+      few tenants stay under the ~1k-10k pool ceiling. Applying it to all basic tenants hits the
+      ceiling fast; the 40M user limit argues for pooling; and it is orthogonal to app-plane pooling.
+    ref: "concepts.md#tenant-context-and-saas-identity-with-cognito-and-jwt-claims"
+
+  - id: aws-saas-metering-tiering-throttling-011
+    difficulty: beginner
+    tags: [routing, edge-tier, context-propagation]
+    question: |
+      Once tenant context exists in a JWT, what does the edge tier (API Gateway / ALB /
+      CloudFront+Lambda@Edge) typically do with it?
+    options:
+      - "Extract it and use it to route the request and enforce tenant scope downstream"
+      - "Store it permanently in the client's browser cookie"
+      - "Discard it because backends re-derive tenant identity themselves"
+      - "Convert it into an IAM user for the tenant"
+    answer: 0
+    explanation: |
+      The edge tier extracts tenant context and routes accordingly (pooled to a shared backend, or
+      siloed/bridge to a dedicated stack) while making the context available downstream. It does not
+      persist it as a cookie, discard it (that risks broken propagation), or mint IAM users.
+    ref: "concepts.md#tenant-routing-and-context-propagation"
+
+  - id: aws-saas-metering-tiering-throttling-012
+    difficulty: intermediate
+    tags: [routing, host-based, route53, eks]
+    question: |
+      A premium/enterprise tenant must be routed to a dedicated stack via a per-tenant subdomain
+      (tenant.app.com). Which AWS building blocks does the EKS SaaS reference use to create the
+      per-tenant DNS automatically?
+    options:
+      - "CloudFront distributions manually created per tenant"
+      - "A separate Cognito pool that resolves DNS for each tenant"
+      - "NGINX ingress + ExternalDNS to Route 53 (or the AWS Load Balancer Controller) for host-based routing"
+      - "DynamoDB Streams triggering Route 53 health checks"
+    answer: 2
+    explanation: |
+      The EKS SaaS reference uses NGINX ingress with ExternalDNS (or the AWS Load Balancer
+      Controller) to create per-tenant Route 53 DNS records for host-based routing. CloudFront is
+      not the DNS-automation mechanism here, Cognito does not do DNS, and DynamoDB Streams/Route 53
+      health checks are unrelated to per-tenant subdomain provisioning.
+    ref: "concepts.md#tenant-routing-and-context-propagation"
+
+  - id: aws-saas-metering-tiering-throttling-013
+    difficulty: advanced
+    tags: [context-propagation, data-leak, design]
+    question: |
+      Broken tenant-context propagation is described as a top cause of cross-tenant data leaks.
+      What is the recommended way to make it structurally hard for any single service to forget
+      to scope by tenant?
+    options:
+      - "Ask each team to code-review their own service's tenant filtering"
+      - "Route every tenant to its own account so scoping is unnecessary"
+      - "Store tenantId only in CloudWatch logs, not in the request path"
+      - "Centralize tenant-context extraction/injection in one place (shared authorizer or a middleware in a shared data-access layer)"
+    answer: 3
+    explanation: |
+      Centralizing extraction/injection in one choke point (a shared authorizer or a data-access-layer
+      interceptor) means no individual service can forget to scope, and it doubles as the natural place
+      to record per-tenant consumption. Per-team code review is error-prone; account-per-tenant is the
+      pooled problem you are trying to avoid; and logging alone does not enforce scoping.
+    ref: "concepts.md#tenant-routing-and-context-propagation"
+
+  - id: aws-saas-metering-tiering-throttling-014
+    difficulty: intermediate
+    tags: [routing, trade-offs, pooled-vs-siloed]
+    question: |
+      What is the core trade-off between pooled routing and host/path-based routing to dedicated
+      per-tenant stacks?
+    options:
+      - "Pooled routing gives physical isolation; dedicated-stack routing gives none"
+      - "Both offer identical isolation; the only difference is cost"
+      - "Pooled routing requires Route 53 subdomains per tenant; dedicated routing does not"
+      - "Dedicated-stack routing buys isolation and predictable capacity but adds DNS/routing config and per-tenant deployment surface; pooled routing is one target with zero per-tenant routing state but no physical isolation"
+    answer: 3
+    explanation: |
+      Dedicated-stack (host/path) routing gives premium tenants isolation and predictable capacity at
+      the price of DNS/routing configuration and more moving parts, while pooled routing is a single
+      target with no per-tenant routing state but only logical isolation. The other options invert which
+      model isolates, deny the isolation difference, or reverse which model needs per-tenant subdomains.
+    ref: "concepts.md#tenant-routing-and-context-propagation"
+
+  - id: aws-saas-metering-tiering-throttling-015
+    difficulty: beginner
+    tags: [onboarding, provisioning, pooled]
+    question: |
+      Why can a new pooled-tenant onboarding be described as "a new tenant is a database row"?
+    options:
+      - "Because pooled tenants share a single row in a global table"
+      - "Because AWS charges per row of tenant data"
+      - "Because pooled onboarding is just a metadata insert plus a Cognito user — milliseconds and near-zero marginal cost"
+      - "Because pooled tenants cannot have any dedicated infrastructure ever"
+    answer: 2
+    explanation: |
+      Pooled onboarding is a cheap metadata insert (register the tenant in a DynamoDB store) plus
+      creating a Cognito user — near-instant and near-zero marginal cost, so a tenant is effectively
+      a row. They do not literally share one row, AWS does not bill per row, and pooled tenants can
+      still be promoted to bridge/silo later.
+    ref: "concepts.md#tenant-onboarding-and-provisioning-automation"
+
+  - id: aws-saas-metering-tiering-throttling-016
+    difficulty: advanced
+    tags: [onboarding, provisioning-throttles, async]
+    question: |
+      For high-velocity tenant onboarding, AWS provisioning APIs impose throttles such as
+      CreateApiKey at 5 RPS and Organizations CreateAccount at roughly 0.1/sec with 5 concurrent
+      creates. What is the recommended provisioning pattern?
+    options:
+      - "Provision all per-tenant resources synchronously inside the sign-up HTTP call so the tenant is fully ready on response"
+      - "Provision per-tenant resources asynchronously — queue the request, do the work in the background, and flip the tenant to active when ready"
+      - "Pre-create 50,000 accounts in advance so onboarding never calls the provisioning APIs"
+      - "Retry the CreateAccount call in a tight loop until it succeeds"
+    answer: 1
+    explanation: |
+      Because provisioning APIs are rate-limited, per-tenant resource creation should be asynchronous:
+      queue it, do the work in the background, and mark the tenant active on completion — the sign-up
+      call returns quickly. Synchronous provisioning couples sign-up latency to slow, throttled APIs;
+      pre-creating 50k accounts is wasteful and still bounded by org limits; tight-loop retries worsen
+      throttling.
+    ref: "concepts.md#tenant-onboarding-and-provisioning-automation"
+
+  - id: aws-saas-metering-tiering-throttling-017
+    difficulty: intermediate
+    tags: [onboarding, eks, codepipeline, siloed]
+    question: |
+      In the EKS SaaS reference, how is siloed tenant onboarding automated?
+    options:
+      - "A manual runbook that an operator follows for each tenant"
+      - "A single DynamoDB PutItem that instantly creates the namespace"
+      - "CodePipeline/CodeBuild creates the namespace, deploys the microservices, and applies isolation policies"
+      - "Cognito automatically provisions a Kubernetes namespace on user creation"
+    answer: 2
+    explanation: |
+      The EKS reference uses CodePipeline/CodeBuild to create the tenant namespace, deploy
+      microservices, and apply isolation policies — real infrastructure provisioning that takes
+      minutes. It is automated (not manual); a metadata insert alone is the pooled path, not
+      namespace creation; and Cognito does not provision Kubernetes namespaces.
+    ref: "concepts.md#tenant-onboarding-and-provisioning-automation"
+
+  - id: aws-saas-metering-tiering-throttling-018
+    difficulty: advanced
+    tags: [onboarding, tiering, trade-offs, economics]
+    question: |
+      How does onboarding cost tie into the tiering decision?
+    options:
+      - "Slow, expensive per-tenant provisioning is affordable for a few high-ARPU enterprise tenants but not for thousands of basic-tier tenants — which is exactly why basic tier must be pooled"
+      - "Onboarding cost is identical for pooled and siloed tenants, so it never affects tiering"
+      - "Basic tier should be siloed because it has the most tenants"
+      - "Enterprise tenants should be pooled to amortize provisioning cost"
+    answer: 0
+    explanation: |
+      You can afford slow, expensive siloed provisioning for a handful of high-ARPU enterprise tenants
+      but not for thousands of low-ARPU basic tenants, so basic must be pooled. Onboarding cost differs
+      sharply by model; siloing basic tier would be economically ruinous; and pooling enterprise
+      undercuts the isolation they pay for.
+    ref: "concepts.md#tenant-onboarding-and-provisioning-automation"
+
+  - id: aws-saas-metering-tiering-throttling-019
+    difficulty: beginner
+    tags: [tiering, jwt-claim, runtime-behavior]
+    question: |
+      In this architecture, what does the tier (e.g., custom:tier claim) primarily control at
+      runtime?
+    options:
+      - "Only the monthly price shown on the invoice, with no technical effect"
+      - "The AWS Region the tenant is deployed to, and nothing else"
+      - "The encryption algorithm used for the tenant's data"
+      - "Cross-cutting behavior: which throttle limits apply, which isolation/capacity model backs the tenant, which features are on, which SLA, and which routing target"
+    answer: 3
+    explanation: |
+      Tier is the master lever: as a JWT claim it drives throttle limits, isolation/capacity model,
+      feature flags, SLA, and routing target at runtime — it selects code paths and capacity pools, not
+      just a price. It is broader than a Region choice and is not about encryption algorithms.
+    ref: "concepts.md#tiering-mapping-tiers-to-isolation-and-capacity"
+
+  - id: aws-saas-metering-tiering-throttling-020
+    difficulty: intermediate
+    tags: [tiering, per-layer-isolation, bridge]
+    question: |
+      An interviewer says "just silo everything for isolation." What nuance should you raise about
+      how isolation is actually chosen?
+    options:
+      - "Isolation must be all-or-nothing across the whole system"
+      - "Isolation is chosen per LAYER (compute, network, data, identity), so a tenant can be pooled at compute but siloed at data — that is the bridge model"
+      - "Only the data layer can ever be siloed; compute is always pooled"
+      - "Per-layer isolation is impossible on AWS, so silo-everything is the only option"
+    answer: 1
+    explanation: |
+      Isolation is decided per layer/axis (compute, network, data, identity); pooling compute while
+      siloing data is precisely the bridge model. It is not all-or-nothing, any layer can be siloed,
+      and per-layer isolation is fully supported on AWS.
+    ref: "concepts.md#tiering-mapping-tiers-to-isolation-and-capacity"
+
+  - id: aws-saas-metering-tiering-throttling-021
+    difficulty: advanced
+    tags: [tiering, economics, cost-per-tenant]
+    question: |
+      What is the counter-intuitive economic result that makes metering and cost attribution core
+      product economics rather than accounting chores?
+    options:
+      - "Enterprise tenants always cost the least to serve"
+      - "All tenants cost exactly in proportion to their price"
+      - "Basic-tier tenants frequently cost the MOST to serve relative to the revenue they generate — a fact you only discover with per-tenant cost data"
+      - "Pooled tenants are always profitable because they share infrastructure"
+    answer: 2
+    explanation: |
+      The key insight is that basic-tier tenants often cost the most relative to the revenue they
+      produce, which is only visible with per-tenant cost data — hence cost attribution is product
+      economics. Enterprise is not automatically cheapest, cost is rarely revenue-proportional, and
+      sharing infrastructure does not guarantee profitability.
+    ref: "concepts.md#tiering-mapping-tiers-to-isolation-and-capacity"
+
+  - id: aws-saas-metering-tiering-throttling-022
+    difficulty: intermediate
+    tags: [tiering, trade-offs, number-of-tiers]
+    question: |
+      What is the recommended starting point for the number of tiers, and why?
+    options:
+      - "Start with as many tiers as competitors offer to maximize price points immediately"
+      - "Start with a single tier and never add more"
+      - "Start with two (pooled basic + siloed enterprise) and add tiers only when the business case is clear, because each tier is a distinct isolation/capacity config to build, test, and operate"
+      - "Start with one tier per tenant so each gets bespoke capacity"
+    answer: 2
+    explanation: |
+      More tiers capture more revenue but each is a distinct isolation/capacity configuration to build,
+      test, and operate, so start with two (pooled basic + siloed enterprise) and add tiers when
+      justified. Copying competitors' count ignores operating cost; a single fixed tier leaves revenue
+      and fit on the table; and a tier per tenant defeats pooling economics.
+    ref: "concepts.md#tiering-mapping-tiers-to-isolation-and-capacity"
+
+  - id: aws-saas-metering-tiering-throttling-023
+    difficulty: advanced
+    tags: [tiering, bridge, premium, cost-attribution]
+    question: |
+      For a premium tier described as "bridge" (pooled compute, siloed data), why is cost
+      attribution easier than for basic tier?
+    options:
+      - "Because premium tenants generate fewer requests"
+      - "Because pooled compute is always free"
+      - "Because premium tenants are billed by AWS directly"
+      - "Because siloed data resources (DB/table per tenant) are taggable, so their cost maps cleanly to the tenant, unlike a shared pool"
+    answer: 3
+    explanation: |
+      In the bridge model the data layer is siloed per tenant, so those DB/table resources are taggable
+      and attribute cleanly to the tenant; only the pooled compute needs apportionment. Request volume
+      is not the reason, pooled compute is not free, and AWS does not bill your tenants.
+    ref: "concepts.md#tiering-mapping-tiers-to-isolation-and-capacity"
+
+  - id: aws-saas-metering-tiering-throttling-024
+    difficulty: beginner
+    tags: [noisy-neighbor, pooled]
+    question: |
+      What is the "noisy neighbor" problem in a pooled SaaS model?
+    options:
+      - "A tenant whose burst or abuse consumes shared capacity and degrades everyone else's latency/availability"
+      - "A tenant whose data is stored physically near another tenant's data on disk"
+      - "A tenant who uses a different AWS Region than the others"
+      - "A tenant who refuses to upgrade to a higher tier"
+    answer: 0
+    explanation: |
+      In pooling, tenants share compute, connections, queues, and data partitions; a noisy neighbor is
+      one whose spike/abuse eats shared capacity and hurts others' latency and availability — the
+      central operational risk of pooling. Physical disk adjacency, Region choice, and tier reluctance
+      are not the definition.
+    ref: "concepts.md#the-noisy-neighbor-problem-and-mitigation-toolkit"
+
+  - id: aws-saas-metering-tiering-throttling-025
+    difficulty: intermediate
+    tags: [noisy-neighbor, bulkheads, mitigation]
+    question: |
+      Which of these is a "bulkhead" mitigation for the noisy-neighbor problem?
+    options:
+      - "Separate SQS queues per tenant/tier, separate Lambda concurrency pools, and separate connection pools so one tenant's spike is contained"
+      - "Increasing token validity in Cognito so users re-auth less often"
+      - "Storing all tenants in a single DynamoDB partition to simplify keys"
+      - "Removing all per-tenant quotas to maximize elasticity"
+    answer: 0
+    explanation: |
+      Bulkheads compartmentalize shared resources — separate SQS queues, Lambda concurrency pools, and
+      connection pools per tenant/tier — so a spike stays contained. Cognito token validity is unrelated;
+      a single shared partition makes hot-partition problems worse; and removing quotas is the opposite
+      of mitigation.
+    ref: "concepts.md#the-noisy-neighbor-problem-and-mitigation-toolkit"
+
+  - id: aws-saas-metering-tiering-throttling-026
+    difficulty: advanced
+    tags: [noisy-neighbor, layers, interview]
+    question: |
+      In an interview, why is it important to name mitigations at multiple layers (edge, compute,
+      data) rather than a single control?
+    options:
+      - "Because AWS bills you less if you use more services"
+      - "Because only the data layer actually matters for noisy neighbors"
+      - "Because edge controls make compute and data controls unnecessary"
+      - "Because a single throttle only protects one choke point; edge (WAF/API GW), compute (bulkhead concurrency), and data (hot-partition/RDS Proxy) each guard a different failure surface and the mitigations compose"
+    answer: 3
+    explanation: |
+      Noisy-neighbor controls compose across layers; a single throttle protects only one choke point, so
+      you name at least three — edge, compute, and data. Cost is irrelevant, the data layer is not the
+      only concern, and edge controls do not eliminate compute/data risks.
+    ref: "concepts.md#the-noisy-neighbor-problem-and-mitigation-toolkit"
+
+  - id: aws-saas-metering-tiering-throttling-027
+    difficulty: advanced
+    tags: [noisy-neighbor, dynamodb, hot-partition]
+    question: |
+      Why can a single hot tenant throttle a shared DynamoDB partition even when the table has huge
+      provisioned capacity?
+    options:
+      - "Because DynamoDB caps every table at 400 KB of throughput"
+      - "Because a single partition has a hard ceiling of 3,000 RCU/sec and 1,000 WCU/sec regardless of table capacity, so a hot tenantId key concentrates load on one partition"
+      - "Because DynamoDB throttles any table that has more than one tenant"
+      - "Because on-demand mode disables per-partition limits entirely"
+    answer: 1
+    explanation: |
+      Each DynamoDB partition is bounded at 3,000 RCU/sec and 1,000 WCU/sec; a hot tenantId key focuses
+      traffic on one partition and throttles there no matter how much table capacity exists — mitigated
+      by write-sharding, key design, and adaptive/on-demand capacity. 400 KB is the item-size limit not
+      throughput, multi-tenancy per table is not throttled by itself, and on-demand does not remove the
+      per-partition ceiling.
+    ref: "concepts.md#the-noisy-neighbor-problem-and-mitigation-toolkit"
+
+  - id: aws-saas-metering-tiering-throttling-028
+    difficulty: expert
+    tags: [noisy-neighbor, trade-offs, elasticity]
+    question: |
+      What is the fundamental tension in every noisy-neighbor control?
+    options:
+      - "They trade encryption strength for latency"
+      - "They only work in siloed architectures, never pooled ones"
+      - "They trade some pooling efficiency or elasticity for fairness: strict per-tenant quotas cap a tenant even when the fleet has spare capacity, while loose quotas maximize elasticity but risk one tenant hurting all"
+      - "They eliminate the need for tiering entirely"
+    answer: 2
+    explanation: |
+      Every noisy-neighbor control trades pooling efficiency/elasticity for fairness — strict quotas
+      leave spare capacity unused, loose quotas risk collateral damage, and dedicated premium capacity
+      wastes money at low utilization but guarantees SLA. It is not an encryption/latency trade, controls
+      apply to pooled models, and they complement rather than replace tiering.
+    ref: "concepts.md#the-noisy-neighbor-problem-and-mitigation-toolkit"
+
+  - id: aws-saas-metering-tiering-throttling-029
+    difficulty: beginner
+    tags: [api-gateway, throttling, token-bucket]
+    question: |
+      Amazon API Gateway throttles requests with a token bucket. What do the "rate" and "burst"
+      parameters mean, and what happens when the bucket is exceeded?
+    options:
+      - "rate = total monthly requests; burst = requests per day; exceeding returns HTTP 403"
+      - "rate = tokens added per second (steady-state); burst = bucket capacity (max concurrent); exceeding returns HTTP 429 Too Many Requests"
+      - "rate = latency budget; burst = payload size; exceeding returns HTTP 500"
+      - "rate = number of API keys; burst = number of usage plans; exceeding returns HTTP 404"
+    answer: 1
+    explanation: |
+      API Gateway's token bucket: rate is the steady-state tokens/second, burst is the bucket capacity
+      (max concurrent), and exceeding it returns HTTP 429. The other options misdescribe both the
+      parameters and the status code (429, not 403/500/404).
+    ref: "concepts.md#tier-based-throttling-with-api-gateway-usage-plans-and-api-keys"
+
+  - id: aws-saas-metering-tiering-throttling-030
+    difficulty: intermediate
+    tags: [api-gateway, usage-plans, api-keys, tiering]
+    question: |
+      What is the standard API Gateway pattern for enforcing per-tier rate limits across many
+      tenants?
+    options:
+      - "One usage plan per tenant, with all tenants sharing a single API key"
+      - "One API key per tier, shared by all tenants in that tier, with no usage plans"
+      - "One usage plan per tier (with that tier's rate + burst + quota), and an API key per tenant attached to the appropriate plan"
+      - "A Lambda authorizer that rewrites the account-level limit per request"
+    answer: 2
+    explanation: |
+      Create one usage plan per tier (encoding that tier's rate, burst, and quota) and attach a
+      per-tenant API key to the right plan — the key identifies the tenant, the plan enforces the tier.
+      One plan per tenant with a shared key inverts the model; a shared key per tier loses per-tenant
+      identity; and rewriting account limits per request is not possible.
+    ref: "concepts.md#tier-based-throttling-with-api-gateway-usage-plans-and-api-keys"
+
+  - id: aws-saas-metering-tiering-throttling-031
+    difficulty: advanced
+    tags: [api-gateway, account-limits, ceiling]
+    question: |
+      Basic tier is set to 100 RPS and enterprise to 5,000 RPS via usage plans. As you add
+      thousands of tenants, which hard ceiling caps the sum of all plans in one Region, and what do
+      you do about it?
+    options:
+      - "The 400 KB item size limit; switch to compression"
+      - "The 40M users-per-Cognito-pool limit; create more pools"
+      - "The CreateApiKey 5 RPS limit; batch key creation"
+      - "The account-level default of ~10,000 RPS steady-state (+5,000 burst) per account per Region; request a quota increase or shard tenants across accounts/Regions"
+    answer: 3
+    explanation: |
+      A per-client limit cannot exceed the account-level limit, and all plans together are bounded by
+      the account-level default (~10,000 RPS + 5,000 burst per account per Region, 2,500/1,250 in some
+      newer Regions); at scale you request an increase or shard across accounts/Regions. Item size and
+      Cognito users are unrelated to request-rate ceilings, and CreateApiKey limits provisioning
+      velocity, not steady-state throughput.
+    ref: "concepts.md#tier-based-throttling-with-api-gateway-usage-plans-and-api-keys"
+
+  - id: aws-saas-metering-tiering-throttling-032
+    difficulty: intermediate
+    tags: [api-gateway, waf, edge]
+    question: |
+      Where do AWS WAF rate-based rules fit relative to API Gateway usage plans in a tenant
+      throttling design?
+    options:
+      - "They replace usage plans entirely because WAF is cheaper"
+      - "They mitigate volumetric abuse at the edge before it reaches API Gateway, and can aggregate on IP or a custom key (e.g., a tenant header) to rate-limit a single tenant/IP cheaply at L7"
+      - "They only apply to WebSocket APIs"
+      - "They enforce business-metric quotas like '500 exports/day'"
+    answer: 1
+    explanation: |
+      WAF rate-based rules are a complementary edge layer: they stop volumetric abuse before traffic
+      reaches API Gateway and can aggregate on IP or a custom key such as a tenant header. They
+      complement rather than replace usage plans, are not WebSocket-only, and cannot express
+      business-metric quotas (that is application-level counters).
+    ref: "concepts.md#tier-based-throttling-with-api-gateway-usage-plans-and-api-keys"
+
+  - id: aws-saas-metering-tiering-throttling-033
+    difficulty: advanced
+    tags: [api-gateway, precedence, limits]
+    question: |
+      API Gateway applies throttle settings in a precedence order. Which ordering (highest-priority
+      / most-specific first) is correct?
+    options:
+      - "AWS Regional limit > account-level > stage > per-client usage-plan"
+      - "Stage limits > per-client limits > Regional limits > account-level limits"
+      - "Per-client (per-API-key)/per-method usage-plan limits > per-method stage limits > account-level per-Region limits > the AWS Regional limit"
+      - "There is no precedence; whichever limit is configured last wins"
+    answer: 2
+    explanation: |
+      The precedence runs from most specific to least: per-client (usage-plan) / per-method, then
+      per-method stage limits, then account-level per-Region limits, then the AWS Regional limit. The
+      reversed and scrambled orderings are wrong, and precedence is well-defined — a per-client limit
+      cannot exceed the account limit.
+    ref: "concepts.md#tier-based-throttling-with-api-gateway-usage-plans-and-api-keys"
+
+  - id: aws-saas-metering-tiering-throttling-034
+    difficulty: expert
+    tags: [api-gateway, trade-offs, business-quotas]
+    question: |
+      A product manager wants to enforce "500 report generations/day for basic tier." Why can't
+      API Gateway usage plans do this, and what does it imply?
+    options:
+      - "They can — set the quota to 500 requests/day on the basic usage plan"
+      - "Usage plans only express request-rate / request-count quotas, not business-metric quotas like report generations, so you need application-level counters"
+      - "API Gateway does not support any quotas at all"
+      - "You must silo the basic tier into its own account to enforce this"
+    answer: 1
+    explanation: |
+      Usage plans express request-rate and request-count quotas, not domain/business metrics like
+      "report generations," because one report may be many or partial requests — so you enforce these
+      with an application-level counter (DynamoDB/ElastiCache). Setting a 500-requests/day quota counts
+      HTTP requests, not reports; API Gateway does support request quotas; and siloing does not create a
+      business-metric counter.
+    ref: "concepts.md#tier-based-throttling-with-api-gateway-usage-plans-and-api-keys"
+
+  - id: aws-saas-metering-tiering-throttling-035
+    difficulty: intermediate
+    tags: [app-quotas, dynamodb, conditional-write]
+    question: |
+      To enforce a durable per-tenant daily quota with DynamoDB, why use an UpdateItem with an ADD
+      and a condition (e.g., attribute_value < limit) rather than a read-then-write?
+    options:
+      - "Because DynamoDB does not support reads on counter items"
+      - "Because ADD is cheaper than GetItem in every case"
+      - "Because a conditional write makes the increment and the limit check atomic, avoiding a read-modify-write race under concurrency"
+      - "Because conditional writes bypass the per-partition WCU limit"
+    answer: 2
+    explanation: |
+      A conditional UpdateItem ADD performs the increment and the limit check atomically server-side, so
+      concurrent requests cannot both read a stale count and both pass the check (the read-modify-write
+      race). DynamoDB does support reads, cost is not the point, and conditional writes do not bypass
+      per-partition WCU limits.
+    ref: "concepts.md#application-level-quotas-and-token-buckets-with-dynamodb-and-elasticache"
+
+  - id: aws-saas-metering-tiering-throttling-036
+    difficulty: advanced
+    tags: [app-quotas, elasticache, redis, trade-offs]
+    question: |
+      When is ElastiCache (Redis) INCR/INCRBY + EXPIRE preferable to a DynamoDB counter for
+      per-tenant rate limiting, and what is the caveat?
+    options:
+      - "Always, because Redis is durable and DynamoDB is not"
+      - "For high-frequency approximate limits where DynamoDB write cost/latency is too high; caveat: Redis is less durable and can lose recent counts on failover, so it's risky for hard billing caps"
+      - "Only for monthly billing caps that must be perfectly accurate"
+      - "Never, because Redis cannot expire keys"
+    answer: 1
+    explanation: |
+      Redis handles very high counter QPS cheaply and with low latency, ideal for approximate
+      rate-limiting, but it is less durable and may lose recent counts on failover — acceptable for
+      approximate limits, risky for hard billing caps (use DynamoDB there). DynamoDB is the durable
+      option (not Redis), Redis is wrong for perfectly-accurate billing caps, and Redis does support
+      EXPIRE.
+    ref: "concepts.md#application-level-quotas-and-token-buckets-with-dynamodb-and-elasticache"
+
+  - id: aws-saas-metering-tiering-throttling-037
+    difficulty: expert
+    tags: [app-quotas, dynamodb, hot-key, design]
+    question: |
+      A durable DynamoDB per-tenant counter is checked on every request for a very active tenant.
+      What is the main risk, and why?
+    options:
+      - "The counter item cannot exceed 400 KB, so it overflows"
+      - "DynamoDB conditional writes are eventually consistent, so the count drifts"
+      - "Every check is a write to a single tenant-keyed item, creating cost and a shared-partition hot-spot risk on that key"
+      - "The counter automatically resets every 24 hours regardless of configuration"
+    answer: 2
+    explanation: |
+      Because each quota check is a conditional write to one tenant-keyed item, a very active tenant
+      concentrates writes on a single partition key — driving cost and a hot-partition risk (the same
+      3,000 RCU/1,000 WCU per-partition ceiling). The item won't approach 400 KB, conditional writes are
+      strongly consistent for the update, and there is no automatic 24h reset.
+    ref: "concepts.md#application-level-quotas-and-token-buckets-with-dynamodb-and-elasticache"
+
+  - id: aws-saas-metering-tiering-throttling-038
+    difficulty: intermediate
+    tags: [app-quotas, when-to-use]
+    question: |
+      Which of the following limits genuinely requires an application-level counter rather than API
+      Gateway usage plans?
+    options:
+      - "100 requests per second per tenant"
+      - "10 concurrent background jobs per tenant"
+      - "5,000 requests per second for the enterprise tier"
+      - "A per-account 10,000 RPS ceiling"
+    answer: 1
+    explanation: |
+      "10 concurrent background jobs" is a business-metric/state quota API Gateway cannot express, so it
+      needs an application-level counter. Per-second request rates and account-level RPS ceilings are
+      exactly what API Gateway usage plans and account limits handle.
+    ref: "concepts.md#application-level-quotas-and-token-buckets-with-dynamodb-and-elasticache"
+
+  - id: aws-saas-metering-tiering-throttling-039
+    difficulty: beginner
+    tags: [bulkheads, lambda-concurrency]
+    question: |
+      How does Lambda reserved concurrency act as a bulkhead in a pooled SaaS backend?
+    options:
+      - "It gives every tenant unlimited concurrency"
+      - "It disables throttling entirely for that function"
+      - "It caps a tier's function to a bounded pool so basic-tier functions cannot consume all account concurrency and starve premium"
+      - "It routes overflow requests to a different Region automatically"
+    answer: 2
+    explanation: |
+      Reserved concurrency per tier caps how much of the account concurrency a tier's functions can use,
+      so a basic-tier spike cannot drain the shared pool and starve premium. It does not grant unlimited
+      concurrency, disable throttling, or perform cross-Region overflow routing.
+    ref: "concepts.md#bulkheads-load-shedding-and-circuit-breakers-by-tier"
+
+  - id: aws-saas-metering-tiering-throttling-040
+    difficulty: intermediate
+    tags: [bulkheads, load-shedding, tier]
+    question: |
+      What does "tier-based load shedding" mean when a pooled system is under pressure?
+    options:
+      - "Randomly dropping requests across all tiers equally (uniform brownout)"
+      - "Shedding premium traffic first because premium tenants have retries"
+      - "Deliberately shedding basic-tier traffic first to preserve premium/enterprise SLAs — tier-aware degradation rather than uniform brownout"
+      - "Shutting down the entire service until pressure subsides"
+    answer: 2
+    explanation: |
+      Tier-based load shedding sheds basic-tier traffic first under pressure (queue depth, latency, error
+      rate crossing thresholds) to protect revenue-important premium SLAs — deliberate, tier-aware
+      degradation. Uniform dropping ignores tier value, shedding premium first protects the wrong
+      customers, and full shutdown is not graceful degradation.
+    ref: "concepts.md#bulkheads-load-shedding-and-circuit-breakers-by-tier"
+
+  - id: aws-saas-metering-tiering-throttling-041
+    difficulty: advanced
+    tags: [rds-proxy, connection-pooling, bulkhead]
+    question: |
+      How does RDS Proxy function as a connection-level bulkhead for a Lambda + relational
+      workload?
+    options:
+      - "It replicates the database across Regions to spread connections"
+      - "It caches query results so the database is never contacted"
+      - "It shards the database automatically by tenantId"
+      - "It pools and multiplexes DB connections, queues/throttles new connections, and sheds load beyond the configured max, preserving the database for the load it can actually serve"
+    answer: 3
+    explanation: |
+      RDS Proxy pools and multiplexes connections, queues and throttles new ones, and rejects (sheds)
+      load beyond the max — essential where naive per-invocation Lambda connections would exhaust the DB.
+      It is not cross-Region replication, not a result cache, and does not auto-shard by tenant.
+    ref: "concepts.md#bulkheads-load-shedding-and-circuit-breakers-by-tier"
+
+  - id: aws-saas-metering-tiering-throttling-042
+    difficulty: expert
+    tags: [rds-proxy, session-pinning, limits]
+    question: |
+      Which RDS Proxy behavior can silently defeat the connection multiplexing you deployed it for?
+    options:
+      - "Statements larger than 16 KB (and certain SQL) cause session pinning, dedicating the connection to one session and killing the pooling benefit"
+      - "It caps you at 40,000 connections per proxy"
+      - "It automatically closes idle connections after 5 minutes"
+      - "It only works with DynamoDB, not relational databases"
+    answer: 0
+    explanation: |
+      Session pinning — triggered by statements over 16 KB and certain SQL constructs — dedicates a
+      connection to one session, defeating multiplexing; PostgreSQL also lacks session-pinning filters
+      and CancelRequest support. The stated ceilings are 20 proxies/account and 200 secrets/proxy, not
+      40k connections; idle-timeout tuning is not the pinning issue; and RDS Proxy is for relational DBs.
+    ref: "concepts.md#bulkheads-load-shedding-and-circuit-breakers-by-tier"
+
+  - id: aws-saas-metering-tiering-throttling-043
+    difficulty: expert
+    tags: [bulkheads, trade-offs, utilization]
+    question: |
+      What is the utilization trade-off of using reserved concurrency (or dedicated pools) as
+      bulkheads?
+    options:
+      - "Bulkheads increase overall utilization because capacity is never idle"
+      - "Bulkheads guarantee isolation but fragment capacity — reserved concurrency for basic sits idle when basic is quiet yet premium is busy, hurting overall utilization"
+      - "Bulkheads have no downside; they are strictly better than a shared pool"
+      - "A single shared pool guarantees isolation but wastes money"
+    answer: 1
+    explanation: |
+      Bulkheads guarantee containment but fragment capacity: a tier's reserved slice sits idle when that
+      tier is quiet even if another tier is starved, lowering overall utilization. A shared pool maximizes
+      utilization but offers no containment — so the claims that bulkheads raise utilization, have no
+      downside, or that a shared pool isolates are all wrong.
+    ref: "concepts.md#bulkheads-load-shedding-and-circuit-breakers-by-tier"
+
+  - id: aws-saas-metering-tiering-throttling-044
+    difficulty: beginner
+    tags: [metering, usage-events, tenant-context]
+    question: |
+      What is "metering" in this SaaS context, and what should a usage event always carry?
+    options:
+      - "Measuring CPU temperature; events carry hardware IDs"
+      - "Counting AWS accounts in the organization; events carry account emails"
+      - "Capturing per-tenant consumption events (to bill on usage and understand load), always stamped with tenant context such as {tenantId, tier, resource, quantity, timestamp}"
+      - "Recording user passwords; events carry credentials"
+    answer: 2
+    explanation: |
+      Metering captures per-tenant consumption events for billing and load insight, with each event
+      stamped with tenant context ({tenantId, tier, resource, quantity, timestamp}). It is not hardware
+      telemetry, account counting, or credential logging (never log credentials).
+    ref: "concepts.md#tenant-metering-pipeline-for-billing-and-insight"
+
+  - id: aws-saas-metering-tiering-throttling-045
+    difficulty: intermediate
+    tags: [metering, async, kinesis, hot-path]
+    question: |
+      Why does the SaaS Lens recommend emitting metering events asynchronously (e.g., to Kinesis/
+      Firehose or EventBridge) rather than synchronously into the billing system?
+    options:
+      - "So application request latency and availability never depend on billing logic — decoupling metering from billing"
+      - "Because synchronous events are more expensive per API call"
+      - "Because Kinesis is the only service that can store tenantId"
+      - "Because billing systems reject synchronous writes by policy"
+    answer: 0
+    explanation: |
+      Emitting asynchronously decouples the hot path from billing so request latency/availability never
+      depends on billing logic — a core SaaS Lens best practice. It is not primarily about per-call cost,
+      Kinesis is not the only tenantId store, and billing systems do not categorically reject synchronous
+      writes.
+    ref: "concepts.md#tenant-metering-pipeline-for-billing-and-insight"
+
+  - id: aws-saas-metering-tiering-throttling-046
+    difficulty: intermediate
+    tags: [metering, billing-integration, marketplace]
+    question: |
+      For the billing-integration step of the metering pipeline, what does AWS guidance generally
+      recommend?
+    options:
+      - "Build your own billing engine from scratch for full control"
+      - "Bill directly from CloudWatch metrics with no aggregation"
+      - "Charge tenants through their own AWS accounts using consolidated billing"
+      - "Usually do not build billing — integrate a third party (Stripe, Zuora) or the AWS Marketplace Metering Service for Marketplace-listed metered SaaS"
+    answer: 3
+    explanation: |
+      The guidance is to not build billing yourself but integrate Stripe/Zuora or the AWS Marketplace
+      Metering Service for Marketplace listings. Building from scratch is discouraged, raw CloudWatch
+      metrics are not a billing system, and consolidated billing rolls up your AWS costs, not your
+      customers' invoices.
+    ref: "concepts.md#tenant-metering-pipeline-for-billing-and-insight"
+
+  - id: aws-saas-metering-tiering-throttling-047
+    difficulty: advanced
+    tags: [metering, aggregation, billable-units]
+    question: |
+      In the canonical AWS metering pipeline (emit -> Kinesis/Firehose -> S3 -> aggregation ->
+      usage store -> billing), what does the aggregation step (Lambda/Athena/KDA/EMR) actually
+      produce?
+    options:
+      - "Raw per-request events replayed verbatim into the billing system"
+      - "A single global counter across all tenants"
+      - "Cognito tokens for each tenant"
+      - "Billable units — API calls, GB-stored, jobs-run, active users — rolled up per tenant per period"
+    answer: 3
+    explanation: |
+      Aggregation rolls raw events into billable units (API calls, GB-stored, jobs-run, active users) per
+      tenant per period, which land in the aggregated usage store for billing and insight. It does not
+      replay raw events verbatim, collapse to one global counter, or mint tokens.
+    ref: "concepts.md#tenant-metering-pipeline-for-billing-and-insight"
+
+  - id: aws-saas-metering-tiering-throttling-048
+    difficulty: expert
+    tags: [metering, granularity, trade-offs]
+    question: |
+      What is AWS guidance on metering granularity, and why?
+    options:
+      - "Always meter at the finest per-request granularity to maximize accuracy"
+      - "Never meter more than once per day regardless of pricing model"
+      - "Meter only at the granularity your pricing model and cost decisions actually require, because fine-grained events cost real money in ingestion/storage/processing plus hot-path overhead"
+      - "Granularity does not matter because storage is free"
+    answer: 2
+    explanation: |
+      Fine-grained per-request events give accurate billing and rich insight but cost money in ingestion,
+      storage, and processing plus hot-path overhead — so meter only as finely as pricing and cost
+      decisions require (e.g., don't emit per-micro-action if you bill per active-user-month). Always
+      finest overspends, a fixed daily cap may be too coarse for some pricing, and storage is not free.
+    ref: "concepts.md#tenant-metering-pipeline-for-billing-and-insight"
+
+  - id: aws-saas-metering-tiering-throttling-049
+    difficulty: beginner
+    tags: [cost-attribution, siloed, organizations]
+    question: |
+      For an account-per-tenant (siloed) model, what is the cleanest way to attribute cost per
+      tenant?
+    options:
+      - "Manually estimate each tenant's share of a shared bill each month"
+      - "Cost allocation tags on a single shared resource"
+      - "Proxy metrics apportioned from request counts"
+      - "AWS Organizations consolidated/linked billing — each member account is a clean per-tenant cost boundary rolling up to the management account"
+    answer: 3
+    explanation: |
+      With account-per-tenant, Organizations consolidated billing makes each member account a clean
+      per-tenant boundary that rolls up to the management account — the cleanest attribution, still
+      preserving volume/RI/SP sharing. Manual estimates, tags on a shared resource, and proxy metrics are
+      needed only in the pooled regime, not the siloed one.
+    ref: "concepts.md#per-tenant-cost-attribution-for-siloed-resources"
+
+  - id: aws-saas-metering-tiering-throttling-050
+    difficulty: intermediate
+    tags: [cost-attribution, cost-allocation-tags, cur]
+    question: |
+      For a VPC-per-tenant or resource-per-tenant model within a single account, how do you
+      attribute cost, and what is the authoritative dataset?
+    options:
+      - "Put a tenantId cost allocation tag on every resource; the AWS Cost and Usage Report (CUR) is the authoritative, most granular billing dataset, with activated tags appearing as columns"
+      - "Use CloudTrail events as the billing source of truth"
+      - "Read per-tenant cost directly from the DynamoDB metering table"
+      - "Rely on the AWS Free Tier dashboard"
+    answer: 0
+    explanation: |
+      Within one account you attribute via a tenantId cost allocation tag on every resource, and CUR is
+      the authoritative line-item dataset where activated tags become groupable columns (Cost Explorer
+      gives interactive filtering). CloudTrail is an audit log not billing, the metering table tracks
+      usage not AWS dollars, and the Free Tier dashboard is not a cost-attribution tool.
+    ref: "concepts.md#per-tenant-cost-attribution-for-siloed-resources"
+
+  - id: aws-saas-metering-tiering-throttling-051
+    difficulty: advanced
+    tags: [cost-allocation-tags, activation, gotcha]
+    question: |
+      You tagged every resource with tenantId but see nothing in Cost Explorer. What are the two
+      most likely causes?
+    options:
+      - "The tag was never activated in the management account, and/or you are within the up-to-24-hour propagation delay (and tags only apply from activation forward, not retroactively)"
+      - "The tags exceeded 400 KB and the tag names contained uppercase letters"
+      - "Cost Explorer does not support user-defined tags at all"
+      - "You must create a new AWS account for tags to appear"
+    answer: 0
+    explanation: |
+      Cost allocation tags must be activated in the Billing console (management account) before appearing
+      in CUR/Cost Explorer, and can take up to 24 hours; they also apply only from activation forward. The
+      400 KB/uppercase claim is fabricated, Cost Explorer does support user-defined tags, and a new
+      account is unnecessary.
+    ref: "concepts.md#per-tenant-cost-attribution-for-siloed-resources"
+
+  - id: aws-saas-metering-tiering-throttling-052
+    difficulty: intermediate
+    tags: [cost-allocation-tags, facts]
+    question: |
+      Which statement about AWS cost allocation tags is correct?
+    options:
+      - "There is one type of tag and it activates automatically"
+      - "Tags are managed by any member account in the organization"
+      - "There are two types (user-defined with a user: prefix and AWS-generated with an aws: prefix), a max of 50 tags per resource, and they must be activated before appearing in CUR/Cost Explorer"
+      - "You may safely store secrets and PII in tags for convenience"
+    answer: 2
+    explanation: |
+      Tags come in two types (user-defined user: and AWS-generated aws:), resources allow max 50 tags,
+      and tags must be activated to appear in billing data. They do not activate automatically, only the
+      management (or standalone) account manages the tag manager, and you must never put sensitive data
+      in tags.
+    ref: "concepts.md#per-tenant-cost-attribution-for-siloed-resources"
+
+  - id: aws-saas-metering-tiering-throttling-053
+    difficulty: advanced
+    tags: [cost-attribution, siloed, trade-offs]
+    question: |
+      What is the core trade-off of siloed cost attribution?
+    options:
+      - "It is inaccurate but cheap"
+      - "It requires complex proxy-metric apportionment"
+      - "It only works if all tenants are in the same account"
+      - "It is trivially accurate but rides on expensive infrastructure (an account or VPC per tenant, with its own limits) — you pay for isolation and get accounting for free"
+    answer: 3
+    explanation: |
+      Siloed attribution is trivially accurate because the AWS billing boundary is the tenant boundary,
+      but it rides on expensive per-tenant infrastructure with its own limits — you pay for isolation and
+      get accounting for free. It is accurate not inaccurate, it needs no proxy metrics (that is the
+      pooled regime), and it specifically uses separate accounts/VPCs.
+    ref: "concepts.md#per-tenant-cost-attribution-for-siloed-resources"
+
+  - id: aws-saas-metering-tiering-throttling-054
+    difficulty: intermediate
+    tags: [cost-attribution, pooled, apportionment]
+    question: |
+      For a shared resource (one Lambda fleet, one DynamoDB table, one Aurora cluster), why can't
+      you just read per-tenant cost from AWS, and what must you do instead?
+    options:
+      - "AWS provides per-tenant cost automatically; no work is needed"
+      - "AWS gives no native per-tenant breakdown — the bill is for the whole resource — so you must apportion it using tenant-stamped consumption metrics and proxy metrics"
+      - "You must delete the shared resource and silo everything"
+      - "You must move the resource to AWS Marketplace to get per-tenant cost"
+    answer: 1
+    explanation: |
+      For a shared resource AWS bills the whole resource with no per-tenant breakdown, so you apportion it
+      using tenant-stamped consumption (proxy metrics) and correlate with CUR dollars. AWS does not
+      provide it automatically, you don't have to silo everything, and Marketplace is a billing
+      integration, not a per-tenant cost source for shared resources.
+    ref: "concepts.md#per-tenant-cost-attribution-for-pooled-resources"
+
+  - id: aws-saas-metering-tiering-throttling-055
+    difficulty: advanced
+    tags: [cost-attribution, pooled, proxy-metrics, compute]
+    question: |
+      For apportioning a shared compute bill (e.g., a Lambda fleet) across tenants, which approach
+      does AWS guidance (Tod Golding) recommend?
+    options:
+      - "Divide the bill equally among all tenants regardless of usage"
+      - "Charge the tenant with the most data all of the compute cost"
+      - "Instrument entry points with tenant-stamped metrics and use proxy metrics (share of request count, CPU-time, or Lambda GB-seconds) to apportion the shared compute bill by that percentage, then correlate with CUR"
+      - "Use only DynamoDB item counts as the compute proxy"
+    answer: 2
+    explanation: |
+      Compute is apportioned with proxy metrics — each tenant's share of request count, CPU-time, or
+      Lambda GB-seconds — converted to dollars by correlating with the actual CUR cost of that resource.
+      Equal division ignores usage, blaming the largest data holder confuses storage with compute, and
+      item counts are a storage/throughput proxy, not the compute proxy.
+    ref: "concepts.md#per-tenant-cost-attribution-for-pooled-resources"
+
+  - id: aws-saas-metering-tiering-throttling-056
+    difficulty: advanced
+    tags: [cost-attribution, pooled, storage, dal]
+    question: |
+      AWS guidance says pooled storage attribution has two dimensions. What are they, and how is
+      each captured?
+    options:
+      - "Encryption and compression, both read from KMS"
+      - "Size (a periodic job analyzes per-tenant data distribution — S3 per-prefix bytes, DynamoDB per-partition-key item sizes) and IOPS/throughput (route all data ops through a common data-access layer that records per-tenant read/write activity)"
+      - "Region and Availability Zone, read from the CUR"
+      - "Backup frequency and retention, read from AWS Backup"
+    answer: 1
+    explanation: |
+      Pooled storage is apportioned on two dimensions: size (a periodic job measuring per-tenant data
+      distribution, e.g., S3 per-prefix bytes or DynamoDB per-key item sizes) and IOPS/throughput
+      (recorded via a common data-access layer). Encryption/compression, Region/AZ, and backup settings
+      are not the storage-attribution dimensions.
+    ref: "concepts.md#per-tenant-cost-attribution-for-pooled-resources"
+
+  - id: aws-saas-metering-tiering-throttling-057
+    difficulty: expert
+    tags: [cost-attribution, good-enough, principle]
+    question: |
+      What is the "good enough" principle for per-tenant cost attribution on pooled resources?
+    options:
+      - "Always pursue 100% accounting precision on every shared resource"
+      - "Never attempt to attribute pooled cost; it is impossible"
+      - "Only premium tenants deserve any cost attribution effort"
+      - "Unless the number directly drives an invoice, aim for a model that captures the general distribution of tenant consumption, not perfect accounting — start coarse and refine where the money is"
+    answer: 3
+    explanation: |
+      The "good enough" principle: unless the number drives an invoice, capture the general distribution of
+      consumption rather than chasing perfect accounting; start coarse and refine where the money is,
+      because the business question ("is this tenant/tier profitable?") needs only directional accuracy.
+      Chasing 100% precision is usually wasted effort, pooled cost is estimable, and all tiers warrant
+      directional insight.
+    ref: "concepts.md#per-tenant-cost-attribution-for-pooled-resources"
+
+  - id: aws-saas-metering-tiering-throttling-058
+    difficulty: expert
+    tags: [cost-attribution, trade-offs, accuracy-vs-effort]
+    question: |
+      Which statement best captures the accuracy-vs-effort trade-off across siloed and pooled cost
+      attribution?
+    options:
+      - "Pooled attribution is both cheaper in infra and more accurate than siloed"
+      - "Silo is trivially accurate but on expensive infra; pool is cheap infra but attribution needs custom instrumentation + apportionment and is never 100% precise — and the apportionment itself has cost that must not exceed the value of the insight"
+      - "Both approaches are equally accurate and equally cheap"
+      - "Siloed attribution requires apportionment while pooled does not"
+    answer: 1
+    explanation: |
+      Silo = trivially accurate but expensive infra; pool = cheap infra but attribution needs custom
+      instrumentation and apportionment and is never perfectly precise, and that instrumentation has cost
+      that must be justified by the insight's value. Pooled is not more accurate than siloed, the two are
+      not equal, and it is pooled (not siloed) that needs apportionment.
+    ref: "concepts.md#per-tenant-cost-attribution-for-pooled-resources"
+
+  - id: aws-saas-metering-tiering-throttling-059
+    difficulty: beginner
+    tags: [cloudwatch, per-tenant-metrics, dimensions]
+    question: |
+      Beyond billing, what operational visibility do tenant-aware CloudWatch metrics provide?
+    options:
+      - "Per-tenant/per-tier latency, error rate, throttle counts, quota consumption, and cost — so operators can spot a noisy neighbor or an unprofitable tenant"
+      - "The AWS account root credentials for each tenant"
+      - "The physical server serial numbers hosting each tenant"
+      - "Each tenant's source code repository status"
+    answer: 0
+    explanation: |
+      Emitting metrics with tenantId/tier dimensions (or via EMF) surfaces per-tenant latency, error rate,
+      throttle counts, quota consumption, and cost on dashboards, letting operators spot noisy neighbors
+      and unprofitable tenants. Credentials, hardware serials, and repo status are not what these metrics
+      provide.
+    ref: "concepts.md#tenant-aware-cloudwatch-metrics-and-health-dashboards"
+
+  - id: aws-saas-metering-tiering-throttling-060
+    difficulty: advanced
+    tags: [cloudwatch, cardinality, emf]
+    question: |
+      At thousands of tenants, why can a distinct CloudWatch custom metric per tenant blow up cost,
+      and what mitigates it?
+    options:
+      - "Custom metrics are free, so there is no cost issue"
+      - "Each unique dimension combination is a separate custom metric billed individually; mitigate with EMF (query high-cardinality dimensions from logs without paying per-metric), aggregation, or per-tenant metrics only for top-N/premium tenants"
+      - "CloudWatch caps metrics at 50 per account, so extra tenants are dropped silently"
+      - "The fix is to store all metrics in DynamoDB instead"
+    answer: 1
+    explanation: |
+      Each unique dimension combination is a separate, individually-billed custom metric, so a metric per
+      tenant explodes cost at scale; EMF lets you query high-cardinality dimensions from logs without
+      paying per metric, and aggregation or top-N/premium-only metrics also help. Custom metrics are not
+      free, there is no silent 50-metric cap, and DynamoDB is not the CloudWatch cost fix.
+    ref: "concepts.md#tenant-aware-cloudwatch-metrics-and-health-dashboards"
+
+  - id: aws-saas-metering-tiering-throttling-061
+    difficulty: intermediate
+    tags: [cloudwatch, emf, embedded-metric-format]
+    question: |
+      What is CloudWatch Embedded Metric Format (EMF) and why is it useful for tenant-aware
+      metrics?
+    options:
+      - "A billing report that lists per-tenant cost"
+      - "A Cognito feature that embeds tenantId into JWTs"
+      - "A way to emit metrics-as-logs so high-cardinality dimensions (like tenantId) are extracted during ingestion without paying per-metric for every dimension combination"
+      - "An API Gateway throttling mode"
+    answer: 2
+    explanation: |
+      EMF emits structured metrics-as-logs, letting CloudWatch extract high-cardinality dimensions such as
+      tenantId during ingestion so you can query them without paying the per-metric cost of every
+      dimension combination. It is not a billing report, a Cognito claim mechanism, or a throttling mode.
+    ref: "concepts.md#tenant-aware-cloudwatch-metrics-and-health-dashboards"
+
+  - id: aws-saas-metering-tiering-throttling-062
+    difficulty: advanced
+    tags: [cloudwatch, trade-offs, aggregation]
+    question: |
+      What is the trade-off between per-tenant metrics and aggregate/tier-level metrics?
+    options:
+      - "Per-tenant metrics are cheaper and more scalable than aggregate metrics"
+      - "Per-tenant metrics give precise operational insight but scale cost with tenant count; aggregate/tier-level metrics are cheap but hide individual noisy neighbors — use EMF or reserve per-tenant metrics for premium tenants and alerting-worthy signals"
+      - "Aggregate metrics reveal individual noisy neighbors better than per-tenant metrics"
+      - "There is no difference in cost or insight between the two"
+    answer: 1
+    explanation: |
+      Per-tenant metrics give precise insight but their cost scales with tenant count; aggregate/tier-level
+      metrics are cheap but hide individual noisy neighbors — so use EMF or reserve per-tenant metrics for
+      premium tenants and alerting signals. Per-tenant metrics are not cheaper, aggregate metrics hide
+      (not reveal) individuals, and the difference is real.
+    ref: "concepts.md#tenant-aware-cloudwatch-metrics-and-health-dashboards"
+
+  - id: aws-saas-metering-tiering-throttling-063
+    difficulty: intermediate
+    tags: [service-limits, organizations, account-per-tenant]
+    question: |
+      Which AWS Organizations limits make account-per-tenant a hard-capped, slow-to-provision
+      strategy?
+    options:
+      - "Accounts per org default 10 (adjustable to 50,000 with qualification) and CreateAccount throttled at ~0.1/sec with 5 concurrent creates"
+      - "Accounts per org are unlimited and CreateAccount runs at 1,000/sec"
+      - "OUs per org cap at 10, which limits accounts"
+      - "SCP documents are limited to 10 characters"
+    answer: 0
+    explanation: |
+      Accounts per org default to 10 (adjustable to 50,000 with qualification) and CreateAccount is
+      throttled at roughly 0.1/sec with 5 concurrent creates, making account-per-tenant hard-capped and
+      slow — viable for enterprise/low counts, not thousands of pooled tenants. Accounts are not unlimited,
+      OUs cap at 2,000 not 10, and SCP documents allow 10,240 chars not 10.
+    ref: "concepts.md#aws-service-limits-that-constrain-saas-designs"
+
+  - id: aws-saas-metering-tiering-throttling-064
+    difficulty: advanced
+    tags: [service-limits, vpc, subnet]
+    question: |
+      A team wants VPC-per-tenant in a single account. Which VPC limit will bite first and force a
+      rethink?
+    options:
+      - "Subnets per VPC: 200 — too few subnets"
+      - "VPCs per Region: 5 default (raisable to hundreds) — VPC-per-tenant hits limits fast, and raising VPCs also raises internet gateways"
+      - "IPv4 CIDR blocks per VPC: 5 — too few CIDRs"
+      - "Route tables per VPC: 200 — too few route tables"
+    answer: 1
+    explanation: |
+      VPCs per Region default to 5 and only raise to "hundreds," so VPC-per-tenant caps out fast (and each
+      VPC pulls in an internet gateway). Subnets-per-VPC, CIDR blocks, and route tables are per-VPC limits
+      that do not gate the number of tenants when you use one VPC per tenant.
+    ref: "concepts.md#aws-service-limits-that-constrain-saas-designs"
+
+  - id: aws-saas-metering-tiering-throttling-065
+    difficulty: advanced
+    tags: [service-limits, dynamodb, per-partition]
+    question: |
+      Which DynamoDB limits are correctly stated for a pooled shared-table design?
+    options:
+      - "Item size max 4 MB; per-partition 30,000 RCU / 10,000 WCU"
+      - "Item size max 400 KB (hard); per-partition ceiling 3,000 RCU/sec and 1,000 WCU/sec (hard); 2,500 tables/Region default rising to 10,000"
+      - "Item size max 400 KB; per-partition unlimited if the table is on-demand"
+      - "Item size max 1 MB; per-partition 1,000 RCU / 3,000 WCU"
+    answer: 1
+    explanation: |
+      Correct DynamoDB facts: 400 KB max item size (hard), 3,000 RCU/sec and 1,000 WCU/sec per-partition
+      ceiling (hard), and 2,500 tables/Region default (10,000 max). The 4 MB item size and swapped or
+      inflated partition numbers are wrong, and on-demand does not remove the per-partition ceiling.
+    ref: "concepts.md#aws-service-limits-that-constrain-saas-designs"
+
+  - id: aws-saas-metering-tiering-throttling-066
+    difficulty: expert
+    tags: [service-limits, dynamodb, table-per-tenant]
+    question: |
+      Why does table-per-tenant (silo) cap out at roughly 2,500-10,000 tenants per account per
+      Region, while a pooled shared table scales far higher?
+    options:
+      - "Because a shared table has no partition-key requirement"
+      - "Because the DynamoDB tables-per-Region limit (2,500 default, 10,000 max) bounds table-per-tenant, whereas a pooled shared table scales higher but needs IAM dynamodb:LeadingKeys = ${tenantId} and hot-partition management"
+      - "Because pooled tables are exempt from all DynamoDB quotas"
+      - "Because silo tables cannot use GSIs"
+    answer: 1
+    explanation: |
+      Table-per-tenant is bounded by the tables-per-Region limit (2,500 default, 10,000 max); a pooled
+      shared table scales far higher but requires IAM dynamodb:LeadingKeys scoped to ${tenantId} and
+      hot-partition management. A shared table still needs a partition key, pooled tables are not
+      quota-exempt, and GSIs are available to any table.
+    ref: "concepts.md#aws-service-limits-that-constrain-saas-designs"
+
+  - id: aws-saas-metering-tiering-throttling-067
+    difficulty: intermediate
+    tags: [service-limits, shape, interview]
+    question: |
+      An interviewer asks "which limit does this design hit first?" What general shape should your
+      answer take?
+    options:
+      - "Pool strategies always hit limits before silo strategies"
+      - "Silo strategies have low, hard-ish ceilings (Orgs 10->50k accounts, DynamoDB 2.5k->10k tables, VPC 5->hundreds, Cognito 1k->10k pools); pool strategies scale far higher but push the problem into isolation (LeadingKeys/RLS) and noisy-neighbor management"
+      - "There are no meaningful AWS limits; everything is soft and instantly raisable"
+      - "The item size limit (400 KB) is always the first limit hit"
+    answer: 1
+    explanation: |
+      The memorable shape: silo strategies have low, hard-ish ceilings tied to the dimension you multiplied
+      per tenant, while pool strategies scale far higher but shift the challenge to isolation (LeadingKeys/
+      RLS) and noisy-neighbor management. Pools do not hit limits first, limits are real and not all
+      instantly raisable, and item size is not universally the first limit.
+    ref: "concepts.md#aws-service-limits-that-constrain-saas-designs"
+
+  - id: aws-saas-metering-tiering-throttling-068
+    difficulty: intermediate
+    tags: [service-limits, security-groups, subnet-isolation]
+    question: |
+      Subnet-level isolation in one VPC is criticized for "tedious NACL/SG management." Which
+      stated limits reflect that pain?
+    options:
+      - "NACLs per VPC: 200, rules per NACL: 20 (max 40); security groups per Region: 2,500 with 60 in / 60 out rules per SG"
+      - "NACLs per VPC: unlimited; rules per NACL: 1,000"
+      - "Security groups per Region: 10; rules per SG: 5"
+      - "There are no limits on NACLs or security groups"
+    answer: 0
+    explanation: |
+      The concepts cite NACLs per VPC 200 with 20 (max 40) rules each, plus 2,500 security groups/Region
+      and 60 in / 60 out rules per SG — the tedious per-subnet rule management. NACLs are limited not
+      unlimited, SG-per-Region is 2,500 not 10, and limits definitely exist.
+    ref: "concepts.md#aws-service-limits-that-constrain-saas-designs"
+
+  - id: aws-saas-metering-tiering-throttling-069
+    difficulty: intermediate
+    tags: [trade-offs, master-table, when-to-use]
+    question: |
+      According to the master isolation table, which model has the highest isolation strength but
+      the lowest cost efficiency and highest ops burden?
+    options:
+      - "Pooled shared-schema (tenantId + RLS/LeadingKeys)"
+      - "Account-per-tenant (silo)"
+      - "Bridge (pooled compute, siloed data)"
+      - "VPC-per-tenant (silo)"
+    answer: 1
+    explanation: |
+      Account-per-tenant has the highest isolation, lowest cost efficiency (no sharing of fixed costs),
+      and highest ops burden (many accounts) — best for regulated/enterprise, few high-ARPU tenants.
+      Pooled shared-schema is lowest isolation/highest efficiency; bridge is medium; VPC-per-tenant is high
+      but not the highest on all three axes.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-saas-metering-tiering-throttling-070
+    difficulty: advanced
+    tags: [trade-offs, decision-guide, scenario]
+    question: |
+      A startup targets a high volume of low-ARPU, cost-sensitive tenants and cannot afford
+      dedicated infrastructure per tenant. Which decision guide applies?
+    options:
+      - "Silo everything (account or VPC per tenant) and accept the cost"
+      - "Give every tenant a dedicated Cognito pool and Aurora cluster"
+      - "Pool (shared compute + shared DB with tenantId + RLS/LeadingKeys) and invest in noisy-neighbor controls plus apportioned cost attribution"
+      - "Refuse to onboard tenants until each can pay for a silo"
+    answer: 2
+    explanation: |
+      For cost efficiency, high tenant count, and low ARPU, the guide is to pool (shared compute + shared
+      DB with tenantId + RLS/LeadingKeys) and invest in noisy-neighbor controls and apportioned cost
+      attribution. Siloing everything is economically wrong for low-ARPU volume, and refusing onboarding
+      defeats the SaaS model.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-saas-metering-tiering-throttling-071
+    difficulty: advanced
+    tags: [trade-offs, mixed-base, bridge]
+    question: |
+      A SaaS has thousands of small tenants plus a handful of large regulated enterprises demanding
+      hard isolation. What does the decision guide recommend, and what stays shared?
+    options:
+      - "Silo every tenant to satisfy the enterprises; run a separate control plane per tier"
+      - "Use a bridge/tiered approach — pool basic/standard, silo premium/enterprise — while ONE control plane serves all tenants"
+      - "Pool everyone including the regulated enterprises to maximize efficiency"
+      - "Run two entirely separate products with duplicated control planes"
+    answer: 1
+    explanation: |
+      For a mixed base the guide is bridge/tiered: pool basic/standard and silo premium/enterprise, while a
+      single control plane serves all tenants. Siloing everyone is wasteful for small tenants and the
+      control plane is not per-tier; pooling regulated enterprises violates their isolation requirements;
+      and duplicating control planes contradicts the one-control-plane principle.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-saas-metering-tiering-throttling-072
+    difficulty: expert
+    tags: [trade-offs, standing-tensions]
+    question: |
+      Which of the following correctly names one of the "three standing tensions" in this topic?
+    options:
+      - "Encryption strength vs key rotation frequency"
+      - "Region choice vs Availability Zone choice"
+      - "Strict quotas vs elasticity — hard caps guarantee fairness but leave spare capacity unused, while loose caps maximize elasticity but risk noisy neighbors"
+      - "IAM roles vs IAM users for tenant access"
+    answer: 2
+    explanation: |
+      The three standing tensions are: metering granularity vs cost/overhead, strict quotas vs elasticity,
+      and pooled attribution accuracy vs effort. "Strict quotas vs elasticity" is correctly stated here.
+      Encryption/rotation, Region/AZ, and roles/users are not the named tensions.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-saas-metering-tiering-throttling-073
+    difficulty: intermediate
+    tags: [trade-offs, throttling-choice, decision]
+    question: |
+      Per the throttling decision guide, which mechanism fits "backpressure / isolation" (keeping
+      one tenant's load from sinking shared resources)?
+    options:
+      - "API Gateway usage plans + API keys"
+      - "AWS WAF rate-based rules"
+      - "SQS-per-tier bulkheads + Lambda reserved concurrency + RDS Proxy load-shedding"
+      - "Application-level token bucket in DynamoDB"
+    answer: 2
+    explanation: |
+      Backpressure/isolation is handled by SQS-per-tier bulkheads, Lambda reserved concurrency, and RDS
+      Proxy load-shedding. Usage plans + API keys handle coarse per-tenant API rate/quota, WAF handles
+      edge/volumetric abuse, and DynamoDB token buckets handle business-metric quotas.
+    ref: "concepts.md#trade-offs-and-when-to-use-what"
+
+  - id: aws-saas-metering-tiering-throttling-074
+    difficulty: beginner
+    tags: [anti-patterns, client-header, security]
+    question: |
+      Which is a listed anti-pattern that invites cross-tenant access?
+    options:
+      - "Deriving tenant context from a validated JWT claim in a shared authorizer"
+      - "Trusting a client-supplied tenantId header instead of deriving tenant context from a validated JWT claim"
+      - "Caching a validated JWT at the edge"
+      - "Scoping DynamoDB access with dynamodb:LeadingKeys"
+    answer: 1
+    explanation: |
+      Trusting a client-supplied tenantId header is a classic anti-pattern — tenant context must be derived
+      only from a validated JWT claim, or a caller can impersonate another tenant. Deriving from a validated
+      claim, caching a validated JWT, and LeadingKeys scoping are recommended practices.
+    ref: "concepts.md#failure-modes-and-anti-patterns"
+
+  - id: aws-saas-metering-tiering-throttling-075
+    difficulty: intermediate
+    tags: [anti-patterns, metering, hot-path]
+    question: |
+      Which is described as a failure mode/anti-pattern in the metering design?
+    options:
+      - "Emitting usage events to Kinesis/Firehose and aggregating out of band"
+      - "Synchronous metering on the hot path that couples app latency/availability to the billing system"
+      - "Rolling raw events into billable units per tenant per period"
+      - "Stamping each usage event with tenant context"
+    answer: 1
+    explanation: |
+      Synchronous metering on the hot path is an anti-pattern because it couples request latency and
+      availability to the billing system; metering must be async (Kinesis/Firehose/EventBridge). Async
+      emission, aggregation into billable units, and tenant-stamped events are correct practices.
+    ref: "concepts.md#failure-modes-and-anti-patterns"
+
+  - id: aws-saas-metering-tiering-throttling-076
+    difficulty: advanced
+    tags: [anti-patterns, silo-limits, scaling]
+    question: |
+      Why is "pool-per-tenant identity / table / VPC / account beyond limits" listed as a failure
+      mode, and what is the remedy?
+    options:
+      - "It improves scalability, so it is not really a failure mode"
+      - "It only fails in newer/smaller Regions"
+      - "It silently caps growth (Cognito 1k-10k pools, DynamoDB 2.5k-10k tables, VPC 5->hundreds, Orgs 10->50k accounts); the remedy is to choose pooling early if you will scale to many tenants"
+      - "The remedy is to request unlimited quotas from AWS"
+    answer: 2
+    explanation: |
+      Creating a dedicated pool/table/VPC/account per tenant silently caps growth at the corresponding
+      service ceiling (Cognito 1k-10k pools, DynamoDB 2.5k-10k tables, VPC 5->hundreds, Orgs 10->50k
+      accounts), so you must choose pooling early if scaling to many tenants. It does not aid scale, is not
+      Region-specific, and AWS does not grant unlimited quotas.
+    ref: "concepts.md#failure-modes-and-anti-patterns"

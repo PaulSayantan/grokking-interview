@@ -103,6 +103,25 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 42 (2026-07-23):** **AWS SaaS multi-tenancy cluster** — 5 NEW topics added to the
+  existing **AWS System Design** group in system-design (AWS group 26 → **31 topics**; domain 74 → 79).
+  User wanted AWS multi-tenancy architectural design patterns as subtopics; decided (per Q) to keep the
+  `aws-` prefix so they slot into the existing AWS group (no new sub-group) as an AWS-specific companion
+  to the vendor-neutral core `multi-tenancy-and-saas-isolation` topic. Anchored on a user-provided
+  Nagarro six-pattern article + the AWS Well-Architected SaaS Lens / SaaS Factory body of knowledge.
+  Topics: `aws-saas-multitenancy-foundations` (isolation spectrum, silo/pool/bridge per layer, control
+  plane vs application plane), `aws-saas-isolation-patterns` (the 6 patterns: Orgs/OU governance →
+  account → VPC → subnet → container → data-layer), `aws-saas-tenant-identity-and-routing` (Cognito
+  tenant context, JWT claims, scoped-IAM-per-request, routing, onboarding automation),
+  `aws-saas-data-partitioning` (4 data sub-models, DynamoDB pooling, Postgres RLS, cross-tenant-leak
+  prevention), `aws-saas-metering-tiering-throttling` (noisy neighbors, tiering, throttling, per-tenant
+  cost attribution). **389 MCQs** (65 B / 138 I / 123 adv / 63 expert), all four tiers, heavy
+  scenario/trade-off. Authored via research→author→verify workflow (`aws-saas-multitenancy-authoring.js`);
+  transient API errors killed 3 agents mid-run, recovered with a targeted repair workflow
+  (`aws-saas-multitenancy-repair.js`). Verify agents web-checked all AWS limits current (Orgs/OU/SCP,
+  Cognito custom-attr/domain caps, STS session-policy/tags, DynamoDB partition throughput, VPC/subnet
+  quotas, cost-allocation tags) and rebalanced badly-skewed answer indices. Validator passes; web build
+  confirms all 5 render in the AWS System Design group.
 - **Session 41 (2026-07-23):** **gRPC Pass 1** (NEW authored domain, was coming-soon) — 16 topics,
   **806 MCQs**, 51 Mermaid (all render clean). High-performance RPC with Protocol Buffers over HTTP/2,
   at the mechanism/protocol level. Topics: fundamentals, Protocol Buffers (proto3/wire-encoding/presence),
