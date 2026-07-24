@@ -504,7 +504,7 @@ article's pattern #1. Verified quotas (defaults):
 | OU nesting depth | 5 levels under one root |
 | Roots | 1 |
 | SCPs per org | 10,000 |
-| SCPs attached per entity | max 5 (root/OU/account) |
+| SCPs attached per entity | max 10 (root/OU/account) |
 | SCP document size | 10,240 chars |
 | Tags per root/OU/account | 50 |
 | Concurrent account creations | 5 |

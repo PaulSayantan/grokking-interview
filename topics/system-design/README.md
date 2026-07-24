@@ -165,7 +165,7 @@ article. **389 MCQs.**
 
 | Topic | Slug | Freq | Difficulty | Status |
 |---|---|---|---|---|
-| AWS SaaS and Multi-Tenancy Foundations | `aws-saas-multitenancy-foundations` | high | beginner | ✅ (81 MCQs · 37 adv/expert) |
+| AWS SaaS and Multi-Tenancy Foundations | `aws-saas-multitenancy-foundations` | high | beginner | ✅ (81 MCQs · 38 adv/expert) |
 | AWS Tenant Isolation Architecture Patterns | `aws-saas-isolation-patterns` | high | advanced | ✅ (70 MCQs · 32 adv/expert) |
 | AWS SaaS Tenant Identity, Context and Routing | `aws-saas-tenant-identity-and-routing` | high | advanced | ✅ (66 MCQs · 30 adv/expert) |
 | AWS SaaS Data Partitioning and Isolation | `aws-saas-data-partitioning` | high | advanced | ✅ (96 MCQs · 51 adv/expert) |

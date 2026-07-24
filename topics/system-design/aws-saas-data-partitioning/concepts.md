@@ -676,7 +676,7 @@ Decision guide (turn into a flowchart in an interview):
 | AWS Organizations — accounts | Default **10**, raisable to thousands | Caps naive account-per-tenant silo |
 | Organizations — OUs per org | **2,000** | Governance-model tenant grouping ceiling |
 | Organizations — OU nesting depth | **5** levels | Tenant hierarchy depth |
-| Organizations — SCPs per OU/account/root | **10** (SCP doc ≤ 5,120 chars stored; validated up to 10,240 with whitespace removed) | Governance guardrails per group |
+| Organizations — SCPs per OU/account/root | **10** (SCP doc max **10,240 chars**; whitespace removed when saved via console) | Governance guardrails per group |
 | Control Tower — accounts per OU | **1,000** (not adjustable); 10,000 per landing zone | Silo-account governance scale |
 | VPCs per Region | **5** default (raisable) | Caps VPC-per-tenant silo |
 | Subnets per VPC | **200** | Caps subnet-per-tenant |
@@ -688,7 +688,7 @@ Decision guide (turn into a flowchart in an interview):
 | S3 request rate | **3,500 write / 5,500 read per prefix/sec** | Prefix-per-tenant aids throughput |
 | S3 buckets per account | **10,000** default / raisable to ~1M | Bounds bucket-per-tenant silo |
 | Cognito quotas | per account **per Region, shared across tenants**; hosted-UI cookie **1 hr** | Pooled identity can hit account throttles |
-| EventBridge | **300 buses/account**, **2,000 rules/bus** | Caps bus-per-tenant silo eventing |
+| EventBridge | **100 buses/account/Region** (raisable), **300 rules/bus** (raisable) | Caps bus-per-tenant silo eventing |
 | RDS connections | set by **DB instance class** | Pool exhaustion → RDS Proxy |
 
 (All "default/soft" values change over time and via Service Quotas — hedge in an
