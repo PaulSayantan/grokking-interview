@@ -65,7 +65,7 @@ never modify anything under `topics/`.
 
 Authored domains (browsable): `system-design`, `spring-boot`, `spring-core`, `java-jvm`.
 Coming-soon domains (no content, `authored:false`): `docker`, `kubernetes`, `devops-cicd`,
-`hibernate-jpa`, `apache-tomcat`, `messaging-databases`. Domain display titles come from
+`hibernate-jpa`, `messaging-databases`. Domain display titles come from
 the first `# H1` of `topics/<domain>/README.md`.
 
 **Current generated volume:** 4 authored domains, 6 coming-soon, 119 subtopics, 9432
@@ -110,7 +110,7 @@ reading the file directly. Real excerpt (trimmed to one authored + one coming-so
 ```
 
 - **Domain order** in `domains[]`: authored first (system-design, spring-boot, spring-core,
-  java-jvm), then coming-soon (docker, kubernetes, devops-cicd, hibernate-jpa, apache-tomcat,
+  java-jvm), then coming-soon (docker, kubernetes, devops-cicd, hibernate-jpa,
   messaging-databases).
 - **Groups:** `system-design` has exactly 3 groups in this order:
   `core` (label "Core Topics", 23 subtopics), `advanced` (label

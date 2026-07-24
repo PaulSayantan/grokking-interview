@@ -2,7 +2,7 @@
 
 A personal, growing library of **interview questions and answers** across system
 design, DevOps (Docker, Kubernetes, CI/CD), and backend frameworks (Spring Boot,
-Spring Core, Hibernate/JPA, Apache Tomcat, JVM, messaging & databases) — stored as
+Spring Core, Hibernate/JPA, JVM, messaging & databases) — stored as
 plain Markdown so it's readable anywhere, plus a **responsive web app** (Astro) that
 publishes the concepts as HTML and lets learners practice the material as
 multiple-choice quizzes on laptop or phone.
@@ -53,7 +53,6 @@ interview-prep/
 | Spring Boot | `topics/spring-boot/` |
 | Spring Framework Core | `topics/spring-core/` |
 | Hibernate & JPA | `topics/hibernate-jpa/` |
-| Apache Tomcat | `topics/apache-tomcat/` |
 | Java & JVM | `topics/java-jvm/` |
 | Messaging & Databases | `topics/messaging-databases/` |
 

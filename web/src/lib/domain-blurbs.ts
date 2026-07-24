@@ -23,7 +23,6 @@ export const DOMAIN_BLURBS: Record<string, string> = {
   "lld-and-ood": "Object-oriented design under time pressure — SOLID, UML, and the machine-coding round: parking lots, rate limiters, and more as clean, extensible code.",
   "reliability-ops": "SLOs and error budgets, resilience patterns (retries, circuit breakers, bulkheads), incident response, chaos engineering, and disaster recovery.",
   "hibernate-jpa": "The ORM layer in depth — persistence context, entity lifecycle, the N+1 problem, caching, and locking across JPA and Hibernate 6/7.",
-  "apache-tomcat": "The servlet container and its architecture — connectors, thread pools, class loading, and tuning the JVM's most common web runtime.",
   grpc: "High-performance RPC with Protocol Buffers over HTTP/2 — the four streaming modes, schema evolution, deadlines, and gRPC versus REST.",
 };
 
