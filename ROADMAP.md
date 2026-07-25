@@ -103,6 +103,20 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 43 (2026-07-25):** **Corpus-wide teaching-quality audit + 4-wave refinement.**
+  Read-only audit of all **430 subtopics** (cache-backed idempotent workflow) scored each
+  against a Senior-Principal-Engineer + gifted-teacher bar weighted to intuition/clarity,
+  worked examples, and interview depth/gotchas → per-domain `CONTENT-AUDIT.md` ×19 + master
+  `CONTENT-AUDIT-MASTER.md`. Verdict: corpus already strong (1 high / ~309 med / 120 low; no
+  rewrites), universal gap = concrete worked examples. Then a 4-wave refine, each wave a
+  2-stage refine→adversarial-verify pipeline (every worked example RECOMPUTED by a 2nd agent):
+  **W0 correctness** (83 files, 115 confirmed bugs incl. base62/enum-readResolve/LLD
+  skeleton-vs-prose; 99 facts web-verified; commit `cb8555e`), **W1 worked-examples** (123
+  files, 515 examples; `049910c`), **W2 worked-examples** (99 files, 380 examples; `278dcc8`),
+  **W3 polish** (33 files: 57 jargon defs + 14 diagrams + structure; `64cb30c`). Verifier caught
+  22 regressions/miscomputations across waves — all fixed + independently re-verified. Net:
+  **274 concepts.md improved, +22,214/−873 lines, 38 new mermaid diagrams**; validator green
+  (430 files, 27,481 Qs). New repo skill `refining-content` encodes the 7-point standard.
 - **Session 42 (2026-07-23):** **AWS SaaS multi-tenancy cluster** — 5 NEW topics added to the
   existing **AWS System Design** group in system-design (AWS group 26 → **31 topics**; domain 74 → 79).
   User wanted AWS multi-tenancy architectural design patterns as subtopics; decided (per Q) to keep the
