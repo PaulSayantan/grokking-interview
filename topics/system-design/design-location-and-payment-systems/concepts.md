@@ -114,9 +114,12 @@ Composite/2D range queries need a structure that preserves 2D locality.
 
 **Core operations any scheme must support:**
 1. **Point → cell** (index a location).
-2. **Radius / kNN query**: given a center and radius, find candidate cells
-   (the center cell + its ring of neighbors), gather points, then do exact
-   distance filtering (haversine) as a refine step.
+2. **Radius / kNN (k-nearest-neighbors) query**: given a center and radius, find
+   candidate cells (the center cell + its ring of neighbors), gather points, then
+   do exact distance filtering (**haversine** — the great-circle distance between
+   two lat/lng points on a sphere) as a refine step. Plain Euclidean distance on
+   raw degrees is wrong, because a degree of longitude shrinks toward the poles,
+   so equal degree-deltas are not equal ground distances.
 3. **Cell → neighbors** (ring/k-ring) — needed because a query circle spills
    across cell borders.
 
@@ -370,7 +373,11 @@ ledger.
 **The core problem.** The client sends "charge $20." The network times out. Did
 it succeed? The client retries. Without protection you **charge twice**. You
 cannot achieve exactly-once *delivery* over an unreliable network, but you can
-achieve exactly-once *effect*.
+achieve exactly-once *effect*. **Why delivery is impossible:** the sender can
+never distinguish "my message was lost" from "the reply/ack was lost," so it
+*must* retry — which guarantees the receiver will sometimes see duplicates. The
+only durable fix is to make duplicates *harmless* (dedupe / idempotent
+handlers), not to try to prevent them.
 
 **Idempotency keys (the standard pattern, popularized by Stripe).**
 1. Client generates a unique **idempotency key** (UUID) for the *logical
@@ -637,8 +644,12 @@ statement; the `available > 0` guard prevents oversell in one atomic step.
 **Option D — Distributed lock (Redis Redlock / ZooKeeper / etcd).** For state
 not in one DB. Gains cross-resource mutual exclusion; gives up correctness
 guarantees under GC pauses/clock skew (Redlock is contested), adds a
-dependency, and needs fencing tokens to be safe. Use sparingly; prefer DB-native
-atomicity when possible.
+dependency, and needs **fencing tokens** to be safe. A fencing token is a
+monotonically increasing number handed out each time the lock is granted; the
+protected resource remembers the highest token it has seen and rejects any write
+carrying a lower one — so a holder that stalled (e.g., a long GC pause) and lost
+its lock cannot later corrupt state with a stale write. Use distributed locks
+sparingly; prefer DB-native atomicity when possible.
 
 **Comparison:**
 

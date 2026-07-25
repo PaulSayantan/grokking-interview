@@ -32,6 +32,14 @@ the `Authorization`/`WWW-Authenticate` headers), **RFC 6749 + RFC 6750** (OAuth
 > `403` = "you can't do that." Never leak *which* by using the wrong code, and
 > never skip the per-object authorization check just because the token is valid.
 
+**How this file is organized.** Core schemes come first (API keys, OAuth flows,
+bearer/JWT, token placement, session-vs-token), then the *Choosing an auth model*
+decision guide, then advanced and FAPI-grade extensions (DPoP, token exchange,
+JWKS rotation, mTLS specifics, PAR/RAR, SigV4 internals). A couple of topics are
+deliberately split — the scheme's essentials up front, its deep-dive later — with
+a forward-reference where that happens; skim the core sections, treat the later
+ones as reference by name.
+
 ---
 
 ## Authentication vs authorization
@@ -531,7 +539,9 @@ Authorization: AWS4-HMAC-SHA256
 ```
 
 The `Signature` is derived through a chain: `canonical request → string to sign
-→ signing key (HMAC chain over date/region/service) → signature`.
+→ signing key (HMAC chain over date/region/service) → signature`. The full
+canonicalization and key-derivation algorithm is a deep-dive later in *§SigV4
+signing internals*.
 
 **Trade-offs.** Signing is **stateless and strong** but **complex** to implement
 correctly (canonicalization bugs are common) and awkward for browsers. It shines
@@ -577,7 +587,8 @@ gets a short-lived cert and services mutually authenticate automatically.
 - Internal microservice ↔ microservice calls.
 - High-assurance partner/B2B integrations (banking, payments — often combined
   with OAuth as "certificate-bound access tokens," RFC 8705, so a stolen token
-  can't be used without the matching cert).
+  can't be used without the matching cert; the client-auth methods and the
+  `cnf.x5t#S256` binding are a deep-dive later in *§mTLS specifics*).
 
 **Trade-offs.**
 
@@ -825,6 +836,30 @@ scoped/audience-narrowed for the *next* hop.
   a token declares *which* actor is permitted to act on the subject's behalf.
 - Each hop should **narrow** audience and scope (downscoping), so a token leaked
   deep in the chain has minimal blast radius.
+
+**The chain, visually.** A user's inbound token is exchanged at each hop for a
+new token whose `aud` targets the *next* service and whose `scope` is trimmed to
+just what that hop needs:
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Service A (edge)
+    participant AS as Authorization Server
+    participant B as Service B
+    participant C as Service C
+    U->>A: request + token (aud=A, scope=read:orders write:orders)
+    A->>AS: token-exchange (subject_token=user tok, audience=B, scope=read:orders)
+    AS-->>A: token2 (aud=B, scope=read:orders, act={sub:A})
+    A->>B: call + token2
+    B->>AS: token-exchange (subject_token=token2, audience=C, scope=read:inventory)
+    AS-->>B: token3 (aud=C, scope=read:inventory, act={sub:B, act:{sub:A}})
+    B->>C: call + token3
+    Note over C: token3 valid only for C, read-only — leaked here, minimal blast radius
+```
+
+The nested `act` claim (`B acting for A acting for user`) is what preserves the
+audit trail across hops — that's delegation, not impersonation.
 
 > [!INTERVIEW]
 > "Five microservices, one user — how do you carry identity?" Token exchange

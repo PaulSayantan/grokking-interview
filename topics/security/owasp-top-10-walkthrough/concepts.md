@@ -666,6 +666,11 @@ must be **per-object-instance**, not just per-endpoint.
 
 ## Security headers, CORS, and cloud misconfiguration (A02/A05 deep dive)
 
+*Numbering note: this heading's "A02/A05" refers to the **2021 list** — security headers
+touch **A02:2021 Cryptographic Failures** (HSTS) and **A05:2021 Security Misconfiguration**
+(the rest). In the 2025 list Misconfiguration is A02. It is the deep dive for
+[A05:2021 – Security Misconfiguration](#a052021--security-misconfiguration).*
+
 The misconfiguration section says "missing security headers" and "overly permissive CORS"
 generically. Senior interviews want specifics.
 
@@ -703,6 +708,10 @@ and unauthenticated **Elasticsearch / Redis / MongoDB** bound to a public interf
 
 ## Password hashing and AEAD — concrete parameters (A04 deep dive)
 
+*Numbering note: cryptography is **A02 in the 2021 list** ("Cryptographic Failures") and
+**A04 in the 2025 list** — this heading uses the 2025 number. It is the deep dive for what
+[A02:2021 – Cryptographic Failures](#a022021--cryptographic-failures) covers.*
+
 "Use Argon2id/bcrypt" is not enough at senior level; know the numbers (per OWASP Password
 Storage Cheat Sheet, RFC 9106, and RFC 7914):
 
@@ -739,6 +748,10 @@ All must use a **unique random salt per password** (the KDFs generate/store this
 ---
 
 ## Injection breadth and XSS taxonomy (A05 deep dive)
+
+*Numbering note: injection is **A03 in the 2021 list** and **A05 in the 2025 list** — this
+heading uses the 2025 number. It is the deep dive for what
+[A03:2021 – Injection](#a032021--injection) covers.*
 
 The A03/A05 injection section shows SQLi + reflected XSS. The category is much broader:
 

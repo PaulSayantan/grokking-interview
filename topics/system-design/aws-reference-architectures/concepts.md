@@ -141,7 +141,8 @@ flowchart LR
 - **Images → Lambda.** Fast, cheap, scales per-object. Constraint: **15 min / 10 GB RAM /
   10 GB `/tmp`** — fine for images, marginal for large video.
 - **Video → AWS Elemental MediaConvert.** Purpose-built transcoding to **HLS/DASH adaptive
-  bitrate**; handles long files, many codecs, DRM. Lambda can't transcode a 2-hour 4K film
+  bitrate**; handles long files, many codecs, **DRM** (Digital Rights Management — content
+  encryption + licensing so only entitled players can decrypt). Lambda can't transcode a 2-hour 4K film
   (time/memory). MediaConvert is job-based (async) and billed per output minute.
 - **Metadata in DynamoDB.** Blob in S3, pointer + attributes (owner, dimensions, status,
   tags) in DynamoDB. Never store the blob in the DB (400 KB item cap; cost).
@@ -161,7 +162,8 @@ flowchart LR
 
 ## Video streaming platform, Netflix style
 
-**Requirements.** Large VOD catalog; millions of concurrent viewers; adaptive quality over
+**Requirements.** Large VOD (Video On Demand — pre-recorded, on-demand playback) catalog;
+millions of concurrent viewers; adaptive quality over
 varying networks; global low-latency start; content protection (DRM); minimize origin load
 and egress cost.
 
@@ -182,13 +184,18 @@ flowchart LR
   switches renditions per segment. This is why start-up is fast and playback adapts.
 - **CloudFront is the load-bearing component.** Video is the ultimate cache-friendly
   workload: the same segments are served to millions. High cache-hit ratio protects the S3
-  origin and slashes egress. Use **Origin Shield** to add a mid-tier cache and further
+  origin and slashes egress. Front the bucket with **OAC** (Origin Access Control — CloudFront
+  signs its origin requests so the S3 bucket can be locked to CloudFront only and never served
+  directly to the public). Use **Origin Shield** to add a mid-tier cache and further
   collapse origin requests. Netflix's real-world answer is **Open Connect** (CDN appliances
   inside ISPs); the AWS-native analog is CloudFront + Origin Shield.
 - **Protection:** **signed URLs / signed cookies** for entitlement; **DRM** (Widevine,
-  FairPlay, PlayReady) via MediaPackage/SPEKE for premium content.
+  FairPlay, PlayReady) via MediaPackage/**SPEKE** (Secure Packager and Encoder Key Exchange —
+  the standard API by which the packager fetches encryption keys from a DRM provider) for
+  premium content.
 - **Live vs VOD:** VOD = S3 + MediaConvert; **live = MediaLive (encode) → MediaPackage
-  (package/DVR/DRM) → CloudFront**.
+  (package/DVR/DRM) → CloudFront**. (**DVR** here = the time-shift buffer that lets live
+  viewers pause/rewind.)
 
 **Trade-offs.**
 - **CloudFront vs S3-direct:** never serve video straight from S3 to viewers — you'd pay full
@@ -441,7 +448,9 @@ flowchart LR
 - **Storage (data lake):** S3 with **partitioning** (e.g. by date) and **columnar Parquet** to
   cut Athena/Redshift scan cost. Glue Data Catalog holds schema.
 - **Query:** **Athena** = serverless, pay-per-TB-scanned, great for ad-hoc; **Redshift** =
-  provisioned/serverless MPP warehouse for heavy, repeated BI with joins; **EMR** =
+  provisioned/serverless **MPP** (Massively Parallel Processing — the query is split across
+  many nodes that each scan a shard of the data in parallel) warehouse for heavy, repeated BI
+  with joins; **EMR** =
   Spark/Hadoop for custom big-data processing.
 - **Real-time:** **Managed Service for Apache Flink** (formerly Kinesis Data Analytics) or
   Lambda consumers for windowed aggregations/alerts.
@@ -583,7 +592,9 @@ Interviewers reward candidates who reason about cost, not just correctness.
   (Instant/Flexible/Deep Archive) trade retrieval latency/cost for storage cost; use lifecycle
   policies for logs/raw data.
 - **Athena vs Redshift cost model:** Athena bills per TB scanned (partition + Parquet to
-  minimize); Redshift bills for the cluster/RPU-hours (cheaper when queries are constant).
+  minimize); Redshift bills for the cluster (provisioned node-hours) or, on Redshift
+  Serverless, **RPU**-hours (Redshift Processing Unit — the serverless compute unit billed
+  per second while a query runs) — cheaper when queries are constant.
 
 **Quick sizing example (URL shortener):** 100 M DAU × 10 redirects = 1 B reads/day ≈ 11.6k
 avg rps, ~60k peak. With a high CloudFront hit ratio, DynamoDB sees a fraction; on-demand or

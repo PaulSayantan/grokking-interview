@@ -241,8 +241,11 @@ This is the single most important — and most probed — distinction in the top
 to get percentiles/latency SLIs out of a Timer or DistributionSummary:
 
 1. **`publishPercentiles(0.95, 0.99)` — client-side (pre-computed) percentiles.** The app computes
-   the p95/p99 *inside the process* using an HdrHistogram and publishes the resulting numbers
-   (Prometheus: a series with a `quantile` label; conceptually like a Prometheus *Summary*).
+   the p95/p99 *inside the process* using an **HdrHistogram** (High Dynamic Range histogram: a
+   compact in-process data structure that records values across a wide range with a configurable,
+   bounded *relative* error, so the resulting percentiles are accurate to that error rather than
+   truly exact) and publishes the resulting numbers (Prometheus: a series with a `quantile` label;
+   conceptually like a Prometheus *Summary*).
 2. **`publishPercentileHistogram()` / `serviceLevelObjectives(...)` — server-side histogram
    buckets.** The app publishes **cumulative bucket counts** (`_bucket{le="..."}`); the monitoring
    backend computes the quantile at query time (Prometheus `histogram_quantile`).
@@ -280,7 +283,7 @@ Trade-offs summary:
 | Aggregate across instances | **No** (invalid) | **Yes** (sum buckets by `le`) |
 | Change percentile after the fact | No (fixed at publish) | Yes (any φ from same buckets) |
 | Cost | fewer series | more series (one per bucket) |
-| Accuracy | exact within HDR error | bounded by bucket width |
+| Accuracy | high precision, bounded by HdrHistogram relative error | bounded by bucket width |
 
 ---
 

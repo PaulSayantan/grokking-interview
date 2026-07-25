@@ -41,6 +41,45 @@ request mapping, query mapping).
 
 ---
 
+## Slice boundaries at a glance
+
+Before diving into each slice annotation below, this diagram shows *which layers
+each test annotation loads* and which must be supplied as mocks. A "slice" loads
+only its own layer; anything below the dashed line for that slice is **absent**
+from the context, so a dependency on it must be provided via
+`@MockitoBean`/`@MockBean` or the context fails to start with a "no qualifying
+bean" error.
+
+```mermaid
+flowchart TB
+    subgraph FULL["@SpringBootTest — loads the whole stack"]
+        C1[Controllers / @RestControllerAdvice]
+        S1[Services / @Component]
+        R1[Repositories / Spring Data JPA]
+        D1[(DataSource / DB)]
+        C1 --> S1 --> R1 --> D1
+    end
+
+    subgraph WEB["@WebMvcTest — web slice only"]
+        C2[Controllers + MockMvc]
+        S2["Services: NOT loaded → @MockitoBean"]
+        C2 -.mock.-> S2
+    end
+
+    subgraph JPA["@DataJpaTest — persistence slice only"]
+        R3[Repositories + TestEntityManager]
+        D3[(Embedded DB, tx rolled back)]
+        R3 --> D3
+    end
+```
+
+Read it as: `@WebMvcTest` loads controllers but stops at the service boundary;
+`@DataJpaTest` loads repositories plus an embedded `DataSource` but no controllers
+or services; `@SpringBootTest` loads everything. The per-slice sections that follow
+detail exactly what each boundary includes and excludes.
+
+---
+
 ## @SpringBootTest and webEnvironment options
 
 `@SpringBootTest` bootstraps the **entire ApplicationContext** — it searches
@@ -211,6 +250,13 @@ class UserRepositoryTest {
   `@Commit` when you need to test commit-time behavior.
 - Testing against H2 while production uses Postgres can hide dialect-specific
   bugs — hence Testcontainers with `replace = Replace.NONE`.
+- **Seeding test data with `@Sql`:** `@Sql(scripts = "classpath:orders.sql")` runs
+  a SQL script before each test method; `executionPhase = AFTER_TEST_METHOD` runs
+  it after (e.g. cleanup). By default these scripts run **within the same
+  rollback-by-default test transaction**, so seeded rows are also rolled back at
+  method end — no manual cleanup needed. Use `@SqlConfig`/`@SqlMergeMode` to change
+  the transaction mode when you need the seed to persist. (A `data.sql` on the
+  classpath also loads, but `@Sql` gives per-method control.)
 
 **The first-level cache masks `findById` bugs:** after `em.persist(entity)`, the
 same entity instance lives in the persistence context. A subsequent
@@ -336,6 +382,31 @@ property `spring.test.context.cache.maxSize`).
 - `@DirtiesContext` — explicitly marks the context dirty so it is **closed and
   removed** from the cache (use sparingly; it forces expensive rebuilds).
 
+**Worked example — when do contexts get shared?** Consider three test classes:
+
+```java
+@WebMvcTest(OrderController.class)
+class OrderControllerTest { @MockitoBean OrderService svc; }        // A
+
+@WebMvcTest(OrderController.class)
+class OrderQueryTest { @MockitoBean OrderService svc; }             // B
+
+@WebMvcTest(OrderController.class)
+@TestPropertySource(properties = "feature.x=true")
+class OrderFeatureTest { @MockitoBean OrderService svc; }           // C
+```
+
+A and B have **identical** cache keys (same slice, same controller, same
+`@MockitoBean` type and field name, no extra properties), so they **share one
+cached context** — it is built once and reused. C adds a property, which changes
+the key, so it forces a **second** context. Result: **2 contexts built, not 3**.
+If each `@WebMvcTest` context costs ~1.5s to build, sharing saves ~1.5s versus
+rebuilding for B. Now imagine 40 web-slice classes where half accidentally vary a
+trivial property or mock field name: you thrash the 32-entry LRU cache, each miss
+pays the full ~1.5s build (and each eviction *closes* a context), and the suite's
+context-build time balloons by roughly 1.5s × (number of avoidable misses). This
+is why "share configuration ruthlessly" is the top suite-speed lever.
+
 **Interview trap:** mutating a shared bean's state in a test can leak into later
 tests that reuse the cached context. Either avoid stateful singletons in tests,
 use `@DirtiesContext`, or reset state in `@AfterEach`.
@@ -416,7 +487,10 @@ Spring test does **not** put it in the context; the real bean is still autowired
 and your "mock" is ignored. You almost always want `@MockBean`/`@MockitoBean`
 there.
 
-**Bean resolution rules for `@MockitoBean` (deep):**
+**Bean resolution rules for `@MockitoBean` (deep):** *The one-line takeaway —
+`@MockitoBean` finds the bean to replace **by type**, and if it finds none it
+quietly **creates** one; the edge cases below are all consequences of those two
+facts.*
 - On a **field**, the target is resolved **by type**. If several beans of that
   type exist, Spring uses the field name (or a `@Qualifier`) as a fallback
   qualifier; if still ambiguous, the context **fails** with an error telling you
@@ -427,6 +501,31 @@ there.
   mock bean instead of replacing anything — a subtle source of "my stub does
   nothing" bugs. Set `enforceOverride = true` (`REPLACE` strategy) to require an
   existing bean and fail otherwise.
+
+  ```java
+  @WebMvcTest(OrderController.class)
+  class OrderControllerTest {
+      @Autowired MockMvc mvc;
+      // AuditLog is NOT part of the web slice (it's a @Service the controller
+      // doesn't even use here). REPLACE_OR_CREATE silently *creates* a fresh
+      // mock bean rather than failing:
+      @MockitoBean AuditLog audit;
+
+      @Test
+      void stubDoesNothing() throws Exception {
+          given(audit.lastEntry()).willReturn("boom");   // stub set on the
+                                                          // orphan mock...
+          mvc.perform(get("/orders/1")).andExpect(status().isOk());
+          // ...but the controller path never touches this bean, so the stub has
+          // no observable effect. No error, no warning — the test "passes" while
+          // proving nothing. Symptom: mysterious green tests / unused-stub smell.
+      }
+  }
+  ```
+
+  **Fix:** `@MockitoBean(enforceOverride = true) AuditLog audit;` switches to the
+  `REPLACE` strategy, which requires the bean to already exist — you get a clear
+  startup failure ("no bean to override") instead of a silent no-op mock.
 - **`@MockitoSpyBean` uses the `WRAP` strategy** and requires **exactly one**
   existing candidate; zero candidates is an error (it cannot create one), and
   multiple candidates need a qualifier.
@@ -602,7 +701,9 @@ class (even `static`) is still expensive across many classes. Two techniques:
 2. **Singleton container pattern:** declare the container `static` in a base class
    and **start it manually** (`pg.start()` in a static block) *without* the
    `@Testcontainers`/`@Container` JUnit lifecycle, so a single container is shared
-   across all test classes and never stopped (Ryuk cleans it up at JVM exit). This
+   across all test classes and never stopped (Ryuk — the Testcontainers
+   resource-reaper sidecar container that tracks and removes started containers —
+   cleans it up at JVM exit). This
    maximizes reuse and pairs well with a **shared cached context**.
 
 **`@ServiceConnection` vs `@DynamicPropertySource` precedence:** `@ServiceConnection`
@@ -668,7 +769,20 @@ class PricingTest {
 }
 ```
 
-**Deeper Mockito traps interviewers use:**
+**Deeper Mockito traps interviewers use:** *The recurring theme — Mockito is
+strict about unused stubs and about argument matchers, and its `@InjectMocks`
+"magic" fails silently (injecting `null`) rather than erroring.*
+
+The argument-matcher rules trip people up most often, so as a quick reference:
+
+| Matcher | Matches `null`? | For primitives? |
+|---|---|---|
+| `any()` (no-arg) | **Yes** — matches anything incl. `null` and varargs | Returns `null` → NPE on unbox; don't use |
+| `any(Class)` | **No** — excludes `null` (since Mockito 2.1.0) | No |
+| `isNull()` / `nullable(Class)` | Yes (that's their purpose) | — |
+| `anyInt()` / `anyLong()` / `anyBoolean()` | n/a (primitives can't be null) | **Yes** — use these |
+| `eq(value)` | matches that value | wrap literals when mixing matchers |
+
 - **Strictness levels:** `MockitoExtension` defaults to `Strictness.STRICT_STUBS`
   (unused stubs fail, argument mismatches are flagged). Override per class with
   `@MockitoSettings(strictness = Strictness.LENIENT)` or per-stub with

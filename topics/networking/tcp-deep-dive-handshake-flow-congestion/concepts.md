@@ -564,8 +564,10 @@ Its pieces:
 
 - **ECT(1) as a classifier.** L4S traffic marks packets **ECT(1)** so the network can steer
   it into a separate low-latency queue.
-- **DualQ Coupled AQM.** A router runs two queues — a classic queue (for CUBIC/Reno) and an
-  L4S queue — coupled so the two share bandwidth fairly while the L4S queue is kept shallow.
+- **DualQ Coupled AQM.** AQM (**Active Queue Management** — where a router proactively marks
+  or drops packets as its queue starts to build, rather than only when it overflows) here runs
+  two queues — a classic queue (for CUBIC/Reno) and an L4S queue — coupled so the two share
+  bandwidth fairly while the L4S queue is kept shallow.
 - **Scalable congestion controls.** L4S flows run controllers like **TCP Prague** or
   **BBRv2/v3** that respond to *frequent, immediate* CE marks (marks are **not**
   drop-equivalent here — they are early and proportional), keeping the queue tiny.

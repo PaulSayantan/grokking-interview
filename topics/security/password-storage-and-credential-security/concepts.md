@@ -122,6 +122,22 @@ Caveats interviewers probe:
   it invalidates every stored hash. Encrypting the hash with the pepper (rather than
   mixing it into the hash) makes rotation feasible: decrypt-then-re-encrypt.
 
+The full register-time pipeline (pre-hash HMAC construction) and the mirror-image
+login-time verify:
+
+```mermaid
+flowchart LR
+    subgraph Register
+      P1[password] --> H1["HMAC-SHA256(·, pepper)"] --> A1["Argon2id(·, salt)"] --> S1[store PHC string]
+    end
+    subgraph Login
+      P2[submitted password] --> H2["HMAC-SHA256(·, pepper)"] --> A2["Argon2id(·, salt from PHC)"] --> C2{constant-time compare vs stored hash}
+    end
+```
+
+The salt and Argon2 parameters are read back from the stored PHC string at login; the
+pepper comes from the secrets store (never the DB).
+
 ---
 
 ## Adaptive and memory-hard password hashes
@@ -286,14 +302,33 @@ them. This stops users from picking a password that's already in an attacker's
 credential-stuffing list.
 
 The **Have I Been Pwned (HIBP) Pwned Passwords range API** lets you check without
-sending the password (or even its full hash) anywhere, using **k-anonymity**:
+sending the password (or even its full hash) anywhere, using **k-anonymity** (a
+privacy property: the queried value is hidden among *k* other possibilities, so the
+server can't tell which one you meant). Here "client" means **your application
+backend acting as the API caller** — not the end-user's browser:
 
-1. Client computes `SHA1(password)` → 40 hex chars.
-2. Client sends only the **first 5 hex chars** (the prefix) to
+1. Your backend computes `SHA1(password)` → 40 hex chars.
+2. It sends only the **first 5 hex chars** (the prefix) to
    `GET https://api.pwnedpasswords.com/range/{prefix}`.
-3. Server returns *all* suffixes (the remaining 35 chars) that share that prefix,
+3. The API returns *all* suffixes (the remaining 35 chars) that share that prefix,
    each with a breach count — typically several hundred to a thousand candidates.
-4. Client checks locally whether the rest of its hash's suffix appears in the list.
+4. Your backend checks locally whether the rest of its hash's suffix appears in the list.
+
+Concrete trace: password `P@ssw0rd` → `SHA1` =
+`21BD12DC183F740EE76F27B78EB39C8AD972A757` → send only prefix `21BD1` → API returns
+the ~500 suffixes sharing that prefix, each as `SUFFIX:count` → search that list for
+your suffix `2DC183F740EE76F27B78EB39C8AD972A757`; if present with a nonzero count,
+the password is breached, so reject it.
+
+```mermaid
+sequenceDiagram
+    participant App as Your backend (API client)
+    participant API as HIBP range API
+    App->>App: SHA1(password) → 40 hex chars
+    App->>API: GET /range/{first 5 hex chars}
+    API-->>App: all 35-char suffixes for that prefix (+ counts)
+    App->>App: is my suffix in the list? → breached or clean
+```
 
 The server never learns the full hash or the password; it only ever sees a 5-char
 prefix shared by many possible passwords — that's the k-anonymity guarantee. (HIBP
@@ -313,9 +348,11 @@ NTLM-hash variant.)
 NIST Special Publication 800-63B (Digital Identity Guidelines) modernized password
 rules. What it says about "memorized secrets":
 
-- **Length over complexity.** Allow at least **8** characters minimum (SHALL), support
-  at least **64** (SHOULD), accept **all** printable ASCII, Unicode, and spaces, and
-  **do not truncate**.
+- **Length over complexity.** Allow at least **8** characters minimum (SHALL) — *note:
+  this 8-character floor was raised to **15** for single-factor use in **Rev. 4**; 8
+  now applies only when the password sits inside MFA (see the "15-character minimum"
+  section below)* — support at least **64** (SHOULD), accept **all** printable ASCII,
+  Unicode, and spaces, and **do not truncate**.
 - **No composition rules.** Verifiers **SHOULD NOT** require mixtures of character
   types (upper/lower/digit/symbol). These rules push users toward predictable patterns
   (`Password1!`) and don't add real entropy.

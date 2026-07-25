@@ -99,7 +99,8 @@ That requires the app tier to be **stateless**: the node holds no client-specifi
 that would be lost if that node vanished and no other node could reconstruct.
 
 **How it works.** Push state *out* of the app process:
-- Session/auth state → signed tokens (JWT) held by the client, or a shared session
+- Session/auth state → signed tokens (JWT — JSON Web Tokens, self-contained
+  signed credentials the client carries) held by the client, or a shared session
   store (Redis/Memcached/DynamoDB).
 - File uploads / working data → object storage (S3) not local disk.
 - In-flight work → a queue (SQS/Kafka), so any worker can pick it up.
@@ -161,7 +162,8 @@ modern proxies handle tens of thousands of TLS handshakes/sec per core.
 **When to pick which.** Use **L4** when you need raw throughput, non-HTTP protocols
 (databases, MQTT, game UDP), true end-to-end TLS, or ultra-low latency and you don't
 need content-based routing. Use **L7** when you need path/host routing, canary/blue-green
-by header, per-request retries/timeouts, WAF, or to fan a single domain out to many
+by header, per-request retries/timeouts, a WAF (Web Application Firewall — inspects
+and filters/blocks malicious HTTP requests, e.g. SQL injection or bad bots), or to fan a single domain out to many
 microservices. **Common modern pattern:** an L4 LB at the very edge for scale and DDoS
 resilience, forwarding to an L7 proxy mesh (Envoy) for routing — you get both.
 
@@ -322,8 +324,9 @@ lives on one node by nature — but its *recoverable* state should still be exte
 
 **Failure modes.** Sticky node dies → its users lose session/state and get errors until
 re-auth. A few "whale" users pinned to one node → hotspot. Deploys are harder: draining
-a node forces session migration. Behind CGNAT, IP-hash affinity clumps thousands of
-users onto one backend.
+a node forces session migration. Behind CGNAT (Carrier-Grade NAT — an ISP-level layer
+that puts many subscribers behind a single shared public IP), IP-hash affinity clumps
+thousands of users onto one backend.
 
 ---
 
@@ -425,7 +428,8 @@ caveats). Set min/max/desired; set a floor for baseline + burst headroom.
   window of degradation (plus boot time). *Predictive/scheduled* removes the lag but is
   wrong if the pattern breaks (unexpected spike, forecast miss).
 - Scaling on CPU is a poor proxy for user-facing latency; scaling on queue depth or p99
-  latency aligns better with SLOs but is noisier.
+  latency aligns better with SLOs (Service Level Objectives — the target values you
+  commit to for a metric, e.g. "p99 latency < 200 ms") but is noisier.
 
 **When to use what.** Steady diurnal traffic → scheduled + target-tracking. Spiky/bursty
 → predictive + generous headroom + fast-booting compute (containers/serverless). Async
@@ -497,6 +501,14 @@ with low latency.
   standby/replica in another AZ with fast (often synchronous) replication. AZs are close
   (~1–2 ms apart) so synchronous replication is affordable → **RPO≈0, RTO seconds–minutes**.
   This is the default HA posture and is comparatively cheap.
+
+> [!KEY-TAKEAWAY]
+> Two disaster-recovery targets drive every replication choice below. **RPO (Recovery
+> Point Objective)** = how much *data* you can afford to lose, measured as a time window
+> (RPO≈0 means "lose nothing"; RPO of 5 min means "up to 5 min of writes may be lost").
+> **RTO (Recovery Time Objective)** = how *long* recovery may take before you're serving
+> again. Synchronous replication buys RPO≈0 at the cost of write latency; asynchronous
+> replication accepts a nonzero RPO to keep writes fast.
 - **Multi-region:** replicate across regions (50–150+ ms apart). Options:
   - *Active-passive (warm/cold standby):* one region serves; another is on standby with
     async replication. Failover via DNS/GSLB.
@@ -691,7 +703,9 @@ knowing the *ladder* of data-scaling techniques and their trade-offs.
 - Read replicas: cheap read scaling, but **replication lag** breaks read-after-write;
   route critical reads to the primary or use session consistency.
 - Sharding: the only way to scale writes/storage beyond one box, but you **lose
-  single-node ACID across shards** — cross-shard transactions need 2PC/sagas (slow/
+  single-node ACID across shards** — cross-shard transactions need 2PC (two-phase commit
+  — a coordinator asks all shards to "prepare," then "commit" only if all agreed; blocks
+  if the coordinator or a participant stalls) or sagas (slow/
   complex), joins become application-side, and a bad shard key causes hotspots you can't
   fix without a painful resharding.
 - CQRS/CDC/event-sourcing: unlock independent scaling and purpose-built stores, but every

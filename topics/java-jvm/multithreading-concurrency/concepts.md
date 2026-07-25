@@ -90,6 +90,8 @@ Gotcha: `Executors.callable(Runnable)` adapts a `Runnable` into a `Callable` tha
 
 ## Runnable vs Thread vs Callable execution model
 
+*Orientation: the previous section defined the **task** abstractions (`Runnable`/`Callable`); this one covers the **execution machinery** that runs them — `ExecutorService`, `Future`, `CompletableFuture`, and the `ThreadPoolExecutor` internals underneath the `Executors` factories.*
+
 `ExecutorService` (Java 5) decouples task submission from thread management and is the recommended replacement for manual `new Thread()`.
 
 ```java

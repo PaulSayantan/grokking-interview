@@ -364,6 +364,18 @@ Flow for username/password:
 3. On success, an **authenticated** token (credentials erased, authorities set)
    is returned and placed in the `SecurityContext`.
 
+```mermaid
+flowchart TD
+  T[Unauthenticated Authentication token] --> PM[ProviderManager]
+  PM -->|supports token type?| P1[DaoAuthenticationProvider]
+  PM -->|supports token type?| P2[Custom / other AuthenticationProvider]
+  P1 -->|authenticated| OK[Authenticated token -> SecurityContext]
+  P2 -->|authenticated| OK
+  PM -.->|none of its own providers succeeded| PARENT[Parent AuthenticationManager<br/>shared across chains]
+  PARENT -->|authenticated| OK
+  PARENT -.->|still no success| FAIL[AuthenticationException]
+```
+
 Advanced:
 - `ProviderManager` can have a **parent** manager (global `AuthenticationManager`
   shared across chains).

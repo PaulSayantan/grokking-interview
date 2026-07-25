@@ -1,6 +1,6 @@
 # Bean Scopes & Lifecycle
 
-Spring beans are objects that the Spring IoC container instantiates, assembles, configures and manages. Two orthogonal questions define a bean's runtime behavior: **scope** ("how many instances exist and for how long?") and **lifecycle** ("what callbacks fire between creation and destruction?"). Interviewers probe both because misunderstanding them causes the most common production bugs: shared mutable state in singletons, memory-leaking prototypes, and initialization-order surprises.
+Spring beans are objects that the Spring **IoC container** (IoC = Inversion of Control — the container, rather than your own code, creates objects and injects their dependencies) instantiates, assembles, configures and manages. Two orthogonal questions define a bean's runtime behavior: **scope** ("how many instances exist and for how long?") and **lifecycle** ("what callbacks fire between creation and destruction?"). Interviewers probe both because misunderstanding them causes the most common production bugs: shared mutable state in singletons, memory-leaking prototypes, and initialization-order surprises.
 
 ---
 
@@ -25,7 +25,7 @@ You set a scope with `@Scope`:
 public class Task { }
 ```
 
-Key nuance: "singleton" here means **one-per-Spring-container**, NOT the classic GoF one-per-classloader/JVM singleton. Two `ApplicationContext`s each get their own instance of a "singleton" bean.
+Key nuance: "singleton" here means **one-per-Spring-container**, NOT the classic GoF (Gang of Four — the four authors of the canonical *Design Patterns* book) one-per-classloader/JVM singleton. Two `ApplicationContext`s each get their own instance of a "singleton" bean.
 
 ---
 
@@ -61,10 +61,8 @@ public class ShoppingCart { }
 
 Critical gotchas:
 
-- **The container does NOT manage the full lifecycle of a prototype.** Spring instantiates, populates, and runs initialization callbacks (`@PostConstruct`), then hands the bean to the caller and **forgets about it**. `@PreDestroy` / `DisposableBean.destroy()` are **NOT called** by the container for prototypes. Cleanup is the client's responsibility (or a custom `BeanPostProcessor` / explicit `destroyBean`). This is the famous "prototype destruction caveat."
+- **The container does NOT manage the full lifecycle of a prototype — because plain prototype scope does not track instances at all.** Spring instantiates, populates, and runs initialization callbacks (`@PostConstruct`), then hands the bean to the caller and keeps **no reference** to it. Consequently `@PreDestroy` / `DisposableBean.destroy()` are **NOT called** for prototypes, and prototypes holding OS resources (sockets, file handles, native memory) are a classic leak source. Cleanup is the client's responsibility (or a custom `BeanPostProcessor` / explicit `destroyBean`). This is the famous "prototype destruction caveat." The one exception: when a prototype is obtained through a **scope that tracks its instances** and calls `registerDestructionCallback` (custom scopes, and the request/session scopes), destruction does run. `ObjectProvider`/`getBean` for a plain prototype always returns an untracked instance.
 - **Injection timing**: injecting a prototype into a singleton gives the singleton **one** prototype instance created at singleton-creation time — you do NOT get a fresh prototype per method call. To get a new instance each time, use one of: method injection via `@Lookup`, `ObjectProvider<T>`/`ObjectFactory<T>`, `Provider<T>` (JSR-330), or a scoped proxy.
-
-Deeper gotcha on prototype destruction: the rule is simply that **plain prototype scope does not track instances at all** — Spring genuinely holds no reference to the raw prototype after handing it back, so `@PreDestroy` is skipped and prototypes that hold OS resources (sockets, file handles, native memory) are a classic leak source. The one exception is when the prototype is obtained through a **scope that tracks its instances** and calls `registerDestructionCallback` (custom scopes, and the request/session scopes) — only then does destruction run. `ObjectProvider`/`getBean` for a plain prototype returns an untracked instance every time.
 
 ```java
 @Component
@@ -102,7 +100,7 @@ These "web-aware" scopes require a web-capable context (they're registered by `W
 - **`session`** — one instance per HTTP session; discarded when the session ends/invalidates.
 - **`application`** — one instance per `ServletContext` (the whole web app). Similar to singleton but tied to the `ServletContext` rather than the container — subtle difference matters when multiple contexts share one `ServletContext`.
 
-The core problem: how do you inject a short-lived `request`/`session` bean into a **singleton** (like a controller or service)? You inject a **scoped proxy** — a CGLIB/interface proxy that, on each method call, resolves the *real* current-request/session instance from the scope. Use `proxyMode`:
+The core problem: how do you inject a short-lived `request`/`session` bean into a **singleton** (like a controller or service)? You inject a **scoped proxy** — a proxy (either a CGLIB subclass proxy — CGLIB being the bytecode library Spring uses to generate a runtime subclass of your class — or a JDK interface proxy) that, on each method call, resolves the *real* current-request/session instance from the scope. Use `proxyMode`:
 
 ```java
 @Component
@@ -173,7 +171,7 @@ For a **singleton** the container drives this ordered sequence on startup and sh
    - `@PostConstruct` annotated method (via `CommonAnnotationBeanPostProcessor`)
    - `InitializingBean.afterPropertiesSet()`
    - custom `init-method` (XML `init-method` / `@Bean(initMethod=...)`)
-6. **`BeanPostProcessor.postProcessAfterInitialization`** — for every BPP. **AOP proxies are created here** (e.g. `@Transactional`, `@Async` wrapping).
+6. **`BeanPostProcessor.postProcessAfterInitialization`** — for every BPP. **AOP proxies are created here** (AOP = Aspect-Oriented Programming; Spring wraps the bean in a proxy that adds cross-cutting behaviour such as `@Transactional`, `@Async`, or caching around the real method calls).
 7. Bean is **ready and in use**.
 
 **Destruction** (on container shutdown / `context.close()`), in order:
@@ -383,6 +381,24 @@ Circular references between singletons are resolved (for setter/field injection)
 | 3 | `singletonFactories` | `ObjectFactory` producing an early reference (needed so AOP returns the *proxy*, not the raw bean) |
 
 Resolution of `A → B → A` with field/setter injection: A is instantiated and its `ObjectFactory` is placed in level 3; while populating A, B is created; B needs A, finds A's factory in level 3, promotes the early A reference to level 2, and injects it into B; B finishes (level 1) and is injected into A; A finishes.
+
+```mermaid
+sequenceDiagram
+    participant C as Container
+    participant A as Bean A
+    participant Cache as 3-level cache
+    participant B as Bean B
+    C->>A: new A() (instantiate)
+    A->>Cache: put A's ObjectFactory in L3
+    C->>A: populate A — needs B
+    C->>B: new B() (instantiate)
+    C->>B: populate B — needs A
+    B->>Cache: look up A (miss L1, miss L2, hit L3)
+    Cache->>B: factory yields early A ref (proxy if AOP); move A to L2
+    B->>B: finish init → promote B to L1
+    C->>A: inject finished B, finish init → promote A to L1
+```
+
 
 **Worked trace — which map holds what, step by step.** Columns are the three caches (L1 `singletonObjects`, L2 `earlySingletonObjects`, L3 `singletonFactories`); read top to bottom:
 

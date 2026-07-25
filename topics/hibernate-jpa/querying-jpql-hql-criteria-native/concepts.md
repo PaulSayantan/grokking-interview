@@ -40,8 +40,10 @@ List<Author> authors = em.createQuery(
     .getResultList();
 ```
 
-Hibernate parses this into its **Semantic Query Model (SQM)** — an AST of the query in
-terms of the entity model — and then translates SQM to SQL for the configured dialect:
+Hibernate parses this into its **Semantic Query Model (SQM)** — an **abstract syntax tree
+(AST)**, i.e. a structured, in-memory tree representation of the query, expressed in terms
+of the entity model rather than tables — and then translates SQM to SQL for the configured
+dialect:
 
 ```sql
 select a.id, a.name, a.version

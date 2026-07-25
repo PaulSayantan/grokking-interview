@@ -187,6 +187,19 @@ Spring and throw `BeanCurrentlyInCreationException`. (Field/setter singleton
 cycles *are* resolvable via early references / the third-level cache, but
 constructor cycles are not.) A common fix is to mark **one** side `@Lazy`:
 
+Why the difference? During singleton creation Spring builds a bean in two
+steps: it first *instantiates* the object, then *populates* its fields. Between
+those steps it exposes a **partially-constructed reference** (the object exists
+but its fields aren't set yet) in an "early singleton" cache. A field/setter
+cycle can therefore hand out that half-built reference to the other bean and
+fill in the fields afterward. A **constructor** cycle can't: the object doesn't
+exist until its constructor completes, and the constructor can't complete
+without the dependency, so there is nothing to hand out — hence the exception.
+Spring implements this with **three caches**: `singletonObjects` (fully built
+singletons), `earlySingletonObjects` (exposed-early, not-yet-populated
+references), and `singletonFactories` (the factories that produce those early
+references, e.g. to allow an AOP proxy to be created early if needed).
+
 ```java
 @Component
 class A {
@@ -475,7 +488,23 @@ style that underpins much of Spring's AOT/native support.
 ### Ordering of the post-processor phases
 
 The container runs these phases in a fixed order (see
-`PostProcessorRegistrationDelegate`):
+`PostProcessorRegistrationDelegate`). The timeline below shows where each
+extension point fires during context refresh — note that
+`ConfigurationClassPostProcessor` (which drives `@Import`, `ImportSelector`, and
+registrars, covered in *Importing configuration* below) is itself a BDRPP, so it
+runs inside step 1:
+
+```mermaid
+flowchart TD
+    A[loadBeanDefinitions: scan + parse initial definitions] --> B[Phase 1: BeanDefinitionRegistryPostProcessors<br/>PriorityOrdered then Ordered then rest<br/>re-scan registry between groups]
+    B --> B1[ConfigurationClassPostProcessor parses @Configuration:<br/>@Import, ImportSelector, registrars,<br/>DeferredImportSelector last]
+    B1 --> C[Phase 2: BeanFactoryPostProcessors<br/>mutate metadata only<br/>PriorityOrdered then Ordered then rest]
+    C --> D[Phase 3: register BeanPostProcessors<br/>not yet invoked]
+    D --> E[Instantiate singletons<br/>BPPs applied around init]
+    E --> F[Init lifecycle:<br/>afterPropertiesSet / @PostConstruct / init-method]
+```
+
+The phases in order:
 
 1. **All `BeanDefinitionRegistryPostProcessor`s first**, and within them Spring
    applies `PriorityOrdered` → `Ordered` → the rest, re-scanning the registry

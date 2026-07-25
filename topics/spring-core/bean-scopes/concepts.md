@@ -1,7 +1,8 @@
 # Bean Scopes
 
 A **bean scope** controls the *lifecycle and visibility* of the object(s) that the Spring
-IoC container creates from a single bean definition: how many instances exist, when they
+**IoC (Inversion of Control) container** — the container that creates and wires your objects
+instead of your code doing it — creates from a single bean definition: how many instances exist, when they
 are created, how long they live, and which callers share them. A bean *definition* is a
 recipe; the scope decides how many objects that recipe produces and who sees each one.
 
@@ -177,6 +178,8 @@ majority of beans. Prototypes are comparatively rare in typical applications.
 - **`@Scope("prototype")` on a `@Bean` factory method** produces a new instance per lookup,
   but only if the method is *called through the container*. Inside a `@Configuration` class,
   calling one `@Bean` method from another is intercepted by the CGLIB-enhanced config proxy
+  (**CGLIB** = *Code Generation Library*, which Spring uses to generate a runtime subclass of
+  a class so it can intercept its method calls without needing an interface)
   and routed through `getBean`, so prototype semantics are preserved; calling a prototype
   `@Bean` method on a `@Configuration(proxyBeanMethods = false)` "lite" config, or via a
   plain `@Component`, is a *direct* Java call that bypasses the container and returns a plain
@@ -218,8 +221,10 @@ only usable when there is a bound web request/session on the thread.
   (there can be several contexts in one app), and it is **exposed as a `ServletContext`
   attribute**, visible to plain servlet code.
 - **websocket** — bound to a WebSocket session; applies to **STOMP-over-WebSocket**
-  applications. Typically declared with a scoped proxy because it's injected into
-  longer-lived beans.
+  applications. (**STOMP** = *Simple Text Oriented Messaging Protocol*, a lightweight
+  message framing that Spring layers on top of raw WebSockets to give them a
+  publish/subscribe, message-broker-style API.) Typically declared with a scoped proxy
+  because it's injected into longer-lived beans.
 
 **Why these scopes exist (intuition).** Your controllers and services are singletons —
 one instance shared by *every* user's request at once. So where does per-user or
@@ -429,6 +434,38 @@ instance *at call time* from whatever session is bound to the thread: `cart#1` f
 long-lived singleton hold a field that transparently maps to the right short-lived instance.
 When `S_A` is invalidated, Spring fires `cart#1`'s destruction callback and drops it.
 
+The per-call resolution — same proxy, different backing instance depending on which session
+is bound to the thread — looks like this:
+
+```mermaid
+sequenceDiagram
+    participant Ctrl as CartController (singleton)
+    participant Proxy as cartProxy (singleton CGLIB proxy)
+    participant RCH as RequestContextHolder
+    participant Store as Session attribute store
+    Note over Ctrl,Store: User A, request 1 (session S_A on thread t1)
+    Ctrl->>Proxy: cart.addItem("book")
+    Proxy->>RCH: current session?
+    RCH-->>Proxy: S_A
+    Proxy->>Store: get scopedTarget.cart in S_A
+    Store-->>Proxy: miss -> ObjectFactory creates cart#1 (@PostConstruct), cache in S_A
+    Proxy-->>Ctrl: forwarded to cart#1  [book]
+    Note over Ctrl,Store: User A, request 2 (same S_A on thread t2)
+    Ctrl->>Proxy: cart.addItem("pen")
+    Proxy->>RCH: current session?
+    RCH-->>Proxy: S_A
+    Proxy->>Store: get scopedTarget.cart in S_A
+    Store-->>Proxy: HIT cart#1
+    Proxy-->>Ctrl: forwarded to cart#1  [book, pen]
+    Note over Ctrl,Store: User B, request 1 (session S_B on thread t3)
+    Ctrl->>Proxy: cart.getItems()
+    Proxy->>RCH: current session?
+    RCH-->>Proxy: S_B
+    Proxy->>Store: get scopedTarget.cart in S_B
+    Store-->>Proxy: miss -> ObjectFactory creates cart#2, cache in S_B
+    Proxy-->>Ctrl: forwarded to cart#2  []
+```
+
 ### Solution 3 — `@Lookup` / Method Injection
 
 Let the container **override an abstract or concrete method** to return a fresh prototype on
@@ -476,7 +513,9 @@ usually cleaner.
   of `NullPointerException` on uninitialized proxy fields). Since Spring 4.0+/objenesis the
   target's constructor is bypassed for the proxy, so a no-arg constructor is not strictly
   required, but the *concrete class* must still be non-final.
-- **Ordering with AOP.** A scoped proxy and other AOP proxies (transactions, security) stack;
+- **Ordering with AOP.** A scoped proxy and other **AOP** (Aspect-Oriented Programming —
+  Spring's mechanism for wrapping beans in proxies to inject cross-cutting behavior like
+  transactions and security) proxies (transactions, security) stack;
   the scoped proxy sits at the injection point and resolves the target, then the target's own
   advice applies. Mixing `proxyMode = INTERFACES` with class-based AOP elsewhere can surface
   `ClassCastException`/proxy-type mismatches if code casts the injected proxy to the concrete

@@ -375,12 +375,30 @@ service PriceService {
 - Client streaming ends when the client **half-closes** its side (END_STREAM on
   its DATA); the server then sends its single response + trailers.
 
+The message *timing* is what distinguishes them — especially bidirectional, where
+neither side waits for the other:
+
 ```mermaid
-flowchart TB
-  U["Unary: 1 req to 1 res"]
-  SS["Server streaming: 1 req to N res"]
-  CS["Client streaming: N req to 1 res"]
-  BD["Bidirectional: N req to M res, interleaved"]
+sequenceDiagram
+  participant C as Client
+  participant S as Server
+  Note over C,S: Unary — 1 req, 1 res
+  C->>S: request
+  S->>C: response
+  Note over C,S: Server streaming — 1 req, N res
+  C->>S: request
+  S->>C: response 1
+  S->>C: response N (then close)
+  Note over C,S: Client streaming — N req, 1 res
+  C->>S: request 1
+  C->>S: request N (then half-close)
+  S->>C: response
+  Note over C,S: Bidirectional — interleaved, app-defined cadence
+  C->>S: req 1
+  S->>C: res A
+  C->>S: req 2
+  S->>C: res B
+  S->>C: res C
 ```
 
 ---

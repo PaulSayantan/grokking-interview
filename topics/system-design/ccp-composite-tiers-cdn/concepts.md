@@ -41,8 +41,9 @@ trade-off / vocabulary) and points at the deep dive:
 **Intent (guiding question).** *How can application functionality be separated from data
 handling so the two can scale independently?*
 
-**Problem / context.** You have decomposed a Distributed Application into components so that
-individual functions can scale on their own. But not all functions scale equally. Stateless
+**Problem / context.** You have decomposed a Distributed Application (*an application split into
+independently deployable components that run across multiple hosts rather than as a single
+monolith*) into components so that individual functions can scale on their own. But not all functions scale equally. Stateless
 functionality (presentation, business logic) scales trivially — add or remove identical
 instances behind a load balancer. **Data-handling functionality scales far less easily**: stateful
 data must be kept consistent across instances, so it cannot simply be cloned. If you bundle

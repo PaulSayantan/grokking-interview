@@ -214,7 +214,22 @@ inodes. This is *proactive kubelet action*, distinct from a kernel OOM kill:
 | Actor | **kubelet** (proactive) | Linux **kernel** OOM killer (reactive) |
 | Trigger | eviction signal crosses threshold (mem/disk/inodes) | cgroup/node out of memory |
 | Result | Pod `phase: Failed`, reason `Evicted`, graceful-ish terminate | container SIGKILLed, exit 137 |
-| Order | lowest-QoS / over-request Pods first (BestEffort → Burstable) | kernel picks by oom_score |
+| Order | lowest-QoS / over-request Pods first (BestEffort → Burstable → Guaranteed) | kernel picks by oom_score |
+
+The **QoS (Quality of Service) class** is a label the kubelet assigns each Pod from its resource
+**requests** (the guaranteed reservation the scheduler sets aside) and **limits** (the hard ceiling)
+— it decides eviction priority:
+
+| QoS class | Definition | Eviction order |
+|---|---|---|
+| **Guaranteed** | every container sets requests **==** limits for both CPU and memory | evicted **last** |
+| **Burstable** | at least one request/limit set, but not all equal (requests **<** limits) | middle |
+| **BestEffort** | **no** requests or limits at all | evicted **first** |
+
+Under node memory pressure the kubelet ranks victims by QoS *and then* by how far each Pod's usage
+exceeds its memory **request** — so a `BestEffort` Pod (or one wildly over its request) goes first, and
+`Guaranteed` Pods with `requests == limits` are the most protected. (Full QoS/throttling depth lives in
+**probes-resources**.)
 
 ```bash
 kubectl get pods --field-selector=status.phase=Failed

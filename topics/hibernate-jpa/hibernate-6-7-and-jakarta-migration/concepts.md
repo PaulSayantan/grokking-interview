@@ -397,6 +397,9 @@ The upgrade is rarely just a package rename. The senior-level checklist:
 
 5. **`enum` and other basic-type defaults** shifted with the new type system; re-verify
    `@Enumerated`, temporal, and `Duration`/`Instant` columns against the actual schema.
+   *(Items 3–5 are summarized here; the exact version-pinned type change and the **revert
+   property** for each — `boolean`, `UUID`, `enum`, `Duration`, `Instant`, `JSON` — live
+   authoritatively in the **Hibernate 6 default mapping changes** table below.)*
 
 6. **Removed/changed legacy APIs**: string-based `@Type`, `@TypeDef`, much of `hbm.xml`,
    old `Criteria` (the pre-JPA `org.hibernate.Criteria` was removed — use JPA Criteria),

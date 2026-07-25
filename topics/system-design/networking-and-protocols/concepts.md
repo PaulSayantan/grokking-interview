@@ -64,7 +64,10 @@ header — you build whatever reliability you need on top.
 numbers. Data is a byte stream cut into segments; the receiver ACKs, lost segments are
 retransmitted. **Flow control** (receive window) stops a fast sender from overwhelming a slow
 receiver. **Congestion control** (slow start, congestion avoidance; algorithms like CUBIC,
-BBR) stops senders from overwhelming the network. Ordered delivery means a lost segment causes
+BBR) stops senders from overwhelming the *network*. Mental model: **slow start** ramps the send
+rate up exponentially until it detects loss, then backs off and probes more cautiously; **CUBIC**
+treats packet loss as the congestion signal, while **BBR** instead models the path's bandwidth and
+round-trip time directly (so it doesn't need loss to find the right rate). Ordered delivery means a lost segment causes
 **head-of-line (HOL) blocking**: later bytes wait until the gap is filled.
 
 **How UDP works.** One datagram, best-effort. No ordering, no retransmit, no congestion control
@@ -119,8 +122,11 @@ ordering, and congestion control in user space, and **bakes in TLS 1.3**. Key wi
   only one stream in HTTP/3.)
 - **Faster handshake**: transport + TLS handshake combined = 1 RTT for a new connection, and
   **0-RTT** for resumption (client sends data with the first packet).
-- **Connection migration**: connection identified by a Connection ID, not the 4-tuple, so
-  switching Wi-Fi → cellular (IP change) doesn't drop the connection — huge for mobile.
+- **Connection migration**: connection identified by a Connection ID, not the **4-tuple**
+  (source IP, source port, destination IP, destination port — the four values that uniquely
+  identify a TCP connection; change any one and TCP treats it as a different, dead connection),
+  so switching Wi-Fi → cellular (which changes the client IP) doesn't drop the connection — huge
+  for mobile.
 
 | Feature                | HTTP/1.1        | HTTP/2               | HTTP/3 (QUIC)          |
 |------------------------|-----------------|----------------------|------------------------|
@@ -445,8 +451,11 @@ and observability. More CPU and latency per request. Examples: AWS ALB, NGINX, E
 | Use when           | Raw throughput, non-HTTP | Smart routing, microservices   |
 
 **Algorithms.** Round-robin, weighted, least-connections, least-response-time, consistent hashing
-(for cache affinity / sticky routing without central state), IP hash. **Health checks** eject bad
-backends; **connection draining** removes a backend gracefully.
+(for cache affinity / sticky routing without central state), IP hash. **Consistent hashing** maps
+both keys (e.g., a cache key or client ID) and backends onto the same hash ring and routes each key
+to the next backend clockwise; adding or removing a backend reshuffles only ~1/N of the keys instead
+of remapping everything, so a given key keeps landing on the same backend as the pool changes.
+**Health checks** eject bad backends; **connection draining** removes a backend gracefully.
 
 **Trade-offs / when to pick what.**
 - Common production pattern: **L4 in front (NLB) → L7 (ALB/Envoy)** — L4 for raw ingress scale and

@@ -122,6 +122,10 @@ What actually distinguishes levels — the two axes interviewers want:
    workaround, is data being lost or corrupted.
 2. **Urgency** — is it actively getting worse, is revenue/SLA/safety on the line.
 
+This table is for orientation; the *named* vendor definitions (PagerDuty's SEV-1/2/3) and
+the **major-incident rule** that couples severity to org activation are developed later in
+*Severity Definitions and the Major-Incident Rule*.
+
 > [!INTERVIEW]
 > "How do you decide severity?" Answer with the **two axes (impact × urgency)** and note
 > that severity is **dynamic** — you set an initial SEV in triage and **re-assess as scope
@@ -245,6 +249,10 @@ Common mitigation levers (reach for the fastest reversible one first):
 | **Load-shed / rate-limit / throttle** | System is overloaded; protect the core | `reliability-ops/load-shedding-and-backpressure`, `security` |
 | **Scale out / add capacity** | Demand exceeds capacity (slower to take effect) | `reliability-ops/capacity-planning-and-load-management` |
 | **Graceful degradation** (serve stale/partial) | A non-critical dependency is down | `reliability-ops/graceful-degradation-and-fallbacks` |
+
+Most of these levers share a deeper property — they stop impact by acting on *where* the
+problem is rather than *what* the bug is. That **generic-vs-targeted** framing is developed
+in *Generic Mitigations* below.
 
 > [!WARNING]
 > The anti-pattern is **"let me just find the root cause first"** while the site is down.

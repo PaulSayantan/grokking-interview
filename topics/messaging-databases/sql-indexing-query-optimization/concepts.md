@@ -272,12 +272,12 @@ seq scan — why?" Common causes:
    (though Postgres may combine per-branch indexes via a `BitmapOr`).
 7. **Leftmost-prefix violation** (querying a non-leading composite column).
 
-```sql
--- NOT sargable (index on created_at unused):
-WHERE EXTRACT(YEAR FROM created_at) = 2026
--- Sargable rewrite (uses the index):
-WHERE created_at >= '2026-01-01' AND created_at < '2027-01-01'
-```
+Causes 1, 2, 3, and 6 above are all one underlying defect — a predicate the engine cannot
+use as a search key. The next section names that property (**sargability**), states the
+mechanical rule once, and catalogs the rewrites in a single table (including the
+`EXTRACT(YEAR …)` → half-open-range case). Read "when an index is not used" as the
+symptom checklist and "SARGable predicates" as its root cause and cure, not as two
+separate lists.
 
 > [!TIP]
 > "Sargable" (Search ARGument ABLE) = a predicate the engine can satisfy by seeking an

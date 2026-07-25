@@ -60,6 +60,9 @@ Key facts:
 
 Why this matters: JPA throws `jakarta.persistence.PersistenceException`, JDBC throws `java.sql.SQLException`, Hibernate throws `HibernateException`, etc. These are technology-specific and often checked or vendor-coded. Spring's `DataAccessException` is a **runtime, unchecked, technology-agnostic** hierarchy (e.g. `DataIntegrityViolationException`, `DuplicateKeyException`, `OptimisticLockingFailureException`), so your service layer can catch meaningful exceptions without coupling to a specific persistence API.
 
+> [!TIP]
+> **Vocabulary for this section (the machinery behind the gotcha below).** An **AOP proxy** ("Aspect-Oriented Programming" proxy) is a stand-in object Spring places in front of your real bean: callers hold the proxy, and the proxy runs extra logic (here, exception translation) *before/after* delegating to the real bean — which is exactly why a call that never passes through the proxy gets none of that logic. A **bean post-processor** is a hook Spring invokes on every bean instance right after construction; it is where a bean can be transparently swapped for such a proxy. An **advisor** bundles the extra logic (the *advice*) together with a **pointcut** — a predicate that selects *which* methods the advice applies to.
+
 How it works:
 
 - The `PersistenceExceptionTranslationPostProcessor` is a **bean post-processor** that scans for beans annotated with `@Repository` and wraps them in an AOP proxy.
@@ -305,6 +308,19 @@ A `BeanDefinition` is the in-memory model the container manipulates before insta
 - **Subtypes by source:** `RootBeanDefinition` / `GenericBeanDefinition` (programmatic and XML), `ScannedGenericBeanDefinition` (component scanning, carries `AnnotationMetadata` from ASM), `AnnotatedGenericBeanDefinition` (classes registered explicitly, e.g. via `register(...)`), and `ConfigurationClassBeanDefinition` (beans produced by `@Bean` methods, carrying `factoryBeanName`/`factoryMethodName`). The `@Bean` case is a **factory-method** definition: the definition points at the config bean plus the method, not at a directly instantiable class.
 - **Role hint:** `BeanDefinition.getRole()` returns `ROLE_APPLICATION`, `ROLE_SUPPORT`, or `ROLE_INFRASTRUCTURE`. Infrastructure beans (like internally registered post-processors) are marked so tools/actuator can hide them. This is metadata only; it does not change wiring.
 - **Two post-processing phases, in strict order:** first all `BeanFactoryPostProcessor`s run and may *mutate bean definitions* (e.g. `PropertySourcesPlaceholderConfigurer` resolves `${...}`; `ConfigurationClassPostProcessor` parses configs). `BeanDefinitionRegistryPostProcessor` (a sub-interface) runs *even earlier* and may *add* definitions. Only **after** that phase completes are singletons pre-instantiated and `BeanPostProcessor`s applied to instances. A `BeanPostProcessor` can never see or change a bean definition; it only wraps/decorates instances. Confusing the two is a classic mistake.
+
+The strict phase ordering is the backbone that ties component scanning, `@Configuration` processing, and PETPP proxying together. Reading top to bottom, each earlier concept in this note lives in exactly one phase:
+
+```mermaid
+flowchart TD
+    A["Scan / parse sources<br/>(ClassPathScanningCandidateComponentProvider,<br/>XML, @Bean methods)"] --> B["BeanDefinitionRegistryPostProcessor<br/>ADDS bean definitions<br/>(ConfigurationClassPostProcessor)"]
+    B --> C["BeanFactoryPostProcessor<br/>MUTATES bean definitions<br/>(PropertySourcesPlaceholderConfigurer, ${...})"]
+    C --> D["Instantiate singletons<br/>(CGLIB enhance full-mode @Configuration here)"]
+    D --> E["BeanPostProcessor<br/>WRAPS instances<br/>(PETPP proxies @Repository beans)"]
+    E --> F["Container ready"]
+```
+
+Key reading: definitions exist only from phase B onward and can still change through phase C; by phase E only *instances* exist, which is why a `BeanPostProcessor` (and thus PETPP) can never see or alter a bean definition — it can only wrap the object it is handed.
 - **Why `BeanFactoryPostProcessor`/`BeanPostProcessor` beans should be `static` `@Bean` methods:** returning them from a non-static `@Bean` method forces early instantiation of the whole config class (and anything it depends on) before the BFPP phase can run, which can defeat the post-processor's own purpose and emit `BeanPostProcessorChecker` warnings.
 
 ## Registration and overriding failure modes

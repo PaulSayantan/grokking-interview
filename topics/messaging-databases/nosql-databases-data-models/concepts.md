@@ -169,8 +169,16 @@ WHERE sensor_id='s-1' AND bucket='2026-07-19'
   **partition key** — it decides which node stores the data.
 - Remaining elements are **clustering columns** — they sort rows *inside* a partition and
   enable range scans and `ORDER BY`.
-- Storage engine is **LSM-tree** based (memtable + immutable SSTables + compaction),
-  which makes writes append-only and extremely fast; reads may merge several SSTables.
+- Storage engine is **LSM-tree** based (Log-Structured Merge-tree). Instead of updating
+  records in place on disk (as a B-tree does, paying a random-write seek each time), an
+  LSM-tree buffers writes in an in-memory sorted table (the **memtable**) plus an
+  append-only commit log, then periodically flushes the memtable to disk as an immutable
+  sorted file (an **SSTable**, Sorted String Table). Because on-disk writes are pure
+  sequential appends of whole files — never in-place edits — writes are extremely fast. The
+  cost is on the read side: a lookup may have to check the memtable plus several SSTables
+  and merge the results (**read amplification**), and a background process called
+  **compaction** continuously merges SSTables to bound their number and discard superseded
+  versions.
 
 Cassandra is **masterless / peer-to-peer** (consistent hashing ring, no single leader),
 giving linear write scalability and no single point of failure. HBase and Bigtable use a
@@ -257,7 +265,12 @@ in **PACELC** terms, even without a partition you trade latency against consiste
   but a read immediately after a write may see stale data. Good enough for likes, view
   counts, feeds, catalogs.
 - **Read-your-writes / monotonic reads / causal consistency**: stronger session
-  guarantees that fix the most jarring anomalies without full linearizability.
+  guarantees that fix the most jarring anomalies without full linearizability. Concretely:
+  *read-your-writes* means you always see your own just-made update (you never post a
+  comment and then not see it on refresh); *monotonic reads* means once you've seen a value
+  you never see an older one on a later read (time never appears to run backwards); *causal
+  consistency* means if write A caused write B, everyone observes A before B (a reply never
+  shows up before the message it answers).
 - **Strong / linearizable consistency**: every read sees the latest committed write, as
   if there were one copy. Costs latency and availability.
 

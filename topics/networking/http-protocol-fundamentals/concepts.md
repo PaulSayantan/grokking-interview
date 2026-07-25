@@ -529,7 +529,12 @@ Proxies must forward the expectation and relay the interim `100` back. This is w
 ## Redirects and Method Preservation
 
 The 3xx redirects differ precisely in **whether they preserve the method and body**
-(RFC 9110 §15.4) — a distinction that matters enormously for non-idempotent requests:
+(RFC 9110 §15.4) — a distinction that matters enormously for non-idempotent requests. A
+method is **safe** if it only reads and has no side effects, and **idempotent** if sending
+it more than once has the same net effect as sending it once (`GET`, `PUT`, and `DELETE`
+qualify; a `POST` generally does **not**, so silently replaying it can double-charge a
+payment). Full treatment lives in `rest-api-design`; the one-line gloss here is enough to
+follow the retry and method-preservation reasoning below.
 
 | Code | Name | Effect on method/body |
 |---|---|---|

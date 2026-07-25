@@ -148,6 +148,21 @@ v.start();  // runs Car.start() if Car overrides start(), decided at runtime
 - `invokespecial` — constructors, `private` methods, and `super.method()` calls; statically bound (non-virtual).
 - `invokedynamic` — bootstrap-based; used for lambdas and string concatenation, not ordinary dispatch.
 
+A **method table (vtable)** is a per-class array where each virtual method occupies a fixed **slot** (index). A subclass reuses the superclass's slot layout, so a method sits at the *same slot* in every class in the hierarchy; overriding just makes that slot point at a different method body. `invokevirtual` therefore reduces to "call the method at slot *N* of the receiver's actual class" — the slot number is fixed at compile time, but which body it points to is decided by the runtime object:
+
+```mermaid
+flowchart LR
+    ref["Vehicle v = new Car();<br/>v.start()"]
+    subgraph VT_Vehicle["Vehicle vtable"]
+        VV0["slot 0: start &rarr; Vehicle.start()"]
+    end
+    subgraph VT_Car["Car vtable (inherits layout, overrides start)"]
+        VC0["slot 0: start &rarr; Car.start()"]
+        VC1["slot 1: honk &rarr; Car.honk()"]
+    end
+    ref -->|"invokevirtual slot 0<br/>of receiver's actual class = Car"| VC0
+```
+
 Because `private`, `static`, and `final` methods are not virtual, calls to them are bound statically and can be inlined more aggressively.
 
 **Advanced — JIT devirtualization.** Even virtual calls are often optimized. If the JIT observes (via class hierarchy analysis) that only one implementation is loaded (**monomorphic** call site), it performs **monomorphic inlining** guarded by a class check. **Bimorphic** (2 targets) is still cheaply inlinable; **megamorphic** call sites (many targets) fall back to a vtable lookup and are hard to inline. This is why "make it `final`" rarely helps modern performance — the JIT already devirtualizes when it can.
