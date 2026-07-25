@@ -155,9 +155,17 @@ export interface SubtopicMastery {
   level: MasteryLevel;
 }
 
+/**
+ * Minimum questions seen before a subtopic can be called "mastered". Guards
+ * against a single lucky answer (1/1 = 100%) reading as green "mastered" — you
+ * need real evidence. Below this floor a high accuracy caps at "familiar".
+ */
+export const MASTERY_MIN_SEEN = 5;
+
 export function masteryLevel(pct: number, seen: number): MasteryLevel {
   if (seen === 0) return "none";
-  if (pct >= 80) return "mastered";
+  // "Mastered" requires both high accuracy AND enough evidence to trust it.
+  if (pct >= 80 && seen >= MASTERY_MIN_SEEN) return "mastered";
   if (pct >= 50) return "familiar";
   return "attempted";
 }

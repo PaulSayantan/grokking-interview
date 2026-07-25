@@ -1,6 +1,7 @@
 import { defineConfig } from "astro/config";
 import tailwind from "@astrojs/tailwind";
 import preact from "@astrojs/preact";
+import sitemap from "@astrojs/sitemap";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import remarkGfm from "remark-gfm";
@@ -18,6 +19,10 @@ export default defineConfig({
     // `compat: true` aliases react/react-dom -> preact/compat so any library
     // that imports from "react" resolves against Preact.
     preact({ compat: true }),
+    // Emits /sitemap-index.xml + /sitemap-0.xml at build using `site` above.
+    // Excludes the raw question JSON (that lives under /questions/, not a route)
+    // — only real HTML routes are enumerated. robots.txt points crawlers here.
+    sitemap(),
   ],
   markdown: {
     // GFM (tables in comparison sections) is enabled by default in Astro; we add

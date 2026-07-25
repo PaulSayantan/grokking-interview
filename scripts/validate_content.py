@@ -104,8 +104,21 @@ def validate_file(path: Path, seen_ids: dict[str, Path]) -> list[str]:
             ans = q.get("answer")
             if not isinstance(ans, int) or not (0 <= ans < len(options)):
                 errors.append(f"{loc}: answer '{ans}' out of range for {len(options)} options")
+            # MCQ integrity invariants: no blank options, no duplicate options
+            # (a repeated option is either a typo or makes two answers "correct").
+            norm = [str(o).strip() for o in options]
+            if any(o == "" for o in norm):
+                errors.append(f"{loc}: has a blank/empty option")
+            lowered = [o.lower() for o in norm if o != ""]
+            if len(set(lowered)) != len(lowered):
+                errors.append(f"{loc}: has duplicate options")
         else:
             errors.append(f"{loc}: 'options' must be a list")
+
+        # Every question must teach: a non-empty explanation is required by the
+        # schema, but an all-whitespace one passes the presence check — catch it.
+        if "explanation" in q and not str(q.get("explanation") or "").strip():
+            errors.append(f"{loc}: 'explanation' is blank")
 
         ref = q.get("ref")
         if ref and "#" in str(ref) and anchors:

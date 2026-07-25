@@ -86,8 +86,7 @@ and 5 new domains added; counts below reflect the current READMEs.
 | [Docker](topics/docker/README.md) | 16 | 16 ✅ (Pass 1, 794 MCQs) |
 | [Kubernetes](topics/kubernetes/README.md) | 19 | 19 ✅ (Pass 1, 981 MCQs) |
 | [DevOps & CI/CD](topics/devops-cicd/README.md) | 21 | 21 ✅ (Pass 1, 1,065 MCQs) |
-| [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 18 ✅ (Pass 1, 868 MCQs) |
-| [Apache Tomcat](topics/apache-tomcat/README.md) | 19 | 0 |
+| [Hibernate & JPA](topics/hibernate-jpa/README.md) | 18 | 18 ✅ (Pass 2, 1,401 MCQs) |
 | [gRPC](topics/grpc/README.md) | 16 | 16 ✅ (Pass 1, 806 MCQs) |
 | [Messaging & Databases](topics/messaging-databases/README.md) | 15 | 15 ✅ (Pass 1, 815 MCQs) |
 | [Security (App & Web)](topics/security/README.md) | 16 | 16 ✅ (all tiers, 1,291 MCQs) |
