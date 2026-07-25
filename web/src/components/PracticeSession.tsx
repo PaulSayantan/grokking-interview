@@ -13,6 +13,8 @@ import {
   registerPractice,
   missedIds,
   missedCount,
+  dueIds,
+  dueCount,
   claimStreakMilestone,
 } from "@lib/progress";
 
@@ -282,12 +284,13 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         ? new URLSearchParams(window.location.search)
         : null;
     const review = params?.get("review") === "1";
+    const due = params?.get("due") === "1";
     if (groups && groups.length && params) {
       const key = params.get("group");
       const match = key ? groups.find((g) => g.key === key) : undefined;
-      if (match) return { url: match.url, scope: match.label, review };
+      if (match) return { url: match.url, scope: match.label, review, due };
     }
-    return { url: poolUrl, scope: title, review };
+    return { url: poolUrl, scope: title, review, due };
   }, [poolUrl, title, groups]);
 
   // Scope the missed-question count to what this pool actually reviews: a
@@ -308,7 +311,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   // Per-tier counts for the chooser pills (null until the pool is sampled once).
   const [tierCounts, setTierCounts] = useState<Record<string, number> | null>(null);
   // Why the pool ended up empty, so the empty state can explain it.
-  const [emptyReason, setEmptyReason] = useState<"pool" | "review" | "tiers">("pool");
+  const [emptyReason, setEmptyReason] = useState<"pool" | "review" | "tiers" | "due">("pool");
   const [status, setStatus] = useState<
     "choosing" | "loading" | "error" | "empty" | "ready"
   >("choosing");
@@ -389,6 +392,16 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           return;
         }
       }
+      // Spaced-repetition mode: keep only questions due for review today.
+      if (preset.due) {
+        const due = new Set(dueIds(missedFilter));
+        pool = pool.filter((q) => due.has(q.id));
+        if (pool.length === 0) {
+          setEmptyReason("due");
+          setStatus("empty");
+          return;
+        }
+      }
       const q = prepare(pool, preset.size ?? pool.length);
       setPrepared(q);
       setSelections(new Array(q.length).fill(undefined));
@@ -414,13 +427,15 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     });
   }, []);
 
-  // Deep-link ?review=1 auto-selects the "missed" preset so it skips the chooser.
+  // Deep-link ?review=1 / ?due=1 auto-select their preset so they skip the chooser.
   useEffect(() => {
     if (preset) return;
-    if (resolved.review) {
+    if (resolved.due) {
+      setPreset(SESSION_PRESETS.find((p) => p.key === "due") ?? null);
+    } else if (resolved.review) {
       setPreset(SESSION_PRESETS.find((p) => p.key === "missed") ?? null);
     }
-  }, [resolved.review, preset]);
+  }, [resolved.review, resolved.due, preset]);
 
   // Tally per-tier counts once for the chooser pills (best-effort; ignores errors).
   useEffect(() => {
@@ -582,6 +597,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   // Pre-quiz preset chooser (microlearning: match session length to time on hand).
   if (status === "choosing") {
     const missed = missedCount(missedFilter);
+    const due = dueCount(missedFilter);
     return (
       <div class="card p-6">
         <style>{ANIM_CSS}</style>
@@ -625,7 +641,13 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         <div class="mt-4 flex flex-col gap-3">
           {SESSION_PRESETS.map((p) => {
             const isMissed = p.key === "missed";
-            const disabled = isMissed && missed === 0;
+            const isDue = p.key === "due";
+            const count = isMissed ? missed : isDue ? due : null;
+            // Count-driven presets (missed / due) disable when their pool is empty.
+            const disabled = (isMissed || isDue) && count === 0;
+            const emptyHint = isMissed
+              ? "Nothing missed yet — practice a round first."
+              : "Nothing due yet — answer some questions and they'll return on a schedule.";
             return (
               <button
                 type="button"
@@ -639,10 +661,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
               >
                 <span class="font-semibold">
                   {p.label}
-                  {isMissed && missed > 0 ? ` (${missed})` : ""}
+                  {count != null && count > 0 ? ` (${count})` : ""}
                 </span>
                 <span class="mt-1 block text-sm" style="color: var(--color-text-muted);">
-                  {disabled ? "Nothing missed yet — practice a round first." : p.hint}
+                  {disabled ? emptyHint : p.hint}
                 </span>
               </button>
             );
@@ -702,9 +724,11 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         <p style="color: var(--color-text-muted);">
           {emptyReason === "tiers"
             ? "No questions match the difficulty levels you picked. Clear or widen the difficulty filter and try again."
-            : resolved.review
-              ? "Nothing to review here — you haven't missed any questions in this scope. Practice a round first, then come back to drill what you got wrong."
-              : "There are no practice questions available for this selection yet."}
+            : emptyReason === "due"
+              ? "Nothing due for review right now — you're all caught up in this scope. Spaced-repetition brings questions back as their intervals elapse; check back tomorrow, or practice a fresh round."
+              : resolved.review
+                ? "Nothing to review here — you haven't missed any questions in this scope. Practice a round first, then come back to drill what you got wrong."
+                : "There are no practice questions available for this selection yet."}
         </p>
         <div class="mt-4 flex flex-wrap gap-3">
           {emptyReason === "tiers" && (
