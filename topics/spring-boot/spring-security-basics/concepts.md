@@ -43,6 +43,18 @@ token) is a frequent bug.
 
 ## Security filter chain and request flow
 
+**Intuition first:** think of security filters as a line of *checkpoints* (like
+airport security lanes) every request passes through before it reaches your
+controller — one checks "who are you?" (authentication), a later one checks
+"are you allowed in here?" (authorization), others stamp response headers or
+validate a CSRF token. Each checkpoint does exactly one job and any of them can
+short-circuit the request (reject it, redirect it) before it goes deeper. The
+proxy indirection exists for a plumbing reason: your security beans live in the
+**Spring application context**, but the servlet container only knows how to call
+**container-registered filters**. So Boot registers *one* thin container filter
+(`DelegatingFilterProxy`) whose only job is to forward the request *inward* to
+the Spring-managed `FilterChainProxy`, which owns the real chain.
+
 Spring Security plugs into the servlet container through a **single** filter
 registered by Boot named `springSecurityFilterChain`, wrapped in a
 `DelegatingFilterProxy`. That delegate forwards to a `FilterChainProxy`, which
@@ -67,6 +79,52 @@ Request flow (happy path, form/basic):
      the **last** filter; enforces `authorizeHttpRequests` rules.
 3. If authorization passes, the request proceeds to the `DispatcherServlet` and
    your controller.
+
+```mermaid
+flowchart LR
+  R[HTTP request] --> DFP[DelegatingFilterProxy<br/>container filter]
+  DFP --> FCP[FilterChainProxy<br/>Spring bean]
+  FCP -->|first matching<br/>RequestMatcher wins| SFC[Selected SecurityFilterChain]
+  SFC --> F1[SecurityContextHolderFilter]
+  F1 --> F2[Csrf / Cors / HeaderWriter]
+  F2 --> F3[Auth filters:<br/>UsernamePassword / Basic / JWT]
+  F3 --> F4[AnonymousAuthenticationFilter]
+  F4 --> F5[ExceptionTranslationFilter]
+  F5 --> F6[AuthorizationFilter<br/>last]
+  F6 -->|allowed| DS[DispatcherServlet -> controller]
+  F6 -.denied.-> F5
+```
+
+**Worked trace — `GET /admin/users` two ways** (rule:
+`.requestMatchers("/admin/**").hasRole("ADMIN")`):
+
+*Case A — anonymous browser (no session, no login):*
+1. `SecurityContextHolderFilter` looks for a saved context → finds none, context
+   stays empty.
+2. Auth filters (form/basic/JWT) see no credentials → they do nothing.
+3. `AnonymousAuthenticationFilter` fires: it populates the context with an
+   `AnonymousAuthenticationToken` (principal `"anonymousUser"`, authority
+   `ROLE_ANONYMOUS`).
+4. `AuthorizationFilter` evaluates `hasRole('ADMIN')` → the token has only
+   `ROLE_ANONYMOUS`, so it throws `AccessDeniedException`.
+5. `ExceptionTranslationFilter` catches it and asks the
+   `AuthenticationTrustResolver`: *is this principal anonymous?* → **yes**. So it
+   treats this as "not authenticated yet" and invokes the **entry point** →
+   **HTTP 302 redirect to `/login`** (or 401 for a REST entry point). **Not a 403.**
+
+*Case B — logged-in `USER`-role user hitting the same URL:*
+1. `SecurityContextHolderFilter` loads the saved context → a fully authenticated
+   `UsernamePasswordAuthenticationToken` with authority `ROLE_USER`.
+2. Auth filters see the request is already authenticated → skip.
+3. `AnonymousAuthenticationFilter` sees a non-anonymous context → skip.
+4. `AuthorizationFilter` evaluates `hasRole('ADMIN')` → token has `ROLE_USER`,
+   not `ROLE_ADMIN` → throws `AccessDeniedException`.
+5. `ExceptionTranslationFilter` asks the trust resolver → principal is **not**
+   anonymous → so it returns **HTTP 403 Forbidden** (no point sending them to
+   login; they're already logged in).
+
+Same URL, same rule, same exception — but *who* the caller is decides 302→login
+vs 403. That is the whole 401/redirect-vs-403 distinction in one trace.
 
 Advanced gotchas:
 - Ordering matters. `AuthorizationFilter` runs last so authentication filters
@@ -368,6 +426,33 @@ PasswordEncoder passwordEncoder() {
   2^10 rounds) and embeds a random **salt** inside the hash string
   (`$2a$10$...`), so you don't store salt separately. `matches()` re-derives with
   the embedded salt.
+
+**Anatomy of a real bcrypt hash** (a common "point to the cost and the salt"
+interview ask). The stored 60-character string is not opaque — it is four fields
+separated by `$`:
+
+```
+$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy
+└┬┘└┬┘└──────────┬─────────┘└──────────────┬───────────────┘
+ │  │            │                          │
+ │  │            │                          └─ 31-char hash (Base64 of 184-bit digest)
+ │  │            └──────────────────────────── 22-char salt (Base64 of 128-bit salt)
+ │  └───────────────────────────────────────── cost = 10  → 2^10 = 1024 key-setup rounds
+ └──────────────────────────────────────────── version = 2a (bcrypt variant)
+```
+
+So: version `2a`, cost `10` (`2^10 = 1024` rounds — bump to `12` and it's
+`2^12 = 4096`, ~4× slower), the salt is the 22 chars right after `$10$`
+(`N9qo8uLOickgx2ZMRZoMye`), and everything after that is the digest. Because the
+salt lives *inside* the string, two users with the identical password get
+completely different hashes — no separate salt column needed.
+
+**Trace of `matches("hunter2", stored)`:** (1) parse the version, cost `10`, and
+22-char salt out of the stored string; (2) run bcrypt on the raw input
+`"hunter2"` with *that* extracted salt and cost → produces a candidate 31-char
+hash; (3) **constant-time** compare the candidate against the stored 31-char hash
+→ equal means match. The re-derivation reuses the embedded salt precisely so the
+comparison lines up; nothing is ever "decrypted" (bcrypt is one-way).
 - **`DelegatingPasswordEncoder`** (the Spring Boot default) stores an
   **`{id}` prefix** — e.g. `{bcrypt}$2a$10$...`, `{argon2}...`, `{noop}...` — so
   you can migrate algorithms over time and verify legacy hashes. `{noop}` means
@@ -445,6 +530,43 @@ Base64URL-encoded parts joined by dots: **`header.payload.signature`**.
   **integrity/authenticity** — the server verifies it and rejects tampered
   tokens. It does **not** provide confidentiality.
 
+**Worked example — decode a real (truncated) token.** A JWT is just three
+Base64URL blobs joined by dots:
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0IiwiaWF0IjoxNzIx...Jhb.3Vf7...sig
+└──────────── header ────────────┘ └───────────── payload ──────────┘ └─ signature ─┘
+```
+
+Base64URL-decoding the **first** part gives the header JSON:
+
+```json
+{ "alg": "HS256", "typ": "JWT" }
+```
+
+Decoding the **second** part gives the payload (claims):
+
+```json
+{ "sub": "1234", "iat": 1721000000, "exp": 1721003600, "scope": "read write" }
+```
+
+Note `exp` is a **Unix timestamp** (seconds since epoch): `1721003600` is
+`1721000000 + 3600`, i.e. `iat` + 1 hour → this token lives one hour. The key
+teaching point: **you just read the payload without any secret** — Base64 is
+encoding, not encryption. Anyone holding the token can `atob()` the middle part.
+That is exactly why you never put a password, PII, or anything secret in a
+signed-only (JWS) JWT.
+
+**Verification and tampering.** To validate, the server takes the *exact* first
+two blobs it received, computes `HMACSHA256("<header>.<payload>", serverKey)`,
+Base64URL-encodes the result, and compares it to the third blob. If they match,
+the token is authentic and untampered. Now suppose an attacker edits the payload
+to `"scope":"read write admin"`, re-Base64s it, and keeps the old signature: the
+server recomputes the HMAC over the *new* header.payload — a different input, so
+a **different** signature — which does not equal the attacker's stale third blob
+→ verification fails → **401**. The attacker can't forge a valid signature
+because they don't have `serverKey` (HS256) / the private key (RS256).
+
 **Access vs refresh token:**
 - **Access token**: short-lived (minutes), sent on every API call, carries
   claims/authorities. If stolen, damage window is small.
@@ -506,6 +628,28 @@ sending a state-changing request using **ambient credentials** (cookies) the
 browser attaches automatically. It only works because the browser auto-sends the
 session cookie — the attacker never sees it.
 
+**Concrete attack (and why a header token is immune).** The single most-tested
+CSRF insight is *the browser auto-attaches cookies to cross-site requests but
+does NOT auto-attach `Authorization` headers.* Trace it:
+
+1. Alice logs into `bank.com`; her browser now holds a `JSESSIONID` session
+   cookie for `bank.com`.
+2. Still logged in, she visits `evil.com`, whose page contains a hidden
+   auto-submitting form: `POST https://bank.com/transfer?to=attacker&amount=5000`.
+3. The browser sends that POST to `bank.com` and — because the request targets
+   `bank.com` — **automatically attaches the `bank.com` session cookie**. The
+   server sees a valid session and executes the transfer. Alice never clicked
+   anything meaningful. That's CSRF.
+
+Now the same attack against a **bearer-token API**: identity lives in an
+`Authorization: Bearer <token>` header, and the token is kept in JS memory /
+`localStorage`, *not* in a cookie. When `evil.com`'s JS forges a request to the
+API, the browser has no cookie to auto-attach, and `evil.com`'s script **cannot
+read Alice's token** (it's in `bank.com`'s origin, blocked by the same-origin
+policy) so it can't set the header itself. No credential rides along → the API
+returns 401 → the attack fails. This is precisely why `csrf().disable()` is
+acceptable for header-token APIs but **dangerous** for cookie/session auth.
+
 - Spring Security enables CSRF protection **by default** and requires a CSRF
   token (synchronizer-token pattern) on unsafe methods (POST/PUT/PATCH/DELETE).
   Safe, idempotent methods (GET/HEAD/OPTIONS/TRACE) are exempt.
@@ -519,6 +663,21 @@ session cookie — the attacker never sees it.
   deferred token loading) — SPAs typically use the
   `CookieCsrfTokenRepository.withHttpOnlyFalse()` so JS can read the token and
   echo it in a header.
+
+Three terms that carry the rest of this section:
+- **Synchronizer-token pattern:** the server generates a random token, stores it
+  server-side (or in a cookie it trusts), and requires the client to **echo it
+  back** on every unsafe request; if the submitted token is absent or doesn't
+  match the stored one, the request is rejected. `evil.com` can't guess the
+  random value, so its forged request has no valid token.
+- **BREACH:** a compression side-channel attack — if a *static* secret is
+  embedded in an HTTP response that's gzip-compressed, an attacker can recover it
+  byte-by-byte by watching how response *size* changes. Defense: make the
+  rendered secret **change every response** (so there's no fixed target), which
+  is exactly what the XOR handler below does.
+- **Token fixation:** an attacker plants a CSRF token *they* know into the
+  victim's session *before* login; if that same token stays valid after login,
+  the attacker can forge requests. Defense: **rotate** the token on login.
 
 **Security 6 CSRF internals (a rich source of "why does my SPA break?"):**
 - The **default request handler is `XorCsrfTokenRequestAttributeHandler`**, which
@@ -685,6 +844,13 @@ OpenID Connect adds identity/authn on top). Key roles: resource owner (user),
 client (app), authorization server (issues tokens), resource server (hosts the
 API).
 
+Concretely, plain OAuth2 gives the client an **access token** that says *"the
+bearer may call these APIs with these scopes"* — it never guarantees *who* the
+user is. OIDC layers an **`id_token`** (a JWT with identity claims like
+`sub` = stable user id, `iss` = issuer, `aud` = the client it was minted for)
+on top, so "Log in with Google" works: the `access_token` authorizes API calls,
+the `id_token` tells your app *which* human just signed in.
+
 Grant types:
 - **Authorization Code**: the standard for web apps — client redirects user to
   auth server, gets a one-time **code**, then exchanges it (server-side, with
@@ -693,6 +859,25 @@ Grant types:
   default for **public clients** (SPAs, mobile) that can't keep a secret. The
   client sends a hashed `code_challenge` up front and the plain `code_verifier`
   at exchange, preventing **authorization-code interception** attacks.
+
+  **What PKCE compensates for:** a confidential (server-side) client proves its
+  identity at the token exchange with a **client secret**; a public client (JS in
+  a browser, an app binary) *cannot hide a secret*, so a stolen authorization
+  code could be redeemed by anyone. PKCE replaces the static secret with a
+  fresh per-request one. **Trace:**
+  1. Client generates a random `code_verifier`, e.g. `verifier = "s3cr3t-rand-xyz"`,
+     and computes `code_challenge = BASE64URL(SHA256(verifier))`. It sends only
+     the **challenge** with the authorization request; the auth server stores it
+     against the issued code.
+  2. The user authenticates; the auth server redirects back with a one-time
+     `code`. An attacker intercepting the redirect (malicious app registered for
+     the same URL scheme, a proxy log) now holds the `code`.
+  3. At exchange, the legitimate client sends `code` **plus the original
+     `verifier`**. The server computes `SHA256(verifier)` and checks it equals the
+     stored `challenge` → match → issues tokens.
+  4. The attacker's exchange fails: they have the `code` but **not the
+     `verifier`** (it never left the real client), and they can't reverse
+     SHA-256 to derive it from the public `challenge`. Stolen code is useless.
 - **Client Credentials**: machine-to-machine (no user) — client authenticates
   with its own credentials to get a token.
 - **Refresh Token**: exchange a refresh token for a new access token.

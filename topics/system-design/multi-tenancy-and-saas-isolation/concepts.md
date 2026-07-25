@@ -63,6 +63,13 @@ cycles, and on-call surfaces.
 
 ## The isolation spectrum: silo, pool, and bridge
 
+A quick analogy before the formalism: **silo** = a standalone house per family —
+private and quiet, but you pay for a whole house even if one person lives there.
+**Pool** = an open-plan hostel with name tags on the beds — cheap and dense, but one
+loud guest disturbs everyone and a mix-up puts you in the wrong bed. **Bridge** = an
+apartment building — shared lobby, plumbing, and roof (cheap to operate) but locked
+private units (your data stays yours).
+
 Isolation is best thought of as a **spectrum**, not a binary. The AWS SaaS Factory
 vocabulary names three reference points:
 
@@ -113,6 +120,24 @@ database, often its own network segment. Nothing tenant-bearing is shared.
 - **Poor density** — practical for tens to low hundreds of tenants, not millions.
 - **Cross-fleet operations are hard** — fleet-wide analytics, reporting, and "apply this
   fix everywhere" become distributed problems.
+
+> [!TIP]
+> **Worked example — why silo is uneconomical and what pool saves.** Take 10,000
+> tenants and a small managed DB instance at ~$50/mo.
+>
+> - **Silo:** one dedicated instance per tenant = 10,000 × $50 = **$500,000/mo → $50 per
+>   tenant.** But each tenant must be sized for *its own peak*, and most sit near ~5%
+>   average utilization — so you are paying for ~95% idle capacity in every stack.
+> - **Pool (statistical multiplexing):** the tenants share a fleet. Aggregate *average*
+>   load = 10,000 × 5% = **500 instance-equivalents**. Because tenant peaks are largely
+>   uncorrelated (they don't all spike at the same second), the aggregate stays close to
+>   that average, so you provision for it plus headroom — run the shared fleet at ~70%
+>   utilization → 500 / 0.70 ≈ **715 instances** = 715 × $50 = **$35,750/mo → ~$3.58 per
+>   tenant.**
+>
+> Same workload, per-tenant cost drops **~14×** ($50 → ~$3.58). That gap *is* statistical
+> multiplexing: silo pays for every tenant's idle 95%; pool sells that idle capacity to
+> whichever tenant needs it right now.
 
 Silo is often reserved for **premium/enterprise tiers** and highly regulated tenants
 (see *Tiered tenants*).
@@ -189,6 +214,20 @@ flowchart TD
   needs pooling strategy (e.g., a pool per shard, not per tenant).
 - **Schema migrations fan out** — you must run migrations across every schema/DB, and
   handle partial failures.
+
+> [!WARNING]
+> **Worked example — why "a pool per tenant" collapses.** Suppose 2,000 tenants and each
+> app node keeps a modest per-tenant pool of 10 connections. That demands 2,000 × 10 =
+> **20,000 open connections** — but a stock PostgreSQL ships with `max_connections ≈ 100`,
+> and every connection also costs several MB of server RAM plus scheduler overhead. You
+> blow past the limit ~200× and the database refuses new connections (or thrashes).
+>
+> The fix is to pool by the *physical* resource, not the logical tenant. Put the 2,000
+> tenants on **20 shards** and keep **one pool of 50 connections per shard**: 20 × 50 =
+> **1,000 connections** total — well within reach and reusable across all tenants on that
+> shard. Or front the databases with a proxy like **PgBouncer** in transaction-pooling
+> mode, which multiplexes thousands of client connections onto a few dozen real backend
+> connections. Either way: pool per shard/proxy, never per tenant.
 
 ---
 
@@ -324,6 +363,43 @@ policies / session tags**: the tenant context is baked into a scoped-down creden
 (e.g., DynamoDB leading-key conditions, S3 prefix conditions) so the *infrastructure*
 refuses cross-tenant access even if code is wrong.
 
+**Worked example — a scoped credential the code cannot escape.** The request comes in
+authenticated as tenant `42`. Before touching data, the service calls STS to assume a
+role, stamping a **session tag** `tenant=42`, and receives temporary credentials whose
+policy pins every access to that tag:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+      "Resource": "arn:aws:dynamodb:us-east-1:111122223333:table/Invoices",
+      "Condition": {
+        "ForAllValues:StringEquals": {
+          "dynamodb:LeadingKeys": ["${aws:PrincipalTag/tenant}"]
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::acme-tenant-docs/${aws:PrincipalTag/tenant}/*"
+    }
+  ]
+}
+```
+
+Now trace a buggy request: the code has a bug and asks for `Query` with partition key
+`43` (a different tenant). AWS resolves `${aws:PrincipalTag/tenant}` to `42` from the
+credential's session tag, sees `dynamodb:LeadingKeys` must equal `42`, and the request's
+leading key `43` fails the condition → **AccessDenied**. Same for `s3://acme-tenant-docs/43/report.pdf`:
+the resource pattern expands to `.../42/*`, so key `43/...` is outside it → denied. The
+credential *itself* only reaches partition/prefix `42`; a forgotten `WHERE` clause or a
+client-supplied `43` can't cross the boundary, because the infrastructure — not the
+application — enforces it.
+
 > [!KEY-TAKEAWAY]
 > RBAC controls actions within a tenant; isolation controls the tenant boundary itself.
 > A correct authz check that omits the tenant scope is still a data leak.
@@ -357,6 +433,15 @@ retry storm, a huge report — degrades latency/availability for everyone else.
 > [!WARNING]
 > Global rate limits alone don't stop noisy neighbors — a single tenant can consume the
 > entire global budget. Limits must be *keyed by tenant* to enforce fairness.
+>
+> **Worked example.** One **global** bucket allows 10,000 rps, shared first-come-first-
+> served across 501 active tenants. Tenant A hits a retry storm and fires 9,800 rps.
+> A alone soaks up 9,800 of the 10,000; the remaining **200 rps** is all that's left for
+> the other 500 tenants — **200 / 500 = 0.4 rps each**, so everyone else is effectively
+> down. Now switch to a **per-tenant token bucket of 50 rps** keyed by `tenant_id`:
+> tenant A is throttled at **50 rps** (its excess 9,750 rps is rejected/queued), and each
+> of the other 500 tenants keeps its own independent 50 rps budget — unaffected by A. The
+> blast radius shrinks from "everyone" to "just the abuser."
 
 ---
 

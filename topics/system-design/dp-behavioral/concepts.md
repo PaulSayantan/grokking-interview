@@ -85,6 +85,17 @@ sequenceDiagram
     Director-->>Client: approved
 ```
 
+**Worked trace — `handle(Expense 25000)`:** the request enters at the TeamLead and walks the
+chain, testing each handler's `canApprove` limit until one covers it:
+
+1. **TeamLead** (`canApprove` iff `≤ 1000`): `25000 ≤ 1000`? **no** → `next.handle(e)` (forward to Manager).
+2. **Manager** (`≤ 10000`): `25000 ≤ 10000`? **no** → forward to Director.
+3. **Director** (`≤ 100000`): `25000 ≤ 100000`? **yes** → `approve(e)`, chain stops here.
+
+So a \$25,000 request is approved by the Director — the first handler whose limit covers it. A
+\$250,000 request would fail all three tests, hit `next == null` at the Director, and fall to
+`escalateToBoard(e)` (the terminal default that keeps receipt from silently vanishing).
+
 **Trade-offs.** *Pros:* decouples sender from receiver; the handler set is configurable at
 runtime; each handler is small and single-responsibility (open/closed). *Cons:* **receipt is
 not guaranteed** — a request can traverse the whole chain and fall off the end unhandled;
@@ -164,6 +175,21 @@ classDiagram
     ConcreteCommand --> Receiver : delegates to
 ```
 
+**Worked trace — paste, paste, undo, undo.** Start with `doc = "Hi"` and the caret at position
+2 (end of "Hi"). Watch the document string and the undo stack after each op:
+
+| Step | Op | Command runs | `doc` after | history stack (top→bottom) |
+|---|---|---|---|---|
+| 1 | paste `" there"` | `at=2; insert(2," there")` | `"Hi there"` | `[P1]` |
+| 2 | paste `"!"` | `at=8; insert(8,"!")` | `"Hi there!"` | `[P2, P1]` |
+| 3 | **undo** | pop P2 → `delete(8, 1)` | `"Hi there"` | `[P1]` |
+| 4 | **undo** | pop P1 → `delete(2, 6)` | `"Hi"` | `[]` |
+
+Each command captured its own `at` at `execute()` time, so `undo()` deletes exactly the span it
+inserted (`clip.length()` chars from `at`) — step 4 removes the 6 chars of `" there"` starting at
+2, restoring the original `"Hi"`. The invoker never knows what a `PasteCommand` does; it only
+pushes on `execute` and pops on `undo`.
+
 **Trade-offs.** *Pros:* decouples the object that invokes an operation from the one that knows
 how to perform it; supports **undo/redo**, **queuing**, **logging** (replay for recovery),
 **macros**, and deferred/remote execution; new commands don't change existing code. *Cons:* a
@@ -237,6 +263,20 @@ classDiagram
     NonterminalExpression o--> Expr : sub-expressions
     TerminalExpression ..> Context : reads
 ```
+
+**Worked trace — evaluating `premium AND (trial OR beta)`.** The parser builds the tree
+`And(Var("premium"), Or(Var("trial"), Var("beta")))`. Evaluate it against
+`ctx = {premium: true, trial: false, beta: true}` — `interpret` is a recursive post-order walk:
+
+1. `And.interpret(ctx)` needs `l.interpret(ctx) && r.interpret(ctx)`.
+2. Left = `Var("premium").interpret` → `ctx.getOrDefault("premium", false)` = **true**.
+3. Short-circuit `&&` still needs the right, so evaluate `Or.interpret(ctx)`:
+   - `Var("trial")` → **false**; `Var("beta")` → **true**; `false || true` = **true**.
+4. Back at the root: `true && true` = **true** → the customer qualifies.
+
+Flip one flag — `beta: false` — and step 3 becomes `false || false = false`, so the root yields
+`true && false = false`. The grammar lives entirely in the tree shape; evaluation is just the
+recursion bottoming out at `Var` leaves that read the context.
 
 **Trade-offs.** *Pros:* each grammar rule is an isolated class, so **extending or changing the
 grammar** is easy (add a rule class); the grammar is explicit and testable. *Cons:* **class
@@ -736,16 +776,54 @@ types. New operation = new visitor class; the element classes never change.
 node types — without adding three methods to each node.
 
 ```java
-interface Visitor { double visit(NumberNode n); double visit(AddNode n); }
+interface Visitor { double visit(NumberNode n); double visit(AddNode n); double visit(MulNode n); }
 interface Node { double accept(Visitor v); }
 class NumberNode implements Node { double val;
     public double accept(Visitor v){ return v.visit(this); } }   // double dispatch
 class AddNode implements Node { Node l, r;
     public double accept(Visitor v){ return v.visit(this); } }
+class MulNode implements Node { Node l, r;
+    public double accept(Visitor v){ return v.visit(this); } }
 class EvalVisitor implements Visitor {
     public double visit(NumberNode n){ return n.val; }
     public double visit(AddNode n){ return n.l.accept(this) + n.r.accept(this); }
+    public double visit(MulNode n){ return n.l.accept(this) * n.r.accept(this); }
 }
+```
+
+Note the Expression Problem made concrete: because `MulNode` exists, the `Visitor` **interface**
+had to declare `visit(MulNode)`, and *every* visitor (`EvalVisitor`, `PrintVisitor`,
+`TypeCheckVisitor`) must implement it. Add a fourth node type tomorrow and all three visitors
+break until each adds the new overload — that is exactly the "adding a type is hard" cost.
+
+**Worked trace — `EvalVisitor` over `Add(Number(2), Number(3))` → 5.** The magic is *two* hops
+per node: `accept` picks the element type, then `visit` picks the visitor's matching overload.
+
+1. `root.accept(eval)` where `root` is the `AddNode` → runs `AddNode.accept` → calls `eval.visit(this)` → resolves to `visit(AddNode)`.
+2. `visit(AddNode)` returns `n.l.accept(eval) + n.r.accept(eval)`.
+3. `n.l.accept(eval)`: `n.l` is `Number(2)` → `NumberNode.accept` → `eval.visit(this)` → `visit(NumberNode)` → returns `2.0`.
+4. `n.r.accept(eval)`: `n.r` is `Number(3)` → `visit(NumberNode)` → returns `3.0`.
+5. Back in step 2: `2.0 + 3.0` = **5.0**.
+
+Swap in a `PrintVisitor` and the *same* tree, *same* `accept` hops, produces `"(2 + 3)"` instead
+— the element type chose which `accept`, the visitor type chose what each `visit` does. That is
+double dispatch.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Add as AddNode
+    participant Num as NumberNode
+    participant V as EvalVisitor
+    Client->>Add: accept(v)
+    Note over Add: 1st dispatch — element type = AddNode
+    Add->>V: visit(this)  %% -> visit(AddNode)
+    Note over V: 2nd dispatch — visitor type = EvalVisitor
+    V->>Num: n.l.accept(v)
+    Num->>V: visit(this)  %% -> visit(NumberNode) = 2
+    V->>Num: n.r.accept(v)
+    Num->>V: visit(this)  %% -> visit(NumberNode) = 3
+    V-->>Client: 2 + 3 = 5
 ```
 
 ```mermaid

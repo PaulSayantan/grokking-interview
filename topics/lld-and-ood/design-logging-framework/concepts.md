@@ -1,5 +1,11 @@
 # Design a Logging Framework
 
+Before the patterns, feel the problem. Scatter `System.out.println` across a codebase and
+you get: no on/off knob (you can't quiet one noisy module without deleting lines), no way to
+send one line to *both* a file and the console, no consistent timestamp/thread/level format,
+and nothing you can assert against in a test. A logging framework exists to make each of those
+a pluggable, configurable seam. Everything below is machinery in service of that.
+
 This is the canonical **Chain of Responsibility** LLD problem — a Log4j / SLF4J /
 `java.util.logging`-style framework. The interviewer is grading whether you can turn a
 deceptively simple requirement ("write log messages somewhere") into a clean, extensible
@@ -253,9 +259,13 @@ Name each GoF pattern by intent and say *why*; cross-ref `dp-*` for the mechanic
 **1. Chain of Responsibility — the logger hierarchy (Behavioral / the star).** Named loggers
 form a tree to the root. A log event travels up the parent chain: each logger contributes its
 own appenders (additivity) and level inheritance flows *down* (a logger with no explicit level
-uses its nearest ancestor's). This is exactly CoR — each handler decides its part and passes
-on. It lets `com.app.svc.Payment` inherit `com.app`'s config with zero duplication. See
-`dp-chain-of-responsibility`.
+uses its nearest ancestor's). It lets `com.app.svc.Payment` inherit `com.app`'s config with zero duplication. See
+`dp-chain-of-responsibility`. Be precise if pushed on "is this *really* CoR?": the
+**level lookup** is textbook CoR — `effectiveLevel()` stops at the first ancestor with a set
+level (first-match-wins, one handler acts). **Appender additivity is not** — it fans out to
+*every* ancestor's appenders rather than stopping at the first, which is broadcast/composite
+delegation up the tree. Naming that distinction (and why the doc also invokes "Observer" for
+the fan-out) pre-empts the pushback and shows you know CoR's defining "handle-or-pass" shape.
 
 **2. Chain / pipeline of appenders + level filtering (Behavioral).** Filtering is threshold
 comparison: emit only if `message.level >= threshold`. The logger does a cheap **early-exit
@@ -296,7 +306,12 @@ logger change. See `dp-observer`.
 
 **9. Ordered enum for levels.** `LogLevel` is an enum whose declaration order encodes severity;
 `isGreaterOrEqual` compares `ordinal()`. Using ints would lose type safety; unordered enums
-couldn't filter. This single decision powers all threshold logic.
+couldn't filter. This single decision powers all threshold logic. **Gotcha (Effective Java
+Item 35):** deriving severity from `ordinal()` is fragile — inserting `NOTICE` between `INFO`
+and `WARN`, or reordering constants, silently shifts every ordinal and corrupts all filtering,
+and you can't map to Log4j-style non-contiguous values (10000/20000). Prefer an explicit
+`private final int severity` field per constant (`TRACE(100)`, `DEBUG(200)`, …) and compare
+that, so the numbers are declared, not positional.
 
 ## API and Method Signatures
 
@@ -384,6 +399,42 @@ public final class Logger {
 }
 ```
 
+### Worked trace: level inheritance + appender additivity
+
+The two hardest mechanics — how `effectiveLevel()` climbs the parent chain and how
+`callAppenders()` fans out — only click once you run real values through them. Set up this
+tree (recall `TRACE < DEBUG < INFO < WARN < ERROR < FATAL`):
+
+| Logger | level | appenders | additive |
+|---|---|---|---|
+| `root` | `INFO` | `Console` | — |
+| `com.app` | *unset* (null) | *none* | true |
+| `com.app.payment` | `DEBUG` | `File` | true |
+
+**Call (a): `paymentLogger.debug("charging card")`.**
+
+1. `effectiveLevel()` walks up from `payment`: `payment.level = DEBUG` is non-null → returns
+   `DEBUG` immediately (first-match-wins — it never reaches `com.app` or `root`).
+2. Filter: `DEBUG.isGreaterOrEqual(DEBUG)` → `1 >= 1` → **true**. Passes, so we build the
+   `LogMessage` and enter `callAppenders`.
+3. `l = payment`: write to **File**. `additive = true` → keep climbing.
+4. `l = com.app`: no appenders, nothing written. `additive = true` → keep climbing.
+5. `l = root`: write to **Console**. `parent = null` → loop ends.
+
+Result: the one line lands in **both File and Console**. That is additivity — the message
+fans out to every ancestor's appenders, not just the logger you called.
+
+**Call (b): `rootLogger.debug("starting up")`.**
+
+1. `effectiveLevel()` on root: `root.level = INFO` → returns `INFO`.
+2. Filter: `DEBUG.isGreaterOrEqual(INFO)` → `1 >= 2` → **false**. Early exit; `callAppenders`
+   is never even called, no `LogMessage` allocated. Dropped for free.
+
+**Now flip `com.app.payment` to `additive = false`** and re-run call (a): step 3 writes to
+File, then `!additive` breaks the loop *before* climbing — so Console is skipped and the line
+lands in **File only**. That one flag is how you stop a chatty subtree from double-logging into
+the root's appenders.
+
 ```java
 public abstract class AbstractAppender implements Appender {  // Template Method
     protected volatile LogLevel threshold = LogLevel.TRACE;
@@ -409,6 +460,37 @@ public class ConsoleAppender extends AbstractAppender {
     @Override public void close() { /* System.out: nothing to release */ }
 }
 ```
+
+### Worked trace: one LogMessage, two layouts
+
+Layout is the Strategy centerpiece — its whole job is `LogMessage -> String`. Feed the *same*
+event to two layouts and the contrast teaches Strategy better than any paragraph. Take:
+
+```
+LogMessage{ level=WARN, message="disk low", timestamp=2026-07-24T10:15:03,
+            threadName="main", loggerName="com.app.payment" }
+```
+
+**`PatternLayout("%d %-5level [%thread] %logger - %msg")`** substitutes token by token:
+
+- `%d` → `2026-07-24 10:15:03`
+- `%-5level` → `WARN ` (left-justified, padded to width 5 → four letters + one trailing space)
+- `[%thread]` → `[main]`
+- `%logger` → `com.app.payment`
+- `- %msg` → `- disk low`
+
+Rendered line: `2026-07-24 10:15:03 WARN  [main] com.app.payment - disk low`
+(note the two spaces before `[main]`: one from the `%-5level` padding, one literal space in
+the pattern).
+
+**`JsonLayout`** renders the identical fields as structured output:
+
+```json
+{"ts":"2026-07-24T10:15:03","level":"WARN","thread":"main","logger":"com.app.payment","msg":"disk low"}
+```
+
+Same input, zero changes to the appender or the `Logger` — you swapped one strategy object.
+That is why format is an injected `Layout`, not an `if (json)` branch inside the appender.
 
 ```java
 public class AsyncAppender implements Appender {                 // Decorator
@@ -527,7 +609,13 @@ Loggers are shared global state hit by every thread, so concurrency is not optio
 - **Disabled-level calls must be cheap.** `logger.debug(expensiveToString())` still *evaluates*
   the argument even when DEBUG is off — that's the argument-construction cost, not the log cost.
   Mention guarded logging (`if (logger.isDebugEnabled())`) or lambda/`Supplier` message args as
-  the fix. The early threshold check protects only the framework's own work.
+  the fix. The early threshold check protects only the framework's own work. The canonical
+  framework answer is **SLF4J-style parameterized messages**: `log.debug("charged {} to card {}",
+  amount, cardId)` — the framework does the `{}` substitution (and the string concatenation) only
+  after confirming DEBUG is enabled, so a disabled call does no formatting work. Its limit: the
+  argument *objects* (`amount`, `cardId`) are still evaluated and boxed at the call site; only the
+  `toString`/concat is deferred. When even constructing an argument is expensive (e.g.
+  `expensiveReport()`), use `Supplier<String>` / a lambda, which defers the argument computation too.
 - **Root logger has no parent** — the CoR climb must terminate; `effectiveLevel()` falls back
   to a default (INFO) at the root.
 - **Additivity off** — a logger with `additive=false` stops the climb, so its ancestors'

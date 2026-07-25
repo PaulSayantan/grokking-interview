@@ -132,6 +132,28 @@ has been consumed (the "limit"/replenish threshold). This is why an operator lik
 matters for throughput vs memory. So "unbounded downstream demand" does not mean
 "the source is asked for everything at once."
 
+**Traced example — demand as a running counter (prefetch=256):** picture a fast
+producer feeding `publishOn` (queue sized 256) with a slow consumer downstream.
+Track outstanding demand as a number:
+
+```
+subscribe        -> operator requests 256 upstream   (outstanding = 256)
+producer emits 256 items, they sit in the 256-slot queue
+consumer drains items one at a time...
+after 192 consumed (256 × 0.75 = 192, the "limit")
+                 -> operator requests 192 MORE        (not another full 256)
+                    queue now holds 64 + up to 192 new = back toward 256
+consumer drains another 192
+                 -> operator requests 192 again ...
+```
+
+So demand is replenished in **192-item batches** once 75% of the previous batch
+is consumed, and the internal queue never exceeds 256. That is the whole trick:
+even with a fast producer, the operator only ever lets 256 items get ahead of the
+consumer, so memory is bounded regardless of how fast the source pushes. Tuning
+`prefetch` up trades memory for fewer upstream `request` round-trips; tuning it
+down bounds memory tighter at the cost of more chatter.
+
 **Backpressure strategies** when a source cannot be slowed (e.g., mouse events,
 `Flux.create`): `onBackpressureBuffer` (queue, risk OOM), `onBackpressureDrop`
 (discard overflow), `onBackpressureLatest` (keep newest), `onBackpressureError`
@@ -172,6 +194,33 @@ Flux<User> users = idFlux.flatMap(id -> userRepo.findById(id));  // async, unord
   order** by buffering.
 - `switchMap` — cancels the previous inner when a new source item arrives
   (typeahead search).
+
+**Traced example — why `flatMap` reorders:** source emits `[A, B]`; the inner for
+`A` takes 100ms, the inner for `B` takes 10ms. `flatMap` subscribes to both inners
+concurrently at t=0:
+
+```
+t=0     subscribe inner(A) [100ms], subscribe inner(B) [10ms]
+t=10ms  inner(B) completes -> emit B     (downstream sees B first)
+t=100ms inner(A) completes -> emit A
+        output: B, A          <- NOT source order
+```
+
+Now contrast the ordered variants on the same input:
+
+```
+concatMap:          subscribe inner(A), wait for it, THEN inner(B)
+                    t=0..100 A runs alone; t=100..110 B runs -> output A, B
+                    (total ~110ms, no concurrency)
+flatMapSequential:  subscribe inner(A) AND inner(B) concurrently (like flatMap)
+                    t=10ms  B completes but is BUFFERED (A not done yet)
+                    t=100ms A completes -> emit A, then release buffered B
+                    output A, B  (total ~100ms, but B held in memory 90ms)
+```
+
+So `flatMap` gives the earliest emission and most concurrency but no order;
+`concatMap` gives order by serializing (slowest); `flatMapSequential` gives order
+*and* concurrency but pays memory to buffer early-finishers behind a slow leader.
 
 **Trap:** using `map` where the function returns a publisher yields
 `Flux<Mono<T>>`; you need `flatMap`. Conversely using `flatMap` for a pure
@@ -246,6 +295,33 @@ queue and latency spikes.
 to the loop** and resumes via a callback when data is ready. Thus a handful of
 threads can serve tens of thousands of concurrent connections — as long as
 **nothing blocks the event loop**.
+
+**Worked example — the capacity math behind the slogan.** Suppose every request
+does one downstream call that takes **100ms**, and the app runs on an **8-core**
+box.
+
+*MVC (thread-per-request, 200-thread Tomcat pool, ~1MB stack each):* while that
+100ms call is in flight the thread is **blocked and idle** — it holds the thread
+but does no work. Each thread can therefore handle `1 / 0.1s = 10 requests/sec`.
+With 200 threads the ceiling is `200 × 10 = 2000 req/s`, and you have paid
+`200 × 1MB ≈ 200MB` of stack just to sit blocked. The 201st concurrent request
+queues and its latency balloons. Want 20,000 concurrent in-flight requests? You'd
+need ~20,000 threads (~20GB of stack) — impossible.
+
+*WebFlux (event loop, ~8 threads):* the 100ms wait is I/O, so the thread is
+**returned to the loop** the instant the call is dispatched and picks up other
+requests; it only burns CPU for the sub-millisecond of assembling/parsing around
+each call. 20,000 concurrent requests are just 20,000 cheap in-flight
+continuations (a few KB of heap each, not a 1MB stack each) parked on 8 threads,
+all waiting on the same 100ms downstream. Throughput is bounded by the downstream
+and the CPU, not by a thread-per-request cap or a 20GB stack budget.
+
+The punchline: MVC throughput here is capped by *thread count ÷ blocking time*
+(`200 / 0.1s`), while WebFlux is capped by *actual CPU work*, because a thread is
+occupied only during CPU work, never during the I/O wait. Flip the workload to
+CPU-bound (each request burns 100ms of CPU) and the advantage evaporates — 8
+event-loop threads do `8 × 10 = 80 req/s` of real compute either way, so WebFlux
+gives you nothing there.
 
 **Runtime, not just server:** WebFlux can run on a Servlet 3.1+ container
 (Tomcat/Jetty) using async non-blocking I/O, or on Netty/Undertow. You are **not
@@ -407,6 +483,39 @@ flux.subscribeOn(Schedulers.boundedElastic())  // source runs on elastic pool
     .publishOn(Schedulers.parallel())           // downstream on parallel pool
     .map(...);
 ```
+
+**Traced example — print the thread name at each boundary.** This is the single
+most clarifying artifact for the topic: instrument a chain with
+`Thread.currentThread().getName()` and read the actual output.
+
+```java
+Flux.just(1, 2, 3)
+    .doOnNext(i -> log("A"))            // BEFORE publishOn
+    .subscribeOn(Schedulers.boundedElastic())
+    .publishOn(Schedulers.parallel())
+    .doOnNext(i -> log("B"))            // AFTER publishOn
+    .subscribe(i -> log("C"));
+// log(x) prints:  x + " on " + Thread.currentThread().getName()
+```
+
+Output (thread names, not values):
+
+```
+A on boundedElastic-1     <- everything upstream of publishOn runs on the
+A on boundedElastic-1        subscribeOn pool (source emission)
+A on boundedElastic-1
+B on parallel-1           <- publishOn switched the thread; everything after
+B on parallel-1              it runs on the parallel pool
+B on parallel-1
+C on parallel-1           <- the subscriber consumer is downstream too
+```
+
+Read it as: `subscribeOn` decided where the **source** runs (`boundedElastic-1`,
+even though it appears *after* `doOnNext("A")` in the code — position-independent),
+and `publishOn` flipped the thread for everything **below** it (`parallel-1`).
+Nothing ran on the calling thread because `subscribeOn` moved the subscription off
+it. Add a second `publishOn(Schedulers.single())` after `B` and every "C" would
+print `single-1` — each `publishOn` re-routes everything downstream of itself.
 
 **Common schedulers:**
 
@@ -747,8 +856,14 @@ controller, router function, or a running server).
 WebFlux distinguishes how a `Flux` response body is serialized by **media type**:
 
 - `application/json` — a `Flux<T>` is rendered as a **single JSON array**; the
-  server still buffers/aggregates conceptually and emits one array. Backpressure
-  applies but the client sees one document.
+  client sees one document (`[{..},{..},...]`). Nuance worth stating precisely:
+  Jackson writes array elements **incrementally** as items arrive, flushing them
+  over a chunked response — the whole list is **not** necessarily materialized in
+  memory first. The OOM risk appears when the source `Flux` is effectively
+  unbounded or you force materialization with `collectList()` (which really does
+  buffer the entire list into a `Mono<List<T>>` before writing). Backpressure
+  applies, but the framing is one array, so the client can't parse element-by-
+  element until the document closes.
 - `application/x-ndjson` (newline-delimited JSON) / `text/event-stream` — each
   item is flushed as it is produced, enabling true streaming and per-item
   backpressure over the connection.

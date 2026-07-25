@@ -21,6 +21,12 @@
 
 ## The deployment pipeline (Humble & Farley)
 
+Picture a **factory assembly line with automated quality-inspection stations**. A part
+(your commit) moves from station to station; any station can reject it and pull it off the
+line; only a part that clears *every* station reaches the loading dock (prod). The pipeline
+is that line for software — and its whole point is to catch the bad part at the *cheapest*
+station possible, not after it has been boxed and shipped.
+
 The **deployment pipeline** is the central pattern from Jez Humble and David Farley's book
 *Continuous Delivery* (2010). Its definition: **an automated implementation of your
 application's build, deploy, test, and release process**, giving *everyone involved*
@@ -64,7 +70,7 @@ one or more **jobs** (units of work run on an agent); a job runs **steps/tasks**
 | **Build** | Compile source, resolve dependencies | Compiled binaries / bytecode |
 | **Test** | Unit tests, static analysis (lint) — fast feedback | Test reports, coverage |
 | **Package** | Bundle into a deployable **artifact** (jar, container image, tarball) | Immutable versioned artifact |
-| **Scan** | SAST, SCA (dependency CVEs), IaC scan, image scan, secret scan | Security findings / gate result |
+| **Scan** | SAST (Static Application Security Testing — analyzes source without running it), SCA (Software Composition Analysis — checks dependencies for known CVEs / Common Vulnerabilities and Exposures), IaC (Infrastructure-as-Code) misconfig scan, image scan, secret scan | Security findings / gate result |
 | **Deploy** | Push artifact to an environment, run migrations, health-check | Running deployment |
 
 The **commit stage** (build + unit tests + lint) is the heart of CI — it must be **fast**
@@ -96,7 +102,8 @@ jobs:
 ```
 
 > [!TIP]
-> Security scanning (SAST/DAST/SCA/IaC) is its own topic — `devsecops-and-pipeline-security`
+> Security scanning (SAST/DAST/SCA/IaC — DAST is Dynamic Application Security Testing, run
+> against a *running* app) is its own topic — `devsecops-and-pipeline-security`
 > — but conceptually it's just another gate stage. "Shift left" means moving these scans
 > *earlier* so problems are caught before they reach expensive later stages.
 
@@ -126,6 +133,32 @@ Core principles (Fowler / Humble & Farley):
 > Long-lived feature branches with rare merges are **not** CI — even with a CI *server*
 > running. If branches live for weeks, you're doing "continuous isolation": you get big,
 > painful merges precisely because you deferred integration. CI is a *behavior*, not a tool.
+
+### Flaky tests: the silent killer of the green build
+
+A **flaky test** passes and fails non-deterministically on the *same* code — usually from
+timing races, order dependence, shared state, network/time-of-day, or under-provisioned
+runners. They are the single most corrosive thing to CI because they attack the *signal
+itself*: if `main` is red 20% of the time from flakes, developers learn that **red doesn't
+mean broken**, so they stop trusting the build, re-run until green, and start ignoring real
+failures. That erodes the entire "keep the build green / fail fast" discipline.
+
+The standard playbook:
+
+- **Detect & measure.** Track a **flake rate** as a first-class metric (a test that fails
+  then passes on retry with no code change is flaky). You can't fix what you don't count.
+- **Quarantine, don't ignore.** Move a known-flaky test to a separate non-blocking suite
+  (skip-and-track with a ticket) so it stops blocking merges — but keep it *visible* so it
+  gets fixed, not silently deleted.
+- **Retry with intent.** A bounded auto-retry (e.g. rerun a failed test once) can keep the
+  pipeline moving, but *log every retry* — silent retries hide a growing flake problem.
+- **Deflake.** Fix the root cause: remove `sleep`-based waits, isolate shared state, pin
+  clocks/seeds, make tests order-independent.
+
+> [!WARNING]
+> Blanket "retry the whole suite until it passes" is an anti-pattern: it masks flakiness,
+> can turn a real intermittent bug into "just retry it," and multiplies CI cost. Retry
+> *narrowly* and *track* it — a rising flake rate is a bug backlog, not a config knob.
 
 ## CI vs Continuous Delivery vs Continuous Deployment
 
@@ -348,6 +381,18 @@ Pipeline topology is a DAG, and how you shape it drives both **speed** and **cor
   language version × arch). A 3×3 matrix = 9 parallel jobs. Great for cross-platform/
   cross-version verification.
 
+**Worked example — sharding a slow suite (and why it doesn't scale linearly).** A test
+suite takes **40 min** on one runner. Fan it out across **10 runners**, evenly split:
+40 min ÷ 10 = **4 min** per shard. Add a fan-in job that waits for all shards and
+aggregates results — say **~30 s** of overhead. Total wall-clock ≈ 4 min + 0.5 min =
+**~4.5 min**, down from 40 — a ~9× speedup for 10× the runners. Now push to **20 runners**:
+40 ÷ 20 = 2 min per shard, but each shard still pays fixed per-shard startup (checkout,
+restore cache, boot the test framework — say **~1 min** each). So each shard is really
+2 + 1 = 3 min, plus fan-in ≈ 0.5 min → **~3.5 min**. You doubled runners (and cost) to
+shave ~1 min: **Amdahl's-law diminishing returns** — the fixed per-shard startup and the
+serial fan-in become the floor. The sweet spot is where per-shard *test* time still
+dominates per-shard *startup* time.
+
 ```mermaid
 flowchart LR
   B[Build] --> T1[test shard 1]
@@ -391,6 +436,17 @@ between runs to speed up builds. It's the single biggest lever on commit-stage s
   instantly.
 - **Build cache** — reuse compiled/task outputs (Gradle build cache, Bazel, `ccache`,
   Docker layer cache). Docker layer caching + BuildKit reuse unchanged image layers.
+
+**Worked example — the payoff.** A cold commit build resolves ~300 MB of Maven
+dependencies from the registry: at a sustained ~1.5 MB/s effective throughput (network +
+unpack), that download alone is 300 ÷ 1.5 = **200 s ≈ 3.3 min**, plus ~40 s to compile —
+call it **~4 min** wall-clock. On the next run the `pom.xml` is unchanged, so
+`hashFiles('**/pom.xml')` yields the *same* cache key → a **hit**: the ~300 MB is restored
+from the cache store in **~15 s** instead of re-downloaded, and only the ~40 s compile
+remains → **~55 s** total. That's roughly **4 min → under 1 min**, and the win repeats on
+every commit where dependencies don't change — which is why caching is the single biggest
+lever on commit-stage speed. When you *do* bump a dependency, the lockfile hash changes →
+cache **miss** → you pay the full ~4 min once, then it's warm again.
 
 ```yaml
 # GitHub Actions — cache Maven deps keyed on the lockfile
@@ -471,8 +527,9 @@ answer "is our pipeline actually good?"
 - **Failed Deployment Recovery Time** (formerly *Mean Time to Restore* / MTTR) — how long to
   recover from a failed deployment / incident.
 
-Rough performance bands (from the *State of DevOps* reports; exact thresholds shift
-year to year):
+Rough performance bands (from the *State of DevOps* reports; the reports cluster teams into
+**four** groups — Elite / High / Medium / Low — and the exact thresholds shift year to
+year, so treat these Elite/Low endpoints as directional, not gospel):
 
 | Metric | Elite | Low |
 |---|---|---|
@@ -480,6 +537,24 @@ year to year):
 | Lead Time for Changes | < 1 hour | > 1 month |
 | Change Failure Rate | 0–15% | 40–60%+ |
 | Failed Deploy Recovery | < 1 hour | > 1 week |
+
+**Worked example — computing the four keys from a month of data.** Say last month a team
+had these numbers:
+
+- **200 production deploys** over ~20 working days → **Deployment Frequency** = 200 ÷ 20 =
+  **10 deploys/day** (multiple per day → Elite band).
+- Of those 200, **18** needed remediation (a hotfix or rollback) → **Change Failure Rate** =
+  18 ÷ 200 = **0.09 = 9%** (within 0–15% → Elite band).
+- One specific change: commit merged at **09:00**, observed running in prod at **09:47** →
+  **Lead Time for Changes** = **47 min** (< 1 hour → Elite band). (In practice you'd take
+  the *median* commit→prod time across all changes, not one sample.)
+- Say three representative failures recovered in 20, 35, and 50 min; the **median**
+  is **35 min** → **Failed Deployment Recovery** = **35 min** (< 1 hour → Elite band).
+
+Note CFR uses *count of failed deploys ÷ count of all deploys*, not error rate; and lead
+time is measured commit→prod, not the pipeline's own runtime. Reporting the median (not the
+mean) for lead time and recovery keeps a couple of pathological outliers from skewing the
+picture.
 
 Key insight from the research: **throughput and stability are not a trade-off** — elite
 teams do *both* well. Small, frequent, automated deploys are *both* faster *and* safer
@@ -512,6 +587,11 @@ because each change is small and easy to reason about and roll back. A fifth mea
   `devsecops-and-pipeline-security`.
 - **Why ephemeral runners?** Clean state, security isolation, elastic scale — at the cost of
   cold-start speed, mitigated by caching.
+- **Your build is red 20% of the time from flaky tests — what do you do?** Measure a flake
+  rate, quarantine known-flaky tests into a non-blocking suite (ticketed, not deleted),
+  add *bounded, logged* retries to keep flow, and deflake root causes (kill `sleep`-based
+  waits, isolate shared state, pin clocks/seeds). Don't blanket-retry the whole suite —
+  that masks real intermittent bugs and destroys trust in the green build.
 - **How do you know your pipeline is good?** DORA four keys: deployment frequency, lead time,
   change failure rate, failed-deployment recovery time — throughput and stability together.
 

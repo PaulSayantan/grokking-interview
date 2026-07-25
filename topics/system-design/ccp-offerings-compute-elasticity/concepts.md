@@ -148,6 +148,14 @@ hosting period — e.g. **99.95%** means the individual component is up 99.95% o
 Because the guarantee attaches to the node itself, the customer must **add their own redundancy
 math** (multiple nodes, failover) to reach a higher application-level availability.
 
+```mermaid
+flowchart LR
+  LB["Load balancer"] --> N1["Node (per-node SLA, e.g. 99.95%)"]
+  LB --> N2["Node (per-node SLA, e.g. 99.95%)"]
+  LB --> N3["Node (per-node SLA, e.g. 99.95%)"]
+  N1 -->|"customer composes availability = 1 − (1−a)^N"| APP["App-level SLA"]
+```
+
 **Modern equivalent.** The single-instance EC2 SLA / a per-VM SLA (e.g. Azure's single-VM SLA
 that requires premium disks); any offering where the SLA is stated *per resource*. You
 typically then run N nodes behind a load balancer to multiply availability.
@@ -156,6 +164,28 @@ typically then run N nodes behind a load balancer to multiply availability.
 carries the burden of composing many nodes into a resilient system. Contrast with
 [Environment-based Availability](#environment-based-availability), where the *platform* owns
 that composition.
+
+> [!INTERVIEW]
+> *"Your nodes are 99.95% available. How many do you need behind a load balancer for four
+> nines?"* This is the canonical follow-up — here is the math.
+>
+> **One node.** Availability `a = 99.95%` → unavailability `1 − a = 0.0005`. Downtime =
+> `0.0005 × 8760 h/yr = 4.38 h/yr`.
+>
+> **N independent nodes, service is up if ≥1 is up.** The service is *down* only when *all* N
+> fail at once, so availability = `1 − (1 − a)^N`.
+>
+> - **N = 2:** `1 − (0.0005)² = 1 − 0.00000025 = 99.999975%` → downtime ≈ `0.00000025 × 8760 h
+>   ≈ 7.9 s/yr`.
+>
+> **"Four nines" (99.99%)** allows `0.0001 × 8760 = 0.876 h/yr ≈ 52.6 min/yr` of downtime. One
+> node (`0.0005`) blows the budget; two nodes (`0.00000025`) beat it by a wide margin — so
+> **N = 2 is enough**, and it actually clears *five* nines.
+>
+> **The caveat that earns the point:** this assumes *independent* failures. Two VMs in the same
+> AZ, on the same rack, or sharing one power/network domain fail *together* — correlated
+> failure collapses `(1−a)^N` back toward `1−a`. That is the whole reason you spread the N nodes
+> across AZs. Environment-based availability hides this composition from you; here it is your job.
 
 **Related patterns.** Watchdog (detects unavailable nodes), Resiliency Management Process,
 [Environment-based Availability](#environment-based-availability) (the sibling model).
@@ -205,6 +235,15 @@ stateless, horizontally scalable components (see Stateless Component). Contrast 
 [Node-based Availability](#node-based-availability), where the SLA is per node and redundancy
 is the customer's job.
 
+**Gotcha the SLA does not cover.** An environment SLA guarantees the *service* stays up — not
+that any individual *in-flight request* survives a node replacement. When the platform kills
+and replaces a node, requests it was serving are dropped mid-flight; the SLA is satisfied
+because a replacement instance is already up. That is why this model pairs with **stateless
+components + client retries**: a retried request just lands on a healthy node. Stateful or
+sticky-session workloads get *no* protection from the environment SLA and still need explicit
+failover (session replication, external state). And aggressive scale-to-zero has a price:
+**cold-start latency** on the next request while the platform provisions a fresh instance.
+
 **Related patterns.** Public Cloud, Watchdog, Resiliency Management Process, Stateless
 Component, [Node-based Availability](#node-based-availability) (the sibling model).
 **Deep dive:** `resilience-tradeoffs-deep-dive`; operational process → `reliability-ops`.
@@ -228,10 +267,22 @@ physical hardware. Because a VM is just an image + config, provisioning and deco
 fast — which is exactly what makes [Elastic Infrastructure](#elastic-infrastructure) possible.
 This is the foundational *virtualization* pattern.
 
-**Modern equivalent.** Type-1 hypervisors: Xen and AWS Nitro (EC2), Microsoft Hyper-V
-(Azure), KVM (GCP, OpenStack), VMware ESXi. Note the modern *sibling* mechanisms the book
+**Modern equivalent.** **Type-1 (bare-metal)** hypervisors run directly on the hardware with
+no host OS underneath — Xen and AWS Nitro (EC2), Microsoft Hyper-V (Azure), KVM (GCP,
+OpenStack), VMware ESXi. **Type-2 (hosted)** hypervisors run as an app *on top of* a normal OS
+— VirtualBox, VMware Workstation — adding a layer of overhead. Cloud providers use Type-1
+everywhere because the extra host-OS layer of Type-2 costs performance and enlarges the attack
+surface on a machine you rent to strangers. Note the modern *sibling* mechanisms the book
 predates: **containers** (Docker/`runc`, shared-kernel OS-level virtualization) and
 **microVMs** (AWS Firecracker) trade some isolation for far faster startup and higher density.
+
+**What isolation containers give up (the senior probe).** A hypervisor gives each VM its own
+kernel, so a guest-kernel compromise stays trapped in that VM. **Containers share the host
+kernel** — so a kernel exploit escapes the container boundary onto the host and its neighbors,
+and a busy container can starve neighbors of shared-kernel resources (the "noisy neighbor").
+That larger blast radius is exactly why multi-tenant serverless (AWS Lambda, Fargate) runs each
+workload inside a **microVM** (Firecracker): near-container startup speed with a real
+per-tenant kernel boundary.
 
 **Trade-offs / when to use.** Strong isolation and OS flexibility (any guest OS), at the cost
 of per-VM OS overhead and slower startup than containers. It is a provider-side building block
@@ -308,6 +359,28 @@ flowchart LR
   M3 --> R
   R --> O["Result data set"]
 ```
+
+**Worked example — word count on 3 chunks.** Input text split into 3 chunks (10 tokens
+total):
+
+- Chunk 1: `"the cat the dog"` → mapper emits `(the,1) (cat,1) (the,1) (dog,1)`
+- Chunk 2: `"the cat sat"` → mapper emits `(the,1) (cat,1) (sat,1)`
+- Chunk 3: `"the the dog"` → mapper emits `(the,1) (the,1) (dog,1)`
+
+**Shuffle** groups every pair by key across the reducers (all `the`s to one reducer, all
+`cat`s to another, …):
+
+- `the → [1,1,1,1,1]`, `cat → [1,1]`, `dog → [1,1]`, `sat → [1]`
+
+**Reduce** sums each group: `the=5, cat=2, dog=2, sat=1` (checks out: `5+2+2+1 = 10`).
+
+**Why shuffle is the bottleneck — skew made concrete.** Notice `the` already pulled 5 of the
+10 pairs onto one reducer. Now imagine a real corpus where a stopword like `the` is ~90% of
+tokens: with 1 B tokens, the `the` reducer receives ~900 M pairs over the network while every
+other reducer sees a sliver. That one reducer becomes the **straggler** — the whole job's
+finish time is gated by it, and its inbound shuffle traffic saturates the network. (Fixes:
+a **combiner** that pre-sums `(the, 5)` on each mapper before the shuffle, or salting the hot
+key across multiple reducers.)
 
 **Modern equivalent.** Apache Hadoop MapReduce and its managed forms — AWS EMR, GCP Dataproc,
 Azure HDInsight — plus the successors that generalize the same map/shuffle/reduce idea: Apache

@@ -91,6 +91,38 @@ flowchart LR
 > usually `become` (sudo) rights on every managed host. That SSH key / bastion is now a
 > high-value target — protect it like any deploy credential.
 
+### Performance and scale (why "push doesn't scale")
+
+The reason push feels slow at scale is concrete: **`forks`** (default **5**) caps how many
+hosts Ansible configures in parallel, and **each task is at least one SSH round-trip per
+host**, so network latency — not CPU — dominates. A play is executed task-by-task across
+the fork batch: task 1 runs on the first 5 hosts, then task 2 on those 5, and so on.
+
+**Worked estimate.** Say 20 tasks, 500 hosts, ~50 ms SSH round-trip per task-host (connect +
+push module + run + collect). Wall time is roughly `tasks × ceil(hosts / forks) × RTT`:
+
+- **forks=5:** `20 × ceil(500/5) × 50 ms = 20 × 100 × 50 ms = 100,000 ms ≈ 100 s`.
+- **forks=50:** `20 × ceil(500/50) × 50 ms = 20 × 10 × 50 ms = 10,000 ms ≈ 10 s` — a 10×
+  win just from widening the batch.
+
+The standard levers:
+
+- **Raise `forks`** (e.g. 50–100) — more hosts in parallel; bounded by control-node CPU/RAM
+  and file descriptors.
+- **SSH pipelining** (`pipelining=True`) — collapses multiple SSH ops per task into one,
+  cutting round-trips.
+- **`ControlPersist`/`ControlMaster`** — reuses one SSH connection across tasks instead of
+  re-handshaking every task (big win since the per-task RTT above includes the connect).
+- **`strategy: free`** — hosts race ahead independently instead of the default `linear`
+  (lock-step at each task), so fast hosts don't wait on slow ones.
+- **`gather_facts: false`** or a **fact cache** — skips the setup round-trip when you don't
+  need facts.
+- **mitogen** / **async** tasks for further speedups on very large fleets.
+
+This is the mechanical answer behind "push doesn't self-heal and fans out SSH at scale":
+pull-based agents converge locally with no fan-out, which is why 10k+ static fleets often
+prefer them.
+
 ---
 
 ## Inventory: hosts and groups
@@ -125,6 +157,27 @@ http_port=8080
 - **Variable precedence** is a classic gotcha: `host_vars` override `group_vars`; more
   specific groups override `all`; command-line `-e` extra-vars beat almost everything. Know
   that `-e` wins.
+
+**Worked example — resolving one variable.** Suppose `http_port` is defined in four places
+for a `web` group containing `web1` and `web2`:
+
+| Source | Value | Precedence |
+|---|---|---|
+| `roles/app/defaults/main.yml` | `80` | lowest |
+| `group_vars/web` | `8080` | middle |
+| `host_vars/web1` | `9090` | high |
+| `-e http_port=443` (extra-vars) | `443` | wins over everything |
+
+Trace it:
+
+- **Run `ansible-playbook site.yml` (no `-e`):** `web1` walks the chain default(80) →
+  group(8080) → host(9090) and resolves to **9090** (host_vars is most specific). `web2`
+  has no host_vars, so it stops at group(8080) and resolves to **8080**. Neither sees `80` —
+  the role default is only a fallback when nothing more specific exists.
+- **Run `ansible-playbook site.yml -e http_port=443`:** extra-vars sit at the top of the
+  ~20-level precedence list and cannot be overridden by inventory, so **both `web1` and
+  `web2` resolve to 443**, silently ignoring the 9090 and 8080 below them. This is exactly
+  why a stray `-e` in a CI job is such a confusing debugging trap.
 
 ---
 
@@ -167,6 +220,60 @@ task calls **one module**.
   rolling deploys).
 - **`hosts:`** selects from inventory; **`become:`** does privilege escalation (sudo);
   **`vars:`** and included var files parameterize the play.
+
+### Tags — running a subset
+
+Tag tasks (or whole roles) and run only the ones you want with `--tags` / `--skip-tags`:
+
+```yaml
+    - name: Install nginx
+      ansible.builtin.apt: { name: nginx, state: present }
+      tags: [install]
+
+    - name: Deploy app code
+      ansible.builtin.copy: { src: app/, dest: /srv/app }
+      tags: [deploy]
+```
+
+`ansible-playbook site.yml --tags deploy` runs *only* the deploy task and skips install —
+handy for "just push new code without re-running the whole provisioning play."
+`--skip-tags install` runs everything except install.
+
+### block / rescue / always — try/catch/finally
+
+`block` groups tasks; `rescue` runs if any task in the block fails; `always` runs no matter
+what (cleanup). This is Ansible's structured error handling:
+
+```yaml
+    - name: Deploy with rollback
+      block:
+        - ansible.builtin.copy: { src: app-v2/, dest: /srv/app }
+        - ansible.builtin.service: { name: app, state: restarted }
+      rescue:
+        - ansible.builtin.copy: { src: app-v1/, dest: /srv/app }   # roll back
+        - ansible.builtin.service: { name: app, state: restarted }
+      always:
+        - ansible.builtin.command: /usr/local/bin/notify-deploy-status
+```
+
+If the restart fails, `rescue` restores the previous version; `always` fires the
+notification either way.
+
+### serial — rolling deploys
+
+`serial` batches the play across hosts instead of hitting them all at once — the core of a
+rolling deploy. With 8 hosts in the `web` group:
+
+```yaml
+- hosts: web
+  serial: 2                 # or "25%"
+  max_fail_percentage: 25
+```
+
+Ansible runs the whole play on hosts 1–2, then 3–4, then 5–6, then 7–8 — **four batches of
+2**. If more than 25% of a batch fails it aborts before touching the rest, so a bad release
+takes down at most a fraction of the fleet, not all of it. `serial: "25%"` on 8 hosts is the
+same 2-at-a-time batching, expressed as a percentage so it scales with fleet size.
 
 ---
 
@@ -221,6 +328,49 @@ Idempotency deserves its own mental model because it is *the* thing interviewers
   without anchors, `command` without `creates`) so the "converged" run still shows
   `changed`, breaking your ability to use `changed` as a signal.
 
+**Worked example — reading the `PLAY RECAP` across runs.** Take the 4-task web play
+(install nginx, deploy config, create a user, start service) against `web1`. The `PLAY
+RECAP` line is Ansible's per-host tally, and watching `changed=` across runs is how you
+*demonstrate* idempotency in an interview:
+
+```
+# Run 1 — fresh host, everything needs doing
+PLAY RECAP
+web1 : ok=4  changed=3  unreachable=0  failed=0
+
+# Run 2 — nothing changed on the box, re-run immediately
+PLAY RECAP
+web1 : ok=4  changed=0  unreachable=0  failed=0
+```
+
+Run 1 shows `ok=4` (all four tasks succeeded) with `changed=3` (three of them actually did
+work; the fourth — say the user already existed from the base image — was `ok` with no
+change). Run 2 shows `changed=0`: every module checked actual vs declared state, found the
+box already converged, and touched nothing. That `changed=0` **is** idempotency.
+
+Now break it manually and re-run to see self-healing:
+
+```
+$ systemctl stop nginx     # a human "fixes" something by hand
+$ ansible-playbook site.yml
+PLAY RECAP
+web1 : ok=4  changed=1  unreachable=0  failed=0
+```
+
+Only the `service: state=started` task reports `changed=1` — it detected nginx was stopped
+and restarted it, reverting the drift. The other three stayed `ok`.
+
+Contrast a task built on the escape hatch:
+
+```yaml
+- name: Restart nginx the wrong way
+  ansible.builtin.shell: systemctl restart nginx   # no state check
+```
+
+This reports `changed=1` on **every** run — run 1, run 2, run 10 — because `shell` just
+executes and can't tell "already correct" from "needed fixing." Now `changed` is noise: you
+can no longer trust the recap to tell you whether the fleet actually drifted.
+
 > [!INTERVIEW]
 > A clean definition scores points: "Idempotent means re-running the playbook on a host
 > already in the desired state produces **no changes** — Ansible checks actual vs declared
@@ -259,6 +409,17 @@ handlers:
   handler may not run — the config changed but the service wasn't restarted, leaving the
   host in a half-applied state on the next run. (`--force-handlers` mitigates this.)
 
+**Worked example — the half-applied trace.** Play order: (1) template writes a new
+`nginx.conf` → reports `changed`, so `Restart nginx` is **queued** (not run yet — handlers
+flush at play end); (2) a later `deploy app` task **fails**. Because the play aborts on that
+host before the end, the queued handler **never flushes**. Result: the new config sits on
+disk but nginx is still running the *old* config in memory — a silent split-brain. Worse,
+on the **next run** the template task now reports `ok` (disk already matches), so it does
+*not* re-notify — nginx never picks up the config unless you restart it by hand. Fixes:
+`ansible-playbook --force-handlers` (flush queued handlers even after a failure), or insert
+`- meta: flush_handlers` right after the template task to restart immediately rather than
+deferring to play end.
+
 ---
 
 ## Facts and gathering
@@ -293,12 +454,15 @@ and facts and writes it to the target — the workhorse for config files.
 ```jinja
 # nginx.conf.j2
 worker_processes {{ ansible_facts['processor_vcpus'] }};
+upstream app {
+{% for backend in app_servers %}
+  server {{ backend }};
+{% endfor %}
+}
 server {
   listen {{ nginx_port }};
   server_name {{ inventory_hostname }};
-{% for backend in app_servers %}
-  upstream_add {{ backend }};
-{% endfor %}
+  location / { proxy_pass http://app; }
 }
 ```
 

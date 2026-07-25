@@ -480,6 +480,39 @@ Note how `ReputationManager` (Strategy map) and `BadgeService` (Observer) both h
 single `publish(...)` seam — every reputation-affecting action funnels through one place,
 so a new consumer or a new rule is an *addition*, never an edit.
 
+## Worked Example: a vote-to-badge trace
+
+The machinery above stays abstract until you push real numbers through it. User **A** starts
+at **reputation 0**. A's answer `a7` collects **5 upvotes**, then **2 downvotes**, then the
+asker **accepts** it. The badge catalog holds one Silver badge whose `qualifies(u)` returns
+true at **reputation ≥ 50**. Watch each action funnel through `publish(...)`:
+
+| # | Action | Event(s) published (target) | `ReputationManager.apply` | A's rep | `BadgeService.onEvent` |
+|---|---|---|---|---|---|
+| 1 | upvote #1 | `ANSWER_UPVOTED` (A) | +10 | 10 | <50, no award |
+| 2 | upvote #2 | `ANSWER_UPVOTED` (A) | +10 | 20 | no |
+| 3 | upvote #3 | `ANSWER_UPVOTED` (A) | +10 | 30 | no |
+| 4 | upvote #4 | `ANSWER_UPVOTED` (A) | +10 | 40 | no |
+| 5 | upvote #5 | `ANSWER_UPVOTED` (A) | +10 | **50** | `qualifies`→true, **award Silver** |
+| 6 | downvote #1 | `DOWNVOTED` (A) **+** `DOWNVOTE_CAST` (voter) | −2 to A; −1 to voter | 48 | has Silver → skip |
+| 7 | downvote #2 | `DOWNVOTED` (A) **+** `DOWNVOTE_CAST` (voter) | −2 to A; −1 to voter | 46 | skip |
+| 8 | asker accepts | `ANSWER_ACCEPTED` (A) | +15 | **61** | skip |
+
+**Arithmetic check:** `5×(+10) + 2×(−2) + (+15) = 50 − 4 + 15 = 61`. The badge fires **exactly
+once**, at step 5 — the moment `A.reputation` crosses 50 on the same event that moved it.
+Steps 6–8 re-run `onEvent`, but `hasBadge(b)` short-circuits the re-award (Observer
+idempotency). Nothing polls; the threshold check rides the reputation event itself. Note also
+that each downvote emits **two** events: the −2 hits author A, and a `DOWNVOTE_CAST` −1 hits
+the *caster* — one physical click, two `ReputationEvent`s to two different users.
+
+**Now flip a vote.** Say upvote #5 was voter V, who at step 5 leaves A at 50 and then switches
+to a downvote. `Post.castVote` overwrites V's map entry and returns `priorType = UP`; the
+service first **reverses** the old `ANSWER_UPVOTED` (−10), then applies the new `DOWNVOTED`
+(−2): A moves `50 → 40 → 38`, a net **−12** from that one voter — not the `+8` you'd get by
+only counting the new downvote against the stale +10. `getScore()` needs no special case: the
+map now holds one `DOWN` where a `UP` used to be, so the derived score drops by 2 (from +5,
+five upvotes, to +3, four upvotes minus one downvote) automatically.
+
 ## Extensibility
 
 The "now add X" follow-ups and where each lands — each should be an addition, not a rewrite:
@@ -510,7 +543,12 @@ Single-process, thread-safe. The interesting races are around **votes** and **re
 - **Concurrent votes on the same post:** back the votes by `voter.getId()` in a
   `ConcurrentHashMap` (shown) so "one vote per user" is enforced atomically — a duplicate
   from the same user is idempotent, and two *different* users don't contend. `getScore()`
-  derives from the map, so it's always consistent with the stored votes.
+  derives from the map, so it's always consistent with the stored votes. **Trade-off:**
+  derive-on-read is dead simple and never drifts, but it streams the whole vote map (O(n) per
+  read) — fine for LLD, painful for a hot question read millions of times. The alternative is
+  a denormalized pair of `AtomicInteger` up/down counters bumped on each vote: O(1) reads at
+  the cost of keeping them in sync with the map under concurrent votes/flips/retracts. Pick
+  the counter only once read pressure justifies the extra invariant to maintain.
 - **Reputation updates:** `addReputation(delta)` must be atomic (`AtomicInteger` or a
   synchronized accumulator) — many votes across many posts credit the same author
   concurrently; a naive `rep += delta` loses updates.
@@ -567,6 +605,27 @@ Single-process, thread-safe. The interesting races are around **votes** and **re
   or a generic service method.
 - **"Model close/duplicate/protected."** `QuestionStatus` state machine (State pattern /
   enum guard); legal operations depend on status.
+- **"You said privileges are reputation-gated — show it."** Make `Privilege` a small enum
+  carrying its own min-rep threshold, and derive the check from `user.reputation` rather than
+  a role table — so the same mechanism that awards badges also unlocks abilities:
+
+  ```java
+  enum Privilege {
+      VOTE_UP(15), VOTE_DOWN(125), COMMENT(50), EDIT_OTHERS(2000), CLOSE(3000);
+      private final int minRep;
+      Privilege(int minRep) { this.minRep = minRep; }
+      int minRep() { return minRep; }
+  }
+  // Information Expert: User owns its reputation, so it answers can()
+  class User { boolean can(Privilege p) { return reputation >= p.minRep(); } }
+  ```
+
+  Worked trace: user A from the example above sits at **rep 61**. `A.can(VOTE_UP)` → `61 ≥ 15`
+  → **true**; `A.can(COMMENT)` → `61 ≥ 50` → **true**; `A.can(VOTE_DOWN)` → `61 ≥ 125` →
+  **false**; `A.can(CLOSE)` → `61 ≥ 3000` → **false**. `QnAService.castVote` gates on
+  `voter.can(type == UP ? VOTE_UP : VOTE_DOWN)` before touching the post. New privilege =
+  new enum constant, no edits (OCP) — and a *moderator* is just a `User` whose rep clears the
+  bar (or an explicit override flag), not a subclass.
 - **"Scale to real Stack Overflow traffic."** Out of LLD scope — read replicas, a search
   index (Elasticsearch), caching, and denormalized reputation counters live in the
   `system-design` domain; the OO model is the single-node core.

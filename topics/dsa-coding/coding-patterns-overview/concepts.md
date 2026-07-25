@@ -88,6 +88,12 @@ while lo < hi:
 **Signal:** sorted input, "find a pair/triplet", partitioning, palindrome check,
 merging two sorted arrays. Turns the O(n²) nested loop into O(n).
 
+> [!INTERVIEW]
+> For pair/triplet problems that must return **distinct** results (e.g. 3Sum), the
+> notorious follow-up is de-duplication: after sorting, skip repeated values on *both*
+> the fixed pointer and the two moving pointers (`while a[lo]==a[lo-1]: lo+=1`), or you'll
+> emit the same triplet multiple times. Forgetting this is the classic 3Sum bug.
+
 ## Sliding window
 
 A window `[left, right]` expands by advancing `right`, and contracts by advancing `left`
@@ -110,6 +116,14 @@ for right, c in enumerate(s):
 fixed-size window (averages of size k). If the problem allows non-contiguous elements,
 it's *not* a sliding window.
 
+> [!WARNING]
+> Sliding window only works when the measured quantity is **monotonic** under
+> shrinking — extending the window grows it and shrinking it shrinks it, so shrinking
+> from the left can restore validity. With **negative numbers** this breaks: "shortest
+> subarray with sum ≥ k" over `[2,-1,2]` can't be solved by a plain window (shrinking
+> might *increase* the sum), and needs prefix-sum + a monotonic deque instead. Check the
+> monotonicity assumption before reaching for a window.
+
 ## Fast & slow pointers
 
 Two pointers advance at different speeds (Floyd's tortoise-and-hare). If a cycle exists,
@@ -126,6 +140,30 @@ detecting repetition in a functional sequence. O(n) time, O(1) space (beats a ha
   single scan. O(n) time, O(1) space — beats sorting or a hash set.
 - **In-place reversal:** reverse a linked list (or sublist) by re-pointing `next`
   pointers with three cursors (`prev, curr, next`). O(n) time, O(1) space.
+
+The cyclic-sort move: value `v` belongs at index `v-1` (for the range `1..n`). Scan `i`
+from 0; while `a[i]` is not already home, swap it to where it belongs — don't advance `i`
+until the slot is correct:
+
+```text
+i = 0
+while i < n:
+    j = a[i] - 1                 # where a[i] should live
+    if a[i] != a[j]: swap(a[i], a[j])   # send it home
+    else:            i += 1              # already correct (or a duplicate) → advance
+```
+
+**Trace on `[3,1,2]`** (n=3):
+
+- `i=0`: `a[0]=3` → home index `j=2`. `a[0]=3 ≠ a[2]=2`, swap → `[2,1,3]`. Stay at `i=0`.
+- `i=0`: `a[0]=2` → `j=1`. `a[0]=2 ≠ a[1]=1`, swap → `[1,2,3]`. Stay at `i=0`.
+- `i=0`: `a[0]=1` → `j=0`. `a[0]==a[0]`, in place → `i=1`.
+- `i=1`: `a[1]=2` → `j=1`, in place → `i=2`. `i=2`: `a[2]=3` → in place → `i=3`, done.
+
+Now `[1,2,3]`. The missing-number scan follows directly: after cyclic sort, walk the
+array and the **first index `i` where `a[i] != i+1` is the missing number `i+1`** (and on
+`[1,2,...]` inputs the misplaced value pinpoints a duplicate). Comparing against `a[j]`
+rather than the target avoids an infinite swap loop when duplicates exist.
 
 **Signal (cyclic sort):** "array of n numbers in range [1,n]", "find the missing /
 duplicate / all missing numbers". **Signal (reversal):** "reverse list", "reverse in
@@ -179,8 +217,11 @@ aggressively. Often upgraded to DP when subproblems overlap.
 A binary heap gives O(log k) push/pop and O(1) peek at the extreme element.
 
 - **Top-K:** keep a heap of size **k** — a **min-heap for the K largest**, max-heap for
-  the K smallest. Scan n elements → O(n log k), far better than sorting all (O(n log n))
-  when k ≪ n.
+  the K smallest. The min-heap-for-largest feels backwards but is the whole trick: the
+  root is the *smallest* of your current top-k, so it's exactly the element to evict when
+  a bigger one arrives (bigger than the root → pop root, push newcomer; else discard).
+  After the scan the heap holds precisely the k largest. Scan n elements → O(n log k), far
+  better than sorting all (O(n log n)) when k ≪ n.
 - **K-way merge:** push the head of each of K sorted lists into a min-heap; repeatedly pop
   the smallest and push its successor. O(n log k) total.
 
@@ -208,11 +249,34 @@ return lo
 "smallest capacity/speed/time that works", answer lies in a numeric range with a
 monotonic yes/no test.
 
+> [!WARNING]
+> Binary search is where most off-by-one bugs live. Pick **one** invariant and stick to
+> it: with `while lo < hi`, pair `hi = mid` (feasible) with `lo = mid + 1` (infeasible) as
+> in the template above — the loop shrinks the range every step and exits with `lo == hi`
+> at the answer. Mixing `lo <= hi` with the wrong half-discard causes infinite loops or
+> skipped answers. Also compute `mid = lo + (hi - lo) // 2`, not `(lo + hi) // 2`, to
+> avoid integer overflow in fixed-width-int languages.
+
 ## Monotonic stack
 
 A stack kept sorted (increasing or decreasing) as you scan. When the incoming element
 breaks the order, pop — and the popped element's "next greater/smaller" is the current
 element. Each element is pushed and popped once → **O(n)**.
+
+**Worked example — Daily Temperatures `T = [3,1,4,2]`** (for each day, how many days
+until a warmer one). Keep a stack of **indices** whose answers are still unresolved:
+
+| i | T[i] | before | action | stack after | answers set |
+|---|---|---|---|---|---|
+| 0 | 3 | `[]` | push 0 | `[0]` | — |
+| 1 | 1 | `[0]` | 1 < T[0]=3, no pop; push 1 | `[0,1]` | — |
+| 2 | 4 | `[0,1]` | 4 > T[1]=1 → pop 1, `ans[1]=2−1=1`; 4 > T[0]=3 → pop 0, `ans[0]=2−0=2`; push 2 | `[2]` | ans[1]=1, ans[0]=2 |
+| 3 | 2 | `[2]` | 2 < T[2]=4, no pop; push 3 | `[2,3]` | — |
+
+Anything left on the stack (indices 2 and 3) has no warmer day → `ans = 0`. Result:
+`[2,1,0,0]`. The rule "the popped element's answer is the current index" becomes concrete:
+day 1 (temp 1) and day 0 (temp 3) both get resolved by day 2 (temp 4), the first day
+hotter than each.
 
 **Signal:** "**next greater element**", "previous smaller", "daily temperatures",
 "largest rectangle in histogram", "trapping rain water", stock spans.
@@ -222,6 +286,24 @@ element. Each element is pushed and popped once → **O(n)**.
 Precompute `prefix[i] = a[0] + … + a[i-1]` so any range sum is `prefix[r] - prefix[l]` in
 O(1). Combined with a hashmap of seen prefix sums, you count subarrays with a target sum
 in O(n).
+
+The counting trick's insight: a subarray ending at the current index sums to `k`
+**iff** some earlier prefix sum equals `running_sum - k` (subtracting that earlier prefix
+leaves exactly `k`). So keep a map of prefix-sums-seen-so-far and, at each step, look up
+how many earlier prefixes equal `running_sum - k`.
+
+**Worked example — `a = [1,2,3]`, `k = 3`.** Seed the map with `{0: 1}` (the empty
+prefix, so a subarray starting at index 0 can be counted), `running = 0`, `count = 0`:
+
+| idx | value | running | look up `running - k` | found? | count | map after |
+|---|---|---|---|---|---|---|
+| 0 | 1 | 1 | 1 − 3 = −2 | no | 0 | `{0:1, 1:1}` |
+| 1 | 2 | 3 | 3 − 3 = 0 | yes (×1) | 1 | `{0:1, 1:1, 3:1}` |
+| 2 | 3 | 6 | 6 − 3 = 3 | yes (×1) | 2 | `{0:1, 1:1, 3:1, 6:1}` |
+
+Final `count = 2`. The two subarrays are `[1,2]` (found at idx 1: prefix `0` seen means
+the whole run so far minus nothing sums to 3) and `[3]` (found at idx 2: prefix `3` was
+recorded at idx 1, and `running 6 − prefix 3 = 3`). O(n), one pass, no nested loop.
 
 **Signal:** many range-sum queries, "subarray sums to k", "count subarrays with property",
 2-D region sums (prefix matrix), "equilibrium/pivot index".
@@ -254,6 +336,33 @@ Both optimize, but rest on different guarantees.
 compound and subproblems repeat, brute-force recursion recomputes the same inputs.
 **Greedy signal:** you can argue an exchange argument — swapping in the greedy choice
 never hurts. When unsure, DP is the safe default; prove greedy before trusting it.
+
+**Worked example — Coin Change (min coins), `coins = [1,2,5]`, `amount = 6`.** The three
+pieces every DP needs:
+
+- **State:** `dp[i]` = fewest coins to make amount `i`.
+- **Transition:** `dp[i] = min(dp[i-c] + 1)` over every coin `c ≤ i` (take one coin `c`,
+  then solve the smaller amount `i-c`).
+- **Base case:** `dp[0] = 0` (zero coins make amount 0); start all others at ∞.
+
+Fill left to right:
+
+| i | candidates (`dp[i-c]+1`) | dp[i] |
+|---|---|---|
+| 0 | — | **0** |
+| 1 | c=1 → dp[0]+1 = 1 | **1** |
+| 2 | c=1 → dp[1]+1 = 2; c=2 → dp[0]+1 = 1 | **1** |
+| 3 | c=1 → dp[2]+1 = 2; c=2 → dp[1]+1 = 2 | **2** |
+| 4 | c=1 → dp[3]+1 = 3; c=2 → dp[2]+1 = 2 | **2** |
+| 5 | c=1 → dp[4]+1 = 3; c=2 → dp[3]+1 = 3; c=5 → dp[0]+1 = 1 | **1** |
+| 6 | c=1 → dp[5]+1 = 2; c=2 → dp[4]+1 = 3; c=5 → dp[1]+1 = 2 | **2** |
+
+`dp` ends as `[0,1,1,2,2,1,2]`, so the answer is `dp[6] = 2` (namely `1 + 5`). Note the
+overlapping subproblems this reuses: `dp[1]` and `dp[5]` are each read by multiple later
+cells — that reuse is exactly why memoizing beats the exponential brute-force recursion.
+A pure greedy "take the biggest coin ≤ remaining" would pick `5,1` here (also 2) but
+fails on `coins=[1,3,4], amount=6` (greedy `4,1,1` = 3 vs optimal `3,3` = 2) — that
+counter-example is *why* coin change needs DP, not greedy.
 
 ### Memoization vs tabulation
 

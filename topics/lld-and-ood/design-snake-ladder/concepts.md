@@ -165,8 +165,32 @@ public int getFinalPosition(int pos) {
 
 The subclass constructors enforce the differing invariants (fail fast with
 `IllegalArgumentException`). This is basic polymorphism doing honest work — not a pattern for
-pattern's sake. (Validation of the *whole* configuration — overlaps, cycles, final-cell rule —
-lives in `Board`, because only the board sees all jumps together.)
+pattern's sake. (Validation of the *whole* configuration — overlaps, cycles, final-cell rule,
+and **target bounds** — lives in `Board`, because only the board sees all jumps together. Note
+the skeleton's constructor range-checks each *trigger* but not each *target*; a complete `Board`
+should also reject `target < 1` or `target > size` in the same loop, since only `Board` knows
+`size`.)
+
+**Trace the transitive resolution.** The subtlety is that `getFinalPosition` loops, so one
+landing can fire a chain. Take jumps `{5→14, 14→30}` and land on **5**:
+
+| step | `pos` before | `containsKey(pos)`? | `seen` after add | `pos` after |
+|---|---|---|---|---|
+| 1 | 5 | yes | `{5}` | 14 |
+| 2 | 14 | yes | `{5, 14}` | 30 |
+| 3 | 30 | no → exit | — | **return 30** |
+
+So a token dropped on 5 climbs all the way to 30 in one call — the exact "ladder drops you on
+another ladder's foot" case.
+
+Now the pathological config `{5→14, 14→5}` (a cycle). `getFinalPosition(5)`:
+
+- `pos=5`: `seen.add(5)` → `true`, `seen={5}`, `pos=14`.
+- `pos=14`: `seen.add(14)` → `true`, `seen={5,14}`, `pos=5`.
+- `pos=5`: `seen.add(5)` → **`false`** (already present) → throw `IllegalStateException`.
+
+Because the `Board` constructor calls `getFinalPosition(trigger)` for every trigger, this blows
+up at *construction*, not mid-game — exactly the fail-fast behavior you want.
 
 **3. `Dice` as a Strategy.**
 Randomness is (a) untestable if hard-coded and (b) the most likely axis of change
@@ -346,6 +370,40 @@ public final class Game {
 A `BoardFactory` (or `GameBuilder`) supplies the classic layout so `main()` is three lines:
 build board, build game, `game.play()`.
 
+## Worked example: one game traced
+
+Interviewers almost always finish with "run me a game." Here is the exact trace to narrate.
+**Setup:** board size **100**, one ladder **3→22**, one snake **17→4**, players **P1** and
+**P2** both starting off-board at position **0**, queue `[P1, P2]`. The dice is a scripted test
+double so the numbers are reproducible. Each turn: `tentative = from + roll`; if
+`tentative > 100` the player stays (agreed overshoot rule), else `to = getFinalPosition(tentative)`.
+
+| turn | player | from | roll | tentative | `getFinalPosition` | to | queue after |
+|---|---|---|---|---|---|---|---|
+| 1 | P1 | 0 | 3 | 3 | 3 is ladder → 22 | **22** | `[P2, P1]` |
+| 2 | P2 | 0 | 5 | 5 | 5 plain → 5 | 5 | `[P1, P2]` |
+| 3 | P1 | 22 | 6 | 28 | 28 plain → 28 | 28 | `[P2, P1]` |
+| 4 | P2 | 5 | 6 | 11 | 11 plain → 11 | 11 | `[P1, P2]` |
+| 5 | P1 | 28 | 4 | 32 | 32 plain → 32 | 32 | `[P2, P1]` |
+| 6 | P2 | 11 | 6 | 17 | 17 is snake → 4 | **4** | `[P1, P2]` |
+
+Turn 1 shows the **ladder** (`getFinalPosition(3)` loops once: 3→22, then 22 is not a trigger,
+returns 22). Turn 6 shows the **snake** (`getFinalPosition(17)`: 17→4, 4 not a trigger, returns
+4) — P2's roll of 6 was a bad-luck landing that cost 13 cells.
+
+Fast-forward many turns; P1 now sits on **98**, P2 on **95**, queue `[P1, P2]`:
+
+| turn | player | from | roll | tentative | result | to | note |
+|---|---|---|---|---|---|---|---|
+| N | P1 | 98 | 5 | 103 | 103 > 100 → **overshoot** | 98 | stays put; `won?` 98≠100 → rotate `[P2, P1]` |
+| N+1 | P2 | 95 | 4 | 99 | 99 plain → 99 | 99 | rotate `[P1, P2]` |
+| N+2 | P1 | 98 | 2 | 100 | `getFinalPosition(100)` → 100 | **100** | `won?` 100==100 → **P1 wins**, status FINISHED |
+
+Turn N is the **overshoot near the end**: 98+5=103 exceeds 100, so `to` stays at `from` (98) and
+P1 forfeits the move — no bounce, per the rule we agreed. Turn N+2 wins: landing exactly on 100
+is legal because validation banned any jump *triggering* on the final cell, so
+`getFinalPosition(100)` returns 100 unchanged and `won = (to == size)` fires.
+
 ## Extensibility
 
 The follow-ups, and why this design absorbs them cheaply:
@@ -393,6 +451,12 @@ Concurrency (usually a brief exchange for this problem):
 - If external callers (e.g., two socket handlers) may invoke `playTurn()` on the *same* game
   concurrently, guard it — `synchronized playTurn()` or confining each game to a
   single-threaded executor/actor. Also validate *whose* turn it is if moves carry a player id.
+- **Memory visibility**, if pushed: `Player.position` is a plain mutable `int` with no
+  `volatile`/synchronization, so the single-thread-per-game claim only holds if confinement is
+  *real*. The moment another thread (a renderer, a telemetry/logger thread) reads `position`
+  directly, it needs a happens-before edge or it may see a stale value. The clean fix is already
+  in the design: hand callers immutable `TurnResult` snapshots instead of exposing live mutable
+  `Player` state across threads.
 
 Edge cases to enumerate (interviewers keep score on these):
 

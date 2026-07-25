@@ -348,8 +348,25 @@ public int getValue() {
 ```
 
 Related predicates: **`isBust()`** = `getValue() > 21`; **`isBlackjack()`** = exactly two
-cards totaling 21 (an Ace + a ten-value); **`isSoft()`** = a hand where an Ace is currently
+cards totaling 21 (an Ace + a ten-value) — note a 21 built by *splitting* (split aces, then
+draw a ten) is **not** a natural: `isBlackjack()` must be false for post-split hands, so it
+pays even money (1:1), not 3:2; **`isSoft()`** = a hand where an Ace is currently
 counted as 11 (matters because the dealer's hit-soft-17 rule keys off it).
+
+**Trace it — sum aces as 1, then promote at most one.** Watch `total`/`aces` after each
+step; the promotion `while` runs after the sum loop finishes:
+
+| Hand | Sum with aces=1 | aces | Promote (`total+10 ≤ 21`?) | Final | Soft? |
+|---|---|---|---|---|---|
+| `[A, 6]` | 1+6 = 7 | 1 | 7+10=17 ≤ 21 → yes, aces→0 | **17** | soft (an Ace is 11) |
+| `[A, 6, 10]` | 1+6+10 = 17 | 1 | 17+10=27 > 21 → no | **17** | hard (promotion undone by the 10) |
+| `[A, A, 9]` | 1+1+9 = 11 | 2 | 11+10=21 ≤ 21 → yes, aces→1; then 21+10=31 > 21 → stop | **21** | soft (one Ace 11, **second Ace stays 1**) |
+| `[K, Q, 2]` | 10+10+2 = 22 | 0 | loop skipped (no aces) | **22** | — → `isBust()` true |
+
+The `A-6` vs `A-6-10` pair is the whole soft/hard story: the same starting hand is a soft 17
+until the 10 arrives, at which point promoting would bust so the Ace silently drops back to
+1 and it becomes a hard 17. `A-A-9` proves the loop promotes exactly one Ace — two 11s would
+be 22.
 
 > [!KEY-TAKEAWAY]
 > Put `getValue()` on `Hand`, never on `Deck` or `Card`. A single `Card` has no Blackjack
@@ -415,6 +432,24 @@ Design notes worth saying out loud:
 - Actions go through `playerAction(...)` so the current `GameState` can reject moves invalid
   in the current phase.
 
+**Trace `PayoutRule.payout(result, bet)` for a $10 bet** (winnings returned, *on top of* the
+returned stake):
+
+| Result | Ratio | Arithmetic | Returns |
+|---|---|---|---|
+| Regular win | 1:1 | 10 × 1/1 | **+10** |
+| Natural blackjack (classic) | 3:2 | 10 × 3/2 = 15 | **+15** |
+| Natural blackjack (6:5 table) | 6:5 | 10 × 6/5 = 12 | **+12** |
+| Push (tie) | — | stake returned, no winnings | **0** |
+| Loss / bust | — | stake collected | **−10** (bet lost) |
+
+> [!WARNING]
+> `payout` returns `int`, which silently truncates fractional chips. The clean $10 cases
+> hide it, but a **$5 bet at 6:5** is 5 × 6/5 = **6** (fine) while a **$5 bet at 3:2** is
+> 5 × 3/2 = **7.5** — and `(int)(5 * 3 / 2)` in Java is 7, quietly stiffing the player half a
+> chip. State a rounding policy explicitly (casinos round *down* to the nearest chip, or
+> restrict bets to even multiples) rather than letting integer division decide it for you.
+
 ## Code Skeleton
 
 ```java
@@ -440,6 +475,9 @@ public class Deck {
         return cards.pop();
     }
     public int size() { return cards.size(); }
+    // Skeleton inlines the shuffle in the constructor for brevity; the real API keeps
+    // shuffle() and reset() as separate public methods (needed to reshuffle at the cut card
+    // and to make the injected-RNG shuffle independently testable).
 }
 
 // Strategy: the Dealer's fixed house policy
@@ -484,6 +522,9 @@ public class PlayerTurnState implements GameState {
             do {
                 a = p.decide(game.getDealer().upCard());
                 if (a == Action.HIT) p.currentHand().addCard(game.getDeck().deal());
+                // Abbreviated to HIT/STAND: DOUBLE = deal one card then stand;
+                // SPLIT = push a second Hand onto the player and iterate player.hands
+                // (this is why Player holds List<Hand>, not a single Hand).
             } while (a == Action.HIT && !p.currentHand().isBust());
         }
         game.setState(new DealerTurnState());   // state decides the transition

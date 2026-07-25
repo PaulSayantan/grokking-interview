@@ -93,6 +93,18 @@ by the *old* TTL. Some resolvers ignore TTLs or cache longer, so plan conservati
 > raise TTL back up. Lowering TTL one minute before the change does nothing — resolvers still
 > hold the old high-TTL answer.
 
+**Worked timeline — cutting over a record currently at TTL 3600 (1h):**
+
+| Clock | Action | Why |
+|---|---|---|
+| **T−2h** | Lower TTL `3600 → 60` | Resolvers may have cached the old answer *with its 3600s TTL* moments ago; that copy lives up to 1h. Waiting ≥ the **old** TTL guarantees every resolver has re-fetched and now holds the `60s` value. The head start must be **≥ the old TTL**, not the new one. |
+| **T−0** | Change the record (new IP/target) | Authoritative change is instant. |
+| **T+2min** | Verify (`dig @8.8.8.8`, a few public resolvers) | With `60s` TTL everywhere, cached copies expire within ~60s, so nearly all resolvers now return the new answer. |
+| **T+1h** | Raise TTL `60 → 3600` | Cutover done; restore high TTL for query-load/resilience. |
+
+The insight: if you'd lowered the TTL only at T−1min, resolvers that fetched at T−2min still
+hold the `3600s` answer until ~T+58min — the low value never had time to propagate first.
+
 - The **negative-caching TTL** (from the SOA record's minimum field) governs how long
   NXDOMAIN/"no such record" answers are cached — relevant when you *add* a record and it
   seems not to appear.
@@ -108,6 +120,20 @@ turning DNS into a coarse global traffic manager:
   authoritative DNS stops returning the primary's answer and returns the secondary. Recovery
   speed is bounded by health-check interval **+ TTL** (clients keep the cached primary until
   it expires). Keep failover-record TTLs low (30–60s).
+
+  **Worked example — how fast does DNS failover actually happen?** Say the health check runs
+  every `10s` with an unhealthy threshold of `3`, and the failover record has a `60s` TTL.
+  - **Detect:** the primary must fail `3` consecutive checks → `3 × 10s = 30s` before the
+    authoritative DNS marks it down and starts handing out the secondary.
+  - **Client cutover:** a client that cached the primary answer `1s` *before* it flipped keeps
+    using it until its copy expires — up to the full `60s` TTL.
+  - **Worst case:** `30s` (detect) `+ 60s` (last cached answer expires) `= ~90s` before *all*
+    well-behaved clients are on the secondary. Resolvers that ignore/extend TTLs stretch the
+    tail beyond that.
+
+  Contrast an in-region **LB** health check: it sees the failure and stops routing to the bad
+  target in seconds, with no client-side cache in the path — which is exactly why DNS is for
+  coarse cross-region failover and the LB is for fast per-request steering.
 - **Weighted routing** — split answers by weight (e.g. 90/10) for canary-at-DNS or gradual
   migration between stacks/regions.
 - **Latency-based routing** — return the region with lowest measured latency to the resolver.
@@ -169,6 +195,18 @@ distinction is the **OSI layer** it operates at:
   another, do host-based virtual hosting, inject headers, and offload TLS.
 - Many stacks combine them: an **NLB in front of Envoy/ingress** (L4 for raw throughput + L7
   for smart routing), or a global L7 (Cloudflare/CloudFront) in front of regional LBs.
+
+**Gotchas interviewers push on:**
+- **Idle-timeout mismatch → surprise 502/504s.** The LB has an **idle timeout** (ALB default
+  ~60s) that closes connections after inactivity. If the LB's idle timeout is *longer* than
+  the backend's keep-alive, the LB reuses a connection the backend already closed → intermittent
+  `502 Bad Gateway`; if a slow backend exceeds the LB idle timeout, you get `504 Gateway
+  Timeout`. Rule of thumb: set the **backend keep-alive slightly longer than the LB idle
+  timeout** so the LB, not the backend, owns connection teardown.
+- **Cross-zone load balancing defaults differ.** An **ALB is always cross-zone** (a node in
+  AZ-a can send to targets in AZ-b, so load spreads evenly). An **NLB is per-AZ by default** —
+  each zonal node only hits targets in its own AZ, so uneven target counts per AZ cause uneven
+  load; enabling cross-zone on an NLB fixes the spread but adds **inter-AZ data-transfer cost**.
 
 > [!TIP]
 > When a backend needs the **real client IP**, an L7 LB that terminates the connection hides
@@ -241,6 +279,22 @@ length. The `/N` says the first N bits are the network; the remaining `32-N` bit
 | `/20` | 4,096 | 4,091 |
 | `/16` | 65,536 | 65,531 |
 
+**Worked example — carve `10.0.0.0/16` into four `/24` subnets across 2 AZs.**
+Start with the bit math: a `/24` has `32 − 24 = 8` host bits, so `2^8 = 256` addresses each,
+and going from a `/16` to `/24` fixes `24 − 16 = 8` extra network bits → `2^8 = 256` possible
+`/24`s fit in the `/16` (plenty of room to grow). Take the first four and pin two per AZ:
+
+| Subnet | Range | AWS reserves (.0/.1/.2/.3 + last) | First–last usable | Hosts |
+|---|---|---|---|---|
+| `10.0.0.0/24` (AZ-a public) | `10.0.0.0`–`10.0.0.255` | `.0 .1 .2 .3 .255` | `10.0.0.4`–`10.0.0.254` | 251 |
+| `10.0.1.0/24` (AZ-a private) | `10.0.1.0`–`10.0.1.255` | `.0 .1 .2 .3 .255` | `10.0.1.4`–`10.0.1.254` | 251 |
+| `10.0.2.0/24` (AZ-b public) | `10.0.2.0`–`10.0.2.255` | `.0 .1 .2 .3 .255` | `10.0.2.4`–`10.0.2.254` | 251 |
+| `10.0.3.0/24` (AZ-b private) | `10.0.3.0`–`10.0.3.255` | `.0 .1 .2 .3 .255` | `10.0.3.4`–`10.0.3.254` | 251 |
+
+Check the usable count: `10.0.0.4` through `10.0.0.254` is `254 − 4 + 1 = 251` hosts, matching
+`256 − 5` reserved. You've consumed 4 of 256 `/24`s (`10.0.0.0/24`…`10.0.3.0/24`); the next free
+block is `10.0.4.0/24`, so there is huge headroom for more AZs/tiers without ever overlapping.
+
 > [!TIP]
 > Smaller mask number = **bigger** network (`/16` > `/24`). Interview shortcut: each step down
 > in prefix length **doubles** the addresses; `/24` → 256, `/23` → 512, `/25` → 128.
@@ -292,6 +346,19 @@ Two layers of network filtering in a VPC, and interviewers love the distinction:
 - **Stateless (NACL):** you must allow the return traffic explicitly, typically on the
   **ephemeral port range** (commonly `1024–65535`) — forgetting this is a classic
   "connection hangs" bug.
+
+  **Worked trace — one HTTPS connection through a NACL.** Client `203.0.113.5:51000` opens a
+  connection to server `:443`:
+  1. **SYN in:** packet arrives `203.0.113.5:51000 → server:443`. The **inbound** NACL must
+     allow dst port `443` from the client CIDR. ✅ (you wrote this rule).
+  2. **SYN-ACK out:** the server replies `server:443 → 203.0.113.5:51000` — destination is the
+     client's **ephemeral** port `51000`. Because a NACL is **stateless**, this does *not*
+     ride the inbound rule; the **outbound** NACL must separately allow dst ports
+     `1024–65535` (or Linux's `32768–60999`). If that outbound rule is missing, the SYN-ACK is
+     dropped, the handshake never completes, and the client just **hangs** until timeout.
+  3. With an **SG** instead: you'd write only rule (1). The SG is **stateful**, so it
+     remembers the inbound connection and auto-permits the return SYN-ACK — no ephemeral
+     outbound rule needed. That single difference is the whole SG-vs-NACL story in one packet.
 - **SGs can reference other SGs** as a source (e.g. "allow 5432 from the app SG"), which is
   cleaner and more durable than hardcoding IPs.
 

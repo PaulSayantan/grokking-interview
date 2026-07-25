@@ -129,6 +129,27 @@ interviewers usually want the map+DLL built by hand.)
 | `put` | O(1) |
 | evict | O(1) |
 
+**Worked trace (capacity 2).** Watch both structures move together; `head → … → tail` is
+MRU → LRU, and `map` lists the live keys.
+
+| Step | List (MRU → LRU) | map keys | Effect |
+|---|---|---|---|
+| `put(1,A)` | `head → 1 → tail` | `{1}` | insert at front |
+| `put(2,B)` | `head → 2 → 1 → tail` | `{1,2}` | new MRU is 2; LRU is 1 |
+| `get(1)` → `A` | `head → 1 → 2 → tail` | `{1,2}` | unlink 1, move to front; LRU is now 2 |
+| `put(3,C)` | `head → 3 → 1 → tail` | `{1,3}` | `map.size==cap` → evict `tail.prev` = **key 2** from *both* list and map, then insert 3 |
+
+The whole point is visible in the last step: because `get(1)` promoted key 1, the victim is
+key 2 — and it disappears from the list **and** the map in the same operation.
+
+> [!WARNING]
+> Guard the degenerate `capacity == 0` case (or state you assume `cap ≥ 1`). With the code
+> above and `cap == 0`, `map.size() == cap` is `0 == 0`, so `put` tries to evict `tail.prev` —
+> which is the `head` sentinel. `remove(head)` then runs `head.prev.next = …`, but `head.prev`
+> is `null` (the constructor only links `head.next = tail` and `tail.prev = head`), so the very
+> first `put` throws a **`NullPointerException`**. Add an early `if (cap == 0) return;` at the
+> top of `put` (as the LFU cache below does) or assert `cap ≥ 1`.
+
 ---
 
 ## LFU cache: hash map + frequency buckets
@@ -146,8 +167,8 @@ The trick is a **second layer of indexing by frequency**:
 
 ```mermaid
 graph TD
-    F1["freq 1"] --> L1["DLL: E &lt;-&gt; D (LRU at back)"]
-    F2["freq 2"] --> L2["DLL: C &lt;-&gt; B"]
+    F1["freq 1"] --> L1["DLL: E, D (LRU at back)"]
+    F2["freq 2"] --> L2["DLL: C, B"]
     F3["freq 3"] --> L3["DLL: A"]
     MIN["minFreq = 1"] -.-> F1
 ```
@@ -163,6 +184,65 @@ among least-frequent), delete from both maps. Insert the new key with `freq = 1`
 Every step is a constant number of hash lookups and O(1) list splices → **O(1)** `get`/`put`.
 The subtlety students miss: **tie-break by recency requires an ordered (LRU) list inside each
 frequency bucket**, and **`minFreq` must be maintained incrementally** (never scanned).
+
+```java
+class LFUCache {
+    class Node { int key, val, freq = 1; }
+    private final Map<Integer, Node> keyToNode = new HashMap<>();
+    // freq -> keys at that freq, insertion-ordered (front = LRU, back = MRU)
+    private final Map<Integer, LinkedHashSet<Integer>> freqToKeys = new HashMap<>();
+    private final int cap;
+    private int minFreq = 0;
+    LFUCache(int capacity){ cap = capacity; }
+
+    private void touch(Node n){                       // called on every access
+        int f = n.freq;
+        LinkedHashSet<Integer> set = freqToKeys.get(f);
+        set.remove(n.key);                            // leave the old bucket
+        if (set.isEmpty()){
+            freqToKeys.remove(f);
+            if (minFreq == f) minFreq++;              // the emptied bucket was the min
+        }
+        n.freq++;                                     // promote
+        freqToKeys.computeIfAbsent(n.freq, k -> new LinkedHashSet<>()).add(n.key);
+    }
+    public int get(int key){
+        Node n = keyToNode.get(key);
+        if (n == null) return -1;
+        touch(n); return n.val;
+    }
+    public void put(int key, int value){
+        if (cap == 0) return;
+        Node n = keyToNode.get(key);
+        if (n != null){ n.val = value; touch(n); return; }
+        if (keyToNode.size() == cap){                 // evict LRU of the minFreq bucket
+            LinkedHashSet<Integer> minSet = freqToKeys.get(minFreq);
+            int evict = minSet.iterator().next();     // front = least-recently-used
+            minSet.remove(evict); keyToNode.remove(evict);
+            if (minSet.isEmpty()) freqToKeys.remove(minFreq);
+        }
+        Node fresh = new Node(); fresh.key = key; fresh.val = value;
+        keyToNode.put(key, fresh);
+        freqToKeys.computeIfAbsent(1, k -> new LinkedHashSet<>()).add(key);
+        minFreq = 1;                                  // a brand-new key always has freq 1
+    }
+}
+```
+
+**Worked trace (capacity 2).** Buckets show `freq → keys (LRU first)`; each key's freq in
+parentheses.
+
+| Step | Buckets | minFreq | Effect |
+|---|---|---|---|
+| `put(1,A)` | `1: [1]` | 1 | new key, freq 1 |
+| `put(2,B)` | `1: [1, 2]` | 1 | new key, freq 1; both least-frequent |
+| `get(1)` → `A` | `1: [2]`, `2: [1]` | 1 | key 1 promoted to freq 2; bucket 1 still non-empty (holds 2), so minFreq stays 1 |
+| `put(3,C)` | `1: [3]`, `2: [1]` | 1 | full → evict from minFreq(=1) bucket, front = **key 2** (freq 1, and LRU among freq-1 keys); insert 3 at freq 1 |
+
+The eviction picks key 2 over key 3-to-be and over key 1: key 1 has freq 2 (protected by the
+frequency layer), and among the freq-1 keys, 2 is the least recently used. Note the moment
+`minFreq` did **not** move at `get(1)`: the freq-1 bucket still held key 2, so it stayed 1 —
+had it emptied, `touch` would have bumped `minFreq` to 2.
 
 ---
 
@@ -251,6 +331,38 @@ graph LR
 `addNum` pushes then rebalances by moving one element across → **O(log n)**; `findMedian` is
 **O(1)**. This two-heaps pattern generalizes to "sliding window median" and "IPO / capital"
 style problems where you need both ends of a partition.
+
+```python
+import heapq
+class MedianFinder:
+    def __init__(self):
+        self.lo = []          # max-heap (store negatives): smaller half
+        self.hi = []          # min-heap: larger half
+    def addNum(self, x):
+        heapq.heappush(self.lo, -x)                    # 1. always push to lo
+        heapq.heappush(self.hi, -heapq.heappop(self.lo))  # 2. move lo's max to hi
+        if len(self.hi) > len(self.lo):                # 3. rebalance size (lo may hold the extra)
+            heapq.heappush(self.lo, -heapq.heappop(self.hi))
+    def findMedian(self):
+        if len(self.lo) > len(self.hi):
+            return -self.lo[0]                         # odd count: lo holds the extra
+        return (-self.lo[0] + self.hi[0]) / 2          # even count: average the two tops
+```
+
+**Worked trace** — `addNum(1), (2), (3), (4)`. `lo` is shown as real values (heap stores their
+negatives); `hi` as real values.
+
+| add | after push→move→rebalance | lo (max-heap) | hi (min-heap) | findMedian |
+|---|---|---|---|---|
+| 1 | push -1 to lo; move 1 to hi; hi>lo → move back | `[1]` | `[]` | `1` (lo bigger) |
+| 2 | push to lo, top 2 moves to hi; sizes 1,1 | `[1]` | `[2]` | `(1+2)/2 = 1.5` |
+| 3 | push to lo; 3 moves to hi; hi(2)>lo(1) → move hi's min 2 back to lo | `[1,2]` | `[3]` | `2` (lo bigger, top = 2) |
+| 4 | push to lo; 4 moves to hi; sizes 2,2 | `[1,2]` | `[3,4]` | `(2+3)/2 = 2.5` |
+
+The off-by-one the gotcha warns about lives in steps 1 and 3: after "push to lo then move lo's
+max to hi," `hi` can end up *larger* than `lo`, so you must move its min back — that final
+rebalance is what keeps the extra element on the `lo` side and makes `findMedian` for odd
+counts a simple `lo[0]`.
 
 ---
 

@@ -107,6 +107,21 @@ requirement). Reference-architecture-wise, a portal typically sits **on top of**
 **orchestrator/control-plane** layer (e.g. Humanitec, Kratix, Crossplane, or Terraform/Argo behind
 the scenes) that actually provisions resources; the portal itself usually doesn't provision.
 
+**Build vs buy vs orchestrator (a common senior follow-up).** Three layers get conflated; separate
+them and give a "pick X when Y":
+
+- **Build the portal — Backstage (OSS framework).** Maximum flexibility and no license cost, but you
+  pay in *staffing*: a real team to build plugins and ride the **upgrade treadmill** (frequent
+  breaking releases). *Pick when* you have platform engineers to invest and unusual needs that SaaS
+  can't model.
+- **Buy the portal — Port / Cortex / OpsLevel (SaaS).** Fast time-to-value, managed upgrades, opinionated
+  scorecards out of the box — but less control and per-seat cost, and your catalog lives in a vendor.
+  *Pick when* you want the portal's value in weeks, not quarters, and can live with their model.
+- **Orchestrator — Humanitec / Crossplane / Kratix.** A *different layer*: it sits **below** the portal
+  and does the actual provisioning (resource graphs, control planes). *Pick when* your hard problem is
+  "turn a high-level request into cloud resources consistently," not "give devs a catalog UI." Often you
+  pair one with a portal (portal = front door, orchestrator = engine room).
+
 > [!TIP]
 > If you can only build one Backstage capability first, build the **Software Catalog + ownership
 > metadata** — it's the substrate everything else (scaffolding, TechDocs, scorecards) hangs off,
@@ -214,6 +229,31 @@ doesn't hand-write HCL.
   higher-level abstractions ("give me a Postgres") that map to cloud resources, often reconciled
   GitOps-style (see the gitops topic).
 
+**Worked example — one trip down the golden path.** Follow what actually happens, artifact by
+artifact, when a developer creates a new service. Say they open the Backstage portal and fill the
+scaffolder form: `name=payments-api`, `team=payments`, `template=java-rest-service`. Click *Create*:
+
+1. **Scaffolder renders the template** → creates a new GitHub repo `acme/payments-api` from
+   `java-rest-service`, substituting the form values into every templated file.
+2. **Repo is committed with the paved-road wiring already inside it:**
+   - `.github/workflows/ci.yaml` — build + unit tests + SAST scan + container publish (the CI golden path).
+   - `Dockerfile` — hardened base image, non-root user.
+   - `terraform/main.tf` — calls the `paved-service` module (`cpu=512`, `enable_slo_dashboard=true`).
+   - `catalog-info.yaml` — the Component entity with `owner: team-payments`, `system: checkout`.
+3. **Scaffolder registers `catalog-info.yaml`** in the Software Catalog → the service is now
+   discoverable and its ownership is known.
+4. **Argo CD sees the new Terraform/manifests in Git and syncs them** (GitOps) → the AWS resources
+   (ECS/EKS service, load balancer, IAM role) get provisioned from the module.
+5. **Because the module set `enable_slo_dashboard=true` and requested Vault access**, the reconcile
+   also produces: a **Grafana SLO dashboard** for `payments-api` and a **Vault secret path**
+   `secret/payments/payments-api` wired to the service's OIDC identity.
+
+Elapsed developer effort: **one form, zero tickets, no hand-written HCL.** What they *received*: a
+running repo, CI, container, cloud infra, observability, and secrets — all on supported, consistent
+defaults. That last-mile bundle ("secure + observable + deployable by default") is the golden path;
+everything the dev *didn't* have to learn (K8s, Terraform state, Vault policy) is the extraneous
+cognitive load the platform absorbed.
+
 **Advanced / gotchas.** Self-service without **guardrails** becomes a foot-gun (teams provision
 oversized/insecure/expensive resources). Guardrails = policy-as-code (OPA/Conftest, Sentinel),
 sane module defaults, quotas, and cost visibility — enforced *in the paved road* so they don't slow
@@ -247,6 +287,29 @@ higher retention, less burnout. You measure it with a mix of **system metrics** 
 
 Platform-specific signals: **time-to-first-deploy for a new hire/service**, **onboarding time**,
 **self-service adoption rate**, **frequency of interruptions**, **build/CI wait times**.
+
+**Worked example — classifying a team with DORA.** DORA buckets teams into four performance
+clusters. The exact thresholds drift a little year to year, but the rough anchors are:
+
+| Metric | Elite | High | Medium | Low |
+|---|---|---|---|---|
+| Deployment frequency | On-demand (multiple/day) | Daily → weekly | Weekly → monthly | < once/month |
+| Lead time for changes | < 1 day | 1 day → 1 week | 1 week → 1 month | > 1 month |
+| Change failure rate | 0–15% | 16–30% | 16–30% | > 30% |
+| Failed-deploy recovery | < 1 hour | < 1 day | 1 day → 1 week | > 1 week |
+
+Now take a hypothetical team: **deploys 30× per week, commit-to-prod median 4h, 1 of every 20
+deploys fails, mean restore 45 min.** Plug each number in:
+
+- **Deployment frequency:** 30/week ÷ 7 ≈ **4.3 deploys/day** → multiple per day → **Elite**.
+- **Lead time:** 4h < 24h → under a day → **Elite** (it's near the Elite/High edge — an hour-scale
+  lead time is comfortably Elite, a multi-day one would drop to High).
+- **Change failure rate:** 1 ÷ 20 = **5%**, inside the 0–15% band → **Elite**.
+- **Failed-deploy recovery:** 45 min < 60 min → **Elite**.
+
+All four land in Elite, so this is an **Elite performer**. Note CFR is a *ratio of deploys that
+break*, not a count — the same 1 failure against 5 weekly deploys would be 20% (High/Medium), so
+deploying *more often* can actually improve CFR by shrinking each change.
 
 **Advanced / gotchas.** Beware **single-metric gaming** — e.g. optimizing deployment *frequency*
 alone encourages tiny meaningless deploys; measuring individual **activity** (commits, PRs) as
@@ -322,6 +385,25 @@ needs to ship product. Building a platform prematurely is over-engineering.
   developers / many teams — Gartner and community guidance often cite the ~tens-of-engineers range;
   there's no hard universal number).
 
+**Worked example — justifying the headcount (rough ROI).** Interviewers push on "how do you justify
+a platform team's cost?" Do the toil arithmetic. Suppose **8 stream-aligned teams each burn ~1
+engineer-month/year** re-inventing and maintaining the *same* CI, Terraform, and observability
+plumbing. Duplicated toil = 8 × 1 = **8 engineer-months/year** of undifferentiated work. A
+**3-person platform team costs ~36 engineer-months/year**. Naively that looks like a loss (8 saved
+vs 36 spent) — which is exactly why platform teams don't pay off at small scale. Now scale to **30
+teams**: duplicated toil = **30 engineer-months/year**, still shy of 36 but close, and the platform
+*also* buys consistency (security, faster onboarding, fewer incidents) that the raw toil number
+undercounts. The break-even flips clearly once the saved toil plus those second-order gains exceed
+the team's cost — typically in the **tens of teams** range. The honest framing: *the platform is
+justified once (duplicated toil eliminated + consistency/onboarding value) > platform team cost*,
+which is why it's a scale play, not a day-one one.
+
+**Migrating existing teams (the "too late" case).** When you already have snowflake infra, don't
+force-migrate. Instead: (1) **pilot with 1–2 willing teams** to prove the golden path and harden it;
+(2) provide a **migration path / codemod** so moving is cheap (scripts that convert their existing
+setup onto the paved module); (3) **pull, don't push** — let teams adopt because the DevEx is
+genuinely better, and leave the gnarliest snowflakes for last rather than mandating a big-bang cutover.
+
 **Advanced / gotchas.** Start with a **Thinnest Viable Platform**, seed it from a real, painful,
 repeated need (not speculation), and grow by demand. Two failure modes bracket the decision:
 (1) **too early** — a platform team polishing tooling nobody needs while the business starves for
@@ -369,6 +451,27 @@ services reliably.
 **extraneous** (accidental complexity from tools/process/environment), and **germane** (effort spent
 learning the value-adding domain). The platform's job is to **minimize extraneous load** so teams
 can spend their limited cognitive budget on the germane, business-differentiating work.
+
+**Worked example — bucketing a payments team's load.** The three types blur unless you tag a real
+team's day. Take the `payments` team and sort what they spend mental effort on:
+
+- **Intrinsic** (inherent to the domain, *cannot* be removed): payment/ledger correctness rules,
+  idempotency of charges, double-entry accounting, PCI-scope reasoning. Hard because payments are
+  hard.
+- **Germane** (effort that *builds* the valuable expertise): learning the fraud-scoring model,
+  reasoning about chargeback flows. This is the "good" load — it's the team getting better at the
+  thing that differentiates the business.
+- **Extraneous** (accidental, tool/process friction — the "bad" load): hand-writing raw Kubernetes
+  manifests, wiring a CI pipeline from scratch, managing Terraform state files, configuring Vault
+  policies.
+
+The platform can only delete the **extraneous** bucket — the golden path hands them CI, manifests,
+IaC, and secrets pre-wired (see the trip-down-the-golden-path trace above). It **cannot** touch the
+intrinsic ledger complexity, and it shouldn't try to remove germane load (that's the team learning
+its own domain). So "reduce cognitive load" precisely means *shrink the extraneous slice*, freeing
+the team's fixed budget for the intrinsic + germane work only they can do. The classic student error
+is filing "learning fraud-scoring" as extraneous — it isn't; it's germane, and off-loading it would
+hollow out the team.
 
 **Intermediate.** "You build it, you run it" (Werner Vogels, Amazon) made teams own their whole
 lifecycle — great for accountability and feedback, but it dumped enormous *extraneous* load on every

@@ -53,6 +53,36 @@ The interview reframe: these are not mutually exclusive whole-system choices. Yo
 (RDS-per-tenant) for the billing service, and silos the *entire* account for two
 regulated enterprise tenants — all under one shared control plane.
 
+**Worked bridge trace — "Acme SaaS", 3 services × 2 tiers.** Make the bridge
+concrete. Acme runs a **Catalog** service and a **Billing** service, with a
+Standard tier (tenants A, B, …) and a Regulated tier (tenant R, a HIPAA hospital).
+Draw the boundary *per layer, per service, per tier*:
+
+| Service + tier | Compute | Network | Data | Identity |
+|---|---|---|---|---|
+| Catalog, Standard | Pool (shared EKS namespace) | Pool (shared VPC) | Pool (one DynamoDB table, `tenant_id` PK) | Pool (one Cognito pool, tenant attr) |
+| Billing, Standard | Pool (shared EKS) | Pool (shared VPC) | **Silo (RDS instance per tenant)** | Pool (same Cognito pool) |
+| Catalog + Billing, Regulated (R) | **Silo (own AWS account)** | **Silo (own VPC)** | **Silo (own RDS + DynamoDB)** | **Silo (own Cognito pool)** |
+
+Now trace how one JWT resolves differently across two requests:
+
+- **Standard tenant A → `GET /catalog/items` (pooled read).** Request lands on the
+  shared EKS pod. The pod holds a *broad* role, so it vends a tenant-scoped STS
+  session (`dynamodb:LeadingKeys = ["A"]`) and reads the shared `Catalog` table,
+  filtered to A's items. Isolation is **enforced at runtime by IAM** inside shared
+  infra — nothing physical separates A from B here.
+- **Standard tenant A → `POST /billing/invoice` (siloed write).** Same shared pod,
+  but the tenant→resource map says Billing data for A lives in **`billing-A` RDS
+  instance**. The pod connects to A's *dedicated* endpoint (creds from Secrets
+  Manager keyed by tenant). Isolation is now **physical** (separate instance), so a
+  bug in the query layer can't leak into B's invoices even if the `tenant_id`
+  predicate is wrong.
+- **Regulated tenant R → any request.** Route 53 sends `r.acme.com` to R's
+  **dedicated account/VPC**; the request never touches the shared pool at all.
+
+One shared control plane onboards, meters, and bills all three rows identically —
+that is what keeps this SaaS rather than three separate products.
+
 ```mermaid
 flowchart LR
   subgraph Coarse["Coarser boundary — stronger isolation, higher cost"]
@@ -231,6 +261,11 @@ VPCs; VPC peering / **Transit Gateway** / **PrivateLink** to a shared-services V
 | SGs per ENI | **5** (up to 16); rules × SGs-per-ENI ≤ **1,000** |
 | IPv4 CIDR blocks per VPC | **5** (up to 50); NAU **64,000** per VPC |
 
+*NAU = **Network Address Usage**: a weighted count of the addressable things in a
+VPC (ENIs, assigned IPs, prefix-list entries, load-balancer addresses), not just
+raw IP count. It is the real per-VPC scaling ceiling — a dense pooled workload can
+exhaust the 64,000 NAU budget long before it runs out of CIDR space.*
+
 **Trade-offs.**
 - *Isolation:* high (network isolation, per-tenant SGs/NACLs/route tables).
 - *Cost:* better than account-silo — **shares account-level discounts and gives
@@ -308,10 +343,23 @@ security burden is real.
   ("**sole-tenant nodes**"), which is costly and complex at many tenants.
 - **Per-pod AWS-credential isolation:** **IRSA (IAM Roles for Service Accounts)**
   and **EKS Pod Identity** give per-workload temporary AWS credentials.
-- **Hard-ish isolation:** **EKS Fargate** (sandboxed pods), Firecracker microVMs,
-  Kata containers, **Bottlerocket** hardened OS; SELinux/seccomp/AppArmor security
-  contexts. **Admission engines** OPA/Gatekeeper and Kyverno enforce node affinity,
-  tolerations, and Pod Security.
+- **Hard-ish isolation — read this as a strength ladder, grouped by the layer each
+  control protects, strongest first:**
+  - *Kernel/VM boundary per pod (VM-strength):* **EKS Fargate** runs each pod in its
+    own **Firecracker microVM**, so pods don't share a kernel; **Kata containers**
+    are the same idea (lightweight VM per container). This is the only tier that
+    stops a kernel-exploit escape between tenants.
+  - *Hardened host OS:* **Bottlerocket** — a minimal, immutable, image-based node OS
+    with a tiny attack surface (no SSH/shell by default). Shrinks what a
+    node-level compromise can reach; does **not** by itself separate pods.
+  - *Syscall / file confinement inside the node:* **seccomp** (filters which
+    syscalls a container may make), **AppArmor**/**SELinux** (mandatory access
+    control on files/capabilities). These narrow the blast radius of a container but
+    still share the kernel.
+  - *Admission-time policy enforcement:* **OPA/Gatekeeper** and **Kyverno** reject
+    non-conforming pods *before* they schedule — e.g. deny a pod missing the
+    sole-tenant node affinity/taints, or violating Pod Security Standards. Governance,
+    not a runtime sandbox.
 - **ECS:** silo = a separate cluster per tenant; its namespace-style logical
   separation is weaker than EKS.
 - **Hard multi-tenancy = cluster-per-tenant:** strongest, but pays a control-plane
@@ -361,6 +409,23 @@ AWS summary and cross-reference.
   **`dynamodb:LeadingKeys`** condition enforces pooled item isolation. Default
   40,000 RCU/40,000 WCU per table; **2,500 tables/account** (raisable to 10,000,
   then multi-account) → table-per-tenant silo does not scale past ~10k tenants.
+
+**Worked example — why `tenant_id` as the raw partition key throttles a big
+tenant.** Say the table is provisioned at **20,000 RCU** and tenant A (an
+enterprise account) drives a sustained **5,000 RCU** of reads. All of A's items
+share one partition-key value (`"A"`), so DynamoDB hashes them to **one physical
+partition**, and a single partition is hard-capped near **3,000 RCU**. A's traffic
+therefore tops out at ~3,000 RCU and the extra ~2,000 RCU/s is **throttled
+(`ProvisionedThroughputExceededException`)** — even though the table as a whole is
+only using 3,000 of its 20,000 RCU (85% sits idle). Adaptive capacity can't help
+because there's nothing to spread: it's one key on one partition.
+
+Fix with **write-sharding** — append a suffix `A#0 … A#9` so A's items spread
+across up to 10 physical partitions (10 × 3,000 = 30,000 RCU of headroom). A read
+now fans out across the 10 shard keys (or you keep a small **tenant-lookup table**
+mapping `A → shard count` so only large tenants pay the fan-out cost while small
+tenants stay on a single key). The 5,000 RCU is now served comfortably; small
+tenants B, C, … keep the simple single-key layout.
 - **RDS/Aurora:** connection limits scale with instance memory → use **RDS Proxy**
   for connection pooling in the pooled model; **Postgres Row-Level Security**
   (`CREATE POLICY ... USING (tenant_id = current_setting('app.current_tenant'))`)
@@ -421,10 +486,51 @@ sequenceDiagram
   reverse proxy (NGINX/Kong) that injects a tenant header.
 
 > [!WARNING]
-> **Hard constraint: an inline STS session policy is capped at 2,048 characters.**
-> Exceeding it means the role is used in too many contexts — split into
-> **per-microservice roles** so each session policy stays small. This is a common
-> expert-level gotcha.
+> **Hard constraint: an inline STS session policy is capped at 2,048 characters**
+> (whitespace excluded). Exceeding it means the role is used in too many contexts —
+> split into **per-microservice roles** so each session policy stays small. This is
+> a common expert-level gotcha.
+
+**Worked example — watch a real policy blow past 2,048.** A "do everything for one
+tenant" role tends to grow one statement per AWS resource the service touches.
+Hydrate the template for `tenant-8f3a2c19` and count the minified characters (the
+cap ignores whitespace, so count the compact form):
+
+| Statements (cumulative) | Minified chars |
+|---|---|
+| + DynamoDB `Orders` (`LeadingKeys`) | 390 |
+| + DynamoDB `Catalog` | 655 |
+| + S3 `tenant-docs` (`s3:prefix`) | 932 |
+| + S3 `tenant-exports` | 1,194 |
+| + KMS key (`EncryptionContext`) | 1,482 |
+| + SQS tenant queue | 1,687 |
+| + SNS tenant topic | 1,829 |
+| + Secrets Manager | **1,997** ← still legal |
+| + SSM Parameter Store | **2,169** ← over the cap, `AssumeRole` rejected |
+
+So **8 resource statements fit; the 9th fails.** In a real fleet a single "orders
+service" role easily wants DynamoDB + S3 + KMS + SQS + SNS + Secrets + SSM — you
+run out of budget fast. The fix isn't to trim conditions (that weakens isolation);
+it's to **split by microservice**: an `orders-role` needs only Orders + its own
+S3/KMS/SQS (5–6 statements, ~1.5 KB), a `billing-role` gets its own small policy.
+Each session policy stays well under 2,048, and each service can only reach its own
+tenant-scoped resources.
+
+**Two gotchas an interviewer will probe on the TVM:**
+- **Credential caching vs. correctness.** An `AssumeRole` call per request adds
+  latency and can hit STS throttling under load. Cache the tenant-scoped
+  credentials keyed by **`(tenantId, role)`** and reuse them until near expiry
+  (STS sessions last 15 min–12 h; a short TTL like 5–15 min is typical). The trap:
+  cache **per tenant**, never one shared credential — a cache keyed only by role
+  would hand tenant A's request tenant B's credentials. Trade-off: longer TTL =
+  fewer STS calls but slower propagation of a revoked/retiered tenant.
+- **Trust boundary on the tenant claim.** The `tenantId` must come from a **JWT
+  signed by your identity provider (Cognito) and validated server-side** (signature
+  + issuer + audience + expiry) at the edge. **Never trust a client-supplied
+  `X-Tenant-Id` header** at the app tier — a caller could set it to any tenant and
+  the TVM would happily vend cross-tenant credentials. The header pattern is fine
+  *only* when an authenticated proxy strips the inbound header and re-injects it
+  from the verified token.
 
 See [`aws-security-iam-deep-dive`](../aws-security-iam-deep-dive/concepts.md) for
 STS session-policy semantics.
@@ -476,7 +582,9 @@ Isolation, tiering, throttling, and cost must be designed together.
 **Per-tenant cost attribution (SaaS COST 2).**
 - *Silo:* native per-account billing, or **cost allocation tags** on VPCs/resources.
 - *Pool:* you must **instrument the application to emit per-tenant consumption
-  metrics** (CloudWatch EMF, tenant-tagged), aggregate each tenant's percentage of
+  metrics** (CloudWatch **EMF — Embedded Metric Format**, a structured-JSON log line
+  that CloudWatch parses into custom metrics; here each line is tagged with the
+  tenant so consumption is attributable), aggregate each tenant's percentage of
   consumption, then correlate with the **AWS Cost and Usage Report (CUR)** to derive
   cost-per-tenant. Infrastructure billing alone cannot attribute pooled cost.
 

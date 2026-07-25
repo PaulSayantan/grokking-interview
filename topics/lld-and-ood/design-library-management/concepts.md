@@ -216,7 +216,13 @@ Name each pattern, the requirement that justifies it, and the alternative you re
   reserved title is returned, interested members must be told. The return flow
   publishes a "copy available" event; `NotificationService` subscribers (email, SMS,
   push) react. The lending code never knows *how* members are contacted, so adding a
-  push channel touches zero lending code.
+  push channel touches zero lending code. Be honest about the skeleton, though: the
+  direct `notifier.notifyAvailable(...)` call is the pragmatic 45-minute form — a
+  single injected listener, not yet a true subject. Full Observer decoupling adds a
+  `ReservationEventPublisher` with `register(listener)` / `publish(event)` and makes
+  `NotificationService` one registered listener among many; reach for that seam once
+  multiple independent subscribers (analytics, hold-shelf display) need the same
+  event.
 - **State (or a disciplined enum) — `BookItem` lifecycle.** Transition rules like
   "return goes to Reserved iff the queue is non-empty" belong in one place, not
   scattered as status checks across services.
@@ -268,6 +274,12 @@ Design notes:
   `HashMap` are dsa-coding territory; here you just justify the choice.
 - Results are `Book`s (titles). Availability is answered per result via
   `book.availableCopyCount()`, which counts `BookItem`s in `Available` state.
+- `normalize()` lowercases and trims, so `"Clean Code"` on insert and
+  `searchByTitle("clean code ")` on query both hash to the same bucket key
+  `"clean code"` → the title is found. But `searchByTitle("clean")` computes key
+  `"clean"`, which no bucket holds, so it returns `[]` — this is **exact-key** match,
+  not prefix. That empty result on a partial query is exactly why prefix/fuzzy needs
+  the trie/inverted-index upgrade below.
 - If the interviewer asks for prefix or fuzzy search, name the upgrade (a trie or an
   inverted index, or a search engine at HLD scale) without building it.
 
@@ -302,6 +314,21 @@ The ordering trap interviewers probe in the return flow: check the reservation q
 **before** marking the copy `Available`. If you flip the order, there is a window
 where a walk-in checkout steals the copy from the member who has been queued for
 weeks.
+
+Worked example — copy `BC-102` (of ISBN `978-…884`) is returned while three members
+have reserved that title. FIFO queue = `[Alice, Bob, Carol]`.
+
+1. `t0` — `returnBook("BC-102")`: `reservations.nextFor(book)` returns `Alice` (queue
+   head). Queue is non-empty, so `item.markReturned(true)` → status `RESERVED` (not
+   `AVAILABLE` — a walk-in cannot grab it), and the copy is assigned to Alice.
+2. `t0` — Observer fires `notifyAvailable(Alice, book)`; a 3-day pickup timer starts.
+   Queue is now `[Bob, Carol]` with Alice pulled into a "notified/held" state.
+3a. **Alice picks up** by `t0 + 3d`: `checkout("BC-102", Alice)` — the `RESERVED &&
+    isHeldFor(Alice)` branch passes, status `RESERVED → LOANED`, Alice's reservation
+    marked `COMPLETED`. Bob and Carol keep waiting.
+3b. **Alice no-shows** past `t0 + 3d`: the expiry job reassigns `BC-102` to `Bob`
+    (head of `[Bob, Carol]`), re-fires `notifyAvailable(Bob, book)`, restarts the
+    3-day timer. Only if *no one* is queued does the copy fall back to `AVAILABLE`.
 
 ## API and Method Signatures
 
@@ -419,6 +446,20 @@ public class LendingService {
 }
 ```
 
+Worked example — run `PerDayFineStrategy(₹10/day)` through both branches so the
+arithmetic is concrete, not abstract:
+
+- **Overdue:** loaned `2026-01-01`, `dueDate = 2026-01-01 + 10 = 2026-01-11`, returned
+  `2026-01-16`. `daysLate = DAYS.between(2026-01-11, 2026-01-16) = 5`. `5 > 0`, so
+  `fine = ₹10 × 5 = ₹50`, and a `Fine` record is created.
+- **On time:** same loan, returned exactly on `2026-01-11`. `daysLate =
+  DAYS.between(2026-01-11, 2026-01-11) = 0`. `0 <= 0`, so `calculate` returns
+  `BigDecimal.ZERO`; the `.filter(a -> a.signum() > 0)` in `returnBook` drops it and
+  **no `Fine` is created** at all.
+- **Early:** returned `2026-01-09`. `daysLate = DAYS.between(2026-01-11, 2026-01-09) =
+  -2`, still `<= 0` → `ZERO`. The `daysLate <= 0` guard (not `== 0`) is why an
+  early return can never produce a negative fine.
+
 Note the constructor-injected `FineStrategy`, `ReservationService`, and
 `NotificationService` — the three seams every follow-up question will pull on.
 Constants like `MAX_BOOKS` would graduate to a `LendingPolicy` config object the
@@ -438,6 +479,14 @@ race:
   title. Serialize per-title reservation-queue operations (lock the queue) so the
   returning copy is either assigned to the new reservation or the reservation waits —
   never both missed.
+- **Double checkout for one *member*:** the symmetric race on the member, not the
+  copy. A member at 4 of 5 books checks out two *different* copies at two desks at
+  once. Both threads read `canCheckout(5)` (4 < 5 → true) before either
+  `incrementCheckedOut()` runs, so both proceed and the member lands at 6 — over the
+  limit. The `synchronized` guard above is on `BookItem`, so it does **not** cover
+  this: it's a second check-then-act, this time on the member. Guard the member-count
+  transition too (synchronize on `Member`, or an atomic increment-and-check that
+  rejects when the post-increment count would exceed `MAX_BOOKS`).
 - **Lock granularity:** lock per `BookItem` / per title-queue, never one global
   library lock — otherwise every checkout in the building serializes.
 

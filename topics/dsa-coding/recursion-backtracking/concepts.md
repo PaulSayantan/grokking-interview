@@ -55,6 +55,15 @@ flowchart TD
 | **Time** | number of calls × work per call — often expressed as a *recurrence*, e.g. `T(n) = 2T(n/2) + O(n)` → `O(n log n)` by the Master Theorem |
 | **Space** | *max recursion depth* × frame size (the call stack), **plus** any heap-allocated state you carry |
 
+**Why `T(n)=2T(n/2)+O(n)` is `O(n log n)` (intuition, not magic).** Draw the recursion
+tree. Each call splits into two halves, so the input shrinks `n → n/2 → n/4 → … → 1`; that
+takes `log₂ n` halvings, so the tree is `log₂ n` levels deep. At *every* level the `O(n)`
+combine work sums to `n`: the top level does `n`, the next level does `n/2 + n/2 = n`, the
+level below `4 × n/4 = n`, and so on. So total = (`n` work per level) × (`log₂ n` levels) =
+`O(n log n)`. Concretely for `n = 8`: the per-level combine costs are `8`, then `4+4=8`, then
+`2+2+2+2=8`, then `1×8=8` — `8` at each of the `log₂ 8 = 3` split levels, i.e. `8 × 3 = 24`
+combine units, which is exactly `n log n`.
+
 A common interview trap: an algorithm can be `O(n)` time but still `O(n)` **space**
 purely because of recursion depth (e.g. recursing down a skewed tree or a linked list).
 
@@ -62,8 +71,9 @@ purely because of recursion depth (e.g. recursing down a skewed tree or a linked
 
 The call stack is a finite region of memory. Each language/runtime caps it:
 
-- **Java:** default main-thread stack is typically ~512 KB (tunable with `-Xss`); blowing
-  it throws `StackOverflowError`. Roughly tens of thousands of frames deep.
+- **Java:** default thread stack is platform/JVM-dependent — commonly 512 KB–1 MB (often
+  ~1 MB on 64-bit Linux/macOS HotSpot), tunable with `-Xss`; blowing it throws
+  `StackOverflowError`. Roughly tens of thousands of frames deep.
 - **Python:** guarded by `sys.getrecursionlimit()` (default 1000) which raises
   `RecursionError` *before* the C stack actually overflows. Deep recursion (e.g. DFS on a
   100k-node graph) will hit this — a frequent gotcha.
@@ -159,6 +169,15 @@ backtrack(state, path):
 > — otherwise later branches see corrupted state. (Alternatively, pass an *immutable copy*
 > down and skip the undo, trading memory for simplicity.)
 
+**The copy-down trade-off, reasoned.** Passing a fresh copy of `path` into each recursive
+call is cleaner and eliminates whole classes of "forgot to undo" bugs — but it is not free.
+You pay an `O(path length)` copy at *every* node, which multiplies both time and memory by
+that factor, and it does **not** compose with shared occupancy sets: the `O(1)` `cols`/`diag`
+pruning in N-Queens and Sudoku only works because one mutable set is threaded through the
+whole search and restored on unchoose. Rule of thumb: **mutate-and-undo** for
+constraint-satisfaction problems (shared pruning state, deep trees); **copy-down** only for
+small paths where clarity clearly wins over the copy cost.
+
 **Recognition signals** — reach for backtracking when the prompt says:
 - "Generate **all** / find **every** …" (subsets, permutations, combinations, partitions).
 - "Return all valid X" under **constraints** (N-Queens, Sudoku, valid parentheses).
@@ -171,6 +190,11 @@ Every backtracking search is a walk over an implicit **decision tree**: each nod
 candidate, each edge is a choice, and leaves are complete candidates. Complexity =
 (number of nodes visited) × (work per node, e.g. copying a solution of length `k` is `O(k)`).
 
+This is the start-index subsets tree for `[1,2,3]`. **Every node — not just the leaves — is a
+recorded subset**, because the template calls `record(path)` on entry to each node. Each edge
+appends the next element; the start index prevents reusing or reordering earlier ones (so no
+`[2,1]`):
+
 ```mermaid
 flowchart TD
     root["[]"] --> a["[1]"]
@@ -179,11 +203,21 @@ flowchart TD
     a --> ab["[1,2]"]
     a --> ac["[1,3]"]
     ab --> abc["[1,2,3]"]
-    ac --> acx["[1,3] leaf"]
     b --> bc["[2,3]"]
 ```
 
-Because you branch at every level, the counts are inherently large:
+Eight nodes = `2³` subsets. Walking this tree in pre-order (record the node, *then* recurse
+into children left-to-right) emits them in exactly this order:
+
+```text
+[]  →  [1]  →  [1,2]  →  [1,2,3]  →  [1,3]  →  [2]  →  [2,3]  →  [3]
+```
+
+Because you branch at every level, the counts are inherently large. The time bound is just
+(number of results) × (cost to build one): for subsets that's `2ⁿ` results × `O(n)` to copy
+each → `O(n · 2ⁿ)`; for permutations `n!` results × `O(n)` to copy → `O(n · n!)`. Plugging in
+`n = 3`: `2³ = 8` subsets, each up to length 3 to copy → ~`8 × 3 = 24` copy-ops; `3! = 6`
+permutations × 3 → ~`18` copy-ops.
 
 | Problem shape | # of results | Typical time |
 |---|---|---|
@@ -247,6 +281,27 @@ permute(nums):
 | Permutations | **Yes** | No | all unused indices | `n!` |
 | Combination Sum | No | **Yes** (reuse allowed) | `start..n`, recurse on same `i` | varies |
 
+**Trace — `permute([1,2,3])`.** Because *order matters*, we loop over all three indices at
+every level and skip any already `used`. Following the template depth-first (always taking the
+lowest available index first, then backtracking):
+
+```text
+pick 1 → pick 2 → pick 3 → path full → record [1,2,3]; undo 3
+              → (no index left) undo 2
+        pick 3 → pick 2 → record [1,3,2]; undo 2,3
+  undo 1
+pick 2 → pick 1 → pick 3 → record [2,1,3]
+        pick 3 → pick 1 → record [2,3,1]
+  undo 2
+pick 3 → pick 1 → pick 2 → record [3,1,2]
+        pick 2 → pick 1 → record [3,2,1]
+```
+
+Six leaves = `3! = 6` permutations: `[1,2,3], [1,3,2], [2,1,3], [2,3,1], [3,1,2], [3,2,1]`.
+Notice `[2,1]` *does* appear here (as a prefix of `[2,1,3]`) — the opposite of the subsets
+tree — because for permutations order is significant and there is no `start` index to forbid
+revisiting element 1 after element 2.
+
 **Handling duplicates** (e.g. Subsets II, Permutations II): *sort first*, then skip a
 candidate equal to its predecessor **at the same tree level**. This dedups without a hash
 set — but the exact condition depends on which template you're in, because the two use
@@ -306,6 +361,40 @@ solveNQueens(n):
 
 This is the full choose/explore/unchoose loop plus `O(1)` constraint pruning — the archetype
 for constraint-satisfaction backtracking.
+
+**Concrete trace — `n = 4`.** Recall `d1 = row - col` (↘ diagonals), `d2 = row + col` (↙
+diagonals). Watch the sets fill, a prune fire, and the first backtrack pop state:
+
+```text
+row0, col0 → place. cols={0} d1={0} d2={0}   board=[0]
+  row1, col0 → col in cols        ✗ PRUNE
+  row1, col1 → d1: 1-1=0 in d1    ✗ PRUNE (same ↘ diagonal as (0,0))
+  row1, col2 → legal → place. cols={0,2} d1={0,-1} d2={0,3}  board=[0,2]
+    row2, col0 ✗cols  col1 → d2:2+1=3 in d2 ✗  col2 ✗cols  col3 → d1:2-3=-1 in d1 ✗
+    row2: no legal column → return  ← BACKTRACK
+  undo (1,2): cols={0} d1={0} d2={0}          board=[0]   ← state restored
+  row1, col3 → place. cols={0,3} d1={0,-2} d2={0,4}  board=[0,3]
+    row2, col1 → place. cols={0,3,1} …  board=[0,3,1]
+      row3: cols/diag block every column → return  ← BACKTRACK
+    …col2 (d1 0 blocks), col3 (cols) → dead → return  ← BACKTRACK
+  undo everything back to row0
+row0, col1 → place. cols={1} d1={-1} d2={1}   board=[1]
+  row1, col3 → place. board=[1,3]
+    row2, col0 → place. board=[1,3,0]
+      row3, col2 → legal → place. board=[1,3,0,2]
+        row==4 → RECORD solution
+```
+
+The first solution is columns **`[1,3,0,2]`** — queen at `(0,1),(1,3),(2,0),(3,2)`. Every
+`✗ PRUNE` above is an `O(1)` set lookup that killed a branch before recursing; without those
+sets you would rescan the whole partial board at each square.
+
+**Grid backtracking (Word Search, Sudoku): the grid *is* the shared mutable state.** When the
+board itself is what you mutate, the choose/unchoose pair marks and *restores in place*: on
+choose, overwrite the visited cell with a sentinel (e.g. set `grid[r][c] = '#'`); recurse into
+the neighbors; on unchoose, write the original character back. That in-place mark replaces a
+separate `visited` set and is the canonical grid gotcha — forget the restore and later paths
+see phantom walls.
 
 ## Interview Problems
 

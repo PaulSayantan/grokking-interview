@@ -3,10 +3,13 @@
 This topic is the **presentation-layer** slice of the `arch-*` Architectural Patterns
 group. Where the other `arch-*` topics describe *system-level* styles — how a whole
 application is structured and deployed (layered, microservices, event-driven,
-pipe-and-filter) — these are a **lower altitude**: patterns for structuring the code
+pipe-and-filter) — these are a **lower altitude** (*altitude* = level of
+abstraction / scope): patterns for structuring the code
 *inside* the UI / presentation tier. They decide **where UI logic lives** (rendering,
 formatting, input-handling, screen state) and **how that logic is separated from the
-domain** so it can evolve — and be tested — independently.
+domain** so it can evolve — and be tested — independently. Throughout, each style is
+graded on its **"-ilities"** (*quality attributes* — testability, maintainability,
+performance, debuggability, and so on).
 
 They are also a **different altitude from the object-level GoF `dp-*` patterns**:
 these are compositional patterns for an entire presentation subsystem (they *use* GoF
@@ -71,7 +74,12 @@ flowchart LR
   well-understood style for server web frameworks; low ceremony.
 - **Cons:** the classic View↔Model observer link couples the View to the Model, which
   hurts **testability** — you often can't test presentation logic without a running
-  View. Roles blur in practice ("fat controller" or "Massive View Controller").
+  View. Roles blur in practice ("fat controller" or "Massive View Controller"). *Why it
+  happens:* on iOS the `UIViewController` (and similarly Rails' controller) is the one
+  class the framework hands you that owns the view lifecycle, navigation, and event
+  wiring — so with no other natural home, networking, formatting, and business logic all
+  accrete there until the class is thousands of lines. This exact pain is the setup for
+  VIPER below, which gives each of those concerns its own component.
 - **When to use:** server-rendered web apps (Rails / Spring MVC / ASP.NET MVC); any UI
   where per-request or Observer-driven rendering is acceptable.
 - **When to avoid:** rich, stateful client UIs that demand heavy unit testing of view
@@ -127,6 +135,35 @@ classDiagram
     Presenter --> IView : drives
     Presenter --> Model : reads/writes
 ```
+
+**In code** — the Presenter reads the humble View, decides, and pushes results back
+through the interface:
+
+```java
+interface IView {                 // the "humble" View: getters, setters, events
+    String getTitle();
+    void   setTitle(String t);
+    void   showError(String msg);
+}
+
+class NotePresenter {
+    private final IView  view;
+    private final NoteRepo model;
+
+    void handleSave() {           // fired by view.onSaveClicked()
+        String title = view.getTitle();
+        if (title.isBlank()) {    // <-- validation lives HERE, in the Presenter
+            view.showError("Title is required");
+            return;
+        }
+        model.save(new Note(title));
+        view.setTitle(title.trim());
+    }
+}
+```
+
+A unit test now needs no widgets: pass a fake `IView` whose `getTitle()` returns `""`,
+call `handleSave()`, and assert `showError("Title is required")` was invoked.
 
 **Trade-offs / -ilities.**
 - **Pros:** excellent **testability** (mock the View interface); the View is trivially
@@ -239,7 +276,9 @@ Model* plus platform data-binding.
 - **View** — declarative markup (XAML/HTML template) that **binds** to the ViewModel;
   contains little or no code-behind.
 - **ViewModel** — an observable abstraction of the View's *state and behavior*: exposes
-  bindable properties (raising change notifications) and **commands**; contains
+  bindable properties (raising change notifications) and **commands** (a *command* is a
+  bindable, invokable action object — e.g. WPF's `ICommand` — that the View triggers on a
+  button without wiring a code-behind callback); contains
   presentation logic; references the Model but never the View.
 - **Model** — domain/data.
 - **Binder** — the framework's binding engine that synchronizes View ↔ ViewModel
@@ -254,13 +293,41 @@ flowchart LR
     VM --> M["Model"]
 ```
 
+**In code** — the ViewModel holds no View reference; it just raises change
+notifications and the binder redraws whatever is bound. The same empty-title rule now
+lives in a bindable property:
+
+```csharp
+class NoteViewModel : INotifyPropertyChanged {
+    string _title = "";
+    public string Title {                    // <Bind Text of the TextBox to this
+        get => _title;
+        set { _title = value; OnChanged(nameof(Title));
+                               OnChanged(nameof(Error)); }   // recompute Error too
+    }
+    public string Error => string.IsNullOrWhiteSpace(Title) ? "Title is required" : "";
+    public ICommand Save => new RelayCommand(               // bound to the Save button
+        execute:   () => _repo.Save(new Note(Title)),
+        canExecute: () => Error == "");                     // button auto-disables
+}
+```
+
+No `view.showError(...)` call: the View has a label bound to `Error`, so when the user
+clears the box, `Title`'s setter fires `OnChanged`, the binder re-reads `Error`, and the
+message appears — the sync is the framework's job, not the ViewModel's.
+
 **Trade-offs / -ilities.**
 - **Pros:** minimal boilerplate (binding replaces glue); the ViewModel is highly
   **testable** (no UI dependency); enables a designer/developer split (designers own the
   View markup); great fit for binding-rich frameworks.
 - **Cons:** binding is "magic" — hard to **debug** when it silently fails; classic
   two-way binding is **memory-leak-prone** (dangling change subscriptions) and can cause
-  performance issues with large/complex bindings; requires framework binding support.
+  performance issues with large/complex bindings on specific frameworks (e.g. WPF's
+  `PropertyChanged` handlers, AngularJS's digest-cycle cost with many watchers);
+  requires framework binding support. *The leak mechanism:* a long-lived ViewModel (or
+  observable) keeps the change-notification handler pointing at a short-lived View, so
+  the View can never be garbage-collected while the ViewModel is alive — the fix is weak
+  event listeners or explicitly unsubscribing when the View is disposed.
 - **When to use:** WPF, UWP, Xamarin/MAUI, Angular, Vue, Knockout, SwiftUI, Jetpack
   Compose — any stack with first-class declarative binding.
 - **When to avoid:** platforms without binding; or when you need the fully predictable,
@@ -300,6 +367,31 @@ flowchart LR
     V -->|"Msg (user action)"| U["update(msg, model)"]
     U -->|"new Model"| M
 ```
+
+**In code** — `update` is a pure function: same `(msg, model)` in, same `newModel` out,
+no mutation. The empty-title rule is just a branch:
+
+```javascript
+// model = { title: "", error: "" }
+function update(msg, model) {
+    switch (msg.type) {
+        case "TitleChanged":
+            return { ...model, title: msg.value, error: "" };   // new object, no mutation
+        case "Save":
+            return model.title.trim() === ""
+                ? { ...model, error: "Title is required" }        // returns next state
+                : { ...model, error: "", saved: true };
+        default:
+            return model;
+    }
+}
+// view(model) renders model.error; runtime re-renders after every update
+```
+
+Trace it: start `{title:"", error:""}` → dispatch `{type:"Save"}` → `update` takes the
+empty-string branch → returns `{title:"", error:"Title is required"}` → runtime re-runs
+`view` and the label shows the error. Replaying the same message list always reproduces
+the same states — that is what makes time-travel debugging possible.
 
 **Trade-offs / -ilities.**
 - **Pros:** the most **predictable** flow — state transitions are pure functions, giving
@@ -385,6 +477,33 @@ flowchart LR
     R --> St["Single Store (immutable state)"]
     St -->|"subscribe"| V
 ```
+
+**In code** — the reducer is `(state, action) => newState`, structurally the same as
+Elm's `update`:
+
+```javascript
+const initial = { title: "", error: "" };
+
+function reducer(state = initial, action) {
+    switch (action.type) {
+        case "TITLE_CHANGED":
+            return { ...state, title: action.payload, error: "" };
+        case "SAVE":
+            return state.title.trim() === ""
+                ? { ...state, error: "Title is required" }
+                : { ...state, error: "", saved: true };
+        default:
+            return state;                 // unknown action -> unchanged
+    }
+}
+
+store.dispatch({ type: "SAVE" });         // the ONLY way to change state
+```
+
+With `state = {title:"", error:""}`, `dispatch({type:"SAVE"})` runs the reducer, hits
+the empty branch, and the store becomes `{title:"", error:"Title is required"}`;
+subscribers re-render and show the message. Because the store is one serializable
+object, you can log every action + resulting state and replay them.
 
 **Trade-offs / -ilities.**
 - **Pros:** single source of truth; serializable state → **time-travel debugging**,
@@ -801,6 +920,36 @@ PoEAA catalog entry does *not* give you.
 > dumb View (manual); **MVVM** = binding engine syncs View ↔ ViewModel (declarative,
 > often two-way); **MVU/Redux** = View is a pure function of immutable state, changes flow
 > one way through update/reducer.
+
+### Same click, four architectures
+
+The sharpest way to *feel* the difference: trace **one concrete event** — the user clicks
+**Save** on a form whose required *Title* field is empty — through each style, watching
+**who validates**, **where the "show error" decision is made**, and **how it reaches the
+screen**.
+
+- **MVC.** The button's click hits the **Controller** (`saveNote()`). It updates the
+  Model (`model.title = ""`), the Model's setter fails validation and flips
+  `model.error = "Title is required"` and fires an Observer notification; the **View**,
+  observing the Model, **re-reads** `model.error` and repaints the label. *Decision made
+  in the Model/Controller; View pulls it.*
+- **MVP.** The View raises `onSaveClicked`; the **Presenter's** `handleSave()` reads
+  `view.getTitle()` → `""`, decides `"Title is required"`, and **pushes** it in with
+  `view.showError("Title is required")`. *Presenter decides and explicitly commands the
+  humble View.*
+- **MVVM.** The Save button is bound to the ViewModel's `Save` **command**; because the
+  bound `Title` is empty, `Error` computes to `"Title is required"` and (via `canExecute`)
+  the button may even be disabled. A label **bound** to `Error` updates automatically —
+  no one calls `showError`. *ViewModel exposes a property; the binder syncs it.*
+- **Redux/MVU.** The click **dispatches** `{type:"SAVE"}`. The pure **reducer/update**
+  takes `state.title === ""` → returns a *new* state `{title:"", error:"Title is
+  required"}`. The store swaps in the new immutable state and the **View re-renders as a
+  pure function** of it. *Nobody mutates or pushes; a new state flows one way and the View
+  redraws.*
+
+The same intent thus surfaces as: **Model setter + Observer** (MVC) → **`view.showError()`
+push** (MVP) → **bound `Error` property** (MVVM) → **reducer returns new state** (Redux/MVU).
+That is the whole progression in one click.
 
 ---
 

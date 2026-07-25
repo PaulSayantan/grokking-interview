@@ -106,6 +106,8 @@ public class MyApp {
 
 ## Auto-Configuration Mechanism
 
+**Intuition first.** Think of auto-configuration as a long checklist Spring runs *last*, after all your own config. For each entry it asks two questions: "is library X on the classpath?" and "did the user *not* already configure this themselves?" — if both are yes, it wires a sensible default. Everything below is just the machinery for how that checklist is discovered, filtered, ordered, and evaluated.
+
 **Beginner definition.** Auto-configuration is Boot's process of automatically registering beans your app likely needs, based on the classpath, existing beans, and properties. It is enabled by `@EnableAutoConfiguration` (included in `@SpringBootApplication`).
 
 **How it works (intermediate).**
@@ -124,6 +126,39 @@ public class MyApp {
 **`DeferredImportSelector.Group` and ordering (staff-level).** `AutoConfigurationImportSelector` uses an inner `AutoConfigurationGroup` that collects all candidates across every `@EnableAutoConfiguration` source, then sorts them **once** using `@AutoConfigureOrder` (coarse, integer, default 0) followed by `@AutoConfigureBefore`/`@AutoConfigureAfter` (fine, dependency-graph based). These ordering hints only order auto-config classes **relative to each other** — they have no effect on user `@Configuration` (which always precedes all of them) and are ignored if applied to a regular `@Component`.
 
 **Debugging.** Run with `--debug` (or set `debug=true`) to print the **Condition Evaluation Report**: `Positive matches`, `Negative matches`, `Exclusions`, `Unconditional classes`.
+
+**Worked example — tracing one auto-config end to end.** You add `spring-boot-starter-jdbc` and the H2 driver to the classpath but write *no* `DataSource` bean and *no* `spring.datasource.*` properties. Here is exactly what happens to `DataSourceAutoConfiguration`:
+
+1. **Discovery.** `AutoConfigurationImportSelector` reads `.../AutoConfiguration.imports` from `spring-boot-autoconfigure.jar`; `DataSourceAutoConfiguration` is one of ~140 candidate FQCNs on the list.
+2. **Filter (cheap, ASM).** `OnClassCondition` checks the class's `@ConditionalOnClass({DataSource.class, EmbeddedDatabaseType.class})`. Both types are present (H2 + `spring-jdbc` bring them), so the candidate **survives** the filter instead of being discarded early.
+3. **Order.** It carries no user beans yet; it is sorted among survivors via `@AutoConfigureOrder`/`Before`/`After` and imported as a `@Configuration`.
+4. **Condition evaluation.** Its `@ConditionalOnMissingBean(DataSource.class)` runs in the `REGISTER_BEAN` phase (after all user bean *definitions* are registered). You defined none → **no match found → condition passes → auto-config proceeds.**
+5. **Bean registration.** Because no explicit URL is set and H2 is on the classpath, the embedded-database branch matches and Boot registers an **H2 `HikariDataSource`** (Hikari is the default pool) pointed at an in-memory URL like `jdbc:h2:mem:<uuid>`.
+
+Now flip one input: you add your *own* `@Bean DataSource myDs() {...}`. In step 4 the `@ConditionalOnMissingBean(DataSource.class)` now *finds* your bean → **condition fails → Boot backs off** and never creates the Hikari one. Your bean wins — which is the whole point of ordering auto-config last.
+
+**What the Condition Evaluation Report actually prints.** Running the first case above with `--debug` yields lines like these (abbreviated):
+
+```
+Positive matches:
+-----------------
+   DataSourceAutoConfiguration matched:
+      - @ConditionalOnClass found required classes 'javax.sql.DataSource',
+        'org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseType' (OnClassCondition)
+
+   DataSourceAutoConfiguration.EmbeddedDatabaseConfiguration matched:
+      - @ConditionalOnMissingBean (types: javax.sql.DataSource; ...) did not find any beans (OnBeanCondition)
+
+Negative matches:
+-----------------
+   GsonAutoConfiguration:
+      - @ConditionalOnClass did not find required class 'com.google.gson.Gson' (OnClassCondition)
+
+   RabbitAutoConfiguration:
+      - @ConditionalOnClass did not find required class 'com.rabbitmq.client.Channel' (OnClassCondition)
+```
+
+Read it like a diff: a **Positive match** shows *why a bean got wired* (the classes/beans that were found or missing), and a **Negative match** shows *why one didn't* (usually a class absent from the classpath). This is the first place to look when a bean "mysteriously" does or doesn't appear.
 
 ---
 
@@ -434,6 +469,27 @@ Boot uses it during `SpringApplication` startup to load `ApplicationContextIniti
 11. `application.properties`/`.yml` (Config Data)
 12. `@PropertySource` on `@Configuration`
 13. `SpringApplication.setDefaultProperties(...)` (lowest)
+
+**Worked example — four sources set `server.port` at once.** The classic follow-up: you set the *same* key in four places and are asked which port boots. Concretely you run:
+
+```
+# application.properties (inside the jar)
+server.port=8080
+
+# then launch:
+SERVER_PORT=8083 java -Dserver.port=8081 -jar app.jar --server.port=8082
+```
+
+Now map each to its rank in the list above and sort highest-wins:
+
+| Source | Value | Rank (lower = higher priority) |
+|---|---|---|
+| Command-line arg `--server.port=8082` | 8082 | **4** |
+| Java system property `-Dserver.port=8081` | 8081 | 8 |
+| OS env var `SERVER_PORT=8083` (relaxed-bound) | 8083 | 9 |
+| `application.properties` | 8080 | 11 |
+
+Spring walks the ordered `PropertySource`s and takes the **first** that has `server.port`. Rank 4 (command-line) is highest, so **the app boots on port 8082** — the `-D`, the env var, and the properties file are all shadowed. Note this is *not* "biggest number wins" and *not* "last one on the line wins": it is purely position in the precedence list. If you then delete `--server.port=8082`, the winner becomes the system property (8081); delete that too and the env var (8083) wins; only with all three removed does the file's 8080 take effect. Corollary: `setDefaultProperties` sits at the *bottom* (rank 13), so it is a fallback anything can override, whereas the command-line argument (rank 4) is the highest slot an operator can inject at launch — the practical "always wins" position.
 
 **Relaxed binding + env var mapping (trap).** `server.port`, `SERVER_PORT`, `server_port`, and `serverPort` all bind to the same property because Boot uses **relaxed binding**. Environment variables in particular are matched by uppercasing and replacing `.`/`-` with `_`, so `spring.datasource.url` ← `SPRING_DATASOURCE_URL`. This is how you configure Boot in containers without a properties file.
 

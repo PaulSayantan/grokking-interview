@@ -104,7 +104,9 @@ trade-off: elite teams score well on both.
 | **Change Failure Rate (CFR)** | % of deploys that cause a failure needing remediation (rollback/hotfix/patch) | Stability |
 | **Failed Deployment Recovery Time** (formerly MTTR) | Time to restore service after a failed deployment | Stability |
 
-Approximate performance clusters from the DORA reports:
+Approximate performance clusters from the DORA reports (the *State of DevOps*
+report recalibrates the exact band boundaries most years — quote these as
+**approximate**, and the CFR bands especially shift between editions):
 
 | Metric | Elite | High | Medium | Low |
 |---|---|---|---|---|
@@ -112,6 +114,19 @@ Approximate performance clusters from the DORA reports:
 | Lead time | < 1 hour | 1 day – 1 week | 1 week – 1 month | 1–6 months |
 | Change failure rate | 0–15% | 16–30% | (varies) | (varies) |
 | Recovery time | < 1 hour | < 1 day | 1 day – 1 week | > 6 months |
+
+**Worked example — computing the keys from raw events.** Take one change and one week:
+
+- **Lead time:** commit pushed **09:00**, merged + built **09:20**, deployed to prod
+  **10:30** → lead time = 10:30 − 09:00 = **90 min**. That's just over the elite
+  threshold (< 1 h), so this team is "high", not "elite", on lead time.
+- **Change failure rate:** over the week you shipped **40 deploys**, of which **2**
+  needed a rollback/hotfix → CFR = 2 / 40 = **5%** — inside the elite 0–15% band.
+- **Recovery time:** the failing deploy broke prod at 14:00 and the rollback restored
+  service at 14:25 → recovery = **25 min** (< 1 h → elite).
+
+Contrast the CFR arithmetic with a slow team: 4 deploys/month, 2 fail → 2 / 4 = **50%**
+CFR. Same *number* of failures as a busy day, 10× the *rate* — which is the point below.
 
 Key nuances interviewers probe:
 
@@ -185,6 +200,21 @@ a regression in any of them is a signal to halt/rollback. This is the metric lay
 tools like **Argo Rollouts (AnalysisTemplate)** and **Flagger** query to decide whether
 to promote or abort a progressive rollout.
 
+**Worked example — reading a canary scorecard.** Say the analysis threshold is "abort if
+p99 latency > 1.5× baseline **or** error rate > 1%":
+
+| Signal | Baseline (stable) | Canary (new) | Threshold | Verdict |
+|---|---|---|---|---|
+| p99 latency | 200 ms | 420 ms | > 300 ms (1.5×) | **regressed** |
+| errors | 0.3% | 1.8% | > 1% | **regressed** |
+| traffic | 1,000 rps | 1,000 rps | (context only) | ok |
+| saturation (CPU) | 55% | 60% | < 80% | ok |
+
+Latency 420 ms > 300 ms **and** errors 1.8% > 1% — either alone is enough, so the canary
+**aborts** and traffic returns to stable. Note traffic isn't a pass/fail gate here: it's
+context (if canary rps had collapsed to near-zero while baseline held, that itself would
+be the alarm — the new version is dropping requests).
+
 > [!INTERVIEW]
 > If asked "which metrics gate a deploy?" the four golden signals are the crisp answer.
 > The related **RED** method (Rate, Errors, Duration — for request-driven services) and
@@ -223,10 +253,18 @@ Distinctions worth knowing:
   regressions and outages any time.
 - Both are **black-box** (outside-in) checks; they complement white-box metrics.
 
+The rollback wiring is mechanical: the smoke stage's script ends in `|| exit 1`, so a
+failed check makes the job exit **non-zero**; the pipeline marks the stage failed, which
+triggers the `on_failure`/rollback job (or, for progressive delivery, the controller sees
+the metric fail and aborts). No human decides — a red smoke test *is* the rollback signal.
+
 > [!WARNING]
-> Point synthetics and post-deploy smoke tests at **real dependencies**, and make test
-> data idempotent/cleanable. A smoke test that mocks the database or leaves junk orders
-> behind gives false confidence or pollutes prod.
+> Two gotchas here. (1) **Exclude synthetic/smoke traffic from user-facing SLIs and
+> dashboards** — those requests aren't real users, and a 1-minute synthetic probe against
+> low real traffic can badly skew error rate and latency percentiles (or worse, mask a
+> real regression). Tag it and filter it out. (2) Point synthetics and smoke tests at
+> **real dependencies** with idempotent/cleanable test data — a smoke test that mocks the
+> database gives false confidence, and one that leaves junk orders behind pollutes prod.
 
 ---
 
@@ -298,6 +336,20 @@ metrics:
         / sum(rate(http_requests_total{app="checkout"}[2m]))
 ```
 
+**Tracing the query.** The numerator sums the rate of requests whose status is *not* a
+5xx; the denominator sums *all* requests — so `result[0]` is the success ratio. Say over
+the 2-minute window the checkout canary served **10,000 requests** and **150** were 5xx:
+
+- non-5xx = 10,000 − 150 = **9,850**
+- ratio = 9,850 / 10,000 = **0.985**
+- successCondition `result[0] >= 0.99` → `0.985 >= 0.99` is **false** → this evaluation
+  **fails**.
+
+`failureLimit: 2` means the metric may fail up to 2 times before it's fatal; the 3rd
+consecutive failure **aborts** the rollout and Argo shifts 100% of traffic back to the
+stable ReplicaSet. (0.985 is a 1.5% error rate — well past a typical <1% budget, so this
+canary is correctly killed.)
+
 Key concepts:
 
 - **Bake time** — a deliberate soak period at each canary step so slow-burning issues
@@ -354,6 +406,19 @@ The tie between reliability signals and *delivery decisions*:
 - **DORA CFR and recovery time** are the retrospective scorecard: rising CFR after a
   process change is a signal your gates (tests, canary, smoke checks) are too weak or
   your changes too large.
+
+**Worked example — "what does 99.9% actually buy you?"** A month is ~30 days ×
+24 h × 60 min = **43,200 min**. The budget is the *allowed* unreliability, `100% − SLO`:
+
+- **99.9%** SLO → 0.1% × 43,200 = **~43 min/month** of allowed downtime.
+- **99.99%** SLO → 0.01% × 43,200 = **~4.3 min/month** — one bad deploy can blow it.
+- **99%** SLO → 1% × 43,200 = **432 min ≈ 7.2 h/month**.
+
+Now spend it: one incident burns **30 min** against a 99.9% (43-min) budget →
+30 / 43 = **~70% of the month's budget gone in one event**. Two more like it and you're
+over budget → the SLO policy **freezes feature releases** until the budget recovers. The
+punchline interviewers want: a "three nines" target is a shockingly small time budget,
+which is exactly why it forces small, safe, reversible deploys.
 
 Together these make observability a *control input* to the pipeline rather than just a
 readout. (The SLI/SLO/error-budget definitions and burn math are owned by the

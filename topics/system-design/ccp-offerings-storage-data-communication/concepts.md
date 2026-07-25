@@ -63,6 +63,14 @@ offerings add limited multi-attach), so it does not by itself solve shared,
 massively-parallel access — that is Blob Storage's job. It is billed for provisioned
 capacity whether used or not.
 
+The reason you **can't run a database on blob storage** comes down to the *access unit*:
+block storage lets you read and write **small byte ranges at an arbitrary offset in
+place** (overwrite bytes 4096–8191 of a volume and `fsync` just that change) — exactly
+what a database's page writes and write-ahead log need. Blob storage has no in-place
+edit: to change one byte you must **replace the whole object by key**. A DB flushing a
+single 8 KB page would have to rewrite an entire multi-megabyte object every time, so the
+random small-write workload that databases live on is simply not expressible.
+
 **Related patterns.** Blob Storage (sibling storage offering), Stateless Component
 (block volumes let you keep compute stateless), Strict Consistency / Eventual
 Consistency (the guarantee the block store provides), Environment-based Availability.
@@ -207,6 +215,22 @@ rule**: choose `r` and `w` so that the read set and write set always intersect �
 book states this as `r + w > n`. Because every read quorum overlaps the latest write
 quorum by at least one replica, a read always sees the most recent write.
 
+**Worked example — why overlap guarantees freshness (`n=3`).** Pick `w=2, r=2`. Check
+the rule: `w + r = 2 + 2 = 4 > 3 = n` ✓. Now trace it with three replicas `{A, B, C}`:
+
+1. **Write** `x=42` with `w=2`: the coordinator writes to `{A, B}` and waits for **both**
+   acks before returning success. `C` has not been updated yet (it will get `x=42`
+   asynchronously, or on the next write quorum that includes it).
+2. **Read** with `r=2`: suppose the read hits `{B, C}`. The read set `{B, C}` and the
+   write set `{A, B}` **must share at least one node** — here it is `B` — because two
+   2-node subsets of a 3-node set cannot be disjoint (2 + 2 = 4 > 3, so by pigeonhole
+   they overlap). `B` holds `x=42`, so the read sees the newest value even though `C` is
+   stale. The client picks the value with the highest version among the replicas it read.
+
+Every possible read pair — `{A,B}`, `{A,C}`, `{B,C}` — intersects the write set `{A,B}`,
+so **no read can miss the write.** Contrast the latency cost: this read and write each
+block on **2 of 3** acks, versus Eventual Consistency's single ack below.
+
 > [!KEY-TAKEAWAY]
 > Strict Consistency is bought with **coordination**: reads and writes must reach an
 > overlapping quorum of replicas. That coordination costs latency and, during a network
@@ -221,6 +245,16 @@ Cassandra (`QUORUM` at `R+W>N`); etcd / ZooKeeper (Raft/ZAB); Google Spanner
 balances, inventory counts, locks, config that must not be stale. Cost: higher latency,
 reduced availability during partitions, lower throughput. Its counterpart, Eventual
 Consistency, trades that guarantee for speed and availability.
+
+**Gotcha — overlap is not linearizability.** `r + w > n` guarantees a read *intersects
+the latest completed write* — that is read-your-writes / freshness, not full
+linearizability. It does **not** by itself order *concurrent* writes: two clients writing
+at the same time can each satisfy a partial quorum and produce conflicting versions. To
+make writes safe you also need a **write majority** (`w > n/2`, so two write quorums can't
+be disjoint) plus a conflict-ordering mechanism (version numbers, timestamps, vector
+clocks). Dynamo-style quorums give you overlap, not consensus. True linearizability comes
+from consensus protocols — Spanner (Paxos + TrueTime), etcd/ZooKeeper (Raft/ZAB) — which
+is strictly stronger than bare quorum overlap.
 
 **Related patterns.** Eventual Consistency (the trade-off counterpart), and the four
 storage offerings (Block, Blob, Relational, Key-Value) that expose one guarantee or the
@@ -246,6 +280,23 @@ means refusing requests.
 then **propagated asynchronously** to the remaining replicas over time. Replicas may be
 briefly out of sync, but in the absence of new writes they *converge* to the same
 value. Conflicts are reconciled later (last-writer-wins, vector clocks, CRDTs, etc.).
+
+**Worked example — the stale read the overlap rule allows (`n=3`).** Pick `w=1, r=1`.
+Check: `w + r = 1 + 1 = 2 <= 3 = n`, so the overlap rule is **violated** on purpose.
+Trace it on `{A, B, C}`:
+
+1. **Write** `x=42` with `w=1`: the coordinator writes only to `A` and returns success
+   immediately after **one** ack. `B` and `C` still hold the old value.
+2. **Read** with `r=1` from `C` (before async propagation reaches it): `C` returns the
+   **stale** value — the read set `{C}` and write set `{A}` are disjoint, so nothing
+   forces them to intersect. The client never sees `x=42` on this read.
+3. Milliseconds later, background replication (anti-entropy / hinted handoff) copies
+   `x=42` to `B` and `C`. Now every replica agrees — the system has **converged**, and a
+   later read from any node returns `42`.
+
+The payoff is latency: this write blocked on **1** ack and the read on **1**, versus
+`2 + 2` under Strict Consistency above — but the window between steps 2 and 3 is exactly
+when a client can read stale data.
 
 **Modern equivalent.** DynamoDB *eventually consistent reads* (the default); Cassandra
 at `ONE`/`LOCAL_ONE`; S3/GCS cross-region replication; DNS; CDN edge caches; Riak.
@@ -513,6 +564,26 @@ flowchart TD
     B -->|"ack before timeout"| C["Deleted"]
     B -->|"timeout expires, no ack"| A
 ```
+
+**Worked example — the tuning tension (visibility timeout = 30s).** Two scenarios on the
+same queue with the timeout set to 30s:
+
+- **Slow-but-alive consumer (duplicate).** Consumer C1 reads message `M` at `t=0`; `M`
+  goes invisible with a 30s deadline. But C1's job actually takes **45s**. At `t=30s` the
+  deadline expires with no ack, so `M` becomes visible again and consumer C2 picks it up
+  and starts processing — while C1 is *still working*. Now `M` is processed **twice**
+  (once by C1 finishing at `t=45s`, once by C2). This is why the consumer must be
+  **idempotent**, and why SQS lets you extend the deadline mid-flight
+  (`ChangeMessageVisibility`) for long jobs.
+- **Crashed consumer (safe recovery, no loss).** Consumer C1 reads `M` at `t=0` and
+  **crashes at `t=10s`** without acking. `M` stays invisible until the deadline; at
+  `t=30s` it reappears and C2 reprocesses it cleanly. The message was never lost — the
+  timeout *is* the recovery mechanism.
+
+The tension: 30s was **too short** for the 45s job (premature redelivery → duplicate) but
+you can't just crank it to, say, 15 minutes, because then the crash case wastes ~15
+minutes before recovery. Tune to just above the P99 processing time, extend for
+outliers, and lean on idempotency for the rest. (SQS default is 30s; max is 12h.)
 
 > [!KEY-TAKEAWAY]
 > Timeout-based Delivery gives **at-least-once** semantics with no distributed

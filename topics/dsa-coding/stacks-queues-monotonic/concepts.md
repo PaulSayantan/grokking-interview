@@ -129,8 +129,12 @@ class MinStack:
 - All four operations are **O(1)**; extra space is **O(n)**.
 - **Space optimization:** store only the values that were the minimum at push time (a
   strictly non-increasing auxiliary stack), or encode deltas from the current min so you
-  don't store a full copy per element. The parallel-stack version above is the one to
-  reach for in an interview — it's simplest and correct.
+  don't store a full copy per element. If you take the "push only new minimums" route, get
+  the two edge cases right: **push** onto the min-stack with `<=` (not `<`) so a repeated
+  minimum is recorded, and on **pop** only pop the min-stack *when the popped value equals
+  `mins[-1]`*. Skip either condition and a duplicate minimum makes `getMin` wrong after a
+  pop — the classic bug. The parallel-stack version above sidesteps all of this and is the
+  one to reach for in an interview — it's simplest and correct.
 
 ## Two stacks as a queue (and vice versa)
 
@@ -147,6 +151,24 @@ flowchart LR
   IN -->|"out empty? pour all IN into OUT (reverses order)"| OUT["OUT stack"]
   OUT --> B["dequeue: pop from OUT"]
 ```
+
+**Worked trace — the amortized pour.** Run `enqueue 1, 2, 3`, then
+`dequeue, dequeue, enqueue 4, dequeue` (IN top is on the right, OUT top on the right):
+
+| Op | IN | OUT | Work | Returns |
+|---|---|---|---|---|
+| enqueue 1 | `[1]` | `[]` | O(1) push | — |
+| enqueue 2 | `[1,2]` | `[]` | O(1) push | — |
+| enqueue 3 | `[1,2,3]` | `[]` | O(1) push | — |
+| dequeue | `[]` | `[3,2,1]` | OUT empty → **pour 3** (O(n)), pop | **1** |
+| dequeue | `[]` | `[3,2]` | OUT non-empty → just pop | **2** |
+| enqueue 4 | `[4]` | `[3,2]` | O(1) push (OUT untouched) | — |
+| dequeue | `[4]` | `[3]` | OUT still has 2 → pop it | **3** |
+
+The single expensive pour (moving 3 elements) happened once and its cost is spread across
+the three cheap dequeues that drain OUT. Element 1 was touched twice total (push to IN, pour
+to OUT); 4 is still sitting in IN having been touched once. Over any sequence, each element
+crosses the pour boundary at most once → **amortized O(1)**.
 
 **Stack using two queues** — one queue, and on each `push` rotate so the newest element
 sits at the front (making one of push or pop O(n)). This is the mirror trick; the
@@ -199,14 +221,80 @@ def next_greater(nums):
   widths (histogram).
 
 **Worked example — Daily Temperatures** `[73,74,75,71,69,72,76,73]` → answer
-`[1,1,4,2,1,1,0,0]` (days to wait for a warmer day). Keep a stack of indices with
+`[1,1,4,2,1,1,0,0]` (days to wait for a warmer day). Keep a stack of **indices** with
 decreasing temperatures; when today is warmer than the stack top, pop and record
-`i - poppedIndex` as the wait.
+`i - poppedIndex` as the wait. Tracing it index by index (stack holds indices, temps shown
+in parens):
+
+| i | temp | pops (record `i - j`) | stack after | res updated |
+|---|---|---|---|---|
+| 0 | 73 | — | `[0]` | |
+| 1 | 74 | pop 0 → `res[0]=1-0=1` | `[1]` | `res[0]=1` |
+| 2 | 75 | pop 1 → `res[1]=2-1=1` | `[2]` | `res[1]=1` |
+| 3 | 71 | — (71<75) | `[2,3]` | |
+| 4 | 69 | — (69<71) | `[2,3,4]` | |
+| 5 | 72 | pop 4 →`res[4]=5-4=1`, pop 3 →`res[3]=5-3=2` (72<75 stop) | `[2,5]` | `res[3]=2, res[4]=1` |
+| 6 | 76 | pop 5 →`res[5]=6-5=1`, pop 2 →`res[2]=6-2=4` | `[6]` | `res[2]=4, res[5]=1` |
+| 7 | 73 | — (73<76) | `[6,7]` | |
+
+Indices 6 and 7 never get popped (no warmer day follows), so they keep the initial `0`.
+Final `res = [1,1,4,2,1,1,0,0]`.
 
 **Largest Rectangle in a Histogram** is the flagship: use an **increasing** stack of bar
 indices; when a shorter bar arrives, pop taller bars and compute the area each can form as
-the shortest bar (`height[popped] * width`, where width spans to the current index and back
-to the new stack top). O(n) with a sentinel `0` height appended to flush the stack.
+the shortest bar. The width formula is the part everyone gets wrong — after popping bar `h`,
+the rectangle of height `heights[h]` extends **right up to (but not including) `i`** and
+**left down to (but not including) the new stack top**, so:
+
+```python
+def largestRectangleArea(heights):
+    stack = []                              # indices, heights increasing bottom->top
+    best = 0
+    for i, h in enumerate(heights + [0]):   # sentinel 0 flushes the stack at the end
+        while stack and heights[stack[-1]] > h:
+            top = stack.pop()               # this bar can't extend past i
+            left = stack[-1] if stack else -1
+            width = i - left - 1            # <-- the crux formula
+            best = max(best, heights[top] * width)
+        stack.append(i)
+    return best
+```
+
+**Numeric trace on `heights=[2,1,5,6,2,3]`** (append sentinel `0`, so the loop sees
+`[2,1,5,6,2,3,0]`). Stack holds indices:
+
+| i | h | pops → `heights[top] * (i - left - 1)` | stack after | best |
+|---|---|---|---|---|
+| 0 | 2 | — | `[0]` | 0 |
+| 1 | 1 | pop 0: `2 * (1 - (-1) - 1) = 2*1 = 2` | `[1]` | 2 |
+| 2 | 5 | — | `[1,2]` | 2 |
+| 3 | 6 | — | `[1,2,3]` | 2 |
+| 4 | 2 | pop 3: `6*(4-2-1)=6`; pop 2: `5*(4-1-1)=10` | `[1,4]` | **10** |
+| 5 | 3 | — | `[1,4,5]` | 10 |
+| 6 | 0 | pop 5:`3*(6-4-1)=3`; pop 4:`2*(6-1-1)=8`; pop 1:`1*(6-(-1)-1)=6` | `[]` | 10 |
+
+Answer **10** — the `5,6` pair widened to width 2 at height 5. Note when the stack is empty
+after a pop, `left = -1`, so `width = i - (-1) - 1 = i` (the bar reaches all the way to the
+left edge). The sentinel `0` at `i=6` guarantees every remaining bar gets popped and costed.
+
+**Two more variants the recognition list names.** *Next Greater Element II* (circular):
+iterate `i` from `0..2n-1` and read `nums[i % n]`, but only **push** indices while `i < n`
+— the second pass just lets earlier bars find a greater element that wraps around. *Trapping
+Rain Water* has a monotonic-stack form: keep a **decreasing** stack; when a taller bar `i`
+arrives, pop the bottom `mid`, and the water it caps is
+`(min(heights[left], heights[i]) - heights[mid]) * (i - left - 1)` where `left` is the new
+top — though the **two-pointer** solution (O(1) space) is usually preferred in interviews.
+
+> [!WARNING]
+> **Strict vs non-strict (`>` vs `>=`) is not cosmetic — it decides how ties are handled.**
+> A `while heights[stack[-1]] > h` (strict) leaves *equal* bars on the stack; `>=`
+> (non-strict) pops them. For plain next-greater this only shifts which duplicate matches,
+> but for **span-counting** problems it controls double-counting. In *Sum of Subarray
+> Minimums* you must use **asymmetric** strictness — e.g. treat the previous-smaller
+> boundary as strictly-smaller (`<`) and the next-smaller boundary as smaller-or-equal
+> (`<=`). That way a run of equal minima is attributed to exactly one bar; make both sides
+> strict (or both non-strict) and subarrays whose minimum is a duplicated value get counted
+> twice or zero times. Rule of thumb: **break ties toward one side only.**
 
 ## Monotonic deque (sliding-window maximum)
 

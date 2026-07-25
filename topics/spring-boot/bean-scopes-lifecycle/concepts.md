@@ -35,6 +35,9 @@ The default scope. The container creates **one shared instance** per bean defini
 
 - **Eager by default**: singletons are instantiated when the `ApplicationContext` starts (during `refresh()` → `finishBeanFactoryInitialization` → `preInstantiateSingletons`). This surfaces wiring errors at startup ("fail fast") rather than at first use.
 - **Lazy option**: `@Lazy` (or `default-lazy-init`) defers creation until first requested.
+
+> [!INTERVIEW]
+> "Then why not just make everything `@Lazy`?" Trade-off: `@Lazy` trims startup time and heap for beans that are rarely (or never) used on a given deploy — genuinely useful for a fat app with many optional code paths. But you **give up fail-fast**: a misconfigured dependency or a bad `@Value` binding that would have blown up at startup now surfaces on the *first request that touches the bean*, i.e. in production traffic instead of at deploy time. Pick eager (the default) for anything on the critical path of a service that must be healthy the moment it reports "up"; reserve `@Lazy` for heavy, optional, or seldom-used beans where the startup saving is worth deferring the wiring check.
 - Instances are cached in the container's singleton registry (`DefaultSingletonBeanRegistry`), keyed by bean name.
 
 ```java
@@ -61,7 +64,7 @@ Critical gotchas:
 - **The container does NOT manage the full lifecycle of a prototype.** Spring instantiates, populates, and runs initialization callbacks (`@PostConstruct`), then hands the bean to the caller and **forgets about it**. `@PreDestroy` / `DisposableBean.destroy()` are **NOT called** by the container for prototypes. Cleanup is the client's responsibility (or a custom `BeanPostProcessor` / explicit `destroyBean`). This is the famous "prototype destruction caveat."
 - **Injection timing**: injecting a prototype into a singleton gives the singleton **one** prototype instance created at singleton-creation time — you do NOT get a fresh prototype per method call. To get a new instance each time, use one of: method injection via `@Lookup`, `ObjectProvider<T>`/`ObjectFactory<T>`, `Provider<T>` (JSR-330), or a scoped proxy.
 
-Deeper gotcha on prototype destruction: the "container forgets it" statement has one important exception. If a prototype is wrapped in a **scoped proxy**, or if you register a `DestructionAwareBeanPostProcessor`, or if the prototype is referenced by a bean that itself is destroyed, destruction still is not automatically driven — Spring genuinely holds no reference to the raw prototype after handing it back. The one case where prototype destruction *does* run is when the prototype is obtained through a scope that tracks its instances (custom scopes can call `registerDestructionCallback`). Plain prototype scope does not track instances at all, which is precisely why `@PreDestroy` is skipped and why prototypes that hold OS resources (sockets, file handles, native memory) are a classic leak source. `ObjectProvider`/`getBean` for a prototype returns an untracked instance every time.
+Deeper gotcha on prototype destruction: the rule is simply that **plain prototype scope does not track instances at all** — Spring genuinely holds no reference to the raw prototype after handing it back, so `@PreDestroy` is skipped and prototypes that hold OS resources (sockets, file handles, native memory) are a classic leak source. The one exception is when the prototype is obtained through a **scope that tracks its instances** and calls `registerDestructionCallback` (custom scopes, and the request/session scopes) — only then does destruction run. `ObjectProvider`/`getBean` for a plain prototype returns an untracked instance every time.
 
 ```java
 @Component
@@ -181,14 +184,33 @@ For a **singleton** the container drives this ordered sequence on startup and sh
 ```java
 @Component
 public class LifecycleBean implements InitializingBean, DisposableBean {
-    public LifecycleBean() { }                  // 1
-    @Autowired void setDep(Dep d) { }           // 2
-    @PostConstruct void post() { }              // 5a
-    public void afterPropertiesSet() { }        // 5b
-    @PreDestroy void pre() { }                  // 8
-    public void destroy() { }                   // 9
+    public LifecycleBean() { System.out.println("1 constructor"); }
+    @Autowired void setDep(Dep d) { System.out.println("2 setDep (populate)"); }
+    @PostConstruct void post() { System.out.println("5a @PostConstruct"); }
+    public void afterPropertiesSet() { System.out.println("5b afterPropertiesSet"); }
+    public void customInit() { System.out.println("5c init-method"); }
+    @PreDestroy void pre() { System.out.println("8 @PreDestroy"); }
+    public void destroy() { System.out.println("9 destroy"); }
+    public void customDestroy() { System.out.println("10 destroy-method"); }
 }
+// registered via @Bean(initMethod = "customInit", destroyMethod = "customDestroy")
 ```
+
+**Worked trace — what actually prints.** Start the context, then call `context.close()`. The console shows the callbacks fire in exactly this order (the numbers are the step labels above, not print statements the bean emits on its own):
+
+```
+1 constructor
+2 setDep (populate)
+5a @PostConstruct
+5b afterPropertiesSet
+5c init-method
+   ... bean is ready and in use ...
+8 @PreDestroy
+9 destroy
+10 destroy-method
+```
+
+Note what is *absent* between steps 2 and 5a: the `Aware` callbacks (step 3) and `postProcessBeforeInitialization` (step 4) run there but produce no output because `LifecycleBean` implements no `Aware` interface and we registered no custom BPP. The load-bearing takeaway a student must be able to reproduce is the init triple `@PostConstruct → afterPropertiesSet → init-method`, and its mirror image on shutdown `@PreDestroy → destroy → destroy-method`.
 
 Reminder: for **prototype** beans only steps 1–6 run; the destruction steps (8–10) never fire automatically.
 
@@ -212,6 +234,8 @@ Trade-offs: prefer `@PostConstruct`/`@PreDestroy` (or `@Bean` init/destroy metho
 
 ## BeanPostProcessor
 
+Intuition: think of the container as a house-building crew. A `BeanPostProcessor` is the **inspector who walks each finished house** — the object already exists and is furnished (properties populated), and the inspector can touch it up or even swap it for a renovated version (a proxy) before the owner moves in. That is why `@Transactional`/`@Async` wrapping happens here: you can only wrap an object that already exists. Contrast this with a `BeanFactoryPostProcessor`, which edits the **blueprint before any house is built** (see below).
+
 `BeanPostProcessor` (BPP) lets you intercept **every bean instance** right around its initialization. Two callbacks:
 
 ```java
@@ -230,6 +254,8 @@ public interface BeanPostProcessor {
 ---
 
 ## BeanFactoryPostProcessor
+
+Intuition (continuing the house analogy): a `BeanFactoryPostProcessor` is the **architect editing the blueprints before construction starts** — no house exists yet, but you can change the spec (property values, scope) on paper so every house is built to the amended plan. This is exactly why placeholder resolution lives here: `${db.url}` in a bean definition must become a real value *before* the bean is instantiated, because the instance's fields get set from the (now-resolved) definition. Two hook layers exist because the two problems are fundamentally different: some things you must decide on the blueprint (a value the constructor needs), and some things you can only do to a finished object (wrap it in a transaction proxy).
 
 `BeanFactoryPostProcessor` (BFPP) operates on **bean definitions (metadata)**, not instances, and runs **before any bean is instantiated**.
 
@@ -257,6 +283,8 @@ Because a BFPP runs before instantiation, avoid having it trigger bean instantia
 ---
 
 ## BeanDefinitionRegistryPostProcessor
+
+Intuition: if BFPP is "edit existing blueprints," a `BeanDefinitionRegistryPostProcessor` is "**add brand-new blueprints to the set**." A plain BFPP can tweak a definition that already exists; it cannot conjure new ones. `@ComponentScan`, `@Bean` processing, and MyBatis mapper scanning all need to *create* definitions the developer never typed by hand — that requires this earlier, more powerful hook.
 
 `BeanDefinitionRegistryPostProcessor` **extends** `BeanFactoryPostProcessor` and adds an earlier callback that can **register brand-new bean definitions** (not just modify existing ones):
 
@@ -314,6 +342,34 @@ When a **shorter-lived** bean (prototype/request/session) is injected into a **l
 
 This is analogous to how `@Transactional` proxies work, and it shares the same **self-invocation caveat**: calling another method on the same object internally (`this.foo()`) bypasses the proxy, so scope/transaction semantics don't apply to internal calls.
 
+**Worked trace — one injected field, two requests, two instances.** A singleton controller injects a `@RequestScope RequestContext` (so the field holds *one* proxy for the app's whole lifetime). Each request stores a value and prints the identity of the resolved instance:
+
+```java
+@RequestScope
+public class RequestContext {                    // proxyMode = TARGET_CLASS
+    final int id = System.identityHashCode(this); // captured when the REAL bean is created
+    String user;
+}
+
+@RestController
+public class MeController {
+    @Autowired RequestContext ctx;               // injected ONCE — this field holds the proxy
+    @GetMapping("/me") String me(@RequestParam String u) {
+        ctx.setUser(u);                           // proxy resolves the current request's real bean
+        return ctx.getId() + " / " + ctx.getUser();
+    }
+}
+```
+
+Fire two requests against the same running app:
+
+```
+GET /me?u=alice   ->  1a2b3c4d / alice     (proxy resolved request A's real RequestContext)
+GET /me?u=bob     ->  9f8e7d6c / bob       (proxy resolved request B's real RequestContext)
+```
+
+The proxy field (`ctx`) is the same object across both calls — but the two lines print **different `id` values** (each captured when a distinct real bean was constructed) and **no bleed-through of `alice`'s value into bob's request**. That proves the proxy is not a cached reference to one instance; on every method call it looks up the real `RequestContext` bound to the *current* request's `RequestAttributes`, and each request got its own freshly created (and freshly `@PostConstruct`-ed) instance. Swap `@RequestScope` for a plain field and both requests would share one instance — bob would sometimes see `alice`. `ObjectProvider<RequestContext>.getObject()` gives the same per-request resolution without a compile-time proxy, returning a distinct object per active request.
+
 ---
 
 ## Circular dependencies and the three-level cache
@@ -327,6 +383,19 @@ Circular references between singletons are resolved (for setter/field injection)
 | 3 | `singletonFactories` | `ObjectFactory` producing an early reference (needed so AOP returns the *proxy*, not the raw bean) |
 
 Resolution of `A → B → A` with field/setter injection: A is instantiated and its `ObjectFactory` is placed in level 3; while populating A, B is created; B needs A, finds A's factory in level 3, promotes the early A reference to level 2, and injects it into B; B finishes (level 1) and is injected into A; A finishes.
+
+**Worked trace — which map holds what, step by step.** Columns are the three caches (L1 `singletonObjects`, L2 `earlySingletonObjects`, L3 `singletonFactories`); read top to bottom:
+
+| Step | Action | L3 (factories) | L2 (early refs) | L1 (ready) |
+|---|---|---|---|---|
+| 1 | `new A()` — instantiated, not populated | `A→factory` | — | — |
+| 2 | Start populating A; A needs B → create B | `A→factory` | — | — |
+| 3 | `new B()`; populating B, B needs A | `A→factory`, `B→factory` | — | — |
+| 4 | B asks for A: miss L1, miss L2, **hit L3** → call factory (returns A's proxy if AOP), move A to L2, drop A's factory | `B→factory` | `earlyA` | — |
+| 5 | Inject `earlyA` into B; B finishes init → promote B to L1, drop B's factory | — | `earlyA` | `B` |
+| 6 | Return finished B into A; A finishes init → promote A to L1, drop `earlyA` from L2 | — | — | `A`, `B` |
+
+The key moment is **step 4**: B does not wait for A to be finished — it accepts A's *early* reference. That early reference must be identical to whatever ends up in L1 at step 6, which is exactly why L3 stores a *factory* (not the raw object): if A is AOP-proxied, the factory produces the proxy once, so B and the final L1 entry point at the same proxy. A constructor cycle can't use any of this — A can't even reach step 1's "instantiated but not populated" state without B, so there is no early reference to expose, and Spring throws `BeanCurrentlyInCreationException`.
 
 Key senior-level points:
 

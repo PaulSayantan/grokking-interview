@@ -220,6 +220,11 @@ page.getTotalElements(); page.getTotalPages(); page.getContent();
 - **Trap 2 — pagination + `JOIN FETCH` of a collection:** Hibernate cannot paginate in SQL when a collection is fetch-joined (rows are duplicated), so it fetches **all** rows and paginates **in memory**, logging `HHH000104: firstResult/maxResults specified with collection fetch; applying in memory`. Fix with `@EntityGraph`, a two-query approach (fetch IDs then entities), or `@BatchSize`.
 - Sorting by a non-persistent/derived alias in native queries needs care; JPQL sort is on entity properties.
 - **Expert — `Page` count-query optimization:** Spring Data does *not* always issue the COUNT. `PageableExecutionUtils` skips it when the result set is smaller than the page size **and** the page is the first (offset 0), or when the current page is the last one — it derives the total from `offset + content.size()`. So a `Page` on a small table may not run a COUNT at all.
+
+  **Worked trace.** Table has 8 rows total:
+  - `PageRequest.of(0, 20)` → content query returns 8 rows. `content.size() = 8 < pageSize 20` **and** offset = 0 → **no COUNT query**; total derived as `offset(0) + 8 = 8`.
+  - `PageRequest.of(0, 5)` → content returns 5 rows. `content.size() = 5 == pageSize 5`, so it *could* be a full page with more behind it → **COUNT query runs** and returns 8.
+  - `PageRequest.of(1, 5)` → content returns 3 rows (rows 6–8). `content.size() = 3 < pageSize 5` and this is the last page → **no COUNT**; total = `offset(5) + 3 = 8`.
 - **Expert — offset pagination is O(offset):** `LIMIT ? OFFSET ?` forces the DB to scan and discard all preceding rows, so deep pages (`page=10000`) degrade linearly and can silently skip/duplicate rows if data is inserted between page fetches. The modern fix is **keyset (seek) pagination** — `WHERE (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC LIMIT ?` — which is O(page size) and stable.
 - **Expert — Spring Data 3.1 Scroll API:** `Window<T> scroll(Sort/Pageable + ScrollPosition)` supports both `OffsetScrollPosition` and `KeysetScrollPosition`. A repository method can return `Window<T>` and be driven by `ScrollPosition.offset()` / `ScrollPosition.keyset()`; `window.positionAt(...)` and `window.hasNext()` advance the cursor without a COUNT. This is the framework-blessed way to do keyset pagination.
 - **Expert — `Sort` and injection:** `Sort.by(userSuppliedString)` is validated against entity properties for derived/JPQL queries (safe), but `JpaSort.unsafe("...")` and native-query sorting concatenate the string into SQL — an injection vector if fed from user input.
@@ -238,6 +243,23 @@ repo.saveAndFlush(user);  // save + immediate flush() → SQL sent to DB now
 - **Trap — `merge` return value:** `save` on a detached entity returns the managed instance; the *argument you passed in stays detached*. Always use the returned reference (`user = repo.save(user)`).
 - **Trap — `save` doesn't always INSERT:** for an existing managed entity, dirty checking may already handle the update; calling `save` can be redundant. And `save` on a non-null-id entity that isn't in the DB will attempt an UPDATE (0 rows) after a SELECT via `merge`, not an INSERT.
 - **Expert — `isNew()` and assigned IDs:** `SimpleJpaRepository.save` calls `entityInformation.isNew(entity)`. For a generated `@Id` it checks null (or 0 for primitives). But with an **assigned identifier** (e.g. a natural key or a UUID you set yourself), the id is never null, so `save` always calls `merge` → an extra SELECT before every INSERT. Fixes: implement `Persistable<ID>` with your own `isNew()` (often backed by a `@Transient` flag set in a `@PrePersist`/lifecycle), or use `@Version` (a null version marks the entity new), or extend `AbstractPersistable`.
+
+**Worked trace — the wasted SELECT.** Watch the SQL for a single `repo.save(user)` in each case:
+
+```
+// Case A: generated id (@GeneratedValue).  user.id == null before save.
+save(user) → isNew() == true  → em.persist(user)
+   flush:  INSERT INTO users (email, id) VALUES (?, ?)        -- 1 statement
+
+// Case B: assigned id (you set user.id = UUID / natural key).  user.id != null.
+save(user) → isNew() == false → em.merge(user)
+   merge must find the "current" row to copy onto:
+           SELECT id, email FROM users WHERE id = ?           -- returns 0 rows
+   Hibernate concludes it's actually new, so:
+   flush:  INSERT INTO users (id, email) VALUES (?, ?)        -- 2 statements total
+```
+
+Every insert of an assigned-id entity pays one pointless `SELECT ... WHERE id=?` that always misses. Over a 10 000-row import that is 10 000 wasted round-trips. Implementing `Persistable.isNew()` to return `true` for a freshly built entity makes Case B take the `persist` path (1 statement) like Case A.
 - **Expert — `merge` cascade and detached children:** `merge` cascades only along associations with `CascadeType.MERGE`/`ALL`. A detached graph with a child that has an assigned id but no matching row causes merge to attempt a re-attach/UPDATE that fails or inserts unexpectedly. Merge also copies state field-by-field into the managed instance, so `@Transient`/non-mapped fields on the argument are lost in the returned copy.
 - **Expert — `saveAll` batching:** `saveAll` just loops `save`; it does **not** enable JDBC batching by itself. Real batch inserts require `spring.jpa.properties.hibernate.jdbc.batch_size`, an identity strategy that isn't `IDENTITY` (which disables insert batching because the id is needed immediately), and often `order_inserts`/`order_updates=true`.
 
@@ -312,7 +334,7 @@ first-level cache and unit of work.
 Flush = synchronizing the persistence context to the DB (executing pending SQL);
 it does **not** commit.
 
-- **`FlushModeType.AUTO`** (default): flush before every query that might be affected by pending changes, and before commit.
+- **`FlushModeType.AUTO`** (default): flush before every query that might be affected by pending changes, and before commit. *Why it matters:* you `persist(newUser)` (still sitting unflushed in the context) and then run `SELECT COUNT(u) FROM User u` in the same transaction. AUTO flushes the pending INSERT first so the count includes your new row; under `COMMIT` mode the INSERT hasn't reached the DB yet and the count comes back one short.
 - **`FlushModeType.COMMIT`**: flush only at commit — faster but a query may read stale data ignoring in-memory changes.
 - Triggers of an AUTO flush: transaction commit, executing a JPQL/HQL/native query (that touches affected tables), or explicit `em.flush()`.
 - **Trap:** Native SQL queries under `AUTO` may not always trigger a flush for the right tables (Hibernate can't always tell which tables a native query touches), risking stale reads — flush manually if needed. Flushing is **not** committing; a flush can still be rolled back.
@@ -354,6 +376,17 @@ lazy association triggers **one additional query per parent** → 1 + N queries.
 List<Order> orders = orderRepo.findAll();      // 1 query
 for (Order o : orders) o.getItems().size();    // N queries (one per order)
 ```
+
+**Worked trace — query counts for 100 orders.** `findAll()` returns 100 `Order` rows, each with a lazy `items` collection:
+
+| Approach | Query count | Why |
+|---|---|---|
+| Lazy, iterate `getItems()` | **1 + 100 = 101** | 1 parent SELECT + one child SELECT per order |
+| `@BatchSize(size = 10)` on `items` | **1 + 10 = 11** | 100 proxies loaded in batches of 10 → `... WHERE order_id IN (?,?,…10)`, 100/10 = 10 batch queries |
+| `@BatchSize(size = 30)` | **1 + 4 = 5** | ceil(100/30) = 4 batches (30+30+30+10) |
+| `JOIN FETCH` / `@EntityGraph` | **1** | parents and items in a single joined result set |
+
+So batch fetching does not eliminate the extra queries, it *coalesces* them: 100 one-row lookups become ceil(N/batchSize) `IN`-list lookups. A fetch join collapses everything to a single statement.
 
 Fixes:
 
@@ -445,6 +478,8 @@ order.getItems().remove(item);   // with orphanRemoval=true → DELETE for that 
 
 Concurrency control to prevent lost updates.
 
+**The lost update it prevents.** Two cashiers load the same account showing `balance = 100`. Cashier A subtracts 30 and writes `70`; Cashier B (who also read `100`) subtracts 20 and writes `80`. The correct answer is `100 − 30 − 20 = 50`, but B's write lands last and clobbers A's — the final balance is `80` and A's 30 vanished. Optimistic locking catches this at B's commit (the version A already bumped no longer matches, so B's UPDATE hits 0 rows → retry). Pessimistic locking prevents it earlier: A's `SELECT … FOR UPDATE` blocks B from even reading until A commits.
+
 | | Optimistic | Pessimistic |
 |---|---|---|
 | Assumes | Conflicts are rare | Conflicts are likely |
@@ -531,6 +566,20 @@ abstract class Auditable {
 | `UUID` / assigned | App generates | Yes | Random UUIDs hurt index locality; prefer time-ordered (UUIDv7) |
 
 - **Expert — `allocationSize` and the `pooled`/`pooled-lo` optimizer:** With `SEQUENCE`, Hibernate fetches one sequence value and multiplies by `allocationSize` (default 50) to hand out a block of ids without hitting the DB each insert. This is safe across app instances *only* with the `pooled`/`pooled-lo` optimizers, which interpret the DB sequence's increment correctly. A common bug: setting `allocationSize=50` in JPA but leaving the DB sequence `INCREMENT BY 1` under the legacy `hilo` optimizer causes id collisions across instances.
+
+**Worked trace — allocationSize=50, `pooled-lo`.** DB sequence is `INCREMENT BY 50`. You insert 120 entities in a loop:
+
+```
+insert #1   → NEXTVAL returns 1   → hand out ids 1,2,…,50   (in memory)   [1 DB hit]
+insert #2..#50                    → served from memory, no DB hit
+insert #51  → block exhausted → NEXTVAL returns 51 → ids 51..100          [2nd DB hit]
+insert #101 → block exhausted → NEXTVAL returns 101 → ids 101..150        [3rd DB hit]
+insert #120 → id 120, still in the third block
+```
+
+120 inserts cost **3** sequence round-trips instead of 120 — one per 50-id block. Contrast `IDENTITY`: 120 inserts = 120 immediate INSERTs (no id block to hand out), and JDBC batching is off.
+
+Now the collision bug: if the DB sequence is left at `INCREMENT BY 1` while JPA thinks `allocationSize=50`, instance A grabs NEXTVAL=1 and hands out ids 1..50, while instance B grabs NEXTVAL=2 and hands out 2..51 — **overlapping ranges → duplicate-key errors**. The DB `INCREMENT BY` must equal `allocationSize` (the `pooled`/`pooled-lo` optimizers assume this) for the blocks to stay disjoint.
 - **Expert — `IDENTITY` breaks batching:** Because the generated key is only known after the INSERT executes, Hibernate cannot defer/batch inserts for `IDENTITY` entities — each `persist` flushes. For high-volume inserts prefer `SEQUENCE` with a pooled optimizer and `hibernate.jdbc.batch_size`.
 - **Expert — `@Version` + assigned id + `Persistable`:** See `save()` section — assigned ids make Spring Data treat entities as non-new, forcing a pre-INSERT SELECT via merge.
 
@@ -560,6 +609,8 @@ abstract class Auditable {
 - **Expert — rollback rules:** Spring rolls back only on `RuntimeException`/`Error` by default; **checked exceptions do not roll back** unless you set `rollbackFor`. A caught-and-swallowed exception inside a tx that was already marked rollback-only throws `UnexpectedRollbackException` at commit ("Transaction silently rolled back because it has been marked as rollback-only").
 - **Expert — flush/commit failures surface late:** Because SQL is deferred to flush (commit), a constraint violation or optimistic-lock failure appears at *commit time*, often outside your try/catch around the repository call. `saveAndFlush` or an explicit `flush()` surfaces it where you can handle it.
 - **Expert — connection & context binding:** The persistence context is bound to the transaction, which is bound to the thread. `REQUIRES_NEW` uses a second pooled connection while the first is held — a source of connection-pool deadlock if the pool is too small (each request needing 2 connections but the pool serves 1).
+
+  **Worked example — pool sizing for the `REQUIRES_NEW` deadlock.** Each in-flight request holds its outer connection *and* grabs a second for the inner `REQUIRES_NEW` call, so it needs **2 connections simultaneously**. With a HikariCP pool of 10 and 5 concurrent such requests: all 5 acquire their outer connection (5 used), all 5 then try to acquire the inner one (5 more) — the 6th..10th grants are the inner ones, so it just fits. Push to a pool of **5** and 5 concurrent requests: each takes 1 outer connection (pool now empty), every request then waits for a second connection that will never free up because no request can finish without its inner tx → **deadlock**, and threads block until `connectionTimeout` fires. Heuristic: `poolSize ≥ maxConcurrentThreads × connectionsHeldPerThread`; here `5 × 2 = 10`. This is why the common "one connection per request" assumption breaks the moment nested `REQUIRES_NEW` transactions enter the picture.
 
 ---
 

@@ -39,7 +39,7 @@ The three trigger styles differ in *when the clock starts*:
 
 | Attribute | Meaning | Overlap behavior |
 |-----------|---------|------------------|
-| `fixedRate` | Interval measured from **start** of one execution to the **start** of the next. | With a single-threaded scheduler, if a run overtakes the interval the next run waits (no concurrency by default). Rate is "aspirational" and can drift under contention. |
+| `fixedRate` | Interval measured from **start** of one execution to the **start** of the next. | A single `@Scheduled` task **never overlaps itself** — if a run overtakes the interval the next run waits, regardless of pool size (see note below). Rate is "aspirational" and can drift under contention. |
 | `fixedDelay` | Interval measured from the **end (completion)** of one execution to the **start** of the next. | Always leaves a gap equal to the delay after completion; naturally prevents overlap. |
 | `cron` | A cron expression evaluated against wall-clock time. | Fires at matching clock times; missed ticks (if the previous run is still going on a single thread) are simply skipped. |
 
@@ -50,7 +50,22 @@ The three trigger styles differ in *when the clock starts*:
 @Scheduled(fixedRateString = "${job.rate:5000}")  // externalized
 ```
 
-**Key distinction (classic trap):** If a task takes 8s and `fixedRate=5000`, with `fixedRate` the scheduler *wants* to start every 5s but a single thread forces serialization, so effectively it runs back-to-back. With `fixedDelay=5000` it runs at 8s + 5s = every 13s. Use `fixedRate` for "run as close to every N ms as possible"; use `fixedDelay` for "wait N ms after each finish" (safer when runs must not pile up).
+**Key distinction (classic trap):** If a task takes 8s and `fixedRate=5000`, with `fixedRate` the scheduler *wants* to start every 5s but successive runs of the same task cannot overlap, so effectively it runs back-to-back. With `fixedDelay=5000` it runs at 8s + 5s = every 13s. Use `fixedRate` for "run as close to every N ms as possible"; use `fixedDelay` for "wait N ms after each finish" (safer when runs must not pile up).
+
+**Worked example — 8s task, `fixedRate=5000ms`, timeline in seconds:**
+
+```
+t=0   run A starts        (scheduler wanted the next start at t=5)
+t=5   next start is DUE, but A is still running → it does NOT start (no self-overlap)
+t=8   run A finishes → the overdue run B starts immediately
+t=13  next start due; B still running (until t=16) → waits
+t=16  B finishes → run C starts immediately  ...
+```
+
+So actual starts land at t=0, 8, 16, 24, … — every 8s (paced by the task's own duration), not every 5s. The "5s" only wins once the body finishes faster than the interval.
+
+> [!WARNING]
+> **`fixedRate` does not overlap a slow job even with a big pool.** The JDK's `scheduleAtFixedRate` guarantees that successive executions of the *same* task never run concurrently — a late run starts late, never in parallel with the previous one. Raising `spring.task.scheduling.pool.size` therefore will **not** make one overrunning `fixedRate` job overlap itself; the pool only lets *different* scheduled jobs run in parallel (and stops one slow job from starving the others). If you genuinely need concurrent runs of the same logical job, make the body itself dispatch `@Async` work.
 
 **`Duration`/`timeUnit` support:** Since Spring 5.3 (the `timeUnit` attribute was added in 5.3.10), `fixedRate`/`fixedDelay`/`initialDelay` can be expressed with `timeUnit` (e.g. `@Scheduled(fixedRate = 5, timeUnit = TimeUnit.SECONDS)`), and the `*String` variants accept ISO-8601 `Duration` strings like `"PT5S"`.
 
@@ -166,7 +181,9 @@ public CompletableFuture<Order> loadOrder(Long id) {
 
 ## Custom TaskExecutor for @Async
 
-By default (if you don't configure one) `@Async` uses a `SimpleAsyncTaskExecutor` in many older setups, but Spring Boot auto-configures a `ThreadPoolTaskExecutor` bean named `applicationTaskExecutor` (also exposed as `taskExecutor`) which `@Async` will use. **`SimpleAsyncTaskExecutor` does NOT reuse threads — it creates a new thread per task** (unless a concurrency limit is set), which is dangerous under load.
+The default executor depends on whether you are on plain Spring or Spring Boot — a real interview gotcha:
+- **Plain Spring** (`@EnableAsync`, no executor bean): `@Async` falls back to a `SimpleAsyncTaskExecutor`, which **does NOT reuse threads — it creates a new thread per task** (unless a concurrency limit is set). Dangerous under load: a burst of work spawns an unbounded number of threads.
+- **Spring Boot:** auto-configures a bounded `ThreadPoolTaskExecutor` bean named `applicationTaskExecutor` (also exposed as `taskExecutor`), and `@Async` picks it up automatically — so on Boot you get pooling for free.
 
 Two ways to customize:
 
@@ -193,6 +210,19 @@ public class AsyncConfig implements AsyncConfigurer {
 **2. Define multiple `Executor` beans and select per-method** with `@Async("beanName")`.
 
 **`ThreadPoolTaskExecutor` sizing semantics (classic trap):** tasks first fill up to `corePoolSize` threads; **additional tasks are queued** until `queueCapacity` is full; only when the queue is full does the pool grow toward `maxPoolSize`. So if `queueCapacity` is very large (e.g. `Integer.MAX_VALUE`, the default), `maxPoolSize` is effectively never reached. When both the queue and max pool are saturated, the `RejectedExecutionHandler` kicks in (default `AbortPolicy` → `TaskRejectedException`).
+
+**Worked example — trace 130 tasks through `core=8, max=16, queue=100`** (the config above). Fire 130 `@Async` tasks in a burst while none have finished:
+
+| Step | Tasks | Where they go | Running / Queued / Rejected |
+|------|-------|---------------|------------------------------|
+| 1 | #1–#8 | start core threads (fill to `corePoolSize=8`) | 8 running |
+| 2 | #9–#108 | queue fills to `queueCapacity=100` | 8 running, 100 queued |
+| 3 | #109–#116 | queue is full → pool grows threads 9..16 (up to `maxPoolSize=16`) | 16 running, 100 queued |
+| 4 | #117–#130 | pool at max **and** queue full → `AbortPolicy` | 14 rejected → `TaskRejectedException` |
+
+So the pool absorbs exactly `maxPoolSize + queueCapacity = 16 + 100 = 116` tasks; the remaining `130 − 116 = 14` (tasks #117 onward) are rejected. The counter-intuitive part: threads 9–16 only spin up **after** 100 tasks are already waiting — the queue is preferred over new threads.
+
+Now change one thing: `queueCapacity = Integer.MAX_VALUE` (the raw `ThreadPoolExecutor` default). Steps 1–2 are the same, but the queue never fills, so step 3 never happens — the pool **stays at 8 threads forever**, `maxPoolSize=16` is dead config, and no task is ever rejected (they just pile up in memory, risking `OutOfMemoryError`). This is why a bounded queue is what actually lets `maxPoolSize` do anything.
 
 **Boot properties:** `spring.task.execution.pool.core-size`, `max-size`, `queue-capacity`, `thread-name-prefix` tune the auto-configured executor without a bean.
 
@@ -292,6 +322,21 @@ Consequences:
 - If a listener throws, the exception **propagates back to the publisher** (`publishEvent` re-throws), and can **roll back the caller's transaction**. Listeners are not isolated by default.
 - Ordering among listeners for one event is controlled by `@Order`; there is no parallelism unless you opt in.
 - Total publish latency = sum of all listener latencies.
+
+**Worked example — trace a publish inside a transaction.** `OrderService.place()` is `@Transactional`; it saves the order row, then calls `publisher.publishEvent(new OrderPlacedEvent(o))`. Two listeners match: A (audit log, ~40ms) then B (throws `MailException`):
+
+```
+[TX begins]  order row saved (not yet committed)
+publishEvent(OrderPlacedEvent) called on the request thread:
+   → listener A runs on THIS thread, blocks ~40ms, returns
+   → listener B runs on THIS thread, throws MailException
+   → publishEvent does NOT swallow it → re-throws MailException to place()
+place() unwinds with MailException:
+   → Spring marks the transaction rollback-only → [TX ROLLS BACK]
+Net result: order row is NOT persisted; caller sees MailException.
+```
+
+Total wall-clock inside `publishEvent` ≈ 40ms (A) + B's time-to-throw — the publisher paid for both listeners serially and lost the whole order because a *notification* listener failed. That coupling — a failed email rolling back a saved order — is exactly why `AFTER_COMMIT` and `@Async` listeners exist: they detach the side-effect from the publisher's thread and transaction.
 
 This is a frequent trap: developers assume events are async "messaging" — they are not. To make a listener async, add `@Async` to it (and `@EnableAsync`) — see [Async events](#async-events-async-on-listener). The underlying multicaster is `SimpleApplicationEventMulticaster`; if you set a `taskExecutor` on it, *all* events become async.
 

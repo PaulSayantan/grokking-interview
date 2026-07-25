@@ -86,6 +86,27 @@ The default is `never` (only the aggregate status is shown). `when-authorized` s
 
 **Status ordering / aggregation:** Overall status is the "worst" among indicators using the `StatusAggregator` ordering: `DOWN > OUT_OF_SERVICE > UP > UNKNOWN`. `HttpCodeStatusMapper` maps status to HTTP codes: `DOWN`/`OUT_OF_SERVICE` → 503, `UP` → 200.
 
+*Worked example — the two response shapes.* With the default `show-details=never`, `GET /actuator/health` returns only the aggregate:
+
+```json
+{ "status": "UP" }
+```
+
+Flip `management.endpoint.health.show-details=always` and the same request expands into the per-component tree the indicators produced (the `downstream` block is the custom `HealthIndicator` shown later):
+
+```json
+{
+  "status": "UP",
+  "components": {
+    "db":        { "status": "UP", "details": { "database": "PostgreSQL", "validationQuery": "isValid()" } },
+    "diskSpace": { "status": "UP", "details": { "total": 500107862016, "free": 218461237248, "threshold": 10485760, "exists": true } },
+    "downstream":{ "status": "UP", "details": { "latencyMs": 12 } }
+  }
+}
+```
+
+The aggregate flips to `DOWN` (and HTTP 503) the moment **any** component reports `DOWN` — e.g. if `db` goes down, `status` becomes `DOWN` even though `diskSpace` and `downstream` are still `UP`, because the aggregator takes the worst.
+
 **Advanced — health groups:** You can group indicators:
 
 ```properties
@@ -99,7 +120,7 @@ Accessible at `/actuator/health/custom`. Groups are the mechanism behind livenes
 
 **Expert — `additional-path` and per-group HTTP mapping:** `management.endpoint.health.group.readiness.additional-path=server:/readyz` exposes the readiness group on the **main application port** (not just the management port) at `/readyz` — useful when the management port is firewalled off from the K8s kubelet but probes must hit the app port. Each group can override `show-details`, `show-components`, its own `StatusAggregator`, and its own `HttpCodeStatusMapper` (`management.endpoint.health.group.<name>.status.http-mapping.DOWN=...`).
 
-**Expert — custom status severity:** If you introduce a custom status string (e.g. `"FROZEN"`) it is treated as **unknown severity** and, by the default `SimpleStatusAggregator` rules, sorts as **less severe than DOWN but the exact position depends on config** — to make it influence the overall status you must register a `StatusAggregator` bean (or set `management.endpoint.health.status.order`) and an `HttpCodeStatusMapper` so it maps to a sensible HTTP code (otherwise it defaults to 200).
+**Expert — custom status severity:** If you introduce a custom status string (e.g. `"FROZEN"`), the default `SimpleStatusAggregator` sorts any code **not** in its known order (`DOWN > OUT_OF_SERVICE > UP > UNKNOWN`) **after** the known ones — i.e. as **least severe of all**. Concretely: given components `{db: UP, cache: FROZEN}`, the aggregate is still **UP**, because `FROZEN` ranks below `UNKNOWN` and cannot outrank `UP`. So by default a custom status will **never** pull the aggregate down, and it maps to **HTTP 200** (unknown codes default to 200, not 503). To make `FROZEN` actually count, register it in `management.endpoint.health.status.order` (or a `StatusAggregator` bean) at the right severity, and add `management.endpoint.health.status.http-mapping.FROZEN=503` so it returns a failing code.
 
 ---
 
@@ -296,6 +317,8 @@ Sending `{"configuredLevel": null}` resets the logger to inherit from its parent
 
 **Intermediate — dimensional tags:** Micrometer is dimensional: meters have a name plus key/value **tags** (e.g. `http.server.requests{uri="/orders",status="200",method="GET"}`). Beware **high-cardinality tags** (user IDs, raw URLs with IDs) — they explode the number of time series and can OOM the registry/backend. Use URI templates (`/orders/{id}`), not actual IDs.
 
+*Worked example — why cardinality is catastrophic (do the multiplication):* the number of time series for ONE meter is the **product** of its tag values, because each distinct combination is its own series. Say `http.server.requests` carries `{uri, status, method}`. If you leak raw IDs into `uri`, a modest 500 distinct URLs (`/orders/1`, `/orders/2`, …) × 8 observed statuses × 4 methods = **500 × 8 × 4 = 16,000 series** for that single metric. Now template the path — `/orders/{id}` collapses those 500 URLs into one route; with ~5 route templates × 4 realistic statuses × 2 methods you get **5 × 4 × 2 = 40 series**. Same traffic, **400× fewer** series. This is why the safety valve `management.metrics.web.server.max-uri-tags` defaults to **100**: the templated design sits comfortably under it (40), while the raw-ID design blows past 100 almost immediately, trips the deny `MeterFilter`, and starts dropping meters with a WARN — the registry's last line of defense before the 16,000-series OOM.
+
 **Advanced — CompositeMeterRegistry & common tags:** Multiple registries are combined into a `CompositeMeterRegistry`; a meter is published to all of them. Add common tags to every metric via a `MeterRegistryCustomizer`:
 
 ```java
@@ -355,6 +378,18 @@ jvm_memory_used_bytes{area="heap",id="G1 Eden Space"} 1.2E7
 - **Push vs pull:** Prometheus is pull-based; for short-lived jobs use the **Pushgateway** (`micrometer-registry-prometheus` supports it) or **OpenTelemetry** push. In Spring Boot 3.2+, `PrometheusExemplars` can attach trace IDs (exemplars) to metrics for metric-to-trace correlation.
 
 **Expert — counter vs histogram vs summary semantics on the wire:** A Micrometer `Timer` with `percentiles-histogram=true` publishes Prometheus **histogram** buckets (`_bucket{le="..."}` cumulative counts) plus `_count` and `_sum`; `histogram_quantile(0.99, sum(rate(..._bucket[5m])) by (le))` computes a fleet-wide p99. `slo`/`service-level-objectives` **add specific bucket boundaries** (`le` values) so you can query "fraction under 100ms" precisely. Pre-computed `percentiles` publish separate `{quantile="0.99"}` time series that are **not aggregatable** — averaging two instances' p99s is statistically meaningless. So: cross-instance quantiles ⇒ histogram/SLO buckets; single-instance quick view ⇒ percentiles.
+
+*Worked example — why you can't average p99s, and how buckets fix it.* Two instances, buckets at `le=100ms` and `le=1000ms` (cumulative `_bucket` counts, plus the implicit `+Inf` = total):
+
+| | count ≤100ms | count ≤1000ms | total (+Inf) |
+|---|---|---|---|
+| Instance A (busy) | 9900 | 10000 | 10000 |
+| Instance B (idle) | 91 | 100 | 100 |
+| **Sum (fleet)** | **9991** | **10100** | **10100** |
+
+Per-instance p99s: A's 99th-percentile rank is `0.99 × 10000 = 9900`, which lands exactly on the `≤100ms` bucket edge, so **A p99 = 100ms**. B's rank is `0.99 × 100 = 99`, which falls in the `(100, 1000]` bucket; linear interpolation gives `100 + (99−91)/(100−91) × 900 ≈ 900ms`, so **B p99 = 900ms**.
+
+Naively averaging the two dashboards' numbers: `(100 + 900) / 2 = 500ms`. But the *true* fleet p99 comes from summing the buckets and running `histogram_quantile`: rank `= 0.99 × 10100 = 9999`, which sits in the merged `(100, 1000]` bucket, interpolating to `100 + (9999−9991)/(10100−9991) × 900 ≈ 166ms`. The real answer (**166ms**) is 3× smaller than the average (500ms) — because A serves 100× more traffic than B, the fleet tail is dominated by A's fast requests, and averaging silently gave B's tiny 100-request sample equal weight. That volume-weighting is *impossible* to recover from pre-computed `{quantile="0.99"}` series; it falls out for free from summing `_bucket` counts. This is the whole reason to prefer `percentiles-histogram` over `percentiles` when you aggregate across instances.
 
 **Expert — scrape staleness and counter resets:** Prometheus derives rates from monotonic counters; on app restart a counter resets to 0 and Prometheus's `rate()` handles the reset via its counter-reset detection — but if you export a **gauge** where a counter belongs, resets silently corrupt rates. Also, the Prometheus registry is **cumulative** (values accumulate across scrapes and only reset on JVM restart), unlike step-based registries (e.g. some SaaS registries publish per-step deltas); mixing mental models causes "my counter looks too high" confusion. `management.prometheus.metrics.export.step` should generally be left alone for pull-based Prometheus.
 
@@ -435,6 +470,8 @@ class OrderService {
 **Advanced — customization:** Configure via `server.*` properties (`server.port`, `server.tomcat.threads.max`, `server.tomcat.accept-count`, `server.tomcat.max-connections`, `server.compression.enabled`). For programmatic tuning implement `WebServerFactoryCustomizer<TomcatServletWebServerFactory>`. `server.port=0` picks a random free port (useful in tests; read it via `@LocalServerPort`). `server.port=-1` disables HTTP entirely.
 
 **Expert — the Tomcat connection pipeline (acceptor → poller → worker):** Requests flow acceptor thread → `acceptCount` OS backlog queue → NIO poller → worker thread pool (`server.tomcat.threads.max`, default 200). Once all `max` worker threads are busy, new connections queue in the `max-connections` (default 8192) NIO layer, and beyond that the OS `accept-count` (default 100) backlog; excess connections are refused. A common production incident: thread pool exhausted by slow downstream calls → requests queue → latency climbs → readiness may still say UP because the pool isn't "down." Tune `threads.max`, add timeouts, and consider `server.tomcat.max-keep-alive-requests`. Virtual threads (`spring.threads.virtual.enabled=true`, Java 21+) change this model: each request gets a virtual thread, sidestepping platform-thread pool limits for blocking I/O.
+
+*Worked example — thread-pool capacity by Little's Law (numbers in → req/s out):* for a blocking (thread-per-request) server, sustainable throughput ≈ `threads ÷ mean_service_time`. Start healthy: 200 worker threads, each request spends a mean **500 ms (0.5 s)** blocked on a downstream call ⇒ capacity ≈ `200 / 0.5 = 400 req/s`. Now the dependency degrades to **2 s** per call. Recompute: `200 / 2 = 100 req/s` — capacity has collapsed to a **quarter** while offered load is unchanged. At, say, 400 req/s still arriving but only 100/s draining, the surplus 300/s piles up: all 200 worker threads sit blocked, the next connections fill the `max-connections=8192` NIO queue, then the `accept-count=100` OS backlog, and everything past that is **refused (connection reset)**. Meanwhile `/health` still says UP — the pool is *saturated*, not *down* — which is exactly why the incident hides from readiness. The fix falls straight out of the formula: cap the blast radius with a **downstream timeout** (a 500 ms read timeout keeps mean service time bounded so one slow dependency can't pin all 200 threads), and only then consider raising `threads.max`. Note raising threads alone is a trap: 2000 threads at 2 s still only buys `2000/2 = 1000 req/s` while multiplying context-switch and memory cost — the timeout attacks the numerator's real problem.
 
 **Expert — Loom / virtual threads:** With `spring.threads.virtual.enabled=true` on Boot 3.2+/Java 21, Tomcat's request-handling uses a virtual-thread-per-request executor, and `@Async`/scheduled executors also switch to virtual threads. Caveat: `synchronized` blocks around blocking I/O **pin** the carrier thread (pre-JDK 24), undermining scalability; prefer `ReentrantLock`. Thread-pool metrics (`tomcat.threads.busy`) become less meaningful under virtual threads.
 
@@ -518,6 +555,9 @@ management.zipkin.tracing.endpoint=http://localhost:9411/api/v2/spans
 **Expert — two bridges on the classpath = broken:** You must have **exactly one** tracing bridge. If both `micrometer-tracing-bridge-brave` and `micrometer-tracing-bridge-otel` are present, auto-configuration produces two `Tracer` beans and startup fails or tracing behaves unpredictably — a frequent "it worked then I added a dependency" incident. Similarly, the propagation format must match across services: Brave defaults to B3, OTel to W3C `traceparent`; a Brave service calling an OTel service without configuring shared propagation drops the trace at the boundary (new trace starts). Configure `management.tracing.propagation.type` to align them.
 
 **Expert — sampling is head-based and per-trace, not per-span:** `management.tracing.sampling.probability` is a **head sampler** decision made at the root span and propagated via the `sampled` flag in `traceparent`/B3 — all downstream services honor the upstream decision, so you can't "sample more" downstream. This means partial traces are rare but also that a low probability at the edge silently drops entire traces for downstream teams. For always-on capture in specific flows, use a custom `Sampler`/`SamplerFunction` or bump probability to 1.0. Sampling affects **spans/traces exported**, not the metric side of an `Observation` — the timer is always recorded even when the span is not sampled.
+
+> [!INTERVIEW]
+> **"Why not just sample 100% in prod, and how do you still keep every error trace at 10%?"** Head sampling is decided at the edge *before* the request runs, so it's cheap (no buffering) but **blind** — at `probability=0.1` you keep a random 10% and silently discard 90%, including 90% of your error and slow traces, exactly the ones you want during an incident. You don't run 100% because trace volume ≈ QPS: at 10k req/s, 100% sampling is 10k traces/s of span export, storage, and egress, and it creates exporter backpressure that can stall the app. The senior answer is **tail-based sampling**: buffer complete traces in the **OTel Collector** (out of process, not in-app) and decide *after* seeing the outcome — keep 100% of error/slow traces and, say, 5% of the successful ones. You pay for the Collector's memory/buffering instead of the app's, and you keep the signal (errors) while shedding the noise (fast successes). Head sampling can't do this because the keep/drop decision is already frozen in `traceparent` before the error happens.
 
 **Expert — Observation lifecycle and `ObservationHandler`:** An `Observation` has `start()` → `openScope()` (binds ThreadLocal context, e.g. MDC/trace) → `close()` scope → `stop()`. `ObservationHandler`s (metrics handler, tracing handler) hook these events. If you manually create observations, forgetting `openScope()`/scope close means the span won't be current and child spans/log correlation break. `@Observed` (needs `ObservedAspect` bean) manages the lifecycle for you but is subject to the same AOP self-invocation limitation as `@Timed`.
 

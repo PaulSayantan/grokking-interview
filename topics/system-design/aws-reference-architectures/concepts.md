@@ -21,7 +21,11 @@ caveat). **Lambda** runs up to **15 minutes**, up to **10 GB memory**, **10 GB e
 `/tmp`**, 6 MB sync / 256 KB async payload, 1000 default concurrent executions (soft).
 **API Gateway** REST/HTTP have a **29-second integration timeout** (raised beyond 29 s only
 by quota increase on REST regional as of 2024). **DynamoDB** items are ≤ **400 KB**; a single
-partition sustains ~**3000 RCU / 1000 WCU** before you need write sharding. **Kinesis Data
+partition sustains ~**3000 RCU / 1000 WCU** before you need write sharding. (An **RCU** =
+Read Capacity Unit = one **strongly** consistent read of up to **4 KB/s**, or two
+**eventually** consistent reads of 4 KB/s — so eventual reads are half price and strong reads
+cost 2× RCU. A **WCU** = Write Capacity Unit = one write of up to **1 KB/s**; a 3 KB write
+costs 3 WCU.) **Kinesis Data
 Streams** shard = **1 MB/s or 1000 records/s ingest, 2 MB/s egress**. **SQS Standard** is
 effectively unlimited TPS and at-least-once; **SQS FIFO** is **300 TPS (3000 with batching
 of 10)** and exactly-once-processing within a dedup window.
@@ -197,6 +201,22 @@ flowchart LR
 - **Cost lever:** egress dominates streaming cost. Higher cache-hit ratio and appropriate
   rendition ladder (don't ship 4K to phones) are the biggest savings.
 
+**Worked example — where the streaming dollars go.** Say **10 M** stream views/month at an
+average **2 GB** each ⇒ **20 M GB = 20 PB** of viewer egress. At CloudFront ~**$0.085/GB**
+that's **~$1.7 M/month** of data transfer out — and note the compute (MediaConvert + Lambda
+control plane) is a rounding error next to it. Two levers, quantified:
+- **Cache-hit ratio protects the origin, not the viewer bill.** Viewer egress is paid on
+  every byte regardless. What a **90%** hit ratio buys is origin offload: instead of S3
+  serving all 20 PB, it serves only the **10% misses = 2 PB**, and popular segments are
+  fetched from S3 *once* then reused for millions of viewers — that collapses S3 request
+  counts and origin load ~**10×**, which is what actually keeps the origin from melting.
+- **Rendition ladder cuts the egress volume itself.** A 2-hour movie at 4K (~18 Mbps) is
+  ~**16 GB**; at 720p (~3 Mbps) it's ~**2.7 GB**. If half your 10 M views are on phones and
+  you *wrongly* ship them 4K, that half costs 5 M × 16 GB × $0.085 ≈ **$6.8 M**; right-sizing
+  them to 720p makes it 5 M × 2.7 GB × $0.085 ≈ **$1.15 M** — a ~**$5.6 M/month** saving from
+  one ABR-ladder decision. This is why "don't ship 4K to phones" is a real cost control, not
+  a slogan.
+
 ---
 
 ## Real-time chat and notifications
@@ -227,6 +247,10 @@ flowchart TD
   (per-shard order) or SQS FIFO (per message-group).
 - **Push to offline users:** SNS mobile push or **Pinpoint** (campaigns, segments, multi-
   channel: push/SMS/email).
+- **Stale connection reconciliation:** when you `postToConnection` to a `connectionId` that
+  has just dropped (client closed, timed out), the call returns **410 GONE** → delete that
+  `connectionId` from the registry. This is the classic follow-up: it's belt-and-suspenders
+  with the TTL, keeps presence accurate, and stops you pushing to ghost connections.
 
 **Trade-offs.**
 - **API Gateway WebSocket vs AppSync subscriptions vs self-managed on ECS/EKS:** WebSocket
@@ -278,6 +302,48 @@ flowchart LR
 - **Inventory contention on flash sales:** a single hot SKU is a hot partition / row lock →
   use conditional decrements, write-sharding, or a reservation queue.
 
+**Worked example — a saga rolling back.** Trace a checkout where step 3 fails:
+
+```
+Step 1  reserve inventory   -> OK   (SKU-42 count 10 -> 9)
+Step 2  charge payment      -> OK   ($59.99 captured, txnId=pay_abc)
+Step 3  create order record -> FAILS (Aurora write conflict / timeout)
+```
+
+The orchestrator (Step Functions) now runs the **compensating actions in reverse order** of
+the steps that succeeded — undo the newest first:
+
+```
+Compensate 3  (nothing to undo — create-order never committed)
+Compensate 2  refund payment pay_abc      ($59.99 returned)
+Compensate 1  release inventory reservation (SKU-42 count 9 -> 10)
+End state: customer not charged, stock restored, no dangling order.
+```
+
+Note compensations are *semantic* undos, not a transactional rollback — a refund is a new
+payment event, not "un-capturing" the charge. Each compensating action must itself be
+idempotent and retriable, because the orchestrator may retry it.
+
+**Worked example — an idempotency key stopping a double charge.** The client sends
+`Idempotency-Key: chk-2026-07-25-u77-o13` (deterministic per checkout attempt). The payment
+Lambda does a **conditional PutItem** *before* calling the payment gateway:
+
+```
+PutItem(
+  Item = { pk: "chk-2026-07-25-u77-o13", status: "charging" },
+  ConditionExpression = "attribute_not_exists(pk)"
+)
+```
+
+- **First delivery:** key absent ⇒ PutItem succeeds ⇒ call gateway, capture $59.99, update
+  item to `status=charged, txnId=pay_abc`.
+- **Retry** (SQS redelivered the same message — SQS is at-least-once): PutItem throws
+  `ConditionalCheckFailedException` because the key already exists ⇒ the Lambda **skips the
+  gateway call** and returns the stored `txnId`. The customer is charged **once**, not twice.
+
+This is why "idempotency key + conditional write" is the standard answer to "SQS is
+at-least-once, so how do you guarantee exactly-once payment effects?"
+
 **Trade-offs.**
 - **Aurora vs DynamoDB for orders:** Aurora for rich relational queries, multi-row ACID,
   reporting, and when the team knows SQL; DynamoDB for extreme scale, predictable key access,
@@ -322,6 +388,20 @@ flowchart LR
   their posts at read time and merge into the pushed timeline. This is the standard answer.
 - **Async fan-out** via **SQS or Kinesis** so posting stays fast and the fan-out absorbs
   spikes; **ElastiCache** holds hot timelines for sub-ms reads.
+
+> [!KEY-TAKEAWAY]
+> **Worked example — why celebrities break fan-out-on-write.** A celebrity with **50 M**
+> followers makes **1** post. Push model = write that postId into 50 M timelines = **50 M
+> writes** for a single post. Each timeline insert is a small item, so at 1 KB it's ~1 WCU
+> each ⇒ **50 M WCU** of work. A DynamoDB partition sustains **1000 WCU/s**, so even spread
+> perfectly across, say, **1000** partitions you get 1000 × 1000 = 1 M WCU/s of table
+> capacity — and 50 M ÷ 1 M = **~50 seconds** of sustained max write pressure for *one*
+> celebrity post (a normal user with 500 followers = 500 writes, done in the blink of an
+> eye). Now multiply by dozens of celebrities posting during a live event and the fan-out
+> queue backs up for minutes and followers see the post late. That is exactly why you flip
+> **high-fan-out accounts to pull**: store the celeb post **once**, and merge it in at read
+> time. The break-even is roughly "followers × post-rate ≫ your follower's read-rate" —
+> above ~a few hundred thousand followers, pull wins.
 
 **Trade-offs.**
 - **Write-heavy fan-out vs read-heavy merge:** push optimizes the (dominant) read at the cost
@@ -427,7 +507,7 @@ Savings Plans). Lead serverless; move right as throughput/duration/control needs
 | Graph | Neptune | Relationships; niche |
 | Time-series | Timestream | Metrics/IoT; niche |
 
-**Messaging/integration:** SQS (decouple, buffer, retries/DLB, work queue) vs SNS (pub/sub
+**Messaging/integration:** SQS (decouple, buffer, retries/DLQ, work queue) vs SNS (pub/sub
 fan-out) vs EventBridge (event bus, content routing, SaaS/schema registry) vs Kinesis/MSK
 (ordered, replayable, high-volume streaming, multiple consumers). Common combo: **SNS→SQS
 fan-out** (durable per-subscriber queues) and **EventBridge** for cross-service events.
@@ -450,10 +530,13 @@ Auto Scaling across AZs). This is table stakes and mostly free architecturally.
 **How designs degrade:**
 - **AZ failure:** multi-AZ services ride through; single-AZ resources (one EC2, one NAT GW)
   are the weak link — spread across ≥2–3 AZs.
-- **Region failure:** needs an explicit **multi-region** strategy chosen by RTO/RPO:
-  backup-restore (cheapest, hours) → pilot light → warm standby → **active-active**
-  (DynamoDB Global Tables, Aurora Global Database, Route 53 failover/latency routing,
-  S3 CRR). More availability = more cost + more complexity (conflict resolution).
+- **Region failure:** needs an explicit **multi-region** strategy chosen by RTO/RPO (RTO =
+  how long recovery takes; RPO = how much recent data you can lose):
+  backup-restore (RTO **hours**, RPO **hours** — cheapest) → pilot light (RTO **10s of
+  minutes**, RPO **minutes**) → warm standby (RTO **minutes**, RPO **minutes/seconds**) →
+  **active-active** (RTO **near-zero**, RPO **seconds** — DynamoDB Global Tables, Aurora
+  Global Database, Route 53 failover/latency routing, S3 CRR). More availability = more cost +
+  more complexity (conflict resolution).
 - **Throttling / hot partitions:** DynamoDB hot key, Kinesis hot shard, Lambda concurrency
   cap → back off, shard keys, add cache, request quota increases; use SQS as a shock absorber.
 - **Poison messages:** SQS/Lambda need **DLQs** and max-receive limits so one bad message
@@ -476,6 +559,21 @@ Interviewers reward candidates who reason about cost, not just correctness.
   and scales to zero; at high, steady throughput a Fargate/EC2 fleet is cheaper per request.
   Estimate: `invocations × (duration × mem GB-s price) + per-request price` vs a fleet's
   hourly cost at target utilization.
+
+  **Worked example — the actual break-even QPS.** Take a 200 ms, 512 MB (0.5 GB) function.
+  Per invocation: compute = 0.2 s × 0.5 GB × **$0.0000166667/GB-s** ≈ **$0.00000167**, plus
+  the **$0.20 per 1 M requests** = **$0.0000002** per request ⇒ ~**$0.00000187** per call.
+  Now the fleet: one Fargate task at 1 vCPU / 2 GB costs ~**$0.049/hour**, and at 200 ms/req
+  a single-vCPU task handles ~**5 req/s** ⇒ its per-request cost is $0.049 ÷ (5 × 3600) ≈
+  **$0.00000272**. So *per request* Lambda ($1.87/M) is actually **cheaper** than a
+  fully-busy Fargate task ($2.72/M) here — because this function is light. Lambda loses only
+  when the fleet runs near 100% while Lambda still pays per-invoke: push duration to 1 s and
+  Lambda compute alone becomes 1 × 0.5 × $0.0000166667 ≈ **$0.0000083/req = $8.3/M**, while a
+  1-vCPU task now serving 1 req/s costs $0.049 ÷ 3600 ≈ **$0.0000136/req = $13.6/M** at 1 rps
+  — but pack that task to ~10 concurrent 1 s requests and it drops to **~$1.36/M**, well under
+  Lambda. **Takeaway:** the crossover isn't a fixed QPS — it's *utilization*. Lambda wins
+  while a container would sit idle (spiky, low duty cycle); the fleet wins once you can keep
+  it densely and steadily busy so its fixed hourly cost is amortized across many requests.
 - **DynamoDB on-demand vs provisioned:** on-demand for unpredictable/spiky or new workloads
   (pay per request, no capacity planning); provisioned + auto scaling (or reserved capacity)
   is much cheaper for steady, predictable traffic.

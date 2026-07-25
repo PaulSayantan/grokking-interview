@@ -98,7 +98,9 @@ the bottleneck** (often cited around Amazon's "two-pizza team" per service).
   fault isolation / independent tech stacks.
 - **Modular monolith** is the best default in 2024-2025 thinking: you get most
   of the boundary discipline of microservices with none of the network tax, and
-  a clean seam to extract a service later (strangler fig).
+  a clean seam to extract a service later (**strangler fig** — stand up the new
+  service and route new traffic to it while the old code still serves the rest,
+  migrating incrementally until the old path is "strangled" and deleted).
 
 ---
 
@@ -207,6 +209,27 @@ bodies), **complex/malicious queries** can hammer the backend (need query depth
 limits, cost analysis, persisted queries), the **N+1 problem** moves server-side
 (need DataLoader batching), and server complexity is higher. Invented at
 Facebook for mobile feeds; used by GitHub, Shopify, Netflix (internal).
+
+**Worked example — over/under-fetch and the GraphQL N+1.** Rendering "20 posts,
+each with its author's name" makes the three styles concrete:
+- **REST under-fetch:** `GET /posts?limit=20` returns 20 posts but only author
+  *ids*, so the client (or BFF) then fires `GET /users/{id}` for each -> **1 + 20
+  = 21 round trips** to fill one screen. (REST *over*-fetch is the mirror image:
+  `GET /users/{id}` hands back the full user record — address, settings, avatar —
+  when you only wanted `name`.)
+- **GraphQL** solves the round-trip count: one query `{ posts(limit:20){ title
+  author{ name } } }` returns exactly those fields in **1 network request**.
+- **...but the N+1 moves server-side.** Naively, the server runs the `posts`
+  resolver once (1 query -> 20 posts), then runs the `author` resolver *once per
+  post* -> **1 + 20 = 21 database queries**. Same N+1, now inside the server. For
+  200 posts it's 201 queries; the fan-out is invisible to the client but hammers
+  the DB.
+- **DataLoader batching fixes it.** DataLoader collects all the author-id lookups
+  requested within one tick of the event loop, de-duplicates them, and issues a
+  **single** batched query `SELECT * FROM users WHERE id IN (7, 3, 9, ...)`. The
+  20 individual author resolvers now resolve from that one result -> **1 (posts)
+  + 1 (batched authors) = 2 queries** total, regardless of post count. (It also
+  caches within the request, so two posts by the same author collapse to one id.)
 
 **gRPC.** Contract-first RPC using **Protocol Buffers** (binary) over **HTTP/2**.
 Very fast and compact, supports **bidirectional streaming**, strong typed
@@ -436,8 +459,11 @@ leave the key recorded without the effect (or vice-versa).
   state machine is `NEW -> (processing) -> COMPLETED`, and the second caller must
   not re-execute while the first is `processing`.
 - **Atomicity of effect + key.** As above, commit the side effect and the
-  stored response in the *same* transaction (or use the outbox pattern) so a
-  crash can't record one without the other.
+  stored response in the *same* transaction (or use the **outbox pattern** —
+  write the event/result to an `outbox` table *in the same DB transaction* as the
+  state change, then a separate relay polls that table and publishes it; because
+  both rows commit or neither does, the effect and its record can never diverge)
+  so a crash can't record one without the other.
 - **TTL and its danger.** Keys are stored with a TTL (Stripe keeps them ~24h).
   The subtle bug: if the TTL is *shorter* than the client's retry window, a late
   retry after expiry re-executes and double-charges. TTL must exceed the maximum
@@ -520,6 +546,27 @@ flowchart LR
   problem, and it *adds* eventual-consistency and rebuild complexity you must be
   ready to operate.
 
+**Worked example — the latency math.** Suppose the order screen needs four
+services with per-call latencies of **20 / 40 / 60 / 80 ms**.
+- **Composition, sequential** (call one after another): 20 + 40 + 60 + 80 =
+  **200 ms** — the *sum*. Every dependency is on the critical path.
+- **Composition, parallel fan-out** (fire all four at once, await all): you wait
+  for the slowest, so ≈ **80 ms** — the *max*. This is why you always fan out
+  concurrently when the calls are independent.
+- **The tail dominates.** Now say the 80 ms call is a p99 straggler that
+  occasionally spikes to **500 ms**. Because the aggregate can't return until the
+  slowest piece does, that one dependency drags the *whole* screen's p99 to
+  ~500 ms even though three of four services are fast. This is why you cap each
+  call with a **per-call timeout** (say 150 ms) and return a **partial response**
+  ("reviews unavailable") rather than letting one slow backend hold the request.
+- **CQRS lookup:** the same screen served from a pre-joined read model is **one**
+  key lookup — **single-digit ms** (e.g. 3-5 ms) — at the cost of eventual
+  consistency (the projection may lag the write by, say, 200 ms).
+
+So the trade is a ~80-200 ms fresh read that puts load on N transactional
+services versus a ~4 ms stale-by-a-fraction-of-a-second read against a
+maintained copy — exactly the freshness-vs-latency axis the table above names.
+
 ---
 
 ## The operational tax of microservices
@@ -545,8 +592,10 @@ senior from mid-level answers.
 - **Deployment and release surface.** N services = N pipelines, N sets of build/
   test/deploy config, N rollback procedures. Cross-service changes need
   **backward/forward-compatible, decoupled rollouts** (expand-contract / parallel
-  change): you can't deploy provider and consumer atomically, so every change
-  must tolerate a window where old and new run side by side.
+  change — *add* the new field/endpoint and deploy it while the old still works,
+  migrate every consumer over, then in a later deploy *remove* the old): you
+  can't deploy provider and consumer atomically, so every change must tolerate a
+  window where old and new run side by side.
 - **On-call and cognitive load.** Every service needs an owner, a runbook,
   alerts, and someone who understands its failure modes at 3am. The org-wide
   on-call burden and the cognitive load of "what talks to what" grow with the
@@ -587,6 +636,24 @@ flowchart LR
     Sidecar -->|"mTLS"| Others["other sidecars"]
     ControlPlane["Control plane (Istio)"] -->|"config/policy/telemetry"| Sidecar
 ```
+
+**Data plane vs control plane (know the split).** The **data plane** is the fleet
+of sidecar proxies (Envoy) that actually *carry* every request — they do the
+mTLS, retries, timeouts, and load balancing on the traffic itself. The **control
+plane** (Istio) carries *no* application traffic; it computes configuration and
+policy and pushes it down to the sidecars. The split matters for failure modes:
+if the control plane goes down, existing sidecars keep running on their last
+pushed config (traffic still flows), but they stop learning about *new* endpoints
+or policy changes.
+
+This is also where **service discovery** (fallacy #5, "topology doesn't change")
+gets grounded: instances come and go with autoscaling, so nobody hardcodes hosts.
+The control plane watches the registry (e.g. Kubernetes endpoints), and pushes
+the current list of healthy instances for each service to every sidecar. The
+sidecar then does **client-side load balancing** — it picks an instance from that
+list per request (round-robin/least-request) instead of routing through a
+central LB. So "how does service A find a healthy instance of B?" answers to:
+control plane -> sidecar's endpoint list -> local load-balancing choice.
 
 **What it gives you:** mTLS everywhere (zero-trust), consistent retries/timeouts/
 circuit breaking, traffic shifting (canary, blue-green), **observability** (the
@@ -665,6 +732,49 @@ or fan out to many consumers.**
   + cascading-failure risk; async = availability + decoupling + eventual
   consistency + operational complexity of a broker. State which one your design
   needs and *why*.
+
+**Worked example — a saga (and why not 2PC).** "Place an order" spans three
+services that each own their own DB, so there is no single ACID transaction to
+wrap it in. A **saga** breaks the workflow into a sequence of *local* commits,
+each with a **compensating action** that undoes it if a later step fails. Trace
+the happy path then a failure:
+
+```
+Step 1  Order svc:      create order (status=PENDING)     -> local commit OK
+Step 2  Inventory svc:  reserve 1 widget (stock 5 -> 4)   -> local commit OK
+Step 3  Payment svc:    charge $30                          -> DECLINED  ✗
+```
+
+Now the saga runs the compensations for the steps that *did* commit, in reverse:
+
+```
+Comp 2  Inventory svc:  release reservation (stock 4 -> 5) -> committed
+Comp 1  Order svc:      mark order CANCELLED (reason=payment_declined)
+```
+
+Net effect: stock is back to 5, the order is CANCELLED, no money moved — the
+system is consistent again *without* any distributed lock. Note compensations
+are business-level undo, not a rollback: if payment had *succeeded* and the
+*next* step (shipping) failed, you'd compensate by **refunding**, not by
+un-charging the card. Two ways to coordinate this:
+- **Orchestration** — a central "order saga" coordinator explicitly calls each
+  step and issues the compensations (easy to see the flow, one place to reason
+  about; the orchestrator is a component you must build and keep available).
+- **Choreography** — no coordinator: each service reacts to the previous one's
+  event (`OrderCreated` -> reserve -> `InventoryReserved` -> charge). Looser
+  coupling, but the end-to-end flow is emergent and harder to trace.
+
+**Why not 2PC (two-phase commit)?** 2PC uses a coordinator that asks every
+participant to *prepare* (phase 1), and only if **all** vote yes does it tell
+them to *commit* (phase 2). During that window each participant holds locks on
+its rows. Two problems make it a poor fit for microservices: (1) it is
+**synchronous locking across services** — a participant blocks on the
+coordinator, so throughput and availability drop; and (2) if the **coordinator
+crashes after prepare but before commit**, participants are stuck holding locks
+indefinitely (the classic *blocking* failure). Sagas trade 2PC's strong
+atomicity for availability + eventual consistency, which is the microservices
+default. (See the dedicated **saga / distributed-transactions** topic for retry,
+timeout, and semantic-lock details.)
 
 ---
 

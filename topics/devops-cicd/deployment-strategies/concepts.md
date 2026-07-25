@@ -91,6 +91,24 @@ spec:
       maxUnavailable: 0
 ```
 
+**Worked trace — rolling 4 pods, `maxSurge: 25%` (=1), `maxUnavailable: 0`.** Desired
+replicas = 4, so 25% surge = 1 extra pod allowed; 0 unavailable means never drop below
+4 serving. Watch the counts (v1 = old, v2 = new):
+
+| Step | Action | v1 | v2 | Serving (ready) |
+|---|---|---|---|---|
+| 0 | steady state | 4 | 0 | 4 |
+| 1 | add 1 v2 (surge to 5) | 4 | 1 | 4, then 5 once v2 passes readiness |
+| 2 | v2 ready → kill 1 v1 | 3 | 1 | 4 |
+| 3 | add 1 v2 | 3 | 2 | 5 |
+| 4 | v2 ready → kill 1 v1 | 2 | 2 | 4 |
+| … | repeat | 0 | 4 | 4 |
+
+Serving capacity never dips below 4 — that's the zero-downtime guarantee. Now flip the
+knobs to `maxUnavailable: 1`, `maxSurge: 0`: step 1 becomes *kill 1 v1 first* (drops to
+**3 serving**), then add 1 v2. Same end state, but you traded an availability floor of 4
+for one of 3 — cheaper (no surge capacity) but you serve 25% below target mid-roll.
+
 - **Pros:** no downtime (with the right knobs), no double infrastructure (only surge
   overhead), built in everywhere.
 - **Cons / gotchas:**
@@ -173,6 +191,30 @@ flowchart TD
   statistically worse, abort. Tools: **Argo Rollouts** (`AnalysisTemplate`/
   `AnalysisRun` querying Prometheus, etc.; "if the analysis is unsuccessful the
   rollout is aborted") and **Flagger**.
+- **Compare against a *concurrent baseline*, not history or a fixed threshold.** The
+  senior move is to run a fresh pod of the *current* version (the "baseline") next to
+  the canary and compare canary-vs-baseline, not canary-vs-prod-average or
+  canary-vs-yesterday. Why: a traffic spike, a noisy neighbor, or the nightly
+  batch-job diurnal pattern hits *both* pods equally, so it cancels out of the
+  comparison — you avoid false aborts (baseline also looks bad) and false passes
+  (baseline also looks good). A static "abort if errors > 1%" threshold can't tell "v2
+  is broken" from "the whole service is having a bad minute."
+
+**Worked trace — reading the abort decision off real numbers.** Service does 10,000
+rps. First step is `setWeight: 5`, so the canary sees ~5% = **~500 rps**. The analysis
+template defines success as *success-rate ≥ 0.99* (i.e. error rate ≤ 1%), sampled every
+1 minute over a 10-minute bake, with `failureLimit: 3` (abort after 3 failing samples).
+
+- Baseline (fresh v1 pod) over the bake: ~0.2% errors → success-rate 0.998 → **passes**
+  every minute.
+- Canary v2 over the same 10 min: 500 rps × 600 s = **300,000 requests**; it returns
+  **5,400 errors → 1.8% error rate → success-rate 0.982**, which is `< 0.99`.
+- Each 1-min sample the canary logs ~0.982 → fails the `≥ 0.99` condition. Sample 1
+  fail, sample 2 fail, sample 3 fail → **`failureLimit: 3` reached at minute 3** → Argo
+  Rollouts marks the `AnalysisRun` `Failed` → **auto-abort**: traffic snaps back to 5%→0
+  on v2, v1 stays at 100%. The bad build touched only ~5% of traffic for 3 minutes, and
+  crucially baseline stayed healthy the whole time, so we *know* it's v2's fault, not a
+  site-wide blip.
 - **Bake time:** each step waits (bakes) long enough to gather signal — a canary that
   jumps straight to 100% in seconds isn't a canary.
 - **vs rolling:** rolling replaces pods but doesn't hold a *fixed small percentage*
@@ -182,6 +224,18 @@ flowchart TD
   precise percentages, good metrics/observability, and takes longer to fully roll
   out. Precise weights below "1 pod = X%" require a traffic router, not just replica
   counts.
+- **Gotcha — session stickiness.** Naive per-request weighting routes each request
+  independently, so one user can bounce v2→v1→v2 across a single flow. A v2-rendered
+  page requesting a v2-only API field, whose next call lands on v1, breaks. Route
+  *consistently per user/session* (hash on a session cookie or user ID) so a chosen
+  user stays on one version for the whole flow — random-per-request is fine only for
+  stateless, self-contained calls.
+- **Gotcha — low-traffic services can't canary meaningfully.** 5% of a service doing
+  20 rps is ~1 rps; a 10-minute bake gathers only ~600 canary requests — far too few
+  for statistical confidence in an error-rate delta. Options: lengthen the bake, use a
+  *larger* initial weight (e.g. 25–50%), or skip canary and prefer blue-green / a
+  manual smoke test. Canary's math only pays off when the canary slice is large enough
+  to detect the regression you care about.
 
 ---
 
@@ -343,7 +397,13 @@ flowchart LR
 ```
 
 1. **Expand** — add the new schema element (new nullable column/table) *additively*.
-   Old and new code both still work. Deploy.
+   Old and new code both still work. Deploy. **Gotcha: additive ≠ free on big tables.**
+   Adding a column with a *non-null default*, or building an index, historically took a
+   long table-level lock (older MySQL/Postgres rewrote the whole table), stalling all
+   writes for the duration — an "additive" change that still caused an outage. Prefer
+   *nullable, no-default* add-then-backfill, use `CREATE INDEX CONCURRENTLY`
+   (Postgres) / online index builds, or an online-DDL tool (`pt-online-schema-change`,
+   `gh-ost`) that copies the table incrementally instead of holding one big lock.
 2. **Migrate** — deploy code that reads/writes the new shape (often dual-writing old
    and new); backfill existing rows.
 3. **Contract** — once *no* running code depends on the old element, drop it in a
@@ -351,6 +411,21 @@ flowchart LR
 
 - **Rename column** = never `RENAME` in one shot; it's *add new → dual-write →
   backfill → switch reads → drop old*.
+
+**Worked trace — rename `name` → `full_name` across four deploys.** The rule to watch:
+at every deploy boundary, *both* the just-shipped code and the previous version must run
+against the current schema.
+
+| Deploy | Schema change (DDL) | App code behavior | Safe to roll back? |
+|---|---|---|---|
+| 1 (Expand) | `ALTER TABLE users ADD COLUMN full_name VARCHAR NULL;` | still reads/writes `name` only | **Yes** — new column is unused & nullable |
+| 2 (Migrate) | none (or run backfill `UPDATE users SET full_name = name WHERE full_name IS NULL;` in batches) | **dual-write**: every write sets both `name` and `full_name`; reads still use `name` | **Yes** — `name` still authoritative |
+| 3 (Switch) | none | reads switch to `full_name`; still dual-writes so `name` stays populated | **Yes** — rolling back to Deploy 2 still reads `name`, which is current |
+| 4 (Contract) | `ALTER TABLE users DROP COLUMN name;` | reads/writes `full_name` only | **No** — dropping `name` is the point of no return; Deploy 3's dual-write needs `name` |
+
+The unsafe boundary is Deploy 4: once `name` is dropped, you cannot roll back to any
+version that still writes it. Ship Deploy 4 only after Deploy 3 has soaked and you're
+confident no rollback to `name` is needed. Deploys 1–3 are each independently reversible.
 - Other zero-downtime requirements: **graceful shutdown** (drain in-flight requests
   on SIGTERM, deregister from the LB first — Kubernetes `preStop` hook +
   `terminationGracePeriodSeconds`), and **backward/forward-compatible API contracts**
@@ -396,7 +471,12 @@ fraction of requests reach each version — and **health gating** — refusing t
 The **DORA / Accelerate** research defines four key metrics for software delivery
 performance; deployment strategy directly moves them.
 
-| Metric | Definition | Elite target (State of DevOps) |
+The elite bands below are **approximate** — DORA re-publishes them roughly yearly in the
+State of DevOps report and the exact thresholds (and even metric names, e.g. MTTR was
+renamed to "failed deployment recovery time") shift across report years. Quote them as
+ballparks, not fixed truths.
+
+| Metric | Definition | Elite target (approx., State of DevOps) |
 |---|---|---|
 | **Deployment frequency** | How often you deploy to production | On-demand (multiple per day) |
 | **Lead time for changes** | Time from commit to running in production | < 1 hour (elite) |

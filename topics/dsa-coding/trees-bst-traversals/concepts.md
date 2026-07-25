@@ -193,6 +193,20 @@ def search(node, target):
     return None
 ```
 
+**Insert** descends the same compare path until it falls off a null slot, then attaches
+the new node there. The recursive form relinks on the way back up:
+
+```python
+def insert(node, val):
+    if node is None: return TreeNode(val)   # empty slot → new node lives here
+    if val < node.val: node.left  = insert(node.left, val)
+    else:              node.right = insert(node.right, val)
+    return node                              # parent re-attaches this subtree
+```
+
+The base case (`node is None`) creates the node; each caller reassigns its `left`/`right`
+to the returned subtree, which also handles the empty-tree/root case cleanly.
+
 **Delete** is the fiddly one — three cases:
 1. **Leaf** — just remove it.
 2. **One child** — splice the child up into the node's place.
@@ -200,11 +214,74 @@ def search(node, target):
    in the right subtree) or inorder predecessor (largest in the left subtree), then
    delete that successor node (which has at most one child).
 
+**Worked trace — deleting `5` (two children).** Start with:
+
+```
+        5
+       / \
+      3    8
+          / \
+         6    9
+```
+
+`5` has two children, so we can't just remove it. Find its **inorder successor** =
+smallest value in the right subtree: from `8`, go left as far as possible → `6`. Copy
+`6` into the node holding `5`:
+
+```
+        6            (now delete the duplicate 6 from the right subtree)
+       / \
+      3    8
+          / \
+         6    9
+```
+
+Now recursively delete `6` from the right subtree. That `6` is a **leaf** (case 1) — or
+in general has at most one child, since it was the leftmost node — so it removes cleanly:
+
+```
+        6
+       / \
+      3    8
+            \
+             9
+```
+
+Inorder before: `3 5 6 8 9`; after: `3 6 8 9` — still strictly increasing, so the BST
+invariant survives. The key insight: the successor is guaranteed to have **no left
+child** (it's the leftmost), so deleting it is always the easy 0-or-1-child case.
+
 > [!WARNING]
 > "Validate BST" is famously failed by checking only `left.val < node.val < right.val`
 > locally. That's insufficient — a node deep in the left subtree could still exceed the
 > root. You must pass down a **(low, high) valid range** and tighten it as you descend,
 > or verify that a full inorder traversal is **strictly increasing**.
+
+**Worked counterexample — why the local check fails.** Take this tree:
+
+```
+        10
+       /  \
+      5     15
+           /  \
+          6    20
+```
+
+The naive per-node check passes everywhere: at `15`, `6 < 15 < 20` ✓; at `10`,
+`5 < 10 < 15` ✓. Yet this is **not** a valid BST — `6` sits in `10`'s *right* subtree,
+so it must be `> 10`, but `6 < 10`. Now watch the **range** method catch it as it
+descends:
+
+| Node | Inherited range `(low, high)` | Check |
+|---|---|---|
+| `10` (root) | `(−∞, +∞)` | ✓ |
+| `5` (left of 10) | `(−∞, 10)` | `5 < 10` ✓ |
+| `15` (right of 10) | `(10, +∞)` | `15 > 10` ✓ |
+| `6` (left of 15) | `(10, 15)` | `6 > 10`? **NO → invalid** |
+
+Going right tightens the *low* bound (`> 10`); going left from `15` tightens *high* to
+`15` but keeps `low = 10`. Node `6` inherits `(10, 15)` and fails `6 > 10` — the exact
+constraint the local check never sees.
 
 ## Why balance matters: AVL & red-black rotations
 
@@ -231,6 +308,11 @@ flowchart LR
     x2 --> b2["β"]
   end
 ```
+
+Read off the **inorder** of each side to confirm the ordering is untouched. Before (`x`
+on top): `α, x, β, y, γ`. After (`y` on top): `α, x, β, y, γ` — identical. The rotation
+only relinks three pointers; the left-to-right sorted sequence is invariant, which is
+exactly why a balanced BST can restructure freely without breaking search.
 
 | Tree | Balance rule | Guarantee | Character |
 |---|---|---|---|
@@ -317,6 +399,32 @@ def lca(root, p, q):
     return L or R
 ```
 
+**Worked trace — how partial results bubble up.** Find LCA of `p = 4` and `q = 7`:
+
+```
+        3
+       / \
+      5    1
+     / \    \
+    4    6    7
+```
+
+Follow the returns bottom-up (each line is what one call hands back to its parent):
+
+| Call at node | left result | right result | returns |
+|---|---|---|---|
+| `4` | — | — | `4` (it *is* p) |
+| `6` | null | null | `null` |
+| `5` | `4` | `null` | `4 or null` = `4` |
+| `7` | — | — | `7` (it *is* q) |
+| `1` | `null` | `7` | `null or 7` = `7` |
+| `3` (root) | `4` (from `5`) | `7` (from `1`) | **both non-null → `3`** |
+
+Nodes off the search path (like `6`) return `null` and vanish. A found target bubbles up
+unchanged through single-sided parents (`5` passes `4` up, `1` passes `7` up). Only at
+`3` do *both* sides come back non-null — that's the split point, so `3` is the answer and
+it then propagates unchanged to the top.
+
 ## Serialize and deserialize
 
 Encode a tree to a string and reconstruct it — tests whether you understand that a
@@ -326,6 +434,46 @@ traversal **plus null markers** uniquely determines a tree.
   deserializes in one recursive pass each, O(n). This is the cleanest approach and the
   usual expected answer.
 - **BFS/level-order with nulls** (LeetCode's own format) also works.
+
+**Worked example — serialize the running tree** (root `1`; `2`,`3`; `4`,`5` under `2`):
+
+```
+    1
+   / \
+  2    3
+ / \
+4   5
+```
+
+Preorder emits the node, then recurses left, then right, writing `#` for each null:
+visit `1` → visit `2` → visit `4` (leaf: `4,#,#`) → visit `5` (leaf: `5,#,#`) → back up,
+`2`'s work done → visit `3` (leaf: `3,#,#`). Full string:
+
+```
+1,2,4,#,#,5,#,#,3,#,#
+```
+
+Deserialize reads those tokens **in the same preorder**, popping from the front of a
+queue; `#` means "no node here," anything else builds a node then fills its left and
+right by recursing:
+
+```python
+def deserialize(data):
+    tokens = iter(data.split(","))
+    def build():
+        t = next(tokens)
+        if t == "#": return None          # null sentinel → empty slot
+        node = TreeNode(int(t))
+        node.left  = build()              # recurse left first (matches serialize)
+        node.right = build()
+        return node
+    return build()
+```
+
+Replaying `1,2,4,#,#,5,#,#,3,#,#`: `build()` reads `1`, then its left `build()` reads
+`2`, whose left `build()` reads `4` and then two `#`s (leaf `4`); back at `2`, right
+`build()` reads `5` and two `#`s (leaf `5`); back at `1`, right `build()` reads `3` and
+two `#`s — reconstructing the exact original tree.
 
 Key theory for the related **"Construct from Preorder + Inorder"** problem: a single
 traversal is *not* enough to rebuild a tree, but **preorder + inorder** (or postorder +

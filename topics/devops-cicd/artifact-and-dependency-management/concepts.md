@@ -81,6 +81,27 @@ and makes caching safe (a cached `1.4.2` is always correct).
 - Optional **pre-release** (`1.0.0-rc.1`) and **build metadata** (`1.0.0+build.42` or
   `1.0.0+sha.a1b2c3`). Build metadata is ignored for precedence ordering.
 
+**Worked example — ordering these five from lowest to highest:**
+`1.0.0`, `1.0.0-rc.1`, `1.0.0+build.42`, `1.0.0-alpha`, `1.0.0-alpha.1`.
+
+Apply the precedence rules step by step:
+
+1. A version *with* a pre-release tag is **lower** than the same version without one, so all
+   three `1.0.0-…` sort below the plain `1.0.0`.
+2. Among pre-releases, compare the dot-separated identifiers left to right. `alpha` vs
+   `alpha.1`: the first field (`alpha`) is equal, but `alpha.1` has an *extra* field, and "a
+   larger set of fields wins when all preceding are equal" → `1.0.0-alpha` < `1.0.0-alpha.1`.
+3. `alpha.1` vs `rc.1`: first field `alpha` vs `rc` compared as text → `alpha` < `rc`, so
+   `1.0.0-alpha.1` < `1.0.0-rc.1`.
+4. `1.0.0+build.42`: **build metadata is stripped before comparison**, so it has the *same*
+   precedence as plain `1.0.0` (they are "equal" for ordering — the repo just won't let two
+   builds actually share the `1.0.0` slot).
+
+Final order:
+`1.0.0-alpha` < `1.0.0-alpha.1` < `1.0.0-rc.1` < `1.0.0` **=** `1.0.0+build.42`.
+This is exactly why an `rc` never accidentally outranks the real release, and why you can't
+encode "which build won" in `+metadata` — it's invisible to the resolver.
+
 For CI-built artifacts, a common scheme is `SemVer + build metadata`, e.g.
 `1.4.2+2026.07.20.build.318` or embedding the Git commit SHA. The SHA ties the artifact
 back to exact source. Many teams also tag images with the **immutable digest**
@@ -101,6 +122,10 @@ back to exact source. Many teams also tag images with the **immutable digest**
 Registries can *enforce* immutability: ECR "tag immutability", Artifactory's block on
 overwriting release versions, etc. **SNAPSHOT** versions (Maven) are the deliberate
 exception — they are mutable-by-design pre-release builds and must never ship to prod.
+Mechanically: each deploy of `1.4.2-SNAPSHOT` uploads a *new timestamped* artifact under the
+covers (`1.4.2-20260720.101500-3`, `…-4`, …), and a client that asks for `1.4.2-SNAPSHOT`
+resolves to the *newest* one. So two builds an hour apart can pull genuinely different bytes
+under the same version string — the reason `-SNAPSHOT` is banned from anything you promote.
 
 ---
 
@@ -186,6 +211,38 @@ Two version-declaration styles:
 tree (you might declare 10 and end up with 300). They are where surprises hide: a
 transitive bump can change behavior or introduce a vulnerability you never chose directly.
 
+You only *declared* `A`, but the resolver walks the whole graph — each node drags in its own
+children, and the tree fans out fast:
+
+```
+your app (declares 1 direct dep: A)
+└─ A@1.2.0            ← direct, pinned by lockfile
+   ├─ B@3.1.0         ← transitive
+   │  └─ D@2.0.4      ← transitive (depth 3)
+   │     └─ E@1.0.7   ← transitive (depth 4)
+   └─ C@0.9.2         ← transitive
+      └─ D@2.0.4      ← shared node, resolved once
+```
+
+One declared dependency became **five** installed packages. Multiply that realistic
+fan-out across 10 direct deps and "10 → 300" stops being hand-wavy. The lockfile pins
+*every* node above (A, B, C, D, E) to an exact version+hash — not just the one you typed.
+
+**Worked example — a floating range diverging overnight.** Your `package.json` declares
+`"acme-lib": "^1.4.0"` (caret = `>=1.4.0 <2.0.0`). Registry state:
+
+- **Monday build**: newest matching version published is `1.4.2`. `npm install` resolves
+  `acme-lib@1.4.2` and writes it into `package-lock.json`.
+- Overnight, upstream publishes `1.4.9` (still `<2.0.0`, so still in range).
+- **Tuesday build on a teammate's laptop, no lockfile**: `^1.4.0` now resolves to
+  `1.4.9` — a *different* artifact, silently, with no code change on your side. "Works on
+  mine, breaks on yours."
+
+With the committed lockfile + `npm ci`, both machines install exactly `1.4.2` regardless of
+what published overnight; the range is only re-consulted when you deliberately run an update
+and regenerate the lock. That is the whole point of pinning: the *range* says what's
+*allowed*, the *lockfile* says what you *got*.
+
 A **lockfile** records the *exact resolved version (and checksum)* of **every** dependency,
 direct and transitive, so a later install reproduces the identical tree:
 
@@ -215,10 +272,75 @@ Rules of thumb interviewers expect:
   source pinning. (Supply-chain deep dive:
   `devops-cicd/software-supply-chain-security`.)
 
+**Worked example — how the hijack actually happens (and what stops it):**
+
+1. Your internal registry hosts `acme-utils@1.2.0`. Your CI is configured with *two*
+   sources — the internal registry **and** public npmjs.org — and simply picks the
+   **highest version it can find, regardless of source**.
+2. An attacker notices the name `acme-utils` is unclaimed publicly and publishes
+   `acme-utils@99.0.0` to npmjs.org.
+3. `npm install` compares candidates: internal `1.2.0` vs public `99.0.0`. `99.0.0` wins on
+   version, so the *malicious* package is pulled — and its `postinstall` script runs on your
+   build agent with your credentials.
+
+Now map each mitigation to the step it breaks:
+
+- **Scoped names** (`@acme/utils`): step 2 fails — an attacker can't publish under your
+  registered `@acme` scope, so there's no higher public candidate to find.
+- **Virtual repo with internal-first resolution**: step 1 fails — the resolver never even
+  *sees* the public `99.0.0` for names that exist internally.
+- **Explicit registry pinning** (per-scope registry in `.npmrc`): step 1 fails — `acme-*`
+  is bound to the internal registry only, so public versions are out of scope entirely.
+
 > [!TIP]
 > `go.sum` and pip `--require-hashes` store cryptographic hashes, not just versions — so
 > even if a registry serves tampered bytes for a pinned version, the install fails. Hashes
 > upgrade a lockfile from "same version" to "same bytes".
+
+### When dependencies conflict (the diamond problem)
+
+The classic senior probe: your app pulls in `lib` **twice, at different versions**, through
+two different paths. `X` needs `lib@1.2`, `Y` needs `lib@2.0`:
+
+```
+your app
+├─ X@1.0 ─→ lib@1.2
+└─ Y@1.0 ─→ lib@2.0
+```
+
+There is no universal answer — each ecosystem resolves it differently, and the *failure
+mode* differs too:
+
+- **npm/yarn — install both, nested.** `node_modules` can hold multiple copies: `lib@1.2`
+  nested under `X`, `lib@2.0` nested under `Y` (npm hoists the most-common one to the top
+  and nests the rest). Both callers get the version they asked for. Cost: duplicated code,
+  larger installs, and two *different* singletons of the same module (a real bug source for
+  things like `instanceof` checks across the two copies).
+- **Maven — "nearest wins".** Only **one** version lands on the classpath: the one at the
+  *shallowest* depth in the dependency tree (ties broken by declaration order). So if
+  `lib@1.2` is one hop away and `lib@2.0` is two hops away, everyone gets `1.2` — including
+  `Y`, which wanted `2.0`. It can **silently** ship an incompatible version; the classic
+  runtime `NoSuchMethodError`. (`mvn dependency:tree` + `<dependencyManagement>` pins are how
+  you take control.)
+- **Python/pip — one global version.** A venv allows exactly **one** `lib`. The backtracking
+  resolver searches for a single version satisfying *both* constraints; if `1.2` and `2.0`
+  are mutually exclusive it **errors out** (`ResolutionImpossible`) rather than guessing.
+  Loud, but you can't proceed until you reconcile.
+- **Go — Minimal Version Selection (MVS).** Go picks the **highest of the minimum** versions
+  required. If `X` needs `≥1.2` and `Y` needs `≥2.0`, MVS selects `2.0` (the highest floor).
+  It never jumps to a newer `2.1` just because it exists — you get the lowest version that
+  satisfies everyone, deterministically. This is *why* `go.sum` gives reproducible builds
+  without a separate lock/update step: resolution is a pure function of the `go.mod`
+  requirements, not "whatever was newest the day you ran install."
+
+The takeaway interviewers want: **npm duplicates, Maven silently picks one (dangerous),
+pip refuses (safe but blocking), Go computes it deterministically.**
+
+> [!TIP]
+> `npm ci` installs strictly from the committed lockfile; `npm install` may *re-resolve and
+> rewrite* `package-lock.json` (introducing drift and noisy diffs). That churn is exactly
+> why CI must use `npm ci` — and why lockfile **merge conflicts** are resolved by
+> regenerating the lockfile (re-run the resolver), never by hand-editing the resolved tree.
 
 ---
 
@@ -261,7 +383,19 @@ the resolved dependencies (or the package-manager cache) between runs.
 Correctness rule: **key the cache on the lockfile hash.** When the lockfile changes,
 dependencies changed, so the cache key changes and you fetch fresh; when it's unchanged,
 you restore instantly. Keying on a branch name or a floating value causes **stale or
-poisoned caches**.
+poisoned caches**:
+
+- **Stale** — key = branch name `feature-x`. You bump a dependency in the lockfile, but the
+  key is *still* `feature-x`, so CI restores yesterday's resolved `node_modules` and the new
+  dependency is never installed. The build silently runs the *old* dependency set — green
+  build, wrong bytes.
+- **Poisoned** — a cache key shared/writable across untrusted PRs. A malicious PR job writes
+  a tampered package into the cache under a key a later trusted job restores from, injecting
+  attacker code into a build that never asked for it.
+
+Keying on the **lockfile hash** kills both: a lockfile edit produces a new key (no stale
+restore), and a per-lockfile-content key can't be steered by an attacker who didn't change
+the lockfile.
 
 GitHub Actions example:
 

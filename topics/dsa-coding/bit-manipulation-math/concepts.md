@@ -25,6 +25,21 @@ position `i` has place value `2^i`.
 sign bit, and a negative number `-x` is represented as `~x + 1` (invert all bits, add one).
 Equivalently, the MSB carries a *negative* weight `-2^(w-1)`.
 
+Worked example — store `-5` in 8 bits, two ways, and confirm they agree:
+
+```
++5           = 0000 0101
+invert (~)   = 1111 1010
+add 1        = 1111 1011   ← this is -5
+
+Read it back by the negative-MSB-weight rule (bit 7 is worth -2^7 = -128):
+1111 1011 = -128 + 64 + 32 + 16 + 8 + 0 + 2 + 1
+          = -128 + 123 = -5   ✓
+```
+
+Both interpretations — "`~x + 1`" and "MSB carries weight `-2^(w-1)`" — land on the same
+value. That is *why* the identities hold; they are not two rules but one.
+
 - Range of a `w`-bit signed int: `[-2^(w-1), 2^(w-1) - 1]`. For 32 bits:
   `[-2147483648, 2147483647]`.
 - There is exactly **one zero** (unlike sign-magnitude), and one "extra" negative value
@@ -98,6 +113,22 @@ but XOR avoids overflow.)
 bit of `p^q` is a position where `p` and `q` differ. Pick the lowest set bit `d = x & -x`,
 partition the array by that bit, and XOR each group separately to recover `p` and `q`.
 
+Worked trace — `nums = [1, 2, 1, 3, 2, 5]` (uniques are 3 and 5):
+
+```
+XOR all:  1^2^1^3^2^5 = (1^1)^(2^2)^(3^5) = 0^0^(3^5) = 3^5
+          3 = 011, 5 = 101  →  3^5 = 110 = 6
+lowest set bit d = 6 & -6 = 2   (binary 010)
+
+partition on "n & 2":
+  bit set   {2, 3, 2}  (2=010, 3=011)  → 2^3^2 = 3
+  bit clear {1, 1, 5}  (1=001, 5=101)  → 1^1^5 = 5
+answer = {3, 5}   ✓
+```
+
+The trick works because `d` is a bit where `p` and `q` disagree, so they land in *different*
+groups — while every duplicate pair shares all its bits and so lands together, cancelling out.
+
 **Single Number II** (every element thrice except one) is *not* solvable by plain XOR —
 threes don't cancel under XOR. Use bit-by-bit counting mod 3, or the two-mask "ones/twos"
 state machine.
@@ -137,8 +168,17 @@ def count_bits(n):          # Kernighan
 ```
 
 **`n & -n` isolates the lowest set bit** (returns its value, e.g. `12 & -12 == 4`). Because
-`-n == ~n + 1`, the low run flips and the lowest set bit is the only position that agrees.
-This is the core of **Fenwick / Binary Indexed Trees** and of Single Number III's partition.
+`-n == ~n + 1`, the low run flips and the lowest set bit is the only position that agrees:
+
+```
+ 12 = 0…0 0 1 1 0 0
+-12 = ~12 + 1 = 0…0 1 0 1 0 0   (invert to …10011, add 1)
+AND = 0…0 0 0 1 0 0 = 4
+```
+
+Bit 2 (value 4) is the only position that is 1 in both: below it the add-1 carry flipped every
+bit, and above it the bits are exact complements, so they can never both be 1. This is the core
+of **Fenwick / Binary Indexed Trees** and of Single Number III's partition.
 
 ## Counting bits and the DP recurrence
 
@@ -154,6 +194,10 @@ A set of `n` elements maps to an `n`-bit integer: bit `i` present ⟺ element `i
   `mask` iff `mask & (1 << i)`.
 - **Enumerate submasks** of a fixed mask `m` (all subsets of `m`):
   `sub = m; while sub: ...; sub = (sub - 1) & m`. Total work over all masks is **O(3^n)**.
+  *Why 3^n?* Across the whole (mask, submask) enumeration each of the `n` bits is
+  independently in one of **three** states: set in `m` and in `sub`, set in `m` but not in
+  `sub`, or not in `m` at all. So total work `= Σ_masks 2^popcount(mask) = Σ_k C(n,k)·2^k =
+  (1+2)^n = 3^n` (binomial theorem). Sanity check `n=2`: masks 00,01,10,11 do 1+2+2+4 = 9 = 3².
 - This underpins **bitmask DP** (e.g. Travelling Salesman `dp[mask][i]`), where `mask` is the
   visited set. Feasible only for small `n` (~20) because of the `2^n` state count.
 
@@ -173,7 +217,25 @@ def get_sum(a, b):
 ```
 
 In Java this is just `while (b != 0) { int c = a & b; a ^= b; b = c << 1; }` — 32-bit wrap is
-automatic. Python needs explicit masking because its ints never overflow.
+automatic. Python needs explicit masking because its ints never overflow, so the two masked
+lines are pure Python bookkeeping: `while b & mask` ignores any carry that has already marched
+past bit 31, and `a & mask if b > mask else a` says "if the carry ran off the top of 32 bits,
+the true answer is negative — return the low 32 bits reinterpreted."
+
+Worked trace — `get_sum(-1, 1)` should give `0`. The carry propagates one bit higher each pass:
+
+```
+a=-1 (…1111), b=1     → a^b = -2,  carry = (a&b)<<1 = 2
+a=-2,         b=2     → a^b = -4,  carry = 4
+a=-4,         b=4     → a^b = -8,  carry = 8
+… (bit climbs) …
+a=-2^31,      b=2^31  → a^b = -2^32, carry = 2^32
+now b = 2^32; b & mask = 2^32 & 0xFFFFFFFF = 0 → loop ends
+b (=2^32) > mask → return a & mask = (-2^32) & 0xFFFFFFFF = 0   ✓
+```
+
+The `b > mask` test fires exactly because the final carry (`2^32`) overflowed 32 bits — the
+signal that the result is a negative 32-bit value, so we mask `a` down to its 32-bit form.
 
 ## GCD (Euclid) and LCM
 
@@ -198,7 +260,9 @@ Interview arithmetic frequently asks for answers **mod 1e9+7** (a prime chosen s
   **if you cast to `long` first**: `((long)a * b) % m`. `a * b` in 32-bit `int` overflows
   silently well before the mod.
 - **Division under a mod** needs the **modular inverse** (Fermat: `a^(m-2) mod m` for prime
-  `m`), not real division.
+  `m`), not real division. Fermat requires `m` prime **and** `a` not a multiple of `m`
+  (`a ≢ 0 mod m`, i.e. `gcd(a, m) = 1`) — otherwise no inverse exists. For composite moduli use
+  the extended Euclidean algorithm instead.
 - Distributivity: `(a*b*c) % m == ((a%m)*(b%m)%m * (c%m)) % m` — reduce at every step.
 
 > [!WARNING]
@@ -221,6 +285,20 @@ def power(x, n):            # n >= 0
         n >>= 1
     return result
 ```
+
+Worked trace — `power(3, 13)`, where `13 = 1101b` (bits 0, 2, 3 set). Watch `x` square each
+step and `result` pick up a factor only when the current low bit is 1:
+
+| n (binary) | n&1 | result before → after | x before → after |
+|---|---|---|---|
+| 13 (1101) | 1 | 1 → 3 | 3 → 9 |
+| 6 (110)   | 0 | 3 → 3 | 9 → 81 |
+| 3 (11)    | 1 | 3 → 243 | 81 → 6561 |
+| 1 (1)     | 1 | 243 → 1594323 | 6561 → … |
+
+`result = 3^1 · 3^4 · 3^8 = 3·81·6561 = 1594323 = 3^13` ✓ — the set bits (0, 2, 3) contribute
+exactly the powers `3^1, 3^4, 3^8`, and `1 + 4 + 8 = 13`. ~7 multiplies (4 squarings + 3 on set
+bits) instead of the 12 a naive loop needs — and only `O(log n)` as `n` grows.
 
 For **Pow(x, n)** on LeetCode: handle `n < 0` by computing `1 / power(x, -n)`, and beware
 `n == Integer.MIN_VALUE` — negating it overflows, so widen to `long` first. The same
@@ -296,6 +374,33 @@ def range_and(L, R):
 ```
 
 O(log R) time, O(1) space. This "find the common high prefix" insight is the whole problem.
+
+## Maximum XOR of two numbers (bit trie / greedy prefix)
+
+Given an array, find the largest `a ^ b` over all pairs. Brute force is O(n²). The trick:
+insert every number's fixed-width bits (say 32, MSB-first) into a **binary trie**. To maximize
+XOR *for one number*, walk the trie from the top bit down and at each level **greedily take the
+opposite bit** if a branch for it exists — a differing bit contributes `1` to that (higher-value)
+position of the XOR. Do this for every number and keep the best. **O(n · W)** time (W = bit
+width), which is O(n) for fixed 32-bit ints.
+
+> [!TIP]
+> Higher bits dominate: a single differing bit at position `k` is worth more (`2^k`) than every
+> lower bit combined. That is why greedily grabbing the opposite bit top-down is optimal — never
+> trade a high bit for lower ones.
+
+Worked trace — `nums = [1, 2, 4]` in 3 bits: `001, 010, 100`. Query with `4 = 100`, walking the
+trie built from all three:
+
+```
+bit2: 4 has 1 → want 0; branches {001,010} have 0 → take it. XOR bit2 = 1.  candidates {001,010}
+bit1: 4 has 0 → want 1; 010 has 1       → take it. XOR bit1 = 1.  candidates {010}
+bit0: 4 has 0 → want 1; 010 has 0 only  → forced 0. XOR bit0 = 0.
+XOR = 110 = 6   (i.e. 4 ^ 2 = 6)
+```
+
+Repeating for 1 and 2 finds nothing larger, so the answer is **6**. (Brute-force check: 1^2=3,
+1^4=5, 2^4=6 — matches.)
 
 ## Interview Problems
 

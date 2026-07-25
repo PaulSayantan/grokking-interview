@@ -46,6 +46,23 @@ built-in `$connect`, `$disconnect`, and `$default` routes. The server pushes to
 clients via the **`@connections` callback API** using the connection ID (you typically
 store connection IDs in DynamoDB). Billed per message + connection-minutes.
 
+*Why persist connection IDs?* The gateway is **stateless per message** — it hands each
+incoming frame to a fresh Lambda invocation, and any Lambda instance (even one triggered
+later by a totally different event) may need to push to a connection it never accepted.
+The connection ID is the only handle to a live socket, so you must save it somewhere all
+your push code can read. Traced fan-out broadcast of "user A posted a message" to 3
+subscribers:
+
+1. Each client opens a socket → `$connect` route → Lambda writes its `connectionId`
+   (e.g. `abc=`, `def=`, `ghi=`) into a DynamoDB `Connections` table.
+2. User A sends a message → `$default`/`sendMessage` route → a producer Lambda **scans
+   the table** (3 rows) and calls `postToConnection(connectionId, payload)` once per row
+   → `abc=`, `def=`, `ghi=` each receive the push.
+3. `def=` closed its laptop 10 minutes ago but never sent `$disconnect` (network drop).
+   `postToConnection("def=")` throws **`GoneException` (HTTP 410)** → the Lambda catches
+   it and **deletes that row** so the next broadcast doesn't waste a call on a dead
+   socket. This stale-connection pruning is the gotcha AppSync handles for you.
+
 ```
         REST API          HTTP API         WebSocket API
         --------          --------         -------------
@@ -79,6 +96,26 @@ Design implications:
   use an **asynchronous pattern**: return `202 Accepted` + a job ID immediately, do the
   work in Step Functions / SQS + Lambda / Batch, and let the client **poll** or receive
   a **WebSocket/AppSync-subscription** push when done.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as API Gateway
+    participant W as Worker (Step Fn / SQS+Lambda)
+    participant S as Job store (DynamoDB)
+    C->>G: POST /reports (Idempotency-Key: k1)
+    G->>S: write job k1 = PENDING
+    G-->>C: 202 Accepted {jobId}
+    G->>W: start async work
+    Note over W,S: work runs > 29s, safely off the request path
+    W->>S: job k1 = DONE {resultUrl}
+    C->>G: GET /reports/{jobId} (poll)  -- or WebSocket/AppSync push
+    G-->>C: 200 {status: DONE, resultUrl}
+```
+
+The **idempotency key** (`k1`) is what prevents a client retry (or a gateway 504 on a
+slow submit) from kicking off the same expensive job twice — the worker checks the store
+and no-ops if `k1` already exists.
 - The default account throttle is **10,000 RPS** with a **5,000 burst** bucket
   (token-bucket) across all API types in a Region (lower — 2,500 RPS / 1,250 burst —
   in a set of newer/smaller Regions). This is a soft limit (increasable), but it is
@@ -95,10 +132,36 @@ order: **account-level** (per Region) → **per-API / per-stage / per-method** �
 Requests**. Two knobs: **rate** (steady-state RPS = bucket refill rate) and **burst**
 (bucket capacity = max concurrent spike).
 
+**Worked trace — rate = 100 RPS, burst = 200, client fires 300 requests in one instant:**
+- The bucket starts full with **200** tokens (that is what "burst = bucket capacity"
+  means). The first **200** requests each take a token and pass **immediately** → the
+  bucket is now empty.
+- The remaining **100** requests arrive with an empty bucket. Tokens refill at 100/sec,
+  i.e. one token every 10 ms. In the *same* instant essentially none have refilled, so
+  those 100 get **429'd** (API Gateway does not queue — it rejects).
+- Over the **next full second** the bucket refills 100 tokens, so a client that backs
+  off and retries can push another 100 requests that second. Steady state is therefore
+  **100 RPS**; the 200-token burst only buys a one-time cushion for a spike, then you are
+  rate-limited to the refill rate.
+- Takeaway: burst absorbs a momentary spike (200 at once), rate governs the sustained
+  ceiling (100/sec). Clients must use **exponential backoff + jitter** on the 429s.
+
 **API keys + usage plans (REST API only):** an API key identifies a caller; a **usage
 plan** attaches rate/burst limits **and a quota** (e.g. 1M requests/month) to a set of
 keys and stages. This is how you build tiered SaaS ("free = 10 RPS/10k/day, pro =
-100 RPS/1M/day"). **Important gotcha:** API keys are **not an authentication
+100 RPS/1M/day").
+
+*Quota vs rate are independent limits — a caller can hit either first.* Work the pro
+tier: a **1M req/month** quota averages `1,000,000 / (30 × 86,400 s) ≈ 0.39 RPS` — trivially
+under the 100 RPS rate limit if traffic were perfectly smooth. But real traffic is bursty:
+a client with **990k requests already used** (quota headroom of 10k) that suddenly sends
+150 requests in one second gets **429'd on the rate limit** (100 RPS) even though it is
+nowhere near exhausting its monthly quota. Conversely a client averaging 0.4 RPS all
+month can burn its **entire 1M quota** and then get 429'd on quota with the rate bucket
+completely full. Interview point: **rate/burst protect your backend per-second; quota
+enforces the billing envelope over a month — enforce and monitor both.**
+
+**Important gotcha:** API keys are **not an authentication
 mechanism** — they identify/meter, they don't authenticate. Never use an API key as
 your only auth for a sensitive API; pair it with an authorizer.
 
@@ -123,6 +186,24 @@ with proper IAM permission. Only worth it for read-heavy, cacheable, latency-sen
 GETs. For global read caching, **CloudFront in front** is often cheaper and more
 flexible than API Gateway's built-in cache.
 
+**Worked "is the cache worth it?" (approx us-east-1 pricing):** suppose **500 GET RPS**,
+all cacheable, **90% hit rate**, each miss costs one Lambda invoke (512 MB, 100 ms) + one
+DynamoDB read.
+- Per-invoke backend cost: Lambda GB-s = 0.5 GB × 0.1 s = 0.05 GB-s × $0.0000166667 ≈
+  **$0.00000083**; Lambda request charge **$0.0000002**; DynamoDB eventually-consistent
+  read (0.5 RRU × $0.125/M RRU) ≈ **$0.0000000625**. Total ≈ **$1.10 per million** misses
+  avoided. (The API Gateway request charge is **not** saved — cache hits still count as
+  API requests — so only the backend cost is in play.)
+- Hits/month at 90%: 500 × 0.9 = 450 RPS × 2,592,000 s ≈ **1.166 billion** backend calls
+  avoided → 1,166.4 M × $1.10/M ≈ **$1,280/month saved**.
+- Cache instance (e.g. 6.1 GB @ ~$0.20/hr) ≈ $0.20 × 730 ≈ **$146/month fixed**.
+- Verdict: save **~$1,280**, pay **$146** → clearly worth it at this volume.
+- **Break-even hit rate:** you need enough avoided calls to cover $146. $146 ÷ $1.10/M ≈
+  **133 M** hits/month. Total GET volume = 500 × 2,592,000 ≈ 1.296 B/month, so break-even
+  ≈ 133 M ÷ 1,296 M ≈ **~10%** hit rate. Below ~10% the fixed hourly cost dominates and
+  the cache loses money — which is exactly why the cache only pays off for **high-volume,
+  high-hit-rate** GETs, not a low-traffic API.
+
 **Request/response mapping (REST API, VTL):** mapping templates let API Gateway
 transform between the client's payload and the integration's expected format
 (rename fields, inject context like `$context.identity.sourceIp`, reshape JSON/XML).
@@ -134,6 +215,13 @@ becomes a maintenance liability, and many teams prefer a thin Lambda for readabi
 **HTTP API supports only lightweight parameter mapping, not full VTL.**
 
 ## Authorizers: IAM, Cognito, and Lambda
+
+Think of authorizers as **four different bouncers at the door**, ranked by cost and
+latency. IAM checks a badge you already carry (SigV4 — no extra server, cheapest inside
+AWS); JWT/Cognito checks a signed wristband against a known issuer (fast, no code); the
+Lambda authorizer is a human bouncer who runs your custom rulebook on every guest
+(most flexible, but you pay for the extra person on every entry). Reach for the cheapest
+one that can express your rule.
 
 Four ways to control who calls an API Gateway endpoint:
 
@@ -277,6 +365,38 @@ Rule of thumb: **serverless for spiky/low-steady + fast delivery; containers beh
 ALB for high steady throughput, long requests, and cost predictability.** You can also
 combine — API Gateway (auth, throttle, WAF) → private integration (VPC Link) → ALB →
 Fargate — to get API management in front of containers.
+
+**Worked cost crossover — "At 50k sustained RPS, is serverless still cheapest?"**
+(approx us-east-1 on-demand pricing; assume HTTP API + Lambda 512 MB / 100 ms). Monthly
+requests = 50,000 × 2,592,000 s = **129.6 billion**.
+
+*Serverless side:*
+- **HTTP API requests:** $1.00/M for the first 300M, $0.90/M beyond → 300M × $1.00 =
+  $300, plus 129,300M × $0.90 = $116,370 → **≈ $116,670**.
+- **Lambda requests:** 129,600M × $0.20/M = **$25,920**.
+- **Lambda compute:** 0.5 GB × 0.1 s = 0.05 GB-s/req × 129.6B = 6.48B GB-s × $0.0000166667
+  = **$108,000**.
+- **Serverless total ≈ $116,670 + $25,920 + $108,000 ≈ $250,000/month.**
+
+*Container side (ALB + Fargate):* say each 1-vCPU / 2-GB task comfortably serves ~500 RPS
+→ 50,000 / 500 = 100 tasks (round to **120** for headroom/HA).
+- **Fargate:** per task = 1 × $0.04048 (vCPU-hr) + 2 × $0.004445 (GB-hr) = $0.04937/hr;
+  120 tasks × $0.04937 × 730 hr ≈ **$4,325**.
+- **ALB:** ~$0.0225/hr × 730 ≈ $16 + LCU charges (connections/bytes/rules) ≈ a few
+  hundred to ~$1,000 at this volume → call it **~$1,000**.
+- **Container total ≈ $4,325 + $1,000 ≈ $5,300/month.**
+
+*Result:* serverless ~$250k vs containers ~$5.3k — containers are **~47× cheaper** at
+50k steady RPS. **So the answer is: no, serverless is not cheapest here.**
+
+*Where is the crossover?* Reduce to cost-per-RPS-per-month. Serverless is purely variable:
+$0.90 + $0.20 + $0.833 ≈ **$1.93 per million requests**, and 1 sustained RPS = 2.592M
+req/month, so **≈ $5.00/month per RPS**. Containers are near-fixed but carry an **HA
+floor** you pay even at trickle traffic: ≥2 tasks across AZs (2 × $36 ≈ $72) + ALB (~$18)
+≈ **$90/month minimum**. Crossover ≈ $90 ÷ $5.00 ≈ **~18 RPS sustained**. Below ~20
+RPS (or for spiky/bursty traffic that would leave containers idle) serverless wins on
+scale-to-zero and zero ops; above it the container line stays flat while the serverless
+line climbs linearly, and the gap explodes by 50k RPS.
 
 ## Rate limiting and WAF integration
 

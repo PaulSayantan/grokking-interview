@@ -57,6 +57,23 @@ geometric growth (say doubling), `n` appends trigger copies of sizes
 `1, 2, 4, ..., n`, and that geometric series sums to `< 2n`. Spreading `~2n` total work
 across `n` appends gives **`O(1) amortized`** per append.
 
+**Worked trace — 8 appends with doubling** (start capacity 1):
+
+| Append # | size before | capacity | Resize? | Elements copied |
+|---|---|---|---|---|
+| 1 | 0 | 1 | first alloc | 0 |
+| 2 | 1 | 1 → 2 | yes | 1 |
+| 3 | 2 | 2 → 4 | yes | 2 |
+| 4 | 3 | 4 | no | 0 |
+| 5 | 4 | 4 → 8 | yes | 4 |
+| 6–8 | 5,6,7 | 8 | no | 0 |
+
+Total copy work to reach 8 elements = `1 + 2 + 4 = 7` (which is `< 2n = 16`). Add the 8
+plain writes and you get `~15` units of work for 8 appends — **`~1.9` per append**, a
+constant. Contrast additive growth by `+2`: resizes at sizes 2,4,6,… copying
+`2+4+6+…+n = O(n²)` total → the cost per append grows *linearly*, which is why doubling
+(or `1.5×`) is mandatory.
+
 > [!WARNING]
 > Growth must be **geometric (multiplicative)**, not additive. If you grew by a fixed
 > `+k` each time, the copies would sum to `O(n^2)` total — amortized `O(n)` per append.
@@ -165,6 +182,15 @@ Brute force checks every pair (`O(n^2)`). By storing each number's index and ask
 I already seen the complement `target - x`?", we answer in `O(1)` per element → **`O(n)`
 time, `O(n)` space**. That space-for-time trade is the essence of hashing.
 
+Trace on `nums=[2,7,11,15], target=9`:
+
+| i | x | need = 9−x | need in seen? | action | seen after |
+|---|---|---|---|---|---|
+| 0 | 2 | 7 | no (`{}`) | store 2 | `{2:0}` |
+| 1 | 7 | 2 | **yes** → `seen[2]=0` | return `[0,1]` | — |
+
+We never touch 11 or 15 — the answer is found on the second element in one pass.
+
 **Group Anagrams — group-by-canonical-key:**
 
 ```python
@@ -175,6 +201,11 @@ def group_anagrams(strs):
         groups.setdefault(key, []).append(s)
     return list(groups.values())
 ```
+
+Trace on `["eat","tea","tan","ate"]`: each string's sorted key is `eat→"aet"`,
+`tea→"aet"`, `tan→"ant"`, `ate→"aet"`, so the map ends as
+`{"aet": ["eat","tea","ate"], "ant": ["tan"]}` → two groups. The canonical key is the
+whole trick: strings that are anagrams collapse to an identical key regardless of order.
 
 > [!INTERVIEW]
 > When you catch yourself writing a nested loop to compare each element against the
@@ -188,6 +219,60 @@ Two subtleties worth stating out loud in an interview:
 - A hash map/set is **unordered**. If you need sorted order or range queries, you want a
   tree-based map (`TreeMap` / balanced BST) at `O(log n)`, not a hash map.
 
+### Fifth pattern — prefix-sum counts (the senior favorite)
+
+Beyond the four table patterns, the most-asked "senior" hashing trick is **prefix sums in
+a count map** (Subarray Sum Equals K). Intuition: the sum of the subarray `(i, j]` equals
+`prefix[j] - prefix[i]`. A subarray ending at `j` sums to `k` exactly when there is an
+earlier prefix equal to `prefix[j] - k`. So instead of re-summing every subarray
+(`O(n²)`), carry a running prefix sum and keep a **count of every prefix seen so far**;
+at each step look up `running - k`.
+
+```python
+def subarray_sum(nums, k):
+    count = {0: 1}          # empty prefix; enables subarrays starting at index 0
+    running = ans = 0
+    for x in nums:
+        running += x
+        ans += count.get(running - k, 0)   # how many earlier prefixes = running-k
+        count[running] = count.get(running, 0) + 1
+    return ans
+```
+
+Trace on `nums=[1,2,3], k=3`:
+
+| x | running | look up `running−k` | found count | ans | count after |
+|---|---|---|---|---|---|
+| 1 | 1 | −2 | 0 | 0 | `{0:1, 1:1}` |
+| 2 | 3 | 0 | 1 | 1 | `{0:1, 1:1, 3:1}` |
+| 3 | 6 | 3 | 1 | 2 | `{0:1, 1:1, 3:1, 6:1}` |
+
+Answer `2` — the subarrays `[1,2]` and `[3]`. Note the seed `{0:1}`: it's what lets a
+subarray that starts at index 0 (like `[1,2]` when `k=3`) be counted.
+
+### Sliding window — variable-size with a last-seen map
+
+When a problem asks for the **longest/shortest contiguous window** satisfying a
+constraint, grow a `right` pointer, and whenever the constraint breaks, shrink `left`
+until it holds again; track the best window. For "no repeating characters," a map of each
+char's last-seen index lets `left` jump directly past the duplicate instead of crawling.
+
+Trace on `"abcabcbb"` (window `[left, right]`, len = `right−left+1`):
+
+| right | char | last-seen ≥ left? | left | window | best |
+|---|---|---|---|---|---|
+| 0 | a | — | 0 | `a` (1) | 1 |
+| 1 | b | — | 0 | `ab` (2) | 2 |
+| 2 | c | — | 0 | `abc` (3) | 3 |
+| 3 | a | yes (0) | 1 | `bca` (3) | 3 |
+| 4 | b | yes (1) | 2 | `cab` (3) | 3 |
+| 5 | c | yes (2) | 3 | `abc` (3) | 3 |
+| 6 | b | yes (4) | 5 | `cb` (2) | 3 |
+| 7 | b | yes (6) | 7 | `b` (1) | 3 |
+
+Answer `3` (any of the length-3 windows). Each of `right` and `left` moves at most `n`
+times total → **`O(n)`**, versus `O(n²)` for re-checking every substring.
+
 ## In-place array techniques
 
 Many problems demand `O(1)` extra space, which means mutating the input array itself.
@@ -200,6 +285,63 @@ Core in-place idioms:
 - **Reverse tricks** — rotate an array by `k` via three reversals; reverse words in place.
 - **Sign / index-as-hashset encoding** — mark "value `i` seen" by negating `a[abs(v)]`,
   using the array's own sign bits as a set without extra space.
+
+These three are the least reconstructible from prose, so trace each one.
+
+**Cyclic sort — First Missing Positive on `[3,4,-1,1]`.** The idea: value `v` (in range
+`1..n`) belongs at index `v-1`. Repeatedly swap `nums[i]` to its home until the slot at
+`i` is either out of range or already correct, then scan for the first index whose value
+isn't `i+1`.
+
+```
+[3,4,-1,1]  i=0: nums[0]=3 → home index 2. swap(0,2) → [-1,4,3,1]
+[-1,4,3,1]  i=0: nums[0]=-1 out of range 1..4 → leave it, i=1
+[-1,4,3,1]  i=1: nums[1]=4 → home index 3. swap(1,3) → [-1,1,3,4]
+[-1,1,3,4]  i=1: nums[1]=1 → home index 0. swap(1,0) → [1,-1,3,4]
+[1,-1,3,4]  i=1: nums[1]=-1 out of range → leave it, i=2
+[1,-1,3,4]  i=2: nums[2]=3 already at home (index 2) → i=3
+[1,-1,3,4]  i=3: nums[3]=4 already at home (index 3) → done
+```
+
+Now scan: index 0 holds 1 ✓, index 1 holds −1 (expected 2) ✗ → answer **2**. Every swap
+puts one value in its final home, so total swaps ≤ n → **`O(n)` time, `O(1)` space**.
+
+**Sign-bit encoding — Find All Numbers Disappeared on `[4,3,2,7,8,2,3,1]`** (n=8, values
+in `1..n`). Pass 1: for each value `v`, negate the slot at index `abs(v)-1` to mark "`v`
+is present." Pass 2: any index still holding a positive number was never marked → its
+`index+1` is missing.
+
+```
+see 4 → negate idx 3: [4,3,2,-7,8,2,3,1]
+see 3 → negate idx 2: [4,3,-2,-7,8,2,3,1]
+see 2 → negate idx 1: [4,-3,-2,-7,8,2,3,1]
+see 7 → negate idx 6: [4,-3,-2,-7,8,2,-3,1]
+see 8 → negate idx 7: [4,-3,-2,-7,8,2,-3,-1]
+see |−2|=2 → idx 1 already negative, leave it
+see |−3|=3 → idx 2 already negative, leave it
+see 1 → negate idx 0: [-4,-3,-2,-7,8,2,-3,-1]
+```
+
+Positives remain at index 4 (value 8) and index 5 (value 2) → missing numbers are
+**5 and 6**. Reading `abs(v)` before indexing is essential, since earlier marks may have
+already flipped the sign of a slot you now need to read as an index.
+
+**Dutch national flag — sort `[2,0,2,1,1,0]` of {0,1,2} in one pass.** Three pointers:
+`low` (next slot for 0), `mid` (cursor), `high` (next slot for 2). If `nums[mid]==0` swap
+with `low`, advance both; if `==1` just advance `mid`; if `==2` swap with `high` and
+shrink `high` (do **not** advance `mid` — the swapped-in value is unexamined).
+
+```
+start                low=0 mid=0 high=5  [2,0,2,1,1,0]
+nums[mid]=2 → swap(mid,high), high=4     [0,0,2,1,1,2]  (mid stays 0)
+nums[mid]=0 → swap(mid,low), low=1 mid=1 [0,0,2,1,1,2]
+nums[mid]=0 → swap(mid,low), low=2 mid=2 [0,0,2,1,1,2]
+nums[mid]=2 → swap(mid,high), high=3     [0,0,1,1,2,2]  (mid stays 2)
+nums[mid]=1 → mid=3
+nums[mid]=1 → mid=4  (mid>high, stop)
+```
+
+Result `[0,0,1,1,2,2]`, sorted in a single pass, `O(n)` / `O(1)`.
 
 **Product of Array Except Self** (no division, `O(1)` extra output-only space) uses
 prefix/suffix passes writing into the result array:

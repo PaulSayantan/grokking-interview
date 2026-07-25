@@ -46,7 +46,11 @@ the load balancer and your app is plaintext — a compromised host or a mirrored
 read it. Re-encrypting (ALB → HTTPS target, or mTLS between services via App Mesh /
 service mesh) gives defense in depth at the cost of extra TLS handshakes and CPU. Pick
 end-to-end when regulation or a zero-trust posture demands it; otherwise edge termination
-is the pragmatic default.
+is the pragmatic default. **Gotcha:** ALB target-group HTTPS re-encryption does *not* validate
+the backend's certificate (no cert pinning by default) — the ALB will happily connect to a target
+presenting a self-signed or expired cert. So "end-to-end TLS via ALB" buys you *confidentiality* on
+the LB→target hop, not *authentication* of the backend; if you need to prove the backend's identity
+(true zero-trust), you need mTLS via App Mesh / a service mesh, not just HTTPS targets.
 
 **Trade-off — at rest is cheap and non-negotiable; in transit needs enforcement.** At-rest
 encryption is essentially free performance-wise (AES-NI hardware acceleration, ~single-digit
@@ -131,11 +135,34 @@ Keys** are a critical cost optimization: instead of calling KMS per object, S3 g
 short-lived bucket-level key, cutting KMS request costs by up to ~99% for high-object-count
 buckets — a common cost-optimization interview answer.
 
+> [!TIP]
+> **Worked example — where does "~99%" come from?** Take a bucket you write **10M objects** into,
+> all SSE-KMS. KMS request pricing is **$0.03 per 10,000 requests**.
+> - **Without S3 Bucket Keys:** every `PutObject` triggers one `GenerateDataKey` → **10,000,000
+>   KMS calls**. Cost = 10,000,000 / 10,000 × $0.03 = **$30** in KMS request charges alone.
+>   Worse, at write bursts you push against the KMS request-per-second quota (5.5k–50k req/s by
+>   Region), so KMS becomes a throughput bottleneck, not just a bill.
+> - **With S3 Bucket Keys ON:** S3 asks KMS for **one** bucket-level key and reuses it to derive
+>   per-object keys for a time window (a few minutes). Over the same 10M writes the KMS calls
+>   collapse to roughly a few hundred (a handful per window), say ~300 calls ≈ 300/10,000 × $0.03
+>   = **$0.0009 — under a cent.** That $30 → ~$0 is the "~99%" (really >99.9% here), *and* the
+>   quota pressure disappears. The math scales with object count, which is why it only matters for
+>   high-object-count buckets.
+
 **Trade-off — DEK caching.** Reusing one data key for many objects reduces KMS calls and cost
 but violates "use a data key few times" and widens the blast radius if that key leaks. The KMS
 SDK's data-key caching lets you bound reuse (max messages / max bytes / max age). Tighter caps
 = more KMS calls + cost; looser caps = fewer calls but more exposure. This is the crypto
 equivalent of a connection pool sizing decision.
+
+**Worked example — DEK caching call count vs blast radius.** Say you encrypt **1,000,000
+messages**. With **no caching**, each message calls `GenerateDataKey` → **1,000,000 KMS calls**
+(= 1,000,000 / 10,000 × $0.03 = **$3**, plus a KMS round-trip on every message's latency path).
+Set the cache to **max 1,000 messages per data key**: you now call KMS only **1,000 times**
+(1,000,000 / 1,000), i.e. **$0.003** and almost no per-message KMS latency — a 1000× reduction.
+The price you pay: a single leaked cached data key no longer exposes *one* message, it exposes up
+to **1,000** messages (everything encrypted under that key before it rolled). Set `max_messages`
+= 1 for one-key-per-message (max isolation, max cost); loosen it to trade blast radius for calls.
 
 ---
 
@@ -278,6 +305,29 @@ DB roles; rotate the inactive one and flip — zero failed connections, but requ
 and the app must tolerate the swap). Alternating-users is the zero-downtime choice for
 high-throughput databases.
 
+**Worked example — why single-user has a failure window and alternating-users doesn't.** Trace
+the same rotation both ways, where a client caches the credential it last read.
+
+*Single-user (one DB user `app`, password changes in place):*
+- **t0** — Client is holding cached password `P_old` for user `app`; connections succeed.
+- **t1** — `createSecret`: Secrets Manager stages `AWSPENDING` = `P_new`.
+- **t2** — `setSecret`: rotation Lambda runs `ALTER USER app PASSWORD P_new` on the DB. **The DB
+  now only accepts `P_new`.**
+- **t3** — In-flight client opens a *new* connection with its still-cached `P_old` → **auth error**.
+  This is the failure window: it lasts until (t4) the client re-fetches `AWSCURRENT` and picks up
+  `P_new`. `finishSecret` moving `AWSCURRENT` doesn't help a client that hasn't re-read the secret.
+
+*Alternating-users (two DB users `app_A` and `app_B`):*
+- **t0** — `AWSCURRENT` points to `app_A`; every live connection uses `app_A`, which stays valid.
+- **t1** — `createSecret`: stage `AWSPENDING` describing `app_B` with a fresh password.
+- **t2** — `setSecret`: set `app_B`'s password on the DB. `app_B` was **idle/offline**, so *no
+  live connection is touching it* — nothing breaks.
+- **t3** — `testSecret`: log in as `app_B` to confirm it works.
+- **t4** — `finishSecret`: flip `AWSCURRENT` to the `app_B` version. New fetches get `app_B`; the
+  old `app_A` credential is still valid (as `AWSPREVIOUS`) so any connection mid-flight keeps
+  working. **At no point was a password changed on the user that live connections were using** —
+  zero failed connections. Next rotation flips back to `app_A`.
+
 **Trade-off — rotation frequency vs risk.** Frequent rotation shrinks the window a leaked
 credential is useful, but each rotation is a small availability risk (a bad `setSecret` can lock
 you out of the DB) and adds Lambda/API cost. AWS guidance: don't call `PutSecretValue`/`UpdateSecret`
@@ -304,6 +354,31 @@ On successful auth the pool returns three tokens:
 - **Access token** (JWT) — OAuth2 scopes; used to authorize calls to APIs (API Gateway JWT
   authorizer, your resource servers, the Cognito userInfo endpoint).
 - **Refresh token** — opaque, used to get new ID/access tokens without re-login.
+
+**Worked example — what's actually inside an ID token.** A JWT is three base64url parts
+(`header.payload.signature`). Decode the payload of a real Cognito ID token and you get claims like:
+
+```json
+{
+  "sub": "e4a1c2f0-9b3d-4c77-8f2a-1d5e6b7c8a90",  // stable, unique user id (use this as the PK, not email)
+  "email": "dev@example.com",
+  "cognito:groups": ["admins", "beta-testers"],     // group membership → app-side role checks
+  "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_AbCdEf123",  // issuer = your user pool
+  "aud": "6r7s8t9u0v1w2x3y4z5a6b7c8d",              // audience = your app client id
+  "token_use": "id",                                 // "id" vs "access" — reject the wrong type
+  "iat": 1753372800,                                 // issued-at (epoch seconds)
+  "exp": 1753376400                                  // expiry — here iat + 3600 = 1-hour token
+}
+```
+
+When you attach a **Cognito user-pool JWT authorizer** to API Gateway, on each request it: (1)
+fetches the pool's public keys from `iss + /.well-known/jwks.json` and verifies the RS256
+signature (proves the token is genuine and untampered); (2) checks `exp` against now — with the
+values above, `exp − iat = 1753376400 − 1753372800 = 3600s`, so a request at `iat + 4000s` is
+**rejected as expired**; (3) checks `aud` (or `client_id` on an access token) matches an allowed
+client and `iss` matches the configured pool. Only if all pass does the request reach your
+integration, which can then read `cognito:groups` to authorize. No signature, wrong `iss/aud`, or
+past `exp` → **401 before your code ever runs.**
 
 **Default expirations (design-relevant):** ID and access tokens default to **1 hour**
 (configurable 5 minutes to 24 hours); refresh tokens default to **30 days** (configurable
@@ -383,6 +458,17 @@ traffic but the request already traveled into your Region. Best practice: WAF on
 restrict the origin to only accept CloudFront traffic, so attackers can't bypass the edge WAF.
 Pricing is per web ACL + per rule + per million requests — over-broad managed rule sets add cost
 and latency and can cause false positives, so start in **Count** mode and tune before **Block**.
+
+> [!WARNING]
+> **Gotcha — rules run in priority order, and Count is per-rule, not global.** WAF evaluates rules
+> from lowest priority number upward and stops at the first **terminating** action (Block/Allow).
+> Two consequences interviewers probe: (1) An early `Allow` rule short-circuits — a request it
+> allows never reaches a later Block rule, so an over-broad allowlist rule at priority 0 can let
+> attacks through. (2) Setting **Count** on one rule only tells *that* rule not to terminate; the
+> request keeps flowing and a *later* Block rule can still block it. "I put the SQLi rule in Count
+> to test it, so why did the request still get blocked?" — because a different rule (IP reputation,
+> rate-based) blocked it downstream. To truly let everything through while tuning, Count *every*
+> rule, not just one.
 
 ---
 

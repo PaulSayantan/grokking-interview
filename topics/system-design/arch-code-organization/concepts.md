@@ -52,6 +52,22 @@ when most requests fall straight through the layers doing no real work (pure pas
 adding cost with no value; a small percentage of pass-through is fine, a large percentage means
 layered is the wrong style.
 
+**Worked example — the sinkhole, and why "some pass-through is fine."** Compare two requests hitting
+the same 3-layer stack:
+
+- `GET /customer/{id}` (a sinkhole request): Presentation just forwards the id -> Business just
+  forwards it -> Persistence issues `SELECT * FROM customer WHERE id=?` -> the row bubbles straight
+  back up. **3 layer hops, 0 business logic** — every layer was pure overhead.
+- `POST /orders` (a request that earns the layers): Presentation validates the JSON -> Business
+  checks inventory, applies a promo, computes tax, enforces credit limit -> Persistence writes the
+  order + line items in one transaction. **3 hops, real work at every layer.**
+
+Richards' rough **80/20 heuristic**: a *few* sinkhole requests are unavoidable and fine, but if you
+audit your endpoints and roughly **80% look like the first case** (only ~20% do real work), the
+layers are taxing every call for value they rarely add — that is the **architecture sinkhole
+anti-pattern**, and it is the signal that a simpler style (or open layers that let reads skip
+straight to persistence) fits the workload better.
+
 > "N-tier" refers to *physical* deployment tiers (separate machines/processes); "layers" are the
 > *logical* partitioning. They often coincide but are not the same thing.
 
@@ -114,6 +130,53 @@ flowchart LR
     DBAD --> DB[("Database")]
 ```
 
+**Worked example — how a use case "calls the DB" while still depending only inward.** This is the
+one idea that makes Hexagonal/Clean/Onion click, so trace it in code. The trick is *who defines the
+interface*: the core does, and the outer ring implements it.
+
+```java
+// ---- core package (domain + use cases): imports NOTHING from infra ----
+package shop.core;
+
+public interface OrderRepository {              // (1) the PORT — interface DEFINED in the core
+    void save(Order order);
+}
+
+public class PlaceOrderService {                // (2) use case depends only on the port…
+    private final OrderRepository repo;         //     …so this arrow is core -> core (inward)
+    public PlaceOrderService(OrderRepository repo) { this.repo = repo; }
+    public void handle(Order order) {
+        order.validate();                       //     business rule lives in the Order entity
+        repo.save(order);                       //     at runtime this reaches the real DB
+    }
+}
+
+// ---- infra package (outer ring): depends ON the core ----
+package shop.infra;
+import shop.core.OrderRepository;               // (3) infra -> core: the import points INWARD
+public class JpaOrderRepository implements OrderRepository {   // adapter implements the port
+    public void save(Order order) { /* JPA / SQL */ }
+}
+
+// ---- wiring (main / DI container): the only place that knows both ----
+OrderRepository repo = new JpaOrderRepository();               // choose the concrete adapter
+PlaceOrderService svc = new PlaceOrderService(repo);           // inject it
+```
+
+Now watch the two arrows point in **opposite** directions — that *is* dependency inversion:
+
+- **Source-code dependency (compile time):** every `import` crosses `infra -> core`
+  (`JpaOrderRepository` imports `OrderRepository`). `core` imports nothing from `infra`. Arrow
+  points **inward**.
+- **Control flow (runtime):** `svc.handle()` -> `repo.save()` -> `JpaOrderRepository.save()` -> DB.
+  Execution flows **outward** from the core toward the database.
+
+The payoff falls straight out of this: in a test, inject `class FakeRepo implements OrderRepository`
+and `PlaceOrderService` runs with **no database at all**; to migrate DBs, write
+`MongoOrderRepository implements OrderRepository` and the core never changes a line. Clean calls the
+port an "interface adapter boundary" and Onion calls it a "repository interface on the domain," but
+it is the exact same move — inner ring defines the interface, outer ring implements it.
+
 **Trade-offs:**
 - *Pros:* Domain is fully unit-testable with fake/in-memory adapters (**highest testability**);
   infrastructure is swappable (change DB or framework without touching the core); **symmetric**
@@ -159,7 +222,7 @@ flowchart LR
     FW["Frameworks & Drivers (DB, Web, UI)"] --> IA["Interface Adapters (Controllers / Gateways / Presenters)"]
     IA --> UC["Use Cases (application business rules)"]
     UC --> EN["Entities (enterprise business rules)"]
-    EN -.->|"Dependency Rule: source deps point INWARD only"| EN
+    FW -.->|"Dependency Rule: source deps point INWARD only"| EN
 ```
 
 **Trade-offs:**
@@ -243,6 +306,25 @@ infrastructure** without editing the core. They differ only in vocabulary and em
 > symmetry; Onion centers the domain model in rings; Clean generalizes both and adds the explicit
 > Dependency Rule plus an entities-vs-use-cases split. Pick the vocabulary your team knows; the
 > discipline matters more than the diagram."*
+
+**When the distinction actually matters (senior nuance).** "They're the same" is the right default,
+but a strong candidate names the two cases where picking one is defensible: choose **Hexagonal** when
+the app is genuinely driven by *many symmetric actors* — e.g. the same use case invoked by a REST
+controller, a CLI, a Kafka consumer, and a test harness — because the driving/driven symmetry keeps
+all four as interchangeable adapters. Choose **Clean** when enterprise-wide business rules must be
+*reused across multiple applications*, because its extra ring — **Entities** (enterprise rules)
+separated from **Use Cases** (app-specific rules) — is exactly the seam that lets several apps share
+the entities layer. Below that scale, the entities-vs-use-cases split is ceremony, and the three are
+interchangeable.
+
+> [!WARNING]
+> **The anemic-domain-model trap** is the #1 way teams botch Onion/Clean/Hexagonal. They draw all
+> the rings, then put every rule in `OrderService` and leave `Order` as a bag of getters/setters —
+> a "domain model" with no behavior. Now the ring diagram is decoration: logic that belongs in the
+> `Order` entity (validate, applyDiscount, canCancel) has leaked outward into procedural services,
+> which is the very coupling the style was meant to prevent. The fix (and the follow-up an
+> interviewer wants): behavior lives *with* the data it guards, on the entity — services only
+> orchestrate across entities.
 
 ---
 
@@ -365,6 +447,16 @@ and exposes an explicit **in-process API**; cross-module access goes *only* thro
 no reaching into another module's tables or internals. The boundaries are enforced by build
 tooling, package/namespace structure, and architecture tests (e.g., ArchUnit), because nothing at
 runtime physically stops a shortcut.
+
+Because that enforcement is the whole game, name the concrete toolchain: (1) **separate build
+modules** (Maven/Gradle submodules, .NET projects) so `billing` simply does not have `orders` on its
+compile classpath — a forbidden call won't compile; (2) **package-private visibility** — expose one
+public `OrdersApi` facade and keep the module's entities/repos package-private so they're invisible
+outside; (3) **CI architecture tests** (ArchUnit in Java, import-linter in Python) that fail the
+build on a banned import. A **boundary violation** looks like `billing.InvoiceService` doing
+`new OrderRepository().findById(...)` — reaching into Orders' internals instead of calling
+`OrdersApi.getOrder(id)`. Without these guards nothing at runtime stops that shortcut, so the "modular"
+monolith silently rots into a big ball of mud.
 
 ```mermaid
 flowchart TD

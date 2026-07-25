@@ -62,6 +62,18 @@ def binary_search(A, target):
     return -1                       # not found; lo is the insertion point
 ```
 
+**Trace it** — `A = [1, 3, 5, 7, 9]`, `target = 6` (a not-found case):
+
+| Step | lo | hi | mid | `A[mid]` | Decision |
+|---|---|---|---|---|---|
+| 1 | 0 | 4 | `0+(4-0)//2 = 2` | `A[2] = 5` | `5 < 6` → `lo = 3` |
+| 2 | 3 | 4 | `3+(4-3)//2 = 3` | `A[3] = 7` | `7 > 6` → `hi = 2` |
+| 3 | 3 | 2 | — | — | `lo > hi` → exit, return `-1` |
+
+At exit `lo = 3`, which is exactly where `6` would be inserted to keep the array sorted
+(between `5` and `7`). That is why "`lo` is the insertion point" — the leftmost gap the
+target belongs in.
+
 > [!WARNING]
 > **Overflow:** `mid = (lo + hi) / 2` overflows when `lo + hi > INT_MAX` (a real bug fixed
 > in `java.util.Arrays.binarySearch` and the JDK in 2006). Always write
@@ -174,6 +186,19 @@ def find_min(A):
     return A[lo]                # lo == hi points at the minimum
 ```
 
+**Trace the rotated search** — `A = [4,5,6,7,0,1,2]`, `target = 0`:
+
+| Step | lo | hi | mid | `A[mid]` | Which half sorted? | Decision |
+|---|---|---|---|---|---|---|
+| 1 | 0 | 6 | 3 | `A[3] = 7` | `A[0]=4 <= 7` → left `[4..7]` sorted | `0` not in `[4,7)` → `lo = 4` |
+| 2 | 4 | 6 | 5 | `A[5] = 1` | `A[4]=0 <= 1` → left `[0..1]` sorted | `0` in `[0,1)` → `hi = 4` |
+| 3 | 4 | 4 | 4 | `A[4] = 0` | — | `A[mid] == target` → return `4` |
+
+Notice the check is `A[lo] <= A[mid]`, not `<`. When the window shrinks to a single
+element (`lo == mid`, as at step 3 before the equality hit), `A[lo] == A[mid]` and the
+left "half" is trivially sorted — using `<` would misclassify that case and pick the wrong
+branch. This "why `<=` and not `<`?" is a classic interviewer probe.
+
 > [!WARNING]
 > **Duplicates break the log bound.** In *Search in Rotated Sorted Array II* / *Find
 > Minimum II*, when `A[lo] == A[mid] == A[hi]` you cannot tell which half is sorted, so you
@@ -213,6 +238,25 @@ def min_feasible(low, high, feasible):     # answer in [low, high]
 answer range is `[1, max(piles)]`; `feasible(k) = sum(ceil(p/k) for p in piles) <= H`,
 which is monotonic (faster eating never needs more hours). Total: O(n log(max pile)).
 
+**Trace Koko fully** — `piles = [3,6,7,11]`, `H = 8`, so the answer range is `[1, 11]`.
+First see how `feasible(k)` produces numbers (hours = `Σ ceil(pile/k)`):
+
+- `feasible(4)` = `ceil(3/4)+ceil(6/4)+ceil(7/4)+ceil(11/4)` = `1+2+2+3` = **8** ≤ 8 → **True**
+- `feasible(3)` = `ceil(3/3)+ceil(6/3)+ceil(7/3)+ceil(11/3)` = `1+2+3+4` = **10** > 8 → **False**
+
+So the predicate is `F,F,F,T,T,…` over `k = 1..11` — monotonic. Now run `min_feasible(1, 11, feasible)`:
+
+| Step | low | high | mid | `feasible(mid)` | Decision |
+|---|---|---|---|---|---|
+| 1 | 1 | 11 | 6 | `1+1+2+2 = 6` ≤ 8 → True | `high = 6` |
+| 2 | 1 | 6 | 3 | `1+2+3+4 = 10` > 8 → False | `low = 4` |
+| 3 | 4 | 6 | 5 | `1+2+2+3 = 8` ≤ 8 → True | `high = 5` |
+| 4 | 4 | 5 | 4 | `1+2+2+3 = 8` ≤ 8 → True | `high = 4` |
+| 5 | 4 | 4 | — | — | `low == high` → return **4** |
+
+The search converges on `k = 4`, the smallest speed that finishes in 8 hours — never
+evaluating most of the 11 candidate speeds. That is the whole pattern in one trace.
+
 **Capacity to Ship Packages Within D Days** — smallest ship capacity so all packages ship
 in `D` days. Range `[max(weights), sum(weights)]`; `feasible(cap)` greedily counts days
 needed and checks `<= D`.
@@ -220,6 +264,18 @@ needed and checks `<= D`.
 **Split Array Largest Sum** — split into `m` subarrays minimizing the largest subarray
 sum. Range `[max(nums), sum(nums)]`; `feasible(limit)` counts how many chunks are needed
 if no chunk exceeds `limit`, checks `<= m`. (This *minimize-the-max* framing is the tell.)
+
+**Binary search on a value + a count predicate** — a close cousin used by *Kth Smallest
+Element in a Sorted Matrix* and "find the k-th number" problems. Here the search space is
+the numeric *value range* `[min, max]`, and `feasible(mid)` = `count(elements <= mid) >= k`,
+which is monotonic (raising `mid` never lowers the count). You shrink toward the *smallest*
+value whose count reaches `k`. Counting is the per-step work: in a row-and-column-sorted
+matrix you count `<= mid` in O(m+n) via a staircase walk, or O(m log n) with a per-row
+`upper_bound`. Concretely, for the matrix `[[1,5,9],[10,11,13],[12,13,15]]`, `k = 8`, range
+`[1, 15]`: at `mid = 13`, `count(<= 13) = 3 + 3 + 2 = 8 >= 8` → True (search left); at
+`mid = 12`, `count(<= 12) = 3 + 2 + 1 = 6 < 8` → False (search right). The search narrows
+to **13**, the 8th smallest (sorted order `1,5,9,10,11,12,13,13,15`). Note this returns a *value*, not an index — distinct from the
+index-based searches above.
 
 ```mermaid
 flowchart TD
@@ -278,6 +334,14 @@ def find_peak(A):
     return lo                   # O(log n)
 ```
 
+> [!WARNING]
+> This slope-guided search relies on the LeetCode 162 guarantee that **no two adjacent
+> elements are equal** (`A[i] != A[i+1]`). With that guarantee the `A[mid] < A[mid+1]`
+> comparison is strict and always points uphill, so the `else` branch is really
+> "descending → peak at `mid` or left." On inputs with a **plateau** (equal adjacent
+> values) the strict-slope reasoning breaks and this O(log n) template is not guaranteed to
+> land on a peak.
+
 ## Median of Two Sorted Arrays
 
 The hard classic: find the median of two sorted arrays `A`, `B` in **O(log(min(m, n)))**.
@@ -287,6 +351,53 @@ The trick is to binary-search a **partition** of the smaller array. Pick `i` ele
 is derived from the four border elements `A[i-1], A[i], B[j-1], B[j]`. Always binary-search
 over the *shorter* array so the range is `[0, min(m,n)]`. This is a partition search, not a
 value search — a frequent senior/staff-level question.
+
+The mental model: you are drawing a vertical cut through both arrays so that **everything
+left of the cut** (the smaller half of all `m+n` numbers) has exactly `(m+n+1)//2` elements
+and every left value is `<=` every right value. The four elements straddling the cut —
+`A[i-1], A[i], B[j-1], B[j]` — are all you need to read off the median. Boundaries use
+sentinels: `A[-1] = B[-1] = -∞` and `A[m] = B[n] = +∞`, so an empty left/right partition
+never falsely fails the invariant.
+
+```python
+def find_median(A, B):
+    if len(A) > len(B):                 # always binary-search the SHORTER array
+        A, B = B, A
+    m, n = len(A), len(B)
+    half = (m + n + 1) // 2             # size of the combined left partition
+    lo, hi = 0, m                       # i = how many of A go left; range [0, m]
+    while lo <= hi:
+        i = lo + (hi - lo) // 2
+        j = half - i
+        Aleft  = A[i-1] if i > 0 else float('-inf')
+        Aright = A[i]   if i < m else float('inf')
+        Bleft  = B[j-1] if j > 0 else float('-inf')
+        Bright = B[j]   if j < n else float('inf')
+        if Aleft <= Bright and Bleft <= Aright:     # valid partition
+            if (m + n) % 2:                         # odd total
+                return max(Aleft, Bleft)
+            return (max(Aleft, Bleft) + min(Aright, Bright)) / 2
+        elif Aleft > Bright:            # took too many from A → move i left
+            hi = i - 1
+        else:                           # Bleft > Aright → too few from A → move i right
+            lo = i + 1
+```
+
+**Trace it** — `A = [1,3,8]` (m=3), `B = [7,9,10,11]` (n=4). `A` is already the shorter, so
+no swap. `half = (3+4+1)//2 = 4`, `lo, hi = 0, 3`:
+
+| Step | i | j = 4−i | Aleft, Aright | Bleft, Bright | Invariant `Aleft<=Bright and Bleft<=Aright`? | Move |
+|---|---|---|---|---|---|---|
+| 1 | `0+(3-0)//2 = 1` | 3 | `A[0]=1, A[1]=3` | `B[2]=10, B[3]=11` | `1<=11` ✓ but `10<=3` ✗ (`Bleft > Aright`) | `lo = 2` |
+| 2 | `2+(3-2)//2 = 2` | 2 | `A[1]=3, A[2]=8` | `B[1]=9, B[2]=10` | `3<=10` ✓ but `9<=8` ✗ (`Bleft > Aright`) | `lo = 3` |
+| 3 | `3+(3-3)//2 = 3` | 1 | `A[2]=8, A[3]=+∞` | `B[0]=7, B[1]=9` | `8<=9` ✓ and `7<=+∞` ✓ | valid! |
+
+Total length `3+4 = 7` is odd, so median = `max(Aleft, Bleft) = max(8, 7) = **8**`. Check
+against the merged array `[1,3,7,8,9,10,11]` — the 4th of 7 elements is indeed `8`. At the
+final cut, `i=3` means all of `A` is on the left and `j=1` means only `B[0]=7` joins it:
+left = `{1,3,8,7}` (4 elements = `half`), right = `{9,10,11}`, and every left value `<=`
+every right value. The `+∞` sentinel for `A[3]` is what lets the `i=m` (empty A-right)
+partition pass cleanly.
 
 ## Complexity summary of variants
 

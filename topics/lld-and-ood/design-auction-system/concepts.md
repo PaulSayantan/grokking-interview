@@ -215,7 +215,10 @@ seller disputes the outcome, and it simplifies concurrent reads.
 
 **Reserve price stays hidden.** The reserve lives on `Auction` as private state consulted
 only inside `close()` and in a boolean-returning `isReserveMet()`. Never expose the value
-through any getter that reaches the API layer — leaking it changes bidder behavior.
+through any getter that reaches the API layer — leaking it changes bidder behavior. State
+the **no-reserve default** explicitly: when the seller sets none, `reservePrice` defaults
+to `startingPrice` (or `Money.ZERO`) so `isReserveMet()` is always well-defined — the
+`close()` comparison must never dereference a null reserve.
 
 ## Bid Validation
 
@@ -252,6 +255,31 @@ bid: `if (endTime - now < snipeWindow) endTime = now + extension` and re-schedul
 closing job. The closing job itself must re-check `now >= endTime` under the lock before
 transitioning to ENDED — otherwise a bid that extended the auction races with a stale
 timer firing.
+
+**Worked timeline — extension + stale timer.** `endTime = 12:00:00`, `snipeWindow = 60s`,
+`extension = 120s`. A close task is scheduled to fire at `12:00:00`.
+
+1. `11:59:30` — a bid lands. `endTime - now = 30s < 60s snipeWindow`, so
+   `endTime = 11:59:30 + 120s = 12:01:30`. A **new** close task is scheduled for `12:01:30`.
+   (The old `12:00:00` task is still queued — cancelling scheduled tasks reliably is fiddly,
+   so we let it fire and defend at the guard instead.)
+2. `12:00:00` — the **stale** task fires, acquires the lock, checks `now(12:00:00) >=
+   endTime(12:01:30)`? **No.** It returns `currentResult()` — a no-op. The auction stays
+   ACTIVE. This is exactly the `clock.instant().isBefore(endTime)` guard in `close()`.
+3. `12:01:30` — the fresh task fires, checks `12:01:30 >= 12:01:30`? **Yes** → proceed to
+   determine winner and transition. (Assuming no further late bid pushed `endTime` again.)
+
+Without step 2's re-check the stale timer would close an auction that had legitimately been
+extended, dropping the very bid that extended it.
+
+**How does Dutch actually end?** English/Sealed close on the timer above; Dutch **inverts the
+trigger** — the first acceptable bid wins *immediately*, no timer. Concretely, the Dutch
+strategy's `validate` returns an "accept-and-close" signal, and `placeBid` acts on it: after
+`bids.add(incoming)`, if `strategy.isWinningAcceptance(result)` is true, call `close(clock)`
+right there inside the lock. Example: Dutch price ticks down `$500 → $450 → $400`; the first
+bidder to accept `$400` is accepted, and that same call flips the auction to PAYMENT_PENDING —
+the scheduled timer, if any, later finds the auction already closed and no-ops (idempotent
+`close`).
 
 At close: `strategy.determineWinner(auction)` picks the winning bid; if
 `winner.amount >= reservePrice` transition to `PAYMENT_PENDING` and notify winner + seller,
@@ -383,6 +411,36 @@ The "now add X" follow-ups and where each lands:
   because auto-bidding becomes a client of the existing API: no changes to `Auction` or
   the strategies. Two proxy bidders competing resolve in a quick escalation loop that
   terminates when one cap is exceeded.
+
+  **Worked trace — two proxies ping-pong.** Opening `$50`, `minIncrement = $10`. A sets a
+  proxy cap of `$200`, B sets `$150`. A bids first at the opening `$50`. Each `onOutbid`
+  fires the minimum needed (`currentHighest + increment`), capped at the agent's max:
+
+  | Bid | Actor | Reason | Amount | Highest after |
+  |---|---|---|---|---|
+  | 1 | A | opening | `$50` | A $50 |
+  | 2 | B | outbid, `50+10=60 ≤ 150` cap | `$60` | B $60 |
+  | 3 | A | outbid, `60+10=70 ≤ 200` cap | `$70` | A $70 |
+  | … | … | (ping-pong in $10 steps) | … | … |
+  | 10 | B | outbid, `130+10=140 ≤ 150` cap | `$140` | B $140 |
+  | 11 | A | outbid, `140+10=150 ≤ 200` cap | `$150` | **A $150** |
+  | — | B | outbid, `150+10=160 > 150` cap → **stops** | — | A $150 wins |
+
+  Final: A wins at `$150`. B is **never charged** — a losing proxy bid is just a bid that got
+  outbid. Note the subtlety: A wins at exactly B's cap because the `$10` ladder happened to
+  land A's turn on `$150`; the loop terminates the instant one agent needs to exceed its own
+  cap. (Real systems — eBay — skip the ladder and *jump* the winner to `loserCap + increment`
+  = `$160` here, capped at the winner's max. That the naive step-by-step observer loop yields
+  `$150` while a jump yields `$160` is itself the interview point: the escalation result is
+  path-dependent unless you compute the settling price in one shot.)
+
+- **Second-price / Vickrey sealed-bid:** worth a concrete trace because the payment is *not*
+  the winning bid. Sealed bids come in at `$300` (X), `$250` (Y), `$180` (Z). `determineWinner`
+  returns the highest bidder **X**, but the price paid is the **second-highest amount, `$250`**
+  — X pays `$250`, not `$300`. That gap (`$300` bid, `$250` paid) is the whole point: bidding
+  your true value is optimal because your bid sets *whether* you win, never *how much* you pay.
+  This is exactly why `AuctionResult` must carry `winningBidder` and `pricePaid` as **separate
+  fields** — in English auctions they coincide (`$160`/`$160` above), in Vickrey they don't.
 - **Buy-it-now:** a fixed price that, if paid while the auction is ACTIVE (typically only
   before bidding crosses a threshold), ends it immediately. Implement as an operation on
   `Auction` guarded by state + strategy, transitioning straight to PAYMENT_PENDING.
@@ -412,6 +470,54 @@ The "now add X" follow-ups and where each lands:
   the persistence-layer analogue.
 - Either way, **the same lock must cover bid placement, end-time extension, and closing**,
   or a bid can slip in after the winner was determined.
+
+**Worked trace — two "simultaneous" bids (coarse lock).** State before: `highestBid = $100`,
+`minIncrement = $5`, so the floor for the next bid is `$105`. Thread A submits `$105`,
+Thread B submits `$103`; both arrive in the same millisecond and race for the lock.
+
+| Step | Thread | Action | Floor at check | Result | State after |
+|---|---|---|---|---|---|
+| 1 | A | acquires lock | `100 + 5 = 105` | `105 >= 105` → **accepted** | highest = **$105** |
+| 2 | A | releases lock | — | — | highest = $105 |
+| 3 | B | acquires lock | `105 + 5 = 110` | `103 >= 110`? no → **rejected** ("Bid must be at least 110") | highest = $105 |
+
+The lock *serializes* the two; the loser doesn't see a stale floor. B re-reads the floor
+as `$110` (against A's new highest), so its `$103` is correctly rejected as too low — the
+outcome is deterministic, not a coin flip.
+
+**Same race, optimistic locking (the DB analogue).** Now `Auction.version = 7`, and suppose
+B bids `$110` (high enough to clear the *original* floor of `$105`). Both threads read
+`highest = $100, version = 7` before either writes:
+
+```
+// read: highest=$100, version=7
+// validate incoming against highest ($105 floor) → both A($105) and B($110) pass
+UPDATE auction SET highest_bid=?, version = version + 1
+ WHERE id = ? AND version = 7;      // CAS: only succeeds if version still 7
+```
+
+- **A** commits first: 1 row updated → `highest=$105, version=8`. Success.
+- **B**'s CAS: `WHERE version = 7` now matches **0 rows** (version is 8) → conflict.
+- B **re-reads** (`highest=$105, version=8`), re-validates: new floor `$110`, `110 >= 110`
+  → still valid, retries the CAS `WHERE version = 8` → 1 row → `highest=$110, version=9`.
+
+Retry loop, bounded so a hot auction can't spin forever:
+
+```java
+for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    Snapshot s = read(auctionId);              // highest + version
+    if (!validate(incoming, s)) return REJECTED; // too low → no point retrying
+    int rows = db.update(
+        "UPDATE auction SET highest_bid=?, version=version+1 " +
+        "WHERE id=? AND version=?", incoming, auctionId, s.version());
+    if (rows == 1) return ACCEPTED;            // CAS won
+    // else another writer moved first → loop, re-read, re-validate
+}
+return REJECTED; // contention budget exhausted
+```
+
+Note the asymmetry: had B bid `$103` here, `validate` would fail on the *first* read and it
+returns REJECTED without ever attempting the CAS — you only retry a bid that could still win.
 
 Other edge cases to enumerate proactively:
 

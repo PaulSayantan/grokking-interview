@@ -67,6 +67,31 @@ flowchart LR
 > "gap" between average and peak utilization (and the less predictable the peak), the more the
 > elastic cloud pays off. A flat curve has almost no gap — so it benefits least.
 
+### Worked example — feeling the peak-to-average gap in dollars
+
+Numbers make the TIP concrete. Assume one server handles **100 req/s**, on-demand costs
+**$1 / server-hour**, and a 1-year reserved commit costs **$0.60 / server-hour** (≈40% off) but is
+billed 24×7 whether you use it or not.
+
+**Static app — flat 100 req/s.** You need exactly 1 server, always on: `1 × 24h = 24 server-hours/day`,
+~100% utilized. There is *no gap to harvest*, so elasticity buys nothing — the only lever is unit price:
+
+- On-demand: `24 × $1 = $24/day`
+- Reserved: `24 × $0.60 = $14.40/day` → **reserved wins by 40%.** This is why Static Workload says
+  *don't* reach for elastic pricing reflexively.
+
+**Periodic app — 10 req/s for 22h, then 500 req/s for 2h.** Baseline needs `ceil(10/100) = 1` server;
+the peak needs `ceil(500/100) = 5` servers.
+
+- *Provision for peak (naive):* 5 servers on 24×7 = `5 × 24 = 120 server-hours/day = $120/day`. But you
+  only *need* `1×22h + 5×2h = 32` server-hours — so utilization is just `32/120 ≈ 27%`. You're paying
+  for idle capacity ~73% of the time.
+- *Scheduled scaling (harvest the gap):* run 1 server for 22h and 5 servers for the 2h peak =
+  `32 server-hours/day = $32/day`.
+- Savings: `($120 − $32) / $120 ≈ 73% cheaper` — purely by matching capacity to a calendar-predictable
+  curve. The bigger the peak-to-average gap, the bigger this number; a flat curve (Static) collapses it
+  to zero, which is exactly why the two patterns point at opposite hosting choices.
+
 ---
 
 ## Static Workload
@@ -246,6 +271,32 @@ flowchart TB
 > **SaaS = you get the finished app**. The higher you go, the less you operate and the less you
 > control.
 
+### Responsibility matrix (who owns each layer)
+
+Reading the stack bottom-up, the boundary between "provider" and "you" slides upward as you move
+IaaS → PaaS → SaaS. ✅ = provider-managed, **You** = your responsibility.
+
+| Stack layer                | IaaS   | PaaS   | SaaS   |
+|----------------------------|--------|--------|--------|
+| Facilities (power/cooling) | ✅     | ✅     | ✅     |
+| Hardware (servers/network) | ✅     | ✅     | ✅     |
+| Virtualization             | ✅     | ✅     | ✅     |
+| OS                         | **You**| ✅     | ✅     |
+| Middleware / runtime       | **You**| ✅     | ✅     |
+| Application code           | **You**| **You**| ✅     |
+| Data + access config       | **You**| **You**| **You**|
+
+Notice the last row never flips: **your data and its access configuration are always yours.**
+
+> [!WARNING]
+> **Shared responsibility model (security).** Interviewers name this term explicitly. Moving
+> IaaS → SaaS shifts more of the *security* stack to the provider (IaaS = you patch the OS, so an
+> unpatched CVE is *your* breach; PaaS = provider patches the runtime; SaaS = provider secures the whole
+> app), **but the customer ALWAYS owns identity/access configuration and their own data** — classification,
+> encryption choices, IAM policies, DLP. The classic wrong answer is "we went serverless/SaaS, so security
+> isn't my problem." A misconfigured public S3 bucket or over-broad IAM role is a *customer* failure at
+> every service level.
+
 ---
 
 ## Infrastructure as a Service (IaaS)
@@ -298,6 +349,29 @@ PaaS. Serverless FaaS is a fine-grained PaaS variant.
 handled for you) and ship faster — but accept **less control** and potential **platform lock-in** and
 constraints (supported runtimes, limited low-level tuning). Use when you want to focus on app code
 and the platform's constraints fit your stack.
+
+*Lock-in, concretely.* The cost isn't abstract — it's the rewrite bill when you leave. Code written
+against a **proprietary FaaS event/runtime API** (the platform's handler signature, event shapes,
+context object) must be re-plumbed to run elsewhere; **managed-service coupling** (a proprietary
+queue, auth, or database whose semantics you've baked into your logic) means porting the app also
+means re-architecting around a different service; and **egress fees** tax moving your data out. Gauge
+lock-in by asking "how many files change if I switch providers?" — glue against portable interfaces is
+cheap to move; business logic tangled with provider-specific APIs is not.
+
+> [!WARNING]
+> **Serverless cost-crossover gotcha.** Per-request FaaS pricing is a bargain for spiky/idle
+> workloads but crosses over above a steady-utilization threshold. Toy math, reusing the workload
+> example: a reserved server costs **$0.60/hr** and handles **100 req/s** (= 360,000 req/hr at full
+> load); a FaaS invoke costs a flat **$0.000002** regardless of volume. The reserved server's *per-request*
+> cost depends entirely on how busy it is — `$0.60 / (3600 × req/s)`:
+> - At **10 req/s**: reserved = `$0.60 / 36,000 ≈ $0.0000167`/req → serverless ($0.000002) is ~8× cheaper,
+>   because the reserved box is mostly idle (you pay for capacity you don't use).
+> - At **100 req/s**: reserved = `$0.60 / 360,000 ≈ $0.00000167`/req → now *reserved* is ~1.2× cheaper.
+> - Crossover: `$0.60 / (3600 × R) = $0.000002` → `R ≈ 83 req/s`. Above ~83 req/s of steady load,
+>   always-on reserved IaaS beats pay-per-invoke.
+>
+> This is the Static Workload lesson wearing a serverless hat: once a workload is busy and flat, you've
+> turned it Static, and paying per invoke stops paying off.
 
 **Related patterns.** Built on **IaaS**; hosts custom applications (contrast SaaS, which hosts the
 *provider's* application). *Deep dive:* serverless/managed-runtime specifics in
@@ -506,6 +580,12 @@ resilience in `aws-resilience-multiregion-dr`.
 - **"Why do the workload patterns matter for choosing a service model?"** IaaS/PaaS enable the elastic
   provisioning that variable workloads (Periodic/Unpredictable/Continuously-Changing) require; a
   purely Static Workload may not need cloud elasticity at all.
+- **"What are NIST's 5 essential cloud characteristics?"** (1) *On-demand self-service* — provision
+  resources yourself via API/console, no human ticket. (2) *Broad network access* — reachable over the
+  network from standard clients. (3) *Resource pooling* — multi-tenant sharing of a common pool, with
+  resources dynamically assigned. (4) *Rapid elasticity* — scale out/in quickly, seemingly unlimited.
+  (5) *Measured service* — usage is metered so you pay per use. If a "cloud" is missing self-service or
+  metering, it's really just outsourced hosting.
 
 ## References
 

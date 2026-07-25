@@ -244,6 +244,8 @@ stateDiagram-v2
     Authenticated --> Dispensing : selectOperation [withdrawal, hold authorized, cash ok]
     Authenticated --> Authenticated : selectOperation [balance inquiry / deposit / transfer]
     Authenticated --> Idle : cancel / eject card
+    HasCard --> Idle : timeout / eject-or-retain card
+    Authenticated --> Idle : timeout / eject card
     Dispensing --> Idle : dispense done / capture hold, print receipt, eject card
 ```
 
@@ -259,6 +261,10 @@ Rules encoded here:
   `Dispensing`; non-cash operations (balance/deposit/transfer) complete in place and stay in
   `Authenticated` so the customer can do another.
 - `Dispensing` accepts no new user input — it releases cash, captures the hold, prints, ejects.
+- **Timeout** is an internal event, not a user action: a session timer fires `cancel()`-like
+  logic from `HasCard`/`Authenticated` (eject the card, or retain it if untaken) and returns to
+  `Idle`. `Dispensing` deliberately ignores the timer — it is non-interruptible, so cash always
+  finishes committing before the FSM moves on (which is also why `Dispensing.cancel` throws).
 - Every terminal path resets the session (clears card, account, attempts) and returns to `Idle`.
 
 Each transition maps 1:1 to a `atm.setState(...)` call inside a concrete state method.
@@ -277,7 +283,11 @@ adding `MaintenanceState` is a new class, not edits everywhere. Cross-ref `dp-be
 
 **Command or Strategy (Behavioral) — transaction types.** The four operations share a
 lifecycle (validate → execute → produce receipt) but differ in the body. Two clean models:
-(a) a `Transaction` **hierarchy** with an abstract `execute()` (Template Method flavor), or
+(a) a `Transaction` **hierarchy** with an abstract `execute()` that each subtype overrides
+wholesale — this is plain **polymorphic subtyping**, *not* Template Method. (It becomes genuine
+Template Method only if you make `execute()` `final` and have it call protected hooks —
+`validate()` → `perform()` → `buildReceipt()` — that subtypes fill in; do that if the interviewer
+wants a fixed skeleton with variable steps.) Or
 (b) **Command** — each operation is a command object with `execute()`/`undo()`, which also
 gives you a transaction *log* and reversal for free. Command shines when the interviewer asks
 for auditing/rollback; the hierarchy is lighter for a plain menu. Cross-ref
@@ -286,9 +296,11 @@ for auditing/rollback; the hierarchy is lighter for a plain menu. Cross-ref
 **Strategy (Behavioral) — cash dispensing.** `NoteDispensingStrategy` isolates the
 note-selection algorithm. **Greedy** (largest denomination first) is optimal for canonical
 note systems and minimizes the note count, but can *fail* when the greedy pick strands the
-remainder (e.g., only {30, 20} available for 40, or a low inventory of small notes); a DP /
-backtracking strategy handles odd sets. Swapping strategies is a config change, not a rewrite.
-(Algorithm internals belong to `dsa-coding`; here the design point is the seam.)
+remainder — e.g. paying $60 from `{FIFTY:1, TWENTY:3}` where greedy grabs the fifty and can't
+cover the last $10, even though three twenties would work (traced in full under *Dispensing
+walkthrough* below). A DP / backtracking strategy handles those odd/low-inventory sets. Swapping
+strategies is a config change, not a rewrite. (Algorithm internals belong to `dsa-coding`; here
+the design point is the seam.)
 
 **Factory (Creational) — transaction creation.** A `TransactionFactory.create(OperationType,
 amount)` centralizes construction so `AuthenticatedState` doesn't hard-code `new
@@ -353,6 +365,13 @@ Design notes:
 - Errors surface as domain results/exceptions — `InsufficientFundsException`,
   `InsufficientCashException`, `CardRetainedException` — pick a `Result` object *or* exceptions
   and stay consistent. Never return `null` or a magic int.
+- **Transfer needs a destination.** `selectOperation(op, amountMinor)` can express withdrawal /
+  balance / deposit, but *transfer to where?* is unanswerable through it. Say this out loud and
+  pick one: overload `selectOperation(op, amountMinor, Account payee)`, pass an
+  `OperationRequest{op, amount, payee}` params object (cleaner as operations grow), or model
+  transfer as a second prompt step that collects the payee before executing. The transaction
+  type then carries both ends: `TransferTransaction(Account from, Account to, int amountMinor)`,
+  and its `execute` does `bank.authorize(from, amt)` → `bank.credit(to, amt)` → `capture`.
 
 ## Code Skeleton
 
@@ -550,6 +569,40 @@ public class GreedyDispensingStrategy implements NoteDispensingStrategy {
 }
 ```
 
+### Dispensing walkthrough (numbers in → notes out)
+
+Watch the greedy strategy run on the file's actual enum
+(`HUNDRED=10000, FIFTY=5000, TWENTY=2000, TEN=1000` minor units).
+
+**Case 1 — happy path, `dispense(8000)` (i.e. $80) with inventory `{HUNDRED:2, FIFTY:1, TWENTY:2, TEN:5}`.**
+Iterate `Denomination.values()` largest-first, `take = min(amount / value, inStock)`:
+
+| Step | Denom | `amount / value` | in stock | take | notes out | remainder |
+|---|---|---|---|---|---|---|
+| 1 | HUNDRED (10000) | 8000/10000 = 0 | 2 | 0 | — | 8000 |
+| 2 | FIFTY (5000) | 8000/5000 = 1 | 1 | 1 | {50:1} | 8000−5000 = 3000 |
+| 3 | TWENTY (2000) | 3000/2000 = 1 | 2 | 1 | {50:1, 20:1} | 3000−2000 = 1000 |
+| 4 | TEN (1000) | 1000/1000 = 1 | 5 | 1 | {50:1, 20:1, 10:1} | 1000−1000 = **0** |
+
+Remainder hits 0 → return `{FIFTY:1, TWENTY:1, TEN:1}` (three notes, the minimum for $80). Sanity
+check: 5000 + 2000 + 1000 = 8000. ✔
+
+**Case 2 — greedy strands, `dispense(6000)` (i.e. $60) with inventory `{HUNDRED:0, FIFTY:1, TWENTY:3, TEN:0}`.**
+
+| Step | Denom | `amount / value` | in stock | take | remainder |
+|---|---|---|---|---|---|
+| 1 | HUNDRED | 6000/10000 = 0 | 0 | 0 | 6000 |
+| 2 | FIFTY | 6000/5000 = 1 | 1 | 1 | 6000−5000 = 1000 |
+| 3 | TWENTY | 1000/2000 = 0 | 3 | 0 | 1000 |
+| 4 | TEN | 1000/1000 = 1 | 0 | 0 | **1000 ≠ 0** |
+
+Greedy grabbed the single $50, which stranded a $10 remainder it can't cover → `throw
+InsufficientCashException`. **But a valid payout exists:** `TWENTY × 3 = 3 × 2000 = 6000`. Greedy's
+"largest-first" bite is locally optimal yet globally wrong once inventory is limited — this is the
+concrete case that motivates the DP/backtracking `NoteDispensingStrategy` (it would skip the fifty
+and pay three twenties). It also shows why `canDispense` must simulate against real inventory, not
+just check `amount % smallestNote == 0`: $60 is trivially "divisible," yet greedy still fails.
+
 The tell that the pattern is working: `ATM`'s public methods contain **zero** `if`/`switch`
 on machine status — all conditional behavior lives inside states.
 
@@ -624,8 +677,9 @@ committed. You can't un-dispense notes; a capture-then-jam is worse than a jam-t
    new states don't touch existing code, illegal-action handling is structural. Know the crossover.
 2. **"Where does the PIN get verified?"** — Bank-side, always. The ATM forwards the PIN to
    `BankService.authenticate`; it never stores or compares the real PIN (security + SRP).
-3. **"Model the four transaction types — hierarchy or Command?"** — Hierarchy/Template Method
-   for a plain menu; Command when you need audit log / reversal. Justify by requirement.
+3. **"Model the four transaction types — hierarchy or Command?"** — A plain polymorphic
+   hierarchy suffices for a menu (Template Method only if `execute()` is `final` and calls
+   protected hooks); reach for **Command** when you need an audit log / reversal. Justify by requirement.
 4. **"Withdraw amount the machine can't compose?"** — `canDispense` respecting limited note
    inventory; greedy vs DP note-selection; reject before the `Dispensing` transition.
 5. **"Two ATMs, same account, at once?"** — Consistency is the bank's job (atomic conditional

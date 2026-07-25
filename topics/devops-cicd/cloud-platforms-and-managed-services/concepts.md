@@ -128,10 +128,59 @@ Three ways to run code in the cloud, from heaviest to lightest:
   **per-invocation cost at very high sustained volume** (where it can become *more* expensive
   than a reserved fleet).
 
+**What a "cold start" actually is:** when no warm execution environment is sitting idle to
+reuse, the provider must build one from scratch *before your handler's first line runs* —
+allocate a fresh micro-VM/container, boot the language runtime, download and load your code +
+dependencies, and (if the function lives in a VPC) attach an elastic network interface. That
+init is the cold start. A **warm** invocation reuses an already-initialized environment and
+skips all of it. Magnitude ranges from **~tens of milliseconds** for a small interpreted
+function to **several seconds** for a heavy JVM/.NET package or a VPC-attached function.
+Biggest inflators: large dependency bundles, VPC/ENI networking, and slow-to-init runtimes.
+Mitigate with **provisioned concurrency** (keep N environments pre-warmed) or slimmer deploy
+packages.
+
 > [!TIP]
 > A useful crossover heuristic: serverless wins on cost when utilization is **low or spiky**;
 > a reserved/committed VM or container fleet wins when utilization is **high and steady**,
 > because you amortize the always-on cost. "Always cheaper" is true for neither.
+
+### Worked example: where Lambda crosses over an always-on VM
+
+The heuristic above becomes a real decision the moment an interviewer asks "*at what volume
+does Lambda get more expensive than just running an instance?*" Let's actually compute it.
+(AWS us-east-1 list prices, standard architecture — illustrative, rates change.)
+
+**The function:** 512 MB memory (`= 0.5 GB`), 200 ms per invocation (`= 0.2 s`).
+- Memory-time per invocation: `0.5 GB × 0.2 s = 0.1 GB-second`.
+- Lambda duration price: `$0.0000166667` per GB-second. Request price: `$0.20` per 1M requests.
+
+So the all-in cost of **one** invocation is:
+
+```
+duration:  0.1 GB-s × $0.0000166667 = $0.00000166667
+request:                $0.20 / 1,000,000 = $0.00000020000
+per invocation total                   ≈ $0.00000186667
+```
+
+Now price two monthly volumes and compare against a `t3.small` running 24/7
+(`$0.0208/hr × 730 hr ≈ $15.18/month`):
+
+| Monthly invocations | Lambda duration | Lambda requests | **Lambda total** | t3.small 24/7 |
+|---|---|---|---|---|
+| 1,000,000 | 100,000 GB-s → $1.67 | $0.20 | **≈ $1.87** | $15.18 |
+| 100,000,000 | 10,000,000 GB-s → $166.67 | $20.00 | **≈ $186.67** | $15.18 |
+
+At **1M/month** Lambda costs ~$1.87 vs the VM's $15.18 — serverless wins ~8×, and you paid
+nothing for the idle hours. At **100M/month** Lambda is ~$187 vs the VM's $15 — the always-on
+instance is now ~12× *cheaper*. The break-even is where `$15.18 / $0.00000186667 ≈ 8.1M
+invocations/month`. Below ~8M/month, scale-to-zero Lambda wins; above it, the reserved
+instance wins — exactly the "low/spiky vs high/steady" heuristic, now with a number on it.
+
+> [!WARNING]
+> Two honest caveats this back-of-envelope skips: the single VM must actually *sustain* the
+> throughput (100M/month ≈ 39 req/s average at 200 ms each ≈ ~8 concurrent) and it is **not
+> HA** — real production needs ≥2 instances across AZs, roughly doubling the VM side. Both
+> push the crossover *higher*, further favoring serverless for modest volumes.
 
 ---
 
@@ -159,6 +208,24 @@ risk**, not the instance bill. Small teams almost always come out ahead on manag
 because they can't afford to staff 24/7 database operations. Reach for self-hosted when you
 need a version/feature the managed service doesn't offer, at a scale where the price premium
 dwarfs the salary of the people to run it, or for strict data-residency/compliance control.
+
+**Worked example — why the salary term dominates.** Compare a Postgres HA setup two ways
+(us-east-1 list prices, illustrative):
+
+- **Self-hosted** on 2× `m5.large` EC2 (primary + standby) for infra:
+  `2 × $0.096/hr × 730 hr ≈ $140/month` compute. Now add the human cost the bill *doesn't*
+  show — patching, backup verification, replication monitoring, failover drills, the 2am page:
+  budget a conservative **8 engineer-hours/month** at a loaded rate of `$100/hr = $800/month`.
+  **Total ≈ $940/month**, of which ~85% is salary, not silicon.
+- **Managed** `db.m5.large` Multi-AZ RDS (provider runs the standby, backups, failover,
+  patching): roughly `$0.356/hr × 730 ≈ $260/month`, and the engineer-hours drop toward zero.
+
+So the "expensive" managed option (~$260) is **cheaper than the "cheap" self-hosted one
+(~$940)** the moment you price in even a modest slice of an engineer's time — and that ignores
+the risk cost of a botched manual failover. The premium per-instance-hour is real, but it buys
+back the dominant line item. The math only flips the other way at large fleets, where the
+per-unit premium multiplied across dozens of nodes finally exceeds the salaries needed to run
+them yourself.
 
 > [!INTERVIEW]
 > "Managed Postgres or run your own on EC2?" Strong answer: default to **managed** (RDS/Cloud

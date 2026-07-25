@@ -72,6 +72,16 @@ write-heavy workloads are far lower. Once you saturate the largest instance, you
 relational options are **read replicas** (offload reads), **caching** (ElastiCache),
 **sharding at the app layer**, or moving to a horizontally-scalable store.
 
+**Worked example — tie the number to the bottleneck.** "Tens of thousands/sec" is only true
+when reads hit RAM. Trace the *disk-bound* case instead: put this instance on a **gp3** volume
+at its baseline **3,000 IOPS**, and suppose the working set does **not** fit in 128 GB so
+each point query averages **~3 storage I/Os** (index descent + heap fetch). Then the storage
+ceiling is `3,000 IOPS ÷ 3 IO/query ≈ 1,000 queries/sec` — two orders of magnitude below the
+in-RAM figure, and CPU/RAM are idle while you wait on disk. The lesson for sizing: identify
+which resource saturates first. If IOPS-bound, provision more gp3 IOPS or move to io2; if the
+working set is the problem, buy RAM (bigger `r`-class) so reads stay in the buffer cache; only
+once a single node's RAM/IOPS/CPU are all maxed do you reach for replicas, caching, or sharding.
+
 **Trade-offs.**
 - **Vertical scaling** is simplest (no app changes) but has a hard ceiling and gets
   super-linearly expensive at the top; a failover/resize causes a short blip.
@@ -98,7 +108,8 @@ writes until promoted.
 
 **Multi-AZ *cluster* deployment (newer).** A different topology: one writer + **two
 readable standbys** across three AZs using semi-synchronous replication (commit
-acknowledged when at least one standby has it). This gives faster failover (often under
+acknowledged once **≥1** of the two standbys confirms — not *all* of them, and not the one
+specific standby that fully-synchronous replication would wait on). This gives faster failover (often under
 35 seconds) *and* lets you read from the two standbys — but with the caveat that reads
 there can be slightly stale.
 
@@ -175,6 +186,28 @@ of the famous line: *"the log is the database."*
   **reader endpoint** load-balances across available Aurora Replicas; you can also make
   **custom endpoints** for subsets of instances.
 
+**Worked example — why 4/6 write and 3/6 read (and what AZ+1 really means).**
+Label the 6 copies by AZ: `AZ-a{c1,c2}`, `AZ-b{c3,c4}`, `AZ-c{c5,c6}`. Total copies **V = 6**,
+write quorum **Vw = 4**, read quorum **Vr = 3**. Two rules make this correct:
+- **Vw + Vr > V** → `4 + 3 = 7 > 6`. The read set (3) and any write set (4) can occupy at most
+  `6` distinct nodes, but they need `7` to be disjoint — so they must share **at least
+  `7 − 6 = 1`** node. That overlapping node holds the latest committed write, so every read
+  quorum is guaranteed to *see* it. This is why 3/6 reads are consistent, not eventually
+  consistent.
+- **Vw > V/2** → `4 > 3`. Any two write quorums also overlap (`4 + 4 = 8 > 6` → share ≥2),
+  so two conflicting writes can't both commit on disjoint sets — no split-brain.
+
+Now trace the fault tolerance the file claims:
+- **Lose a whole AZ** (say `AZ-a`: c1, c2 down) → **4 copies remain** (c3–c6). Reads need 3 ≤ 4 ✅,
+  writes need 4 ≤ 4 ✅ (exactly met). So a full AZ outage costs you *nothing* — reads and
+  writes both continue.
+- **Lose an AZ + 1 more copy** (`AZ-a` down *and* c3 in `AZ-b` fails) → **3 copies remain**
+  (c4, c5, c6). Reads need 3 ≤ 3 ✅ — **reads still served, no data loss** (the surviving 3 still
+  contain the latest write by the overlap rule). Writes need 4 > 3 ❌ — **writes pause/degrade**
+  until storage self-heals a copy back to 4-available. That is exactly the "AZ+1 with no write
+  *loss*" guarantee: durability and read availability survive AZ+1; only write *availability*
+  is briefly sacrificed, which is why Aurora races to re-replicate lost segments.
+
 **Failover.** Because replicas already share storage, promoting one to writer is fast —
 Aurora failover is typically **under 30 seconds** (often ~10–15 s), versus RDS Multi-AZ's
 60–120 s, because there's no volume to reattach or crash-recover from scratch.
@@ -227,6 +260,19 @@ and transactions are running (no connection drops, unlike v1's abrupt pauses). M
 **256 ACUs** (≈512 GiB). With **scale-to-zero** (automatic pause/resume), the min can go to
 **0 ACU** so an idle cluster costs (near) nothing for compute; the first connection after
 a pause incurs a resume latency (seconds). Billing is **per-second on ACU consumed.**
+
+**Worked example — when "spiky wins on serverless" is actually true.** Consider a cluster
+that idles at **2 ACU for 20 h/day** and bursts to **30 ACU for 4 h/day** (a daily reporting
+window). Serverless v2 bills per-second on ACU consumed, so per day:
+`(2 ACU × 20 h) + (30 ACU × 4 h) = 40 + 120 = 160 ACU-hours`. At an illustrative
+**$0.12 / ACU-hour**, that's `160 × 0.12 = $19.20/day ≈ $576/month`. To cover the same 30-ACU
+peak on a **provisioned** instance you must run 30 ACU-equivalent **24/7**:
+`30 × 24 = 720 ACU-hours/day → $86.40/day ≈ $2,592/month`. Serverless is **~4.5× cheaper**
+here because you're paying for the peak only 4 h/day instead of all 24. Flip the workload —
+a steady **28 ACU for ~22 h/day** — and the arithmetic inverts: serverless ≈ `28×22 = 616`
+ACU-hours/day vs provisioned `30×24 = 720`, only ~15% cheaper *before* Reserved-Instance
+discounts (often 30–50% off provisioned), at which point provisioned + RI wins. Rule of thumb:
+serverless pays off when the **average ACU is well below the peak ACU** (low duty cycle).
 
 **Real-world usage.** Spiky/unpredictable workloads, dev/test, multi-tenant SaaS (one
 cluster per tenant with a wide range), and secondary/read-scaling instances. You can mix
@@ -301,6 +347,25 @@ Lambda concurrency opens a connection per container and blows through connection
 with the proxy, thousands of Lambdas share a small backend pool. Also helps any spiky/
 high-concurrency app and smooths failovers.
 
+**Worked example — quantifying the "too many connections" failure and the fix.**
+Take a `db.r6g.large` (2 vCPU, **16 GiB**) running RDS PostgreSQL. Its default
+`max_connections` comes from the parameter-group formula
+`LEAST({DBInstanceClassMemory / 9531392}, 5000)`. With ~16 GiB of usable memory:
+`16 × 1,073,741,824 / 9,531,392 ≈ 1,802` connections (call it ~1,800; a bit lower in
+practice once the OS/engine reserve memory).
+- **Without a proxy:** a traffic spike drives Lambda to **2,000 concurrent executions**.
+  Each execution's container opens its own connection → **2,000 connection attempts**.
+  `2,000 > ~1,800` → the ~1,801st connection gets `FATAL: sorry, too many clients already`.
+  Worse, each idle-but-open connection still costs ~5–10 MB of backend RAM, so you're paying
+  memory for connections that are mostly parked between short queries.
+- **With RDS Proxy:** the same 2,000 Lambdas open 2,000 connections *to the proxy*, but the
+  proxy multiplexes them onto a small warm pool — say **~100 backend connections** (a typical
+  `MaxConnectionsPercent` of ~100 caps the pool well under 1,800). Because each Lambda's SQL
+  is short, 2,000 clients rarely hold a transaction simultaneously, so ~100 backend
+  connections absorb the load. Backend connection count drops from **2,000 → ~100** and the
+  errors disappear — *provided* the sessions don't force **pinning** (temp tables, session
+  variables), which would tie clients 1:1 to backends and reclaim the exhaustion problem.
+
 **Trade-offs.**
 - **RDS Proxy vs direct connection:** the proxy adds a small latency hop (~single-digit ms)
   and hourly cost per vCPU of the DB, but prevents connection exhaustion and reduces
@@ -333,6 +398,55 @@ group lets you deviate from AWS defaults.
 - **Aurora cluster vs instance parameter groups:** cluster-level settings (e.g. binlog)
   apply to all instances; instance-level lets a replica differ — know which layer a
   parameter lives at.
+
+---
+
+## Blue-Green Deployments and low-downtime major-version upgrades
+
+**Intuition.** The interviewer's classic follow-up is "how do you do a major Postgres/MySQL
+version upgrade (or a risky schema change) with near-zero downtime?" An **in-place** major
+upgrade reboots the instance and can take many minutes of hard downtime with no easy rollback.
+RDS/Aurora **Blue-Green Deployments** avoid that by spinning up a synchronized *green* copy of
+your whole topology that you upgrade and validate off to the side, then cut over in seconds.
+
+**How it works.** RDS creates a **green** environment (the staging clone: writer + replicas +
+parameter groups) that stays in sync with the live **blue** environment via **logical
+replication** under the hood. You apply the change on green — bump the engine major version,
+change an instance class, alter a schema — and test against green's own endpoints while blue
+keeps serving production. When ready, you trigger **switchover**: RDS blocks writes on blue,
+lets green catch up to zero lag, verifies health, and **renames the endpoints** so green
+becomes production. The switchover itself is typically **seconds to ~a minute**, and blue is
+kept around (now the old version) so rollback is "switch back," not "restore from backup."
+
+**Trade-offs.**
+- **Blue-Green vs in-place upgrade:** Blue-Green gives a tested target and fast, reversible
+  cutover — pick it for major-version jumps and risky changes. In-place is simpler/cheaper for
+  minor patches where a short maintenance-window reboot is acceptable.
+- **Caveats (the gotcha):** because sync uses logical replication, writes to **green are
+  blocked** while it's a replica, DDL/replication has engine limitations, and **in-flight
+  transactions during switchover can be interrupted**. You also pay for the duplicated green
+  fleet for the overlap period. Don't promise *zero* downtime — promise *seconds*, and design
+  clients to retry the brief cutover blip.
+
+---
+
+## Security: encryption, TLS, and IAM authentication
+
+**Intuition.** Security follow-ups are near-guaranteed at the senior bar. Know the three
+layers (at rest, in transit, auth) and the one migration gotcha interviewers love.
+
+**How it works.**
+- **Encryption at rest (KMS):** enable at creation and RDS/Aurora encrypts the volume,
+  automated backups, snapshots, and read replicas with a KMS key. The **gotcha:** you
+  **cannot toggle encryption on an existing unencrypted instance in place** — you must
+  **snapshot → copy the snapshot with encryption enabled → restore** the encrypted copy (and
+  cut traffic over). Plan the encryption decision before launch.
+- **Encryption in transit (TLS):** connect over TLS using the AWS-provided RDS CA bundle; you
+  can enforce it (e.g. Postgres `rds.force_ssl=1`) via a parameter group.
+- **IAM database authentication:** instead of a DB password, clients fetch a short-lived
+  (15-minute) IAM auth token to log in — no long-lived secrets to rotate, and access governed
+  by IAM policies. Trade-off: a connection-rate ceiling makes it best for moderate connection
+  churn (pair it with RDS Proxy, which also integrates Secrets Manager for password auth).
 
 ---
 
@@ -413,8 +527,10 @@ and budget** — not from familiarity.
 - **Replica lag under write burst:** stale reads on replicas — route read-your-writes to
   the writer.
 - **Hot single writer:** you saturate the largest instance/256 ACUs — mitigate with caching,
-  read replicas (reads only), CQRS, or app-level sharding; writes fundamentally don't scale
-  horizontally on a single relational writer.
+  read replicas (reads only), **CQRS** (Command Query Responsibility Segregation — split the
+  write model/path from the read model/path so reads scale on replicas independently), or
+  app-level sharding; writes fundamentally don't scale horizontally on a single relational
+  writer.
 - **Storage cap:** Aurora auto-grows to **128 TiB**; RDS gp3/io2 have their own max volume
   sizes — very large datasets may need partitioning/archival or a different store.
 
@@ -451,6 +567,12 @@ Instances / Savings Plans cut steady-state compute cost; Serverless v2 wins on s
   scale + multi-master vs joins/ad-hoc queries/transactions.)
 - "Steady 24/7 load vs spiky — Serverless v2 or provisioned + RI? Why?"
 - "How do you get read-your-writes consistency when reading from replicas?"
+- "How do you run a major-version upgrade or risky schema change with minimal downtime?"
+  (Blue-Green Deployment: synced green copy, upgrade/test off to the side, seconds-long
+  switchover, keep blue for rollback — not truly zero downtime.)
+- "How is the data encrypted, and how would you encrypt an already-running unencrypted DB?"
+  (KMS at rest + TLS in transit + optional IAM auth; existing unencrypted → snapshot, copy
+  with encryption, restore — no in-place toggle.)
 - "PITR vs snapshot vs backtrack — when each?"
 - "Your write throughput exceeds the largest instance. Now what?" (No horizontal write
   scaling on a single relational writer; cache, CQRS, shard, or re-platform.)

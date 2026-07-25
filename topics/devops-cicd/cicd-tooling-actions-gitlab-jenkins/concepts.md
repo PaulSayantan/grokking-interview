@@ -13,6 +13,27 @@ security, cost, and scale trade-offs in an interview.
 > stage/job, Jenkinsfile/stage) used *correctly*, and for whether you understand runners,
 > caching, secrets, and reuse — not just that you can paste YAML.
 
+## Cross-tool mental model (Rosetta stone)
+
+All three tools are the **same model with different nouns**: an *event* triggers a run,
+the run is split into *ordered phases*, each phase contains *units of work* that execute on
+a *runner/agent*, and each unit is a list of *commands*. Learn the mapping once and you can
+translate any pipeline between tools — exactly what an interviewer wants when they say "you
+know GitLab, now explain it in GitHub Actions terms."
+
+| Universal concept | GitHub Actions | GitLab CI | Jenkins |
+|---|---|---|---|
+| Top-level file | `.github/workflows/*.yml` (workflow) | `.gitlab-ci.yml` (pipeline) | `Jenkinsfile` (pipeline) |
+| Ordered phase | (implicit via `needs:`) | **stage** | **stage** |
+| Unit of work on one runner | **job** | **job** | **stage**'s work / node block |
+| Individual command | **step** (`run:`/`uses:`) | line in `script:` | **step** (`sh`, etc.) |
+| Reuse mechanism | composite action / reusable workflow | `include` / `extends` / anchors | shared library |
+| Machine that runs work | **runner** (hosted/self-hosted) | **runner** (+ executor) | **agent/node** (+ executor) |
+
+The one real modelling difference: GitHub Actions has **no first-class "stage"** — you
+express ordering by wiring jobs with `needs:`, whereas GitLab and Jenkins have an explicit
+stage layer that jobs are slotted into.
+
 ## GitHub Actions core model
 
 GitHub Actions is the CI/CD system built into GitHub. Its object model is a strict hierarchy:
@@ -67,8 +88,10 @@ jobs:
 A **runner** is the machine that executes a job. Two flavours:
 
 - **GitHub-hosted runners** — ephemeral VMs GitHub provisions per job (Ubuntu, Windows,
-  macOS), pre-loaded with common toolchains, **fresh and destroyed every run**. You pay per
-  minute (macOS/Windows cost multipliers apply); free minutes for public repos.
+  macOS), pre-loaded with common toolchains, **fresh and destroyed every run**. Billing splits
+  by repo visibility: **public repos on standard runners are free/unlimited**; **private repos**
+  pay per minute (Linux $0.008/min, Windows 2×, macOS 10×) after a **2,000 free min/month**
+  Free-tier quota.
 - **Self-hosted runners** — machines *you* register and manage (on-prem or your cloud).
   Chosen for: access to private networks, custom/large hardware (GPUs), OS/architecture not
   offered hosted, or cost at very high volume.
@@ -176,6 +199,42 @@ jobs:
       - run: aws s3 sync dist/ s3://my-bucket
 ```
 
+**How the OIDC handshake actually works** (the top follow-up — narrate it step by step):
+
+```mermaid
+sequenceDiagram
+    participant J as GHA job
+    participant G as GitHub OIDC provider
+    participant A as AWS STS
+    J->>G: 1. request token (needs id-token: write)
+    G-->>J: 2. signed JWT w/ claims (sub, aud, repo, ref)
+    J->>A: 3. AssumeRoleWithWebIdentity(JWT, role ARN)
+    A->>A: 4. verify signature vs GitHub JWKS + trust-policy conditions
+    A-->>J: 5. short-lived STS creds (~1h)
+```
+
+1. The job (having `id-token: write`) calls GitHub's token endpoint and gets back a
+   **signed JWT** whose claims describe *this* run — e.g. `sub =
+   repo:my-org/my-repo:ref:refs/heads/main`, `aud = sts.amazonaws.com`.
+2. `configure-aws-credentials` calls `sts:AssumeRoleWithWebIdentity`, passing that JWT and
+   the role ARN.
+3. AWS fetches GitHub's **public keys** (JWKS) to verify the token's signature — proving
+   GitHub minted it — then checks the role's trust policy conditions against the claims.
+4. Only if the conditions match does STS return **temporary credentials** (~1 hour). There
+   is no long-lived key anywhere: nothing to leak, nothing to rotate.
+
+The trust policy is what scopes it — this is the load-bearing part interviewers probe:
+
+```json
+"Condition": {
+  "StringEquals":   { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+  "StringLike":     { "token.actions.githubusercontent.com:sub": "repo:my-org/my-repo:ref:refs/heads/main" }
+}
+```
+
+A common mistake is a `sub` like `repo:my-org/*` — that lets **any repo in the org** (or a
+fork's PR branch) assume the role. Pin it to the exact repo and `ref`/`environment`.
+
 Deep dive on Vault, sealed-secrets, and rotation is in the `secrets-management` topic.
 
 ## GitLab CI core model and pipeline config
@@ -276,7 +335,11 @@ Jenkins is a self-hosted, plugin-driven automation server — the oldest and mos
 the three, and the one you'll most often inherit in a legacy shop.
 
 - **Controller** (historically called the "master") — schedules builds, serves the UI/API,
-  stores config. It **should not run build workloads** in production for security/scaling.
+  stores config. It **should not run build workloads** in production — the controller holds
+  *all* credentials and global config, so a malicious `Jenkinsfile` or plugin executing there
+  is a direct path to full-system compromise, and heavy build load starves the scheduler.
+  The hardening default follows from this: set the controller to **0 executors** so no build
+  ever lands on it.
 - **Agent** (historically "slave"; now **agent/node**) — a worker that executes builds.
   Connected via SSH, JNLP/inbound, or dynamically provisioned (Kubernetes, EC2, Docker
   plugins). An **executor** is a single build slot on a node.
@@ -371,6 +434,29 @@ The universal runner trade-off across all three tools:
   special OS/arch, compliance, or cheaper steady-state at very high volume. Trade-offs: **you
   own patching, scaling, and isolation**, and a poorly-isolated self-hosted runner is a
   serious security risk (job persistence, cache poisoning, credential theft).
+
+**Worked example — "at what build volume does self-hosting pay off?"** (the classic probe).
+Concrete GitHub Actions numbers: hosted **Linux** 2-core runners bill at **$0.008/min**;
+**Windows** at 2× (**$0.016/min**), **macOS** at 10× (**$0.08/min**). Free-tier private repos
+get **2,000 free min/month**; **public repos on standard hosted runners are free/unlimited**.
+
+Take a team running **100 CI builds/day × 8 min each on Linux**:
+
+- Usage = 100 × 8 = 800 min/day × 30 = **24,000 min/month**.
+- **Hosted cost** = (24,000 − 2,000 free) × $0.008 = 22,000 × $0.008 = **$176/month**.
+- **Self-hosted cost**: 24,000 min = 400 build-hours/month. One always-on **m5.large**
+  (~$0.096/hr) gives 730 hrs/month of capacity — more than enough — for $0.096 × 730 ≈
+  **$70/month**, plus ~2 hrs/month of engineer patching (~$30 loaded) ≈ **$100/month all-in**.
+
+So at this volume self-hosting already wins ($100 vs $176). The **breakeven** is where
+hosted cost equals the ~$100 self-hosted fixed cost: (x − 2,000) × $0.008 = $100 →
+x ≈ **14,500 Linux min/month (~480 min/day)**. Below that, hosted's zero fixed cost and zero
+ops burden win; above it, the self-hosted fleet's fixed cost amortizes.
+
+Two things move the breakeven sharply: **macOS/Windows** (hosted's 10×/2× multipliers make
+hosted far pricier, so self-hosting a Mac mini / Windows box pays off at *much* lower volume),
+and **spiky vs steady load** (bursty traffic wastes an always-on fleet — hosted's elasticity
+wins; steady 24/7 load keeps a self-hosted fleet busy — self-hosting wins).
 
 > [!KEY-TAKEAWAY]
 > The dominant security rule for self-hosted runners: make them **ephemeral** (fresh,

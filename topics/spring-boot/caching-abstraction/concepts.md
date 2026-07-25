@@ -38,8 +38,11 @@ which wraps beans containing caching annotations in a proxy. Key attributes:
 
 - `mode` — `PROXY` (default, Spring AOP proxies) or `ASPECTJ` (compile/load-time
   weaving, which defeats the self-invocation limitation because there is no proxy).
-- `proxyTargetClass` — `false` (default) uses **JDK dynamic proxies** when the
-  bean implements an interface; `true` forces **CGLIB** subclass proxies.
+- `proxyTargetClass` — `false` (the *framework* default) uses **JDK dynamic proxies**
+  when the bean implements an interface; `true` forces **CGLIB** subclass proxies.
+  Note: **Spring Boot flips this to `true`**, so CGLIB is the norm in Boot apps —
+  don't assume JDK proxies just because your bean has an interface (see the
+  self-invocation section).
 - `order` — advisor ordering relative to other advice (e.g. `@Transactional`).
 
 In Spring Boot, you rarely define a `CacheManager` yourself: adding
@@ -240,6 +243,48 @@ own multi-field key object, it **must** implement `equals`/`hashCode` correctly,
 you get silent cross-key collisions (wrong cached value returned) — this is the single
 most common home-grown-key bug.
 
+**Worked trace — how a broken key returns the wrong value.** Suppose you write a
+custom key for a rate lookup keyed on `(from, to)`, but slip up: `hashCode()` uses
+both fields, `equals()` compares only `from`:
+
+```java
+record RateKey(String from, String to) {
+    @Override public int hashCode() { return Objects.hash(from, to); }   // both
+    @Override public boolean equals(Object o) {                          // only `from`!
+        return o instanceof RateKey k && from.equals(k.from);
+    }
+}
+```
+
+A `HashMap`-backed cache (Caffeine/ConcurrentMap) locates an entry by `hashCode()`
+to find the bucket, then walks the bucket calling `equals()` to pick the match. Now
+trace two calls:
+
+1. `findRate("USD","EUR")` → miss → stores `RateKey("USD","EUR") → 0.92`.
+2. `findRate("USD","GBP")` → `hashCode()` differs from #1 (`hash("USD","GBP") ≠
+   hash("USD","EUR")`), so it lands in a *different* bucket → miss → stores
+   `RateKey("USD","GBP") → 0.79`. So far so good — no collision yet.
+
+The truly dangerous bug — a *silent wrong hit* — needs both methods to ignore `to`:
+`equals` **and** `hashCode` computed over only `from`. Then `("USD","EUR")` and
+`("USD","GBP")` both hash to the same bucket **and** compare equal. Take that case:
+
+1. `findRate("USD","EUR")` → stored under bucket `h = hash("USD")`, value `0.92`.
+2. `findRate("USD","GBP")` → same bucket `h` (hashCode ignored `to`), map walks the
+   bucket, calls `equals()` → since `equals` also ignores `to`, `("USD",_).equals(("USD",_))`
+   → **true** → **hit** → returns `0.92` (EUR rate) for a GBP request. Wrong currency, no
+   exception, silent corruption.
+
+(The subtler variant — correct `equals` over both fields but `hashCode` over only `from` —
+is *not* corrupting: the two keys collide into one bucket, but `equals` still distinguishes
+EUR from GBP, so the GBP lookup misses and stores `0.79` correctly. You only pay a
+performance cost from the over-full bucket, not a wrong answer.)
+
+The contract you must honor: **`a.equals(b)` ⇒ `a.hashCode() == b.hashCode()`**, and
+both must span *every* field that distinguishes the key. A `record` (or a `String`)
+gets this right for free — which is exactly why the default `SimpleKey` and immutable
+value keys are the safe choice.
+
 **Mutable keys are a landmine.** The key object is stored by reference in most local
 providers. If you use a mutable object (or an array) as the key and later mutate it,
 its `hashCode`/`equals` shift and the entry becomes unreachable (or worse, collides).
@@ -437,6 +482,21 @@ A **cache stampede** (a.k.a. dog-piling / thundering herd) happens when a popula
 key expires (or is cold) and many concurrent requests all miss simultaneously,
 each triggering the expensive backing computation at once — hammering the DB.
 
+**Worked trace — feel the load spike.** Say the backing query takes **200 ms**, and
+the hot key's entry expires at `T=0`. In the next 200 ms window, **500 requests**
+arrive for that same key.
+
+- **Without `sync`:** request #1 misses at `T=0` and starts the 200 ms query. But the
+  entry isn't stored until it *finishes* at `T=200 ms`, so every request that arrives
+  during `[0, 200)` also sees an empty cache and launches its own query. Result:
+  **500 concurrent DB queries** — a 500× load spike on the source exactly when the hot
+  key drops. The cache made the failure *worse* (synchronized expiry → synchronized
+  herd).
+- **With `sync = true`:** request #1 acquires the per-key compute lock and runs the
+  single 200 ms query. The other **499** requests find the lock held, **block**, and
+  when #1 stores the result they all read that one value. Result: **1 DB query**,
+  499 threads parked for ≤200 ms. Same latency for the herd, 1/500th the DB load.
+
 Mitigations:
 
 - **`@Cacheable(sync = true)`** — Spring serializes concurrent misses for the
@@ -508,6 +568,25 @@ invocation time the interceptor:
    stores the result (`@CachePut` always stores; `@Cacheable` stores on a miss);
 5. runs `beforeInvocation=false` evictions.
 
+**Worked trace — one `findBook("978-1")` method, two calls.** Cache `"books"` starts
+empty; the method is `@Cacheable("books")` with default key generation (one arg → the
+arg itself, so `key = "978-1"`).
+
+- **Call 1 (miss):** step 1 resolves one `@Cacheable` operation; step 2 has no
+  before-evictions; step 3 computes `key = "978-1"`, probes `books.get("978-1")` →
+  `null` (miss), so it does **not** short-circuit; step 4 proceeds to the target
+  method, which runs the real DB fetch (say 50 ms) returning `Book#42`, evaluates
+  `unless` (default absent → store), and calls `books.put("978-1", Book#42)`. Cache
+  now holds `{ "978-1" → Book#42 }`. Returned: `Book#42`.
+- **Call 2 (hit):** steps 1–2 identical; step 3 computes the same `key = "978-1"`,
+  probes `books.get("978-1")` → `Book#42` (**hit**) → returns it **without proceeding**
+  to step 4, so the DB fetch never runs (0 ms of method body). Returned: the *same*
+  cached `Book#42`.
+
+Net: two identical calls, one DB hit. Note the returned object is the cached instance
+— if a caller mutates `Book#42`, every future hit sees the mutation (local caches
+store by reference), which is why cached values should be treated as immutable.
+
 **Ordering vs. `@Transactional`:** both are AOP advisors and their relative order
 matters. The cache advisor's `order` defaults to `Ordered.LOWEST_PRECEDENCE`. In the
 common case you want the **transaction advice to be the outermost** (lower order
@@ -546,6 +625,21 @@ expensive; it hurts (or is outright wrong) otherwise.
 - **Low hit ratio** → you pay lookup + store cost for little benefit.
 - **Correctness-critical fresh data** (e.g. account balance) where staleness is
   unacceptable without careful eviction/TTL.
+
+**Break-even math — is the cache worth it?** Average latency ≈
+`hitRatio × cacheLatency + (1 − hitRatio) × (cacheLatency + sourceLatency)`
+(you always pay the cache lookup; on a miss you also pay the source). With a 1 ms
+cache and a 50 ms source:
+
+- **90% hits:** `0.9×1 + 0.1×(1+50) = 0.9 + 5.1 = 6.0 ms` avg vs 50 ms uncached — a
+  ~8× win.
+- **50% hits:** `0.5×1 + 0.5×51 = 0.5 + 25.5 = 26.0 ms` — still helps, but you've
+  added a moving part for a 2× gain.
+- **10% hits:** `0.1×1 + 0.9×51 = 0.1 + 45.9 = 46.0 ms` vs 50 ms — barely faster, and
+  you now pay memory, invalidation complexity, and a 1 ms tax on the 90% that miss.
+
+The lesson: the payoff scales with hit ratio, so a cache only earns its keep when a
+small hot set absorbs most reads. Low hit ratios add cost and risk for almost no gain.
 
 Rule of thumb: cache the *result* of pure, expensive, read-mostly computations;
 pair `@Cacheable` reads with `@CachePut`/`@CacheEvict` on the writes that change

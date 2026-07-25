@@ -77,6 +77,16 @@ data. Three models, each with sharp trade-offs:
 | **Silo identity** (user pool per tenant) | One Cognito user pool per tenant, provisioned at onboarding | Strong — hard directory boundary, per-tenant password/MFA policy, per-tenant IdP | Higher — hits **1,000 user pools per Region** (raisable to 10,000); onboarding must create a pool; cross-tenant admin harder | Regulated/enterprise tenants; tenants demanding their own IdP or data-residency of the directory |
 | **Federated identity** (tenant brings its own IdP) | Corporate SAML/OIDC IdP federated into a shared or per-tenant pool | Depends on host pool; auth lives in the customer's directory | Per-tenant IdP config; onboarding wires the federation | B2B enterprise SSO ("log in with your company account") |
 
+With federation you also have to decide **which** corporate IdP a given login goes
+to — **home-realm discovery**. Typically you route on the email **domain** (send
+`@acme.com` users to Acme's Okta, `@globex.com` to Globex's Entra ID) or a tenant
+hint in the login URL (`app.com/login?tenant=acme`), *not* the full email address:
+in a pooled directory the same person may exist under two tenants, so the email
+alone cannot tell you which tenant's IdP to trust. This also splits **SP-initiated**
+(user starts at your app, you bounce them to their IdP) from **IdP-initiated**
+(user starts in their corporate portal and lands on you with a SAML assertion)
+flows — both must resolve to the same tenant mapping.
+
 > [!INTERVIEW]
 > A classic trap: "just make a user pool per tenant, it's the cleanest isolation."
 > The senior answer weighs the **1,000-user-pools-per-Region soft quota** (10,000
@@ -110,6 +120,34 @@ token. Because the pool signs the token, these claims are tamper-evident.
 - The **total combined added claims + scopes** in one token-generation
   transaction must stay within Cognito's limit (**5,000**, adjustable), which is
   generous; the practical cap is JWT size, not this quota.
+
+**Worked example — what the decoded token actually looks like.** After the
+pre-token trigger runs, the base64url-decoded **access token** payload that a
+downstream API receives (and authorizes on) looks like this:
+
+```json
+{
+  "sub": "3b9c...-uuid",
+  "token_use": "access",
+  "scope": "aws.cognito.signin.user.admin",
+  "custom:tenantId": "t-8421",
+  "custom:tier": "premium",
+  "custom:role": "admin",
+  "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_AbC123",
+  "client_id": "6f2k...",
+  "iat": 1721800000,
+  "exp": 1721803600
+}
+```
+
+Reading it: `token_use: "access"` marks this as the access token (the ID token
+would say `"id"`); `iss` is the pool the authorizer pins for signature/issuer
+checks; `exp - iat = 1721803600 - 1721800000 = 3600` seconds = a 1-hour validity.
+The three `custom:*` claims are exactly what the pre-token **V2/V3** trigger
+stamped in. Note the placement: V1 could only enrich the **ID token**, so an API
+authorizing on the access token would not see `custom:tenantId`; **V2/V3** writes
+the same claims into the **access token**, which is why modern designs use it —
+the access token is the one the API Gateway JWT authorizer validates.
 
 > [!TIP]
 > Keep the token **small and stable**: `tenantId`, `tier`, `role`, maybe a
@@ -165,6 +203,23 @@ sequenceDiagram
 > background job that runs "for all tenants" and forgets the filter. Propagation is
 > not just the synchronous request path.
 
+**Staleness and revocation.** Because tenant context lives *inside* the JWT, the
+claims are only as fresh as the token TTL. If you downgrade a tenant from
+`premium` to `basic`, or suspend/offboard them mid-session, a token minted 20
+minutes ago still carries the old `custom:tier`/`custom:role` and keeps working
+until it expires — up to the 1-day max validity. Concretely: with a 1-hour access
+token, an offboarded tenant can keep calling your API for up to ~60 minutes after
+you flip their registry status to `SUSPENDED`. Three ways to force it sooner:
+
+- **Short access-token TTL** (e.g. 5–15 min) so stale claims self-heal quickly —
+  the simplest lever, at the cost of more refresh-token round trips.
+- **Explicit revocation** — Cognito **global sign-out** / token revocation
+  invalidates refresh tokens so no *new* access tokens are issued.
+- **Server-side status check** — on sensitive operations, re-read the tenant's
+  `status` from the registry (cheap, cached) and reject if `SUSPENDED`, rather than
+  trusting the token alone. This is the belt-and-suspenders answer that closes the
+  window entirely and ties directly to the `SUSPENDED` offboarding state.
+
 ---
 
 ## Enforcing isolation with scoped IAM credentials
@@ -193,6 +248,52 @@ The resulting temporary credentials (valid 15 minutes to 12 hours; **1 hour** if
 in application code no longer leaks data, because IAM denies the cross-tenant
 access.
 
+**Worked example — the policy that makes it click.** The service assumes the
+shared role and tags the session with the tenant from the *verified JWT* claim:
+
+```python
+sts.assume_role(
+    RoleArn="arn:aws:iam::111122223333:role/PooledTenantDataRole",
+    RoleSessionName="tenant-t-8421",
+    Tags=[{"Key": "TenantID", "Value": "t-8421"}],  # from the JWT, never the client
+    Policy=json.dumps(SESSION_POLICY),               # inline session policy below
+)
+```
+
+where the inline session policy scopes DynamoDB access to only that tenant's
+partition keys:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["dynamodb:Query", "dynamodb:GetItem"],
+    "Resource": "arn:aws:dynamodb:us-east-1:111122223333:table/AppData",
+    "Condition": {
+      "ForAllValues:StringEquals": {
+        "dynamodb:LeadingKeys": ["${aws:PrincipalTag/TenantID}"]
+      }
+    }
+  }]
+}
+```
+
+**Trace it.** The session is tagged `TenantID=t-8421`, so at request time
+`${aws:PrincipalTag/TenantID}` resolves to `t-8421`. Now suppose the app code has
+a bug and issues `Query` with partition key `t-9999` (another tenant):
+
+1. DynamoDB evaluates the `dynamodb:LeadingKeys` condition against the request's
+   partition key `t-9999`.
+2. The condition requires every leading key to equal `t-8421` — but `t-9999 !=
+   t-8421`, so `ForAllValues:StringEquals` is **false**.
+3. IAM denies the request with `AccessDeniedException` **before** any data is read.
+
+Even if the developer forgot the `WHERE tenant_id = ?` predicate entirely, a
+`Query` for `t-8421`'s own keys succeeds and a `Query` for anyone else's is
+rejected by IAM — the credential is *physically incapable* of reading another
+tenant's items. That is layer (3) in the defense-in-depth answer below.
+
 ```mermaid
 sequenceDiagram
     participant SV as Service;
@@ -212,6 +313,18 @@ sequenceDiagram
   you **cache** the scoped credentials per tenant (keyed by `tenantId`) for their
   TTL, or assume the role at Lambda **cold start** for single-tenant-per-invoke
   patterns, rather than per request.
+
+  **Worked example — why caching is mandatory, not optional.** Say you serve
+  **2,000 req/s** and each request does a fresh `AssumeRole`. That is 2,000 STS
+  calls/s against a 600/s quota: `2000 / 600 = 3.33x` over the limit, so ~70% of
+  requests get throttled (`ThrottlingException`). Now cache the 1-hour credentials
+  per tenant. With **500 active tenants**, each tenant's creds are minted once and
+  reused for the full hour, so you make ~500 `AssumeRole` calls **per hour** =
+  `500 / 3600 = 0.14 calls/s`. You dropped from 2,000/s to 0.14/s — about a
+  **14,000x reduction** (roughly four orders of magnitude), landing you at ~0.02%
+  of the quota with enormous headroom. The cache TTL must be *shorter* than the
+  credential expiry (e.g. refresh at 50 minutes for 1-hour creds) so you never hand
+  out an expired session.
 - **Cross-account note:** for a cross-account `AssumeRole`, only the **calling**
   account's STS quota is consumed, not the target account's.
 - **Granularity vs. blast radius:** session tags let **one role** serve all

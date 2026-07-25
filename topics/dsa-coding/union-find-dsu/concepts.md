@@ -17,6 +17,15 @@ BFS/DFS, then the canonical interview problems.
 
 ## The structure: parent array as a forest
 
+**Mental model — friend groups with one leader.** Picture people split into friend
+groups where each group only remembers a single **leader**. To check whether two people
+are in the same group, each follows the *"who's your leader?"* chain upward until they
+hit someone who is their own leader — if both arrive at the same person, they're in the
+same group. To merge two groups, you just make one leader report to the other. That's the
+whole trick. Map it to DSU: **leader → root**, **the chain-following → `find`**,
+**"make one leader report to the other" → `union`**. The array below is just a compact way
+to store "who does each person report to."
+
 DSU represents each set as a **rooted tree**, and the whole collection as a **forest**.
 Each element has exactly one parent pointer; the **root** of a tree (an element that is
 its own parent) is the set's canonical **representative**. Two elements are in the same
@@ -60,8 +69,13 @@ Every element starts in its own singleton set, so each element is its own parent
 ```java
 int[] parent = new int[n];
 int[] rank    = new int[n];      // or size[]; used to keep trees shallow
+int   count   = n;               // number of disjoint sets — starts as n singletons
 for (int i = 0; i < n; i++) parent[i] = i;   // rank[i] = 0 implicitly
 ```
+
+`count` tracks how many disjoint sets currently exist; each successful `union` decrements
+it (see below), so it answers "how many connected components?" in O(1). A trivial helper
+follows from `find`: `boolean connected(int a, int b) { return find(a) == find(b); }`.
 
 Initialization is **O(n)** time and **O(n)** space. Some problems key on strings or
 coordinates rather than `0..n-1`; map them to integer ids first (via a hash map or
@@ -111,6 +125,32 @@ int find(int x) {
 
 Path compression alone (with naive union) gives **O(log n)** amortized per operation.
 
+**Worked trace — watch the tree flatten.** Start with a degenerate chain over 5 nodes,
+`parent = [0,0,1,2,3]`, i.e. `4 → 3 → 2 → 1 → 0` (node 4 is 4 links deep). Call
+`find(4)`.
+
+- **Recursive compression** recurses all the way to root 0, then on the way back points
+  *every* node on the path straight at 0:
+
+  ```
+  before: parent = [0,0,1,2,3]     4→3→2→1→0  (depth of 4 is 4)
+  after:  parent = [0,0,0,0,0]     4→0, 3→0, 2→0, 1→0  (all depth 1)
+  ```
+
+  A second `find(4)` now reads `parent[4]==0`, returns in **one step — O(1)**.
+
+- **Path halving** on the same input only shortcuts every *other* node (each step relinks
+  `x` to its grandparent):
+
+  ```
+  x=4: parent[4] = parent[parent[4]] = parent[3] = 2;  x ← 2
+  x=2: parent[2] = parent[parent[2]] = parent[1] = 0;  x ← 0  → root, stop
+  after: parent = [0,0,0,2,2]      4→2→0, 3→2→0  (depths cut from 4/3 to 2)
+  ```
+
+  Not fully flat, but node 4 dropped from depth 4 to depth 2 in a single tight loop with
+  no recursion — and repeated `find`s keep halving until the tree is flat.
+
 ## Optimization 2: union by rank / union by size
 
 When merging two trees, always attach the **shorter/smaller** tree under the **taller/
@@ -135,6 +175,26 @@ boolean union(int a, int b) {
 }
 ```
 
+**Worked trace — how rank evolves (and why the tie rule matters).** All ranks start at 0,
+`parent = [0,1,2,3]`. Run three unions:
+
+| Union | Roots (ranks) | Link | Rank update | ranks after |
+|---|---|---|---|---|
+| `union(0,1)` | 0(0), 1(0) — tie | `parent[1]=0` | tie → `rank[0]++` | `[1,0,0,0]` |
+| `union(2,3)` | 2(0), 3(0) — tie | `parent[3]=2` | tie → `rank[2]++` | `[1,0,1,0]` |
+| `union(1,3)` | find(1)=0 (1), find(3)=2 (1) — tie | `parent[2]=0` | tie → `rank[0]++` | `[2,0,1,0]` |
+
+The last union merges two rank-1 trees, so the survivor (root 0) climbs to rank 2 — the
+height genuinely grew by one, and that's the *only* case where rank increments. When ranks
+differ, the shorter tree tucks under the taller one and the taller tree's height is
+unchanged, so no increment. That's why you bump **only on a tie**: any other case adds a
+node at a depth that already existed.
+
+**Union by size** tracks counts instead of a height bound; the same three unions give
+sizes `[2,1,1,1] → [2,1,2,1] → [4,1,2,1]` (root 0 ends with 4 nodes). Size is just "how
+many nodes are under me" — always the sum, never a conditional increment — which is why
+many find it more intuitive, and it directly answers "largest component?" problems.
+
 Union by rank/size **alone** (without path compression) already guarantees tree height
 **O(log n)**, so `find` is O(log n).
 
@@ -157,6 +217,19 @@ number of atoms in the universe is still < 5). So amortized cost per operation i
 | Path compression only | O(log n) |
 | Union by rank/size only | O(log n) |
 | **Both** | **O(α(n)) ≈ O(1)** |
+
+**Intuition for why the two optimizations collapse to α(n).** Union-by-rank does the
+*height control*: a root's rank only rises on a tie, and a rank-`r` tree needs at least
+`2^r` nodes, so ranks — and therefore heights — never exceed `O(log n)`. Path compression
+does the *payoff*: every expensive `find` that walks a long path immediately shortcuts all
+those nodes to the root, so that cost is "paid forward" and never charged again. The
+accounting (potential) argument then shows a node can only be re-parented onto a
+strictly-higher-rank ancestor so many times before it's hanging off the root — and the
+number of distinct rank *bands* a node can climb through is bounded by α(n), not log n.
+That's the whole story at interview depth: **rank bounds how tall trees get; compression
+means each costly walk buys down many future walks; the leftover per-op cost is α(n).**
+Interviewers almost never want the full potential proof — stating this causal chain is
+enough.
 
 This near-constant amortized bound (Tarjan, 1975) is why DSU beats a graph traversal for
 *incremental* connectivity: each edge added is essentially free.
@@ -298,6 +371,15 @@ Advanced / union-by-size & offline:
 - **"How does Kruskal's use it?"** Sort edges by weight; for each edge, `union` the
   endpoints if they're in different sets (DSU rejects cycle-forming edges), stopping after
   n-1 edges.
+- **"Can DSU track more than membership?"** Yes — **weighted / relational DSU** stores a
+  relation to the parent (a parity bit, or a numeric offset/ratio) alongside each parent
+  pointer, and *combines* those relations during `find` as it compresses the path. This
+  answers "what's the relationship between a and b?", not just "same set?". Uses:
+  bipartite detection (parity to the root — same parity ⇒ conflict), and
+  [Evaluate Division](https://leetcode.com/problems/evaluate-division/) (store the
+  multiplicative ratio to the root, so `a/b` = ratio(a)/ratio(b) when they share a root).
+  The catch: path compression must recompute the accumulated relation as it re-points each
+  node, or the offsets go stale.
 
 ## References
 

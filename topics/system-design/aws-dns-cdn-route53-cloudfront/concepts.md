@@ -57,6 +57,24 @@ congestion-managed fiber) rather than the public internet, which reduces jitter 
 packet loss. This is the core reason CloudFront and Global Accelerator help dynamic,
 non-cacheable traffic — not caching, but *proximity + backbone*.
 
+**Worked trace — user in Tokyo, origin in us-east-1, content NOT cacheable.** Take
+RTT(Tokyo↔us-east-1) ≈ 160 ms and RTT(Tokyo↔local PoP) ≈ 8 ms. A cold HTTPS request
+pays 3 round trips of setup before the first byte: 1 RTT for the TCP handshake + 2 RTTs
+for a TLS 1.2 handshake.
+
+- **Direct to origin:** setup = 3 × 160 ms = **480 ms**, then the actual HTTP
+  request/response adds 1 more RTT = 160 ms → **≈ 640 ms to first byte**.
+- **Via CloudFront PoP:** the viewer does that same 3-RTT TCP+TLS setup against the PoP
+  8 ms away = 3 × 8 = **24 ms**. The PoP already holds a *warm, pooled* connection to the
+  origin (no per-request TCP/TLS setup), so fetching the uncacheable object costs one
+  backbone round trip ≈ 140 ms (backbone is comparable-or-lower latency than public
+  internet, with far less jitter) → **≈ 164 ms to first byte**.
+
+That's **~476 ms faster on a request that hit the cache 0%** — the ~456 ms saved is
+purely the setup handshakes moving from the 160 ms origin to the 8 ms PoP, which is
+exactly the "300–600 ms of setup" the section above claims. Repeat-visit and keep-alive
+connections narrow the gap, but the first-byte win on cold/dynamic traffic is real.
+
 **Anycast.** A single IP address is advertised (BGP) from many locations at once; the
 internet routes each client to the topologically nearest advertisement. Global
 Accelerator gives you **2 static anycast IPv4 addresses** (from the AWS IP pool or your
@@ -138,6 +156,10 @@ scenarios. The eight policies:
   user's *physical location* regardless of latency — you use it for **compliance /
   data-residency / language**, not performance. "Route EU users to the Frankfurt stack
   for GDPR" = geolocation; "give every user the fastest region" = latency.
+  - *How LBR "knows" latency before you connect:* it does **not** probe per request. AWS
+    continuously measures latency between networks (by prefix) and AWS Regions from real
+    traffic and maintains a **latency database keyed by network prefix**; at query time
+    LBR just looks up the querying network in that table and returns the best Region.
 - **Geolocation vs geoproximity.** Geolocation is discrete buckets (country/state) with
   a "default" fallback. Geoproximity is continuous distance with a **bias** knob that
   lets you *shift* traffic (e.g. expand `us-east-1`'s catchment to offload another
@@ -152,6 +174,18 @@ scenarios. The eight policies:
   then ramp. Weight 0 disables a record. Because it is DNS, shifting is subject to TTL
   and is coarse — for precise, instant traffic splitting prefer an ALB weighted target
   group or App Mesh.
+
+> [!INTERVIEW]
+> **Whose location does Route 53 actually see?** Latency-based and geolocation routing
+> decide from the **recursive resolver's IP**, not the client's — Route 53 never sees the
+> end user directly, only whoever forwarded the query. The bridge is **EDNS Client Subnet
+> (ECS)**: if the resolver forwards a truncated client subnet, Route 53 can approximate
+> the real user; if it doesn't, the resolver's own location wins.
+> *Failure mode:* a corporate office in Sydney whose DNS is centralized through a resolver
+> in London gets routed as if it were in London; a user on a public resolver (e.g.
+> `8.8.8.8`) can be answered from the resolver's PoP, not their own. This is exactly why
+> **geolocation is not a hard compliance guarantee at the DNS layer** — enforce
+> data-residency at the application/auth tier, not just in the routing policy.
 
 **Nesting.** Traffic Flow lets you nest policies (e.g. geolocation → then latency
 within a continent → then weighted for canary). Powerful but adds config complexity and
@@ -193,6 +227,29 @@ caching (often longer, and some clients cache forever). So DNS failover realisti
 takes **1–several minutes** and cannot guarantee a fast RTO. When the requirement is
 *seconds* of failover with no dependence on client DNS behavior, use **Global
 Accelerator** (data-plane failover) or an active-active design behind it.
+
+**Worked timeline — why "60 s TTL" is not 60 s of downtime.** Assume standard 30 s
+endpoint checks, primary record TTL = 60 s, and a resolver that happened to cache the
+primary A record 5 seconds before the outage:
+
+| Wall clock | Event |
+|---|---|
+| t = −5 s | A resolver caches `primary = 203.0.113.10`, TTL 60 → this cached copy is valid until **t = 55 s** |
+| t = 0 s | Primary origin dies; it is now returning errors / not answering |
+| t = 0–30 s | Route 53's ~15+ global health checkers observe the failures; the endpoint isn't declared unhealthy until enough checkers agree |
+| t ≈ 30 s | Route 53 flips the primary to unhealthy and starts handing the **secondary** IP to any *new* query |
+| t = 30–55 s | The resolver that cached at t = −5 s **keeps serving the dead `203.0.113.10`** — Route 53's change can't reach into an already-cached answer |
+| t ≈ 55 s | That resolver's TTL finally expires; its next query gets the secondary. **Recovery ≈ 55 s for that user** |
+| t = minutes+ | A browser/OS/JVM client that pins DNS (ignores TTL, caches for the process lifetime) can keep hitting the dead IP far longer |
+
+So detection (~30 s) and cache expiry (~25 s remaining here) stack to ~55 s in the
+*lucky* case, and unbounded when a client pins DNS — hence "1–several minutes."
+
+**Same outage under Global Accelerator:** the client is still using the **same two
+static anycast IPs**; there is no A record to expire. At t = 0 the origin dies; GA's
+continuous health checks detect it and, at **t ≈ 30 s or less**, the edge simply steers
+new connections to the healthy endpoint group over the backbone. No resolver, no TTL,
+no pinned-DNS tail — recovery is bounded at ~30 s regardless of client DNS behavior.
 
 ---
 

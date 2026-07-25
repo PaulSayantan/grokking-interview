@@ -131,6 +131,65 @@ A handler can simply **return a `ProblemDetail`** (or throw an exception impleme
 
 **Boot's default error handling contrast:** Even with no advice, Spring Boot has `BasicErrorController` (`/error`) and `DefaultErrorAttributes`, producing a default JSON error body (`timestamp`, `status`, `error`, `path`, and optionally `message`/`trace`). This is a fallback via error-dispatch, distinct from `@ExceptionHandler` resolution. `server.error.include-message`, `include-stacktrace`, `include-binding-errors` control what's exposed (defaults are conservative — `message` and `stacktrace` are `never`/off by default in Boot 2.3+).
 
+**Worked example — what the client literally gets back.** Take this DTO and endpoint:
+
+```java
+public record UserDto(
+    @NotBlank String name,
+    @Email String email,
+    @Min(18) int age) {}
+
+@PostMapping("/users")
+public User create(@Valid @RequestBody UserDto dto) { ... }
+```
+
+A client sends an invalid request:
+
+```
+POST /users HTTP/1.1
+Content-Type: application/json
+
+{ "name": "", "email": "nope", "age": 15 }
+```
+
+All three constraints fail (`name` blank, `email` malformed, `age` below 18), so Spring throws `MethodArgumentNotValidException`. With the `handleMethodArgumentNotValid` override shown in the `ResponseEntityExceptionHandler` section above — which packs the field errors into a `ProblemDetail` extension member `errors` — the response body is exactly:
+
+```
+HTTP/1.1 400 Bad Request
+Content-Type: application/problem+json
+
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Validation failed",
+  "instance": "/users",
+  "errors": [
+    "name: must not be blank",
+    "email: must be a well-formed email address",
+    "age: must be greater than or equal to 18"
+  ]
+}
+```
+
+Trace the fields: `type` defaults to `about:blank` (you never called `setType`); `title` defaults to the status reason phrase `"Bad Request"`; `status` mirrors the `HttpStatus` you passed; `detail` is your literal `"Validation failed"` string; `instance` is auto-populated with the request path `/users`; and `errors` is the extension array you attached via `setProperty`. Note the content type is `application/problem+json`, not plain `application/json`.
+
+Now contrast the **same failed request with no advice at all** — it falls through to Boot's `/error` dispatch:
+
+```
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{
+  "timestamp": "2026-07-25T10:15:30.123+00:00",
+  "status": 400,
+  "error": "Bad Request",
+  "path": "/users"
+}
+```
+
+Same 400 status, but a totally different shape: `timestamp`/`error`/`path` instead of `type`/`title`/`detail`/`instance`, plain `application/json`, and — with the conservative defaults — **no** per-field messages (`message` is `never`, `include-binding-errors` is `never`), so the client cannot tell *which* field was wrong. That missing detail is exactly why teams add the advice.
+
 ---
 
 ## Mapping exceptions to status codes
@@ -392,6 +451,51 @@ Spring Framework 6.1 (Boot 3.2) split controller method validation into **two di
 | `@Validated` service bean method params | `ConstraintViolationException` (AOP) | 500 (unless handled) |
 
 Note: method-level validation *supersedes* individual command-object validation on the same method — if a method mixes a `@Valid @RequestBody` object and a constrained `@RequestParam`, the whole method goes through method validation and you can get a `HandlerMethodValidationException` covering both (its `ParameterValidationResult`s include a `ParameterErrors` for the cascaded body). Handle **both** `MethodArgumentNotValidException` and `HandlerMethodValidationException` in a robust advice.
+
+**Worked example — same request, two different responses depending on `@Validated`.** Take one constrained query-param endpoint and send it a value that violates the constraint:
+
+```java
+@GetMapping("/products")
+public List<Product> list(@RequestParam @Min(1) int page) { ... }
+```
+
+```
+GET /products?page=0 HTTP/1.1
+```
+
+`page=0` fails `@Min(1)` in both cases, but *which exception and status* the client sees depends entirely on whether the controller class carries `@Validated`:
+
+**Case A — class annotated `@Validated` (Path 1, AOP proxy).** The AOP interceptor validates and throws a raw `ConstraintViolationException`. There is no default 400 mapping for it, so absent a custom handler it surfaces via `/error` as:
+
+```
+HTTP/1.1 500 Internal Server Error
+Content-Type: application/json
+
+{
+  "timestamp": "2026-07-25T10:15:30.123+00:00",
+  "status": 500,
+  "error": "Internal Server Error",
+  "path": "/products"
+}
+```
+
+A *client-side* mistake (bad input) is reported as a *server* error — the classic wrong-status trap.
+
+**Case B — class has NO `@Validated` (Path 2, MVC built-in, Spring 6.1+).** The handler-adapter layer validates the parameter and throws `HandlerMethodValidationException`, which implements `ErrorResponse` and maps to 400 with per-parameter detail automatically — no custom handler required:
+
+```
+HTTP/1.1 400 Bad Request
+Content-Type: application/problem+json
+
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Validation failure"
+}
+```
+
+Same input, same constraint — but removing one class-level annotation flips a misleading 500 into a correct 400. That is why the guidance is to drop `@Validated` from controllers on Boot 3.2+ and let the built-in path run (and, on the AOP path, to always register an `@ExceptionHandler(ConstraintViolationException.class)` that forces 400).
 
 **`setAdaptConstraintViolations(true)`:** on the AOP path, you can configure `MethodValidationPostProcessor` to raise `MethodValidationException` (violations adapted to `MessageSourceResolvable`/`FieldError`s grouped by parameter) instead of the raw `ConstraintViolationException` — useful for uniform, message-source-driven error rendering on service beans.
 

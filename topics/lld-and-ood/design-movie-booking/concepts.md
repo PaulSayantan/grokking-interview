@@ -365,6 +365,22 @@ intent category** — the dp-* topics teach them in full; here we justify the *c
   orchestration with pricing math. `PricingStrategy.price(showSeat, show)` makes each policy
   its own class; new rules are new classes. Compose them (seat-type base → weekend uplift →
   demand multiplier) by chaining/wrapping strategies decorator-style.
+
+  *Worked example — trace the chain for one RECLINER seat on a busy Saturday show.* Each
+  strategy takes the running total and transforms it, in order:
+
+  | Step | Strategy | Rule applied | Running total |
+  |---|---|---|---|
+  | 1 | `SeatTypePricing` | RECLINER base rate | **300.00** |
+  | 2 | `WeekendPricing` | Saturday uplift ×1.20 | 300.00 × 1.20 = **360.00** |
+  | 3 | `DemandPricing` | 80% occupancy ×1.15 | 360.00 × 1.15 = **414.00** |
+
+  Final per-seat price = **414.00**. Two things the trace makes concrete: (a) **order matters** —
+  the demand multiplier compounds on the already-upped weekend price (×1.20 then ×1.15 = ×1.38
+  overall), not on the bare 300; and (b) each strategy is a pure `total → total` transform, which
+  is exactly why they wrap decorator-style and why adding a coupon (a ×0.90 step at the end,
+  giving 414.00 × 0.90 = 372.60) is a new class, not an edit. For a whole booking, `selectSeats`
+  runs this chain per seat and sums — 2 recliners at this show = 828.00.
 - **Strategy (Behavioral) — payment method.** Card / UPI / wallet / net-banking are
   interchangeable algorithms behind `PaymentProcessor` — a new method is a new implementation,
   not an edit to the booking flow.
@@ -400,6 +416,36 @@ both click Book. The "check status, then mark booked" is a **check-then-act** se
 without mutual exclusion, both checks pass before either write lands, and A12 is
 double-booked. Cross-reference the concurrency-in-lld topic for the general check-then-act
 and lock-granularity treatment.
+
+*Worked example — interleave two threads on seat A12.* **Without the lock**, the OS can slice
+the two threads so both reads finish before either write, so both threads "win":
+
+| Time | Thread A (user Alice) | Thread B (user Bob) | A12 status |
+|---|---|---|---|
+| T0 | read A12 → `AVAILABLE` | | AVAILABLE |
+| T1 | | read A12 → `AVAILABLE` | AVAILABLE |
+| T2 | check passes (was free) | | AVAILABLE |
+| T3 | | check passes (was free) | AVAILABLE |
+| T4 | write `BOOKED`, confirm Alice | | BOOKED (Alice) |
+| T5 | | write `BOOKED`, confirm Bob | **BOOKED (Bob)** |
+
+Both users hold a ticket for A12 — a double-book. The bug is that the *check* at T2/T3 and the
+*act* at T4/T5 are not one indivisible step. **With `synchronized(show)`** the acquire becomes
+atomic, so one thread runs the whole check-then-act before the other can start:
+
+| Time | Thread A (user Alice) | Thread B (user Bob) | A12 status |
+|---|---|---|---|
+| T0 | acquire `show` monitor | | AVAILABLE |
+| T1 | | try acquire → **blocks** (A holds it) | AVAILABLE |
+| T2 | read A12 → `AVAILABLE`, check passes | (still blocked) | AVAILABLE |
+| T3 | write `HELD`, record lock, release monitor | (still blocked) | HELD (Alice) |
+| T4 | | acquires monitor, reads A12 → `HELD` | HELD (Alice) |
+| T5 | | check fails → `SeatUnavailableException` | HELD (Alice) |
+
+Alice holds A12; Bob gets a clean exception at T5 and can pick another seat. The monitor forced
+the two acquires to serialize, so exactly one write to A12 happens. Note it's a **per-show**
+monitor, so a thread booking a *different* show never blocks here — the mutual exclusion is
+scoped to just the contended show.
 
 **The seat-hold model (the expected answer):**
 

@@ -184,6 +184,21 @@ spot even if a compact spot is nearer, preserving big spots for big vehicles). T
 is real — nearest-first can strand a bus because cars ate all the large spots — so making it
 pluggable shows judgment, not pattern-collecting.
 
+*Worked trace — how nearest-first strands the bus.* Take one floor, free spots ordered by
+distance from the gate (nearest first): `L-1 (LARGE)`, `L-2 (LARGE)`, `C-3 (COMPACT)`,
+`C-4 (COMPACT)`, `C-5 (COMPACT)` — 2 LARGE + 3 COMPACT free. Now the arrival sequence
+*Car, Car, Bus*:
+
+- **`NearestFirstStrategy`** picks the globally nearest *compatible* free spot, ignoring
+  size. A car fits LARGE, and `L-1` is nearest → **Car A → L-1**. Next **Car B → L-2**.
+  Both LARGE spots are now gone. **Bus** needs a LARGE spot, sees only `C-3/C-4/C-5` (COMPACT,
+  can't fit a bus) → **rejected** — even though three spots sit empty.
+- **`BestFitStrategy`** picks the *smallest* compatible spot: a car's smallest fit is COMPACT,
+  so **Car A → C-3**, **Car B → C-4**, leaving both LARGE free. **Bus → L-1**. All three park.
+
+Same inventory, same arrivals — one strategy rejects a paying bus, the other doesn't. That
+one-spot difference is the whole reason assignment is a Strategy and not a hard-coded rule.
+
 **Factory for spot/vehicle creation.** Lot initialization ("floor 2: 20 motorcycle, 50
 compact, 10 large, 5 handicapped") goes through a `ParkingSpotFactory` so construction
 logic (IDs, type wiring) lives in one place. A simple static factory method is enough —
@@ -315,7 +330,25 @@ class HourlyPricing implements PricingStrategy {
         return ratePerHour.get(t.getVehicle().getType()).times(hours);
     }
 }
+```
 
+*Worked trace — the round-up gotcha bites.* Car rate `$3/hr`, entry `10:15`, exit `12:20`.
+Elapsed = 2h05m. `ceilHours` rounds the partial hour **up**: `ceil(2h05m) = 3` billable hours
+→ `3 × $3 = $9`. The customer parked just over two hours and pays for three. Watch the
+boundary — it's the classic off-by-one an interviewer probes:
+
+| Exit time | Elapsed | `ceilHours` | Fee |
+|---|---|---|---|
+| 12:15 exactly | 2h00m | 2 | $6 |
+| 12:16 | 2h01m | 3 | $9 |
+| 12:20 | 2h05m | 3 | $9 |
+
+One minute past the hour (12:15 → 12:16) jumps the bill from $6 to $9. State that rule out
+loud — "any started hour is a full billed hour" — and note the alternatives an interviewer may
+prefer: a per-minute prorated rate, or a grace period (e.g. round down within the first 10
+minutes) so 12:16 still bills as 2 hours.
+
+```java
 class ParkingLot {
     private final List<ParkingFloor> floors;
     private final SpotAssignmentStrategy assignmentStrategy;
@@ -351,6 +384,26 @@ class ParkingLot {
 
 Note what is *not* here: no getters/setters ceremony, no `DisplayBoard` internals, no
 payment-gateway plumbing. In a live round, write exactly this much and narrate the rest.
+
+*End-to-end trace — one car, park → pay → exit.* Watch the ticket/spot/`activeTickets`
+lifecycle with concrete field values (car rate `$3/hr`, `BestFitStrategy`):
+
+1. `parkVehicle(Car "KA-01")` — takes `allocationLock`; strategy probes COMPACT first and
+   returns `C-204`.
+2. `floorOf(C-204).occupy(C-204, car)` — `C-204` is **removed** from
+   `freeSpotsByType[COMPACT]` and its `parkedVehicle` set to the car (so a second gate can no
+   longer see it free).
+3. `Ticket T-abc{spot=C-204, vehicle=KA-01, entry=10:15}` created and stored:
+   `activeTickets["T-abc"] = T-abc`. Lock released. Customer drives off with `T-abc`.
+4. *(2h05m later)* `unparkVehicle("T-abc", card)` — `activeTickets.get("T-abc")` hits →
+   fee = `HourlyPricing` → `ceil(2h05m)=3 × $3 = $9`.
+5. `card.pay($9)` → `success` (if it failed, we throw here and the spot stays occupied —
+   nothing below runs).
+6. Under `allocationLock`: `release(C-204)` **adds** `C-204` back to
+   `freeSpotsByType[COMPACT]` and clears `parkedVehicle`; `activeTickets.remove("T-abc")`.
+7. Return `Receipt{ticket=T-abc, fee=$9}`. A duplicate `unparkVehicle("T-abc", …)` now finds
+   no entry in `activeTickets` → `InvalidTicketException` — the map removal is what makes exit
+   idempotent-safe.
 
 ## Concurrency and Edge Cases
 

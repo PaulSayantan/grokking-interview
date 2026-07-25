@@ -72,6 +72,10 @@ flowchart LR
 
 ## Provider Adapter
 
+*Intuition:* a universal travel power adapter — your appliance (business logic) never
+changes, you just swap the wall-side plug (the provider) to fit whatever socket the country
+gives you.
+
 **Intent — "How can the dependencies of an application component on a provider-specific
 interface be managed?"**
 
@@ -131,7 +135,11 @@ Flagsmith) is a specialized form.
 **Trade-offs / when to use.** Central config enables uniform, hot changes and immutable
 instances — but the config store becomes a dependency (and a potential blast radius: one
 bad value can break the whole fleet). Prefer versioned, validated, gradually-rolled config;
-combine push for latency with polling for resilience.
+combine push for latency with polling for resilience. Treat a config change with the **same
+discipline as a code deploy**: schema-validate the value before it lands, **canary it to a
+small percentage of instances** and watch health before fleet-wide rollout, and keep a
+**fast rollback / kill-switch** to the last-known-good value. Skipping this is a classic
+outage class — a single mistyped flag or bad value propagated instantly to every instance.
 
 **Related patterns.** Blob Storage, Relational Database, Key-Value Storage,
 Message-oriented Middleware, Provider Adapter, and the **Feature Flag Management Process**
@@ -217,6 +225,17 @@ needs no reconfiguration of a load balancer.
 GCP Pub/Sub** queue length; **AWS Lambda** event-source scaling on SQS/Kafka; ASG scaling on
 `ApproximateNumberOfMessagesVisible`. Serverless "scale from a queue" is the archetype.
 
+> [!TIP]
+> **Worked example — worker count from queue depth.** Backlog is **10,000 messages** and your
+> scaling policy targets **500 messages per worker** (the KEDA `queueLength` / SQS
+> `ApproximateNumberOfMessagesVisible` target). Desired workers = `ceil(10,000 / 500) = 20`.
+> If each worker drains **50 msg/s**, 20 workers clear `20 × 50 = 1000 msg/s`, so a static
+> 10,000 backlog empties in `10,000 / 1000 = 10s`. Now suppose messages keep arriving at
+> **600 msg/s**: net drain is `1000 − 600 = 400 msg/s`, so the backlog clears in
+> `10,000 / 400 = 25s` instead — the same math tells you whether your target-per-worker keeps
+> up with arrival rate or lets the queue grow unbounded (if arrivals ever exceed
+> `workers × 50`, add workers or the backlog diverges).
+
 **Trade-offs / when to use.** Ideal for **async, bursty, decoupled** processing where
 latency tolerance lets a backlog form and drain. Requires **Stateless Component** workers and
 ideally **idempotent** processing (at-least-once delivery). Not for low-latency synchronous
@@ -230,6 +249,10 @@ Adapter, Message-oriented Middleware. *Deep dive:*
 ---
 
 ## Watchdog
+
+*Intuition:* a hospital heart monitor — it watches for a flatline, then pages a nurse and
+gets the patient swapped into a working bed. It *detects and triggers*; it does not itself
+treat. The recovery decision loop around it is the Resiliency Management Process.
 
 **Intent — "How can applications automatically detect failing application components and
 handle their replacement?"**
@@ -283,6 +306,18 @@ removing them as it falls. It is the orchestrator over the elasticity *sensor* c
 scheduled scaling actions, **Azure autoscale rules**. Predictive/scheduled scaling realizes
 the "expected workload" half.
 
+> [!TIP]
+> **Worked example — target-tracking math.** The most common policy computes
+> `desired = ceil(current_instances × current_metric / target_metric)`. Target CPU is **50%**;
+> right now **4 instances** average **75%** CPU. Desired = `ceil(4 × 0.75 / 0.50) = ceil(6.0)
+> = 6`, so the process adds **2 instances**. After they warm up, the same total load spreads
+> over 6 instances → `4 × 75% / 6 = 50%`, exactly the target, and the loop stops adding.
+> Conversely, if load later falls so 6 instances sit at **30%**, desired =
+> `ceil(6 × 0.30 / 0.50) = ceil(3.6) = 4` — scale *in* to 4. Notice how a metric hovering just
+> above target (e.g. 51% → desired `ceil(4×0.51/0.50)=ceil(4.08)=5`) can trigger a scale-out
+> that immediately drops utilization below target and invites a scale-in: that oscillation is
+> **thrashing**, and it's exactly why you add cooldowns and a deadband around the target.
+
 **Trade-offs / when to use.** Reactive-only scaling always trails a spike (provisioning
 lag); combine with **scheduled/predictive** scaling and **Standby Pooling** to cover the lag.
 Tune intervals and cooldowns to avoid **thrashing** (oscillating scale up/down).
@@ -311,7 +346,9 @@ mechanism powers **progressive rollout** (turn features on for a fraction of tra
 
 **Modern equivalent.** **LaunchDarkly, Unleash, Flagsmith, Split.io**, AWS AppConfig feature
 flags, Azure App Configuration feature management, and framework flags (Spring `@ConditionalOnProperty`,
-Togglz). Netflix-style "brownout" / graceful-degradation toggles are the canonical use.
+Togglz). Netflix-style "brownout" / graceful-degradation toggles are the canonical use —
+*brownout* meaning deliberately degrading or disabling non-essential features under load, by
+analogy with a power-grid voltage reduction that dims the lights instead of blacking out.
 
 **Trade-offs / when to use.** Cheap, instant safety valve that needs **no new resources** —
 but requires the app to be *designed* with optional/degradable features and disciplined flag
@@ -359,7 +396,12 @@ by feature.
 **Trade-offs / when to use.** Zero-downtime and easy rollback, but requires running **both
 versions simultaneously** (extra cost, and both must be **backward/forward compatible** —
 schemas, message formats, APIs). Stateless components make this trivial; stateful ones need
-careful data migration.
+careful data migration. The concrete senior answer for schema changes is the
+**expand/contract (parallel-change) pattern**: *expand* the schema with a nullable
+column/optional field, *dual-write* old and new, *backfill* existing rows, *switch reads* to
+the new field, then *contract* by dropping the old — each step is independently deployable and
+reversible, and it's why you deploy the reader that tolerates the new field **before** the
+writer that produces it.
 
 **Related patterns.** **Stateless Component**, **Loose Coupling**, **Managed Configuration**,
 Elasticity Management Process. *Deep dive:* blue-green/canary/rolling specifics in the DevOps
@@ -398,6 +440,18 @@ spares" strategy.
 (and, under per-second billing, you no longer recoup that spend through better slot
 utilization). Right-size the pool to the expected spike magnitude and provisioning lag. Complements **Elasticity Management** (which decides counts) and
 **Feature Flag Management** (the fallback when even warm capacity is exhausted).
+
+> [!TIP]
+> **Worked example — sizing the warm pool.** Say each instance serves **100 req/s** and a
+> flash sale drives traffic from **200 → 800 req/s in 30s**. Steady state needs
+> `800 / 100 = 8` instances; you were running `200 / 100 = 2`, so the spike demands **6 extra
+> instances**. Cold boot (image pull + boot + app warm-up) is **90s**. A reactive autoscaler
+> only *starts* those 6 when it sees the spike, so for ~90s you serve 800 req/s of demand with
+> 2 instances' worth of capacity (200 req/s) — the other **600 req/s queue or error**. Keep
+> **6 warm** on the standby list and they activate in seconds, absorbing the full jump
+> instantly; the pool size is just "peak-minus-baseline instances," here `8 − 2 = 6`. Tie the
+> pool size to the *spike magnitude you must survive without dropping traffic*, and refill it
+> in the background afterward.
 
 **Related patterns.** Multi-Component Image, Resiliency Management Process, Feature Flag
 Management Process, Elasticity Management Process. *Deep dive:* capacity/warm-pool operational

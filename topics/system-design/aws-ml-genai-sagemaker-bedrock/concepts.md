@@ -224,6 +224,15 @@ Units (MUs)** for guaranteed, higher, steady throughput at a fixed hourly cost.
   until deleted**. **Custom (fine-tuned) models can ONLY be served via Provisioned
   Throughput.**
 
+**Worked example — sizing MUs from a throughput target.** Suppose peak demand is
+**600,000 tokens/minute** (input + output combined) and one MU is rated (illustrative) at
+**100,000 tokens/minute** for your chosen model. Then `MUs = ceil(600,000 / 100,000) = 6`.
+You always **round up** — 5 MUs (500k TPM) would throttle at peak. And because you size to
+*peak*, a spiky load whose peak is 600k but whose average is only 200k TPM still needs 6 MUs
+billed 24/7, so you'd be paying for ~3x the average — the concrete reason spiky traffic
+favors on-demand and only steady, high load justifies committing to MUs. (Get the real
+tokens-per-minute-per-MU for your specific model from the Bedrock console before sizing.)
+
 **Trade-offs.**
 - **On-demand vs provisioned:** on-demand is cheapest for spiky/low/unpredictable volume
   and needs no commitment, but can throttle and has no latency guarantee. Provisioned gives
@@ -363,6 +372,17 @@ expensive cross-encoder that reads query+chunk together, dramatically improving 
 that actually enters the prompt. **Grounding** means the answer must be traceable to
 retrieved text, enforced via citations.
 
+**Bi-encoder vs cross-encoder (why re-ranking is more accurate but can't run over the whole
+corpus).** The embedding model that built your index is a **bi-encoder**: it encodes the
+query and each document **separately** into vectors, so document vectors are precomputed
+once and a query is one cheap vector lookup — but the model never sees query and document
+*together*, so it can't reason about how they interact. A **cross-encoder** feeds
+`query + chunk` through the model **jointly**, letting attention compare every query token
+against every chunk token — far more accurate, but it must run a full forward pass **per
+(query, chunk) pair**, i.e. O(N) per query. That's why you can't cross-encode a million-doc
+corpus per query: you retrieve ~50 candidates cheaply with the bi-encoder ANN index, then
+pay the cross-encoder only on those 50 to pick the top 5.
+
 **How it works.** Retrieve top-N (e.g., 50) cheaply via ANN, then re-rank to top-k (e.g., 5)
 with **Cohere Rerank (on Bedrock)** or a cross-encoder on SageMaker. Only the top-k go into
 the prompt. Grounding: instruct the model to answer only from context and cite chunk IDs;
@@ -420,6 +440,17 @@ proportional to (context length × batch), and it's often the binding constraint
 concurrent requests fit. **Streaming** (`ConverseStream`) sends tokens as generated so the
 user sees output at TTFT rather than waiting for the full response — huge perceived-latency
 win for chat.
+
+**Worked example — why KV cache, not FLOPs, caps concurrency.** Per-token KV bytes ≈
+`2 (K and V) × num_layers × hidden_dim × bytes_per_param`. For a 7B-class model
+(num_layers = 32, hidden_dim = 4096, FP16 = 2 bytes): `2 × 32 × 4096 × 2 = 524,288 bytes ≈
+0.5 MB per token`. A single **8k-token** context (say a long RAG prompt) therefore holds
+`8192 × 0.5 MB ≈ 4 GB` of KV cache — for **one** in-flight sequence. On a **24 GB A10G**,
+the FP16 weights already eat `7B × 2 bytes = 14 GB`, leaving ~10 GB for KV (minus framework
+and activation overhead). So `10 GB ÷ 4 GB ≈ 2` concurrent 8k-context requests before you're
+out of memory. Halve the context to 4k and each sequence needs only ~2 GB, so you fit ~5 —
+the same GPU, double the concurrency. **That is the concrete reason re-ranking down to a few
+short chunks isn't just a cost lever; it directly raises how many users one GPU can serve.**
 
 **Trade-offs.**
 - **Long context:** more retrieved chunks / bigger prompts raise TTFT, KV-cache memory, and
@@ -511,8 +542,13 @@ chain steps to complete a multi-step task, not just answer.
 **How it works.** **Bedrock Agents** orchestrate: reasoning (ReAct-style) + **action groups**
 (Lambda functions or OpenAPI-described APIs the model can call) + attached **Knowledge Bases**
 (RAG) + **Guardrails** + session memory. The model decides which tool to call, AWS executes it
-(e.g., Lambda), feeds the result back, and iterates until done. **MCP (Model Context Protocol)**
-and multi-agent collaboration are the emerging patterns for tool/agent interoperability.
+(e.g., Lambda), feeds the result back, and iterates until done. **ReAct (Reason + Act)** is the
+loop that makes this work: the model emits a natural-language *thought* ("I need the order
+status, I'll call `getOrder`"), then an *action* (the tool call), the runtime returns an
+*observation* (the tool's result), and the model loops — thought → action → observation —
+until it has enough to answer. **MCP (Model Context Protocol)** standardizes *how* tools and
+context are exposed to a model (a common client/server protocol), so the same tool works
+across agents and hosts; multi-agent collaboration is the emerging pattern built on top.
 
 **Trade-offs.**
 - **Agents vs a fixed pipeline / Step Functions:** agents are flexible for open-ended,
@@ -535,6 +571,27 @@ scale-to-zero**, you've missed the point. Cost and latency are the dominant cons
   pricier and serial. Example: 2k input + 500 output tokens per request × 1M requests/day —
   compute daily token volume, multiply by per-token price, then decide **on-demand vs
   Provisioned Throughput** (provisioned wins once you'd saturate MUs steadily).
+
+**Worked example — carry the token math to dollars (prices illustrative: $3/M input,
+$15/M output).**
+
+1. **Daily token volume.** Input: `2,000 × 1M = 2.0B tokens/day`. Output:
+   `500 × 1M = 0.5B tokens/day`. Total `2.5B tokens/day`.
+2. **Daily cost, split by direction.** Input: `2,000M ÷ 1M × $3 = $6,000/day`. Output:
+   `500M ÷ 1M × $15 = $7,500/day`. **Total ≈ $13,500/day (~$405k/month).** Note the tell:
+   output is only **20%** of the tokens but **56%** of the cost ($7,500 of $13,500) — that is
+   why "shorten the output" is the top cost lever.
+3. **Blended price.** `0.8 × $3 + 0.2 × $15 = $5.40 per M tokens` — a handy single number for
+   crossover math.
+4. **On-demand vs Provisioned crossover.** Take one MU at (illustrative) 100k TPM and
+   **$20/hr**. Flat cost = `$20 × 24 = $480/day`. Fully saturated it can push
+   `100,000 × 1,440 min = 144M tokens/day`, i.e. `$480 ÷ 144 = $3.33 per M tokens` — cheaper
+   than the $5.40 blended on-demand rate. But that's only *at saturation*. Break-even volume:
+   `$480 ÷ $5.40 per M = 88.9M tokens/day`, i.e. you must keep each MU **~62% utilized**
+   (`88.9M ÷ 144M`) before it beats on-demand. Below that, on-demand's pay-per-token wins;
+   above it, buy the MU. Since you must size MUs to *peak* (see the MU sizing example above),
+   a spiky workload rarely clears ~62% average utilization — the concrete reason to stay
+   on-demand until load is both **high and steady**.
 - **Latency:** total ≈ TTFT + output_tokens × ITL. Cut output length, stream, re-rank to
   fewer context tokens, cache prefixes.
 

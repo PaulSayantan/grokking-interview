@@ -237,6 +237,20 @@ many small states run millions of times gets expensive; there Express (charged b
 duration/GB-s) is far cheaper. Conversely a low-volume, long-running, must-audit workflow
 is cheap on Standard and impossible on Express (5-min cap, at-least-once).
 
+**Worked example — 50M short executions/day, 6 states each.**
+
+- *Standard* bills per transition at ~$0.000025 (first 1,000 free). Transitions/day =
+  50M × 6 = 300M. Cost = 300M × $0.000025 = **~$7,500/day ≈ $225,000/month**. The
+  per-transition model turns "6 tiny states" into 300M billable events — the cost is
+  driven by *step count × volume*, not by how little each step does.
+- *Express* bills per request + duration (GB-s). Say each execution runs 500 ms end-to-end
+  in the 64 MB (0.0625 GB) minimum tier. Requests = 50M/day × $1.00/1M = **$50/day**.
+  Duration = 50M × 0.5 s × 0.0625 GB = 1.5625M GB-s/day × ~$0.00001667/GB-s ≈ **$26/day**,
+  so ≈ **$76/day ≈ $2,300/month**.
+- *Verdict:* ~$225k vs ~$2.3k/month — roughly **100× cheaper on Express** for this
+  high-volume, short, idempotent workload. That order-of-magnitude gap, not any single
+  feature, is why you pick Express here (accepting at-least-once + logs-only history).
+
 **Patterns:**
 - **Task tokens (`.waitForTaskToken`)** — pause a workflow until an external system /
   human calls back with success/failure. Enables human approval and async callbacks.
@@ -366,6 +380,16 @@ connection.
 - Item max **400 KB**. Single-partition throughput ceiling: **3,000 RCU and 1,000 WCU per
   partition** — exceed it and you get a **hot partition** (throttling even if table
   capacity is high). Design partition keys for high cardinality / even access.
+
+  *Worked example — the "capacity looks fine but it throttles" trap.* Provision the table
+  at **10,000 WCU**. A leaderboard uses partition key = `today's date`, so every write on
+  2026-07-25 lands on **one** partition. At 1,500 writes/s (1 WCU = 1 write ≤ 1 KB/s),
+  that single partition is capped at **1,000 WCU** → ~500 writes/s get **throttled
+  (ProvisionedThroughputExceeded)** while **9,000 WCU sit idle** on other partitions. The
+  table dashboard reads healthy; one key is on fire. Fix by spreading the key: append a
+  shard suffix `2026-07-25#0` … `2026-07-25#9`, and 1,500 writes/s now split ~150/s across
+  10 partitions (well under 1,000 each) — reads fan back in by querying all 10 shards. High
+  cardinality in the partition key, not high table capacity, is what removes the hot spot.
 - **On-demand vs provisioned:** on-demand scales instantly, pay per request (great for
   spiky/unknown); provisioned + auto scaling is cheaper for steady, predictable load.
 - **Consistency:** eventually consistent reads by default (~1 RCU/4 KB); strongly consistent
@@ -420,6 +444,23 @@ reintroduces connection management and vertical scaling limits.
   GB-s = 100M × 0.2 s × 0.5 GB = 10M GB-s. Plus 100M requests. This is where you compare
   vs an always-on fleet: if the same load could saturate a handful of EC2/Fargate tasks
   24/7, containers may be cheaper.
+
+**Worked example — finish the dollar math and find the crossover.** Take that same
+workload and price both sides:
+
+- *Lambda:* compute = 10M GB-s × $0.00001667/GB-s ≈ **$167**. Requests = 100M × $0.20/1M
+  = **$20**. Total ≈ **$187/month** — and this bill scales linearly with traffic (halve
+  the invocations, halve the bill; idle month = ~$0).
+- *Always-on fleet:* 100M × 0.2 s = 20M function-seconds of work per month. A month is
+  ~2.59M seconds, so you need ~20M / 2.59M ≈ **8 workers busy on average** (matches
+  Little's Law: 38.6 req/s × 0.2 s ≈ 7.7 concurrent). Two Fargate tasks at 2 vCPU / 4 GB
+  cover that with headroom: each costs (2 × $0.04048 + 4 × $0.004445) × 730 h ≈ **$72/mo**,
+  so **~$144/month** for the pair — and this bill is *fixed* whether the tasks are busy or idle.
+- *Crossover:* the $144 fleet is flat; Lambda's $187 scales with usage, so Lambda would
+  also cost $144 at (144 / 187) × 100M ≈ **77M invocations/month**. Below ~77M (the fleet
+  would sit idle >20% of the time) Lambda's scale-to-zero wins; above it (fleet stays
+  busy) the always-on box wins. That is the concrete answer to "at what utilization does
+  always-on get cheaper?" — roughly once the equivalent fleet would run more than ~75% busy.
 - **Cost cliffs:** high steady RPS, chatty Step Functions Standard (per-transition), high
   provisioned concurrency, and NAT Gateway data charges for VPC Lambdas talking to the internet.
 

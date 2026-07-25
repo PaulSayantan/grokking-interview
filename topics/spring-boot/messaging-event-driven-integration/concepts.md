@@ -24,8 +24,10 @@ down consumer does not block the producer), and easy fan-out (one event, many re
 |-------|---------|----------|---------|
 | Event Notification | thin ("OrderId=42 changed") | consumer must call back for details | webhook ping |
 | Event-Carried State Transfer | fat (full order snapshot) | consumer keeps a local copy, no callback | replicated read model |
-| Event Sourcing | store events as the source of truth; state = fold(events) | rebuild state by replay | ledger, audit |
-| CQRS | separate write model (commands) from read model (queries), often event-synced | | reporting DB |
+| Event Sourcing | store events as the source of truth; rebuild current state by replaying all past events in order | rebuild state by replay | ledger, audit |
+| CQRS | separate write model (commands) from read model (queries), often event-synced | write path emits events read side subscribes to | order write DB + separate read-optimized query view |
+
+One line of intuition per style: **Notification** just says "something changed, go look" (small, but chatty — every consumer calls back). **ECST** ships the whole new state so consumers never call back (bigger messages, but self-sufficient replicas). **Event Sourcing** stores the *events themselves* as the source of truth instead of the current row — because if you keep every "MoneyDeposited"/"MoneyWithdrawn" fact you can always recompute today's balance, get a perfect audit trail for free, and replay history to fix a bug or build a new view; the trade-off is you must replay (or snapshot) to read current state. **CQRS** splits the model you *write* through from the model(s) you *read* through so each can be optimized independently (normalized write DB, denormalized read view), usually kept in sync by events.
 
 **Command vs Event:** A **command** is an instruction directed at one handler ("ShipOrder")
 and may be rejected; an **event** is a fact broadcast to zero-or-more listeners and cannot be
@@ -36,6 +38,21 @@ rejected (it already happened). Naming: commands are imperative, events are past
   not atomic — a crash between them loses or duplicates the event. Solve with the
   **Transactional Outbox** pattern (write event to an outbox table in the same DB
   transaction, then a relay/CDC like Debezium publishes it) or a **listener-to-log** CDC.
+
+  **Outbox walkthrough (trace).** Say `placeOrder` must both persist the order and emit
+  `OrderPlaced`:
+  1. **One local transaction:** `INSERT INTO orders(...)` **and** `INSERT INTO outbox(id='evt-9',
+     type='OrderPlaced', payload='{...}', sent=false)` — both rows commit together or neither does.
+     No broker call happens inside the tx, so there is nothing to be "half done".
+  2. **Relay** (a poller doing `SELECT * FROM outbox WHERE sent=false`, or a CDC tool tailing the
+     DB log) reads `evt-9` and publishes it to the broker.
+  3. On broker ack it marks the row `sent=true` (or deletes it).
+  4. **Crash between step 2 and 3?** The row is still `sent=false`, so on restart the relay
+     publishes `evt-9` **again** → the same event reaches the broker twice.
+
+  So the relay is **at-least-once**: the outbox kills the dual-write *loss/silent-drop* problem,
+  but it does **not** stop *duplicate emits*. That is precisely why the consumer must still be
+  **idempotent** — outbox on the producer + idempotent consumer is the effective-once combo.
 - **Eventual consistency:** consumers see state after a delay; UIs and business logic must
   tolerate staleness.
 - **Ordering & idempotency** become first-class concerns (covered below).
@@ -246,6 +263,17 @@ same data and replay it.
 - **Offset** = a consumer's position; committed offsets (in the internal `__consumer_offsets`
   topic) let a restarted consumer resume.
 
+**Partition placement (trace).** Topic `orders` with **4 partitions** (0–3), producing with
+`key="order-42"`. The default partitioner computes `partition = (hash(keyBytes) & 0x7fffffff) %
+numPartitions` (the `& 0x7fffffff` just forces the hash non-negative). Suppose the key's bytes
+hash to `34`. Then `34 % 4 = 2` → the record lands on **partition 2**. The hash is a pure
+function of the *key bytes*, so **every** future `"order-42"` event also hashes to `34`, also
+`% 4 = 2`, and also lands on partition 2 — which is exactly why same-key records stay ordered
+(they share one log). Change the key to `"order-43"` (say it hashes to `35`): `35 % 4 = 3` →
+partition 3, a different log with no ordering relationship to partition 2's records. And note
+what breaks if you later grow to 6 partitions: `34 % 6 = 4`, so old `"order-42"` events sit on
+partition 2 while new ones go to partition 4 — the per-key ordering guarantee is severed.
+
 **Spring for Apache Kafka:**
 - `KafkaTemplate<K,V>` to produce; `send()` returns a `CompletableFuture` (Spring Kafka 3.x;
   it was `ListenableFuture` in 2.x).
@@ -326,6 +354,18 @@ every start — it does not; an existing committed offset always wins.
   commit; crash after processing but before commit ⇒ redelivery.) This is the common default.
 - **Exactly-once:** delivered and processed effectively once — hardest and most expensive.
 
+**Crash-sequence trace (why the offsets matter).** Consumer is at **offset 5** = "charge the
+card for order 5":
+- **At-least-once** (process *then* commit): `poll offset 5` → charge card ✓ → **CRASH before
+  commit**. On restart the committed offset is still 4, so it re-polls **offset 5** → charges
+  the card **again** = duplicate charge. Never lost, may double.
+- **At-most-once** (commit *then* process): `poll offset 5` → **commit offset 6 first** → **CRASH
+  before charging**. On restart the committed offset is 6, so it resumes at offset 6 and
+  **never charges order 5** = lost charge. Never doubled, may be lost.
+- **Exactly-once (effective):** either use Kafka transactions so the charge-output and the
+  offset-advance commit atomically, or make the charge idempotent on `order-5` so the
+  at-least-once redelivery above is a no-op the second time.
+
 **Kafka specifics:**
 - **Idempotent producer** (`enable.idempotence=true`, default since Kafka 3.0): the broker
   assigns each producer a PID and per-partition sequence numbers, so retries of the same
@@ -343,6 +383,23 @@ every start — it does not; an existing committed offset always wins.
 
 **acks levels:** `acks=0` (fire and forget, may lose), `acks=1` (leader only), `acks=all`/`-1`
 (all in-sync replicas — durable; pair with `min.insync.replicas>=2`).
+
+**Durability trace — `replication.factor=3`, `min.insync.replicas=2`, `acks=all`.** The topic
+has 3 replicas (1 leader + 2 followers). `acks=all` means "wait until every replica *currently
+in the ISR* (in-sync replica set) has the record"; `min.insync.replicas=2` means "the ISR must
+have at least 2 members or refuse the write". Walk the failure ladder:
+- **All 3 up:** ISR = 3. Producer's write is acked once the record is on all in-sync replicas;
+  since 3 ≥ 2 the write succeeds and can survive losing any one broker.
+- **1 broker down:** ISR shrinks to 2. `2 ≥ min.insync.replicas(2)`, so the write **still
+  succeeds** — it's acked after both remaining in-sync replicas have it. You're now one failure
+  from unavailability, but no data loss.
+- **2 brokers down:** ISR shrinks to 1. `1 < min.insync.replicas(2)`, so the leader **refuses**
+  the produce and the producer gets `NotEnoughReplicasException` (it blocks/retries rather than
+  ack a write that couldn't be safely replicated). Availability is sacrificed to guarantee that
+  nothing is acknowledged unless it's on ≥2 replicas — the whole point of the setting.
+
+Note the interplay: `min.insync.replicas` only bites *with* `acks=all`. With `acks=1` the leader
+acks alone regardless, so a leader crash before followers replicate silently loses the record.
 
 **JMS/RabbitMQ:** auto-ack ≈ at-most-once risk (ack before processing); manual/transacted ack
 after processing ≈ at-least-once. True exactly-once generally isn't offered — you achieve
@@ -499,6 +556,30 @@ the *same* transaction as the side effect. This turns a TOCTOU race into an atom
 decision. For non-transactional external effects (send email, call payment API), a DB marker
 still leaves a window between "did the effect" and "recorded the effect" — use a provider-side
 idempotency key (Stripe-style) so the *external* system dedups.
+
+**Race trace — two pods, message `id='abc'`, redelivered.** `processed(key PRIMARY KEY)` table.
+- *Naive check-then-act (broken):*
+  ```
+  Pod A: SELECT ... WHERE key='abc'  -> 0 rows ("not processed")   ┐ both see "new"
+  Pod B: SELECT ... WHERE key='abc'  -> 0 rows ("not processed")   ┘ interleaved
+  Pod A: charge card ; INSERT key='abc'  -> OK
+  Pod B: charge card ; INSERT key='abc'  -> OK (or overwrites)  => card charged TWICE
+  ```
+  The gap between SELECT and INSERT is the TOCTOU hole.
+- *Insert-first, let the constraint arbitrate (correct):* inside the same tx as the side effect —
+  ```
+  Pod A: BEGIN; INSERT key='abc'  -> OK ; charge card ; COMMIT          => processed once
+  Pod B: BEGIN; INSERT key='abc'  -> UNIQUE VIOLATION -> catch -> ROLLBACK/skip (no charge)
+  ```
+  The DB's unique constraint is the single point of arbitration, so exactly one pod wins the
+  insert and only that pod runs the effect. No SELECT-then-INSERT window exists.
+- *Ordering guard (orthogonal problem).* Duplicates handled, but a **stale** update can still
+  clobber a newer one if messages arrive reordered. Carry a version in the payload and write
+  conditionally so an older event is a no-op:
+  ```sql
+  UPDATE account SET balance = :newBalance, version = :incoming
+  WHERE id = :id AND version < :incoming;   -- 0 rows updated if :incoming is stale -> ignore
+  ```
 
 **Ordering vs idempotency are orthogonal:** idempotency stops *duplicates* from corrupting
 state, but a *reordered* pair of updates can still land the wrong final value. Guard with a

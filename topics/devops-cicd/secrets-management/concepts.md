@@ -95,6 +95,13 @@ Key protections and gotchas:
 - **`pull_request` from forks gets no secrets by default** in GitHub Actions — a deliberate defense
   so a malicious PR cannot exfiltrate them. `pull_request_target` runs with secrets in the base repo
   context and is a classic exfiltration footgun if you check out and run untrusted PR code.
+  Concretely: `pull_request_target` executes the workflow **as defined on the base branch** but *with
+  the base repo's secrets in scope*. If that workflow then does `actions/checkout` of the PR head and
+  runs the PR's code — e.g. `npm install`, whose `postinstall` script the attacker controls, or a
+  test the attacker rewrote — that untrusted code runs in a job that can read `${{ secrets.* }}` and
+  `curl` them to an attacker server. The safe pattern is to **not check out or execute untrusted PR
+  code in any secret-bearing job**: use plain `pull_request` (no secrets) for build/test of fork PRs,
+  and split off a separate, gated deploy job that has the secrets but never runs PR-supplied code.
 - **CI is a production system.** Whoever controls the runner can read every secret it can access, so
   runner isolation and least-privilege scoping matter as much as the store.
 
@@ -141,6 +148,35 @@ Why this is the modern default:
   condition (e.g. wildcarding the `sub` claim or trusting `*`) lets *any* repo assume your role — the
   condition must pin org/repo and ideally branch/environment.
 
+**Worked example — the trust policy is where the vulnerability lives.** The GitHub YAML above only
+*requests* the token; the cloud side decides who to trust. This is the AWS IAM role's trust policy,
+and the one line that matters is the `sub` condition:
+
+```json
+// SAFE — pins the exact repo AND the exact branch, and verifies the audience
+"Condition": {
+  "StringEquals": {
+    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+    "token.actions.githubusercontent.com:sub": "repo:acme/payments:ref:refs/heads/main"
+  }
+}
+
+// DANGEROUS — wildcards let far more than "prod deploys from main" in
+"StringLike": {
+  "token.actions.githubusercontent.com:sub": "repo:acme/payments:*"   // any ref: branches, tags, PRs
+}
+// even worse: "repo:acme/*" (any repo in the org) or "*" (any repo, anywhere on GitHub)
+```
+
+Trace the leak with `repo:acme/payments:*`. A contributor opens a pull request; the PR workflow runs
+and its OIDC token carries `sub = repo:acme/payments:ref:refs/pull/57/merge`. Against the safe policy
+that string must equal `...:ref:refs/heads/main`, so `AssumeRoleWithWebIdentity` is **denied**.
+Against the wildcard, `repo:acme/payments:*` matches `refs/pull/57/merge` too, so STS hands the PR job
+the **production** deploy credentials — untrusted PR code now runs with prod access. Widen to
+`repo:acme/*` and any repo in the org qualifies; `"*"` means *any GitHub repo on earth* can mint your
+prod creds. The fix is to pin `sub` to the exact repo + `ref:refs/heads/main` (or an `environment:`
+claim) and always assert `aud = sts.amazonaws.com`.
+
 ## HashiCorp Vault and dynamic secrets
 
 **HashiCorp Vault** is a dedicated secrets-management system. Beyond storing static key/value
@@ -166,6 +202,29 @@ Core Vault concepts:
 - **Seal/unseal** — Vault storage is encrypted; the master key is protected by Shamir key shares or
   auto-unseal via a cloud KMS.
 
+**Worked example — what a dynamic credential actually looks like.** An app authenticates to Vault,
+then reads the database role. Vault runs a `CREATE USER ...` against the DB right then and returns a
+brand-new, throwaway login:
+
+```console
+$ vault read database/creds/app-x-role
+Key                Value
+---                -----
+lease_id           database/creds/app-x-role/8sT3kQ9dLpVn2mXw    # handle for renew/revoke
+lease_duration     1h                                            # TTL: valid for 60 minutes
+lease_renewable    true
+password           A1b-2Cd3Ef4Gh5Ij                              # random, generated just now
+username           v-approle-app-x-r7Kf2p0Zqe-1721880000          # v-<auth>-<role>-<rand>-<epoch>
+```
+
+Trace the lifecycle. At `t=0` Vault has created DB user `v-approle-app-x-r7Kf2p0Zqe-1721880000` with
+that password and stamped a 1h lease. The app connects with it. At `t=1h` (or the moment an operator
+runs `vault lease revoke database/creds/app-x-role/8sT3kQ9dLpVn2mXw`) Vault issues `DROP USER
+v-approle-app-x-...` against the DB — the login stops working everywhere, instantly, with no config
+change and no redeploy. A *second* app reading the same path gets a *different* username/password and
+its own lease, so a credential leaked from one app neither works for long nor implicates the other —
+that is the concrete meaning of "unique per-client, short-lived, auto-revoked."
+
 > [!TIP]
 > The interview one-liner: **"dynamic secrets turn a standing, shared, long-lived credential into a
 > per-client, short-lived, auto-revoked one"** — that is Vault's headline value over a plain
@@ -178,7 +237,7 @@ The major clouds offer managed secret stores that integrate with their IAM and K
 | Service | Cloud | Notable features |
 |---|---|---|
 | **Secrets Manager** | AWS | Built-in **automatic rotation** via Lambda; KMS-encrypted; versioned |
-| **SSM Parameter Store** | AWS | Cheaper KV; `SecureString` KMS-encrypted; no built-in rotation |
+| **SSM Parameter Store** | AWS | Cheaper KV; `SecureString` KMS-encrypted; no *native* rotation (but a param can reference a Secrets Manager secret to inherit its rotation) |
 | **Secret Manager** | GCP | Versioned secrets; IAM-scoped; CMEK support |
 | **Key Vault** | Azure | Secrets + keys + certs; managed-identity access |
 
@@ -191,6 +250,14 @@ Trade-offs vs Vault:
   flexible engines (no general dynamic-DB-user or `transit` equivalent out of the box).
 - **Access is by workload identity**, not a stored key: an EC2 instance role, EKS IRSA, or Lambda
   execution role calls `GetSecretValue` — again solving secret-zero via platform identity.
+- **Cache, don't hammer.** These APIs are throttled per account and billed per 10k calls, so calling
+  `GetSecretValue` on *every request* melts down at scale. Quick math: 500 pods each serving 100
+  req/s and fetching per request = 50,000 calls/s, which blows past the account's request-rate quota
+  (throttling → `ThrottlingException` → failed requests) and, at roughly $0.05 per 10k calls, runs on
+  the order of hundreds of dollars an hour. Fetch once and **cache with a TTL** (client-side cache,
+  the AWS Secrets Manager Lambda extension / agent, or the Secrets Store CSI driver) so 50k req/s
+  collapses to one refresh per secret per TTL. The senior follow-up "how do you avoid hammering
+  Secrets Manager?" wants exactly this: cache + TTL + shared sidecar, not per-request fetch.
 
 ## Kubernetes Secrets and their limitations
 
@@ -278,6 +345,27 @@ redeploy**:
     works, roll consumers over, then revoke the old. This avoids a window where nobody has a valid
     credential — essential for zero-downtime rotation. (AWS Secrets Manager rotation uses `AWSCURRENT`
     / `AWSPENDING` staging labels for exactly this.)
+
+**Worked example — the four-step Secrets Manager rotation state machine.** Say `AWSCURRENT` holds DB
+password `p-old`. Secrets Manager invokes your rotation Lambda four times, each with a `Step`
+argument, and the label moves only at the very end:
+
+1. **`createSecret`** — generate a new random password `p-new` and store it as a new version tagged
+   `AWSPENDING`. `AWSCURRENT` still points at `p-old`; apps keep working. (Idempotent: if `AWSPENDING`
+   already exists it is reused.)
+2. **`setSecret`** — actually change the credential in the database: `ALTER USER app SET PASSWORD =
+   'p-new'`. Now the DB accepts `p-new`; `p-old` may still work briefly (the overlap window).
+3. **`testSecret`** — open a real connection *using the `AWSPENDING` value* (`p-new`) and run a
+   harmless query. This is the safety gate: if `p-new` cannot log in, rotation **stops here** with
+   `AWSCURRENT` still on `p-old`, so a botched rotation never strands your apps on a dead password.
+4. **`finishSecret`** — move the `AWSCURRENT` label from the old version onto the `AWSPENDING` version
+   (which becomes the new current); the old one is relabeled `AWSPREVIOUS`.
+
+The label flip in step 4 is what makes rotation atomic from the app's point of view: an app that
+calls `GetSecretValue` (default = `AWSCURRENT`) reads `p-old` before the flip and `p-new` after,
+never a half-written value. The overlap between steps 2 and 4 (both `p-old` and `p-new` briefly
+valid) is the dual-validity window that lets in-flight callers finish without a "nobody has a working
+password" gap.
 - **Mounted files rotate more gracefully than env vars**: an env var is fixed for the process
   lifetime (you must restart the process to change it), while a mounted file can be updated in place
   and re-read.

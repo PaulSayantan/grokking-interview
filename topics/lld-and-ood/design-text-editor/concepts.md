@@ -302,6 +302,38 @@ lines, a gap buffer, or a rope underneath. See `dp-iterator`.
 pushes back to undo. **Any brand-new edit clears the redo stack** — you cannot redo after
 diverging. This rule is a frequent bug source; state it explicitly.
 
+### Worked example: watch the two stacks (and the redo-clear rule fire)
+
+Trace `type → type → undo → new edit → redo` on a real buffer. Stacks are written
+**bottom … top** (top = most recent, the end `pop()` touches); `Ins(p,"s")` = an
+`InsertCommand` with `pos=p`, `text="s"`.
+
+| Step | Call | Action taken | `content` | `undoStack` | `redoStack` |
+|---|---|---|---|---|---|
+| 0 | — | start empty | `""` | `[]` | `[]` |
+| 1 | `type("cat")` | `Ins(0,"cat").execute()`, then `push` | `"cat"` | `[Ins(0,"cat")]` | `[]` |
+| 2 | `type(" dog")` | caret at 3; `Ins(3," dog").execute()`, `push` | `"cat dog"` | `[Ins(0,"cat"), Ins(3," dog")]` | `[]` |
+| 3 | `undo()` | pop `Ins(3," dog")`; its `undo()` → `delete(3,4)`; push to redo | `"cat"` | `[Ins(0,"cat")]` | `[Ins(3," dog")]` |
+| 4 | `type("!")` | `Ins(3,"!").execute()`, `push` → **`redoStack.clear()`** | `"cat!"` | `[Ins(0,"cat"), Ins(3,"!")]` | `[]` |
+| 5 | `redo()` | `redoStack` empty → **no-op** | `"cat!"` | `[Ins(0,"cat"), Ins(3,"!")]` | `[]` |
+
+The payoff is step 4→5: typing `"!"` after the undo pushed a new command and wiped the redo
+stack, so the `" dog"` edit is gone forever — `redo()` in step 5 finds nothing to replay.
+That is the divergence rule in action: you cannot redo into a branch you abandoned. Had you
+called `redo()` *before* step 4 instead, it would have popped `Ins(3," dog")`, re-run
+`execute()` → `"cat dog"`, and pushed it back onto the undo stack.
+
+Command flow between the stacks:
+
+```text
+new edit ─push─►┌───────────┐   undo()   ┌───────────┐
+                │ undoStack │ ─────────►  │ redoStack │
+                │  (top)    │ ◄─────────  │  (top)    │
+                └───────────┘   redo()    └───────────┘
+                      ▲                          │
+                      └──── any new push ────────┘  clears redoStack
+```
+
 **8. Caret as its own object.** Position + selection is real state with invariants (must stay
 within `[0, length]`, selection has anchor+caret). Keeping it out of `Document` respects SRP:
 the document owns *text*, the caret owns *position*.
@@ -527,6 +559,25 @@ Start single-threaded (the natural model for one user typing), then upgrade if a
   must clamp to `[0, length]`.
 - **DeleteCommand must capture text before deleting.** If `undo()` is written to reconstruct
   text some other way, it will be wrong; the captured `deletedText` is the source of truth.
+- **Restore the caret on undo/redo, not just the text.** A classic senior probe: *"after I
+  undo, where does the cursor go?"* The skeleton's commands mutate only the document, so
+  `undo()` leaves the caret wherever it landed — wrong UX. Real editors restore the caret to
+  its **pre-edit** position. Fix: each `Command` also captures caret/selection *before* and
+  *after* execute, and `undo()` restores the *before* caret, `redo()` the *after*. Concrete:
+  content `"cat"`, caret at 3; `type(" dog")` → content `"cat dog"`, caret 7, and the command
+  remembers `caretBefore=3, caretAfter=7`. `undo()` → content `"cat"` **and** caret snaps back
+  to 3 (not left at 7). Trade-off: store the caret *in* the command (simple, self-contained)
+  vs. a parallel caret-history (decouples cursor policy from edits but adds a second stack to
+  keep in sync). A `MacroCommand` restores the caret to the state before the *whole* macro,
+  not before each sub-command.
+- **`delete(length)` direction is ambiguous — pin it down.** Backspace deletes the `length`
+  chars **before** the caret; the Delete key deletes `length` chars **after** it, and the two
+  pass a *different* `pos` to `DeleteCommand`. Concrete on `"cat dog"` with caret at 4 (just
+  before `d`): forward-delete of 3 → `DeleteCommand(pos=4, len=3)` removes `"dog"` → `"cat "`,
+  caret stays 4. Backspace of 3 → `pos = caret - length = 1`, `DeleteCommand(pos=1, len=3)`
+  removes `"at "` → `"cdog"`, then caret moves back to 1. The `pos` must be computed for the
+  direction so `undo()` re-inserts at the right spot — get it wrong and undo restores the text
+  in the wrong place.
 - **Memory growth.** An unbounded undo stack grows with edit count; bound it or periodically
   compact with snapshots.
 - **Large files.** `StringBuilder`/array-of-lines makes a mid-document insert O(n) (shifting).

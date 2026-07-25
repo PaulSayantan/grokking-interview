@@ -199,6 +199,48 @@ Savings Plan is typically cheaper *per request* — but only if utilization stay
 that same volume arrives in a 3-hour daily spike, Lambda (or Fargate scaling in/out) likely
 wins because the fleet would sit idle 21 hours a day.
 
+**Worked crossover — with the actual numbers.** Let's compute both $/request curves and find
+where they cross (us-east-1, x86, illustrative rates).
+
+*Serverless side — Lambda at 512 MB (0.5 GB), 200 ms/request:*
+- Compute: `0.5 GB × 0.2 s = 0.1 GB-s/req`, at **$0.0000166667/GB-s** ≈ **$0.00000167/req**.
+- Request charge: **$0.20 / 1M** = **$0.0000002/req**.
+- Total ≈ **$0.00000187/req → ~$1.87 per 1M requests.** Idle costs **$0** — you pay only while
+  a request is running.
+
+*Provisioned side — one `c7g.large` (2 vCPU) on a 3-yr Compute Savings Plan ≈ $0.036/hr:*
+- Monthly cost = `$0.036 × 730 hr` = **~$26.28/month — flat, whether it's slammed or idle.**
+- Capacity: at 200 ms of CPU per request, 2 vCPUs sustain `2 × (1000/200)` = **~10 req/s** ≈
+  `10 × 3600 × 730` ≈ **26.3M requests/month** at full tilt.
+- Fully loaded: `$26.28 / 26.3M` ≈ **~$1.00 per 1M requests** — cheaper than Lambda's $1.87.
+
+*Where the curves cross.* The instance bill is a flat $26.28 no matter the volume, so Lambda
+(which rises linearly) is cheaper only until its bill reaches $26.28:
+`$26.28 ÷ $1.87-per-1M` ≈ **14M requests/month** — which is `14M / 26.3M` ≈ **~53% duty cycle**
+of that one instance.
+- **Above ~53% utilization** (steady, near-capacity) → **provisioned wins.**
+- **Below ~53%** → **Lambda wins.** A 3-hour daily spike is only `3/24` = **12.5% duty cycle**
+  (~3.3M req/month): Lambda ≈ `3.3M × $1.87/1M` ≈ **$6.14/month** versus the instance's $26.28
+  sitting idle 21 h/day — serverless wins by ~4×.
+
+```
+$/month
+ 50 |                                          . Lambda: rises linearly
+    |                                     .        with volume (~$1.87/1M)
+    |                                .
+ 30 |___________________________.________________ provisioned c7g.large:
+    |                     .    :                    flat ~$26.28/month
+    |               .         :
+    |         .              : <- crossover ~14M req/mo  (~53% duty cycle)
+    |   .                    :
+  0 +---------------------------------------------> requests / month
+    0                14M              26M (this instance's max)
+```
+
+The lesson: the crossover isn't a vibe — it's the request volume where the pay-per-use line
+climbs above the always-on line's fixed cost, and it moves with request duration, memory,
+instance price, and how fully you keep the instance loaded.
+
 **The real trade-off is not just dollars.** Serverless also buys: no capacity planning, no
 patching, automatic scaling, built-in AZ redundancy. So even past the pure-cost crossover,
 teams stay serverless to save **operational effort** — you pay a compute premium to delete
@@ -246,6 +288,17 @@ cost. Set scale-in cool-downs to avoid thrashing. The classic failure: scaling o
 metric (CPU) for a latency-driven workload, so you scale *after* the SLO is already blown —
 scale on the metric that actually predicts saturation (queue depth, RPS, concurrency).
 
+**Two senior gotchas on scale-in.**
+- **Graceful termination.** Scaling *in* kills instances mid-request unless you drain them:
+  set an ELB/target-group **deregistration delay (connection draining)** and an ASG **lifecycle
+  hook** so in-flight requests finish before the instance dies. Otherwise scale-in shows up as
+  a burst of 5xx/reset connections every time load drops.
+- **Don't scale below your committed baseline.** Savings Plans and RIs are paid whether or not
+  you run the capacity, so if you commit to, say, 10 instances of baseline and autoscaling
+  scales you down to 4 at night, you still pay for the other 6 — you've wasted the commitment
+  *and* gained nothing. Align the two: commit only to the floor autoscaling never drops below,
+  and let On-Demand/Spot absorb everything above it.
+
 ---
 
 ## NAT gateway and data-transfer cost traps
@@ -261,7 +314,10 @@ through it — *on top of* any egress transfer cost. Traps:
 - **Sending S3/DynamoDB traffic through NAT.** Private-subnet instances reaching S3 or
   DynamoDB over the internet path pay NAT data-processing per GB. Fix: **Gateway VPC
   endpoints** for S3 and DynamoDB are **free** and bypass NAT entirely. This is the #1 easy
-  win.
+  win. **Do the math:** a data pipeline pulling **50 TB/month** from S3 through a NAT Gateway
+  pays `50,000 GB × $0.045` = **~$2,250/month in NAT data-processing alone** (plus the ~$32/mo
+  hourly), versus **$0** through a Gateway VPC endpoint. Same bytes, same latency — one config
+  change deletes the entire line item.
 - **One NAT Gateway per AZ vs one shared.** For HA you want a NAT GW per AZ (survives AZ
   loss), but cross-AZ traffic to a single shared NAT adds cross-AZ transfer charges. Trade
   resilience (NAT per AZ) vs cost (one NAT) — for prod, per-AZ; for dev, one is fine.
@@ -395,6 +451,24 @@ comfortably above ~50–60% most of the time, provisioned + auto scaling is chea
 bursty or low-average traffic, on-demand wins on both cost *and* operational simplicity. You
 can switch modes (limited frequency), so start on-demand to learn the pattern, then move to
 provisioned once it's predictable.
+
+**Worked example — where the DynamoDB crossover actually sits.** Take a table doing a steady
+**1,000 writes/second** of ≤1 KB items (so 1,000 WCU) all month (us-east-1, illustrative rates):
+
+- **Provisioned:** 1,000 WCU billed per WCU-hour at **~$0.00065/WCU-hr**:
+  `1,000 × $0.00065 × 730 hr` = **~$474.50/month — fixed**, whether traffic is 1,000/s or 0.
+- **On-demand:** billed **~$1.25 per 1M write-request-units**. `1,000/s × 3,600 × 730` =
+  **2,628M writes/month**: `2,628 × $1.25` = **~$3,285/month.**
+- **Ratio:** `$3,285 / $474.50` ≈ **~6.9×** — that's where "on-demand is ~6–7× the provisioned
+  per-request rate" comes from.
+
+*Crossover on utilization.* On-demand only charges for writes that happen, so its bill scales
+straight down with traffic; provisioned's $474.50 is fixed. They break even where on-demand's
+bill falls to $474.50: `$474.50 / $3,285` ≈ **14.4% of peak**. So if this 1,000-WCU-sized table
+runs **above ~15% average utilization**, provisioned is cheaper; below that, on-demand wins.
+(The "50–60%" rule of thumb bakes in headroom you must provision for bursts and the fact that
+real traffic isn't a flat line — you rarely run provisioned safely at 90%+, so the *practical*
+break-even lands higher than the raw 14%.)
 
 ---
 

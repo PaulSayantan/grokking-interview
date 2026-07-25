@@ -77,6 +77,26 @@ The "adopt the highest previously-accepted value" rule is the entire safety
 argument: any two majorities intersect, so a later proposer *learns* an
 already-chosen value and cannot override it. Chosen is forever.
 
+**Worked trace ("chosen is forever").** Three acceptors A1, A2, A3 (majority =
+2).
+
+1. Proposer P wants value **X**. It runs Phase 1 with ballot `n=3`, gets
+   promises from A1, A2 (none had accepted anything), then Phase 2
+   `Accept(3, X)`. A1 and A2 accept → **X is chosen at ballot 3** (a majority
+   holds it). A3 never heard about it.
+2. A different proposer Q comes along wanting its own value **Y**, ballot
+   `n=5`. Phase 1 `Prepare(5)` reaches, say, **A2 and A3**. A2 replies "I
+   accepted `(3, X)`"; A3 replies "I've accepted nothing."
+3. Q got a majority of promises, so it may proceed to Phase 2 — **but the rule
+   forces it to use the highest-ballot accepted value it saw**, which is
+   `(3, X)`. Q must send `Accept(5, X)`, **not** `Accept(5, Y)`. Its own Y is
+   discarded.
+
+Why it is unavoidable: any Phase-1 majority for ballot 5 shares **at least one
+node** with the ballot-3 majority that chose X (2 + 2 > 3). That shared node
+reports `(3, X)`, so Q *cannot miss* the chosen value. X wins forever, no matter
+how many later proposers try — that intersection is the whole safety proof.
+
 **Multi-Paxos:** running full 2-phase Paxos per log slot is wasteful. Optimization:
 elect a **stable leader** that runs Phase 1 *once* for a range of future slots;
 thereafter it only needs **Phase 2** (one round trip) per command — same cost as
@@ -164,9 +184,40 @@ future leader (the "Figure 8" scenario). Instead, once the leader commits an
 entry from its current term, all prior entries are committed *indirectly* via the
 Log Matching Property. Missing this rule breaks agreement.
 
+**Worked trace (Figure 8).** Five nodes S1–S5; write entries as `Tn` = an entry
+created in term `n`. Watch index 2.
+
+1. **Term 2:** S1 is leader, appends `T2` at index 2, replicates it to **only
+   S1, S2** before crashing. `T2` is on 2 of 5 — *not* a majority, *not*
+   committed.
+2. **Term 3:** S5 wins election (votes from S3, S4, itself — their logs are
+   empty at index 2, so no restriction blocks it), appends a *different* entry
+   `T3` at index 2 on **only S5**.
+3. **Term 4:** S5 crashes; S1 is elected again and replicates its old `T2` entry
+   at index 2 to **S1, S2, S3 — a majority (3 of 5)**. Tempting to call `T2`
+   committed. **Raft forbids this**: `T2` is from a *previous* term, so the
+   leader may not commit it by counting replicas.
+4. **The overwrite:** S1 crashes. S5 runs for leader in **term 5**. Its last
+   entry is `T3` (term 3), which beats S2/S3/S4's last entry `T2` (term 2) under
+   the election restriction (higher last-term wins), so S5 collects a majority
+   and wins. As the new leader it forces its log onto the others — **`T3`
+   overwrites `T2` at index 2 on the majority that stored it.** Had step 3 been
+   allowed to "commit" `T2`, a committed entry would have just vanished →
+   agreement violated.
+5. **The fix in action:** suppose instead that in step 3 S1 also appends a
+   *current-term* entry `T4` at index 3 and replicates it to a majority. Now
+   `T4` is committed by the current-term rule, and by **Log Matching** the `T2`
+   before it is locked in too. Crucially, S5 can no longer win: its log lacks
+   `T4`, so its last entry (`T3`) is less up-to-date than the majority's, and the
+   election restriction denies it the votes. Committing one current-term entry
+   retroactively secures every prior entry.
+
 **Throughput/latency:** steady state = **one round trip** to a majority; commit
-latency ≈ leader→follower RTT of the *median* follower (the one that completes
-the quorum). Batching and pipelining `AppendEntries` amortize per-entry cost.
+latency ≈ leader→follower RTT of the **slowest follower needed to complete the
+quorum — the `⌊N/2⌋`-th fastest follower**. For N=3 the leader needs only
+`⌊3/2⌋ = 1` follower ack, so it waits on the *faster* of its two followers (the
+1st order statistic), not the slower — precisely why a quorum tolerates one
+lagging replica. Batching and pipelining `AppendEntries` amortize per-entry cost.
 The leader is a throughput bottleneck and a single hop everyone funnels through.
 
 ---
@@ -223,7 +274,7 @@ Zab and Raft are close cousins; the main conceptual differences are historical
 locally by any server → **fast, but can be stale** unless you call `sync()`
 before the read (linearizable writes, sequentially-consistent reads by default).
 
-**Viewstamped Replication (VR, Oski/Liskov, 1988; "revisited" 2012)** predates
+**Viewstamped Replication (VR, Oki, Liskov, 1988; "revisited" 2012)** predates
 Paxos-in-practice and is essentially equivalent in power. Concepts: **views**
 (≈ terms/epochs) with a **view-change** protocol to elect a new primary, and a
 primary-driven normal-operation protocol. Raft's design is widely recognized as
@@ -384,6 +435,23 @@ two timestamps you can't tell if one caused the other or they're independent.
 totally-ordered multicast, tie-breaking, allocating monotonic IDs). **Not** for
 detecting conflicts — for that you need vector clocks. Cost: O(1) space (one int).
 
+**Worked trace (why `C(a) < C(b)` ⇏ `a → b`).** Three processes, all counters
+start at 0. P1 does two local events and sends two messages; P2 and P3 run
+mostly on their own.
+
+- **P1:** `a1` local → `C=1`; send `m1` (stamp 1); `a2` local → `C=2`; send
+  `m2` (stamp 2).
+- **P3:** receive `m1` (stamp 1) → `C = max(0,1)+1 = 2`; `c` local → `3`;
+  `d` local → `4`.
+- **P2:** receive `m2` (stamp 2) → `C = max(0,2)+1 = 3`.
+
+Now compare P2's receive (`C=3`) with P3's event `d` (`C=4`). Lamport says
+`3 < 4`, so its total order puts the receive *before* `d`. But no message path
+links them — they are genuinely **concurrent**. The counter invented a causal
+ordering that does not exist. That is exactly why `C(a) < C(b)` tells you
+nothing about `a → b`. (The vector-clock section replays these same events and
+recovers the "concurrent" verdict.)
+
 ---
 
 ## Vector clocks and version vectors
@@ -402,6 +470,30 @@ size N (a counter per node).
 **This is the key win over Lamport:** vector clocks **detect concurrency**
 exactly — the converse holds. That's how Dynamo/Riak surface **sibling** conflicts
 for the application (or a CRDT) to merge instead of silently losing data.
+
+**Worked trace (replaying the Lamport scenario).** Vectors are ordered
+`[P1,P2,P3]`, all start `[0,0,0]`.
+
+- **P1:** `a1` → `[1,0,0]`; send `m1` (attach `[1,0,0]`); `a2` → `[2,0,0]`;
+  send `m2` (attach `[2,0,0]`).
+- **P3:** receive `m1` `[1,0,0]` → componentwise max with `[0,0,0]` = `[1,0,0]`,
+  then `V[P3]+=1` → `[1,0,1]`; `c` → `[1,0,2]`; `d` → `[1,0,3]`.
+- **P2:** receive `m2` `[2,0,0]` → max with `[0,0,0]` = `[2,0,0]`, then
+  `V[P2]+=1` → `[2,1,0]`.
+
+Now compare the two events Lamport wrongly ordered — P2's receive `[2,1,0]` vs
+P3's event `d` `[1,0,3]`, componentwise:
+
+- index P1: `2 > 1`
+- index P2: `1 > 0`
+- index P3: `0 < 3`
+
+Neither vector is `≤` the other (each has a strictly larger component
+somewhere), so **neither happens-before the other → concurrent.** The vector
+recovered the truth Lamport's single counter erased. Contrast with a genuinely
+causal pair: `a1 = [1,0,0]` and P3's `d = [1,0,3]` — here `[1,0,0] ≤ [1,0,3]`
+and they differ, so `[1,0,0] < [1,0,3]`, correctly declaring `a1 → d` (the
+message `m1` carried causality into P3's later events).
 
 **Version vectors** are the same idea applied to *replicas of a data item* (not
 processes/events) — used to track which replica has seen which updates and detect
@@ -432,8 +524,34 @@ close to physical time within NTP error) and `c` is a logical counter that break
 ties / advances when physical time doesn't move enough.
 
 Update (send/local): `l' = max(l, pt)`; if `l' == l` then `c += 1` else `c = 0`.
-Receive `(lm, cm)` with local `pt`: `l' = max(l, lm, pt)`; `c` advances per which
-term won the max.
+Receive `(lm, cm)` with local `pt`, compute `l' = max(l, lm, pt)` then:
+- if `l' == l == lm` → `c = max(c, cm) + 1` (physical time didn't advance on
+  either side; bump the counter past both),
+- elif `l' == l` → `c += 1` (our own `l` still leads),
+- elif `l' == lm` → `c = cm + 1` (the message's `l` leads; continue its counter),
+- else (`l'` came from `pt`) → `c = 0` (real time moved forward; reset counter).
+
+**Worked example (2 nodes, small skew).** Physical clocks are in ms; B runs
+10 ms ahead of A. Both start `(l,c)=(0,0)`.
+
+1. **A** local event at `pt=10`: `l' = max(0,10) = 10 ≠ l`, so `c=0` →
+   `A=(10,0)`. A sends `m1` stamped `(10,0)`.
+2. **B** receives `m1` at its local `pt=15` (B's clock ahead): `lm=10`, so
+   `l' = max(0, 10, 15) = 15`. That came from `pt` (not `l`, not `lm`), so
+   `c=0` → `B=(15,0)`. B sends `m2` stamped `(15,0)`.
+3. **A** receives `m2` at local `pt=12` (A still lagging): `lm=15`,
+   `l' = max(10, 15, 12) = 15`. Here `l' == lm` but `l' ≠ l`, so `c = cm+1 =
+   0+1 = 1` → `A=(15,1)`. Notice A's physical clock reads only 12, yet its HLC
+   is `(15,1)` — it inherited B's higher `l` and bumped the counter to stay
+   **strictly greater** than the `(15,0)` it just received, preserving
+   `m2_send → m2_recv`.
+4. **A** does a local event at `pt=13`: `l' = max(15,13) = 15 == l`, so `c += 1`
+   → `A=(15,2)`. The counter keeps ticking while wall-clock is behind `l`;
+   once A's real clock passes 15, `l` jumps and `c` resets to 0.
+
+The counter `c` is doing the work whenever physical time is stalled or skewed,
+keeping HLC monotonic and causally correct without ever letting it drift more
+than the NTP error away from real time.
 
 **Guarantees / benefits:**
 - **Captures happens-before** like a logical clock (`a → b ⇒ HLC(a) < HLC(b)`).
@@ -467,8 +585,9 @@ database. The enabler is **TrueTime**.
 
 **TrueTime API** returns an **interval**, not a point: `TT.now() = [earliest,
 latest]` with a guarantee that the true absolute time lies within it. The width
-`ε = (latest - earliest)/2` is the uncertainty, kept small (historically avg
-~1–7 ms, bounded by a few ms) using **GPS receivers + atomic clocks** in every
+`ε = (latest - earliest)/2` is the uncertainty, kept small (roughly single-digit
+ms on average per the Spanner paper; treat exact figures as ballpark) using
+**GPS receivers + atomic clocks** in every
 datacenter, cross-checked so a bad clock is detected and evicted. `2ε` is the
 worst-case interval width.
 
@@ -596,8 +715,9 @@ split-brain*, you need consensus.
 Consensus is not free — quantify it:
 
 **Latency:** every committed operation needs at least **one round trip to a
-majority quorum**. Commit latency ≈ RTT to the *median* replica completing the
-quorum (not the fastest, not the slowest). Cross-region: if replicas span
+majority quorum**. Commit latency ≈ RTT to the **`⌊N/2⌋`-th fastest follower**
+that completes the quorum — for N=3 the *faster* of the two followers, not the
+slowest, so one lagging replica doesn't stall commits. Cross-region: if replicas span
 continents, each commit pays inter-region RTT (e.g. us-east↔eu ≈ 80–90 ms one
 way → commit latency dominated by WAN). This is why global consensus is slow and
 why Spanner's commit-wait matters.

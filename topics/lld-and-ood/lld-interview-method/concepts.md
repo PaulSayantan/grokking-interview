@@ -35,7 +35,7 @@ proportionally for 60–90 min):
 | 4. Define key interfaces & methods | ~10 min | Public API, signatures, return types |
 | 5. Apply patterns | ongoing | Named patterns with *why* |
 | 6. Write the code | ~15 min | Compile-ready skeleton + critical methods |
-| 7. Extensibility & edge cases | ~5 min | "What if we add X?" answered via OCP |
+| 7. Extensibility & edge cases | ~5 min | "What if we add X?" answered via OCP (Open/Closed — open to extension, closed to modification) |
 
 The times add to the full 45 minutes. The code phase is the one that stretches most as
 the round lengthens — about 15 minutes here, expanding toward the 20–40 minutes noted in
@@ -110,7 +110,12 @@ Then apply the discipline that separates senior candidates:
   string in v1. Over-modeling wastes your limited time — a real pitfall (see
   [Common Pitfalls](#common-pitfalls)).
 - **Prefer value objects for money, time, coordinates.** A `Money` type beats a raw
-  `double`; it signals care and prevents rounding bugs interviewers love to probe.
+  `double`; it signals care and prevents rounding bugs interviewers love to probe. Concretely:
+  in Java `System.out.println(0.1 + 0.2)` prints `0.30000000000000004`, because 0.1 and 0.2
+  have no exact binary representation. Sum a day of parking fees in `double` and the total
+  drifts by cents; a customer disputes the bill. A `Money` value object that wraps a `long`
+  of cents (or a `BigDecimal`) keeps arithmetic exact — `10 + 20 = 30` cents, always. This is
+  exactly the follow-up an interviewer asks: "why not just use a double for the fee?"
 
 > [!WARNING]
 > The opposite failure of over-modeling is the **god class**: a single `ParkingLotManager`
@@ -126,7 +131,8 @@ here you just need enough to communicate).
 
 - **is-a (inheritance / interface implementation).** `Car`, `Truck`, `Motorcycle` *are*
   `Vehicle`s. Reach for this only when there's a genuine subtype relationship that honors
-  Liskov substitution — otherwise prefer composition.
+  Liskov substitution (subtypes must be usable anywhere the base type is, without surprises) —
+  otherwise prefer composition.
 - **has-a (composition / aggregation).** A `ParkingLot` *has* `Floor`s; a `Floor` *has*
   `ParkingSpot`s. Favor **composition over inheritance** — it's more flexible and avoids
   fragile hierarchies.
@@ -192,7 +198,8 @@ Decisions to make explicit here:
 - **Error signaling.** How does "lot full" surface — exception, `Optional`, a result
   object? Say which and why.
 - **Keep it minimal.** Only the methods the agreed use-cases need. Speculative methods are
-  YAGNI violations and waste time.
+  YAGNI violations (You Aren't Gonna Need It — don't build for imagined future needs) and
+  waste time.
 
 > [!INTERVIEW]
 > When you present the API, ask: "Does this interface look right to you before I implement
@@ -268,6 +275,22 @@ needs synchronization (a lock per floor, or a concurrent structure / atomic comp
 on spot state) to prevent two gates assigning the same spot. Don't bolt on threading if the
 scope was single-threaded — that's over-engineering.
 
+Be ready to *walk the race*, because "make it thread-safe" is a near-certain follow-up. Trace
+it concretely with two gate threads and one free spot `S`:
+
+- Gate-1 reads `S.isFree()` → `true`.
+- Gate-2 reads `S.isFree()` → `true` (Gate-1 hasn't written yet).
+- Gate-1 calls `S.occupy(carA)` — spot now holds `carA`.
+- Gate-2 calls `S.occupy(carB)` — **overwrites**; `carA`'s driver has a ticket for a spot that
+  now holds `carB`. Two cars, one spot.
+
+The fix is to make check-and-set a single atomic step. With a lock, `synchronized` on the spot
+means Gate-2 can't read until Gate-1 finishes its occupy; Gate-2 then sees `false` and moves to
+the next spot. Lock-free, model the spot's state as an `AtomicBoolean occupied` and use
+`occupied.compareAndSet(false, true)`: exactly one thread's CAS succeeds (returns `true` and
+takes the spot); the loser's CAS returns `false` and it retries elsewhere. Either way the
+read-decide-write is indivisible, so the double-assignment can't happen.
+
 ## Step 7 — Discuss Extensibility and Edge Cases (5 min)
 
 Reserve the last few minutes to demonstrate that your design *bends without breaking*. The
@@ -333,9 +356,54 @@ class RateLimiter {
 `RateLimiter` stays closed for modification." *Factory* could build the strategy from config.
 The injected `Clock` is a testability seam, not a pattern to name.
 
-**6. Code.** Implement `TokenBucket.allowRequest` fully: refill tokens based on elapsed time,
-decrement on allow, use an atomic/synchronized section per client so concurrent requests
-don't over-admit. Stub `SlidingWindowLog` with a comment.
+**6. Code.** This is the critical method the whole problem turns on, so implement it fully —
+refill lazily from elapsed time, consume on allow, guard with a per-client lock so concurrent
+requests don't over-admit. Stub `SlidingWindowLog` with a comment.
+
+```java
+class TokenBucket implements RateLimitStrategy {
+    private final long capacity;         // max tokens, e.g. 10
+    private final double refillPerSec;   // tokens added per second, e.g. 5
+    private final Map<String, Bucket> buckets = new ConcurrentHashMap<>();
+
+    TokenBucket(long capacity, double refillPerSec) {
+        this.capacity = capacity;
+        this.refillPerSec = refillPerSec;
+    }
+
+    private static final class Bucket {
+        double tokens;
+        Instant lastRefill;
+        Bucket(double tokens, Instant lastRefill) { this.tokens = tokens; this.lastRefill = lastRefill; }
+    }
+
+    @Override
+    public boolean allowRequest(String clientId, Instant now) {
+        Bucket b = buckets.computeIfAbsent(clientId, id -> new Bucket(capacity, now)); // lazily full
+        synchronized (b) {                        // per-client lock — only this client's calls serialize
+            double elapsedSec = Duration.between(b.lastRefill, now).toNanos() / 1_000_000_000.0;
+            b.tokens = Math.min(capacity, b.tokens + elapsedSec * refillPerSec);       // refill, capped
+            b.lastRefill = now;
+            if (b.tokens >= 1.0) {
+                b.tokens -= 1.0;                  // consume one token
+                return true;                      // allow
+            }
+            return false;                         // deny — not enough tokens
+        }
+    }
+}
+```
+
+**Trace it with numbers** (capacity `10`, refill `5` tokens/sec):
+
+- Client `userA`'s bucket sits at **2 tokens**, last refilled at `t0`. A request arrives at
+  `t0 + 1.0s`. Refill: `elapsedSec = 1.0`, so `tokens = min(10, 2 + 1.0 × 5) = min(10, 7) = 7`.
+  `7 ≥ 1`, so consume one → **6 tokens left**, return **`true`** (allowed).
+- Boundary — near-empty bucket: `userB` at **0.4 tokens**, only `0.1s` elapsed. Refill:
+  `tokens = min(10, 0.4 + 0.1 × 5) = min(10, 0.9) = 0.9`. `0.9 < 1`, so **no token to
+  consume** → return **`false`** (denied); the bucket keeps its 0.9 and the caller waits for
+  more refill. Note the cap: even after a long idle gap the bucket refills to at most 10, so a
+  client can burst up to `capacity` but no further.
 
 **7. Extensibility & edge cases.** "Add a new algorithm?" → new `RateLimitStrategy` impl,
 zero edits elsewhere. Edge cases: first-ever request (bucket lazily initialized full), clock

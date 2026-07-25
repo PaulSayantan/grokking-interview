@@ -130,7 +130,7 @@ classDiagram
         -List~ExpenseObserver~ observers
         +addExpense(ExpenseRequest req) Expense
         +settleUp(String fromId, String toId, long cents)
-        +getBalances(String userId) List~Balance~
+        +getBalances(String userId) Map~String,Long~
         +simplifyDebts(String groupId) List~Transaction~
     }
     class ExpenseObserver {
@@ -220,8 +220,13 @@ three ways is 3333 cents each, leaving 1 cent unassigned. Two accepted fixes:
    `total - sum(others)`.
 
 Either is fine; what's not fine is ignoring it, or "fixing" it with doubles. Percent splits
-have the same issue (33.33% of ₹100 three times = ₹99.99) — compute `n-1` shares and derive
-the last, or re-apply remainder distribution.
+have the same issue — trace ₹100 (10000 cents) split 33.33% / 33.33% / 33.34% (sums to 100):
+naive `total * pct / 100` gives `10000*33.33/100 = 3333`, `3333`, `10000*33.34/100 = 3334`,
+which happens to sum to 10000 here — but round *equal* thirds (33.33% each) and you get
+`3333 × 3 = 9999`, 1 cent lost. The fix mirrors the equal case: compute the first `n−1`
+shares by flooring (`3333`, `3333`) and **derive the last as `total − sum(others)` =
+`10000 − 6666 = 3334`**, guaranteeing the splits sum to exactly 10000 regardless of how the
+percentages rounded.
 
 Validation belongs **in the strategy**, not in `ExpenseService`: the rule "percents sum to
 100" is knowledge about percentage splitting, and the service shouldn't know it exists.
@@ -282,6 +287,35 @@ to zero and can be removed entirely.
    `min(credit, |debt|)` to the creditor; push back whichever side has a remainder.
 4. Repeat until empty.
 
+**Worked example — from pairwise sheet to settlement plan.** Take a 4-person group whose
+pairwise ledger (creditor-first, `balances[X][Y]=+v` means *Y owes X* `v`) holds four raw
+IOUs:
+
+- `balances[A][C] = +600` (C owes A 600) · `balances[A][D] = +100` (D owes A 100)
+- `balances[B][D] = +300` (D owes B 300) · `balances[C][D] = +200` (D owes C 200)
+
+Collapse each user's row into a **net** (`Σ owed − Σ owes`):
+
+| User | owed | owes | `net` |
+|---|---|---|---|
+| A | 600 + 100 | — | **+700** |
+| B | 300 | — | **+300** |
+| C | 200 | 600 | **−400** |
+| D | — | 200+300+100 | **−600** |
+
+`Σ net = 700 + 300 − 400 − 600 = 0` ✓. Load creditors `{A:700, B:300}` into one max-heap,
+debtors `{D:600, C:400}` into another (keyed by `|net|`), then trace:
+
+| Step | pop creditor | pop debtor | `min` → transaction | push-back |
+|---|---|---|---|---|
+| 1 | A(700) | D(600) | **D → A 600** | A(100); D done |
+| 2 | B(300) | C(400) | **C → B 300** | C(100); B done |
+| 3 | A(100) | C(100) | **C → A 100** | both done |
+
+Final plan: **D→A 600, C→B 300, C→A 100** — 3 transactions. Sanity: A receives 600+100=700,
+B receives 300, C pays 300+100=400, D pays 600 — every net honored. Four raw IOUs became
+**3 settlements**, and with 4 non-zero users we hit the `n−1 = 3` ceiling exactly.
+
 Properties to state:
 
 - Each step fully settles **at least one** person, so at most **n − 1** transactions for n
@@ -290,6 +324,15 @@ Properties to state:
   zero-sum subsets)`, and finding those subsets is NP-hard (subset-sum reduction). Saying
   "greedy gives ≤ n−1, optimal is NP-hard, greedy is the accepted trade-off" is a strong
   senior signal — real Splitwise uses the same style of heuristic.
+
+  *Counterexample when they ask "show me where greedy loses".* Nets:
+  `A=+7, B=+6, C=−3, D=−4, E=−6` (sum 0). Greedy matches largest creditor to largest debtor:
+  A↔E pays 6 (A left +1), B↔D pays 4 (B left +2), B↔C pays 2 (C left −1), A↔C pays 1 —
+  **4 transactions**. But two *hidden zero-sum subsets* exist: `{A:+7, C:−3, D:−4}` (7−3−4=0)
+  and `{B:+6, E:−6}` (6−6=0). Settling inside each — C→A 3, D→A 4, E→B 6 — is only
+  **3 transactions**. Greedy's blind largest-largest match (A↔E) straddled both groups and
+  destroyed the structure. The optimum is `n − k = 5 − 2 = 3`; *finding* that `k=2` clean
+  partition is the NP-hard part greedy skips.
 - Simplification produces a **suggested settlement plan**; it must not silently rewrite the
   pairwise ledger unless the group opted into "simplify debts" (Splitwise makes this a group
   setting precisely because users find rewritten creditors confusing).
@@ -373,6 +416,27 @@ class ExactSplitStrategy implements SplitStrategy {
     }
     public void computeAmounts(long total, List<Split> splits) {
         splits.forEach(s -> s.amountCents = ((ExactSplit) s).inputAmountCents);
+    }
+}
+
+class PercentSplitStrategy implements SplitStrategy {
+    public void validate(long total, List<Split> splits) {
+        double sum = splits.stream()
+                           .mapToDouble(s -> ((PercentSplit) s).percent).sum();
+        if (Math.abs(sum - 100.0) > 1e-9)
+            throw new InvalidSplitException("percents must sum to 100");
+    }
+    public void computeAmounts(long total, List<Split> splits) {
+        long assigned = 0;
+        for (int i = 0; i < splits.size(); i++) {
+            if (i < splits.size() - 1) {                 // first n-1 by flooring
+                long share = (long) (total * ((PercentSplit) splits.get(i)).percent / 100);
+                splits.get(i).amountCents = share;
+                assigned += share;
+            } else {
+                splits.get(i).amountCents = total - assigned;   // last absorbs the drift
+            }
+        }
     }
 }
 

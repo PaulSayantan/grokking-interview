@@ -177,6 +177,22 @@ graph LR
     B -.->|"event backbone"| G["Event-Driven / Space-Based (async, elastic)"]
 ```
 
+**Worked example — counting quanta for one e-commerce system** (the exact interview probe "how
+many quanta does this design have?"). Take Orders, Payments, Inventory.
+
+- **Modular monolith** — all three modules in one process, one shared DB. One thing deploys, one
+  thing fails, one thing scales together → **1 quantum**.
+- **Service-based, shared DB** — Orders/Payments/Inventory are now separate deployables, but they
+  all read/write the *same* database. The DB is a single point of coupling and failure that binds
+  their availability and forces coordinated schema changes → still **1 data quantum** (three
+  services, but the shared data collapses them into one). This is exactly why "microservices with
+  a shared DB" is the Distributed-Monolith trap.
+- **Microservices, DB-per-service** — each service owns its own database, deploys, fails, and
+  scales independently. Nothing is shared at runtime → **3 quanta**.
+
+The lesson: it is **shared data, not shared code, that collapses the quantum count.** Splitting
+the code but keeping one database buys you distribution's cost with none of its independence.
+
 **Trade-offs.** Left = simplicity, strong consistency, low ops, but coarse scaling and lockstep
 deploys. Right = fine-grained scaling and deployability, but distributed-systems tax.
 *Optimizes:* intuition for *where* a candidate style lands.
@@ -217,6 +233,25 @@ flowchart TD
     I --> J
 ```
 
+**Worked example — running the procedure on ride-hailing dispatch:**
+
+1. **Rank characteristics:** availability > scalability (spiky, city-wide surges) > elasticity >
+   consistency (an eventually-consistent driver location is fine; a *lost* ride request is not).
+2. **Communication + data:** dispatch is inherently reactive ("rider requested", "driver
+   accepted") → **asynchronous**, event-first; data is naturally partitioned by city/region →
+   **distributed** data.
+3. **Map to candidates:** async + independent scaling + reactive → **microservices + EDA**.
+4. **Constraints:** 4 autonomous teams (matching, pricing, driver, trip) — Conway says draw the
+   service boundaries along those teams; availability target means one bad region must not sink
+   the rest → add **cell-based** partitioning (one cell per region) for blast-radius control.
+5. **Record:** ADR-00xx "Microservices + EDA, regional cells" with the ranking above as Context.
+6. **Enforce:** fitness functions — "no service reads another's DB", p99 dispatch latency gate.
+
+Result: *"microservices + EDA, cells for blast radius — because availability and spiky
+scalability dominate and we have 4 teams,"* not "microservices because they're modern." Note the
+output is **several styles composed**, which is the norm: real systems layer styles (microservices
++ EDA + cell-based here) rather than picking exactly one.
+
 **Trade-offs.** A procedure adds up-front effort but prevents expensive re-platforming.
 *Optimizes:* decision quality and defensibility. *When to avoid:* trivial CRUD apps — just pick
 a modular monolith and move on.
@@ -250,6 +285,30 @@ sequenceDiagram
     P->>R: ADR-0019 "supersedes ADR-0007"
     Note over R: ADR-0007 marked "Superseded" (never deleted)
 ```
+
+**Worked example — a real filled-in ADR** (so you see the *reasoning genre*, not just the
+skeleton). If an interviewer says "walk me through an ADR," produce something like this:
+
+> **ADR-0007: Adopt a modular monolith over microservices for the v1 platform**
+> **Status:** Accepted (2026-03-11)
+> **Context:** We are 6 engineers on one team; the domain boundaries are still shifting weekly;
+> time-to-market for the first paying customer is the top business driver; we have no dedicated
+> ops/on-call maturity yet. Microservices would give per-service scaling we do not need at
+> current load (~200 req/s).
+> **Decision:** Build a single deployable modular monolith with per-module schemas and ArchUnit
+> fitness functions enforcing module boundaries, structured so modules can be extracted into
+> services later.
+> **Consequences:**
+> - *Good:* one deploy, in-process transactions (strong consistency), fast local debugging,
+>   cheap ops; boundaries stay explicit via fitness functions.
+> - *Bad:* one runtime failure domain and one scaling unit; if a module later needs independent
+>   scale we must pay the extraction cost then.
+> - Revisit when we exceed ~4 teams or a module's scaling needs clearly diverge (→ would be
+>   superseded by a new ADR).
+
+Note how the Context captures **forces** (team size, unstable boundaries, TTM) and Consequences
+honestly list **both** the wins and what was given up — that trade-off honesty is what the Second
+Law ("why > how") is protecting.
 
 **Trade-offs.** *Pros:* durable rationale, faster onboarding, fewer relitigated debates. *Cons:*
 discipline to keep writing them. *Optimizes:* modifiability/evolvability of the *organization's
@@ -300,8 +359,10 @@ technical, and ignoring it dooms the architecture.
 **How it works.** **Conway's Law** (1968): *"Any organization that designs a system will produce
 a design whose structure is a copy of the organization's communication structure."* So the
 system's boundaries mirror the org chart's communication paths. The **Inverse Conway Maneuver**
-(*Team Topologies*, Fowler): deliberately *shape the teams* to match the architecture you want —
-e.g. give each microservice a single long-lived team so the boundaries hold.
+(term coined by Jonny LeRoy & Matt Simons at ThoughtWorks; popularized by Skelton & Pais,
+*Team Topologies* — Fowler is the go-to commentator on Conway's Law itself, not the origin of this
+term): deliberately *shape the teams* to match the architecture you want — e.g. give each
+microservice a single long-lived team so the boundaries hold.
 
 ```mermaid
 graph LR
@@ -841,6 +902,11 @@ harder end-to-end testing. *Optimizes:* deployability, scalability, evolvability
 large systems, many teams, differing scale needs. *When to avoid:* small teams/early products
 (start modular monolith) — premature microservices produce a **Distributed Monolith**.
 
+**Reasoned trade-off (say this, not just the bullets):** you *buy* independent deploy + per-service
+scaling + team autonomy, and you *pay* with eventual consistency, saga complexity, and a standing
+observability/ops bill; it's worth it only **past the point where team-coordination cost or
+divergent scaling needs exceed that tax** — roughly several teams, not two engineers.
+
 **Differs from:** **SOA** (no ESB, DB-per-service, finer grain), **Service-Based** (independent
 databases, many more quanta), **Modular Monolith** (network boundaries + separate deploys).
 
@@ -868,6 +934,20 @@ graph LR
     FN --> Q["Managed queue"]
     FN --> OUT["Response / downstream event"]
 ```
+
+**Worked example — the cost crossover** (back-of-envelope; why serverless *loses* at steady high
+load). Suppose an always-on box costs **$150/month** and comfortably serves your traffic. A
+serverless function billed at **$0.40 per million invocations** (plus compute-duration, ignored
+here for the intuition). Break-even on the per-invocation charge alone:
+
+- $150 / $0.40 per million = **375 million invocations/month** to equal the always-on box.
+- 375M / (30 × 24 × 3600 ≈ 2.6M seconds/month) ≈ **~145 req/s sustained.**
+
+So below ~145 req/s of *steady* load, pay-per-use wins (and at truly spiky/idle load it wins big,
+because it scales to zero and you pay ~nothing off-peak). Above it — a service pinned at, say,
+1,000 req/s all day — the always-on box is far cheaper, and duration/memory charges only push the
+crossover *lower*. That is the precise sense of "per-request cost can exceed always-on at high
+steady load": serverless is priced for **burst and idle**, not for a flat, busy 24/7 line.
 
 **Trade-offs.** *Pros:* zero server ops, elastic **cost** (pay-per-use, scale to zero),
 automatic scaling. *Cons:* **cold starts** (latency), execution time/memory limits, **vendor
@@ -909,6 +989,18 @@ graph TD
     DW --> DB[("Backing database")]
 ```
 
+**Worked example — the flash sale that breaks the DB.** Say your relational primary tops out at
+~5,000 writes/s before lock contention and disk fsync latency spike. A flash sale opens and you
+take **50,000 concurrent write requests/s** (cart updates, stock decrements). No amount of
+app-tier scaling helps: every request funnels to that one primary, so ~45,000 req/s queue up
+behind the 5k ceiling and latency explodes — **the database is the wall.** Space-Based removes it
+from the request path: serve all 50k/s from a replicated in-memory grid (say 5 processing units ×
+~12k ops/s each ≈ 60k/s headroom, memory-speed, no lock contention), and let **data pumps** drain
+writes to the backing DB asynchronously at whatever rate it can sustain (~5k/s). The trade you
+accept: a **data-loss window** — if a unit dies before its pump flushes, the not-yet-persisted
+writes in that unit's grid are gone, so this fits inventory/session data far better than the
+money-movement ledger.
+
 **Trade-offs.** *Pros:* near-linear elastic **scalability** and very high **performance**
 (memory-speed, no DB bottleneck), high availability (replicated grid). *Cons:* **eventual
 consistency** (async persistence — risk of data loss window), complex IMDG tooling/operations,
@@ -942,6 +1034,15 @@ graph TD
     R --> C2["Cell 2: full stack + data"]
     R --> C3["Cell 3: full stack + data"]
 ```
+
+**Worked example — blast radius math.** You have 800,000 tenants. In a single shared stack, one
+poison deploy or a poison request that crashes the fleet takes down **100% = 800,000 tenants**.
+Now split into **8 cells** of 100,000 tenants each and roll the bad deploy to one cell at a time.
+The first cell tips over, your health checks catch it, and you halt the rollout: impact =
+**1/8 = 12.5% = 100,000 tenants**, and the other 7 cells (700,000 tenants) never saw the bad
+build. Push to 16 cells and the same failure caps at 1/16 ≈ 6.25%. That is the whole pitch: blast
+radius shrinks as **1/(number of cells)**, at the cost of replicating (and paying for) the full
+stack N times and routing every request to the right cell.
 
 **Trade-offs.** *Pros:* strong **fault isolation**, high **availability**, safe incremental
 deploys, limits correlated failure. *Cons:* **routing/partitioning complexity**, cost of
@@ -1022,6 +1123,12 @@ scalability, decoupling, extensibility. *When to use:* reactive, high-throughput
 systems. *When to avoid:* workflows needing strong immediate consistency and simple synchronous
 request/response.
 
+**Reasoned trade-off:** you *gain* decoupling and the freedom to add consumers without touching
+producers, and you *give up* the simple mental model of a synchronous call — no global
+transaction, out-of-order/duplicate events, and async flows that are painful to trace; choose it
+**when reactions can tolerate eventual consistency and fan-out/extensibility matters more than a
+linear, debuggable call stack.**
+
 **Differs from:** **Pub-Sub** (a *messaging* mechanism EDA uses) and **Broker style** (generic
 mediation); **Microservices** often *use* EDA for inter-service async communication.
 
@@ -1033,8 +1140,11 @@ Deep dive: see `event-driven-cqrs-saga-cdc`.
 
 **Problem it solves:** four recurring problems in event/distributed systems — reads and writes
 have conflicting models (**CQRS**), you need a full audit trail and time-travel of state
-(**Event Sourcing**), a business transaction spans multiple services with no distributed 2PC
-(**Saga**), and you must propagate database changes to other systems reliably (**CDC**).
+(**Event Sourcing**), a business transaction spans multiple services with no distributed
+**two-phase commit (2PC)** — a coordinator-driven "prepare, then commit" protocol whose locks
+block every participant until the slowest one votes, making it fragile and slow across
+independent services (**Saga**), and you must propagate database changes to other systems reliably
+(**CDC**).
 
 **How it works (architectural implications only).** **CQRS** splits the write model (commands) from
 one or more read models (queries), each optimized independently. **Event Sourcing** stores state
@@ -1055,6 +1165,27 @@ sequenceDiagram
     O->>P: compensate (refund) 
     Note over O,P: Saga: no global lock, compensations undo prior steps
 ```
+
+**Worked example — a saga that fails on step 3 and compensates.** Order #4412, total **$120**.
+Trace the local transactions and the running state:
+
+| Step | Action | Result | State after |
+|---|---|---|---|
+| 1 | Payments: authorize $120 | OK | payment = AUTHORIZED ($120 held) |
+| 2 | Inventory: reserve 1 unit | OK | stock reserved = 1 |
+| 3 | Shipping: book courier slot | **FAIL** (no capacity) | — |
+
+No global lock ever existed, so there is nothing to "roll back" atomically. Instead the saga runs
+**compensating transactions in reverse order** to undo the committed steps:
+
+| Compensate | Action | State after |
+|---|---|---|
+| undo step 2 | Inventory: release the 1 reserved unit | stock reserved = 0 |
+| undo step 1 | Payments: **refund/void the $120 hold** | payment = $0, customer made whole |
+
+End state: money returned ($120 → $0 held), stock freed, order marked FAILED. The point: each
+service committed its *own* local transaction, and correctness on failure comes from explicit
+compensations — not from a distributed 2PC coordinator holding locks across all three services.
 
 **Trade-offs.** *Pros:* independent read/write **scalability**, **auditability**/replay, distributed
 transactions without 2PC locks. *Cons:* significant **complexity** and **eventual consistency**;

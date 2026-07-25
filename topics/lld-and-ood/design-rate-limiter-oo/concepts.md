@@ -240,6 +240,46 @@ constant processing rate; choose token bucket when clients deserve burst allowan
 | Sliding window counter | Minor approximation | ~Exact | O(1) | High scale, near-exact |
 | Leaky bucket | Smooths/queues bursts | Exact outflow | O(queue) | Downstream needs steady rate |
 
+### Worked numeric traces
+
+You can recite the shapes above; the interviewer will then ask you to *plug in
+numbers* live. Do each of these once by hand and the arithmetic stops being scary.
+
+**Token bucket** — `capacity = 10`, `refillPerSecond = 5`, bucket starts full
+(`tokens = 10`). Ten requests arrive back-to-back at `t = 0`: each consumes one, so
+`tokens` walks `10 → 9 → … → 0` and all ten are **allowed** — that's the burst. An
+11th request lands at `t = +0.1 s`: refill adds `0.1 s × 5/s = 0.5` tokens, so
+`tokens = min(10, 0 + 0.5) = 0.5`. Since `0.5 < 1` it is **denied**, and
+`retryAfter = (1.0 − 0.5) / refillPerNano = 0.5 ÷ (5 / 1e9 ns) = 1e8 ns = 100 ms`.
+Note the reported `remaining`: `RateLimitDecision.allowed((int) tokens)` floors the
+double, so a request that leaves `tokens = 3.7` reports `remaining = 3` — the
+fractional token is real state, but the `X-RateLimit-Remaining` header is a whole
+number.
+
+**Fixed window** — `limit = 100 / min`. A client fires 100 requests at `12:00:59.9`
+(inside the `[12:00, 12:01)` window; `count` climbs `0 → 100`, all allowed). At
+`12:01:00` the window rolls over and `count` resets to 0; the client fires 100 more
+at `12:01:00.1`, all allowed again. Net: **200 requests in ~0.2 s** straddling the
+boundary — 2× the intended rate, even though neither window's counter ever exceeded
+100. That is the boundary-burst flaw made concrete.
+
+**Sliding window counter** — `limit = 100 / min`. The previous fixed minute
+`[12:00, 12:01)` saw `previousCount = 80`; we are now `20 s` into the current minute
+`[12:01, 12:02)` with `currentCount = 30`. The trailing 60 s window
+`[12:00:20, 12:01:20)` still overlaps the previous fixed minute for its first 40 s, so
+`overlapFraction = (60 − 20) / 60 = 0.667`. Estimate =
+`previousCount × overlapFraction + currentCount = 80 × 0.667 + 30 = 53.3 + 30 = 83.3
+→ 83`. Since `83 < 100`, the request is **allowed** — and it took two integers, not 83
+stored timestamps, which is the O(1) win over the log variant.
+
+**Leaky bucket** — `leakRate = 2 / s`, `queueCapacity = 5`. Ten requests arrive at
+`t = 0`: the first 5 enter the queue; the other 5 find it full and are **dropped**.
+The queue drains at exactly 2/s, so the admitted 5 exit at
+`t = 0.5, 1.0, 1.5, 2.0, 2.5 s` — a perfectly smooth outflow regardless of how bursty
+the arrival was. Contrast the token bucket above (`capacity = 10`), which let all 10
+through *instantly*: identical burst, opposite philosophy — leaky bucket **smooths**,
+token bucket **tolerates**.
+
 ## API and Method Signatures
 
 ```java
@@ -438,6 +478,11 @@ The limiter sits on every request thread; a data race here silently breaks the l
   `incrementAndGet() <= max`. Beware read-then-act races: `if (count.get() < max)
   count.incrementAndGet();` is broken — two threads both pass the check. The
   increment-then-compare form (optionally decrement on failure) is the atomic fix.
+  One caveat worth volunteering: increment-then-compare-with-rollback admits a brief
+  transient over-count (a concurrent reader can observe `count > max` between the
+  over-increment and the decrement) and burns CAS traffic under heavy rejection. A
+  CAS loop that only commits when the new value stays under the limit avoids the
+  transient entirely — fixed window rarely cares, but token/sliding cases may.
 - **CAS loop (token bucket):** pack state into an `AtomicReference<BucketState>`
   (immutable record of tokens + lastRefill) and loop:
   `compareAndSet(oldState, newState)` until it sticks. Guava's `RateLimiter` instead

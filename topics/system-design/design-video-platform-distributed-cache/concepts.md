@@ -498,6 +498,32 @@ across all remaining nodes instead of dumping onto one neighbor.
    [N2]--------+
 ```
 
+**Worked example — why only K/N keys move.** Say you have **1000 keys** spread
+over **N = 4** nodes, ~**250 keys each**. Now add a 5th node:
+
+- **Consistent hashing:** N4's incoming node lands on the ring and owns exactly
+  one arc — the keys between it and the next node clockwise. The new steady state
+  is 1000/5 = **200 keys per node**, so only ~**200 keys move** (K/N = 1000/5),
+  and every one of them is *stolen from a single neighbor's arc*. The other three
+  nodes are untouched — their keys never move, so their cache stays warm.
+- **Modulo hashing (`hash(key) % N`):** changing N from 4 to 5 changes almost
+  every mapping. A key keeps its home only when `hash%4 == hash%5`; enumerating
+  `hash mod 20` that happens only for remainders 0,1,2,3 — **4 of 20 = 20%**. So
+  **~800 of 1000 keys (80%) move**, i.e. 800 fresh cache misses slam the DB at
+  once. That is the miss storm consistent hashing avoids.
+
+**Worked example — virtual nodes on failure.** Take **3 physical nodes** each
+placed at **150 vnodes** = 450 positions on the ring, 1000 keys ~= 333 per node.
+Now node N2 dies:
+
+- **Without vnodes** (one arc each), N2's entire ~333-key arc dumps onto its
+  single clockwise neighbor N3 -> N3 jumps to ~**667 keys** while N1 stays ~333.
+  One node is now doing double the work (load imbalance + a hot spot).
+- **With 150 vnodes**, N2's 150 little arcs are scattered around the ring, so
+  each arc's keys fall to whichever of N1/N3 sits next. Statistically ~half go to
+  each: N1 -> ~500, N3 -> ~500. The failed node's load spreads *evenly* across
+  the survivors instead of crushing one neighbor.
+
 **Real-world:** DynamoDB, Cassandra, Redis Cluster (uses 16384 hash slots — a
 fixed-slot variant that's easy to resize by moving slots), Memcached client
 libraries, consistent-hashing load balancers.
@@ -539,9 +565,45 @@ sync.
   just miss and refill from DB. Simplest and cheapest; acceptable because it's
   "only a cache."
 
+**Worked example — why W + R > N guarantees read-after-write.** The rule is pure
+pigeonhole: if the set of nodes you wrote (size W) and the set you read (size R)
+together exceed the total N, they *must* overlap in at least one node — and that
+node has the newest value. Take **N = 3** (nodes A, B, C):
+
+- **W = 2, R = 2 -> W + R = 4 > 3.** A write of `v2` acks after landing on any 2
+  nodes, say {A, B}. A later read polls any 2 nodes, say {B, C}. The write set
+  {A,B} and read set {B,C} *must* share a node (here B) — 2 + 2 = 4 slots into 3
+  nodes forces an overlap. B returns `v2` (highest version wins), so the read
+  never misses the latest write. Guaranteed fresh.
+- **W = 1, R = 1 -> sum = 2, not > 3.** Write `v2` to {A} only; read from {C}
+  only. {A} and {C} don't overlap, so C still holds the stale `v1` — **you can
+  read stale**. Fastest and most available, but no read-after-write.
+- **W = 3, R = 1 -> sum = 4 > 3.** Every write hits all 3, so any single node has
+  the latest and a 1-node read is always fresh (cheap, strong reads). Cost: if
+  *one* node is down you can't reach W=3, so **all writes block** — you traded
+  write availability for strong cheap reads.
+
+Read this as a dial: push W up for fresh cheap reads (pay in write latency /
+write availability); push both down for speed and availability (pay in
+staleness). W=2,R=2 on N=3 is the balanced "strong-ish and still tolerates one
+node down" default.
+
 **Consistency spectrum:** strong (read-after-write, costs latency/coordination)
 -> read-your-writes -> eventual (fast, may serve stale). For a cache you almost
 always accept **eventual consistency** because the source of truth is the DB.
+
+**Gotchas — split brain and cache poisoning (interviewer probes):**
+- **Split brain on failover:** if the network partitions primary from replica,
+  a naive setup promotes the replica to a second primary — now *two* primaries
+  accept writes and diverge. Fix with quorum-based failover fencing: Redis
+  Sentinel (or a Raft-style controller) requires a majority of sentinels to agree
+  before promoting, and the old primary is fenced/demoted so it stops taking
+  writes when it rejoins.
+- **Cache poisoning:** one bad/corrupt value written to a hot key gets replicated
+  and served to everyone until it expires. Mitigate with **versioned keys**
+  (bump the key/version on a schema or logic change so old poison is orphaned),
+  **short TTLs on suspect/derived data** to bound blast radius, and
+  **validation on write** so malformed values never enter the cache.
 
 **Trade-offs (CAP/PACELC applied to caches):**
 - Replicate vs not: replication gives HA + read scaling but doubles memory cost
@@ -585,6 +647,41 @@ your access pattern.
   and frequency.
 - **Random / allkeys-random:** evict a random key; O(1), surprisingly decent,
   used when you can't afford bookkeeping.
+
+**Worked example — LRU vs LFU on the same sequence.** Cache size **3**, access
+sequence **A, B, C, A, B, D, E, A**:
+
+| Step | Access | LRU state (MRU→LRU) | LRU action        | LFU state (key=count)   | LFU action        |
+|------|--------|---------------------|-------------------|-------------------------|-------------------|
+| 1    | A      | A                   | miss, insert      | A=1                     | miss, insert      |
+| 2    | B      | B,A                 | miss, insert      | A=1,B=1                 | miss, insert      |
+| 3    | C      | C,B,A               | miss, insert (full)| A=1,B=1,C=1            | miss, insert (full)|
+| 4    | A      | A,C,B               | hit               | A=2,B=1,C=1             | hit               |
+| 5    | B      | B,A,C               | hit               | A=2,B=2,C=1             | hit               |
+| 6    | D      | D,B,A               | miss, **evict C** (LRU)| A=2,B=2,D=1        | miss, **evict C** (freq 1)|
+| 7    | E      | E,D,B               | miss, **evict A** (LRU)| A=2,B=2,E=1        | miss, **evict D** (freq 1)|
+| 8    | A      | A,E,D               | **miss**, evict B | A=3,B=2,E=1             | **hit**           |
+
+Same inputs, different final access: **LRU misses on the last A** (it evicted A
+at step 7 as "least recently used"), while **LFU hits** (A's frequency of 2 kept
+it resident). Tally: LRU = 6 misses / 2 hits; LFU = 5 misses / 3 hits. That extra
+hit is exactly LFU protecting a genuinely popular key that LRU threw away.
+
+**Worked example — scan pollution.** Hot set `{A, B, C}` already accessed ~10x
+each (LFU counts A=B=C=10), then a one-time **scan reads 100 fresh keys X1..X100**
+through the same size-3 cache:
+
+- **LRU:** X1 evicts A, X2 evicts B, X3 evicts C — after just 3 scan reads the
+  *entire hot set is gone*. When the app next asks for A/B/C, all miss and refill
+  from the DB. The scan flushed the working set.
+- **LFU (naive counters):** X1 comes in at freq 1 and evicts one hot key (a tie
+  broken by recency), but then X2 (freq 1) evicts X1 (freq 1), X3 evicts X2, and
+  so on — the scan keys churn through a *single* cold slot while B and C (freq 10)
+  stay put. It loses at most one hot key, not all three.
+- **W-TinyLFU (Caffeine):** an admission filter compares the newcomer's estimated
+  frequency to the eviction candidate's; X1 (freq 1) < the victim's freq 10, so
+  X1 is **rejected on admission** and never enters — zero hot keys lost. This is
+  why modern caches use it.
 
 **Real-world:** Redis maxmemory policies (`allkeys-lru`, `volatile-lru`,
 `allkeys-lfu`, `volatile-ttl`, `noeviction`); Memcached slab LRU; Caffeine's
@@ -638,6 +735,27 @@ DB simultaneously — a **thundering herd / cache stampede / dogpile**.
   the same instant.
 - **Negative caching:** cache "not found" briefly to stop repeated misses from
   hammering the DB.
+
+**Worked example — sizing a hot-key fix.** A trending video's metadata key takes
+**1M req/s**, but one cache node caps at ~**100k req/s**. One owner is 10x over
+budget.
+- **Replicate the key** to `key#1..key#10` across 10 nodes and read a random
+  copy: 1,000,000 / 10 = **100k req/s per node** — exactly at budget. Cost: every
+  write/invalidation must fan out to all 10 copies.
+- **L1 local cache** instead: put the key in an in-process cache on all **500 app
+  servers**. Each server serves its own reads from RAM, so the distributed tier
+  sees only refills — roughly one fetch per server per TTL. At a 10 s TTL that's
+  500 / 10 = **~50 req/s** reaching the shared cache, essentially zero. Cost: 500
+  uncoordinated copies can be up to 10 s stale.
+
+**Worked example — single-flight collapsing a stampede.** A hot key expires and
+**50,000 concurrent requests** miss in the same instant.
+- **No coalescing:** all 50,000 miss, all 50,000 hit the DB to recompute the same
+  value -> the DB takes 50,000x its intended load and can topple.
+- **Single-flight:** the first miss acquires the in-flight slot and issues
+  **exactly 1 DB read**; the other **49,999** block on that shared in-flight
+  promise. When it resolves, one populated value is returned to all 50,000 and
+  written to the cache once. DB load: **1 query instead of 50,000**.
 
 **Cache penetration / avalanche:**
 - **Penetration:** requests for keys that don't exist bypass the cache and hit

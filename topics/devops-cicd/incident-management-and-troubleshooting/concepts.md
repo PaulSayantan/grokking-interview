@@ -195,6 +195,25 @@ Gotchas interviewers love:
   recovering faster (lower MTTR) — and for many systems, **lowering MTTR is cheaper and
   more achievable** than eliminating all failures. That's the SRE bet: assume failure,
   optimize recovery.
+
+**Worked example — why "recover faster" beats "fail less" on cost.** Start with a system
+that fails on average every 30 days (MTBF = 720 h) and takes 4 h to restore each time
+(MTTR = 4 h):
+
+- Availability = 720 / (720 + 4) = 720 / 724 = **0.99448 ≈ 99.45%**.
+- Downtime/year = (1 − 0.99448) × 8760 h ≈ 0.00552 × 8760 ≈ **48 h/yr**.
+
+Now compare the two levers, each aiming for the same target:
+
+- **Halve MTTR to 2 h** (faster rollback, better runbook, automation): 720 / (720 + 2) =
+  720 / 722 = **0.99723 ≈ 99.72%** → downtime ≈ 0.00277 × 8760 ≈ **24 h/yr**.
+- **Double MTBF to 1440 h** (make the system fail *half as often*): 1440 / (1440 + 4) =
+  1440 / 1444 = **0.99723 ≈ 99.72%** → downtime ≈ **24 h/yr**.
+
+Both land on the *same* 99.72% / ~24 h. But halving MTTR is usually a scripting-and-drills
+project; doubling MTBF means making the whole system twice as reliable — far harder and
+open-ended. Same availability gain, wildly different cost. That's the "recovery is cheaper"
+bet made concrete.
 - **"Mean" hides tails.** A handful of hours-long incidents can dwarf many quick ones;
   medians and percentiles often tell a truer story than the mean.
 
@@ -251,6 +270,13 @@ The fastest safe mitigations — roughly in order of "try first":
 
 Only *after* customer impact is stopped do you dig into root cause at leisure.
 
+Note the ordering is "roll back *first*" only when the **timeline implicates a recent
+change**. If nothing shipped and the incident is load-driven (an organic traffic surge, a
+viral event) or dependency-driven (a downstream on fire, a poisoned cache), rolling back a
+perfectly good deploy wastes precious minutes and fixes nothing — scale out, shed load, or
+fail over is the faster mitigation there. Let the timeline pick the lever: recent change →
+roll back; no change → scale/shed/failover.
+
 > [!INTERVIEW]
 > The canonical scenario: *"You deploy at 2pm, error rate spikes at 2:03pm, pager goes off.
 > What do you do?"* The winning answer is **roll back first** (mitigate — the timing screams
@@ -302,6 +328,25 @@ flowchart TD
   HYP -->|confirmed| FIX[Mitigate]
   HYP -->|refuted| SIG
 ```
+
+**Worked example — bisecting a p99 latency spike.** Say p99 latency jumps from 120 ms to
+900 ms with no recent deploy. There are ~10 places it could live (2 load balancers, 4 app
+instances across 2 AZs, a cache tier, 2 DB replicas, a downstream API). Instead of
+inspecting all ten, halve the search space at each step:
+
+1. **Client or server?** Server-side latency metric shows 850 ms; the client isn't slow.
+   → drop everything client-side.
+2. **All AZs or one?** Split p99 by AZ: `us-east-1a` = 130 ms, `us-east-1b` = 870 ms.
+   → the fault lives in AZ **1b** only; AZ 1a is exonerated (half the fleet gone).
+3. **App or its dependency?** In 1b, app CPU is normal but time-spent-in-DB-call is 780 ms.
+   → it's downstream of the app, in the data tier.
+4. **Which replica?** 1b routes to DB replica-3, whose CPU is pinned at 100% (replica-4 at
+   20%). → **culprit: replica-3 in 1b, saturated.**
+
+Four halving cuts took ~10 candidates → 1. Mitigation follows immediately (drain traffic
+off replica-3 / fail its readers over to replica-4), *before* you diagnose *why* replica-3
+saturated. That is bisection: every step you spend on the answer must eliminate roughly
+half of what's left, or you're just poking around.
 
 > [!TIP]
 > "It's always DNS" is a meme because it's *often* true — and it stands in for a whole

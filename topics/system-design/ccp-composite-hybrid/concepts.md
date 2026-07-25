@@ -8,6 +8,13 @@ split ONE distributed application across a **static environment** (a private dat
 center / on-premises) and an **elastic environment** (a public cloud) — and,
 crucially, *which part lives where and why*.
 
+Plain-language grounding: a **static** environment is capacity you already own and
+can't grow quickly (fixed cost you pay whether or not you use it, full control,
+compliance-friendly); an **elastic** environment is rented capacity that scales up
+and down in minutes (pay-per-use, but you pay egress to pull data out and you cede
+some control). Every hybrid pattern below is just deciding *which half each component
+belongs in*.
+
 Every hybrid pattern answers the same shaped question: given components with
 different **forces** — workload shape (steady vs. spiky/bursty), data-volume
 volatility, compliance/data-residency, cost, latency, and lifecycle stage — where
@@ -126,6 +133,14 @@ Interface (burst is in UI), Elastic Queue, Message-oriented Middleware. Deep div
 bursting/elasticity → `system-design/scalability-and-load-balancing`; workload shaping →
 `system-design/capacity-modeling-and-tail-latency`.
 
+> [!INTERVIEW]
+> Interviewers push: *does cloud bursting actually pay off?* Often it doesn't. The elastic
+> side must already be able to reach the data (see the data-gravity math in Hybrid Backend);
+> per-core software **licenses frequently don't burst**; on-demand capacity has **cold-start /
+> warm-up** delays; and **egress** can erase the savings. Bursting wins cleanly for
+> **stateless, data-light, genuinely spiky** compute — if the workload is steady-ish or
+> data-heavy, running steady-state fully in cloud (or fully on-prem) usually beats it.
+
 ---
 
 ## Hybrid Data
@@ -220,8 +235,31 @@ system-of-record and only stages needed data to the cloud.
 
 **Trade-offs / when to use.** Choose over plain **Hybrid Processing** when the burst
 compute is **data-heavy** and co-locating data with compute is cheaper/faster than moving
-data per request. Cost is the data-staging/egress and the coordination of *where* data
-lives (the Data Access Component's job). Consistency of the staged copy is eventual.
+data per request. This is the **data-gravity** trade-off: large datasets are expensive and
+slow to move, so once data is heavy enough you bring *compute to the data* rather than data
+to compute. Cost is the data-staging/egress and the coordination of *where* data lives (the
+Data Access Component's job). Consistency of the staged copy is eventual.
+
+### Worked example: the Processing → Backend crossover (data gravity in numbers)
+
+A nightly analytics job reads a **500 GB** dataset that lives on-prem, runs **30 times/month**,
+and the dataset changes by only ~**10 GB/day**. Cross-boundary transfer costs ~**$0.02/GB**
+(Direct Connect–class), the link is **1 Gbps**, S3 standard is ~**$0.023/GB-month**.
+
+- **Hybrid Processing (leave data on-prem, stream it to cloud compute every run).**
+  Move the full 500 GB each of the 30 runs: `500 GB × 30 = 15,000 GB × $0.02 = $300/month`.
+  And every run stalls waiting for data first: `500 GB × 8 = 4,000 Gb ÷ 1 Gbps ≈ 4,000 s ≈ 67 min`
+  of transfer *before compute starts*.
+- **Hybrid Backend (stage the data once into S3, run EMR co-located).**
+  Initial stage: `500 GB × $0.02 = $10` (one-time). Daily deltas: `10 GB × 30 = 300 GB × $0.02 = $6/month`.
+  Storage: `500 GB × $0.023 = $11.50/month`. Steady-state ≈ **$17.50/month**, and each run's
+  pre-compute wait is ~0 because the data is already local to the compute.
+
+So $300/mo (Processing) vs ~$18/mo (Backend) — a **~17×** swing, plus you delete a 67-minute stall
+per run. The **crossover**: for a *one-off* run the two are a near-wash (~$10 stream vs ~$10 stage +
+one month storage). Data gravity is a function of **repetition × size**: the more often you re-run a
+big dataset, the harder gravity pulls compute toward it — which is exactly the force that turns Hybrid
+Processing into Hybrid Backend.
 
 **Related patterns.** Hybrid Processing (burst compute without large data), Hybrid Data,
 Message-oriented Middleware, Data Access Component, Stateful Component. Deep dive: async
@@ -337,7 +375,8 @@ provider hybrid → `system-design/aws-migration-modernization`.
 - **"The burst is in compute but it needs terabytes of local data — Hybrid Processing or
   Hybrid Backend?"** Hybrid Backend — move the data *with* the compute and trigger via a
   queue; a Data Access Component tells the elastic side where the data is. Plain Hybrid
-  Processing assumes the burst processor does *not* need large co-located data.
+  Processing assumes the burst processor does *not* need large co-located data. This is the
+  **data-gravity** call — see the ~17× cost swing worked out under Hybrid Backend.
 - **"What forces the choice between Hybrid Data and Hybrid Backup?"** Hybrid Data moves the
   *active working set* (driver: volatile volume or residency). Hybrid Backup moves *periodic
   archival copies* (driver: DR + regulatory retention, tuned by RPO/RTO).

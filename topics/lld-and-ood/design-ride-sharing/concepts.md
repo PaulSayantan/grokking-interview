@@ -345,6 +345,22 @@ public class NearestDriverStrategy implements DriverMatchingStrategy {
 }
 ```
 
+**Worked example — watch `NearestDriverStrategy` choose.** An Economy request with pickup
+at `(0, 0)`, three candidate drivers in the pool:
+
+| Driver | Status | Vehicle | Location | Distance to pickup |
+|---|---|---|---|---|
+| D1 | AVAILABLE | Economy | (0.8, 0) | 0.8 km |
+| D2 | AVAILABLE | Premium | (0.3, 0) | 0.3 km |
+| D3 | IN_TRIP | Economy | (0.2, 0) | 0.2 km |
+
+Trace the pipeline: `filter(status == AVAILABLE)` drops **D3** (it's mid-trip); `filter(type
+== ECONOMY)` drops **D2** (wrong vehicle type, even though it's the physically closest);
+that leaves only **D1**, so `min(by distance)` returns **D1** — the winner is the *nearest
+eligible* driver, not the nearest driver. Note the ordering lesson: D3 at 0.2 km and D2 at
+0.3 km are both closer than D1, but availability and type are hard filters applied *before*
+the distance comparison, so proximity only breaks ties among the already-eligible set.
+
 - `NearestDriverStrategy` — minimize pickup distance (fast pickup; may overload drivers
   clustered near demand).
 - `HighestRatedStrategy` — prefer top-rated available drivers (rider experience).
@@ -390,6 +406,24 @@ public class BasePricingStrategy implements PricingStrategy {
 `SurgePricingStrategy` decorates/extends the base with a `surgeMultiplier` (e.g. 1.8×
 during peak). The **multiplier value is an input**; computing it from live demand is HLD.
 This keeps "add surge" an Open/Closed change: a new strategy, no edits to trip or fare.
+
+**Worked example — trace `Fare.total()` end to end.** Economy rates: base `$2.50`,
+`$1.20`/km, `$0.25`/min. A 5 km trip that took 12 minutes at a 1.8× surge:
+
+| Component | Computation | Amount |
+|---|---|---|
+| base | flat | `$2.50` |
+| distance | `$1.20 × 5 km` | `$6.00` |
+| time | `$0.25 × 12 min` | `$3.00` |
+| **subtotal** | `2.50 + 6.00 + 3.00` | **`$11.50`** |
+| **total** | `11.50 × 1.8` | **`$20.70`** |
+
+The key call the diagram encodes: **surge multiplies the whole subtotal, base included**
+(`(2.50 + 6.00 + 3.00) × 1.8 = 20.70`), not just the distance/time components — otherwise
+`2.50 + (6.00 + 3.00)×1.8 = 18.70`, a different (and wrong, per Uber/Lyft billing) answer.
+So `Fare` stores the three raw components plus the multiplier, and `total()` sums then
+scales: `(base + distanceComponent + timeComponent) × surgeMultiplier`. At 1.0× (no surge)
+`total()` returns the `$11.50` subtotal unchanged.
 
 ## Key Design Decisions
 
@@ -583,6 +617,16 @@ Single-process, multi-threaded — raise these before the interviewer does:
   each — the check belongs in the rating service, keyed by trip id.
 - **Surge snapshot.** Capture the surge multiplier *at request/quote time* into the trip,
   so the fare doesn't jump between request and completion.
+- **Where do the billable km and minutes come from?** `endTrip` feeds `distanceOf(trip)`
+  and `minutesOf(trip)` into pricing — and these must be the **actually traversed route**
+  (the accumulated GPS trace), not `source.distanceTo(destination)`. Straight-line distance
+  under-bills every real trip (roads curve, one-way streets, detours) — in the worked
+  example above the pickup-to-drop straight line might be 3.5 km while the driven route is
+  5 km, a `(5 − 3.5) × $1.20 = $1.80` under-charge before surge, `$3.24` after. So
+  `Location.distanceTo()` is a **matching heuristic only** (who is nearest), never a billing
+  source; billable distance/time come from the GPS/location stream (an HLD concern) that
+  `distanceOf`/`minutesOf` read from. Name that seam rather than silently charging the
+  straight line.
 
 ## Extensibility
 

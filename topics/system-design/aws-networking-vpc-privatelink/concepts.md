@@ -241,6 +241,21 @@ Key properties and why interviewers love it:
   required same-Region consumers or inter-Region TGW/peering to bridge; that constraint
   is now relaxed for services that opt in.
 
+Two senior follow-ups this pattern invites:
+
+- **"Does the provider see the real client IP?"** By default the NLB **source-NATs** the
+  connection, so the provider sees the endpoint's/NLB's IP, not the consumer's. To
+  preserve the client source IP the provider must either use **target-type = IP with
+  client-IP preservation** or enable **Proxy Protocol v2** on the target group (which
+  prepends the original source to the TCP stream). Because it's an NLB (L4), there is
+  **no HTTP path-based routing** — the provider gets one TCP/UDP listener, not
+  per-path fan-out.
+- **"How does the provider control who connects?"** The endpoint service has an
+  **allowed-principals** list (which AWS accounts/roles may even create an endpoint to
+  it) and a **connection-acceptance** mode: `auto-accept` for open self-serve, or manual
+  **pending → accept/reject** so the provider approves each consumer — the knob SaaS
+  providers use to gate tenants.
+
 **Trade-off — PrivateLink vs VPC peering/TGW for service-to-service.** PrivateLink
 exposes **one service endpoint**, one-way, overlap-safe, least-privilege — ideal for a
 **provider/consumer (SaaS-like) relationship** or exposing a single API across
@@ -327,6 +342,17 @@ ports) or run **IPsec VPN over DX** for encryption in transit.
 | Cost             | Low hourly + data              | Port-hours + lower per-GB + circuit   |
 | Resilience       | Two tunnels; add 2nd VPN       | **Single DX is a SPOF — need 2**      |
 
+**Worked example — "on-prem needs 5 Gbps sustained, <5 ms, encrypted."** Each VPN
+tunnel caps at ~1.25 Gbps, so to reach 5 Gbps you need **⌈5 ÷ 1.25⌉ = 4 tunnels**
+load-shared via **ECMP** on a TGW (which requires **dynamic BGP**, not static routes).
+But that only helps if traffic spreads across ≥4 distinct 5-tuple flows — a single
+elephant flow still pins to one tunnel and stalls at 1.25 Gbps. And ECMP does nothing
+for the **<5 ms / no-jitter** requirement, because the tunnels still ride the public
+internet. So the constraint set (sustained 5 Gbps **and** consistent low latency **and**
+encrypted) points to **Direct Connect** — a 10 Gbps port with **MACsec** (or IPsec over
+DX) — with a Site-to-Site VPN as the cheap failover path. The VPN math is what proves
+VPN alone is the wrong tool here.
+
 **Trade-off — and the best-practice combo.** VPN is right for **quick setup, low
 bandwidth, dev/test, or as a *backup* path**. DX is right for **sustained high
 throughput, latency-sensitive workloads (hybrid DBs, VDI, real-time), and lower
@@ -396,6 +422,22 @@ address space**.
 the VPC CNI assigns a VPC IP **per pod**; thousands of pods exhaust a small subnet
 fast — plan `/20` or larger app subnets, or use IPv6 / prefix delegation.
 
+**Worked example — "how big a subnet for N pods?"** Target **~2,000 pods per AZ** on
+EKS with the VPC CNI (each pod eats one VPC IP, plus a handful for node primary ENIs
+and headroom). Size the per-AZ subnet:
+
+- `/24` → 256 − 5 reserved = **251 usable** → holds ~250 pods. **Off by ~8×** — launches
+  start failing (`InsufficientFreeAddressesInSubnet`) at ~250 pods.
+- `/22` → 1,024 − 5 = **1,019 usable** → still short of 2,000.
+- `/21` → 2,048 − 5 = **2,043 usable** → just fits ~2,000 pods + node/ENI overhead. So
+  plan **`/21` per AZ** (or `/20` = 4,091 usable for real growth headroom).
+- Across **3 AZs** at `/21` each you consume three `/21`s = a `/19` worth of space — so
+  the *VPC* CIDR must be sized for that up front, since you can't shrink the primary.
+- The escape hatches when even that is tight: **prefix delegation** (the CNI hands each
+  node a `/28` = 16 IPs at once, packing far more pods per ENI) or **IPv6** (a `/64` per
+  subnet is effectively unlimited), which is why ENI-dense EKS is the canonical reason
+  to reach for IPv6.
+
 ---
 
 ## Egress cost and data-transfer trade-offs
@@ -424,6 +466,23 @@ The rough hierarchy (numbers vary by Region, directionally correct):
   means it's often cheaper to move compute to the data than data to the compute.
 - Central egress VPC over TGW **adds TGW per-GB** — cheaper on NAT consolidation but
   you pay to cross the hub; model both before choosing.
+
+**Worked example — "why is the bill so high, and how do you cut it?"** A private-subnet
+fleet in 3 AZs pushes **10 TB/month (10,000 GB)** to the internet through NAT gateways.
+
+- *Data cost, before:* every GB is billed **twice** — NAT processing **$0.045/GB** +
+  internet egress **$0.09/GB** = **$0.135/GB**. So 10,000 GB × $0.135 = **$1,350/month**.
+- *NAT hourly, before:* one NAT GW per AZ at ~$0.045/hr × 730 hr/month = ~$32.85 each,
+  × 3 AZs ≈ **$99/month**. Total ≈ **$1,449/month**.
+- *The fix:* suppose **6 TB** of that traffic is actually to **S3**. Move it onto a
+  **free gateway endpoint** — no ENI, no NAT processing, no egress (S3 is in-Region).
+  Now only 4 TB hits NAT+internet: 4,000 GB × $0.135 = **$540/month** data + ~$99 hourly
+  ≈ **$639/month**. That single route-table change saves **~$810/month** on data alone.
+- *The cross-AZ trap:* separately, a chatty service replicating **5 TB/month** to a
+  peer in another AZ pays cross-AZ **$0.01/GB each direction** = 5,000 GB × $0.02 =
+  **$100/month** — for traffic that never leaves the Region. Pin both ends in the
+  **same AZ** (where availability allows) and that $100 goes to **$0** (same-AZ private
+  IP is free). This is why "which AZ" is a cost decision, not just an HA decision.
 
 ---
 

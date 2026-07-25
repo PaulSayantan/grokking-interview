@@ -64,6 +64,25 @@ Why the `h ^ (h >>> 16)` spread? Because the index is `hash & (capacity-1)`, and
 small capacity only the *low* bits of the hash matter. If two keys differ only in their
 high bits they would always collide. XOR-ing the high bits down mixes them in cheaply.
 
+**Worked example — hash a real key into a bucket (and force a collision).** Take a
+`HashMap` at the default `capacity = 16`, so the index mask is `capacity - 1 = 15`
+(binary `0000 1111`). Insert `"cat"`:
+
+- `"cat".hashCode()` in Java = `((('c'*31)+'a')*31)+'t'` = `((99*31+97)*31)+116` =
+  `3166*31 + 116` = **98262**.
+- Spread: `98262 >>> 16 = 1`, so `hash = 98262 ^ 1 = 98263`.
+- Index: `98263 & 15` → `98263 = 6141*16 + 7`, so the low nibble is `7` → **bucket 7**.
+
+Now insert `"sat"`:
+
+- `"sat".hashCode()` = `((115*31+97)*31)+116` = `3662*31 + 116` = **113638**.
+- Spread: `113638 >>> 16 = 1`, so `hash = 113638 ^ 1 = 113639`.
+- Index: `113639 & 15` → `113639 = 7102*16 + 7` → **bucket 7** again.
+
+`"cat"` and `"sat"` **collide**: both land in bucket 7. With separate chaining (below),
+bucket 7 becomes a two-node list `("cat") → ("sat")`, and a `get("sat")` walks that list
+comparing with `equals` until it finds the match.
+
 > [!TIP]
 > `hash % capacity` and `hash & (capacity-1)` are equivalent **only** when capacity is a
 > power of two. That is precisely why Java rounds requested capacities up to the next
@@ -118,6 +137,14 @@ no per-node pointer overhead).
 - **Robin Hood hashing:** on insert, the entry that has probed farther from its "home"
   slot steals the slot from one that is closer, evening out probe lengths.
 
+> [!TIP]
+> CPython's `dict` since 3.6 uses a **compact layout**: a sparse *index array* (holding
+> positions) plus a dense, append-only *entries array* (the actual key/hash/value rows).
+> Probing happens over the small index array (open addressing), but iteration walks the
+> dense entries array in insertion order — which is why **dict insertion order is a
+> guaranteed language feature since Python 3.7**. The compact design also cut dict memory
+> by ~20–25%.
+
 **Deletion needs tombstones.** You cannot just empty a slot, because a later slot in a
 probe sequence would become unreachable (lookup stops at the first empty slot). Instead
 you mark the slot as a **tombstone** (deleted-but-occupied) so probing continues past
@@ -154,10 +181,33 @@ flowchart LR
   C --> D["O(n) once,<br/>amortized O(1) / insert"]
 ```
 
+**Worked example — trace a resize.** Start `capacity = 16`, `load factor = 0.75`, so
+`threshold = 16 × 0.75 = 12`. Insert entries 1 through 12: each fits, `size` reaches 12,
+still `≤ threshold`, no resize. Insert the **13th** entry: now `size = 13 > 12`, so the
+table doubles to `capacity = 32` and rehashes all 13 entries into the bigger array.
+
+Watch the Java 8 "one extra bit" trick decide where our two colliding keys go. The new
+mask is `capacity - 1 = 31` (binary `0001 1111`) — one bit wider than before. The deciding
+bit is `oldCapacity = 16` (`0001 0000`):
+
+- `"cat"` had `hash = 98263`. `98263 & 16` → `98263 = 6141*16 + 7`, and `6141` is odd, so
+  bit-4 is `1` → `98263 & 16 = 16 ≠ 0`. So `"cat"` **moves** from index 7 to
+  `7 + oldCapacity = 7 + 16 =` **23** (and indeed `98263 & 31 = 23`).
+- `"sat"` had `hash = 113639`. `113639 & 16`: `113639 = 7102*16 + 7`, and `7102` is even,
+  so bit-4 is `0` → `113639 & 16 = 0`. So `"sat"` **stays** at index 7 (`113639 & 31 = 7`).
+
+The collision is resolved for free: after doubling, `"cat"` and `"sat"` no longer share a
+bucket, and no entry needed a full modulo recompute — each just checked one bit.
+
 > [!WARNING]
 > Rehashing is why a single `put` can occasionally take O(n): the resize it triggers
 > touches every element. In latency-sensitive code, **pre-size** the map
-> (`new HashMap<>(expectedSize / 0.75 + 1)`) to avoid mid-flight resizes.
+> (`new HashMap<>(expectedSize / 0.75 + 1)`) to avoid mid-flight resizes. Note the
+> int-arg constructor sets *initial capacity*, and HashMap rounds it **up to the next
+> power of two** (`tableSizeFor`), so the exact formula matters less than "ask for
+> capacity ≥ expectedSize / 0.75." E.g. for 100 entries, `100/0.75 ≈ 133.3` rounds up to
+> 256, giving threshold `256 × 0.75 = 192 ≥ 100` — no resize. Java 19+ added
+> `HashMap.newHashMap(int numMappings)`, which does this sizing correctly for you.
 
 > [!TIP]
 > Java 8 optimizes rehash: because capacity doubles, each entry either stays at index `i`
@@ -212,6 +262,16 @@ record Point(int x, int y) {}   // record auto-generates consistent equals + has
 @Override public boolean equals(Object o) { /* compare x, y */ }
 ```
 
+> [!INTERVIEW]
+> **Null keys/values — a classic "what's the difference" probe.** `HashMap` allows
+> **exactly one null key** and **any number of null values**. The null key bypasses
+> `hashCode()` entirely (the `hash()` method returns `0`), so it always lives in
+> **bucket 0**. By contrast, `Hashtable` and `ConcurrentHashMap` **throw
+> `NullPointerException`** on a null key *or* value. The reason for the concurrent ban:
+> `map.get(k)` returning `null` would be ambiguous — it can't distinguish "key absent"
+> from "key mapped to null" without a second `containsKey` call, which isn't atomic under
+> concurrency, so the API forbids null outright.
+
 ## HashSet is a HashMap with a dummy value
 
 A `HashSet` is not a separate structure — Java implements it as a thin wrapper around a
@@ -264,6 +324,36 @@ Defenses:
   algorithm landed in 3.4 via PEP 456), so an attacker can't precompute colliding keys.
 - Don't build hash maps directly from untrusted input at unbounded size without limits.
 
+## Thread-safety and ConcurrentHashMap
+
+`HashMap` is **not thread-safe** — it does zero synchronization. Concurrent writes can
+corrupt it in ways that go far beyond a lost update:
+
+- **Java 7 resize infinite loop.** In Java 7, resize rehashed each chain by *prepending*
+  nodes (order-reversing). If two threads resized the same bucket at once, the
+  `next`-pointer rewrites could interleave into a **circular linked list** — a later
+  `get` on that bucket then spins forever at 100% CPU. Java 8's resize preserves node
+  order using the lo/hi split (the "one extra bit" trick above), which removes *this*
+  specific cycle, but concurrent puts can **still** lose entries, resurrect stale data, or
+  see a half-built table. HashMap remains unsafe under concurrency — Java 8 just made the
+  failure less catastrophic.
+- **Fail-fast iterators.** Every structural modification bumps an internal `modCount`.
+  An iterator snapshots `modCount` at creation and checks it each `next()`; a mismatch
+  throws `ConcurrentModificationException`. This is a **best-effort bug detector**, not a
+  concurrency guarantee — it also fires on single-threaded modification during iteration.
+
+Your options for concurrent access:
+
+| Choice | Locking | Notes |
+|---|---|---|
+| `Collections.synchronizedMap(map)` | one **coarse** lock around every method | simple, but serializes all access → contention; compound ops (`get`-then-`put`) still need external sync |
+| `ConcurrentHashMap` | **per-bin** CAS + `synchronized` on the head node (Java 8; no `Segment` striping anymore) | high concurrency, **weakly-consistent** iterators (never throw CME, may miss/see concurrent updates), **no null keys or values** |
+
+**When to use which:** reach for `ConcurrentHashMap` for genuine concurrent maps (caches,
+counters via `merge`/`computeIfAbsent`); use `synchronizedMap` only for a quick wrapper on
+a legacy map with low contention; use plain `HashMap` when access is single-threaded or
+externally confined (e.g. thread-local, or fully built then published safely as read-only).
+
 ## Interview Problems
 
 The unifying signal for reaching for a hash map: **"have I seen this / how many times /
@@ -292,6 +382,38 @@ Medium:
 Hard:
 - [LFU Cache](https://leetcode.com/problems/lfu-cache/) — Hard — two hash maps + frequency buckets of linked lists
 - [First Missing Positive](https://leetcode.com/problems/first-missing-positive/) — Hard — hashing into the array itself (index-as-hash)
+
+### Worked trace — Two Sum
+
+`nums = [2, 7, 11, 15]`, `target = 9`. Keep a map of `value → index`; for each element,
+check whether its **complement** (`target - value`) is already in the map before inserting
+it. One pass, O(n):
+
+| i | nums[i] | complement = 9 − nums[i] | complement in map? | action | map after |
+|---|---|---|---|---|---|
+| 0 | 2 | 7 | no | store `2 → 0` | `{2:0}` |
+| 1 | 7 | 2 | **yes → 0** | return `[0, 1]` | — |
+
+The complement check turns the O(n²) nested-loop brute force into O(n): the map answers
+"have I already seen the number that pairs with me?" in O(1).
+
+### Worked trace — LRU Cache
+
+An LRU cache is a **hash map + doubly linked list**. The map gives O(1) `key → node`
+lookup; the list orders nodes by recency (**head = most-recently used, tail = least**). On
+every access, unlink the node and move it to the head; on insert past capacity, evict the
+tail. Trace `capacity = 2`:
+
+1. `put(1, A)` → list: `[1]`, map `{1}`.
+2. `put(2, B)` → list: `[2, 1]` (2 is newest at head), map `{1, 2}`.
+3. `get(1)` → returns A, and 1 moves to head → list: `[1, 2]`.
+4. `put(3, C)` → at capacity; evict the **tail = 2** (least recently used), insert 3 at
+   head → list: `[3, 1]`, map `{1, 3}`.
+5. `get(2)` → **miss** (evicted in step 4) → returns −1.
+
+Each `get`/`put` is O(1): the map locates the node, and the doubly linked list lets us
+unlink and re-insert without scanning. Java's `LinkedHashMap` in access-order mode plus an
+overridden `removeEldestEntry` gives the same behavior in a few lines.
 
 ## Common follow-up questions
 
