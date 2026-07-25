@@ -370,7 +370,11 @@ public final class NotificationBroker implements Broker {
         subs.computeIfAbsent(t, k -> new CopyOnWriteArrayList<>()).add(s);
     }
     public void unsubscribe(Topic t, Subscriber s) {
-        subs.getOrDefault(t, List.of()).remove(s);
+        // computeIfPresent so we mutate the real CopyOnWriteArrayList only when the topic
+        // exists. NOTE: getOrDefault(t, List.of()).remove(s) is a trap here — when the topic
+        // is absent it calls remove() on the immutable empty List.of(), throwing
+        // UnsupportedOperationException. (List.of() lists are immutable regardless of size.)
+        subs.computeIfPresent(t, (k, list) -> { list.remove(s); return list; });
     }
     public void publish(Topic t, Notification n) {
         for (Subscriber s : subs.getOrDefault(t, List.of())) {
@@ -405,10 +409,15 @@ public final class NotificationService {
             r = c.send(n, u);
             if (r.status() == Status.SENT) return;
             attempt++;
-            sleep(retryPolicy.nextDelay(attempt));
-        } while (retryPolicy.shouldRetry(attempt, r));
+            if (!retryPolicy.shouldRetry(attempt, r)) break;  // no sleep before dead-lettering
+            sleep(retryPolicy.nextDelay(attempt));            // only between attempts we'll retry
+        } while (true);
         deadLetter(n, u, r);                 // exhausted retries
     }
+    // NOTE: sleep() here blocks a pool thread for the whole backoff window — a simplification
+    // that contradicts the slow-channel-isolation goal above. The non-blocking idiom is to
+    // re-submit the next attempt to a ScheduledExecutorService after nextDelay(attempt), freeing
+    // the worker while it waits.
 }
 ```
 

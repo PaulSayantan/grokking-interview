@@ -171,7 +171,7 @@ class SumTask extends RecursiveTask<Long> {
 **Beginner.** JUC provides thread-safe collections that scale far better than the legacy `Collections.synchronizedXxx` wrappers (which lock the whole collection on every operation) and the ancient `Hashtable`/`Vector`.
 
 **ConcurrentHashMap (CHM).**
-- **Reads are lock-free**; writes lock only a small portion. In **Java 7** it used lock striping with `Segment`s (default 16). **Since Java 8** it abandoned segments for a `synchronized` block on the **first node of each bin** plus CAS for empty bins, and it converts a long bin to a **red-black tree** when it exceeds 8 entries (treeification) for O(log n) worst case.
+- **Reads are lock-free**; writes lock only a small portion. In **Java 7** it used lock striping with `Segment`s (default 16). **Since Java 8** it abandoned segments for a `synchronized` block on the **first node of each bin** plus CAS for empty bins, and it converts a long bin to a **red-black tree** when it exceeds 8 entries (treeification) for O(log n) worst case. Treeification also requires overall table capacity ≥ 64 (`MIN_TREEIFY_CAPACITY`); below that a bin hitting 8 triggers a **resize instead**, since a small table with a hot bin is better fixed by spreading entries across more buckets.
 - `null` keys and values are **forbidden** (unlike `HashMap`) — ambiguity between "absent" and "mapped to null" in concurrent `get`.
 - Atomic compound ops: `putIfAbsent`, `computeIfAbsent`, `compute`, `merge`. Bulk parallel ops `forEach`, `search`, `reduce` (Java 8).
 - **Weakly consistent iterators**: never throw `ConcurrentModificationException`; reflect some but not necessarily all updates since creation. `size()` is an estimate.

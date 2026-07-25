@@ -183,7 +183,7 @@ Options:
 |---|---|---|---|
 | **DataSync** | Online, managed agent | File/object transfer (NFS, SMB, HDFS, S3, EFS, FSx) over network or Direct Connect | Handles incremental, verification, scheduling; parallelized; up to ~10 Gbps per agent task |
 | **AWS Transfer Family** | Online, managed SFTP/FTPS/FTP/AS2 | Ongoing partner file exchange into S3/EFS | Not a bulk-migration tool; it's a *protocol front-end* for recurring transfers |
-| **Snowball Edge** | Offline, ~80 TB usable device | 10s of TB to low PB when the wire is too slow | Ship the device; also has compute (Storage/Compute Optimized) for edge/pre-processing |
+| **Snowball Edge** | Offline device, tens of TB usable (current Storage Optimized ~210 TB; earlier generations ~80 TB) | 10s of TB to low PB when the wire is too slow | Ship the device; a Compute Optimized variant adds vCPU/GPU for edge/pre-processing. (Note: Snow Family is no longer offered to new customers — know the pattern for scale reasoning) |
 | **Snowmobile** | Offline, up to ~100 PB (a truck) | Exabyte/hyperscale data-center evacuations | (Being deprecated as networks improved; know it exists for scale reasoning) |
 | **S3 Transfer Acceleration** | Online, edge-optimized upload to S3 | Long-haul internet uploads to S3 | Uses CloudFront edges; costs extra per GB |
 | **Direct Connect** | Dedicated private link | Sustained high-throughput hybrid + migration | 1/10/100 Gbps ports; weeks to provision |
@@ -286,12 +286,18 @@ Refactoring targets on AWS, from least to most transformation:
 - **Lambda:** max **15-minute** timeout, up to **10 GB** memory (CPU scales with memory),
   up to **10 GB** ephemeral `/tmp`, 6 MB synchronous payload (256 KB async). Long/batch
   jobs > 15 min must go to Fargate/Batch, not Lambda.
-- **API Gateway:** **29-second** integration timeout — long request/response must move to
-  async (return 202 + poll, or WebSockets/AppSync subscriptions).
+- **API Gateway:** **29-second** *default* integration timeout for REST APIs. Since June 2024
+  this is *raisable* above 29s on Regional and private REST APIs (opt-in, and it may reduce
+  your account throttle quota) — but the default is still 29s, so long request/response
+  patterns should generally move to async (return 202 + poll, or WebSockets/AppSync
+  subscriptions) rather than lean on a raised timeout.
 - **DynamoDB:** 400 KB item; per-partition ~3000 RCU / 1000 WCU before you risk a hot
   partition — model access patterns, not entities.
-- **SQS FIFO:** 300 TPS (3000 with batching) vs Standard's effectively unlimited but
-  at-least-once + best-effort-ordering throughput. Ordering costs throughput.
+- **SQS FIFO:** baseline ~300 TPS per API action (~3000 with batching) — but **high-throughput
+  FIFO** mode lifts this far higher by spreading messages across partitions (throughput scales
+  with the number of distinct message-group IDs, into the thousands-to-tens-of-thousands TPS
+  per queue, subject to a regional quota). Standard queues are effectively unlimited but
+  at-least-once + best-effort ordering. Strict ordering still costs throughput vs Standard.
 
 **Trade-offs:** serverless maximizes agility and scale-to-zero cost efficiency but brings
 cold starts, per-service limits, distributed-systems complexity (idempotency, eventual
@@ -435,3 +441,6 @@ the post-arrival sync itself is a mini-migration.
 - AWS Migration Hub, Application Discovery Service, and Migration Evaluator docs.
 - AWS Architecture Center — "Strangler Fig pattern" and monolith-to-microservices guidance.
 - re:Invent deep-dive sessions on large-scale migrations and application modernization.
+- Service limits (verify current values): API Gateway quotas / June 2024 "increase integration
+  timeout beyond 29 seconds" announcement; SQS high-throughput FIFO and message quotas;
+  Snow Family device specifications (Storage Optimized 210 TB).

@@ -322,6 +322,10 @@ Contract subtleties worth saying out loud:
   every public method funnels through it.
 - `ls` returns names (or lightweight entries), not the node objects, to avoid leaking
   internal references clients could mutate.
+- `find` must return **full/absolute paths**, not bare names. `ls` is scoped to one
+  directory so a bare name is unambiguous, but `find` spans the whole subtree, where the
+  same name can occur in different directories (two `config.txt`); returning `/a/config.txt`
+  vs `/b/config.txt` is what a follow-up open/delete needs to act on.
 
 ## Code Skeleton
 
@@ -458,9 +462,19 @@ public class SearchVisitor implements NodeVisitor {
     private final List<String> matches = new ArrayList<>();
     public SearchVisitor(SearchStrategy strategy) { this.strategy = strategy; }
 
-    @Override public void visit(File f)      { if (strategy.matches(f)) matches.add(f.getName()); }
-    @Override public void visit(Directory d) { if (strategy.matches(d)) matches.add(d.getName()); }
+    @Override public void visit(File f)      { if (strategy.matches(f)) matches.add(fullPath(f)); }
+    @Override public void visit(Directory d) { if (strategy.matches(d)) matches.add(fullPath(d)); }
     public List<String> getMatches() { return matches; }
+
+    // find spans the whole subtree, so a bare name is ambiguous — two "config.txt"
+    // in different directories would collide and be unusable for a follow-up
+    // open/delete. Return the absolute path instead, rebuilt from the parent chain.
+    private String fullPath(FileSystemNode node) {
+        Deque<String> parts = new ArrayDeque<>();
+        for (FileSystemNode n = node; n != null && n.parent != null; n = n.parent)
+            parts.addFirst(n.getName());
+        return "/" + String.join("/", parts);
+    }
 }
 
 public class GlobStrategy implements SearchStrategy {   // e.g. "*.txt"

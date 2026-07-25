@@ -607,7 +607,9 @@ changes), `EVFILT_PROC` (process events) — one unified mechanism where Linux n
 - **Is one socket per port a limit on concurrent connections?** No — connections are keyed
   by the full 4-tuple, so a single listening port serves many clients. The practical
   limits are file-descriptor limits (`ulimit -n`), memory, and — for a *client* connecting
-  to one server — the ~28K ephemeral source ports per (src IP, dst IP:port).
+  to one server — the pool of ephemeral source ports per (src IP, dst IP:port). That pool
+  size is OS-configured: IANA *reserves* 49152–65535 (~16K), but Linux's default
+  `ip_local_port_range` is 32768–60999, giving the commonly cited **~28K** ports.
 - **How do goroutines/virtual threads handle 100K connections without 100K OS threads?**
   The runtime parks a blocked "thread" and uses an epoll/kqueue-backed netpoller to resume
   it when the fd is ready, multiplexing many logical threads onto few OS threads.

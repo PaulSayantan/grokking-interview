@@ -170,8 +170,11 @@ Common variable types:
 **Chaining / dependent variables:** a variable's query can reference another variable, e.g.
 `label_values(up{cluster="$cluster"}, instance)` so picking a cluster narrows the instance
 list. **Multi-value** variables let you select several values; in PromQL you interpolate
-them into a regex match with the `=~` operator using the built-in `{{.}}`/regex format, e.g.
-`http_requests_total{service=~"$service"}`.
+them into a regex match with the `=~` operator. With Prometheus, a multi-value `$service`
+auto-expands to a pipe-joined regex group — e.g. `service=~"$service"` becomes
+`service=~"(payments|checkout|search)"` (Grafana's default regex-safe formatting). Use the
+explicit **`${service:regex}`** format when you need special characters in the values
+escaped for a literal match.
 
 ```promql
 # Panel query driven by template variables:

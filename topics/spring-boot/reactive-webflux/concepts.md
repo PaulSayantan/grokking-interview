@@ -195,9 +195,12 @@ write started in the cancelled inner may or may not have committed). `concatMap`
 runs every inner to completion in order, so it never drops work but can build a
 backlog.
 
-**`zip`** — combines the *latest* item from each of several publishers pairwise
-into a tuple/combined value, completing when the shortest completes. Great for
-firing independent calls in parallel and joining:
+**`zip`** — pairs items by **position/index** — the 1st item of each source
+together, then the 2nd, etc. — buffering faster sources until the slowest emits
+its Nth item, and completing when any source completes. (This is *not* "latest"
+semantics — that belongs to `combineLatest`, below.) Great for firing independent
+calls in parallel and joining. For `Mono` sources (0 or 1 item) there is only one
+"position," so `Mono.zip` simply joins the single result of each:
 
 ```java
 Mono<UserProfile> profile = Mono.zip(
@@ -207,8 +210,9 @@ Mono<UserProfile> profile = Mono.zip(
 ```
 
 Related combinators: `merge` (interleave, no order), `concat` (sequential,
-ordered), `combineLatest`, `then`/`thenMany` (ignore values, chain on
-completion), `zipWith`.
+ordered), `combineLatest` (re-emits using the *latest* value from each source
+whenever **any** source emits — the "latest" semantics often confused with
+`zip`), `then`/`thenMany` (ignore values, chain on completion), `zipWith`.
 
 **Error/util operators:** `onErrorReturn`, `onErrorResume` (fallback publisher),
 `onErrorMap`, `retry(n)`, `retryWhen(Retry.backoff(...))`, `timeout`,

@@ -225,7 +225,7 @@ VPCs; VPC peering / **Transit Gateway** / **PrivateLink** to a shared-services V
 |---|---|
 | VPCs per Region | default **5**, raisable to "hundreds" (raises IGWs per Region by the same amount) |
 | Subnets per VPC | **200** |
-| Route tables per VPC | **200**; routes per table default **50** (raisable to 1,000) |
+| Route tables per VPC | **200**; routes per table default **500** (raisable to 1,000) |
 | Network ACLs per VPC | **200**; **20 rules** each (raisable to 40 in / 40 out) |
 | Security groups per Region | **2,500**; **60 inbound + 60 outbound rules** each |
 | SGs per ENI | **5** (up to 16); rules × SGs-per-ENI ≤ **1,000** |

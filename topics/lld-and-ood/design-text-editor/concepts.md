@@ -392,6 +392,16 @@ public class DeleteCommand implements Command {
     public void undo()    { doc.insert(pos, deletedText); }      // re-insert what we removed
 }
 
+public class ReplaceCommand implements Command {                 // swap old range for new text
+    private final Document doc; private final int pos; private final int len;
+    private final String newText; private String oldText;        // oldText captured at execute time
+    public ReplaceCommand(Document doc, int pos, int len, String newText) {
+        this.doc = doc; this.pos = pos; this.len = len; this.newText = newText;
+    }
+    public void execute() { oldText = doc.delete(pos, len); doc.insert(pos, newText); }
+    public void undo()    { doc.delete(pos, newText.length()); doc.insert(pos, oldText); }
+}
+
 public class MacroCommand implements Command {                   // Composite
     private final List<Command> commands;
     public MacroCommand(List<Command> commands) { this.commands = commands; }
@@ -432,10 +442,19 @@ public class TextEditor {
     private final Clipboard clipboard = new Clipboard();
 
     public void type(String text) {
-        Command c = new InsertCommand(document, caret.getPosition(), text);
-        c.execute();                       // apply now
-        history.push(c);                   // record for undo (clears redo)
-        caret.moveTo(caret.getPosition() + text.length());
+        Command c;
+        if (caret.hasSelection()) {        // contract: typing over a selection replaces it
+            int[] sel = caret.selectionRange();          // [from, to)
+            c = new ReplaceCommand(document, sel[0], sel[1] - sel[0], text);
+            c.execute();
+            history.push(c);               // record for undo (clears redo)
+            caret.moveTo(sel[0] + text.length());
+        } else {
+            c = new InsertCommand(document, caret.getPosition(), text);
+            c.execute();                   // apply now
+            history.push(c);               // record for undo (clears redo)
+            caret.moveTo(caret.getPosition() + text.length());
+        }
     }
 
     public void delete(int length) {

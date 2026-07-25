@@ -313,8 +313,13 @@ public class Auction {
             Optional<Bid> previousHighest = getHighestBid();
             bids.add(incoming);
             maybeExtendForSniping(clock);
-            previousHighest.ifPresent(prev ->
-                notifyObservers(o -> o.onOutbid(prev.bidder(), this)));
+            // Whether an outbid is announced during ACTIVE is a strategy concern, not a
+            // hardcoded English behavior: sealed-bid must reveal nothing until close, so it
+            // returns false here and stays silent. Route the decision through the strategy.
+            if (strategy.revealsOutbidDuringActive()) {
+                previousHighest.ifPresent(prev ->
+                    notifyObservers(o -> o.onOutbid(prev.bidder(), this)));
+            }
             return BidResult.accepted(incoming);
         }
     }

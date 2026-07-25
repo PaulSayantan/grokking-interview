@@ -323,4 +323,5 @@ Under the hood every piece of advice becomes an `Advisor` = `Pointcut` + `Advice
 - Spring Framework Reference — Proxying mechanisms (JDK dynamic proxies vs CGLIB): https://docs.spring.io/spring-framework/reference/core/aop/proxying.html
 - Spring Framework Reference — Advice types and ordering: https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/advice.html
 - Spring Framework Reference — Choosing between Spring AOP and full AspectJ: https://docs.spring.io/spring-framework/reference/core/aop/choosing.html
+- Spring Boot Reference — AOP (Boot defaults to CGLIB proxies; `spring.aop.proxy-target-class`): https://docs.spring.io/spring-boot/reference/features/aop.html
 - AspectJ Programming Guide (terminology and full weaving model): https://eclipse.dev/aspectj/doc/latest/progguide/

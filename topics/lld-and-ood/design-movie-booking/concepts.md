@@ -250,7 +250,8 @@ classDiagram
         <<interface>>
         +lockSeats(Show s, List~ShowSeat~ seats, String userId)
         +unlockSeats(Show s, List~ShowSeat~ seats, String userId)
-        +confirm(Show s, List~ShowSeat~ seats)
+        +confirm(Show s, List~ShowSeat~ seats, String userId)
+        +isHeldBy(Show s, List~ShowSeat~ seats, String userId) boolean
         +isLocked(Show s, ShowSeat seat) boolean
     }
     class InMemorySeatLockManager
@@ -522,7 +523,8 @@ public class ShowSeat {
 public interface SeatLockManager {
     void lockSeats(Show show, List<ShowSeat> seats, String userId);   // atomic, all-or-nothing
     void unlockSeats(Show show, List<ShowSeat> seats, String userId);
-    void confirm(Show show, List<ShowSeat> seats);                    // HELD -> BOOKED
+    void confirm(Show show, List<ShowSeat> seats, String userId);     // HELD -> BOOKED; re-checks owner, throws HoldExpiredException
+    boolean isHeldBy(Show show, List<ShowSeat> seats, String userId); // still held by this user (not swept)?
     boolean isLocked(Show show, ShowSeat seat);
 }
 
@@ -567,9 +569,19 @@ public class BookingService {
     public Booking pay(Booking booking, PaymentDetails details) {
         if (booking.getStatus() != BookingStatus.SEATS_HELD)
             throw new IllegalBookingStateException(booking.getId());
-        // re-verify the hold is still valid (sweep may have expired it)
-        Payment payment = payments.charge(booking.getUser(), booking.getAmount());  // may throw
-        lockManager.confirm(booking.getShow(), booking.getSeats());   // HELD -> BOOKED
+        // Re-verify the hold BEFORE charging (the sweep may have expired it) so we never
+        // charge for seats we can't deliver. If the sweep already freed them, fail here —
+        // no charge to refund.
+        if (!lockManager.isHeldBy(booking.getShow(), booking.getSeats(), booking.getUser().getId()))
+            throw new HoldExpiredException(booking.getId());
+        Payment payment = payments.charge(booking.getUser(), booking.getAmount());   // may throw
+        try {
+            lockManager.confirm(booking.getShow(), booking.getSeats(),               // HELD -> BOOKED;
+                                booking.getUser().getId());                          // re-checks owner under the lock
+        } catch (HoldExpiredException e) {
+            payments.refund(payment, booking.getAmount());   // lost the sweep/payment race: compensate
+            throw e;
+        }
         booking.confirm();
         notifyConfirmed(booking);                                     // after commit, best-effort
         return booking;

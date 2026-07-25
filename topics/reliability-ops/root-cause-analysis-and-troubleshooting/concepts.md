@@ -616,8 +616,10 @@ Rule of thumb: symptom-side, user-facing → RED/golden; resource-side, "what's 
 one signal common to the resource views and the golden set is **Saturation**, and it's the
 **leading indicator** — it climbs *before* errors and severe latency, so it predicts the cliff.
 This ties to **Little's Law** (L = λW): as utilization → 1, queue length and wait time → ∞, so a
-saturating resource forecasts the latency blow-up before it happens (cross-ref cascading-failures;
-the Little's-Law mechanism is worked in the golden-signals section above).
+saturating resource forecasts the latency blow-up before it happens. Concretely, for a simple
+queue the mean wait scales like 1/(1−ρ) in utilization ρ, so going from ρ = 0.5 to 0.9 to 0.99
+multiplies waiting time roughly 2× → 10× → 100× — which is why the last few percent of saturation
+detonate latency and why saturation leads errors (cross-ref cascading-failures).
 
 ---
 

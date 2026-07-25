@@ -516,15 +516,20 @@ public class WalletService {
     private final List<TransactionObserver> observers = new CopyOnWriteArrayList<>();
 
     public Transaction transfer(String fromId, String toId, Money amt, String key) {
-        Transaction existing = byIdempotencyKey.get(key);
-        if (existing != null) return existing;            // idempotent: no double-spend
-
+        // Claim the key BEFORE executing. putIfAbsent is one atomic step:
+        // only the thread that wins the insert runs execute(); any concurrent
+        // retry sees the existing txn and returns it — so no two retries execute.
         Transfer txn = TransactionFactory.transfer(resolve(fromId), resolve(toId), amt, key);
-        txn.execute(new WalletContext(ledger));
-        byIdempotencyKey.putIfAbsent(key, txn);
+        Transaction existing = byIdempotencyKey.putIfAbsent(key, txn);
+        if (existing != null) return existing;            // idempotent: retry lost the race, no double-spend
+
+        txn.execute(new WalletContext(ledger));           // only the key owner executes
         observers.forEach(o -> o.onCommitted(txn));       // notify after commit
         return txn;
     }
+    // NOTE: the tempting get(key) -> if-null execute() -> putIfAbsent(key) ordering
+    // is exactly the double-spend bug: two retries both read null, both execute, and
+    // the store de-dupes too late. Reserve the key first, then execute.
 }
 ```
 

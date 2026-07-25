@@ -296,6 +296,17 @@ stateDiagram-v2
 `EN_ROUTE_TO_PICKUP` (accepted a trip) → `IN_TRIP` (trip started) → back to `AVAILABLE`
 (trip ended) or `OFFLINE`.
 
+**Where does "driver arrived" live?** Deliberately *not* as a separate `TripStatus`: the
+trip lifecycle stays lean by jumping `DRIVER_ASSIGNED → IN_PROGRESS`. Arrival is a
+**driver-side event** — the driver marks arrived while still `EN_ROUTE_TO_PICKUP`, which
+fires the rider's "your driver has arrived" notification through the notification service
+but does not advance the trip's state (the trip only advances when the driver *starts* it
+at pickup). If an interviewer wants arrival to be explicit and auditable, add a
+`DRIVER_ARRIVED` step between `DRIVER_ASSIGNED` and `IN_PROGRESS` on the trip machine (and
+a matching `ARRIVED` driver sub-state) — a one-row transition-map addition. State the
+lean-vs-explicit trade-off out loud rather than leaving the notification with no event to
+fire on.
+
 Rules to state out loud:
 
 - **Transitions are validated centrally.** A `Map<TripStatus, Set<TripStatus>>` of allowed

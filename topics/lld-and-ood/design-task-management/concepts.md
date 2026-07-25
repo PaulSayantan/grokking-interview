@@ -431,7 +431,6 @@ public class Task implements TaskComponent {
             throw new IllegalStateException("open subtasks or unmet dependencies");
         Status prev = this.status;
         this.status = next;
-        this.version++;
         fire(new TaskEvent(this, EventType.STATUS_CHANGED, prev, next, actor));
     }
 
@@ -445,6 +444,10 @@ public class Task implements TaskComponent {
     }
     public void addWatcher(TaskObserver o) { watchers.add(o); }
     private void fire(TaskEvent e) { watchers.forEach(w -> w.onEvent(e)); }
+
+    public Status getStatus() { return status; }
+    public long getVersion()  { return version; }            // version at load = the "base"
+    public void bumpVersion() { this.version++; }             // advanced only on successful save
 }
 
 public class Workflow {                                     // per-board, configurable
@@ -477,19 +480,23 @@ public class MoveTaskCommand implements TaskCommand {
 }
 
 // optimistic-versioning save (see concurrency-in-lld)
+// `incoming.getVersion()` is the base version the client loaded; compare it to the
+// version currently in the repo. Equal => no one else wrote since load, so bump + persist.
 public void saveTask(Task incoming) {
     Task current = repo.get(incoming.getId());
-    if (current.getVersion() != incoming.getBaseVersion())
+    if (current.getVersion() != incoming.getVersion())
         throw new OptimisticLockException(incoming.getId());       // stale — reject/merge
-    repo.put(incoming.bumpVersion());
+    incoming.bumpVersion();                                        // advance token on write
+    repo.put(incoming);
 }
 ```
 
 Notes to narrate: `Task implements TaskComponent`, so `getEstimate()` recurses uniformly
-over the tree; `transitionTo` is the *only* status mutator, so the observer fan-out and
-version bump can never be skipped; `Workflow` is a per-board object, so a new board shape is
-configuration, not code; `MoveTaskCommand` records enough to `undo()`; `saveTask` uses a
-version token instead of a lock.
+over the tree; `transitionTo` is the *only* status mutator, so the observer fan-out can
+never be skipped; the `version` token is advanced on a successful `saveTask` (not on each
+in-memory mutation), so the base version a client loaded stays comparable to the repo copy;
+`Workflow` is a per-board object, so a new board shape is configuration, not code;
+`MoveTaskCommand` records enough to `undo()`; `saveTask` uses a version token instead of a lock.
 
 ## Concurrency and Edge Cases
 

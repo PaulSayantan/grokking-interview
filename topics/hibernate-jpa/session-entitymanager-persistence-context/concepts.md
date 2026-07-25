@@ -159,20 +159,29 @@ enough.
 ```java
 @Transactional
 void raise(Long id) {
+    // assume employee 42 loaded with name='Ada', dept='R&D', salary=5000
     Employee e = em.find(Employee.class, id);   // SELECT; snapshot taken
     e.setSalary(e.getSalary() + 1000);          // just a setter — no em call
-}   // on commit: flush compares snapshot, emits UPDATE employee SET salary=? WHERE id=?
+}   // on commit: flush compares snapshot, emits an UPDATE for employee 42
 ```
 
-Generated SQL on flush:
+Generated SQL on flush. By **default** Hibernate UPDATEs *all* mapped columns (not just the
+one that changed) so it can reuse a single cached prepared statement:
 
 ```sql
+-- default: every column is in the SET list, even unchanged ones
+UPDATE employee SET name = 'Ada', dept = 'R&D', salary = 6000 WHERE id = 42
+```
+
+`@DynamicUpdate` switches to updating only the dirty columns, at the cost of statement-cache
+churn:
+
+```sql
+-- @DynamicUpdate: only the changed column
 UPDATE employee SET salary = 6000 WHERE id = 42
 ```
 
-By default Hibernate UPDATEs *all* columns (not just changed ones) so it can reuse a single
-cached prepared statement; `@DynamicUpdate` switches to updating only dirty columns at the
-cost of statement-cache churn. See `transactions-dirty-checking-flushing` for flush order,
+See `transactions-dirty-checking-flushing` for flush order,
 `FlushModeType`, and dynamic-update trade-offs.
 
 > [!WARNING]

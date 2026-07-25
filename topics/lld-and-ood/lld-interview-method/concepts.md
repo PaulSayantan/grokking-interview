@@ -34,15 +34,19 @@ proportionally for 60–90 min):
 | 3. Establish relationships | ~5 min | Rough class diagram: is-a / has-a, multiplicity |
 | 4. Define key interfaces & methods | ~10 min | Public API, signatures, return types |
 | 5. Apply patterns | ongoing | Named patterns with *why* |
-| 6. Write the code | ~20 min | Compile-ready skeleton + critical methods |
+| 6. Write the code | ~15 min | Compile-ready skeleton + critical methods |
 | 7. Extensibility & edge cases | ~5 min | "What if we add X?" answered via OCP |
+
+The times add to the full 45 minutes. The code phase is the one that stretches most as
+the round lengthens — about 15 minutes here, expanding toward the 20–40 minutes noted in
+Step 6 for a 60–90 minute session.
 
 ```mermaid
 flowchart TD
     A[Clarify requirements<br/>5 min] --> B[Identify core objects<br/>5 min]
     B --> C[Establish relationships<br/>5 min]
     C --> D[Define interfaces and methods<br/>10 min]
-    D --> E[Write the code<br/>20-40 min]
+    D --> E[Write the code<br/>15 min base, up to 20-40 min]
     E --> F[Discuss extensibility and edge cases<br/>5 min]
     D -.apply patterns throughout.-> E
     F -.requirement change.-> B
@@ -171,6 +175,8 @@ interface PricingStrategy {
 }
 
 class ParkingLot {
+    private final PricingStrategy pricing;         // injected variation point
+    ParkingLot(PricingStrategy pricing) { this.pricing = pricing; }
     Ticket park(Vehicle vehicle);          // returns null / throws if full
     Money  exit(Ticket ticket);            // computes fee, frees the spot
 }
@@ -314,8 +320,12 @@ interface RateLimitStrategy {
 
 class RateLimiter {
     private final RateLimitStrategy strategy;
-    RateLimiter(RateLimitStrategy strategy) { this.strategy = strategy; }
-    boolean allow(String clientId) { return strategy.allowRequest(clientId, clock.now()); }
+    private final Clock clock;                 // injected: the testability seam
+    RateLimiter(RateLimitStrategy strategy, Clock clock) {
+        this.strategy = strategy;
+        this.clock = clock;
+    }
+    boolean allow(String clientId) { return strategy.allowRequest(clientId, clock.instant()); }
 }
 ```
 

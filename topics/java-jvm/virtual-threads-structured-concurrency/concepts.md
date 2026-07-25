@@ -282,6 +282,15 @@ Response handle() throws InterruptedException, ExecutionException {
 }
 ```
 
+> **Version caveat — the API surface changed after JDK 21.** The subclass-based shape above
+> (`new StructuredTaskScope.ShutdownOnFailure()`, `throwIfFailed()`) is **JDK-21-preview-specific**.
+> In later previews the API was reworked: the subclasses were replaced by a static factory
+> `StructuredTaskScope.open(...)` that takes a `Joiner` strategy (e.g.
+> `Joiner.awaitAllSuccessfulOrThrow()` for fail-fast, `Joiner.anySuccessfulResultOrThrow()` for
+> racing), with `scope.join()` returning the result directly. This is the shape in the JDK 25 preview
+> (JEP 505). If you are on JDK 23/24/25, the exact method names below will not compile — check your JDK's
+> `StructuredTaskScope` Javadoc for the API version you have.
+
 Built-in policies (in the JDK 21 preview API):
 - **`ShutdownOnFailure`** — fail fast: the first subtask that throws cancels the others (invoke-all,
   all-must-succeed semantics).
@@ -371,6 +380,7 @@ Key points for interviews:
 - JEP 425: Virtual Threads (Preview, JDK 19) — https://openjdk.org/jeps/425
 - JEP 436: Virtual Threads (Second Preview, JDK 20) — https://openjdk.org/jeps/436
 - JEP 453: Structured Concurrency (Preview, JDK 21) — https://openjdk.org/jeps/453
+- JEP 505: Structured Concurrency (Fifth Preview, JDK 25) — reworked API: `StructuredTaskScope.open(...)` + `Joiner` strategies replace the `ShutdownOnFailure`/`ShutdownOnSuccess` subclasses — https://openjdk.org/jeps/505
 - JEP 446: Scoped Values (Preview, JDK 21) — https://openjdk.org/jeps/446
 - JEP 428/437: Structured Concurrency (Incubator, JDK 19/20)
 - JEP 491: Synchronize Virtual Threads without Pinning (JDK 24) — https://openjdk.org/jeps/491

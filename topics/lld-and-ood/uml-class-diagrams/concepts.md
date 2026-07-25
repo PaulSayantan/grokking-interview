@@ -320,7 +320,7 @@ classDiagram
         -String id               %% - private, + public, # protected, ~ package
         +close() Money           %% return type goes AFTER the method
         +helper()$               %% $ = static
-        +area()* double          %% * = abstract
+        +area() double*          %% * = abstract; classifier goes at the very END (after the return type)
         -List~Item~ items        %% generics use tildes, not < >
     }
 

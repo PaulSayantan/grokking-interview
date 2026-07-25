@@ -64,9 +64,10 @@ incidence rates.
 
 **What moved/merged 2017 → 2021 (the story to tell):**
 
-- **Broken Access Control** jumped from #5 to **#1** — 94% of tested apps had some form of
-  it; it also carries the most CWE instances of any category. Authorization is hard and
-  broadly broken.
+- **Broken Access Control** jumped from #5 to **#1** — 94% of tested apps were *tested for*
+  some form of it (average incidence rate ~3.81%), and it had the most CWE occurrences
+  (34 mapped CWEs) of any category. Note the exact wording: it is not that 94% *had* the
+  flaw. Authorization is hard and broadly broken.
 - **Sensitive Data Exposure → Cryptographic Failures (A02).** Renamed to describe the
   *root cause* (crypto done wrong or not at all) rather than the *symptom* (data leaked).
 - **Injection dropped to #3 and absorbed XSS.** XSS is injection into an HTML/JS
@@ -93,7 +94,9 @@ is allowed to do*. It is **broken** when the server fails to enforce those limit
 a user act outside their intended permissions — reading/modifying other users' data,
 escalating to admin, or invoking functions they shouldn't.
 
-**Why #1.** It was found in ~94% of applications tested and maps the most CWE instances.
+**Why #1.** 94% of tested applications were *assessed for* some form of broken access
+control (average incidence rate ~3.81%), and it had the most CWE occurrences (34 mapped
+CWEs) of any category — not, as the statistic is often misquoted, that 94% *had* the flaw.
 Authorization is application-specific, hard to test automatically, and easy to forget on
 even one endpoint.
 
@@ -822,8 +825,9 @@ Expanding A06:2021 → A03:2025, know the standards and the distinctions:
 
 - **"Is the OWASP Top 10 a standard you can certify against?"** No — it's an *awareness*
   document. For verifiable requirements use **ASVS**; for testing use the **WSTG**.
-- **"Why did Broken Access Control move to #1?"** ~94% of tested apps had it and it maps
-  the most CWE instances; authorization is app-specific and hard to test automatically.
+- **"Why did Broken Access Control move to #1?"** 94% of tested apps were *tested for* it
+  (avg incidence ~3.81%) and it had the most CWE occurrences (34 mapped CWEs) — not that
+  94% *had* it; authorization is app-specific and hard to test automatically.
 - **"What's the difference between A04 Insecure Design and A05 Misconfiguration?"** A04 =
   a needed control was never designed in (can't be patched, must redesign); A05 = a
   control exists but is deployed with insecure/default settings.

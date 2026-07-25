@@ -33,8 +33,9 @@ transformations. It is the most expensive of the two HTTP-style APIs.
 supports JWT authorizers natively (great with Cognito or any OIDC provider), Lambda
 authorizers, automatic deployments, and CORS config. But it **drops** several REST
 features: no request/response mapping templates (only basic parameter mapping), no
-API keys/usage plans, no per-method caching, no request validation via models, no
-WAF integration (historically — check current status), no private endpoints in the
+API keys/usage plans, no per-method caching, no request validation via models, **no
+direct WAF integration** (as of 2025 you still cannot attach a Web ACL to an HTTP
+API — you must front it with CloudFront + WAF), no private endpoints in the
 same way, no edge-optimized endpoint type. Pick HTTP API when you have a simple
 Lambda- or HTTP-proxy backend and want the lowest cost/latency.
 
@@ -286,9 +287,10 @@ Two layers of protection:
 - **AWS WAF:** attach a Web ACL to **REST API stages**, **CloudFront** (in front of
   edge-optimized/regional), **ALB**, and **AppSync**. WAF gives **rate-based rules**
   (e.g. block an IP exceeding N requests / 5 min), SQLi/XSS managed rule groups, geo
-  blocking, IP allow/deny lists, and bot control. Note: **HTTP APIs historically could
-  not attach WAF directly** — a reason to keep security-sensitive public APIs on REST
-  API or front them with CloudFront + WAF.
+  blocking, IP allow/deny lists, and bot control. Note: **HTTP APIs still cannot
+  attach WAF directly** — WAF associates only with REST API stages, CloudFront, ALB,
+  and AppSync, so front security-sensitive public HTTP APIs with CloudFront + WAF (or
+  keep them on REST API).
 
 Layered defense for a public API: **CloudFront (+ WAF, + Shield for DDoS)** →
 **API Gateway (throttle + authorizer)** → backend. Shield Standard is automatic;

@@ -433,6 +433,21 @@ classDiagram
     BookingService ..> Booking : creates
 ```
 
+> [!WARNING]
+> **A subtle modeling bug hides in the diagram above.** It puts `status` directly on the physical
+> `Seat`, but availability is really *per-show*: the same physical seat can be `BOOKED` for the
+> 6pm show and `AVAILABLE` for the 9pm show at the same instant — one `status` field on the
+> shared `Seat` cannot represent that. The fix is the `SeatAssignment` (a.k.a. `ShowSeat`)
+> already named in [Domain Modeling](#domain-modeling-entities-value-objects-relationships):
+> model `Show "1" *-- "1..*" SeatAssignment`, where each `SeatAssignment` references a physical
+> `Seat` and carries *that show's* `SeatStatus` (so `hold()`/`book()`/`free()` and the
+> `SeatHold` move onto `SeatAssignment`). The physical `Seat` then owns only intrinsic facts
+> (id, row/column, `SeatType`), and `Screen *-- Seat` still holds. Collapsing per-show status
+> onto the shared `Seat` — as this first draft does — is the single most common modeling error
+> in this problem, and exactly what a senior interviewer probes. The diagram is shown in its
+> naive form on purpose so you can catch the smell and refactor it, per
+> [Iteration and Refinement](#iteration-and-refinement).
+
 ### Step 6 — Patterns that fall out (named, not re-taught)
 
 - **Strategy** for `PricingStrategy` — a new pricing rule (surge, loyalty discount) is a new

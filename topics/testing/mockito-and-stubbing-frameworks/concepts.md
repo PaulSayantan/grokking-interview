@@ -2,10 +2,12 @@
 
 A **mocking framework** lets you replace a class-under-test's collaborators with
 programmable **test doubles** so a unit test can run in isolation, deterministically,
-and fast. **Mockito** is the de-facto standard on the JVM: it creates dynamic proxies
-(or, since 5.x, bytecode-instrumented mocks) that record every interaction, let you
-**stub** return values/exceptions, and later **verify** that the expected calls
-happened. This topic covers Mockito's core API — mock/spy creation, stubbing, argument
+and fast. **Mockito** is the de-facto standard on the JVM: it generates mock objects at runtime
+via ByteBuddy — the classic *subclass* mock-maker creates a dynamic subclass of the
+type (so it can't touch `final`/`static`/`private`), while the *inline* mock-maker
+(ByteBuddy plus a Java instrumentation agent, the default since 5.x) can. Either way the
+generated object records every interaction, lets you **stub** return values/exceptions,
+and later **verify** that the expected calls happened. This topic covers Mockito's core API — mock/spy creation, stubbing, argument
 matchers, verification, ArgumentCaptor, strictness, spies, mocking statics/finals, and
 BDDMockito — plus the discipline of *what not to mock*.
 
@@ -166,7 +168,7 @@ By default a stub matches by `equals`. **Argument matchers** relax or widen matc
 
 | Matcher | Matches |
 |---|---|
-| `any()` / `any(T.class)` | any value; `any(T.class)` matches non-null of that type (5.x) |
+| `any()` / `any(T.class)` | any value; `any(T.class)` matches non-null of that type (Mockito 2+) |
 | `anyInt()`, `anyString()`, `anyList()` | any value of the primitive/type (**not null** for reference overloads) |
 | `eq(value)` | exactly `value` (needed to mix with other matchers) |
 | `isNull()` / `isNotNull()` / `nullable(T.class)` | null-ness constraints |
@@ -507,6 +509,9 @@ dependency.
   `ArgumentCaptor`, `MockedStatic`, `MockedConstruction`, `Strictness`.
 - Mockito 5.0.0 release notes — inline mock-maker made default, minimum Java 11,
   `mockito-subclass` for the legacy maker.
+- "What's new in Mockito 2" (Mockito wiki) — mock-maker engine switched from CGLIB to
+  ByteBuddy; `anyX()` / `any(SomeType.class)` matchers changed to reject `null` and
+  check type (only bare `any()` still matches `null`).
 - Mockito wiki: "How to write good tests", "Using Mockito with JUnit 5",
   "Strict stubbing", "Mocking Object Methods".
 - JUnit 5 User Guide — `@ExtendWith`, extension model (for `MockitoExtension`).

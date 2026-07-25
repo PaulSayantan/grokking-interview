@@ -327,7 +327,7 @@ For multi-tenant or untrusted workloads, two OCI-compatible runtimes add a stron
 | Runtime | Binary | Isolation mechanism | Trade-off |
 |---|---|---|---|
 | **runc** (default) | `runc` | Namespaces + cgroups, shared host kernel | Fastest, thinnest boundary |
-| **gVisor** (Google) | `runsc` | A **user-space kernel** that intercepts syscalls (via ptrace/KVM) and re-implements them, so the container rarely touches the host kernel | Stronger isolation, some syscall-heavy perf cost + compatibility gaps |
+| **gVisor** (Google) | `runsc` | A **user-space kernel** that intercepts syscalls (via a pluggable platform — **systrap** (seccomp `SIGSYS`-trap) is the default since mid-2023, **KVM** for bare-metal, and the legacy **ptrace** platform now deprecated) and re-implements them, so the container rarely touches the host kernel | Stronger isolation, some syscall-heavy perf cost + compatibility gaps |
 | **Kata Containers** | `kata-runtime` | Each container runs in a **lightweight microVM** with its *own* guest kernel (via QEMU/Firecracker) | VM-grade isolation, higher startup/memory overhead |
 
 Both plug in as OCI runtimes, so you select them per workload:
@@ -417,7 +417,7 @@ default (daemonless); Docker offers rootless mode as an opt-in install.
   [Rootless mode](https://docs.docker.com/engine/security/rootless/),
   [Alternative runtimes](https://docs.docker.com/engine/daemon/alternative-runtimes/),
   [Runtime privilege and capabilities](https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities)
-- [gVisor docs](https://gvisor.dev/docs/) · [Kata Containers docs](https://katacontainers.io/)
+- [gVisor docs](https://gvisor.dev/docs/) ([platforms — systrap default](https://gvisor.dev/docs/architecture_guide/platforms/)) · [Kata Containers docs](https://katacontainers.io/)
 - Linux man pages — [`namespaces(7)`](https://man7.org/linux/man-pages/man7/namespaces.7.html),
   [`cgroups(7)`](https://man7.org/linux/man-pages/man7/cgroups.7.html),
   [`capabilities(7)`](https://man7.org/linux/man-pages/man7/capabilities.7.html)

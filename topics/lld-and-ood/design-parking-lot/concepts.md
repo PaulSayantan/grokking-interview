@@ -96,7 +96,7 @@ classDiagram
         -SpotAssignmentStrategy assignmentStrategy
         +getInstance() ParkingLot
         +parkVehicle(Vehicle) Ticket
-        +unparkVehicle(Ticket, PaymentMethod) Receipt
+        +unparkVehicle(String ticketId, PaymentMethod) Receipt
     }
     class ParkingFloor {
         -int floorNumber
@@ -247,6 +247,10 @@ Signature-design points interviewers notice:
 - `Optional<ParkingSpot>` from the strategy (or a checked `ParkingFullException` from the
   facade) forces callers to handle "lot full" — no silent nulls.
 - Fees use a `Money` type (amount + currency), never `double`.
+- The `PricingStrategy` is **not** a parameter of `unparkVehicle` — it's a configured field
+  of the exit flow (owned by `ExitGate`, or held on the lot when the facade delegates), swapped
+  once at wiring time. Only the `ticketId` and `PaymentMethod` — the things the customer
+  presents at exit — cross the call boundary.
 
 ## Code Skeleton
 
@@ -315,6 +319,7 @@ class HourlyPricing implements PricingStrategy {
 class ParkingLot {
     private final List<ParkingFloor> floors;
     private final SpotAssignmentStrategy assignmentStrategy;
+    private final PricingStrategy pricingStrategy;            // owned by the exit flow
     private final Map<String, Ticket> activeTickets = new ConcurrentHashMap<>();
     private final Object allocationLock = new Object();       // see Concurrency
 
@@ -329,11 +334,10 @@ class ParkingLot {
         }
     }
 
-    public Receipt unparkVehicle(String ticketId, PricingStrategy pricing,
-                                 PaymentMethod method) {
+    public Receipt unparkVehicle(String ticketId, PaymentMethod method) {
         Ticket t = activeTickets.get(ticketId);
         if (t == null) throw new InvalidTicketException(ticketId);
-        Money fee = pricing.calculateFee(t, Instant.now());
+        Money fee = pricingStrategy.calculateFee(t, Instant.now());
         PaymentResult result = method.pay(fee);
         if (!result.success()) throw new PaymentFailedException();
         synchronized (allocationLock) {

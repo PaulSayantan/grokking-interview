@@ -232,10 +232,16 @@ reactions.**
 - **Standard topics:** high throughput, at-least-once, best-effort order. Can
   fan out to all subscriber types.
 - **FIFO topics:** strict ordering + dedup (5-min dedup window), with
-  `MessageGroupId`/`MessageDeduplicationId`. **FIFO topics can only deliver to
-  SQS FIFO queues** (and, more recently, are constrained on subscriber types).
-  Throughput capped like SQS FIFO (300 msg/s base, 3,000 with batching; high
-  throughput mode available). Use SNS FIFO → SQS FIFO when you need ordered fan-out.
+  `MessageGroupId`/`MessageDeduplicationId`. **SNS FIFO topics deliver only to SQS
+  queues** — to **SQS FIFO** queues when you need order/dedup preserved end-to-end,
+  or to **SQS standard** queues when downstream can tolerate best-effort order (and
+  you just want dedup at publish). They **cannot** deliver to customer-managed
+  endpoints — HTTP/S, email, SMS, or mobile push — because those can't guarantee
+  strict order; to reach a Lambda you subscribe an SQS queue and let it trigger the
+  function. Throughput is capped: **300 msg/s per message group**, with a per-topic
+  default of **3,000 msg/s (or 20 MB/s, whichever comes first)** when
+  `FifoThroughputScope=Topic` (raisable via quota increase). Use SNS FIFO → SQS FIFO
+  when you need ordered fan-out.
 
 **Message filtering (subscription filter policies).** Each subscription can carry a
 **filter policy** (JSON). SNS evaluates it against the message and only delivers
@@ -530,7 +536,10 @@ scope as the things juniors forget.
 - AWS SQS Developer Guide — standard vs FIFO, visibility timeout, long polling,
   DLQ/redrive, message retention, quotas, Extended Client Library.
 - AWS SNS Developer Guide — pub/sub, subscription types, message filtering, FIFO
-  topics, subscription DLQs, fan-out to SQS.
+  topics, subscription DLQs, fan-out to SQS. See "Amazon SNS message delivery for
+  FIFO topics" (FIFO delivers to SQS standard *and* FIFO queues, not to
+  HTTP/S/email/SMS/push) and the SNS quotas page (FIFO 300 msg/s per message group,
+  3,000 msg/s or 20 MB/s per topic default).
 - AWS EventBridge User Guide — event buses, rules and event patterns, schema
   registry, Scheduler, Pipes, archive and replay, partner event sources.
 - AWS Kinesis Data Streams Developer Guide — shard limits, retention, consumers.

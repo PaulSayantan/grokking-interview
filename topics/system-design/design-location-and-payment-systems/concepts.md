@@ -147,9 +147,13 @@ precision 8  ≈ 38 m × 19 m
 trivially deployable on infrastructure you already have.
 
 **The two big warts:**
-1. **Boundary problem.** Two points 1 m apart across a cell border share *no*
-   common prefix (e.g., they differ in the top bit). A prefix search misses
-   the neighbor. **Fix:** always query the center cell **plus its 8
+1. **Boundary problem.** Two points 1 m apart across a cell border fall in
+   *different* cells, so a prefix search rooted on one cell misses the other.
+   Usually they still share a long prefix and differ only in the last
+   character(s); but in the worst case — straddling a high-level bisection
+   (e.g., the equator or prime meridian) — they differ at a top bit and share
+   *no* common prefix at all. Either way the prefix scan is **not guaranteed**
+   to include the neighbor. **Fix:** always query the center cell **plus its 8
    neighbors** (compute the 8 adjacent geohashes) and union the results.
 2. **Non-uniform cells.** Cells are lat/lng rectangles, so physical area
    shrinks toward the poles and cells aren't square. Fine for city-scale apps,

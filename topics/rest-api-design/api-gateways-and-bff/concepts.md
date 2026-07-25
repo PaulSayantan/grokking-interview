@@ -744,9 +744,11 @@ and forgotten "zombie" old versions are a top breach vector.
 - **`Sunset` header (RFC 8594).** Advertises the date/time a resource will stop
   working: `Sunset: Sat, 31 Jan 2026 23:59:59 GMT`. Clients (and tooling) can
   detect the retirement window.
-- **`Deprecation` header (IETF draft).** Signals a resource is deprecated (a
-  boolean or a date), typically paired with a `Link; rel="deprecation"` or
-  `rel="sunset"` pointing to docs and `Sunset`.
+- **`Deprecation` header (RFC 9745).** Signals a resource is deprecated,
+  typically paired with a `Link; rel="deprecation"` or `rel="sunset"` pointing to
+  docs and `Sunset`. Standardized in 2025 as RFC 9745 (Proposed Standard), which
+  supersedes the earlier `draft-ietf-httpapi-deprecation-header` and pins the
+  value to a Structured-Fields Date (e.g. `Deprecation: @1735689600`).
 
 Centralizing this at the gateway means a single, auditable place that knows every
 live route and its lifecycle state — the antidote to zombie APIs.
@@ -1018,6 +1020,9 @@ the edge) is the same, just measured in tokens.
   https://www.rfc-editor.org/rfc/rfc9651
 - **RFC 8594 — The Sunset HTTP Header Field**:
   https://www.rfc-editor.org/rfc/rfc8594
+- **RFC 9745 — The Deprecation HTTP Response Header Field** (Proposed Standard,
+  2025; supersedes the deprecation-header draft):
+  https://www.rfc-editor.org/rfc/rfc9745
 - **RFC 8693 — OAuth 2.0 Token Exchange**: https://www.rfc-editor.org/rfc/rfc8693
 - **IETF draft — OAuth 2.0 for Browser-Based Applications** (token-handling BFF):
   https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/

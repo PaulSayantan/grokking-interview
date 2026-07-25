@@ -322,13 +322,16 @@ inserts get slower and slower.
 The canonical batch pattern: flush and **clear** the context every `batch_size` rows.
 
 ```java
+int batchSize = 50;                       // keep == hibernate.jdbc.batch_size
 for (int i = 0; i < list.size(); i++) {
     em.persist(list.get(i));
-    if (i % 50 == 0) {          // == batch_size
-        em.flush();             // push this batch's INSERTs to the DB
-        em.clear();             // detach them → free memory, shrink dirty-check set
+    if (i > 0 && i % batchSize == 0) {    // guard i>0 so it does NOT fire at i=0
+        em.flush();                       // push this batch's INSERTs to the DB
+        em.clear();                       // detach them → free memory, shrink dirty-check set
     }
 }
+em.flush();                               // flush the trailing partial batch
+em.clear();                               // (the tx commit would also flush it)
 ```
 
 `flush()` synchronizes pending SQL to the DB (does *not* commit); `clear()` detaches

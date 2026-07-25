@@ -288,8 +288,10 @@ central control point and a small, stable set of backend connections.
 
 Sampling comes in two flavors (see also `sampling-cardinality-and-telemetry-cost-management`):
 
-- **Head sampling** — decide at the start of a trace, in the SDK, before you know the outcome
-  (e.g. keep 10%). Cheap, but you might discard the very trace that errored.
+- **Head sampling** — decide at the start of a trace, before you know the outcome (e.g. keep 10%).
+  Usually done in the SDK, but the Collector can also head-sample via the `probabilistic_sampler`
+  processor (useful when you don't control the SDK). Cheap, but you might discard the very trace
+  that errored.
 - **Tail sampling** — decide **after** the trace completes, so you can keep traces that are
   slow or errored and drop boring fast ones. Done in the Collector via the **`tail_sampling`
   processor** with policies (`status_code`, `latency`, `probabilistic`, `string_attribute`, ...).

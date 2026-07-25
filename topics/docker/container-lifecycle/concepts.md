@@ -429,8 +429,12 @@ docker run -d --memory=512m --memory-swap=512m myapp
 ```
 
 - `--memory` (`-m`) is a **hard limit**. Exceeding it triggers the kernel **OOM killer**, which
-  kills a process in the cgroup — usually PID 1, so the container dies with **exit code 137** and
-  `OOMKilled=true`.
+  picks the **highest-`oom_score` process in the cgroup** (roughly the largest memory footprint) —
+  *not* PID 1 by convention. In the common single-process container that victim *is* PID 1, so the
+  container dies with **exit code 137** and `OOMKilled=true`. In a multi-process container the
+  killer may reap a *child* while PID 1 survives, so the container stays up and `OOMKilled` may not
+  flip — check `OOMKilled` and `dmesg` to be sure. (On cgroup v2 you can set `memory.oom.group` to
+  kill the whole cgroup atomically, but it defaults to `0` — single-process kills.)
 - `--memory-swap` is memory **+ swap** combined; setting it equal to `--memory` disables swap.
 - `--memory-reservation` is a *soft* limit (best-effort under pressure).
 
@@ -523,4 +527,5 @@ docker container prune -f        # reclaim all stopped containers
 - Docker Docs — [Specify a container's init process (`--init` / tini)](https://docs.docker.com/reference/cli/docker/container/run/#init)
 - Tini — [krallin/tini (the init `--init` uses)](https://github.com/krallin/tini)
 - OCI Runtime Spec — [container lifecycle & operations](https://github.com/opencontainers/runtime-spec/blob/main/runtime.md)
+- Linux kernel — [Control Group v2 (memory controller, `memory.oom.group`)](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html) (default `0`: OOM killer targets the highest-`oom_score` process, not necessarily PID 1)
 - `signal(7)` / `credentials(7)` man pages — PID 1 signal semantics and zombie reaping

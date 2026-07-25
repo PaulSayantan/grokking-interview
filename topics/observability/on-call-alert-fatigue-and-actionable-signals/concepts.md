@@ -321,10 +321,17 @@ Why this cuts noise so effectively:
 
 - **It alerts on user impact, by construction.** The SLI *is* the user-facing
   symptom, so SLO alerts are inherently symptom-based.
-- **It self-scales to load.** A 5%-error blip during a traffic trough burns
-  almost no budget and shouldn't page; the same 5% at peak burns fast and should.
-  Burn rate captures this automatically where a static "errors > 5%" threshold
-  can't.
+- **It normalizes for load and integrates over time.** Burn rate is a *ratio*
+  (actual error ratio ÷ SLO error ratio), so unlike a static *absolute-count*
+  threshold ("errors > 100/s") it doesn't misfire across the traffic cycle — an
+  absolute-count rule fires constantly at peak and can stay silent during a real
+  low-traffic outage, whereas burn rate is the *same* 50x for a sustained 5%
+  error ratio at any volume (it is traffic-independent). What actually makes a
+  blip cheap is its **short duration**, not low traffic: because burn rate is
+  measured against the budget over time, a 5% error ratio lasting ~2 minutes
+  spends only ~0.2% of the 43.2-minute budget (a 50x burn would exhaust the
+  30-day budget in ~14.4 h, so 2 min ≈ 2/864), while the same 5% sustained for an
+  hour spends ~7% and should page.
 - **It collapses many alerts into few.** One error-budget policy per SLO replaces
   a pile of ad-hoc threshold alerts.
 - **It ties paging to a *decision*.** Budget nearly exhausted → page and possibly
@@ -505,8 +512,9 @@ loop** specifically.
   than user-facing symptoms — the top source of fatigue.
 - **Wiring "warning" severity to the pager** "to be safe." Warnings should ticket
   or notify low-priority, not wake people.
-- **Static thresholds that ignore load** — a fixed "errors > N" pages at trough
-  and misses real problems at peak. Prefer SLO/burn-rate.
+- **Static thresholds that ignore load** — a fixed absolute-count "errors > N"
+  fires constantly at peak and misses real problems at low-traffic troughs (where
+  the error *ratio* is high but the raw count stays under N). Prefer SLO/burn-rate.
 - **No `for:` duration** — every transient blip pages. Add a debounce window.
 - **No grouping/inhibition** — one incident produces a storm of duplicate pages.
 - **Pages with no runbook** — responder is left to improvise at 3am; MTTR balloons.
@@ -537,8 +545,9 @@ actionable — a healthy service can run hot, and a struggling service can be at
 Alert on the user-visible symptom; use CPU as a diagnostic *after* you're paged.
 
 **"How does SLO-based alerting reduce noise?"** It alerts on error-budget burn
-rate, which is symptom-based by construction and self-scales to traffic, so blips
-within budget don't page and one budget policy replaces many ad-hoc thresholds.
+rate, which is symptom-based by construction and normalizes for traffic (a ratio,
+not an absolute count), so short blips within budget don't page and one budget
+policy replaces many ad-hoc thresholds.
 
 **"What's multi-window multi-burn-rate?"** Multiple burn-rate tiers (fast page /
 slow ticket) each gated by a short confirming window, giving high precision

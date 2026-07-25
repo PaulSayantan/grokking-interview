@@ -502,7 +502,7 @@ this."
 docker history --no-trunc myimage:tag   # per-layer instruction + size (find the fat layer)
 docker image inspect myimage:tag        # config: env, cmd, entrypoint, layers (RootFS.Layers)
 docker build --progress=plain .         # full step output; shows CACHED vs executed steps
-docker build .  | grep CACHED           # which steps hit cache
+docker build --progress=plain . 2>&1 | grep CACHED  # BuildKit writes progress to stderr, so 2>&1 is required
 docker save myimage:tag -o img.tar      # export layers as tar (inspect what's inside)
 ```
 

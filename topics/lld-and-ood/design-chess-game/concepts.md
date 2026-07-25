@@ -468,6 +468,16 @@ public class Pawn extends Piece {
             return true;
         return false;   // en passant handled by MoveValidator with history context
     }
+
+    /** A pawn threatens its two forward diagonals regardless of occupancy,
+        and never the square it pushes to — so this diverges from canMove. */
+    @Override
+    public boolean attacks(Board board, Position from, Position to) {
+        int dir = (color == Color.WHITE) ? -1 : 1;     // white moves up
+        int dr = to.row() - from.row();
+        int dc = Math.abs(to.col() - from.col());
+        return dc == 1 && dr == dir;                   // diagonals only, occupancy ignored
+    }
 }
 
 public class Board {

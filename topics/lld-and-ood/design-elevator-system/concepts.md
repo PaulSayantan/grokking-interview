@@ -346,15 +346,28 @@ class Elevator {
     private final int id;
     private int currentFloor = 0;
     private ElevatorState state = ElevatorState.IDLE;
+    private Direction direction = Direction.NONE;   // committed travel direction (survives DOOR_OPEN)
     private final NavigableSet<Integer> upStops   = new TreeSet<>();
     private final NavigableSet<Integer> downStops = new TreeSet<>(Comparator.reverseOrder());
     private final Door door = new Door();
     private final List<ElevatorObserver> observers = new CopyOnWriteArrayList<>();
 
-    public synchronized void addStop(int floor) {
-        if (floor > currentFloor) upStops.add(floor);
-        else if (floor < currentFloor) downStops.add(floor);
-        else openDoor();                       // request for the current floor
+    // Cabin call: no desired direction, bucket purely by geometry.
+    public synchronized void addStop(int floor) { addStop(floor, Direction.NONE); }
+
+    // Hall call: callDir is the rider's desired direction (UP/DOWN); NONE = cabin call.
+    public synchronized void addStop(int floor, Direction callDir) {
+        if (floor == currentFloor) { openDoor(); return; }   // request for the current floor
+        // A cabin call goes to the sweep its geometry implies. A hall call must go to the
+        // sweep whose *direction matches the rider's* so nobody boards a car going the wrong
+        // way (the LOOK-correctness rule). The tricky case — a DOWN call ABOVE the car (or an
+        // UP call BELOW it) — cannot just be dropped into downStops/upStops here, because the
+        // car would never reach it on that sweep; a production controller first routes the car
+        // to that floor on the current sweep, then serves it on the reverse sweep. This
+        // skeleton handles the common in-line cases; see the note below for the reverse-sweep case.
+        boolean servesUp = (callDir == Direction.NONE) ? floor > currentFloor
+                                                       : callDir == Direction.UP;
+        if (servesUp) upStops.add(floor); else downStops.add(floor);
         if (state == ElevatorState.IDLE) chooseDirection();
     }
 
@@ -376,16 +389,26 @@ class Elevator {
     }
 
     private void chooseDirection() {   // LOOK policy lives here
-        if (state == ElevatorState.MOVING_UP || state == ElevatorState.IDLE) {
-            if (!upStops.isEmpty())        { state = ElevatorState.MOVING_UP;   return; }
-            if (!downStops.isEmpty())      { state = ElevatorState.MOVING_DOWN; return; }
+        // Consult the *committed* direction, NOT state: when we call this from DOOR_OPEN we
+        // must remember which way we were travelling and finish that sweep before reversing.
+        // (A car that arrived at a stop while going UP must keep going UP while upStops has
+        // floors ahead — reversing here would yo-yo, the exact bug LOOK exists to prevent.)
+        boolean preferUp = (direction != Direction.DOWN);   // UP or NONE -> exhaust up first
+        if (preferUp) {
+            if (!upStops.isEmpty())   { state = ElevatorState.MOVING_UP;   direction = Direction.UP;   return; }
+            if (!downStops.isEmpty()) { state = ElevatorState.MOVING_DOWN; direction = Direction.DOWN; return; }
         } else {
-            if (!downStops.isEmpty())      { state = ElevatorState.MOVING_DOWN; return; }
-            if (!upStops.isEmpty())        { state = ElevatorState.MOVING_UP;   return; }
+            if (!downStops.isEmpty()) { state = ElevatorState.MOVING_DOWN; direction = Direction.DOWN; return; }
+            if (!upStops.isEmpty())   { state = ElevatorState.MOVING_UP;   direction = Direction.UP;   return; }
         }
         state = ElevatorState.IDLE;
+        direction = Direction.NONE;
     }
 
+    public Direction getDirection() { return direction; }
+
+    // Note: openDoor() deliberately leaves `direction` untouched so a stop reached mid-sweep
+    // remembers where it was heading; only chooseDirection() may change the committed direction.
     private void openDoor() { door.open(); state = ElevatorState.DOOR_OPEN; }
     private void notifyObservers() { observers.forEach(o -> o.onStateChange(this)); }
 }
@@ -396,7 +419,7 @@ class ElevatorSystem {
 
     public void requestElevator(int floor, Direction dir) {
         Elevator chosen = strategy.selectElevator(elevators, new ExternalRequest(floor, dir));
-        chosen.addStop(floor);
+        chosen.addStop(floor, dir);          // pass desired direction so LOOK routes the sweep
     }
     public void requestFloor(int elevatorId, int destination) {
         elevatorById(elevatorId).addStop(destination);

@@ -447,11 +447,11 @@ When several `@RequestMapping`s match one request, Spring does **not** pick by d
 
 ### PathPattern vs AntPathMatcher
 
-Spring 5.3+ introduced `PathPattern` (parsed path matching) as the default for Spring MVC via `PathPatternParser`, replacing string-based `AntPathMatcher` for most cases. Differences that trip people up:
+`PathPattern` (parsed path matching) was first introduced for WebFlux (Spring 5.0), then made **available as an opt-in** for Spring MVC in 5.3 — where `AntPathMatcher` remained the MVC default. It became the **default** for Spring MVC only in **6.0** (via `PathPatternParser`), with `AntPathMatcher` retained (not deprecated) as a fully supported opt-in for back-compat — only specific *options* like suffix-pattern and trailing-slash matching are deprecated. Getting this version story right matters under interviewer probing. Differences that trip people up:
 
 - `PathPattern` only allows `**` at the **end** of a pattern; `/a/**/b` is illegal with `PathPatternParser` but was allowed by `AntPathMatcher`.
 - `PathPattern` uses a pre-parsed `RequestPath` and is faster and allocation-light on the hot path.
-- The historical **suffix pattern matching** (`/foo` also matching `/foo.*`) and trailing-slash matching (`/foo` matching `/foo/`) are **deprecated and disabled by default** in Spring 6. `setUseTrailingSlashMatch(true)` is removed; you must map both explicitly or add a redirect. This is a common migration break: `/users` no longer matches `/users/`.
+- The historical **suffix pattern matching** (`/foo` also matching `/foo.*`) and trailing-slash matching (`/foo` matching `/foo/`) are **deprecated and disabled by default** in Spring 6. The trailing-slash option itself is deprecated — `setUseTrailingSlashMatch(true)` (via `PathMatchConfigurer`) still restores the old behavior for now, but the guidance is to map both explicitly or add a redirect. This is a common migration break: `/users` no longer matches `/users/` by default.
 
 ---
 
@@ -535,3 +535,4 @@ Filters run outside `DispatcherServlet`, wrapping it. Their **order is determine
 - Handler interceptors: https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/handlermapping-interceptor.html
 - Javadoc: `org.springframework.web.servlet.DispatcherServlet`, `ResponseEntity`, `HandlerInterceptor`
 - Jakarta Servlet migration (Spring Framework 6.x): https://docs.spring.io/spring-framework/reference/
+- Spring Framework 6.0 Release Notes (PathPatternParser default for MVC; trailing-slash matching deprecated/off by default): https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-6.0-Release-Notes

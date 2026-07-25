@@ -554,7 +554,7 @@ Quick decision guide for the primitives interviewers force you to choose between
   (docs.aws.amazon.com/vpc/latest/userguide/).
 - Amazon VPC quotas page (VPCs/Region, subnets, CIDR /16–/28, SG/NACL rule limits).
 - AWS Transit Gateway User Guide and Transit Gateway quotas (attachments, routes,
-  100 Gbps/attachment, ~50 Gbps per-flow, ECMP, appliance mode).
+  100 Gbps/attachment aggregate per AZ, ~5 Gbps per-flow, ECMP, appliance mode).
 - AWS PrivateLink documentation — interface endpoints, endpoint services, gateway vs
   interface endpoints.
 - AWS Site-to-Site VPN User Guide (two tunnels, ~1.25 Gbps/tunnel, ECMP) and AWS

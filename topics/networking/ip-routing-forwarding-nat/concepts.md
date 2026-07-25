@@ -139,8 +139,8 @@ computation and trusts what neighbors tell it ("routing by rumor"). Simple and l
 but slow to converge and prone to **routing loops** and the **count-to-infinity** problem,
 mitigated by hacks like **split horizon**, **route poisoning**, and **hold-down timers**.
 - **RIP** (RFC 2453, v2): metric = hop count, max **15** hops (16 = unreachable/infinity),
-  updates broadcast every 30s. Obsolete for anything nontrivial due to that tiny diameter
-  and slow convergence.
+  updates sent every 30s — **RIPv2 multicasts to `224.0.0.9`** (only legacy RIPv1 broadcasts).
+  Obsolete for anything nontrivial due to that tiny diameter and slow convergence.
 
 **Link-state (OSPF, IS-IS):** every router floods **Link-State Advertisements (LSAs)**
 describing its own links, so *every* router builds an identical, complete **map** of the

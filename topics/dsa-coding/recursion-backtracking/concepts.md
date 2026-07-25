@@ -247,9 +247,21 @@ permute(nums):
 | Permutations | **Yes** | No | all unused indices | `n!` |
 | Combination Sum | No | **Yes** (reuse allowed) | `start..n`, recurse on same `i` | varies |
 
-**Handling duplicates** (e.g. Subsets II, Permutations II): *sort first*, then in each loop
-skip a candidate equal to its predecessor at the same tree level
-(`if i > start and nums[i] == nums[i-1]: continue`). This dedups without a hash set.
+**Handling duplicates** (e.g. Subsets II, Permutations II): *sort first*, then skip a
+candidate equal to its predecessor **at the same tree level**. This dedups without a hash
+set — but the exact condition depends on which template you're in, because the two use
+different loop structures:
+
+- **Subsets / Combinations (start-index loop):** `if i > start and nums[i] == nums[i-1]: continue`.
+  Here `i > start` means "not the first choice at this level," so you keep the leftmost of a
+  run of equal values and skip the rest as *siblings*.
+- **Permutations (used[] loop over all indices):** the permutation template has **no `start`
+  parameter** — it loops over *every* index each level — so `i > start` does not apply. Use
+  `if i > 0 and nums[i] == nums[i-1] and not used[i-1]: continue`. Intuition: among a run of
+  equal values, only pick the leftmost one that is still available at this level; if its
+  identical predecessor `nums[i-1]` is *not* currently in use (`not used[i-1]`), then choosing
+  `nums[i]` would just re-generate a permutation already produced by choosing `nums[i-1]` here,
+  so skip it.
 
 ## Pruning: cutting the search space
 
@@ -308,7 +320,7 @@ Canonical LeetCode problems that drill recursion & backtracking. Grouped by sub-
 
 **Permutations (used-set / swap template):**
 - [Permutations](https://leetcode.com/problems/permutations/) — Medium — used[] array, all unused indices per level
-- [Permutations II](https://leetcode.com/problems/permutations-ii/) — Medium — duplicates; sort + skip rule with used[]
+- [Permutations II](https://leetcode.com/problems/permutations-ii/) — Medium — duplicates; sort + `i>0 && nums[i]==nums[i-1] && !used[i-1]` skip rule (not the start-index rule)
 
 **String / partition generation:**
 - [Letter Combinations of a Phone Number](https://leetcode.com/problems/letter-combinations-of-a-phone-number/) — Medium — digit→letters branching, classic decision tree
@@ -338,7 +350,9 @@ Canonical LeetCode problems that drill recursion & backtracking. Grouped by sub-
   explicit heap-allocated stack (Java/Python don't do tail-call optimization, so tail-form
   rewriting alone won't help).
 - **"How do you handle duplicate inputs without emitting duplicate results?"** Sort, then skip a
-  candidate equal to its sibling at the same tree level (`i > start && nums[i]==nums[i-1]`).
+  candidate equal to its sibling at the same tree level. For the start-index template
+  (subsets/combinations) that's `i > start && nums[i]==nums[i-1]`; for permutations (used[]
+  loop, no `start`) it's `i > 0 && nums[i]==nums[i-1] && !used[i-1]`.
 - **"Where does pruning help most?"** Reject invalid partial candidates *before* recursing — a
   cut at a shallow node eliminates an entire exponential subtree.
 - **"Backtracking vs DP — how do I choose?"** If you must enumerate *all* configurations →

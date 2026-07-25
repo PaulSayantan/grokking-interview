@@ -369,8 +369,9 @@ stream at their own pace, or event sourcing / stream processing.
 ## Quorum queues and high availability
 
 For HA, a queue's contents must survive a **node** failure, not just a process restart.
-RabbitMQ's modern answer is the **quorum queue** (default queue type direction since 3.8,
-and the recommended/replicated type in 4.x).
+RabbitMQ's modern answer is the **quorum queue** (introduced in 3.8 and now the
+recommended queue type for replicated, highly-available queues — though the declaration
+default queue type remains `classic`).
 
 - A **quorum queue** replicates its state across an odd number of cluster nodes using the
   **Raft** consensus algorithm. Writes are confirmed once a **majority (quorum)** of

@@ -358,9 +358,12 @@ Notes:
 
 ## Pull rate limits
 
-Docker Hub throttles pulls to fund free hosting. A "pull" is counted per **manifest
-request** (an index request plus the platform manifest can count). Current limits are
-measured over a **6-hour window**:
+Docker Hub throttles pulls to fund free hosting. A "pull" is counted per **image
+manifest actually downloaded**: a multi-arch image counts as **one pull per architecture
+pulled**, and a normal single-host `docker pull` retrieves just one architecture, so it
+counts as one (version/manifest checks that download nothing do not count). As of
+mid-2026 the limits below are measured over a **6-hour window** — Docker has revised
+these repeatedly, so always confirm the current figures on docs.docker.com:
 
 | Account | Limit (per 6h) |
 |---|---|
@@ -472,6 +475,7 @@ because immutable-tag + frequent-build workflows accumulate storage quickly.
 - OCI Image Spec — manifest, image index, config, descriptors: <https://github.com/opencontainers/image-spec>
 - OCI Distribution Spec v1.1: <https://github.com/opencontainers/distribution-spec/blob/main/spec.md>
 - Docker Hub usage & rate limits: <https://docs.docker.com/docker-hub/usage/>
+- Docker Hub — how pulls are counted (one per architecture): <https://docs.docker.com/docker-hub/usage/pulls/>
 - Docker registry / distribution (CNCF Distribution): <https://distribution.github.io/distribution/>
 - `docker buildx imagetools`: <https://docs.docker.com/reference/cli/docker/buildx/imagetools/>
 - Multi-platform builds: <https://docs.docker.com/build/building/multi-platform/>

@@ -375,38 +375,66 @@ public class TrafficLight {
 }
 
 public class TrafficController {           // the context + coordinator
+    private static final int ALL_RED_SECONDS = 2;   // clearance beat between phase swaps
     private final Map<PhaseGroup, List<TrafficLight>> groups;
     private PhaseGroup activeGroup;
     private TimingStrategy timing;
+    private TrafficContext ctx;                      // sensor snapshot the adaptive strategy reads
     private final List<SignalObserver> observers = new ArrayList<>();
     private boolean preempted = false;
+    private PhaseGroup preemptTarget = null;         // group to green once the current wind-down finishes
+    private int elapsedSeconds = 0;                  // time held in the active group's current phase
+    private int allRedRemaining = 0;                 // >0 while BOTH groups are held red
 
+    // One tick == one second. A phase advances only when its duration elapses, so
+    // getDurationSeconds() (and the TimingStrategy for GREEN) actually governs timing —
+    // a tick is NOT a whole phase.
     public synchronized void onTick() {
-        // driven by the Timer; advance the currently active group's lights.
-        TrafficLight lead = groups.get(activeGroup).get(0);
-        lead.advance();                          // e.g., GREEN -> YELLOW -> RED
-        groups.get(activeGroup).forEach(l -> l.setState(lead.getState()));
-        if (lead.getColor() == SignalColor.RED) {
-            handOverToNextGroup();               // clearance done: swap groups
+        if (allRedRemaining > 0) {                   // all-red clearance beat: both groups red
+            if (--allRedRemaining == 0) handOverToNextGroup();
+            assertNoConflict();
+            notifyObservers();
+            return;
         }
-        assertNoConflict();                      // safety invariant, every tick
+        TrafficLight lead = groups.get(activeGroup).get(0);
+        int hold = lead.getState().getDurationSeconds();
+        if (lead.getColor() == SignalColor.GREEN && timing != null) {
+            hold = timing.greenDurationSeconds(activeGroup, ctx);   // Strategy governs green length
+        }
+        if (++elapsedSeconds >= hold) {
+            elapsedSeconds = 0;
+            lead.advance();                          // GREEN -> YELLOW -> RED
+            groups.get(activeGroup).forEach(l -> l.setState(lead.getState()));
+            if (lead.getColor() == SignalColor.RED) {
+                allRedRemaining = ALL_RED_SECONDS;   // hold a genuine all-red beat before the swap
+            }
+        }
+        assertNoConflict();                          // safety invariant, every tick
         notifyObservers();
     }
 
+    // Runs only after the all-red clearance beat, so both groups were genuinely red in between.
     private void handOverToNextGroup() {
-        PhaseGroup next = other(activeGroup);
-        // all-red clearance implicitly holds here (both groups red for one beat)
-        activeGroup = next;
-        groups.get(next).forEach(l -> l.setState(States.GREEN));
+        activeGroup = (preemptTarget != null) ? preemptTarget : other(activeGroup);
+        preemptTarget = null;
+        elapsedSeconds = 0;
+        groups.get(activeGroup).forEach(l -> l.setState(States.GREEN));
     }
 
+    // Preemption never slams a green group to red. It winds the active group down through
+    // YELLOW; onTick() then runs the normal yellow -> all-red clearance before the emergency
+    // group greens (handOverToNextGroup honors preemptTarget).
     public synchronized void preempt(Direction d) {
-        preempted = true;
         PhaseGroup wanted = groupOf(d);
-        groups.values().stream().flatMap(List::stream)
-              .forEach(l -> l.setState(States.RED));   // everyone red first
-        groups.get(wanted).forEach(l -> l.setState(States.GREEN));
-        activeGroup = wanted;
+        preempted = true;
+        if (wanted == activeGroup) return;           // already this group's turn — nothing to wind down
+        preemptTarget = wanted;
+        elapsedSeconds = 0;
+        for (TrafficLight l : groups.get(activeGroup)) {
+            if (l.getColor() == SignalColor.GREEN) {
+                l.setState(States.YELLOW);           // begin safe wind-down, not a hard slam to red
+            }
+        }
         assertNoConflict();
     }
 

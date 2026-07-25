@@ -194,8 +194,11 @@ where the per-call thread overhead wasn't worth it.
 ## Combining Breaker, Bulkhead, and Timeout
 
 No single pattern is sufficient — they defend different layers, and the standard resilient
-integration point layers **all** of them. A typical decorator ordering (outermost →
-innermost) around a remote call:
+integration point layers **all** of them. Read the list below as a *conceptual* "layers of
+defense" — what each layer is *for* — **not** as the literal decorator-nesting order. The
+actual Resilience4j nesting is nearly the reverse of this list and is given in the WARNING
+below (with the reasoning for why it differs). Conceptually, the layers a remote call passes
+through are:
 
 1. **Bulkhead** — reject immediately if this dependency's concurrency budget is already
    full (protects your resource pool).
@@ -231,8 +234,15 @@ flowchart TD
 > **Retry outermost** so each retry re-evaluates the breaker; **CircuitBreaker** next so it
 > short-circuits before you spend a rate-limiter permit or a bulkhead slot; **RateLimiter**
 > between breaker and timeout to shape throughput; **TimeLimiter** to bound the call's
-> duration; **Bulkhead innermost** so it sits closest to the resource it protects. Always cap
-> the total retry budget so worst-case latency stays bounded.
+> duration; **Bulkhead innermost** so it sits closest to the resource it protects. **Note this
+> is almost the reverse of the conceptual list above** (there Bulkhead was drawn outermost and
+> Retry near the inside): the two are not in conflict — the list orders patterns by *what they
+> protect*, while this orders them by *aspect nesting*. Putting the **bulkhead innermost** means
+> a concurrency slot is consumed only for calls the breaker has already *admitted* — a call the
+> breaker short-circuits never touches the bulkhead at all. A "reject-early" bulkhead sitting
+> *outermost* (as in the conceptual list) is a legitimate but different design choice: it sheds
+> load before any breaker evaluation, at the cost of rejecting calls the breaker might have let
+> through. Always cap the total retry budget so worst-case latency stays bounded.
 
 ## Resilience4j and Hystrix
 

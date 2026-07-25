@@ -250,8 +250,8 @@ year to year, so cite them as *bands*, not gospel):
 |---|---|---|---|---|
 | Deployment frequency | On-demand (multiple/day) | Daily–weekly | Weekly–monthly | < monthly |
 | Lead time for changes | < 1 day | 1 day–1 week | 1 week–1 month | 1–6 months |
-| Change failure rate | ~0–15% | 16–30% | | higher |
-| Recovery time | < 1 hour | < 1 day | < 1 day | > 1 week |
+| Change failure rate | 0–15% | 16–30% | 31–45% | 46–60% |
+| Recovery time | < 1 hour | < 1 day | 1 day–1 week | > 1 week |
 
 Key points interviewers probe:
 

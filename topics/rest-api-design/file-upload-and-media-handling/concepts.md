@@ -240,6 +240,18 @@ equivalent, and the usual answer for S3-backed systems:
   costing storage until aborted** — configure an `AbortIncompleteMultipartUpload`
   lifecycle rule to clean them up.
 
+> [!WARNING]
+> **The multipart ETag is not the object's MD5.** For a single-`PUT` upload, S3's
+> ETag *is* the MD5 hash of the object — but for a multipart upload it is a
+> composite: the MD5 of the concatenated part MD5s, suffixed with `-N` where `N`
+> is the part count (e.g. `d41d8cd...e3-4`). So you cannot recompute a multipart
+> object's ETag by hashing the whole file, and it must **not** be used as a
+> content hash for integrity verification or dedup — precisely the large files
+> this doc centers on. For real integrity/dedup, store a **client-computed
+> SHA-256** (what the `checksum` column in the schema below holds) or use S3's additional
+> checksums (`x-amz-checksum-sha256`, including full-object checksums for
+> multipart).
+
 You can combine both worlds: hand clients **pre-signed URLs for each part** so
 they upload parts directly to S3 while your API only orchestrates
 create/complete.
@@ -394,7 +406,7 @@ CREATE TABLE files (
   original_name TEXT NOT NULL,        -- for display / download filename only
   content_type  TEXT NOT NULL,        -- verified type, not the client's claim
   size_bytes    BIGINT NOT NULL,
-  checksum      TEXT,                 -- e.g. sha256 / ETag, for integrity/dedup
+  checksum      TEXT,                 -- client-computed sha256 for integrity/dedup (NOT the multipart ETag; see the ETag warning above)
   status        TEXT NOT NULL,        -- pending | scanning | ready | infected | failed
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -569,6 +581,9 @@ correct answer. See also `webhooks-and-async-api-patterns` and
   https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html
 - AWS — *Using presigned URLs*:
   https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html
+- AWS — *Checking object integrity in Amazon S3* (ETag vs. additional/full-object
+  checksums; multipart ETag composite):
+  https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
 - AWS — *Serving private content with signed URLs (CloudFront)*:
   https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PrivateContent.html
 - OWASP — *File Upload Cheat Sheet*:

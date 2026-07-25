@@ -510,10 +510,14 @@ The API server injects several special usernames/groups that RBAC can bind to:
 
 Gotchas:
 
-- **Anonymous access:** the API server enables anonymous auth by default; unauthenticated
-  requests become user `system:anonymous` in group `system:unauthenticated`. They only get
-  what RBAC grants that identity (by default: a tiny discovery allowlist like
-  `/healthz`, `/version`). Binding real permissions to `system:unauthenticated` or
+- **Anonymous access:** the API server enables anonymous auth by default **unless the
+  authorization mode is `AlwaysAllow`** (disable it explicitly with `--anonymous-auth=false`);
+  unauthenticated requests become user `system:anonymous` in group `system:unauthenticated`.
+  They only get what RBAC grants that identity (by default: a tiny discovery allowlist like
+  `/healthz`, `/version`, via the `system:public-info-viewer` binding). Newer clusters can
+  harden this further with an `AuthenticationConfiguration` file that restricts anonymous
+  requests to a fixed endpoint allowlist (the `AnonymousAuthConfigurableEndpoints` feature,
+  stable in v1.34). Binding real permissions to `system:unauthenticated` or
   `system:authenticated` is dangerous — the latter includes *everyone with any credential,
   including every ServiceAccount*.
 - **`system:masters` bypasses meaningful RBAC scoping** — it's hard-bound to cluster-admin and

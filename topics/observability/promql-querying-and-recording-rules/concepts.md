@@ -308,9 +308,11 @@ Rules and gotchas:
 - Plain matching **fails** if the match is not strictly one-to-one — you get
   "multiple matches for labels: many-to-one matching must be explicit" — which is
   Prometheus forcing you to declare intent with `group_left`/`group_right`.
-- The label list in `group_left(...)` names the **extra labels copied from the "many" side
-  onto the result**; grouping side labels come along, the "one" side's extra labels are
-  pulled in.
+- With `group_left`, the **left** vector is the "many" (higher-cardinality) side and keeps
+  its own label set, which defines each result series' identity. The labels listed in
+  `group_left(version)` are the **extra labels copied from the "one" (right) side** onto
+  each result series. `group_right` mirrors this exactly: the **right** vector is the "many"
+  side, and `group_right(...)` copies the listed labels from the "one" (left) side.
 - `and`/`or`/`unless` are **set operators** (filter, don't do arithmetic): `and` keeps
   left series that have a match on the right; `unless` keeps left series with **no** match;
   `or` unions. They also honor `on`/`ignoring`.

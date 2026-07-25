@@ -248,11 +248,19 @@ flowchart TD
     B -->|No, need complement| D["Use a HashMap (see Arrays and Hashing)"]
     A -->|Yes| E{"Fixed window size k?"}
     E -->|Yes| F["Fixed-size sliding window"]
-    E -->|No| G{"All values positive AND asking longest/shortest?"}
-    G -->|Yes| H["Variable-size sliding window"]
-    G -->|"No (negatives, or exact-sum count)"| I["Prefix sum + HashMap"]
+    E -->|No| G{"Is the window constraint a running sum?"}
+    G -->|"No (distinct-count / frequency / replacement)"| H["Variable-size sliding window"]
+    G -->|Yes| K{"All values positive?"}
+    K -->|Yes| H
+    K -->|"No (negatives, or exact-sum count)"| I["Prefix sum + HashMap"]
     A -->|"Many static range-sum queries"| J["Prefix sum array (1D / 2D)"]
 ```
+
+The all-positive gate only applies when the window's constraint is a **running sum**
+(monotone growth is what lets you shrink safely). Distinct-count, frequency, and
+character-replacement windows (Longest Substring Without Repeating Characters, Fruit Into
+Baskets, Longest Repeating Character Replacement) are variable-window problems *regardless*
+of whether values are positive or negative — value positivity is irrelevant there.
 
 | Pattern | Signal | Time | Space | Replaces |
 |---|---|---|---|---|

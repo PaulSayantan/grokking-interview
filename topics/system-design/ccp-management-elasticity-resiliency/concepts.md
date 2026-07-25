@@ -372,25 +372,31 @@ Elasticity Management Process. *Deep dive:* blue-green/canary/rolling specifics 
 **Intent — "How can defined provisioning times be ensured while using pay-per-use resources
 *optimally*?"**
 
-**Problem / context.** Provisioning/decommissioning takes time, which hurts applications with
-**sudden sharp spikes** (the autoscaler can't add capacity fast enough). Also, providers bill
-in **fixed time-slots**, so tearing an instance down the instant it goes idle wastes money
-you've already paid for.
+**Problem / context.** The dominant, still-valid driver is **provisioning latency**:
+provisioning/decommissioning takes time (image pull, boot, app warm-up), which hurts
+applications with **sudden sharp spikes** because the autoscaler can't add capacity fast
+enough. A secondary, now largely *historical* driver is **billing granularity**: in the
+2014-era hourly-billing model, tearing an instance down the instant it went idle wasted a
+time-slot you'd already paid for. That argument has weakened sharply — AWS moved EC2 (Linux)
+and EBS to **per-second billing with a 1-minute minimum on 2 Oct 2017** (Windows and
+separately-charged Linux distros excepted) — so today, boot-latency, not paid slots, is the
+main reason to keep warm capacity.
 
 **Solution.** Instead of terminating idle instances immediately, move them to a **standby
 list** (a warm pool). Keep a **defined number** of instances on standby so demand spikes can
-be met **instantly** by activating warm instances; only truly decommission an instance once
-its **paid time-slot is exhausted** *and* it is still unneeded. Trades a little idle cost for
-fast, guaranteed provisioning and better slot utilization.
+be met **instantly** by activating warm instances that skip the boot/warm-up delay. (Under the
+original hourly-billing model you would also defer decommissioning until an instance's paid
+time-slot was exhausted; with per-second billing that slot-utilization benefit is now minor.)
+Trades a little idle cost for fast, guaranteed provisioning latency.
 
 **Modern equivalent.** **AWS EC2 Auto Scaling *warm pools*** and Lambda **provisioned
 concurrency** / SnapStart, **Kubernetes over-provisioning / cluster-autoscaler pause pods**,
 GKE node warm pools, keeping a buffer of pre-pulled container images. Any "keep N warm
 spares" strategy.
 
-**Trade-offs / when to use.** Cuts scale-up latency and avoids paying for slots you discard —
-at the cost of **idle capacity spend**. Right-size the pool to the expected spike magnitude
-and provisioning lag. Complements **Elasticity Management** (which decides counts) and
+**Trade-offs / when to use.** Cuts scale-up latency — at the cost of **idle capacity spend**
+(and, under per-second billing, you no longer recoup that spend through better slot
+utilization). Right-size the pool to the expected spike magnitude and provisioning lag. Complements **Elasticity Management** (which decides counts) and
 **Feature Flag Management** (the fallback when even warm capacity is exhausted).
 
 **Related patterns.** Multi-Component Image, Resiliency Management Process, Feature Flag
@@ -479,6 +485,9 @@ and `reliability-ops`.
   Provider Adapter, Managed Configuration, Elasticity Manager, Elastic Load Balancer, Elastic
   Queue, Watchdog, Elasticity Management Process, Feature Flag Management Process, Update
   Transition Process, Standby Pooling Process, Resiliency Management Process.
+- AWS News Blog (2 Oct 2017), *Per-Second Billing for EC2 Instances and EBS Volumes* —
+  [aws.amazon.com/blogs/aws/new-per-second-billing-for-ec2-instances-and-ebs-volumes](https://aws.amazon.com/blogs/aws/new-per-second-billing-for-ec2-instances-and-ebs-volumes/)
+  (per-second billing, 1-minute minimum; Windows and separately-charged Linux distros excepted).
 - Cross-references (this library): `system-design/scalability-and-load-balancing`,
   `system-design/aws-load-balancing-elb-autoscaling`, `system-design/message-queues-and-async`,
   `system-design/aws-messaging-sqs-sns-eventbridge`, `system-design/resilience-tradeoffs-deep-dive`,

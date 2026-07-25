@@ -16,8 +16,9 @@ The fundamental theorem of this whole area is that **exact answers to certain qu
 provably require linear space**, while approximate answers require only sublinear (often
 logarithmic or constant-relative) space. Counting distinct elements exactly needs Θ(n)
 space (you must remember every distinct item, or a perfect hash of it); HyperLogLog
-answers it to ~2% in a fixed ~1.5 KB regardless of n. That is not an engineering
-convenience — it is a lower bound you cannot beat with a clever exact algorithm.
+answers it to ~1% in a bounded ~12 KB (Redis's dense p=14 form) that stays constant
+regardless of n. That is not an engineering convenience — it is a lower bound you
+cannot beat with a clever exact algorithm.
 
 The three axes you are trading among:
 
@@ -177,7 +178,9 @@ full (long "runs" of shifted slots). Used in storage/genomics (e.g. Squeakr, k-m
 
 **Problem:** count distinct elements (unique visitors, distinct search terms, distinct source
 IPs) over a massive stream. Exact requires storing every distinct value (Θ(n) space).
-HyperLogLog (HLL) estimates cardinality up to billions in a **fixed ~1.5 KB** with ~2% error.
+HyperLogLog (HLL) estimates cardinality up to billions in a **bounded ~12 KB** (Redis's
+dense p=14 form) with ~0.81% standard error; a sparse encoding uses far less only while
+cardinality is low, converting to the fixed dense form at scale.
 
 **Mechanism (intuition first):** hash each element to a uniform bit string. In a random stream
 of hashes, seeing a hash with `ρ` leading zeros suggests you've seen ~`2^ρ` distinct items
@@ -192,8 +195,9 @@ E = α_m · m^2 / Σ_j 2^(-M[j])         (harmonic mean damps large-register out
 ```
 
 - **Standard error ≈ 1.04 / √m.** With `m = 2^14 = 16384` registers of ~6 bits each →
-  ~12 KB raw, ~1.5 KB compressed → **error ≈ 1.04/128 ≈ 0.81%** (Redis uses p=14, quotes ~0.81%).
-  Halving the error costs 4x the registers (√m in the denominator).
+  ~12 KB in the dense representation → **error ≈ 1.04/128 ≈ 0.81%** (Redis uses p=14, and
+  its dense HLL caps at ~12 KB; a sparse form is smaller only at low cardinality). Halving
+  the error costs 4x the registers (√m in the denominator).
 - **HLL++ (Google)** adds 64-bit hashing (removes the 2^32 ceiling), bias correction for small
   cardinalities, and a **sparse representation** that is exact-ish and tiny for low n, switching
   to dense at scale.
@@ -417,7 +421,7 @@ trace sampling) rather than sampling uniformly.
 | Keep a uniform raw sample | Reservoir sampling | sampling error |
 
 **Setting the error budget:** work backward from the *product* tolerance and the *cost of a
-mistake in each direction*. A unique-visitor dashboard tolerates ±2% (HLL p=14, 1.5 KB); an edge
+mistake in each direction*. A unique-visitor dashboard tolerates ~1% (HLL p=14, ~12 KB); an edge
 rate limiter tolerates over-counting (fails safe → throttle) but not under-counting (lets abuse
 through) — so CMS's over-count bias is a *feature*. An LSM Bloom filter's FP costs one wasted
 disk read, so 1% is fine; a *final-answer* membership check with no backstop needs ~0. Remember
@@ -477,7 +481,8 @@ to detect because it's wrong only occasionally.
 - Bender et al., "Don't Thrash: How to Cache Your Hash on Flash" — quotient filters / RSQF; Pandey
   et al., "A General-Purpose Counting Filter" (CQF, 2017).
 - Flajolet, Fusy, Gandouet, Meunier, "HyperLogLog: the analysis of a near-optimal cardinality
-  estimation algorithm" (2007); Heule, Nunkesser, Hall, "HyperLogLog in Practice" (HLL++, Google, 2013).
+  estimation algorithm" (2007); Heule, Nunkesser, Hall, "HyperLogLog in Practice" (HLL++, Google, 2013);
+  Redis HyperLogLog docs (dense form up to 12 KB, 0.81% standard error, p=14) — redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/.
 - Cormode & Muthukrishnan, "An Improved Data Stream Summary: the Count-Min Sketch and its
   Applications" (2005); Charikar, Chen, Farach-Colton, "Finding Frequent Items in Data Streams"
   (Count-Sketch).

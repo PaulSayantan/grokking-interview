@@ -184,7 +184,7 @@ classDiagram
         -List~Vote~ votes
         -List~Comment~ comments
         +castVote(User voter, VoteType type) VoteResult
-        +retractVote(User voter) void
+        +retractVote(User voter) Vote
         +addComment(User author, String text) Comment
         +getScore() int
     }
@@ -328,8 +328,8 @@ Key public surface (types shown; `Result` objects report accept/reject reasons):
 Question postQuestion(User author, String title, String body, List<Tag> tags);
 Answer   postAnswer(User author, Question question, String body);
 Comment  addComment(User author, Post target, String text);
-VoteResult castVote(User voter, Post target, VoteType type);   // idempotent per user
-void       retractVote(User voter, Post target);
+VoteResult castVote(User voter, Post target, VoteType type);   // idempotent; a flip reverses old rep then applies new
+void       retractVote(User voter, Post target);               // reverses the reputation the removed vote granted
 void       acceptAnswer(User asker, Question question, Answer answer);
 List<Question> searchByTag(Tag tag);
 List<Question> searchByTag(Tag tag, SortStrategy sort);
@@ -368,10 +368,13 @@ abstract class Post {
         if (existing != null && existing.type() == type)
             return VoteResult.rejected("Already voted");     // idempotent
         votesByUser.put(voter.getId(), new Vote(voter, type, this, Instant.now()));
-        return VoteResult.accepted(type);   // service publishes the ReputationEvent
+        // hand back the prior vote type (null if none) so the service can reverse its rep
+        // delta before applying the new one — a flip is a reversal PLUS a new event
+        return VoteResult.accepted(type, existing == null ? null : existing.type());
     }
 
-    void retractVote(User voter) { votesByUser.remove(voter.getId()); }
+    // returns the removed Vote (or null) so the service can reverse the reputation it granted
+    Vote retractVote(User voter) { return votesByUser.remove(voter.getId()); }
 
     int getScore() {
         return (int) votesByUser.values().stream().filter(v -> v.type() == VoteType.UP).count()
@@ -410,12 +413,16 @@ class ReputationManager {
     private final Map<EventType, ReputationRule> rules = Map.of(
         EventType.ANSWER_UPVOTED,   e -> +10,
         EventType.QUESTION_UPVOTED, e -> +5,
-        EventType.DOWNVOTED,        e -> -2,
+        EventType.DOWNVOTED,        e -> -2,   // to the post author
+        EventType.DOWNVOTE_CAST,    e -> -1,   // to the voter, for downvoting an answer
         EventType.ANSWER_ACCEPTED,  e -> +15
     );
     void apply(ReputationEvent e) {
         ReputationRule rule = rules.get(e.type());
-        if (rule != null) e.targetUser().addReputation(rule.pointsFor(e));
+        if (rule == null) return;
+        // reversal events (vote flip / retract) negate the delta the original event granted
+        int delta = e.isReversal() ? -rule.pointsFor(e) : rule.pointsFor(e);
+        e.targetUser().addReputation(delta);
     }
 }
 
@@ -437,8 +444,30 @@ class QnAService {
 
     VoteResult castVote(User voter, Post target, VoteType type) {
         VoteResult r = target.castVote(voter, type);
-        if (r.accepted()) publish(new ReputationEvent(eventTypeFor(target, type), target.getAuthor()));
+        if (!r.accepted()) return r;
+        // A flip (priorType != null) first reverses what the old vote granted, then applies the new vote.
+        if (r.priorType() != null)
+            reverse(target, voter, r.priorType());
+        applyVote(target, voter, type);
         return r;
+    }
+
+    void retractVote(User voter, Post target) {
+        Vote removed = target.retractVote(voter);
+        if (removed != null) reverse(target, voter, removed.type());
+    }
+
+    // one physical vote can move TWO users' reputation: the post author (up/down) and,
+    // for a downvote on an answer, the voter (-1). Emit an event per affected user.
+    private void applyVote(Post target, User voter, VoteType type) {
+        publish(new ReputationEvent(eventTypeFor(target, type), target.getAuthor(), false));
+        if (type == VoteType.DOWN && target instanceof Answer)
+            publish(new ReputationEvent(EventType.DOWNVOTE_CAST, voter, false));
+    }
+    private void reverse(Post target, User voter, VoteType type) {
+        publish(new ReputationEvent(eventTypeFor(target, type), target.getAuthor(), true));
+        if (type == VoteType.DOWN && target instanceof Answer)
+            publish(new ReputationEvent(EventType.DOWNVOTE_CAST, voter, true));
     }
     private void publish(ReputationEvent e) {
         reputation.apply(e);
@@ -486,8 +515,13 @@ Single-process, thread-safe. The interesting races are around **votes** and **re
   synchronized accumulator) — many votes across many posts credit the same author
   concurrently; a naive `rep += delta` loses updates.
 - **Self-vote / double-vote / vote flip:** rejected or handled idempotently in
-  `Post.castVote` (author check + per-user map). Flipping up→down is a remove-then-add;
-  do it atomically so the score never transiently double-counts.
+  `Post.castVote` (author check + per-user map). Flipping up→down is a single atomic
+  `put` that overwrites the map entry, so the stored vote — and the derived score — never
+  transiently double-counts. **Reputation must be reversed too:** `castVote` returns the
+  *prior* vote type, and the service publishes a **reversal event** (negating the old
+  delta) before applying the new vote's delta, so a +10 upvote flipped to a −2 downvote
+  nets the author −12, not +8. `retractVote` returns the removed vote and publishes a
+  single reversal, undoing exactly what that vote had granted.
 - **Accept answer races:** only the asker accepts, and re-accepting moves the flag
   atomically (unset old, set new) under the question's guard so at most one answer is
   accepted at any instant.
@@ -513,6 +547,14 @@ Single-process, thread-safe. The interesting races are around **votes** and **re
 - **"How do you stop a user voting twice or voting on their own post?"** Reify `Vote` and
   key votes by user id (map); author check in `castVote`. A plain `int` counter can't
   enforce either.
+- **"What happens to reputation when a vote is flipped or retracted?"** The granted rep
+  must be reversed, not just overwritten. `castVote` returns the prior vote type; the
+  service publishes a **reversal event** (negating the old delta) and then the new vote's
+  event, so up→down nets the author −12 (undo +10, then −2). `retractVote` returns the
+  removed vote and publishes one reversal. This is also why one physical downvote on an
+  answer emits **two** events — −2 to the author and −1 to the voter (`DOWNVOTE_CAST`) —
+  each reversible independently. Recomputing rep from the full vote set on every change is
+  the simpler-but-slower alternative.
 - **"Make the reputation numbers configurable."** They already are — `ReputationManager`
   is a map of `EventType → ReputationRule`; load the map from config. That's the Strategy
   payoff.

@@ -350,6 +350,24 @@ Note the one-limiter-instance-per-key model: `computeIfAbsent` gives atomic lazy
 creation, and each instance's state is independent, so contention is per key — two
 different users never contend on the same lock.
 
+Be explicit about *where* keying lives, because it changes what `allow(key)` means:
+
+- **Per-key instances (this skeleton).** The registry owns the keying and creates one
+  limiter object per key, so a leaf like `TokenBucketLimiter` holds a single `tokens`
+  field — its counters *are* the state for that one key. The `key` passed to `allow()`
+  is then redundant for the leaf; it rides along only for logging/decision context. If
+  that bothers you, drop the parameter (`allow()`) on the leaves and let the registry
+  key the map.
+- **Per-rule instance with an internal map.** Alternatively, hold *one* limiter per
+  rule that keeps a `ConcurrentHashMap<String,State>` and genuinely uses `allow(key)`
+  to look up per-key state. The registry then keys its map by rule id alone, not by
+  `rule.id() + "|" + key`.
+
+The trade-off: per-key objects give simple per-key locks and easy TTL/LRU eviction of
+idle keys, but multiply object count; a per-rule map amortizes objects but needs
+striped or per-entry locking and manual entry eviction. Pick one and keep the skeleton
+consistent with it.
+
 ## Composing Limits with Composite and Chain
 
 "100/min per user AND 20/sec per API" should not produce a
@@ -358,25 +376,45 @@ different users never contend on the same lock.
 **Composite (AND semantics):**
 
 ```java
-public final class CompositeRateLimiter implements RateLimiter {
-    private final List<RateLimiter> delegates;
+// Each entry pairs a leaf limiter with the dimension it keys on, so the
+// composite hands every delegate the CORRECT per-dimension key from the Request.
+public final class CompositeRateLimiter {
+    private record Entry(LimitDimension dimension, RateLimiter limiter) {}
+    private final List<Entry> delegates;
 
-    @Override
-    public RateLimitDecision allow(String key) {
-        for (RateLimiter d : delegates) {
-            RateLimitDecision r = d.allow(key);
-            if (!r.allowed()) return r;      // deny fast, propagate retryAfter
+    public RateLimitDecision allow(Request req) {
+        for (Entry e : delegates) {
+            String key = e.dimension().keyFor(req);   // "user:42" vs "api:/search"
+            RateLimitDecision r = e.limiter().allow(key);
+            if (!r.allowed()) return r;               // deny fast, propagate retryAfter
         }
         return RateLimitDecision.allowed(-1);
     }
 }
 ```
 
+(If you prefer `CompositeRateLimiter` to *be* a `RateLimiter`, give it an
+`allow(Request)` overload or make the whole interface `Request`-based; the point is
+that combining dimensions needs the `Request`, not one pre-resolved `String`.)
+
 Because `CompositeRateLimiter` *is a* `RateLimiter`, composites nest: (per-user AND
-(per-API OR premium-override)). One subtlety worth volunteering: naive
-short-circuiting **consumes** quota from earlier limiters even when a later one
-denies. Fix by splitting the contract into `tryAcquire`/check-then-commit, or accept
-and state the small over-count — noticing it is senior-level signal.
+(per-API OR premium-override)).
+
+One correctness subtlety worth volunteering: a single opaque `key` string cannot serve
+both a per-user and a per-API delegate — `"user:42"` is the wrong key for the per-API
+limiter, which needs `"api:/search"`. So a composite that forwards *one* key to every
+child silently rate-limits the wrong dimension. Two clean fixes: either compose over a
+`Request` (`allow(Request req)`, each delegate resolving its own key via its
+`LimitDimension`), or do the AND-composition at the *registry* level — the registry
+already iterates rules and resolves a per-rule key (`rule.dimension().keyFor(req)`), so
+each single-dimension leaf gets the correct key and `allow(String)` stays reserved for
+leaves. The skeleton's registry loop is exactly that registry-level composition;
+`CompositeRateLimiter` earns its place only when it operates over the `Request` (or
+carries a per-delegate key resolver), not a pre-resolved String.
+
+A second subtlety: naive short-circuiting **consumes** quota from earlier limiters even
+when a later one denies. Fix by splitting the contract into `tryAcquire`/check-then-commit,
+or accept and state the small over-count — noticing it is senior-level signal.
 
 **Chain of Responsibility** — same composition expressed as linked handlers; ideal
 when some handlers aren't limiters at all: `AllowlistHandler` (admin IPs bypass

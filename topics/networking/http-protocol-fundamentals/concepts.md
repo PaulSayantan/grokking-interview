@@ -311,10 +311,13 @@ is a great site.\r\n               <-- 0x10 = 16 octets
 
 Rules and gotchas:
 
-- A message **must not** use both `Content-Length` and `Transfer-Encoding: chunked`. If
-  both appear, `Transfer-Encoding` wins and `Content-Length` must be ignored/removed —
-  disagreement between a front-end and back-end over which to honor is the root of
-  **HTTP request smuggling** (CL.TE / TE.CL attacks).
+- A message **must not** use both `Content-Length` and `Transfer-Encoding: chunked`.
+  RFC 9112 §6.1 historically instructed a recipient that sees both to **remove
+  `Content-Length` and prefer `Transfer-Encoding`**; but because front-end/back-end
+  disagreement over exactly that reconciliation is the root of **HTTP request smuggling**
+  (CL.TE / TE.CL attacks), modern hardened stacks instead **reject** the message (respond
+  `400` and close the connection) rather than silently preferring TE. (This matches the
+  Headers and Request-Smuggling sections.)
 - `chunked` must be the **final** transfer coding, and it is a **hop-by-hop** property
   (a proxy may de-chunk before forwarding).
 - Some responses are **implicitly** framed: 1xx/204/304 and any response to HEAD have no

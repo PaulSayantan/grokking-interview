@@ -132,8 +132,14 @@ Other hooks:
   `this` (e.g., a compact serialization proxy). Can be `private` and is found
   via inheritance.
 - `readResolve()` — returns the object that replaces the freshly deserialized
-  one. **Essential for singletons and enums** to preserve the single-instance
+  one. **Essential for class-based singletons** to preserve the single-instance
   invariant, because deserialization otherwise creates a brand-new instance.
+  Note that **enums do *not* rely on `readResolve`**: the JVM serializes an enum
+  constant specially — by its `name()` only — and reconstructs it via
+  `Enum.valueOf`, ignoring `writeObject`/`readObject`/`readResolve` entirely.
+  The single-instance guarantee therefore comes for free, which is exactly why
+  *Effective Java* (Items 3 and 89) recommends the enum singleton over a
+  class-plus-`readResolve` idiom.
 - `readObjectNoData()` — called when the stream lacks data for a superclass
   (e.g., receiver added a superclass the sender didn't have).
 - `ObjectInputValidation` + `registerValidation` — post-deserialization
@@ -374,8 +380,9 @@ serialization for essentially nothing new.
 - Does the constructor run during deserialization? For `Serializable`? For
   `Externalizable`? For a record?
 - How do records change the safety story of serialization?
-- Difference between `writeReplace`/`readResolve` and why enums/singletons rely
-  on `readResolve`.
+- Difference between `writeReplace`/`readResolve` and why *class-based*
+  singletons rely on `readResolve` — while enums do not (they serialize by name
+  and get the single-instance guarantee for free).
 - When would you choose `Externalizable` over `Serializable`? Is it worth it?
 - How does Jackson deserialize without `Serializable`? What does it need
   (constructor, setters, annotations)?

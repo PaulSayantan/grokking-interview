@@ -267,10 +267,17 @@ def diameter(root):
         L = height(node.left)
         R = height(node.right)
         best = max(best, L + R)       # path THROUGH this node (in edges)
-        return 1 + max(L, R)          # height returned to parent
+        return 1 + max(L, R)          # node-count height returned to parent
     height(root)
     return best
 ```
+
+Convention note: this `height()` uses **node counts** (null → 0, leaf → 1), which
+differs from the edge-based height in the terminology table (leaf height 0). That is
+intentional and keeps the diameter correct: with node counts, `L + R` equals the number
+of **edges** on the longest path through the node — exactly LeetCode's edge-based
+diameter. (Equivalently, use null → −1, leaf → 0 to match the table's edge convention;
+then `best = max(best, L + R + 2)`.)
 
 Note the split: `height` is the **return value** (what the parent needs), while `best`
 is the **global answer** (a path that may not extend to the parent). Recognising that a

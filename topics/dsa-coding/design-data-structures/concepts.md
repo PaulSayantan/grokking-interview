@@ -275,9 +275,11 @@ graph TD
 
 These are variations on the same composition method:
 
-- **Design Twitter** — `getNewsFeed` merges the 10 most recent tweets across the people a user
-  follows. Store each user's tweets as a list with a **global timestamp**; merge feeds with a
-  **heap (k-way merge)** of the followees' latest tweets. Follows/tweets are hash-map + set.
+- **Design Twitter** — `getNewsFeed` merges the 10 most recent tweets across the **user's own
+  tweets plus everyone they follow** (a common trick is to have each user implicitly follow
+  themselves so the merge set always includes self). Store each user's tweets as a list with a
+  **global timestamp**; merge feeds with a **heap (k-way merge)** of those users' latest tweets.
+  Follows/tweets are hash-map + set.
 - **Time-Based Key-Value Store** — `set(key, val, timestamp)` and `get(key, timestamp)` returns
   the value with the **largest timestamp ≤ query**. Store `key → list of (timestamp, value)`
   appended in increasing time; `get` is a **binary search** on that list → O(log n).

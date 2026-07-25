@@ -210,9 +210,12 @@ isolation.
 ## Span duration vs self-time, and reading gaps
 
 A span's **duration** is its total wall-clock time. Its **self-time** (a.k.a.
-exclusive time) is duration **minus** the time attributable to its child spans —
-i.e., the time the operation spent doing its *own* work rather than waiting on
-downstream calls. This distinction is where real root-causing happens.
+exclusive time) is duration **minus** the wall-clock time **covered** by its
+child spans — i.e., the time the operation spent doing its *own* work rather than
+waiting on downstream calls. "Covered" means the **union** of the children's time
+intervals, **not** the arithmetic sum of their durations: overlapping/parallel
+children only cover the wall-clock they collectively span. This distinction is
+where real root-causing happens.
 
 - **Duration ≈ sum of children** → this span is mostly an *orchestrator*; the
   latency lives **downstream**, not here. Go into the children.
@@ -234,6 +237,14 @@ flowchart LR
   A --> C["child B (150ms)"]
   A --> D["self-time / gaps = 250ms\n(local work, queueing, network)"]
 ```
+
+Above, children A and B run **serially** (they don't overlap), so they cover
+100 + 150 = 250 ms of wall-clock and self-time = 500 − 250 = 250 ms. The naive
+"subtract the sum of child durations" shortcut only works in this serial case.
+If instead two 150 ms children ran **in parallel and fully overlapped**, they
+cover just 150 ms of wall-clock (not 300 ms), so self-time is *larger* than a
+sum-based estimate — subtracting the sum would over-count and can even go
+negative. Always subtract the wall-clock **union** of child intervals.
 
 > [!WARNING]
 > A large gap with no child span is the classic sign of **missing

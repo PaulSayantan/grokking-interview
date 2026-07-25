@@ -452,15 +452,27 @@ public class FoodDeliveryService {
 
         Order order = new Order(newId(), cart.getCustomer(),
                                 cart.getRestaurant(), snapshot, payment);
-        registerDefaultObservers(order);                      // customer, restaurant, partner, analytics
+        registerDefaultObservers(order);                      // customer, restaurant, analytics; partner is wired later in assignPartner (no partner exists yet)
         cart.clear();
         return order;
     }
 
     public Optional<DeliveryPartner> assignPartner(String orderId) {
         Order order = orders.get(orderId);
-        return assignment.assign(order, partnerPool.availablePartners())
-                         .map(p -> { p.acceptOrder(order); order.setPartner(p); return p; });
+        // Retry loop: the strategy proposes a candidate, but the *claim* must be atomic
+        // (see Concurrency) — the loser of a race just asks for the next candidate.
+        while (true) {
+            Optional<DeliveryPartner> candidate =
+                assignment.assign(order, partnerPool.availablePartners());
+            if (candidate.isEmpty()) return Optional.empty();   // nobody free — wait/queue
+            DeliveryPartner p = candidate.get();
+            if (p.tryAcceptOrder(order)) {                      // atomic CAS on availability
+                order.setPartner(p);
+                order.addObserver(new PartnerNotifier(p));      // partner exists now — safe to wire
+                return Optional.of(p);
+            }
+            // else: lost the race for p, loop and let the strategy pick another
+        }
     }
 }
 ```
@@ -468,7 +480,11 @@ public class FoodDeliveryService {
 Notes to narrate while writing it: the transition map makes illegal moves impossible by
 construction; `transitionTo` is the *only* mutator of `status`, so observers can never
 be skipped; `PaymentFactory` + `Payment` keeps checkout closed against new payment
-types; the strategy is constructor-injected, so tests pass a `FakeStrategy`.
+types; the strategy is constructor-injected, so tests pass a `FakeStrategy`. Note the
+observer wiring is split by *when the participant exists*: the customer, restaurant, and
+analytics observers are registered at order creation, but the partner observer is added
+inside `assignPartner` only once a partner has been claimed — registering it earlier
+would give it no partner to notify.
 
 ## Concurrency and Edge Cases
 

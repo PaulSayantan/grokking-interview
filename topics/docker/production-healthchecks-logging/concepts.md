@@ -476,16 +476,21 @@ process.on('SIGTERM', () => {
 A subtle but critical **race**: when the LB/orchestrator tells the container to stop, it
 sends SIGTERM at roughly the same moment it *starts* removing the endpoint. There's a
 window where the app has begun shutting down but the LB is still routing new requests to
-it → those get connection-refused. The standard mitigation is a **preStop delay** (or a
-short sleep before closing the listener) so the app keeps serving during the few seconds
-it takes the LB to deregister the endpoint.
+it → those get connection-refused. The standard mitigation is a **short delay before the
+app stops accepting new connections** so it keeps serving during the few seconds it takes
+the LB to deregister the endpoint. In plain Docker/Compose this delay lives *in the app*:
+on SIGTERM, sleep briefly (or deregister from the LB first) before closing the listener.
+On Kubernetes the same delay is expressed declaratively as a **`preStop` lifecycle hook**
+(e.g. `exec: sleep 5`), which K8s runs before it sends SIGTERM — note that `preStop` is a
+K8s-only construct and has no equivalent in the plain Docker runtime.
 
 > [!INTERVIEW]
 > "Why do we still see errors during deploys even though the app handles SIGTERM?" — the
 > answer they're looking for is the **deregistration race**: SIGTERM and endpoint removal
-> aren't atomic. You keep the listener open (or add a preStop delay) long enough for the
-> LB to stop routing, then drain and exit. Also ensure the grace period is *longer* than
-> your longest in-flight request.
+> aren't atomic. You keep the listener open long enough for the LB to stop routing (an
+> in-app delay before closing the listener in plain Docker; a `preStop` hook on K8s), then
+> drain and exit. Also ensure the grace period is *longer* than your longest in-flight
+> request.
 
 ---
 

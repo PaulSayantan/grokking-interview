@@ -718,8 +718,12 @@ connection).
 
 HTTP/3 reuses HTTP/2's frame *concepts* but with its own numeric codes on QUIC streams:
 **DATA `0x00`**, **HEADERS `0x01`**, **CANCEL_PUSH `0x03`**, **SETTINGS `0x04`**,
-**PUSH_PROMISE `0x05`**, **GOAWAY `0x06`**, **MAX_PUSH_ID `0x07`**. Note the analogue of
-`SETTINGS_MAX_FIELD_SECTION_SIZE` is `0x06`. There is **no per-stream flow-control frame** in
+**PUSH_PROMISE `0x05`**, **GOAWAY `0x07`**, **MAX_PUSH_ID `0x0d`** (`0x02` and `0x06` are
+*reserved* in the frame-type registry to avoid clashing with HTTP/2 code points). Mind the
+two separate registries: in the **frame-type** registry `0x06` is reserved, whereas in the
+**SETTINGS-parameter** registry `0x06` = `SETTINGS_MAX_FIELD_SECTION_SIZE` (the HTTP/3
+analogue of HTTP/2's `SETTINGS_MAX_HEADER_LIST_SIZE`) — same number, different namespaces.
+There is **no per-stream flow-control frame** in
 HTTP/3 (QUIC handles that) and **no `WINDOW_UPDATE`/`RST_STREAM`** at the HTTP layer — QUIC's
 `RESET_STREAM`/`STOP_SENDING` do that job.
 

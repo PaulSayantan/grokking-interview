@@ -238,9 +238,15 @@ thundering herd.
 **Trade-offs.** Aggressive health checks (short interval, low unhealthy threshold)
 detect failures fast but risk flapping and false negatives under transient GC
 pauses; conservative checks are stable but slow to eject bad hosts. A deep health
-check that pings downstream deps can cascade a dependency outage into "all targets
-unhealthy" (fail-closed) — a shallow `/healthz` avoids that but can keep routing to
-a target whose dependency is down. Balance depth vs blast radius.
+check that pings downstream deps can flip *every* target to unhealthy at once when
+that shared dependency blips. Critically, ELB does **not** then drop all traffic:
+when *all* targets in a target group are unhealthy the LB **fails open** and routes
+to every target anyway (regardless of health status). So the real danger of a deep
+check isn't dropped traffic — it's that the LB sends requests to targets that will
+all error on the dead dependency, and you've lost the health signal that could have
+routed around a genuinely bad host. A shallow `/healthz` avoids the mass-unhealthy
+flip but can keep routing to a target whose dependency is down. Balance depth vs
+blast radius.
 
 ---
 
@@ -341,8 +347,10 @@ ASG supports several policy types; picking the right one is a common design ques
   further action. Oldest, least responsive; largely superseded by target/step.
 - **Scheduled scaling**: change min/max/desired at set times (e.g. scale up before
   a 9 a.m. business spike, down at night). Deterministic, predictable loads.
-- **Predictive scaling**: ML forecasts load from ≥24 h of history (needs history;
-  forecasts up to 48 h) and **provisions capacity ahead of the predicted spike**,
+- **Predictive scaling**: ML forecasts load from history — a **24 h minimum** to
+  produce a first forecast, but AWS analyzes up to the past **14 days** and forecasts
+  are more accurate with ~2 full weeks of data (hourly forecast for the next 48 h,
+  refreshed every 6 h) — and **provisions capacity ahead of the predicted spike**,
   ideal for cyclical/daily patterns. Often combined with target tracking (predictive
   handles the known cycle, target tracking handles the unexpected).
 
@@ -356,8 +364,8 @@ or memory-bound apps.
 *after* the metric moves, so there's a boot-time lag). Step scaling reacts more
 aggressively to severe breaches but you must design the steps. Scheduled is perfect
 for known cycles but blind to surprises. Predictive removes the boot-lag for
-*recurring* patterns but is useless for novel spikes and needs weeks of history to
-be accurate. Real systems layer them: predictive/scheduled for the baseline curve +
+*recurring* patterns but is useless for novel spikes and, while 24 h of history is
+enough to start, needs about two weeks of history to be accurate. Real systems layer them: predictive/scheduled for the baseline curve +
 target tracking as the safety net.
 
 ---
@@ -495,8 +503,10 @@ exposed to the full request volume and to L7 attacks at the region.
 - **Deploy fails health checks**: ASG/instance refresh loops launching and killing;
   min-healthy-percentage and rollback protect you.
 - **Deep health check + dependency outage**: if `/healthz` pings a down dependency,
-  *all* targets report unhealthy and ELB fail-opens or drops traffic — a shallow
-  check avoids turning a dependency blip into a total outage.
+  *all* targets report unhealthy at once; ELB then **fails open** (routes to every
+  target regardless of health) rather than dropping traffic — so requests still flow
+  but hit targets that all error on the dead dependency. A shallow check avoids
+  turning a dependency blip into a fleet-wide "all unhealthy" event.
 - **Sticky sessions + scale-in**: draining a pinned target disrupts its users;
   stateless design avoids this.
 - **NLB source-IP + security groups**: forgetting that targets see client IPs (not
@@ -569,12 +579,17 @@ speed and the traffic shape.
 
 - AWS docs — Elastic Load Balancing: User Guide, and the Application, Network,
   Gateway, and Classic Load Balancer developer guides (target groups, health checks,
-  cross-zone load balancing, sticky sessions, target group attributes).
+  cross-zone load balancing, sticky sessions, target group attributes). The ALB
+  target-group health-checks guide documents the **fail-open** rule: if a target
+  group contains only unhealthy targets the LB routes to all of them regardless of
+  status.
 - AWS docs — Product comparison for Elastic Load Balancing (ALB vs NLB vs GWLB vs CLB
   feature matrix).
 - AWS docs — Amazon EC2 Auto Scaling User Guide: scaling policies (target tracking,
   step, simple, scheduled, predictive), cooldowns and warm-up, warm pools, lifecycle
-  hooks, health checks and grace period.
+  hooks, health checks and grace period. "How predictive scaling works" states the
+  **24 h minimum** history to start forecasting, analysis of up to the **past 14
+  days**, and an hourly forecast for the next 48 h refreshed every 6 h.
 - AWS docs — Gateway Load Balancer and GENEVE (UDP 6081), Gateway Load Balancer
   endpoints.
 - AWS docs — AWS Global Accelerator, Amazon CloudFront developer guide (CloudFront +

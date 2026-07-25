@@ -83,7 +83,7 @@ public class MyApp {
 
 **`ApplicationReadyEvent` vs runners (subtle).** `CommandLineRunner`/`ApplicationRunner` execute **before** `ApplicationReadyEvent` is published. So if a runner throws, the app fails and `ApplicationReadyEvent` never fires (an `ApplicationFailedEvent` fires instead). Readiness probes keyed to `ApplicationReadyEvent` therefore won't flip to "ready" until all runners have completed successfully — a deliberate ordering for correct traffic gating.
 
-**Thread-safety at startup.** Singleton bean instantiation during `refresh()` happens on the **main (bootstrap) thread**, single-threaded by default, so bean construction order is deterministic. Background bootstrapping (`spring.main.background-initialization` via `BackgroundPreinitializer`, or `@Async`/`SmartInitializingSingleton` tricks) can move work off the main thread, but naive parallel bean init is not something Boot does implicitly — do not assume constructors run concurrently.
+**Thread-safety at startup.** Singleton bean instantiation during `refresh()` happens on the **main (bootstrap) thread**, single-threaded by default, so bean construction order is deterministic. Boot's `BackgroundPreinitializer` does move *some* framework warm-up work (e.g. validator, message-converter, and conversion-service initialization) onto a background thread, but it runs **automatically** on multi-core JVMs — its gate is simply `availableProcessors() > 1`, and it is disabled by setting the system property `spring.backgroundpreinitializer.ignore=true` (there is no `spring.main.background-initialization` key). This preinitialization touches only internal helpers; your *own* singletons are still constructed sequentially on the main thread, so do not assume your bean constructors run concurrently.
 
 ---
 
@@ -507,6 +507,7 @@ Boot uses it during `SpringApplication` startup to load `ApplicationContextIniti
 - Spring Boot Reference — "Packaging Layered Jars / Efficient Container Images": https://docs.spring.io/spring-boot/reference/packaging/efficient.html
 - Spring Boot Reference — "Dependency Management / Build Systems": https://docs.spring.io/spring-boot/reference/using/build-systems.html
 - Spring Boot Reference — "Spring Application" (run flow, events, runners): https://docs.spring.io/spring-boot/reference/features/spring-application.html
+- Spring Boot source — `BackgroundPreinitializer` (runs when `availableProcessors() > 1`; disabled via `spring.backgroundpreinitializer.ignore`): https://github.com/spring-projects/spring-boot/blob/v3.3.0/spring-boot-project/spring-boot-autoconfigure/src/main/java/org/springframework/boot/autoconfigure/BackgroundPreinitializer.java
 - Spring Boot 2.7 Release Notes — auto-configuration registration change: https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-2.7-Release-Notes
 - Spring Boot 3.0 Migration Guide — Jakarta EE, Java 17: https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.0-Migration-Guide
 - Spring Framework `SpringFactoriesLoader` Javadoc: https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/core/io/support/SpringFactoriesLoader.html

@@ -443,7 +443,13 @@ cloud providers draw:
 > **Windows-based SLOs mislead at low traffic.** In a 1-minute window with only 2 requests, a
 > single failure flips the window from 100% to 50% — if your in-window threshold is 99%, that
 > whole minute is "bad", massively over-penalizing 1 error. Request-based counting weights by
-> actual volume and doesn't have this failure mode. Conversely, windows-based is convenient when
+> actual volume and avoids this *window-flip* artifact — but it is **not** a cure for low traffic:
+> a genuinely low-volume service is statistically noisy either way. With only 100 requests in the
+> window, a single failure is a 1% error rate — that is **10× a 99.9% SLO's 0.1% budget** blown by
+> one data point (and against a 99% SLO's 1% budget, one failure spends the *entire* budget). The Workbook's
+> remedies are the same regardless of method: **aggregate over a longer window**, **group related
+> low-traffic endpoints** into one SLI, or **generate synthetic/probe traffic** to reach a
+> statistically meaningful denominator. Conversely, windows-based is convenient when
 > "up/down" is easier to observe than per-request success (e.g. a health signal), and it's how
 > most contractual SLAs are written.
 

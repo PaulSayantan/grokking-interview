@@ -887,8 +887,8 @@ Arazzo describes their **orchestration**.
 `bindings`. Use it for Kafka/MQTT/AMQP/WebSocket streams that OpenAPI's HTTP
 request/response model cannot describe.
 
-**Version facts to cite:** OpenAPI 3.1.1 (latest 3.1 patch) and 3.0.4 — with
-OpenAPI 3.2.0 released Sept 2025 as the newest line; Arazzo 1.0.0 (later 1.1.0);
+**Version facts to cite:** OpenAPI 3.1.2 (latest 3.1 patch) and 3.0.4 — with
+OpenAPI 3.2.0 released Sept 2025 as the newest line; Arazzo 1.1.0 (latest);
 Overlay 1.0.0; AsyncAPI 3.0.
 
 ---
@@ -1009,6 +1009,7 @@ responses:
 
 - OpenAPI Specification 3.1.0 — <https://spec.openapis.org/oas/v3.1.0.html>
 - OpenAPI Specification 3.0.4 — <https://spec.openapis.org/oas/v3.0.4.html>
+- OpenAPI Specification releases (3.2.0, 3.1.2, 3.0.4 dates) — <https://github.com/OAI/OpenAPI-Specification/releases>
 - OpenAPI Initiative — <https://www.openapis.org/>
 - Migrating from OpenAPI 3.0 to 3.1 — <https://www.openapis.org/blog/2021/02/16/migrating-from-openapi-3-0-to-3-1-0>
 - JSON Schema 2020-12 — <https://json-schema.org/specification-links#2020-12>
@@ -1021,7 +1022,7 @@ responses:
 - RFC 8288 — Web Linking (`Link` header) — <https://www.rfc-editor.org/rfc/rfc8288>
 - RFC 6570 — URI Template — <https://www.rfc-editor.org/rfc/rfc6570>
 - Overlay Specification 1.0 — <https://spec.openapis.org/overlay/v1.0.0.html>
-- Arazzo Specification 1.0 — <https://spec.openapis.org/arazzo/latest.html>
+- Arazzo Specification 1.1.0 (latest) — <https://spec.openapis.org/arazzo/latest.html>
 - AsyncAPI 3.0 — <https://www.asyncapi.com/docs/reference/specification/v3.0.0>
 - oasdiff (breaking-change detection) — <https://www.oasdiff.com/>
 - Redocly CLI (bundle/lint) — <https://redocly.com/docs/cli/>

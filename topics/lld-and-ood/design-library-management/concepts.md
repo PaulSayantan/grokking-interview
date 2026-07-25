@@ -399,6 +399,7 @@ public class LendingService {
 
     public ReturnResult returnBook(BookItem item) {
         BookLending lending = activeLendings.remove(item.getBarcode());
+        if (lending == null) return ReturnResult.noop();  // double scan / no active lending: idempotent, never a crash
         lending.setReturnDate(LocalDate.now());
         Optional<Fine> fine = Optional.of(fineStrategy.calculate(lending))
                 .filter(a -> a.signum() > 0)

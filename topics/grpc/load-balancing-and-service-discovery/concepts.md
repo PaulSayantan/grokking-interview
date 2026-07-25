@@ -228,12 +228,15 @@ DNS gives back multiple IPs, `round_robin` can spread across them. If DNS return
 VIP, you're back to pinning. Hence the Kubernetes headless-service pattern below.
 
 > [!WARNING]
-> Plain DNS is a weak service-discovery mechanism: gRPC's DNS resolver **re-resolves
-> infrequently** (min interval, default ~30s) and honours the OS/library, not necessarily
-> per-record TTLs. Backends that scale up or churn fast may not be picked up promptly. For
-> dynamic fleets use xDS or a custom resolver that watches your registry (Consul/etcd) and
-> pushes updates. Note gRPC does **not** re-resolve on a timer alone — it re-resolves when a
-> connection breaks or the LB policy asks.
+> Plain DNS is a weak service-discovery mechanism. gRPC's DNS resolver is **event-driven,
+> not periodic**: on the success path it does **not** re-resolve on a timer — it re-resolves
+> only when a connection breaks or the LB policy requests it (a `ResolveNow` trigger). Even
+> then a **minimum re-resolution interval** (grpc-go default **30s**, `MinResolutionInterval`)
+> rate-limits how often it will actually re-query DNS, so bursts of triggers can't hammer the
+> resolver. (Only on a resolution *error* does it retry on a schedule — exponential backoff.)
+> It also honours the OS/library resolver, not necessarily per-record TTLs. So backends that
+> scale up or churn fast may not be picked up promptly. For dynamic fleets use xDS or a custom
+> resolver that watches your registry (Consul/etcd) and pushes updates.
 
 ## Kubernetes: Headless Services and the ClusterIP Gotcha
 
@@ -368,9 +371,10 @@ scale is owned by `system-design`.
   config** `loadBalancingConfig: [{round_robin:{}}]` (default service config or resolver-
   delivered), *and* resolve to real backend IPs (e.g. `dns:///` to a headless service) — not
   a single VIP.
-- **"How does the client find out a new backend appeared?"** The resolver re-resolves (on
-  connection failure / LB request; DNS also on its min-interval) and hands the new address
-  list to the LB policy, which creates a subchannel; xDS/mesh instead *push* updates.
+- **"How does the client find out a new backend appeared?"** The resolver re-resolves when
+  triggered (connection failure / LB request), rate-limited by its minimum re-resolution
+  interval (grpc-go default ~30s) rather than on a fixed poll, and hands the new address list
+  to the LB policy, which creates a subchannel; xDS/mesh instead *push* updates.
 - **"How do you drain a gRPC backend during a deploy without dropping RPCs?"** Server sends
   HTTP/2 `GOAWAY`; clients finish in-flight RPCs, then reconnect/re-resolve to other backends.
 - **"What is `pick_first` good for if it doesn't balance?"** It's correct when something
@@ -386,6 +390,7 @@ scale is owned by `system-design`.
 - gRPC docs — *Load Balancing* (concept guide): https://grpc.io/docs/guides/custom-load-balancing/ and the load-balancing design doc `grpc/grpc/blob/master/doc/load-balancing.md`
 - gRPC blog — *gRPC Load Balancing*: https://grpc.io/blog/grpc-load-balancing/
 - gRPC docs — *Name Resolution* design: `grpc/grpc/blob/master/doc/naming.md`
+- grpc-go DNS resolver — event-driven re-resolution + `MinResolutionInterval` (30s default): `grpc/grpc-go/blob/master/internal/resolver/dns/dns_resolver.go`
 - gRPC docs — *Service Config* & `loadBalancingConfig`: `grpc/grpc/blob/master/doc/service_config.md`
 - gRFC A6 — client retries; gRFC A8 — client-side keepalive; gRFC A27/A28/A30/A31 — xDS support in gRPC (see `grpc/proposal`)
 - gRPC docs — *gRPC xDS features* and proxyless service mesh: https://grpc.io/docs/guides/xds/
