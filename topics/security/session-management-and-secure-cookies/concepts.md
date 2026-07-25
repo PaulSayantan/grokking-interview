@@ -33,6 +33,33 @@ server-side state (a row in a session store) that holds the real information —
 roles, CSRF token, last-activity timestamp. This indirection is what makes server-side
 sessions revocable: delete the row and the pointer is worthless.
 
+**The full lifecycle on the wire.** A user submits credentials; the server authenticates,
+**kills any pre-login session ID, and issues a fresh one** in the same response:
+
+```
+POST /login HTTP/1.1
+Host: app.com
+Cookie: __Host-SESSIONID=PRE_AUTH_7c1e...          ← anonymous pre-login ID
+
+HTTP/1.1 302 Found
+Location: /dashboard
+Set-Cookie: __Host-SESSIONID=POST_AUTH_a9f2...; Secure; HttpOnly; SameSite=Lax; Path=/
+   ← server DELETES the PRE_AUTH_7c1e row and issues a brand-new POST_AUTH_a9f2
+```
+
+The browser overwrites its stored value and returns the new one on the redirected request:
+
+```
+GET /dashboard HTTP/1.1
+Host: app.com
+Cookie: __Host-SESSIONID=POST_AUTH_a9f2...          ← authenticated ID
+```
+
+`PRE_AUTH_7c1e` is now dead everywhere: if an attacker had planted it in the victim's
+browser (session fixation, below), it points to an invalidated row and grants nothing.
+That single rotation-at-login is the whole fixation defense — see the Session Fixation
+section.
+
 > [!INTERVIEW]
 > "Why can't we just put the username in a cookie?" Because cookies are client-controlled
 > — the user can edit `Cookie: user=alice` to `user=admin`. A session ID works because it
@@ -88,6 +115,32 @@ an incrementing counter, or a weak `Math.random()` lets an attacker who observes
 model the generator and predict others. Effective entropy also collapses if part of the
 ID is fixed (a server prefix, a constant hostname) — only the *random* portion counts.
 
+**Worked example — why 64 bits is safe and 32 is not.** Use OWASP's brute-force estimate:
+with `A` guesses/second against `S` valid sessions live at once, the expected time to hit
+*any* one of them is
+
+```
+time ≈ 2^bits / (2 × A × S)
+```
+
+Take an aggressive attacker at `A = 10,000` guesses/sec and a busy app with `S = 10,000`
+concurrent sessions, so the denominator is `2 × 10^4 × 10^4 = 2×10^8` guesses/sec-effective:
+
+- **64-bit ID:** `2^64 ≈ 1.84×10^19`. Time `≈ 1.84×10^19 / 2×10^8 = 9.2×10^10 s ≈ 2,900
+  years`. Astronomically safe — and that is *already* assuming 10,000 valid targets.
+- **128-bit ID (framework default):** `2^128 ≈ 3.4×10^38`, giving `~1.7×10^30 s ≈ 5×10^22
+  years` — longer than the age of the universe by many orders of magnitude. This is why
+  "128-bit is comfortably safe" needs no further thought.
+- **32-bit ID:** `2^32 ≈ 4.3×10^9`. Time `≈ 4.3×10^9 / 2×10^8 ≈ 21 seconds`. A truncated
+  or weak 32-bit ID is **guessable in seconds** — dropping 32 bits costs you a factor of
+  `2^32 ≈ 4.3 billion` in attacker effort.
+
+**Tie it to encoding:** entropy = (number of random characters) × (bits per character).
+Hex is 4 bits/char, so **16 hex chars = 16 × 4 = 64 bits** — exactly the floor. Base64 is
+6 bits/char, so the same 64 bits needs only `⌈64/6⌉ = 11` characters; a 128-bit ID is 32
+hex chars or 22 Base64 chars. Only the *random* characters count: a `sess_` prefix or an
+embedded server ID adds length but **zero entropy**.
+
 > [!TIP]
 > Interview soundbite: "High-entropy (≥128-bit) session IDs from a CSPRNG; the ID must be
 > opaque, carry no meaning, and reveal nothing about the user or the generator's state."
@@ -96,7 +149,12 @@ ID is fixed (a server prefix, a constant hostname) — only the *random* portion
 
 **Server-side**, session records should be stored so that a store compromise is not
 game-over. Treat the session ID like a password: many designs store a **hash** of the ID
-(so a leaked store dump can't be replayed directly) and never log the raw ID.
+(so a leaked store dump can't be replayed directly) and never log the raw ID. The
+trade-off: hashing means the store is keyed by `hash(id)`, so every request pays one hash
+before the lookup, and — since the hash is one-way — you can never recover the raw ID from
+the store (fine, you never need to). Because the ID is already high-entropy random, a fast
+single hash (e.g. SHA-256) suffices; you do **not** need a slow password KDF like bcrypt,
+whose cost only buys resistance to low-entropy guessing.
 
 **On the wire**, the golden rule is: the session ID must only travel inside a secure
 cookie, never in a URL. Session IDs in the URL (`?sessionid=abc`) leak through:
@@ -273,6 +331,14 @@ Two independent timeouts limit how long a session — and thus a stolen ID — s
 - **Renewal timeout** — periodically **regenerates the session ID** mid-session while
   keeping the session alive, shrinking the window a captured ID is valid.
 
+**Scaling gotcha — sliding-window write amplification.** A naive idle timeout updates the
+`last_activity` timestamp on *every* request, so a session store handling 50k req/s takes
+50k writes/s **just to bump timestamps** — often more write load than the app's real data.
+Mitigations: **throttle** the update (only write if the stored timestamp is more than, say,
+30–60 s old, trading timeout precision for far fewer writes), or go **lazy** (write only on
+meaningful actions and check freshness on read). An interviewer probing "what happens at
+scale?" is fishing for this write-amplification answer.
+
 > [!WARNING]
 > All timeouts must be **enforced server-side** against a stored timestamp. Relying on the
 > cookie's `Max-Age`/`Expires` is not a control — the client can ignore or edit it. The
@@ -358,6 +424,16 @@ well-understood token defenses.
 > plus anti-CSRF tokens.** Choosing `localStorage` trades a solvable CSRF problem for an
 > unsolvable "every XSS = total token compromise" problem.
 
+---
+
+> [!TIP]
+> **Signpost:** everything above is table-stakes an interviewer expects any web engineer to
+> know cold. The sections below — 6265bis limits, schemeful same-site, cookie tossing,
+> session puzzling, DBSC/DPoP, CHIPS, BFF, the revocation toolkit, federated logout — are
+> the **senior differentiators** an interviewer probes to separate levels. Where CSRF detail
+> (SameSite, double-submit) overlaps here, the dedicated CSRF topic is authoritative; it is
+> repeated only where it bears on cookie/session design.
+
 ## RFC 6265bis: Modern Cookie Rules and Limits
 
 RFC 6265 (2011) is being superseded by **RFC 6265bis** (draft-ietf-httpbis-rfc6265bis),
@@ -422,6 +498,20 @@ whether it was `Secure`, or what `Domain`/`Path` it had.
    then **earlier creation time**. By setting a more specific `Path` (e.g. `Path=/app/login`),
    the attacker's cookie sorts **ahead** of the real one, so a naive server that reads "the
    first `sess`" reads the **attacker's** value — the real cookie is *shadowed*.
+
+Concretely, two same-name cookies with different paths:
+
+| Cookie | Path | Set by | Path length → sort |
+|---|---|---|---|
+| `sess=ATTACKER` | `/app/login` | `evil.example.com`, `Domain=.example.com` | 10 chars → **first** |
+| `sess=REAL` | `/` | `app.example.com` (the real app) | 1 char → second |
+
+The browser emits them longest-path-first:
+
+```
+Cookie: sess=ATTACKER; sess=REAL
+        └── server that reads "the first sess" gets the ATTACKER value
+```
 
 **Impact:** breaks the **naive double-submit CSRF** pattern (attacker overwrites the CSRF
 cookie so it matches their forged token), can force **session fixation** (attacker's known ID
@@ -596,6 +686,37 @@ The safe design is the **selector + validator** pattern:
 - The token is **single-use / rotated**: each successful use issues a fresh validator (and often
   selector). If a token is presented whose selector exists but whose validator **doesn't match**,
   that indicates theft/cloning → **invalidate the whole remember-me series** and alert.
+
+**Worked example — tracing one remember-me use.** Suppose the cookie is:
+
+```
+remember_me = 3f2a9d10 : 9c8b7a6f5e4d3c2b     ← selector : validator
+```
+
+The server row stores the selector in **plaintext** (it's just a lookup key, indexed for a
+fast `WHERE selector = ?`) and the validator only as a **hash**:
+
+```
+{ selector: "3f2a9d10", validator_hash: sha256("9c8b7a6f5e4d3c2b"), user_id: 42, series }
+```
+
+On presentation the server:
+1. Looks up the row by selector `3f2a9d10` (fast, indexed). No row → reject silently.
+2. Computes `sha256("9c8b7a6f5e4d3c2b")` from the *presented* validator and **constant-time
+   compares** it to the stored `validator_hash`. (Constant-time so an attacker can't time
+   the comparison to learn the validator byte-by-byte; and hashed so a leaked DB dump can't
+   be replayed — the same reason session IDs are stored hashed.)
+3. **Match** → authenticate as user 42, then **rotate**: issue a new validator (and often a
+   new selector), update the row, and re-set the cookie. The old validator is now dead.
+
+Now the **theft-detection branch**. The attacker steals the cookie and uses it first: the
+server rotates the validator to `V2`, so the attacker's stolen copy is stale. When the
+*victim* later returns, they present the old validator — the selector `3f2a9d10` **exists**
+but `sha256(old) ≠ validator_hash` (which now holds `sha256(V2)`). Selector-hit +
+validator-mismatch is the tell-tale of a cloned token → **invalidate the entire series for
+user 42 and alert**, forcing a fresh login. Splitting selector from validator is exactly
+what makes this cheap: you get an O(1) indexed lookup *and* a constant-time secret compare
+without leaking whether the selector alone was valid.
 
 This avoids the classic mistakes: storing a raw persistent token (a store leak = instant account
 takeover) or reusing the session ID as a long-lived disk cookie.

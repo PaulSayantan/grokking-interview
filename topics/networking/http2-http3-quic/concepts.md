@@ -137,6 +137,22 @@ HPACK has three mechanisms:
    inserted once, then referenced by index thereafter.
 3. **Huffman coding** — a static Huffman table compresses literal string values.
 
+**Worked example — the byte savings.** Say each request carries a 900-byte session
+`Cookie` (the header *name* `cookie` is 6 bytes, the *value* 900 bytes) plus `:method: GET`,
+and the client makes 50 requests on the connection.
+
+- *Without header compression* (HTTP/1.1-style plain text): the cookie is re-sent on every
+  request → `900 × 50 = 45,000 bytes` just for that one header, every request paying full price.
+- *With HPACK*: request #1 sends the cookie as a literal **with incremental indexing**, which
+  inserts it into the dynamic table. Its accounted table size is `name(6) + value(900) + 32 =
+  938 bytes`, and roughly the value's 900 bytes go on the wire that one time. Requests #2–#50
+  now reference that dynamic-table slot with a single **indexed header field** byte (the slot
+  index is < 127, so it fits in one byte). Total ≈ `900 + 49 × 1 = 949 bytes`.
+
+That is `45,000 / 949 ≈ 47×` fewer bytes (~98% saved) for the repeated cookie — and `:method:
+GET` collapses from ~13 text bytes to the **1-byte** static-table index 2 on *every* request.
+That collapse from "re-send the string" to "send one index byte" is the whole point of HPACK.
+
 > [!INTERVIEW]
 > "Why was HPACK invented instead of just using gzip on headers?" Because HTTP/2 headers
 > were vulnerable to **CRIME**-style attacks: gzip's back-references leak secret content
@@ -170,6 +186,21 @@ This lets a client, for example, pause a large download stream (stop granting wi
 still receiving other streams — something impossible in HTTP/1.1. Tuning the initial window
 (`SETTINGS_INITIAL_WINDOW_SIZE`) matters for high-bandwidth-delay-product links; a small
 window caps throughput at `window / RTT`.
+
+**Worked example — why the default window throttles fast links.** A sender may have at most
+one window of unacknowledged `DATA` in flight, so per-stream throughput is bounded by
+`window / RTT`. Plug in the default 65,535-byte window on a 100 ms RTT path:
+
+```
+throughput ≤ 65,535 bytes / 0.1 s = 655,350 B/s ≈ 640 KB/s ≈ 5.2 Mbps
+```
+
+That ceiling holds **no matter how fast the link is** — on a 1 Gbps pipe you'd still crawl at
+~5 Mbps on that one stream. To actually fill a 1 Gbps × 100 ms link you need a window equal to
+the bandwidth-delay product: `1,000,000,000 bits/s × 0.1 s = 100,000,000 bits = 12.5 MB` — about
+`12,500,000 / 65,535 ≈ 191×` larger than the default. This is exactly the "connection window not
+auto-scaled" gotcha later: raising only the per-stream window while the connection window stays
+at 65,535 caps aggregate throughput just the same.
 
 > [!TIP]
 > QUIC/HTTP-3 has its own flow control at the QUIC transport layer (per-stream and
@@ -609,6 +640,24 @@ referenced entry hasn't arrived yet). **`SETTINGS_QPACK_BLOCKED_STREAMS`** (defa
 bounds how many streams may be in that state; an encoder that wants zero blocking references
 only already-acknowledged entries. Violations raise **`QPACK_DECOMPRESSION_FAILED`** (or
 `QPACK_ENCODER_STREAM_ERROR` / `QPACK_DECODER_STREAM_ERROR` for stream-level faults).
+
+**Worked example — when a stream blocks.** Suppose the encoder has inserted 5 entries so far,
+and the decoder has acknowledged the first 3 (Known Received Count = 3). Now a new request on
+stream 12 references dynamic entry #5, so its field-section prefix carries **RIC = 5**.
+
+- The encoder-stream inserts for entries #4 and #5 travel on the *separate* encoder stream. If
+  that stream's packets are lost/reordered and arrive *after* stream 12's HEADERS, the decoder
+  sees `RIC(5) > current insert count(3)` → stream 12 is **blocked**, waiting for two more
+  inserts before it can decode. If `SETTINGS_QPACK_BLOCKED_STREAMS = 0` (the default), the
+  encoder is *forbidden* from creating this situation — it must instead reference only
+  acknowledged entries (index ≤ 3) or send the header as a literal, guaranteeing `RIC ≤ 3` and
+  zero blocking.
+- Once the decoder applies inserts #4 and #5, it sends **Insert Count Increment** back; the
+  encoder's Known Received Count rises to 5 and future sections may safely reference #4/#5.
+
+So `SETTINGS_QPACK_BLOCKED_STREAMS` is the exact knob trading compression ratio (reference the
+freshest entries eagerly) against HOL-blocking risk (wait for acknowledgment) — the HPACK-vs-QUIC
+tension made tunable.
 
 ---
 

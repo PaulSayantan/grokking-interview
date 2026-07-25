@@ -186,6 +186,57 @@ field tags in the bytes at all.
   registry, so consumers fetch the writer schema by ID instead of shipping it in
   every message.
 
+### Worked example: bytes on the wire
+
+Take the same `OrderPlaced` record — `orderId="o-8891"`, `amountCents=9900`,
+`currency="USD"` — and count the bytes each way.
+
+**JSON** (minified, keys included):
+
+```
+{"orderId":"o-8891","amountCents":9900,"currency":"USD"}
+```
+
+That's **56 bytes**: the three field *names* (`orderId`, `amountCents`, `currency`),
+the braces, quotes, colons and commas all cost bytes on *every* message, and `9900`
+travels as the four ASCII characters `9 9 0 0`.
+
+**Avro** encodes positionally against the schema — no field names, no tags:
+
+| Field | Encoding | Bytes |
+|---|---|---|
+| `orderId` = "o-8891" | length prefix `0x0C` (zig-zag of 6) + 6 ASCII bytes | 7 |
+| `amountCents` = 9900 | zig-zag(9900)=19800 → varint `D8 9A 01` | 3 |
+| `currency` = "USD" | length prefix `0x06` (zig-zag of 3) + 3 ASCII bytes | 4 |
+| **payload total** | | **14** |
+
+Add Confluent's **5-byte header** (1 magic byte + 4-byte schema ID) and the wire
+message is **19 bytes** vs JSON's 56 — a **4x** shrink on the raw payload, **~3x**
+after the header. Multiply by millions of messages/sec and that ratio *is* the broker
+storage and network bill the intro promised.
+
+### Worked example: Avro schema resolution
+
+Now watch resolution reconcile a **writer** and **reader** schema that differ by one
+field.
+
+**New reader, old data (BACKWARD).** Writer schema v1 has `{orderId, amountCents}`;
+it emitted the 10-byte record `0C "o-8891" D8 9A 01`. Reader schema v2 adds
+`currency` with `default:"USD"`. Resolution walks the *reader's* fields, matching by
+name: `orderId` and `amountCents` are present in the writer bytes and read directly;
+`currency` is in the reader but **not** the writer, so the reader substitutes its
+default. Decoded value: `{orderId:"o-8891", amountCents:9900, currency:"USD"}` — the
+`USD` came from the default, not the bytes. *New code read old data.*
+
+**Old reader, new data (FORWARD).** Reverse it: writer v2 emits the 14-byte record
+with `currency="EUR"`, but the consumer still runs reader v1 `{orderId, amountCents}`.
+Resolution reads `orderId` and `amountCents`, then sees the writer has a `currency`
+field the reader lacks, so it **parses-and-skips** those 4 bytes to stay byte-aligned
+and discards the value. Decoded value: `{orderId:"o-8891", amountCents:9900}` — the
+`EUR` is silently dropped, and the old consumer keeps working. *Old code read new
+data.* (Note the reader always needs the writer schema to know how many bytes to skip;
+that's why Avro ships the schema ID.)
+
 > [!TIP]
 > Rule of thumb interviewers like: **Protobuf for RPC / service APIs, Avro for data
 > streams and analytics.** Avro's tag-free, schema-resolved records and rich default
@@ -244,6 +295,13 @@ the format's default rules. The registry turns these into enforceable modes.
 
 ## Compatibility modes (BACKWARD, FORWARD, FULL, NONE)
 
+The names trip everyone up, so anchor them to *time* and *upgrade order*:
+**BACKWARD** = the new schema is compatible looking **backward in time at old data**,
+so the new-schema side (usually the **consumers**) can be upgraded **first** and still
+read everything already on the topic. **FORWARD** = the old schema can read data from
+the **future**, so **producers** can go first and old consumers survive the new bytes.
+Whichever direction is guaranteed is the side you *don't* have to rush.
+
 Confluent Schema Registry (and Apicurio, and others) let you set a **compatibility
 mode** per subject. The mode decides which schema changes are allowed to register.
 
@@ -267,6 +325,24 @@ Two crucial nuances:
    (they must handle both old and new). Under **FORWARD**, upgrade **producers first**.
    Under **FULL**, either side can go first. The default mode is **BACKWARD**.
 
+**Worked example: why the upgrade order is not arbitrary.** Say the subject is
+**BACKWARD** and you add `currency` with `default:"USD"` (a BACKWARD-legal change).
+BACKWARD only guarantees *new reads old*, not *old reads new*. Trace two rollout
+orders during a rolling deploy:
+
+- **Consumers first (correct for BACKWARD).** Upgrade consumers to v2 while producers
+  still emit v1. v2 consumers read v1 bytes and fill `currency` from the default —
+  fine. Later, producers flip to v2 and now emit `currency` explicitly — v2 consumers
+  read it — fine. Nothing ever breaks.
+- **Producers first (wrong order).** A producer ships v2 and starts emitting the extra
+  `currency` bytes *before* consumers upgrade. Now old v1 consumers hit new bytes —
+  and that's a **forward** read, which BACKWARD does **not** promise. With Avro they'd
+  need the writer schema to skip the field cleanly; a stricter/positional decoder can
+  desync. You bet on a guarantee the mode never gave you.
+
+That's the whole rule: upgrade the side the mode *protects* (BACKWARD → consumers,
+FORWARD → producers) first, so the unprotected direction never occurs on the wire.
+
 > [!WARNING]
 > **NONE disables all checks.** It does not make evolution safe — it just stops the
 > registry from stopping you. Reserve it for controlled migrations, and prefer a
@@ -284,6 +360,11 @@ The single most important table to internalize:
 | **Remove** a **required** field | ✅ | ❌ (new data lacks it) |
 | **Rename** a field | ❌ in Avro (matched by name) · ✅ in Protobuf (matched by number) | same |
 | **Change a field's type** | usually ❌ (only narrow promotions, e.g. int→long in Avro) | usually ❌ |
+
+How this composes with the mode table above: the **mode** is the registry's per-subject
+*gate*, and this **field table** is the underlying per-change rule the mode enforces.
+BACKWARD's "delete fields" is safe precisely because of the row below — a new reader
+simply stops looking for a field that's gone, so old data still decodes.
 
 Practical rules:
 
@@ -342,6 +423,30 @@ code has never heard of.
 - In **Avro**, an enum can declare a **`default`** symbol (Avro 1.9+): if the reader
   sees a symbol not in its schema, it resolves to that default instead of erroring —
   the safe way to add enum symbols.
+
+**Worked example: the breakage in code.** Producer adds `STATUS_REFUNDED = 3` to the
+enum and starts emitting it. An old consumer compiled against `{UNSPECIFIED=0,
+PENDING=1, SHIPPED=2}` runs this strict switch:
+
+```java
+switch (order.getStatus()) {   // no default arm
+  case PENDING: reserveInventory(); break;
+  case SHIPPED: sendTracking();   break;
+  // STATUS_REFUNDED (3) matches nothing
+}                                // proto3 Java: getStatus() returns UNRECOGNIZED
+```
+
+In proto3 Java the wire value `3` deserializes to the `UNRECOGNIZED` sentinel (the raw
+int is preserved), so the switch silently falls through and the refund is **never
+processed** — a data-loss bug, not a crash. In proto2 or many strict deserializers the
+same message is **rejected at decode time**. The fix is one arm:
+
+```java
+  default: log.warn("unknown status {}", order.getStatusValue()); park(order);
+```
+
+Same idea in Avro: declare `"default":"UNKNOWN"` on the enum so an unrecognized symbol
+resolves to `UNKNOWN` instead of erroring.
 
 > [!WARNING]
 > Adding an enum value looks trivial and is one of the most common production
@@ -456,6 +561,23 @@ discipline: additive/optional changes are safe, removing/renaming/retyping requi
 fields is a breaking change, and defaults/deprecation windows are how you avoid
 lockstep upgrades. See **rest-api-design / api-versioning-and-evolution** for the
 REST side in depth.
+
+## When you must break compatibility
+
+Sometimes a change genuinely can't be made backward/forward compatible (a field
+changes meaning, a `required` type flips). In-place evolution is off the table, so
+streaming borrows the REST `/v1 → /v2` parallel-run trick:
+
+- **New topic + dual-write.** Producers write both the old topic (old schema) and a
+  new `orders.v2` topic (new schema) for a migration window. Consumers cut over topic
+  by topic; when the last old consumer is gone, stop the dual-write and retire the old
+  topic. This is the streaming analog of running `/v1` and `/v2` in parallel.
+- **Versioned envelope.** Wrap the payload in a record with a `version` field (or a
+  union of the old and new payload types) so one topic carries both shapes and
+  consumers branch on the version — useful when a second topic is too heavy.
+- **Schema references.** For shared/nested types, registries let one schema
+  **reference** another registered subject (e.g., a common `Address` record) so you
+  compose and version shared types once instead of copy-pasting them into every event.
 
 ## Common follow-up questions
 

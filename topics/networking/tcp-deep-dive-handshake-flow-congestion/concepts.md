@@ -196,6 +196,22 @@ retransmissions; too long stalls throughput after a real loss.
 - **RTO = SRTT + 4·RTTVAR**, clamped to a minimum (commonly 200 ms–1 s) and a maximum
   (≥ 60 s).
 
+The smoothing is an **EWMA** with fixed weights `α = 1/8` for SRTT and `β = 1/4` for
+RTTVAR (RFC 6298): `RTTVAR = (1−β)·RTTVAR + β·|SRTT − R|` then
+`SRTT = (1−α)·SRTT + α·R`, where `R` is the new RTT sample.
+
+**Worked example — derive an RTO.** Suppose the current estimators are `SRTT = 100 ms`,
+`RTTVAR = 20 ms`. Then `RTO = SRTT + 4·RTTVAR = 100 + 4·20 = 180 ms`.
+
+Now a new sample arrives, `R = 140 ms` (the path just got slower):
+- `RTTVAR = (1 − 1/4)·20 + (1/4)·|100 − 140| = 0.75·20 + 0.25·40 = 15 + 10 = 25 ms`
+- `SRTT   = (1 − 1/8)·100 + (1/8)·140 = 87.5 + 17.5 = 105 ms`
+- `RTO    = 105 + 4·25 = 205 ms`
+
+Note the variance term did the heavy lifting: SRTT barely moved (100→105) but the jump in
+`R` widened RTTVAR (20→25), pushing RTO up 180→205 ms. That is the point of the `4·RTTVAR`
+term — a jittery path gets a more forgiving timeout so TCP does not retransmit spuriously.
+
 **Karn's algorithm.** Do **not** take an RTT sample from a retransmitted segment — you
 cannot tell whether the ACK is for the original or the retransmission. Also apply
 **exponential backoff**: double the RTO on each successive timeout for the same segment.
@@ -264,6 +280,22 @@ buffer); the **sender** side is handled by Nagle's algorithm.
 `window ≥ bandwidth × RTT`. Because the base window field is 16 bits (max 64 KiB), the
 **Window Scale option** (RFC 7323) is essential on high-BDP ("long fat") networks.
 
+**Worked example — why 64 KiB cripples a fast link.** Take a 1 Gbps path with an 80 ms RTT
+(a typical coast-to-coast link):
+
+- `BDP = 1 Gbps × 80 ms = 125,000,000 bytes/s × 0.08 s = 10,000,000 bytes ≈ 10 MB`. You must
+  have ~10 MB in flight to keep the pipe full.
+- Without window scaling the window maxes at `65535 bytes`. The sender can put at most one
+  window in flight per RTT, then must wait for ACKs, so
+  `throughput ≤ 65535 B / 0.08 s ≈ 819,000 B/s ≈ 6.5 Mbps`.
+- That is `6.5 / 1000 ≈ 0.65%` of the 1 Gbps pipe — the link is **99.35% idle**, throttled
+  purely by a too-small window, no matter how fat the pipe.
+
+To fill 10 MB you need a shift of at least `ceil(log2(10 MB / 64 KiB)) = ceil(log2(153)) = 8`,
+so a window scale of 8 (window ×256, giving up to ~16 MB) is the minimum here. This is the arithmetic behind the
+"high-BDP link stuck at a few Mbps" bug in the follow-ups — a stripped Window Scale option
+leaves you at exactly this 6.5 Mbps ceiling.
+
 > [!TIP]
 > Flow control vs congestion control in one line: **rwnd** is set by the *receiver*
 > (don't overrun my buffer); **cwnd** is computed by the *sender* (don't overrun the
@@ -289,6 +321,38 @@ per RTT (additive increase). This gently probes for more bandwidth.
 The characteristic classic **"sawtooth"** of cwnd over time comes from AIMD: slow linear
 climb, sharp halving on loss. AIMD is what makes multiple TCP flows converge toward a
 **fair** share of a bottleneck.
+
+**Worked example — watch cwnd actually move.** Start with `IW = 10 MSS`, `ssthresh` very
+large. Trace one RTT at a time (cwnd in MSS):
+
+| RTT # | Phase | Event | cwnd (start → end) | ssthresh |
+|---|---|---|---|---|
+| 1 | Slow start | all ACKed | 10 → 20 | — |
+| 2 | Slow start | all ACKed | 20 → 40 | — |
+| 3 | Slow start | all ACKed | 40 → 80 | — |
+| 4 | Fast recovery | **3 dup ACKs at 80** | 80 → **40** | 40 |
+| 5 | Cong. avoidance | all ACKed | 40 → 41 | 40 |
+| 6 | Cong. avoidance | all ACKed | 41 → 42 | 40 |
+| … | Cong. avoidance | +1 MSS/RTT | climbs linearly | 40 |
+
+At RTT 4 the loss is *mild* (dup ACKs, network still delivering), so
+`ssthresh = cwnd/2 = 40` and `cwnd = ssthresh = 40` — one sharp halving, then a slow linear
+climb: that is one tooth of the sawtooth. **Contrast the RTO branch:** if instead an RTO
+fired at cwnd=80, `ssthresh = 40` but `cwnd` collapses to **1 MSS** and slow start restarts
+(1 → 2 → 4 → 8 → 16 → 32 → hits ssthresh=40 → linear from there). A timeout is far more
+expensive than three dup ACKs — that gap is exactly why fast retransmit and RACK-TLP exist.
+
+```
+cwnd (MSS)
+ 80 |        /|
+    |       / |            /|
+ 40 |      /  +---+       / +---+      (dup-ACK loss: halve to ssthresh, then +1/RTT)
+    |     /       \      /
+    |    /(slow    \    /(sawtooth)
+  1 |___/  start)___\__/________________ time
+        ^exp ramp   ^loss
+```
+
 
 **Loss-based vs signal.** Classic (Reno/NewReno/CUBIC) congestion control treats **packet
 loss** as the congestion signal. **ECN** (RFC 3168) lets routers mark packets instead of
@@ -324,6 +388,19 @@ they overflow.
 | Reno / NewReno | Loss | Classic AIMD sawtooth |
 | CUBIC | Loss | Linux default; RTT-independent cubic growth |
 | BBR | Bandwidth + RTT model | Paces to BDP; fights bufferbloat; fairness caveats |
+
+**Which to pick.**
+- **CUBIC** — the safe default: loss-based, provably fair with other CUBIC/Reno flows, and
+  scales well on high-BDP WAN paths. Pick it for general internet traffic sharing a public
+  bottleneck where you cannot assume everyone runs the same algorithm.
+- **BBR** — pick it on **lossy, high-latency paths** (mobile/wireless, cross-continent
+  video) where random loss ≠ congestion, so loss-based controllers needlessly throttle.
+  Give up: fairness on a shared *classic* bottleneck (BBRv1 can starve CUBIC — prefer
+  BBRv2/v3, which add a loss/ECN response).
+- **DCTCP / L4S (TCP Prague)** — only inside a **controlled, ECN-enabled fabric**
+  (datacenter, or an L4S/DualQ-provisioned path). They assume fine-grained ECN marking that
+  the classic public internet does not provide, so deploying them end-to-end over the open
+  internet is not yet safe.
 
 ## Head-of-Line Blocking
 
@@ -446,15 +523,19 @@ path is effectively *slow start → HyStart++ exit → CUBIC congestion avoidanc
 
 Classic TCP is **ACK-clocked**: new data is sent only as ACKs return, so the sending rate
 is self-limited by the returning ACK stream. The problem is **burstiness** — a large cwnd,
-TSO/GSO segmentation offload, or a burst of ACKs after a stretch ACK can release many
-segments back-to-back (a **micro-burst**), overrunning a shallow buffer and causing loss
-even when the average rate is fine.
+**TSO/GSO** (TCP/Generic Segmentation Offload — the kernel/NIC hands off one large buffer
+that is split into MSS-sized segments and sprayed out in a burst), or a burst of ACKs after
+a **stretch ACK** (a single ACK that covers many segments at once, releasing that whole
+amount of new data instantly) can release many segments back-to-back (a **micro-burst**),
+overrunning a shallow buffer and causing loss even when the average rate is fine.
 
 **Pacing** spreads a congestion window's worth of packets evenly over the RTT
 (inter-packet gap ≈ RTT / cwnd) instead of firing them in a clump. Pacing is **fundamental
 to BBR**, which computes an explicit sending rate (`pacing_gain × bottleneck bandwidth`)
 and paces to it; without pacing, BBR's model-based rate would still arrive as bursts.
-Linux implements pacing via the `fq` qdisc or internal TCP pacing. The mental model:
+Linux implements pacing via the `fq` **qdisc** (queueing discipline — the kernel's packet
+scheduler for an interface; `fq` is the fair-queue scheduler that spaces departures) or
+internal TCP pacing. The mental model:
 ACK-clocking reacts to the network's feedback loop; pacing proactively shapes the
 departure process so the feedback loop never sees a burst.
 
@@ -562,15 +643,36 @@ W_cubic(t) = C · (t − K)³ + W_max
 ```
 
 where `W_max` is the window at the last reduction, `C = 0.4` is a fixed scaling constant,
-and `K = cbrt(W_max · β / C)` is the time it takes to climb back to `W_max`. The
-multiplicative decrease factor is **β_cubic = 0.7** (window kept at 70% on loss, versus
-Reno's 0.5). The curve has three regions: a **concave** region as it approaches `W_max`
+and `K = cbrt(W_max · (1 − β) / C)` is the time it takes to climb back to `W_max`. The
+multiplicative decrease factor is **β_cubic = 0.7** (window *kept* at 70% on loss, versus
+Reno's 0.5), so the *reduction* fraction that appears in `K` is `1 − β = 0.3`. (Be careful:
+some texts define β as the reduction fraction 0.3 and write `K = cbrt(W_max · β / C)` — same
+formula, different naming. Here β is the retention factor 0.7, so we use `1 − β`.) The curve has three regions: a **concave** region as it approaches `W_max`
 (cautious near the last loss point), a **convex** region above `W_max` (aggressive probing
 into new bandwidth), and a **Reno-friendly** region where CUBIC tracks an estimated Reno
 window `W_est` so it does not lose to Reno on low-BDP paths. A **fast convergence**
 heuristic lowers `W_max` further when consecutive losses show the available bandwidth
 dropped, helping new flows grab their share faster. Because `t` is wall-clock time, growth
 is **RTT-independent**.
+
+**Worked example — plug numbers into the cubic.** Say the last loss happened at
+`W_max = 80 MSS`. On that loss the window drops to `β·W_max = 0.7·80 = 56 MSS`. The time to
+climb back to `W_max` is
+`K = cbrt(W_max·(1−β)/C) = cbrt(80·0.3/0.4) = cbrt(60) ≈ 3.9 s`. Now evaluate
+`W_cubic(t) = 0.4·(t − 3.9)³ + 80`:
+
+| t (s since loss) | W_cubic | Region |
+|---|---|---|
+| 0 | `0.4·(−3.9)³ + 80 = 0.4·(−59.3) + 80 ≈ 56` | concave — cautious, just above the reset point |
+| 3.9 (= K) | `0.4·0 + 80 = 80` | inflection — back at W_max |
+| 6.0 | `0.4·(2.1)³ + 80 = 0.4·9.26 + 80 ≈ 84` | convex — probing aggressively for new bandwidth |
+
+So CUBIC spends the first ~4 s crawling from 56 back up to 80 (concave, gentle near the
+danger zone), then accelerates past 80 (convex). **Contrast Reno on the same 3.9 s:** Reno
+adds ~1 MSS/RTT, so on a 100 ms RTT it climbs 56 → 56 + 39 ≈ 95 MSS in that window — but on
+a 200 ms WAN RTT it climbs only 56 → 56 + ~20 ≈ 76. CUBIC's curve reaches 80 at t≈3.9 s
+*regardless of RTT* (it reads wall-clock `t`, not ACK arrivals), which is exactly what
+"RTT-independent, fairer to high-latency flows" means.
 
 **BBR versions.**
 - **BBRv1** builds a model of two quantities: **BtlBw** (bottleneck bandwidth, the max
@@ -636,9 +738,12 @@ that strips the option from the SYN** silently disables scaling and caps through
 64 KiB/RTT — a classic "high-BDP link stuck at a few Mbps" bug that a packet capture reveals
 by the missing option.
 
-**Sequence wrap and PAWS.** The sequence space is 32 bits ≈ 4 GiB. At high rates it wraps
-fast: roughly **17 s at 1 Gbps**, and **sub-second at 10–100 Gbps** — potentially within one
-MSL, so an old delayed segment could be mistaken for new data. **PAWS** uses the
+**Sequence wrap and PAWS.** The sequence space is 32 bits ≈ 4 GiB. At 1 Gbps (125 MB/s) the
+full `2³² ≈ 4 GiB` space wraps in `4 GiB / 125 MB/s ≈ 34 s`; but PAWS guards the
+`2³¹ ≈ 2 GiB` *half*-space (a segment is treated as old once its sequence number is more
+than half the space behind), which wraps in `≈ 17 s`. At 10–100 Gbps this drops to
+**sub-second** — potentially within one MSL, so an old delayed segment could be mistaken for
+new data. **PAWS** uses the
 **Timestamps option (TSval/TSecr)** to reject any segment whose timestamp is older than what
 has already been seen. The very same Timestamps option **doubles as the RTT clock** for
 SRTT/RTTVAR estimation — which is why window scaling, timestamps, and PAWS all live together

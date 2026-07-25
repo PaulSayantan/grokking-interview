@@ -126,6 +126,20 @@ Its purpose is to prove the server actually understands WebSocket (and to defend
 caching proxies / cross-protocol attacks replaying a plain HTTP response). `Sec-WebSocket-
 Version: 13` is the only version defined by RFC 6455.
 
+**Worked example — deriving the canonical accept value.** Take the exact key from the request
+above and run the three steps (this reproduces RFC 6455 §1.3's own example):
+
+1. **Concatenate** key + GUID into one string (no separator):
+   `dGhlIHNhbXBsZSBub25jZQ==258EAFA5-E914-47DA-95CA-C5AB0DC85B11`
+2. **SHA-1** that ASCII string → a 20-byte digest, in hex:
+   `b3 7a 4f 2c c0 62 4f 16 90 f6 46 06 cf 38 59 45 b2 be c4 ea`
+3. **Base64-encode** those 20 bytes (20 bytes → ceil(20/3)=7 groups → 28 chars incl. one `=`
+   pad) → `s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`
+
+That final string is exactly the `Sec-WebSocket-Accept` the server returns. Note the client
+never encrypts anything — any observer can compute the same value, which is why it's an
+"understands-the-protocol" proof, not authentication.
+
 Key facts interviewers probe:
 
 - Status **101**, not 200. The `Connection: Upgrade` + `Upgrade: websocket` header pair is
@@ -196,6 +210,24 @@ Fields:
   length is the next 16 bits; **127** means the next 64 bits. This variable-length scheme
   keeps small frames tiny.
 
+**Worked example — reading the first bytes of real frames.** The first byte packs FIN + RSV +
+opcode; the second packs MASK + the 7-bit length. Trace three unmasked server→client text
+frames (opcode `0x1`):
+
+- **5-byte payload "Hello"** → first byte `0x81` = `1000 0001` = FIN=1, RSV=000, opcode=`0x1`
+  (text); second byte `0x05` = MASK=0, len=5 (fits in 0–125, no extended field). Wire:
+  `81 05 48 65 6C 6C 6F`.
+- **200-byte payload** → 200 doesn't fit in 7 bits, so len=**126** and the *real* length rides
+  in the next 16 bits, big-endian: 200 = `0x00C8`. Wire header: `81 7E 00 C8` then 200 payload
+  bytes. (`0x7E` = `0111 1110` = MASK=0, len-field=126.)
+- **70,000-byte payload** → exceeds 65,535, so len=**127** and the length is the next 64 bits:
+  70000 = `0x00 00 00 00 00 01 11 70`. Wire header: `81 7F 00 00 00 00 00 01 11 70` then the
+  payload.
+
+So the 7-bit field is a *sentinel*, not always the length: values 126/127 say "the length is
+elsewhere." A client→server frame would flip the MASK bit (e.g. second byte `0x85` instead of
+`0x05`) and insert the 4-byte masking key before the payload.
+
 **Masking.** Every frame sent **client→server MUST be masked**: the payload is XORed with a
 random 32-bit key that changes per frame. Server→client frames MUST NOT be masked. Masking
 exists to defend intermediaries (proxies/caches) against **cache-poisoning attacks** where
@@ -205,6 +237,23 @@ confidentiality — use `wss://`/TLS for that.
 The exact transform (RFC 6455 §5.3) is per-octet:
 `transformed[i] = original[i] XOR masking-key[i mod 4]`, where the masking key is 32 bits
 drawn fresh **from a strong RNG for every frame** (a predictable key defeats the purpose).
+
+**Worked example — masking "Hello".** Payload `48 65 6C 6C 6F` ("Hello"), masking key
+`37 FA 21 3D`. XOR each byte with `key[i mod 4]`:
+
+| i | original | key[i mod 4] | XOR → masked |
+|---|---|---|---|
+| 0 | `0x48` | `0x37` | `0x7F` |
+| 1 | `0x65` | `0xFA` | `0x9F` |
+| 2 | `0x6C` | `0x21` | `0x4D` |
+| 3 | `0x6C` | `0x3D` | `0x51` |
+| 4 | `0x6F` | `0x37` (key wraps: 4 mod 4 = 0) | `0x58` |
+
+Masked payload on the wire: `7F 9F 4D 51 58`. The full client frame is
+`81 85 37 FA 21 3D 7F 9F 4D 51 58` (`0x85` = MASK=1, len=5; then the 4 key bytes; then the
+masked payload). The server unmasks by XOR-ing with the *same* key — XOR is its own inverse, so
+`0x7F XOR 0x37 = 0x48` ("H") again, recovering "Hello". This is the canonical RFC 6455 §5.7
+example.
 The concrete attack masking defends against is the **transparent-proxy cache-poisoning /
 request-smuggling** vector demonstrated in the "Talking to Yourself for Fun and Profit"
 research: without an unpredictable mask, a client could upgrade and then emit bytes that a
@@ -395,8 +444,15 @@ Security and resource trade-offs:
 - **CRIME/BREACH-style leak.** Because context takeover lets the compressed size of a message
   depend on *previously seen bytes*, an attacker who can inject partial content and **observe
   ciphertext/compressed size** can infer secrets (a guess that matches earlier bytes compresses
-  smaller). Mitigate by disabling context takeover (`*_no_context_takeover`) on sensitive
-  streams, or not compressing attacker-influenced-plus-secret data together.
+  smaller). *Concrete illustration:* suppose the window already contains the secret
+  `token=SECRET`. The attacker gets the app to compress a message containing their guess. If
+  they inject `token=SECR`, DEFLATE finds that 10-byte run already in the window and replaces it
+  with a short back-reference — say the frame is **42 bytes**. If they instead inject the wrong
+  `token=SECX`, only `token=SEC` matches, the back-reference is one byte shorter, and the frame
+  is **43 bytes**. That single-byte size difference leaks "the 5th char is R," so the attacker
+  recovers the secret one character at a time just by watching frame sizes. Mitigate by
+  disabling context takeover (`*_no_context_takeover`) on sensitive streams, or not compressing
+  attacker-influenced-plus-secret data together.
 - **Decompression bomb / amplification DoS.** A tiny compressed frame can inflate to a huge
   payload — cheap for the attacker, expensive for you. Bound the **decompressed** size and the
   window (`*_max_window_bits`), and enforce a max message size (close 1009).
@@ -611,6 +667,13 @@ Key challenges and standard techniques:
   consumes a file descriptor and some memory; a single server can hold hundreds of
   thousands of *idle* connections only with an event-driven / async I/O model
   (epoll/kqueue), not thread-per-connection. This ties back to socket I/O multiplexing.
+  *Capacity math to anchor it:* budget ~**10 KB** of app+kernel memory per idle WebSocket
+  (send/receive buffers + per-connection bookkeeping; real numbers vary). Then **100k
+  connections ≈ 100,000 × 10 KB ≈ 1 GB** of RAM just to *hold* them idle, before any message
+  traffic — and you must also raise the file-descriptor `ulimit` (default is often 1024) above
+  100k. That's why the scaling conversation is about **connection count and memory**, not
+  requests/second: a box doing near-zero request rate can still fall over at ~1M connections
+  purely on RAM and fds.
 - **Load balancing**: L4 (TCP) LBs pass WebSocket through transparently. L7 LBs must be
   configured to forward the `Upgrade`/`Connection` headers and to allow long-lived
   connections (raise idle timeouts). Sticky routing isn't strictly required per connection
@@ -620,6 +683,29 @@ Key challenges and standard techniques:
   (e.g. a Redis pub/sub, Kafka, or a NATS/message broker); each node delivers only to the
   connections it locally owns. This decouples "who is connected where" from "who needs the
   message."
+
+  *Traced message path* — user **A** (socket on node 1) posts to room 42, where **B** (socket on
+  node 3) and **C** (socket on node 2) are listening:
+
+  1. A's frame arrives at **node 1**. Node 1 has no socket for B or C, so it doesn't try to
+     deliver directly — it `PUBLISH`es the message to the pub/sub channel **`room:42`**.
+  2. Every app node is `SUBSCRIBE`d to `room:42`, so nodes 1, 2, and 3 all *receive* the
+     published message from the bus.
+  3. Each node writes the frame **only to its own local sockets** for room 42: node 3 writes to
+     B, node 2 writes to C, node 1 writes to nobody else (A was the sender). No node needs a
+     global map of "who is where" — the bus does the fan-out.
+
+```mermaid
+flowchart LR
+  A["Client A"] --> N1["App node 1"]
+  B["Client B"] --> N3["App node 3"]
+  C["Client C"] --> N2["App node 2"]
+  N1 -- "PUBLISH room:42" --> BUS[("Pub/sub bus<br/>Redis / Kafka / NATS")]
+  BUS -- "deliver" --> N2
+  BUS -- "deliver" --> N3
+  N3 -- "write frame" --> B
+  N2 -- "write frame" --> C
+```
 - **Delivery semantics across the backplane**: decide **at-most-once** (fire-and-forget over
   pub/sub — a message published while B is mid-reconnect is simply lost) vs **at-least-once**
   (persist to a durable log/stream and replay on reconnect, which forces consumers to be

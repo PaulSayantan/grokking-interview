@@ -174,6 +174,16 @@ game netcode, and reliable-UDP libraries. The key idea: you pick your reliabilit
 semantics (fully reliable, partially reliable, unreliable-but-ordered, etc.) rather than
 being locked into TCP's one-size-fits-all model.
 
+> [!WARNING]
+> **When NOT to hand-roll reliable UDP.** If you need the *full* TCP feature set —
+> reliability, in-order delivery, and congestion control — do **not** reinvent it on raw
+> UDP. You will rebuild TCP badly: naive schemes skip RTT/RTO tuning and Karn's algorithm
+> (so timeouts are wrong), skip congestion control (so you risk the congestion collapse
+> RFC 8085 exists to prevent), and mishandle reordering/duplicates. Reach for **QUIC** or a
+> mature reliable-UDP library instead. Hand-rolling only pays off when you genuinely need
+> *partial* reliability that TCP/QUIC don't offer (e.g. drop-late-packet media, FEC-based
+> recovery, or app-specific ordering) — otherwise the right answer is often just TCP.
+
 ## UDP vs. TCP trade-off table
 
 | Dimension | UDP | TCP |
@@ -227,7 +237,14 @@ What QUIC provides (things UDP itself lacks):
 - Reliable, ordered delivery **per stream**, with retransmission and congestion control.
 - **Stream multiplexing without head-of-line blocking** — independent streams over one
   connection; a loss on one stream doesn't stall the others (TCP's fatal flaw for HTTP/2
-  multiplexing).
+  multiplexing). **Concrete trace of the HoL stall:** HTTP/2 multiplexes stream A (a big
+  image) and stream B (a small CSS file) over one TCP connection. Say bytes arrive in TCP
+  segments `[A1] [A2] [B1] [A3]`, and `[A2]` is lost in flight. `[B1]` and `[A3]` *have
+  already arrived* and sit in the kernel's receive buffer — but TCP guarantees **in-order
+  byte delivery**, so it will not hand *any* bytes past the gap up to the application until
+  `[A2]` is retransmitted (one RTT later). Stream B's CSS is stuck behind stream A's loss
+  even though they share no data. QUIC fixes this because loss recovery is **per-stream**:
+  B's bytes are delivered the instant they arrive, regardless of A's missing segment.
 - **Integrated TLS 1.3** — encryption and the transport handshake are combined, giving
   **1-RTT** (and **0-RTT** for resumed) connection setup versus TCP+TLS's multiple RTTs.
 - **Connection IDs** — a connection survives an IP/port change (e.g. Wi-Fi ↔ cellular)
@@ -372,14 +389,41 @@ Deeper mechanics behind the checksum field:
   permit a **zero UDP checksum only for specific tunnel/encapsulation** use in controlled
   environments, and it must be explicitly enabled per destination port.
 
+**Worked example — sum two words, fold the carry, complement.** Say the words to protect
+are just `0xF3D2` and `0x1E4C` (in a real datagram this stream includes the pseudo-header,
+UDP header, and payload, but the arithmetic is identical).
+
+1. **Add them as plain 16-bit integers:** `0xF3D2 + 0x1E4C = 0x1121E`. That's a **17-bit**
+   result — the leading `1` is a carry-out of the top bit.
+2. **End-around carry:** fold the carry back into the low bit: `0x121E + 0x1 = 0x121F`.
+   (One's-complement addition never lets a carry escape; it always comes back around.)
+3. **One's complement (flip every bit):** `~0x121F = 0xFFFF − 0x121F = 0xEDE0`. That
+   `0xEDE0` is the checksum written into the header.
+
+Now the **receiver** re-sums *everything including the checksum field*:
+`0x121F (the data words, already folded) + 0xEDE0 = 0xFFFF`. No carry, and the result is
+**all-ones (0xFFFF)** — the signal "intact." (Equivalently, complementing that `0xFFFF`
+gives `0x0000`, the "sum checks out" value.) Flip a single bit anywhere and the receiver's
+sum lands somewhere other than `0xFFFF`, so the datagram is silently dropped.
+
+This also explains the **`0 → 0xFFFF` rule**: if the computed complement had come out to
+exactly `0x0000`, it would collide with the reserved "checksum disabled" value, so it's
+transmitted as `0xFFFF` instead. In one's-complement math `0x0000` and `0xFFFF` are the two
+representations of zero (positive and negative zero), so the swap is arithmetically free —
+the receiver's verification still works.
+
 ## GSO, GRO, and batched syscalls
 
 Scaling UDP throughput is a real staff-level topic.
 
 - **UDP_SEGMENT (Generic Segmentation Offload).** The application hands the kernel one
-  large "super-buffer" plus a segment size; the kernel/NIC slices it into up to **64**
-  MTU-sized datagrams on the way out. This amortizes the per-datagram stack traversal.
-  (Linux ≥ 4.18.)
+  large "super-buffer" plus a segment size; the kernel/NIC slices it into MTU-sized
+  datagrams on the way out, amortizing the per-datagram stack traversal. (Linux ≥ 4.18.)
+  The segment count is **bounded by the ~64 KB super-buffer ÷ segment size**, so "up to 64
+  segments" is an approximation, not a hard universal cap: at a 1448-byte payload you get
+  `65535 ÷ 1448 ≈ 45` segments, and you only approach ~64 with *smaller* segments. Treat
+  Cloudflare's reported **~900k → ~15k syscalls/sec** below as an illustrative figure from
+  one QUIC deployment, not a fixed guarantee.
 - **GRO (Generic Receive Offload).** On RX, consecutive same-flow datagrams are coalesced
   into one larger buffer handed up the stack, cutting per-packet cost.
 - **sendmmsg / recvmmsg.** Send or receive **many datagrams in one syscall**. Real-world
@@ -409,8 +453,21 @@ the real attacker, aim traffic at the victim) + **amplification** (reply ≫ req
 | SSDP | 1900 | ~30× | M-SEARCH |
 | SNMP | 161 | ~6× | GetBulk |
 
-- The **2018 GitHub 1.35 Tbps** attack used **memcached reflection** — the record at the
-  time.
+**Worked example — turning a BAF into attacker leverage.** Take NTP `monlist` (BAF ≈ 556×):
+
+1. The attacker sends a **60-byte** `monlist` request to a public NTP server, but **spoofs
+   the source IP** to the victim's address.
+2. The server dutifully replies to the "requester" (the victim) with a `monlist` dump of
+   ~`60 × 556 ≈ 33,360 bytes` (~33 KB), split across several packets.
+3. Now scale the *request* stream. The attacker only needs to source **1 Gbps** of these
+   tiny spoofed requests. Each request byte becomes ~556 reply bytes, so the victim is hit
+   with ~`1 Gbps × 556 = 556 Gbps` — from an attacker who never needed a 556 Gbps uplink.
+
+The reflection hides the attacker (the victim sees traffic from legitimate NTP servers, not
+the attacker) and the amplification is the force multiplier. Memcached pushes this to the
+extreme: at **~51,000×**, a mere `~26 Mbps` of spoofed 15-byte requests becomes ~1.3 Tbps —
+which is exactly the shape of the **2018 GitHub 1.35 Tbps** attack, the record at the time,
+built on **memcached reflection**.
 - **Mitigations to name:**
   - **BCP 38 / RFC 2827** (ingress filtering / **Source Address Validation, SAV**) and
     **BCP 84 / RFC 3704** — networks drop packets whose source address couldn't legitimately
@@ -434,6 +491,14 @@ security and ossification problems.
   that client. This is precisely how QUIC avoids becoming a UDP reflector during its own
   handshake — contrast open DNS/NTP resolvers that will happily amplify. Address is
   validated either by completing the handshake or via a **Retry** token round-trip.
+  **Worked example of the budget:** the client's Initial packet is padded to the mandatory
+  **1200-byte** minimum, so before validation the server may send at most `3 × 1200 =
+  **3600 bytes**`. A ServerHello plus the certificate chain routinely exceeds that (a chain
+  with an intermediate can be several KB), so the server runs out of budget mid-handshake
+  and must **stop and wait** for the client's next packet (which extends the budget), or
+  force a **Retry** to validate the address up front. This is the deliberate cap that keeps
+  a QUIC server from being turned into a 3600-byte reflector by a single 1200-byte spoofed
+  Initial (a ~3× ceiling, versus the ~556× or ~51,000× of an open NTP/memcached box).
 - **Connection IDs decouple identity from the 4-tuple (RFC 9000 §5).** A CID identifies the
   connection independently of source/dest IP+port, enabling **connection migration** (Wi-Fi
   ↔ LTE) **and** server-side routing: a **load balancer can encode routing info into the

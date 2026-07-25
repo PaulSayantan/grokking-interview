@@ -182,6 +182,24 @@ the code to a secret the legitimate client generated, so a stolen code is useles
 
 **The exchange (conceptually):**
 
+```mermaid
+sequenceDiagram
+    participant U as User-Agent (browser)
+    participant C as Client (app)
+    participant AS as Authorization Server
+    participant RS as Resource Server (API)
+    C->>C: gen code_verifier; challenge=base64url(SHA256(verifier))
+    C->>AS: /authorize?...&code_challenge=E9Mel...&method=S256&state=xyz
+    Note over AS: stores challenge against issued code
+    AS->>U: login + consent
+    AS-->>C: 303 redirect ?code=Splxl...&state=xyz
+    C->>AS: POST /token code=Splxl... + code_verifier=dBjft...
+    Note over AS: recompute SHA256(verifier)==stored challenge?
+    AS-->>C: access_token (+ refresh_token)
+    C->>RS: GET /orders  Authorization: Bearer <access_token>
+    RS-->>C: 200 (after validating token + object-level authz)
+```
+
 1. Client generates a random **`code_verifier`** and its SHA-256 hash,
    **`code_challenge`** (`S256` method — `plain` is discouraged).
 2. Redirect the user to the authorization server's `/authorize`:
@@ -191,7 +209,9 @@ the code to a secret the legitimate client generated, so a stolen code is useles
        &client_id=s6BhdRkqt3
        &redirect_uri=https://app.example.com/cb
        &scope=read:orders write:orders
-       &state=xyz&code_challenge=E9Melhoa...&code_challenge_method=S256
+       &state=xyz
+       &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+       &code_challenge_method=S256
    ```
 3. User authenticates and consents; the AS redirects back with a one-time
    `code` (and echoes `state` — a CSRF guard the client must verify).
@@ -203,7 +223,8 @@ the code to a secret the legitimate client generated, so a stolen code is useles
 
    grant_type=authorization_code&code=SplxlOB...
    &redirect_uri=https://app.example.com/cb
-   &client_id=s6BhdRkqt3&code_verifier=dBjftJeZ4CVP...
+   &client_id=s6BhdRkqt3
+   &code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk
    ```
 5. AS returns tokens:
 
@@ -212,6 +233,28 @@ the code to a secret the legitimate client generated, so a stolen code is useles
      "expires_in": 300, "refresh_token": "def502...",
      "scope": "read:orders write:orders" }
    ```
+
+**Worked example — how the verifier binds to the challenge (S256).** Take the
+real RFC 7636 test vector so you can see the two values above are *not*
+unrelated placeholders — they are a hash pair:
+
+```
+code_verifier  = dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk   (43-char random, step 1)
+                 │
+                 ▼  SHA-256 over the ASCII bytes → 32 raw bytes
+digest (hex)   = 13d31e96...cb70f9c3  (32 raw bytes, abbreviated)
+                 │
+                 ▼  base64url-encode, strip '=' padding
+code_challenge = E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM   (sent to /authorize, step 2)
+```
+
+The AS stores `code_challenge` alongside the issued `code`. At `/token` (step 4)
+the client sends the raw `code_verifier`; the AS recomputes
+`base64url(SHA256(verifier))` and checks it **equals the stored challenge**. An
+attacker who intercepted only the `code` never had the verifier, and
+`SHA256(anything-else)` won't reproduce `E9Melhoa...`, so the stolen code is
+dead. (With `plain` the "challenge" *is* the verifier, so anyone who saw the
+`/authorize` URL could replay it — that's why `S256` is the norm.)
 
 **Gotchas.** `state` (CSRF) and PKCE (code-injection) protect *different*
 things — you need both. The implicit grant, which returned tokens directly in
@@ -330,6 +373,26 @@ revocation/replay). The signature (JWS) lets the resource server verify
 integrity **without calling the authorization server** — that's the headline
 benefit: **stateless, self-contained validation**.
 
+**Worked example — decode the header yourself.** Take the first segment of the
+token in the `Authorization` example above (everything before the first dot):
+
+```
+eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9
+```
+
+Base64URL-decode it (no key required — this is *encoding*, not encryption):
+
+```
+$ echo 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9' | base64 -d
+{"alg":"RS256","typ":"JWT"}
+```
+
+Anyone on the wire can do the identical thing to the **payload** segment and
+read every claim — `sub`, `scope`, `email`, whatever you put there. The
+signature stops *tampering*, not *reading*. That is why a "readable JWT" is
+fine for `sub`/`scope` but a breach if you ever park a password, API key, or PII
+in a claim: use JWE if the payload must stay secret.
+
 > [!WARNING]
 > "Bearer" ≠ "JWT". A bearer token can be an opaque random string *or* a JWT.
 > And **JWT ≠ encrypted** — a signed JWT (JWS) is only Base64-encoded and fully
@@ -373,6 +436,24 @@ grant_type=refresh_token&refresh_token=def502...&client_id=s6BhdRkqt3
 refresh token and invalidates the old one. If a stolen refresh token is reused
 after the legitimate client already rotated it, the AS detects the reuse
 (replay) and revokes the whole token family — a key defense for public clients.
+
+**Worked example — reuse detection revoking the family.** All tokens below
+descend from one login, so the AS tracks them as one *family*:
+
+1. Legit client refreshes with **R1** → AS marks R1 *consumed*, issues **R2**.
+   The client now holds R2; R1 is spent.
+2. An attacker who earlier stole **R1** replays it: `grant_type=refresh_token&refresh_token=R1`.
+3. The AS looks up R1, sees it is **already consumed** — a refresh token should
+   only ever be used once, so a second use means the family leaked. It
+   **revokes the entire family** (R1, R2, and any access tokens minted from
+   them).
+4. Both the attacker *and* the honest client are now logged out; the honest
+   client's next R2 refresh fails and it must re-authenticate.
+
+The trade-off to name aloud: reuse detection can log out the *honest* user (a
+false positive from the user's point of view), but that is accepted on purpose —
+a duplicated refresh token means one copy was compromised, and forcing a fresh
+login is far cheaper than letting an attacker mint tokens indefinitely.
 
 **Gotchas.** A refresh token should **never** be sent to the resource server —
 only to the AS. Client-credentials tokens get **no** refresh token (just
@@ -460,6 +541,20 @@ are simpler; HMAC signing is stronger against interception and tampering.
 **Gotcha.** Clock skew breaks signing: if the client clock drifts beyond the
 allowed window, every request fails with an auth error — a classic
 hard-to-diagnose production incident.
+
+**Worked example — the skew check.** The request carries
+`X-Amz-Date: 20260719T120000Z`. The server compares it to *its own* clock and
+rejects if the gap exceeds the ~5-minute window:
+
+```
+server clock = 20260719T120400Z → |gap| = 4 min ≤ 5 → ACCEPT (verify signature)
+server clock = 20260719T120600Z → |gap| = 6 min >  5 → REJECT 403 (RequestTimeTooSkewed)
+```
+
+Note the timestamp is *inside* the signed canonical request, so the client
+can't just backdate the header to widen the window — changing `X-Amz-Date`
+changes the signature. The fix in production is NTP on both ends, not a wider
+window.
 
 ---
 
@@ -593,7 +688,21 @@ Auth is where APIs bleed. The 2023 list's top entries are almost all authN/authZ
   it unsigned. Always pin the expected algorithm server-side.
 - **Algorithm-confusion (RS256→HS256)** — attacker flips an RS256 token to HS256
   and signs it with the *public* key (which the server then uses as an HMAC
-  secret). Reject unexpected `alg`s.
+  secret). Reject unexpected `alg`s. *Why it works, in 3 steps:*
+  1. The server intends **RS256**: it signs with its private key and verifies
+     with a matching **public** key that it *publishes* (JWKS) — public by
+     design, so the attacker has it verbatim.
+  2. The attacker crafts a token with header `{"alg":"HS256"}`, sets any claims
+     they want, and computes the signature as
+     `HMAC-SHA256(key = <the PEM/JWK bytes of the public key>, header.payload)`.
+  3. A naive verifier reads `alg` **from the token**, sees `HS256`, and calls
+     `verify(token, publicKey)`. The HMAC branch treats those same public-key
+     bytes as the shared secret, recomputes the HMAC over `header.payload`, and
+     it **matches** the attacker's — forgery accepted. The attacker signed with
+     the exact bytes the server verifies with.
+  - **Fix:** never let the token pick the algorithm — allow-list `alg` to
+    `["RS256"]` server-side, so an `HS256` token is rejected before any key is
+    loaded. (Asymmetric-only setups can't be tricked this way at all.)
 - **Not verifying `exp`, `aud`, `iss`** — accepting expired tokens, or tokens
   minted for a different API (`aud` mismatch enables cross-service replay).
 - **Trusting claims without checking the signature**, or fetching the signing key
@@ -813,12 +922,20 @@ hard to revoke) with two gateway patterns:
 
 ## DPoP: sender-constrained tokens
 
+A plain bearer token is a **movie ticket anyone can use** — steal it and you're
+in. A DPoP-bound token is a ticket that **only works if you also show the
+matching ID you registered at the door**: on every request the caller must prove
+they still hold a private key, and the token itself was stamped with that key's
+fingerprint. That is what "sender-constrained" means — the token is welded to
+one holder.
+
 mTLS cert-binding (RFC 8705) proves possession for backend/PKI clients, but is
 impractical for SPAs and native apps. **DPoP — Demonstrating Proof-of-Possession
 (RFC 9449)** is the **application-layer** answer: it makes a token
 **sender-constrained** so a stolen/leaked token is useless without the client's
 private key. This is the canonical 2025 answer to "how do you stop token replay
-without mTLS?"
+without mTLS?" (A **JWK thumbprint**, used below, is just a SHA-256 fingerprint
+of the public key — a short stable ID for "which key.")
 
 **How it works.** The client holds a key pair and sends a per-request **DPoP
 proof JWT** in a `DPoP` header:
@@ -834,6 +951,38 @@ putting the JWK thumbprint in the token's confirmation claim:
 **`cnf.jkt`** (JWK SHA-256 thumbprint). The RS recomputes the thumbprint of the
 proof's `jwk` and checks it equals `cnf.jkt`. The `dpop_jkt` authorization-request
 parameter can bind the *authorization code* to the key too.
+
+**Worked example — one request, three checks.** The client calls
+`GET https://api.example.com/orders` and attaches two headers:
+
+```
+Authorization: DPoP eyJ...            # the access token, cnf.jkt = "0ZcOCORZ...Nk"
+DPoP:          eyJ0eXAiOiJkcG9wK2p3dCIsImp3ayI6ey...   # the per-request proof
+```
+
+Decode the proof JWT and the RS verifies:
+
+```
+proof.header:  { "typ":"dpop+jwt", "alg":"ES256",
+                 "jwk": { <the client's PUBLIC key> } }
+proof.payload: { "htm":"GET",
+                 "htu":"https://api.example.com/orders",
+                 "iat": 1737330900,
+                 "jti": "e1b2...unique",
+                 "ath": "sIyREHWzX7z...IkE" }   # base64url(SHA256(access token))
+```
+
+1. **Key match:** RS computes the JWK thumbprint of `proof.header.jwk` (i.e.
+   `base64url(SHA-256(canonical jwk))`) and checks it equals the token's `cnf.jkt`
+   (`0ZcOCORZ...Nk`) — thumbprint compared to thumbprint, not hashed again. A thief who copied only the
+   two headers can't forge a fresh proof — they lack the private key that signs it.
+2. **Request match:** `htm`/`htu` must equal the actual method+URL — a proof
+   captured for `GET /orders` can't be replayed against `POST /transfers`.
+3. **Token match:** `ath` must equal `base64url(SHA256(<this access token>))`, so
+   the proof is welded to that exact token, not any token the client holds.
+
+Reused `jti` or stale `iat` (outside the acceptance window) → rejected, which is
+what kills replay of a captured proof.
 
 **Nonce.** To stop pre-generated proofs, the server can demand a server-chosen
 nonce via the **`DPoP-Nonce`** response header and the **`use_dpop_nonce`** error

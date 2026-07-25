@@ -14,6 +14,15 @@ double-checked locking, `final` field semantics, and false sharing.
 
 ## The Java Memory Model and happens-before
 
+**Intuition first.** Think of happens-before as a *delivery guarantee*, not a stopwatch. If
+action X happens-before action Y, then everything X did is "packaged and delivered" to Y —
+Y is guaranteed to see it. Crucially the delivery can be lazy and the packing reordered: the
+JMM does **not** promise X ran earlier in wall-clock time, only that *when* an hb edge exists,
+Y cannot observe a state older than X's. No hb edge means no delivery promise — Y may see X's
+work, stale data, or a torn mix, and the JVM is free to reorder. So the whole game of writing
+correct concurrent code is: create enough hb edges that every read you care about has a
+delivery guarantee from the write that produced its value.
+
 **Beginner.** Each thread may keep its own working copy of variables (in registers, store
 buffers, or per-core caches). Without synchronization there is *no guarantee* that a write
 made by thread A is ever seen by thread B, or in what order. The JMM does not talk about
@@ -114,6 +123,42 @@ volatile int v;
 v++;   // NOT atomic: load v, add 1, store v — lost updates under contention
 ```
 
+**Worked example — why `volatile` cannot save `v++`.** Say `v == 5` and threads A and B each
+run `v++` once. `v++` is three steps: *load*, *add 1*, *store*. `volatile` guarantees each
+individual load and store is visible and atomic — but it does **not** fuse the three into one
+step, so the interleaving below is legal:
+
+```
+time  Thread A            Thread B            v (in memory)
+ t1   load v -> 5                             5
+ t2                       load v -> 5         5     <- B reads BEFORE A stores
+ t3   add 1  -> 6                             5
+ t4                       add 1  -> 6         5
+ t5   store 6                                 6
+ t6                       store 6             6     <- B overwrites with its stale 6
+```
+
+Two increments happened, yet the final value is `6`, not `7` — one update was **lost**.
+`volatile`'s visibility does not help: B's load at t2 saw a legitimately fresh `5`; the race
+is in the gap between load and store, which no visibility guarantee closes.
+
+Now the same race under `AtomicInteger.incrementAndGet()`, which is a CAS loop
+(`compareAndSet(expected, expected+1)`):
+
+```
+time  Thread A                        Thread B                        v
+ t1   load v -> 5                                                      5
+ t2                                    load v -> 5                     5
+ t3   CAS(expect 5, set 6) -> OK                                       6
+ t4                                    CAS(expect 5, set 6) -> FAIL (v is 6, not 5)
+ t5                                    retry: load v -> 6              6
+ t6                                    CAS(expect 6, set 7) -> OK      7
+```
+
+B's first CAS fails because `v` is no longer the `5` it expected, so B *re-reads* and retries
+with the current value — final result `7`, correct. That retry-on-conflict is exactly the
+atomicity `volatile` lacks.
+
 **Intermediate — the piggyback / release-acquire pattern.** Since JSR-133, a volatile write
 acts as a *release* and a volatile read as an *acquire*. Everything a thread wrote *before*
 a volatile write is visible to any thread that *reads* that same volatile afterward — even
@@ -136,12 +181,27 @@ if (ready) {              // (3) volatile read — acquire
 Because (1) hb (2), (2) hb (3), (3) hb (4) by transitivity, the plain write of `data` is
 visible. This "piggybacking" is the single most useful volatile idiom.
 
-**Advanced — barriers HotSpot emits.** Conceptually the JMM requires: LoadLoad + LoadStore
-after a volatile read; StoreStore + LoadStore before a volatile write, and a
-**StoreLoad** barrier after a volatile write (the expensive one — a full fence, e.g. `mfence`
-/ `lock addl` on x86). This StoreLoad is what makes a volatile write followed by a volatile
-read of a *different* variable ordered, and is why volatile writes are more expensive than
-volatile reads.
+**Advanced — barriers HotSpot emits.** A **memory barrier** (fence) is a special instruction
+that forbids the compiler and CPU from moving certain memory operations across it — it does
+not compute anything; it just constrains reordering (and, for StoreLoad, forces buffered
+writes out to where other cores can see them). The four named barriers each pin one
+before→after pair in place:
+
+- **LoadLoad** — a load before the barrier completes before any load after it (no read gets
+  hoisted past the barrier).
+- **LoadStore** — a load before the barrier completes before any store after it.
+- **StoreStore** — a store before the barrier becomes visible before any store after it (used
+  before a volatile write so all the plain writes you did first land first — this is what makes
+  the piggyback pattern work).
+- **StoreLoad** — a store before the barrier becomes visible before any *load* after it.
+
+Conceptually the JMM requires: LoadLoad + LoadStore after a volatile read; StoreStore +
+LoadStore before a volatile write, and a **StoreLoad** barrier after a volatile write (the
+expensive one — a full fence, e.g. `mfence` / `lock addl` on x86). StoreLoad is costly because
+it must **drain the CPU store buffer**: pending writes sitting in the buffer have to be flushed
+to cache before the next load may proceed, stalling the pipeline. This StoreLoad is what makes
+a volatile write followed by a volatile read of a *different* variable ordered, and is why
+volatile writes are more expensive than volatile reads.
 
 **Gotchas:**
 
@@ -195,10 +255,26 @@ synchronized (lock) {
 }
 ```
 
+**Gotcha — lock-ordering deadlock.** The most common `synchronized` failure is two threads
+acquiring two locks in opposite orders:
+
+```
+Thread 1: synchronized(A) { ... synchronized(B) { ... } }
+Thread 2: synchronized(B) { ... synchronized(A) { ... } }
+```
+
+Interleave them: T1 grabs A, T2 grabs B, then T1 blocks waiting for B (held by T2) while T2
+blocks waiting for A (held by T1) — neither can proceed, and `synchronized` cannot be
+interrupted or timed out, so the threads are wedged forever. Fixes: impose a **global lock
+order** (every thread always takes A before B — e.g. order by `System.identityHashCode` or a
+fixed tier) so the cycle is impossible, or use `ReentrantLock.tryLock(timeout)` so a thread
+that can't get the second lock backs off and releases the first instead of hanging.
+
 **Trade-off vs `ReentrantLock` (java.util.concurrent, Java 5):** explicit `Lock` adds
 `tryLock`, timed/interruptible acquisition, fairness policy, and multiple `Condition`s, at
 the cost of a mandatory `try/finally unlock()`. Use `synchronized` for simple cases; reach
-for `ReentrantLock`/`StampedLock`/`ReadWriteLock` when you need those features.
+for `ReentrantLock`/`StampedLock`/`ReadWriteLock` when you need those features — the
+`tryLock`-with-timeout above is a concrete reason to prefer it when deadlock risk is real.
 
 ---
 
@@ -233,10 +309,35 @@ guarantees as volatile (the backing field is volatile).
 
 - **ABA problem:** a value changes A→B→A; a plain CAS can't tell it changed. Use
   `AtomicStampedReference` (version stamp) or `AtomicMarkableReference`.
+
+  *Worked example — a corrupted lock-free stack pop.* The stack top is an `AtomicReference`.
+  `pop()` reads `top`, then does `CAS(top, oldTop, oldTop.next)`. Start with stack `A -> B -> C`
+  (top = A, A.next = B):
+
+  ```
+  Thread 1: reads top = A, computes A.next = B, is about to CAS(top, A, B) ... then STALLS
+  Thread 2: pop() -> top now B    (removed A)
+  Thread 2: pop() -> top now C    (removed B; B is recycled/free)
+  Thread 2: push(A) -> top now A again, and sets A.next = C   (stack is now A -> C)
+  Thread 1: wakes, runs CAS(top, A, B): top IS A, so CAS SUCCEEDS
+            -> top is set to B, but B was already popped and is garbage!
+  ```
+
+  The stack is now corrupted (top points to a freed/unlinked node) even though every CAS
+  "succeeded", because the value returned to `A` and the plain CAS only compares the reference,
+  not its history. `AtomicStampedReference` fixes this by pairing the reference with an int
+  stamp bumped on every change: Thread 1 read `(A, stamp=10)`; after Thread 2's three ops the
+  stamp is `13`; Thread 1's `compareAndSet(A, B, 10, 11)` now **fails** on the stamp mismatch
+  (`13 != 10`), forcing a re-read instead of a silent corruption.
 - **LongAdder / DoubleAdder (Java 8):** under high contention, `AtomicLong` CAS retries
   become a bottleneck. `LongAdder` spreads the count over multiple *cells* (striping) to
   reduce contention, summing them on `sum()`. Prefer it for hot counters where you rarely
-  read; prefer `AtomicLong` when you need an exact instantaneous value cheaply.
+  read; prefer `AtomicLong` when you need an exact instantaneous value cheaply. Concretely:
+  with N cells, `increment()` CASes just *one* cell (threads on different cores rarely collide,
+  so almost no retries), but `sum()` must add all N cells and it is **not** an atomic snapshot —
+  it reads cell 0, then cell 1, ... while other threads keep updating cells it already passed.
+  So the total is approximate under concurrent writes (eventually exact once writers quiesce),
+  which is why it fits metrics/throughput counters but not a value you must read exactly.
 - **VarHandle (Java 9, JEP 193)** replaced `sun.misc.Unsafe` for fine-grained access modes:
   `getPlain`, `getOpaque`, `getAcquire`/`setRelease`, `getVolatile`, and `compareAndSet`.
   This exposes the C11-style access-mode spectrum directly in the standard API.
@@ -347,6 +448,32 @@ long p1,p2,p3,p4,p5,p6,p7;   // pad before
 volatile long value;
 long q1,q2,q3,q4,q5,q6,q7;   // pad after
 ```
+
+**Worked example — the 64-byte arithmetic.** Suppose a counters array holds two `long`s used
+by two threads. A `long` is 8 bytes, a cache line is 64 bytes. Laid out back to back:
+
+```
+offset:  0        8        16 ...                                  63 | 64
+         [ longA ][ longB ][ ...other data... ]                      | next line
+         \___________________ one 64-byte cache line ______________/
+```
+
+`longA` (offset 0) and `longB` (offset 8) are both inside bytes 0–63 — the **same line**.
+Thread A writing `longA` invalidates the whole line in Thread B's core, so B's independent
+write to `longB` must re-fetch it, and vice versa: the line ping-pongs between cores on every
+write. For a two-thread counter this can cut throughput by roughly an order of magnitude versus
+truly independent lines — the algorithm looks shared-nothing but the hardware disagrees.
+
+The 7-long pad fixes it by pushing the second hot field past the 64-byte boundary. Placing
+`longA` at offset 0 then 7 pad longs (7 × 8 = 56 bytes) fills offsets 8–63, so the next hot
+field lands at offset 64 — the *start of the next cache line*:
+
+```
+line 0: [longA][pad][pad][pad][pad][pad][pad][pad]   offsets 0..63
+line 1: [longB]...                                    offset 64.. (separate line)
+```
+
+Now A's and B's writes touch different lines and never invalidate each other.
 
 **Advanced — `@Contended` (Java 8, JEP 142).** `jdk.internal.vm.annotation.Contended`
 (was `sun.misc.Contended` in Java 8) tells the JVM to pad a field/class onto its own cache

@@ -15,6 +15,11 @@ attack (ARP spoofing) interviewers like to probe.
 
 ## Ethernet frame structure
 
+Think of a frame as an envelope stamped for the wire: the two MAC addresses steer it (who
+it's *for*, who *sent* it), the EtherType says what's inside so the receiver hands the
+payload to the right protocol, and the FCS is a tamper/corruption seal the receiver
+re-checks. Everything else (preamble, padding) is plumbing that keeps the hardware in sync.
+
 An Ethernet II (DIX) frame is the workhorse of modern LANs. On the wire the sequence is:
 
 | Field | Size | Purpose |
@@ -57,6 +62,12 @@ Common EtherTypes (worth memorizing):
 
 ## MAC addressing
 
+A MAC is like a factory serial number stamped on the NIC: globally unique but
+*location-independent*. Because it says nothing about where you are in the network
+topology, it can't be used to route across networks — only to pick out one interface on
+the wire directly in front of you. That's why IP (a hierarchical, location-based address)
+handles global delivery and MAC handles the final "which port on this segment" step.
+
 A MAC (Media Access Control) address is a 48-bit (6-byte) hardware address, usually
 written as six hex octets, e.g. `00:1A:2B:3C:4D:5E`. It identifies a network interface
 on the local link.
@@ -80,6 +91,20 @@ Because the I/G bit is in the *first transmitted octet*, a MAC whose first byte 
 (e.g. `01:...`, `33:...`) is a multicast address. IPv4 multicast maps to MACs starting
 `01:00:5E`; IPv6 multicast maps to `33:33:...`.
 
+Worked decode — read only the *first octet* in binary; the two low bits decide everything:
+
+```
+01:00:5E  → 0x01 = 0000 0001   I/G bit (LSB) = 1 → multicast   (odd → matches "first byte odd")
+33:33:..  → 0x33 = 0011 0011   I/G bit (LSB) = 1 → multicast   (odd)
+00:1A:2B  → 0x00 = 0000 0000   I/G bit (LSB) = 0 → unicast      (even)
+02:42:AC  → 0x02 = 0000 0010   I/G bit (LSB) = 0 → unicast,
+                                U/L bit (next) = 1 → locally administered (e.g. a Docker/VM NIC)
+```
+
+So "odd first byte = multicast" is just "the least-significant bit of that byte is 1" —
+and 0x02 shows the trick that the *next* bit up is the U/L flag, set on software-assigned
+addresses while I/G stays 0 (still a unicast, just not IEEE-burned-in).
+
 > [!WARNING]
 > MAC addresses are *not* globally routable and are not guaranteed unique in practice —
 > virtualization and locally-administered addresses mean you should never treat a MAC as
@@ -102,6 +127,31 @@ The exchange (two frames):
 ARP packet fields include hardware type (1 = Ethernet), protocol type (`0x0800` = IPv4),
 operation (1 = request, 2 = reply), and the sender/target hardware and protocol
 addresses.
+
+Worked exchange — A (`10.0.0.2` / `aa:aa:aa:aa:aa:aa`) needs B's MAC for `10.0.0.5`:
+
+```
+REQUEST (broadcast, EtherType 0x0806)          REPLY (unicast back to A)
+  htype = 1  (Ethernet)                          htype = 1
+  ptype = 0x0800 (IPv4)                           ptype = 0x0800
+  op    = 1  (request)                            op    = 2  (reply)
+  sender HW = aa:aa:aa:aa:aa:aa                    sender HW = bb:bb:bb:bb:bb:bb   ← the answer
+  sender IP = 10.0.0.2                             sender IP = 10.0.0.5
+  target HW = 00:00:00:00:00:00  ← unknown         target HW = aa:aa:aa:aa:aa:aa
+  target IP = 10.0.0.5                             target IP = 10.0.0.2
+```
+
+Note the request's target HW is all-zeros (A doesn't know it yet), and the request rides
+in a frame with dest MAC `FF:FF:FF:FF:FF:FF` so the whole segment sees it; only B replies,
+and it replies *unicast*. A's neighbor cache then transitions:
+
+```
+before:  10.0.0.5 dev eth0  INCOMPLETE        ← request sent, waiting
+after :  10.0.0.5 dev eth0  lladdr bb:bb:bb:bb:bb:bb  REACHABLE   ← reply parsed
+```
+
+The entry later ages to `STALE`; the next packet to it moves it to `DELAY`/`PROBE` and, if
+B is silent, back to `INCOMPLETE` — the same neighbor state machine listed below.
 
 > [!KEY-TAKEAWAY]
 > ARP resolves addresses only for destinations on the **same subnet**. To reach a host on
@@ -173,6 +223,14 @@ Content-Addressable Memory**) by *learning*:
 > unknown-unicast **flooding**. The switch has no table entry, so it floods; the reply
 > teaches it the port, and subsequent frames are forwarded directly. This is *learning*,
 > not routing.
+
+An entry that sits idle past the aging timer (~300 s default) is purged, so the *next*
+frame to that now-forgotten MAC floods once out every port until the host speaks again and
+re-teaches its port — a normally harmless blip. But if traffic is **asymmetric** (a host
+receives constantly yet rarely transmits, so its source MAC is never re-learned) or the
+aging timer is misconfigured too short, that flooding becomes *chronic* unknown-unicast
+flooding — a real diagnostic when you see steady background flooding on an otherwise quiet
+VLAN.
 
 CAM (Content-Addressable Memory) lets the switch look up a destination MAC in a single
 hardware operation — you supply the value (MAC) and it returns the location (port),
@@ -344,6 +402,34 @@ logical tree over a physically redundant topology and putting the redundant link
 - **BPDUs:** Bridge Protocol Data Units — Configuration BPDUs (root/cost info) and
   **Topology Change Notification (TCN)** BPDUs. Sent to the reserved multicast MAC
   **`01:80:C2:00:00:00`**.
+
+**Worked election + path-cost trace.** Three switches, all at default priority 32768:
+
+```
+  A  mac aa:aa:aa:aa:aa:aa
+  B  mac bb:bb:bb:bb:bb:bb
+  C  mac cc:cc:cc:cc:cc:cc
+links:  A—B = 1 Gb (cost 20000)   A—C = 10 Gb (cost 2000)   B—C = 1 Gb (cost 20000)
+```
+
+*Root election:* Bridge ID = priority ++ MAC. All three tie on priority 32768, so it breaks
+on lowest MAC. `aa:.. < bb:.. < cc:..` → **A is root**. (If you instead set B to priority
+4096, its Bridge ID `4096.bb..` beats A's `32768.aa..` on the priority field alone, and B
+becomes root — priority is compared *before* MAC.)
+
+*Root-port selection on C* — compare C's two paths to root A by cumulative cost:
+
+```
+  path 1:  C → A directly        = 2000
+  path 2:  C → B → A             = 20000 + 20000 = 40000
+```
+
+2000 < 40000, so C's link to A is its **root port**; C's link toward B is not on the best
+path. On the B–C segment, the two candidate designated-port costs to root are B's (20000
+via B→A) vs C's (2000 via C→A). The lower cost owns the segment, so **C is the designated
+port** on B–C and **B's port toward C goes to blocking** — that's the one redundant link
+STP shuts off to break the loop. Result: the physical triangle becomes the loop-free tree
+`A—C` and `A—B` forwarding, `B—C` blocked.
 
 **RSTP (802.1w)** — the modern default, folded into 802.1Q-2018:
 

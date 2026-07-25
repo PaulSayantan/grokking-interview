@@ -188,6 +188,16 @@ Set with `setsockopt(fd, level, optname, ...)`. The ones interviewers ask about:
 `listen(fd, backlog)` sizes the queue of connections waiting to be `accept()`ed. Modern
 Linux maintains **two** queues:
 
+```mermaid
+flowchart LR
+    C[Client SYN] --> SQ[SYN queue<br/>incomplete handshakes<br/>size: tcp_max_syn_backlog]
+    SQ -->|final ACK arrives| AQ[Accept queue<br/>established conns<br/>size: min backlog, somaxconn]
+    AQ -->|accept dequeues| APP[Your accept loop]
+    SQ -. SYN flood exhausts .-> DROP1[drop / SYN cookies]
+    AQ -. queue full .-> DROP2[drop conn / ignore final ACK]
+```
+
+
 - **SYN queue (incomplete)** — connections mid-handshake (SYN received, SYN-ACK sent,
   awaiting the final ACK). Sized by `net.ipv4.tcp_max_syn_backlog`.
 - **Accept queue (completed)** — fully established connections awaiting `accept()`. Sized
@@ -278,6 +288,22 @@ non-blocking I/O only on the ready ones.
   stall the connection until the *next* edge. Fewer wakeups and syscalls; the standard
   choice for maximum-performance servers (e.g. nginx uses ET).
 
+**Worked trace — 2000 bytes arrive, you read only 1400.** Say the fd's receive buffer
+fills with 2000 bytes and your handler does one `recv(fd, buf, 1400)` that returns 1400,
+leaving **600 bytes** unread in the kernel buffer.
+
+- **LT:** the *condition* "data is readable" still holds (600 bytes remain), so the very
+  next `epoll_wait` returns this fd ready **again** — you get another chance and drain the
+  last 600 on the following pass. One read per wakeup is safe; it just costs extra wakeups.
+- **ET:** the edge (empty → readable) already fired for the arrival of those 2000 bytes.
+  Since you didn't drain to `EAGAIN`, the next `epoll_wait` does **not** report this fd —
+  there's been no new *transition*. Those 600 bytes sit unread indefinitely, and the
+  connection looks hung, until *more* data happens to arrive and produce a fresh edge.
+- **ET done right:** loop on the same numbers — `recv` → 1400, `recv` → 600, `recv` →
+  `-1`/`EAGAIN` (three syscalls, buffer fully drained). Only after you hit `EAGAIN` is it
+  safe to return to `epoll_wait`, because you've consumed everything the single edge told
+  you about.
+
 > [!WARNING]
 > The #1 edge-triggered bug: reading once per notification. With ET you *must* loop reads
 > (and writes) until `EAGAIN`. A partial read leaves data buffered with no further
@@ -315,6 +341,12 @@ scalability with thread-per-connection ergonomics.
 | Best for | modest/CPU-bound | high-concurrency, I/O-bound |
 
 ## Reactor, Proactor, and true async I/O
+
+Think of a restaurant. **Reactor** = the kitchen shouts "your food's on the counter, come
+grab it" — you still walk over and do the pickup (the syscall) yourself. **Proactor** = you
+hand over the order and the kitchen carries the finished plate to your table — the work is
+done *for* you and you're just told it's complete. Map it: `epoll`/`kqueue` → Reactor;
+`io_uring`/IOCP → Proactor.
 
 The **Reactor** pattern is readiness-based: wait for "fd is *ready*," then *you* perform
 the (non-blocking) read/write. `epoll`/`kqueue`-based servers are reactors.
@@ -462,6 +494,25 @@ Beyond `TCP_NODELAY`, several options shape when bytes actually hit the wire:
   reply. Result: both sides wait for each other → a ~40 ms stall on small
   request/response exchanges. **`TCP_QUICKACK`** disables delayed ACK, but note it is
   **not permanent** — the kernel resets it, so it must be re-set as needed.
+
+  *Timeline trace* — a client writes a request in two small `send()`s, part A then part B
+  (each below one MSS), and the server replies only after it has both:
+  - `t=0 ms` — client `send(A)`. No unacknowledged small segment is outstanding, so Nagle
+    lets A go on the wire immediately.
+  - `t=0 ms` — client `send(B)`. But A is still unacknowledged and B is sub-MSS, so **Nagle
+    holds B** until A's ACK returns.
+  - `t≈0.5 ms` — server receives A. It can't build a reply from A alone (it needs B), and
+    it has nothing to piggyback an ACK onto, so **delayed ACK holds** A's acknowledgment,
+    hoping a reply will carry it.
+  - **Standoff:** client waits for A's ACK before releasing B; server waits for B before
+    replying; server's ACK is stuck behind that not-yet-existent reply. Nobody moves.
+  - `t≈40 ms` — the server's delayed-ACK timer expires and it sends the bare ACK for A.
+    The client now releases B, the server finally has the full request and replies — the
+    exchange completes ~40 ms late for want of a handful of bytes.
+
+  **Fix:** `TCP_NODELAY` removes the Nagle hold so B goes out immediately; or use one
+  `writev([A, B])`/`send(A+B)` so A and B leave as a **single** segment — the server gets
+  the whole request at once, replies right away, and the delayed-ACK timer never arms.
 - **`TCP_DEFER_ACCEPT`** — `accept()` returns only once the client has sent data, not
   merely completed the handshake. Saves a wakeup for request/response servers (the first
   read has data waiting). RFC 6928's IW10 (initial congestion window of 10 segments)
@@ -482,6 +533,12 @@ applies to connections actively trying to send, and it also **modifies keepalive
 a dead peer in seconds, not hours."
 
 ## io_uring internals
+
+The goal is to stop paying a syscall per I/O. `epoll`-style servers still make a syscall
+for every read and write; at millions of ops/sec that kernel-boundary tax dominates.
+`io_uring` batches submissions through ring buffers the kernel and your process **share**,
+so a busy server can submit and reap hundreds of operations while barely entering the
+kernel at all.
 
 `io_uring` (Linux 5.1+) is a true completion-based (Proactor) interface built on two shared
 ring buffers mapped between user space and kernel: the **submission queue (SQ)** where you

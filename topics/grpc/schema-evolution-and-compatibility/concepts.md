@@ -86,6 +86,17 @@ Field numbers 1–15 encode their tag in a single byte, so reserve them for the 
 frequently-set fields (hot-path size optimization). 19000–19999 are reserved by protobuf
 itself. The valid range is 1 to 536,870,911 (2^29 − 1).
 
+**Worked byte trace — why renumbering silently corrupts.** Take `int32 age = 2`. The tag
+is `(field_number << 3) | wire_type` = `(2 << 3) | 0` = `16` = `0x10` (wire type `0` =
+varint). An old client sending `age = 30` puts `0x10 0x1E` on the wire (`0x1E` = 30). Now
+someone renumbers the field to `age = 4`: the new server's decoder now expects tag
+`(4 << 3) | 0` = `32` = `0x20` for `age`. The old client's `0x10`-prefixed bytes match no
+known field number on the new server, so it files them under **unknown field 2** and `age`
+reads as its default `0` — no exception, the value simply vanishes into the unknown-field
+set. Reverse the roles and a new client's `0x20` bytes land as unknown field 4 on the old
+server. That is the "silent corruption" the rule warns about, expressed in bytes: the
+number moved, so the data missed its field.
+
 > [!WARNING]
 > Reusing a field number is the most dangerous protobuf mistake because it usually does
 > **not** produce a parse error — the bytes decode into the wrong field. Always
@@ -195,6 +206,53 @@ The famous traps:
 - **`fixed32`↔`sfixed32`** (and the 64-bit pair) are safe; the bytes are identical, only
   signedness of interpretation differs.
 
+**Worked byte trace — the `sint`/`int` mangle.** Take the value `-1` in a field.
+- Written as `int32`: negatives are sign-extended to 64 bits and varint-encoded, giving the
+  10-byte sequence `FF FF FF FF FF FF FF FF FF 01`. An `int32` reader decodes it back to
+  `-1`. (This is exactly why `int32 -1` read as `int64` is still `-1`: same 10 bytes.)
+- Written as `sint32`: zigzag maps `-1` to `(-1 << 1) ^ (-1 >> 31)` = `-2 ^ -1` = `1`, a
+  one-byte varint `01`. A `sint32` reader zigzag-decodes `01` back to `-1`.
+
+Now swap the declared types without changing the bytes:
+- The `sint32` writer's `01` read by an `int32` reader is a plain varint = **`+1`** — sign
+  flipped, magnitude wrong, no error.
+- The `int32` writer's 10-byte `FF…01` read by a `sint32` reader decodes to the unsigned
+  varint `0xFFFFFFFFFFFFFFFF`, which zigzag-decodes to a **huge garbage number**.
+
+So `-1` silently becomes `+1` or an enormous integer depending on direction. That is why
+`sint*` ↔ `int*` is breaking even though both ride wire type `0` (varint).
+
+## Repeated and Packed Encoding
+
+This is the "packed-repeated nuance" the breaking-changes table points at, and a favorite
+senior probe. In proto3, **scalar `repeated` fields are packed by default**: instead of
+writing one tag per element, the encoder writes a single length-delimited (wire type `2`)
+blob containing all the varints back-to-back. An *unpacked* repeated field writes the
+field's tag once per element.
+
+Two facts matter for evolution:
+
+1. **Parsers accept both encodings for the same field**, regardless of the current
+   `[packed=...]` setting. So toggling `[packed=true]`/`[packed=false]` on a scalar
+   repeated field is **wire-compatible** — a reader expecting packed still decodes an old
+   unpacked stream and vice versa.
+2. **Singular ↔ repeated for a scalar is wire-compatible in one direction that matters:** a
+   reader of a `repeated` field that meets the *singular* encoding (one value) treats it as
+   a one-element list; a reader of a *singular* field that meets a repeated stream keeps the
+   **last** value. Data isn't corrupted, but "many values collapse to one" can be a
+   surprising semantic change, so treat singular→repeated as safe and repeated→singular as
+   lossy.
+
+**Worked byte trace — packed vs unpacked, same field.** Take `repeated int32 ids = 6` with
+values `[3, 270]`. Tag for field 6 packed is `(6 << 3) | 2` = `50` = `0x32`.
+- **Packed:** `0x32` (tag) `0x03` (payload length = 3 bytes) `0x03` (=3) `0x8E 0x02`
+  (varint for 270). Total: `32 03 03 8E 02`.
+- **Unpacked** (same field re-encoded per element, wire type `0`, tag `(6<<3)|0` = `0x30`):
+  `0x30 0x03` (id=3) then `0x30 0x8E 0x02` (id=270). Total: `30 03 30 8E 02`.
+
+Different bytes, but a proto3 parser decodes **either** into `ids = [3, 270]`. That is why
+flipping the `packed` option never breaks the wire.
+
 ## The Three Compatibility Axes
 
 The costliest evolution mistakes come from conflating three *distinct* kinds of
@@ -287,6 +345,29 @@ value from a newer server. Always write a `default:`/`else` branch and treat unk
 `*_UNSPECIFIED`. Never `reserved`-recycle an enum number for a different meaning, same as
 fields.
 
+**Worked trace — the exhaustive-switch bug.** A v1 client compiled against the enum above
+writes:
+
+```go
+switch order.State {
+case ORDER_STATE_PENDING: showBadge("Pending")
+case ORDER_STATE_SHIPPED: showBadge("Shipped")
+// no default
+}
+```
+
+A v2 server sends an order with `state = 3` (`ORDER_STATE_RETURNED`). The open-enum decoder
+stores `3` as the raw int (no crash), but the switch matches neither case, so **no badge
+renders** — a silent UI bug that only shows up for returned orders. In Java, the value
+surfaces as the `UNRECOGNIZED` constant, and calling `getNumber()` on it **throws**
+`IllegalArgumentException`, turning the silent gap into a crash. The fix is one branch:
+
+```go
+default: showBadge("Unknown")   // treat any unrecognized value as *_UNSPECIFIED
+```
+
+Now the v1 client degrades gracefully against any future enum value.
+
 ## Optional and Oneof Migration
 
 Proto3 field presence and `oneof` interact with evolution in ways that trip people up.
@@ -298,6 +379,16 @@ Proto3 field presence and `oneof` interact with evolution in ways that trip peop
   value is identical to a non-optional field. So adding/removing `optional` on a scalar is
   **wire-compatible** — it only changes whether you can distinguish unset from default in
   generated code.
+
+  **Worked trace — why `0.00` needs `optional`.** With implicit presence
+  (`double price = 4;`), the encoder skips any field equal to its type default, so
+  `price = 0.00` serializes to **zero bytes** — byte-for-byte identical to leaving `price`
+  unset. The reader sees `0.0` either way and `has_price()` doesn't exist. Flip to
+  `optional double price = 4;`: now presence is tracked explicitly, so setting `0.00` emits
+  the field's tag+value (`(4 << 3) | 1` = `0x21` for a fixed64 double, then 8 value bytes),
+  while leaving it unset emits nothing. The reader can now call `has_price()` → `true` for
+  the explicit `0.00` and `false` for unset. That extra tag on the wire is the entire
+  difference between "customer chose free" and "no price provided."
 
 - **Moving a single existing field *into* a new `oneof`:** this specific case is
   wire-compatible (the field number and wire encoding are unchanged), and the docs call it

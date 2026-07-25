@@ -85,6 +85,15 @@ HGETALL user:1001
 > in listpack encoding are far more memory-efficient than N separate keys (each key has
 > per-key overhead).
 
+**Worked example — per-key overhead.** A top-level key isn't free: the dict entry, the key
+`robj`, the value `robj`, and the sds string headers add up to roughly **50–90 bytes of
+overhead per key** before your actual data. Store a user's 10 fields as 10 separate
+`user:1001:name`, `user:1001:plan`, … keys and you pay ~**500–900 bytes of pure overhead**
+per user (plus 10 dict slots). Store the same 10 fields in one `HSET user:1001 …` and,
+while it stays under `hash-max-listpack-entries` (default 128), the whole thing is one
+listpack — a single contiguous blob with one key's overhead. At 1M users that's the
+difference between ~0.5–0.9 GB of overhead and a few tens of MB.
+
 ---
 
 ## Sorted sets for leaderboards and rate limiting
@@ -93,6 +102,21 @@ A **sorted set (ZSET)** stores unique members each with a floating-point **score
 in score order. Internally it is a **skip list** (ordered traversal, `O(log N)`
 insert/rank) plus a **hash table** (member→score, `O(1)` lookup). This dual structure is
 why it can do both "rank of member X" and "top N by score" cheaply.
+
+A **skip list** is just a sorted linked list with a few "express-lane" levels stacked on
+top: each higher level links only ~every other node, so a search starts on the top lane,
+runs forward until the next node would overshoot, then drops a level and repeats — the
+same halving that gives binary search its `O(log N)`.
+
+```
+L2:  head ------------------> 30 ----------------> nil
+L1:  head ------> 10 ------> 30 ------> 50 ------> nil
+L0:  head -> 5 -> 10 -> 20 -> 30 -> 40 -> 50 -> 60 -> nil   (search 40: top→30, drop, 30→40)
+```
+
+Redis picked a skip list over a balanced (red-black) tree because it is far simpler to
+implement lock-free-ish, and range queries (`ZRANGE`) are just "find start, then walk the
+bottom list" — no tree-rebalancing gymnastics.
 
 **Leaderboard:**
 
@@ -117,6 +141,36 @@ EXPIRE         rl:user:42 60                  # let the key self-clean
 A simpler **fixed-window** limiter uses a counter: `INCR rl:user:42:<minute>` then
 `EXPIRE ... 60`; reject when the value exceeds the limit. Fixed windows are cheaper but
 allow up to 2× burst at the boundary; the ZSET sliding window is smoother but heavier.
+
+**Worked example — the boundary-burst bug (limit = 100 / 60s).** With a fixed window the
+counter key is bucketed by minute, so two adjacent buckets are independent:
+
+```
+11:00:59  → INCR rl:user:42:1100  ... 100 requests, counter 1→100, all ACCEPTED
+11:01:01  → INCR rl:user:42:1101  ... 100 requests, counter 1→100, all ACCEPTED
+```
+
+Those 200 requests land within a **2-second span** straddling the 11:01:00 boundary, yet
+each bucket only saw 100 — so a client legally does 2× the limit in any rolling minute.
+
+Now the **same traffic through the ZSET sliding window**. The set holds one member per
+request scored by its epoch-ms timestamp; every call first trims everything older than
+`now - 60000`:
+
+```
+Request #1 at 11:00:59.000 (now=..._59000):
+  ZREMRANGEBYSCORE rl:user:42 0 (now-60000)  → nothing older than the window yet
+  ZADD ... 59000 <id>;  ZCARD → 1     ≤100 → ACCEPT
+  ... requests #2..#100 through 11:00:59.999 → ZCARD climbs to 100, all ACCEPT
+Request #101 at 11:01:01.000 (now=..._61000):
+  window floor = 61000 - 60000 = 1000ms-mark, i.e. 11:00:01
+  ZREMRANGEBYSCORE drops only entries scored < 11:00:01 → the 11:00:59 batch is STILL inside the window
+  ZCARD is still 100  → 100 ≥ 100 → REJECT
+```
+
+The old requests only fall out of the count once they are a full 60s in the past, so no
+rolling 60-second interval ever exceeds 100. That is precisely the boundary burst the
+fixed window let through.
 
 > [!TIP]
 > Wrap multi-step limiters in a **Lua script** (`EVAL`) so the check-and-increment is
@@ -154,6 +208,24 @@ BITOP AND dau:both dau:2026-07-18 dau:2026-07-19   # retention: active both days
 
 **Geo** commands store lon/lat as geohash scores inside a ZSET and let you do radius
 queries: `GEOADD`, then `GEOSEARCH ... BYRADIUS 5 km ASC`.
+
+**Worked example — counting 10M daily-active users three ways.** Say you want the DAU count
+for a day with user ids 0…10,000,000:
+
+- **Bitmap:** one bit per id, so `10,000,000 bits ÷ 8 = 1,250,000 bytes ≈ 1.25 MB`
+  (a single String). `BITCOUNT` gives the exact count, and `BITOP AND` across two days
+  gives exact retention.
+- **Set of 8-byte ints:** the raw ids alone are `10M × 8 B = 80 MB`, and once past
+  `set-max-intset-entries` the hashtable adds tens of bytes of overhead *per member*, so
+  realistically **hundreds of MB**. You get exact membership tests (`SISMEMBER`), which the
+  bitmap can also do via `GETBIT`.
+- **HyperLogLog:** a flat **~12 KB regardless of cardinality** (10M or 10B — same size),
+  with ~0.81% error. `PFCOUNT` gives an *estimate* only — you can `PFMERGE` unions but you
+  **cannot** `AND` two HLLs, so it can't answer "active both days" retention.
+
+So the pick is a trade-off: HLL when you only need an approximate count and want the memory
+flat and tiny; bitmap when ids are dense integers and you need exact counts *and* boolean
+set-algebra (retention/funnels); a Set only when you also need to enumerate members.
 
 ---
 
@@ -212,6 +284,14 @@ rules (e.g. `save 900 1`).
 - **Cons:** you lose everything written since the last snapshot (minutes of data) if the
   process dies. `fork()` on a huge dataset can cause a latency spike and needs headroom
   (COW can transiently ~2× memory under heavy writes).
+
+  *How COW eats memory:* `fork()` shares the parent's pages read-only; the moment the parent
+  **writes** to a page, the kernel duplicates that 4 KB page (copy-on-write) so the child's
+  frozen snapshot stays intact. Under a write storm the parent can end up dirtying most of
+  its pages before `BGSAVE` finishes — a 40 GB instance being heavily written can balloon
+  toward **~80 GB** resident, so you must provision headroom and watch `latency_percentiles`
+  for the fork spike. Transparent Huge Pages (THP) make it worse: dirtying one byte copies a
+  **2 MB** huge page instead of 4 KB, so Redis recommends disabling THP.
 
 **AOF (Append Only File) — log every write command.** Redis appends each mutating command
 to the AOF; on restart it replays them. The durability knob is `appendfsync`:
@@ -295,6 +375,28 @@ DB is temporarily stale.
 **Cache stampede (thundering herd / dogpile):** a hot key expires (or is missing) and
 thousands of concurrent requests all miss simultaneously, all hit the database at once,
 and can overwhelm it — often re-computing the *same* value redundantly.
+
+**Worked example — quantifying a stampede.** A hot key is served at 5,000 QPS and the DB
+recompute takes 200 ms. The instant it expires, every request arriving during that 200 ms
+window misses and starts its own DB read before the first one finishes repopulating:
+`5,000 req/s × 0.2 s = 1,000 concurrent DB queries` for the *same* value, where a mutex
+would have allowed exactly **1**. That 1000× spike is what topples the database.
+
+**Worked example — a stale read even with delete-on-write.** Delete-on-write still has a
+lost-update race across the read/write gap. Trace the interleaving (DB truth = v1 → v2):
+
+```
+t1  Reader A: GET key            → MISS
+t2  Reader A: SELECT from DB     → reads v1  (still the old value)
+t3  Writer B: UPDATE DB          → DB is now v2
+t4  Writer B: DEL key            → key already absent (A hasn't written yet) — no-op
+t5  Reader A: SET key v1 EX 300  → cache now holds STALE v1
+```
+
+The cache serves v1 for up to 300 s even though the DB says v2 — because A's stale read
+(t2) landed in the cache *after* B's delete (t4). This is why a **TTL is a mandatory safety
+net** (bounds the staleness), and why freshness-sensitive shops reach for short TTLs,
+versioned keys (bump `:v7`→`:v8` instead of deleting), or delaying/double-deleting the key.
 
 Mitigations:
 
@@ -394,6 +496,15 @@ flowchart TB
   P3 -.replica.-> R3[Replica C]
 ```
 
+> [!WARNING]
+> **Cluster does not fix a single hot key.** Sharding spreads *slots* across primaries, but
+> one key hashes to exactly one slot on exactly one primary — so if `product:top-seller`
+> takes 200k QPS, all 200k land on that single primary; the other shards sit idle. This is
+> the same "breakdown" hotspot from the section above, just at the cluster tier.
+> Mitigations aren't more shards — they're client-side/local caching in front of Redis,
+> **fanning the key out** across N suffixed copies (`product:top-seller:{0..9}`, read a
+> random one) to spread load across slots, or serving reads from replicas.
+
 ---
 
 ## Distributed locks and the Redlock debate
@@ -416,6 +527,39 @@ SET lock:resource <random-token> NX PX 30000   # acquire: only if not set, 30s T
 **Redlock** is an algorithm to acquire a lock across **N independent** Redis primaries
 (no replication between them): the client tries to `SET NX PX` on a majority (N/2+1) within
 a time budget and considers the lock held only if it got the majority quickly enough.
+
+**Worked example — why "quickly enough" and the shrinking validity window.** Take N=5
+instances, so majority = `5/2 + 1 = 3`, with TTL = 30,000 ms. The client records the start,
+fires `SET NX PX 30000` at all five, and gets 3 OKs by `t0 + 400 ms`:
+
+```
+elapsed acquiring   = 400 ms
+clock-drift guard   = 0.01 × 30000 = 300 ms   (allow ~1% drift across nodes)
+effective validity  = 30000 − 400 − 300 = 29,300 ms  ≈ 29.3 s of safe holding time
+```
+
+So the lock the client *thinks* it holds for 30 s is really good for ~29.3 s — the time
+spent acquiring and a drift margin are **subtracted** from the TTL. If acquisition itself
+had taken longer than the TTL (say GC-paused for 31 s mid-acquire), effective validity goes
+**negative** → treat as a failed acquire, release everything, retry.
+
+**Worked example — why a TTL lock alone still admits two holders.** Even with the margin,
+a pause *after* acquiring breaks it:
+
+```
+t0      Client A acquires lock, TTL 30s (valid until t30)
+t5      A begins work, then STOPS THE WORLD (GC / VM freeze) for 35s
+t30     TTL expires → Redis deletes the key. A is still paused and doesn't know.
+t31     Client B acquires the now-free lock, starts writing
+t40     A resumes, still believes it holds the lock, also writes
+        → TWO holders write concurrently. Mutual exclusion is violated.
+```
+
+No TTL tuning fixes this, because A can't detect that its lease lapsed while frozen. The
+remedy is a **fencing token**: each acquire hands out a monotonically increasing number
+(A gets 33, B gets 34). The protected resource records the highest token it has seen and
+rejects any lower one — so when paused A finally writes with token 33, the store has already
+accepted 34 and refuses `33 < 34`. That, not a cleverer lock, is what guarantees safety.
 
 > [!WARNING]
 > The **Redlock debate**: Martin Kleppmann argued Redlock is unsafe for correctness

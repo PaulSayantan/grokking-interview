@@ -8,6 +8,15 @@ interviews, because it explains *why* your `@PostConstruct` runs when it does,
 *why* a proxy or configured property is (or is not) available in a callback, and
 *why* a prototype bean's cleanup never fires.
 
+A useful analogy: think of it like onboarding an employee. They are *hired*
+(instantiated), *given their tools and logins* (dependencies injected), *shown
+the building and org chart* (aware callbacks), sent through *orientation before
+their first real task* (init callbacks), then they *do the job* (ready), and
+finally have an *exit interview and return their badge* (destruction). The
+container is doing the setup work you would otherwise hand-write in a
+constructor — but in a controlled order, so that every dependency actually
+exists at the moment a phase needs it.
+
 This note covers Spring **Framework** 6.x (Jakarta EE, `jakarta.annotation.*`).
 Where the older Spring 5 / `javax.annotation.*` naming matters, it is called out
 explicitly. None of the behavior here depends on Spring Boot — it is all core
@@ -135,6 +144,37 @@ is created **at most once** and only **on demand**. If a bean B, mid-creation,
 injects a reference to A (also mid-creation), A's factory is invoked, the early
 (possibly proxied) reference is promoted from level 3 to level 2, and B receives
 *that same* reference A will ultimately expose.
+
+**Worked trace — A and B in a setter cycle.** Say `A` needs `B` and `B` needs
+`A`, both via field/setter injection, and neither is AOP-advised. Watch which
+map holds what after each step (L1 = `singletonObjects`, L2 =
+`earlySingletonObjects`, L3 = `singletonFactories`):
+
+1. `getBean(A)` starts. A is instantiated (raw `new A()`), and A's
+   `ObjectFactory` is placed in **L3**.
+   `L1={} · L2={} · L3={A}`
+2. `populateBean(A)` runs; A needs B, so it triggers `getBean(B)`.
+   (A is still parked mid-population.)
+   `L1={} · L2={} · L3={A}`
+3. B is instantiated; B's factory goes into **L3**. `populateBean(B)` runs; B
+   needs A, so it calls `getBean(A)`. A is not in L1 or L2, but its factory is
+   in L3 — so that factory is invoked, running `getEarlyBeanReference` (which
+   would create an early proxy *if* A were advised; here it just returns raw A).
+   That early reference is promoted **L3 → L2**, and B's setter receives it.
+   `L1={} · L2={A} · L3={B}`
+4. B now has its A reference, so B finishes initialization. The finished B is
+   promoted to **L1** and dropped from L3.
+   `L1={B} · L2={A} · L3={}`
+5. Control returns to step 2: A's `populateBean` gets the finished B and injects
+   it. A finishes initialization. Before caching, Spring checks that the object
+   it finished equals the early reference sitting in L2 (identity match here,
+   since no proxy diverged), then promotes A to **L1**, clearing L2.
+   `L1={A,B} · L2={} · L3={}`
+
+The key insight the trace makes concrete: B never sees a half-built A getter by
+getter — it gets one stable reference (from L3, cached in L2) that becomes the
+*same* object A ends up publishing in L1. Level 3 exists so that reference is
+minted **once, lazily, only if something actually asks for A mid-creation**.
 
 **The AOP + circular-reference gotcha:** if A is proxied and lands in a setter
 cycle, Spring compares the object it finished initializing against the early
@@ -269,6 +309,15 @@ registered, which happens automatically with annotation-config or component
 scanning (`<context:annotation-config/>`, `@ComponentScan`, or an
 `AnnotationConfigApplicationContext`).
 
+> [!WARNING]
+> Since Spring 6 / Boot 3, `@PostConstruct` / `@PreDestroy` live in
+> `jakarta.annotation.*`, whose `jakarta.annotation-api` JAR is **not always on
+> the classpath** in plain (non-web) Spring Framework projects. If that JAR is
+> absent, the annotations are **silently ignored** — no error, your init method
+> just never runs. This is the classic "my `@PostConstruct` stopped firing after
+> I upgraded to Spring 6" bug. Boot's starters pull the dependency in
+> transitively; a bare Framework project may need to add it explicitly.
+
 ### Deduplication when the same method is targeted twice
 
 The "three mechanisms run in order" rule assumes three *distinct* methods. If two
@@ -326,6 +375,29 @@ Key points:
   different object here replaces the bean** — this is exactly how Spring AOP
   (`AbstractAutoProxyCreator`) wraps beans in proxies. So the reference callers
   get can be a proxy, not the raw instance.
+
+```java
+@Component
+class TimingBpp implements BeanPostProcessor {
+    public Object postProcessAfterInitialization(Object bean, String name) {
+        if (!(bean instanceof Service)) return bean;   // guard: only wrap Service
+        return Proxy.newProxyInstance(               // return a DIFFERENT object
+            bean.getClass().getClassLoader(),
+            bean.getClass().getInterfaces(),
+            (proxy, method, args) -> {
+                long t = System.nanoTime();
+                try { return method.invoke(bean, args); }   // delegate to raw bean
+                finally { log.info(name + "." + method.getName() + " took " +
+                                   (System.nanoTime() - t) + "ns"); }
+            });
+    }
+}
+```
+
+Because this returns the proxy rather than `bean`, the container stores **that
+wrapper** in the singleton cache. Every later injection point that asks for the
+`Service` gets the timing proxy, not the original instance — the raw bean now
+only exists as the proxy's private delegate.
 - A `BeanPostProcessor` applies to beans in the **same container**, not to beans
   in a parent context.
 - Beans that are themselves `BeanPostProcessor`s are instantiated early (before
@@ -505,6 +577,27 @@ be torn down first. A negative phase therefore starts *before* ordinary
 `Lifecycle` beans; a positive phase starts *after* them. Beans sharing a phase
 have no guaranteed order among themselves. Explicit `depends-on` relationships
 override phase: a dependent bean starts after, and stops before, its dependency.
+
+**Worked example — four beans, four phases.** Take:
+
+- `Metrics` — `SmartLifecycle`, phase **-10**
+- `Cache` — plain `Lifecycle` (no phase) → treated as phase **0**
+- `HttpServer` — `SmartLifecycle`, phase **100**
+- `Scheduler` — default `SmartLifecycle` → phase **`Integer.MAX_VALUE`** (2,147,483,647)
+
+Sort the phases ascending: `-10 < 0 < 100 < MAX_VALUE`.
+
+- **Start order (lowest → highest):** `Metrics(-10)` → `Cache(0)` →
+  `HttpServer(100)` → `Scheduler(MAX_VALUE)`.
+- **Stop order (exact reverse, highest → lowest):** `Scheduler(MAX_VALUE)` →
+  `HttpServer(100)` → `Cache(0)` → `Metrics(-10)`.
+
+Read off the two rules the trace makes concrete: the default `MAX_VALUE`
+component (`Scheduler`) starts **last** and stops **first** — sensible, since a
+thing started last usually depends on everything before it and should be torn
+down before its dependencies go. And the negative-phase bean (`Metrics`) starts
+**before** the plain-`Lifecycle` `Cache` (phase 0) and stops **after** it, so
+metrics collection is up first and down last.
 
 **`stop(Runnable)` and the shutdown timeout:** on context close, the
 `DefaultLifecycleProcessor` stops beans one phase at a time, and within a phase

@@ -180,6 +180,51 @@ CompletableFuture.supplyAsync(() -> load())      // pool thread A
     .thenApplyAsync(x -> x - 3, myExecutor); // myExecutor thread
 ```
 
+**Worked example — print the thread at each stage.** Instrument every stage and
+reason through what actually prints. Assume an 8-core box (common pool
+parallelism 7).
+
+```java
+static Object log(String stage, Object v) {
+    System.out.println(stage + " on " + Thread.currentThread().getName());
+    return v;
+}
+
+CompletableFuture.supplyAsync(() -> log("supplyAsync", "hi"))   // (1)
+    .thenApply(v -> log("thenApply", v))                        // (2)
+    .thenApplyAsync(v -> log("thenApplyAsync", v))              // (3)
+    .thenApplyAsync(v -> log("thenApplyAsync+exec", v), io);    // (4)
+```
+
+Reasoned output (one plausible run):
+
+```
+supplyAsync        on ForkJoinPool.commonPool-worker-1   (1) ran on a pool worker
+thenApply          on ForkJoinPool.commonPool-worker-1   (2) NON-async: reuses the
+                                                             thread that just completed (1)
+thenApplyAsync     on ForkJoinPool.commonPool-worker-1   (3) async, common pool: often the
+                                                             SAME idle worker, not guaranteed
+thenApplyAsync+exec on io-pool-thread-3                  (4) your executor `io`
+```
+
+The key insight for (2): `thenApply` didn't pick a fresh thread — it ran on
+`worker-1` *because that's the thread that had just finished (1)*. Stage (3) is
+`Async` so it *resubmits* to the common pool; the pool frequently hands it back to
+the same free worker, which is why "async" does not guarantee a *different* thread.
+
+**Now flip it to the already-completed case:**
+
+```java
+CompletableFuture.completedFuture("hi")   // already done, no pool work
+    .thenApply(v -> log("thenApply", v));  // runs INLINE
+// Output:  thenApply on main
+```
+
+Here `thenApply` runs **synchronously on `main`** (the calling thread) because the
+upstream stage was already complete when the callback was attached — there was no
+"completing thread" to inherit, so the caller runs it itself. Same method, opposite
+thread, purely because of *when* the stage completed.
+
 **Intermediate gotcha — the "hijacked thread":** with non-async chaining, a fast
 callback can end up running on the thread that *completed* the upstream stage
 (e.g., a Netty I/O thread or a thread that called `complete()`). If that callback
@@ -219,6 +264,25 @@ ExecutorService io = Executors.newFixedThreadPool(50); // sized for blocking I/O
 CompletableFuture.supplyAsync(() -> jdbcCall(), io)
                  .thenApplyAsync(this::transform, io);
 ```
+
+**Why 50, not a guess? (worked sizing calc.)** For *blocking* work the thread is
+mostly waiting, so size by **Little's law**: concurrency = throughput × latency.
+
+```
+target throughput = 500 req/s
+per-request blocking latency (one JDBC round-trip) = 100 ms = 0.1 s
+threads needed ≈ 500 req/s × 0.1 s = 50 concurrent requests in flight
+```
+
+So ~50 threads keeps the pipe full at 500 req/s. Contrast with **CPU-bound** work,
+where extra threads just thrash the cores — there the rule is `N + 1` (≈ 9 threads
+on an 8-core box), because a thread rarely yields the core.
+
+Trade-off of oversizing: gain more in-flight concurrency, but each thread costs
+~1 MB of stack plus context-switching overhead, and — the usual real ceiling — you
+can't exceed your **DB connection-pool size**. If the pool caps at 20 connections,
+50 threads just means 30 of them block waiting for a connection; size the executor
+to match the downstream limit, not above it.
 
 **Advanced notes:**
 - Common pool parallelism can be tuned via the system property
@@ -268,6 +332,11 @@ cf.whenComplete((val, ex) -> { if (ex != null) log.error("failed", ex); });
   logging/cleanup, not recovery.
 - **`handle`** runs on both paths and can *introduce* an exception path even after
   success. It is the most general.
+- **Which thread runs recovery?** Like any other non-async stage,
+  `exceptionally`/`handle`/`whenComplete` run on the thread that completed the
+  (failed) upstream stage — or inline on the caller if the stage was already
+  complete. Recovery is **not** automatically deferred to a pool. Use the
+  `...Async` variants to move recovery onto a chosen executor.
 - Java 12 added `exceptionallyAsync`, `exceptionallyCompose`, and
   `exceptionallyComposeAsync` for async recovery and recovering with another
   future. (The base `exceptionally` was Java 8.)
@@ -317,6 +386,38 @@ CompletableFuture<Object> fastest =
 - To implement **first-successful**, you typically use
   `exceptionally`/`handle` on each and a custom combinator, or wrap so failures
   are ignored until success.
+
+**Worked example — "anyOf that ignores failures".** The trick: don't race the raw
+futures. Create one result promise, and have *every* source try to `complete` it —
+but only on success. Losers (failures) do nothing, so a fast failure can't settle
+the race.
+
+```java
+static <T> CompletableFuture<T> firstSuccessful(List<CompletableFuture<T>> fs) {
+    CompletableFuture<T> result = new CompletableFuture<>();
+    for (CompletableFuture<T> f : fs) {
+        f.thenAccept(result::complete);          // success -> try to win; complete() is a no-op if already won
+        // failures: intentionally ignored so they can't settle `result`
+    }
+    // if EVERY future fails, complete exceptionally once all are done
+    CompletableFuture.allOf(fs.toArray(new CompletableFuture[0]))
+        .exceptionally(ex -> { result.completeExceptionally(ex); return null; });
+    return result;
+}
+```
+
+Trace with three mirrors where the *fastest* one fails: `m1` fails at 10 ms, `m2`
+succeeds "B" at 30 ms, `m3` succeeds "C" at 50 ms.
+
+```
+t=10ms  m1 fails      -> ignored (no thenAccept fires); result still pending
+t=30ms  m2 -> "B"     -> result.complete("B") wins; result = "B"
+t=50ms  m3 -> "C"     -> result.complete("C") returns false (already done), ignored
+```
+
+Result is `"B"`. Plain `anyOf` here would have completed **exceptionally at 10 ms**
+(first to *settle* was the failure) — this is exactly the "first to settle vs first
+to succeed" distinction made concrete.
 - `allOf(...).join()` blocks; prefer chaining `thenApply`/`thenAccept` off the
   `allOf` result to stay non-blocking.
 
@@ -335,6 +436,20 @@ CompletableFuture<Response> pipeline =
         .orTimeout(2, TimeUnit.SECONDS)            // Java 9
         .exceptionally(ex -> Response.error(ex));  // single funnel for all errors
 ```
+
+**Two `orTimeout` gotchas that this pipeline depends on:**
+- **`orTimeout` does not cancel the underlying work.** At 2 s it completes *this*
+  future exceptionally with `TimeoutException`, but `loadUserAsync`/`loadConfigAsync`
+  keep running on their threads and hold their resources (connection, buffer) until
+  they finish naturally. The timeout protects *your caller's latency*, not the far
+  side — that's a resource leak unless the downstream call has its own timeout.
+- **Ordering matters.** `orTimeout` is placed **before** `exceptionally` here, so a
+  `TimeoutException` flows *down* into the funnel and becomes `Response.error(...)`.
+  Flip them — `.exceptionally(...).orTimeout(2, SECONDS)` — and the funnel runs
+  first (catching only pipeline errors), leaving a later timeout with **no handler**,
+  so it escapes to whoever `join()`s. Also note the `exceptionally` callback runs on
+  whichever thread completed the failure — for a timeout that's the internal
+  **timeout scheduler thread**, so keep it cheap and non-blocking.
 
 **Principles:**
 - Use `thenCompose` for **dependent** sequential calls, `thenCombine`/`allOf` for

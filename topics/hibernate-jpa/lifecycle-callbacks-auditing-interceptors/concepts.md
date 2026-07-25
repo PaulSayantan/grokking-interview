@@ -134,6 +134,20 @@ Consequences a senior candidate should name:
 > in `@PreUpdate` (timestamps, validation, soft-delete stamping) is silently skipped by
 > `@Modifying` bulk queries. This is a classic auditing-gap interview trap.
 
+**Traced scenario.** Load `Order(status=NEW, updatedAt=T0)` — Hibernate captures the *loaded
+snapshot* `{status:NEW, updatedAt:T0}`. Three ways the transaction can end:
+
+1. `order.setStatus(NEW)` then commit → at flush, current `{status:NEW}` **equals** the
+   snapshot → **no `UPDATE`, `@PreUpdate` never runs**, `updatedAt` stays `T0`. Writing the
+   same value is not a change.
+2. `order.setStatus(PAID)` then commit → current `{status:PAID}` **differs** from snapshot
+   `{status:NEW}` → dirty. `@PreUpdate` fires, stamps `updatedAt=T1`, and Hibernate emits
+   `update orders set status='PAID', updated_at=T1 where id=?`.
+3. `@Modifying @Query("update Order o set o.status='PAID' where o.id=:id")` → runs one bulk
+   SQL `UPDATE` straight to the DB. **No persistence context, no dirty check, no
+   `@PreUpdate`** → `updatedAt` is left **stale at `T0`**, and any managed copy of the row in
+   the session is now out of date until refreshed.
+
 ---
 
 ## @EntityListeners and external listener classes
@@ -171,9 +185,12 @@ Key rules and mechanics:
   a `@MappedSuperclass` base entity so every entity inherits auditing.
 
 Listener beans are **not Spring-managed by default** — plain JPA instantiates them
-reflectively, so `@Autowired` in a listener is null. Spring Data's `AuditingEntityListener`
-is the wired exception (it resolves its collaborators through a static
-`BeanFactory`-backed bridge that `@EnableJpaAuditing` installs).
+reflectively, so `@Autowired` in a listener is null. The reason: JPA constructs listeners
+*outside* the Spring container (via reflection, not the bean factory), so normal dependency
+injection simply isn't available to them. Spring Data's `AuditingEntityListener` is the wired
+exception — it works around this by pulling its `AuditorAware`/`DateTimeProvider` from a
+**static reference to the `BeanFactory`** that `@EnableJpaAuditing` populates at startup. It's
+a deliberate escape hatch, not standard DI.
 
 ---
 
@@ -292,7 +309,9 @@ What Envers creates and does:
   via a `@RevisionEntity` with `@RevisionNumber` and `@RevisionTimestamp`, e.g. to also
   store the acting user).
 - On every insert/update/delete of an audited entity, Envers writes a new audit row inside
-  the **same transaction** (it hooks Hibernate's post-commit/flush event listeners).
+  the **same transaction** (it hooks Hibernate's `POST_COMMIT_*` event listeners — a
+  historically misleading name: they fire *after the SQL flush but still before the DB
+  transaction commits*, which is exactly why the audit row is written transactionally).
 
 Querying history uses the `AuditReader`:
 
@@ -316,6 +335,41 @@ Trade-offs / config a senior should mention:
 - Schema coupling: audit tables must be migrated alongside the main schema (Flyway/Liquibase).
 - Envers is **Hibernate-specific** (not portable JPA) and lives in the `hibernate-envers`
   module.
+
+### Worked example: what the _AUD table holds and how "state at revision N" is read
+
+Take one `Order` (`id=42`) with three changes: **inserted at rev 5** (`total=100`),
+**updated at rev 8** (`total=150`), **deleted at rev 11**. Here is what `ORDER_AUD` actually
+contains under each strategy (`REVTYPE`: `0=ADD, 1=MOD, 2=DEL`):
+
+```text
+DefaultAuditStrategy — one "start" revision per row
+ REV | REVTYPE | id | total
+   5 |    0    | 42 |  100
+   8 |    1    | 42 |  150
+  11 |    2    | 42 |  NULL     (DEL row; columns NULL unless store_data_at_delete=true)
+
+ValidityAuditStrategy — adds REVEND = the revision at which this row stopped being current
+ REV | REVEND | REVTYPE | id | total
+   5 |    8   |    0    | 42 |  100    (valid for revs 5..7)
+   8 |   11   |    1    | 42 |  150    (valid for revs 8..10)
+  11 |  NULL  |    2    | 42 |  NULL   (open-ended; entity is deleted)
+```
+
+Now ask for **`reader.find(Order.class, 42L, 9)`** — the state as of revision 9:
+
+- **Default** must find "the newest row whose start rev ≤ 9" with a correlated subquery:
+  `WHERE id=42 AND REV = (SELECT max(REV) FROM ORDER_AUD WHERE id=42 AND REV<=9)`. The
+  candidate revs are `{5, 8, 11}`; `max(REV ≤ 9) = 8`, so it returns row `(8, 150)` →
+  **`total=150`**. Every historical read pays for that self-join/subquery.
+- **Validity** answers with a plain range predicate, no subquery:
+  `WHERE id=42 AND REV<=9 AND (REVEND IS NULL OR REVEND>9)`. Row `rev 5` fails (`REVEND=8`,
+  not `>9`); row `rev 8` passes (`8≤9` and `REVEND=11>9`); row `rev 11` fails (`11>9`). One
+  row survives → `(8, 150)` → **`total=150`**.
+
+Same answer, different cost: Validity trades a **second write** (on the rev-8 update it must
+first `UPDATE` the rev-5 row to set `REVEND=8`) for a **subquery-free read**. That is exactly
+the read-vs-write choice the strategy trade-off above describes.
 
 ---
 
@@ -363,6 +417,8 @@ registry.appendListeners(EventType.POST_INSERT, new MyPostInsertListener());
 
 Envers itself is implemented this way. Use event listeners when you need to *replace or
 augment* core behavior globally; use an `Interceptor` for simpler per-session hooks.
+(The **StatementInspector, veto and post-commit listeners** section below distinguishes
+these three hook families in detail and shows where each sees SQL vs entity state.)
 
 ```mermaid
 flowchart TD
@@ -409,7 +465,8 @@ public class Order { @Id @GeneratedValue Long id; }
 
 Hibernate manages the indicator column, rewrites deletes to updates, and adds the filter
 automatically; `strategy` can be `DELETED` (a "is-deleted" flag) or `ACTIVE` (an
-"is-active" flag).
+"is-active" flag). (Full generated SQL, converters, and the in-memory-state advantage over
+`@SQLDelete` are in the **@SoftDelete internals** and **@SQLDelete gotchas** sections below.)
 
 Gotchas (the interview meat):
 
@@ -490,7 +547,15 @@ By default Hibernate generates **one static UPDATE per entity that sets *all* co
 one field, the flush emits `update orders set col1=?, col2=?, ... col40=? where id=?`.
 
 `@DynamicUpdate` tells Hibernate to **regenerate the UPDATE SQL on each flush** to include
-**only the dirty columns**:
+**only the dirty columns**. For the same scenario above (a `@PreUpdate` changed only
+`status` and `updatedAt` on a 40-column table), the emitted SQL shrinks:
+
+```sql
+-- static (default): all columns in SET, string cached once
+update orders set status=?, total=?, customer_id=?, ... col40=?, updated_at=? where id=?
+-- @DynamicUpdate: only the two dirty columns
+update orders set status=?, updated_at=? where id=?
+```
 
 ```java
 @Entity
@@ -713,8 +778,10 @@ Three distinct hook families, often confused:
   `Interceptor`, which never sees SQL text.
 - **Event listeners** — `PRE_INSERT`/`PRE_UPDATE`/`PRE_DELETE` listeners can **veto** an
   operation by returning `true`; `POST_COMMIT_INSERT`/`POST_COMMIT_UPDATE`/
-  `POST_COMMIT_DELETE` variants fire with after-commit semantics (historically how Envers
-  ordered its work). Registered via `EventListenerRegistry.appendListeners` /
+  `POST_COMMIT_DELETE` variants fire **after the SQL flush but still within the same DB
+  transaction (before the actual commit)** — the `POST_COMMIT_` name is historically
+  misleading, and this in-transaction timing is precisely how Envers writes its audit rows
+  transactionally. Registered via `EventListenerRegistry.appendListeners` /
   `prependListeners` from an `Integrator`.
 
 Compared to a JPA `@PreUpdate`: a `PRE_UPDATE` event listener is SessionFactory-wide and can

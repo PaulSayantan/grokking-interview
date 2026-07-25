@@ -1,5 +1,7 @@
 # Configuration, Profiles, and Externalized Properties
 
+Why any of this exists: the *same* jar must run on your laptop, in CI, and in prod — against different databases, URLs, and secrets — without being recompiled. Externalized configuration is how one build reads its environment-specific values from outside the code. Two abstractions make it work: **`PropertySource`s** are a prioritized stack of lookup tables (system properties, env vars, files) that the container reads top-down, and **profiles** are named switches that pick which bean wiring is active. Everything below is the plumbing that makes that swap-without-recompile possible.
+
 This topic covers how the **Spring Framework** (the core container, not Spring Boot) defines beans through Java-based configuration, how it models external configuration through the `Environment` and `PropertySource` abstractions, how values are injected and resolved with placeholders, and how profiles let you switch bean definitions per environment.
 
 > Scope note: This is the **core Spring Framework** view. Spring Boot layers auto-configuration, `application.properties`/`application.yml` loading, relaxed binding, `@ConfigurationProperties`, and the `spring.config.*` machinery *on top of* these primitives. Wherever a feature is Boot-specific, it is called out explicitly. On **Spring Framework 6.x** the container runs on **Jakarta EE 9+** (packages moved from `javax.*` to `jakarta.*`); annotations like `@PostConstruct` now come from `jakarta.annotation`.
@@ -29,6 +31,8 @@ public class AppConfig {
 ```
 
 ### Full (proxied) vs lite bean methods
+
+The intuition for why interception is even needed: a raw Java call like `orderService()` invoking `dataSource()` is just an ordinary method call — nothing in plain Java tells it to reuse the container's cached singleton, so it would run the body and build a *second* `DataSource`. The CGLIB subclass overrides each `@Bean` method to first check the container and hand back the already-built instance. That interception *is* the whole point of `proxyBeanMethods=true`.
 
 A `@Configuration` class is **enhanced by a CGLIB subclass** at runtime (`proxyBeanMethods = true`, the default). The subclass intercepts calls to `@Bean` methods so that a direct method call (like `dataSource()` above) returns the container-managed singleton rather than executing the method body again. This preserves singleton scoping and inter-bean references.
 
@@ -140,6 +144,30 @@ MutablePropertySources sources = env.getPropertySources();
 sources.addFirst(new MapPropertySource("overrides", Map.of("api.url", "http://local")));
 ```
 
+#### Worked example: watching a precedence collision resolve
+
+Suppose the same logical key is set three ways at once:
+
+- `app.properties` (loaded via `@PropertySource`): `api.url=http://file`
+- OS environment variable: `API_URL=http://env`
+- JVM launch flag: `-Dapi.url=http://sysprop`
+
+Now `env.getProperty("api.url")` walks the sources top-down:
+
+1. `systemProperties` — contains `api.url` (from `-D`) → **match, returns `http://sysprop`**. Stop.
+2. `systemEnvironment` — never consulted.
+3. `@PropertySource` file — never consulted.
+
+Result: `http://sysprop`. The file value `http://file` is *silently* ignored — this is the exact "I set it in `app.properties` but it comes out wrong" bug. First source with the key wins; later sources are not merged or averaged.
+
+Now drop the `-D` flag so only the env var and the file are in play:
+
+1. `systemProperties` — no `api.url`. Skip.
+2. `systemEnvironment` — a `SystemEnvironmentPropertySource`, so the lookup for `api.url` tries `api.url` (miss) → `api_url` (miss) → `API.URL` (miss) → `API_URL` (**hit**) → returns `http://env`. Stop.
+3. `@PropertySource` file — never consulted.
+
+Result: `http://env`. The env var wins *and* the name-mangling bridges `api.url` → `API_URL`, so a file key spelled exactly `api.url` still loses to an all-caps env var. Only when both system sources lack the key does the file's `http://file` finally surface.
+
 ### Property name resolution and relaxed access
 
 Core Spring does **not** do Spring Boot's "relaxed binding". However, `systemEnvironment` uses a `SystemEnvironmentPropertySource` that tolerates lookups where dots/hyphens map to underscores and case differences — so `getProperty("api.url")` can be satisfied by an env var `API_URL`. This behavior is limited to the system-environment source.
@@ -194,7 +222,41 @@ public class MailClient {
 
 ### Resolution order and the two-pass model
 
+Mental model first: a `@Value` string goes through an assembly line with two stations. Station one substitutes `${...}` placeholders (looking values up in the `Environment`); it hands the resulting string to station two, which parses `#{...}` as SpEL and executes it. The order is fixed — placeholders always run first — and that ordering is what creates both the "nest a placeholder inside SpEL" convenience and the SpEL-injection hazard.
+
+```
+@Value("...")  raw string
+      |
+      v
+[ Pass 1: PSPC / resolveEmbeddedValue ]   -- substitutes ${...} from PropertySources
+      |
+      v
+  intermediate string (placeholders now literal text)
+      |
+      v
+[ Pass 2: BeanExpressionResolver / evaluateBeanDefinitionString ]  -- parses & runs #{...} SpEL
+      |
+      v
+  injected value
+```
+
 There are actually two distinct processors involved. `${...}` placeholders are resolved by the `PropertySourcesPlaceholderConfigurer` (a `BeanFactoryPostProcessor`) which runs against `StringValueResolver`s. `#{...}` SpEL is evaluated by a `BeanExpressionResolver` (`StandardBeanExpressionResolver`) that the `AutowiredAnnotationBeanPostProcessor` invokes when populating the `@Value`. The key subtlety: the container **resolves `${...}` first** and **then** hands the *resulting* string to SpEL. Concretely, `DefaultListableBeanFactory.doResolveDependency` does `resolveEmbeddedValue(strValue)` (placeholder pass) and then `evaluateBeanDefinitionString(resolvedValue, bd)` (SpEL pass) on its output. So in `#{'${a}'.length()}` the placeholder is substituted into the string literal before SpEL parses it. A consequence that surprises people: because SpEL runs on the *post-placeholder* string, if a placeholder resolves to text that itself contains `#{...}`, that produced text **is** handed to the SpEL parser and gets evaluated — this is exactly the SpEL-injection risk of interpolating untrusted property values into `@Value`. (The reverse is not true: `${...}` is resolved only once, not re-scanned after SpEL runs.)
+
+#### Worked example: the two passes on real inputs
+
+**Benign case.** Property `a=hello`, and the field is `@Value("#{'${a}'.length()}")`.
+
+- Pass 1 sees the placeholder `${a}` embedded in the string, resolves it against the `Environment` → `hello`. The `#{...}` is *not* a placeholder, so it is left untouched. Intermediate string: `#{'hello'.length()}`.
+- Pass 2 parses `#{'hello'.length()}` as SpEL: string literal `'hello'`, call `.length()` → `5`.
+- Injected value: `5`. (Target field is an `int`, so `5` binds cleanly.)
+
+**Dangerous case.** Property `evil=#{T(java.lang.Runtime).getRuntime()}`, and the field is `@Value("${evil}")`.
+
+- Pass 1 resolves `${evil}` → the literal text `#{T(java.lang.Runtime).getRuntime()}`. To PSPC this is just a string; it has no idea it contains SpEL. Intermediate string: `#{T(java.lang.Runtime).getRuntime()}`.
+- Pass 2 receives that string and *does* recognize `#{...}` as SpEL, so it parses and **executes** it — obtaining the live `Runtime` (and an attacker who controlled the property could chain `.exec(...)`).
+- Injected value: whatever the expression evaluates to — arbitrary code has run.
+
+The two traces share one mechanism: pass 1 blindly produces a string, pass 2 blindly evaluates any `#{...}` in it. That is why interpolating an *untrusted* property value into a `@Value` is an injection risk, while nesting a *trusted* `${...}` inside your own `#{...}` is a handy idiom.
 
 ### Nested and recursive placeholders
 
@@ -308,6 +370,12 @@ Profiles are activated (not by `@Profile`, which only *declares* eligibility) vi
 `@Profile` can annotate a `@Bean` method, a `@Component`, or a whole `@Configuration` class (which then gates all its beans). Note `@Profile` is a `@Conditional(ProfileCondition.class)` under the hood; for arbitrary conditions use `@Conditional` directly.
 
 Multiple active profiles are additive — beans from every active profile are registered. A bean **without** any `@Profile` is always registered regardless of active profiles.
+
+### Which activation wins when several are set at once
+
+If the *same* activation appears in more than one place, it resolves through the ordinary `Environment` precedence, because `spring.profiles.active` is itself just a property. Concretely, with `-Dspring.profiles.active=prod` on the command line **and** `SPRING_PROFILES_ACTIVE=qa` in the environment, `systemProperties` is checked before `systemEnvironment`, so the active set becomes `{prod}` — the env var never contributes. There is no merge; the first source that supplies the key defines the whole comma-separated set.
+
+Programmatic activation is a different axis. `ctx.getEnvironment().setActiveProfiles("prod")` called before `refresh()` **replaces** the active set outright — it does *not* append, and it overrides property-driven values already present. If you meant to add to whatever was configured, call `addActiveProfile("prod")` instead. (`setActiveProfiles` clears then sets; `addActiveProfile` unions.)
 
 ### Profile is a registration-time condition, not a runtime toggle
 

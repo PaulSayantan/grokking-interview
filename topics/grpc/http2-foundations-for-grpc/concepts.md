@@ -166,6 +166,31 @@ Multiple messages (in streaming calls) are just concatenated length-prefixed fra
 stream. This framing is why gRPC can stream: the receiver reads a prefix, reads that many bytes,
 delivers one message, and repeats — independent of how HTTP/2 chose to chunk the `DATA` frames.
 
+**Worked example — decode a message off the wire.** Suppose a capture shows these 10 bytes in
+the stream's `DATA`:
+
+```
+00 00 00 00 05 68 65 6C 6C 6F
+```
+
+Read them left to right the way the receiver does:
+
+1. **Byte 0** = `0x00` → compressed flag is 0, so the payload is **uncompressed** (no
+   `grpc-encoding` decode needed).
+2. **Bytes 1–4** = `00 00 00 05`, an unsigned 32-bit big-endian integer =
+   `0×2²⁴ + 0×2¹⁶ + 0×2⁸ + 5` = **5**. So exactly 5 payload bytes follow.
+3. **Next 5 bytes** = `68 65 6C 6C 6F` = the ASCII codes for `h e l l o` → the message is
+   **`"hello"`**.
+
+Total on the wire = 5 prefix bytes + 5 payload bytes = **10 bytes**, and we consumed exactly 10 —
+so the message is complete and the next byte (if any) begins the *next* length prefix.
+
+Now the compressed variant. If the frame instead began `01 00 00 00 20 …`, byte 0 = `0x01`
+means the payload **is** compressed with the codec named in `grpc-encoding` (e.g. `gzip`), and
+the length `0x00000020` = **32** is the length of the *compressed* payload — you read 32 bytes,
+then decompress them to recover the original protobuf. The prefix length always counts on-wire
+bytes, never the decompressed size.
+
 > [!TIP]
 > The 5-byte prefix is per **message**, not per HTTP/2 frame. A 1 MB message may span many
 > `DATA` frames; ten tiny messages may fit in one `DATA` frame. Never assume one message =
@@ -235,6 +260,7 @@ The canonical status codes (subset shown; there are 17 total, 0–16):
 | 8 | `RESOURCE_EXHAUSTED` | Quota / rate limit / out of space |
 | 9 | `FAILED_PRECONDITION` | System state wrong for the operation |
 | 10 | `ABORTED` | Concurrency conflict (e.g. txn abort) — often retryable |
+| 12 | `UNIMPLEMENTED` | Method/service not implemented on the server |
 | 13 | `INTERNAL` | Serious internal invariant broken |
 | 14 | `UNAVAILABLE` | Transient — connection lost, server down; safest to retry |
 | 16 | `UNAUTHENTICATED` | Missing/invalid credentials |
@@ -276,6 +302,26 @@ The mechanics of propagation, cancellation, and hedging are covered in
 `grpc/deadlines-timeouts-cancellation` and `grpc/retries-resiliency-and-deadline-propagation`;
 cross-ref `reliability-ops` for the general timeout/deadline theory.
 
+**Worked example — a budget shrinking down a chain.** Client → Service A → Service B, client
+sets a 500 ms deadline:
+
+1. Client sends `grpc-timeout: 500m`. **Budget = 500 ms.**
+2. A receives it, does 60 ms of local work (validation, a cache read). Remaining = 500 − 60 =
+   **440 ms**. Before calling B, A subtracts a small safety margin for one-way latency and clock
+   skew — say 10 ms — and sends `grpc-timeout: 430m` downstream. So B is told it has **430 ms**,
+   not 440.
+3. B starts a DB query that takes 400 ms and returns at the 400 ms mark — under its 430 ms
+   budget — so B succeeds and replies. Total elapsed at the client ≈ 60 + 10 (network) + 400 =
+   **470 ms < 500 ms**: the whole call fits.
+
+Now change one number: B's query hangs for 500 ms. B's own 430 ms `grpc-timeout` fires first: B
+fails **its** RPC with `DEADLINE_EXCEEDED` at 430 ms and stops touching the DB — it does not run
+orphaned work for a caller that is about to give up. A sees B fail (or A's own deadline
+tracking fires) and returns `DEADLINE_EXCEEDED` up to the client. The key payoff: because the
+budget rides on the wire and shrinks at each hop, **every** layer bails at roughly the same wall
+-clock instant instead of each hop restarting a fresh 500 ms timer (which would let a 3-hop
+chain burn up to 1500 ms).
+
 **What happens when a deadline expires.** The RPC is terminated with `DEADLINE_EXCEEDED`. On the
 wire the client (or server) resets the HTTP/2 stream with a `RST_STREAM` frame; in-flight work
 on that stream is cancelled and any further `DATA` is dropped. The client's call fails
@@ -301,6 +347,35 @@ A receiver advertises an initial window (via `SETTINGS_INITIAL_WINDOW_SIZE`) and
 by sending `WINDOW_UPDATE` frames as it consumes data. If a receiver stops reading, its window
 drains to zero and the sender **must stop sending `DATA`** on that stream — this is
 backpressure: a slow consumer automatically throttles a fast producer, without dropping data.
+
+**Worked example — the window counting down.** Take HTTP/2's default per-stream window,
+**65,535 bytes**, and a server streaming 16 KB (16,384-byte) messages to a client that has
+temporarily stopped reading:
+
+```
+window = 65535
+send msg 1 (16384 B):  65535 - 16384 = 49151
+send msg 2 (16384 B):  49151 - 16384 = 32767
+send msg 3 (16384 B):  32767 - 16384 = 16383
+send msg 4 (16384 B):  16383 - 16384 = -1  → NOT ALLOWED
+```
+
+The sender may only transmit while the remaining window is ≥ the bytes it wants to send. After
+msg 3 the window is **16,383 bytes** — smaller than a whole 16,384-byte message — so the sender
+can push at most 16,383 more bytes and then **blocks**; it cannot send msg 4. Nothing moves
+until the client actually consumes buffered data and emits a `WINDOW_UPDATE`, say `+49152`,
+lifting the window to 16,383 + 49,152 = **65,535** again, at which point the sender unblocks and
+resumes. That stall *is* the backpressure — the producer is pinned to the consumer's drain rate.
+
+> [!WARNING]
+> Those defaults are footguns at scale. The **~64 KB default initial window** caps in-flight
+> bytes per stream, so on a high bandwidth-delay-product link (fast pipe, high RTT) a single
+> stream can't keep enough data in flight to saturate the link until `WINDOW_UPDATE`s catch up —
+> throughput is stuck at roughly window ÷ RTT regardless of bandwidth (BDP tuning lives in
+> `networking/http2-http3-quic`). Separately, `MAX_CONCURRENT_STREAMS` defaults to **100** in
+> common gRPC implementations: RPC 101 on a connection **queues** behind an open stream until one
+> finishes — an invisible latency cliff. This is a core reason clients open **multiple
+> subchannels** rather than funneling everything through one connection.
 
 **Why this matters for gRPC streaming.** In a server-streaming call, if the client is slow to
 process messages, gRPC (via the transport) stops advertising window, the server's writes block,
@@ -342,8 +417,13 @@ production failure mode.
 
 **GOAWAY and graceful shutdown.** When a server wants to drain (deploy, scale-down), it sends a
 `GOAWAY` frame naming the last stream ID it will process. Existing RPCs finish; new streams go to
-other connections. gRPC clients handle `GOAWAY` by reconnecting elsewhere. `MAX_CONCURRENT_STREAMS`
-(a `SETTINGS` value) caps how many RPCs may be in flight per connection at once.
+other connections. gRPC clients handle `GOAWAY` by reconnecting elsewhere. Crucially, any streams
+the client already opened with IDs **greater than** the last-processed ID named in the `GOAWAY`
+were never accepted by the server (a race: they were in flight when the server decided to drain),
+so they must be transparently **retried on a new connection**. This is exactly why `GOAWAY`
+enables zero-downtime server drain/deploy — nothing in flight is silently lost.
+`MAX_CONCURRENT_STREAMS` (a `SETTINGS` value) caps how many RPCs may be in flight per connection
+at once.
 
 Connection pooling, subchannel lifecycle, and name resolution are detailed in
 `grpc/channels-stubs-client-server-lifecycle`; the transport-level keepalive mechanics are here.

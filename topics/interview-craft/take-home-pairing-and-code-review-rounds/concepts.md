@@ -59,6 +59,11 @@ How to scope well:
 - **Honor the stated time-box.** If it says ~3–4 hours, plan to a 3–4 hour deliverable. Going
   10 hours doesn't impress — it signals poor prioritization and disadvantages candidates with
   jobs, kids, or disabilities (many companies now explicitly cap or check this).
+- **If no time-box is stated, impose your own.** Default to a self-imposed 3–4 hour box and say
+  so in the README ("I boxed this to ~4 hours; here's what that bought and what I cut"). A
+  take-home with no cap that clearly demands 15+ hours is itself a mild red flag about how the
+  company values candidates' time — it's reasonable to ask the recruiter for an expected effort
+  before you start, or to deliver a deliberately time-boxed slice and name it.
 - **Build a thin vertical slice, then widen.** A working request→logic→response→test path beats
   three half-built features. Depth on the core beats breadth of stubs.
 - **Timebox with a visible plan.** Even a scratch TODO list of "must / nice-to-have / skipped"
@@ -168,6 +173,30 @@ flowchart TD
   G --> H[README: run, assumptions, trade-offs, next steps]
 ```
 
+## AI coding assistants: use them like a senior would
+
+By 2026, "did you use Copilot / ChatGPT / Claude?" is one of the most common candidate questions
+and interviewer concerns for both take-homes and pairing. The reality on the job is that seniors
+*do* use assistants — so the interview signal isn't abstinence, it's **ownership**: can you
+explain, defend, and stand behind every line, whoever typed it?
+
+- **Follow the prompt's stated policy.** Some take-homes say "assistants allowed," some say "no
+  AI," some ask you to disclose usage. Read it and comply; violating a stated no-AI rule is an
+  integrity ding that outweighs any code you produce.
+- **Assume you must explain every line.** In the follow-up conversation (or a pairing round with
+  no assistant), you'll be asked "why this approach?" or "walk me through this function." Code an
+  assistant wrote that you can't reason through is a landmine — it exposes you as someone who
+  ships what they don't understand.
+- **Disclose when asked, and be matter-of-fact.** "I used Copilot to scaffold the boilerplate
+  and wrote the core logic and tests myself" is a fine, senior answer. The risk isn't having used
+  a tool; it's hiding it or being unable to defend the output.
+
+> [!WARNING]
+> The failure mode is *unowned* AI code: a slick submission the candidate can't explain, defend,
+> or debug under questioning. Treat an assistant like a junior pair — it drafts, you review,
+> reason, and own. If you can't justify a line in one sentence tied to a requirement, rewrite it
+> until you can.
+
 ## Pairing & live-coding: think out loud and communicate intent
 
 In a pairing round the interviewer is your temporary teammate, and the **primary thing being
@@ -192,6 +221,28 @@ How to communicate well:
 > The two extremes both fail: total silence (interviewer can't follow your reasoning or help)
 > and non-stop chatter that never produces code. Aim for a running commentary tied to progress
 > — talk *while* you build, and let there be quiet moments while you actually type.
+
+**What good narration actually sounds like.** Prompt: "given an array of ints and a target,
+return the indices of the two numbers that sum to the target." Here is the cadence — clarify →
+plan → brute force → trade-off → incremental test — with the spoken line, then what it buys you:
+
+> 1. *(clarify)* "Quick questions: can the same element be used twice? Is exactly one valid pair
+>    guaranteed, or could there be zero or many? Can the array be empty?" → shows you probe
+>    requirements before touching code.
+> 2. *(plan)* "Plan: I'll start with the obvious double loop to get something correct and
+>    running, then swap to a hash map for O(n) if we have time." → interviewer can redirect now,
+>    before you invest.
+> 3. *(brute force, typing)* "So — outer loop `i`, inner loop `j` from `i+1`, return `[i, j]`
+>    when `nums[i] + nums[j] == target`." → correct-first beats clever-first.
+> 4. *(trade-off)* "This is O(n²) time, O(1) space. The hash-map version trades O(n) memory for
+>    O(n) time — worth it once N is large; for a bounded input either is fine." → same trade-off
+>    articulation design rounds reward.
+> 5. *(incremental test)* "Let me sanity-check on `[2,7,11,15], target 9` → `i=0,j=1`, `2+7=9`,
+>    returns `[0,1]`. And an edge case: empty array returns nothing, no crash." → test-mindedness,
+>    live.
+
+Notice the ratio: roughly one sentence of intent per chunk of code, plus silence while typing —
+not a keystroke-by-keystroke monologue.
 
 ## Pairing: clarify first, then build and test incrementally
 
@@ -255,6 +306,12 @@ is the signal.**
   stumbling.
 - **Preparation reduces nerves.** Practicing out-loud coding and setting up your environment
   beforehand (editor, language, runtime) removes avoidable friction on the day.
+- **Sort out remote logistics first.** These rounds are almost always remote on a shared tool
+  (CoderPad, CodeSandbox, a shared repo, or their editor via screen share). Confirm the tool and
+  language ahead of time, test your screen share and mic before the call, and get fluent in
+  whatever shared editor they use — fumbling with an unfamiliar environment or a broken share
+  burns real minutes and reads as unpreparedness. If you can bring your own editor, ask; if you
+  must use theirs, do a dry run.
 
 ## Code-review round: what senior reviewers catch
 
@@ -319,6 +376,11 @@ Techniques that read as senior:
   need a check here" — a question can be less confrontational and surfaces context you lack.
 - **Acknowledge what's good.** Noting a clean abstraction or good test isn't fluff; it calibrates
   your feedback and builds trust.
+- **Delivering it live?** Many code-review rounds are a spoken screen-share walkthrough, not
+  written PR comments. Structure it the same way: open by stating your triage order aloud ("I'll
+  go correctness and security first, then tests, then nits"), walk the highest-severity issue
+  first with the concrete risk, and *don't* enumerate every nit — bundle them into one closing
+  "a few minor readability things" instead of ten separate remarks.
 
 > [!WARNING]
 > Two failure modes sink this round: the **rubber-stamp** ("looks good") that misses planted
@@ -330,11 +392,60 @@ grows unbounded inside the loop, so a large query could OOM the process — can 
 paginate here? Not a blocker for the happy path, but worth addressing before this hits
 production."
 
+### Worked example: reviewing a real diff
+
+Here is exactly the kind of PR a code-review round hands you. Four problems are planted; find
+them in severity order before writing a single comment.
+
+```python
+ 1  def get_user_orders(db, user_id, status):
+ 2      # returns all orders for a user filtered by status
+ 3      q = "SELECT * FROM orders WHERE user_id = " + user_id \
+ 4          + " AND status = '" + status + "'"
+ 5      rows = db.execute(q)
+ 6      user = db.get_user(user_id)
+ 7      results = []
+ 8      for r in rows:
+ 9          if r.total > user.credit_limit:      # flag high-value orders
+10              r.flagged = True
+11          results.append(r)
+12      return results
+```
+
+**Internal triage (scan correctness → edge cases → security → tests → style):**
+
+- *Correctness:* line 6 fetches `user`, line 9 dereferences `user.credit_limit`. If `get_user`
+  returns `None` for an unknown/deleted `user_id`, line 9 throws `AttributeError` — the whole
+  request 500s. **High.**
+- *Edge case:* line 4 interpolates `status` with no validation; an empty or unexpected `status`
+  silently returns an empty list rather than an error. Minor, but worth a guard. **Medium.**
+- *Security:* lines 3–4 build SQL by string concatenation — classic **SQL injection**. A
+  `status` of `x' OR '1'='1` dumps every user's orders. This is the highest-value catch even
+  though it sits below the null bug in raw line order. **High/blocker.**
+- *Style:* `q`, `r` are terse; the comment on line 2 restates the signature. **Lowest — a nit.**
+
+**The review, prioritized and delivered in kind/specific/actionable form:**
+
+1. *(blocker — security)* "Line 3–4: this builds the query by string concatenation, so `status`
+   and `user_id` are injectable — e.g. `status = \"x' OR '1'='1\"` would return every user's
+   orders. Let's use a parameterized query: `db.execute(\"... WHERE user_id = %s AND status =
+   %s\", (user_id, status))`. Must fix before merge."
+2. *(blocker — correctness)* "Line 9 dereferences `user.credit_limit`, but `get_user` on line 6
+   can return `None` for a missing user — that'll `AttributeError` and 500 the request. Can we
+   guard: return early (or 404) when `user is None` before the loop?"
+3. *(nit)* "Optional: `q`/`r` could be `query`/`order` for readability, and the line-2 comment
+   just restates the signature. Not blocking."
+
+Note what happened: the two high-severity issues lead and are labeled blockers; the style nit is
+named once and explicitly deprioritized — never buried on top of the injection flaw. That
+ordering *is* the signal.
+
 ## Being reviewed graciously
 
 The flip side — how you respond when *your* code is critiqued — is also assessed, sometimes by
-having the interviewer push back on your take-home or pairing solution. It's a direct proxy for
-day-to-day collaboration and ego.
+having the interviewer push back on your take-home or pairing solution. It's the same muscle as
+taking hints gracefully, but now it's your own committed code, which stings more — so ego
+management matters even more. It's a direct proxy for day-to-day collaboration and ego.
 
 - **Assume good intent and stay curious.** Treat feedback as being about the code, not you.
   "Good point, I hadn't considered that case" costs nothing and signals maturity.

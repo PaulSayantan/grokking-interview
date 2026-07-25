@@ -157,6 +157,51 @@ where `|d|` is the doc's field length and `avgdl` the average field length. BM25
 for `the fox` ranks a short doc titled "The Fox" above a 5,000-word article that mentions "fox"
 once.
 
+**Worked example — why the short doc wins.** Take query term `fox` over a corpus of N = 1,000,000
+docs, of which df = 1,000 contain "fox". Lucene's BM25 IDF is `ln(1 + (N − df + 0.5)/(df + 0.5))`:
+
+```
+IDF = ln(1 + (1,000,000 − 1,000 + 0.5) / (1,000 + 0.5))
+    = ln(1 + 998.50)  = ln(999.50)  ≈ 6.91
+```
+
+That IDF is *identical* for both docs (same term), so it doesn't decide the ranking — the
+length-normalized TF term does. With `k1 = 1.2`, `b = 0.75`, `avgdl = 250`:
+
+```
+Doc A — short title, tf = 1, |d| = 3:
+  denom   = tf + k1·(1 − b + b·|d|/avgdl) = 1 + 1.2·(1 − 0.75 + 0.75·3/250)
+          = 1 + 1.2·0.259 = 1.311
+  TF term = tf·(k1+1)/denom = 2.2 / 1.311 = 1.678
+  score   = IDF · 1.678 = 6.91 · 1.678 ≈ 11.6
+
+Doc B — 500-word body, tf = 1, |d| = 500:
+  denom   = 1 + 1.2·(1 − 0.75 + 0.75·500/250) = 1 + 1.2·1.75 = 3.10
+  TF term = 2.2 / 3.10 = 0.710
+  score   = 6.91 · 0.710 ≈ 4.9
+```
+
+Same term, same tf, same IDF — yet the short doc scores **11.6 vs 4.9**, purely from length
+normalization. Set `b = 0` and both length factors collapse to `1 − 0 + 0 = 1`, so both denoms
+become `1 + 1.2 = 2.2`, both TF terms become `2.2/2.2 = 1`, and both docs tie at `6.91`: length
+stops mattering.
+
+**TF saturation, numerically.** Fix a doc at average length (`|d| = avgdl`, so the length factor
+is 1 and denom = `tf + 1.2`). The TF term `tf·2.2 / (tf + 1.2)` climbs then flattens toward its
+ceiling `k1 + 1 = 2.2`:
+
+| tf | TF term |
+|---|---|
+| 1 | 1.000 |
+| 2 | 1.375 |
+| 3 | 1.571 |
+| 10 | 1.964 |
+| → ∞ | 2.200 (ceiling) |
+
+Going from 1→2 occurrences adds 0.375; going from 2→10 (eight *more* occurrences) adds only 0.589
+and can never cross 2.2. That's why keyword-stuffing a doc with the same term stops paying off —
+`k1` caps the reward for raw repetition.
+
 | | TF-IDF (legacy) | BM25 (default) |
 |---|---|---|
 | TF contribution | Unbounded (linear-ish) | Saturating (bounded by `k1`) |
@@ -180,6 +225,15 @@ Scores are relative within a single query — you tune ranking by **boosting**:
 > `_score` is not comparable across different queries or (before scores are combined) across
 > shards with different term statistics. Tune with the `_explain` API and A/B tests, not by
 > guessing magnitudes. Don't treat `_score` as an absolute quality metric to threshold on.
+
+**"Why do my scores jump around on a tiny index?"** By default each shard computes IDF from its
+**own local** term/doc counts, not global ones. If "fox" appears in 990 docs on shard 0 but only
+10 on shard 1, its IDF (and thus `_score`) is *lower* on shard 0 — so the same document can rank
+differently depending on which shard it landed in. On a large evenly-distributed index the shards'
+statistics converge and this is negligible; on small or skewed indices it's visibly unstable. The
+fix is **`search_type=dfs_query_then_fetch`**: a distributed pre-pass (**DFS** = Distributed
+Frequency Search) gathers **global** term stats first, then scores every shard against those, so
+ranking is consistent — at the cost of an extra round trip.
 
 ## The Elasticsearch / OpenSearch data model
 
@@ -217,9 +271,28 @@ flowchart TB
   end
 ```
 
-A search **scatters** to one copy of each shard and **gathers**/merges the results (the
-query-then-fetch phases). Too many small shards wastes overhead; too few huge shards limits
-parallelism and slows recovery — a common sizing guideline is tens of GB per shard.
+A search **scatters** to one copy of each shard and **gathers**/merges the results via
+**query-then-fetch**: in **phase 1 (query)** each shard runs the query locally and returns just
+the top-N **doc IDs + `_score`** (not the documents); the coordinator merges those into the global
+top-N. In **phase 2 (fetch)** it retrieves the full `_source` only for those final winners. Too
+many small shards wastes overhead; too few huge shards limits parallelism and slows recovery — a
+common sizing guideline is tens of GB per shard.
+
+**Why the shard count is frozen.** Since `shard = hash(_id) % number_of_primary_shards`, the shard
+a doc lives on is a function of the primary count. Change the count from 3 to 4 and `hash % 3`
+becomes `hash % 4` — almost every existing `_id` now maps to a *different* shard, so ES would have
+to rewrite all data anyway. That's exactly why you can't resize in place: you reindex, or use the
+Split/Shrink APIs (which rebuild). Replica count carries no such constraint (replicas are copies,
+not a routing input), so it's freely changeable at runtime.
+
+**Deep-pagination gotcha.** `from`/`size` paginates by *discarding* — `from=10000, size=10` forces
+**every** shard to return its top `from + size = 10,010` hits to the coordinator, which merges
+`shards × 10,010` hits (30,030 for 3 shards) just to throw away the first 10,000 and hand back 10.
+Cost and memory grow with the offset, which is why `index.max_result_window` defaults to **10,000**
+and rejects deeper `from`. For scalable deep paging use **`search_after`** (a cursor keyed on the
+last hit's sort values — each page is a fresh top-N, no offset), pinned to a **point-in-time (PIT)**
+so the view is stable across pages; use the **scroll** API only for one-off batch export, not for
+user-facing pagination.
 
 ## Lucene segments, refresh, and near-real-time search
 
@@ -227,6 +300,16 @@ Each shard is a Lucene index made of immutable **segments**. New/updated docs fi
 in-memory **indexing buffer**. Segments are **write-once, never modified**: an update is a
 *delete-marker on the old doc + a new doc*, and a delete just marks a `.del` bit — space is
 reclaimed later by **segment merges** (background merging of small segments into larger ones).
+
+**Trace — updating an immutable doc.** Index doc `42` (v1): it lands in segment **S1**. Update
+doc `42` to v2: ES does *not* touch S1 — it writes v1's slot in S1's `.del` bitset (tombstone) and
+appends v2 as a fresh doc in a new segment **S2**. A search now sees only v2 (S1's copy is filtered
+out by the `.del` bit) — but v1's bytes still occupy disk. Later a **merge** of S1+S2 into S3
+physically drops every tombstoned doc, reclaiming that space. So an "update" is really
+*append-new + tombstone-old + reclaim-on-merge* — never an in-place edit.
+
+(Relatedly, a two-term AND intersects the shorter posting list against the longer one and uses the
+list's **skip pointers** to leap over stretches of non-matching doc IDs rather than scanning them.)
 
 A **refresh** takes the buffered docs and writes them into a new segment that is opened for
 search — but only into the **filesystem cache**, not yet fsynced to disk. This is cheap and is

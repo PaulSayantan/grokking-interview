@@ -144,7 +144,7 @@ You can route specific methods to named executors with `@Async("beanName")`. As 
 
 ### Rejection, saturation, and shutdown semantics
 
-- **The saturation trap.** The `corePoolSize → queue → maxPoolSize` ordering means a **large `queueCapacity` effectively caps you at `corePoolSize`**: the pool will not grow to `maxPoolSize` until the queue is full. If you set `corePoolSize=2, maxPoolSize=50, queueCapacity=Integer.MAX_VALUE`, you will never get more than 2 threads — the queue absorbs everything first. This surprises people expecting more parallelism. For burst parallelism, keep the queue small (or zero, using a `SynchronousQueue`-style handoff).
+- **The saturation trap.** Mental model first: think of a restaurant that hires up to `corePoolSize` **permanent cooks**; extra orders **wait in a queue** (up to `queueCapacity`); only when the waiting area is *physically full* does it call in **temp cooks** up to `maxPoolSize`; and when even the temps are all busy it **turns customers away** (rejection). The counterintuitive part — the queue fills *before* new threads spawn — falls right out of that order. The `corePoolSize → queue → maxPoolSize` ordering means a **large `queueCapacity` effectively caps you at `corePoolSize`**: the pool will not grow to `maxPoolSize` until the queue is full. If you set `corePoolSize=2, maxPoolSize=50, queueCapacity=Integer.MAX_VALUE`, you will never get more than 2 threads — the queue absorbs everything first. This surprises people expecting more parallelism. For burst parallelism, keep the queue small (or zero, using a `SynchronousQueue`-style handoff).
 - **`SimpleAsyncTaskExecutor` has no queue at all** (each task gets a fresh thread unless a concurrency limit is configured), so under load it can create unbounded threads — the reason it is unsuitable for production without `setConcurrencyLimit(...)`.
 - **Rejection policy.** When queue and `maxPoolSize` are both exhausted the `RejectedExecutionHandler` runs. The default `AbortPolicy` throws `RejectedExecutionException` — on the **caller thread**, synchronously, at submit time. `CallerRunsPolicy` instead runs the task on the caller thread (providing back-pressure but stalling the caller).
 - **Graceful shutdown.** `ThreadPoolTaskExecutor` supports `setWaitForTasksToCompleteOnShutdown(true)` and `setAwaitTerminationSeconds(...)`. On context close the executor's `destroy()` shuts the pool down; in-flight `@Async` tasks may be interrupted or awaited depending on this config. Tasks still sitting in the queue can be silently dropped on an abrupt shutdown.
@@ -201,6 +201,18 @@ public TaskScheduler taskScheduler() {
 - **`SimpleAsyncTaskScheduler` (Spring 6.1)** fires each execution on a new (optionally virtual) thread from a single scheduler thread — great for `fixedRate`/`cron`, but fixed-delay tasks are forced onto the single scheduler thread (delay semantics require waiting for completion). Hence the guidance: with virtual threads, prefer `fixedRate`/`cron` over `fixedDelay`.
 - **Programmatic registration.** Implement `SchedulingConfigurer` and use the `ScheduledTaskRegistrar` to register tasks with dynamic triggers (e.g. a `Trigger` whose next execution is computed from data, or a `cron` string resolved at runtime) — something the static annotation cannot express.
 
+### Distributed scheduling — the multi-instance gotcha
+
+`@Scheduled` is **per-JVM with no leader election**: every instance runs its own `TaskScheduler` and fires the trigger independently. That is invisible on a single node but bites hard the moment you scale horizontally.
+
+Concrete trace: you deploy `@Scheduled(cron = "0 0 0 1 * *") void sendMonthlyInvoices()` and run **3 replicas** behind a load balancer. At midnight on the 1st, all 3 schedulers fire the same method → **3 invoice runs** → every customer is billed three times. Nothing in Spring coordinates them; the annotation has no notion of "cluster."
+
+Mitigations (this is a reliable interviewer follow-up — *"how do you make a scheduled job run exactly once across a cluster?"*):
+
+- **Shared lock (ShedLock / Spring Integration `LockRegistry`)** — each instance tries to grab a lock (row in a DB, Redis key) named for the task before running; the loser skips. Simplest bolt-on for existing `@Scheduled` code.
+- **Clustered scheduler (Quartz in clustered mode with a JDBC job store)** — the scheduler itself elects one node per trigger via the shared DB.
+- **Externalize the trigger** — a single external scheduler (Kubernetes `CronJob`, EventBridge, a cron pod) publishes a message/HTTP call; app instances only *react* to the one event, so fan-out never happens.
+
 ### The double-initialization pitfall
 
 Do not put `@Scheduled` on a class that is also instantiated outside the container (e.g. via `@Configurable` load-time weaving *and* registered as a bean), or register the same `@Scheduled` bean twice — each live instance registers its own triggers, so the method fires **multiple times per interval**. Prototype-scoped `@Scheduled` beans are also a smell: every created instance schedules itself.
@@ -253,7 +265,12 @@ Special values: `*` (any), `?` (no specific value, for day-of-month/day-of-week)
 
 ### Cron edge cases
 
-- **day-of-month and day-of-week are AND-combined when both are restricted** — a deliberate Spring deviation from Unix/Vixie crontab (which OR-combines them). Spring's `CronExpression` fires only when *both* day constraints are satisfied: e.g. `0 0 0 13 * FRI` fires **only on a Friday that is also the 13th**, not on every 13th and every Friday. This surprises people who expect Unix-style OR — a subtle source of "why didn't it fire on the day I expected" bugs. Use `?` in one field to mean "no specific value" and disable that constraint.
+- **day-of-month and day-of-week are AND-combined when both are restricted** — a deliberate Spring deviation from Unix/Vixie crontab (which OR-combines them). Spring's `CronExpression` fires only when *both* day constraints are satisfied. Contrast the two behaviors side by side for `0 0 0 13 * FRI`:
+
+- **Unix/Vixie cron (OR):** fires on **every 13th of the month AND on every Friday** — roughly 12 + 52 ≈ 60 firings a year.
+- **Spring (AND):** fires **only when the 13th of the month happens to be a Friday** — a "Friday the 13th" schedule, which in 2026 hits only **February, March, and November** (3 firings that year).
+
+That is a ~20x difference in how often the job runs. This surprises people who expect Unix-style OR — a subtle source of "why didn't it fire on the day I expected" bugs. Use `?` in one field to mean "no specific value" and disable that constraint.
 - **DST transitions**: with a `zone`, Spring's `CronExpression` computes fire times in that zone. A daily job at `02:30` may be skipped or run once around a spring-forward/fall-back transition; wall-clock cron does not "make up" a skipped time.
 - Spring cron does not support seconds-less 5-field Unix expressions — a 5-field string is invalid; you must supply all six fields (or a macro).
 
@@ -308,6 +325,35 @@ Important attributes and behaviors:
 `@Cacheable` vs `@CachePut`: never put both on the same method — `@Cacheable` skips execution on a hit while `@CachePut` always executes, so their behaviors conflict.
 
 Spring also supports the **JSR-107 (JCache) annotations** (`@CacheResult`, `@CachePut`, `@CacheRemove`, `@CacheRemoveAll` from `javax.cache.annotation`) when a JCache provider and the corresponding config are present.
+
+### Worked example: a miss, then a hit (and what the key actually is)
+
+Take `@Cacheable("books") Book findBook(String isbn)` backed by the `ConcurrentMapCacheManager("books")` above, and trace two calls.
+
+**Call 1 — `findBook("111")`:**
+
+1. **Compute the key.** `SimpleKeyGenerator` sees exactly one argument, so the key is *the argument itself* — the `String` `"111"`, **not** a `SimpleKey` wrapper. (Zero args → `SimpleKey.EMPTY`; two-plus args → a `SimpleKey`.)
+2. **Look up.** The proxy calls `cache("books").get("111")` → returns `null` → **MISS**.
+3. **Run the body.** The slow lookup executes and returns, say, `Book("111", "Dune")`.
+4. **Store.** The proxy calls `cache("books").put("111", Book("111","Dune"))`. The `"books"` cache now holds one entry:
+
+   ```
+   books:  { "111" -> Book("111","Dune") }
+   ```
+
+**Call 2 — `findBook("111")` again:**
+
+1. Key = `"111"` (same rule).
+2. `cache("books").get("111")` → returns the stored `Book` → **HIT**.
+3. **The method body is skipped entirely** — the cached `Book("111","Dune")` is returned directly. No slow lookup runs.
+
+**Now add a second argument** — `@Cacheable("books") Book findBook(String isbn, String lang)`:
+
+- `findBook("111", "en")` → two args → key = `SimpleKey["111", "en"]` (both args wrapped).
+- Because the wrapper differs from the bare `"111"` key, `findBook("111","en")` and the earlier single-arg `findBook("111")` land on **different cache entries** — even in the same `"books"` cache. This is exactly why overloads/refactors that change the argument list silently invalidate old cached entries, and why people pin the key explicitly with `key = "#isbn"` when only the ISBN should matter.
+
+> [!TIP]
+> The single-arg-becomes-the-key rule means the argument's own `equals`/`hashCode` *are* the cache key. Keying on a mutable object and then mutating it after the `put` leaves the entry stranded — the new object no longer hashes to the stored key. Prefer keying on an immutable id (`key = "#book.isbn"`).
 
 ### SpEL evaluation context for keys, condition, and unless
 
@@ -411,6 +457,15 @@ public class OrderService {
 ```
 
 Why: the proxy wraps the object from the *outside*. Once execution is inside the target object, `this` is the raw target, which has no notion of the advice.
+
+```mermaid
+flowchart LR
+    ExtCaller[External caller] -->|"process()"| Proxy[OrderService proxy]
+    Proxy -->|advice runs| Target[raw OrderService target]
+    Target -.->|"this.audit() stays inside — advice SKIPPED"| Target
+```
+
+Read it as: the external call to `process()` crosses the proxy boundary (advice would run if `process` were advised), but the `this.audit()` call loops back *within* the raw target and never re-crosses the proxy — so `@Async` on `audit()` is silently ignored.
 
 Ways to make self-invocation work (or avoid the problem):
 

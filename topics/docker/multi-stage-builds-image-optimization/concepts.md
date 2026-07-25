@@ -38,6 +38,20 @@ Smaller images are not just tidiness — size has concrete operational consequen
   cross-region replication cost real money.
 - **Faster CI.** Smaller images push faster and scanners have less to scan.
 
+**Put numbers on it (a senior is expected to back-of-envelope this).** Take a 1 GB image on
+a 200-node fleet that redeploys 10×/day, and assume the layers are cache-cold on pull:
+
+- Egress: `1 GB × 200 nodes × 10 deploys = 2,000 GB/day` of registry pulls. At a
+  cross-region egress rate of ~$0.09/GB that is `2,000 × $0.09 = $180/day ≈ $5,400/month`,
+  every month, just to move bits you never execute.
+- Cold-start latency: a 1 GB pull at ~100 MB/s adds `1,000 MB ÷ 100 MB/s = ~10 s` to every
+  cache-cold pod start — brutal when autoscaling is racing a traffic spike.
+
+Now swap in a 20 MB image: `20 MB × 200 × 10 = 40 GB/day → 40 × $0.09 ≈ $3.60/day (~$108/mo)`,
+and the pull is `20 MB ÷ 100 MB/s = 0.2 s`. Same app, ~50× less egress and a near-instant
+start. (Numbers are illustrative — the point is that image size maps directly to dollars and
+seconds, so "it's cleaner" is the wrong lead.)
+
 > [!INTERVIEW]
 > "Why do we care if the image is big?" Lead with the two answers interviewers want:
 > **deploy/pull speed** (autoscaling, cold starts) and **attack surface / CVE count**.
@@ -203,6 +217,40 @@ Language-specific patterns:
 - **Python:** builder installs into a venv or `--user`; final stage copies the
   site-packages, dropping build headers and `pip` caches.
 
+The Go example above is the *easy* case (a compiled binary carries nothing). The tricky,
+most-asked case is an interpreted runtime like Node, where you have to decide *which*
+`node_modules` to carry. A complete worked multi-stage Node build:
+
+```dockerfile
+# Stage 1: build with the full toolchain + devDependencies
+FROM node:20 AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci                      # installs ALL deps (incl. devDependencies: tsc, webpack…)
+COPY . .
+RUN npm run build               # emits compiled output to /app/dist
+
+# Stage 2: production deps only, reinstalled clean
+FROM node:20 AS prod-deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev           # prod deps ONLY — no tsc/webpack/jest
+
+# Stage 3: tiny runtime — copy artifacts, never the builder's node_modules
+FROM gcr.io/distroless/nodejs20-debian12 AS final
+WORKDIR /app
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=builder   /app/dist         ./dist
+CMD ["dist/server.js"]          # exec form — distroless has no shell
+```
+
+Why not just `COPY --from=builder /app/node_modules`? Because the builder's `node_modules`
+was populated by `npm ci` and still contains **devDependencies** — TypeScript, webpack,
+jest, eslint — that you only needed to *produce* `dist/`, never to run it. Reinstalling with
+`npm ci --omit=dev` in a separate stage (or `npm prune --omit=dev`) is what actually drops
+those megabytes. Copy the built `dist/` from `builder`, the pruned `node_modules` from
+`prod-deps`, and nothing else.
+
 > [!INTERVIEW]
 > A crisp way to state the principle: *"Build tools are needed to produce the artifact but
 > not to run it, so they belong in a throwaway stage. The runtime image should contain the
@@ -326,6 +374,27 @@ Each `RUN`, `COPY`, and `ADD` creates a **layer**. Two rules matter for size:
    (it's just hidden by a whiteout). You must add and delete **in the same layer**.
 2. **Package-manager caches are pure bloat** — clean them in the same `RUN`.
 
+Trace the whiteout with real bytes — it's the single most counterintuitive thing here:
+
+```
+Layer 1  FROM debian:slim         +75 MB    running total = 75 MB
+Layer 2  COPY bigfile /bigfile   +400 MB    running total = 475 MB
+Layer 3  RUN rm /bigfile           +0 MB    running total = 475 MB  ← still 475 MB!
+```
+
+`rm` in layer 3 only writes a tiny **whiteout marker** that *hides* `/bigfile` from the
+final filesystem view — the 400 MB it occupies in layer 2 is immutable and still ships and
+still transfers on every pull. Collapse the add-and-delete into one instruction and the
+committed layer is what's *left after* the delete:
+
+```
+Layer 1  FROM debian:slim                              +75 MB    total = 75 MB
+Layer 2  RUN <download bigfile> && <use it> && rm ...   +0 MB    total = ~75 MB  ← gone
+```
+
+Because the file never survives to the moment layer 2 is committed, it never enters the
+image at all. Same principle for `apt` lists and package caches below.
+
 ```dockerfile
 # BAD — cache and lists left in a layer; extra layers
 RUN apt-get update
@@ -442,9 +511,43 @@ docker images myapp
 dive myapp:latest
 ```
 
-Reading `docker history`, look for: a huge `RUN apt-get ...` layer (missing cache cleanup),
-a large `COPY . .` (missing `.dockerignore`), or build tools present in what should be a
-runtime image (missing multi-stage).
+Here is what `docker history` actually looks like on the fat single-stage Node image from
+*The fat-image anti-pattern* — and how to read every row:
+
+```
+$ docker history --human myapp:latest
+IMAGE          CREATED       CREATED BY                                      SIZE
+a1b2c3d4e5f6   2 min ago     CMD ["node" "dist/server.js"]                   0B
+<missing>      2 min ago     RUN npm run build (webpack, tsc output)         40MB
+<missing>      3 min ago     RUN npm install (all deps incl. devDeps)        300MB
+<missing>      3 min ago     COPY . . (source, .git, tests, fixtures)        45MB
+<missing>      4 min ago     RUN apt-get install -y build-essential          120MB
+<missing>      5 min ago     WORKDIR /app                                    0B
+<missing>      2 weeks ago   /bin/sh -c #(nop) ... node:20 base userland     75MB
+```
+
+Total ≈ `75 + 120 + 45 + 300 + 40 = 580 MB`. Read top-to-bottom, biggest-first, and each
+fat row maps to a fix already taught:
+
+- **300 MB `npm install`** — this is `node_modules` *including* devDependencies (webpack,
+  tsc, jest). A multi-stage build reinstalls with `npm ci --omit=dev` in the runtime stage
+  and this collapses to the prod-only slice.
+- **120 MB `apt-get install build-essential`** — a build toolchain that never runs in prod,
+  and it never cleaned `/var/lib/apt/lists/*`. Belongs in a throwaway builder stage.
+- **45 MB `COPY . .`** — the whole context: `.git`, tests, fixtures. A `.dockerignore` plus
+  explicit `COPY` paths drops most of it.
+- **40 MB `npm run build`** — bundler output; only `dist/` needs to ship, not the layer's
+  intermediate junk.
+- **75 MB base** — the full `node:20` userland; swapping the *final* stage to
+  `distroless/nodejs20` trims this too.
+
+The multi-stage rewrite ships only the 75 MB base (or ~small distroless) + prod
+`node_modules` + `dist/` — the 120 MB apt layer and the devDependency bulk simply never
+reach the final image.
+
+More generally, reading `docker history`, look for: a huge `RUN apt-get ...` layer (missing
+cache cleanup), a large `COPY . .` (missing `.dockerignore`), or build tools present in what
+should be a runtime image (missing multi-stage).
 
 ---
 

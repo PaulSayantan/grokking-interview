@@ -149,6 +149,15 @@ conn, _ := grpc.NewClient("host:443", grpc.WithTransportCredentials(creds))
 > right SANs. Modern TLS ignores the deprecated CN field for hostname matching — SANs
 > are authoritative.
 
+Concrete failure: the server cert has `SAN = DNS:api.example.com`, but the client dials
+`10.0.2.15:443` (the pod IP) instead of the DNS name. The handshake presents the cert,
+the client tries to match `10.0.2.15` against the SAN list, finds no matching IP entry,
+and aborts with `x509: cannot validate certificate for 10.0.2.15 because it doesn't
+contain any IP SANs`. Fix by dialing `api.example.com:443` (so `:authority` matches the
+DNS SAN) or by reissuing the cert with `IP:10.0.2.15` added to the SANs. Note the RPC
+never even starts — this is a transport handshake failure, surfaced to the caller as
+`UNAVAILABLE`, not an application-level auth error.
+
 gRPC requires **HTTP/2**, and public HTTP/2 in practice implies TLS with ALPN. gRPC
 also supports **h2c** (HTTP/2 cleartext) for the insecure case, but that is dev/internal
 only.
@@ -195,6 +204,20 @@ srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
 The `ClientAuth` policy matters: `RequireAndVerifyClientCert` is true mTLS;
 `VerifyClientCertIfGiven` makes it optional (a downgrade risk if you rely on it for
 authz).
+
+> [!WARNING]
+> **Cert rotation does not retroactively refresh a live connection.** gRPC channels are
+> long-lived and their subchannels are pooled and reused. The peer certificates are
+> negotiated *once*, during the handshake — so if SPIRE rotates a workload's SVID at
+> 12:00 while a channel established at 11:30 is still open, that open connection keeps
+> the *old* cert until it re-handshakes (i.e., reconnects). Concretely: SVID TTL is 1h,
+> minted at 11:00 (expires 12:00), rotated to a fresh SVID at 11:50. A channel dialed at
+> 11:10 and never dropped is still presenting the 11:00 cert at 12:05 — now expired — and
+> the *next* reconnect (or a peer that revalidates) rejects it. This is why mesh mTLS
+> pairs short TTLs with a **rotating credentials provider** (xds/tls reloader, Istio's
+> SDS) that supplies the fresh cert on the *next* handshake, and why callers must be
+> willing to reconnect. Contrast tokens: a call credential re-mints per-RPC, so token
+> refresh is transparent on the same connection; cert refresh is not.
 
 ### SPIFFE / SPIRE identities
 
@@ -260,6 +283,19 @@ The token is **per-RPC** because call credentials' `GetRequestMetadata` is invok
 each call — this lets the credential refresh a short-lived token transparently
 (e.g., an OAuth2 `TokenSource` that re-mints before expiry).
 
+> [!WARNING]
+> **"Per-RPC" means per stream-open, not per message.** Metadata is sent once, in the
+> initial HEADERS frame when the stream opens — so `GetRequestMetadata` runs at stream
+> start and its token is fixed for the stream's lifetime. For unary calls this is fine
+> (each call is its own short-lived stream). But a long-lived server/bidi stream can
+> *outlive* its token: token minted at stream open with `exp` in 15 min, stream stays
+> open for 2 hours → after minute 15 the token is expired but the stream keeps flowing
+> DATA frames because no new metadata is ever sent. The initial validation passed and
+> gRPC does not re-invoke the interceptor per message. Mitigations: keep streams short
+> and re-open (re-auth) on reconnect; or push authorization into per-message
+> application-level checks inside the handler; or bind stream lifetime to token `exp`
+> and close when it lapses.
+
 Why put the token in **metadata** and not in the protobuf message?
 - It is cross-cutting context, not domain data — it should not pollute your `.proto`.
 - Interceptors can enforce it uniformly without every handler unpacking it.
@@ -305,6 +341,43 @@ flowchart LR
 `io.grpc.Grpc.TRANSPORT_ATTR_SSL_SESSION` / `SecurityLevel`) surfaces the peer's
 `SecurityLevel` (NONE / INTEGRITY / PRIVACY) and, under mTLS, the verified client
 certificate chain from which you extract the identity.
+
+### Worked trace: one RPC end-to-end
+
+Wire it all together with concrete values so the pieces stop being a pile of config
+snippets and become one flow.
+
+**Happy path** — client calls `PaymentService/Charge` at t = `1690000100`:
+
+1. **Dial + handshake (channel creds).** Client does `grpc.NewClient("api.example.com:443",
+   WithTransportCredentials(tls))`. TCP connects, TLS handshake runs, ALPN negotiates
+   `h2`. Server presents its cert; client checks `:authority = api.example.com` against
+   `SAN = DNS:api.example.com` → match. Encrypted connection established;
+   `SecurityLevel = PRIVACY`.
+2. **Mint token (call creds).** For this RPC, gRPC invokes `GetRequestMetadata`. The
+   `TokenSource` sees the cached JWT with `exp = 1690003600` (valid for ~58 min) and
+   returns `{"authorization": "Bearer eyJhbGci...aud=payments...exp=1690003600"}`.
+   Because the channel is `PRIVACY`, the safety check passes and the header is attached.
+3. **On the wire.** The token rides in the HTTP/2 **HEADERS** frame as
+   `authorization: Bearer eyJhbGci...`, inside encrypted TLS records, alongside
+   `:path = /PaymentService/Charge`.
+4. **Server interceptor.** Runs before the handler. Reads the metadata, verifies the JWT
+   signature, then checks `exp (1690003600) > now (1690000100)` → still valid, and
+   `aud = payments` → matches this service. Resolves principal `sub = user-42`, injects
+   it into the context, returns nil (proceed).
+5. **Handler.** `Charge` runs, returns `OK (0)`.
+
+**Expired-token path** — same client, but 1 hour later at t = `1690003700`:
+
+1–3 are identical (same open channel, `TokenSource` returns the *same* cached JWT
+   because it has not refreshed yet — or a bidi stream is reusing the token minted at
+   step 2).
+4. Interceptor checks `exp (1690003600) > now (1690003700)`? → `3600 < 3700`, **false**.
+   The token expired 100 seconds ago. Interceptor short-circuits and returns
+   **`UNAUTHENTICATED (16)`** — the handler never runs.
+5. Client sees status 16. It must obtain a fresh token and retry. (If instead the token
+   were valid but `user-42` lacked the `charge:write` scope, the interceptor would pass
+   authentication but fail authorization → **`PERMISSION_DENIED (7)`**, not 16.)
 
 > [!INTERVIEW]
 > "Client sent no token / an expired token — which status?" → `UNAUTHENTICATED` (16).

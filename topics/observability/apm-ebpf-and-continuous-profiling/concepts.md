@@ -87,9 +87,41 @@ and its own backend. Advantages: turnkey, deep framework coverage, rich app-leve
 - **Per-language effort** — the vendor must build and maintain an agent per runtime; coverage
   and quality vary by language.
 - **Overhead & risk** — an in-process agent adds CPU/memory and, because it rewrites
-  bytecode, can occasionally break on library upgrades.
+  bytecode, can occasionally break on library upgrades. Concretely: the agent matches *known
+  class/method signatures*, so a library major-version bump that renames or re-shapes those
+  methods can make spans **silently disappear** (a coverage gap you notice only when a
+  dashboard goes empty) or, worse, throw at class-load. Agent and library versions are
+  effectively coupled and must be re-tested together on every upgrade.
 - **Go/compiled languages** — the auto-magic largely doesn't work; you fall back to manual
   spans or eBPF.
+
+**Worked example — what the agent actually produces.** Take one uninstrumented request,
+`GET /checkout`, that runs a SQL query then calls a payment API. You changed *zero* lines of
+code; you just loaded the `-javaagent` JAR. On that single request the Java APM agent
+auto-creates a small span tree:
+
+```
+span  GET /checkout                    dur=212ms  http.method=GET  http.status_code=200   [SERVER]
+ └ span  SELECT orders                 dur=140ms  db.system=postgresql
+ │                                      db.statement="SELECT * FROM orders WHERE id=$1"
+ └ span  POST payments.internal/charge dur= 61ms  http.status_code=201                    [CLIENT]
+```
+
+The agent knew the Servlet, JDBC, and HTTP-client libraries, so it timed each hop and attached
+**app-level context** (the SQL text, the DB system, the status code). It also rolls these spans
+up into a **RED metric** for the endpoint, e.g. `http.server.duration{route="/checkout"}` with
+p50/p99 and an error count.
+
+Now the same request seen by an **eBPF** agent, which reads only syscall/socket timing at the
+kernel boundary — no app symbols:
+
+```
+RED line:  route=/checkout  method=GET  status=200  count=1  duration=212ms
+```
+
+Same latency number, but **no `db.statement`, no span tree, no "which line"** — eBPF saw bytes
+in and bytes out, not "this was a Postgres call for order 42." That gap is the whole
+"app context vs kernel bytes" trade-off in one picture.
 
 > [!WARNING]
 > Auto-instrumentation is not free coverage. Agents only instrument libraries they *know*.
@@ -168,7 +200,12 @@ Core building blocks (all commonly asked):
   syscalls. This is how in-kernel data reaches your collector.
 - **Helper functions** — programs cannot call arbitrary kernel code; they use a stable set of
   **BPF helpers**. **CO-RE (Compile Once, Run Everywhere)** + BTF lets one compiled program
-  run across kernel versions with different struct layouts.
+  run across kernel versions with different struct layouts. The problem CO-RE solves:
+  kernel structs shift field offsets between versions (a field that lives at byte offset 16 in
+  one kernel may sit at offset 24 in another), so a program compiled against one kernel would
+  read the *wrong bytes* elsewhere. **BTF (BPF Type Format)** is metadata the kernel emits
+  describing its *own* struct layouts; CO-RE uses that BTF to **relocate field accesses at load
+  time**, so a single compiled binary reads the right offsets on any kernel.
 
 Why observability loves it: **one agent, per-node, sees everything** — every process's
 syscalls, network, and CPU — with **no application changes, no redeploys, and language
@@ -312,7 +349,13 @@ Mechanics:
   - **DWARF/debug-info unwinding** — works without frame pointers but is heavier and needs
     debug info; eBPF profilers ship unwinders to do this in/near the kernel.
 - **Profile types** — **CPU** (on-CPU time), **heap/allocations** (memory), **off-CPU**
-  (blocked/waiting time), plus lock/mutex, goroutine, etc.
+  (blocked/waiting time), plus lock/mutex, goroutine, etc. **On-CPU profiling shows where CPU
+  is *burned*; off-CPU profiling captures the time a thread spent *blocked/waiting* — on I/O, a
+  lock, or a sleep — while it was NOT running.** This distinction matters because a slow
+  request often spends most of its latency doing nothing on-CPU (waiting on a DB round-trip),
+  so it is invisible in a standard CPU flame graph; only an off-CPU profile explains it.
+  Off-CPU profiling is heavier because it hooks *scheduler* events (every context-switch off
+  the CPU) rather than a fixed-rate timer.
 - **pprof format** — Google's **`pprof` `profile.proto`** is the de-facto interchange format
   for profiles. Go's `net/http/pprof`, Parca, and Pyroscope all speak it. A profile is
   essentially a set of **stack samples with a value** (e.g. CPU nanoseconds or bytes) and
@@ -321,6 +364,25 @@ Mechanics:
   resource** spent in that frame (and its children), stacked by call depth. **Differential
   (diff) flame graphs** color frames by whether they grew or shrank between two profiles —
   the release-regression workflow. (Interpreting them deeply is a perf-engineering skill.)
+
+**Worked example — how counting stacks becomes CPU time.** Say a CPU runs for exactly
+**1 second** and the profiler fires at **100 Hz** → that's **100 stack captures** (one every
+10 ms). Suppose the captured top-of-stack tallies come out as:
+
+| Function | Samples caught | Fraction | Attributed on-CPU time |
+|---|---|---|---|
+| `serializeJSON()` | 60 | 60/100 | ~600 ms |
+| `compileRegex()` | 30 | 30/100 | ~300 ms |
+| everything else | 10 | 10/100 | ~100 ms |
+
+The profiler never measured a stopwatch on any function — it just **counted how often each
+one was the code running when the timer fired** and multiplied the fraction by the wall-clock
+window. That is exactly the "200 ms span was 60% JSON serialization, 30% regex" claim from the
+fourth-pillar section, made concrete. Now the sampling caveat with numbers: a function that
+runs for **0.5 ms** once has only a `0.5 ms / 10 ms = 5%` chance of being live when any single
+100 Hz tick fires — so it will usually be *missed entirely*. Sampling is accurate for
+**aggregate** hot paths over a window, not for catching one rare short call; that statistical
+approximation is precisely what keeps overhead at a few percent.
 
 ```mermaid
 flowchart TB
@@ -359,9 +421,12 @@ the modern zero-instrumentation approach:
   bundled DWARF unwinder) and records it in a **stack-trace map**.
 - Because it's at the kernel level, it profiles **every process on the node in every language
   — including native, kernel, and runtime frames — with no code changes and one agent.**
-- Symbolization (turning addresses into function names) happens using debug info; for
-  interpreted/JIT languages (JVM, Python, Node) extra symbol maps are needed to get meaningful
-  frames.
+- Symbolization (turning a raw instruction address like `0x7f3c...` into `serializeJSON`)
+  happens using debug info. For interpreted/JIT languages (JVM, Python, Node) extra symbol maps
+  are needed: JIT-compiled code is generated at runtime, so its address has **no static symbol
+  in the binary** for the profiler to look up. The runtime must emit a **side map** (e.g. a JVM
+  `perf-map` / async-profiler map listing `address → method name`) that the profiler joins
+  against; without it those frames show up as bare hex addresses.
 
 The classic trade-off mirrors the eBPF-vs-SDK one: **eBPF profilers give zero-touch,
 whole-fleet, cross-language coverage** including native code; **language runtime profilers
@@ -373,6 +438,20 @@ JIT/interpreted frames, allocation call sites) but must be built into each app.
 > a DaemonSet** samples every process's stack at the kernel level (~100 Hz via perf events),
 > stores pprof over time, and lets you diff flame graphs across releases — language-agnostic
 > and low-overhead.
+
+### Gotcha: what "always-on, fleet-wide" costs to store
+
+"Always-on and fleet-wide" is an observability *storage* problem, and interviewers probe it.
+Profiling backends (Parca, Pyroscope) store **aggregated stack-sample series labelled
+Prometheus-style** — `{service, version, instance, ...}`. Cardinality is the trap: attach a
+**per-request or high-cardinality label** (user ID, request ID) and you multiply the number of
+distinct series by every value that label takes, exploding storage the same way a bad
+Prometheus label does. So profiles are **aggregated over time windows** (e.g. 10–60 s) rather
+than stored per-sample, kept with **short retention**, and labels are kept low-cardinality. On
+top of the sample series you also pay for **symbolization data** (debug info / symbol maps) and
+storage of **unsymbolized addresses** for frames that couldn't be resolved. This is why
+**sampling frequency and label discipline** are the two knobs that keep fleet-scale profiling
+affordable.
 
 ---
 

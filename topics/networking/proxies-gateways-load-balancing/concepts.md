@@ -185,7 +185,51 @@ How the LB picks a backend from the healthy pool:
   session affinity that needs no cookie). **Consistent hashing** minimizes remapping when
   the pool changes size (only ~1/N keys move), which matters for cache-server pools.
 - **Random / random-of-two ("power of two choices")** — pick two backends at random and
-  send to the less loaded of the two; cheap and surprisingly close to optimal.
+  send to the less loaded of the two; cheap and surprisingly close to optimal. *Why two
+  samples help so much:* throwing `n` requests at `n` backends purely at random leaves the
+  busiest backend with roughly `ln n / ln ln n` more than average, but sampling **two** and
+  taking the lesser drops that gap to about `ln ln n / ln 2` — an **exponential**
+  improvement — so a single extra sample kills the "unlucky hot node" that pure random (and
+  round-robin under skew) both suffer, without the coordination cost of true least-connections.
+
+**Worked example — round robin overloading a node.** Three equal backends A, B, C, all
+idle. Requests arrive one per 100 ms, alternating **expensive** (2000 ms) and **cheap**
+(10 ms): req1 exp, req2 cheap, req3 exp, req4 cheap, req5 exp, req6 cheap. Round robin
+hands them out in strict rotation A, B, C, A, B, C:
+
+| Req (cost) | Arrives | RR target | Still in flight there? |
+|---|---|---|---|
+| 1 (2000ms) | t=0   | A | A busy until t=2000 |
+| 2 (10ms)   | t=100 | B | B free at t=110 |
+| 3 (2000ms) | t=200 | C | C busy until t=2200 |
+| 4 (10ms)   | t=300 | A | **A still busy** (req1) → queues behind it |
+| 5 (2000ms) | t=400 | B | B busy until t=2400 |
+| 6 (10ms)   | t=500 | C | **C still busy** (req3) → queues |
+
+The rotation blindly put cheap req4 back onto A **while req1's 2000 ms job was still
+running** — even though B had been free since t=110 — so a 10 ms request waits ~1.7 s
+(t=300 until A frees at t=2000) behind an unrelated slow job, and cheap req6 similarly
+queues on C behind req3. Round robin counts *turns*, not *work in flight*.
+
+Now **least connections** on the same arrivals (route to fewest active connections; ties
+broken A<B<C). Each backend runs one request at a time, so "active" is 0 or 1; the counts
+are *just before* each arrival:
+
+| Req (cost) | Arrives | Active {A,B,C} | Picks | Why / effect |
+|---|---|---|---|---|
+| 1 (exp)   | t=0   | {0,0,0} | A | tie → A; A busy until t=2000 |
+| 2 (cheap) | t=100 | {1,0,0} | B | A busy; B,C idle, tie → B; B busy until t=110 |
+| 3 (exp)   | t=200 | {1,0,0} | B | B freed at t=110; tie B,C → B; B busy until t=2200 |
+| 4 (cheap) | t=300 | {1,1,0} | C | A,B busy; C idle → C; done t=310 (no queue) |
+| 5 (exp)   | t=400 | {1,1,0} | C | C freed at t=310 → C; C busy until t=2400 |
+| 6 (cheap) | t=500 | {1,1,1} | A | all busy, tie → A; A still running req1 → queues ~1.5 s |
+
+The three expensive jobs (1, 3, 5) each land on a **different** backend (A, B, C), and cheap
+reqs 2 and 4 each hit an idle node and finish instantly. Only cheap req6 queues — and only
+because by t=500 *all three* backends are mid-way through a 2000 ms job, so **no** policy could
+have avoided it. Contrast round robin, where cheap req4 queued on A *while B sat idle*. Least
+connections adapts to work-in-flight, so it halves the head-of-line blocking here (one cheap
+request delayed instead of two) — it just can't conjure capacity once every backend is saturated.
 
 > [!TIP]
 > Round robin is the classic default, but **least connections** is usually the better
@@ -333,7 +377,14 @@ scale to enormous throughput — it only handles the small inbound half.
 - The LB never sees responses, so it **can't do L7 processing, response rewriting, or
   connection-level tracking of the reply** — DSR is inherently L4.
 - Requires specific network topology (backends and LB on the same L2 segment for MAC-rewrite
-  DSR, or tunneling) and loopback VIP + ARP suppression on backends.
+  DSR, or tunneling) and loopback VIP + ARP suppression on backends. **Why suppress ARP:**
+  the same VIP now lives on the LB *and* every backend's loopback. If a backend answered ARP
+  "who has the VIP?", the switch would learn the backend's MAC for the VIP and deliver client
+  traffic straight to that backend — bypassing the LB entirely (no balancing) and causing
+  duplicate-IP conflicts as multiple hosts claim the address. So backends must be configured
+  **not** to ARP-announce or ARP-reply for the VIP (`arp_ignore`/`arp_announce`, or hiding it
+  on a non-ARPing loopback); only the LB answers ARP for the VIP, so all inbound client
+  packets still land on the LB first.
 - Health checking and connection state are trickier since the LB sees only one direction.
 
 ---
@@ -370,6 +421,27 @@ connections stitched together.
 | L7 features | none | full |
 | Overhead | low | higher |
 
+The three return paths side by side (solid = request, dashed = response):
+
+```mermaid
+flowchart LR
+  subgraph NAT["NAT mode"]
+    c1[Client] --> l1[LB] --> b1[Backend]
+    b1 -.-> l1 -.-> c1
+  end
+  subgraph DSR["DSR"]
+    c2[Client] --> l2[LB] --> b2[Backend]
+    b2 -.->|reply bypasses LB| c2
+  end
+  subgraph PROXY["Full proxy"]
+    c3[Client] <--> l3[LB] <--> b3[Backend]
+  end
+```
+
+In NAT the reply retraces its steps through the LB (so it can un-NAT); in DSR the backend
+answers the client directly; in full proxy the LB terminates both connections, so every byte
+in each direction passes through it.
+
 > [!KEY-TAKEAWAY]
 > Three L4 forwarding styles, by return path and rewriting: **NAT** (LB rewrites dest,
 > replies return through LB), **DSR** (LB forwards, replies bypass LB), and **full proxy**
@@ -395,6 +467,32 @@ keyspace (e.g. `0 .. 2^32 - 1`). To find a key's backend, hash the key and walk
 re-homes the keys in the *one arc* between the changed node and its predecessor — about
 `K/N` keys — instead of nearly all of them. That bounded disruption is the whole point.
 
+**Worked example — the ring in numbers.** Shrink the keyspace to `0..99` and place three
+backends A@10, B@45, C@80. Route each key by hashing it, then walking **clockwise** to the
+next backend point (wrapping past 99→0):
+
+- key hashes to **5** → clockwise the first backend is A@10 → **A**
+- key hashes to **30** → next backend clockwise is B@45 → **B**
+- key hashes to **70** → next backend clockwise is C@80 → **C**
+- key hashes to **90** → nothing until we wrap 99→0 and reach A@10 → **A** (the wrap arc)
+
+So each backend owns the arc *ending at its point*: A owns `(80,10]` (i.e. 81..99 and
+0..10), B owns `(10,45]`, C owns `(45,80]`.
+
+Now **add D@50**. D owns the arc `(45,50]` — carved out of C's old arc `(45,80]`. The only
+keys that move are those hashing into **46..50**: our key at 30 stays on B, at 70 stays on
+C, at 5 stays on A. *Nothing* outside 46..50 is disturbed. Contrast `hash % N`: going
+`3→4` backends changes the divisor for every key and remaps roughly `(N-1)/N = 3/4 ≈ 75%`
+of them. The ring moved one small arc; modulo would have reshuffled three keys in four.
+
+**Virtual nodes, concretely.** With one point each, A owns arc `(80,10]` (length 30), B
+`(10,45]` (35), C `(45,80]` (35) — already uneven. Give C three points instead — C@22,
+C@60, C@80 — and its share becomes three small arcs scattered around the circle rather than
+one fat 35-wide slice, so no single unlucky hash range can dump a huge fraction on one box.
+A heavier box simply gets *more* points and thus a bigger — but still smooth — total share:
+that is exactly how weight is expressed. More points per box = smoother balance, at the cost
+of more ring entries to store and search.
+
 **Virtual nodes (replicas).** Placing each physical backend at a *single* ring point gives
 badly uneven arcs (load skew) and can't express weights. The fix is **virtual nodes**: hash
 each backend to *many* points (e.g. 100–1000 `hash(node#i)` positions). Averaging over many
@@ -416,6 +514,41 @@ spread + minimal disruption + constant-time lookup — is why Maglev-style hashi
 modern standard for **per-packet L4 balancing at line rate** (Maglev, Katran, Cilium),
 where a ring walk per packet would be too slow. Its disruption on membership change is
 slightly worse than an idealized ring but negligible in practice.
+
+**Worked example — filling a size-7 Maglev table.** Table slots `0..6`, backends A, B, C.
+Each backend's `(offset, skip)` yields a **permutation** — the order in which it *prefers*
+slots. Suppose the derived preference lists are:
+
+- **A**: 0, 3, 6, 2, 5, 1, 4
+- **B**: 1, 4, 0, 3, 6, 2, 5
+- **C**: 2, 5, 1, 4, 0, 3, 6
+
+Now backends **take turns** (A, then B, then C, repeat), each claiming its most-preferred
+*still-empty* slot:
+
+1. A wants 0 → free → **slot 0 = A**
+2. B wants 1 → free → **slot 1 = B**
+3. C wants 2 → free → **slot 2 = C**
+4. A wants 3 → free → **slot 3 = A**
+5. B wants 4 → free → **slot 4 = B**
+6. C wants 5 → free → **slot 5 = C**
+7. A wants 6 → free → **slot 6 = A**
+
+All 7 slots filled. Final table: `[A, B, C, A, B, C, A]` → A owns 3 slots, B and C own 2
+each — near-perfectly even for 7 slots / 3 backends (ideal is 2.33 each). A packet's
+Connection-ID hashes to a slot index, e.g. `hash=17 → 17 mod 7 = 3 → slot 3 = A`; that's
+the whole per-packet lookup — one array index, **O(1)**, no ring walk.
+
+**Removing a backend touches little.** Drop C and refill with just A and B taking turns:
+
+1. A→0. 2. B→1. 3. A: 0 taken → **3**. 4. B: 1 taken → **4**. 5. A: 0,3 taken → **6**.
+6. B (list 1,4,0,3,6,2,5): 1,4,0,3,6 all taken → first free is **2**. 7. A (list
+0,3,6,2,5): 0,3,6,2 taken → **5**.
+
+New table: `[A, B, B, A, B, A, A]`. Compare to the old `[A, B, C, A, B, C, A]`: slots 0,
+1, 3, 4, 6 are unchanged — only C's two slots (2 and 5) got reassigned. A modulo scheme
+(`hash mod 3` → `hash mod 2`) would instead have moved a *majority* of keys. That "only the
+departed node's share moves" is Maglev's minimal-disruption property.
 
 **Rendezvous / Highest-Random-Weight (HRW) hashing.** For a key, compute `hash(key, node)`
 for **every** node and pick the node with the maximum score. Removing a node only affects

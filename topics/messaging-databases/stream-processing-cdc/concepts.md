@@ -146,6 +146,37 @@ arrived "too late"). Options:
 > too loose and every result is delayed. There is no "correct" watermark — it encodes
 > your tolerance for lateness.
 
+**Worked example — watching one window fire.** Bound (allowed out-of-orderness) = 5s,
+watermark formula `WM = max_event_time_seen − 5s`, tumbling window `[10:00:00, 10:01:00)`
+that fires once `WM ≥ 10:01:00`. Events arrive in this processing order (note #3 is out
+of order):
+
+| # | arrives (event-time) | max_seen | watermark = max_seen − 5s | effect |
+|---|---|---|---|---|
+| 1 | 10:00:10 | 10:00:10 | 10:00:05 | buffered in window (count 1) |
+| 2 | 10:00:30 | 10:00:30 | 10:00:25 | buffered (count 2) |
+| 3 | 10:00:25 | 10:00:30 | 10:00:25 | out-of-order but not behind WM → buffered (count 3) |
+| 4 | 10:00:58 | 10:00:58 | 10:00:53 | buffered (count 4) |
+| 5 | 10:01:06 | 10:01:06 | **10:01:01** | WM crosses 10:01:00 → **window fires, result = 4**; the 10:01:06 event opens the next window |
+
+Now a **straggler** with event-time `10:00:40` arrives *after* the fire, when `WM =
+10:01:01`. Since `10:00:40 < 10:01:01`, it is **late**:
+
+- **Default (drop):** result stays **4** — the straggler is silently discarded.
+- **With `allowedLateness = 10s`:** the window's state is kept until `WM > 10:01:10`.
+  The current WM is `10:01:01 ≤ 10:01:10`, so the window is still alive and re-fires with
+  the corrected result **5**. Past `10:01:10` the state is dropped and the same straggler
+  would be lost. That grace window is the latency-vs-completeness knob made concrete.
+
+**Watermarks across parallel inputs.** When an operator has several input channels
+(multiple partitions or upstream tasks), its watermark is the **minimum** of the
+per-channel watermarks — the operator can only be sure it has seen everything up to
+`T` if *every* input has reached `T`. Consequence: one slow input holds back the whole
+pipeline, and an **idle/empty partition** that emits nothing keeps its channel watermark
+frozen, so downstream windows **never fire**. The fix is idleness detection (Flink's
+`withIdleness`), which marks a silent channel as idle so it stops dragging the minimum
+down.
+
 ---
 
 ## Stateful stream processing
@@ -186,7 +217,12 @@ processed exactly once, even across failures and retries.
 2. As the barrier flows downstream, each operator snapshots its state when the barrier
    reaches it. With multiple inputs, an operator **aligns** barriers: it waits for the
    same barrier on every input channel before snapshotting (buffering the faster
-   inputs), so the snapshot is a consistent cut across the whole dataflow.
+   inputs), so the snapshot is a consistent cut across the whole dataflow. **Cost of
+   alignment:** under backpressure a fast input can be buffered a long time waiting on a
+   slow channel's barrier, stalling the checkpoint (and the pipeline). Flink's **unaligned
+   checkpoints** let the barrier overtake in-flight records and snapshot those buffered
+   records as part of the state instead of waiting — trading a larger checkpoint for
+   checkpoints that still make progress under load.
 3. When all operators/sinks confirm, the checkpoint is complete and durably stored.
 4. On failure, every operator restores from the last complete checkpoint and the
    sources **rewind to the offsets recorded in it**, then replay.
@@ -202,6 +238,26 @@ sequenceDiagram
     Snk->>Snk: snapshot / pre-commit
     Note over Src,Snk: checkpoint n complete -> offsets durable
 ```
+
+**Worked example — crash and recover on real offsets.** Checkpoint *n* is taken when the
+source is at Kafka **offset 100**; the operator's running count is snapshotted as **40**.
+Processing then continues to **offset 150** (count climbs to 90) — but *before* the next
+checkpoint, the task **crashes**. On restart:
+
+1. Every operator restores state **as of checkpoint n** → count resets to **40** (the 50
+   records in offsets 100–149 that it had processed are erased from state).
+2. The source **rewinds to offset 100** (the offset recorded in checkpoint n) and
+   **replays offsets 100–149**.
+3. State is rebuilt deterministically: count goes 40 → 90 again. Internal state is now
+   correct exactly once.
+
+The catch is the **sink**: records for offsets 100–149 were emitted once *before* the
+crash and are **re-emitted** on replay. So the raw replay guarantee is **at-least-once**
+(offsets 100–149 delivered twice). It becomes effectively-once only if the sink swallows
+that duplicate — an idempotent upsert overwrites the same keys to the same values, or a
+transactional sink never committed the pre-crash output for 100–149 in the first place so
+the duplicate is the *only* commit. That is precisely why the replayed range must hit an
+idempotent or transactional sink.
 
 Replay alone gives **at-least-once** (records after the checkpoint are re-emitted).
 To upgrade to exactly-once end-to-end you also need the **sink** to cooperate:
@@ -543,6 +599,13 @@ should enrich each event with the table value **as of the event's time**, not wh
 the table happens to hold now. Naive implementations use the latest table value, which is
 wrong when the stream event is older than a subsequent table update (this is the
 "temporal join" / "versioned table" problem Flink and Kafka Streams address explicitly).
+
+Concretely: a `click` event has event-time **10:00** when user 42's tier is **SILVER**;
+the user table is then updated to **GOLD** at **10:05**. If that 10:00 click is
+reprocessed at **10:06**, a naive stream-table join reads the *current* table value and
+enriches it with **GOLD** — wrong, the user was SILVER when they clicked. A temporal /
+versioned join looks up the tier **as-of the event's 10:00 timestamp** and correctly
+attaches **SILVER**.
 
 > [!INTERVIEW]
 > "Why does a stream-stream join need a window but a stream-table join doesn't?" Because

@@ -183,6 +183,23 @@ The **`redelivered` flag** is a *hint*, not a guarantee — it can be true even 
 message was never actually processed (e.g. broker restart). Use it as a signal to be
 careful, not as a reliable dedup mechanism.
 
+**How do you actually make a consumer idempotent?** (the follow-up to "consumers must be
+idempotent"). Give every message a stable **idempotency key** — a producer-set `message_id`
+or a natural business key like `order_id` — and dedup on it:
+
+- **Dedup table with a unique constraint.** Before (or as) you process, `INSERT INTO
+  processed(msg_id) VALUES ('abc')` with `msg_id` as a primary/unique key inside the same
+  transaction as your side effect. First delivery inserts and commits; a redelivery of
+  `abc` hits a duplicate-key violation → you catch it, ack, and skip. The DB, not the
+  broker, enforces exactly-once *effect*.
+- **Conditional write / upsert.** Make the effect naturally re-runnable: `UPDATE accounts
+  SET status='paid' WHERE id=42 AND status='pending'` — the second delivery matches zero
+  rows and changes nothing. Or `INSERT ... ON CONFLICT DO NOTHING`.
+
+Cost: the dedup table grows, so give `msg_id` rows a TTL/retention window at least as long
+as your maximum possible redelivery delay (e.g. purge after 7 days) so it doesn't grow
+unbounded.
+
 ---
 
 ## Prefetch and QoS: fair dispatch and flow control
@@ -206,8 +223,29 @@ Tuning:
 - **`prefetch=1`** — maximally fair; best when tasks vary wildly in cost. But it adds a
   round-trip per message, so throughput drops for small/fast tasks.
 - **Higher prefetch (e.g. 20–100)** — better throughput (pipelining) at the cost of some
-  fairness and larger in-flight memory. Tune to `≈ round-trip-time / processing-time`.
+  fairness and larger in-flight memory. A useful starting heuristic is to keep the pipe
+  full: `prefetch ≈ (network-round-trip + processing-time) / processing-time`, i.e. enough
+  in flight that the consumer never sits idle waiting for the next message to cross the
+  network. Note this *grows* as processing gets **fast** relative to the network, and
+  shrinks toward 1 as processing dominates.
 - Prefetch also bounds memory: too high and one consumer hoards the whole queue.
+
+**Worked example — pick a prefetch.** Round-trip to the broker (dispatch + ack) is
+`RTT = 5ms`, and each message takes `P = 1ms` to process (fast tasks).
+
+- With `prefetch=1`: the consumer processes for 1ms, then waits ~5ms for the broker to
+  send the next message → it is busy only `1 / (1+5) ≈ 17%` of the time. Terrible
+  throughput.
+- Target `prefetch ≈ (RTT + P) / P = (5 + 1) / 1 = 6`: while message *n* is being
+  acked and the next is in flight (5ms), the consumer already has ~5 more buffered to chew
+  through, so it never stalls. Six messages in flight hides the 5ms network gap.
+- Now flip it — heavy tasks, `P = 50ms`, same `RTT = 5ms`:
+  `prefetch ≈ (5 + 50) / 50 ≈ 1.1`, so **prefetch 1–2 is plenty**. The 5ms network gap is
+  noise next to 50ms of work, and a low prefetch keeps dispatch fair when task costs vary.
+
+The takeaway: fast-and-cheap messages want a *higher* prefetch to amortize the round-trip;
+slow-and-expensive messages want a *low* prefetch for fairness. Then cap it so one consumer
+can't hoard memory.
 
 Prefetch can be set **per-consumer** or **per-channel** (`global` flag). It only has an
 effect with **manual ack** — with auto-ack there is no unacked state to limit.
@@ -291,6 +329,26 @@ dead-lettered back to the work queue for another attempt. Increasing TTLs per le
 **exponential backoff**; a retry-count header (incremented each pass) lets you route to a
 final **parked/dead queue** after N attempts for manual inspection.
 
+**Worked example — 3-level exponential backoff.** Declare three wait queues with
+`x-message-ttl` = **10s / 60s / 300s**, each with a DLX pointing back to `work`. Trace one
+poison message that fails every time:
+
+| Time | Where | Event |
+|---|---|---|
+| `t=0s` | `work` | consumer nacks (`requeue=false`), reads `x-retry-count`=0 (absent) → routes to `wait-10s`, sets `x-retry-count`=1 |
+| `t=0s → 10s` | `wait-10s` | message sits; no consumer. At head, TTL 10s expires |
+| `t=10s` | `work` | dead-lettered back. Consumer fails again, `x-retry-count`=1 → routes to `wait-60s`, bumps to 2 |
+| `t=10s → 70s` | `wait-60s` | waits 60s, expires |
+| `t=70s` | `work` | fails again, `x-retry-count`=2 → routes to `wait-300s`, bumps to 3 |
+| `t=70s → 370s` | `wait-300s` | waits 300s (5 min), expires |
+| `t=370s` | `work` | fails again, `x-retry-count`=3 = **max** → routed to `parked` dead queue for a human |
+
+Total elapsed before parking: `10 + 60 + 300 = 370s` across 4 processing attempts (the
+initial try plus 3 retries). The consumer's logic is just: read `x-retry-count`; if it has
+hit the limit, nack to the `parked` DLX; otherwise nack to the next `wait-N` queue with the
+count incremented. The wait queues have **no consumers** — TTL expiry is the only way out,
+which is exactly what produces the delay.
+
 > [!WARNING]
 > **Per-queue TTL only expires messages at the head of the queue** (RabbitMQ checks
 > expiry from the front). A message behind an un-expired one won't be removed until it
@@ -317,6 +375,19 @@ jobs.
   same `correlation_id`.
 - The client matches responses to requests by `correlation_id` (needed because one client
   may have many outstanding requests on one reply queue).
+
+**Worked example — why the id, if the reply queue is dedicated?** The client fires two
+requests back-to-back on the *same* reply queue `amq.rabbitmq.reply-to`:
+
+- Req **A**: `correlation_id=abc`, `reply_to=amq.rabbitmq.reply-to` — a slow query.
+- Req **B**: `correlation_id=xyz`, `reply_to=amq.rabbitmq.reply-to` — a fast query.
+
+B's server happens to finish first and publishes `{correlation_id: xyz, ...}` to the reply
+queue; A's server replies later with `{correlation_id: abc, ...}`. The client's pending map
+is `{abc: futureA, xyz: futureB}`. When the `xyz` response arrives it completes `futureB`
+even though A is still outstanding; when `abc` arrives it completes `futureA`. Without the
+id the client would wrongly hand B's result to whoever asked first (A) — the dedicated queue
+tells you *a* reply landed, but not *which request* it answers when several are in flight.
 
 **Priority queues** — declare a queue with `x-max-priority` (e.g. 10). Messages published
 with a higher `priority` property are delivered before lower-priority ones. Caveats:
@@ -369,15 +440,36 @@ stream at their own pace, or event sourcing / stream processing.
 ## Quorum queues and high availability
 
 For HA, a queue's contents must survive a **node** failure, not just a process restart.
-RabbitMQ's modern answer is the **quorum queue** (introduced in 3.8 and now the
-recommended queue type for replicated, highly-available queues — though the declaration
-default queue type remains `classic`).
+RabbitMQ's modern answer is the **quorum queue** — **introduced in 3.8** as the recommended
+replicated, highly-available queue type, and **made the default queue type in 4.0**. (In
+the 3.x line the declaration default stayed `classic`; you opted in with
+`x-queue-type: quorum`.)
 
 - A **quorum queue** replicates its state across an odd number of cluster nodes using the
   **Raft** consensus algorithm. Writes are confirmed once a **majority (quorum)** of
   replicas have persisted them, so it tolerates the loss of a minority of nodes (e.g. 1 of
   3, 2 of 5) without data loss. Publisher confirms on a quorum queue mean the message is
   **replicated to a majority**, giving real durability.
+
+**Worked example — 3-node quorum queue.** Replicas on nodes N1 (leader), N2, N3; majority =
+`floor(3/2) + 1 = 2`.
+
+- **Publish:** leader N1 appends the message and replicates. As soon as **2 of 3** nodes
+  (say N1 + N2) have fsync'd the entry, the write is committed and the **publisher confirm**
+  fires — the broker does not wait for the slowest node N3.
+- **Lose 1 node (N3 dies):** surviving `{N1, N2}` = 2 ≥ 2 majority, so the queue **stays
+  available** and no acked message is lost (every committed write was on ≥2 nodes, so at
+  least one survivor has it).
+- **Lose 2 nodes (N2 and N3 die):** only `{N1}` = 1 < 2 majority. Raft **refuses to elect a
+  leader / commit writes**, so the queue goes **unavailable and rejects publishes** rather
+  than accepting writes it can't safely replicate. That is deliberate: choosing
+  unavailability over split-brain (CP over AP).
+
+Why **odd** counts: a 3-node cluster survives 1 failure (majority 2); a 4-node cluster
+*also* only survives 1 failure (majority is still `floor(4/2)+1 = 3`) — the extra node buys
+no more fault tolerance but adds a replica to write to. Odd counts also avoid a 2-vs-2 tie
+in a Raft leader election. So you pay for 4 nodes and get the resilience of 3 — always size
+quorum queues at 3, 5, or 7.
 - **Classic mirrored queues** (the old `ha-mode` policy / classic HA) were the legacy
   approach. They had well-known problems — split-brain edge cases, unsafe failover, "loss
   of a mirror re-syncs the whole queue" — and are **deprecated and removed in RabbitMQ

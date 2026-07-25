@@ -182,8 +182,35 @@ Key behaviors:
 - **File mounts auto-update** when the ConfigMap/Secret changes (eventually consistent, via
   kubelet sync) — *except* **`subPath` mounts, which are frozen** at mount time and never
   update. Env-var injections also never update; both require a pod restart to pick up changes.
+- **Why `subPath` is frozen (the mechanism):** kubelet keeps a projected mount fresh by writing
+  each new version into a timestamped directory (`..2026_07_25_.../`) and then **atomically
+  swapping a symlink** (`..data`) to point at it — the mount path is really a symlink chased to
+  the current version. A `subPath` **bind-mounts one specific file/inode at mount time**,
+  bypassing that `..data` symlink, so the atomic swap never reaches it — hence the classic "why
+  isn't my `subPath`-mounted config reloading?" bug.
 - Config content lives in the `config-secrets` topic; here the point is the **volume
   mechanics**. Secret encryption at rest / etcd is covered in `workload-network-security`.
+
+### Volume ownership & permissions (fsGroup)
+
+A frequent production failure: a container running as **non-root** mounts a PVC (or block CSI
+volume) and gets **`permission denied` / `EACCES`** on first write, because the volume's
+filesystem is owned by `root:root` while the process runs as, say, UID 1000. The fix is
+`securityContext.fsGroup` — kubelet then **`chown`s the volume to that group and sets the
+setgid bit**, so the non-root process can write:
+
+```yaml
+spec:
+  securityContext:
+    fsGroup: 2000                  # volume group-owned by GID 2000; process can write
+    fsGroupChangePolicy: OnRootMismatch  # skip the recursive chown if top-level owner already matches
+```
+
+Gotcha: that ownership change is a **recursive `chown` of every file at mount time**, which on
+a multi-million-file volume can add **minutes** to pod startup. `fsGroupChangePolicy:
+OnRootMismatch` skips the walk when the volume root already has the right owner (the common
+case after the first mount). For file `ConfigMap`/`Secret` mounts you instead control per-file
+bits with `defaultMode` (e.g. `0400` for credentials).
 
 ---
 
@@ -266,6 +293,32 @@ can only bind a static PV. If the field is **omitted**, the `DefaultStorageClass
 controller injects the cluster's default class (the one annotated
 `storageclass.kubernetes.io/is-default-class: "true"`).
 
+### Worked example: binding matches 1:1, it never *splits* a PV
+
+Say an admin hand-creates one **100Gi RWO** PV in class `manual`, and a developer submits a
+PVC asking for **20Gi RWO** in class `manual`. Walk the controller's match:
+
+| Check | PV offers | PVC asks | Result |
+|---|---|---|---|
+| capacity | 100Gi | ≥ 20Gi | 100 ≥ 20 ✓ |
+| access modes | {RWO} | {RWO} (must be a subset of the PV's) | ✓ |
+| storageClassName | `manual` | `manual` | ✓ |
+
+All three pass, so the controller **binds this PVC to this PV**. Now run
+`kubectl get pvc` and read the surprise:
+
+```
+NAME   STATUS   VOLUME     CAPACITY   ACCESS MODES   STORAGECLASS
+data   Bound    pv-manual  100Gi      RWO            manual
+```
+
+The `CAPACITY` column shows **100Gi, not 20Gi**. Binding is **1:1 and whole-volume** — a PV
+is never carved into pieces, so the PVC consumes the entire 100Gi and the extra
+**100 − 20 = 80Gi is stranded** (unusable by any other claim until this PVC is deleted).
+Contrast dynamic provisioning: the CSI driver creates a **right-sized 20Gi** volume on the
+fly, so nothing is wasted. This is the classic argument against hand-pooling large static PVs
+and expecting them to be sub-allocated.
+
 ---
 
 ## StorageClass
@@ -325,6 +378,17 @@ Critical, frequently-missed facts:
 > because a RWO volume can't attach to a second node. Fixes: use RWX storage, pin replicas to
 > one node, or use a **StatefulSet with `volumeClaimTemplates`** so each pod gets its own PVC.
 
+- **RWO + ungraceful node failure (the failover-latency gotcha).** When a node dies *cleanly*
+  (drained/graceful shutdown), the volume detaches and a rescheduled pod re-attaches quickly.
+  When a node dies **hard** (kernel panic, power loss, network partition), the API server
+  **cannot confirm the RWO volume detached** — for all it knows the dead node is still writing.
+  So a pod rescheduled to a healthy node sits in **Multi-Attach / ContainerCreating** until the
+  controller **force-detaches**, which by default waits **~6 minutes** after the node goes
+  `NotReady`. That 6-minute stall is baked into your StatefulSet/DB **failover RTO**. To cut it,
+  either apply the `out-of-service` taint via **Non-Graceful Node Shutdown** (GA in v1.28) so
+  Kubernetes force-detaches and reschedules immediately, or manually
+  `kubectl delete volumeattachment <name>` for the stuck volume.
+
 ---
 
 ## Reclaim policies (Retain / Delete / Recycle)
@@ -372,6 +436,14 @@ stateDiagram-v2
 | **Bound** | bound to a PVC |
 | **Released** | claim was deleted, but the PV/asset is not yet reclaimed (Retain) |
 | **Failed** | automatic reclamation failed |
+
+> [!WARNING]
+> Reusing a **Retained** PV has a non-obvious trap. Deleting the PVC leaves the PV in
+> **`Released`** with its `spec.claimRef` still pointing at the now-gone PVC — and that stale
+> claimRef **blocks any new PVC from binding**, even one that matches perfectly, so the PV
+> stays `Released` forever. To make it `Available` again you must **clear the claimRef**:
+> `kubectl patch pv <name> --type=json -p '[{"op":"remove","path":"/spec/claimRef"}]'`
+> (or `kubectl edit pv`). Only then will a new claim bind.
 
 A PVC is either **Pending** (no PV yet) or **Bound**. **Storage Object in Use Protection** adds
 finalizers (`kubernetes.io/pvc-protection`, `kubernetes.io/pv-protection`) so that a PVC still
@@ -529,6 +601,17 @@ the CSI driver provisions a new volume pre-populated from the snapshot. (You can
 **clone** a PVC by using another PVC as the `dataSource`.) Snapshots are your in-cluster backup
 primitive for stateful workloads, and are usually **crash-consistent** unless the app is
 quiesced first.
+
+- **Crash-consistent vs application-consistent.** A raw snapshot is **crash-consistent**: it
+  captures whatever was on disk at that instant, exactly as if the machine had lost power — so
+  on restore the database must **replay its WAL/redo log** to reach a clean state, and an
+  in-flight multi-file write may be half-applied. **Application-consistent** means you
+  **quiesce** the app first: `fsfreeze` the filesystem, or have the DB flush buffers and hold a
+  lock (Postgres `CHECKPOINT` / `pg_backup_start`, MySQL `FLUSH TABLES WITH READ LOCK`), take
+  the snapshot, then unfreeze. Interviewers push here after you mention snapshots.
+- **Not a real backup.** VolumeSnapshots usually live on the **same storage backend** as the
+  source volume, so they don't survive backend/region loss or an accidental account deletion.
+  For true DR, ship data **off-cluster** (Velero to object storage, DB logical dumps).
 
 ---
 

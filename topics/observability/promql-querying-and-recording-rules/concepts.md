@@ -130,10 +130,38 @@ so `increase()` of an integer counter can return **non-integer** values (e.g. 3.
 is expected and correct — it's estimating the true count at the window edges, not counting
 raw deltas.
 
+**Worked example — extrapolation step by step.** Counter scraped every 15s; you evaluate
+a **60s** window at `t=60s`. The samples that fall inside `(0s, 60s]` are:
+
+| t (s) | 5 | 20 | 35 | 50 |
+|---|---|---|---|---|
+| value | 100 | 112 | 120 | 135 |
+
+- Observed delta between the first and last in-window samples: `135 − 100 = 35`, spanning
+  `50 − 5 = 45s` (the *sampled interval*).
+- Average gap between samples: `45s / (4 − 1) = 15s`.
+- `rate` extrapolates that 45s of coverage out to the full 60s window. Gap to the start
+  edge is `5 − 0 = 5s`; gap to the end edge is `60 − 50 = 10s`. Both are under the
+  ~16.5s threshold (≈1.1× the average gap), so both get added: extrapolated interval
+  `= 45 + 5 + 10 = 60s`, giving factor `60 / 45 = 1.333`.
+- `increase = 35 × 1.333 = 46.67` — a **non-integer** even though the counter only takes
+  integer values. That is the "increase() returns 3.4" surprise, and it is correct.
+- `rate = 46.67 / 60s = 0.778 req/s`.
+
+**Worked example — a reset mid-window.** Now the process restarts inside the window, so the
+samples are `100, 120, 135, 4, 18`. Naive last − first = `18 − 100 = −82` — nonsensically
+negative. `rate` detects the drop `135 → 4`, treats it as a reset, and adds the pre-reset
+value back: `−82 + 135 = 53`. That equals the real work done — `(135 − 100) = 35` before the
+restart plus `(18 − 0) = 18` after it — and it never goes negative. (Boundary extrapolation
+then applies on top, exactly as in the first example.)
+
 **Sizing the window.** The range `w` should be **at least 2× the scrape interval** (the
 common rule of thumb is ≥ 4×) so every evaluation window contains at least two samples;
 otherwise `rate` returns nothing or is very noisy. A 5m window on a 15s scrape is a safe,
-common default.
+common default. The trade-off is **detection latency vs smoothness**: a wider window
+suppresses noise but a spike must persist longer to move the windowed average, so it fires
+later. In an alerting rule the total time-to-fire ≈ the range window **plus** the rule's
+`for:` duration, so both add lag — size them together.
 
 ---
 
@@ -162,6 +190,22 @@ topk(5, sum(rate(http_requests_total[5m])) by (path))  # 5 busiest paths
 > ratio, aggregate numerator and denominator separately, then divide:
 > `sum(rate(errors[5m])) / sum(rate(total[5m]))`. Similarly, you cannot average
 > pre-computed percentiles across instances — average of p99s is meaningless.
+
+**Worked example — why avg-of-averages lies.** Two instances over the same window:
+
+| instance | requests | errors | per-instance error ratio |
+|---|---|---|---|
+| A | 1000 | 100 | 100/1000 = **10%** |
+| B | 10 | 5 | 5/10 = **50%** |
+
+- **Wrong** (`avg` of the per-instance ratios): `(10% + 50%) / 2 = 30%`. Each instance
+  votes equally, so tiny instance B drags the number up as hard as busy instance A.
+- **Right** (`sum(errors)/sum(requests)`): `(100 + 5) / (1000 + 10) = 105 / 1010 = 10.4%`.
+  Now every *request* votes equally, which is what "the error rate" actually means.
+
+The two answers — **30% vs 10.4%** — differ by ~3× purely from the weighting bug. In an SLO
+alert, the avg-of-averages version would page you for a fleet that is almost entirely
+healthy.
 
 **`topk`/`bottomk` return the series themselves** (with their labels), not a scalar, and
 they select per evaluation timestamp — so on a range query the "top 5" set can change
@@ -201,6 +245,33 @@ Critical rules:
   *inside* the bucket the quantile falls into, so **accuracy is bounded by bucket layout**.
   If p99 lands in a bucket spanning 1s–10s, the estimate is rough. You must choose bucket
   boundaries to match the SLO you care about.
+
+**Worked example — computing p95 by hand.** Cumulative bucket counts at one instant:
+
+| `le` | 0.1 | 0.5 | 1 | +Inf |
+|---|---|---|---|---|
+| cumulative count | 0 | 80 | 90 | 100 |
+
+- Total observations = the `+Inf` bucket = **100**. The p95 rank is `0.95 × 100 = 95`
+  observations.
+- Which bucket does rank 95 fall in? Cumulative reaches 90 at `le=1` and 100 at `le=+Inf`,
+  so the 95th observation lies **between `le=1` and `le=+Inf`**.
+- `histogram_quantile` interpolates linearly across `[lower, upper]`, but the top bucket's
+  upper bound is `+Inf`. Prometheus cannot interpolate against infinity, so it **clamps the
+  estimate to the highest finite bound** — it returns **1s (the `le=1` boundary)**. This is
+  the classic "your p95 is pinned to the last real bucket" symptom: with only 90 of 100
+  observations under 1s, the true p95 could be anywhere above 1s, and the layout simply
+  cannot express it.
+- **Fix the layout, then re-derive.** Add a `le=2` bucket and suppose it now reads:
+  `le=1 → 90`, `le=2 → 98`, `le=+Inf → 100`. Rank 95 now sits between `le=1` (cum 90) and
+  `le=2` (cum 98). Interpolate:
+
+  `estimate = lower + (upper − lower) × (rank − count_below) / (count_in_bucket)`
+  `        = 1 + (2 − 1) × (95 − 90) / (98 − 90)`
+  `        = 1 + 1 × 5/8 = 1.625 s`.
+
+  That is why "accuracy is bounded by bucket layout": the same data yields "≥1s, can't say"
+  vs a concrete **1.625s** purely from where you placed the boundaries.
 - **Quantiles are not aggregable, but histograms are.** You can `sum` bucket counters
   across instances and *then* compute the quantile — that's correct. You cannot average
   the resulting quantiles. This aggregatability is histograms' big win over Summaries
@@ -297,11 +368,38 @@ a small lookup table). Use **`group_left`** (right side has the "one") or **`gro
 (left side has the "one"):
 
 ```promql
-# attach the "version" label from a per-instance info metric onto a rate
-sum(rate(http_requests_total[5m])) by (instance)
+# attach the "version" label from a per-instance info metric onto per-path rates
+sum(rate(http_requests_total[5m])) by (instance, path)
 * on (instance) group_left(version)
 node_build_info
 ```
+
+**Worked example — what group_left copies.** Suppose the left side (the "many") has three
+per-`(instance, path)` series and the right side (the "one") has a single info series per
+instance:
+
+```
+LEFT  (many):  {instance="i-1", path="/a"}  = 5
+               {instance="i-1", path="/b"}  = 3
+               {instance="i-1", path="/c"}  = 8
+RIGHT (one) :  node_build_info{instance="i-1", version="1.4.2"} = 1
+```
+
+Matching is `on (instance)`, so all three left series match the one right series — that's
+the many-to-one that forces `group_left`. The result keeps the **left** side's identity
+(`instance` + `path`) and copies only the label named in `group_left(version)` from the
+right:
+
+```
+RESULT:  {instance="i-1", path="/a", version="1.4.2"} = 5
+         {instance="i-1", path="/b", version="1.4.2"} = 3
+         {instance="i-1", path="/c", version="1.4.2"} = 8
+```
+
+Three series in, three series out — none collapsed — each now decorated with `version`.
+(Multiplying by `node_build_info = 1` leaves the value unchanged; the join exists purely to
+attach the label.) Without `group_left` this errors with "many-to-one matching must be
+explicit."
 
 Rules and gotchas:
 

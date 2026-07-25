@@ -143,6 +143,19 @@ Key panel mechanics interviewers probe:
   rendered as a heatmap reveals **bimodal** latency (e.g. a fast cache path and a slow DB
   path) that a p99 line or an average would smear away.
 
+**Worked example — why the average lies.** Take 1,000 requests in a window: 900 are cache
+hits at **5 ms**, 100 miss and hit the DB at **800 ms**.
+
+- **Average** = (900 × 5 + 100 × 800) / 1000 = (4,500 + 80,000) / 1000 = **84.5 ms**.
+- **p50** (the 500th request, sorted) is a cache hit = **5 ms**.
+- **p99** (the 990th request) — requests 901–1000 are the DB path — = **800 ms**.
+
+A single-stat panel reading "avg latency **84.5 ms**" describes a value **no request
+actually experienced**: every request was either ~5 ms or ~800 ms, and 84.5 ms sits in the
+empty gap between the two clusters. The average has invented a fictional "typical" request.
+A **heatmap** of the same data shows two bright bands — one at 5 ms, one at 800 ms — so you
+instantly see the bimodality and can ask "why do 10% of requests fall off the fast path?"
+
 > [!WARNING]
 > A **gauge/single-stat** showing an *average* latency is one of the most misleading panels
 > you can build. Averages hide tail latency and bimodality. Prefer time-series of
@@ -176,6 +189,14 @@ auto-expands to a pipe-joined regex group — e.g. `service=~"$service"` becomes
 explicit **`${service:regex}`** format when you need special characters in the values
 escaped for a literal match.
 
+> [!WARNING]
+> Keep variable-driving labels **low-cardinality**. A `label_values()` query on a
+> high-cardinality label (e.g. `pod` or `instance` across a 10k-node fleet, or worse
+> `user_id`) enumerates every distinct value: the backing series-enumeration query is slow,
+> the dropdown becomes a scroll-forever list nobody can use, and it runs on **every**
+> dashboard load. Also mind the variable's **refresh mode** — "On dashboard load" re-queries
+> options each open (fresher, more load) vs "On time range change" (cheaper, can go stale).
+
 ```promql
 # Panel query driven by template variables:
 sum by (status) (
@@ -191,11 +212,58 @@ Two built-ins worth knowing cold:
 - **`$__interval`** — the time width of one pixel/step, used to keep the number of returned
   points sane as you zoom in/out.
 
+**Worked example — why `[15s]` breaks but `$__rate_interval` doesn't.** Grafana computes
+`$__rate_interval = max($__interval + scrape_interval, 4 × scrape_interval)`. Say your
+scrape interval is **15 s** and you're zoomed in tight so the step `$__interval` resolves to
+**10 s**:
+
+- **Hard-coded `rate(...[10s])`:** samples land every 15 s, so a 10 s window frequently
+  contains only **one** sample (sometimes zero). `rate()` needs **≥ 2 samples** in the
+  window to compute a delta → it returns nothing → the graph shows **gaps / NaN**.
+- **`$__rate_interval`:** = max(10 s + 15 s, 4 × 15 s) = max(**25 s**, **60 s**) = **60 s**.
+  A 60 s window always spans ~4 scrape samples, so `rate()` always has ≥ 2 points → a
+  smooth, gap-free line. The `4 × scrape` floor is exactly the guarantee that no window can
+  starve `rate()`.
+
 > [!INTERVIEW]
 > "How would you build one dashboard that works for every microservice?" → A **query
 > variable** `label_values(..., service)` + a **data source variable** for environment, and
 > parameterize every query with `service=~"$service"`. That single JSON, provisioned as
 > code, replaces hundreds of hand-built dashboards.
+
+## Provisioning and dashboards-as-code
+
+Clicking dashboards together in the UI is fine for exploration, but production dashboards
+should be **version-controlled artifacts** — reviewed in git, reproducible across
+environments, and immune to "someone edited prod at 2 a.m. and nobody knows what changed."
+Grafana supports this through **provisioning**: config that Grafana reads on startup (and
+on a poll interval) to create data sources, folders, and dashboards from files.
+
+- **File-based provisioning** — YAML files in Grafana's provisioning directory
+  (`/etc/grafana/provisioning/{datasources,dashboards}/`). A `dashboards` provider YAML
+  points at a folder of dashboard **JSON models**; a `datasources` YAML declares each data
+  source (type, URL, UID). Grafana loads them at boot and re-reads on `updateIntervalSeconds`.
+- **Read-only in the UI (the classic gotcha).** A provisioned dashboard shows a **lock/
+  "Provisioned" banner** and cannot be saved from the UI — because the file is the source of
+  truth and Grafana would overwrite your edit on the next reload. Edits must go back to the
+  source file (or you'll "Save As" a copy). Interviewers love this: it's what enforces
+  no-drift GitOps.
+- **API vs Terraform vs Grizzly.** Three ways to push dashboards as code: the HTTP
+  **`/api/dashboards/db`** API (imperative, good for CI), the **`grafana` Terraform
+  provider** (declarative, state-tracked), and **Grizzly** (`grr`, a kubectl-style CLI over
+  the API). Same JSON model underneath.
+- **The UID / datasource-variable portability pitfall.** When you export a dashboard's JSON,
+  its panels reference the data source by **UID** — a value that differs per Grafana
+  instance. Import that JSON elsewhere and every panel says "datasource not found." Fixes:
+  either export with **`__inputs`** (Grafana's "Export for sharing externally" prompts for a
+  datasource on import) or, better, parameterize panels with a **data-source template
+  variable** (`${datasource}`) so the same JSON is environment-portable by design.
+
+> [!TIP]
+> If asked "how do you review and roll back dashboard changes?" the crisp answer is:
+> dashboards are **JSON models under provisioning**, changes go through a git PR, Terraform/
+> Grizzly/API applies them, and the live dashboard is **read-only** so no one can silently
+> click-edit prod. Rollback = revert the commit.
 
 ## The RED and USE dashboard patterns
 

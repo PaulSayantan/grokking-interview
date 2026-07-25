@@ -111,10 +111,26 @@ methods), the **operand stack** (scratch space where bytecode instructions compu
 the run-time **constant pool** of the method's class. When the method returns (or throws), its frame is
 popped.
 
+The **operand stack** is the transient scratch area where bytecode actually computes, distinct from the
+named **local-variable array**. For `int c = a + b;` (with `a` in local slot 1, `b` in slot 2, `c` in
+slot 3) HotSpot runs:
+
+```
+iload_1   ; push a onto the operand stack        -> operand stack: [a]
+iload_2   ; push b                                -> operand stack: [a, b]
+iadd      ; pop two, push their sum              -> operand stack: [a+b]
+istore_3  ; pop the sum into local slot 3 (c)    -> operand stack: []
+```
+
+So the operand stack is a small push/pop compute area that empties out between statements, while the
+local-variable array is the frame's set of named, persistent slots.
+
 **Intermediate.** When recursion (or any call chain) goes too deep, the thread's stack cannot allocate
 another frame and the JVM throws **`StackOverflowError`** — a subclass of `VirtualMachineError`
-(itself an `Error`, not an `Exception`). It is thrown *on the offending thread* and is typically
-recoverable in the sense that the stack unwinds, but it usually signals a bug (missing base case).
+(itself an `Error`, not an `Exception`). It is thrown *on the offending thread* and the stack unwinds so
+the thread can survive — but the JVM may have been mid-operation at an arbitrary frame (even inside a
+library invariant), so **catching `StackOverflowError` to resume is generally unsafe**. It signals a bug
+(usually a missing base case), not a condition to recover from.
 
 ```java
 long fib(int n) {           // no base case in some inputs -> deep recursion
@@ -173,6 +189,31 @@ eden:survivor = 8:1 per survivor.
 - G1 (**default since JDK 9**, JEP 248) does not use fixed contiguous Eden/Survivor/Old regions; it
   divides the heap into equal-size **regions** dynamically tagged as Eden, Survivor, Old, or Humongous.
   The generational *concept* survives even though the physical layout differs.
+
+**Worked example — one object aging to tenure.** Config: `Eden = 80 MB`, `S0 = S1 = 10 MB`,
+`MaxTenuringThreshold = 6`. One survivor is always the empty "to" space. Follow object **O** (allocated
+in Eden on day one) through successive minor GCs. Each minor GC copies the *live* set out of Eden **and**
+out of the current "from" survivor into the "to" survivor, then swaps their roles and clears the old
+space; every surviving object's age increments by 1.
+
+| Minor GC | Copy step (from → to) | O's age after | O lives in |
+|---|---|---|---|
+| #1 | Eden live set → **S0** (S0 now "to") | 0 → **1** | S0 |
+| #2 | Eden + S0 live → **S1**, swap | 1 → **2** | S1 |
+| #3 | Eden + S1 live → **S0**, swap | 2 → **3** | S0 |
+| #4 | Eden + S0 live → **S1**, swap | 3 → **4** | S1 |
+| #5 | Eden + S1 live → **S0**, swap | 4 → **5** | S0 |
+| #6 | age would hit 6 = threshold → **promote** | **6** → Old | **Old gen** |
+
+So O is copied back and forth five times (ages 1–5, always inside a 10 MB survivor), and on the sixth
+minor GC — where its age would reach `MaxTenuringThreshold = 6` — it is **tenured to the old gen** instead
+of copied again. The copy-and-swap is why survivors come in pairs: one is always the empty target.
+
+**Now the premature-promotion failure.** Suppose a minor GC finds **14 MB** of live survivors but the "to"
+survivor is only **10 MB**. The 10 MB fills and the remaining **~4 MB spills straight to the old gen**
+regardless of age — objects that were about to die get tenured anyway, feeding expensive major/full GCs.
+The fix is a bigger survivor space (lower `-XX:SurvivorRatio`, e.g. `6` instead of `8`) so the young gen
+can hold a full generation of survivors without overflowing.
 
 ---
 
@@ -296,6 +337,42 @@ event). Controlled by `-XX:+UseTLAB` (on by default) and `-XX:TLABSize`.
 - **Scalar replacement**: a non-escaping object is *never allocated as an object*; its fields become
   local scalars in registers/stack slots. This is the real optimization — people say "stack allocation"
   but HotSpot primarily does scalar replacement, not literal object-on-stack.
+
+**Worked example — what scalar replacement does to your code.** Take a hot loop:
+
+```java
+long sum = 0;
+for (int i = 0; i < 1_000_000; i++) {
+    Point p = new Point(i, i + 1);   // p never escapes this iteration
+    sum += p.getX() + p.getY();
+}
+```
+
+Naïvely this is **1,000,000 heap allocations** (one `Point` per iteration → constant TLAB churn and GC
+pressure). Escape analysis proves `p` never escapes the loop body, so C2 **scalar-replaces** it: the
+`Point` object is never created, its two fields collapse into two local `int` slots, and the loop
+compiles to roughly:
+
+```java
+long sum = 0;
+for (int i = 0; i < 1_000_000; i++) {
+    int px = i, py = i + 1;          // no object, no allocation
+    sum += px + py;
+}
+```
+
+Result: **zero heap allocations**, no GC pressure — the object simply vanished. Now defeat it by letting
+`p` escape:
+
+```java
+Point p = new Point(i, i + 1);
+this.last = p;   // stored in a field -> escapes the method
+return p;        // returned -> escapes -> allocation MUST survive on the heap
+```
+
+Once the reference outlives the method (stored in a field, returned, or passed to a method C2 can't see
+into), the JVM has no choice: the `Point` is heap-allocated normally. That is why this is a *performance*
+optimization you can't rely on for correctness — a one-line change flips it off.
 - **Lock elision (synchronization elimination)**: locks on a non-escaping object are removed, since no
   other thread can see it.
 - **Gotcha**: escape analysis is a *JIT* optimization, so it only kicks in after methods are hot and
@@ -329,7 +406,18 @@ pointing at a different region and root cause — naming the right one is a comm
 
 - **`StackOverflowError` is NOT an `OutOfMemoryError`** — different sibling under `VirtualMachineError`.
   Deep recursion → `StackOverflowError`; too many *threads* → `OOME: unable to create new native
-  thread`. Interviewers test this distinction constantly.
+  thread`. Interviewers test this distinction constantly. They are **siblings, not parent-child**:
+
+  ```
+  Throwable
+   └─ Error
+       └─ VirtualMachineError
+           ├─ StackOverflowError      (thread stack can't push another frame)
+           ├─ OutOfMemoryError        (a memory region is exhausted)
+           └─ InternalError
+  ```
+
+  So `catch (OutOfMemoryError e)` will **not** catch a `StackOverflowError`, and vice versa.
 - **Direct buffer memory** is off-heap: `ByteBuffer.allocateDirect(...)` and NIO/Netty use native memory
   freed by a `Cleaner`/`PhantomReference` tied to the buffer's GC — so a heap that never fills can still
   starve direct memory if buffers are held. Cap it with `-XX:MaxDirectMemorySize`.
@@ -370,6 +458,24 @@ pointing at a different region and root cause — naming the right one is a comm
   `java -XX:+PrintFlagsFinal -version` dumps the effective values.
 - Rule of thumb for total footprint: `RSS ≈ heap (-Xmx) + Metaspace + (threads × -Xss) + direct memory
   + code cache + GC overhead`.
+
+**Worked example — why the 4 GB container gets OOM-killed.** You set `-Xmx=4g` and, reasonably-sounding,
+give the container a **4 GB** memory limit. Add up what actually lands in RSS:
+
+| Component | Size |
+|---|---|
+| Heap (`-Xmx`) | 4096 MB |
+| Metaspace (loaded classes) | 256 MB |
+| Thread stacks (400 threads × `-Xss1m`) | 400 MB |
+| Direct buffers (NIO/Netty) | 256 MB |
+| JIT code cache | 240 MB |
+| GC structures + misc native | 200 MB |
+| **Total RSS** | **≈ 5448 MB (~5.3 GB)** |
+
+The process needs **~5.3 GB** of resident memory but the cgroup limit is 4 GB, so the kernel OOM-killer
+terminates it (`exit 137`) even though the Java heap itself never threw `OutOfMemoryError`. The lesson:
+size the container to **RSS**, not to `-Xmx` — here you'd want a ~6 GB limit (or drop `-Xmx` to ~2.5 GB
+and use `-XX:MaxRAMPercentage` so the heap scales *inside* the 4 GB budget with headroom for the rest).
 
 ---
 

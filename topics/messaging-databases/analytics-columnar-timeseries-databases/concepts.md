@@ -118,6 +118,38 @@ let operators run *directly on the encoded form*.
 - **XOR encoding for floats:** Gorilla XORs consecutive float values; similar readings
   share leading/trailing bits, so the XOR is mostly zeros and packs tightly.
 
+**Worked example — delta-of-delta on regular timestamps.** Say a metric is scraped
+every 15s, giving timestamps `1000, 1015, 1030, 1045`:
+
+- Store the first timestamp in full (`1000`), then the first *delta* (`15`).
+- Deltas of the rest: `1030−1015 = 15`, `1045−1030 = 15`.
+- **Delta-of-delta** = the change *between* consecutive deltas: `15−15 = 0`, then
+  `15−15 = 0`.
+
+So after the header, the stream is `[1000][Δ=15][0][0]`. Gorilla encodes a
+delta-of-delta of `0` as a **single `0` bit**. Four 64-bit timestamps (256 bits raw)
+collapse to roughly `64 + 14 + 1 + 1 ≈ 80 bits` — and every additional on-schedule
+point after that adds just **1 bit**. If one scrape is late — `…1030, 1046` → deltas
+`15, 16` → delta-of-delta `0, +1` — only that hiccup costs extra bits (a few, to encode
+`+1`); the stream snaps back to 1-bit points afterward.
+
+**Worked example — XOR encoding on floats.** Take two consecutive readings `2.0` then
+`2.5` as IEEE-754 single-precision:
+
+```
+      sign  exponent   mantissa
+2.0 =  0    10000000   00000000000000000000000   (0x40000000)
+2.5 =  0    10000000   01000000000000000000000   (0x40200000)
+XOR =  0    00000000   01000000000000000000000   (0x00200000)
+```
+
+The XOR is `0x00200000` = only **bit 21 set**: 10 leading zero bits, then 1 meaningful
+bit, then 21 trailing zeros. Gorilla stores just a control bit + a leading-zero count +
+a meaningful-window length + the meaningful bit(s) — roughly `1 + 5 + 6 + 1 ≈ 13 bits`
+instead of 32. And if the next reading is *identical* (`2.5` then `2.5`), the XOR is all
+zeros → stored as a **single `0` bit**. This is why slowly-changing gauges compress to a
+fraction of a byte per point.
+
 These "lightweight" encodings are usually combined with a **general-purpose block
 compressor** (LZ4, Zstd, Snappy, gzip) applied on top. The lightweight encodings are
 preferred first because operators can filter/aggregate *without fully decompressing*.
@@ -145,6 +177,22 @@ storage (S3/GCS/ADLS):
   transactional table layer — **Apache Iceberg, Delta Lake, Apache Hudi** — providing
   ACID commits, schema evolution, time-travel, and partition/file pruning via a
   manifest/metadata layer on top of the Parquet files.
+- **How do you get ACID on immutable S3 objects?** Writes never mutate an existing
+  Parquet file. A writer creates *new* data files plus a new **snapshot/manifest** that
+  lists the set of files making up the table, then flips the table pointer to the new
+  snapshot with a single **atomic swap** (an atomic metadata commit / conditional
+  put). Readers always read one consistent snapshot → **snapshot isolation**; keeping
+  old snapshots around gives **time-travel**. On update the table must decide *how* to
+  reflect changed rows, which is the copy-on-write vs merge-on-read choice:
+  - **Copy-on-write (CoW):** rewrite the *entire* data file(s) containing the changed
+    rows. Reads stay fast (no merge at query time) but writes are heavy — a one-row
+    update rewrites a whole file. Good for read-heavy tables with infrequent updates.
+  - **Merge-on-read (MoR):** leave base files untouched and write small **delete /
+    position files** (or delta files) recording the change; readers merge base + deltas
+    at query time. Writes are cheap and fast (good for frequent updates/streaming) but
+    reads pay a merge cost until a background **compaction** folds deltas into new base
+    files. Iceberg and Hudi expose both modes; this CoW-vs-MoR knob is the deep answer
+    to "how do updates work on a lakehouse?".
 
 ```mermaid
 flowchart LR
@@ -191,6 +239,36 @@ hash to nodes — a bad key causes skew), **sort keys / clustering** (physical o
 for range pruning), and **materialized views** for precomputed aggregates. BigQuery
 hides nodes entirely behind a *serverless slot* model; Snowflake exposes sizeable
 virtual warehouses; Redshift exposes explicit clusters (with Serverless as an option).
+
+**Join strategies (a very common MPP follow-up).** How a join runs depends on the
+size of each side:
+
+- **Broadcast join** — replicate the *small* side (e.g. a dimension table) to every
+  node, so each node joins its local fact-table shard against a full local copy. Cheap
+  when one side is small (a few MB); no shuffle of the big side. The classic
+  fact-table-joins-small-dimension case.
+- **Shuffle / hash-redistribution join** — when *both* sides are large, repartition
+  both on the join key so matching keys land on the same node, then join locally. This
+  moves both tables across the network, so it's the expensive plan the optimizer avoids
+  when broadcast is viable. If the tables are already distributed on the join key, the
+  shuffle is skipped entirely — this is why distribution-key choice matters.
+
+**Worked example — distribution skew.** Distribute a 1-billion-row table on `country`
+across 10 nodes. If 80% of rows are `'US'`, then hashing on `country` sends all 800M
+US rows to *one* node while the other 9 nodes split the remaining 200M. One node holds
+~800M rows and does the bulk of every scan/join/aggregate; the query finishes only when
+that straggler finishes, so you effectively lose the parallelism you paid 10 nodes for.
+Fix: pick a high-cardinality, evenly-distributed key (e.g. `user_id`), or an explicit
+even/round-robin distribution.
+
+**Zone maps need sort order to work.** Min-max/zone-map pruning can skip a block only
+when the block's `[min,max]` for the predicate column is *narrow* — which happens only
+if the data is sorted/clustered on (or correlated with) that column. On a column sorted
+by `order_date`, a `WHERE order_date = '2026-07-01'` prunes to the one block whose range
+contains that date. On an *unsorted* column, every block's `[min,max]` spans nearly the
+whole range, so no block can be excluded and the engine scans everything. This is the
+same lever as the "sort before load" WARNING in the compression section — physical sort
+order drives both compression *and* prune ratio.
 
 > [!INTERVIEW]
 > "Why is Snowflake able to give each team its own performance?" → Storage/compute
@@ -275,7 +353,31 @@ http_requests_total{method="POST", status="500", instance="host2"} ← another s
 Cardinality is *multiplicative*: `methods × statuses × instances × …`. Adding a tag
 whose values are effectively unbounded — **user IDs, email addresses, request IDs,
 full URLs, timestamps, session IDs** — causes **cardinality explosion**: millions of
-one-point series. Consequences:
+one-point series.
+
+**Worked example — the multiplication.** Suppose `http_requests_total` carries these
+bounded labels:
+
+```
+endpoint : 20 values
+method   :  5 values   (GET, POST, PUT, DELETE, PATCH)
+status   : 10 values   (200, 201, 400, 401, 403, 404, 500, 502, 503, 504)
+instance : 500 values  (500 pods)
+```
+
+Total series = `20 × 5 × 10 × 500 = 500,000`. Large but bounded — Prometheus handles
+it. Now add one label `user_id` with 1,000,000 distinct users:
+
+```
+500,000 × 1,000,000 = 500,000,000,000  (500 billion series)
+```
+
+Each series needs its own inverted-index entry and storage stream, so the index alone
+now wants hundreds of GB of RAM it does not have → **OOM**. The killer is that the new
+label doesn't *add* to the total, it *multiplies* it. That is why `user_id` belongs in a
+log line or a wide-event/columnar store, never in a Prometheus label.
+
+Consequences:
 
 - The in-memory **inverted index** of label→series balloons, driving memory/OOM.
 - Ingest and query slow down; TSDBs like Prometheus can crash or hit series limits.

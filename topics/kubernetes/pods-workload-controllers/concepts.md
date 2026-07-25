@@ -138,6 +138,22 @@ kubectl scale deployment web --replicas=5    # you change desired state...
 kubectl get pods -w                          # ...and watch the loop converge
 ```
 
+**Traced convergence (a Deployment starting at 3 replicas):**
+
+| Step | Event | Desired | Observed | Diff | Action |
+|---|---|---|---|---|---|
+| 1 | steady state | 3 | 3 | 0 | none (requeue) |
+| 2 | `kubectl scale --replicas=5` | **5** | 3 | +2 | create 2 Pods |
+| 3 | 2 new Pods reach Running | 5 | 5 | 0 | none |
+| 4 | you `kubectl delete pod web-xxxx` | 5 | 4 | +1 | create 1 Pod |
+| 5 | replacement Running | 5 | 5 | 0 | none |
+
+Notice steps 4–5: nothing "told" the reconciler a Pod was deleted as a special event — on its next
+pass it simply *observed* the level (4 Pods) fell below desired (5) and acted. That is
+**level-triggered** convergence. An edge-triggered system that only reacted to the delete *event*
+would silently stay at 4 if it ever missed that event; the level-triggered loop self-heals on the
+very next pass regardless.
+
 > [!INTERVIEW]
 > A favorite question: "You `kubectl delete pod` a Deployment-managed Pod — what happens?" Answer:
 > the ReplicaSet's reconciler sees replicas below desired and creates a replacement within seconds.
@@ -290,6 +306,22 @@ Behavioral details interviewers probe:
 - Use for databases, message brokers, quorum systems (Kafka, ZooKeeper, etcd, Postgres, Cassandra)
   — anything where "which replica am I" and "my disk" matter.
 
+**Traced ordered operations (`OrderedReady`, a StatefulSet named `web`):**
+
+- **Scale 0 → 3 (create up, ascending):** create `web-0`; **wait until `web-0` is Running & Ready**;
+  only then create `web-1`; wait until Ready; only then create `web-2`. If `web-1` never becomes
+  Ready (say its DB volume fails to mount), the StatefulSet **stalls** — `web-2` is never created.
+  Contrast a Deployment, which would fire all 3 Pods at once.
+- **Scale 3 → 1 (scale down, descending):** delete `web-2` first, then `web-1`; **`web-0` is kept**.
+  The PVCs `www-web-2` and `www-web-1` are **not** deleted (default) — scaling back up to 3 later
+  re-mounts the *same* disks to the *same* ordinals.
+- **Rolling update (revs, descending):** update `web-2` (wait Ready) → `web-1` (wait Ready) →
+  `web-0`, one at a time.
+
+Why descending? In a leader/quorum system the lowest ordinal (`web-0`) is conventionally the seed /
+initial leader; bringing members up 0→1→2 lets each later member join an already-healthy quorum, and
+tearing down 2→1→0 removes followers before the seed — predictable, quorum-safe order.
+
 > [!WARNING]
 > A StatefulSet **does not create the headless Service for you**, and it does not delete PVCs when
 > you scale down. Two classic surprises: Pods stuck without DNS because the Service is missing, and
@@ -387,6 +419,32 @@ kubectl create job pi --image=perl:5.34.0 -- perl -Mbignum=bpi -wle 'print bpi(2
 kubectl get job pi                            # COMPLETIONS 1/1 when done
 kubectl logs job/pi
 ```
+
+**Traced parallelism (`completions: 6, parallelism: 2, backoffLimit: 4`):**
+
+The Job needs **6 successes** and runs **at most 2 Pods at a time**. Watch `COMPLETIONS` climb:
+
+```
+t0:  P1, P2 running                     COMPLETIONS 0/6, active 2
+t1:  P1 succeeds  -> start P3           COMPLETIONS 1/6, active 2  (P2, P3)
+t2:  P2 succeeds  -> start P4           COMPLETIONS 2/6, active 2  (P3, P4)
+t3:  P3, P4 succeed -> start P5, P6     COMPLETIONS 4/6, active 2  (P5, P6)
+t4:  P5, P6 succeed                     COMPLETIONS 6/6  -> Job Complete
+```
+
+The invariant: keep `min(parallelism, remaining) = min(2, needed)` Pods running until 6 successes
+land. Now the failure path — say 4 Pods *fail* instead of succeed. Each failure increments a
+retry counter; the Job keeps launching replacements until the accumulated failure count hits
+`backoffLimit: 4`, at which point the whole Job is marked **Failed** and no more Pods are started,
+even if some completions were still outstanding. (Replacements are launched with exponential
+back-off — ~10s, 20s, 40s, … — so retries slow down rather than hammer instantly.)
+
+**Indexed mode (`completionMode: Indexed`, same `completions: 6, parallelism: 2`):** the 6 required
+successes are the fixed indices **0,1,2,3,4,5**, and each Pod is pinned to one via the
+`JOB_COMPLETION_INDEX` env var. With parallelism 2 the scheduler works through them two at a time,
+e.g. run indices `{0,1}` first, then `{2,3}`, then `{4,5}` — a Pod for index 3 that fails is retried
+*as index 3* (not reassigned), so a partitioned worker (shard 3 of 6) always reprocesses its own
+slice. The Job completes only when **every** index 0–5 has one success.
 
 ---
 
@@ -549,6 +607,30 @@ Two things to keep straight:
 
 ---
 
+## Pod termination (graceful shutdown)
+
+restartPolicy is the *restart* story; termination is the *stop* story, and it's a common senior
+follow-up whenever Pods go away — rolling updates, StatefulSet scale-down, node drains. When a Pod is
+deleted it doesn't vanish instantly; the kubelet runs an ordered, time-bounded shutdown:
+
+1. Pod is marked **Terminating** and removed from Service endpoints (so no new traffic arrives).
+2. If a container has a **`preStop` hook**, it runs first (e.g. tell a load balancer to drain, flush
+   a buffer, `sleep` a few seconds to let in-flight requests finish).
+3. The kubelet sends **`SIGTERM`** to each container's main process.
+4. The **`terminationGracePeriodSeconds`** countdown runs (**default 30s**). The app should catch
+   SIGTERM and exit cleanly within it.
+5. If the process is still alive when the grace period expires, the kubelet sends **`SIGKILL`** (the
+   hard, uncatchable kill).
+
+**Traced (a Pod with a 5s `preStop` sleep and default 30s grace):** at t=0 the Pod goes Terminating
+and leaves endpoints; the preStop sleep runs t=0→5s; at t=5s SIGTERM is sent and the app begins
+draining; if it exits at, say, t=12s the Pod is removed cleanly; if it were still running at t=30s
+it would be SIGKILLed. Note the grace period is a *ceiling*, not a fixed wait — a clean early exit
+ends it immediately. (Native sidecars are terminated **after** the app containers, in reverse order,
+so the app can still log/proxy through its sidecar while shutting down.)
+
+---
+
 ## Multi-container Pod patterns
 
 Because containers in a Pod share network and volumes, several **co-located helper** patterns are
@@ -563,6 +645,22 @@ idiomatic. The main app container is joined by one or more helpers:
 - **Adapter** — transforms the app's output/interface into a **standardized external format**. E.g.,
   an adapter that scrapes the app's bespoke stats and exposes them in Prometheus format, so the
   outside world sees a uniform interface.
+
+**Concrete wiring for the two less-obvious patterns:**
+
+- **Ambassador (outbound proxy on localhost).** The app is compiled to talk to a plain
+  `localhost:6379` Redis. In the Pod you add an ambassador container (e.g. `twemproxy` or `envoy`)
+  that *listens* on `127.0.0.1:6379` and *forwards* to a 3-shard Redis cluster
+  (`redis-0:6379`, `redis-1:6379`, `redis-2:6379`), hashing each key to a shard. App code never
+  changes; sharding/failover/TLS all live in the sidecar. **App sees `localhost`; the world sees a
+  sharded cluster.**
+- **Adapter (normalize the outbound-facing interface).** The app writes bespoke stats to a shared
+  file `/var/run/stats.json` (`{"reqs":1200,"errs":3}`). The adapter container reads that file and
+  *re-exposes* it as Prometheus text on `:9090`:
+  `app_requests_total 1200` / `app_errors_total 3`. Prometheus scrapes `:9090` and sees a standard
+  format. **App emits its own quirky output; the world sees a uniform interface** — the adapter
+  points *outward* (fixes what others consume), whereas the ambassador points *inward* (fixes what
+  the app consumes).
 
 ```mermaid
 flowchart LR

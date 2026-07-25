@@ -111,6 +111,12 @@ These are the timeless principles (rooted in Saltzer & Schroeder's 1975 paper "T
 Protection of Information in Computer Systems"). Interviewers love to hear you *name* the
 principle a given fix embodies.
 
+(One attribution nuance interviewers exploit: **defense in depth** and **secure defaults** as
+named below are *widely-adopted later additions* — the canonical Saltzer & Schroeder eight are
+economy of mechanism, fail-safe defaults, complete mediation, open design, separation of
+privilege, least privilege, least common mechanism, and psychological acceptability. Use all of
+them, but don't attribute defense-in-depth to the 1975 paper.)
+
 **Defense in depth.** Layer independent controls so one failure doesn't breach the system.
 A WAF *and* parameterized queries *and* least-privilege DB accounts *and* egress filtering:
 if the WAF misses an injection, the prepared statement still blocks it. No single layer is
@@ -375,6 +381,16 @@ by scoring five factors (historically 1–10 each) and combining them:
 
 Risk score = (D + R + E + A + D) / 5, giving a rough priority ordering.
 
+**Worked example — scoring an SQL-injection threat.** A reflected SQLi on a login form:
+Damage = 8 (full DB read), Reproducibility = 9 (works every time), Exploitability = 6
+(needs a crafted payload but public tools exist), Affected users = 10 (all accounts),
+Discoverability = 7 (an error message leaks the flaw). Sum = 8 + 9 + 6 + 10 + 7 = **40**,
+so Risk = 40 / 5 = **8.0** → high priority. Now watch the averaging trap: a *catastrophic*
+threat with Damage = 10 and Affected = 10 but Reproducibility = 3, Exploitability = 3,
+Discoverability = 2 scores (10 + 3 + 3 + 10 + 2) / 5 = 28 / 5 = **5.6** — a "medium" that
+buries a total-loss scenario, because two low factors dragged the mean down. That masking is
+exactly why the average is untrustworthy.
+
 **Intermediate/Advanced — why it fell out of favor.** DREAD is largely deprecated (even
 Microsoft moved away from it) because:
 
@@ -459,21 +475,47 @@ factors (financial damage, reputation, non-compliance, privacy violation). Each 
 averaged into Low/Medium/High, and combined in a matrix:
 
 ```
-              IMPACT
-           Low   Med   High
-    High    Med  High  Crit
-LIKE Med    Low  Med   High
-LIHD Low    Note Low   Med
+                        IMPACT
+                   Low     Med     High
+              +-------+-------+-------+
+   L    High  |  Med  | High  | Crit  |
+   I          +-------+-------+-------+
+   K    Med   |  Low  |  Med  | High  |
+   E          +-------+-------+-------+
+   L    Low   | Note  |  Low  |  Med  |
+   I          +-------+-------+-------+
+   H    Legend: "Note" = informational / negligible — log it,
+   O              but it does not warrant remediation effort.
+   O    Read a cell as (Likelihood row × Impact column).
+   D
 ```
+
+For example, a threat with **High** likelihood and **High** impact lands in the top-right
+cell = **Crit**; a **Low**-likelihood, **Low**-impact finding lands bottom-left = **Note**
+(you record it but do not spend on it).
 
 **Advanced — qualitative vs quantitative.** Most teams use *qualitative* ratings
 (Low/Med/High or a heat map) because probabilities are hard to estimate. *Quantitative* risk
 uses money: **SLE** (Single Loss Expectancy) = Asset Value × Exposure Factor, and **ALE**
-(Annualized Loss Expectancy) = SLE × ARO (Annualized Rate of Occurrence). ALE lets you
-justify a control ("this $50k control prevents $200k/yr of expected loss"), but the inputs are
-often guesses. Know the trade-off: qualitative is fast and communicable; quantitative is
-defensible when you have real data. Whatever the method, risk is *managed* — mitigate,
-transfer, avoid, or accept — never assumed to be zero.
+(Annualized Loss Expectancy) = SLE × ARO (Annualized Rate of Occurrence).
+
+**Worked example — justifying a control with ALE.** A customer PII database is valued at
+**AV = $1,000,000**. A breach wouldn't destroy all of it; you estimate an **Exposure Factor
+EF = 30%** (fraction of value lost per incident). Then:
+
+- **SLE** = AV × EF = $1,000,000 × 0.30 = **$300,000** per breach.
+- You judge such a breach happens about once every two years, so **ARO = 0.5** occurrences/yr.
+- **ALE** = SLE × ARO = $300,000 × 0.5 = **$150,000/yr** of expected loss.
+
+Now a control (WAF + parameterized queries + monitoring) costs **$40,000/yr** and you believe
+it cuts the ARO from 0.5 to 0.1. New ALE = $300,000 × 0.1 = $30,000/yr, so the control saves
+$150,000 − $30,000 = **$120,000/yr** for $40,000 — a clear net win. Spending $40k to avoid
+$120k of expected loss is defensible; spending $200k on that same risk would not be.
+
+ALE lets you justify a control this way, but the inputs (EF, ARO) are often guesses. Know the
+trade-off: qualitative is fast and communicable; quantitative is defensible when you have real
+data. Whatever the method, risk is *managed* — mitigate, transfer, avoid, or accept — never
+assumed to be zero.
 
 ## CVSS Scoring Basics
 
@@ -508,6 +550,25 @@ groups:
 The **Base score alone is not your risk.** A "9.8 Critical" on a component you don't expose,
 or have compensating controls for, may be low *actual* risk — that's what the Environmental
 metrics (and your own risk assessment) are for.
+
+**Worked example — decoding a real vector.** Log4Shell's v3.1 Base vector is
+`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H`, which scores **10.0**. Read it left to right:
+
+| Metric | Value | Meaning |
+|---|---|---|
+| **AV**:N | Network | exploitable remotely over the network — the worst (maximal reach) |
+| **AC**:L | Low | no special conditions; attack is reliable |
+| **PR**:N | None | attacker needs no privileges |
+| **UI**:N | None | no victim interaction required (fully automatable, wormable) |
+| **S**:C | Changed | exploit escapes the vulnerable component's security scope (JNDI reaches the host/other systems) |
+| **C**:H / **I**:H / **A**:H | High | total loss of confidentiality, integrity, and availability |
+
+Every exploitability metric is at its most-severe value, all three impacts are High, and
+**Scope:Changed** removes the cap the formula otherwise applies — together they saturate the
+score at **10.0**. Contrast a stored-XSS in one app: `AV:N/AC:L/PR:L/UI:R/S:C/C:L/I:L/A:N` =
+**5.4 (Medium)** — same network vector, but `PR:L` (needs a low-priv account), `UI:R`
+(a victim must click), and only Low C/I impact with no availability loss pull it down. Each
+letter you weaken visibly buys down the score.
 
 **Advanced — v3.1 vs v4.0 and misuse.** CVSS **v4.0** (released 2023) refines v3.1: it
 renames Temporal to **Threat**, splits impact into **Vulnerable System** and **Subsequent
@@ -639,10 +700,10 @@ or "what technique?" (ATT&CK) — the three are complementary, not competing.
 
 ## Quantitative Risk with FAIR
 
-The doc already covers SLE/ALE point estimates and the qualitative L×I heat map. **FAIR**
-(Factor Analysis of Information Risk, an Open Group standard — O-RA) is the rigorous
-*quantitative* alternative that fixes two problems with both: heat-map subjectivity and the
-false precision of a single ALE number.
+SLE/ALE point estimates and the qualitative L×I heat map both share a weakness: they collapse
+deep uncertainty into a single number or colored cell. **FAIR** (Factor Analysis of Information
+Risk, an Open Group standard — O-RA) is the rigorous *quantitative* alternative that fixes
+exactly that: heat-map subjectivity and the false precision of a single ALE number.
 
 **The decomposition.** FAIR expresses:
 
@@ -652,6 +713,22 @@ Risk = Loss Event Frequency (LEF) × Loss Magnitude (LM)
   Vulnerability = f(Threat Capability  vs  Resistance/Control Strength)
   LM  = Primary Loss + Secondary Loss (fines, legal, reputation, response)
 ```
+
+**Worked example — deriving a loss estimate.** Take a phishing-driven breach of that PII
+database. Threat Event Frequency **TEF = 4/yr** (attackers attempt it four times a year).
+Your controls (MFA, filtering, training) mean only a quarter of attempts succeed, so
+**Vulnerability = 0.25**. Then:
+
+- **LEF** = TEF × Vulnerability = 4 × 0.25 = **1.0 loss event/yr**.
+- Loss Magnitude isn't one number — it's a range: **Primary Loss** (response, forensics) is
+  roughly $150k–$400k, and **Secondary Loss** (fines, legal, churn) is $50k–$4.6M, so per
+  event **LM ≈ $200k (low) to $5M (high)**.
+
+Feeding those *distributions* into a **Monte Carlo simulation** (draw LEF and LM thousands of
+times, multiply, tally) yields a **loss-exceedance curve** — e.g. "median annual loss ≈ $500k,
+80% chance under $2M, 5% chance it exceeds $10M." That curve, not a single "$500k ALE" or a
+red "High" cell, is what you hand a CFO: it makes the tail risk explicit and lets two "High"
+risks that differ 100× in expected loss be told apart.
 
 **Why it matters (the senior nuance).** FAIR does not produce a single number; you feed
 **distributions** (min/most-likely/max) for each factor and run a **Monte Carlo simulation**
@@ -690,8 +767,9 @@ continuous, developer-owned threat modeling.
 
 ## Supply-Chain Security: SBOM, SLSA, and Provenance
 
-The doc mentions **SCA**; a 2024-2025 senior bar expects the fuller supply-chain picture,
-because the dependency-ingestion point is a **trust boundary** most teams never modeled. Maps to
+**SCA** finds known-vulnerable dependencies, but a 2024-2025 senior bar expects the fuller
+supply-chain picture, because the dependency-ingestion point is a **trust boundary** most
+teams never modeled. Maps to
 **OWASP A06 (Vulnerable & Outdated Components)** and **A08 (Software & Data Integrity Failures)**,
 and to **NIST SSDF (SP 800-218)**.
 
@@ -726,7 +804,7 @@ dependency pinning/review**.
 
 ## Assurance vs Security, and the ASVS Ladder
 
-A staff-level distinction the doc did not draw: **security** is the set of protective properties
+A staff-level distinction worth drawing sharply: **security** is the set of protective properties
 a system *actually has*; **assurance** is the **justified confidence — the evidence — that those
 properties hold**. You can be *secure without assurance* (correct by luck, but nobody can
 demonstrate it) and, more dangerously, have *assurance without security* (a passed checklist over

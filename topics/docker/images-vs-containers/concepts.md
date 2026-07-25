@@ -101,6 +101,26 @@ adds a near-empty writable layer. `docker ps -s` shows this as two numbers — `
 written in *this* container's writable layer) and `virtual size` (writable layer + the
 shared read-only image data).
 
+**Worked example — "how much disk do 5 nginx containers use?"** Pull `nginx` (its layers
+total ~187 MB on disk) and start five containers. Each has written only a couple of bytes of
+runtime state, so `docker ps -s` looks like:
+
+```
+CONTAINER   IMAGE   SIZE               (= writable layer + virtual)
+web1        nginx   2B (virtual 187MB)
+web2        nginx   2B (virtual 187MB)
+web3        nginx   2B (virtual 187MB)
+web4        nginx   2B (virtual 187MB)
+web5        nginx   2B (virtual 187MB)
+```
+
+Read `virtual size` naively and you'd think 5 × 187 MB = **935 MB**. But the 187 MB of
+read-only layers is stored **once** and shared by all five. Actual disk =
+187 MB (shared, counted once) + 5 × 2 B (the private writable layers) ≈ **187 MB**. The
+de-dup saves ~748 MB — and the more containers you run off one image, the more the naive
+multiplication overstates reality. That is the numbers answer to "if I run 10 containers from
+one image, how much disk do the images use?": ~one image's worth, not ten.
+
 > [!WARNING]
 > Data written to the writable layer is **ephemeral** — deleting the container (`docker rm`)
 > discards its writable layer and everything in it. For anything that must survive a
@@ -124,6 +144,22 @@ efficiency." The rules:
 
 Because the copy happens only on first modification, starting a container and reading from it
 is essentially free in disk terms. The cost is paid once, per file, on first write.
+
+**Worked example — the 2 GB file trap.** Suppose the image ships a 2 GB `data.bin` in a
+read-only layer. Trace the writable layer's size:
+
+| Step | Action | Writable layer size |
+|---|---|---|
+| 1 | `docker run` — container starts, `data.bin` is read-only-shared | **0 B** |
+| 2 | `cat data.bin > /dev/null` — pure read | **0 B** (read straight from lower layer) |
+| 3 | `echo x >> data.bin` — first write triggers `copy_up` | **~2 GB** (entire file copied up, then 1 byte appended) |
+
+One appended byte cost you 2 GB of writable-layer disk — and the same `copy_up` fires even
+for a `chmod data.bin` (a metadata-only change). Now put `data.bin` on a **volume** instead:
+a volume bypasses the union filesystem, so the `echo x >>` writes in place and the writable
+layer stays at **~0 B**. That before/after — 2 GB vs ~0 B for the identical write — is why
+large or write-heavy files (databases, uploads) belong on volumes, not the container
+filesystem.
 
 > [!WARNING]
 > `copy_up` copies the **entire file**, even for a tiny change — and even a metadata change
@@ -204,6 +240,27 @@ flowchart LR
 There's also the **image ID** (`docker images` short hex) — this is the digest of the image
 *config* object (local identity), distinct from the *manifest* digest used for `pull`/push by
 `@sha256:` (registry identity). Interviewers occasionally probe this distinction.
+
+**Multi-arch: a tag is usually a manifest *index*, not one manifest.** On Docker Hub today,
+`nginx:latest` isn't a single manifest — it's a **manifest list / OCI image index** that
+fans out to one per-arch manifest each (amd64, arm64, …). Pull resolves the index, then
+picks the manifest matching your CPU arch:
+
+```mermaid
+flowchart TD
+  T[tag :latest] --> IDX["manifest index<br/>sha256:idx…"]
+  IDX --> MA["amd64 manifest<br/>sha256:aaa…"]
+  IDX --> MB["arm64 manifest<br/>sha256:bbb…"]
+  MA --> CFGA[config + layers · amd64]
+  MB --> CFGB[config + layers · arm64]
+```
+
+This nuances "pin by digest." `nginx@sha256:idx…` (the **index** digest) is reproducible and
+tamper-evident *and* still arch-selecting at pull time — the same one-liner brings amd64 to
+your x86 CI and arm64 to your Apple-Silicon laptop, which is what you usually want. Pinning
+the **per-arch** manifest digest (`sha256:aaa…`) locks to one architecture and will refuse
+to run on the other. So on Apple Silicon, prefer pinning the index digest unless you
+deliberately need a single-arch build.
 
 ## Container vs virtual machine
 
@@ -428,6 +485,13 @@ they can be created and destroyed at will, which maps directly onto containers:
 - **"What's copy-on-write and why does it matter for performance?"** Files are shared
   read-only until first modified, then `copy_up`'d into the writable layer — so reads are free
   but the first write copies the whole file. Large/write-heavy files belong on volumes.
+- **"Why does my container ignore Ctrl-C / SIGTERM and take 10s to stop?"** Almost always
+  **shell-form vs exec-form CMD**. `CMD nginx` (shell form) runs as `/bin/sh -c "nginx"`, so
+  **`/bin/sh` is PID 1** and receives the `SIGTERM` from `docker stop` — and a plain shell
+  doesn't forward it, so your app never hears it; Docker waits out the timeout and `SIGKILL`s
+  the whole tree (no graceful drain). `CMD ["nginx"]` (exec form) makes **nginx itself PID 1**,
+  so it gets `SIGTERM` directly and can shut down cleanly. Fix: use exec-form, or run an init
+  (`--init` / `tini`) that forwards signals and reaps zombies.
 
 ## References
 

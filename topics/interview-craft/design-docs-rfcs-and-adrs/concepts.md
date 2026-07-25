@@ -91,6 +91,20 @@ no sense of when a heavyweight RFC is warranted versus a one-line ADR versus jus
 a two-way-door change. Right-sizing the process to the reversibility and blast radius of
 the decision *is itself* a judgment signal.
 
+The reversibility framing comes from Bezos: a **two-way door** is an easily reversible
+decision — if it's wrong you walk back through it cheaply (a feature flag, a config value,
+a library choice you can swap). A **one-way door** is costly or impossible to undo (a
+public API contract, a data-model migration, a schema other teams now depend on). Invest
+process *proportional to how one-way the door is*: two-way doors want speed and a bias to
+action; one-way doors want a written doc and review before you commit.
+
+And the judgment cuts *both ways*. Under-processing (treating a one-way door casually) is
+the obvious failure, but over-processing is the equal-and-opposite senior gotcha
+interviewers also probe: writing a full RFC for a reversible flag, bikeshedding a
+config default across a week of async threads, analysis-paralysis on a decision you could
+cheaply reverse. Process as theater is a real cost. The fix is the same principle applied
+in reverse — timebox it, and for a two-way door, just ship it and learn.
+
 ```mermaid
 flowchart TD
   A[A decision needs to be made] --> B{Blast radius / reversibility?}
@@ -138,6 +152,50 @@ with "Design Docs at Google" and most internal RFC templates):
 solving in the first half-page, the rest is noise. Strong problem statements are specific
 and often quantified: not "search is slow," but "p99 search latency is 1.8s against a 300ms
 SLO, driven by fan-out to 40 shards; this doc proposes reducing it below SLO."
+
+**Worked example — a skeletal mini design doc (orders store).** Listing the 12 sections is
+not the same as seeing them work together. Here's the whole anatomy compressed onto one
+screen, starting with the BLUF the busy reviewer actually reads:
+
+> **TL;DR (BLUF):** The orders service currently writes to a shared Postgres owned by the
+> monolith; at our 5k-TPS projected peak this table contends with billing writes and is our
+> top source of lock timeouts. This doc proposes a **dedicated Postgres instance for the
+> orders domain**, migrated behind a dual-write flag over three weeks. Ask: sign-off from
+> Billing and Platform by Thursday.
+>
+> **Context.** Orders and billing share `db-core`; orders is ~60% of write volume and grew
+> 3x YoY. Lock-wait p99 hit 400ms last peak. (See incident INC-2231.)
+>
+> **Problem.** Orders writes contend with billing on `db-core`, causing lock timeouts at
+> peak; the two domains have independent scaling needs but one failure domain.
+>
+> **Goals:** isolate orders writes; keep p99 write latency < 50ms at 5k TPS; zero data loss
+> on cutover. **Non-goals:** sharding orders (single primary + read replica covers 5k TPS,
+> revisit past ~15k); multi-region (tracked separately).
+>
+> **Proposed design.** Stand up `db-orders` (Postgres 16, primary + 1 read replica).
+> Dual-write from the orders service → backfill history → verify row counts → switch reads →
+> stop writing to `db-core`. [diagram of the four phases]
+>
+> **Alternatives considered.** (1) *DynamoDB* — effortless scale, no ops; rejected, we need
+> multi-item transactions and joins across order/payment/line-item (see full entry below).
+> (2) *Stay on `db-core`, add read replicas* — cheapest; rejected, replicas don't relieve
+> **write** contention, which is the actual bottleneck. (3) *Do nothing* — rejected, lock
+> timeouts already breach SLO at peak.
+>
+> **Trade-offs.** Gain an isolated failure/scaling domain; give up cross-domain transactions
+> between orders and billing (now must reconcile via events, accepted — they're already
+> eventually consistent downstream).
+>
+> **Risks & mitigations.** Backfill doubles DB load → throttle to 10%, off-peak, abort if
+> replica lag > 5s. Dual-write drift → nightly row-count + checksum diff during migration.
+>
+> **Rollout.** Flag `orders.db=core|orders`, per-phase; rollback = flip flag to `core`
+> (safe until the "stop writing to core" phase). **Open questions:** do we keep `db-core`
+> orders tables read-only for 30 days as a safety net, or drop immediately?
+
+Notice how much of the doc is *not* the solution — problem, alternatives, and trade-offs
+carry the argument. That ratio is the seniority tell.
 
 ---
 
@@ -324,6 +382,34 @@ stateDiagram-v2
 > sharding" tells future-you exactly what you signed up for. An ADR that lists only
 > upsides is advocacy, not a record.
 
+**Worked example — a complete one-page ADR.** The sections above are easy to recite and
+hard to picture as a whole. Here is the full thing, filled in for the running
+orders-store decision — the kind of artifact a "draft an ADR" round wants to see:
+
+> **ADR-014: Use Postgres for the orders store**
+>
+> **Status:** Accepted (2026-03-11). Supersedes nothing; superseded by nothing.
+>
+> **Context.** The orders service needs a durable store for orders, payments, and line
+> items. Peak write projection is ~5k TPS. Order placement must update multiple rows
+> (order + N line items + a payment record) atomically, and support reflects ad-hoc joins
+> across those entities. We already run Postgres in production; the team has no DynamoDB
+> operational experience.
+>
+> **Decision.** We will use a dedicated PostgreSQL instance (primary + one read replica)
+> as the orders store, with order placement wrapped in a single transaction.
+>
+> **Consequences.** *Easier:* multi-item transactions and cross-entity joins come for free;
+> we reuse existing Postgres tooling, backups, and on-call runbooks; support's ad-hoc
+> queries need no new store. *Harder:* horizontal write scaling is now bounded by a single
+> primary — past roughly 15k TPS we will need app-level sharding or a re-decision (a
+> superseding ADR). We own capacity planning and failover for another database.
+
+Everything the code can't tell you — *why* it's Postgres, what we knowingly gave up, and the
+tripwire (15k TPS) that should trigger a superseding ADR — lives in those five short
+sections. Note it's genuinely one screen: Nygard keeps it lightweight so people actually
+write them.
+
 ---
 
 ## Why record decisions: future-you, onboarding, and not re-litigating
@@ -370,6 +456,17 @@ How to run a review well as the author:
   proceeding; distinguish "this changes the decision" from "style preference."
 - **Update the doc, don't just argue in threads.** The doc is the source of truth; fold
   resolutions back in so the next reader sees the current state.
+
+**Who actually decides when you can't reach consensus?** Consensus-*seeking* is not
+consensus-*requiring* — driving alignment does not mean holding out for unanimity, which is
+how docs die in endless threads. Every significant decision should have a named **driver /
+single-threaded owner** (the person accountable for getting to a decision) and, in DACI/RACI
+terms, a clear **Approver** (who actually decides) distinct from those merely *Consulted*.
+When a point stays genuinely contested after async review, the senior move is to *escalate
+cleanly*: identify the decider, bring them the one or two unresolved trade-offs with a
+recommendation (not the whole doc), and timebox a short decision meeting. That's the
+concrete mechanism behind the "how do you drive alignment" follow-up — an owner and an
+escalation path, not a hope that everyone eventually agrees.
 
 **Disagree and commit** (an Amazon Leadership Principle, and a broadly useful norm): once a
 decision is made through legitimate discussion, everyone — *including those who argued the

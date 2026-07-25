@@ -184,6 +184,19 @@ Key distinction interviewers probe: `REQUIRES_NEW` = two independent transaction
 
 **Suspension is real resource bookkeeping.** `REQUIRES_NEW` and `NOT_SUPPORTED` *suspend* the current transaction: Spring unbinds the existing resources (e.g. the `Connection`) from the thread via `TransactionSynchronizationManager`, holds them in a `SuspendedResourcesHolder`, runs the inner work (acquiring a **second** connection for `REQUIRES_NEW`), then rebinds the originals on resume. Because the outer connection stays bound (idle) while the inner one is in use, a pool sized to the thread count can **deadlock**: every thread holds its outer connection and blocks waiting for an inner one. Spring's guidance: size the pool to exceed concurrent threads by at least 1.
 
+**Worked example — the deadlock with real numbers.** Pool size = **10**. Ten request threads arrive at once, each entering an outer `REQUIRED` method that then calls a `REQUIRES_NEW` method:
+
+```
+Step 1: each of the 10 threads begins its outer tx -> grabs 1 connection.
+        Pool: 10 checked out, 0 free.  (10 outer connections, all suspended-but-still-bound)
+Step 2: each thread enters the REQUIRES_NEW method -> asks for a 2nd connection.
+        Pool has 0 free. All 10 threads block, waiting for a connection to return.
+Step 3: no thread can release its outer connection until its inner tx finishes,
+        and no inner tx can start until it gets a connection. Circular wait -> deadlock.
+```
+
+Every thread needs 2 connections but holds 1 and the pool is empty, so nobody can make progress; the threads eventually die on the pool's connection-timeout. Raise the pool to **11**: now one thread gets the 11th connection for its inner tx, commits it, returns it, that thread finishes and frees its outer connection too, and the freed connections cascade to unblock the rest. In production you size for `maxConcurrentThreads + (nesting depth)`, not just thread count.
+
 **`NESTED` is JDBC-savepoint-only.** It maps onto JDBC `Savepoint`s and therefore works with `DataSourceTransactionManager` (JDBC resource transactions). It does **not** work over JTA, and JPA/Hibernate support is conditional (the underlying JDBC driver and dialect must support savepoints, and `nestedTransactionAllowed` must be enabled). If nesting is requested but unsupported, Spring throws `NestedTransactionNotSupportedException`.
 
 ```java
@@ -223,7 +236,51 @@ The three classic read phenomena:
 public Report buildReport() { ... }
 ```
 
+**Worked traces — watch each anomaly interleave.** The matrix is abstract until you interleave two transactions on a clock and see the same read return a different answer. `-->` marks time flowing down; the right column is T2.
+
+*Dirty read* (only at `READ_UNCOMMITTED`) — T1 reads a value that never really existed:
+
+```
+T1: BEGIN (READ_UNCOMMITTED)
+T1: SELECT balance WHERE id=1  --> 100
+                                        T2: BEGIN
+                                        T2: UPDATE balance=50 WHERE id=1   (NOT committed)
+T1: SELECT balance WHERE id=1  --> 50   <-- dirty: read T2's uncommitted write
+                                        T2: ROLLBACK  (balance is back to 100)
+T1 acted on 50, a value that was rolled away.
+```
+
+*Non-repeatable read* (still possible at `READ_COMMITTED`) — same row, re-read, different value because a committed update slipped in between:
+
+```
+T1: BEGIN (READ_COMMITTED)
+T1: SELECT balance WHERE id=1  --> 100
+                                        T2: BEGIN
+                                        T2: UPDATE balance=50 WHERE id=1
+                                        T2: COMMIT
+T1: SELECT balance WHERE id=1  --> 50   <-- non-repeatable: same query, new answer
+T1: COMMIT
+```
+
+Bump T1 to `REPEATABLE_READ` and its second `SELECT` still returns **100** — its snapshot/read locks pin the row for T1's whole life, so T2's committed change is invisible until T1 ends.
+
+*Phantom read* (still possible at ANSI `REPEATABLE_READ`) — differs from a non-repeatable read in that no existing row changed; a **new row appeared** in the range:
+
+```
+T1: BEGIN (REPEATABLE_READ)
+T1: SELECT COUNT(*) WHERE age>30  --> 5
+                                        T2: BEGIN
+                                        T2: INSERT INTO person(age) VALUES (40)
+                                        T2: COMMIT
+T1: SELECT COUNT(*) WHERE age>30  --> 6   <-- phantom: a row that matches the predicate materialized
+T1: COMMIT
+```
+
+At `SERIALIZABLE` the range predicate itself is locked (or T1 is aborted with a serialization error), so the second `COUNT(*)` still returns **5**. The mental hook: non-repeatable read = *a row I already saw changed*; phantom = *a new row entered my search results*.
+
 Caveats: not all databases implement every level (some map unsupported levels up to a stronger one); and with `DataSourceTransactionManager` a custom isolation level is applied to the JDBC `Connection` and reset afterward. With `JtaTransactionManager`, per-transaction isolation typically is not portable and may require vendor-specific extensions.
+
+**The ANSI table is a floor, not what your engine actually does.** The levels above are *minimum* guarantees; real engines are frequently stronger or different, and interviewers push on this. MySQL/InnoDB's `REPEATABLE_READ` uses next-key/gap locks that eliminate most phantoms — so the "Possible" cell for phantoms at RR does not hold in practice on InnoDB. PostgreSQL is MVCC-based, so `READ_COMMITTED` already avoids dirty reads cheaply via snapshots, and its `SERIALIZABLE` is implemented as SSI (Serializable Snapshot Isolation) — optimistic rather than lock-blocking, so it can abort a transaction at commit with a `serialization_failure` (SQLSTATE 40001), meaning your code must be ready to **retry**. So "what isolation gives you" is engine-specific; name the engine before you reason about the anomaly.
 
 ---
 
@@ -253,6 +310,26 @@ public void doWork() throws BusinessException { ... }
 ```
 
 Rule resolution: Spring uses the **most specific** matching rule by exception-class inheritance distance. Rules can be positive (rollback) or negative (no-rollback), and the winning rule for a thrown exception is the one whose exception type is the closest supertype. If no custom rule matches, the default (rollback on unchecked only) applies.
+
+**Worked example — counting hops when rollback and no-rollback compete.** Take this hierarchy and these rules:
+
+```
+RuntimeException
+   └── AppException          (rollbackFor   = AppException.class)
+         └── PaymentException  (noRollbackFor = PaymentException.class)
+```
+
+*Case A — a `PaymentException` is thrown.* Measure hops from the thrown type up to each rule's type:
+- to `PaymentException` (noRollbackFor): 0 hops.
+- to `AppException` (rollbackFor): 1 hop.
+
+Smallest depth wins → `PaymentException` at depth 0 → it is a **no-rollback** rule → the transaction **COMMITS** (even though a subclass of `AppException`, which we asked to roll back, propagated out).
+
+*Case B — a plain `AppException` (not the `PaymentException` subtype) is thrown:*
+- to `AppException` (rollbackFor): 0 hops.
+- to `PaymentException` (noRollbackFor): not a supertype of `AppException` → does not match at all.
+
+Only `rollbackFor` matches, at depth 0 → the transaction **ROLLS BACK**. Same two rules, opposite outcomes, decided purely by which rule's type sits closer above the exception actually thrown.
 
 Additional mechanisms:
 

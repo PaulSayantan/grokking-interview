@@ -99,6 +99,24 @@ same key land in the same partition** and therefore preserve order relative to e
 > one consumer in the group. Consider a composite key or a salted key when a single key's
 > volume exceeds one partition's throughput.
 
+**Worked example — "how many partitions?"** This is the single most common Kafka
+capacity question. The heuristic is `partitions >= max(target_in / per_partition_in,
+target_out / per_partition_out)`, then round up for headroom.
+
+- Target ingest: **600 MB/s** into topic `orders`.
+- Measured ceiling on this hardware: a single partition sustains **~10 MB/s** (bounded by
+  leader disk write + replication to followers).
+- Producer side: `ceil(600 / 10) = 60` partitions to *accept* the write rate.
+- Consumer side: suppose each consumer thread processes **~10 MB/s** too, so you also need
+  `ceil(600 / 10) = 60` consumers — and since a partition maps to at most one consumer in a
+  group, you need **>= 60 partitions** for 60 consumers to all be busy.
+- Take the max (60) and add headroom for growth/rebalance skew → provision **~90
+  partitions** (1.5x). You can add partitions later but never remove them, and adding them
+  reshuffles the `hash(key) % n` mapping — so for a keyed/ordered topic, size up front.
+
+The trap: picking 30 partitions here caps you at 300 MB/s no matter how many consumers you
+add — the extra consumers just sit idle.
+
 ---
 
 ## Producers: acks, batching, and linger
@@ -138,6 +156,24 @@ batch.size=65536
 compression.type=zstd
 ```
 
+**Worked example — what batching buys you.** Say each record is ~200 bytes and one
+partition takes **5000 msg/s**.
+
+- With `linger.ms=0` and tiny batches, in the worst case each record is its own request:
+  ~5000 requests/s to that partition — request overhead (headers, acks round-trips)
+  dominates and throughput stalls.
+- With `linger.ms=10` and `batch.size=65536` (64 KB): in a 10 ms window you accumulate
+  `5000 msg/s × 0.010 s = 50 records ≈ 50 × 200 B = 10 KB`, which fits in one 64 KB batch.
+  So you send **~100 batches/s** instead of 5000 requests/s — a **~50x** drop in request
+  count for only 10 ms of added latency.
+- Compression then works on the whole 10 KB batch. JSON-ish payloads often compress ~3–5x,
+  so `zstd` might ship ~2–3 KB per batch over the wire and store it compressed on disk and
+  all the way to the consumer.
+
+The knob interaction: a batch is sent when *either* it hits `batch.size` *or* `linger.ms`
+elapses, whichever comes first. Under high load `batch.size` fires first (latency stays
+low); under light load `linger.ms` caps how long a partial batch waits.
+
 ---
 
 ## Idempotent producer and min.insync.replicas
@@ -153,6 +189,15 @@ seen, so retries no longer create duplicates. This gives **exactly-once *writes*
 single partition** within a producer session. It requires `acks=all`,
 `max.in.flight.requests.per.connection <= 5`, and `retries > 0` (the defaults satisfy
 this).
+
+*Why the `<= 5` cap, and why it also protects ordering:* pre-idempotence, having more than
+one request in flight with retries enabled could **reorder** writes within a partition —
+picture batch A (offsets it wants) failing and being retried while batch B, sent right
+after, succeeds first: B lands before the retried A, so the log order no longer matches
+send order. The idempotent producer stamps each batch with a per-partition sequence number,
+so the broker can detect an out-of-order or duplicate sequence, **reject it, and let the
+client resend in order** — preserving ordering even with up to 5 in-flight requests. Beyond
+5 the broker can't track enough sequence state to guarantee this, hence the cap.
 
 **`min.insync.replicas` (broker/topic config):** the minimum number of replicas that must
 acknowledge an `acks=all` write for it to succeed. With replication factor 3 and
@@ -253,10 +298,47 @@ committed offset (or from `auto.offset.reset` = `earliest`/`latest` if none exis
   records → no duplicates, but possible loss.
 - **Exactly-once:** requires transactions / an idempotent sink (next section).
 
+**Worked example — trace the offsets.** Committed offset for partition `orders-0` is
+**5** (records 0–4 are done). The consumer polls and gets records **5, 6, 7, 8, 9**.
+
+- *At-least-once (process, then commit):* it processes 5, 6, 7, then **crashes** before
+  `commitSync()`. Committed offset is still **5**. On restart the consumer resumes at 5 and
+  re-polls **5, 6, 7, 8, 9** — so **5, 6, 7 are processed a second time → duplicates**.
+  Nothing is lost. (This is why the sink must be idempotent.)
+- *At-most-once (commit, then process):* it polls 5–9, immediately commits offset **10**,
+  then processes 5, 6, 7 and **crashes**. On restart it resumes at 10 — records **8 and 9
+  were never processed → lost**. No duplicates.
+
+Same crash, same records; only the commit *order* changed and it flipped duplicate-vs-loss.
+Note the committed offset is the *next* offset to read (10 = "I'm past 9"), not the last
+one processed.
+
 > [!KEY-TAKEAWAY]
 > "Commit before processing = at-most-once (may lose). Commit after processing =
 > at-least-once (may duplicate)." Kafka's out-of-the-box behavior is **at-least-once**, so
 > design consumers to tolerate duplicates.
+
+**Consumer lag** is the #1 operational health metric — it tells you whether consumers are
+keeping up. Per partition, `lag = log-end-offset − committed-offset`: how many records have
+been produced that this group hasn't processed yet. In the trace above, if the producer has
+written up to offset 100 while the group is committed at 5, lag = 95. Monitor it with
+`kafka-consumer-groups --describe`, Burrow, or the client's JMX `records-lag-max`. Steadily
+*rising* lag means consumers are falling behind; the scaling lever is more partitions +
+more consumers (up to the partition count), or faster per-record processing. Heartbeats
+tell you a consumer is *alive*; lag tells you it's *keeping up* — you need both.
+
+> [!WARNING]
+> **Poison pills and the missing DLQ.** Kafka has **no native dead-letter queue** (unlike
+> SQS/RabbitMQ — see the comparison table). Because offsets advance in order, a record that
+> *always* throws during processing can stall its partition **indefinitely**: you can't
+> skip it without committing past it, and committing past it under at-least-once means
+> giving up on it. Patterns: (1) catch the failure, write the bad record to a **DLQ topic**,
+> then commit and move on; (2) **retry topics** with increasing backoff (Spring Kafka's
+> `DeadLetterPublishingRecoverer` / `@RetryableTopic`, or Kafka Connect's
+> `errors.tolerance` + `errors.deadletterqueue.topic.name`); (3) **error-handling
+> deserializers** so a malformed byte payload doesn't crash the poll loop. The interviewer's
+> probe is usually "what happens to a message that can never be processed?" — the honest
+> answer is "it blocks the partition unless you build DLQ/skip logic yourself."
 
 ---
 
@@ -275,6 +357,21 @@ is a special case; treat the leader as the single source by default.)
   out of the ISR doesn't stall producers, but `min.insync.replicas` sets the floor.
 - **Leader failover:** if the leader dies, the controller elects a new leader from the ISR.
   Committed records survive because every ISR member already has them.
+
+```mermaid
+flowchart LR
+  L[Leader P0] -->|replicate| F1[Follower A - caught up]
+  L -->|replicate| F2[Follower B - lagging]
+  F2 -.->|falls behind replica.lag.time.max.ms| OUT[dropped from ISR]
+```
+
+**Worked trace — ISR shrinking past the floor** (RF=3, `min.insync.replicas=2`,
+`acks=all`): ISR starts as `{Leader, A, B}` = **3**. Follower B GCs and lags beyond
+`replica.lag.time.max.ms` → dropped, ISR = `{Leader, A}` = **2**. Writes still succeed
+(2 ≥ 2). Now A also dies → ISR = `{Leader}` = **1**, which is *below* `min.insync.replicas`
+= 2, so producers get `NotEnoughReplicasException` and writes are **rejected** — Kafka
+refuses under-replicated writes rather than accept them with weak durability. Consumers can
+still read already-committed records. Recovery of A or B back into the ISR restores writes.
 
 **Unclean leader election (`unclean.leader.election.enable`):**
 
@@ -345,6 +442,16 @@ from aborted (and still-open) transactions; the default `read_uncommitted` sees 
 Broker/producer settings: `enable.idempotence=true` (implied), `transactional.id` set,
 `transaction.timeout.ms`. In Kafka Streams, exactly-once is a single switch
 (`processing.guarantee=exactly_once_v2`).
+
+**Zombie fencing** is the classic deep probe once you mention transactions. A **fixed
+`transactional.id`** is the identity the broker fences on. Each `initTransactions()` bumps
+an **epoch** for that id: say instance A calls `initTransactions()` and gets epoch **5**,
+then hangs (long GC pause) while the orchestrator, thinking it dead, starts instance B with
+the *same* `transactional.id`; B calls `initTransactions()` and gets epoch **6**. Now A
+wakes up as a "zombie" and tries to `commitTransaction()` with epoch 5 — the broker sees a
+stale epoch (current is 6) and rejects it with `ProducerFencedException`. Only one active
+producer per `transactional.id` can write, so the zombie can't double-produce or corrupt
+the output.
 
 > [!WARNING]
 > Exactly-once is **scoped to Kafka**. If your "process" step writes to an external system
@@ -446,6 +553,15 @@ per-message acknowledgement and low operational footprint.
   it's only exactly-once within Kafka.
 - **"Consumers outnumber partitions — what happens?"** Extra consumers idle; parallelism is
   capped by partition count.
+- **"How do you know consumers are keeping up?"** Watch consumer lag =
+  `log-end-offset − committed-offset` per partition (`kafka-consumer-groups --describe`,
+  Burrow, JMX `records-lag-max`); rising lag = falling behind, scale partitions + consumers.
+- **"What do you do with a record that always fails to process?"** Kafka has no native DLQ;
+  a poison pill blocks the partition since offsets advance in order. Build a DLQ topic +
+  skip-and-commit, retry topics with backoff, or error-handling deserializers.
+- **"How does exactly-once stop a zombie/duplicated producer?"** A fixed `transactional.id`
+  gets an incrementing epoch on `initTransactions`; a resurrected producer with a stale
+  epoch is fenced (`ProducerFencedException`) — one active writer per id.
 - **"Why is Kafka fast?"** Sequential writes, page cache, zero-copy `sendfile`, batching +
   compression — not per-message cleverness.
 - **"What is unclean leader election and when would you enable it?"** Electing an

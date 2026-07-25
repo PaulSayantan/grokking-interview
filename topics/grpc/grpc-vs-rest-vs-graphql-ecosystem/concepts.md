@@ -141,7 +141,11 @@ single **aggregating endpoint** — a classic BFF role.
 **gRPC** is **fixed-method RPC**: each method has a fixed request/response type.
 There is no "give me only these fields" — you get the whole response message
 (though `google.protobuf.FieldMask` lets a server *optionally* honor a
-client-specified subset, it's a convention, not the transport). gRPC shines for
+client-specified subset, it's a convention, not the transport: `FieldMask` is
+just a request *field* the server must explicitly read and apply in its own
+handler code — nothing in the wire protocol enforces it. So it gives read/update
+masks for get-and-update patterns you hand-code, **not** the free, runtime-enforced
+client field selection GraphQL gives you). gRPC shines for
 **typed, high-throughput, internal service-to-service** calls where the shapes are
 known and stable and you want minimal latency and codegen safety.
 
@@ -185,6 +189,29 @@ for internal RPC, and the caveats:
 - **HPACK header compression** amortizes repeated headers.
 - **Streaming** avoids repeated request framing for high-volume data.
 
+**Worked example — "binary is smaller," in actual bytes.** Take the message
+`{"user_id": 42, "name": "Ada", "active": true}`.
+
+*JSON on the wire* (compact, no spaces) is the literal text
+`{"user_id":42,"name":"Ada","active":true}` — **41 bytes**. Every field *name* is
+shipped as characters, plus quotes, colons, commas, and braces.
+
+*Protobuf* ships field *numbers* + wire types, no names. Each field starts with a
+**tag byte** = `(field_number << 3) | wire_type`:
+
+- `user_id = 42` (field 1, wire type 0 = varint): tag = `(1<<3)|0 = 0x08`, then
+  varint `42 = 0x2A` → `08 2A` = **2 bytes**.
+- `name = "Ada"` (field 2, wire type 2 = length-delimited): tag = `(2<<3)|2 = 0x12`,
+  length `3`, then bytes `A d a` = `41 64 61` → `12 03 41 64 61` = **5 bytes**.
+- `active = true` (field 3, wire type 0 = varint): tag = `(3<<3)|0 = 0x18`, then
+  `true = 1` → `18 01` = **2 bytes**.
+
+Total = 2 + 5 + 2 = **9 bytes** vs 41 for JSON — roughly a **4.5× shrink**, and the
+CPU win is bigger still because there is no text tokenizing/number-parsing. Note the
+caveat: after gzip/brotli the *field-name* redundancy JSON pays for compresses away,
+so on large, repetitive payloads the compressed gap narrows to ~1.5–2× — the raw
+byte win is largest on small, high-frequency messages.
+
 **Why the gap is workload-dependent (and REST can win):**
 
 - **HTTP caching.** REST `GET`s can be served from browser/CDN/proxy caches; a
@@ -195,8 +222,13 @@ for internal RPC, and the caveats:
 - **JSON is not always the bottleneck.** DB latency, network RTT, and business
   logic often dominate; shaving serialization time may be noise.
 - **TCP HOL blocking under loss.** HTTP/2 multiplexes over one TCP connection, so
-  packet loss stalls *all* streams (a lossy-network caveat; HTTP/3/QUIC addresses
-  it — networking owns this).
+  packet loss stalls *all* streams. Why: all streams are interleaved into one
+  *ordered* TCP byte-stream, and TCP guarantees in-order delivery, so a single lost
+  segment forces the kernel to hold back *every* byte that arrived after it — even
+  bytes belonging to unrelated streams — until the retransmit arrives. HTTP/2's
+  multiplexing lives *above* TCP and can't see past that reorder buffer. QUIC (HTTP/3)
+  fixes it by giving each stream its own delivery order, so loss on stream A doesn't
+  block stream B (a lossy-network caveat; networking owns the details).
 
 > [!KEY-TAKEAWAY]
 > Correct interview claim: *"gRPC is generally faster and more efficient for
@@ -286,6 +318,26 @@ flowchart LR
   surfaces.
 - **GraphQL BFFs** commonly implement resolvers as **gRPC calls** to downstream
   microservices.
+
+**Worked example — trace one "profile page" request through the layers.** A browser
+loads a profile screen that needs the user, their recent orders, and recommendations:
+
+1. Browser sends **`GET /profile/42`** — plain REST/JSON over HTTP/1.1 (cacheable,
+   browser-native, needs zero tooling).
+2. The **BFF** receives it and fans out **3 concurrent gRPC calls** —
+   `GetUser(42)`, `ListOrders(user_id=42)`, `GetRecommendations(user_id=42)` — to
+   three internal services. All three ride **one HTTP/2 connection per service**
+   (or even one shared mux), so there's **no new TCP/TLS handshake per call** and no
+   HTTP-layer head-of-line blocking; the three responses come back in parallel.
+3. The BFF **assembles one JSON object** `{ user, orders, recommendations }` and
+   returns it as the single REST response to the browser.
+
+Net: the browser paid **1 round trip** over a universal protocol; the internal fan-out
+was **3 parallel typed binary RPCs**, not 3 more browser round trips. The **GraphQL-BFF
+variant** is the same shape — the browser POSTs one query to `/graphql`, and the
+`user`, `orders`, and `recommendations` *resolvers* each make the identical gRPC calls
+— the only difference is the client, not the server, picks which of those fields to
+fetch.
 
 > [!TIP]
 > "One contract, two surfaces": annotate your `.proto` with

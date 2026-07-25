@@ -34,7 +34,8 @@ JSON object per line (JSON Lines / NDJSON), or logfmt (`key=value` pairs):
 
 Why it matters: with structure you can query `level="ERROR" AND reason="payment_declined"`
 and aggregate `count by user_id` **without regex-parsing prose**. Unstructured logs force
-downstream tools to guess at fields with fragile patterns (Grok/regex) that break the
+downstream tools to guess at fields with fragile patterns (Grok — Logstash's library of
+named regex patterns for parsing text lines — or hand-written regex) that break the
 moment someone edits the message string.
 
 | Aspect | Unstructured | Structured (JSON/logfmt) |
@@ -60,7 +61,8 @@ section).
 
 Levels are a severity ordering used both to decide *whether to emit* a line (the
 configured threshold) and *how to route/alert* on it. The common ordering, lowest to
-highest severity:
+highest severity (the table also lists **FATAL**, which is included for completeness but
+is facade-dependent — see the warning below):
 
 | Level | Meaning | Emit when… | Prod default? |
 |---|---|---|---|
@@ -169,6 +171,16 @@ OpenTelemetry's log data model carries `TraceId`, `SpanId`, and `TraceFlags` as
 first-class fields precisely so a `LogRecord` can be linked back to its span; the
 OTel Logback/Log4j2 appenders inject these automatically.
 
+> [!WARNING]
+> **Don't order a reconstructed request by wall-clock `ts` alone.** When you gather one
+> request's lines from many hosts, each host's clock drifts (NTP typically keeps hosts
+> within a few ms, but skew of tens of ms — or worse on a bad clock — is common). Two lines
+> "1 ms apart" on different hosts can be genuinely out of order. Async appenders make it
+> worse: buffering can reorder lines within a host and lose the un-flushed tail on a crash.
+> Reconstruct causal order from **span parentage** (parent span ⟶ child span) or a
+> **monotonic per-request sequence field** you increment yourself, and treat `ts` as an
+> approximate hint, not ground truth.
+
 ## What to Log vs What NOT to Log (PII, Secrets, Redaction)
 
 Logs are frequently the biggest accidental data-leak surface. **Never log:**
@@ -238,10 +250,13 @@ Logging is I/O; done naively it serializes requests behind disk/network writes.
   isn't blocked on I/O. Log4j2 async loggers offer very high throughput and low latency.
 - **Never log in hot loops.** A log call per element in a million-item loop can dominate CPU
   and flood storage. Log a summary after the loop, or sample.
-- **Beware the queue.** Async appenders have a bounded queue; under overload Logback by
-  default *drops* TRACE/DEBUG/INFO when the queue is 80% full (`discardingThreshold`) to avoid
-  blocking — configure this deliberately. A full queue with blocking behavior can stall
-  request threads (backpressure) — a subtle latency source.
+- **Beware the queue.** Async appenders have a bounded queue; under overload Logback's
+  `AsyncAppender` starts *dropping* TRACE/DEBUG/INFO once free capacity falls below its
+  `discardingThreshold` — whose default is **20% of the queue capacity remaining**, i.e. it
+  begins discarding those lower levels once the queue is ~80% full (ERROR/WARN are still
+  kept). Set `discardingThreshold` to `0` to never drop — configure this deliberately. A
+  full queue with blocking behavior can stall request threads (backpressure) — a subtle
+  latency source.
 - **Structured serialization cost.** JSON encoding per line isn't free; encoders like Logback's
   `net.logstash` or Log4j2 `JsonTemplateLayout` are optimized for it.
 
@@ -261,6 +276,19 @@ At high volume you can't afford to store every log. **Log sampling** keeps a sub
   `trace_flags` sampled bit) so logs and traces agree — otherwise you get logs for
   un-sampled traces and vice versa.
 - **Deduplication/aggregation**: collapse `logged N times in last 10s` instead of N lines.
+
+**Worked example — how level-based + head sampling compose.** Say a service emits two
+streams: a repetitive cache-hit line at **50,000/s** and an ERROR stream at **5/s**
+(total 50,005 lines/s). Apply level-based first (keep 100% of ERROR) *then* head-sample the
+happy-path cache-hit line 1:1000:
+
+- Cache-hit: 50,000/s ÷ 1000 = **50/s stored** — you dropped 49,950 of them, −99.9% of that
+  stream.
+- ERROR: 5/s × 100% = **5/s stored** — untouched.
+- New total = 50 + 5 = **55 lines/s** vs 50,005 before → **(50,005 − 55) / 50,005 ≈ 99.9%**
+  fewer lines ingested, while you still kept *every* error. That is the whole point: the
+  volume collapse comes almost entirely from the one high-cardinality-free happy-path event,
+  and the diagnostically precious lines are exempt because level-based sampling ran first.
 
 Trade-off: sampling reduces cost and noise but can drop the *one* line explaining an
 incident. Standard practice: **never sample errors**, sample the high-volume happy-path.
@@ -300,6 +328,28 @@ Logs are often the *largest* observability cost line. Reasons and levers:
   trade-off is a favorite interview contrast (detailed in `log-aggregation-and-analysis`).
 - **Cardinality in labels/indexed fields** blows up storage and query cost (same disease as
   metric cardinality) — keep high-cardinality data in the log *body*, not in indexed labels.
+
+**Worked example — sizing the bill and the levers.** Take a service at **10,000 req/s**
+emitting a ~**2 KB** canonical line per request (plus some DEBUG):
+
+- Raw volume: 10,000 × 2 KB = 20,000 KB/s = **20 MB/s**. Over a day: 20 MB/s × 86,400 s =
+  1,728,000 MB ≈ **1.7 TB/day**.
+- At an illustrative **$0.50/GB ingest**: 1,728 GB × $0.50 = **~$864/day** (~$26k/month) just
+  to ingest.
+
+Now apply the levers in order and watch the volume collapse:
+
+1. **Cut DEBUG in prod (−40%)**: 1,728 GB × 0.60 = **1,037 GB/day**.
+2. **Sample the happy path 10:1** on what remains (−50% of it): 1,037 × 0.50 = **518 GB/day**.
+   Ingest is now 518 × $0.50 = **~$260/day** — a **70% cut** (518 / 1,728 = 0.30) while you
+   kept 100% of errors.
+3. **Tiered retention**: keep those 518 GB/day hot & searchable for 7 days, then roll to
+   object-storage archive (often 10–20× cheaper per GB-month), so *retention* — the second
+   factor in `volume × retention × index/replication` — stops multiplying your priciest tier.
+
+So the back-of-envelope goes **~$864/day → ~$260/day** before archive savings even land.
+Frame it as **signal-per-dollar**: you removed low-value happy-path bytes, not the errors
+that actually explain incidents.
 
 Cost-control levers: right log levels (INFO in prod), sampling the happy path, **tiered
 retention** (hot 7–14 days searchable, then cheap object-storage archive), dropping/

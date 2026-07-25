@@ -68,13 +68,17 @@ doubly-linked list of nodes. `ArrayList` is the default choice ~95% of the time.
 | `add(E)` at end (amortized) | O(1) amortized | O(1) |
 | `add(int, E)` / `remove(int)` in middle | O(n) (array shift) | O(n) to *find*, O(1) to unlink |
 | Iterator `remove()` | O(n) (shift) | O(1) |
-| Memory per element | compact (Object ref) | high (node = prev + next + item, ~24 bytes overhead) |
+| Memory per element | compact (~4–8 byte array slot per element) | high (separate node object: header + 3 references) |
 | Cache locality | excellent (contiguous) | poor (pointer chasing) |
 
 **Advanced / gotchas.**
 
 - `ArrayList` growth: when capacity is exceeded it grows by ~1.5× (`oldCapacity + (oldCapacity >> 1)`),
   copying via `Arrays.copyOf`. Pre-sizing with `new ArrayList<>(expectedSize)` avoids repeated copies.
+- Memory math: each `LinkedList` node is a *separate heap object* — 12 B object header + 3 references
+  (`prev`, `next`, `item`), so **≈ 24 bytes per element with compressed oops** (closer to 40 B
+  without them), versus a single ~4-byte array slot per element in `ArrayList` (both then pay for the
+  element object itself). So a `LinkedList` costs several times more overhead per element.
 - Despite O(1) theoretical middle insertion, `LinkedList` is almost always *slower in practice* than
   `ArrayList` because finding the position is O(n) with cache-hostile pointer chasing. Modern advice:
   prefer `ArrayDeque` over `LinkedList` even for queue/stack use cases.
@@ -87,7 +91,14 @@ doubly-linked list of nodes. `ArrayList` is the default choice ~95% of the time.
 
 ## HashMap Internals
 
-**Beginner.** `HashMap<K,V>` stores key→value pairs and gives *average* O(1) `get`/`put` by hashing
+**Beginner — the mental model.** A hash table is like a coat-check with numbered hooks: instead of
+scanning every coat to find yours, the attendant runs your ticket number through a rule that names
+one hook directly, so you go straight to it. The "rule" is the *hash function*, the hooks are
+*buckets* (slots in an array), and the ticket is your key. That direct jump is why lookup is O(1)
+average instead of the O(n) of walking a list. Two coats can be assigned the same hook (a
+*collision*); those are hung together on that hook (a *chain*) and told apart by comparing tickets.
+
+`HashMap<K,V>` stores key→value pairs and gives *average* O(1) `get`/`put` by hashing
 the key to an array index (a "bucket"). It permits one null key and multiple null values, and gives
 no ordering guarantee.
 
@@ -101,6 +112,14 @@ each slot is a "bucket"). Key constants (Java 8+):
 | `TREEIFY_THRESHOLD` | 8 | a bucket's list converts to a red-black tree at 8 nodes... |
 | `UNTREEIFY_THRESHOLD` | 6 | ...and reverts to a list when it shrinks to 6 |
 | `MIN_TREEIFY_CAPACITY` | 64 | but treeify only if table capacity ≥ 64, else it resizes instead |
+
+*Why these magic numbers?* **0.75** balances two costs: a low load factor wastes memory (a
+mostly-empty table), while a high one raises the average chain length and collision probability —
+0.75 is the sweet spot the JDK ships. **8** is not arbitrary either: assuming a decent hash, bucket
+occupancy follows a Poisson distribution, and the OpenJDK source computes the probability of a
+bucket ever reaching 8 entries at roughly **6 in 100 million (~0.00000006)**. So treeification is
+essentially a *defense against adversarial or broken `hashCode`s* (e.g. everything hashing to one
+bucket), not something that fires during normal operation.
 
 **How a bucket index is computed.** `HashMap` does **not** use `key.hashCode()` directly. It
 "perturbs" the hash to mix high bits into low bits (because the index is `hash & (n-1)` and `n` is a
@@ -116,6 +135,29 @@ static final int hash(Object key) {
 
 Because capacity `n` is always a power of two, `hash & (n-1)` is a fast bitmask equivalent to
 `hash % n`. A null key hashes to 0 and always lands in bucket 0.
+
+*Worked example — why the XOR matters.* Take a table of capacity `n = 16`, so the mask is
+`n-1 = 15 = 0b1111` — **only the low 4 bits pick the bucket.** Insert two `Integer` keys whose
+`hashCode()` is the value itself:
+
+- Key **A = 5** → `hashCode = 5 = 0x0000_0005`
+- Key **B = 65541** → `hashCode = 65541 = 0x0001_0005`
+
+They differ only in a *high* bit (bit 16), but share the same low 4 bits (`0101`). **Without**
+perturbation, `5 & 15 = 5` and `65541 & 15 = 5` — both slam into bucket 5, an avoidable collision
+the low-bit mask can't see.
+
+Now apply `hash = h ^ (h >>> 16)`:
+
+| Key | `h` | `h >>> 16` | `h ^ (h>>>16)` | `& 15` → bucket |
+|-----|-----|-----------|-----------------|-----------------|
+| A=5 | `0x0000_0005` | `0x0000_0000` | `0x0000_0005` | `5 & 15` = **5** |
+| B=65541 | `0x0001_0005` | `0x0000_0001` | `0x0001_0004` | `4 & 15` = **4** |
+
+For B, XOR-ing the high half (`0x0001`) down onto the low half flips the low bits from `0101` to
+`0100`, so B now lands in bucket **4** while A stays in **5** — the two spread across buckets
+instead of colliding. That is the "aha": the perturbation folds otherwise-ignored high bits into the
+4 bits that actually choose the bucket, so keys that differ only up high stop piling into one slot.
 
 **Collision handling.** Multiple keys in the same bucket form a singly linked list of `Node`s
 (chaining). `get` walks the chain comparing `hash` first (cheap int compare) then
@@ -137,14 +179,41 @@ also **preserves relative order** within a bucket, unlike Java 7 which reversed 
 transfer (the Java 7 reversal is the root cause of the infamous concurrent-resize infinite-loop /
 CPU spin bug when `HashMap` was misused across threads).
 
+*Worked example — the single-bit split.* Grow `oldCap = 16` → `newCap = 32`. The mask widens from
+`15 = 0b01111` to `31 = 0b11111`, so the resize only cares about the **newly exposed bit 4**
+(`oldCap = 16 = 0b10000`). Take two keys that both live in bucket 5 today (`hash & 15 == 5`,
+i.e. low bits `...00101`) but differ in bit 4:
+
+- Key **X**: `hash = ...0_00101` → bit 4 = 0 → `hash & 16 = 0` → stays at index **5** ("lo")
+- Key **Y**: `hash = ...1_00101` → bit 4 = 1 → `hash & 16 = 16` → moves to **5 + 16 = 21** ("hi")
+
+Check the full new mask: X gives `hash & 31 = 00101 = 5`; Y gives `hash & 31 = 10101 = 21`. Same
+answer as the one-bit test — that's the point. Java 8 never recomputes `hash % newCap`; it just asks
+"is the old-capacity bit set?" One node goes to the *lo* list (index `i`), the other to the *hi* list
+(index `i + oldCap`), and each list keeps its original order.
+
 **Gotchas.**
 
 - Resizing is O(n) and happens mid-`put`; a map that will hold N entries should be created with
   `new HashMap<>((int)(N / 0.75) + 1)` to avoid repeated resizes.
+
+  *Worked example — pre-sizing pays off.* Default capacity 16 has threshold `16 × 0.75 = 12`, so
+  inserting the **13th** distinct key triggers a resize to 32 (new threshold 24). To reach 100
+  entries from the default you cross 12 → 24 → 48 → 96, resizing at capacities 16, 32, 64, and 128 —
+  **four O(n) table copies.** Pre-size instead: `(int)(100 / 0.75) + 1 = 133 + 1 = 134`; the map
+  rounds that up to the next power of two, **256** (threshold 192), which holds all 100 with **zero
+  resizes**. The trade-off is memory (256 slots reserved up front) traded for the CPU/GC cost of the
+  four copies — worth it when N is known and large, wasteful when the map stays small.
 - Mutating a key's fields *after* insertion so that its `hashCode`/`equals` changes makes the entry
   effectively unreachable (it hashes to the wrong bucket). Use immutable keys.
 - `HashMap` is **not** thread-safe. Concurrent structural modification can corrupt the table, spin
   the CPU (Java 7), or lose updates. Use `ConcurrentHashMap`.
+- Iteration order is **unspecified** and can *change* — a resize reshuffles keys across buckets
+  (see the lo/hi split above), and the order isn't guaranteed stable across JDK versions. Never rely
+  on it; use `LinkedHashMap` for insertion/access order or `TreeMap` for sorted order.
+- `HashSet`, `LinkedHashSet`, and `TreeSet` are thin wrappers over the corresponding maps — a
+  `HashSet` is literally a `HashMap` whose values are all a shared dummy `PRESENT` sentinel, so every
+  bucket-index/resize/treeify rule above applies to sets too.
 
 ---
 
@@ -177,6 +246,22 @@ and performance.
 - **`LinkedHashMap`** extends `HashMap`, adding a doubly-linked list across entries to preserve
   **insertion order** (or **access order** if constructed with `accessOrder=true`). Overriding
   `removeEldestEntry` turns it into a simple LRU cache. Since JDK 21 it implements `SequencedMap`.
+
+  *LRU in 5 lines* — `accessOrder=true` moves a key to the tail on every `get`/`put`, so the head is
+  always the least-recently-used entry, and `removeEldestEntry` evicts it once the cap is exceeded:
+
+  ```java
+  class LRU<K,V> extends LinkedHashMap<K,V> {
+      private final int max;
+      LRU(int max) { super(16, 0.75f, true); this.max = max; }  // accessOrder = true
+      @Override protected boolean removeEldestEntry(Map.Entry<K,V> eldest) {
+          return size() > max;   // true -> drop the least-recently-used entry
+      }
+  }
+  ```
+
+  This is **not** thread-safe; wrap with `Collections.synchronizedMap` or, for production, use
+  Caffeine / Guava `Cache`, which add TTL, weighting, and concurrency.
 - **`TreeMap`** is a red-black tree implementing `NavigableMap`; keys must be mutually `Comparable`
   or a `Comparator` supplied. Gives sorted iteration and range queries (`floorKey`, `ceilingKey`,
   `headMap`, `tailMap`, `subMap`). O(log n) operations.

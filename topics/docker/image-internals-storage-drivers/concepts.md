@@ -124,6 +124,27 @@ The **config** JSON is what `docker image inspect` mostly shows. It carries:
 > instructions may have only 4 layers — the rest are `empty_layer` metadata entries in the
 > config's `history`.
 
+**Worked example — reading `docker history`, spotting the 0B rows.** A trimmed
+`docker history nginx:1.27 --no-trunc` (newest instruction on top) looks like:
+
+```
+CREATED BY                                              SIZE
+CMD ["nginx" "-g" "daemon off;"]                        0B      ← empty_layer (config only)
+STOPSIGNAL SIGQUIT                                      0B      ← empty_layer
+EXPOSE 80                                               0B      ← empty_layer
+ENTRYPOINT ["/docker-entrypoint.sh"]                    0B      ← empty_layer
+COPY docker-entrypoint.sh / # buildkit                  1.62kB  ← real layer
+RUN /bin/sh -c set -x && apt-get update && apt-get ...  118MB   ← real layer
+ENV NGINX_VERSION=1.27.0                                0B      ← empty_layer
+/bin/sh -c #(nop) ADD file:... in /                     97.2MB  ← real layer (base rootfs)
+```
+
+Count the rows: 8 instructions shown, but only **3** carry bytes (`ADD` 97.2MB, `RUN`
+118MB, `COPY` 1.62kB) — the other 5 (`CMD`/`STOPSIGNAL`/`EXPOSE`/`ENTRYPOINT`/`ENV`) are
+`empty_layer: true` entries in the config `history` and add **0B**. That is the
+"12 instructions, 4 layers" claim made visible: the SIZE column is your bloat map — the
+`RUN apt-get` row (118MB) is where you'd look first to shrink this image.
+
 ## Content-addressable storage and digests
 
 Every object — manifest, config, each layer blob — is stored and referenced by the
@@ -175,6 +196,35 @@ filesystem state and the image's overall `ImageID`. The **`ImageID`** you see in
 > Because `docker image inspect` shows layers under `RootFS.Layers` as **diff_ids** but the
 > manifest lists **digests**, the two lists don't match hash-for-hash even for the same image.
 > They're different hashes of the same layers (uncompressed vs compressed). Both are correct.
+
+**Worked example — the two hashes of one layer, side by side.** Take the base layer of an
+image and look at it from both sides:
+
+```bash
+# From the manifest (registry blob = compressed tar+gzip):
+$ docker manifest inspect debian:12 | jq -r '.layers[0].digest'
+sha256:9834876dcfb05cb167a5c24953eba58c4ac89b1adf57f28f2f9d09af107ee8f0   # ← the "digest"
+
+# From the config (uncompressed tar):
+$ docker image inspect debian:12 --format '{{index .RootFS.Layers 0}}'
+sha256:e5f0e3d4f8b1a2c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0   # ← the "diff_id"
+```
+
+The two strings differ — same layer, different hashes. To see *why* they differ, reproduce
+each one from the raw blob:
+
+```bash
+$ sha256sum layer.tar.gz         # hash the blob AS STORED (gzip-compressed)
+9834876dcfb05cb1...   layer.tar.gz          # == the manifest digest
+
+$ gzip -dc layer.tar.gz | sha256sum   # decompress first, THEN hash the tar
+e5f0e3d4f8b1a2c6...   -                     # == the diff_id
+```
+
+So `digest = sha256(compressed bytes)` (what travels the wire, must match on download);
+`diff_id = sha256(uncompressed tar)` (identifies filesystem content regardless of how it was
+compressed). The config commits to the diff_ids, and the **`ImageID`** is `sha256` of that
+config JSON — a *third* hash again, distinct from both of the above.
 
 ## Layers as filesystem diffs (changesets), not snapshots
 
@@ -293,6 +343,13 @@ flowchart TD
 | **`merged`** | The unified mount point the container uses as its root. |
 | **`workdir`** | An empty working directory overlayfs uses internally for atomic operations (must be an empty dir on the same fs as `upperdir`). |
 
+Why does `workdir` have to be empty *and* on the same filesystem as `upperdir`? overlayfs
+uses it as a staging area: when it `copy_up`s a file or creates a whiteout, it builds the
+result in `workdir` first, then `rename()`s it into `upperdir`. A `rename()` is only atomic
+*within one filesystem* (moving across filesystems is a copy, which can be interrupted
+half-way) — so `workdir` must share the filesystem of `upperdir`, guaranteeing the merged
+view never exposes a half-copied file.
+
 Roughly, the mount is:
 
 ```
@@ -369,6 +426,28 @@ Backing-filesystem requirement for overlay2: **xfs must be formatted with `d_typ
 > in a driver-specific layout) — push/save images first, then reconfigure `daemon.json`
 > (`"storage-driver": "overlay2"`).
 
+## Graph drivers vs containerd snapshotters (the modern shift)
+
+Everything above describes the classic **graph driver** model (overlay2 et al.) that Docker
+has used for years. Modern Docker is migrating to the **containerd image store**, which
+manages layers with **snapshotters** instead of graph drivers — already the default in Docker
+Desktop and newer Engine releases. Conceptually the *mechanics are the same*: the overlayfs
+snapshotter is the direct analog of the overlay2 graph driver — same lowerdir/upperdir union,
+same file-level copy_up, same on-disk overlayfs. What changes is the **management layer**:
+containerd (not the Docker daemon's graph-driver code) owns the content store and snapshots,
+which unlocks native multi-arch image storage, lazy-pulling snapshotters (e.g. stargz), and a
+shared stack with Kubernetes.
+
+To tell which store you're on: `docker info` shows `driver-type io.containerd.snapshotter.v1`
+(and lists it under `features.containerd-snapshotter: true`) when on the containerd store, vs
+`Storage Driver: overlay2` on the classic graph driver.
+
+> [!INTERVIEW]
+> "Graph driver vs snapshotter?" A graph driver is Docker's own layer-management code;
+> a snapshotter is containerd's equivalent. Same overlayfs union under the hood — different
+> component managing it. The industry is moving to the containerd image store, so expect this
+> as a modern follow-up to any storage-driver question.
+
 ## Layer sharing, dedup, and why order saves space
 
 Content addressing means **identical layers are stored once and transferred once**, across
@@ -381,6 +460,24 @@ containers *and* across images:
 - **Across the network**: `docker pull` and `docker push` skip blobs whose digest the other
   side already has. Pull a new tag of an app whose base you already have and only the changed
   top layers transfer.
+
+**Worked example — put numbers on the dedup win.** Run 50 containers from `python:3.12`
+(base ≈ 350MB), each writing ≈ 5MB of its own data to the writable layer:
+
+- **Naive (no sharing):** 50 × 350MB = **17,500MB ≈ 17.5GB** on disk.
+- **overlay2 (shared lowerdirs):** 350MB stored **once** + 50 × 5MB upperdirs = 350 + 250 =
+  **600MB total**. A ~29× reduction, and it's why 50 containers start in seconds instead of
+  copying 17.5GB.
+
+`docker ps -s` shows this split per container: `SIZE 5MB (virtual 355MB)` — 5MB is the
+private writable layer, 355MB is writable + the shared 350MB image (counted once physically,
+not 50×).
+
+The same math hits the network on `docker push`. Say your image is 350MB base + an 8MB app
+layer = 358MB. You change one line of app code and rebuild:
+
+- Base 350MB digests are unchanged and already in the registry → **skipped**.
+- Only the 8MB app layer got a new digest → `docker push` transfers **8MB, not 358MB**.
 
 This is why **Dockerfile ordering matters for the whole registry, not just one build**: put
 rarely-changing content (base, OS packages, dependencies) in *lower* layers so those digests

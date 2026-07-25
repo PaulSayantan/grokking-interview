@@ -137,19 +137,41 @@ a **key–value pair**. The key is a *varint* that packs the **field number** an
 | LEN | 2 | `string`, `bytes`, embedded messages, packed repeated |
 | I32 | 5 | `fixed32`, `sfixed32`, `float` |
 
+**What a varint is.** A *varint* (variable-length integer) is protobuf's base-128
+encoding: each byte carries **7 payload bits**, and the high bit (bit 8) is a
+**continuation flag** — `1` means "more bytes follow", `0` means "this is the last
+byte". So values `0–127` fit in **1 byte**, `128–16383` in 2, and so on — small
+integers are cheap. (Trace: `300` = `0b1_0010_1100` splits into 7-bit groups
+`0000010` and `0101100`; emitted low-group-first with continuation bits set it
+becomes bytes `0xAC 0x02`.)
+
 Because field **numbers** — not names — go on the wire, protobuf is compact and
 renaming a field in the `.proto` does **not** break the wire format. This is the
 foundation of schema evolution (see below).
 
 **Field-number cost.** Tags for field numbers **1–15** fit in a single byte;
 **16–2047** take two bytes. So the *most frequently set* fields should get the low
-numbers. Numbers **19000–19999** are reserved for the protobuf implementation.
+numbers. (The tag is itself a varint: field 15 with a VARINT type is
+`(15 << 3) | 0 = 120 = 0x78`, still under 128 → one byte; field 16 is
+`(16 << 3) = 128`, which spills to two varint bytes.) Numbers **19000–19999** are
+reserved for the protobuf implementation.
+
+**Worked example: `Point{latitude=1, longitude=2}` on the wire.** Take the `Point`
+message from the snippet above. Field `latitude` (number 1, `int32` → VARINT):
+tag = `(1 << 3) | 0` = `8` = `0x08`, value `1` as a varint = `0x01` → `08 01`.
+Field `longitude` (number 2 → VARINT): tag = `(2 << 3) | 0` = `16` = `0x10`, value
+`2` = `0x02` → `10 02`. The whole message is just **`08 01 10 02` — 4 bytes**. On
+decode the receiver reads `08` → "field 1, wire-type VARINT", reads `01` as the
+value, then `10` → "field 2", reads `02` — no text scanning, and the field *names*
+never appear on the wire.
 
 **Why binary beats JSON here.** Integers are varint-packed, there are no field
 names or quotes/braces, and there is no text parsing — deserialization is largely
-a memcpy-and-shift. Payloads are typically several times smaller than the
-equivalent JSON, and encode/decode is much cheaper. The cost is that the bytes are
-**not human-readable** (see Strengths/weaknesses).
+a memcpy-and-shift. Concretely, the `Point` above is **4 bytes** of protobuf
+versus **28 bytes** for the equivalent JSON `{"latitude":1,"longitude":2}` — about
+**7× smaller** — and the savings come almost entirely from dropping the field-name
+strings and varint-packing the numbers. The cost is that the bytes are **not
+human-readable** (see Strengths/weaknesses).
 
 > [!WARNING]
 > Protobuf is *not* self-describing. Without the `.proto` (or a `FileDescriptorSet`),
@@ -190,9 +212,10 @@ Other precision points:
 - **`repeated` and `map` fields** have no "presence" — empty and absent are the
   same; scalar `repeated` fields are **packed** (a single LEN blob) by default in
   proto3.
-- **Unknown fields** encountered during parsing are, by default, **preserved** (in
-  proto3 since a later revision), so a proxy that round-trips a message won't drop
-  fields it doesn't understand.
+- **Unknown fields** encountered during parsing are, by default, **preserved**.
+  (proto3 originally *dropped* unknown fields; retention was restored in **protobuf
+  3.5**, released December 2017.) So a modern proxy that round-trips a message
+  won't drop fields it doesn't understand.
 
 | | proto2 | proto3 |
 |---|---|---|

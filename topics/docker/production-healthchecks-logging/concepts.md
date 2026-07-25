@@ -71,6 +71,12 @@ The check command's **exit code** is the entire contract:
 | `1` | **unhealthy** — the check failed |
 | `2` | **reserved** — do not use it (undefined behavior) |
 
+In practice Docker treats *any* non-`0` exit as failure-ish, so codes you didn't intend
+still flip the container toward `unhealthy`: a shell syntax error exits `2`, and a missing
+binary exits `127` (`sh: curl: not found`). That's the same trap as the distroless `curl`
+gotcha below — the probe "fails" not because the app is sick but because the *probe* is
+broken, and the resulting states are confusing to debug.
+
 Two forms exist:
 
 - `HEALTHCHECK [OPTIONS] CMD <command>` — define a check.
@@ -97,6 +103,12 @@ Two forms exist:
 The `--start-period` is the key production knob for slow-booting apps (JVM, large
 frameworks): set it long enough that startup doesn't immediately mark the container
 unhealthy, but don't set it so long that a truly-dead container looks fine for minutes.
+
+Note the trap in the defaults themselves: `--timeout` defaults to `30s`, which *equals*
+the default `--interval` of `30s`. That means a hung probe can occupy the entire interval
+before it's declared a failure — the exact opposite of the "fail fast" advice below. Almost
+always override it (e.g. `--timeout=3s`) so a stuck check fails quickly instead of eating a
+whole cycle.
 
 > [!TIP]
 > Keep `--timeout` well under `--interval`, and keep the probe *cheap*. A health endpoint
@@ -132,6 +144,37 @@ stateDiagram-v2
 > replaces unhealthy tasks, a load balancer stops routing, or you pair it with
 > `--restart` plus tooling like Docker's autoheal pattern. `HEALTHCHECK` + `restart: unless-stopped`
 > alone will **not** auto-restart an unhealthy-but-running container.
+
+### Worked example: how long until a dead backend is declared `unhealthy`?
+
+Interviewers love "your probe takes 90s to notice a dead backend — why?" You can't answer
+that by reading `--interval`, `--timeout`, and `--retries` as three isolated knobs; you
+have to multiply them out. Take the defaults from the Dockerfile above —
+`--interval=30s --timeout=3s --retries=3` — and say the app was healthy, then wedges
+(deadlocks, stops responding) at **t=0**:
+
+| Time | Check | Result | Failing streak | State |
+|---|---|---|---|---|
+| t≈30s | probe #1 fires, hangs, times out at +3s | fail | 1 | still `healthy` |
+| t≈60s | probe #2 fires, times out | fail | 2 | still `healthy` |
+| t≈90s | probe #3 fires, times out | fail | **3 = retries** | → **`unhealthy`** |
+
+So detection latency ≈ `interval × retries` ≈ `30 × 3 = 90s`. For ~90 seconds after the
+backend is effectively dead, `docker ps` still shows `(healthy)` and anything gating on
+Docker's status keeps treating it as good. The `--timeout=3s` isn't the driver of the
+90s — it just bounds how long *each* failing check occupies before being scored a
+failure (a check that hangs forever would otherwise never return a verdict).
+
+To cut that latency you trade against flap risk:
+
+- `--interval=10s --retries=3` → ≈30s detection, but 3× more probe executions and a
+  higher chance a single slow-GC pause trips a false `unhealthy`.
+- `--retries=1` → detection ≈ one interval, but now a *single* transient blip (one dropped
+  packet, one 200ms GC stall) flips you to `unhealthy`. Retries exist precisely to require
+  *consecutive* failures so noise doesn't cause flapping.
+
+Rule of thumb: pick the largest detection latency your dependents can tolerate, then back
+into `interval` and `retries` — don't just shrink `interval` blindly.
 
 Inspect the last few probe results (stdout + exit code of each check are stored):
 
@@ -296,10 +339,17 @@ services:
         max-file: "3"
 ```
 
+Do the disk-budget math before you pick numbers, because the per-container cap multiplies
+across the fleet. With `max-size=10m` and `max-file=3`, each container is capped at
+`10 MB × 3 = ~30 MB` of logs on disk. That looks tiny — until you run **100 containers**
+on a host: `30 MB × 100 = ~3 GB` of `/var/lib/docker` consumed by logs alone, before a
+single image layer. Size `max-size` against your log volume *and* your densest host, not
+just one container.
+
 The newer **`local`** driver is recommended when you don't need `docker logs` to be
 consumed by an external json-file-based tool: it **rotates by default** (20 MB × 5 files,
-i.e. ~100 MB per container, out of the box) and uses a more compact, more efficient
-on-disk format.
+i.e. ~100 MB per container, out of the box — so 100 containers ≈ 10 GB, more than 3× the
+`json-file` example above) and uses a more compact, more efficient on-disk format.
 
 > [!TIP]
 > Changing `daemon.json` only affects **newly created** containers — existing containers
@@ -473,6 +523,18 @@ process.on('SIGTERM', () => {
 });
 ```
 
+> [!WARNING]
+> That `server.close()` has a famous trap: it stops *accepting new* connections but does
+> **not** close idle **keep-alive** sockets that are open but between requests. Under
+> keep-alive traffic (browsers, connection-pooling clients) those idle sockets keep the
+> server "busy," the `close()` callback never fires, and the app rides out the *entire*
+> grace period until SIGKILL — truncating exactly the requests this code was meant to
+> protect. In Node 18+, pair `server.close()` with `server.closeIdleConnections()` (and
+> `closeAllConnections()` once the drain deadline is hit) so idle keep-alive sockets are
+> released. The general lesson beyond Node: **"stop the listener" is not enough** if
+> long-lived or keep-alive connections stay open — you must actively close idle ones once
+> draining begins.
+
 A subtle but critical **race**: when the LB/orchestrator tells the container to stop, it
 sends SIGTERM at roughly the same moment it *starts* removing the endpoint. There's a
 window where the app has begun shutting down but the LB is still routing new requests to
@@ -493,6 +555,27 @@ K8s-only construct and has no equivalent in the plain Docker runtime.
 > request.
 
 ---
+
+## Putting it together: anatomy of a deploy (the 502 timeline)
+
+This is the model answer to the flagship question this topic opened with. The three
+pillars only pay off when you can trace *one request* through a rolling replace and map
+each 502 to its fix. Suppose grace period = 30s, LB deregistration takes ~2s to propagate,
+and the app's longest request is ~5s:
+
+| Time | What happens | 502 risk & the fix |
+|---|---|---|
+| t=0 | Orchestrator sends **SIGTERM** to old container **and** begins deregistering its LB endpoint — these are *not* atomic. | If the app closes its listener instantly on SIGTERM, requests the LB still routes during the ~2s propagation get **connection-refused → 502**. **Fix:** on SIGTERM, keep the listener open and `sleep ~2–5s` (K8s: `preStop` hook) *before* closing it, so the LB stops routing first. |
+| t≈0–2s | LB is still deregistering; new requests may arrive. App is still accepting them (thanks to the delay). | No 502 — the delay covers the race window. |
+| t≈2s | Deregistration propagated; LB no longer routes new requests here. App now **stops accepting** new connections and closes idle keep-alive sockets. | If the app used shell-form `CMD` (PID 1 = `/bin/sh`), SIGTERM was **swallowed** and it never got here → sits idle until t=30s SIGKILL. **Fix:** exec form so the app is PID 1. |
+| t≈2–7s | App **drains** the in-flight ~5s request to completion. | If grace period were *shorter* than 5s, SIGKILL would truncate this request → dropped connection. **Fix:** grace period > longest request + drain (here 30s ≫ 7s). |
+| t≈7s | All in-flight work done; app closes DB pool, flushes logs, **exits 0** — well before the 30s deadline. | Clean exit; no SIGKILL, no cleanup skipped. |
+| meanwhile | New container starts; its `HEALTHCHECK`/readiness must pass **before** the LB routes to it (start-period covers slow boot). | If the LB routed before readiness passed, requests hit a not-yet-ready backend → **502/503**. **Fix:** gate routing on health/readiness, not just "process started." |
+
+Every 502 cause maps to exactly one pillar: **premature listener close** → deregistration
+race (in-app delay / `preStop`); **swallowed SIGTERM** → exec form + `tini`; **truncated
+request** → grace period sizing; **routing to a cold replica** → readiness gating. Name all
+four and you've given the senior answer.
 
 ## Common follow-up questions
 

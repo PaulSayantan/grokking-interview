@@ -51,6 +51,13 @@ flowchart LR
   when the predicate is on a raw column (fewer rows to aggregate).
 - `LIMIT` without `ORDER BY` returns an **arbitrary** (non-deterministic) subset — the
   engine may return rows in any order and it can change between runs.
+- **`OFFSET` does not skip work — it scans and discards.** `... ORDER BY id LIMIT 20 OFFSET
+  10000` still reads and throws away the first 10,000 rows before emitting 20, so deep
+  pagination degrades **linearly** (page 500 is ~500× slower than page 1). The scalable fix is
+  **keyset / seek pagination**: remember the last row's sort key and filter past it —
+  `WHERE (created_at, id) < (:last_ts, :last_id) ORDER BY created_at DESC, id DESC LIMIT 20`
+  — which an index on `(created_at, id)` turns into an O(log n) seek regardless of page depth
+  (the trade-off: you can only page forward/back, not jump to an arbitrary page number).
 
 > [!WARNING]
 > `SELECT` running late is why `SELECT price * 1.1 AS gross ... WHERE gross > 100` fails.
@@ -194,6 +201,19 @@ SELECT * FROM customers c
 WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
 ```
 
+**Worked example — the NULL swallows the whole result.** `customers.id = {1, 2, 3}`;
+`orders.customer_id = {1, NULL}` (one order placed by customer 1, one order with an unknown
+customer). You want "customers who have never ordered" — intuitively `{2, 3}`.
+
+- `NOT IN` expands, for each customer, to `id <> 1 AND id <> NULL`:
+  - id=1 → `1<>1` = FALSE → excluded (correct).
+  - id=2 → `2<>1` (TRUE) `AND 2<>NULL` (**UNKNOWN**) → `TRUE AND UNKNOWN` = **UNKNOWN** → row not kept.
+  - id=3 → `3<>1` (TRUE) `AND 3<>NULL` (**UNKNOWN**) → **UNKNOWN** → row not kept.
+  - Result: **0 rows** — not `{2,3}`. The single NULL made every "not-matched" row UNKNOWN.
+- `NOT EXISTS` instead asks "is there any order row with `o.customer_id = c.id`?" For id=2
+  and id=3 no such row exists (the NULL order's `customer_id = 2` is itself UNKNOWN, i.e. not
+  a match), so `NOT EXISTS` is TRUE → correctly returns **{2, 3}**.
+
 ---
 
 ## Window functions
@@ -221,6 +241,24 @@ FROM employees;
 | `RANK()` | same rank | **gaps** (1,1,3) |
 | `DENSE_RANK()` | same rank | **no gaps** (1,1,2) |
 
+**Worked example — one department, salaries `100, 100, 90, 90, 80`** ordered `salary DESC`.
+Watch the three columns diverge only at the ties:
+
+| salary | `ROW_NUMBER` | `RANK` | `DENSE_RANK` |
+|---|---|---|---|
+| 100 | 1 | 1 | 1 |
+| 100 | 2 | 1 | 1 |
+| 90  | 3 | **3** | **2** |
+| 90  | 4 | 3 | 2 |
+| 80  | 5 | **5** | **3** |
+
+Reading it: `ROW_NUMBER` never repeats (the two 100s get 1 and 2, tie broken arbitrarily).
+`RANK` gives both 100s rank 1, then *skips to 3* for the next value — it "leaves gaps" equal
+to the number of tied rows (two 1s consumed positions 1 and 2, so the next rank is 3, and
+after the two 3s it jumps to 5). `DENSE_RANK` gives the same 1,1 but then continues 2,2,3 —
+no gaps, so it counts *distinct* salary levels. If a query asks for "the 3rd-highest distinct
+salary," you want `DENSE_RANK = 3` (returns 80), not `RANK = 3` (returns 90).
+
 **`PARTITION BY` vs `GROUP BY`:** `PARTITION BY` divides rows into windows but keeps every
 row; `GROUP BY` returns one row per group. You can have a window that resets per partition
 and still see individual rows.
@@ -233,6 +271,24 @@ the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. With `
 **peer rows (equal ORDER BY values) are included together**, which can make a running
 `SUM` jump. Use `ROWS BETWEEN ...` for a precise physical row count (e.g. a trailing
 3-row moving average: `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW`).
+
+**Worked example — RANGE includes peers, ROWS advances one physical row.** Take three rows
+ordered by `day`, with a tie on day 1: `(day=1, amt=10)`, `(day=1, amt=20)`, `(day=2, amt=5)`,
+and compute a running total `SUM(amt) OVER (ORDER BY day ...)`.
+
+| row | day | amt | default `RANGE` running SUM | `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` |
+|---|---|---|---|---|
+| 1 | 1 | 10 | **30** | 10 |
+| 2 | 1 | 20 | **30** | 30 |
+| 3 | 2 | 5  | 35 | 35 |
+
+With `RANGE`, rows 1 and 2 are **peers** (same `day = 1`), so the frame for *both* covers
+"all rows whose day ≤ current day" — that is both day-1 rows at once — giving `10 + 20 = 30`
+on *each* of them. Row 1's running total already shows 30 even though physically it is the
+first row: the value "jumped" past its own row. With `ROWS`, the frame is purely positional
+("all physical rows up to and including this one"), so row 1 = 10, row 2 = 10+20 = 30, row 3
+= 35. Same final total (35), but the intermediate per-row values differ — which is exactly
+what breaks a naive "moving average" or "cumulative balance" that assumed one row at a time.
 
 > [!WARNING]
 > Window functions are evaluated in the `SELECT` step, *after* `WHERE`/`GROUP BY`/`HAVING`.
@@ -288,6 +344,33 @@ WITH RECURSIVE subordinates AS (
 SELECT * FROM subordinates;
 ```
 
+**Worked example — trace the iterations.** Take this `employees` table and run the CTE above
+starting from `id = 1`:
+
+| id | manager_id | name |
+|---|---|---|
+| 1 | NULL | Ann  |
+| 2 | 1    | Bob  |
+| 3 | 1    | Cal  |
+| 4 | 2    | Dee  |
+| 5 | 4    | Eve  |
+
+The engine keeps a *working set* (the rows produced by the previous step) and feeds it into
+the recursive member until that member returns **zero rows**:
+
+- **Anchor:** `WHERE id = 1` → `{(1, Ann, depth=1)}`. Result so far: {1}.
+- **Iteration 1:** join `employees e` to the working set on `e.manager_id = s.id` where `s.id = 1`
+  → Bob (mgr 1) and Cal (mgr 1) → `{(2, Bob, 2), (3, Cal, 2)}`. Result: {1,2,3}.
+- **Iteration 2:** working set is now {2,3}. Who reports to 2 or 3? Dee (mgr 2) → `{(4, Dee, 3)}`.
+  Cal (id 3) has no reports. Result: {1,2,3,4}.
+- **Iteration 3:** working set {4}. Eve (mgr 4) → `{(5, Eve, 4)}`. Result: {1,2,3,4,5}.
+- **Iteration 4:** working set {5}. Nobody reports to 5 → **0 rows returned → recursion stops.**
+
+Final output is the union of every step: Ann(1), Bob(2), Cal(2), Dee(3), Eve(4) — the whole
+subtree under Ann with each node's `depth`. The key mental model: each iteration only sees the
+*most recent* level's rows, not the full accumulated set, so it naturally walks the tree one
+level deeper per step.
+
 - `UNION` (vs `UNION ALL`) in a recursive CTE deduplicates, which can help terminate on
   cyclic graphs; still guard against infinite loops (SQL Server: `OPTION (MAXRECURSION n)`;
   PostgreSQL: `LIMIT` or a depth/`CYCLE` clause; MySQL: `cte_max_recursion_depth`).
@@ -330,6 +413,10 @@ NULL means "unknown / no value" — *not* zero and *not* empty string.
   `IS NOT NULL` (or `IS DISTINCT FROM`), never `= NULL`.
 - `WHERE` and `ON` keep **only TRUE** rows — UNKNOWN rows are discarded (same as FALSE for
   filtering). But `CHECK` constraints *accept* UNKNOWN (only reject FALSE) — opposite polarity.
+- **Intuition:** treat NULL as "could be either TRUE or FALSE." An operator returns a
+  *definite* value only when that unknown operand can't change the outcome — `FALSE AND
+  anything` is always FALSE, `TRUE OR anything` is always TRUE — otherwise the result is
+  UNKNOWN because it would flip depending on the hidden value.
 - `NULL AND FALSE = FALSE`; `NULL OR TRUE = TRUE`; but `NULL AND TRUE = UNKNOWN`,
   `NULL OR FALSE = UNKNOWN`, and `NOT NULL = UNKNOWN`.
 - Arithmetic and string concatenation with NULL usually yield NULL (`5 + NULL = NULL`).

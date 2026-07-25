@@ -163,6 +163,41 @@ Staff+ signals:
 > cross-team influence or strategy. It's a great story for the wrong level. The panel levels it
 > Senior. Staff stories must cross a team boundary.
 
+**Weak vs strong (same domain — retries/reliability):**
+
+This is the exact trap the WARNING names. Both stories below are *true* and *good*. The first
+is a Senior story wearing a Staff costume; the second crosses a team boundary and moves the org.
+
+> **Weak (a Senior story dressed up as Staff):** "I owned reliability for the payments team. We
+> had a 4% transient failure rate, so I designed retries-with-jitter plus idempotency keys,
+> drove it past a security review, and got us to 0.3%. It was a big cross-team effort — I
+> coordinated with the checkout team who call our API."
+>
+> *Why it levels Senior:* the actual work is a single team's system. "Coordinated with the
+> checkout team who call our API" is normal Senior cross-team collaboration *for your own
+> project* — not org influence. There is no problem nobody had named, no standard other teams
+> adopt, no multiplier beyond the payments team.
+>
+> **Strong (a true Staff story):** "After we fixed payments' retry problem, I noticed **five
+> different teams** had each hand-rolled their own retry logic — three had no jitter and were
+> synchronizing retry storms that amplified every downstream blip into an incident. Nobody owned
+> this; it fell between teams. I wrote a one-page 'resilience standard' RFC, socialized it across
+> the four service orgs, and — because I had no authority over those teams — won them over by
+> shipping a shared `resilient-client` library with jitter, idempotency, and circuit-breaking
+> baked in, plus a migration guide. I got the platform team to adopt it as the paved-road
+> default so new services get it for free. Within two quarters, retry-storm incidents across the
+> org dropped from ~6/quarter to 1, and no new service has hand-rolled retries since."
+
+Line up the two against the Staff+ signals and the gap is stark:
+
+| Signal | Weak (Senior) | Strong (Staff) |
+|---|---|---|
+| **Cross-team boundary** | One team; "coordinated with a caller" | Five teams / four service orgs |
+| **Problem nobody named** | Assigned reliability goal | *Found* the between-teams retry-storm problem |
+| **Influence without authority** | Reviewed by security (normal) | Won over teams he didn't manage via an RFC + a better default |
+| **Org-scale multiplier** | Fixed one team's metric | Paved-road library every new service inherits |
+| **Org-level outcome** | 4% → 0.3% for payments | Org-wide retry-storm incidents 6/qtr → 1/qtr |
+
 ---
 
 ## Published engineering ladders (Dropbox, CircleCI, GitLab, Rent the Runway)
@@ -242,6 +277,17 @@ you frame scope precisely.
 | **Solver** | Trusted specialist who dives into thorny, high-risk problems and stays until resolved | "When search latency was in crisis, I was pulled in, went deep for six weeks, fixed it, and moved on." |
 | **Right Hand** | Rarest; extends an executive's reach with borrowed authority across business/tech/people/process (org of hundreds+) | "I acted as the VP's technical right hand across a 300-person org, driving whatever was on fire." |
 
+Naming the archetype is the easy part; the interviewer's next question tests whether you
+actually *lived* it. Each archetype has a signature follow-up probe and one detail that proves
+it's real:
+
+| Archetype | Signature follow-up probe | The detail that proves you lived it |
+|---|---|---|
+| **Tech Lead** | "How did you handle an engineer who disagreed with your technical direction?" | You can name the disagreement, how you decided (data/prototype, not rank), and that the team still shipped aligned. |
+| **Architect** | "Name a team that pushed back on your standard — how did you handle it?" | A specific team, their objection, and whether you bent the standard or held it *and why* (a standard nobody resists isn't load-bearing). |
+| **Solver** | "How did you hand it off so it didn't regress after you left?" | Runbook / owning team / guardrail metric you left behind — a Solver who just leaves is a hero-mode risk, not Staff. |
+| **Right Hand** | "Where did the executive's authority end and your own judgment begin?" | A decision you made *without* checking, and one you escalated — showing you knew the line on borrowed authority. |
+
 > [!TIP]
 > Pick the archetype your evidence actually supports. A candidate whose real strength is deep
 > problem-solving should tell a crisp **Solver** story rather than fake an org-wide
@@ -281,6 +327,43 @@ flowchart LR
 > follow-up; an inflated one dies on the first "what did *you* personally decide?" and now the
 > interviewer discounts your *other* stories too.
 
+### Scope is relative to company size — don't import your old ladder
+
+A title is not a fixed amount of scope; it's scope *relative to that company's size and stage*.
+"Staff" at a 40-person startup and "Staff" at Google describe very different blast radii, and
+the interviewer calibrates against **their own** ladder, not the one on your résumé. This trips
+up candidates in both directions.
+
+Worked comparison — the *same title*, "Staff Engineer," two contexts:
+
+- **Staff at a 40-engineer Series-B startup:** you set architecture for ~3 of the company's 5
+  teams, ~25 engineers feel your decisions, you own the ~$8M-ARR product's core services. That
+  is genuinely the top of that ladder — but in *absolute* terms it's roughly one org.
+- **Staff (L6) at a 30,000-engineer FAANG:** the same absolute footprint (3 teams, 25 people)
+  is a *Senior* (L5) blast radius there. Their Staff bar expects influence across several orgs,
+  hundreds of engineers, and a multi-year technical bet.
+
+So a startup Staff walking into a big-company Staff loop and describing "I owned architecture
+for three teams" can get **down-leveled to Senior** — not because the work was weak, but because
+the *absolute* scope matches the interviewer's Senior rung. The reverse also happens: a
+big-company Senior can read as over-reaching at a startup if they claim org-wide language the
+40-person company can't even have.
+
+The fix is to **describe scope in concrete, title-free units** so the interviewer maps it onto
+their own ladder instead of guessing from your title:
+
+- Say the numbers: "N teams / N engineers affected, $X revenue or Y QPS of traffic, a Z-month
+  effort" — not "I was Staff, so…".
+- Research the target company's mapping *before* the loop (levels.fyi's cross-company comparison
+  is the standard tool) so you know whether your "Staff" is their L5 or L6 and lead with stories
+  that hit the *absolute* scope of the rung you're targeting.
+
+> [!INTERVIEW]
+> Expect the direct probe: *"Your title was Staff — what was that scope at a company your size?"*
+> The strong answer skips the title and gives absolute units ("~25 engineers across 3 teams, our
+> core $8M-ARR services, an 18-month re-platform"). That lets the panel level you on evidence
+> instead of a label that means something different on their ladder.
+
 ---
 
 ## Common calibration mistakes: the "senior IC in a mid interview" and scope > tenure
@@ -307,6 +390,47 @@ team or wider?", they're testing scope. Respond by *sharpening the personal-owne
 boundary details*, not by adding more technical depth. If you're offered a level below target,
 you can (politely) ask what scope evidence would have supported the higher level — often the
 gap is a missing cross-team or strategy story you simply didn't tell.
+
+**What to actually do when offered below target.** A down-level offer is a negotiation opening,
+not a verdict. In rough order:
+
+1. **Ask for the specific missing signal.** "What scope evidence would have supported Staff?"
+   Pin it to a concrete gap (usually cross-team influence or top-of-funnel ambiguity) rather
+   than a vague "seemed more Senior."
+2. **Offer to close it with evidence.** If the gap is a story you simply didn't tell, propose
+   an additional story or a short follow-up conversation/panel targeted at that competency. Many
+   companies allow a re-level or an extra interview when the gap is narrow and specific.
+3. **Weigh accept-and-grow vs re-interview.** Accepting the lower level with a written,
+   time-boxed promo expectation ("re-review in 2 quarters against these signals") can beat
+   re-interviewing if the comp bands overlap and the manager is credible — you start delivering
+   at target scope immediately. Re-interviewing makes sense when the down-level is large or the
+   bands don't overlap.
+4. **Consider that the calibration may be right.** If your true absolute scope genuinely matches
+   their lower rung (see the scope-relativity trap above), a down-level is honest signal worth
+   heeding — accepting it beats being stretched into a role you can't yet defend and struggling.
+
+### How leveling decisions actually get made
+
+Understanding the machinery demystifies *why* legible scope is decisive. Leveling is rarely one
+person's gut call — it's a structured panel decision, and Amazon's loop is the canonical example
+this repo's readers will face:
+
+- **Each interviewer owns a slice.** Interviewers are assigned specific competencies (at Amazon,
+  a subset of the Leadership Principles — e.g., one focuses on Ownership + Deliver Results,
+  another on Are Right, A Lot + Dive Deep). Each collects behavioral evidence and writes it up
+  with a hire/no-hire and an *inclination on level*.
+- **The debrief maps evidence to a rung.** The panel meets, shares written feedback, and argues
+  the evidence against the ladder: does the demonstrated scope clear the target level's bar?
+  Stories with ambiguous or under-stated scope get read down, because the panel can only credit
+  what you made legible.
+- **A calibrator guards consistency.** At Amazon a **Bar Raiser** — a trained interviewer from
+  *outside* the hiring team with veto power — ensures the bar is applied the same way across
+  candidates and that the hiring manager's enthusiasm doesn't inflate the level. Other big
+  companies use an equivalent hiring-committee / calibration role.
+- **Borderline resolves *down*.** This is the load-bearing rule: absent clear evidence for the
+  higher rung, a borderline candidate is leveled at the **lower** level ("lean hire at L5, not
+  L6"). Ties do not go to the candidate. This is precisely why an unambiguous, boundary-explicit,
+  ownership-verb story is worth so much — it turns a borderline into a clear pass.
 
 > [!KEY-TAKEAWAY]
 > You are leveled on **demonstrated scope**, not potential or tenure. Prepare a story

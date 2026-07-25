@@ -136,6 +136,17 @@ engine, the app requests `database/creds/<role>`; Vault runs a configured SQL st
 | Revocation | Rotate + redeploy consumers | Revoke lease; expires automatically |
 | Attribution | Shared cred → hard | Unique cred → precise |
 
+Dynamic secrets aren't free, and an interviewer will probe the cost. **Trade-offs / gotchas:**
+every credential issuance now depends on the manager being up, so you've added an **availability
+coupling** — Vault down means new workers can't get DB creds (mitigate with caching of a
+still-valid lease and graceful degradation). Per-request DB users cause **churn**: a leaky
+connection pool or a spike can hit the database's **max-connections / max-roles limits**, since
+each lease is a real `CREATE USER`. And **cleanup-on-crash** is the classic edge case — if the
+manager or the DB is unreachable when a lease should be revoked, you get **orphaned users** the
+`DROP` never ran on, so you need lease-renewal + a reconciliation sweep. Net: dynamic secrets
+earn their operational cost for **high-value, high-blast-radius credentials** (prod DB, cloud
+keys); a low-value static config value is often better left as a plain versioned secret.
+
 Cloud KMS services (AWS KMS, GCP KMS, Azure Key Vault, CloudHSM) are a related but distinct
 tool: they **hold key material and perform crypto operations** (encrypt/decrypt/sign) so the
 raw key **never leaves** the HSM/KMS boundary. You send data to KMS and get ciphertext back;
@@ -181,6 +192,25 @@ plaintext DEK back → decrypt the data locally → discard the DEK.
                                   [ Wrapped DEK ]  (stored next to ciphertext)
 ```
 
+**Worked example — one `GenerateDataKey` call.** You want to encrypt a 5 MB object. You call
+KMS once:
+
+```
+GenerateDataKey(KeyId="arn:aws:kms:...:key/1234-abcd", KeySpec="AES_256")
+  -> {
+       Plaintext:      <32 raw bytes>            # the DEK, in the clear, in your RAM only
+       CiphertextBlob: <~184-byte wrapped DEK>   # same DEK encrypted under the KEK
+       KeyId:          "arn:...key/1234-abcd"
+     }
+```
+
+Now the local steps: (1) AES-256-GCM-encrypt the 5 MB with the 32-byte `Plaintext` DEK →
+~5 MB of ciphertext; (2) **overwrite/zeroize the 32-byte `Plaintext`** in memory; (3) persist
+`ciphertext (5 MB) + CiphertextBlob (~184 bytes)` together. Note the arithmetic that makes the
+pattern win: KMS moved **32 bytes** over the wire, not 5 MB — the whole 5 MB was encrypted
+locally at symmetric-cipher speed. To decrypt later you send just the ~184-byte `CiphertextBlob`
+back to `Decrypt`, get the 32-byte DEK, decrypt locally, and zeroize again.
+
 A KEK hierarchy can be multi-level: a **root/master key** (often in an HSM) wraps KEKs, which
 wrap DEKs. NIST SP 800-57 recommends keeping key-wrapping keys higher in the hierarchy and
 using them narrowly.
@@ -199,6 +229,16 @@ Naively "rotating an encryption key" sounds like it requires decrypting and re-e
 
 **Rotating the KEK (cheap):** because the KEK only ever encrypts **DEKs**, rotating it means
 re-wrapping the (small, few) DEKs under the new KEK — you never touch the bulk ciphertext.
+
+**Put numbers on it.** Say 100 TB is stored as 1 MB objects → **~100 million objects**, so
+~100 million DEKs, each a 32-byte key wrapped into a ~184-byte blob (~18 GB of wrapped-DEK
+metadata total). "Rotating the master key" then means: `Decrypt` each ~184-byte blob under the
+old KEK and re-`Encrypt` it under the new KEK — **100 million tiny KMS calls moving ~18 GB**,
+versus reading, decrypting, re-encrypting, and rewriting the full **100 TB** of object data.
+That is a ~**5,500× reduction** in bytes touched (100 TB / 18 GB), and the 100 TB of ciphertext
+is never rewritten at all. (With AWS KMS automatic rotation you don't even re-wrap: KMS keeps
+old key *versions*, so old blobs still decrypt and new writes use the new version — zero calls
+on your side.)
 AWS KMS "automatic key rotation" goes further: the key **ID stays the same** while KMS keeps
 old key *versions* internally, so new data uses the new version and old ciphertext still
 decrypts with the retained old version — no re-wrapping visible to you at all.
@@ -444,8 +484,17 @@ where the KEK lives and whether the cloud provider can technically access plaint
   once imported the **key material now exists inside the provider's KMS** — the provider
   *could*, technically, be compelled to use it. BYOK is about provenance/control, **not** about
   denying the provider access.
-- **HYOK (Hold Your Own Key)** — key stays under your control; used for the strictest data
-  where the cloud service must never see plaintext.
+- **HYOK (Hold Your Own Key)** — the key **stays on-prem and the cloud service can never
+  decrypt at all**. The term originated with Microsoft AD RMS / Azure Information Protection:
+  the most sensitive documents are protected by an on-prem-held key so the cloud service is
+  *architecturally excluded* from ever seeing plaintext (at the cost of losing any cloud-side
+  feature that needs to read the content). Contrast the two adjacent models: **XKS** *does*
+  let the cloud KMS decrypt, but only by **proxying a call-out to your on-prem HSM** for each
+  operation (cloud orchestrates, your HSM holds the key); pure **HYOK** keeps decryption
+  entirely on-prem with no cloud call-out. In modern AWS terms, XKS is the concrete productized
+  form of the "provider physically cannot decrypt without you" goal — HYOK and XKS are often
+  spoken of interchangeably, but the sharp distinction is *who performs the decrypt* (on-prem
+  only vs. cloud-proxied to your HSM).
 - **External Key Store / XKS** (AWS External Key Store, Google **EKM**, Azure equivalents) —
   the KEK **never enters the cloud**. Every encrypt/decrypt is a call-out from the cloud KMS to
   **your on-prem HSM via a proxy**. Trade-off: you get a hard **kill switch** — block the proxy
@@ -499,6 +548,16 @@ for blast-radius, but because the cipher fails if you overuse one key.
   far below the exhaustion bound and make a nonce collision across keys irrelevant. This ties
   envelope encryption directly to a real A02:2021 cryptographic-failure mechanism, not just
   "smaller blast radius."
+
+**Worked example — feel the bound.** 2^32 ≈ **4.29 billion** encryptions is the safe cap for
+one key under random 96-bit nonces. Suppose one shared DEK encrypts a busy stream at **50,000
+ops/sec**: it burns through the budget in `4.29e9 / 50,000 ≈ 85,900 s ≈ 23.9 hours` — a single
+key exhausts its safe life in **about a day**, after which every additional message raises the
+odds of a catastrophic nonce collision. Now switch to **one DEK per object**: a typical object
+is written a handful of times, so each DEK sees maybe **1–100** encryptions — roughly **2^32 /
+100 ≈ 4×10^7 (forty-million-fold) below** the bound. The exhaustion limit is never remotely
+approached, which is *why* narrow, per-object DEKs are the safe design, independent of blast
+radius.
 
 > [!WARNING]
 > Deterministic/counter nonces avoid random-collision exhaustion **only if the counter is
@@ -672,7 +731,12 @@ secret manager itself is down, IdP outage, incident). Done right it is tightly c
   separate vault.
 - **Multi-party / split control.** Vault's **Shamir seal** splits the unseal key into shares
   (e.g. 3-of-5) held by different operators, so no single person can unseal; **auto-unseal**
-  delegates this to a KMS/HSM. Break-glass creds themselves can be split similarly.
+  delegates this to a KMS/HSM. Break-glass creds themselves can be split similarly. The magic
+  of a `k`-of-`n` **threshold scheme**: **any `k` shares reconstruct** the secret, but **any
+  `k-1` shares reveal literally zero** about it (mathematically as much information as guessing
+  blind). So 3-of-5 means any 3 of the 5 operators together can unseal (survives 2 holders
+  being unavailable), yet any 2 colluding attackers learn nothing — you get both fault
+  tolerance and no single (or double) point of trust.
 - **Heavily audited and alarmed.** Any *use* of a break-glass credential fires an immediate
   alert to security and starts an incident review — its use is expected to be rare and always
   investigated.

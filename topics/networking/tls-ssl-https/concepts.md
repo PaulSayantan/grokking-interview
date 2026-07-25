@@ -106,6 +106,32 @@ establishment is a deliberate performance trade-off.
   1.2 that key is used to **sign** the handshake (proving possession of the private key), not
   to encrypt the secret.
 
+**The Diffie-Hellman intuition (mixing paint).** How can two public values yield a shared
+secret an eavesdropper can't reconstruct? Think of mixing paint. Both sides agree on a
+public base colour. Each side secretly picks its own colour and *mixes* it with the base,
+then sends the mixture across the wire. Mixing is easy; **un-mixing a blended colour back
+into its components is hard.** Each side now adds its own secret colour to the *other's*
+mixture — and both arrive at the identical final blend (base + secretA + secretB). The
+eavesdropper saw the two public mixtures but can't separate out either secret colour, so
+can't produce the final blend. Modular exponentiation is the "mixing": easy forward, but
+reversing it (the discrete-log problem) is computationally infeasible.
+
+**Worked toy example.** Public parameters `g = 5`, `p = 23`. Alice's secret `a = 6`, Bob's
+secret `b = 15`.
+
+1. Alice sends `A = g^a mod p = 5^6 mod 23`. Compute: `5^2 = 25 ≡ 2`, `5^4 ≡ 2^2 = 4`,
+   `5^6 = 5^4·5^2 ≡ 4·2 = 8`. **A = 8** goes on the wire.
+2. Bob sends `B = g^b mod p = 5^15 mod 23`. Compute: `5^8 ≡ 16`, so
+   `5^15 = 5^8·5^4·5^2·5^1 ≡ 16·4·2·5`; `16·4 = 64 ≡ 18`, `18·2 = 36 ≡ 13`,
+   `13·5 = 65 ≡ 19`. **B = 19** goes on the wire.
+3. Alice computes `B^a mod p = 19^6 mod 23`. Since `19 ≡ −4`, this is `4^6`;
+   `4^3 = 64 ≡ 18`, `18^2 = 324 ≡ 2`. **Shared secret = 2.**
+4. Bob computes `A^b mod p = 8^15 mod 23 ≡ 2` (same value, arrived at independently).
+
+Both sides now hold **2** without ever transmitting it. The wire only carried `g`, `p`,
+`A = 8`, `B = 19`; recovering `a` or `b` from those requires solving a discrete log. (Real
+TLS uses X25519 or 256-bit+ groups, not `p = 23`, but the mechanic is identical.)
+
 > [!KEY-TAKEAWAY]
 > Asymmetric crypto = authentication + key agreement (slow, used briefly). Symmetric crypto =
 > bulk encryption of application data (fast, used for the whole session). The session key is
@@ -200,6 +226,24 @@ What changed from 1.2 → 1.3 (classic interview list):
 > made forward secrecy mandatory by removing static RSA key exchange, (3) encrypted the
 > certificate and reduced cipher suites to AEAD-only. Bonus: added 0-RTT with replay caveats.
 
+**Worked latency example — where the round trips actually go.** Take a client in London
+hitting a server in New York: real-world RTT ≈ **40 ms**. "Time to first HTTP byte on the
+wire" is just (number of setup round trips) × RTT:
+
+| Scenario | Round trips before first request | Time @ 40 ms RTT |
+|---|---|---|
+| **TCP + TLS 1.2 fresh** | 1 (TCP SYN/SYN-ACK) + 2 (TLS 1.2 full) = **3** | **120 ms** |
+| **TCP + TLS 1.3 fresh** | 1 (TCP) + 1 (TLS 1.3) = **2** | **80 ms** |
+| **TCP + TLS 1.3 0-RTT resume** | 1 (TCP); request rides the first TLS flight = **1** | **40 ms** |
+| **QUIC fresh** | TCP+TLS folded into one = **1** | **40 ms** |
+| **QUIC 0-RTT resume** | request ships in the very first packet = **~0** | **~0 ms** |
+
+So the "TLS 1.3 saves a round trip" claim is concretely **120 → 80 ms = 40 ms saved** on a
+fresh connection, and 0-RTT resumption saves *another* 40 ms (80 → 40). QUIC's win is that
+it removes the separate TCP handshake entirely: a fresh QUIC connection (40 ms) matches a
+*resumed* TLS-over-TCP connection. Multiply by the number of connections a page opens and
+the difference is very visible to users.
+
 ---
 
 ## Cipher suites
@@ -277,6 +321,26 @@ Root CA (self-signed, in OS/browser trust store, kept offline)
 - A **self-signed** certificate has no CA above it, so clients reject it unless it's manually
   trusted (common in dev/internal use).
 
+**Traced chain verification.** Concretely, suppose `example.com` serves two certs and the
+client trusts Let's Encrypt's root:
+
+- Leaf: `Subject = example.com`, `Issuer = R3`, signed by R3's private key.
+- Intermediate: `Subject = R3`, `Issuer = ISRG Root X1`, signed by X1's private key.
+- Client's trust store contains: `ISRG Root X1` (self-signed root).
+
+Verification walks **bottom-up**: (1) take the leaf, look at its `Issuer = R3`, find the R3
+cert in what the server sent, use **R3's public key to verify the leaf's signature** — valid.
+(2) Take R3, its `Issuer = ISRG Root X1`, use **X1's public key to verify R3's signature** —
+valid. (3) X1 is present **in the local trust store** → anchor reached → **chain trusted.**
+(The client also checks hostname/validity/revocation on top of this.)
+
+Now the missing-intermediate failure: the server sends **only the leaf** (a very common
+misconfig). The client reads `Issuer = R3` on the leaf but has no R3 cert to continue from,
+and R3 is *not* a trusted root — so it can't link the leaf to any anchor. Result:
+`NET::ERR_CERT_AUTHORITY_INVALID`. `curl` may still succeed if it happens to have R3 cached
+or fetches it via the leaf's AIA URL, which is exactly why "works in curl, fails in browser"
+appears.
+
 > [!TIP]
 > A frequent production bug: "works in curl, fails in browser" or vice-versa. Usually the
 > server forgot to send the **intermediate certificate**. The client can't build the chain to
@@ -340,11 +404,14 @@ most common cause of sudden site outages.
 |---|---|---|
 | **CRL** (Certificate Revocation List) | CA publishes a signed list of revoked serial numbers; client downloads it | Lists get huge; clients rarely fetch them in time |
 | **OCSP** (Online Certificate Status Protocol) | Client asks the CA's OCSP responder "is serial X still valid?" in real time | Latency + **privacy leak** (CA learns which sites you visit); if responder is down, clients "soft-fail" and accept |
-| **OCSP stapling** | The **server** fetches a signed, time-stamped OCSP response and **staples** it into the TLS handshake (`status_request` extension) | Fixes privacy + latency; needs server support. `Must-Staple` cert flag forces it |
+| **OCSP stapling** | The **server** fetches a signed, time-stamped OCSP response and **staples** it into the TLS handshake (`status_request` extension, RFC 6066) | Fixes privacy + latency; needs server support. `Must-Staple` cert flag forces it |
 
 - **OCSP stapling** is the modern preferred approach: the client gets fresh revocation proof
   without contacting the CA itself. The stapled response is signed by the CA and short-lived,
-  so it can't be replayed indefinitely.
+  so it can't be replayed indefinitely. Single-cert stapling uses the `status_request`
+  extension (**RFC 6066**); the multi-cert variant `status_request_v2` is **RFC 6961**, and
+  **Must-Staple** is the separate TLS Feature extension (**RFC 7633**) — these are three
+  distinct things people often conflate.
 - Because of soft-fail and reliability issues, browsers increasingly rely on **pushed
   revocation sets** (e.g. CRLite / OneCRL / CRLSets) baked into browser updates rather than
   live OCSP. Notably, **Let's Encrypt is phasing out OCSP in favour of CRLs (2025)**.
@@ -373,6 +440,13 @@ abbreviated handshake).
 **TLS 1.3 resumption:** uses a **pre-shared key (PSK)** derived from the previous session and
 delivered in a `NewSessionTicket` message. On return the client offers the PSK in its
 ClientHello. This is also 1-RTT, or **0-RTT** if the client also sends **early data**.
+
+> [!TIP]
+> The full "is resumption safe / forward-secret?" picture is assembled from four places in
+> this file: the **0-RTT replay caveat** below, the **`psk_ke` vs `psk_dhe_ke`** distinction
+> under "Signature algorithms and named groups," the **STEK rotation** caveat, and the
+> **0-RTT anti-replay in depth** section. Read them together before answering a resumption
+> follow-up.
 
 **0-RTT (early data):**
 
@@ -523,6 +597,18 @@ end up with the same application-traffic keys." TLS 1.3 answers this with a dete
 **HKDF (RFC 5869) key ladder** (RFC 8446 §7.1). Both peers feed the same inputs (PSK,
 (EC)DHE shared secret, and the running **transcript hash**) into the same functions, so
 they derive identical keys without ever transmitting them.
+
+**What Extract and Expand each do (plain words).** HKDF has two steps with opposite jobs.
+**Extract = whiten:** it takes messy, non-uniform input entropy (the raw (EC)DHE shared
+secret, whose bits aren't perfectly random-looking) and blends it into **one** uniform,
+high-quality pseudorandom secret — think of it as a randomness laundering step. **Expand =
+stretch:** it takes that single good secret and deterministically stretches it into **many**
+independent, purpose-labelled keys (a client key, a server key, an IV, a Finished key, …),
+each tagged with a distinct label so they can never collide. The ladder below is just
+**Extract** (mix in a new keying input) alternating with **Expand** (derive named traffic
+secrets from the current stage). Because each Extract folds in fresh input (PSK, then the DHE
+secret) and each Expand binds to the transcript, the keys are chained — you can't compute a
+later key without every earlier input.
 
 Two helper functions build everything:
 
@@ -809,6 +895,25 @@ must rekey. (RFC 8446 §5.3, §4.6.3.)
 - **Why this matters.** AES-GCM catastrophically loses confidentiality *and* integrity if a
   (key, nonce) pair is ever reused. Deriving the nonce from a monotonic counter guarantees
   uniqueness for the lifetime of a key.
+
+**Worked nonce trace.** Say the key schedule produced a 12-byte
+`write_iv = 00 11 22 33 44 55 66 77 88 99 AA BB`. The 64-bit sequence number is left-padded
+to 12 bytes and XORed in:
+
+- **Record seq = 0:** `seq` padded = `00 00 00 00 00 00 00 00 00 00 00 00`. Nonce =
+  `write_iv XOR 0` = `00 11 22 33 44 55 66 77 88 99 AA BB` (the IV unchanged).
+- **Record seq = 1:** `seq` padded = `…00 00 00 01`. Only the last byte flips:
+  `BB XOR 01 = BA`. Nonce = `00 11 22 33 44 55 66 77 88 99 AA BA`.
+- **Record seq = 2:** last byte `BB XOR 02 = B9`. Nonce = `…AA B9`.
+
+Each record gets a **distinct** nonce, derived identically by both peers with nothing extra
+on the wire. Now the failure mode: the sequence number is 64-bit and **must never wrap or
+reset under the same key**. If a buggy implementation reset the counter to 0 without
+rekeying, record seq=0 would reuse nonce `…AA BB` under the same key — and a repeated
+(key, nonce) in AES-GCM lets an attacker XOR the two ciphertexts to strip the keystream *and*
+recover the GCM authentication subkey `H`, forging arbitrary records. That is exactly why
+**KeyUpdate** rekeys (resetting the sequence number *and* changing the key together) long
+before the 64-bit space is at risk.
 - **KeyUpdate (`key_update(24)`).** A post-handshake message that rekeys the traffic keys
   mid-connection: the sender derives a new `*_ap_traffic_secret` via
   `HKDF-Expand-Label(secret, "traffic upd", "", len)` and resets its sequence number. This is
@@ -1058,11 +1163,12 @@ is a real debugging scenario. (Extends the "serve intermediates" advice.)
 
 - RFC 8446 — The Transport Layer Security (TLS) Protocol Version 1.3
 - RFC 5246 — The Transport Layer Security (TLS) Protocol Version 1.2
-- RFC 6066 — TLS Extensions (Server Name Indication)
+- RFC 6066 — TLS Extensions (Server Name Indication; `status_request` single-cert OCSP stapling)
 - RFC 7301 — Application-Layer Protocol Negotiation Extension (ALPN)
 - RFC 5077 — TLS Session Resumption without Server-Side State (Session Tickets)
 - RFC 6960 — Online Certificate Status Protocol (OCSP)
-- RFC 6961 — TLS Multiple Certificate Status Request (OCSP stapling / Must-Staple context)
+- RFC 6961 — TLS Multiple Certificate Status Request (`status_request_v2`)
+- RFC 7633 — TLS Feature Extension (`Must-Staple`)
 - RFC 5280 — X.509 Public Key Infrastructure Certificate and CRL Profile
 - RFC 8555 — Automatic Certificate Management Environment (ACME)
 - RFC 9001 — Using TLS to Secure QUIC

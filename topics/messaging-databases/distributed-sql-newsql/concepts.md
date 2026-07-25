@@ -128,6 +128,15 @@ Reads are **not** usually run through the log. The **leaseholder** (in Cockroach
 the Paxos leader (in Spanner) can serve a linearizable read locally as long as it holds
 a valid time-based lease, avoiding a consensus round-trip per read.
 
+In CockroachDB the **Raft leader** and the **leaseholder** are two distinct roles, not
+the same thing. The Raft leader drives log replication for a range (it sends the
+`AppendEntries` and decides commit order). The leaseholder is the single replica that
+holds the time-based **lease** and is the only one allowed to serve consistent reads and
+coordinate writes for that range. They are normally **co-located** on the same node —
+CockroachDB actively rebalances to keep the leaseholder on the Raft leader so a read/write
+doesn't have to hop from one to the other — but they are conceptually separate and can
+temporarily diverge after a leadership change until the system re-converges them.
+
 ---
 
 ## Automatic sharding: ranges vs hashing, and rebalancing
@@ -215,6 +224,22 @@ sequenceDiagram
     Tx->>Tx: release locks, commit visible
 ```
 
+**Worked example — how long is commit-wait, and why is it correct?** TrueTime returns
+an interval whose width is `2ε` (from `earliest` to `latest`). Say ε ≈ 4 ms, so a call
+returns something like `[t−4ms, t+4ms]`. The transaction picks `s = latest = t+4ms`, then
+blocks until `TT.now().earliest > s`. The `earliest` bound started at `t−4ms`, so it must
+advance past `t+4ms` — a slide of about `2ε ≈ 8 ms`. That ~8 ms of blocking per read-write
+commit is the entire reason Google invests in GPS/atomic clocks: halving ε to 2 ms halves
+the wait to ~4 ms.
+
+Why the wait buys correctness: T1 commits at `s1`, waits out commit-wait, *then* acks the
+client. The client now starts T2, and the server stamps it `s2 = TT.now().latest`, which is
+`≥` the real time right now — and real time is already past `s1` (commit-wait proved `s1`
+is in everyone's past before the ack). So `s2 > s1` necessarily, and any reader orders them
+T1→T2. **Skip the wait** and T2 could be stamped from an interval that still straddles `s1`
+(e.g. `s2 = t+3ms < s1 = t+4ms`), making a transaction that finished *before* T2 began look
+like it happened *after* — violating external consistency.
+
 > [!KEY-TAKEAWAY]
 > TrueTime doesn't make clocks perfect — it makes the **error bound explicit** and then
 > pays for it with commit-wait. Tighter clock sync (smaller ε) means shorter waits and
@@ -245,6 +270,25 @@ uncertainty differently from Spanner's commit-wait:
   it, so it **restarts** at a higher timestamp (or advances its read timestamp). This
   is CockroachDB's analog of commit-wait: it pays the uncertainty cost on the *read*
   side (as occasional retries) rather than on every commit.
+
+**Worked example — a single uncertainty restart, step by step.** Suppose `max-offset = 500 ms`
+and a read-only transaction begins at HLC `read_ts = 100 ms`. Its **uncertainty window** is
+`[100, 600]` — anything committed in that window *might* have really happened before the read
+(the reader's clock could be up to 500 ms slow relative to the writer's).
+
+1. The read scans key `X` and finds a committed version with `commit_ts = 350 ms`.
+2. `350` lies inside `[100, 600]`. The reader cannot prove whether `X` was written *before*
+   or *after* its own read in real wall-clock time — the clock skew makes it genuinely
+   ambiguous. Returning "not found" could violate linearizability if `X` was actually written
+   first; returning the value could violate the snapshot if it was written after.
+3. To break the tie safely, CockroachDB assumes the write **might** be visible and pushes the
+   read timestamp forward to just past the offender: `read_ts → 350` (technically `350+`).
+   Re-reading at `350` makes `X` (commit_ts `350`) unambiguously in the past → it is returned.
+4. **Restarts are bounded, not infinite.** Each key is only checked against uncertainty *once*;
+   after the bump the window's upper bound is **not** re-extended to `350+500`. So a transaction
+   can be pushed at most by the values it actually encounters inside the original window — it
+   cannot ping-pong forever. In practice most reads see zero restarts; skew-window collisions
+   are rare.
 
 | | Spanner | CockroachDB / YugabyteDB |
 |---|---|---|
@@ -312,6 +356,18 @@ that can drive the transaction to completion. Fault tolerance comes from *combin
 > coordinator. Replicating the coordinator and participants with Paxos/Raft is exactly
 > the fix Spanner's paper describes ("2PC over Paxos groups").
 
+**Gotcha — the intent cleanup / contention footprint.** The happy path is clean, but
+consider what happens when a coordinator crashes *after* laying down intents but *before*
+flipping its transaction record: those write intents **linger** on their keys. A later
+transaction that touches one of those keys reads the intent, follows the pointer to the
+transaction record, and must **resolve** it: if the original coordinator's heartbeat has
+expired, the new txn can abort the stale one and clean up; if it is still live, the new txn
+may **wait** or **push** the other txn's timestamp. The practical consequence: a hot row
+(one many transactions contend on) forces those transactions to **serialize** through this
+resolve-and-push dance and can **thrash** even when the row's *replicas* are perfectly
+placed. This is why "no placement hotspot" does not mean "no contention hotspot" — a single
+high-write key hurts throughput regardless of how evenly its range is distributed.
+
 ---
 
 ## Why cross-region commit is slow (the latency cost of strong consistency)
@@ -373,6 +429,19 @@ These terms get conflated; interviewers probe the distinction.
 | Linearizable | Single object | Yes |
 | Strict serializable / external consistency | Multi-object txn | Yes |
 
+**What is write skew (the defining weakness of snapshot isolation)?** Two transactions read
+an overlapping snapshot, each makes a decision based on what it read, and each writes to a
+*different* row — so they never conflict on the same key, and SI happily commits both, yet
+together they break an invariant that no serial order would allow. Canonical example: two
+doctors, Alice and Bob, are on-call, and a rule says **at least one must remain on-call**.
+Both open the "go off-call" transaction at the same snapshot; each reads `on_call = 2` (sees
+the *other* is still on), each concludes "safe for me to leave," and each updates its **own**
+row to off-call. The two writes touch different rows, so SI sees no write-write conflict and
+commits both → **zero doctors on-call**, violating the invariant. Serializable forbids this
+(no serial order Alice-then-Bob or Bob-then-Alice ever leaves zero on-call); snapshot
+isolation permits it precisely because the conflict is on a *read* the other txn invalidated,
+not on a shared write key. This is why the table marks SI "No" for real-time/serial safety.
+
 Where the systems land (defaults matter — cite them):
 
 - **Spanner:** external consistency (strict serializable) for read-write transactions;
@@ -404,6 +473,28 @@ than overwriting in place, so **readers never block writers and writers never bl
 readers**. A read at timestamp `t` sees the latest version with commit timestamp `≤ t`.
 This is what makes consistent, lock-free snapshot reads and time-travel queries (`AS OF
 SYSTEM TIME`) possible.
+
+**How do you get from MVCC to *serializable*?** MVCC by itself only gives you **snapshot
+isolation** — each transaction reads a consistent point-in-time snapshot, which (as above)
+still permits write skew. To climb from SI to full serializable, CockroachDB tracks each
+transaction's **read set** and performs a **read refresh** at commit: it re-checks every key
+the txn read and verifies no *other* transaction committed a write to that key at a timestamp
+between the txn's read time and its commit time. If nothing changed, the reads are still valid
+at the commit timestamp and the txn commits; if some key *was* overwritten, the read the txn
+relied on is stale, so the txn **restarts** (retries at a newer timestamp). This is
+optimistic, timestamp-ordered concurrency control (an SSI-style approach): it detects
+read-write conflicts and aborts one side rather than preventing them with locks.
+
+**Worked contrast — write skew, caught.** Take the two-doctors case above under CockroachDB
+SERIALIZABLE. Both txns read `on_call` rows (read set = {Alice.on_call, Bob.on_call}). Alice's
+txn commits first, flipping `Alice.on_call = false`. When Bob's txn tries to commit, its read
+refresh re-reads `Alice.on_call` and finds it was written *after* Bob's read timestamp → Bob's
+read is invalidated → Bob's txn restarts, re-reads `on_call = 1`, and its "safe to leave" test
+now fails. Invariant preserved. Spanner reaches the same guarantee **pessimistically**: its
+read-write transactions take **locks** on the rows they read, so the second doctor's txn blocks
+until the first commits, then sees the updated value — locks up front vs. optimistic refresh at
+commit is the core trade-off (Spanner favors contention-heavy correctness with blocking; CRDB
+favors lock-free reads with occasional retries).
 
 - **Leaseholder reads (strongly consistent):** the range's leaseholder (CockroachDB) /
   Paxos leader (Spanner) serves reads at the current time without a consensus round-trip,

@@ -5,7 +5,9 @@ RPC doing, how long is it taking, is it succeeding, and how does one call relate
 the downstream calls it triggered?" The three classic signals map cleanly onto gRPC:
 
 - **Metrics** — aggregate counters/histograms per method and status code (call rate,
-  error rate, latency, message sizes, in-flight RPCs). The RED/USE numbers you alarm on.
+  error rate, latency, message sizes, in-flight RPCs). These are the **RED** (Rate,
+  Errors, Duration) numbers you alarm on for request-driven services; **USE**
+  (Utilization, Saturation, Errors) is the resource-side counterpart.
 - **Traces** — a span per RPC, stitched parent→child across services by propagating
   trace context **in request metadata**. Answers "where did the latency go" and "what
   fanned out from this request."
@@ -58,6 +60,16 @@ failing span and its children, then to the **logs** for that trace ID to read th
 error. The connective tissue is the **trace ID**, which is why propagating context
 correctly is the foundation.
 
+**Worked example — one trace ID threading all three signals.** A dashboard alarm fires:
+the error ratio for `/pkg.Svc/PlaceOrder` jumped from 0.1% to **8%** (metric → *what* and
+*how bad*). You filter **traces** to `rpc.method=PlaceOrder AND status_code=4` and open one
+failing span: trace `trace_id=abc123`, a SERVER span on `PlaceOrder` whose child CLIENT
+span to Service C returned status **4 (DEADLINE_EXCEEDED)** after 2.00 s (trace → *where*
+the latency/error lives — the downstream call to C). You then `grep trace_id=abc123` in the
+**logs** and read Service C's line: `"upstream db query timed out after 2s, conn pool
+exhausted"` (log → *why*). Same literal `abc123` carried from metric label → sampled trace
+→ log field; that shared ID is what lets you pivot in seconds instead of guessing.
+
 ## Per-RPC Metrics: What to Measure
 
 The standard gRPC metric set is per-RPC and keyed primarily by **fully-qualified method**
@@ -78,6 +90,27 @@ The standard gRPC metric set is per-RPC and keyed primarily by **fully-qualified
   sent/received on the stream, separate from the RPC count (one streaming RPC = many
   messages).
 
+**Worked example — reading p99 off a histogram (and why the mean lies).** Say 1000 RPCs
+completed in one scrape window, bucketed by a cumulative latency histogram (each bucket
+counts every request *at or below* that boundary):
+
+| Bucket (`le`) | Cumulative count |
+|---|---|
+| ≤ 10 ms | 900 |
+| ≤ 50 ms | 980 |
+| ≤ 100 ms | 999 |
+| ≤ +Inf | 1000 |
+
+- **p99** = the 990th slowest request (99% of 1000). Cumulative count hits 980 at 50 ms
+  and 999 at 100 ms, so the 990th request lands **in the 50–100 ms bucket**. Prometheus
+  interpolates linearly inside it: `50 + (990−980)/(999−980) × (100−50) ≈ 50 + (10/19)×50
+  ≈ **76 ms**`.
+- **Mean** ≈ `(900×5 + 80×30 + 19×75 + 1×2000) / 1000 ≈ 10 325/1000 ≈ **10 ms**`
+  (using each bucket's rough midpoint; the single +Inf request was a ~2 s straggler).
+
+The average says "everything's ~10 ms, all good" — yet 1% of callers wait 76 ms+ and one
+waited ~2 s. That gap is exactly why you keep a histogram and alarm on p99, not the mean.
+
 > [!WARNING]
 > A single streaming RPC produces **one** entry in the RPC-count/latency metrics (it
 > starts once, ends once) but **many** message-level events. If you only watch RPC count,
@@ -93,8 +126,9 @@ The measurement points differ between unary and streaming, which is a classic go
 | Message count | always 1 each way | N each way |
 | Correct SLO | end-to-end latency | first-message latency + per-message throughput |
 
-Cross-ref `observability` for histogram bucket design, exemplars, and how these feed
-Prometheus/OTel metric pipelines.
+Cross-ref `observability` for histogram bucket design, exemplars (trace IDs attached to
+specific histogram samples, so you can click a slow bucket and jump straight to an example
+trace), and how these feed Prometheus/OTel metric pipelines.
 
 ## OpenTelemetry gRPC Instrumentation & RPC Semantic Conventions
 
@@ -194,7 +228,13 @@ Gotchas:
   `traceparent` unchanged so every span claims the same id.
 - **Sampling decision propagates too.** The trace-flags bit in `traceparent` (sampled or
   not) is honored downstream — this is **head-based sampling**. If A decides not to
-  sample, B and C won't either, keeping a trace all-or-nothing.
+  sample, B and C won't either, keeping a trace all-or-nothing. **Trade-off:** head-based
+  is cheap and decided once at the root, but the decision is made *before* you know the
+  outcome — so a request that turns out to be an error or a p99 straggler is lost if the
+  root rolled a "don't sample." **Tail-based** sampling defers the keep/drop decision until
+  the trace finishes (keep all errors + slow ones), which catches exactly the interesting
+  traces, but it needs the collector to buffer every span in flight until the trace
+  completes (memory + latency cost). Cross-ref `observability` for depth.
 - **Streaming spans are long.** For a long-lived stream the span stays open for the
   stream's lifetime; events (messages) can be span events. Beware spans open for hours.
 - **Context must actually flow through your code.** Propagation only works if you pass
@@ -485,7 +525,13 @@ Cross-ref `networking` for HTTP/2 frame types Wireshark shows; cross-ref
   value; enable body/binary logging only selectively with redaction.
 - **"What label cardinality problem hits gRPC metrics?"** Labeling metrics by dynamic
   values (user id, request id) explodes time-series cardinality; keep labels to `method` +
-  `status` (bounded) and put high-cardinality data in traces/logs instead.
+  `status` (bounded) and put high-cardinality data in traces/logs instead. **Do the math:**
+  50 methods × 17 gRPC status codes = **850** time series — trivial. Add a `user_id` label
+  with 1M distinct users and the ceiling becomes 50 × 17 × 1,000,000 = **850 million**
+  series. Each series costs memory in Prometheus (order of a few KB of index + churn per
+  active series), so 850M series is on the order of **hundreds of GB to several TB** of RAM —
+  far beyond a single scraper, which OOM-kills long before it gets there. That is why `user_id`
+  belongs in a trace/log field, never a metric label.
 
 ## References
 

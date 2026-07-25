@@ -141,9 +141,47 @@ matters for interviews:
   generated.
 - **Better SQL generation**: Hibernate 6 reads results **by position** (column index)
   rather than by alias/name, and generates cleaner, more optimizable SQL. This also fixed
-  many edge cases in tuple/DTO and polymorphic queries.
+  many edge cases in tuple/DTO and polymorphic queries. Why by-position is faster and
+  unambiguous: because the SQL AST already knows the exact column order it emitted (step 2
+  above), Hibernate can pull `resultSet.getObject(1)`, `getObject(2)`… directly instead of
+  resolving a column *name/alias* per column per row — but it means for hand-written native
+  SQL the driver's column order and casing now matter.
 - **Extensibility**: new HQL functions and features (see 3.1/3.2 below) plug into the SQM
   → SQL-AST pipeline cleanly.
+
+**One query through the whole pipeline.** Take this HQL, run with `.setMaxResults(10)`:
+
+```
+select o from Order o where o.amount > 100
+```
+
+1. **Parse → SQM (typed, DB-agnostic).** ANTLR parses it, then the SQM builder resolves
+   every node *against the entity metamodel*: `o` becomes an `SqmRoot` of type `Order`;
+   `o.amount` becomes an `SqmPath` typed as `BigDecimal` (because that's the field's declared
+   type); the literal `100` is coerced to a **`BigDecimal` literal** to match the path — not
+   left as an `int`. The result is an `SqmComparisonPredicate(GT)` over two `BigDecimal`
+   nodes. This is where a type error (e.g. comparing `o.amount` to `'abc'`) is caught, *before*
+   any SQL exists. The exact same tree is what `criteriaBuilder.gt(root.get("amount"), 100)`
+   would produce — one model for HQL and Criteria.
+2. **Lower → SQL AST.** The SQM is translated to a `SelectStatement` SQL AST: a `TableGroup`
+   for table `orders` aliased `o1_0`, a select list of the mapped columns (`o1_0.id`,
+   `o1_0.amount`), and a `ComparisonPredicate` `o1_0.amount > ?` with `100` registered as a
+   **JDBC bind parameter**. The AST records the exact column *order* it emitted — this is the
+   fact that lets the reader index the `ResultSet` by position later.
+3. **Render → vendor SQL (the ONLY dialect-specific step).** The dialect walks the SQL AST.
+   The body is identical across vendors; only the limit clause diverges because each dialect
+   returns a different `LimitHandler`:
+
+   ```sql
+   -- PostgreSQLDialect (OffsetFetchLimitHandler):
+   select o1_0.id, o1_0.amount from orders o1_0 where o1_0.amount>? fetch first ? rows only
+
+   -- MySQLDialect (LimitLimitHandler):
+   select o1_0.id, o1_0.amount from orders o1_0 where o1_0.amount>? limit ?
+   ```
+
+   Same SQM, same SQL AST, two renderings that differ *only* at the leaf the dialect owns —
+   that is what "typed, DB-agnostic AST" buys you.
 
 > [!TIP]
 > A common upgrade surprise: because Hibernate 6 reads results **by column position**,
@@ -187,6 +225,27 @@ class Document {
     Metadata metadata;
 }
 ```
+
+**One value through both descriptors.** Trace the `@JdbcTypeCode(SqlTypes.VARCHAR) UUID externalRef`
+field for the value `UUID = 3f2504e0-4f89-41d3-9a0c-0305e82c3301`:
+
+- **On write (INSERT/UPDATE):**
+  1. `JavaType<UUID>` **unwraps** the domain value toward the JDBC side: it turns the `UUID`
+     into its `String` form `"3f2504e0-4f89-41d3-9a0c-0305e82c3301"` (because the target JDBC
+     type is `VARCHAR`).
+  2. `JdbcType` (the `VARCHAR` binder) **binds** it: `preparedStatement.setString(idx, "3f25…3301")`,
+     registering the column as `java.sql.Types.VARCHAR`. A 36-char string lands in the column.
+- **On read (SELECT):**
+  1. `JdbcType` **extracts** from the driver: `resultSet.getString(1)` → `"3f2504e0-…-e82c3301"`.
+  2. `JavaType<UUID>` **wraps** it back into the domain type: `UUID.fromString("3f25…3301")` →
+     the `UUID` object your entity field holds.
+
+Contrast the **default** `UUID` mapping (no `@JdbcTypeCode`): the JavaType is the same, but the
+JdbcType is now the `UUID`/binary one — on write it does `setBytes` of the 16-byte value (or
+`setObject` to a native `uuid` column on Postgres), and on read `getBytes`/`getObject`. Same Java
+side, different JDBC side: that is exactly the `(JavaType, JdbcType)` pair being tuned by one
+annotation, and why swapping only the JdbcType lets the same `UUID` field target a `varchar(36)`,
+a `binary(16)`, or a native `uuid` column without a `UserType`.
 
 > [!WARNING]
 > `@Type` and `@TypeDef` still *exist* in Hibernate 6 but their signatures changed
@@ -263,6 +322,12 @@ Three modern APIs interviewers may probe as "what's new / when would you use it"
 | Cascade of operations | Yes | **No** |
 | Lazy loading of associations | Yes | **No** (no proxies backed by a context) |
 | Best for | Normal transactional work | High-volume batch / streaming |
+
+> [!WARNING]
+> These are the *classic* (Hibernate 5-era) `StatelessSession` semantics. **Hibernate 7
+> changed two of them** — it now uses the second-level cache by default, and
+> `hibernate.jdbc.batch_size` no longer applies. See "## StatelessSession in Hibernate 7:
+> second-level cache and batching" below before relying on the table's cache/batching rows.
 
 - **Hibernate Reactive** — a non-blocking implementation built on **Mutiny** (SmallRye)
   and Vert.x reactive DB clients, for reactive stacks (e.g. Quarkus). It exposes reactive
@@ -482,10 +547,13 @@ The existing checklist says several `Session` methods are "deprecated/legacy" �
   `@Where`/`@WhereJoinTable` → **`@SQLRestriction`**; `@Proxy`, `@LazyCollection`,
   `@LazyToOne`, `@Persister`, `@SelectBeforeUpdate`, `@Loader`, the Hibernate `@Table`,
   `@ForeignKey`, `@Index`, `@Target`, `@GeneratorType`.
-- **Bootstrap/packaging changes:** `hibernate-models` replaces HCANN (the
-  annotation/reflection metadata layer), and classpath entity **scanning now requires the
-  opt-in `hibernate-scan-jandex` module** — a boot-time surprise if you relied on
-  auto-scan.
+- **Bootstrap/packaging changes:** `hibernate-models` replaces **HCANN (Hibernate Commons
+  Annotations)**, the old annotation/reflection metadata layer Hibernate used to read
+  mapping annotations off classes. Classpath entity **scanning now requires the opt-in
+  `hibernate-scan-jandex` module** — Jandex is Red Hat's offline annotation *index* (a
+  precomputed bytecode index of which classes carry which annotations), used to discover
+  `@Entity` classes without loading every class; making it opt-in is a boot-time surprise if
+  you relied on auto-scan.
 - **License change to Apache License 2.0** (from LGPL, as of 7.0.0.Beta5). This forced
   dropping `hibernate-ucp` (Oracle UCP connection pool) and the `TeradataDialect`, whose
   licenses were incompatible.

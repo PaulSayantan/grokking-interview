@@ -89,6 +89,41 @@ grype myorg/api:1.4.2
 docker scout cves myorg/api:1.4.2
 ```
 
+**Worked example — reading a real scan report.** A student needs to *see* what comes
+back. A representative Trivy OS-package table looks like this (values illustrative):
+
+```
+myorg/api:1.4.2 (debian 12.5)
+Total: 3 (HIGH: 2, CRITICAL: 1)
+
+┌───────────┬────────────────┬──────────┬──────────┬───────────────────┬───────────────┬──────────────────────────────┐
+│  Library  │ Vulnerability  │ Severity │  Status  │ Installed Version │ Fixed Version │            Title             │
+├───────────┼────────────────┼──────────┼──────────┼───────────────────┼───────────────┼──────────────────────────────┤
+│ libssl3   │ CVE-2024-6119  │ HIGH     │ fixed    │ 3.0.11-1          │ 3.0.14-1      │ openssl: denial of service   │
+│ zlib1g    │ CVE-2023-45853 │ CRITICAL │ affected │ 1:1.2.13.dfsg-1   │              │ MiniZip integer overflow     │
+│ libpcre3  │ CVE-2017-11164 │ HIGH     │ affected │ 2:8.39-15         │              │ regex stack exhaustion       │
+└───────────┴────────────────┴──────────┴──────────┴───────────────────┴───────────────┴──────────────────────────────┘
+```
+
+The layer that introduced each package comes from the base image (Debian 12.5 userland),
+so the fix is "bump/rebuild the base," not edit your own `RUN`. Now walk three rows:
+
+- **`libssl3` (row 1)** — installed `3.0.11-1`, fixed in `3.0.14-1`, status `fixed`. The
+  scanner compared the two versions (`3.0.11-1 < 3.0.14-1`) and a vendor fix *exists*, so
+  this fires and, being HIGH, **fails a `--severity CRITICAL,HIGH` gate**. `--ignore-unfixed`
+  keeps it (it *is* fixable) — the remediation is to rebuild on a patched base.
+- **`zlib1g` / `libpcre3` (rows 2-3)** — status `affected`, **Fixed Version is empty**: the
+  distro has no patched build yet. These fire on a plain gate, but with
+  `--ignore-unfixed` they are **dropped** because you can't remediate them today — that is
+  exactly the trade-off `--ignore-unfixed` makes (fewer un-actionable blockers, at the
+  cost of no longer tracking them unless you add an allowlist/SLA).
+- **The backport false-positive that *isn't* in this table** — suppose the image also has
+  `libc6 2.36-9` and NVD lists CVE-2023-XXXX as affecting glibc `2.36`. A naive
+  NVD-version match would add a fourth row. But Debian *backported* the fix into
+  `2.36-9+deb12u1` **without changing the upstream `2.36` number**. A distro-aware scanner
+  reads Debian's OVAL advisory, sees the package marked *not-vulnerable* at that build,
+  and **omits it** — so it never appears above. Matching NVD alone would over-report it.
+
 > [!WARNING]
 > A scanner only finds *known* CVEs that are *in its database*. A zero-day, an
 > unpublished vuln, or a bug in your own code is invisible to it. Scanning is necessary,
@@ -263,6 +298,12 @@ docker pull myorg/api:1.4.2   # refuses unsigned/tampered content
 ```
 
 DCT signs *tags* and provides freshness/rollback protection via TUF timestamp metadata.
+The mechanism, in one breath: TUF has a short-lived **timestamp role** that is re-signed
+frequently and expires quickly (hours/days). A malicious or lagging mirror that serves you
+an *old* snapshot (a rollback/freeze attack — "here's last month's un-patched signed
+image, pretend nothing changed") gets caught because its timestamp metadata has expired,
+and the client rejects expired metadata. That expiry clock is what turns "these bytes were
+validly signed once" into "these bytes are still the *current* signed release."
 Limitations that made the industry move on:
 
 - Tied to Docker Hub / a Notary server; awkward key management; poor CI ergonomics.
@@ -304,6 +345,15 @@ uses short-lived certificates from an OIDC identity:
 - **Rekor** — a public, append-only **transparency log** that records the signature, so
   the signing event is tamper-evidently auditable even after the ephemeral key is gone.
 
+If there's no public key to hold, what does `cosign verify` actually check against? Three
+things: (1) the signing certificate **chains to the trusted Fulcio root CA** (baked into
+the client's trust root), (2) the cert's embedded **identity + OIDC issuer match** the
+`--certificate-identity` / `--certificate-oidc-issuer` you expect (e.g. *exactly* that
+GitHub workflow from `token.actions.githubusercontent.com`), and (3) the signature has a
+**Rekor inclusion proof** — it's recorded in the transparency log, which also lets
+verification succeed after the ≈10-min cert has long expired (Rekor timestamps *when* it
+was signed). Trust thus shifts from "a key you protect" to "an identity + a public log."
+
 ```bash
 # Keyless: uses OIDC (e.g. GitHub Actions) + Fulcio + Rekor
 cosign sign myorg/api@sha256:abc123...
@@ -339,6 +389,21 @@ FROM node:20-slim
 FROM node:20-slim@sha256:2b3f1e...c9
 ```
 
+Where does that `sha256:` come from? You don't hand-copy it from Docker Hub — resolve it:
+
+```bash
+# Preferred: inspect the tag's manifest digest without pulling the whole image
+docker buildx imagetools inspect node:20-slim | grep Digest
+# → Digest: sha256:2b3f1e...c9
+
+# Or, if you've already pulled it, read the repo digest off the local image
+docker inspect --format '{{index .RepoDigests 0}}' node:20-slim
+# → node:20-slim@sha256:2b3f1e...c9
+```
+
+Renovate/Dependabot write and bump this digest for you automatically, so in practice you
+pin once and let the bot open PRs — you rarely type the hash by hand.
+
 Why pin:
 
 - **Reproducibility** — the same Dockerfile always resolves to the same base bytes; builds
@@ -360,6 +425,14 @@ scans). Pinning without a bump process is how you end up frozen on a vulnerable 
 ---
 
 ## Scanning in CI and at the registry — gating on severity
+
+First, what does "Critical/High" *mean*? Severity comes from **CVSS** (Common
+Vulnerability Scoring System), a 0–10 score. The bands: **None 0.0**, **Low 0.1–3.9**,
+**Medium 4.0–6.9**, **High 7.0–8.9**, **Critical 9.0–10.0**. So `--severity CRITICAL,HIGH`
+means "score ≥ 7.0." One catch: distros often assign their *own* severity that overrides
+NVD's base score (e.g. Red Hat may rate a glibc CVE Moderate where NVD says High, because
+it accounts for their compile flags), so the label a distro-aware scanner shows can differ
+from the raw NVD number for the same CVE.
 
 Scanning has value only if a *policy* acts on the result. The standard pattern is **fail
 the build on Critical/High**:
