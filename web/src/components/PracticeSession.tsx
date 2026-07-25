@@ -199,8 +199,8 @@ const ANIM_CSS = `
       transform var(--dur-fast, 140ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
       background-color 150ms ease, border-color 150ms ease, color 150ms ease;
   }
-  .ps-press-opt:hover:not(:disabled) { transform: scale(1.01); }
-  .ps-press-opt:active:not(:disabled) { transform: scale(0.985); }
+  .ps-press-opt:hover:not(:disabled):not([aria-disabled="true"]) { transform: scale(1.01); }
+  .ps-press-opt:active:not(:disabled):not([aria-disabled="true"]) { transform: scale(0.985); }
   .ps-answer-pulse { animation: ps-answer-pulse 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)); }
   .ps-answer-dip { animation: ps-answer-dip 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)); }
   .ps-progress-fill {
@@ -980,7 +980,13 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
             Q {current + 1} / {total}
           </p>
         </div>
-        <p class="text-sm font-medium" style="color: var(--color-text-muted);">
+        <p
+          class="text-sm font-medium"
+          style="color: var(--color-text-muted);"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           Score: {score} / {answeredCount}
         </p>
       </div>
@@ -1008,11 +1014,22 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       {activeQ && (
         /* Keyed by question index so the CSS enter animation replays on change. */
         <div key={current} class="card ps-card-in p-5 sm:p-6">
-          <h2 class="text-lg font-semibold" style="white-space: pre-wrap;">
+          <h2
+            id={`ps-q-${current}`}
+            class="text-lg font-semibold"
+            style="white-space: pre-wrap;"
+            tabIndex={-1}
+          >
             {activeQ.q.question.trim()}
           </h2>
 
-          <div class="mt-4 flex flex-col gap-2" role="group" aria-label="Answer choices">
+          {/* The answer group is labelled by the question stem, so a screen
+              reader announces the new question when focus moves here on Next. */}
+          <div
+            class="mt-4 flex flex-col gap-2"
+            role="group"
+            aria-labelledby={`ps-q-${current}`}
+          >
             {activeQ.options.map((opt, oi) => {
               const chosen = activeSelection === oi;
               const isCorrect = oi === activeQ.correctIndex;
@@ -1052,7 +1069,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                     color: fg,
                     cursor: isLocked ? "default" : "pointer",
                   }}
-                  disabled={isLocked}
+                  /* aria-disabled (not `disabled`) keeps locked options focusable
+                     so a screen-reader user can review every choice + its marked
+                     correctness after answering; select() still ignores re-answers. */
+                  aria-disabled={isLocked}
                   aria-pressed={chosen}
                   tabIndex={oi === focusIndex ? 0 : -1}
                   onClick={() => select(oi)}
@@ -1071,6 +1091,11 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                     {oi + 1}
                   </span>
                   <span class="flex-1">{opt}</span>
+                  {/* Correctness conveyed by name, not color alone (WCAG 1.4.1). */}
+                  {isLocked && isCorrect && <span class="sr-only"> (correct answer)</span>}
+                  {isLocked && chosen && !isCorrect && (
+                    <span class="sr-only"> (your answer — incorrect)</span>
+                  )}
                   {isLocked && isCorrect && (
                     <span
                       class="ps-mark-in ml-auto text-base font-bold"
@@ -1108,7 +1133,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                 >
                   {activeSelection === activeQ.correctIndex
                     ? "Correct"
-                    : `Incorrect — the correct answer is ${activeQ.correctIndex + 1}.`}
+                    : `Incorrect — the correct answer is ${activeQ.correctIndex + 1}. ${activeQ.options[activeQ.correctIndex]}`}
                 </p>
                 {(() => {
                   // Slim pools carry no explanation; look it up in the lazily
