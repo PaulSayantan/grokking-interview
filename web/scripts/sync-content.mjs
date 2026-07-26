@@ -227,18 +227,25 @@ async function processAuthoredDomain(domainSlug) {
     const groupLabel = isSystemDesign ? SD_GROUP_LABELS[groupKey] : "";
 
     // --- Inject domain + topic_slug into each question, normalize fields ---
-    const outQuestions = questions.map((q) => ({
-      id: q.id,
-      difficulty: q.difficulty,
-      tags: q.tags ?? [],
-      question: q.question,
-      options: q.options,
-      answer: q.answer,
-      explanation: q.explanation,
-      ...(q.ref ? { ref: q.ref } : {}),
-      domain: domainSlug,
-      topic_slug: slug,
-    }));
+    // `type` defaults to "single"; multi (select-all) questions carry `answers: []`
+    // instead of `answer`. Both the type and the correct-answer key must survive into
+    // the slim pool (the quiz needs them), so they're set here and kept by slimQuestion.
+    const outQuestions = questions.map((q) => {
+      const isMulti = q.type === "multi";
+      return {
+        id: q.id,
+        difficulty: q.difficulty,
+        tags: q.tags ?? [],
+        type: isMulti ? "multi" : "single",
+        question: q.question,
+        options: q.options,
+        ...(isMulti ? { answers: q.answers } : { answer: q.answer }),
+        explanation: q.explanation,
+        ...(q.ref ? { ref: q.ref } : {}),
+        domain: domainSlug,
+        topic_slug: slug,
+      };
+    });
 
     // --- Write per-subtopic questions JSON (full + slim) ---
     const domQDir = path.join(QUESTIONS_OUT, domainSlug);

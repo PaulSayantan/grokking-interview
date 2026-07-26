@@ -6,7 +6,10 @@ Contract: docs/content-schema.md
 Checks:
   - Required top-level keys present.
   - Each question has required fields with correct types.
-  - `answer` is an in-range 0-based index into `options`.
+  - `type` is `single` (default) or `multi`.
+  - single: `answer` is an in-range 0-based index into `options`.
+  - multi: `answers` is a list of in-range, unique 0-based indices with at least one
+    correct option AND at least one distractor (never all-correct).
   - 3-5 options per question.
   - `id`s are globally unique.
   - `difficulty` is one of the allowed values.
@@ -28,7 +31,10 @@ except ImportError:
     sys.exit("PyYAML is required: pip install pyyaml")
 
 ALLOWED_DIFFICULTY = {"beginner", "intermediate", "advanced", "expert"}
-REQUIRED_Q_FIELDS = {"id", "difficulty", "question", "options", "answer", "explanation"}
+ALLOWED_TYPE = {"single", "multi"}
+# Fields every question needs regardless of type; the correct-answer field
+# (`answer` for single, `answers` for multi) is checked separately below.
+REQUIRED_Q_FIELDS = {"id", "difficulty", "question", "options", "explanation"}
 
 
 def slugify_heading(text: str) -> str:
@@ -97,13 +103,37 @@ def validate_file(path: Path, seen_ids: dict[str, Path]) -> list[str]:
         if diff and diff not in ALLOWED_DIFFICULTY:
             errors.append(f"{loc}: difficulty '{diff}' not in {sorted(ALLOWED_DIFFICULTY)}")
 
+        # Question type: default single. `multi` uses `answers: [..]`, single uses `answer`.
+        qtype = q.get("type", "single")
+        if qtype not in ALLOWED_TYPE:
+            errors.append(f"{loc}: type '{qtype}' not in {sorted(ALLOWED_TYPE)}")
+
         options = q.get("options")
         if isinstance(options, list):
-            if not (3 <= len(options) <= 5):
-                errors.append(f"{loc}: expected 3-5 options, got {len(options)}")
-            ans = q.get("answer")
-            if not isinstance(ans, int) or not (0 <= ans < len(options)):
-                errors.append(f"{loc}: answer '{ans}' out of range for {len(options)} options")
+            n = len(options)
+            if not (3 <= n <= 5):
+                errors.append(f"{loc}: expected 3-5 options, got {n}")
+            if qtype == "multi":
+                # multi: `answers` list, no `answer`. Indices in range, unique, and at
+                # least one correct AND one distractor (an all-correct SATA teaches nothing).
+                if "answer" in q:
+                    errors.append(f"{loc}: multi question must use 'answers' (list), not 'answer'")
+                answers = q.get("answers")
+                if not isinstance(answers, list) or not answers:
+                    errors.append(f"{loc}: 'answers' must be a non-empty list of option indices")
+                elif not all(isinstance(a, int) and 0 <= a < n for a in answers):
+                    errors.append(f"{loc}: 'answers' {answers} has an index out of range for {n} options")
+                elif len(set(answers)) != len(answers):
+                    errors.append(f"{loc}: 'answers' {answers} has duplicate indices")
+                elif len(set(answers)) >= n:
+                    errors.append(f"{loc}: multi question marks all options correct — must leave ≥1 distractor")
+            else:
+                # single: exactly one correct via `answer`, no `answers`.
+                if "answers" in q:
+                    errors.append(f"{loc}: single question must use 'answer' (int), not 'answers'")
+                ans = q.get("answer")
+                if not isinstance(ans, int) or not (0 <= ans < n):
+                    errors.append(f"{loc}: answer '{ans}' out of range for {n} options")
             # MCQ integrity invariants: no blank options, no duplicate options
             # (a repeated option is either a typo or makes two answers "correct").
             # Compare CASE-SENSITIVELY: options that differ only by case are legitimately

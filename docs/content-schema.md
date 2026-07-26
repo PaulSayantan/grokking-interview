@@ -84,18 +84,55 @@ questions:
 |---|---|---|
 | `id` | yes | Unique **within its domain**. Format `<topic-slug>-<3-digit-seq>`. (Two different domains may reuse a topic-slug — e.g. `spring-boot` and `spring-core` both have `configuration-profiles-properties` — so ids collide across domains but not within one; the domain folder disambiguates.) |
 | `difficulty` | yes | One of `beginner`, `intermediate`, `advanced`, `expert`. `expert` = deep internals, tricky edge cases, and senior/staff-level scenario questions. |
+| `type` | no | `single` (default) or `multi`. Omit for ordinary single-answer questions. See **Question types** below. |
 | `tags` | no | Lowercase kebab tokens; used for cross-topic filtering. |
 | `question` | yes | The prompt. Multi-line ok (use `|`). |
-| `options` | yes | 3–5 options. Exactly one correct (single-answer MCQ v1). |
-| `answer` | yes | 0-based index of the correct option. |
+| `options` | yes | 3–5 options. For `single`: exactly one correct. For `multi`: ≥1 correct **and** ≥1 incorrect (never all-correct). |
+| `answer` | yes (single only) | 0-based index of the correct option. Present on `single` questions only. |
+| `answers` | yes (multi only) | List of 0-based indices of the correct options (≥1, and fewer than the option count). Present on `multi` questions only; replaces `answer`. |
 | `explanation` | yes | Why the answer is correct; teach, don't just assert. |
 | `ref` | no | `concepts.md#anchor` deep-link for "Learn more". |
 
+### Question types (`single` vs `multi`)
+
+- **`single`** (default, and the shape of ~all existing questions) — exactly one correct
+  option, addressed by `answer`. If `type` is omitted the question is `single`. Do **not**
+  add an `answers` field to a single question.
+- **`multi`** — "select all that apply" (SATA). Uses `answers: [i, j, …]` instead of
+  `answer`. **Scoring is all-or-nothing**: the learner is correct only if they select
+  *every* correct option and *no* incorrect one — so a `multi` question stays a binary
+  right/wrong for streaks, mastery, and spaced-repetition (no partial credit). Constraints:
+  at least one correct option **and** at least one distractor (a SATA question where every
+  option is correct teaches nothing and is rejected by the validator).
+
+```yaml
+  - id: aws-saas-isolation-patterns-071
+    difficulty: advanced
+    type: multi
+    tags: [isolation, trade-offs]
+    question: |
+      Which of the following are TRUE of the account-per-tenant (silo) isolation model
+      on AWS? Select all that apply.
+    options:
+      - "It gives each tenant the smallest possible blast radius"        # correct
+      - "It forfeits cross-tenant volume discounts and raises per-tenant cost"  # correct
+      - "It is the cheapest model to operate at thousands of tenants"    # wrong
+      - "Per-tenant billing falls out naturally from the account boundary"  # correct
+    answers: [0, 1, 3]
+    explanation: |
+      Silo maximizes isolation (blast radius = one tenant) and yields native per-account
+      billing, but you lose pooling economies and pay for a full stack per tenant — so it
+      is the *most* expensive, not the cheapest, at high tenant counts.
+    ref: "concepts.md#account-per-tenant-the-full-silo"
+```
+
 ### Authoring rules of thumb
 
-- **One clearly correct answer.** Distractors should be plausible but wrong for a
-  reason you could explain.
-- **No "all of the above"** style options — they don't teach well.
+- **One clearly correct answer** for `single` questions; for `multi`, each correct option
+  must be independently, defensibly true and each distractor independently false.
+  Distractors should be plausible but wrong for a reason you could explain.
+- **No "all of the above" / "none of the above"** style options — they don't teach well,
+  and a `multi` question exists precisely so you don't need them.
 - Randomize which position the correct answer sits in across a file (don't always
   make it option B).
 - Keep each question self-contained; don't rely on the previous question's context.

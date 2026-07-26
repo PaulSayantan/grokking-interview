@@ -162,6 +162,13 @@ Each question object (matches the `Question` type in `@lib/types`):
 ```
 
 - `answer` is a **0-based** index into `options` (3–5 options).
+- **Question type (`type`).** Default `single` (the shape above). A `type: "multi"`
+  question is select-all-that-apply: it carries `answers: [i, j, …]` (0-based indices of
+  **all** correct options) **instead of** `answer`. Both `type` and the correct-answer key
+  survive into the slim pool (the quiz needs them). Grading is **all-or-nothing** — the
+  chosen set must exactly equal `answers` — so a multi question is still a binary
+  correct/incorrect for streaks, mastery, and spaced-repetition. The practice island renders
+  multi options as a checkbox group with a Submit step (single stays tap-to-lock).
 - `ref` is optional. `domain` and `topic_slug` are **injected by sync** (not in source YAML)
   so a standalone question knows its origin for the "Learn more" link.
 - **Learn-more link:** given a question with `ref: "concepts.md#<anchor>"`, build

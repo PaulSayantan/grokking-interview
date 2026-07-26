@@ -61,11 +61,27 @@ interface Props {
   groups?: GroupOption[];
 }
 
-/** A question with its options shuffled and the correct index remapped. */
+/**
+ * A question with its options shuffled and the correct answer(s) remapped.
+ * `correctSet` holds the remapped correct option indices — one entry for a
+ * single-answer question, several for a `multi` (select-all-that-apply) one.
+ * `correctIndex` is kept for the single-answer path (−1 for multi).
+ */
 interface PreparedQuestion {
   q: Question;
   options: string[];
   correctIndex: number;
+  correctSet: Set<number>;
+  isMulti: boolean;
+}
+
+/** All-or-nothing grade: the chosen index set must exactly equal the correct set. */
+function selectionCorrect(
+  pq: PreparedQuestion,
+  sel: number[] | undefined,
+): boolean {
+  if (!sel || sel.length !== pq.correctSet.size) return false;
+  return sel.every((i) => pq.correctSet.has(i));
 }
 
 interface StoredStats {
@@ -137,14 +153,25 @@ function humanizeSlug(slug: string): string {
   return slug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-/** Sample + shuffle a pool into prepared questions (options shuffled, answer remapped). */
+/** The original correct-option indices for a question, regardless of type. */
+function originalCorrect(q: Question): number[] {
+  if (q.type === "multi") return Array.isArray(q.answers) ? q.answers : [];
+  return typeof q.answer === "number" ? [q.answer] : [];
+}
+
+/** Sample + shuffle a pool into prepared questions (options shuffled, answers remapped). */
 function prepare(pool: Question[], size: number): PreparedQuestion[] {
   const sampled = pickN(pool, size);
   return sampled.map((q) => {
     const order = seededShuffle(q.options.map((_, i) => i));
     const options = order.map((i) => q.options[i]);
-    const correctIndex = order.indexOf(q.answer);
-    return { q, options, correctIndex };
+    // Remap each original correct index to its new post-shuffle position.
+    const correctSet = new Set(
+      originalCorrect(q).map((orig) => order.indexOf(orig)),
+    );
+    const isMulti = q.type === "multi";
+    const correctIndex = isMulti ? -1 : (correctSet.values().next().value ?? -1);
+    return { q, options, correctIndex, correctSet, isMulti };
   });
 }
 
@@ -321,8 +348,13 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     null,
   );
   const [current, setCurrent] = useState(0);
-  // selections[i] = chosen option index for question i (undefined = unanswered)
-  const [selections, setSelections] = useState<(number | undefined)[]>([]);
+  // selections[i] = chosen option indices for question i.
+  //   • single: [] = unanswered, [k] = answered (locks immediately on tap).
+  //   • multi: [] = nothing checked yet, [..] = checked-but-not-yet-submitted OR submitted.
+  // `submitted[i]` disambiguates the multi case (a single question is "answered"
+  // exactly when selections[i] is non-empty; a multi one only once submitted).
+  const [selections, setSelections] = useState<number[][]>([]);
+  const [submitted, setSubmitted] = useState<boolean[]>([]);
   const [finished, setFinished] = useState(false);
   const [stats, setStats] = useState<StoredStats | null>(null);
   // Streak milestone just reached this session (null = none), for celebration.
@@ -404,7 +436,8 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       }
       const q = prepare(pool, preset.size ?? pool.length);
       setPrepared(q);
-      setSelections(new Array(q.length).fill(undefined));
+      setSelections(q.map(() => []));
+      setSubmitted(new Array(q.length).fill(false));
       setCurrent(0);
       setFinished(false);
       setFocusIndex(0);
@@ -469,28 +502,66 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   }, [resolved.url]);
 
   const total = prepared.length;
-  const answeredCount = selections.filter((s) => s !== undefined).length;
+  // A question counts as "answered" when locked: single => a choice exists;
+  // multi => it has been submitted.
+  const isAnswered = useCallback(
+    (i: number): boolean =>
+      prepared[i]?.isMulti ? !!submitted[i] : (selections[i]?.length ?? 0) > 0,
+    [prepared, submitted, selections],
+  );
+  const answeredCount = prepared.reduce((n, _pq, i) => (isAnswered(i) ? n + 1 : n), 0);
   const score = prepared.reduce(
-    (n, pq, i) => (selections[i] === pq.correctIndex ? n + 1 : n),
+    (n, pq, i) => (isAnswered(i) && selectionCorrect(pq, selections[i]) ? n + 1 : n),
     0,
   );
 
   const activeQ = prepared[current];
-  const activeSelection = activeQ ? selections[current] : undefined;
-  const isLocked = activeSelection !== undefined;
+  const activeSelection = activeQ ? (selections[current] ?? []) : [];
+  const isLocked = activeQ ? isAnswered(current) : false;
 
+  // Single-answer: tap locks immediately. Multi: tap toggles the option in/out of
+  // the pending selection (no lock until Submit).
   const select = useCallback(
     (optionIndex: number) => {
       if (finished) return;
-      setSelections((prev) => {
-        if (prev[current] !== undefined) return prev; // lock: ignore re-answer
-        const next = prev.slice();
-        next[current] = optionIndex;
-        return next;
-      });
+      const pq = prepared[current];
+      if (!pq) return;
+      if (pq.isMulti) {
+        if (submitted[current]) return; // locked after submit
+        setSelections((prev) => {
+          const next = prev.slice();
+          const cur = next[current] ?? [];
+          next[current] = cur.includes(optionIndex)
+            ? cur.filter((i) => i !== optionIndex)
+            : [...cur, optionIndex];
+          return next;
+        });
+      } else {
+        setSelections((prev) => {
+          if ((prev[current]?.length ?? 0) > 0) return prev; // lock: ignore re-answer
+          const next = prev.slice();
+          next[current] = [optionIndex];
+          return next;
+        });
+      }
     },
-    [current, finished],
+    [current, finished, prepared, submitted],
   );
+
+  // Multi-select: commit the pending checkboxes (requires ≥1 checked). This is the
+  // "lock" event for multi questions — mirrors the instant lock a single tap gives.
+  const submitMulti = useCallback(() => {
+    if (finished) return;
+    const pq = prepared[current];
+    if (!pq || !pq.isMulti) return;
+    if ((selections[current]?.length ?? 0) === 0) return; // must pick at least one
+    setSubmitted((prev) => {
+      if (prev[current]) return prev;
+      const next = prev.slice();
+      next[current] = true;
+      return next;
+    });
+  }, [current, finished, prepared, selections]);
 
   const goNext = useCallback(() => {
     if (current < total - 1) {
@@ -522,7 +593,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       recordAnswers(
         prepared.map((pq, i) => ({
           id: pq.q.id,
-          correct: selections[i] === pq.correctIndex,
+          correct: selectionCorrect(pq, selections[i]),
           domain: pq.q.domain,
           topic_slug: pq.q.topic_slug,
         })),
@@ -548,8 +619,9 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     (e: KeyboardEvent) => {
       if (finished || !activeQ) return;
       const count = activeQ.options.length;
+      const multi = activeQ.isMulti;
 
-      // Number keys select an option directly.
+      // Number keys select an option. Single: locks. Multi: toggles (until submitted).
       if (/^[1-9]$/.test(e.key)) {
         const idx = Number(e.key) - 1;
         if (idx < count) {
@@ -584,12 +656,16 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           optionRefs.current[n]?.focus();
           return n;
         });
+      } else if (multi && e.key === "Enter") {
+        // Multi: Enter submits the checked set (if any); Space toggles the focused box.
+        e.preventDefault();
+        submitMulti();
       } else if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         select(focusIndex);
       }
     },
-    [activeQ, finished, isLocked, focusIndex, select, goNext],
+    [activeQ, finished, isLocked, focusIndex, select, goNext, submitMulti],
   );
 
   // ---- Render states -------------------------------------------------------
@@ -772,7 +848,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     prepared.forEach((pq, i) => {
       const key = pq.q.topic_slug;
       const row = bySlug.get(key) ?? { title: humanizeSlug(key), right: 0, wrong: 0 };
-      if (selections[i] === pq.correctIndex) row.right++;
+      if (selectionCorrect(pq, selections[i])) row.right++;
       else row.wrong++;
       bySlug.set(key, row);
     });
@@ -923,8 +999,8 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         <h2 class="mb-3 mt-8 text-lg font-bold">Review</h2>
         <ol class="flex flex-col gap-3">
           {prepared.map((pq, i) => {
-            const chosen = selections[i];
-            const correct = chosen === pq.correctIndex;
+            const chosenSet = new Set(selections[i] ?? []);
+            const correct = selectionCorrect(pq, selections[i]);
             const href = learnMoreHref(pq.q);
             return (
               <li class="card reveal p-4" key={pq.q.id}>
@@ -932,6 +1008,14 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   <p class="font-medium">
                     <span style="color: var(--color-text-muted);">{i + 1}.</span>{" "}
                     {pq.q.question}
+                    {pq.isMulti && (
+                      <span
+                        class="ml-2 rounded px-1.5 py-0.5 align-middle text-xs font-semibold"
+                        style="background: var(--color-surface-2); color: var(--color-text-muted);"
+                      >
+                        Select all
+                      </span>
+                    )}
                   </p>
                   <span
                     class="shrink-0 rounded px-2 py-0.5 text-xs font-semibold"
@@ -946,8 +1030,8 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                 </div>
                 <ul class="mt-2 flex flex-col gap-1 text-sm">
                   {pq.options.map((opt, oi) => {
-                    const isCorrect = oi === pq.correctIndex;
-                    const isChosen = oi === chosen;
+                    const isCorrect = pq.correctSet.has(oi);
+                    const isChosen = chosenSet.has(oi);
                     const color = isCorrect
                       ? "var(--color-correct)"
                       : isChosen
@@ -1047,20 +1131,30 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
             {activeQ.q.question.trim()}
           </h2>
 
+          {activeQ.isMulti && (
+            <p class="mt-1 text-sm font-medium" style="color: var(--color-text-muted);">
+              Select all that apply, then submit.
+            </p>
+          )}
+
           {/* The answer group is labelled by the question stem, so a screen
-              reader announces the new question when focus moves here on Next. */}
+              reader announces the new question when focus moves here on Next.
+              Multi questions are a checkbox group; single stays a button list. */}
           <div
             class="mt-4 flex flex-col gap-2"
             role="group"
             aria-labelledby={`ps-q-${current}`}
           >
             {activeQ.options.map((opt, oi) => {
-              const chosen = activeSelection === oi;
-              const isCorrect = oi === activeQ.correctIndex;
+              const chosen = activeSelection.includes(oi);
+              const isCorrect = activeQ.correctSet.has(oi);
               let bg = "var(--color-surface)";
               let border = "var(--color-border)";
               let fg = "var(--color-text)";
               if (isLocked) {
+                // After lock: correct options green; a wrongly-chosen option red.
+                // (For multi, a missed correct option still shows green so the
+                // learner sees what they should also have picked.)
                 if (isCorrect) {
                   bg = "color-mix(in srgb, var(--color-correct) 14%, transparent)";
                   border = "var(--color-correct)";
@@ -1070,6 +1164,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   border = "var(--color-incorrect)";
                   fg = "var(--color-incorrect)";
                 }
+              } else if (chosen) {
+                // Multi, pre-submit: show the checked state clearly (primary tint).
+                bg = "color-mix(in srgb, var(--color-primary) 12%, transparent)";
+                border = "var(--color-primary)";
               }
               // One-shot settle animation when the answer locks in: the correct
               // option pulses up, an incorrect chosen option dips.
@@ -1095,24 +1193,31 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   }}
                   /* aria-disabled (not `disabled`) keeps locked options focusable
                      so a screen-reader user can review every choice + its marked
-                     correctness after answering; select() still ignores re-answers. */
+                     correctness after answering; select() still ignores re-answers.
+                     role=checkbox + aria-checked for multi; single stays a plain
+                     button whose selected state is aria-pressed. */
+                  role={activeQ.isMulti ? "checkbox" : undefined}
+                  aria-checked={activeQ.isMulti ? chosen : undefined}
                   aria-disabled={isLocked}
-                  aria-pressed={chosen}
+                  aria-pressed={activeQ.isMulti ? undefined : chosen}
                   tabIndex={oi === focusIndex ? 0 : -1}
                   onClick={() => select(oi)}
                 >
                   <span
-                    class="flex h-6 w-6 shrink-0 items-center justify-center rounded border text-xs font-bold tabular-nums"
+                    class={`flex h-6 w-6 shrink-0 items-center justify-center border text-xs font-bold tabular-nums ${activeQ.isMulti ? "rounded-[4px]" : "rounded"}`}
                     style={
                       isLocked && isCorrect
                         ? "background: var(--color-correct); color: var(--color-primary-contrast); border-color: var(--color-correct);"
                         : isLocked && chosen
                           ? "background: var(--color-incorrect); color: var(--color-primary-contrast); border-color: var(--color-incorrect);"
-                          : "background: var(--color-surface-2); color: var(--color-text-muted); border-color: var(--color-border); box-shadow: 0 1px 0 color-mix(in srgb, var(--color-border) 70%, transparent);"
+                          : chosen
+                            ? "background: var(--color-primary); color: var(--color-primary-contrast); border-color: var(--color-primary);"
+                            : "background: var(--color-surface-2); color: var(--color-text-muted); border-color: var(--color-border); box-shadow: 0 1px 0 color-mix(in srgb, var(--color-border) 70%, transparent);"
                     }
                     aria-hidden="true"
                   >
-                    {oi + 1}
+                    {/* Multi pre-lock shows a check when ticked; otherwise the hotkey number. */}
+                    {activeQ.isMulti && chosen && !isLocked ? "✓" : oi + 1}
                   </span>
                   <span class="flex-1">{opt}</span>
                   {/* Correctness conveyed by name, not color alone (WCAG 1.4.1). */}
@@ -1145,19 +1250,26 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
 
           {/* Feedback (announced) */}
           <div aria-live="polite" class="mt-4">
-            {isLocked && (
+            {isLocked && (() => {
+              const correct = selectionCorrect(activeQ, activeSelection);
+              // For an incorrect answer, name every correct option (1-based positions).
+              const correctList = [...activeQ.correctSet]
+                .sort((a, b) => a - b)
+                .map((i) => `${i + 1}. ${activeQ.options[i]}`)
+                .join("; ");
+              return (
               <div class="ps-feedback-in">
                 <p
                   class="text-sm font-semibold"
                   style={`color: ${
-                    activeSelection === activeQ.correctIndex
-                      ? "var(--color-correct)"
-                      : "var(--color-incorrect)"
+                    correct ? "var(--color-correct)" : "var(--color-incorrect)"
                   };`}
                 >
-                  {activeSelection === activeQ.correctIndex
+                  {correct
                     ? "Correct"
-                    : `Incorrect — the correct answer is ${activeQ.correctIndex + 1}. ${activeQ.options[activeQ.correctIndex]}`}
+                    : activeQ.isMulti
+                      ? `Incorrect — the correct answers are: ${correctList}`
+                      : `Incorrect — the correct answer is ${correctList}`}
                 </p>
                 {(() => {
                   // Slim pools carry no explanation; look it up in the lazily
@@ -1196,8 +1308,36 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                   </a>
                 )}
               </div>
-            )}
+              );
+            })()}
           </div>
+
+          {/* Multi, pre-submit: a Submit button commits the checked set. */}
+          {!isLocked && activeQ.isMulti && (
+            <div class="mt-5 flex items-center justify-between gap-3">
+              <p class="text-xs" style="color: var(--color-text-muted);">
+                {activeSelection.length === 0
+                  ? "Select one or more, then submit."
+                  : `${activeSelection.length} selected`}
+              </p>
+              <button
+                type="button"
+                disabled={activeSelection.length === 0}
+                class="ps-press-btn min-h-[44px] rounded-md px-5 py-2.5 font-semibold no-underline shadow-1"
+                style={`background: var(--color-primary); color: var(--color-primary-contrast); opacity: ${activeSelection.length === 0 ? 0.5 : 1}; cursor: ${activeSelection.length === 0 ? "default" : "pointer"};`}
+                onClick={submitMulti}
+              >
+                Submit
+                <span
+                  aria-hidden="true"
+                  class="ml-2 inline-flex items-center rounded border px-1.5 text-xs font-normal"
+                  style="border-color: color-mix(in srgb, var(--color-primary-contrast) 45%, transparent); color: var(--color-primary-contrast); opacity: 0.85;"
+                >
+                  ↵
+                </span>
+              </button>
+            </div>
+          )}
 
           {isLocked && (
             <div class="mt-5 flex justify-end">
@@ -1224,7 +1364,9 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
             <p class="mt-4 text-xs" style="color: var(--color-text-muted);">
               Tip: press{" "}
               <kbd style="border: 1px solid var(--color-border); color: var(--color-text-muted); border-radius: var(--radius-sm); padding: 0 0.25rem;">1</kbd>–<kbd style="border: 1px solid var(--color-border); color: var(--color-text-muted); border-radius: var(--radius-sm); padding: 0 0.25rem;">{String(activeQ.options.length)}</kbd>{" "}
-              or use arrow keys + Enter to answer.
+              {activeQ.isMulti
+                ? "to toggle options, then Enter to submit."
+                : "or use arrow keys + Enter to answer."}
             </p>
           )}
         </div>

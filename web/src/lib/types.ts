@@ -32,11 +32,15 @@ export interface Question {
   difficulty?: Difficulty;
   /** Absent in `.slim.json` pools. */
   tags?: string[];
+  /** "single" (default) or "multi" (select-all-that-apply). Absent => single. */
+  type?: "single" | "multi";
   question: string;
   /** 3-5 answer choices. */
   options: string[];
-  /** 0-based index into `options`. */
-  answer: number;
+  /** 0-based index of the correct option. Present on single questions. */
+  answer?: number;
+  /** 0-based indices of the correct options. Present on multi (SATA) questions. */
+  answers?: number[];
   /** Absent in `.slim.json` pools — look up in `_explanations.json` instead. */
   explanation?: string;
   /**
