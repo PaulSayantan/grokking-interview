@@ -25,10 +25,10 @@ questions:
     question: |
       What does the "first" in "Garbage-First (G1)" refer to?
     options:
-      - "It always collects the youngest region first"
-      - "It is the first collector to run at JVM startup"
+      - "It always collects the youngest region first, evacuating regions strictly in allocation order each cycle"
+      - "It is the first collector to run at JVM startup, initializing before any application thread begins executing"
       - "It prioritizes evacuating the regions containing the most garbage first, to maximize space reclaimed per unit of pause"
-      - "It collects the first region allocated after startup"
+      - "It collects the first region allocated after startup, treating that initial region as a permanent collection root"
     answer: 2
     explanation: |
       G1 divides the heap into regions and, during mixed collections, evacuates
@@ -44,7 +44,7 @@ questions:
       happened to CMS?
     options:
       - "CMS was made the default in JDK 11 and G1 was removed"
-      - "CMS was merged into ZGC in JDK 15"
+      - "CMS was merged into ZGC's old-generation codebase in JDK 15"
       - "CMS is still supported and recommended for large heaps"
       - "CMS was deprecated in JDK 9 (JEP 291) and removed in JDK 14 (JEP 363)"
     answer: 3
@@ -59,10 +59,10 @@ questions:
     question: |
       In G1, what is a "humongous" object?
     options:
-      - "Any object promoted to the old generation"
+      - "Any object that survives enough young collections to be promoted into the old generation"
       - "An object larger than half of a G1 region size, allocated directly into contiguous humongous regions"
-      - "An object referenced by more than 1000 other objects"
-      - "The largest object in the young generation each cycle"
+      - "An object referenced by more than 1000 other live objects and pinned by the collector"
+      - "The single largest object in the young generation, always evacuated first each cycle"
     answer: 1
     explanation: |
       In G1, objects larger than half a region are "humongous" and allocated
@@ -78,9 +78,9 @@ questions:
       during concurrent marking?
     options:
       - "Snapshot-At-The-Beginning (SATB) with a write barrier, plus Remembered Sets for cross-region references"
-      - "A pure reference-counting scheme"
-      - "Colored pointers with a load barrier"
-      - "Brooks forwarding pointers"
+      - "A pure reference-counting scheme that frees each object the instant its last reference is dropped"
+      - "Colored pointers with a load barrier that self-heals references lazily as they are read"
+      - "Brooks forwarding pointers, an extra header word per object indirecting to its current copy"
     answer: 0
     explanation: |
       G1 uses SATB marking (a write barrier records overwritten references so the
@@ -111,9 +111,9 @@ questions:
     question: |
       What is the headline design goal of ZGC regarding pause times?
     options:
-      - "Maximize throughput at the cost of longer pauses"
-      - "Guarantee zero garbage collection ever occurs"
-      - "Keep pauses under 200 ms, scaling with heap size"
+      - "Maximize raw throughput even if that means multi-second stop-the-world pauses under load"
+      - "Guarantee that zero garbage collection ever occurs by pre-allocating the entire heap upfront"
+      - "Keep pauses under a 200 ms ceiling that grows proportionally with the configured heap size"
       - "Keep max pause times sub-millisecond and independent of heap or live-set size"
     answer: 3
     explanation: |
@@ -128,10 +128,10 @@ questions:
       What is the core mechanism ZGC uses to relocate (compact) objects
       concurrently with the running application?
     options:
-      - "Stopping all threads at a safepoint while it updates every reference"
+      - "Stopping all application threads at a global safepoint while it rewrites every live reference in one pass"
       - "Colored pointers (metadata bits in the reference) combined with a load barrier that self-heals references when they are read"
-      - "A reference-counting garbage collector with cycle detection"
-      - "Reserving a full copy of the heap and swapping it atomically"
+      - "A reference-counting garbage collector with a background cycle-detection pass to reclaim islands of garbage"
+      - "Reserving a full duplicate copy of the entire heap and atomically swapping the two halves each cycle"
     answer: 1
     explanation: |
       ZGC stores color/metadata bits inside the 64-bit pointer and uses a load
@@ -147,9 +147,9 @@ questions:
       Why is ZGC a 64-bit-only collector?
     options:
       - "It stores metadata (color) bits inside the object pointer, which needs the extra address bits available in 64-bit pointers"
-      - "It requires at least 4 GB of RAM, only available on 64-bit systems"
-      - "32-bit JVMs cannot run concurrent GC threads"
-      - "It uses double-precision floating point for pause calculations"
+      - "It requires a minimum of 4 GB of committed RAM for its remembered sets, an amount only addressable on 64-bit operating systems"
+      - "32-bit JVMs are structurally unable to schedule the concurrent GC worker threads that ZGC's relocation phase depends on"
+      - "It performs pause-time budgeting with double-precision floating-point arithmetic, which needs the wider 64-bit CPU registers"
     answer: 0
     explanation: |
       ZGC embeds color/metadata bits directly in the pointer (colored pointers).
@@ -179,9 +179,9 @@ questions:
       What problem did Generational ZGC (JDK 21) address compared to the original
       single-generation ZGC?
     options:
-      - "The original ZGC could not run on Linux"
-      - "The original ZGC had pauses that grew with heap size"
-      - "The original ZGC required manual heap sizing at every GC"
+      - "The original ZGC could not run on Linux and was limited to Windows and macOS hosts"
+      - "The original ZGC had stop-the-world pauses that grew linearly with the configured heap size"
+      - "The original ZGC required the operator to manually resize the heap before every collection cycle"
       - "The original ZGC marked and relocated the entire heap every cycle, wasting CPU/memory; generational ZGC collects the young generation cheaply and frequently per the weak generational hypothesis"
     answer: 3
     explanation: |
@@ -197,10 +197,10 @@ questions:
       A service on ZGC with limited spare CPU shows occasional latency spikes
       described as "allocation stalls." What is happening?
     options:
-      - "ZGC has paused all threads for a full compaction"
+      - "ZGC has paused all application threads at a safepoint to perform a full stop-the-world heap compaction"
       - "The concurrent GC threads cannot keep up with the allocation rate, so mutator threads must stall waiting for memory to be reclaimed"
-      - "The JIT is deoptimizing hot methods"
-      - "ZGC has run out of colored pointer bits"
+      - "The JIT is aggressively deoptimizing hot methods back to the interpreter and stalling execution"
+      - "ZGC has exhausted the fixed pool of colored-pointer metadata bits and must reset them synchronously"
     answer: 1
     explanation: |
       ZGC relies on concurrent GC threads staying ahead of allocation. If there
@@ -216,9 +216,9 @@ questions:
       possible with a generous pause budget, why might ZGC be a poor choice?
     options:
       - "ZGC's concurrent work and load barriers add CPU/throughput overhead; a throughput-oriented collector (Parallel) may do more work per second"
-      - "ZGC cannot handle heaps over 4 GB"
-      - "ZGC only works with GraalVM Native Image"
-      - "ZGC forces single-threaded execution"
+      - "ZGC cannot handle heaps larger than 4 GB and silently falls back to Serial GC above that limit"
+      - "ZGC only works when the application is compiled ahead-of-time with GraalVM Native Image"
+      - "ZGC forces the entire application onto a single mutator thread while it is active"
     answer: 0
     explanation: |
       ZGC optimizes latency, not throughput. Its load barrier and concurrent
@@ -248,9 +248,9 @@ questions:
     question: |
       What is Shenandoah's defining capability relative to G1?
     options:
-      - "It never allocates in the young generation"
-      - "It disables the JIT compiler to reduce pauses"
-      - "It only works on 32-bit JVMs"
+      - "It never allocates in the young generation, placing every new object straight into old-gen regions"
+      - "It disables the JIT compiler while collecting so that pause times are kept short and predictable"
+      - "It only works on 32-bit JVMs and is unavailable on modern 64-bit server deployments"
       - "It performs concurrent compaction/evacuation — relocating live objects while the application runs — keeping pauses short and largely heap-size-independent"
     answer: 3
     explanation: |
@@ -265,10 +265,10 @@ questions:
       Which mechanism did early versions of Shenandoah use to support concurrent
       relocation, later largely replaced by load-reference barriers (LRB)?
     options:
-      - "Colored pointers embedded in the reference"
+      - "Colored pointers with metadata bits embedded directly in each 64-bit object reference"
       - "Brooks forwarding pointers — an extra word per object pointing to itself or its relocated copy"
-      - "Remembered sets only"
-      - "Reference counting"
+      - "Remembered sets alone, tracking only cross-region references without any per-object indirection"
+      - "Reference counting, decrementing a per-object counter and freeing it the moment the count hits zero"
     answer: 1
     explanation: |
       Shenandoah originally used Brooks forwarding pointers (an extra header word
@@ -283,9 +283,9 @@ questions:
       Which statement best distinguishes ZGC from Shenandoah?
     options:
       - "ZGC uses colored pointers + load barriers and is 64-bit-only, scaling to multi-TB heaps; Shenandoah uses forwarding pointers / load-reference barriers"
-      - "ZGC targets throughput; Shenandoah targets latency"
-      - "Shenandoah is 64-bit-only while ZGC runs on 32-bit"
-      - "They are the same collector under two marketing names"
+      - "ZGC is tuned purely for batch throughput while Shenandoah is the only one of the two aimed at latency"
+      - "Shenandoah is the 64-bit-only collector, whereas ZGC is specifically supported on legacy 32-bit JVMs"
+      - "They are in fact the same collector shipped under two different marketing names by competing vendors"
     answer: 0
     explanation: |
       Both are concurrent low-pause compacting collectors. The key mechanical
@@ -300,10 +300,10 @@ questions:
       Why might a developer on a stock Oracle JDK build have found Shenandoah
       unavailable historically?
     options:
-      - "Shenandoah requires a paid license key"
-      - "Shenandoah only runs on Windows"
+      - "Shenandoah requires a paid commercial license key that must be unlocked with a runtime VM flag"
+      - "Shenandoah only runs on Windows and has no supported implementation on Linux or macOS hosts"
       - "For a long time Oracle's own JDK builds shipped without Shenandoah, though it is in mainline OpenJDK and included in builds like Red Hat/Adoptium"
-      - "Shenandoah was never merged into OpenJDK"
+      - "Shenandoah was never merged into mainline OpenJDK and lives only in an external vendor fork"
     answer: 2
     explanation: |
       Shenandoah is part of mainline OpenJDK, but Oracle's own JDK binaries did
@@ -334,10 +334,10 @@ questions:
     question: |
       What is the Epsilon garbage collector (JEP 318, JDK 11)?
     options:
-      - "A generational low-pause collector for TB heaps"
+      - "A generational low-pause collector that keeps sub-millisecond pauses across multi-terabyte heaps using colored pointers"
       - "A no-op collector that allocates but never reclaims memory, used for testing/benchmarking; the JVM exits (OOM) when the heap is exhausted"
-      - "The new default collector since JDK 11"
-      - "A collector optimized for 32-bit systems"
+      - "The garbage collector that replaced G1 as the JVM default starting in JDK 11, tuned for balanced throughput and pauses"
+      - "A compacting collector optimized for 32-bit systems and small embedded heaps, minimizing memory overhead per object"
     answer: 1
     explanation: |
       Epsilon (JEP 318, JDK 11) handles allocation but performs no reclamation.
@@ -354,9 +354,9 @@ questions:
       change to evaluate?
     options:
       - "Evaluate ZGC or Generational ZGC, which target sub-millisecond pauses independent of heap size"
-      - "Switch to Serial GC to reduce CPU usage"
-      - "Switch to Parallel GC to reduce pauses"
-      - "Disable garbage collection with Epsilon in production"
+      - "Switch to Serial GC, whose single-threaded stop-the-world collection cuts CPU usage and thereby shortens the p99 pauses"
+      - "Switch to Parallel GC, whose multi-threaded young collections shrink pause length below G1 on a heap this large"
+      - "Disable garbage collection entirely with Epsilon in production so that no stop-the-world pause can ever occur"
     answer: 0
     explanation: |
       G1 pauses tend to grow with heap size and are bounded by a goal, not a
@@ -371,10 +371,10 @@ questions:
       Which statement about switching from G1 to a low-pause collector like ZGC is
       MOST accurate?
     options:
-      - "It always improves both throughput and latency for free"
-      - "It requires switching to GraalVM Native Image"
+      - "It always improves both throughput and latency for free, since concurrent collection does its work without competing for CPU"
+      - "It requires first switching to GraalVM Native Image, because ZGC's load barriers are only emitted by the ahead-of-time compiler"
       - "Lower pauses can come at the cost of reduced total throughput and increased CPU and memory usage"
-      - "It eliminates the need to size the heap"
+      - "It eliminates the need to size the heap, as ZGC grows and shrinks the heap fully automatically to fit the live set"
     answer: 2
     explanation: |
       Low-pause collectors trade wall-clock work and RAM for latency smoothness.
@@ -406,10 +406,10 @@ questions:
       Why does a freshly started JVM application typically run slower before
       reaching "peak" performance?
     options:
-      - "The GC is disabled at startup"
+      - "The garbage collector is disabled at startup and only activates once the first old-generation region fills, adding overhead later"
       - "Code starts out interpreted and only gets JIT-compiled to optimized native code once it is identified as hot (warm-up)"
-      - "The OS caches are cold and never warm up"
-      - "The JVM runs at half CPU frequency until warmed up"
+      - "The operating system's file and page caches start cold and, for a server JVM, never warm up during the process lifetime"
+      - "The JVM deliberately runs the CPU at half its rated clock frequency until class loading and verification have fully completed"
     answer: 1
     explanation: |
       HotSpot begins by interpreting bytecode and profiles execution to find hot
@@ -424,9 +424,9 @@ questions:
       What is the primary difference between the C1 and C2 JIT compilers?
     options:
       - "C1 (client) compiles fast with lighter optimization; C2 (server) compiles more slowly but applies aggressive optimizations for the fastest code"
-      - "C1 compiles Kotlin, C2 compiles Java"
-      - "C1 runs on ARM, C2 runs on x86 only"
-      - "C1 is for GC, C2 is for threads"
+      - "C1 compiles Kotlin and other JVM guest languages, while C2 is reserved exclusively for bytecode produced by the Java compiler"
+      - "C1 targets ARM and other embedded processors, whereas C2 emits native code only for the x86-64 server architecture"
+      - "C1 is the compiler dedicated to garbage-collection barriers, while C2 specializes in compiling thread synchronization primitives"
     answer: 0
     explanation: |
       C1 (client) prioritizes fast compilation and quick startup with modest
@@ -441,10 +441,10 @@ questions:
       In HotSpot tiered compilation, what is the typical progression of a hot
       method from start to fully optimized?
     options:
-      - "Level 4 (C2) → Level 0 (interpreter)"
-      - "Level 1 (C1 trivial) → Level 2 (C2) directly"
+      - "Level 4 (C2 fully optimized) → Level 0 (interpreter), progressively stripping optimizations as the method cools down"
+      - "Level 1 (C1 trivial, no profiling) → Level 2 (C2 with profiling), skipping the interpreter for any method flagged hot at load time"
       - "Level 0 (interpreter) → Level 3 (C1 with full profiling) → Level 4 (C2)"
-      - "Interpreter → C2 → C1"
+      - "Interpreter → Level 4 (C2) → Level 1 (C1), where C1 re-runs afterward to add the runtime profiling data C2 lacked"
     answer: 2
     explanation: |
       The common path is Level 0 (interpret) → Level 3 (C1 with full profiling) →
@@ -458,9 +458,9 @@ questions:
     question: |
       What triggers HotSpot to compile a method?
     options:
-      - "A fixed timer that fires every 10 seconds"
-      - "Only an explicit call to System.compile()"
-      - "The garbage collector requesting compilation"
+      - "A fixed background timer that fires every 10 seconds and compiles whichever method was most recently executing"
+      - "Only an explicit call to System.compile(method), which the application must invoke to opt a method into JIT compilation"
+      - "The garbage collector requesting compilation of methods whose objects survived the most recent young-generation collection"
       - "Invocation counters and back-edge (loop) counters crossing thresholds, indicating the code is hot"
     answer: 3
     explanation: |
@@ -474,10 +474,10 @@ questions:
     question: |
       What is On-Stack Replacement (OSR) in the context of the HotSpot JIT?
     options:
-      - "Replacing the operating system scheduler with the JVM's own"
+      - "Replacing the operating system's thread scheduler with the JVM's own cooperative scheduler while compiled code is running"
       - "Compiling and swapping in optimized code for a long-running loop mid-execution, without waiting for the method to be re-entered"
-      - "Moving objects off-heap during GC"
-      - "Restarting a stalled thread on a different core"
+      - "Moving live objects from the stack into an off-heap arena during GC so that a running frame is not disturbed"
+      - "Restarting a thread that has stalled on a lock by migrating its saved stack frame onto a different idle CPU core"
     answer: 1
     explanation: |
       OSR lets the JVM replace an interpreted long-running loop with compiled code
@@ -509,10 +509,10 @@ questions:
       A virtual call site that has observed many different receiver types
       ("megamorphic") tends to hurt performance primarily because:
     options:
-      - "It forces a full garbage collection on each call"
-      - "It triggers deoptimization on every invocation"
+      - "It forces a full stop-the-world garbage collection on each call so the collector can update the dispatch table"
+      - "It triggers a deoptimization back to the interpreter on every single invocation, discarding the compiled method each time"
       - "The compiler cannot reliably devirtualize/inline it, losing the optimizations inlining would enable"
-      - "It disables tiered compilation globally"
+      - "It disables tiered compilation globally, forcing every other method in the process to fall back to the interpreter"
     answer: 2
     explanation: |
       Monomorphic/bimorphic call sites can be speculatively devirtualized and
@@ -526,9 +526,9 @@ questions:
     question: |
       What is deoptimization in HotSpot, and why is it necessary?
     options:
-      - "A bug where the JIT produces slower code than the interpreter"
-      - "The act of turning off the C2 compiler permanently"
-      - "Compressing the compiled code cache to save memory"
+      - "A performance bug in which the JIT accidentally produces machine code that runs slower than the original interpreted bytecode"
+      - "The act of permanently turning off the C2 compiler for a method so that it is only ever executed by the C1 client compiler"
+      - "Compressing and de-duplicating entries in the compiled code cache to reclaim memory once it approaches its size limit"
       - "Discarding compiled code and falling back to the interpreter when a speculative assumption (e.g., a class hierarchy or an untaken branch) is invalidated — it makes aggressive speculation safe"
     answer: 3
     explanation: |
@@ -545,10 +545,10 @@ questions:
       Which event can commonly trigger a wave of deoptimizations during
       application warm-up?
     options:
-      - "Reading a file from disk"
+      - "Reading a large file from disk, which forces the compiler to flush its code cache to make room for I/O buffers"
       - "Loading a new class that overrides a method the compiler had assumed was effectively final / monomorphic (invalidating Class Hierarchy Analysis)"
-      - "Allocating a large array"
-      - "Calling Thread.sleep()"
+      - "Allocating a very large array that spans multiple heap regions and triggers a humongous-object relocation pass"
+      - "Calling Thread.sleep(), which parks the thread and invalidates any speculative optimizations tied to that call site"
     answer: 1
     explanation: |
       C2 uses Class Hierarchy Analysis to devirtualize calls assuming no
@@ -564,9 +564,9 @@ questions:
       deoptimizations?
     options:
       - "The compilation log produced by -XX:+UnlockDiagnosticVMOptions -XX:+LogCompilation (an XML log)"
-      - "The GC log from -Xlog:gc*"
-      - "A heap dump (.hprof)"
-      - "A JFR recording (.jfr) only"
+      - "The unified garbage-collection log emitted by -Xlog:gc*, correlating each pause with the methods compiled during it"
+      - "A heap dump (.hprof) captured at exit, from which JITWatch reconstructs the inlining tree by walking object references"
+      - "A JFR recording (.jfr), which is the only source JITWatch can parse for method-level compilation and deopt events"
     answer: 0
     explanation: |
       JITWatch parses the HotSpot LogCompilation XML output (enabled with
@@ -580,10 +580,10 @@ questions:
     question: |
       What is the practical effect of running with -XX:TieredStopAtLevel=1?
     options:
-      - "It disables the interpreter entirely"
-      - "It forces C2-only compilation for maximum peak performance"
+      - "It disables the interpreter entirely, so every method is compiled by C1 on its very first invocation before running"
+      - "It forces C2-only compilation from the first invocation, skipping C1 to reach maximum peak performance immediately"
       - "It forces C1-only compilation (no C2), giving faster startup and lower peak performance — useful for short-lived tools"
-      - "It enables Graal as the top-tier compiler"
+      - "It enables the Graal compiler as the top-tier optimizing compiler in place of C2 for the hottest methods"
     answer: 2
     explanation: |
       `-XX:TieredStopAtLevel=1` caps compilation at C1 (no C2). Startup is quicker
@@ -598,9 +598,9 @@ questions:
       Why should Java microbenchmarks be written with JMH rather than a hand-rolled
       loop with System.nanoTime()?
     options:
-      - "JMH runs benchmarks on the GPU"
-      - "JMH disables the JIT so results are deterministic"
-      - "Hand-rolled loops always crash the JVM"
+      - "JMH offloads the benchmark body to the GPU, giving reproducible timings free of CPU scheduling and cache-contention noise"
+      - "JMH disables the JIT for the whole run so results are fully deterministic and reflect the raw interpreter execution cost"
+      - "Hand-rolled timing loops using System.nanoTime() reliably crash the JVM once the method is promoted to C2"
       - "JMH handles JIT warm-up, dead-code elimination (via Blackhole), and fork isolation, so you measure steady-state C2 code rather than interpreter/C1 artifacts"
     answer: 3
     explanation: |
@@ -630,10 +630,10 @@ questions:
       Which optimization can allow the `new Point(...)` allocation to be removed
       entirely so no object is created on the heap?
     options:
-      - "Loop unrolling"
+      - "Loop unrolling, which merges several iterations so the repeated Point allocations collapse into one shared heap object"
       - "Escape analysis with scalar replacement — since the Point never escapes the loop iteration, its fields are replaced by local scalars and no heap allocation occurs"
-      - "On-stack replacement (OSR)"
-      - "Deoptimization"
+      - "On-stack replacement (OSR), which relocates the Point from the heap onto the current thread's stack frame for the loop"
+      - "Deoptimization, which discards the compiled loop and lets the interpreter reuse a single cached Point across iterations"
     answer: 1
     explanation: |
       When escape analysis proves an object does not escape its scope, C2 can
@@ -649,9 +649,9 @@ questions:
       What does GraalVM Native Image produce?
     options:
       - "A standalone native executable containing the app, needed JDK libraries, and a minimal runtime (Substrate VM) — no separate JVM required at run time"
-      - "A JAR that runs faster on any JVM"
-      - "An interpreter written in Python"
-      - "A container image only, not an executable"
+      - "A portable JAR that has been optimized to run faster on any standard JVM without recompilation"
+      - "A bytecode interpreter, written in Python, that re-executes the class files at run time"
+      - "A Docker/OCI container image only, bundling a full JVM, rather than a standalone executable binary"
     answer: 0
     explanation: |
       Native Image ahead-of-time compiles the application plus reachable library
@@ -665,10 +665,10 @@ questions:
     question: |
       Native Image is especially attractive for which kind of workload?
     options:
-      - "Long-running throughput-critical services that stay warm for days"
-      - "Numeric HPC batch jobs that need maximum steady-state throughput"
+      - "Long-running, throughput-critical services that stay warm for days and depend on the JIT reaching peak-optimized C2 code"
+      - "Numeric HPC batch jobs that run for hours and need the maximum steady-state throughput a fully warmed-up JVM can deliver"
       - "Serverless functions, CLIs, and scale-to-zero microservices where fast startup and low memory matter and warm-up would be wasted"
-      - "Applications that rely heavily on runtime reflection and dynamic class loading"
+      - "Applications that rely heavily on runtime reflection, dynamic proxies, and class loading discovered only during execution"
     answer: 2
     explanation: |
       Native Image starts in milliseconds with a small footprint, ideal where
@@ -682,9 +682,9 @@ questions:
     question: |
       What is the "closed-world assumption" in GraalVM Native Image?
     options:
-      - "The image can only make outbound network calls to a fixed allowlist"
-      - "The heap size is fixed at build time and cannot grow"
-      - "Only one thread may run at a time"
+      - "The generated image may only open outbound network connections to a fixed allowlist of hosts declared at build time"
+      - "The maximum heap size is frozen at build time and the process cannot grow its heap beyond that limit at run time"
+      - "Only a single application thread may run at any instant, because the closed-world analysis serializes all execution"
       - "All reachable code must be known at build time via static analysis; anything discovered only at runtime (reflection, proxies, JNI, resources) must be declared in configuration"
     answer: 3
     explanation: |
@@ -701,10 +701,10 @@ questions:
       Your Native Image build fails at runtime with a ClassNotFoundException /
       reflection error on a class you load by name. What is the standard remedy?
     options:
-      - "Recompile with -XX:+UseZGC"
+      - "Recompile the native image with -XX:+UseZGC so the collector can locate the reflected class during marking"
       - "Declare the class in reflection configuration (reflect-config.json) or auto-generate config by running the app on a JVM with the native-image tracing agent"
-      - "Increase the heap size at build time"
-      - "Switch to Shenandoah GC"
+      - "Increase the maximum heap size at build time so the closed-world analysis has room to include the missing class"
+      - "Switch the runtime garbage collector to Shenandoah, whose concurrent marking discovers reflected classes automatically"
     answer: 1
     explanation: |
       Reflectively accessed classes must be registered in reflect-config.json (or
@@ -719,9 +719,9 @@ questions:
       Compared with a fully warmed-up HotSpot JVM, a Native Image typically has:
     options:
       - "Faster startup and lower memory, but often lower peak throughput because there is no runtime profile-guided JIT (C2) at run time"
-      - "Higher peak throughput because AOT code is always faster than JIT code"
-      - "Identical performance characteristics in every dimension"
-      - "Slower startup but higher throughput"
+      - "Higher peak throughput in every case, because statically AOT-compiled code is unconditionally faster than JIT-generated code"
+      - "Effectively identical performance characteristics across startup time, memory footprint, and steady-state throughput"
+      - "Noticeably slower startup yet higher steady-state throughput than a warmed JVM, because AOT skips the interpreter tier"
     answer: 0
     explanation: |
       Native Image wins on startup and footprint but usually loses on peak
@@ -736,10 +736,10 @@ questions:
       What is Profile-Guided Optimization (PGO) in the GraalVM Native Image
       context?
     options:
-      - "A runtime JIT that kicks in after the native image warms up"
-      - "A garbage collector tuning wizard"
+      - "A lightweight runtime JIT compiler embedded in the native image that kicks in and recompiles hot methods once it warms up"
+      - "An interactive wizard that inspects a running image and recommends garbage-collector flags to tune pause times and footprint"
       - "Collecting execution profiles from a training run and feeding them back into the native-image build to narrow the peak-performance gap (largely an Oracle GraalVM feature)"
-      - "A way to disable the closed-world assumption"
+      - "A build option that relaxes the closed-world assumption so that classes can be discovered by reflection at run time"
     answer: 2
     explanation: |
       Since a native image has no runtime JIT, PGO gathers profiles from a
@@ -754,9 +754,9 @@ questions:
       What happened to the experimental `jaotc` ahead-of-time compiler (JEP 295,
       JDK 9) and the experimental Graal JIT integration in OpenJDK?
     options:
-      - "They became the default in JDK 11"
-      - "They were merged into ZGC"
-      - "They are still experimental and enabled by default in JDK 21"
+      - "Both graduated from experimental status to become the default compilers shipped in the JDK 11 release"
+      - "Both were folded into the ZGC codebase and now run as part of its concurrent-compilation phase"
+      - "Both remain experimental and are enabled by default in JDK 21 behind an unlock-experimental flag"
       - "Both were removed in JDK 17 (JEP 410); modern 'AOT' in the Java ecosystem effectively means the separate GraalVM Native Image project"
     answer: 3
     explanation: |
@@ -773,10 +773,10 @@ questions:
       for weeks and uses several dynamic-proxy / reflection-heavy frameworks. They
       ask whether to move it to GraalVM Native Image for "performance." Best advice?
     options:
-      - "Yes — Native Image is always faster than the JVM"
+      - "Yes — move it, because a Native Image binary is unconditionally faster than the JVM for every category of workload"
       - "Native Image is likely a poor fit here: a warmed JVM's C2 usually gives higher peak throughput, and the reflection/proxy usage fights the closed-world model; keep it on the JVM (tune GC/JIT instead)"
-      - "Yes, because it will reduce GC pauses to zero"
-      - "It doesn't matter; performance is identical either way"
+      - "Yes — move it, because compiling ahead of time eliminates the garbage collector entirely and reduces GC pauses to zero"
+      - "It makes no measurable difference; peak throughput is identical whether it runs as a native image or on the JVM"
     answer: 1
     explanation: |
       Native Image's strengths (startup, footprint) are irrelevant to a
@@ -792,9 +792,9 @@ questions:
       Image primarily because they:
     options:
       - "Do as much wiring (dependency injection, config, metadata) as possible at build time, minimizing runtime reflection so the closed-world analysis succeeds"
-      - "Avoid using any Java standard library classes"
-      - "Ship their own JIT compiler inside the native image"
-      - "Only run on 32-bit JVMs"
+      - "Avoid using any Java standard library classes, replacing them with hand-written primitives that the analyzer can trace"
+      - "Bundle their own lightweight JIT compiler inside the native image so hot methods can still be recompiled at run time"
+      - "Run only on 32-bit JVMs, where the closed-world static analysis has a smaller address space to reason about"
     answer: 0
     explanation: |
       Quarkus/Micronaut (and Spring's AOT) shift traditionally-runtime work
@@ -809,10 +809,10 @@ questions:
       Native Image lets some class initialization run at build time instead of run
       time. What is a common gotcha with this?
     options:
-      - "It always makes startup slower"
-      - "It disables all static fields"
+      - "It invariably makes process startup slower, because the frozen initializers must be re-verified on every launch"
+      - "It disables all static fields in the affected classes, forcing them to be recomputed lazily on first access"
       - "State captured during build-time initialization gets baked into the image, so environment- or time-dependent values (e.g., a cached hostname or random seed) can be frozen incorrectly"
-      - "It forces the app to use reflection"
+      - "It forces the application to fall back to runtime reflection for every class whose init was moved to build time"
     answer: 2
     explanation: |
       Moving initialization to build time can freeze state into the image. If a
@@ -827,9 +827,9 @@ questions:
     question: |
       What is JDK Flight Recorder (JFR)?
     options:
-      - "A build tool that compiles Java to native code"
-      - "A garbage collector for real-time systems"
-      - "A replacement for the C2 compiler"
+      - "A build tool that ahead-of-time compiles Java bytecode into a standalone native executable"
+      - "A specialized garbage collector for hard real-time systems that guarantees bounded pause times"
+      - "A drop-in replacement for the C2 server compiler that emits more aggressively optimized machine code"
       - "A low-overhead, built-in JVM framework that records events (GC, allocation, locks, method samples, JIT, etc.) into a .jfr file for later analysis"
     answer: 3
     explanation: |
@@ -843,10 +843,10 @@ questions:
     question: |
       What is JDK Mission Control (JMC)?
     options:
-      - "A command-line garbage collector tuner"
+      - "A command-line utility that automatically tunes garbage-collector flags based on a running JVM's heap statistics"
       - "The desktop GUI application that opens and visualizes JFR (.jfr) recordings — flame graphs, allocation profiles, automated analysis rules"
-      - "A native-image build server"
-      - "A JIT compiler log format"
+      - "A build server that compiles applications into GraalVM native images and caches the resulting binaries"
+      - "A structured log-file format the JIT compiler emits to record its inlining and deoptimization decisions"
     answer: 1
     explanation: |
       JMC is the analysis GUI for JFR recordings. It renders flame graphs,
@@ -860,9 +860,9 @@ questions:
       What changed for JFR in JDK 11 (JEP 328)?
     options:
       - "JFR was open-sourced into OpenJDK and made freely available (previously a commercial feature requiring -XX:+UnlockCommercialFeatures)"
-      - "JFR was removed from the JDK"
-      - "JFR started requiring a paid license for the first time"
-      - "JFR was rewritten to run only on Windows"
+      - "JFR was removed from the JDK entirely and re-released as a separately downloaded profiling add-on"
+      - "JFR began requiring a paid commercial license for the first time, unlockable only with a runtime activation key"
+      - "JFR was rewritten to run only on Windows hosts, dropping support for Linux and macOS deployments"
     answer: 0
     explanation: |
       JFR originated in JRockit and shipped in Oracle JDK 7/8 as a commercial
@@ -912,10 +912,10 @@ questions:
       some traditional Java sampling profilers is that traditional profilers often
       suffer from:
     options:
-      - "Garbage collection bias — they only sample during GC"
+      - "Garbage-collection bias — they can capture stacks only while a collection is in progress, skewing the profile"
       - "Safepoint bias — samples are only taken at safepoints, skewing which code appears hot"
-      - "Compiler bias — they only profile interpreted code"
-      - "Thread bias — they only sample the main thread"
+      - "Compiler bias — they profile only interpreted code and stop sampling once a method is JIT-compiled"
+      - "Thread bias — they sample only the main application thread and ignore every worker or pool thread"
     answer: 1
     explanation: |
       Many JVMTI-based sampling profilers can only capture stacks at safepoints,
@@ -930,9 +930,9 @@ questions:
       How do you record your own application-domain events into a JFR recording?
     options:
       - "Extend jdk.jfr.Event, add fields (optionally annotated with @Label, @Category), and commit() instances so they appear alongside JVM events"
-      - "You cannot; JFR only records built-in JVM events"
-      - "Write JSON to a special file that JFR polls"
-      - "Call System.recordEvent(String) from the standard library"
+      - "You cannot; JFR records only the fixed set of built-in JVM events and offers no API for application-defined ones"
+      - "Write your event payloads as JSON into a designated spool directory that the JFR daemon periodically polls and ingests"
+      - "Call the standard-library method System.recordEvent(String) at each point where you want a custom event captured"
     answer: 0
     explanation: |
       JFR supports custom events: subclass `jdk.jfr.Event`, define fields
@@ -946,10 +946,10 @@ questions:
     question: |
       Which statement about JFR's method profiling is correct?
     options:
-      - "It records an exact invocation count for every method call"
-      - "It instruments every bytecode, doubling execution time"
+      - "It records an exact invocation count for every method call by incrementing a per-method counter on entry"
+      - "It instruments every executed bytecode, roughly doubling execution time while the recording is active"
       - "It is sampled, so it shows statistical hot spots rather than exact call counts"
-      - "It only works when the JIT is disabled"
+      - "It functions only when the JIT compiler is disabled, so that all code runs through the interpreter"
     answer: 2
     explanation: |
       JFR's execution-sample events are statistical: they periodically capture
@@ -963,8 +963,8 @@ questions:
       Regarding ZGC's generational mode across releases, which is accurate?
     options:
       - "Generational ZGC has been the default since JDK 15"
-      - "Generational ZGC was removed in JDK 21"
-      - "ZGC has never had a generational mode"
+      - "Generational ZGC was briefly the default in JDK 17 but was then removed in JDK 21 over stability concerns"
+      - "ZGC has never had a generational mode; like G1 it always treats the heap as one space with no young/old split"
       - "Generational ZGC was delivered in JDK 21 (JEP 439) and became the default ZGC mode in JDK 23, with non-generational ZGC deprecated"
     answer: 3
     explanation: |
@@ -980,10 +980,10 @@ questions:
     question: |
       Which mapping of collector to its characteristic barrier is correct?
     options:
-      - "G1: load barrier; ZGC: SATB write barrier; Shenandoah: no barrier"
+      - "G1: colored-pointer load barrier; ZGC: SATB write barrier; Shenandoah: no barrier because it compacts entirely at safepoints"
       - "G1: SATB write barrier; non-generational ZGC: load barrier; Shenandoah: load-reference barrier (formerly Brooks forwarding pointer)"
-      - "All three use identical colored-pointer load barriers"
-      - "G1: colored pointers; ZGC: forwarding pointers; Shenandoah: reference counting"
+      - "All three collectors use identical colored-pointer load barriers that read metadata bits from every 64-bit reference on load"
+      - "G1: colored pointers; ZGC: Brooks forwarding pointers; Shenandoah: reference counting with a background cycle-detection pass"
     answer: 1
     explanation: |
       G1 relies on an SATB write barrier (plus remembered-set barriers).
@@ -1001,9 +1001,9 @@ questions:
       executed for the first time. What most likely happens?
     options:
       - "The uncommon trap deoptimizes the method back to the interpreter, executes the branch correctly, and the method may be recompiled later"
-      - "The JVM crashes with a SIGSEGV"
-      - "C2 silently produces a wrong result"
-      - "The method is permanently blocklisted from ever being compiled again"
+      - "The JVM crashes with a SIGSEGV because the compiled frame has no machine code emitted for the never-compiled branch"
+      - "C2 silently produces a wrong result, since the branch was optimized away and control simply falls through to the next block"
+      - "The method is permanently blocklisted from ever being compiled again and runs interpreted for the rest of the process lifetime"
     answer: 0
     explanation: |
       Rarely-taken paths are compiled as uncommon traps. When the branch is first
@@ -1018,10 +1018,10 @@ questions:
       A common operational trade-off when adopting GraalVM Native Image for a
       service is:
     options:
-      - "You gain full runtime bytecode instrumentation for free"
-      - "You can no longer log to stdout"
+      - "You gain full runtime bytecode instrumentation for free, since the AOT compiler leaves rewrite hooks in every method"
+      - "You can no longer log to stdout because the Substrate VM redirects all output to a build-time-frozen file handle"
       - "Runtime observability tooling (agents, some JFR features, dynamic attach) is more limited than on a full JVM, though support has been improving"
-      - "You must switch to a 32-bit build"
+      - "You must switch to a 32-bit build, as Native Image's closed-world analysis is only supported on 32-bit address spaces"
     answer: 2
     explanation: |
       Because there's no full JVM at runtime, dynamic agents and some profiling/
@@ -1037,9 +1037,9 @@ questions:
       single vCPU where memory footprint is the top priority, which collector is
       often the most appropriate?
     options:
-      - "ZGC, for its sub-ms pauses"
-      - "Shenandoah, for concurrent compaction"
-      - "Parallel GC, for maximum throughput"
+      - "ZGC, whose sub-ms pauses and colored-pointer barriers add negligible memory overhead even on a tiny single-vCPU heap"
+      - "Shenandoah, because its concurrent compaction runs on a single vCPU with essentially no extra memory or CPU cost"
+      - "Parallel GC, whose multi-threaded collection maximizes throughput and minimizes footprint on a one-core container"
       - "Serial GC, which has the smallest footprint/overhead and suits small heaps and single-core environments"
     answer: 3
     explanation: |
@@ -1056,10 +1056,10 @@ questions:
       then marked "made not entrant" / "made zombie," then recompiled repeatedly.
       What does this most likely indicate?
     options:
-      - "The GC is running out of memory"
+      - "The GC is running out of memory and evicting compiled code from the heap to free space for object allocation"
       - "Repeated deoptimization and recompilation — the compiler's speculative assumptions keep being invalidated, so the method churns between compiled and interpreted"
-      - "The method is being inlined into itself infinitely"
-      - "The class file is corrupt"
+      - "The method is being inlined into itself infinitely because C2 failed to detect the recursive call site as a cycle"
+      - "The class file is corrupt and the verifier re-reads it from disk on each invocation before handing it to the compiler"
     answer: 1
     explanation: |
       "made not entrant" / "made zombie" markers indicate deoptimization: the
@@ -1075,9 +1075,9 @@ questions:
       extreme latency SLA, which collector is the recommended starting point?
     options:
       - "G1 (the default)"
-      - "Epsilon"
-      - "Serial GC"
-      - "The removed CMS collector"
+      - "Epsilon, the no-op collector, so the service never pays any collection overhead during normal request handling"
+      - "Serial GC, whose single-threaded stop-the-world pauses are the best default for a multi-core general-purpose server"
+      - "The CMS collector, still the recommended balanced default for moderate heaps on modern JDK releases"
     answer: 0
     explanation: |
       G1 is the default and a well-balanced starting point for general-purpose
@@ -1092,10 +1092,10 @@ questions:
       Historically, one criticism of (non-generational) ZGC versus G1 was higher
       memory usage. Which explanation is most accurate?
     options:
-      - "ZGC duplicates every object permanently"
-      - "ZGC stores the entire heap twice on disk"
+      - "ZGC permanently keeps two copies of every live object so the load barrier can pick whichever one has not been relocated"
+      - "ZGC mirrors the entire heap to a memory-mapped file on disk to survive relocation, doubling the resident footprint"
       - "ZGC needs extra heap headroom so concurrent relocation can proceed while the app allocates, and used multi-mapped memory; Generational ZGC substantially reduces this cost"
-      - "ZGC cannot free any memory until shutdown"
+      - "ZGC cannot free any reclaimed memory back to the OS until the JVM shuts down, so its footprint only ever grows"
     answer: 2
     explanation: |
       Concurrent relocation requires free space to copy live objects into while
@@ -1111,9 +1111,9 @@ questions:
       Before JEP 410 removed it, the experimental "Graal JIT" in OpenJDK was
       integrated through which interface?
     options:
-      - "JNI"
-      - "JDBC"
-      - "JMX"
+      - "JNI, the Java Native Interface, which let the Graal compiler hand native code back to HotSpot via C stubs"
+      - "JDBC, repurposed as a generic driver interface through which the compiler streamed generated machine code"
+      - "JMX, the management extension, whose MBeans exposed the compiler's optimization hooks to the running VM"
       - "JVMCI (JVM Compiler Interface)"
     answer: 3
     explanation: |
@@ -1130,10 +1130,10 @@ questions:
       times, but on single-generation ZGC you observed high CPU overhead and large
       heap headroom requirements. What is the most targeted improvement?
     options:
-      - "Switch to Parallel GC"
+      - "Switch to Parallel GC, whose throughput-oriented multi-threaded young collections also deliver the sub-ms pauses this service needs"
       - "Enable Generational ZGC, which collects the young generation frequently and cheaply, reducing CPU overhead and required headroom while keeping sub-ms pauses"
-      - "Switch to Serial GC to reduce CPU"
-      - "Disable the JIT compiler"
+      - "Switch to Serial GC to reduce CPU, since its single-threaded collection uses fewer cores while preserving low pause times"
+      - "Disable the JIT compiler so freed compiler threads leave more CPU for ZGC's concurrent relocation to keep up"
     answer: 1
     explanation: |
       High allocation rate is exactly where single-generation ZGC's whole-heap
