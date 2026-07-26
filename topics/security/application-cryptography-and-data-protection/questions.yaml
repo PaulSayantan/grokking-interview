@@ -45,10 +45,10 @@ questions:
     A team says "we use TLS and encrypted EBS volumes, so our PII is safe." What is the
     key gap in that reasoning?
   options:
-  - "TLS is deprecated and should be replaced with IPsec"
-  - "Encrypted EBS is slower than plaintext, so it should not be used for PII"
+  - "TLS is deprecated as of TLS 1.3 and should be replaced everywhere with IPsec tunnels"
+  - "Encrypted EBS adds roughly 40% query latency over plaintext, so it should not be used for PII"
   - "A SQL injection or leaked DB credential still returns plaintext, since data is decrypted at query time"
-  - "TLS and disk encryption together double-encrypt data, corrupting it"
+  - "TLS and disk encryption together double-encrypt every byte, corrupting it unless one layer is disabled"
   answer: 2
   explanation: |
     TLS protects the wire and disk encryption protects a stolen drive, but once the volume
@@ -103,9 +103,9 @@ questions:
     general trade-off?
   options:
   - "Smaller blast radius / better threat coverage, but more application complexity"
-  - "Larger blast radius but simpler application code"
-  - "Weaker ciphers but faster queries"
-  - "No trade-off; higher is always strictly better and free"
+  - "Larger blast radius overall, but simpler application code because the DB handles all keys transparently"
+  - "Weaker ciphers are mandated at higher layers, but queries run faster on the encrypted columns"
+  - "No trade-off at all; encrypting higher in the stack is always strictly better, free, and requires no key handling"
   answer: 0
   explanation: |
     Higher-layer encryption protects against more threats and shrinks the blast radius, but
@@ -137,9 +137,9 @@ questions:
   question: |
     AWS KMS `GenerateDataKey` returns the data key in two forms. Why both?
   options:
-  - "One is for encryption and one is for signing"
-  - "One is AES and one is RSA for algorithm agility"
-  - "It returns two independent DEKs for redundancy"
+  - "One copy is reserved for encrypting payloads while the other is used only for signing them"
+  - "One copy is a 256-bit AES key and the other an RSA-2048 key, returned together for algorithm agility"
+  - "It returns two independently generated DEKs so encryption can continue if one key is lost"
   - "It returns the plaintext DEK (to encrypt now) and the KEK-encrypted DEK (to store), so you never store the plaintext key"
   answer: 3
   explanation: |
@@ -154,10 +154,10 @@ questions:
   question: |
     Why not just send all your data directly to the KMS to encrypt, skipping the DEK?
   options:
-  - "KMS only supports asymmetric keys"
-  - "KMS cannot encrypt data at all, only sign it"
+  - "KMS only supports asymmetric RSA keys, which cannot encrypt bulk records at all"
+  - "KMS cannot perform data encryption at all and is restricted to generating digital signatures"
   - "KMS has small request-size limits and per-call latency/cost, so bulk encryption is done locally with a DEK while KMS only handles the tiny DEK"
-  - "Sending data to KMS violates TLS"
+  - "Sending plaintext data to the KMS endpoint violates the TLS handshake and drops the connection"
   answer: 2
   explanation: |
     KMS APIs cap payloads at a few KB and each call adds latency and cost. Envelope
@@ -172,9 +172,9 @@ questions:
     A multi-tenant SaaS wants per-tenant crypto isolation and easy tenant offboarding using
     envelope encryption. What is the standard design?
   options:
-  - "One global DEK for all tenants, rotated weekly"
-  - "A KEK per row and one shared DEK"
-  - "Encrypt every tenant's data directly with the KEK"
+  - "One global DEK shared across all tenants, rotated on a fixed weekly schedule"
+  - "A distinct KEK generated per database row protecting a single DEK shared by every tenant"
+  - "Encrypt every tenant's data directly with the KEK, calling KMS on each read and write"
   - "A DEK per tenant, each wrapped by a shared KEK; delete a tenant's DEK to render its data unreadable"
   answer: 3
   explanation: |
@@ -189,9 +189,9 @@ questions:
   question: |
     What is a security downside of caching decrypted (plaintext) DEKs in application memory?
   options:
-  - "It makes every operation require a KMS call"
-  - "It corrupts the ciphertext stored in the database"
-  - "It prevents key rotation entirely"
+  - "It forces every single encrypt and decrypt operation to make a fresh round-trip to KMS"
+  - "It gradually corrupts the ciphertext already stored in the database on each cache hit"
+  - "It prevents key rotation entirely because the cached key can never be replaced or aged out"
   - "It widens the window a plaintext DEK is exposed and weakens revocation, since disabling the KEK will not stop already-cached DEKs"
   answer: 3
   explanation: |
@@ -206,10 +206,10 @@ questions:
   question: |
     Where should the wrapped (KEK-encrypted) DEK be stored?
   options:
-  - "Inside the KMS, replacing the KEK"
-  - "In a separate secrets manager only, never near the data"
+  - "Inside the KMS itself, imported back to permanently replace the wrapping KEK"
+  - "In a separate secrets manager only, kept far from the data it protects"
   - "Alongside the ciphertext it protects (e.g., in the same record/file)"
-  - "It should never be stored; regenerate it on every read"
+  - "It should never be stored at all; regenerate a fresh DEK on every single read"
   answer: 2
   explanation: |
     The wrapped DEK is safe to store next to the ciphertext because it is useless without
@@ -223,9 +223,9 @@ questions:
   question: |
     What is the defining property of a Hardware Security Module (HSM) regarding key material?
   options:
-  - "It stores keys in plaintext files for fast access"
-  - "It only works for asymmetric keys"
-  - "It exports keys to the application so the app can do crypto locally"
+  - "It stores keys as plaintext files on a fast local SSD for low-latency access"
+  - "It works only for asymmetric RSA/ECC keys and cannot hold symmetric AES keys"
+  - "It exports the raw private keys to the application so the app can perform all crypto locally"
   - "The private/root key material never leaves the tamper-resistant hardware boundary in plaintext"
   answer: 3
   explanation: |
@@ -240,9 +240,9 @@ questions:
   question: |
     Which statement best captures the KMS-vs-HSM trade-off for a typical application?
   options:
-  - "Use a dedicated HSM by default; managed KMS is insecure"
-  - "KMS and HSM are identical; the choice is purely cosmetic"
-  - "HSMs are cheaper per key and require no operational effort"
+  - "Always use a dedicated HSM by default, because managed KMS is fundamentally insecure for real keys"
+  - "KMS and HSM are functionally identical, so the choice between them is purely cosmetic branding"
+  - "HSMs are cheaper per key and require essentially no operational or provisioning effort to run"
   - "Use managed KMS for almost everything (often itself HSM-backed); reach for a dedicated HSM when a regulation demands sole control of FIPS-Level-3 hardware or custom PKCS#11"
   answer: 3
   explanation: |
@@ -258,10 +258,10 @@ questions:
     In an envelope-encryption design backed by a KMS/HSM, which key lives inside the
     KMS/HSM and which does the application handle directly?
   options:
-  - "The DEK lives in the HSM; the KEK is handled by the app"
-  - "Both keys live in the HSM and never touch the app"
+  - "The DEK lives permanently inside the HSM while the KEK is generated and handled entirely by the app"
+  - "Both the DEK and the KEK live inside the HSM at all times and never touch the application code"
   - "The KEK lives in the KMS/HSM; the app handles DEKs (in plaintext, briefly, to encrypt/decrypt data)"
-  - "Neither key touches the HSM; both are in the database"
+  - "Neither key ever touches the HSM; both the DEK and KEK are stored directly in the database columns"
   answer: 2
   explanation: |
     The KEK is the root key that stays in the KMS/HSM. The application receives plaintext DEKs
@@ -275,9 +275,9 @@ questions:
   question: |
     Why does envelope encryption make KEK rotation cheap?
   options:
-  - "Because the KEK never changes, only its alias does"
-  - "Because all data is re-encrypted automatically by the disk controller"
-  - "Because DEKs are rotated instead, which is free"
+  - "Because the KEK material never actually changes during rotation; only its human-readable alias is updated"
+  - "Because all encrypted data is re-encrypted automatically and transparently by the disk controller hardware"
+  - "Because the DEKs are simply discarded and regenerated instead of the KEK, which costs nothing"
   - "Because rotating the KEK only requires re-wrapping the small DEKs, not re-encrypting the bulk data"
   answer: 3
   explanation: |
@@ -293,9 +293,9 @@ questions:
     A plaintext DEK is believed to have leaked. Is rotating the KEK (re-wrapping the DEK)
     sufficient to protect the affected data?
   options:
-  - "Yes, re-wrapping invalidates the leaked plaintext DEK"
-  - "Yes, because the KMS refuses to decrypt with old versions"
-  - "No, you must delete the entire database"
+  - "Yes, re-wrapping the DEK under a new KEK cryptographically invalidates the leaked plaintext DEK"
+  - "Yes, because after rotation the KMS will refuse to decrypt anything wrapped by older KEK versions"
+  - "No, the only safe recovery is to delete the entire database and restore from a pre-leak backup"
   - "No — the leaked plaintext DEK can still decrypt the existing ciphertext, so you must re-encrypt the data under a fresh DEK"
   answer: 3
   explanation: |
@@ -310,9 +310,9 @@ questions:
   question: |
     Why should you store a key ID / version tag with each ciphertext record?
   options:
-  - "To make the ciphertext longer and harder to brute force"
-  - "Because the KMS refuses ciphertext without it"
-  - "To let the database sort ciphertext efficiently"
+  - "To pad the ciphertext to a fixed length and make brute-force attacks computationally harder"
+  - "Because the KMS Decrypt API refuses any ciphertext blob that lacks an embedded key version tag"
+  - "To let the database index and sort the opaque ciphertext values more efficiently at query time"
   - "So you can decrypt old data with the right key while new writes use the current key, enabling rotation and algorithm changes (crypto-agility)"
   answer: 3
   explanation: |
@@ -328,9 +328,9 @@ questions:
     What distinguishes "lazy/on-write" key rotation from "eager" re-encryption?
   options:
   - "Lazy rotation re-encrypts records opportunistically (e.g., on next write), while eager rotation re-encrypts everything immediately"
-  - "Lazy rotation deletes keys; eager rotation keeps them"
-  - "They are the same thing with different names"
-  - "Lazy rotation applies only to KEKs; eager only to DEKs"
+  - "Lazy rotation permanently deletes the old keys on a fixed schedule, while eager rotation keeps every historical key forever"
+  - "They are two interchangeable names for the exact same process, differing only in vendor documentation and marketing"
+  - "Lazy rotation can only ever be applied to KEKs, whereas eager re-encryption is strictly limited to rotating DEKs alone"
   answer: 0
   explanation: |
     Lazy rotation tags records with their key version and re-encrypts them opportunistically or
@@ -345,10 +345,10 @@ questions:
     When AWS KMS automatically rotates a customer managed key, what happens to data encrypted
     under the old key material?
   options:
-  - "It becomes permanently unreadable and must be re-encrypted"
-  - "It is silently re-encrypted by KMS in the background"
+  - "It becomes permanently unreadable the instant rotation completes and must be bulk re-encrypted before any of it can be read again"
+  - "It is silently and automatically re-encrypted record-by-record by KMS in a managed background job that finishes within minutes"
   - "The key ID stays stable and old backing key versions are retained, so old ciphertext still decrypts while new operations use the new material"
-  - "The old ciphertext is migrated to a new key ID that the app must track"
+  - "The old ciphertext is transparently migrated to a brand-new key ID that the application must discover and track for every stored blob"
   answer: 2
   explanation: |
     KMS keeps prior backing-key versions under the same stable key ID. Existing ciphertext
@@ -362,9 +362,9 @@ questions:
   question: |
     What is field-level (application-layer) encryption?
   options:
-  - "Encrypting the entire disk the database sits on"
-  - "Encrypting network packets between microservices"
-  - "Hashing every column with SHA-256"
+  - "Encrypting the entire physical disk the database sits on, so the volume is protected only while the machine is powered off"
+  - "Encrypting the network packets exchanged between microservices, so the payload is protected purely while it moves across the wire"
+  - "Hashing every column with SHA-256 on write, so the stored values become fixed-length digests instead of stored ciphertext"
   - "The application encrypts specific sensitive fields before storing them, so the DB holds only ciphertext for those columns"
   answer: 3
   explanation: |
@@ -380,9 +380,9 @@ questions:
     You encrypt an SSN column with AES-GCM. To stop an attacker from copying one row's
     ciphertext into another row (or another tenant), what should you do?
   options:
-  - "Use a longer nonce"
-  - "Switch to ECB mode"
-  - "Reuse the same nonce for every row so they can be compared"
+  - "Use a longer 192-bit nonce so each row's ciphertext becomes statistically unique and cannot be relocated"
+  - "Switch the column to AES-ECB mode, since its block-independent structure prevents any cross-row reuse"
+  - "Reuse the exact same fixed nonce for every row so the engine can detect and reject any relocated ciphertext"
   - "Bind Additional Authenticated Data (AAD), e.g., the row's primary key or tenant ID, into the AEAD encryption"
   answer: 3
   explanation: |
@@ -397,9 +397,9 @@ questions:
   question: |
     What is the primary functional cost of encrypting a column at the application/field level?
   options:
-  - "The database can no longer store the data at all"
-  - "TLS must be disabled for that connection"
-  - "The column must be stored in a separate database"
+  - "The database engine can no longer store the data at all and must offload the entire column to external object storage"
+  - "TLS must be disabled for that specific connection, because the field cipher and the transport cipher cannot coexist"
+  - "The encrypted column must be physically relocated into a separate dedicated database instance kept apart from the rest"
   - "The DB can no longer natively index, sort, range-query, or LIKE-search that column, and the app must manage keys"
   answer: 3
   explanation: |
@@ -415,10 +415,10 @@ questions:
     Which encryption mode is appropriate for field-level encryption so ciphertext is
     tamper-evident?
   options:
-  - "AES-ECB"
-  - "AES-CBC with no MAC"
+  - "AES-ECB, which encrypts each block independently and therefore flags any tampering by design"
+  - "AES-CBC with no MAC, relying on the chaining of blocks alone to make any modification detectable"
   - "An AEAD mode such as AES-GCM, AES-GCM-SIV, or ChaCha20-Poly1305"
-  - "Plain XOR with a static key"
+  - "Plain XOR against a long static key, since a mismatch in the keystream reveals that bytes were altered"
   answer: 2
   explanation: |
     AEAD modes provide confidentiality plus integrity/authenticity, so any tampering with the
@@ -433,10 +433,10 @@ questions:
     Why does properly randomized (AEAD, random nonce) encryption break `WHERE col = ?`
     equality search?
   options:
-  - "The database rejects binary columns"
+  - "The database engine outright rejects binary ciphertext columns from appearing in any WHERE predicate"
   - "The same plaintext encrypts to a different ciphertext each time, so you cannot reproduce the stored ciphertext to compare against"
-  - "Randomized encryption is slower than the query timeout"
-  - "AEAD strips the WHERE clause"
+  - "Randomized encryption is so much slower than plaintext that every equality query exceeds the default statement timeout"
+  - "The AEAD layer intercepts and strips the WHERE clause before the query planner ever evaluates the predicate"
   answer: 1
   explanation: |
     With a fresh random nonce, encrypting the same value yields different ciphertext every time.
@@ -452,10 +452,10 @@ questions:
     Deterministic encryption enables equality search. What does it leak that randomized
     encryption does not?
   options:
-  - "The encryption key"
-  - "The plaintext length only"
+  - "The raw encryption key itself, which becomes derivable from any two equal ciphertexts"
+  - "The exact plaintext byte length only, while leaking nothing at all about value equality"
   - "Which rows share the same value, and the frequency of each value (enabling frequency analysis)"
-  - "Nothing; deterministic encryption is strictly safer"
+  - "Nothing measurable; deterministic encryption is strictly safer than randomized encryption in every case"
   answer: 2
   explanation: |
     Because equal plaintexts map to equal ciphertexts, deterministic encryption reveals value
@@ -470,9 +470,9 @@ questions:
     Regarding range queries on encrypted data, which statement is accurate?
   options:
   - "Order-preserving/order-revealing encryption (OPE/ORE) enables ranges but leaks ordering and is generally considered weak; FHE can compute on ciphertext but is impractical for general production"
-  - "AES-GCM natively supports encrypted range queries"
-  - "Range queries on encrypted data are trivial and leak nothing"
-  - "Deterministic encryption fully supports range and sort with no leakage"
+  - "AES-GCM natively supports encrypted range queries by comparing authentication tags in sorted order"
+  - "Range queries over encrypted data are trivial to run and leak nothing at all beyond the row count returned"
+  - "Deterministic encryption fully supports both range scans and ordered sorts while leaking no ordering information"
   answer: 0
   explanation: |
     OPE/ORE preserves order to enable range queries but leaks ordering (and often more), making
@@ -489,9 +489,9 @@ questions:
     `account_status` (active/closed/suspended)?
   options:
   - "The few distinct values with a skewed distribution let an observer infer plaintext from ciphertext frequencies"
-  - "It makes the column too large to index"
-  - "It requires a separate database"
-  - "It disables TLS on that column"
+  - "It inflates the ciphertext so much that the column grows too large for the database to build any index on it"
+  - "It forces the encrypted status column to be relocated into a separate physically isolated database instance"
+  - "It silently disables the TLS protection on every connection that reads or writes that particular column"
   answer: 0
   explanation: |
     With only a handful of possible values and a known/skewed distribution, an attacker who
@@ -507,9 +507,9 @@ questions:
     A blind index for exact-match search on an encrypted column should be computed as:
   options:
   - "A keyed HMAC (or KDF) of the normalized plaintext, using a secret index key separate from the encryption key"
-  - "A plain SHA-256 hash of the value"
-  - "The value stored in plaintext in a hidden column"
-  - "The AES-GCM ciphertext itself, reused as the index"
+  - "A plain unsalted SHA-256 hash of the raw value, stored directly in an indexed lookup column"
+  - "The original value kept as plaintext in a hidden helper column that ordinary queries never select"
+  - "The AES-GCM ciphertext itself reused verbatim as the index, so the stored blob doubles as the lookup key"
   answer: 0
   explanation: |
     A blind index uses a keyed HMAC/KDF over the normalized value, stored in an indexed column
@@ -524,10 +524,10 @@ questions:
   question: |
     Why is a plain `SHA256(value)` a poor blind index for a column like phone number or SSN?
   options:
-  - "SHA-256 is too slow for indexing"
+  - "SHA-256 is far too slow to compute at index-build time, so lookups on the column time out under load"
   - "The value space is small/low-entropy, so an unkeyed hash is trivially brute-forced or rainbow-tabled to recover the plaintext"
-  - "SHA-256 output cannot be stored in a database"
-  - "SHA-256 produces collisions for all phone numbers"
+  - "SHA-256 produces a raw binary digest that no relational database is able to persist in an indexed column"
+  - "SHA-256 collides on essentially all phone numbers, so distinct numbers map to one indistinguishable hash bucket"
   answer: 1
   explanation: |
     SSNs, phones, and emails have small/predictable value spaces. An attacker who obtains the
@@ -542,10 +542,10 @@ questions:
     A blind index still leaks value equality (equal plaintexts produce equal index values).
     What technique reduces this frequency leakage?
   options:
-  - "Storing the index in a second database"
+  - "Storing the blind index inside a second, physically separate database so the two columns cannot be correlated"
   - "Using a coarse/truncated (bloom-style) blind index so many values collide into each bucket, then decrypting candidates to check exactly"
-  - "Encrypting the index column with the same DEK as the data"
-  - "Removing the index and doing full table scans"
+  - "Encrypting the blind-index column with the very same DEK used for the data so the two share protection"
+  - "Removing the blind index entirely and falling back to full table scans that decrypt every row on each query"
   answer: 1
   explanation: |
     Truncating the HMAC output to a few bits makes many distinct values share a bucket, blunting
@@ -560,10 +560,10 @@ questions:
     Why must you normalize a value (e.g., lowercase an email, strip formatting from a phone
     number) before computing its blind index?
   options:
-  - "To make the index shorter"
-  - "Because HMAC rejects uppercase letters"
+  - "To make the resulting index value shorter and therefore cheaper for the database to store and scan"
+  - "Because the HMAC primitive silently rejects any input that contains uppercase letters or punctuation"
   - "So that equal-but-differently-formatted values produce the same index and therefore match during lookup"
-  - "To encrypt the value more strongly"
+  - "To encrypt the underlying value more strongly by feeding a cleaner, canonical input into the cipher"
   answer: 2
   explanation: |
     A blind index only matches identical inputs. Without normalization, `Bob@x.com` and
@@ -577,10 +577,10 @@ questions:
   question: |
     What kind of query does a blind index support?
   options:
-  - "Range queries (BETWEEN)"
-  - "Substring / LIKE queries"
+  - "Range queries using BETWEEN, because the keyed hash preserves the numeric ordering of the inputs"
+  - "Substring and LIKE pattern queries, since the hash of a prefix matches the hash of the whole value"
   - "Exact-match (equality) lookups only"
-  - "Full-text search with ranking"
+  - "Full-text search with relevance ranking across all the tokenized words inside the field"
   answer: 2
   explanation: |
     A blind index maps a specific normalized value to a deterministic keyed hash, so it supports
@@ -595,9 +595,9 @@ questions:
     How does tokenization differ fundamentally from encryption?
   options:
   - "A token has no mathematical relationship to the original value; recovery requires a lookup in an isolated token vault, whereas ciphertext is reversible with the key"
-  - "Tokenization uses a stronger cipher than encryption"
-  - "Tokenization is just base64 encoding"
-  - "Tokenization and encryption are identical in every respect"
+  - "Tokenization applies a stronger, larger-key cipher than encryption and is therefore harder to reverse"
+  - "Tokenization is simply base64 encoding of the value, reversible by anyone who recognizes the encoding"
+  - "Tokenization and encryption are identical in every respect, differing only in the name each vendor uses"
   answer: 0
   explanation: |
     Encryption is key-reversible math over the data. A token is an unrelated surrogate; the only
@@ -612,8 +612,8 @@ questions:
     A payments team tokenizes card PANs so most services store only tokens. What is the main
     benefit?
   options:
-  - "Tokens are faster to encrypt than PANs"
-  - "Tokens eliminate the need for TLS"
+  - "Tokens are faster to encrypt than PANs because their fixed surrogate format skips the cipher's padding step"
+  - "Tokens eliminate the need for TLS between services, since a surrogate value is safe to send in the clear"
   - "Systems that only ever handle tokens fall out of PCI-DSS scope, since they never hold real card numbers — shrinking the audit surface"
   - "Tokenization removes the need to ever store the real PAN anywhere"
   answer: 2
@@ -630,10 +630,10 @@ questions:
     Format-Preserving Encryption (FPE, e.g., NIST FF1/FF3) is sometimes called "vaultless
     tokenization." Why?
   options:
-  - "It is not really encryption, just a hash"
+  - "It is not really encryption at all but a one-way hash, so the original value can never be recovered from it"
   - "It is key-reversible encryption that outputs the same format/length as the input (a 16-digit PAN → a 16-digit ciphertext), fitting legacy schemas without a token vault"
-  - "It stores tokens in the database with no key"
-  - "It only works on 8-digit numbers"
+  - "It writes plain surrogate tokens into the database using no key whatsoever, relying on the vault for reversal"
+  - "It functions only on fixed 8-digit numeric inputs and cannot preserve the format of a 16-digit card number"
   answer: 1
   explanation: |
     FPE is genuine encryption but preserves the input's format and length, so it drops into
@@ -648,10 +648,10 @@ questions:
     Compared to tokenization, what is a weakness of relying on encryption alone to reduce
     compliance scope for card data?
   options:
-  - "Encryption cannot protect card numbers at all"
+  - "Encryption cannot protect stored card numbers at all and adds no real confidentiality over plaintext"
   - "Encryption leaves ciphertext (and the decryption key) inside your systems, so those systems remain in scope"
-  - "Encryption is always slower than a vault lookup"
-  - "Encryption changes the card number's checksum"
+  - "Encryption is always far slower than a token-vault lookup and misses every card-data latency budget"
+  - "Encryption rewrites the card number's Luhn checksum, so downstream validators reject the encrypted PAN"
   answer: 1
   explanation: |
     Even encrypted, the ciphertext and the key management live within your environment, so those
@@ -665,10 +665,10 @@ questions:
   question: |
     What is "crypto-shredding" (crypto-erasure)?
   options:
-  - "Physically shredding the hard drives"
-  - "Overwriting data with random bytes seven times"
+  - "Physically shredding the hard drives and degaussing the platters until the media is destroyed"
+  - "Overwriting the data in place with random bytes seven times following an old DoD wipe standard"
   - "Deleting the encryption key so that the still-existing ciphertext becomes effectively unrecoverable"
-  - "Compressing data before deleting it"
+  - "Compressing the data with a strong algorithm before finally deleting the original files from disk"
   answer: 2
   explanation: |
     Crypto-shredding deletes the key rather than the data. Once the DEK is irrecoverably gone,
@@ -684,9 +684,9 @@ questions:
     daily backups, and an append-only event log. How does crypto-shredding help?
   options:
   - "If each user has their own DEK, destroying that one key renders all copies of that user's ciphertext unreadable at once — including immutable/backup copies"
-  - "It rewrites every backup in place to remove the user"
-  - "It exempts the company from GDPR"
-  - "It deletes the entire event log"
+  - "It rewrites every daily backup and replica in place to surgically remove that one user's records"
+  - "It legally exempts the company from GDPR erasure obligations for any data placed under encryption"
+  - "It deletes the entire append-only event log so no trace of any user's activity remains anywhere"
   answer: 0
   explanation: |
     Physically deleting data from immutable logs and countless backups is impractical.
@@ -701,10 +701,10 @@ questions:
     Your system encrypts all user data under a single shared DEK. Why can't you satisfy a
     per-user erasure request via crypto-shredding?
   options:
-  - "Because DEKs cannot be deleted"
+  - "Because KMS-managed DEKs are permanently retained and can never actually be deleted or disabled"
   - "Because deleting the one shared key would make ALL users' data unreadable, not just the requesting user's — you can only shred at the granularity you keyed"
-  - "Because GDPR forbids crypto-shredding entirely"
-  - "Because the DEK is stored in the ciphertext"
+  - "Because GDPR explicitly forbids crypto-shredding as a valid erasure method under any circumstance"
+  - "Because the plaintext DEK is embedded inside every ciphertext record and survives key deletion"
   answer: 1
   explanation: |
     Crypto-shredding erases exactly at the key's granularity. A single shared DEK cannot be
@@ -719,9 +719,9 @@ questions:
     What is a critical caveat that can silently defeat crypto-shredding?
   options:
   - "If the key store's backups still contain the 'deleted' key, the data remains recoverable — key destruction must be as complete/durable as the erasure you claim"
-  - "The ciphertext must be compressed first"
-  - "Crypto-shredding only works on SSDs"
-  - "You must also delete the algorithm implementation"
+  - "The ciphertext must be compressed with a lossless algorithm first or the key deletion silently fails"
+  - "Crypto-shredding only works on SSDs and quietly leaves recoverable data behind on spinning disks"
+  - "You must also delete the cipher's algorithm implementation, since the code alone can reverse ciphertext"
   answer: 0
   explanation: |
     Erasure is only as real as the key destruction. If KMS/HSM key backups, exports, or escrow
@@ -735,10 +735,10 @@ questions:
   question: |
     Crypto-shredding provides no protection in which scenario?
   options:
-  - "When the ciphertext sits in immutable backups"
+  - "When the ciphertext sits in immutable WORM backups that the key deletion cannot physically overwrite"
   - "When an adversary already copied the ciphertext AND had the key (or the algorithm is later broken) before you destroyed the key"
-  - "When the user has multiple records"
-  - "When the data is stored in an event log"
+  - "When the user has many records spread across multiple tables, each wrapped under its own DEK"
+  - "When the data is stored in an append-only event log alongside its per-record wrapped data key"
   answer: 1
   explanation: |
     Crypto-shredding assumes the ciphertext was never usefully exposed while the key lived. If an
@@ -752,10 +752,10 @@ questions:
   question: |
     Which design tension does crypto-shredding specifically reconcile?
   options:
-  - "Latency vs throughput"
+  - "The classic latency-versus-throughput trade-off when sizing an encrypted write-ahead pipeline"
   - "The conflict between append-only/immutable stores (audit logs, event sourcing, WORM backups) and the right to erasure"
-  - "Symmetric vs asymmetric encryption"
-  - "TLS 1.2 vs TLS 1.3"
+  - "The choice between symmetric AES and asymmetric RSA keys for encrypting large stored records"
+  - "The migration gap between deprecated TLS 1.2 handshakes and the newer TLS 1.3 record protocol"
   answer: 1
   explanation: |
     Immutable stores are designed so you cannot change the past, which conflicts directly with
@@ -771,9 +771,9 @@ questions:
     mitigates it?
   options:
   - "Lower environments typically have weaker controls, so copying real PII there expands exposure; static data masking (sanitizing the copy) mitigates it"
-  - "It is not a risk; lower environments are always secure"
-  - "It only wastes disk space; there is no security concern"
-  - "You should encrypt the entire lower environment instead of masking"
+  - "It is not a real risk, because lower environments always inherit the same access controls as production"
+  - "It only wastes disk space and slows test runs; there is no meaningful security or compliance concern"
+  - "You should full-disk encrypt the entire lower environment instead of ever masking the copied values"
   answer: 0
   explanation: |
     Non-prod environments usually have looser access and monitoring, so real PII there is a top
@@ -788,10 +788,10 @@ questions:
     Dynamic Data Masking (DDM), which masks values on read for certain roles, should be
     understood as:
   options:
-  - "A strong cryptographic security boundary equivalent to encryption"
+  - "A strong cryptographic security boundary that is functionally equivalent to encrypting the column at rest"
   - "A convenience/least-privilege display control, NOT a strong security boundary, since the underlying data is intact and privileged or injection paths can bypass it"
-  - "A replacement for access control"
-  - "A form of tokenization with a vault"
+  - "A complete replacement for row- and column-level access control that makes separate permissions unnecessary"
+  - "A form of vault-backed tokenization that swaps the stored value for an unrelated surrogate token"
   answer: 1
   explanation: |
     DDM masks presentation for some roles but the real value is still stored and returned to
@@ -806,10 +806,10 @@ questions:
     Under GDPR, how is pseudonymized data (e.g., values replaced by consistent tokens that can
     be re-linked via a mapping) treated?
   options:
-  - "As fully anonymous data outside GDPR scope"
+  - "As fully anonymous data that falls entirely outside GDPR scope once the tokens replace the originals"
   - "As still personal data, because it is reversible via the mapping/key — only true (irreversible) anonymization removes data from scope"
-  - "As public data"
-  - "As deleted data"
+  - "As non-personal public data that may be shared or sold freely without any consent or safeguards"
+  - "As already-deleted data that satisfies erasure requests the moment the tokens are substituted in"
   answer: 1
   explanation: |
     GDPR treats pseudonymized data as still personal because a mapping/key can re-identify
@@ -824,10 +824,10 @@ questions:
     A production incident shows full request bodies (including passwords and card numbers) in
     application logs and APM traces. Which control set addresses this?
   options:
-  - "Encrypt the entire log volume at rest and consider it solved"
+  - "Encrypt the entire log volume at rest with a KMS key and consider the exposure fully solved"
   - "Never log secrets/PII: scrub at the logging layer (allowlist fields, redaction filters for PANs/emails/tokens) and mark fields sensitive so serializers omit them"
-  - "Delete logs immediately after every request"
-  - "Move logging to a different cloud region"
+  - "Delete all application logs immediately after every request completes so nothing is retained"
+  - "Move the logging and APM pipeline to a different cloud region with stricter data-residency rules"
   answer: 1
   explanation: |
     Logs, traces, and stack traces are a major, under-appreciated leak vector. The fix is to not
@@ -843,10 +843,10 @@ questions:
     Confidential computing (Intel SGX, AMD SEV-SNP, AWS Nitro Enclaves) primarily protects data
     in which state?
   options:
-  - "At rest"
-  - "In transit"
+  - "At rest, protecting the encrypted bytes sitting on disk, EBS volumes, and archived snapshots"
+  - "In transit, protecting the bytes as they cross the network between the client and the server"
   - "In use (while decrypted in memory / processed by the CPU)"
-  - "In backups"
+  - "In backups, protecting the point-in-time copies replicated to a separate durable storage tier"
   answer: 2
   explanation: |
     Confidential computing uses hardware Trusted Execution Environments to protect data while it
@@ -861,10 +861,10 @@ questions:
     In a confidential-computing design, what is the role of remote attestation before releasing
     a DEK into an enclave?
   options:
-  - "It compresses the DEK for faster transfer"
-  - "It rotates the KEK automatically"
+  - "It compresses the DEK into a smaller blob so it transfers into the enclave with lower latency"
+  - "It automatically rotates the wrapping KEK each time a secret is released into the enclave boundary"
   - "It lets the client cryptographically verify it is talking to genuine, unmodified enclave code before releasing the secret"
-  - "It disables the hypervisor"
+  - "It disables the host hypervisor so the enclave gains exclusive direct control of the physical CPU"
   answer: 2
   explanation: |
     Remote attestation produces a verifiable measurement of the code/environment running in the
@@ -879,10 +879,10 @@ questions:
     How do homomorphic encryption and secure multi-party computation relate to confidential
     computing?
   options:
-  - "They are identical to hardware enclaves"
+  - "They are identical to hardware enclaves, just implemented as a firmware feature of the same CPU"
   - "They are cryptographic (software) approaches to protecting data 'in use' — computing on/over protected data — but remain mostly impractical for general workloads today"
-  - "They only protect data at rest"
-  - "They are older names for TLS"
+  - "They only protect data at rest by encrypting stored blobs and offer nothing for in-memory processing"
+  - "They are older, pre-1999 names for the TLS handshake and record protocols used to secure the wire"
   answer: 1
   explanation: |
     Homomorphic encryption (compute on ciphertext) and MPC (compute across parties without
