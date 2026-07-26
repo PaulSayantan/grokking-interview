@@ -102,6 +102,24 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 44 (2026-07-24):** **System Design refinement pilot — overlapped Session 43, verified clean.**
+  User asked (via /deep-research, but the task was a content audit not web research) to review + refine
+  study content to a great-teacher bar; scoped as a system-design pilot, audit-first with a review gate.
+  Ran: (1) 87-subtopic audit → `topics/system-design/CONTENT-AUDIT.md` (`system-design-content-audit.js`);
+  verdict corpus already strong (clarity 4.81/depth 4.72; 0 high/59 med/28 low), dominant gap = worked
+  examples. (2) Full pedagogy refine of the 59 medium files (`system-design-refine.js`, refine→verify, 118
+  agents, high effort, **NO web** per user cost choice) — commit `268a063`, +5.8k lines, worked examples +
+  intuition + gotchas + confirmed logic-error fixes (base62(125)="21", TGW per-flow contradiction, geohash/
+  HLL). **KEY LESSON: this DUPLICATED Session 43**, which had already refined the whole corpus (incl.
+  system-design) WITH web verification — 42 of my 59 files were re-refined. Worse, a no-web pass on
+  web-verified content caused fact regressions (SCP-attached-per-entity 10→5; NLB idle-timeout stated
+  "fixed/not tunable"). (3) So ran a web-verify sweep of my diff (`system-design-refine-factcheck.js`, 32
+  AWS files, live docs) — commit `cd08d66` — fixed both regressions (NLB timeout now tunable 60–6000s since
+  Nov 2023; SCP corrected + SCP-vs-RCP clarifier added), confirmed the other 30 files' facts current and
+  all worked-example arithmetic correct. Net: system-design got extra worked examples + a fresh fact-check
+  on top of Session 43. Validator green (453 files). **DO NOT** re-run the audit→refine loop on other
+  domains — Session 43 already covered all 19 with web verification; further no-web passes only risk
+  regressions. See [[content-refinement-effort]].
 - **Session 43 (2026-07-25):** **Corpus-wide teaching-quality audit + 4-wave refinement.**
   Read-only audit of all **430 subtopics** (cache-backed idempotent workflow) scored each
   against a Senior-Principal-Engineer + gifted-teacher bar weighted to intuition/clarity,
